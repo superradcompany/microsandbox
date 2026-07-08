@@ -192,7 +192,7 @@ mod tests {
     fn ts_rs_renders_cloud_contract_declarations() {
         let declarations = declarations();
 
-        assert_eq!(declarations.len(), 53);
+        assert_eq!(declarations.len(), 83);
         assert!(
             declarations
                 .iter()
@@ -203,7 +203,7 @@ mod tests {
         assert!(
             declarations
                 .iter()
-                .any(|decl| decl.contains("CloudCreateSandboxRequest"))
+                .any(|decl| decl.contains("CloudCreateSandboxResponse"))
         );
         assert!(
             declarations

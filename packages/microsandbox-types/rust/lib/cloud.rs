@@ -723,7 +723,7 @@ impl Default for CloudRootfsSource {
 pub struct CloudSecretsConfig {
     /// Secrets to inject.
     #[serde(default)]
-    pub secrets: Vec<CloudSecretEntry>,
+    pub entries: Vec<CloudSecretEntry>,
     /// Default action when a placeholder leaks to a disallowed host.
     #[serde(default)]
     pub on_violation: CloudViolationAction,
@@ -923,7 +923,7 @@ impl From<CloudSecretEntry> for SecretEntry {
 impl From<SecretsConfig> for CloudSecretsConfig {
     fn from(config: SecretsConfig) -> Self {
         Self {
-            secrets: config.secrets.into_iter().map(Into::into).collect(),
+            entries: config.secrets.into_iter().map(Into::into).collect(),
             on_violation: config.on_violation.into(),
         }
     }
@@ -932,7 +932,7 @@ impl From<SecretsConfig> for CloudSecretsConfig {
 impl From<CloudSecretsConfig> for SecretsConfig {
     fn from(config: CloudSecretsConfig) -> Self {
         Self {
-            secrets: config.secrets.into_iter().map(Into::into).collect(),
+            secrets: config.entries.into_iter().map(Into::into).collect(),
             on_violation: config.on_violation.into(),
         }
     }
@@ -1023,7 +1023,7 @@ mod tests {
     #[test]
     fn cloud_secrets_config_round_trips_through_domain() {
         let cloud = CloudSecretsConfig {
-            secrets: vec![CloudSecretEntry {
+            entries: vec![CloudSecretEntry {
                 env_var: "OPENAI_API_KEY".into(),
                 value: "sk-x".into(),
                 source: Some(CloudSecretSource::Env {
@@ -1041,11 +1041,11 @@ mod tests {
         };
 
         let back: CloudSecretsConfig = SecretsConfig::from(cloud.clone()).into();
-        assert_eq!(back.secrets.len(), 1);
-        assert_eq!(back.secrets[0].value, "sk-x");
-        assert_eq!(back.secrets[0].allowed_hosts.len(), 1);
+        assert_eq!(back.entries.len(), 1);
+        assert_eq!(back.entries[0].value, "sk-x");
+        assert_eq!(back.entries[0].allowed_hosts.len(), 1);
         assert!(matches!(
-            back.secrets[0].on_violation,
+            back.entries[0].on_violation,
             Some(CloudViolationAction::BlockAndTerminate)
         ));
     }

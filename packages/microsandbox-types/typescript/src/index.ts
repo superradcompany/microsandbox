@@ -1295,7 +1295,7 @@ export type CloudSecretsConfig = {
 /**
  * Secrets to inject.
  */
-secrets: Array<CloudSecretEntry>,
+entries: Array<CloudSecretEntry>,
 /**
  * Default action when a placeholder leaks to a disallowed host.
  */
