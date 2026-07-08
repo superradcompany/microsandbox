@@ -3,7 +3,7 @@ title: Images
 description: Rust SDK - Image cache API reference
 ---
 
-Inspect, remove, and prune the local OCI image cache: the images that sandbox creation has already pulled. The ambient `Image::*` methods use the active default backend and return `Unsupported` when that backend is cloud. The `*_local` variants take an explicit `LocalBackend` and never consult ambient backend state.
+Inspect, remove, prune, and import/export the local OCI image cache: the images that sandbox creation has already pulled. The ambient `Image::*` methods use the active default backend and return `Unsupported` when that backend is cloud. The `*_local` variants take an explicit `LocalBackend` and never consult ambient backend state.
 
 ```rust
 use microsandbox::{Image, ImagePruneReport};
@@ -11,14 +11,16 @@ use microsandbox::{Image, ImagePruneReport};
 
 <div className="msb-glance">
 
-  <p className="msb-gl"><span className="msb-dot static"></span>Ambient cache methods<span className="msb-ct">5</span></p>
+  <p className="msb-gl"><span className="msb-dot static"></span>Ambient cache methods<span className="msb-ct">7</span></p>
   <a className="msb-row" href="#image-get"><span className="msb-rn">Image::get()</span><span className="msb-rg">one cached image</span></a>
   <a className="msb-row" href="#image-list"><span className="msb-rn">Image::list()</span><span className="msb-rg">all cached images</span></a>
   <a className="msb-row" href="#image-inspect"><span className="msb-rn">Image::inspect()</span><span className="msb-rg">config + layer detail</span></a>
   <a className="msb-row" href="#image-remove"><span className="msb-rn">Image::remove()</span><span className="msb-rg">delete a cached image</span></a>
   <a className="msb-row" href="#image-prune"><span className="msb-rn">Image::prune()</span><span className="msb-rg">reclaim unused data</span></a>
+  <a className="msb-row" href="#image-load"><span className="msb-rn">Image::load()</span><span className="msb-rg">import from archive</span></a>
+  <a className="msb-row" href="#image-save"><span className="msb-rn">Image::save()</span><span className="msb-rg">export to archive</span></a>
 
-  <p className="msb-gl"><span className="msb-dot static"></span>Explicit local variants<span className="msb-ct">5</span></p>
+  <p className="msb-gl"><span className="msb-dot static"></span>Explicit local variants<span className="msb-ct">7</span></p>
   <a className="msb-row" href="#explicit-local-variants"><span className="msb-rn">Image::*_local()</span><span className="msb-rg">operate on a LocalBackend</span></a>
 
   <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
@@ -28,6 +30,7 @@ use microsandbox::{Image, ImagePruneReport};
     <a className="msb-typepill" href="#imageconfigdetail">ImageConfigDetail</a>
     <a className="msb-typepill" href="#imagelayerdetail">ImageLayerDetail</a>
     <a className="msb-typepill" href="#imageprunereport">ImagePruneReport</a>
+    <a className="msb-typepill" href="#imagearchiveformat">ImageArchiveFormat</a>
   </div>
 
 </div>
@@ -154,6 +157,51 @@ println!("{:?}", report.bytes_reclaimed);
 
 </Accordion>
 
+---
+
+#### <span className="msb-recv">Image::</span><span className="msb-hn">load()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
+
+```rust
+async fn load(input: &Path, tags: Vec<String>) -> MicrosandboxResult<Vec<ImageHandle>>
+```
+
+Import images from a local archive into the cache. Accepts `docker save` tarballs and OCI Image Layout archives, so locally built images can be used without going through a registry. `tags` applies extra references to the first image in the archive. Returns a handle for every image reference imported.
+
+<Accordion title="Example">
+
+```rust
+// docker save my-image:latest -o my-image.tar
+let images = Image::load(Path::new("my-image.tar"), vec!["app:local".into()]).await?;
+for image in &images {
+    println!("{}", image.reference());
+}
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">Image::</span><span className="msb-hn">save()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
+
+```rust
+async fn save(references: &[String], output: &Path, format: ImageArchiveFormat) -> MicrosandboxResult<()>
+```
+
+Export cached images to an archive file. [`ImageArchiveFormat`](#imagearchiveformat) selects the layout: `Docker` (loadable with `docker load`) or `Oci` (OCI Image Layout). Returns `ImageNotFound` when any reference is missing from the local cache.
+
+<Accordion title="Example">
+
+```rust
+use microsandbox::ImageArchiveFormat;
+
+let references = vec!["python:3.12".to_string()];
+Image::save(&references, Path::new("python.tar"), ImageArchiveFormat::Docker).await?;
+```
+
+</Accordion>
+
 ## Explicit local variants
 
 Use these when your program owns a specific `LocalBackend` and should not depend on the process default backend.
@@ -180,6 +228,8 @@ let report = Image::prune_local(&backend).await?;
 | `inspect_local` | `async fn inspect_local(local: &LocalBackend, reference: &str) -> MicrosandboxResult<ImageDetail>` |
 | `remove_local` | `async fn remove_local(local: &LocalBackend, reference: &str, force: bool) -> MicrosandboxResult<()>` |
 | `prune_local` | `async fn prune_local(local: &LocalBackend) -> MicrosandboxResult<ImagePruneReport>` |
+| `load_local` | `async fn load_local(local: &LocalBackend, input: &Path, tags: Vec<String>) -> MicrosandboxResult<Vec<ImageHandle>>` |
+| `save_local` | `async fn save_local(local: &LocalBackend, references: &[String], output: &Path, format: ImageArchiveFormat) -> MicrosandboxResult<()>` |
 
 ## Types
 
@@ -268,3 +318,16 @@ Summary of cached image data removed by [`Image::prune()`](#image-prune).
 | `fsmeta_removed` | `u32` | Merged fsmeta EROFS artifacts removed from disk |
 | `vmdk_removed` | `u32` | VMDK descriptor artifacts removed from disk |
 | `bytes_reclaimed` | `Option<u64>` | Best-effort measured bytes reclaimed from deleted artifacts |
+
+### ImageArchiveFormat
+
+<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
+
+<p className="msb-backref">Used by <a href="#image-save">save()</a></p>
+
+Archive layout to write when exporting images with [`Image::save()`](#image-save).
+
+| Variant | Description |
+|---------|-------------|
+| `Docker` | Docker `docker save` compatible archive (default) |
+| `Oci` | OCI Image Layout archive |

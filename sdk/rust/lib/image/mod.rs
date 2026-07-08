@@ -13,7 +13,8 @@ use sea_orm::{
 };
 
 use microsandbox_image::{
-    CachedImageMetadata, CachedLayerMetadata, Digest, GlobalCache, ImageConfig, Platform, Reference,
+    CachedImageMetadata, CachedLayerMetadata, Digest, GlobalCache, ImageArchiveFormat, ImageConfig,
+    ImageLoadOptions, ImageSaveConfig, ImageSaveLayer, ImageSaveRequest, Platform, Reference,
 };
 
 use crate::{
@@ -295,6 +296,31 @@ impl Image {
         let backend = crate::backend::default_backend();
         let local = backend.as_local().ok_or_else(image_ops_unsupported)?;
         Self::prune_local(local).await
+    }
+
+    /// Load images from a local archive into the active local backend's cache.
+    ///
+    /// Accepts `docker save` tarballs and OCI Image Layout archives. `tags`
+    /// applies extra references to the first image in the archive. Returns a
+    /// handle for every image reference imported.
+    pub async fn load(input: &Path, tags: Vec<String>) -> MicrosandboxResult<Vec<ImageHandle>> {
+        let backend = crate::backend::default_backend();
+        let local = backend.as_local().ok_or_else(image_ops_unsupported)?;
+        Self::load_local(local, input, tags).await
+    }
+
+    /// Save cached images from the active local backend to an archive at `output`.
+    ///
+    /// If any reference is missing from the local cache, returns
+    /// [`MicrosandboxError::ImageNotFound`].
+    pub async fn save(
+        references: &[String],
+        output: &Path,
+        format: ImageArchiveFormat,
+    ) -> MicrosandboxResult<()> {
+        let backend = crate::backend::default_backend();
+        let local = backend.as_local().ok_or_else(image_ops_unsupported)?;
+        Self::save_local(local, references, output, format).await
     }
 
     /// Get an image handle by reference from an explicit local backend.
@@ -705,6 +731,70 @@ impl Image {
 
         Ok(report)
     }
+
+    /// Load images from a local archive into an explicit local backend's cache.
+    ///
+    /// Accepts `docker save` tarballs and OCI Image Layout archives. `tags`
+    /// applies extra references to the first image in the archive. Each loaded
+    /// image is persisted to the database and returned as an [`ImageHandle`].
+    pub async fn load_local(
+        local: &LocalBackend,
+        input: &Path,
+        tags: Vec<String>,
+    ) -> MicrosandboxResult<Vec<ImageHandle>> {
+        let cache_dir = local.cache_dir();
+        let loaded = microsandbox_image::load_archive(
+            &cache_dir,
+            input,
+            ImageLoadOptions {
+                tags,
+                progress: None,
+            },
+        )
+        .await?;
+
+        let mut handles = Vec::with_capacity(loaded.len());
+        for image in loaded {
+            Self::persist(local, &image.reference, image.metadata).await?;
+            handles.push(Self::get_local(local, &image.reference).await?);
+        }
+        Ok(handles)
+    }
+
+    /// Save cached images from an explicit local backend to an archive at `output`.
+    ///
+    /// If any reference is missing from the local cache, returns
+    /// [`MicrosandboxError::ImageNotFound`].
+    pub async fn save_local(
+        local: &LocalBackend,
+        references: &[String],
+        output: &Path,
+        format: ImageArchiveFormat,
+    ) -> MicrosandboxResult<()> {
+        let cache_dir = local.cache_dir();
+        let cache = GlobalCache::new(&cache_dir)?;
+
+        let mut requests = Vec::with_capacity(references.len());
+        for reference in references {
+            let parsed: Reference = reference.parse().map_err(|e| {
+                MicrosandboxError::Custom(format!("invalid image reference '{reference}': {e}"))
+            })?;
+            let metadata = cache
+                .read_image_metadata(&parsed)?
+                .ok_or_else(|| MicrosandboxError::ImageNotFound(reference.clone()))?;
+            requests.push(save_request_from_metadata(reference.clone(), metadata));
+        }
+
+        let output = output.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let cache = GlobalCache::new(&cache_dir)?;
+            microsandbox_image::save_archive(&cache, &output, &requests, format)
+        })
+        .await
+        .map_err(|e| MicrosandboxError::Custom(format!("image save task panicked: {e}")))??;
+
+        Ok(())
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -732,6 +822,57 @@ fn build_handle_from_parts(
         created_at: model.created_at.map(|dt| dt.and_utc()),
         updated_at: model.updated_at.map(|dt| dt.and_utc()),
     }
+}
+
+/// Build an [`ImageSaveRequest`] from cached image metadata.
+fn save_request_from_metadata(
+    reference: String,
+    metadata: CachedImageMetadata,
+) -> ImageSaveRequest {
+    let (architecture, os) = raw_config_platform(&metadata.raw_config_json);
+
+    let layers = metadata
+        .layers
+        .iter()
+        .map(|layer| ImageSaveLayer {
+            diff_id: layer.diff_id.clone(),
+        })
+        .collect();
+
+    let config = metadata.config;
+    ImageSaveRequest {
+        reference,
+        config: ImageSaveConfig {
+            architecture,
+            os,
+            env: config.env,
+            entrypoint: config.entrypoint,
+            cmd: config.cmd,
+            working_dir: config.working_dir,
+            user: config.user,
+            labels: config.labels.into_iter().collect(),
+        },
+        raw_config_json: metadata.raw_config_json,
+        layers,
+    }
+}
+
+/// Extract `architecture` and `os` from a raw OCI config JSON document.
+fn raw_config_platform(raw_config_json: &str) -> (Option<String>, Option<String>) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw_config_json) else {
+        return (None, None);
+    };
+
+    let architecture = value
+        .get("architecture")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
+    let os = value
+        .get("os")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
+
+    (architecture, os)
 }
 
 /// Error returned when local image-cache operations are used with a cloud backend.
@@ -1005,5 +1146,7 @@ mod tests {
         let _ = super::Image::inspect;
         let _ = super::Image::remove;
         let _ = super::Image::prune;
+        let _ = super::Image::load;
+        let _ = super::Image::save;
     }
 }

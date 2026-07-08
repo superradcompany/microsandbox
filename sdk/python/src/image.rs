@@ -1,6 +1,10 @@
+use std::io::Write;
+use std::path::PathBuf;
+
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyList, PyModule};
 
+use microsandbox::ImageArchiveFormat;
 use microsandbox::image::{
     Image as RustImage, ImageConfigDetail as RustImageConfigDetail, ImageDetail as RustImageDetail,
     ImageHandle as RustImageHandle, ImageLayerDetail as RustImageLayerDetail,
@@ -179,6 +183,78 @@ impl PyImage {
             let local = backend.as_local().expect("checked above");
             let report = RustImage::prune_local(local).await.map_err(to_py_err)?;
             Ok(PyImagePruneReport::from_rust(report))
+        })
+    }
+
+    /// Load images from a local archive into the image cache.
+    ///
+    /// Accepts `docker save` tarballs and OCI Image Layout archives. Pass
+    /// `input_path="-"` to read the archive from stdin. `tag` applies an
+    /// extra reference to the first image in the archive.
+    #[staticmethod]
+    #[pyo3(signature = (input_path, *, tag = None))]
+    fn load<'py>(
+        py: Python<'py>,
+        input_path: String,
+        tag: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let backend = resolve_local().map_err(to_py_err)?;
+            let local = backend.as_local().expect("checked above");
+            let tags: Vec<String> = tag.into_iter().collect();
+
+            let stdin_temp;
+            let input = if input_path == "-" {
+                stdin_temp = read_stdin_to_temp_file().await.map_err(to_py_err)?;
+                stdin_temp.path().to_path_buf()
+            } else {
+                PathBuf::from(input_path)
+            };
+
+            let handles = RustImage::load_local(local, &input, tags)
+                .await
+                .map_err(to_py_err)?;
+            let py_handles: Vec<PyImageHandle> =
+                handles.into_iter().map(PyImageHandle::from_rust).collect();
+            Ok(py_handles)
+        })
+    }
+
+    /// Save a cached image to an archive file.
+    ///
+    /// `format` selects the archive layout: `"docker"` (default, compatible
+    /// with `docker load`) or `"oci"` (OCI Image Layout).
+    #[staticmethod]
+    #[pyo3(signature = (reference, *, output_path, format = None))]
+    fn save<'py>(
+        py: Python<'py>,
+        reference: String,
+        output_path: String,
+        format: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let format = match format.as_deref().unwrap_or("docker") {
+            "docker" => ImageArchiveFormat::Docker,
+            "oci" => ImageArchiveFormat::Oci,
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "invalid archive format '{other}': expected 'docker' or 'oci'"
+                )));
+            }
+        };
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let backend = resolve_local().map_err(to_py_err)?;
+            let local = backend.as_local().expect("checked above");
+            let references = vec![reference];
+            RustImage::save_local(
+                local,
+                &references,
+                PathBuf::from(output_path).as_path(),
+                format,
+            )
+            .await
+            .map_err(to_py_err)?;
+            Ok(())
         })
     }
 }
@@ -491,6 +567,21 @@ fn resolve_local() -> microsandbox::MicrosandboxResult<std::sync::Arc<dyn micros
         });
     }
     Ok(backend)
+}
+
+async fn read_stdin_to_temp_file() -> microsandbox::MicrosandboxResult<tempfile::NamedTempFile> {
+    tokio::task::spawn_blocking(
+        || -> microsandbox::MicrosandboxResult<tempfile::NamedTempFile> {
+            let mut temp = tempfile::NamedTempFile::new()?;
+            std::io::copy(&mut std::io::stdin().lock(), temp.as_file_mut())?;
+            temp.as_file_mut().flush()?;
+            Ok(temp)
+        },
+    )
+    .await
+    .map_err(|e| {
+        microsandbox::MicrosandboxError::Custom(format!("stdin read task panicked: {e}"))
+    })?
 }
 
 fn json_object_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<PyObject> {

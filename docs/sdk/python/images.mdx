@@ -3,7 +3,7 @@ title: Images
 description: Python SDK - Image cache API reference
 ---
 
-`Image` is the static namespace for two related things: configuring an explicit rootfs source for a sandbox (`Image.oci`, `Image.bind`, `Image.disk`), and managing the local OCI image cache that sandbox creation pulls into (`get`, `list`, `inspect`, `remove`, `prune`). Cache operations require a local backend. See [Sandbox](/sdk/python/sandbox) for the `image=` and `pull_policy=` creation kwargs.
+`Image` is the static namespace for two related things: configuring an explicit rootfs source for a sandbox (`Image.oci`, `Image.bind`, `Image.disk`), and managing the local OCI image cache that sandbox creation pulls into (`get`, `list`, `inspect`, `remove`, `prune`, `load`, `save`). Cache operations require a local backend. See [Sandbox](/sdk/python/sandbox) for the `image=` and `pull_policy=` creation kwargs.
 
 ```python
 from microsandbox import Image
@@ -16,12 +16,14 @@ from microsandbox import Image
   <a className="msb-row" href="#image-bind"><span className="msb-rn">Image.bind()</span><span className="msb-rg">bind a host directory</span></a>
   <a className="msb-row" href="#image-disk"><span className="msb-rn">Image.disk()</span><span className="msb-rg">boot from a disk image</span></a>
 
-  <p className="msb-gl"><span className="msb-dot static"></span>Cache management<span className="msb-ct">5</span></p>
+  <p className="msb-gl"><span className="msb-dot static"></span>Cache management<span className="msb-ct">7</span></p>
   <a className="msb-row" href="#image-get"><span className="msb-rn">Image.get()</span><span className="msb-rg">one cached image</span></a>
   <a className="msb-row" href="#image-list"><span className="msb-rn">Image.list()</span><span className="msb-rg">all cached images</span></a>
   <a className="msb-row" href="#image-inspect"><span className="msb-rn">Image.inspect()</span><span className="msb-rg">config + layer detail</span></a>
   <a className="msb-row" href="#image-remove"><span className="msb-rn">Image.remove()</span><span className="msb-rg">delete a cached image</span></a>
   <a className="msb-row" href="#image-prune"><span className="msb-rn">Image.prune()</span><span className="msb-rg">reclaim unused data</span></a>
+  <a className="msb-row" href="#image-load"><span className="msb-rn">Image.load()</span><span className="msb-rg">import from archive</span></a>
+  <a className="msb-row" href="#image-save"><span className="msb-rn">Image.save()</span><span className="msb-rg">export to archive</span></a>
 
   <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
   <div className="msb-chiprow">
@@ -362,6 +364,92 @@ print(f"{report.layers_removed} layers, {report.bytes_reclaimed} bytes")
 
 </Accordion>
 
+---
+
+#### <span className="msb-recv">Image.</span><span className="msb-hn">load()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
+
+```python
+@staticmethod
+async def load(input_path: str, *, tag: str | None = None) -> list[ImageHandle]
+```
+
+Import images from a local archive into the cache. Accepts `docker save` tarballs and OCI Image Layout archives, so locally built images can be used without going through a registry.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>input_path</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Path to the archive file, or <code>"-"</code> to read the archive from stdin.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>tag</code><span className="msb-type">str | None</span></div>
+    <div className="msb-param-desc">Extra reference applied to the first image in the archive.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#imagehandle">list[ImageHandle]</a></div>
+    <div className="msb-param-desc">A handle for every image reference imported.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```python
+# docker save my-image:latest -o my-image.tar
+images = await Image.load(input_path="my-image.tar", tag="app:local")
+for image in images:
+    print(image.reference, image.layer_count)
+
+# Or pipe it in: docker save my-image:latest | python app.py
+images = await Image.load(input_path="-")
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">Image.</span><span className="msb-hn">save()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
+
+```python
+@staticmethod
+async def save(reference: str, *, output_path: str, format: str = "docker") -> None
+```
+
+Export a cached image to an archive file. Raises [`ImageNotFoundError`](#errors) when the reference is not in the local cache, and `ValueError` for an unknown `format`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>reference</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Cached image reference to export.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>output_path</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">File path to write the archive to.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>format</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Archive layout: <code>"docker"</code> (default, loadable with <code>docker load</code>) or <code>"oci"</code> (OCI Image Layout).</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```python
+await Image.save("python:3.12", output_path="python.tar")
+await Image.save("python:3.12", output_path="python-oci.tar", format="oci")
+```
+
+</Accordion>
+
 ## Types
 
 ### ImageSource
@@ -385,9 +473,9 @@ Explicit rootfs image source. Build one with [`Image.oci()`](#image-oci), [`Imag
 
 <div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
-<p className="msb-backref">Returned by <a href="#image-get">get()</a> · <a href="#image-list">list()</a></p>
+<p className="msb-backref">Returned by <a href="#image-get">get()</a> · <a href="#image-list">list()</a> · <a href="#image-load">load()</a></p>
 
-A lightweight handle to a cached OCI image, returned by [`Image.get()`](#image-get) and [`Image.list()`](#image-list). Properties are read-only attributes; the two methods are async.
+A lightweight handle to a cached OCI image, returned by [`Image.get()`](#image-get), [`Image.list()`](#image-list), and [`Image.load()`](#image-load). Properties are read-only attributes; the two methods are async.
 
 | Property / Method | Type | Description |
 |-------------------|------|-------------|
