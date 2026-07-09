@@ -347,6 +347,28 @@ pub(crate) mod local {
         resolve_relative(&volume_root(local, name), path)
     }
 
+    /// Normalize a volume-relative path to `/`-separated absolute form
+    /// (`""`/`"/"` → `"/"`, `"a//./b/../c"` → `"/a/c"`). Purely textual —
+    /// volume paths are platform-independent and must not route through
+    /// host `Path` APIs, whose separator semantics differ on Windows.
+    fn normalize_slash_path(path: &str) -> String {
+        let mut parts: Vec<&str> = Vec::new();
+        for seg in path.split('/') {
+            match seg {
+                "" | "." => {}
+                ".." => {
+                    parts.pop();
+                }
+                seg => parts.push(seg),
+            }
+        }
+        if parts.is_empty() {
+            "/".to_string()
+        } else {
+            format!("/{}", parts.join("/"))
+        }
+    }
+
     pub(crate) async fn read(
         local: &LocalBackend,
         name: &str,
@@ -388,23 +410,29 @@ pub(crate) mod local {
     ) -> MicrosandboxResult<Vec<FsEntry>> {
         let root = volume_root(local, name);
         let full = resolve_relative(&root, path)?;
+        // Present entries as the request path joined with '/'. Deriving them from
+        // host paths instead (strip_prefix + display) breaks on Windows: `display()`
+        // renders host separators, and canonicalization adds a `\\?\` verbatim
+        // prefix that defeats the strip against the un-canonicalized root.
+        let base = normalize_slash_path(path);
         let mut dir = tokio::fs::read_dir(&full).await?;
         let mut entries = Vec::new();
 
         while let Some(entry) = dir.next_entry().await? {
-            let entry_path = entry.path();
-            let rel_path = entry_path.strip_prefix(&root).unwrap_or(&entry_path);
+            let entry_name = entry.file_name();
+            let entry_path = if base == "/" {
+                format!("/{}", entry_name.to_string_lossy())
+            } else {
+                format!("{base}/{}", entry_name.to_string_lossy())
+            };
 
             match entry.metadata().await {
                 Ok(meta) => {
-                    entries.push(metadata_to_entry(
-                        &format!("/{}", rel_path.display()),
-                        &meta,
-                    ));
+                    entries.push(metadata_to_entry(&entry_path, &meta));
                 }
                 Err(_) => {
                     entries.push(FsEntry {
-                        path: format!("/{}", rel_path.display()),
+                        path: entry_path,
                         kind: FsEntryKind::Other,
                         size: 0,
                         mode: 0,
@@ -689,6 +717,27 @@ mod tests {
         );
         assert!(root.is_dir());
         assert!(root.join("nested/file.txt").is_file());
+    }
+
+    #[tokio::test]
+    async fn list_returns_slash_paths_anchored_at_request() {
+        let (_temp, backend) = local_backend().await;
+        local::write(&backend, "vol", "nested/inner/file.txt", b"data")
+            .await
+            .unwrap();
+
+        let root_entries = local::list(&backend, "vol", "/").await.unwrap();
+        assert_eq!(root_entries.len(), 1);
+        assert_eq!(root_entries[0].path, "/nested");
+
+        let nested = local::list(&backend, "vol", "/nested").await.unwrap();
+        assert_eq!(nested.len(), 1);
+        assert_eq!(nested[0].path, "/nested/inner");
+
+        // Trailing slash and missing leading slash normalize to the same form.
+        let inner = local::list(&backend, "vol", "nested/inner/").await.unwrap();
+        assert_eq!(inner.len(), 1);
+        assert_eq!(inner[0].path, "/nested/inner/file.txt");
     }
 
     #[tokio::test]

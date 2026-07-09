@@ -252,7 +252,7 @@ impl SandboxConfig {
         let Some(init) = self.spec.init.as_ref() else {
             return;
         };
-        if init.cmd.as_os_str() != HANDOFF_INIT_AUTO {
+        if init.cmd != HANDOFF_INIT_AUTO {
             return;
         }
         let Some(entrypoint) = image_entrypoint else {
@@ -272,7 +272,7 @@ impl SandboxConfig {
                 .init
                 .as_mut()
                 .expect("init was present at start of auto resolution");
-            init.cmd = PathBuf::from(init_path);
+            init.cmd = init_path.to_string();
             init.env = merge_init_env(&self.spec.env, &init.env);
             return;
         }
@@ -297,7 +297,7 @@ impl SandboxConfig {
             .init
             .as_mut()
             .expect("init was present at start of auto resolution");
-        init.cmd = PathBuf::from(init_path);
+        init.cmd = init_path.to_string();
         init.args.extend(init_args);
         init.env = merge_init_env(&self.spec.env, &init.env);
 
@@ -598,8 +598,6 @@ impl Default for SandboxConfig {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::{SandboxConfig, merge_env};
     use crate::sandbox::{
         HandoffInit, MountOptions, NamedVolumeMode, RootfsSource, StatVirtualization, VolumeMount,
@@ -727,7 +725,7 @@ mod tests {
         let mut config = SandboxConfig {
             spec: SandboxSpec {
                 init: Some(HandoffInit {
-                    cmd: PathBuf::from("auto"),
+                    cmd: "auto".to_string(),
                     args: Vec::new(),
                     env: Vec::new(),
                 }),
@@ -742,7 +740,7 @@ mod tests {
             .init
             .as_ref()
             .expect("init should remain configured");
-        assert_eq!(init.cmd, PathBuf::from("/init"));
+        assert_eq!(init.cmd, "/init");
         assert_eq!(
             init.args,
             vec!["/opt/hermes/docker/main-wrapper.sh".to_string()]
@@ -766,7 +764,7 @@ mod tests {
         let mut config = SandboxConfig {
             spec: SandboxSpec {
                 init: Some(HandoffInit {
-                    cmd: PathBuf::from("auto"),
+                    cmd: "auto".to_string(),
                     args: Vec::new(),
                     env: Vec::new(),
                 }),
@@ -782,7 +780,7 @@ mod tests {
             .init
             .as_ref()
             .expect("init should remain configured");
-        assert_eq!(init.cmd, PathBuf::from("/init"));
+        assert_eq!(init.cmd, "/init");
         assert_eq!(
             init.args,
             vec![
@@ -815,7 +813,7 @@ mod tests {
         let mut config = SandboxConfig {
             spec: SandboxSpec {
                 init: Some(HandoffInit {
-                    cmd: PathBuf::from("auto"),
+                    cmd: "auto".to_string(),
                     args: Vec::new(),
                     env: vec![
                         ("PATH".to_string(), "/init/bin:/usr/bin:/bin".to_string()),
@@ -863,7 +861,7 @@ mod tests {
         let mut config = SandboxConfig {
             spec: SandboxSpec {
                 init: Some(HandoffInit {
-                    cmd: PathBuf::from("auto"),
+                    cmd: "auto".to_string(),
                     args: Vec::new(),
                     env: Vec::new(),
                 }),
@@ -875,7 +873,7 @@ mod tests {
         config.merge_image_defaults(&image);
 
         let init = config.spec.init.as_ref().expect("runtime init");
-        assert_eq!(init.cmd, PathBuf::from("/init"));
+        assert_eq!(init.cmd, "/init");
         assert_eq!(
             init.args,
             vec![
@@ -938,7 +936,7 @@ mod tests {
         let config = SandboxConfig {
             spec: SandboxSpec {
                 init: Some(HandoffInit {
-                    cmd: PathBuf::from("/lib/systemd/systemd"),
+                    cmd: "/lib/systemd/systemd".to_string(),
                     args: vec!["--unit=multi-user.target".to_string()],
                     env: Vec::new(),
                 }),
@@ -1002,7 +1000,7 @@ mod tests {
         let mut config = SandboxConfig {
             spec: SandboxSpec {
                 init: Some(HandoffInit {
-                    cmd: PathBuf::from("auto"),
+                    cmd: "auto".to_string(),
                     args: Vec::new(),
                     env: Vec::new(),
                 }),
@@ -1018,7 +1016,7 @@ mod tests {
             .init
             .as_ref()
             .expect("init should remain configured");
-        assert_eq!(init.cmd, PathBuf::from("/init"));
+        assert_eq!(init.cmd, "/init");
         assert_eq!(
             init.args,
             vec!["/app/server".to_string(), "--serve".to_string()]
@@ -1040,7 +1038,7 @@ mod tests {
         let mut config = SandboxConfig {
             spec: SandboxSpec {
                 init: Some(HandoffInit {
-                    cmd: PathBuf::from("auto"),
+                    cmd: "auto".to_string(),
                     args: Vec::new(),
                     env: Vec::new(),
                 }),
@@ -1056,7 +1054,7 @@ mod tests {
             .init
             .as_ref()
             .expect("init should remain configured");
-        assert_eq!(init.cmd, PathBuf::from("/lib/systemd/systemd"));
+        assert_eq!(init.cmd, "/lib/systemd/systemd");
         assert_eq!(init.args, vec!["bash".to_string()]);
         assert_eq!(config.spec.runtime.entrypoint, None);
     }
@@ -1078,7 +1076,7 @@ mod tests {
                     ..Default::default()
                 },
                 init: Some(HandoffInit {
-                    cmd: PathBuf::from("auto"),
+                    cmd: "auto".to_string(),
                     args: Vec::new(),
                     env: Vec::new(),
                 }),
@@ -1094,7 +1092,7 @@ mod tests {
             .init
             .as_ref()
             .expect("init should remain configured");
-        assert_eq!(init.cmd, PathBuf::from("/init"));
+        assert_eq!(init.cmd, "/init");
         assert!(init.args.is_empty());
         assert_eq!(
             config.spec.runtime.entrypoint,
@@ -1112,7 +1110,7 @@ mod tests {
         let mut config = SandboxConfig {
             spec: SandboxSpec {
                 init: Some(HandoffInit {
-                    cmd: PathBuf::from("auto"),
+                    cmd: "auto".to_string(),
                     args: Vec::new(),
                     env: Vec::new(),
                 }),
@@ -1124,7 +1122,7 @@ mod tests {
 
         assert_eq!(
             config.spec.init.expect("init should remain configured").cmd,
-            PathBuf::from("auto")
+            "auto"
         );
         assert_eq!(
             config.spec.runtime.entrypoint,

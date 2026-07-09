@@ -175,8 +175,25 @@ pub(super) async fn index_upsert(
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
-fn looks_like_path(s: &str) -> bool {
-    s.contains('/') || s.starts_with('.') || s.starts_with('~')
+/// Heuristic split between a bare snapshot name and a filesystem path.
+pub(super) fn looks_like_path(s: &str) -> bool {
+    if s.contains('/') || s.starts_with('.') || s.starts_with('~') {
+        return true;
+    }
+    // On Windows hosts, native separators and drive/UNC prefixes (`C:\snaps\foo`, `C:foo`, `\\server\share`) mark a path even when no forward slash appears.
+    #[cfg(windows)]
+    {
+        use typed_path::{Utf8WindowsComponent, Utf8WindowsPath};
+        s.contains('\\')
+            || matches!(
+                Utf8WindowsPath::new(s).components().next(),
+                Some(Utf8WindowsComponent::Prefix(_))
+            )
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
 }
 
 pub(super) async fn list_indexed(local: &LocalBackend) -> MicrosandboxResult<Vec<SnapshotHandle>> {
@@ -365,5 +382,37 @@ fn handle_from_model(m: snapshot_entity::Model) -> SnapshotHandle {
         size_bytes: m.size_bytes.map(|n| n as u64),
         created_at: m.created_at,
         artifact_path: PathBuf::from(m.artifact_path),
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::looks_like_path;
+
+    #[test]
+    fn bare_names_are_not_paths() {
+        assert!(!looks_like_path("nightly"));
+        assert!(!looks_like_path("my-snapshot_2"));
+    }
+
+    #[test]
+    fn posix_anchors_and_separators_are_paths() {
+        assert!(looks_like_path("/srv/snaps/foo"));
+        assert!(looks_like_path("snaps/foo"));
+        assert!(looks_like_path("./foo"));
+        assert!(looks_like_path("~/snaps"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_forms_are_paths() {
+        assert!(looks_like_path(r"C:\snaps\foo"));
+        assert!(looks_like_path(r"C:foo"));
+        assert!(looks_like_path(r"\\server\share\foo"));
+        assert!(looks_like_path(r"snaps\foo"));
     }
 }

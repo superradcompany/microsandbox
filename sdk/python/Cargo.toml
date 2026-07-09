@@ -22,3 +22,4 @@ pyo3-async-runtimes = { version = "0.24", features = ["tokio-runtime"] }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
+typed-path = { workspace = true }
