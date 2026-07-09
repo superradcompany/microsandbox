@@ -177,7 +177,7 @@ pub async fn run(args: LogsArgs) -> anyhow::Result<()> {
     if !log_dir.exists() {
         return Err(anyhow!(
             "no logs directory for sandbox {:?} (sandbox not found?)",
-            &args.name
+            args.name
         ));
     }
 
