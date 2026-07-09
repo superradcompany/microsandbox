@@ -1356,7 +1356,7 @@ fn parse_stdin(stdin: Option<&Bound<'_, PyAny>>) -> PyResult<(Option<String>, Op
     let data = stdin
         .getattr("_data")
         .ok()
-        .and_then(|v| if v.is_none() { None } else { Some(v) })
+        .filter(|v| !v.is_none())
         .map(|v| v.extract::<Vec<u8>>())
         .transpose()?;
     normalize_stdin(mode, data)

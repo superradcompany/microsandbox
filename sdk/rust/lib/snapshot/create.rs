@@ -15,7 +15,7 @@ use crate::db::entity::sandbox as sandbox_entity;
 use crate::sandbox::{SandboxConfig, SandboxStatus};
 use crate::{MicrosandboxError, MicrosandboxResult};
 
-use super::store::index_upsert;
+use super::store::{index_upsert, looks_like_path};
 use super::{Snapshot, SnapshotConfig, SnapshotDestination};
 
 //--------------------------------------------------------------------------------------------------
@@ -197,7 +197,7 @@ fn resolve_destination(
                     "snapshot name must not be empty".into(),
                 ));
             }
-            if name.contains('/') || name.starts_with('.') {
+            if looks_like_path(name) {
                 return Err(MicrosandboxError::InvalidConfig(format!(
                     "snapshot name must be a bare identifier, not a path: '{name}'"
                 )));

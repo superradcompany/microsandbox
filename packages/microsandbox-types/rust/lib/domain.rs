@@ -494,9 +494,9 @@ pub enum PortProtocol {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct HandoffInit {
     /// Init binary: absolute path inside the guest rootfs, or the literal `auto`.
-    #[cfg_attr(feature = "ts", ts(type = "string"))]
-    #[cfg_attr(feature = "utoipa", schema(value_type = String))]
-    pub cmd: PathBuf,
+    ///
+    /// Always a Linux-style `/`-separated path — never build it with host OS path APIs, whose semantics diverge on Windows (`\` separators, `/sbin/init` treated as relative).
+    pub cmd: String,
 
     /// Supplemental argv. `argv[0]` is implicitly `cmd`.
     #[serde(default)]

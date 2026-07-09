@@ -57,7 +57,7 @@ pub struct CloudSandboxSpec {
     /// CPU, memory, and user-facing disk resources.
     pub resources: CloudSandboxResources,
 
-    /// Guest runtime options (curated; platform-controlled fields omitted).
+    /// Guest runtime options.
     pub runtime: CloudSandboxRuntimeOptions,
 
     /// Environment variables visible to commands in the sandbox.
@@ -75,7 +75,7 @@ pub struct CloudSandboxSpec {
     /// Rootfs patches applied before VM start.
     pub patches: Vec<CloudPatch>,
 
-    /// Network specification (curated; platform-controlled fields omitted).
+    /// Network specification.
     pub network: CloudNetworkSpec,
 
     /// Hand off PID 1 to a guest init binary after agentd setup.
@@ -722,11 +722,10 @@ impl From<VolumeMount> for CloudVolumeMount {
     }
 }
 
-/// Cloud network specification. Mirrors the domain [`NetworkSpec`] but omits
-/// the platform-controlled fields: interface overrides, host port mapping,
-/// DNS, TLS interception, and host-CA trust are set by the cloud, not the
-/// caller. `deny_unknown_fields` — posting an omitted field is an error, not a
-/// silent drop.
+/// Cloud network specification: a subset of the domain [`NetworkSpec`].
+/// Interface overrides, host port mapping, DNS, TLS interception, and host-CA
+/// trust are not part of this type. `deny_unknown_fields` — posting an omitted
+/// field is an error, not a silent drop.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -735,8 +734,7 @@ pub struct CloudNetworkSpec {
     /// Whether networking is enabled for this sandbox.
     pub enabled: bool,
 
-    /// Egress/ingress policy. The cloud floors it (hard-denies the internal
-    /// network) before boot; public egress stays the caller's to govern.
+    /// Egress/ingress policy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub policy: Option<NetworkPolicy>,
 
@@ -744,7 +742,7 @@ pub struct CloudNetworkSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secrets: Option<CloudSecretsConfig>,
 
-    /// Max concurrent guest connections (the cloud clamps it to a ceiling).
+    /// Max concurrent guest connections.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_connections: Option<usize>,
 }
@@ -760,9 +758,9 @@ impl Default for CloudNetworkSpec {
     }
 }
 
-/// Cloud guest runtime options. Mirrors [`SandboxRuntimeOptions`] but omits the
-/// platform-controlled fields: the hostname (pinned to the sandbox id) and the
-/// metrics-sampling knobs (metering integrity). `deny_unknown_fields`.
+/// Cloud guest runtime options: a subset of [`SandboxRuntimeOptions`]. The
+/// hostname and the metrics-sampling knobs are not part of this type.
+/// `deny_unknown_fields`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -950,11 +948,9 @@ impl TryFrom<CloudSandboxSpec> for SandboxSpec {
             max_memory_mib: spec.resources.memory_mib,
         };
 
-        // Fill the platform-controlled fields the cloud twins omit with safe
-        // defaults; the resolver + driver floor set/override them.
-        // Platform-controlled fields are set/overridden by the resolver and
-        // driver; the cloud caller never supplies them. Listed explicitly (not
-        // `..default()`) so a new NetworkSpec field forces a decision here.
+        // Fields not present on `CloudNetworkSpec` are defaulted here, listed
+        // explicitly (not `..default()`) so a new `NetworkSpec` field forces a
+        // decision here.
         let network = NetworkSpec {
             enabled: spec.network.enabled,
             interface: None,

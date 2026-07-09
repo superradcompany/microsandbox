@@ -3397,6 +3397,7 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "typed-builder",
+ "typed-path",
  "which",
  "windows-sys 0.61.2",
  "zeroize",
@@ -3676,6 +3677,7 @@ dependencies = [
  "pyo3-async-runtimes",
  "serde_json",
  "tokio",
+ "typed-path",
 ]
 
 [[package]]
@@ -7528,6 +7530,12 @@ dependencies = [
  "quote",
  "syn 2.0.118",
 ]
+
+[[package]]
+name = "typed-path"
+version = "0.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e28f89b80c87b8fb0cf04ab448d5dd0dd0ade2f8891bae878de66a75a28600e"
 
 [[package]]
 name = "typenum"

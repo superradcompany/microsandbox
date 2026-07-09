@@ -880,7 +880,7 @@ fn os_str_bytes(value: &OsStr) -> Vec<u8> {
 /// Collapses `..` components lexically before checking containment, so that
 /// paths like `/etc/foo/../../bar` are caught even without filesystem access.
 fn resolve_guest_path(target_dir: &Path, guest_path: &str) -> MicrosandboxResult<PathBuf> {
-    use std::path::Component;
+    use typed_path::{Utf8UnixComponent, Utf8UnixPath};
 
     if !guest_path.starts_with('/') {
         return Err(crate::MicrosandboxError::PatchFailed(format!(
@@ -889,26 +889,27 @@ fn resolve_guest_path(target_dir: &Path, guest_path: &str) -> MicrosandboxResult
     }
 
     // Build a normalized relative path by collapsing `.` and `..` lexically.
+    // Parsed with Unix semantics regardless of host — `std::path` would treat
+    // `\` as a separator on Windows and mis-split guest components.
     let mut normalized = PathBuf::new();
-    for component in Path::new(guest_path).components() {
+    for component in Utf8UnixPath::new(guest_path).components() {
         match component {
-            Component::RootDir | Component::CurDir => {}
-            Component::ParentDir => {
+            Utf8UnixComponent::RootDir | Utf8UnixComponent::CurDir => {}
+            Utf8UnixComponent::ParentDir => {
                 if !normalized.pop() {
                     return Err(crate::MicrosandboxError::PatchFailed(format!(
                         "patch path escapes rootfs: '{guest_path}'"
                     )));
                 }
             }
-            Component::Normal(c) => {
-                if c.as_encoded_bytes().contains(&b'\0') {
+            Utf8UnixComponent::Normal(c) => {
+                if c.contains('\0') {
                     return Err(crate::MicrosandboxError::PatchFailed(format!(
                         "patch path contains null byte: '{guest_path}'"
                     )));
                 }
                 normalized.push(c);
             }
-            Component::Prefix(_) => {}
         }
     }
 

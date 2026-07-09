@@ -24,8 +24,6 @@
 //!     .build().await?;
 //! ```
 
-use std::path::Path;
-
 use microsandbox_protocol::HANDOFF_INIT_AUTO;
 
 use crate::{MicrosandboxError, MicrosandboxResult};
@@ -100,11 +98,12 @@ impl InitOptionsBuilder {
 /// vars.
 ///
 /// Constraints (each violation produces an `InvalidConfig` error):
-/// - `cmd` must be valid UTF-8 (the host→guest transport is
-///   `String`-only and `PathBuf` JSON serde drops non-UTF-8 bytes).
 /// - `cmd` must be either an absolute path or the literal sentinel
 ///   [`HANDOFF_INIT_AUTO`] (which agentd resolves at boot time).
 /// - `cmd` must not contain a NUL byte (CString incompatibility).
+/// - `cmd` must not contain `\` — it's a guest (Linux) path, where
+///   backslash is a valid filename byte but in practice always means
+///   the caller built it with host `Path` APIs on Windows.
 /// - Each argv entry must be free of `\0` (CString terminator).
 /// - Each env key must be non-empty and free of `=` and `\0`
 ///   (POSIX disallows `=` in keys).
@@ -120,21 +119,20 @@ pub(crate) fn validate(spec: &HandoffInit) -> MicrosandboxResult<()> {
     Ok(())
 }
 
-fn validate_cmd(cmd: &Path) -> MicrosandboxResult<()> {
-    let s = cmd.to_str().ok_or_else(|| {
-        MicrosandboxError::InvalidConfig(format!(
-            "init cmd path must be valid UTF-8: {}",
-            cmd.display()
-        ))
-    })?;
+fn validate_cmd(s: &str) -> MicrosandboxResult<()> {
     if s.contains('\0') {
         return Err(MicrosandboxError::InvalidConfig(format!(
             "init cmd path must not contain a NUL byte: {s:?}"
         )));
     }
+    if s.contains('\\') {
+        return Err(MicrosandboxError::InvalidConfig(format!(
+            "init cmd is a guest (Linux) path and must not contain '\\' — use '/' separators: {s:?}"
+        )));
+    }
     // The sentinel `auto` is resolved guest-side; everything else must be a
-    // Linux guest absolute path. Do not use `Path::is_absolute` here because it
-    // follows host semantics and treats `/sbin/init` as relative on Windows.
+    // Linux guest absolute path, checked textually — never via `Path::is_absolute`,
+    // which follows host semantics and treats `/sbin/init` as relative on Windows.
     if s != HANDOFF_INIT_AUTO && !s.starts_with('/') {
         return Err(MicrosandboxError::InvalidConfig(format!(
             "init cmd must be an absolute path or `{HANDOFF_INIT_AUTO}`, got: {s:?}"
@@ -183,11 +181,10 @@ fn validate_env_pair(key: &str, value: &str) -> MicrosandboxResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     fn ok(cmd: &str, args: &[&str], env: &[(&str, &str)]) -> HandoffInit {
         HandoffInit {
-            cmd: PathBuf::from(cmd),
+            cmd: cmd.to_string(),
             args: args.iter().map(|s| s.to_string()).collect(),
             env: env
                 .iter()
@@ -252,14 +249,10 @@ mod tests {
         assert!(format!("{err}").contains("absolute path or `auto`"));
     }
 
-    #[cfg(unix)]
     #[test]
-    fn validate_rejects_non_utf8_cmd() {
-        use std::ffi::OsStr;
-        use std::os::unix::ffi::OsStrExt;
-        let mut spec = ok("/sbin/init", &[], &[]);
-        spec.cmd = PathBuf::from(OsStr::from_bytes(b"/\xff/init"));
+    fn validate_rejects_backslash_in_cmd() {
+        let spec = ok("/opt\\init", &[], &[]);
         let err = validate(&spec).unwrap_err();
-        assert!(format!("{err}").contains("valid UTF-8"));
+        assert!(format!("{err}").contains("guest (Linux) path"));
     }
 }
