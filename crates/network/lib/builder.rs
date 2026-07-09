@@ -15,7 +15,7 @@ use zeroize::Zeroizing;
 use crate::secrets::config::{
     HostPattern, SecretEntry, SecretInjection, SecretSource, ViolationAction,
 };
-use crate::tls::{ScopedUpstreamCaCert, ScopedVerifyUpstream, TlsConfig};
+use microsandbox_types::{ScopedUpstreamCaCert, ScopedVerifyUpstream, TlsConfig};
 
 //--------------------------------------------------------------------------------------------------
 // Types

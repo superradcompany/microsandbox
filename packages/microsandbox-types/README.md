@@ -15,14 +15,14 @@ packages/microsandbox-types/
 ```
 
 - `rust/` publishes as `microsandbox-types` (crate name `microsandbox_types`). It is the source of truth for every shared type.
-- `typescript/` publishes as `@microsandbox/types`. Its `src/index.ts` is generated from the Rust types, never hand-edited.
+- `typescript/` publishes as `@microsandbox/types`. Its `src/cloud.ts` (entry) and `src/domain.ts` are generated from the Rust types, never hand-edited; only the cloud contract and the domain types it references are emitted.
 
 ## Source Of Truth
 
 The Rust crate owns the definitions. The TypeScript bindings are derived from them with [`ts-rs`](https://github.com/Aleph-Alpha/ts-rs) behind the crate's `ts` feature, so the two stay byte-for-byte aligned.
 
 ```text
-rust/lib/*.rs  ──(ts-rs)──▶  typescript/src/index.ts
+rust/lib/*.rs  ──(ts-rs)──▶  typescript/src/{cloud,domain}.ts
 ```
 
 To regenerate the bindings after changing a Rust type:

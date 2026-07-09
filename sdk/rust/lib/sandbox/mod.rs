@@ -53,7 +53,7 @@ use microsandbox_image::{
 use crate::{
     MicrosandboxResult,
     agent::AgentClient,
-    backend::LocalBackend,
+    backend::{LocalBackend, SandboxInner::Cloud},
     db::entity::{
         run as run_entity, sandbox as sandbox_entity, sandbox_rootfs as sandbox_rootfs_entity,
     },
@@ -459,23 +459,18 @@ impl Sandbox {
         }
     }
 
-    /// Build an outer `Sandbox` from a [`CloudSandbox`](crate::backend::CloudSandbox)
+    /// Build an outer `Sandbox` from a [`CloudCreateSandboxResponse`](crate::backend::CloudCreateSandboxResponse)
     /// HTTP response plus the originating [`SandboxConfig`].
     pub(crate) fn from_cloud(
         backend: Arc<dyn crate::backend::Backend>,
-        cloud: crate::backend::CloudSandbox,
+        state: crate::backend::SandboxCloudState,
+        name: String,
         config: SandboxConfig,
     ) -> Self {
         Self {
             backend,
-            inner: Arc::new(crate::backend::SandboxInner::Cloud(
-                crate::backend::SandboxCloudState {
-                    id: cloud.id,
-                    org_id: cloud.org_id,
-                    created_at: cloud.created_at,
-                },
-            )),
-            name: cloud.name,
+            inner: Arc::new(Cloud(state)),
+            name,
             config,
         }
     }
@@ -1371,7 +1366,7 @@ impl Sandbox {
     pub fn local(&self) -> Option<&crate::backend::SandboxLocalState> {
         match self.inner.as_ref() {
             crate::backend::SandboxInner::Local(s) => Some(s),
-            crate::backend::SandboxInner::Cloud(_) => None,
+            Cloud(_) => None,
         }
     }
 
@@ -1379,7 +1374,7 @@ impl Sandbox {
     /// created by the cloud backend.
     pub fn cloud(&self) -> Option<&crate::backend::SandboxCloudState> {
         match self.inner.as_ref() {
-            crate::backend::SandboxInner::Cloud(s) => Some(s),
+            Cloud(s) => Some(s),
             crate::backend::SandboxInner::Local(_) => None,
         }
     }

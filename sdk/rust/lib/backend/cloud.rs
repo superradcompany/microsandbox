@@ -46,7 +46,8 @@ use crate::sandbox::{
 };
 use crate::{MicrosandboxError, MicrosandboxResult};
 use microsandbox_types::{
-    CloudCreateSandboxRequest, CloudErrorBody, CloudMessageResponse, CloudPaginated, CloudSandbox,
+    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudMessageResponse,
+    CloudPaginated,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -188,7 +189,7 @@ impl CloudBackend {
         &self,
         req: &CloudCreateSandboxRequest,
         start: bool,
-    ) -> MicrosandboxResult<CloudSandbox> {
+    ) -> MicrosandboxResult<CloudCreateSandboxResponse> {
         let path = if start {
             "/v1/sandboxes?start=true"
         } else {
@@ -210,7 +211,7 @@ impl CloudBackend {
         &self,
         cursor: Option<&str>,
         limit: Option<u32>,
-    ) -> MicrosandboxResult<CloudPaginated<CloudSandbox>> {
+    ) -> MicrosandboxResult<CloudPaginated<CloudCreateSandboxResponse>> {
         let mut url = format!("{}/v1/sandboxes", self.url);
         let mut query = Vec::new();
         if let Some(c) = cursor {
@@ -233,7 +234,7 @@ impl CloudBackend {
     }
 
     /// `GET /v1/sandboxes/by-name/:name`.
-    pub async fn get_sandbox(&self, name: &str) -> MicrosandboxResult<CloudSandbox> {
+    pub async fn get_sandbox(&self, name: &str) -> MicrosandboxResult<CloudCreateSandboxResponse> {
         let url = format!("{}/v1/sandboxes/by-name/{}", self.url, urlencoding(name));
         let resp = self
             .http
@@ -245,7 +246,10 @@ impl CloudBackend {
     }
 
     /// `POST /v1/sandboxes/by-name/:name/start`.
-    pub async fn start_sandbox(&self, name: &str) -> MicrosandboxResult<CloudSandbox> {
+    pub async fn start_sandbox(
+        &self,
+        name: &str,
+    ) -> MicrosandboxResult<CloudCreateSandboxResponse> {
         let url = format!(
             "{}/v1/sandboxes/by-name/{}/start",
             self.url,
@@ -262,7 +266,7 @@ impl CloudBackend {
     }
 
     /// `POST /v1/sandboxes/by-name/:name/stop`.
-    pub async fn stop_sandbox(&self, name: &str) -> MicrosandboxResult<CloudSandbox> {
+    pub async fn stop_sandbox(&self, name: &str) -> MicrosandboxResult<CloudCreateSandboxResponse> {
         let url = format!(
             "{}/v1/sandboxes/by-name/{}/stop",
             self.url,

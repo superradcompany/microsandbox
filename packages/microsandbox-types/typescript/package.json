@@ -2,12 +2,12 @@
   "name": "@microsandbox/types",
   "version": "0.6.6",
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "./dist/cloud.js",
+  "types": "./dist/cloud.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "types": "./dist/cloud.d.ts",
+      "import": "./dist/cloud.js"
     }
   },
   "license": "Apache-2.0",
