@@ -453,6 +453,12 @@ pub fn enter(config: Config) -> ! {
 }
 
 fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
+    // Raise the fd limit before anything else: every guest-held open file on a virtiofs share pins one fd in this process, so the shell's default soft limit
+    // (1024 on many distros) is nowhere near enough for real workloads. Reference virtiofsd raises its own limit for the same reason. Best-effort: failure is
+    // not fatal, just a smaller fd budget.
+    #[cfg(unix)]
+    raise_nofile_limit();
+
     // Write startup JSON and redirect output FIRST, before any tracing.
     // This ensures all tracing goes to runtime.log, not the terminal.
     let pid = std::process::id();
@@ -1405,6 +1411,65 @@ fn build_vm(
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+/// Raise `RLIMIT_NOFILE` to the hard limit, capped at 1M (the reference virtiofsd default). On macOS the soft limit is additionally clamped to
+/// `kern.maxfilesperproc`, which `setrlimit` enforces even when the hard limit is unlimited.
+#[cfg(unix)]
+fn raise_nofile_limit() {
+    const TARGET: libc::rlim_t = 1_048_576;
+
+    let mut lim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } != 0 {
+        tracing::warn!(
+            error = %std::io::Error::last_os_error(),
+            "getrlimit(RLIMIT_NOFILE) failed; keeping inherited fd limit"
+        );
+        return;
+    }
+
+    let want = lim.rlim_max.min(TARGET);
+    #[cfg(target_os = "macos")]
+    let want = macos_maxfilesperproc().map_or(want, |max| want.min(max));
+
+    if want <= lim.rlim_cur {
+        return;
+    }
+
+    let new = libc::rlimit {
+        rlim_cur: want,
+        rlim_max: lim.rlim_max,
+    };
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &new) } != 0 {
+        tracing::warn!(
+            error = %std::io::Error::last_os_error(),
+            soft = lim.rlim_cur,
+            wanted = want,
+            "setrlimit(RLIMIT_NOFILE) failed; keeping inherited fd limit"
+        );
+    } else {
+        tracing::debug!(from = lim.rlim_cur, to = want, "raised RLIMIT_NOFILE");
+    }
+}
+
+/// Read `kern.maxfilesperproc`, the ceiling macOS enforces on the `RLIMIT_NOFILE` soft limit.
+#[cfg(target_os = "macos")]
+fn macos_maxfilesperproc() -> Option<libc::rlim_t> {
+    let mut maxfiles: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>();
+    let ret = unsafe {
+        libc::sysctlbyname(
+            c"kern.maxfilesperproc".as_ptr(),
+            &mut maxfiles as *mut _ as *mut libc::c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (ret == 0 && maxfiles > 0).then_some(maxfiles as libc::rlim_t)
+}
 
 /// Build the host-directory rootfs backend used for `RootfsSource::Bind`.
 ///
