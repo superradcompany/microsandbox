@@ -1851,6 +1851,13 @@ async fn stage_file_mounts(
         let file_mount_dir = tempdir.path().join(&tag);
         tokio::fs::create_dir_all(&file_mount_dir).await?;
 
+        // Canonicalize the staging directory so the mount root is symlink-free
+        // (the system temp dir often sits under a symlinked prefix, e.g. macOS
+        // `/var` -> `/private/var`). This resolves the one benign system symlink
+        // here in the trusted host context, so the mount stays under the default
+        // no-follow root protection instead of needing an exemption.
+        let file_mount_dir = tokio::fs::canonicalize(&file_mount_dir).await?;
+
         let filename_os = host.file_name().ok_or_else(|| {
             crate::MicrosandboxError::InvalidConfig(format!(
                 "file mount has no filename: {}",
@@ -1943,12 +1950,18 @@ fn push_dir_mount_arg(
     options: MountOptions,
     stat_virtualization: StatVirtualization,
     host_permissions: HostPermissions,
+    follow_root_symlinks: bool,
     quota_mib: Option<u32>,
 ) {
     let tag = guest_mount_tag(guest);
     let mut arg = format!("{tag}:{host_display}");
     let mut opts = mount_option_tokens(options);
-    append_policy_options(&mut opts, stat_virtualization, host_permissions);
+    append_policy_options(
+        &mut opts,
+        stat_virtualization,
+        host_permissions,
+        follow_root_symlinks,
+    );
     if let Some(mib) = quota_mib {
         opts.push(format!("quota={mib}"));
     }
@@ -1979,7 +1992,9 @@ fn push_file_mount_arg(
 ) {
     let mut arg = format!("{tag}:{}", file_mount_dir.display());
     let mut opts = mount_option_tokens(options);
-    append_policy_options(&mut opts, stat_virtualization, host_permissions);
+    // The staging directory is canonicalized at creation, so it is symlink-free
+    // and stays under the default no-follow root protection — no opt-out here.
+    append_policy_options(&mut opts, stat_virtualization, host_permissions, false);
     append_option_block(&mut arg, opts);
     mounts.push(arg);
 }
@@ -2060,6 +2075,7 @@ fn append_policy_options(
     opts: &mut Vec<String>,
     stat_virtualization: StatVirtualization,
     host_permissions: HostPermissions,
+    follow_root_symlinks: bool,
 ) {
     match stat_virtualization {
         StatVirtualization::Strict => {}
@@ -2069,6 +2085,11 @@ fn append_policy_options(
     match host_permissions {
         HostPermissions::Private => {}
         HostPermissions::Mirror => opts.push("host-perms=mirror".to_string()),
+    }
+    // Presence token opts out of the protective default (no-follow root
+    // resolution); its absence keeps the default protection on.
+    if follow_root_symlinks {
+        opts.push("follow-root-symlinks".to_string());
     }
 }
 
@@ -2237,8 +2258,12 @@ fn sandbox_cli_args(
     }
 
     match &config.spec.image {
-        RootfsSource::Bind(path) => {
+        RootfsSource::Bind {
+            path,
+            follow_root_symlinks,
+        } => {
             launch.rootfs.path = Some(path.clone());
+            launch.rootfs.follow_root_symlinks = *follow_root_symlinks;
         }
         RootfsSource::Oci(_) => {
             // Derive VMDK + upper paths from the stored manifest digest.
@@ -2295,6 +2320,7 @@ fn sandbox_cli_args(
                 options,
                 stat_virtualization,
                 host_permissions,
+                follow_root_symlinks,
                 quota_mib,
             } => {
                 if let Some((file_mount_dir, filename, tag)) = staged_file_mounts.get(guest) {
@@ -2318,6 +2344,7 @@ fn sandbox_cli_args(
                         *options,
                         *stat_virtualization,
                         *host_permissions,
+                        *follow_root_symlinks,
                         Some(quota),
                     );
                     push_dir_mounts_spec(&mut dir_mounts_val, guest, *options);
@@ -2329,6 +2356,7 @@ fn sandbox_cli_args(
                 options,
                 stat_virtualization,
                 host_permissions,
+                follow_root_symlinks,
                 create: _,
             } => {
                 let named_volume = named_volumes
@@ -2371,6 +2399,7 @@ fn sandbox_cli_args(
                             *options,
                             *stat_virtualization,
                             *host_permissions,
+                            *follow_root_symlinks,
                             *quota_mib,
                         );
                         push_dir_mounts_spec(&mut dir_mounts_val, guest, *options);
@@ -3517,7 +3546,9 @@ mod tests {
 
         let rendered = render_args_with_file_mounts(&config, &staged_file_mounts);
 
-        // File mount should use staging dir in --mount.
+        // File mount should use staging dir in --mount. The staging dir is
+        // canonicalized at creation so it stays under the no-follow default;
+        // the spec carries no opt-out token.
         assert!(rendered.windows(2).any(|pair| pair[0] == "--mount"
             && pair[1] == "fm_aabbccdd:/tmp/staging/fm_aabbccdd:ro,noexec"));
         // MSB_FILE_MOUNTS should contain the spec.
@@ -3579,6 +3610,50 @@ mod tests {
                 .windows(2)
                 .any(|pair| pair[0] == "--mount" && pair[1] == expected),
             "missing default-quota --mount arg in {rendered:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_cli_args_bind_mount_protected_by_default() {
+        // No opt-out: the rendered mount spec must NOT carry the token, so the
+        // runtime applies the protective no-follow default.
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/data", |m| m.bind("/host/data"))
+            .build()
+            .await
+            .unwrap();
+        let rendered = render_args(&config);
+        let data_tag = super::guest_mount_tag("/data");
+        let arg = rendered
+            .windows(2)
+            .find(|p| p[0] == "--mount" && p[1].starts_with(&format!("{data_tag}:/host/data")))
+            .map(|p| p[1].clone())
+            .unwrap_or_default();
+        assert!(
+            !arg.contains("follow-root-symlinks"),
+            "protected mount must omit the opt-out token, got {arg:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_cli_args_bind_mount_follow_root_symlinks_opt_out() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/data", |m| m.bind("/host/data").follow_root_symlinks(true))
+            .build()
+            .await
+            .unwrap();
+        let rendered = render_args(&config);
+        let data_tag = super::guest_mount_tag("/data");
+        let arg = rendered
+            .windows(2)
+            .find(|p| p[0] == "--mount" && p[1].starts_with(&format!("{data_tag}:/host/data")))
+            .map(|p| p[1].clone())
+            .unwrap_or_default();
+        assert!(
+            arg.contains("follow-root-symlinks"),
+            "opt-out mount must carry the token, got {arg:?}"
         );
     }
 
@@ -4089,6 +4164,7 @@ mod tests {
                         options: MountOptions::default(),
                         stat_virtualization: StatVirtualization::Strict,
                         host_permissions: HostPermissions::Private,
+                        follow_root_symlinks: false,
                     },
                     VolumeMount::Named {
                         name: "data".to_string(),
@@ -4097,6 +4173,7 @@ mod tests {
                         options: MountOptions::default(),
                         stat_virtualization: StatVirtualization::Strict,
                         host_permissions: HostPermissions::Private,
+                        follow_root_symlinks: false,
                     },
                 ],
                 ..Default::default()

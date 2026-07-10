@@ -267,3 +267,82 @@ fn test_readdirplus_skips_dot_dotdot() {
         assert_ne!(de.name, b"..");
     }
 }
+
+#[test]
+fn test_readdirplus_degrades_entry_on_lookup_failure() {
+    let sb = TestSandbox::new();
+    sb.fuse_create_root("ok.txt").unwrap();
+    sb.fuse_create_root("broken.txt").unwrap();
+
+    // Corrupt the override xattr so lookups of broken.txt fail with EIO (strict stat virtualization is on by default in TestSandbox).
+    super::test_corrupt_xattr::host_set_raw_xattr(&sb.root.join("broken.txt"), &[0u8; 5]);
+
+    let handle = sb.fuse_opendir(ROOT_INODE).unwrap();
+    let entries = sb
+        .fs
+        .readdirplus(sb.ctx(), ROOT_INODE, handle, 65536, 0)
+        .unwrap();
+
+    // The broken entry must still be listed, degraded to inode 0 ("no lookup performed") rather than silently omitted.
+    let broken = entries.iter().find(|(de, _)| de.name == b"broken.txt");
+    let (_, broken_entry) = broken.expect("broken.txt missing from readdirplus listing");
+    assert_eq!(broken_entry.inode, 0, "degraded entry should have inode 0");
+
+    let ok = entries.iter().find(|(de, _)| de.name == b"ok.txt");
+    let (_, ok_entry) = ok.expect("ok.txt missing from readdirplus listing");
+    assert_ne!(ok_entry.inode, 0, "healthy entry should have a real inode");
+}
+
+#[test]
+fn test_readdirplus_for_each_degrades_entry_on_lookup_failure() {
+    let sb = TestSandbox::new();
+    sb.fuse_create_root("ok.txt").unwrap();
+    sb.fuse_create_root("broken.txt").unwrap();
+
+    super::test_corrupt_xattr::host_set_raw_xattr(&sb.root.join("broken.txt"), &[0u8; 5]);
+
+    let handle = sb.fuse_opendir(ROOT_INODE).unwrap();
+    let mut seen: Vec<(Vec<u8>, u64)> = Vec::new();
+    sb.fs
+        .readdirplus_for_each(sb.ctx(), ROOT_INODE, handle, 65536, 0, &mut |de, entry| {
+            seen.push((de.name.to_vec(), entry.inode));
+            Ok(1)
+        })
+        .unwrap();
+
+    let broken = seen.iter().find(|(name, _)| name == b"broken.txt");
+    let (_, broken_inode) = broken.expect("broken.txt missing from streaming listing");
+    assert_eq!(*broken_inode, 0, "degraded entry should have inode 0");
+
+    let ok = seen.iter().find(|(name, _)| name == b"ok.txt");
+    let (_, ok_inode) = ok.expect("ok.txt missing from streaming listing");
+    assert_ne!(*ok_inode, 0, "healthy entry should have a real inode");
+}
+
+#[test]
+fn test_readdirplus_skips_entry_deleted_after_snapshot() {
+    let sb = TestSandbox::new();
+    sb.fuse_create_root("keep.txt").unwrap();
+    sb.fuse_create_root("gone.txt").unwrap();
+
+    // First readdirplus builds the point-in-time snapshot with both files.
+    let handle = sb.fuse_opendir(ROOT_INODE).unwrap();
+    let entries = sb
+        .fs
+        .readdirplus(sb.ctx(), ROOT_INODE, handle, 65536, 0)
+        .unwrap();
+    assert!(entries.iter().any(|(de, _)| de.name == b"gone.txt"));
+
+    // Delete the file on the host; the snapshot still lists it, but the per-entry lookup now fails with ENOENT — a genuine race, so the entry is skipped rather than degraded.
+    std::fs::remove_file(sb.root.join("gone.txt")).unwrap();
+
+    let entries = sb
+        .fs
+        .readdirplus(sb.ctx(), ROOT_INODE, handle, 65536, 0)
+        .unwrap();
+    assert!(
+        !entries.iter().any(|(de, _)| de.name == b"gone.txt"),
+        "deleted entry should be skipped, not degraded"
+    );
+    assert!(entries.iter().any(|(de, _)| de.name == b"keep.txt"));
+}

@@ -47,11 +47,19 @@ pub enum DiskImageFormat {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum RootfsSource {
     /// Use a host directory directly as the root filesystem.
-    Bind(
+    Bind {
         /// Host path to bind mount.
         #[cfg_attr(feature = "ts", ts(type = "string"))]
-        PathBuf,
-    ),
+        path: PathBuf,
+        /// Whether to follow symlinks when resolving the host rootfs path.
+        ///
+        /// Defaults to `false`: the path is resolved following no symlink in any
+        /// component, matching the `--mount` protection, so a symlink at or under
+        /// the rootfs path cannot redirect the mount. Set `true` to opt out when
+        /// the host rootfs path legitimately traverses a symlink.
+        #[serde(default)]
+        follow_root_symlinks: bool,
+    },
 
     /// Use an OCI image reference with an EROFS lower and ext4 overlay upper.
     Oci(OciRootfsSource),
@@ -264,6 +272,13 @@ pub enum VolumeMount {
         stat_virtualization: StatVirtualization,
         /// Host permission propagation policy.
         host_permissions: HostPermissions,
+        /// Whether to follow symlinks when resolving the host mount root.
+        ///
+        /// Defaults to `false`: the host path is resolved following no symlink in
+        /// any component, so a symlink planted at (or under) the mount root cannot
+        /// redirect the mount out of its intended target. Set `true` to opt out
+        /// when the host path legitimately traverses a symlink.
+        follow_root_symlinks: bool,
         /// Guest-write byte budget in MiB.
         ///
         /// Bounds how much the guest may add beyond the directory's existing
@@ -288,6 +303,11 @@ pub enum VolumeMount {
         stat_virtualization: StatVirtualization,
         /// Host permission propagation policy.
         host_permissions: HostPermissions,
+        /// Whether to follow symlinks when resolving the host mount root.
+        ///
+        /// Defaults to `false` (resolve following no symlink). See
+        /// [`VolumeMount::Bind`] for details.
+        follow_root_symlinks: bool,
     },
 
     /// Temporary filesystem backed by guest memory.
@@ -1163,15 +1183,17 @@ impl Serialize for VolumeMount {
                 options,
                 stat_virtualization,
                 host_permissions,
+                follow_root_symlinks,
                 quota_mib,
             } => {
-                let mut map = serializer.serialize_map(Some(7))?;
+                let mut map = serializer.serialize_map(Some(8))?;
                 map.serialize_entry("type", "Bind")?;
                 map.serialize_entry("host", host)?;
                 map.serialize_entry("guest", guest)?;
                 map.serialize_entry("options", options)?;
                 map.serialize_entry("stat_virtualization", stat_virtualization)?;
                 map.serialize_entry("host_permissions", host_permissions)?;
+                map.serialize_entry("follow_root_symlinks", follow_root_symlinks)?;
                 map.serialize_entry("quota_mib", quota_mib)?;
                 map.end()
             }
@@ -1182,14 +1204,16 @@ impl Serialize for VolumeMount {
                 options,
                 stat_virtualization,
                 host_permissions,
+                follow_root_symlinks,
             } => {
-                let mut map = serializer.serialize_map(Some(6))?;
+                let mut map = serializer.serialize_map(Some(7))?;
                 map.serialize_entry("type", "Named")?;
                 map.serialize_entry("name", name)?;
                 map.serialize_entry("guest", guest)?;
                 map.serialize_entry("options", options)?;
                 map.serialize_entry("stat_virtualization", stat_virtualization)?;
                 map.serialize_entry("host_permissions", host_permissions)?;
+                map.serialize_entry("follow_root_symlinks", follow_root_symlinks)?;
                 map.end()
             }
             Self::Tmpfs {
@@ -1249,6 +1273,8 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 #[serde(default = "default_private")]
                 host_permissions: HostPermissions,
                 #[serde(default)]
+                follow_root_symlinks: bool,
+                #[serde(default)]
                 quota_mib: Option<u32>,
             },
             Named {
@@ -1262,6 +1288,8 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 stat_virtualization: StatVirtualization,
                 #[serde(default = "default_private")]
                 host_permissions: HostPermissions,
+                #[serde(default)]
+                follow_root_symlinks: bool,
             },
             Tmpfs {
                 guest: String,
@@ -1294,6 +1322,7 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 readonly,
                 stat_virtualization,
                 host_permissions,
+                follow_root_symlinks,
                 quota_mib,
             } => Self::Bind {
                 host,
@@ -1301,6 +1330,7 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 options: decode_mount_options(options, readonly),
                 stat_virtualization,
                 host_permissions,
+                follow_root_symlinks,
                 quota_mib,
             },
             VolumeMountHelper::Named {
@@ -1310,6 +1340,7 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 readonly,
                 stat_virtualization,
                 host_permissions,
+                follow_root_symlinks,
             } => Self::Named {
                 name,
                 guest,
@@ -1317,6 +1348,7 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 options: decode_mount_options(options, readonly),
                 stat_virtualization,
                 host_permissions,
+                follow_root_symlinks,
             },
             VolumeMountHelper::Tmpfs {
                 guest,
@@ -1355,6 +1387,7 @@ impl fmt::Debug for VolumeMount {
                 options,
                 stat_virtualization,
                 host_permissions,
+                follow_root_symlinks,
                 quota_mib,
             } => f
                 .debug_struct("Bind")
@@ -1363,6 +1396,7 @@ impl fmt::Debug for VolumeMount {
                 .field("options", options)
                 .field("stat_virtualization", stat_virtualization)
                 .field("host_permissions", host_permissions)
+                .field("follow_root_symlinks", follow_root_symlinks)
                 .field("quota_mib", quota_mib)
                 .finish(),
             Self::Named {
@@ -1372,6 +1406,7 @@ impl fmt::Debug for VolumeMount {
                 options,
                 stat_virtualization,
                 host_permissions,
+                follow_root_symlinks,
             } => f
                 .debug_struct("Named")
                 .field("name", name)
@@ -1380,6 +1415,7 @@ impl fmt::Debug for VolumeMount {
                 .field("options", options)
                 .field("stat_virtualization", stat_virtualization)
                 .field("host_permissions", host_permissions)
+                .field("follow_root_symlinks", follow_root_symlinks)
                 .finish(),
             Self::Tmpfs {
                 guest,

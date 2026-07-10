@@ -1183,7 +1183,7 @@ pub(super) fn cloud_create_request_from_config(
     // handing the spec to the control plane. Borrow so the spec isn't moved.
     match &config.spec.image {
         RootfsSource::Oci(_) => {}
-        RootfsSource::Bind(_) => {
+        RootfsSource::Bind { .. } => {
             return Err(unsupported(
                 "image-from-host-dir",
                 "when cloud volumes ship",

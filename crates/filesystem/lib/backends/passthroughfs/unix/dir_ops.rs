@@ -9,6 +9,7 @@ use std::{
     io,
     os::fd::{AsRawFd, FromRawFd},
     sync::{Arc, RwLock, atomic::Ordering},
+    time::Duration,
 };
 
 use super::{DirSnapshot, PassthroughDirEntry, PassthroughDirHandle, PassthroughFs, inode};
@@ -131,7 +132,8 @@ pub(crate) fn do_readdirplus(
                 de.type_ = mode_to_dtype(file_type);
                 result.push((de, entry));
             }
-            Err(_) => continue,
+            Err(err) if lookup_says_gone(&err) => continue,
+            Err(_) => result.push((de, no_lookup_entry())),
         }
     }
 
@@ -168,7 +170,7 @@ pub(crate) fn do_readdirplus_for_each(
             continue;
         }
 
-        let dir_entry = DirEntry {
+        let mut dir_entry = DirEntry {
             ino: snapshot_entry.inode(),
             offset: snapshot_entry.offset(),
             type_: snapshot_entry.file_type(),
@@ -187,24 +189,33 @@ pub(crate) fn do_readdirplus_for_each(
             Ok(c) => c,
             Err(_) => continue,
         };
-        let entry = match inode::do_lookup(fs, inode, &name_cstr) {
-            Ok(entry) => entry,
-            Err(_) => continue,
+        let (entry, looked_up_inode) = match inode::do_lookup(fs, inode, &name_cstr) {
+            Ok(entry) => {
+                let file_type = platform::mode_file_type(entry.attr.st_mode);
+                dir_entry.type_ = mode_to_dtype(file_type);
+                let looked_up_inode = entry.inode;
+                (entry, Some(looked_up_inode))
+            }
+            Err(err) if lookup_says_gone(&err) => continue,
+            Err(_) => (no_lookup_entry(), None),
         };
-
-        let mut dir_entry = dir_entry;
-        let file_type = platform::mode_file_type(entry.attr.st_mode);
-        dir_entry.type_ = mode_to_dtype(file_type);
-        let looked_up_inode = entry.inode;
 
         match add_entry(dir_entry, entry) {
             Ok(0) => {
-                inode::forget_one(fs, looked_up_inode, 1);
+                if let Some(ino) = looked_up_inode {
+                    inode::forget_one(fs, ino, 1);
+                }
                 break;
             }
-            Ok(_) => emitted_lookup_refs.push(looked_up_inode),
+            Ok(_) => {
+                if let Some(ino) = looked_up_inode {
+                    emitted_lookup_refs.push(ino);
+                }
+            }
             Err(err) => {
-                inode::forget_one(fs, looked_up_inode, 1);
+                if let Some(ino) = looked_up_inode {
+                    inode::forget_one(fs, ino, 1);
+                }
                 for emitted_inode in emitted_lookup_refs {
                     inode::forget_one(fs, emitted_inode, 1);
                 }
@@ -257,6 +268,26 @@ impl SnapshotEntry for PassthroughDirEntry {
 /// Convert a file mode type to a directory entry type.
 fn mode_to_dtype(mode_type: u32) -> u32 {
     platform::dirent_type_from_mode(mode_type)
+}
+
+/// Whether a failed per-entry lookup means the name is truly gone from the directory (deleted or replaced between snapshot and lookup) rather than temporarily unresolvable.
+///
+/// Errors from `do_lookup` are already translated to Linux errno values; `ENOENT` and `ENOTDIR` are numerically identical on Linux and macOS.
+fn lookup_says_gone(err: &io::Error) -> bool {
+    matches!(err.raw_os_error(), Some(libc::ENOENT) | Some(libc::ENOTDIR))
+}
+
+/// Entry for a dirent whose lookup failed for a reason other than the name being gone (fd exhaustion, I/O error, permissions). `inode: 0` tells the guest kernel that no
+/// lookup was performed: the name still appears in the listing and the real error surfaces when the entry is accessed, instead of silently vanishing from the guest's view.
+fn no_lookup_entry() -> Entry {
+    Entry {
+        inode: 0,
+        generation: 0,
+        attr: unsafe { std::mem::zeroed() },
+        attr_flags: 0,
+        attr_timeout: Duration::ZERO,
+        entry_timeout: Duration::ZERO,
+    }
 }
 
 /// Build a point-in-time directory snapshot with stable synthetic offsets.

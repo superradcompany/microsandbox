@@ -4,7 +4,7 @@ use super::*;
 use crate::backends::shared::stat_override::OVERRIDE_XATTR_KEY;
 
 /// Write raw bytes to the override xattr on a host file, bypassing the filesystem.
-fn host_set_raw_xattr(path: &std::path::Path, data: &[u8]) {
+pub(super) fn host_set_raw_xattr(path: &std::path::Path, data: &[u8]) {
     let path_cstr = CString::new(path.to_str().unwrap()).unwrap();
     let file = std::fs::OpenOptions::new()
         .read(true)

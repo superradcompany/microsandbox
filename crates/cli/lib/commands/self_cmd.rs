@@ -2464,10 +2464,13 @@ mod tests {
         .unwrap();
         Migrator::up(db.inner(), None).await.unwrap();
 
-        rollback_schema(db.inner(), 1).await.unwrap();
+        // The latest migration is a no-op data migration (bind rootfs shape); the
+        // `sandbox.active_config` schema migration sits one below it. Roll back
+        // two steps so the observable schema change (the column) is undone.
+        rollback_schema(db.inner(), 2).await.unwrap();
 
-        // The latest migration adds `sandbox.active_config`; rolling back one
-        // step must drop the column while leaving older tables intact.
+        // Rolling back through the active_config migration must drop the column
+        // while leaving older tables intact.
         let rows = db
             .query_all(Statement::from_string(
                 DatabaseBackend::Sqlite,

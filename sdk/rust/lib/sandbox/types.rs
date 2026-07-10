@@ -67,6 +67,7 @@ pub struct MountBuilder {
     disk_fstype: Option<String>,
     stat_virtualization: Option<StatVirtualization>,
     host_permissions: Option<HostPermissions>,
+    follow_root_symlinks: bool,
     error: Option<crate::MicrosandboxError>,
 }
 
@@ -184,6 +185,7 @@ impl MountBuilder {
             disk_fstype: None,
             stat_virtualization: None,
             host_permissions: None,
+            follow_root_symlinks: false,
             error: None,
         }
     }
@@ -306,6 +308,18 @@ impl MountBuilder {
     /// a tmpfs or disk-image mount produces an error at `.build()` time.
     pub fn stat_virtualization(mut self, policy: StatVirtualization) -> Self {
         self.stat_virtualization = Some(policy);
+        self
+    }
+
+    /// Follow symlinks when resolving the host mount root.
+    ///
+    /// By default the host path is resolved following no symlink in any
+    /// component, so a symlink planted at or under the mount root cannot
+    /// redirect the mount. Pass `true` to opt out when the host path
+    /// legitimately traverses a symlink. Valid only for bind and named-directory
+    /// mounts.
+    pub fn follow_root_symlinks(mut self, follow: bool) -> Self {
+        self.follow_root_symlinks = follow;
         self
     }
 
@@ -467,6 +481,7 @@ impl MountBuilder {
                     options: self.options,
                     stat_virtualization,
                     host_permissions,
+                    follow_root_symlinks: self.follow_root_symlinks,
                     quota_mib: self.quota_mib,
                 }
             }
@@ -479,6 +494,7 @@ impl MountBuilder {
                     options: self.options,
                     stat_virtualization,
                     host_permissions,
+                    follow_root_symlinks: self.follow_root_symlinks,
                 }
             }
             MountKind::Tmpfs => VolumeMount::Tmpfs {
@@ -668,7 +684,10 @@ impl ImageSource {
                 fstype: None,
             })
         } else {
-            Ok(RootfsSource::Bind(path))
+            Ok(RootfsSource::Bind {
+                path,
+                follow_root_symlinks: false,
+            })
         }
     }
 }
@@ -793,7 +812,33 @@ impl ImageBuilder {
     /// .image_with(|i| i.bind("/srv/rootfs"))
     /// ```
     pub fn bind(mut self, host: impl Into<PathBuf>) -> Self {
-        self.source = Some(RootfsSource::Bind(host.into()));
+        self.source = Some(RootfsSource::Bind {
+            path: host.into(),
+            follow_root_symlinks: false,
+        });
+        self
+    }
+
+    /// Follow symlinks when resolving a bind rootfs host path.
+    ///
+    /// By default the bind rootfs path is resolved following no symlink, so a
+    /// symlink at or under it cannot redirect the mount. Pass `true` to opt out
+    /// when the host path legitimately traverses a symlink. Only valid after
+    /// [`bind`](Self::bind); produces an error at build time otherwise.
+    pub fn follow_root_symlinks(mut self, follow: bool) -> Self {
+        match &mut self.source {
+            Some(RootfsSource::Bind {
+                follow_root_symlinks,
+                ..
+            }) => *follow_root_symlinks = follow,
+            _ if self.error.is_none() => {
+                self.error = Some(crate::MicrosandboxError::InvalidConfig(
+                    "follow_root_symlinks is only valid for a bind rootfs (call .bind() first)"
+                        .into(),
+                ));
+            }
+            _ => {}
+        }
         self
     }
 
@@ -1233,6 +1278,7 @@ mod tests {
                 options: MountOptions::default(),
                 stat_virtualization: StatVirtualization::Strict,
                 host_permissions: HostPermissions::Private,
+                follow_root_symlinks: false,
             },
         ];
 
@@ -1300,6 +1346,7 @@ mod tests {
             options: MountOptions::default(),
             stat_virtualization: StatVirtualization::Off,
             host_permissions: HostPermissions::Mirror,
+            follow_root_symlinks: false,
             quota_mib: None,
         };
 
@@ -1319,6 +1366,7 @@ mod tests {
             },
             stat_virtualization: StatVirtualization::Strict,
             host_permissions: HostPermissions::Private,
+            follow_root_symlinks: false,
             quota_mib: None,
         };
 
@@ -1456,7 +1504,7 @@ mod tests {
     fn test_image_source_resolves_directory_as_bind() {
         let source = ImageSource::from("./rootfs");
         let rootfs = source.into_rootfs_source().unwrap();
-        assert!(matches!(rootfs, RootfsSource::Bind(_)));
+        assert!(matches!(rootfs, RootfsSource::Bind { .. }));
     }
 
     #[test]
@@ -1464,7 +1512,7 @@ mod tests {
         let source = ImageSource::from(".");
         let rootfs = source.into_rootfs_source().unwrap();
         match rootfs {
-            RootfsSource::Bind(path) => assert_eq!(path, PathBuf::from(".")),
+            RootfsSource::Bind { path, .. } => assert_eq!(path, PathBuf::from(".")),
             _ => panic!("expected Bind"),
         }
     }
@@ -1474,7 +1522,7 @@ mod tests {
         let source = ImageSource::from("..");
         let rootfs = source.into_rootfs_source().unwrap();
         match rootfs {
-            RootfsSource::Bind(path) => assert_eq!(path, PathBuf::from("..")),
+            RootfsSource::Bind { path, .. } => assert_eq!(path, PathBuf::from("..")),
             _ => panic!("expected Bind"),
         }
     }
@@ -1579,11 +1627,42 @@ mod tests {
     fn test_image_builder_bind() {
         let rootfs = ImageBuilder::new().bind("/srv/rootfs").build().unwrap();
         match rootfs {
-            RootfsSource::Bind(path) => {
-                assert_eq!(path, std::path::PathBuf::from("/srv/rootfs"))
+            RootfsSource::Bind {
+                path,
+                follow_root_symlinks,
+            } => {
+                assert_eq!(path, std::path::PathBuf::from("/srv/rootfs"));
+                // Protected by default.
+                assert!(!follow_root_symlinks);
             }
             _ => panic!("expected Bind"),
         }
+    }
+
+    #[test]
+    fn test_image_builder_bind_follow_root_symlinks_opt_out() {
+        let rootfs = ImageBuilder::new()
+            .bind("/srv/rootfs")
+            .follow_root_symlinks(true)
+            .build()
+            .unwrap();
+        match rootfs {
+            RootfsSource::Bind {
+                follow_root_symlinks,
+                ..
+            } => assert!(follow_root_symlinks),
+            _ => panic!("expected Bind"),
+        }
+    }
+
+    #[test]
+    fn test_image_builder_follow_root_symlinks_without_bind_errors() {
+        // The opt-out only applies to a bind rootfs.
+        let result = ImageBuilder::new()
+            .oci("python:3.12")
+            .follow_root_symlinks(true)
+            .build();
+        assert!(result.is_err());
     }
 }
 
