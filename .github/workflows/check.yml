@@ -185,7 +185,11 @@ jobs:
     needs: [build-kernel, build-agentd-aarch64, changes]
     if: always() && needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    # A green darwin-aarch64 run takes ~35m, and GitHub-hosted macos-14
+    # runner speed varies enough that slow runners blew a 45m budget
+    # mid-build (main and a PR, both on 2026-07-10). 60m restores
+    # headroom while still bounding a genuinely wedged run.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
