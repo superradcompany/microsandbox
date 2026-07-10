@@ -974,6 +974,21 @@ export declare class SandboxBuilder {
   /** Configure a disk-image rootfs explicitly via a callback. */
   imageWith(configure: (arg: ImageBuilder) => ImageBuilder): this
   /**
+   * Configure the writable rootfs layer (root disk) for the OCI image.
+   *
+   * Sugar over `imageWith((i) => i.oci(...).rootDisk(...))` — the root
+   * disk lives on the OCI rootfs source, so an OCI image must be set
+   * first. Pass a number of MiB for a managed root disk, or a callback
+   * for the tmpfs and disk-image kinds:
+   *
+   * ```ts
+   * .image("python").rootDisk(8192)
+   * .image("python").rootDisk((d) => d.tmpfs().size(512))
+   * .image("python").rootDisk((d) => d.disk("./scratch.img"))
+   * ```
+   */
+  rootDisk(sizeMibOrConfigure: number | ((d: RootDiskBuilder) => RootDiskBuilder)): this
+  /**
    * Boot a fresh sandbox from a snapshot artifact (path or name).
    * Mutually exclusive with `image()` / `imageWith()` — the
    * snapshot already pins the image reference and digest.

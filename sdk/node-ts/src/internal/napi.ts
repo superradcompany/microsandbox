@@ -141,6 +141,10 @@ export interface NapiSandboxBuilderSetters {
   fromSnapshot(pathOrName: string): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   imageWith(configure: (b: any) => any): this;
+  /** Managed root disk of the given size in MiB. Requires an OCI image. */
+  rootDisk(sizeMiB: number): this;
+  /** Configure the root disk (managed size, tmpfs, or disk image). Requires an OCI image. */
+  rootDisk(configure: (d: NapiRootDiskBuilder) => NapiRootDiskBuilder): this;
   cpus(n: number): this;
   maxCpus(n: number): this;
   memory(mib: number): this;

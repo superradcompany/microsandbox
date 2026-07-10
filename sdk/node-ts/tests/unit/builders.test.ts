@@ -602,6 +602,35 @@ describe("ImageBuilder root disk", () => {
   });
 });
 
+describe("SandboxBuilder top-level rootDisk", () => {
+  it("sets a managed root disk on the OCI image", async () => {
+    const cfg = await Sandbox.builder("x")
+      .image("alpine")
+      .rootDisk(8192)
+      .build();
+    expect(cfg.image).toMatchObject({
+      Oci: { rootDisk: { kind: "managed", sizeMib: 8192 } },
+    });
+  });
+
+  it("sets a tmpfs root disk via the builder callback", async () => {
+    const cfg = await Sandbox.builder("x")
+      .image("alpine")
+      .memory(1024)
+      .rootDisk((d) => d.tmpfs().size(512))
+      .build();
+    expect(cfg.image).toMatchObject({
+      Oci: { rootDisk: { kind: "tmpfs", sizeMib: 512 } },
+    });
+  });
+
+  it("rejects a non-OCI image at build time", async () => {
+    await expect(
+      Sandbox.builder("x").image("./rootfs.qcow2").rootDisk(8192).build(),
+    ).rejects.toThrow(InvalidConfigError);
+  });
+});
+
 describe("Stdin factory", () => {
   it("emits the right discriminants", () => {
     expect(Stdin.null()).toEqual({ kind: "null" });
