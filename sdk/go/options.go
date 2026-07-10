@@ -1082,6 +1082,11 @@ type MountOptions struct {
 	Nodev              bool
 	StatVirtualization StatVirtualization
 	HostPermissions    HostPermissions
+	// QuotaMiB sets a guest-write quota for a bind mount, bounding how much
+	// the guest may add beyond the host directory's existing contents. Zero
+	// keeps the runtime's protective default. Bind mounts only; named volume
+	// quotas go through NamedVolumeOptions.QuotaMiB instead.
+	QuotaMiB uint32
 }
 
 // NamedVolumeOptions tunes sandbox-time named volume provisioning.
@@ -1136,6 +1141,7 @@ func (mountFactory) Bind(hostPath string, opts MountOptions) MountConfig {
 		Nodev:              opts.Nodev,
 		StatVirtualization: opts.StatVirtualization,
 		HostPermissions:    opts.HostPermissions,
+		QuotaMiB:           opts.QuotaMiB,
 	}
 }
 

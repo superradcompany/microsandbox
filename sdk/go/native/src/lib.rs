@@ -1711,7 +1711,13 @@ fn apply_volume(
 
     Ok(builder.volume(guest_path, move |mb| {
         let mut mb = if let Some(ref host) = bind {
-            mb.bind(host)
+            // A caller-provided guest-write quota overrides the protective
+            // default; None keeps it.
+            let mut b = mb.bind(host);
+            if let Some(quota) = quota_mib {
+                b = b.quota(quota);
+            }
+            b
         } else if let Some(ref name) = named {
             if needs_named_create_options {
                 mb.named_with(name, |mut nb| {
