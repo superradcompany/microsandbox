@@ -23,6 +23,7 @@ mod network_policy_builder;
 mod patch_builder;
 mod pull_progress;
 mod registry_builder;
+mod root_disk_builder;
 mod runtime_config;
 mod sandbox;
 mod sandbox_builder;

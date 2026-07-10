@@ -63,6 +63,7 @@ export interface NativeBindings {
   readonly PatchBuilder: NapiBuilderCtor<NapiPatchBuilder>;
   readonly RegistryConfigBuilder: NapiBuilderCtor<NapiRegistryConfigBuilder>;
   readonly ImageBuilder: NapiBuilderCtor<NapiImageBuilder>;
+  readonly RootDiskBuilder: NapiBuilderCtor<NapiRootDiskBuilder>;
   readonly Setup: new () => NapiSetup;
   readonly imageGet: (reference: string) => Promise<NapiImageHandle>;
   readonly imageList: () => Promise<NapiImageInfo[]>;
@@ -1081,8 +1082,26 @@ export interface NapiRegistryConfigBuilder {
 
 export interface NapiImageBuilder {
   oci(reference: string): this;
+  /** Managed root disk of the given size, in MiB. */
+  rootDisk(sizeMiB: number): this;
+  /** Configure the root disk via a builder callback (tmpfs / disk-image kinds). */
+  rootDisk(configure: (d: NapiRootDiskBuilder) => NapiRootDiskBuilder): this;
+  /** @deprecated Use `rootDisk` instead. */
   upperSize(sizeMiB: number): this;
   disk(path: string): this;
   bind(host: string): this;
+  fstype(fstype: string): this;
+}
+
+export interface NapiRootDiskBuilder {
+  /** Size in MiB (managed and tmpfs kinds only). */
+  size(mib: number): this;
+  /** RAM-backed tmpfs upper: ephemeral, counts against guest memory. */
+  tmpfs(): this;
+  /** User-supplied disk image attached writable as the upper. */
+  disk(path: string): this;
+  /** Disk image format (`"raw" | "qcow2"`); only valid after `.disk()`. */
+  format(format: "raw" | "qcow2"): this;
+  /** Inner filesystem type (e.g. `"ext4"`); only valid after `.disk()`. */
   fstype(fstype: string): this;
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   GiB,
+  ImageBuilder,
   InterfaceOverridesBuilder,
   intoRootfsSource,
   InvalidConfigError,
@@ -8,6 +9,7 @@ import {
   MountBuilder,
   NetworkBuilder,
   PatchBuilder,
+  RootDiskBuilder,
   Sandbox,
   SecretBuilder,
   Stdin,
@@ -569,6 +571,34 @@ describe("NetworkBuilder ports", () => {
       guestPort: 53,
       protocol: "udp",
     });
+  });
+});
+
+describe("ImageBuilder root disk", () => {
+  it("accepts a managed size in MiB", () => {
+    const i = new ImageBuilder().oci("python:3.12");
+    expect(i.rootDisk(8192)).toBe(i);
+  });
+
+  it("accepts a tmpfs root disk via the builder callback", () => {
+    const i = new ImageBuilder().oci("python:3.12");
+    expect(i.rootDisk((d) => d.tmpfs().size(512))).toBe(i);
+  });
+
+  it("accepts a disk-image root disk via the builder callback", () => {
+    const i = new ImageBuilder().oci("python:3.12");
+    expect(i.rootDisk((d) => d.disk("./scratch.img").format("raw").fstype("ext4"))).toBe(i);
+  });
+
+  it("rejects an unknown disk-image format eagerly", () => {
+    expect(() => new RootDiskBuilder().disk("./scratch.img").format("floppy")).toThrow(
+      /invalid root disk image format/,
+    );
+  });
+
+  it("keeps the deprecated upperSize alias working", () => {
+    const i = new ImageBuilder().oci("python:3.12");
+    expect(i.upperSize(8192)).toBe(i);
   });
 });
 

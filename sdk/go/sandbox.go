@@ -76,8 +76,12 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		PortsUDP:        o.PortsUDP,
 		PortBindings:    buildFFIPortBindings(o.PortBindings),
 	}
-	if o.ociUpperSizeSet || o.OCIUpperSizeMiB != 0 {
-		ffiOpts.OCIUpperSizeMiB = &o.OCIUpperSizeMiB
+	if o.RootDisk != nil {
+		ffiOpts.RootDisk = buildFFIRootDisk(*o.RootDisk)
+	} else if o.ociUpperSizeSet || o.OCIUpperSizeMiB != 0 {
+		// Deprecated flat field, honored as a managed root disk.
+		size := o.OCIUpperSizeMiB
+		ffiOpts.RootDisk = &ffi.RootDiskSpec{Kind: "managed", SizeMiB: &size}
 	}
 	if o.ReplaceWithTimeout != nil {
 		var ms uint64
@@ -158,6 +162,28 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 	}
 
 	return ffiOpts
+}
+
+// buildFFIRootDisk translates a RootDiskConfig into the FFI wire shape.
+func buildFFIRootDisk(rd RootDiskConfig) *ffi.RootDiskSpec {
+	spec := &ffi.RootDiskSpec{}
+	switch rd.Kind() {
+	case RootDiskKindTmpfs:
+		spec.Kind = "tmpfs"
+	case RootDiskKindDiskImage:
+		spec.Kind = "disk-image"
+		spec.Path = rd.Path
+		spec.Format = rd.Format
+		spec.Fstype = rd.Fstype
+	default:
+		// Managed, including zero-valued configs built without the factory.
+		spec.Kind = "managed"
+	}
+	if rd.sizeSet || rd.SizeMiB != 0 {
+		size := rd.SizeMiB
+		spec.SizeMiB = &size
+	}
+	return spec
 }
 
 // durationSecsCeil rounds a Duration up to whole seconds. Sub-second values

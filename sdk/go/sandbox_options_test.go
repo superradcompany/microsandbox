@@ -39,7 +39,7 @@ func TestSandboxConfigUnmarshalPersistedRootfsSource(t *testing.T) {
 		"image": {
 			"Oci": {
 				"reference": "mirror.gcr.io/library/alpine",
-				"upper_size_mib": 4096
+				"root_disk": {"kind": "managed", "size_mib": 4096}
 			}
 		},
 		"cpus": 1,
@@ -60,14 +60,90 @@ func TestSandboxConfigUnmarshalPersistedRootfsSource(t *testing.T) {
 	if cfg.Image != "mirror.gcr.io/library/alpine" {
 		t.Fatalf("Image = %q", cfg.Image)
 	}
+	if cfg.RootDisk == nil || cfg.RootDisk.Kind() != RootDiskKindManaged || cfg.RootDisk.SizeMiB != 4096 {
+		t.Fatalf("RootDisk = %#v, want managed 4096", cfg.RootDisk)
+	}
 	if cfg.OCIUpperSizeMiB != 4096 || !cfg.ociUpperSizeSet {
-		t.Fatalf("OCI upper = %d, set = %v", cfg.OCIUpperSizeMiB, cfg.ociUpperSizeSet)
+		t.Fatalf("legacy OCI upper mirror = %d, set = %v", cfg.OCIUpperSizeMiB, cfg.ociUpperSizeSet)
 	}
 	if cfg.CPUs != 1 || cfg.MemoryMiB != 512 || cfg.Workdir != "/" {
 		t.Fatalf("scalar config mismatch: %#v", cfg)
 	}
 	if cfg.Labels["suite"] != "sdk" || cfg.Scripts["hello"] != "echo hi" {
 		t.Fatalf("map config mismatch: labels=%v scripts=%v", cfg.Labels, cfg.Scripts)
+	}
+}
+
+func TestSandboxConfigUnmarshalPersistedTmpfsRootDisk(t *testing.T) {
+	raw := []byte(`{
+		"name": "go-sdk-example-main",
+		"image": {
+			"Oci": {
+				"reference": "mirror.gcr.io/library/alpine",
+				"root_disk": {"kind": "tmpfs"}
+			}
+		}
+	}`)
+
+	var cfg SandboxConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if cfg.RootDisk == nil || cfg.RootDisk.Kind() != RootDiskKindTmpfs {
+		t.Fatalf("RootDisk = %#v, want tmpfs", cfg.RootDisk)
+	}
+	if cfg.ociUpperSizeSet {
+		t.Fatal("legacy upper mirror must stay unset for tmpfs root disks")
+	}
+}
+
+func TestSandboxConfigUnmarshalPersistedDiskImageRootDisk(t *testing.T) {
+	raw := []byte(`{
+		"name": "go-sdk-example-main",
+		"image": {
+			"Oci": {
+				"reference": "mirror.gcr.io/library/alpine",
+				"root_disk": {"kind": "disk-image", "path": "/imgs/scratch.img", "format": "Raw", "fstype": "ext4"}
+			}
+		}
+	}`)
+
+	var cfg SandboxConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	rd := cfg.RootDisk
+	if rd == nil || rd.Kind() != RootDiskKindDiskImage {
+		t.Fatalf("RootDisk = %#v, want disk-image", rd)
+	}
+	if rd.Path != "/imgs/scratch.img" || rd.Format != "raw" || rd.Fstype != "ext4" {
+		t.Fatalf("disk-image fields = %#v", rd)
+	}
+}
+
+func TestSandboxConfigUnmarshalLegacyFlatUpperSize(t *testing.T) {
+	raw := []byte(`{
+		"name": "go-sdk-example-main",
+		"image": {
+			"Oci": {
+				"reference": "mirror.gcr.io/library/alpine",
+				"upper_size_mib": 4096
+			}
+		}
+	}`)
+
+	var cfg SandboxConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if cfg.RootDisk == nil || cfg.RootDisk.Kind() != RootDiskKindManaged || cfg.RootDisk.SizeMiB != 4096 {
+		t.Fatalf("RootDisk = %#v, want managed 4096 from legacy field", cfg.RootDisk)
+	}
+	if cfg.OCIUpperSizeMiB != 4096 || !cfg.ociUpperSizeSet {
+		t.Fatalf("legacy OCI upper mirror = %d, set = %v", cfg.OCIUpperSizeMiB, cfg.ociUpperSizeSet)
 	}
 }
 
@@ -140,17 +216,80 @@ func TestFFIWireShape_WithBindRootfs(t *testing.T) {
 	}
 }
 
+func TestFFIWireShape_WithRootDiskManaged(t *testing.T) {
+	got := marshalCreateOptions(t, WithImage("python:3.12"), WithRootDisk(RootDisk.Managed(8192)))
+	rd := mustField(t, got, "root_disk").(map[string]any)
+	if rd["kind"] != "managed" || rd["size_mib"] != float64(8192) {
+		t.Fatalf("root_disk = %v, want managed 8192", rd)
+	}
+}
+
+func TestFFIWireShape_WithRootDiskTmpfs(t *testing.T) {
+	got := marshalCreateOptions(t,
+		WithImage("python:3.12"),
+		WithRootDisk(RootDisk.Tmpfs(RootDiskTmpfsOptions{SizeMiB: 512})),
+	)
+	rd := mustField(t, got, "root_disk").(map[string]any)
+	if rd["kind"] != "tmpfs" || rd["size_mib"] != float64(512) {
+		t.Fatalf("root_disk = %v, want tmpfs 512", rd)
+	}
+}
+
+func TestFFIWireShape_WithRootDiskTmpfsDefaultSizeOmitsSize(t *testing.T) {
+	got := marshalCreateOptions(t,
+		WithImage("python:3.12"),
+		WithRootDisk(RootDisk.Tmpfs(RootDiskTmpfsOptions{})),
+	)
+	rd := mustField(t, got, "root_disk").(map[string]any)
+	if rd["kind"] != "tmpfs" {
+		t.Fatalf("root_disk = %v, want tmpfs", rd)
+	}
+	if _, present := rd["size_mib"]; present {
+		t.Fatalf("size_mib must be omitted for the runtime default; root_disk = %v", rd)
+	}
+}
+
+func TestFFIWireShape_WithRootDiskImage(t *testing.T) {
+	got := marshalCreateOptions(t,
+		WithImage("python:3.12"),
+		WithRootDisk(RootDisk.Disk("./scratch.img", RootDiskImageOptions{Format: "raw", Fstype: "ext4"})),
+	)
+	rd := mustField(t, got, "root_disk").(map[string]any)
+	if rd["kind"] != "disk-image" || rd["path"] != "./scratch.img" || rd["format"] != "raw" || rd["fstype"] != "ext4" {
+		t.Fatalf("root_disk = %v, want disk-image fields", rd)
+	}
+	if _, present := rd["size_mib"]; present {
+		t.Fatalf("size_mib must be omitted for disk-image root disks; root_disk = %v", rd)
+	}
+}
+
 func TestFFIWireShape_WithOCIUpperSize(t *testing.T) {
 	got := marshalCreateOptions(t, WithImage("python:3.12"), WithOCIUpperSize(8192))
-	if v := mustField(t, got, "oci_upper_size_mib"); v != float64(8192) {
-		t.Fatalf("oci_upper_size_mib = %v, want 8192", v)
+	rd := mustField(t, got, "root_disk").(map[string]any)
+	if rd["kind"] != "managed" || rd["size_mib"] != float64(8192) {
+		t.Fatalf("root_disk = %v, want managed 8192 from deprecated alias", rd)
+	}
+	if _, present := got["oci_upper_size_mib"]; present {
+		t.Fatal("deprecated flat field must not reach the wire")
 	}
 }
 
 func TestFFIWireShape_WithOCIUpperSizeZero(t *testing.T) {
 	got := marshalCreateOptions(t, WithImage("python:3.12"), WithOCIUpperSize(0))
-	if v := mustField(t, got, "oci_upper_size_mib"); v != float64(0) {
-		t.Fatalf("oci_upper_size_mib = %v, want 0", v)
+	rd := mustField(t, got, "root_disk").(map[string]any)
+	if rd["kind"] != "managed" || rd["size_mib"] != float64(0) {
+		t.Fatalf("root_disk = %v, want explicit managed 0", rd)
+	}
+}
+
+func TestFFIWireShape_LegacyConfigFieldMapsToRootDisk(t *testing.T) {
+	// WithConfig users may still set the deprecated public field directly.
+	got := marshalCreateOptions(t, WithImage("python:3.12"), func(o *SandboxConfig) {
+		o.OCIUpperSizeMiB = 2048
+	})
+	rd := mustField(t, got, "root_disk").(map[string]any)
+	if rd["kind"] != "managed" || rd["size_mib"] != float64(2048) {
+		t.Fatalf("root_disk = %v, want managed 2048 from legacy field", rd)
 	}
 }
 
@@ -488,7 +627,7 @@ func TestFFIWireShape_EmptyConfigOmitsOptionalFields(t *testing.T) {
 		"image", "snapshot", "memory_mib", "cpus", "max_memory_mib", "max_cpus", "workdir", "shell",
 		"hostname", "user", "replace", "detached", "env", "scripts",
 		"ports", "ports_udp", "network", "secrets", "patches", "volumes",
-		"init", "registry_auth", "oci_upper_size_mib",
+		"init", "registry_auth", "root_disk",
 	} {
 		if _, present := got[key]; present {
 			body, _ := json.Marshal(got)

@@ -228,7 +228,7 @@ export type JsFsWriteSink = FsWriteSink
  * Fluent builder for an explicit rootfs image source.
  *
  * Used inside `Sandbox.builder(...).imageWith((i) => i.disk(...).fstype(...))`
- * or `Sandbox.builder(...).imageWith((i) => i.oci(...).upperSize(...))`.
+ * or `Sandbox.builder(...).imageWith((i) => i.oci(...).rootDisk(...))`.
  * Standalone use is rare; `.image("python:3.12")` and `.image("./ubuntu.qcow2")`
  * resolve the common cases automatically.
  */
@@ -236,7 +236,24 @@ export declare class ImageBuilder {
   constructor()
   /** Use an OCI image reference as the root filesystem. */
   oci(reference: string): this
-  /** Set the writable overlay upper size for an OCI rootfs, in MiB. */
+  /**
+   * Configure the writable rootfs layer (root disk) for an OCI rootfs.
+   *
+   * Pass a number of MiB for a managed root disk, or a callback for the
+   * tmpfs and disk-image kinds:
+   *
+   * ```ts
+   * .imageWith((i) => i.oci("python:3.12").rootDisk(8192))
+   * .imageWith((i) => i.oci("python:3.12").rootDisk((d) => d.tmpfs().size(512)))
+   * .imageWith((i) => i.oci("python:3.12").rootDisk((d) => d.disk("./scratch.img")))
+   * ```
+   */
+  rootDisk(sizeMibOrConfigure: number | ((d: RootDiskBuilder) => RootDiskBuilder)): this
+  /**
+   * Set the writable overlay upper size for an OCI rootfs, in MiB.
+   *
+   * @deprecated Use `rootDisk` instead.
+   */
   upperSize(sizeMib: number): this
   /**
    * Use a host disk image file as the root filesystem. The format is
@@ -634,6 +651,48 @@ export declare class RegistryConfigBuilder {
   build(): RegistryConfig
 }
 export type JsRegistryConfigBuilder = RegistryConfigBuilder
+
+/**
+ * Fluent builder for the writable rootfs layer (root disk) of an OCI image.
+ *
+ * Used inside `ImageBuilder.rootDisk((d) => ...)`:
+ *
+ * ```ts
+ * .imageWith((i) => i.oci("python:3.12").rootDisk(8192))                       // managed, sized
+ * .imageWith((i) => i.oci("python:3.12").rootDisk((d) => d.tmpfs().size(512))) // RAM-backed
+ * .imageWith((i) => i.oci("python:3.12").rootDisk((d) => d.disk("./scratch.img").fstype("ext4")))
+ * ```
+ */
+export declare class RootDiskBuilder {
+  constructor()
+  /**
+   * Size in MiB. Valid for the managed (default) and tmpfs kinds; a
+   * user-supplied disk image is sized by the image file itself.
+   */
+  size(mib: number): this
+  /**
+   * Use a RAM-backed tmpfs upper. Ephemeral: the rootfs is pristine on
+   * every boot, and the size counts against guest memory.
+   */
+  tmpfs(): this
+  /**
+   * Use a user-supplied disk image as the upper, attached writable. The
+   * format is derived from the file extension (`.img`/`.raw` → raw,
+   * `.qcow2` → qcow2) unless set explicitly with `.format()`.
+   */
+  disk(path: string): this
+  /**
+   * Set the disk image format explicitly (`"raw" | "qcow2"`). Only valid
+   * after `.disk()`; vmdk is not supported as a root disk.
+   */
+  format(format: string): this
+  /**
+   * Inner filesystem type of the disk image (e.g. `"ext4"`). Only valid
+   * after `.disk()`.
+   */
+  fstype(fstype: string): this
+}
+export type JsRootDiskBuilder = RootDiskBuilder
 
 /**
  * Per-rule-batch builder. Lives only inside the closure passed to

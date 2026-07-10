@@ -16,9 +16,10 @@ use zeroize::Zeroizing;
 use crate::domain::{
     DiskImageFormat, EnvVar, HandoffInit, HostPattern, HostPermissions, MountOptions,
     NetworkPolicy, NetworkSpec, OciRootfsSource, Patch, PullPolicy, Rlimit, RlimitResource,
-    RootfsSource, SandboxLogLevel, SandboxPolicy, SandboxResources, SandboxRuntimeOptions,
-    SandboxSpec, SecretEntry, SecretInjection, SecretsConfig, SecurityProfile, StatVirtualization,
-    ViolationAction, VolumeMount, default_private, default_strict,
+    RootDisk, RootfsSource, SandboxLogLevel, SandboxPolicy, SandboxResources,
+    SandboxRuntimeOptions, SandboxSpec, SecretEntry, SecretInjection, SecretsConfig,
+    SecurityProfile, StatVirtualization, ViolationAction, VolumeMount, default_private,
+    default_strict,
 };
 use crate::modify::SecretSource;
 use crate::{TypesError, TypesResult};
@@ -921,9 +922,11 @@ impl TryFrom<CloudSandboxSpec> for SandboxSpec {
     fn try_from(spec: CloudSandboxSpec) -> TypesResult<Self> {
         let disk_size_mib = spec.resources.disk_size_mib;
         let image = match spec.image {
+            // The cloud wire expresses only the managed kind (a size); tmpfs and
+            // disk-image root disks are local-only until the wire grows a kind field.
             CloudRootfsSource::Oci { reference } => RootfsSource::Oci(OciRootfsSource {
                 reference,
-                upper_size_mib: disk_size_mib,
+                root_disk: disk_size_mib.map(RootDisk::managed),
             }),
             CloudRootfsSource::Bind { .. } | CloudRootfsSource::DiskImage { .. }
                 if disk_size_mib.is_some() =>
@@ -1012,11 +1015,16 @@ impl From<SandboxSpec> for CloudCreateSandboxRequest {
 impl From<SandboxSpec> for CloudSandboxSpec {
     fn from(spec: SandboxSpec) -> Self {
         let (image, disk_size_mib) = match spec.image {
+            // Only the managed size is representable on the cloud wire today; tmpfs and
+            // disk-image root disks are local-only and map to no disk_size_mib.
             RootfsSource::Oci(oci) => (
                 CloudRootfsSource::Oci {
                     reference: oci.reference,
                 },
-                oci.upper_size_mib,
+                match &oci.root_disk {
+                    Some(RootDisk::Managed { size_mib }) => *size_mib,
+                    _ => None,
+                },
             ),
             RootfsSource::Bind { path, .. } => (CloudRootfsSource::Bind { path }, None),
             RootfsSource::DiskImage {
@@ -1337,7 +1345,7 @@ impl From<CloudSecretsConfig> for SecretsConfig {
 mod tests {
     use super::*;
     use crate::domain::{
-        DEFAULT_SANDBOX_CPUS, DEFAULT_SANDBOX_MEMORY_MIB, OciRootfsSource, RootfsSource,
+        DEFAULT_SANDBOX_CPUS, DEFAULT_SANDBOX_MEMORY_MIB, OciRootfsSource, RootDisk, RootfsSource,
     };
 
     fn spec(name: &str) -> CloudSandboxSpec {
@@ -1455,7 +1463,7 @@ mod tests {
         match domain.image {
             RootfsSource::Oci(oci) => {
                 assert_eq!(oci.reference, "python:3.12");
-                assert_eq!(oci.upper_size_mib, Some(8192));
+                assert_eq!(oci.root_disk, Some(RootDisk::managed(8192)));
             }
             other => panic!("expected OCI rootfs, got {other:?}"),
         }
@@ -1482,7 +1490,7 @@ mod tests {
             name: "agent-1".into(),
             image: RootfsSource::Oci(OciRootfsSource {
                 reference: "python:3.12".into(),
-                upper_size_mib: Some(8192),
+                root_disk: Some(RootDisk::managed(8192)),
             }),
             ..Default::default()
         };

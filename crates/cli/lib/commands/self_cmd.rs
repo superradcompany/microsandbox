@@ -2464,10 +2464,10 @@ mod tests {
         .unwrap();
         Migrator::up(db.inner(), None).await.unwrap();
 
-        // The latest migration is a no-op data migration (bind rootfs shape); the
-        // `sandbox.active_config` schema migration sits one below it. Roll back
-        // two steps so the observable schema change (the column) is undone.
-        rollback_schema(db.inner(), 2).await.unwrap();
+        // Three steps: the two latest migrations (root disk, bind rootfs shape)
+        // have no-op downs; `sandbox.active_config` sits below them. Roll back
+        // through all three so the observable schema change (the column) is undone.
+        rollback_schema(db.inner(), 3).await.unwrap();
 
         // Rolling back through the active_config migration must drop the column
         // while leaving older tables intact.

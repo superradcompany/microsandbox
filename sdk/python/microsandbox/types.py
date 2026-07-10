@@ -397,12 +397,60 @@ def _enum_value(value: enum.Enum | str) -> str:
 #--------------------------------------------------------------------------------------------------
 
 @dataclass(frozen=True, slots=True)
+class RootDiskConfig:
+    """Writable rootfs layer (root disk) for an OCI image. Construct via RootDisk."""
+    kind: str
+    size_mib: int | None = None
+    path: str | None = None
+    format: DiskImageFormat | str | None = None
+    fstype: str | None = None
+
+    def _to_dict(self) -> dict:
+        d: dict = {"kind": self.kind}
+        if self.size_mib is not None:
+            d["size_mib"] = self.size_mib
+        if self.path is not None:
+            d["path"] = self.path
+        if self.format is not None:
+            d["format"] = _enum_value(self.format)
+        if self.fstype is not None:
+            d["fstype"] = self.fstype
+        return d
+
+class RootDisk:
+    """Factory for root disk configurations, used with Image.oci(root_disk=...)."""
+
+    @staticmethod
+    def managed(size_mib: int | None = None) -> RootDiskConfig:
+        """Sparse ext4 created and owned by microsandbox. Default kind;
+        size defaults to 4096 MiB when omitted."""
+        return RootDiskConfig(kind="managed", size_mib=size_mib)
+
+    @staticmethod
+    def tmpfs(size_mib: int | None = None) -> RootDiskConfig:
+        """RAM-backed upper: ephemeral, pristine on every boot. The size
+        counts against guest memory; defaults to half the sandbox memory."""
+        return RootDiskConfig(kind="tmpfs", size_mib=size_mib)
+
+    @staticmethod
+    def disk(
+        path: str,
+        *,
+        format: DiskImageFormat | str | None = None,
+        fstype: str | None = None,
+    ) -> RootDiskConfig:
+        """User-supplied disk image attached writable as the upper. Format is
+        derived from the file extension unless given (vmdk is not supported)."""
+        return RootDiskConfig(kind="disk-image", path=path, format=format, fstype=fstype)
+
+@dataclass(frozen=True, slots=True)
 class ImageSource:
     """Explicit rootfs image source."""
     _type: str
     _path: str | None = None
     _reference: str | None = None
-    _upper_size_mib: int | None = None
+    _root_disk: RootDiskConfig | dict | int | None = None
+    _upper_size_mib: int | None = None  # deprecated: use _root_disk
     _fstype: str | None = None
     _format: DiskImageFormat | None = None
 
@@ -420,10 +468,21 @@ class Image:
     """Factory for explicit image source configuration."""
 
     @staticmethod
-    def oci(reference: str, *, upper_size_mib: int | None = None) -> ImageSource:
+    def oci(
+        reference: str,
+        *,
+        root_disk: RootDiskConfig | dict | int | None = None,
+        upper_size_mib: int | None = None,
+    ) -> ImageSource:
+        if root_disk is not None and upper_size_mib is not None:
+            raise ValueError("pass either root_disk= or upper_size_mib=, not both")
+        if root_disk is None and upper_size_mib is not None:
+            # Deprecated alias: upper_size_mib= is managed-root-disk sugar.
+            root_disk = RootDisk.managed(upper_size_mib)
         return ImageSource(
             _type="oci",
             _reference=reference,
+            _root_disk=root_disk,
             _upper_size_mib=upper_size_mib,
         )
 

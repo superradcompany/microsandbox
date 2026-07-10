@@ -29,7 +29,7 @@ pub use domain::{
     DnsConfig, EnvVar, HandoffInit, HostPattern, HostPermissions, InterceptCaConfig,
     InterfaceOverrides, LogSource, MAX_SECRET_PLACEHOLDER_BYTES, MountOptions, NamedVolumeCreate,
     NamedVolumeMode, NetworkPolicy, NetworkSpec, OciRootfsSource, Patch, PortProtocol, PortRange,
-    Protocol, PublishedPortSpec, PullPolicy, Rlimit, RlimitResource, RootfsSource, Rule,
+    Protocol, PublishedPortSpec, PullPolicy, Rlimit, RlimitResource, RootDisk, RootfsSource, Rule,
     SandboxLogLevel, SandboxPolicy, SandboxResources, SandboxRuntimeOptions, SandboxSpec,
     ScopedUpstreamCaCert, ScopedVerifyUpstream, SecretConfigError, SecretEntry, SecretInjection,
     SecretsConfig, SecurityProfile, SnapshotDestination, SnapshotSpec, StatVirtualization,

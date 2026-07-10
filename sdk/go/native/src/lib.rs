@@ -922,12 +922,31 @@ struct RegistryAuthOpts {
 }
 
 #[derive(serde::Deserialize)]
+struct RootDiskOpts {
+    /// "managed" | "tmpfs" | "disk-image".
+    kind: String,
+    /// Size in MiB for the managed and tmpfs kinds.
+    size_mib: Option<u32>,
+    /// Host path of a disk-image root disk.
+    path: Option<String>,
+    /// Disk image format ("raw" | "qcow2"); derived from the path
+    /// extension when absent. vmdk is not supported as a root disk.
+    format: Option<String>,
+    /// Inner filesystem type of a disk-image root disk (default ext4).
+    fstype: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
 struct SandboxCreateOpts {
     image: Option<String>,
     image_fstype: Option<String>,
     /// Host directory used directly as the root filesystem (bind rootfs).
     /// Mutually exclusive with `image` and `snapshot`.
     image_bind: Option<String>,
+    /// Structured root disk config for an OCI rootfs.
+    root_disk: Option<RootDiskOpts>,
+    /// Deprecated flat spelling of a managed root disk size. Still
+    /// accepted so older Go SDK versions keep working against this dylib.
     oci_upper_size_mib: Option<u32>,
     snapshot: Option<String>,
     memory_mib: Option<u32>,
@@ -1511,6 +1530,69 @@ fn parse_security_profile(s: &str) -> Result<SecurityProfile, FfiError> {
     }
 }
 
+/// Apply a structured root disk config to the sandbox builder. Kind and
+/// per-kind field combinations are validated here so errors surface as
+/// invalid-argument; sizing/kind guards stay in the core builder.
+fn apply_root_disk(
+    builder: microsandbox::sandbox::SandboxBuilder,
+    root_disk: RootDiskOpts,
+) -> Result<microsandbox::sandbox::SandboxBuilder, FfiError> {
+    match root_disk.kind.as_str() {
+        "managed" | "tmpfs" => {
+            if root_disk.path.is_some() || root_disk.format.is_some() || root_disk.fstype.is_some()
+            {
+                return Err(FfiError::invalid_argument(format!(
+                    "path/format/fstype are only valid for a disk-image root disk (got kind={})",
+                    root_disk.kind
+                )));
+            }
+        }
+        "disk-image" => {
+            if root_disk.path.as_deref().unwrap_or_default().is_empty() {
+                return Err(FfiError::invalid_argument(
+                    "disk-image root disk requires path",
+                ));
+            }
+            if root_disk.size_mib.is_some() {
+                return Err(FfiError::invalid_argument(
+                    "size_mib is not valid for a disk-image root disk; resize the image file itself",
+                ));
+            }
+        }
+        other => {
+            return Err(FfiError::invalid_argument(format!(
+                "unknown root disk kind: {other} (expected managed, tmpfs, disk-image)"
+            )));
+        }
+    }
+    let format = root_disk
+        .format
+        .as_deref()
+        .map(|f| {
+            f.parse::<microsandbox::sandbox::DiskImageFormat>()
+                .map_err(FfiError::invalid_argument)
+        })
+        .transpose()?;
+
+    Ok(builder.root_disk_with(|mut d| {
+        match root_disk.kind.as_str() {
+            "tmpfs" => d = d.tmpfs(),
+            "disk-image" => d = d.disk_image(root_disk.path.as_deref().unwrap_or_default()),
+            _ => {}
+        }
+        if let Some(size_mib) = root_disk.size_mib {
+            d = d.size(size_mib);
+        }
+        if let Some(format) = format {
+            d = d.format(format);
+        }
+        if let Some(fstype) = root_disk.fstype {
+            d = d.fstype(fstype);
+        }
+        d
+    }))
+}
+
 fn apply_secret(
     mut builder: microsandbox::sandbox::SandboxBuilder,
     s: &SecretOpts,
@@ -1883,9 +1965,16 @@ pub unsafe extern "C" fn msb_sandbox_create(
                     "image and snapshot are mutually exclusive",
                 ));
             }
-            if opts.oci_upper_size_mib.is_some() && opts.snapshot.is_some() {
+            if opts.root_disk.is_some() && opts.oci_upper_size_mib.is_some() {
                 return Err(FfiError::invalid_argument(
-                    "oci_upper_size_mib is not valid when booting from a snapshot",
+                    "root_disk and oci_upper_size_mib are mutually exclusive",
+                ));
+            }
+            if (opts.root_disk.is_some() || opts.oci_upper_size_mib.is_some())
+                && opts.snapshot.is_some()
+            {
+                return Err(FfiError::invalid_argument(
+                    "root_disk is not valid when booting from a snapshot",
                 ));
             }
             if opts.image_bind.is_some() && (opts.image.is_some() || opts.snapshot.is_some()) {
@@ -1903,8 +1992,12 @@ pub unsafe extern "C" fn msb_sandbox_create(
             if let Some(bind_path) = opts.image_bind {
                 builder = builder.image_with(|i| i.bind(bind_path));
             }
+            if let Some(root_disk) = opts.root_disk {
+                builder = apply_root_disk(builder, root_disk)?;
+            }
             if let Some(size_mib) = opts.oci_upper_size_mib {
-                builder = builder.oci_upper_size(size_mib);
+                // Deprecated flat spelling: managed root disk of that size.
+                builder = builder.root_disk(size_mib);
             }
             if let Some(snapshot) = opts.snapshot {
                 builder = builder.from_snapshot(snapshot);
@@ -5975,6 +6068,66 @@ mod tests {
         let opts: SandboxCreateOpts = serde_json::from_str(r#"{"image":"python:3.12"}"#).unwrap();
 
         assert_eq!(opts.oci_upper_size_mib, None);
+        assert!(opts.root_disk.is_none());
+    }
+
+    #[test]
+    fn sandbox_create_opts_parses_structured_root_disk() {
+        let opts: SandboxCreateOpts = serde_json::from_str(
+            r#"{"image":"python:3.12","root_disk":{"kind":"tmpfs","size_mib":512}}"#,
+        )
+        .unwrap();
+
+        let root_disk = opts.root_disk.expect("root_disk parsed");
+        assert_eq!(root_disk.kind, "tmpfs");
+        assert_eq!(root_disk.size_mib, Some(512));
+        assert!(root_disk.path.is_none());
+    }
+
+    #[test]
+    fn apply_root_disk_rejects_unknown_kind() {
+        let builder = microsandbox::sandbox::SandboxBuilder::new("test").image("alpine");
+        let opts = RootDiskOpts {
+            kind: "floppy".to_string(),
+            size_mib: None,
+            path: None,
+            format: None,
+            fstype: None,
+        };
+
+        let err = match apply_root_disk(builder, opts) {
+            Ok(_) => panic!("unknown root disk kind should be rejected"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.message.contains("unknown root disk kind"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn apply_root_disk_rejects_disk_image_without_path() {
+        let builder = microsandbox::sandbox::SandboxBuilder::new("test").image("alpine");
+        let opts = RootDiskOpts {
+            kind: "disk-image".to_string(),
+            size_mib: None,
+            path: None,
+            format: None,
+            fstype: None,
+        };
+
+        let err = match apply_root_disk(builder, opts) {
+            Ok(_) => panic!("disk-image root disk without path should be rejected"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.message.contains("requires path"),
+            "got: {}",
+            err.message
+        );
     }
 
     #[test]

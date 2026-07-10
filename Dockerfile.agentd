@@ -29,6 +29,7 @@ edition = "2024"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 ciborium = "0.2"
+ipnetwork = { version = "0.21.0", features = ["serde"] }
 libc = "0.2"
 microsandbox-protocol = { path = "crates/protocol" }
 microsandbox-types = { path = "packages/microsandbox-types/rust" }

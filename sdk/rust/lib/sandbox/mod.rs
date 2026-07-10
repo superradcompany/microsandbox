@@ -163,8 +163,8 @@ pub use ssh::{
 };
 pub use types::{
     DiskImageFormat, HostPermissions, ImageBuilder, ImageSource, IntoImage, MountBuilder,
-    MountOptions, NamedVolumeMode, OciRootfsSource, Patch, PatchBuilder, RootfsSource,
-    SecurityProfile, StatVirtualization, VolumeMount,
+    MountOptions, NamedVolumeMode, OciRootfsSource, Patch, PatchBuilder, RootDisk, RootDiskBuilder,
+    RootfsSource, SecurityProfile, StatVirtualization, VolumeMount,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -536,9 +536,9 @@ pub(crate) async fn create_local(
             .snapshot_upper_source
             .as_ref()
             .and(config.manifest_digest.clone());
-        let upper_size_mib = oci
-            .upper_size_mib
-            .unwrap_or(config::DEFAULT_OCI_UPPER_SIZE_MIB);
+        let root_disk = oci
+            .root_disk
+            .unwrap_or(types::RootDisk::Managed { size_mib: None });
         let overrides = RegistryOverrides {
             auth: config.registry_auth.clone(),
             insecure: config.insecure,
@@ -604,7 +604,7 @@ pub(crate) async fn create_local(
             None
         };
 
-        // Create upper.ext4 for the writable overlay upper layer.
+        // Materialize the writable layer per root disk kind.
         tokio::fs::create_dir_all(&sandbox_dir).await?;
         let upper_path = sandbox_dir.join("upper.ext4");
         if let Some(snap_upper) = config.snapshot_upper_source.take() {
@@ -623,8 +623,26 @@ pub(crate) async fn create_local(
             })
             .await
             .map_err(|e| crate::MicrosandboxError::Custom(format!("snapshot copy task: {e}")))??;
-        } else if !upper_path.exists() || upper_tree.is_some() {
-            create_upper_ext4(&upper_path, upper_size_mib, upper_tree).await?;
+        } else {
+            match &root_disk {
+                types::RootDisk::Managed { size_mib } => {
+                    let upper_size_mib = size_mib.unwrap_or(config::DEFAULT_OCI_UPPER_SIZE_MIB);
+                    if !upper_path.exists() || upper_tree.is_some() {
+                        create_upper_ext4(&upper_path, upper_size_mib, upper_tree).await?;
+                    }
+                }
+                // The builder rejects patches with a tmpfs root disk, and the
+                // guest assembles the tmpfs itself — nothing to create here.
+                types::RootDisk::Tmpfs { .. } => {}
+                types::RootDisk::DiskImage { path, .. } => {
+                    if tokio::fs::metadata(path).await.is_err() {
+                        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                            "root disk image not found: {}",
+                            path.display()
+                        )));
+                    }
+                }
+            }
         }
 
         // Store manifest digest for spawn to derive paths.
@@ -3846,7 +3864,7 @@ mod tests {
             "pinned",
             RootfsSource::Oci(OciRootfsSource {
                 reference: "docker.io/library/alpine".into(),
-                upper_size_mib: None,
+                root_disk: None,
             }),
         );
         config.manifest_digest = Some("sha256:aaaa".into());
@@ -3890,7 +3908,7 @@ mod tests {
             "recreated",
             RootfsSource::Oci(OciRootfsSource {
                 reference: "docker.io/library/alpine".into(),
-                upper_size_mib: None,
+                root_disk: None,
             }),
         );
         config.manifest_digest = Some("sha256:aaaa".into());
@@ -3933,7 +3951,7 @@ mod tests {
             "persisted-digest",
             RootfsSource::Oci(OciRootfsSource {
                 reference: "docker.io/library/alpine".into(),
-                upper_size_mib: None,
+                root_disk: None,
             }),
         );
         config.manifest_digest = Some("sha256:abc123".into());
@@ -4222,7 +4240,7 @@ mod tests {
             "persisted",
             RootfsSource::Oci(OciRootfsSource {
                 reference: "docker.io/library/alpine".into(),
-                upper_size_mib: None,
+                root_disk: None,
             }),
         );
         config.manifest_digest = Some("sha256:aaaa".into());

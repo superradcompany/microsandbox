@@ -84,9 +84,50 @@ pub struct OciRootfsSource {
     /// OCI image reference (e.g. `python`).
     pub reference: String,
 
-    /// Writable overlay upper size in MiB.
+    /// Writable rootfs layer backing. `None` resolves to a managed 4 GiB upper.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub upper_size_mib: Option<u32>,
+    pub root_disk: Option<RootDisk>,
+}
+
+/// Backing for the writable rootfs layer (overlay upper) of an OCI sandbox.
+///
+/// This lives only on [`OciRootfsSource`]: the root disk is a property of how an OCI image
+/// becomes a rootfs. Every user surface (CLI `--root-disk`, SDK builders) is sugar resolving
+/// into this type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum RootDisk {
+    /// Sparse ext4 created and owned by microsandbox in the sandbox dir. Default. Persistent;
+    /// grow-only via modify; deleted with the sandbox.
+    Managed {
+        /// Virtual size in MiB. `None` resolves to 4096.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size_mib: Option<u32>,
+    },
+
+    /// RAM-backed upper. Ephemeral: the rootfs is pristine on every boot. Pages come from
+    /// guest memory, so the size must not exceed the sandbox memory.
+    Tmpfs {
+        /// Size in MiB. `None` resolves to half the sandbox memory.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size_mib: Option<u32>,
+    },
+
+    /// User-supplied disk image attached writable as the upper. User-owned lifecycle: never
+    /// created, resized, or deleted by microsandbox.
+    DiskImage {
+        /// Host path to the image file.
+        #[cfg_attr(feature = "ts", ts(type = "string"))]
+        #[cfg_attr(feature = "utoipa", schema(value_type = String))]
+        path: PathBuf,
+        /// Disk image format. Never probed from file contents.
+        format: DiskImageFormat,
+        /// Inner filesystem type. `None` resolves to ext4.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fstype: Option<String>,
+    },
 }
 
 /// Controls when an OCI registry is contacted for manifest freshness.
@@ -851,8 +892,46 @@ impl OciRootfsSource {
     pub fn new(reference: impl Into<String>) -> Self {
         Self {
             reference: reference.into(),
-            upper_size_mib: None,
+            root_disk: None,
         }
+    }
+}
+
+impl RootDisk {
+    /// Create a managed root disk with the given size in MiB.
+    pub fn managed(size_mib: u32) -> Self {
+        Self::Managed {
+            size_mib: Some(size_mib),
+        }
+    }
+
+    /// Create a tmpfs root disk with the given size in MiB.
+    pub fn tmpfs(size_mib: u32) -> Self {
+        Self::Tmpfs {
+            size_mib: Some(size_mib),
+        }
+    }
+
+    /// Return the configured size in MiB, if this kind carries one.
+    pub fn size_mib(&self) -> Option<u32> {
+        match self {
+            Self::Managed { size_mib } | Self::Tmpfs { size_mib } => *size_mib,
+            Self::DiskImage { .. } => None,
+        }
+    }
+
+    /// Return the lowercase kind tag used on the wire, in the DB, and in CLI output.
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            Self::Managed { .. } => "managed",
+            Self::Tmpfs { .. } => "tmpfs",
+            Self::DiskImage { .. } => "disk-image",
+        }
+    }
+
+    /// Whether this is the managed (default) kind.
+    pub fn is_managed(&self) -> bool {
+        matches!(self, Self::Managed { .. })
     }
 }
 
@@ -870,10 +949,23 @@ impl RootfsSource {
         }
     }
 
-    /// Return the configured OCI upper size in MiB if this is an OCI rootfs.
-    pub fn oci_upper_size_mib(&self) -> Option<u32> {
+    /// Return the configured root disk if this is an OCI rootfs.
+    pub fn oci_root_disk(&self) -> Option<&RootDisk> {
         match self {
-            Self::Oci(oci) => oci.upper_size_mib,
+            Self::Oci(oci) => oci.root_disk.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// Return the managed root disk size in MiB if this is an OCI rootfs with a managed
+    /// (or unset, i.e. default-managed) root disk. Non-managed kinds return `None`.
+    pub fn oci_managed_root_disk_size_mib(&self) -> Option<u32> {
+        match self {
+            Self::Oci(oci) => match &oci.root_disk {
+                Some(RootDisk::Managed { size_mib }) => *size_mib,
+                Some(_) => None,
+                None => None,
+            },
             _ => None,
         }
     }
