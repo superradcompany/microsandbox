@@ -143,6 +143,13 @@ pub const MIGRATION_METADATA: &[MigrationMetadata] = &[
         affects_user_data: false,
         summary: "remove active sandbox config snapshots",
     },
+    MigrationMetadata {
+        id: "m20260708_000001_migrate_bind_rootfs_source",
+        reversible: false,
+        affects_cache: false,
+        affects_user_data: false,
+        summary: "rewrite bind rootfs config back to the legacy string shape",
+    },
 ];
 
 //--------------------------------------------------------------------------------------------------

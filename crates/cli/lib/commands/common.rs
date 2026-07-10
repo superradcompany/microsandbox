@@ -401,6 +401,7 @@ struct CliMountOptions {
     noexec: bool,
     nosuid: bool,
     nodev: bool,
+    follow_root_symlinks: bool,
     stat_virtualization: Option<microsandbox::sandbox::StatVirtualization>,
     host_permissions: Option<microsandbox::sandbox::HostPermissions>,
     size_mib: Option<u32>,
@@ -779,7 +780,7 @@ fn validate_guest_path(context: &str, path: &str) -> anyhow::Result<()> {
 
 /// Parse a volume spec and apply it to the builder.
 ///
-/// Accepts: `SRC:DST[:ro|rw][,noexec][,nosuid][,nodev][,stat-virt=...][,host-perms=...]`.
+/// Accepts: `SRC:DST[:ro|rw][,noexec][,nosuid][,nodev][,follow-root-symlinks][,stat-virt=...][,host-perms=...]`.
 pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<SandboxBuilder> {
     let parsed = parse_cli_mount_spec(
         "volume",
@@ -825,6 +826,9 @@ pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<Sandb
         }
         if options.nodev {
             m = m.nodev();
+        }
+        if options.follow_root_symlinks {
+            m = m.follow_root_symlinks(true);
         }
         if let Some(sv) = options.stat_virtualization {
             m = m.stat_virtualization(sv);
@@ -1025,6 +1029,9 @@ fn apply_common_mount_options(mut mount: MountBuilder, options: CliMountOptions)
     if options.nodev {
         mount = mount.nodev();
     }
+    if options.follow_root_symlinks {
+        mount = mount.follow_root_symlinks(true);
+    }
     if let Some(sv) = options.stat_virtualization {
         mount = mount.stat_virtualization(sv);
     }
@@ -1125,6 +1132,7 @@ fn parse_cli_mount_options(
     let mut seen_noexec = false;
     let mut seen_nosuid = false;
     let mut seen_nodev = false;
+    let mut seen_follow_root = false;
     let mut seen_stat_virt = false;
     let mut seen_host_perms = false;
     let mut seen_size = false;
@@ -1170,6 +1178,13 @@ fn parse_cli_mount_options(
                 }
                 seen_nodev = true;
                 parsed.nodev = true;
+            }
+            "follow-root-symlinks" if support.policies => {
+                if seen_follow_root {
+                    anyhow::bail!("mount option `follow-root-symlinks` specified more than once");
+                }
+                seen_follow_root = true;
+                parsed.follow_root_symlinks = true;
             }
             "suid" | "exec" | "dev" => {
                 anyhow::bail!("unsupported mount option {opt:?}");

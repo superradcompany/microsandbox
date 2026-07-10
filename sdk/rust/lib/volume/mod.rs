@@ -911,6 +911,7 @@ mod tests {
                     options: MountOptions::default(),
                     stat_virtualization: StatVirtualization::Strict,
                     host_permissions: HostPermissions::Private,
+                    follow_root_symlinks: false,
                 }],
                 ..Default::default()
             },

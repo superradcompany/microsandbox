@@ -155,6 +155,7 @@ pub fn run(args: SandboxArgs) -> ! {
             .unwrap_or(args.memory_mib)
             .max(args.memory_mib),
         rootfs_path: launch.rootfs.path,
+        rootfs_follow_root_symlinks: launch.rootfs.follow_root_symlinks,
         rootfs_vmdk: if is_vmdk {
             launch.rootfs.disk.clone()
         } else {

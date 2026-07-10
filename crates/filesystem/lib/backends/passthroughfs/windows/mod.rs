@@ -241,6 +241,69 @@ fn ensure_lexically_under_root(root: &Path, path: &Path) -> io::Result<()> {
     }
 }
 
+/// Resolve the mount root trusting no component of the provided path.
+///
+/// Walks `root_dir` from the volume root, rejecting a reparse point (symlink or
+/// junction) at every component and refusing `..`, so neither a planted reparse
+/// point nor an injected `..` can move the mount off its intended target. The
+/// only implicitly trusted object is the volume root (e.g. `C:\`), which cannot
+/// be a reparse point. Each component is checked with a non-following
+/// `symlink_metadata` only after its ancestors are verified clean, so path
+/// resolution never crosses a reparse point. Unlike `canonicalize`, this never
+/// follows a reparse point out of the intended subtree.
+fn resolve_root_no_reparse(root_dir: &Path) -> io::Result<PathBuf> {
+    // Reject `..` from the RAW path string, not from `Path::components()`.
+    //
+    // For verbatim (`\\?\`) paths, `components()` collapses `a\..` lexically
+    // before we ever see a `ParentDir` or `Normal("..")`, so a `..` would slip
+    // through and the filesystem would resolve it out of the subtree. Splitting
+    // the raw string on separators catches a `..` segment in any path form.
+    // (`..` is pure ASCII, so a lossy conversion can neither hide nor fabricate
+    // one.)
+    if root_dir
+        .as_os_str()
+        .to_string_lossy()
+        .split(['\\', '/'])
+        .any(|segment| segment == "..")
+    {
+        return Err(linux_error(LINUX_EINVAL));
+    }
+
+    // Split into the trusted base and the segments below it. For an absolute
+    // path the base is the volume root (prefix + root); for a relative path it
+    // is the working directory. Neither is attacker-controllable.
+    let mut cursor = PathBuf::new();
+    let mut names = Vec::new();
+    for component in root_dir.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => cursor.push(component.as_os_str()),
+            Component::Normal(part) => names.push(part.to_os_string()),
+            Component::CurDir => {}
+            Component::ParentDir => return Err(linux_error(LINUX_EINVAL)),
+        }
+    }
+    if cursor.as_os_str().is_empty() {
+        cursor.push(".");
+    }
+
+    // Descend one component at a time; each ancestor is verified non-reparse
+    // before the next lookup, so resolution never follows a reparse point.
+    for name in &names {
+        if name.to_str().is_some_and(is_reserved_name) {
+            return Err(linux_error(LINUX_EPERM));
+        }
+        cursor.push(name);
+        let metadata = std::fs::symlink_metadata(&cursor).map_err(host_error)?;
+        reject_reparse_metadata(&metadata)?;
+    }
+
+    let metadata = std::fs::symlink_metadata(&cursor).map_err(host_error)?;
+    if !metadata.file_type().is_dir() {
+        return Err(linux_error(LINUX_ENOTDIR));
+    }
+    Ok(cursor)
+}
+
 fn safe_metadata_under_root(root: &Path, path: &Path) -> io::Result<std::fs::Metadata> {
     ensure_lexically_under_root(root, path)?;
     let relative = path

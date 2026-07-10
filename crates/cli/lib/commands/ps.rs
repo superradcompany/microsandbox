@@ -229,7 +229,7 @@ fn format_ports(config: &SandboxConfig) -> String {
 fn extract_image_raw(config: &SandboxConfig) -> String {
     match &config.spec.image {
         microsandbox::sandbox::RootfsSource::Oci(oci) => oci.reference.clone(),
-        microsandbox::sandbox::RootfsSource::Bind(p) => p.display().to_string(),
+        microsandbox::sandbox::RootfsSource::Bind { path, .. } => path.display().to_string(),
         microsandbox::sandbox::RootfsSource::DiskImage { path, .. } => path.display().to_string(),
     }
 }

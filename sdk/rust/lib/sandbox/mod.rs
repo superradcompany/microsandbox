@@ -2880,7 +2880,7 @@ fn sandbox_handle_matches_filter(handle: &SandboxHandle, filter: &SandboxFilter)
 /// Validate rootfs configuration that depends on host filesystem state.
 fn validate_rootfs_source(rootfs: &RootfsSource) -> MicrosandboxResult<()> {
     match rootfs {
-        RootfsSource::Bind(path) => {
+        RootfsSource::Bind { path, .. } => {
             if !path.exists() {
                 return Err(crate::MicrosandboxError::InvalidConfig(format!(
                     "rootfs bind path does not exist: {}",
@@ -3526,7 +3526,13 @@ mod tests {
                 .unwrap(),
         );
         let backend_trait: Arc<dyn Backend> = backend;
-        let mut config = test_config_with_rootfs("bad-mounts", RootfsSource::Bind(rootfs));
+        let mut config = test_config_with_rootfs(
+            "bad-mounts",
+            RootfsSource::Bind {
+                path: rootfs,
+                follow_root_symlinks: false,
+            },
+        );
         config.spec.mounts = vec![
             VolumeMount::Tmpfs {
                 guest: "/dup".to_string(),
@@ -3648,7 +3654,11 @@ mod tests {
     #[test]
     fn test_validate_rootfs_source_missing_bind_path() {
         let path = unique_temp_path("missing");
-        let err = validate_rootfs_source(&RootfsSource::Bind(path.clone())).unwrap_err();
+        let err = validate_rootfs_source(&RootfsSource::Bind {
+            path: path.clone(),
+            follow_root_symlinks: false,
+        })
+        .unwrap_err();
         assert_eq!(
             err.to_string(),
             format!(
@@ -3663,7 +3673,11 @@ mod tests {
         let path = unique_temp_path("file");
         fs::write(&path, b"not a directory").unwrap();
 
-        let err = validate_rootfs_source(&RootfsSource::Bind(path.clone())).unwrap_err();
+        let err = validate_rootfs_source(&RootfsSource::Bind {
+            path: path.clone(),
+            follow_root_symlinks: false,
+        })
+        .unwrap_err();
         assert_eq!(
             err.to_string(),
             format!(
@@ -3680,7 +3694,11 @@ mod tests {
         let path = unique_temp_path("dir");
         fs::create_dir(&path).unwrap();
 
-        validate_rootfs_source(&RootfsSource::Bind(path.clone())).unwrap();
+        validate_rootfs_source(&RootfsSource::Bind {
+            path: path.clone(),
+            follow_root_symlinks: false,
+        })
+        .unwrap();
 
         fs::remove_dir(path).unwrap();
     }
@@ -3772,8 +3790,13 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        let mut config =
-            test_config_with_rootfs("test", RootfsSource::Bind(unique_temp_path("missing")));
+        let mut config = test_config_with_rootfs(
+            "test",
+            RootfsSource::Bind {
+                path: unique_temp_path("missing"),
+                follow_root_symlinks: false,
+            },
+        );
         config.spec.runtime.hostname = Some("y".repeat(MAX_HOSTNAME_BYTES + 1));
 
         let err =

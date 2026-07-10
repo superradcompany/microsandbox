@@ -2610,7 +2610,10 @@ mod tests {
     #[test]
     fn non_oci_rootfs_upper_change_conflicts() {
         let mut current = config(2, 1024);
-        current.spec.image = RootfsSource::Bind("/srv/rootfs".into());
+        current.spec.image = RootfsSource::Bind {
+            path: "/srv/rootfs".into(),
+            follow_root_symlinks: false,
+        };
         let patch = SandboxModificationPatch {
             oci_upper_size_mib: Some(8192),
             ..SandboxModificationPatch::default()

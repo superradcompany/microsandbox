@@ -116,6 +116,13 @@ pub struct RootfsConfig {
     /// Root filesystem path for direct passthrough mounts.
     pub path: Option<PathBuf>,
 
+    /// Follow symlinks when resolving a bind (`path`) rootfs.
+    ///
+    /// Defaults to `false` (resolve following no symlink), matching the
+    /// `--mount` protection for the caller/tenant-provided rootfs path.
+    #[serde(default)]
+    pub follow_root_symlinks: bool,
+
     /// Disk image file path for virtio-blk rootfs.
     pub disk: Option<PathBuf>,
 

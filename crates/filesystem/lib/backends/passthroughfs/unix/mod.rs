@@ -17,11 +17,12 @@ mod xattr_ops;
 
 use std::{
     collections::BTreeMap,
-    ffi::CStr,
+    ffi::{CStr, CString},
     fs::File,
     io,
     os::fd::{AsRawFd, FromRawFd},
-    path::PathBuf,
+    os::unix::ffi::OsStrExt,
+    path::{Component, Path, PathBuf},
     sync::{
         Arc, Mutex, RwLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -114,6 +115,21 @@ pub enum HostPermissions {
 pub struct PassthroughConfig {
     /// Path to the root directory on the host.
     pub root_dir: PathBuf,
+
+    /// Resolve `root_dir` treating no component of the path as trusted.
+    ///
+    /// When `true`, `root_dir` is resolved from the real filesystem root with
+    /// symlink following disabled for *every* component, and `..` is refused.
+    /// A symlink anywhere in the path — tenant-created or not — fails the mount
+    /// rather than being followed, so a caller cannot escape the intended target
+    /// by planting a symlink or by injecting `..` into a path segment it
+    /// influences. Because nothing is trusted, the caller must pass a fully
+    /// resolved (symlink-free, absolute) path; a legitimately symlinked prefix
+    /// must be canonicalized before it reaches this backend.
+    ///
+    /// `false` preserves the legacy behavior of opening `root_dir` directly,
+    /// following symlinks, with the caller vouching for the whole path.
+    pub no_symlink_root: bool,
 
     /// Stat virtualization policy.
     ///
@@ -248,25 +264,8 @@ impl PassthroughFs {
     ///
     /// Opens the root directory and optionally probes for xattr support.
     pub fn new(cfg: PassthroughConfig) -> io::Result<Self> {
-        // Open the root directory.
-        let root_path = std::ffi::CString::new(
-            cfg.root_dir
-                .to_str()
-                .ok_or_else(platform::einval)?
-                .as_bytes(),
-        )
-        .map_err(|_| platform::einval())?;
-
-        let root_fd_raw = unsafe {
-            libc::open(
-                root_path.as_ptr(),
-                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY,
-            )
-        };
-        if root_fd_raw < 0 {
-            return Err(platform::linux_error(io::Error::last_os_error()));
-        }
-        let root_fd = unsafe { File::from_raw_fd(root_fd_raw) };
+        // Open the root directory, contained beneath the anchor when one is set.
+        let root_fd = open_root(&cfg)?;
 
         // Probe xattr support if strict mode is enabled.
         if cfg.strict_enabled() && cfg.xattr_enabled() {
@@ -467,6 +466,7 @@ impl Default for PassthroughConfig {
     fn default() -> Self {
         Self {
             root_dir: PathBuf::new(),
+            no_symlink_root: false,
             stat_virtualization: StatVirtualization::Strict,
             host_permissions: HostPermissions::Private,
             readonly: false,
@@ -878,6 +878,117 @@ impl DynFileSystem for PassthroughFs {
             flags,
         )
     }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+/// Open the mount root directory.
+///
+/// With `no_symlink_root` unset this opens `cfg.root_dir` directly, following
+/// symlinks — the legacy behavior where the caller vouches for the whole path.
+///
+/// With `no_symlink_root` set, the path is resolved from the real filesystem
+/// root following no symlink in any component and refusing `..`; a symlink
+/// anywhere (not just a tenant-created tail) fails the mount. On Linux this is a
+/// single `openat2` with `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS |
+/// RESOLVE_NO_MAGICLINKS`; elsewhere it is a per-component `openat(O_NOFOLLOW)`
+/// walk with the same effect.
+pub(crate) fn open_root(cfg: &PassthroughConfig) -> io::Result<File> {
+    if cfg.no_symlink_root {
+        open_root_no_symlink(&cfg.root_dir)
+    } else {
+        open_dir_follow(&cfg.root_dir)
+    }
+}
+
+/// Open a directory by path, following symlinks (`O_DIRECTORY`).
+fn open_dir_follow(path: &Path) -> io::Result<File> {
+    let c = CString::new(path.as_os_str().as_bytes()).map_err(|_| platform::einval())?;
+    let fd = unsafe {
+        libc::open(
+            c.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY,
+        )
+    };
+    if fd < 0 {
+        return Err(platform::linux_error(io::Error::last_os_error()));
+    }
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+/// Resolve `root_dir` trusting no component, following no symlink.
+///
+/// Every path segment is opened without following symlinks, and `..` is refused
+/// so a caller-influenced segment cannot move the target laterally without ever
+/// crossing a symlink. An absolute path resolves from the real root `/`; a
+/// relative path resolves from the process working directory — in both cases the
+/// base is the only implicitly trusted object and is not attacker-controllable.
+/// A legitimately symlinked prefix must be canonicalized upstream.
+fn open_root_no_symlink(root_dir: &Path) -> io::Result<File> {
+    // Collect the real path segments, refusing `..` and any drive prefix.
+    let mut names = Vec::new();
+    for comp in root_dir.components() {
+        match comp {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(name) => names.push(name),
+            Component::ParentDir | Component::Prefix(_) => return Err(platform::einval()),
+        }
+    }
+
+    // Base: the real root for absolute paths, the working directory otherwise.
+    // Neither is attacker-controllable and neither can be a symlink component we
+    // follow — resolution of the untrusted tail starts here.
+    let base = open_dir_follow(if root_dir.is_absolute() {
+        Path::new("/")
+    } else {
+        Path::new(".")
+    })?;
+    if names.is_empty() {
+        return Ok(base);
+    }
+
+    // Linux fast path: one openat2 from `/`, symlink resolution disabled.
+    //
+    // `open_beneath`'s internal fallback is an uncontained `openat`, so it is
+    // only safe to use when openat2 is genuinely present — probe explicitly and
+    // drop to the portable walk otherwise.
+    #[cfg(target_os = "linux")]
+    if platform::probe_openat2() {
+        let rel: PathBuf = names.iter().copied().collect();
+        let rel_c = CString::new(rel.as_os_str().as_bytes()).map_err(|_| platform::einval())?;
+        let fd = platform::open_beneath(
+            base.as_raw_fd(),
+            rel_c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY,
+            true,
+        );
+        if fd < 0 {
+            return Err(platform::linux_error(io::Error::last_os_error()));
+        }
+        return Ok(unsafe { File::from_raw_fd(fd) });
+    }
+
+    // Portable fallback: walk one component at a time, each `openat` relative to
+    // the previously opened real directory fd, so a component swapped mid-walk
+    // cannot redirect resolution.
+    let mut dir = base;
+    for name in names {
+        let c = CString::new(name.as_bytes()).map_err(|_| platform::einval())?;
+        let fd = unsafe {
+            libc::openat(
+                dir.as_raw_fd(),
+                c.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+            )
+        };
+        if fd < 0 {
+            return Err(platform::linux_error(io::Error::last_os_error()));
+        }
+        dir = unsafe { File::from_raw_fd(fd) };
+    }
+    Ok(dir)
 }
 
 //--------------------------------------------------------------------------------------------------
