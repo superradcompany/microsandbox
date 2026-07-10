@@ -195,7 +195,13 @@ pub(crate) fn do_flush(
 
     let newfd = unsafe { libc::dup(f.as_raw_fd()) };
     if newfd < 0 {
-        return Err(platform::linux_error(io::Error::last_os_error()));
+        let err = io::Error::last_os_error();
+        // The dup+close idiom exists to trigger POSIX lock release on close, but this server never negotiates remote locks, so there is nothing to release. Under fd
+        // exhaustion, failing here would make guest close() fail at exactly the moment it is trying to shed descriptors — report success instead so the guest can recover.
+        if matches!(err.raw_os_error(), Some(libc::EMFILE) | Some(libc::ENFILE)) {
+            return Ok(());
+        }
+        return Err(platform::linux_error(err));
     }
     let ret = unsafe { libc::close(newfd) };
     if ret < 0 {

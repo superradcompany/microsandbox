@@ -566,6 +566,9 @@ fn get_inode_fd_linux(fs: &PassthroughFs, inode: u64) -> io::Result<InodeFd> {
 
     let current_anchor = current_anchor_alias(&data);
     let candidates = candidate_aliases(&data, current_anchor.clone());
+    // Stale-alias failures (ENOENT/ENOTDIR — the path was renamed or removed) mean "try the next alias" and fall through to ENOENT. Any other reopen failure (EMFILE,
+    // EACCES, EIO) is a host-side problem, not a missing file: preserve it so fd exhaustion does not masquerade as phantom "No such file or directory" in the guest.
+    let mut host_err: Option<io::Error> = None;
     for alias in candidates {
         let mut seen = HashSet::new();
         let components = match build_alias_components_locked(&inodes, &alias, &mut seen) {
@@ -574,7 +577,12 @@ fn get_inode_fd_linux(fs: &PassthroughFs, inode: u64) -> io::Result<InodeFd> {
         };
         let fd = match secure_open_path_linux(fs, &components, libc::O_PATH | libc::O_NOFOLLOW) {
             Ok(fd) => fd,
-            Err(_) => continue,
+            Err(err) => {
+                if !matches!(err.raw_os_error(), Some(libc::ENOENT) | Some(libc::ENOTDIR)) {
+                    host_err = Some(err);
+                }
+                continue;
+            }
         };
         if validate_identity_linux(fd, expected).is_ok() {
             drop(inodes);
@@ -586,7 +594,7 @@ fn get_inode_fd_linux(fs: &PassthroughFs, inode: u64) -> io::Result<InodeFd> {
         unsafe { libc::close(fd) };
     }
 
-    Err(platform::enoent())
+    Err(host_err.unwrap_or_else(platform::enoent))
 }
 
 #[cfg(target_os = "linux")]
