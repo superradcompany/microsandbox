@@ -628,6 +628,12 @@ jobs:
     # several jobs can build at once without crushing VM boot latency.
     env:
       CARGO_BUILD_JOBS: "12"
+      # Full debuginfo for the dozen-plus integration-test binaries is
+      # ~14 GiB of target/ and has filled the shared runner disk mid-link,
+      # killing rust-lld with SIGBUS (#1162). line-tables-only keeps
+      # file:line in backtraces — all CI needs — at a fraction of the size.
+      CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+      CARGO_PROFILE_TEST_DEBUG: "line-tables-only"
     steps:
       - name: Clean workspace
         run: |
