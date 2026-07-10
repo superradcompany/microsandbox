@@ -1,5 +1,4 @@
 use std::net::IpAddr;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use napi::bindgen_prelude::*;
@@ -299,10 +298,9 @@ impl JsSandboxBuilder {
     #[napi]
     pub fn init(&mut self, cmd: String, args: Option<Vec<String>>) -> &Self {
         let prev = self.take_inner();
-        let cmd_path = PathBuf::from(cmd);
         self.inner = Some(match args {
-            Some(args) if !args.is_empty() => prev.init_with(cmd_path, |i| i.args(args)),
-            _ => prev.init(cmd_path),
+            Some(args) if !args.is_empty() => prev.init_with(cmd, |i| i.args(args)),
+            _ => prev.init(cmd),
         });
         self
     }
@@ -324,7 +322,7 @@ impl JsSandboxBuilder {
         let mut returned = configure.call(initial)?;
         let init_builder = returned.take_inner_builder()?;
         let prev = self.take_inner();
-        self.inner = Some(prev.init_with(PathBuf::from(cmd), |_default| init_builder));
+        self.inner = Some(prev.init_with(cmd, |_default| init_builder));
         Ok(self)
     }
 

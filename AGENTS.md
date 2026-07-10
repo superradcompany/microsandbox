@@ -15,8 +15,9 @@ Do not apply them to other repositories or to general agent behavior outside thi
 - `sdk/rust` is the public Rust SDK crate.
 - `crates/cli` contains the `msb` CLI.
 - `crates/runtime` contains VM runtime integration.
-- `crates/filesystem`, `crates/image`, `crates/network`, `crates/db`, `crates/migration`, `crates/metrics`, `crates/protocol`, and `crates/utils` are shared internal crates.
-- `crates/agentd` is the in-guest agent. It is excluded from the root Cargo workspace and is built separately.
+- `crates/filesystem`, `crates/image`, `crates/network`, `crates/db`, `crates/migration`, `crates/metrics`, `crates/metrics-collector`, `crates/protocol`, and `crates/utils` are shared internal crates.
+- `packages/agent-client` and `packages/microsandbox-types` are the shared agent-protocol client and wire-contract type packages, each with Rust and TypeScript implementations.
+- `crates/agentd` is the in-guest agent. It is a workspace member; the musl guest binary that ships in releases is built separately.
 - `sdk/python`, `sdk/node-ts`, and `sdk/go` contain the language SDKs and native bindings.
 - `docs/` contains the documentation site. Keep docs in sync with user-facing behavior.
 - `examples/` contains runnable examples. Add new example projects only when requested or clearly required by the contribution.
@@ -35,7 +36,6 @@ Repository layout:
 |-- justfile
 |-- msb-entitlements.plist
 |-- assets/
-|-- benchmarks/
 |-- crates/
 |   |-- agentd/
 |   |-- cli/
@@ -43,6 +43,7 @@ Repository layout:
 |   |-- filesystem/
 |   |-- image/
 |   |-- metrics/
+|   |-- metrics-collector/
 |   |-- migration/
 |   |-- network/
 |   |-- protocol/
@@ -52,13 +53,16 @@ Repository layout:
 |   |-- test-utils/
 |   `-- utils/
 |-- docs/
+|   |-- changelog/
 |   |-- cli/
 |   |-- getting-started/
 |   |-- images/
 |   |-- networking/
+|   |-- observability/
 |   |-- recipes/
 |   |-- sandboxes/
-|   `-- sdk/
+|   |-- sdk/
+|   `-- security/
 |-- examples/
 |   |-- python/
 |   |-- rust/
@@ -67,6 +71,9 @@ Repository layout:
 |   |-- bin/
 |   |-- src/
 |   `-- package.json
+|-- packages/
+|   |-- agent-client/
+|   `-- microsandbox-types/
 |-- packaging/
 |   `-- docker/
 |-- scripts/
@@ -194,13 +201,7 @@ cargo test --workspace
 cargo build -p microsandbox-cli
 ```
 
-`agentd` is not part of the root workspace. Validate it separately when touched:
-
-```bash
-cargo fmt --manifest-path crates/agentd/Cargo.toml -- --check
-cargo clippy --manifest-path crates/agentd/Cargo.toml -- -D warnings
-cargo test --manifest-path crates/agentd/Cargo.toml
-```
+`agentd` is a workspace member, so the workspace-wide commands above cover it. The musl guest binary that ships in releases is built separately via `just build-agentd`.
 
 Python SDK checks:
 
