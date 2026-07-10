@@ -658,7 +658,8 @@ fn enable_windows_hypervisor_platform() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_update(args: SelfUpdateArgs) -> anyhow::Result<()> {
+/// Update msb and libkrunfw to the latest release.
+pub async fn run_update(args: SelfUpdateArgs) -> anyhow::Result<()> {
     info(&format!("Current version: v{CURRENT_VERSION}"));
 
     let spinner = ui::Spinner::start("Checking", "latest release");
@@ -703,7 +704,8 @@ async fn run_update(args: SelfUpdateArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_downgrade(args: SelfDowngradeArgs) -> anyhow::Result<()> {
+/// Downgrade msb and local state to an older supported release.
+pub async fn run_downgrade(args: SelfDowngradeArgs) -> anyhow::Result<()> {
     run_downgrade_local(args).await
 }
 

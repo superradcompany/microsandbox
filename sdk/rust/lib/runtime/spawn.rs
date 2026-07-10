@@ -2479,15 +2479,11 @@ fn sandbox_cli_args(
     }
 
     // Handoff-init: PID 1 hand-off to a user-supplied init binary.
-    // The builder's `validate()` rejects non-UTF-8 cmd paths, args/env
-    // containing NUL, and env keys containing `=`, so the JSON payloads
-    // below can't produce a corrupted execve wire format.
+    // The builder's `validate()` rejects cmd paths containing NUL or `\`,
+    // args/env containing NUL, and env keys containing `=`, so the JSON
+    // payloads below can't produce a corrupted execve wire format.
     if let Some(ref init) = config.spec.init {
-        let cmd = init
-            .cmd
-            .to_str()
-            .expect("validate() rejects non-UTF-8 cmd paths");
-        launch.env.push(format!("{ENV_HANDOFF_INIT}={cmd}"));
+        launch.env.push(format!("{ENV_HANDOFF_INIT}={}", init.cmd));
 
         if !init.args.is_empty() {
             let argv_val = encode_handoff_json(&init.args);
@@ -3063,7 +3059,7 @@ mod tests {
             .await
             .unwrap();
         config.spec.init = Some(HandoffInit {
-            cmd: PathBuf::from("/init"),
+            cmd: "/init".to_string(),
             args: vec![
                 "/opt/hermes/docker/main-wrapper.sh".to_string(),
                 "gateway".to_string(),

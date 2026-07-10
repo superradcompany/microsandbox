@@ -98,34 +98,56 @@ just build release && just install
 
 ### Workspace Crates
 
-The project is a Cargo workspace with these crates (in dependency order):
+The project is a Cargo workspace. Published crates (in dependency order):
 
 | Crate | Path | Description |
 | --- | --- | --- |
 | `microsandbox-utils` | `crates/utils` | Shared utilities |
+| `microsandbox-types` | `packages/microsandbox-types/rust` | Shared task and wire contract types |
 | `microsandbox-protocol` | `crates/protocol` | Wire protocol definitions ([versioning](./crates/protocol/VERSIONING.md)) |
+| `microsandbox-agent-client` | `packages/agent-client/rust` | Transport-agnostic client for the agent protocol |
+| `microsandbox-agentd` | `crates/agentd` | In-guest agent (guest binary is built separately for musl) |
 | `microsandbox-db` | `crates/db` | Database layer |
 | `microsandbox-migration` | `crates/migration` | Database migrations |
 | `microsandbox-image` | `crates/image` | OCI image handling |
 | `microsandbox-filesystem` | `crates/filesystem` | Filesystem composition |
 | `microsandbox-network` | `crates/network` | smoltcp-based networking |
+| `microsandbox-metrics` | `crates/metrics` | Shared-memory live metrics registry |
+| `microsandbox-metrics-collector` | `crates/metrics-collector` | Metrics collector orchestrator and `msb-metrics` binary |
 | `microsandbox-runtime` | `crates/runtime` | VM runtime (libkrun integration) |
 | `microsandbox` | `sdk/rust` | Public SDK crate |
 | `microsandbox-cli` | `crates/cli` | `msb` CLI binary |
-| `agentd` | `crates/agentd` | In-guest agent (workspace member, built separately for musl) |
+
+Internal (unpublished) workspace members:
+
+| Crate | Path | Description |
+| --- | --- | --- |
+| `test-utils` | `crates/test-utils` | Internal test helpers and the `#[msb_test]` attribute |
+| `test-macros` | `crates/test-macros` | Proc-macro behind `#[msb_test]` (re-exported by `test-utils`) |
+| `test-init` | `crates/test-init` | Tiny static guest init binary for handoff integration tests |
+| `microsandbox-node` | `sdk/node-ts` | NAPI bindings behind the Node.js SDK |
+| `microsandbox-py` | `sdk/python` | PyO3 bindings behind the Python SDK |
+| `microsandbox-go` | `sdk/go/native` | C-ABI FFI layer behind the Go SDK |
+
+The `examples/rust/*` projects are workspace members as well.
 
 ### Other Packages
 
 | Package | Path | Description |
 | --- | --- | --- |
-| `microsandbox` (npm) | `sdk/node-ts` | TypeScript/Node.js SDK (NAPI bindings) |
-| `microsandbox-mcp` (npm) | `mcp/` | MCP server for AI agents |
+| `microsandbox` (npm) | `sdk/node-ts` | TypeScript/Node.js SDK (NAPI bindings, plus per-platform sub-packages) |
+| `microsandbox` (PyPI) | `sdk/python` | Python SDK (PyO3 bindings) |
+| `github.com/superradcompany/microsandbox/sdk/go` | `sdk/go` | Go SDK (CGO over `microsandbox-go`), versioned via `sdk/go/vX.Y.Z` tags |
+| `@microsandbox/agent-client` (npm) | `packages/agent-client/typescript` | Transport-agnostic client for the agent protocol |
+| `@microsandbox/types` (npm) | `packages/microsandbox-types/typescript` | Shared task and wire contract types |
+| `microsandbox-mcp` (npm) | `mcp/` (submodule) | MCP server for AI agents |
 
 ### Key Directories
 
 - `vendor/libkrunfw` — Submodule for the kernel firmware library
 - `build/` — Build output (agentd binary, libkrunfw shared library, msb binary)
 - `examples/rust/` — Rust example projects
+- `examples/python/` — Python example projects
 - `examples/typescript/` — TypeScript example projects
 
 ## Testing
@@ -150,14 +172,9 @@ cargo test -p microsandbox test_name
 
 ## Benchmarking
 
-```bash
-just bench-fs
-```
-
-Runs Docker-vs-Microsandbox filesystem benchmarks (14 workloads covering metadata, reads,
-writes, deletes, renames, mmap, and concurrent I/O). Results are written as JSON to
-`build/bench/fs/`. See [`benchmarks/README.md`](benchmarks/README.md) for full usage,
-workload descriptions, multi-image runs, and baseline comparison.
+The benchmark suite lives in its own repository:
+[superradcompany/microvm-benchmarks](https://github.com/superradcompany/microvm-benchmarks).
+See that repository's README for setup, workload descriptions, and usage.
 
 ## Code Quality
 
@@ -191,17 +208,22 @@ cargo clippy --workspace  # Run lints
 
 ## Releasing
 
-Microsandbox releases are automated via CI. The process has two steps:
+Microsandbox releases are automated via CI. All crates and packages share the same version number. The process has two steps:
 
 ### 1. Version Bump PR
 
-Create a PR that bumps the version across all crates and packages. All crates and packages share the same version number:
+Dispatch the **Release version bump** workflow (`.github/workflows/release-bump.yml`) with the target version. It runs `scripts/bump-version.sh`, which bumps:
 
-- `Cargo.toml` (workspace `version` field — all crates inherit from this)
-- `sdk/node-ts/package.json`
-- `mcp/package.json`
+- `Cargo.toml` (workspace `version` field and path-dependency versions — all crates inherit from this)
+- `sdk/node-ts/package.json` and its per-platform sub-packages
+- `packages/agent-client/typescript/package.json`
+- `packages/microsandbox-types/typescript/package.json`
+- `sdk/go/setup.go` (`sdkVersion`)
+- `examples/typescript/*/package.json` (`microsandbox` dependency pins)
 
-The PR title should follow the format: `chore: bump version to X.Y.Z`
+The workflow then regenerates `Cargo.lock` and the npm lockfiles and opens a PR titled `chore: release vX.Y.Z`.
+
+`microsandbox-mcp` is versioned in its own repository (the `mcp/` submodule). Bump it there and advance the `mcp/` (and, when changed, `skills/`) submodule pointers in the release PR — `release.yml` publishes whatever `microsandbox-mcp` version the submodule pointer holds.
 
 ### 2. Tag and Release
 
@@ -214,12 +236,17 @@ git push origin v0.X.Y
 
 The release workflow (`.github/workflows/release.yml`) will:
 
-1. Build `msb`, `agentd`, and `libkrunfw` for release platforms (linux-x86_64, linux-aarch64, darwin-aarch64, windows-x86_64, windows-aarch64)
+1. Build `msb`, `agentd`, `msb-metrics`, and `libkrunfw` for release platforms (linux-x86_64, linux-aarch64, darwin-aarch64, windows-x86_64, windows-aarch64)
 2. Create Unix platform bundles (`.tar.gz`) and Windows platform bundles (`.zip`) with SHA256 checksums
 3. Create a GitHub release with the bundles and installer scripts (`install.sh` and `install.ps1`)
-4. Publish the Node.js SDK to npm (`microsandbox` + platform packages)
-5. Publish the MCP server to npm (`microsandbox-mcp`)
-6. Publish Rust crates to crates.io (in dependency order, 10 crates)
+4. Publish the npm packages: `microsandbox` (+ platform sub-packages), `@microsandbox/agent-client`, and `@microsandbox/types`
+5. Publish the MCP server to npm (`microsandbox-mcp`, from the `mcp/` submodule)
+6. Publish Rust crates to crates.io (in dependency order, 15 crates)
+7. Publish the Python SDK to PyPI (`microsandbox`)
+8. Tag the Go SDK (`sdk/go/vX.Y.Z`)
+9. Build and publish Docker images to GHCR
+10. Update the Homebrew tap and winget manifests
+11. Sync docs to Mintlify and refresh the npm lockfile on `main`
 
 ## Additional Resources
 

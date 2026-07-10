@@ -35,7 +35,14 @@ const TOP_LEVEL_COMMAND_GROUPS: &[CommandGroup] = &[
     },
     CommandGroup {
         heading: "Installation",
-        commands: &["install", "uninstall", "doctor", "self"],
+        commands: &[
+            "install",
+            "uninstall",
+            "doctor",
+            "update",
+            "downgrade",
+            "self",
+        ],
     },
 ];
 
@@ -174,6 +181,13 @@ enum Commands {
 
     /// Check local runtime and host virtualization prerequisites.
     Doctor(self_cmd::DoctorArgs),
+
+    /// Update msb and libkrunfw to the latest release (alias for `self update`).
+    #[command(visible_alias = "upgrade")]
+    Update(self_cmd::SelfUpdateArgs),
+
+    /// Downgrade msb and local state to an older supported release (alias for `self downgrade`).
+    Downgrade(self_cmd::SelfDowngradeArgs),
 
     /// Manage the msb installation.
     #[command(name = "self")]
@@ -641,6 +655,8 @@ fn run_async_command_anyhow(
             Commands::Install(args) => install::run(args).await,
             Commands::Uninstall(args) => uninstall::run(args).await,
             Commands::Doctor(args) => self_cmd::run_doctor(args),
+            Commands::Update(args) => self_cmd::run_update(args).await,
+            Commands::Downgrade(args) => self_cmd::run_downgrade(args).await,
             Commands::Self_(args) => self_cmd::run(args).await,
         }
     })

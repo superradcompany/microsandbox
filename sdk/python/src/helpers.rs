@@ -1410,14 +1410,36 @@ fn extract_required<'py, T: FromPyObject<'py>>(
 }
 
 /// Resolve a snapshot reference (bare name or path) to its on-disk
-/// directory. Mirrors the convention used by `Snapshot::open`.
+/// directory. Mirrors the convention used by `Snapshot::open`
+/// (`snapshot::store::looks_like_path`) — keep the heuristics in sync.
 fn resolve_snapshot_dir(s: &str) -> std::path::PathBuf {
-    if s.contains('/') || s.starts_with('.') || s.starts_with('~') {
+    if snapshot_ref_looks_like_path(s) {
         std::path::PathBuf::from(s)
     } else {
         microsandbox::backend::default_backend()
             .as_local()
             .map(|local| local.snapshots_dir().join(s))
             .unwrap_or_else(|| std::path::PathBuf::from(s))
+    }
+}
+
+/// Heuristic split between a bare snapshot name and a filesystem path.
+fn snapshot_ref_looks_like_path(s: &str) -> bool {
+    if s.contains('/') || s.starts_with('.') || s.starts_with('~') {
+        return true;
+    }
+    // On Windows hosts, native separators and drive/UNC prefixes (`C:\snaps\foo`, `C:foo`, `\\server\share`) mark a path even when no forward slash appears.
+    #[cfg(windows)]
+    {
+        use typed_path::{Utf8WindowsComponent, Utf8WindowsPath};
+        s.contains('\\')
+            || matches!(
+                Utf8WindowsPath::new(s).components().next(),
+                Some(Utf8WindowsComponent::Prefix(_))
+            )
+    }
+    #[cfg(not(windows))]
+    {
+        false
     }
 }

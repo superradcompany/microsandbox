@@ -15,8 +15,8 @@ use tokio_rustls::TlsConnector;
 
 use super::ca::CertAuthority;
 use super::certgen::{self, DomainCert, DomainCertError};
-use super::config::TlsConfig;
 use crate::secrets::handle::SecretsHandle;
+use microsandbox_types::TlsConfig;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -495,8 +495,8 @@ fn write_key_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::config::{ScopedUpstreamCaCert, ScopedVerifyUpstream};
     use super::*;
+    use microsandbox_types::{ScopedUpstreamCaCert, ScopedVerifyUpstream};
 
     use crate::secrets::config::SecretsConfig;
     use crate::secrets::handle::SecretsHandle;

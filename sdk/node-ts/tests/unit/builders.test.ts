@@ -53,6 +53,45 @@ describe("intoRootfsSource", () => {
     const src = { kind: "oci" as const, reference: "alpine" };
     expect(intoRootfsSource(src)).toBe(src);
   });
+
+  it("treats Windows-style paths as bind mounts on Windows hosts", () => {
+    const original = process.platform;
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+      expect(intoRootfsSource("C:\\images\\rootfs")).toEqual({
+        kind: "bind",
+        path: "C:\\images\\rootfs",
+      });
+      expect(intoRootfsSource("C:/images/rootfs")).toEqual({
+        kind: "bind",
+        path: "C:/images/rootfs",
+      });
+      expect(intoRootfsSource(".\\rootfs")).toEqual({
+        kind: "bind",
+        path: ".\\rootfs",
+      });
+      expect(intoRootfsSource("C:\\images\\disk.qcow2")).toEqual({
+        kind: "disk",
+        path: "C:\\images\\disk.qcow2",
+        format: "qcow2",
+      });
+      // OCI references stay OCI even on Windows.
+      expect(intoRootfsSource("python:3.12")).toEqual({
+        kind: "oci",
+        reference: "python:3.12",
+      });
+    } finally {
+      Object.defineProperty(process, "platform", { value: original });
+    }
+  });
+
+  it("does not treat Windows-style paths as bind mounts on POSIX hosts", () => {
+    if (process.platform === "win32") return;
+    expect(intoRootfsSource("C:\\images\\rootfs")).toEqual({
+      kind: "oci",
+      reference: "C:\\images\\rootfs",
+    });
+  });
 });
 
 describe("MountBuilder", () => {
