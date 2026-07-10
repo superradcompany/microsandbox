@@ -145,6 +145,77 @@ fn sha256_digest(bytes: &[u8]) -> String {
     format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
+/// Build a synthetic snapshot artifact whose upper file is sparse:
+/// apparent size `len`, with the given `(offset, bytes)` data extents
+/// and holes everywhere else. Records a sha256 integrity digest over
+/// the logical content. Returns `(artifact_dir, manifest_digest,
+/// logical_content)`.
+#[cfg(unix)]
+fn make_sparse_artifact(
+    parent: &Path,
+    name: &str,
+    len: u64,
+    extents: &[(u64, Vec<u8>)],
+) -> (std::path::PathBuf, String, Vec<u8>) {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let dir = parent.join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let upper_path = dir.join(DEFAULT_UPPER_FILE);
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&upper_path)
+        .unwrap();
+    f.set_len(len).unwrap();
+    let mut logical = vec![0u8; len as usize];
+    for (offset, bytes) in extents {
+        f.seek(SeekFrom::Start(*offset)).unwrap();
+        f.write_all(bytes).unwrap();
+        logical[*offset as usize..*offset as usize + bytes.len()].copy_from_slice(bytes);
+    }
+    f.sync_all().unwrap();
+
+    let manifest = Manifest {
+        schema: SCHEMA_VERSION,
+        format: SnapshotFormat::Raw,
+        fstype: "ext4".into(),
+        image: ImageRef {
+            reference: "docker.io/library/alpine:3.20".into(),
+            manifest_digest:
+                "sha256:0000000000000000000000000000000000000000000000000000000000000001".into(),
+        },
+        parent: None,
+        created_at: "2026-05-01T12:00:00Z".into(),
+        labels: BTreeMap::new(),
+        upper: UpperLayer {
+            file: DEFAULT_UPPER_FILE.into(),
+            size_bytes: len,
+            integrity: Some(UpperIntegrity {
+                algorithm: "sha256".into(),
+                digest: sha256_digest(&logical),
+            }),
+        },
+        source_sandbox: Some("synthetic".into()),
+    };
+    let bytes = manifest.to_canonical_bytes().unwrap();
+    let digest = manifest.digest().unwrap();
+    std::fs::write(dir.join(MANIFEST_FILENAME), bytes).unwrap();
+    (dir, digest, logical)
+}
+
+/// Bytes allocated on disk. Sparseness assertions are guarded on the
+/// source actually being sparse, since not every test filesystem
+/// sparsifies `set_len` + seek/write files.
+#[cfg(unix)]
+fn allocated_bytes(path: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).unwrap().blocks() * 512
+}
+
 async fn seed_image_cache(cache: &microsandbox_image::GlobalCache) -> SeededImageCache {
     let image_ref: microsandbox_image::Reference = "docker.io/library/alpine:3.20".parse().unwrap();
     let raw_manifest = br#"{"schemaVersion":2,"layers":[]}"#;
@@ -397,6 +468,203 @@ async fn export_then_import_round_trips_via_plain_tar() {
     let dest = tmp.path().join("imported-plain");
     let handle = Snapshot::import(&archive, Some(&dest)).await.unwrap();
     assert_eq!(handle.digest(), original_digest);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn export_sparse_upper_round_trips_and_preserves_holes() {
+    let tmp = TempDir::new().unwrap();
+    let len: u64 = 16 * 1024 * 1024;
+    // Data at the start, in the middle, and at a 512-unaligned offset;
+    // trailing hole after the last extent.
+    let extents = vec![
+        (0u64, vec![0xAB; 64 * 1024]),
+        (4 * 1024 * 1024, vec![0xCD; 64 * 1024]),
+        (12 * 1024 * 1024 + 300, vec![0xEF; 1000]),
+    ];
+    let (dir, original_digest, logical) =
+        make_sparse_artifact(tmp.path(), "src-sparse", len, &extents);
+    if allocated_bytes(&dir.join(DEFAULT_UPPER_FILE)) >= len / 2 {
+        eprintln!("filesystem did not sparsify the upper; sparse export not exercised");
+        return;
+    }
+
+    let archive = tmp.path().join("sparse.tar.zst");
+    Snapshot::export(
+        dir.to_string_lossy().as_ref(),
+        &archive,
+        microsandbox::snapshot::ExportOpts::default(),
+    )
+    .await
+    .unwrap();
+
+    // Import verifies the recorded sha256 over the unpacked upper's
+    // logical content; compare the bytes explicitly as well.
+    let dest = tmp.path().join("imported-sparse");
+    let handle = Snapshot::import(&archive, Some(&dest)).await.unwrap();
+    assert_eq!(handle.digest(), original_digest);
+    let imported_upper = handle.path().join(DEFAULT_UPPER_FILE);
+    assert_eq!(std::fs::read(&imported_upper).unwrap(), logical);
+
+    // Holes must come back as holes, not zero-filled blocks.
+    let imported_allocated = allocated_bytes(&imported_upper);
+    assert!(
+        imported_allocated < len / 2,
+        "imported upper was densified: {imported_allocated} bytes allocated for apparent size {len}",
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn sparse_export_stores_only_data_extents_in_plain_tar() {
+    let tmp = TempDir::new().unwrap();
+    let len: u64 = 16 * 1024 * 1024;
+    let extents = vec![
+        (0u64, vec![0x5A; 64 * 1024]),
+        (8 * 1024 * 1024, vec![0xA5; 64 * 1024]),
+    ];
+    let (dir, _, logical) = make_sparse_artifact(tmp.path(), "src-plain-sparse", len, &extents);
+    if allocated_bytes(&dir.join(DEFAULT_UPPER_FILE)) >= len / 2 {
+        eprintln!("filesystem did not sparsify the upper; sparse export not exercised");
+        return;
+    }
+
+    let archive = tmp.path().join("sparse.tar");
+    Snapshot::export(
+        dir.to_string_lossy().as_ref(),
+        &archive,
+        microsandbox::snapshot::ExportOpts {
+            plain_tar: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // A dense entry would make the uncompressed archive at least the
+    // upper's 16 MiB apparent size.
+    let archive_len = std::fs::metadata(&archive).unwrap().len();
+    assert!(
+        archive_len < 2 * 1024 * 1024,
+        "archive stored hole bytes: {archive_len} bytes",
+    );
+
+    // The upper is an old-GNU sparse entry that an independent tar
+    // implementation (the sync `tar` crate) reads back to identical
+    // logical content.
+    let mut ar = tar::Archive::new(std::fs::File::open(&archive).unwrap());
+    let mut upper_entry_type = None;
+    for entry in ar.entries().unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path().unwrap().to_path_buf();
+        if path.file_name().and_then(|n| n.to_str()) == Some(DEFAULT_UPPER_FILE) {
+            upper_entry_type = Some(entry.header().entry_type());
+        }
+    }
+    assert_eq!(upper_entry_type, Some(EntryType::GNUSparse));
+
+    let unpack_dir = tmp.path().join("external-unpack");
+    std::fs::create_dir_all(&unpack_dir).unwrap();
+    let mut ar = tar::Archive::new(std::fs::File::open(&archive).unwrap());
+    ar.unpack(&unpack_dir).unwrap();
+    let unpacked_upper = std::fs::read_dir(&unpack_dir)
+        .unwrap()
+        .map(|e| e.unwrap().path().join(DEFAULT_UPPER_FILE))
+        .find(|p| p.exists())
+        .expect("unpacked artifact dir with upper file");
+    assert_eq!(std::fs::read(&unpacked_upper).unwrap(), logical);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn sparse_export_many_extents_round_trips() {
+    // Enough extents to spill past the 4 inline sparse-map slots into
+    // chained extended sparse headers (21 slots each). The file ends
+    // with data, so no trailing-hole terminator is needed.
+    let tmp = TempDir::new().unwrap();
+    let len: u64 = 8 * 1024 * 1024;
+    let mut extents: Vec<(u64, Vec<u8>)> = (0..60u64)
+        .map(|i| (i * 128 * 1024, vec![(i % 251) as u8 + 1; 4096]))
+        .collect();
+    extents.push((len - 4096, vec![0x77; 4096]));
+    let (dir, original_digest, logical) =
+        make_sparse_artifact(tmp.path(), "src-many-extents", len, &extents);
+    if allocated_bytes(&dir.join(DEFAULT_UPPER_FILE)) >= len / 2 {
+        eprintln!("filesystem did not sparsify the upper; sparse export not exercised");
+        return;
+    }
+
+    let archive = tmp.path().join("many.tar.zst");
+    Snapshot::export(
+        dir.to_string_lossy().as_ref(),
+        &archive,
+        microsandbox::snapshot::ExportOpts::default(),
+    )
+    .await
+    .unwrap();
+
+    let dest = tmp.path().join("imported-many");
+    let handle = Snapshot::import(&archive, Some(&dest)).await.unwrap();
+    assert_eq!(handle.digest(), original_digest);
+    let imported_upper = handle.path().join(DEFAULT_UPPER_FILE);
+    assert_eq!(std::fs::read(&imported_upper).unwrap(), logical);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn sparse_export_all_hole_upper_round_trips() {
+    let tmp = TempDir::new().unwrap();
+    let len: u64 = 4 * 1024 * 1024;
+    let (dir, original_digest, logical) =
+        make_sparse_artifact(tmp.path(), "src-all-hole", len, &[]);
+    if allocated_bytes(&dir.join(DEFAULT_UPPER_FILE)) >= len / 2 {
+        eprintln!("filesystem did not sparsify the upper; sparse export not exercised");
+        return;
+    }
+
+    let archive = tmp.path().join("hole.tar.zst");
+    Snapshot::export(
+        dir.to_string_lossy().as_ref(),
+        &archive,
+        microsandbox::snapshot::ExportOpts::default(),
+    )
+    .await
+    .unwrap();
+
+    let dest = tmp.path().join("imported-hole");
+    let handle = Snapshot::import(&archive, Some(&dest)).await.unwrap();
+    assert_eq!(handle.digest(), original_digest);
+    let imported_upper = handle.path().join(DEFAULT_UPPER_FILE);
+    assert_eq!(std::fs::read(&imported_upper).unwrap(), logical);
+}
+
+#[tokio::test]
+async fn dense_upper_keeps_regular_entry() {
+    let tmp = TempDir::new().unwrap();
+    let (dir, _) = make_artifact(tmp.path(), "src-dense", b"fully allocated upper");
+
+    let archive = tmp.path().join("dense.tar");
+    Snapshot::export(
+        dir.to_string_lossy().as_ref(),
+        &archive,
+        microsandbox::snapshot::ExportOpts {
+            plain_tar: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut ar = tar::Archive::new(std::fs::File::open(&archive).unwrap());
+    let mut upper_entry_type = None;
+    for entry in ar.entries().unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path().unwrap().to_path_buf();
+        if path.file_name().and_then(|n| n.to_str()) == Some(DEFAULT_UPPER_FILE) {
+            upper_entry_type = Some(entry.header().entry_type());
+        }
+    }
+    assert_eq!(upper_entry_type, Some(EntryType::Regular));
 }
 
 #[tokio::test]
