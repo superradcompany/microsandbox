@@ -3650,6 +3650,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "microsandbox-oci-runtime"
+version = "0.6.6"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "libc",
+ "microsandbox",
+ "microsandbox-protocol",
+ "microsandbox-runtime",
+ "nix 0.31.3",
+ "oci-spec 0.10.0",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "microsandbox-protocol"
 version = "0.6.6"
 dependencies = [
@@ -4166,6 +4186,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+ "memoffset",
 ]
 
 [[package]]
