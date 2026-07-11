@@ -1,23 +1,12 @@
 //! Snapshot export / import via `.tar.zst` bundles.
 //!
-//! Default archive format is zstd-compressed tar. Regular files with
-//! holes — notably the sparse `upper.ext4`, whose logical size is the
-//! configured upper cap rather than the data written — are stored as
-//! old-GNU sparse entries (type `S`): only allocated extents are read
-//! and archived, so export cost scales with the data a sandbox
-//! actually wrote instead of the upper layer's logical size. Dense
-//! files keep plain regular entries. Plain `.tar` archives are also
-//! accepted on import.
+//! Default archive format is zstd-compressed tar. Regular files with holes — notably the sparse `upper.ext4`, whose logical size is the configured upper cap rather than the data
+//! written — are stored as old-GNU sparse entries (type `S`): only allocated extents are read and archived, so export cost scales with the data a sandbox actually wrote instead of
+//! the upper layer's logical size. Dense files keep plain regular entries. Plain `.tar` archives are also accepted on import.
 //!
-//! Import walks the tar records itself rather than going through
-//! `tokio_tar::Archive`: the entry grammar is closed (regular files,
-//! directories, and old-GNU sparse entries at fixed depths, produced
-//! by our own exporter), and owning the walk lets sparse entries be
-//! restored map-driven — data runs copied straight off the wire,
-//! holes never written and kept unallocated per platform
-//! ([`extent::mark_sparse`] on NTFS, [`extent::punch_hole_aligned`]
-//! on APFS). `tokio_tar` remains the header codec and the dense-entry
-//! writer.
+//! Import walks the tar records itself rather than going through `tokio_tar::Archive`: the entry grammar is closed (regular files, directories, and old-GNU sparse entries at fixed
+//! depths, produced by our own exporter), and owning the walk lets sparse entries be restored map-driven — data runs copied straight off the wire, holes never written and kept
+//! unallocated per platform ([`extent::mark_sparse`] on NTFS, [`extent::punch_hole_aligned`] on APFS). `tokio_tar` remains the header codec and the dense-entry writer.
 
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
@@ -335,11 +324,8 @@ const TAR_BLOCK: u64 = 512;
 const GNU_HEADER_SPARSE_SLOTS: usize = 4;
 const GNU_EXT_SPARSE_SLOTS: usize = 21;
 
-/// Append `path` as an old-GNU sparse entry if it has holes. Returns
-/// `false` without writing anything when the file is better served by
-/// the dense path (no holes, empty, extents not enumerable on this
-/// filesystem, or a name too long for the fixed GNU header path
-/// field).
+/// Append `path` as an old-GNU sparse entry if it has holes. Returns `false` without writing anything when the file is better served by the dense path (no holes, empty, extents
+/// not enumerable on this filesystem, or a name too long for the fixed GNU header path field).
 async fn try_append_sparse<W>(
     builder: &mut Builder<W>,
     path: &Path,
@@ -433,11 +419,8 @@ where
     Ok(true)
 }
 
-/// Round an [`ExtentMap`]'s byte extents outward to tar blocks and
-/// merge runs that touch: sparse readers require every data run before
-/// the last to be a multiple of 512. `None` means "archive it dense" —
-/// an empty or hole-free file, where a regular entry is equivalent and
-/// stays readable by older importers.
+/// Round an [`ExtentMap`]'s byte extents outward to tar blocks and merge runs that touch: sparse readers require every data run before the last to be a multiple of 512. `None`
+/// means "archive it dense" — an empty or hole-free file, where a regular entry is equivalent and stays readable by older importers.
 fn tar_sparse_map(map: &ExtentMap) -> Option<SparseMap> {
     let len = map.len;
     if len == 0 {
@@ -491,11 +474,8 @@ fn write_tar_numeric(field: &mut [u8; 12], value: u64) {
     }
 }
 
-/// Walk the archive's 512-byte records directly. The grammar is closed
-/// — regular files, directories, and old-GNU sparse entries at fixed
-/// depths, produced by our own exporter — so a small owned walker
-/// replaces `tokio_tar::Archive` and lets sparse entries restore
-/// map-driven instead of through the library's opaque unpack.
+/// Walk the archive's 512-byte records directly. The grammar is closed — regular files, directories, and old-GNU sparse entries at fixed depths, produced by our own exporter — so
+/// a small owned walker replaces `tokio_tar::Archive` and lets sparse entries restore map-driven instead of through the library's opaque unpack.
 async fn unpack_archive<R>(
     reader: R,
     snapshots_dir: &Path,
@@ -604,8 +584,7 @@ where
     Ok(UnpackedArchive { manifest_dirs })
 }
 
-/// Read one 512-byte tar record. `Ok(false)` on clean EOF at a record
-/// boundary; a partial record is corruption.
+/// Read one 512-byte tar record. `Ok(false)` on clean EOF at a record boundary; a partial record is corruption.
 async fn read_record<R>(
     reader: &mut R,
     block: &mut [u8; TAR_BLOCK as usize],
@@ -629,10 +608,8 @@ where
     Ok(true)
 }
 
-/// Verify a header's recorded checksum: sum of the record's bytes with
-/// the checksum field itself read as spaces. Accept both the unsigned
-/// sum (what everything modern writes, including our exporter) and the
-/// legacy signed-byte sum some historic implementations produced.
+/// Verify a header's recorded checksum: sum of the record's bytes with the checksum field itself read as spaces. Accept both the unsigned sum (what everything modern writes,
+/// including our exporter) and the legacy signed-byte sum some historic implementations produced.
 fn verify_header_checksum(header: &Header) -> MicrosandboxResult<()> {
     let bytes = header.as_bytes();
     let recorded = header.cksum().map_err(|e| {
@@ -701,12 +678,9 @@ where
     discard_exact(reader, tar_pad(size)).await
 }
 
-/// Restore an old-GNU sparse entry map-driven: parse the sparse map
-/// (inline slots plus chained extended records), enforce its
-/// invariants, then copy each data run straight off the wire to its
-/// logical offset. Hole bytes are never in the stream and never
-/// written; [`extent::mark_sparse`] / [`extent::punch_hole_aligned`]
-/// keep them unallocated on filesystems that need telling.
+/// Restore an old-GNU sparse entry map-driven: parse the sparse map (inline slots plus chained extended records), enforce its invariants, then copy each data run straight off the
+/// wire to its logical offset. Hole bytes are never in the stream and never written; [`extent::mark_sparse`] / [`extent::punch_hole_aligned`] keep them unallocated on filesystems
+/// that need telling.
 async fn unpack_sparse_entry<R>(
     reader: &mut R,
     header: &Header,

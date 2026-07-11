@@ -145,15 +145,11 @@ fn sha256_digest(bytes: &[u8]) -> String {
     format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
-/// Build a synthetic snapshot artifact whose upper file is sparse:
-/// apparent size `len`, with the given `(offset, bytes)` data extents
-/// and holes everywhere else. Records a sha256 integrity digest over
-/// the logical content. Returns `(artifact_dir, manifest_digest,
-/// logical_content)`.
+/// Build a synthetic snapshot artifact whose upper file is sparse: apparent size `len`, with the given `(offset, bytes)` data extents and holes everywhere else. Records a sha256
+/// integrity digest over the logical content. Returns `(artifact_dir, manifest_digest, logical_content)`.
 ///
-/// Holes are made real per platform: `mark_sparse` before writing so
-/// NTFS keeps unwritten ranges unallocated, and explicit hole punching
-/// afterwards on APFS, which densifies seek-written files.
+/// Holes are made real per platform: `mark_sparse` before writing so NTFS keeps unwritten ranges unallocated, and explicit hole punching afterwards on APFS, which densifies
+/// seek-written files.
 fn make_sparse_artifact(
     parent: &Path,
     name: &str,
@@ -228,9 +224,8 @@ fn make_sparse_artifact(
     (dir, digest, logical)
 }
 
-/// Bytes allocated on disk. Sparseness assertions are guarded on the
-/// source actually being sparse, since not every test filesystem
-/// keeps holes even with `mark_sparse` + hole punching.
+/// Bytes allocated on disk. Sparseness assertions are guarded on the source actually being sparse, since not every test filesystem keeps holes even with `mark_sparse` + hole
+/// punching.
 fn allocated_bytes(path: &Path) -> u64 {
     #[cfg(unix)]
     {
@@ -695,9 +690,7 @@ async fn dense_upper_keeps_regular_entry() {
     assert_eq!(upper_entry_type, Some(EntryType::Regular));
 }
 
-/// The import walker's grammar is closed: GNU long-name entries (which
-/// our exporter never produces — archive names are two short
-/// components) must be rejected, not resolved.
+/// The import walker's grammar is closed: GNU long-name entries (which our exporter never produces — archive names are two short components) must be rejected, not resolved.
 #[tokio::test]
 async fn import_rejects_long_name_entries() {
     let tmp = TempDir::new().unwrap();
@@ -730,8 +723,7 @@ async fn import_rejects_long_name_entries() {
     );
 }
 
-/// A header whose recorded checksum disagrees with its bytes is
-/// corruption, not something to unpack around.
+/// A header whose recorded checksum disagrees with its bytes is corruption, not something to unpack around.
 #[tokio::test]
 async fn import_rejects_corrupt_header_checksum() {
     let tmp = TempDir::new().unwrap();
@@ -766,8 +758,7 @@ async fn import_rejects_corrupt_header_checksum() {
     );
 }
 
-/// A sparse map whose runs overlap or run backwards is malformed and
-/// must be rejected before any data is written.
+/// A sparse map whose runs overlap or run backwards is malformed and must be rejected before any data is written.
 #[tokio::test]
 async fn import_rejects_overlapping_sparse_map() {
     fn octal12(field: &mut [u8; 12], value: u64) {

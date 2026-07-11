@@ -110,9 +110,8 @@ async fn sha256_file(path: &Path) -> MicrosandboxResult<String> {
     Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
 }
 
-/// Hash the file's logical content — data extents plus synthesized
-/// zeros for holes — in O(data) wherever [`ExtentMap`] can enumerate
-/// the allocation map, with a full sequential read as the fallback.
+/// Hash the file's logical content — data extents plus synthesized zeros for holes — in O(data) wherever [`ExtentMap`] can enumerate the allocation map, with a full sequential
+/// read as the fallback.
 fn sparse_integrity_blocking(path: &Path) -> io::Result<UpperIntegrity> {
     let mut file = File::open(path)?;
     let len = file.metadata()?.len();

@@ -1,17 +1,10 @@
 //! Filesystem allocation-map scanning.
 //!
-//! Answers one question — "which byte ranges of this file are actually
-//! allocated?" — with the same `(offset, length)` shape on every
-//! supported platform: `SEEK_DATA`/`SEEK_HOLE` on unix,
-//! `FSCTL_QUERY_ALLOCATED_RANGES` on Windows. Consumers (sparse
-//! snapshot export, integrity verification, capture) never branch on
-//! OS; only the scan backend does.
+//! Answers one question — "which byte ranges of this file are actually allocated?" — with the same `(offset, length)` shape on every supported platform: `SEEK_DATA`/`SEEK_HOLE` on
+//! unix, `FSCTL_QUERY_ALLOCATED_RANGES` on Windows. Consumers (sparse snapshot export, integrity verification, capture) never branch on OS; only the scan backend does.
 //!
-//! Also home to the hole-restoration primitives that the scan's
-//! consumers need on platforms where "just don't write the hole" is not
-//! enough: NTFS only keeps unwritten ranges unallocated on files
-//! flagged sparse ([`mark_sparse`]), and APFS densifies files on any
-//! write, so holes must be punched explicitly ([`punch_hole_aligned`]).
+//! Also home to the hole-restoration primitives that the scan's consumers need on platforms where "just don't write the hole" is not enough: NTFS only keeps unwritten ranges
+//! unallocated on files flagged sparse ([`mark_sparse`]), and APFS densifies files on any write, so holes must be punched explicitly ([`punch_hole_aligned`]).
 
 use std::fs::File;
 use std::io;
@@ -37,14 +30,12 @@ use windows_sys::Win32::System::Ioctl::{
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Allocation map of a file: logical length plus sorted,
-/// non-overlapping, byte-granular data extents.
+/// Allocation map of a file: logical length plus sorted, non-overlapping, byte-granular data extents.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtentMap {
     /// Logical (apparent) file size in bytes.
     pub len: u64,
-    /// Sorted `(offset, length)` allocated ranges. Everything outside
-    /// them reads as zeros.
+    /// Sorted `(offset, length)` allocated ranges. Everything outside them reads as zeros.
     pub extents: Vec<(u64, u64)>,
 }
 
@@ -55,13 +46,10 @@ pub struct ExtentMap {
 impl ExtentMap {
     /// Scan `path`'s allocation map.
     ///
-    /// Returns `Ok(None)` when the filesystem cannot enumerate extents
-    /// (no `SEEK_DATA` / allocated-ranges support); callers should then
-    /// treat the file as fully dense. A dense file on a capable
-    /// filesystem scans as `Some` with a single `(0, len)` extent.
+    /// Returns `Ok(None)` when the filesystem cannot enumerate extents (no `SEEK_DATA` / allocated-ranges support); callers should then treat the file as fully dense. A dense file
+    /// on a capable filesystem scans as `Some` with a single `(0, len)` extent.
     ///
-    /// **Blocking.** Callers in async contexts should wrap in
-    /// `tokio::task::spawn_blocking`.
+    /// **Blocking.** Callers in async contexts should wrap in `tokio::task::spawn_blocking`.
     pub fn scan(path: &Path) -> io::Result<Option<ExtentMap>> {
         let file = File::open(path)?;
         Self::scan_file(&file)
@@ -79,8 +67,7 @@ impl ExtentMap {
         scan_impl(file, len)
     }
 
-    /// Sum of extent lengths — the bytes a sparse-aware reader must
-    /// actually move.
+    /// Sum of extent lengths — the bytes a sparse-aware reader must actually move.
     pub fn data_bytes(&self) -> u64 {
         self.extents.iter().map(|(_, len)| len).sum()
     }
@@ -95,9 +82,8 @@ impl ExtentMap {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Flag `file` as sparse so NTFS keeps unwritten ranges unallocated.
-/// No-op semantics on filesystems where files are implicitly
-/// hole-capable is handled by the unix definition below.
+/// Flag `file` as sparse so NTFS keeps unwritten ranges unallocated. No-op semantics on filesystems where files are implicitly hole-capable is handled by the unix definition
+/// below.
 #[cfg(windows)]
 pub fn mark_sparse(file: &File) -> io::Result<()> {
     let mut bytes_returned = 0;
@@ -119,18 +105,14 @@ pub fn mark_sparse(file: &File) -> io::Result<()> {
     Ok(())
 }
 
-/// Unix files are hole-capable without any flag; kept so callers can
-/// mark destinations unconditionally.
+/// Unix files are hole-capable without any flag; kept so callers can mark destinations unconditionally.
 #[cfg(unix)]
 pub fn mark_sparse(_file: &File) -> io::Result<()> {
     Ok(())
 }
 
-/// Punch a hole over as much of `[offset, offset + len)` as the
-/// filesystem's allocation block size allows, shrinking the range
-/// inward to block alignment. Ranges smaller than one block are left
-/// allocated. Needed on APFS, which densifies a file on any write —
-/// unwritten ranges do not stay holes the way they do on ext4/XFS.
+/// Punch a hole over as much of `[offset, offset + len)` as the filesystem's allocation block size allows, shrinking the range inward to block alignment. Ranges smaller than one
+/// block are left allocated. Needed on APFS, which densifies a file on any write — unwritten ranges do not stay holes the way they do on ext4/XFS.
 #[cfg(target_os = "macos")]
 pub fn punch_hole_aligned(file: &File, offset: u64, len: u64) -> io::Result<()> {
     let block = allocation_block_size(file)?;
@@ -152,9 +134,7 @@ pub fn punch_hole_aligned(file: &File, offset: u64, len: u64) -> io::Result<()> 
     Ok(())
 }
 
-/// Hole punching is unnecessary outside macOS: on ext4/XFS/btrfs (and
-/// on NTFS files flagged via [`mark_sparse`]) ranges that are never
-/// written stay unallocated.
+/// Hole punching is unnecessary outside macOS: on ext4/XFS/btrfs (and on NTFS files flagged via [`mark_sparse`]) ranges that are never written stay unallocated.
 #[cfg(not(target_os = "macos"))]
 pub fn punch_hole_aligned(_file: &File, _offset: u64, _len: u64) -> io::Result<()> {
     Ok(())
@@ -177,9 +157,7 @@ fn scan_impl(file: &File, len: u64) -> io::Result<Option<ExtentMap>> {
             match err.raw_os_error() {
                 // No more data past this offset: trailing hole.
                 Some(libc::ENXIO) => break,
-                // Filesystem doesn't implement the seek flags — report
-                // "can't enumerate" rather than failing the caller.
-                // ENOTSUP and EOPNOTSUPP are distinct on macOS / BSDs.
+                // Filesystem doesn't implement the seek flags — report "can't enumerate" rather than failing the caller. ENOTSUP and EOPNOTSUPP are distinct on macOS / BSDs.
                 Some(libc::EINVAL) | Some(libc::ENOTSUP) => return Ok(None),
                 #[cfg(not(target_os = "linux"))]
                 Some(libc::EOPNOTSUPP) => return Ok(None),
@@ -204,8 +182,7 @@ fn scan_impl(file: &File, len: u64) -> io::Result<Option<ExtentMap>> {
 
 #[cfg(windows)]
 fn scan_impl(file: &File, len: u64) -> io::Result<Option<ExtentMap>> {
-    // Query in batches; ERROR_MORE_DATA means the output buffer filled
-    // and the walk continues from the end of the last returned range.
+    // Query in batches; ERROR_MORE_DATA means the output buffer filled and the walk continues from the end of the last returned range.
     const BATCH: usize = 64;
 
     let handle = file.as_raw_handle() as HANDLE;
@@ -239,8 +216,7 @@ fn scan_impl(file: &File, len: u64) -> io::Result<Option<ExtentMap>> {
             if err.raw_os_error() == Some(ERROR_MORE_DATA as i32) {
                 true
             } else {
-                // Filesystem without allocated-range support (FAT,
-                // network shares): report "can't enumerate".
+                // Filesystem without allocated-range support (FAT, network shares): report "can't enumerate".
                 return Ok(None);
             }
         } else {
@@ -346,8 +322,7 @@ mod tests {
             return;
         };
         assert_eq!(map.len, len);
-        // Extents must cover both data ranges (a densifying FS may
-        // report more than the written bytes, never less).
+        // Extents must cover both data ranges (a densifying FS may report more than the written bytes, never less).
         let covers = |target: u64| {
             map.extents
                 .iter()
