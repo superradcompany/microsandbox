@@ -726,11 +726,11 @@ impl ImageSource {
 
 impl RootDiskBuilder {
     /// Set the size in MiB. Valid for the managed (default) and tmpfs kinds;
-    /// a user-supplied disk image is sized by the image file itself.
+    /// a user-supplied disk image takes its size from the image file.
     pub fn size(mut self, size: impl Into<Mebibytes>) -> Self {
         if matches!(self.kind, RootDiskKind::DiskImage(_)) {
             self.set_error(
-                "size() is not valid for a disk-image root disk; resize the image file itself",
+                "size() is not valid for a disk-image root disk; the image file determines the size",
             );
             return self;
         }
@@ -762,7 +762,7 @@ impl RootDiskBuilder {
         }
         if self.size_mib.is_some() {
             self.set_error(
-                "size() is not valid for a disk-image root disk; resize the image file itself",
+                "size() is not valid for a disk-image root disk; the image file determines the size",
             );
             return self;
         }

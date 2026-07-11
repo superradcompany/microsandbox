@@ -834,7 +834,7 @@ fn parse_root_disk_image_options(
             }
             Some(("fstype", value)) => fstype = Some(value.to_string()),
             Some(("size", _)) => anyhow::bail!(
-                "--root-disk: a disk-image root disk is sized by the image file; resize it with qemu-img or truncate"
+                "--root-disk: size= is not valid for a disk image; the image file determines the size"
             ),
             _ => anyhow::bail!(
                 "--root-disk: unknown option '{token}' (expected format=raw|qcow2 or fstype=...)"
@@ -2422,7 +2422,10 @@ mod tests {
     #[test]
     fn parse_root_disk_spec_rejects_invalid_combinations() {
         let err = parse_root_disk_spec("./scratch.img:size=8G").unwrap_err();
-        assert!(err.to_string().contains("sized by the image file"));
+        assert!(
+            err.to_string()
+                .contains("the image file determines the size")
+        );
 
         let err = parse_root_disk_spec("8G:fstype=ext4").unwrap_err();
         assert!(err.to_string().contains("only valid for a disk image path"));

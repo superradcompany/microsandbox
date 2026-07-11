@@ -1376,7 +1376,7 @@ fn push_root_disk_size_conflicts(
             conflicts.push(ModificationConflict {
                 field: ROOT_DISK_FIELD.to_string(),
                 message:
-                    "the root disk is a user-supplied disk image; resize the image file itself"
+                    "the root disk is a user-supplied disk image; its size is determined by the image file"
                         .to_string(),
             });
         }
