@@ -99,7 +99,9 @@ mod linux {
     use nix::sys::stat::Mode;
     use nix::unistd;
 
-    use crate::config::{BlockRootSpec, DirMountSpec, DiskMountSpec, FileMountSpec, TmpfsSpec};
+    use crate::config::{
+        BlockRootSpec, BlockRootUpper, DirMountSpec, DiskMountSpec, FileMountSpec, TmpfsSpec,
+    };
     use crate::error::{AgentdError, AgentdResult};
 
     const UPPER_METRICS_PATH: &str = "/sys/kernel/msb_metrics/upper_path";
@@ -205,12 +207,8 @@ mod linux {
             BlockRootSpec::DiskImage { device, fstype } => {
                 mount_disk_image(device, fstype.as_deref())?;
             }
-            BlockRootSpec::OciErofs {
-                lower,
-                upper,
-                upper_fstype,
-            } => {
-                mount_oci_erofs(lower, upper, upper_fstype)?;
+            BlockRootSpec::OciErofs { lower, upper } => {
+                mount_oci_erofs(lower, upper)?;
             }
         }
 
@@ -242,11 +240,7 @@ mod linux {
     }
 
     /// Mount merged EROFS lower + writable upper + overlayfs at /newroot.
-    fn mount_oci_erofs(
-        lower_device: &str,
-        upper_device: &str,
-        upper_fstype: &str,
-    ) -> AgentdResult<()> {
+    fn mount_oci_erofs(lower_device: &str, upper: &BlockRootUpper) -> AgentdResult<()> {
         // Mount the EROFS lower device read-only.
         let lower_dir = "/.msb/rootfs/lower";
         mkdir_ignore_exists("/.msb/rootfs")?;
@@ -260,17 +254,37 @@ mod linux {
         )
         .map_err(|e| AgentdError::Init(format!("mount {lower_device} at {lower_dir}: {e}")))?;
 
-        // Mount the writable upper device.
+        // Mount the writable upper: a block-device filesystem (managed ext4
+        // or user disk image), or a RAM-backed tmpfs for tmpfs root disks.
         let upperfs_dir = "/.msb/rootfs/upperfs";
         mkdir_ignore_exists("/.msb/rootfs/upperfs")?;
-        mount::mount(
-            Some(upper_device),
-            upperfs_dir,
-            Some(upper_fstype),
-            MsFlags::empty(),
-            None::<&str>,
-        )
-        .map_err(|e| AgentdError::Init(format!("mount {upper_device} at {upperfs_dir}: {e}")))?;
+        match upper {
+            BlockRootUpper::Device { device, fstype } => {
+                mount::mount(
+                    Some(device.as_str()),
+                    upperfs_dir,
+                    Some(fstype.as_str()),
+                    MsFlags::empty(),
+                    None::<&str>,
+                )
+                .map_err(|e| AgentdError::Init(format!("mount {device} at {upperfs_dir}: {e}")))?;
+            }
+            BlockRootUpper::Tmpfs { size_mib } => {
+                let data = size_mib
+                    .map(|mib| format!("size={},mode=755", u64::from(mib) * 1024 * 1024))
+                    .unwrap_or_else(|| "mode=755".to_owned());
+                mount::mount(
+                    Some("tmpfs"),
+                    upperfs_dir,
+                    Some("tmpfs"),
+                    MsFlags::MS_RELATIME,
+                    Some(data.as_str()),
+                )
+                .map_err(|e| {
+                    AgentdError::Init(format!("mount tmpfs upper at {upperfs_dir}: {e}"))
+                })?;
+            }
+        }
         register_upper_metrics(upperfs_dir);
         // The pivot below makes this mount unreachable by path; pin a fd now so poweroff teardown can still remount it read-only.
         crate::teardown::register_upper_fs(upperfs_dir);

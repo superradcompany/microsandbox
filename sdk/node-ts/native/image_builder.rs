@@ -4,6 +4,9 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use microsandbox::sandbox::ImageBuilder as RustImageBuilder;
+use microsandbox::size::Mebibytes;
+
+use crate::root_disk_builder::JsRootDiskBuilder;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -12,7 +15,7 @@ use microsandbox::sandbox::ImageBuilder as RustImageBuilder;
 /// Fluent builder for an explicit rootfs image source.
 ///
 /// Used inside `Sandbox.builder(...).imageWith((i) => i.disk(...).fstype(...))`
-/// or `Sandbox.builder(...).imageWith((i) => i.oci(...).upperSize(...))`.
+/// or `Sandbox.builder(...).imageWith((i) => i.oci(...).rootDisk(...))`.
 /// Standalone use is rare; `.image("python:3.12")` and `.image("./ubuntu.qcow2")`
 /// resolve the common cases automatically.
 #[napi(js_name = "ImageBuilder")]
@@ -41,11 +44,50 @@ impl JsImageBuilder {
         self
     }
 
+    /// Configure the writable rootfs layer (root disk) for an OCI rootfs.
+    ///
+    /// Pass a number of MiB for a managed root disk, or a callback for the
+    /// tmpfs and disk-image kinds:
+    ///
+    /// ```ts
+    /// .imageWith((i) => i.oci("python:3.12").rootDisk(8192))
+    /// .imageWith((i) => i.oci("python:3.12").rootDisk((d) => d.tmpfs().size(512)))
+    /// .imageWith((i) => i.oci("python:3.12").rootDisk((d) => d.disk("./scratch.img")))
+    /// ```
+    #[napi(
+        js_name = "rootDisk",
+        ts_args_type = "sizeMibOrConfigure: number | ((d: RootDiskBuilder) => RootDiskBuilder)"
+    )]
+    pub fn root_disk(
+        &mut self,
+        env: &Env,
+        size_mib_or_configure: Either<
+            u32,
+            Function<ClassInstance<JsRootDiskBuilder>, ClassInstance<JsRootDiskBuilder>>,
+        >,
+    ) -> Result<&Self> {
+        let prev = self.take_inner();
+        match size_mib_or_configure {
+            Either::A(size_mib) => {
+                self.inner = Some(prev.root_disk(Mebibytes::from(size_mib)));
+            }
+            Either::B(configure) => {
+                let initial = JsRootDiskBuilder::new().into_instance(env)?;
+                let mut returned = configure.call(initial)?;
+                let disk_builder = returned.take_inner_builder()?;
+                self.inner = Some(prev.root_disk_with(|_default| disk_builder));
+            }
+        }
+        Ok(self)
+    }
+
     /// Set the writable overlay upper size for an OCI rootfs, in MiB.
+    ///
+    /// @deprecated Use `rootDisk` instead.
     #[napi(js_name = "upperSize")]
     pub fn upper_size(&mut self, size_mib: u32) -> &Self {
         let prev = self.take_inner();
-        self.inner = Some(prev.upper_size(size_mib));
+        self.inner = Some(prev.root_disk(Mebibytes::from(size_mib)));
         self
     }
 

@@ -160,9 +160,21 @@ pub(crate) enum BlockRootSpec {
     /// OCI EROFS: merged EROFS lower + writable upper + guest overlayfs.
     OciErofs {
         lower: String,
-        upper: String,
-        upper_fstype: String,
+        upper: BlockRootUpper,
     },
+}
+
+/// Writable upper backing for the OCI EROFS root.
+///
+/// `upper=<device>` carries a filesystem on a virtio-blk device (managed
+/// ext4 or a user disk image); `upper=tmpfs` means no upper device is
+/// attached and agentd assembles a RAM-backed upper itself.
+#[derive(Debug)]
+pub(crate) enum BlockRootUpper {
+    /// Writable filesystem on a block device (`upper_fstype` required).
+    Device { device: String, fstype: String },
+    /// RAM-backed tmpfs sized by `upper_size_mib` (kernel default when absent).
+    Tmpfs { size_mib: Option<u32> },
 }
 
 /// Parsed virtiofs directory volume mount specification.
@@ -401,13 +413,30 @@ fn parse_block_root(val: &str) -> AgentdResult<BlockRootSpec> {
         }
         Some("oci-erofs") => {
             let lower = get("lower")?;
-            let upper = get("upper")?;
-            let upper_fstype = get("upper_fstype")?;
-            Ok(BlockRootSpec::OciErofs {
-                lower,
-                upper,
-                upper_fstype,
-            })
+            let upper = if kv.get("upper").copied() == Some("tmpfs") {
+                let size_mib = kv
+                    .get("upper_size_mib")
+                    .map(|v| {
+                        v.parse::<u32>().map_err(|e| {
+                            AgentdError::Config(format!(
+                                "MSB_BLOCK_ROOT invalid upper_size_mib '{v}': {e}"
+                            ))
+                        })
+                    })
+                    .transpose()?;
+                if kv.contains_key("upper_fstype") {
+                    return Err(AgentdError::Config(
+                        "MSB_BLOCK_ROOT upper_fstype is not valid with upper=tmpfs".into(),
+                    ));
+                }
+                BlockRootUpper::Tmpfs { size_mib }
+            } else {
+                BlockRootUpper::Device {
+                    device: get("upper")?,
+                    fstype: get("upper_fstype")?,
+                }
+            };
+            Ok(BlockRootSpec::OciErofs { lower, upper })
         }
         Some(other) => Err(AgentdError::Config(format!(
             "MSB_BLOCK_ROOT unknown kind: {other}"
@@ -1124,17 +1153,56 @@ mod tests {
         let spec =
             parse_block_root("kind=oci-erofs,lower=/dev/vda,upper=/dev/vdb,upper_fstype=ext4")
                 .unwrap();
-        let BlockRootSpec::OciErofs {
-            lower,
-            upper,
-            upper_fstype,
-        } = spec
-        else {
+        let BlockRootSpec::OciErofs { lower, upper } = spec else {
             panic!("expected OciErofs");
         };
         assert_eq!(lower, "/dev/vda");
-        assert_eq!(upper, "/dev/vdb");
-        assert_eq!(upper_fstype, "ext4");
+        let BlockRootUpper::Device { device, fstype } = upper else {
+            panic!("expected Device upper");
+        };
+        assert_eq!(device, "/dev/vdb");
+        assert_eq!(fstype, "ext4");
+    }
+
+    #[test]
+    fn test_parse_block_root_oci_erofs_tmpfs_upper() {
+        let spec =
+            parse_block_root("kind=oci-erofs,lower=/dev/vda,upper=tmpfs,upper_size_mib=2048")
+                .unwrap();
+        let BlockRootSpec::OciErofs { lower, upper } = spec else {
+            panic!("expected OciErofs");
+        };
+        assert_eq!(lower, "/dev/vda");
+        let BlockRootUpper::Tmpfs { size_mib } = upper else {
+            panic!("expected Tmpfs upper");
+        };
+        assert_eq!(size_mib, Some(2048));
+    }
+
+    #[test]
+    fn test_parse_block_root_oci_erofs_tmpfs_upper_no_size() {
+        let spec = parse_block_root("kind=oci-erofs,lower=/dev/vda,upper=tmpfs").unwrap();
+        let BlockRootSpec::OciErofs {
+            upper: BlockRootUpper::Tmpfs { size_mib: None },
+            ..
+        } = spec
+        else {
+            panic!("expected Tmpfs upper without size");
+        };
+    }
+
+    #[test]
+    fn test_parse_block_root_oci_erofs_tmpfs_upper_rejects_fstype() {
+        let err = parse_block_root("kind=oci-erofs,lower=/dev/vda,upper=tmpfs,upper_fstype=ext4")
+            .unwrap_err();
+        assert!(err.to_string().contains("not valid with upper=tmpfs"));
+    }
+
+    #[test]
+    fn test_parse_block_root_oci_erofs_tmpfs_upper_invalid_size_errors() {
+        let err = parse_block_root("kind=oci-erofs,lower=/dev/vda,upper=tmpfs,upper_size_mib=big")
+            .unwrap_err();
+        assert!(err.to_string().contains("invalid upper_size_mib"));
     }
 
     #[test]

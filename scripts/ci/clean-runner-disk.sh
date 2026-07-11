@@ -14,8 +14,10 @@ rm -rf "${HOME}/.microsandbox"
 # Clean only old temp directories so active jobs keep their per-test homes.
 # The runner sudoers policy only permits apt-get, so keep this best-effort and
 # limited to paths the current runner user can remove.
+# 'msb*' not 'msb-*': tests also leave hyphen-less dirs (msbperf,
+# msbtest1128, msbunmount) that a 'msb-*' glob never reclaims (#1162).
 find /tmp -mindepth 1 -maxdepth 1 -type d \
-  \( -name 'msb-*' -o -name 'TestSandbox*' -o -name 'go-build*' \) \
+  \( -name 'msb*' -o -name 'TestSandbox*' -o -name 'go-build*' \) \
   -mmin +120 -exec rm -rf {} + 2>/dev/null || true
 
 find /tmp -mindepth 1 -maxdepth 1 -type d \
@@ -40,3 +42,12 @@ echo "::group::runner disk after cleanup"
 df -hT / /tmp "${GITHUB_WORKSPACE:-$PWD}" "${RUNNER_WORKSPACE:-$PWD}" || true
 du -xhd1 /tmp 2>/dev/null | sort -h | tail -30 || true
 echo "::endgroup::"
+
+# A job that starts under this headroom can still fill the shared disk while
+# linking test binaries in parallel and kill rust-lld with SIGBUS (#1162
+# died from an 18G start), so surface low disk as an annotation instead of
+# leaving the next occurrence to read as a mysterious linker crash.
+avail_kb=$(df -Pk / | awk 'NR==2 {print $4}' || echo 0)
+if (( avail_kb > 0 && avail_kb < 25 * 1024 * 1024 )); then
+  echo "::warning::runner root disk has only $(( avail_kb / 1024 / 1024 ))G free after cleanup (<25G); parallel test linking may fail with SIGBUS (#1162)"
+fi

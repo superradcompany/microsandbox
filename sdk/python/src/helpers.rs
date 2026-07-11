@@ -112,39 +112,31 @@ pub fn sandbox_builder_from_args(
         } else {
             None
         };
-        let upper_size_mib = if let Ok(upper_size_attr) = image_obj.getattr("_upper_size_mib") {
-            if upper_size_attr.is_none() {
-                None
-            } else {
-                Some(upper_size_attr.extract::<u32>()?)
-            }
-        } else {
-            None
-        };
+        let root_disk = extract_root_disk(&image_obj)?;
 
-        if upper_size_mib.is_some() {
+        if root_disk.is_some() {
             let image_type = image_obj
                 .getattr("_type")
                 .ok()
                 .and_then(|attr| attr.extract::<String>().ok());
             if image_type.as_deref() != Some("oci") {
                 return Err(pyo3::exceptions::PyValueError::new_err(
-                    "upper_size_mib is only valid for Image.oci(...)",
+                    "root_disk is only valid for Image.oci(...)",
                 ));
             }
         }
 
-        match (fstype, upper_size_mib) {
+        match (fstype, root_disk) {
             (Some(_), Some(_)) => {
                 return Err(pyo3::exceptions::PyValueError::new_err(
-                    "fstype and upper_size_mib cannot be set on the same ImageSource",
+                    "fstype and root_disk cannot be set on the same ImageSource",
                 ));
             }
             (Some(fstype), None) => {
                 builder = builder.image_with(|i| i.disk(&image_str).fstype(&fstype));
             }
-            (None, Some(size_mib)) => {
-                builder = builder.image_with(|i| i.oci(image_str.as_str()).upper_size(size_mib));
+            (None, Some(spec)) => {
+                builder = builder.image_with(|i| spec.apply(i.oci(image_str.as_str())));
             }
             (None, None) => {
                 builder = builder.image(image_str.as_str());
@@ -443,6 +435,131 @@ fn parse_args_env(dict: &Bound<'_, PyDict>) -> PyResult<ArgsEnv> {
         _ => Vec::new(),
     };
     Ok((args, env))
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Root Disk
+//--------------------------------------------------------------------------------------------------
+
+/// Root disk configuration extracted from an ImageSource's `_root_disk`
+/// attribute (int, dict, or `RootDisk.*()` config object).
+struct RootDiskSpec {
+    kind: String,
+    size_mib: Option<u32>,
+    path: Option<String>,
+    format: Option<microsandbox::sandbox::DiskImageFormat>,
+    fstype: Option<String>,
+}
+
+impl RootDiskSpec {
+    /// Apply this spec to an OCI image builder.
+    fn apply(
+        self,
+        image: microsandbox::sandbox::ImageBuilder,
+    ) -> microsandbox::sandbox::ImageBuilder {
+        image.root_disk_with(|mut d| {
+            match self.kind.as_str() {
+                "managed" => {}
+                "tmpfs" => d = d.tmpfs(),
+                // Path presence is validated in `extract_root_disk`.
+                "disk-image" => d = d.disk_image(self.path.as_deref().unwrap_or_default()),
+                _ => unreachable!("validated root disk kind"),
+            }
+            if let Some(size_mib) = self.size_mib {
+                d = d.size(size_mib);
+            }
+            if let Some(format) = self.format {
+                d = d.format(format);
+            }
+            if let Some(fstype) = self.fstype {
+                d = d.fstype(fstype);
+            }
+            d
+        })
+    }
+}
+
+/// Read the `_root_disk` attribute of an ImageSource, falling back to the
+/// deprecated `_upper_size_mib` (managed sugar) when absent.
+fn extract_root_disk(image_obj: &Bound<'_, PyAny>) -> PyResult<Option<RootDiskSpec>> {
+    let root_disk_attr = image_obj
+        .getattr("_root_disk")
+        .ok()
+        .filter(|attr| !attr.is_none());
+
+    let Some(attr) = root_disk_attr else {
+        // Legacy dataclass instances constructed with only _upper_size_mib.
+        if let Ok(upper_size_attr) = image_obj.getattr("_upper_size_mib")
+            && !upper_size_attr.is_none()
+        {
+            return Ok(Some(RootDiskSpec {
+                kind: "managed".to_string(),
+                size_mib: Some(upper_size_attr.extract::<u32>()?),
+                path: None,
+                format: None,
+                fstype: None,
+            }));
+        }
+        return Ok(None);
+    };
+
+    // Bare int: managed root disk of that size.
+    if let Ok(size_mib) = attr.extract::<u32>() {
+        return Ok(Some(RootDiskSpec {
+            kind: "managed".to_string(),
+            size_mib: Some(size_mib),
+            path: None,
+            format: None,
+            fstype: None,
+        }));
+    }
+
+    let dict = as_dict(&attr)?;
+    let kind = extract_opt::<String>(&dict, "kind")?.unwrap_or_else(|| "managed".to_string());
+    let size_mib = extract_opt::<u32>(&dict, "size_mib")?;
+    let path = extract_opt::<String>(&dict, "path")?;
+    let format = extract_opt::<String>(&dict, "format")?
+        .map(|s| {
+            s.parse::<microsandbox::sandbox::DiskImageFormat>()
+                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+        })
+        .transpose()?;
+    let fstype = extract_opt::<String>(&dict, "fstype")?;
+
+    match kind.as_str() {
+        "managed" | "tmpfs" => {
+            if path.is_some() || format.is_some() || fstype.is_some() {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "path/format/fstype are only valid for a disk-image root disk (got kind={kind})"
+                )));
+            }
+        }
+        "disk-image" => {
+            if path.as_deref().unwrap_or_default().is_empty() {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "disk-image root disk requires path",
+                ));
+            }
+            if size_mib.is_some() {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "size_mib is not valid for a disk-image root disk; resize the image file itself",
+                ));
+            }
+        }
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "unknown root disk kind: {other} (expected managed, tmpfs, disk-image)"
+            )));
+        }
+    }
+
+    Ok(Some(RootDiskSpec {
+        kind,
+        size_mib,
+        path,
+        format,
+        fstype,
+    }))
 }
 
 //--------------------------------------------------------------------------------------------------

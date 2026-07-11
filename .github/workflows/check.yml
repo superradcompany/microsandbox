@@ -185,7 +185,11 @@ jobs:
     needs: [build-kernel, build-agentd-aarch64, changes]
     if: always() && needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    # A green darwin-aarch64 run takes ~35m, and GitHub-hosted macos-14
+    # runner speed varies enough that slow runners blew a 45m budget
+    # mid-build (main and a PR, both on 2026-07-10). 60m restores
+    # headroom while still bounding a genuinely wedged run.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -628,6 +632,12 @@ jobs:
     # several jobs can build at once without crushing VM boot latency.
     env:
       CARGO_BUILD_JOBS: "12"
+      # Full debuginfo for the dozen-plus integration-test binaries is
+      # ~14 GiB of target/ and has filled the shared runner disk mid-link,
+      # killing rust-lld with SIGBUS (#1162). line-tables-only keeps
+      # file:line in backtraces — all CI needs — at a fraction of the size.
+      CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+      CARGO_PROFILE_TEST_DEBUG: "line-tables-only"
     steps:
       - name: Clean workspace
         run: |

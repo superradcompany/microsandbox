@@ -349,11 +349,14 @@ export const MountBuilder = napi.MountBuilder;
 export const PatchBuilder = napi.PatchBuilder;
 export const RegistryConfigBuilder = napi.RegistryConfigBuilder;
 export const ImageBuilder = napi.ImageBuilder;
+export const RootDiskBuilder = napi.RootDiskBuilder;
+export type RootDiskBuilder = NapiRootDiskBuilder;
 export const ExecOptionsBuilder = napi.ExecOptionsBuilder;
 export const InitOptionsBuilder = napi.InitOptionsBuilder;
 export const AttachOptionsBuilder = napi.AttachOptionsBuilder;
 import type {
   NapiNetworkPolicyBuilder,
+  NapiRootDiskBuilder,
   NapiRuleBuilder,
   NapiRuleDestinationBuilder,
 } from "./internal/napi.js";

@@ -18,7 +18,7 @@ use clap::Args;
 use microsandbox_runtime::{
     launch::LaunchConfig,
     logging::LogLevel,
-    vm::{Config, DiskMountSpec, VmConfig},
+    vm::{Config, DiskMountSpec, UpperSpec, VmConfig, validate_disk_format},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -145,6 +145,32 @@ pub fn run(args: SandboxArgs) -> ! {
             std::process::exit(2);
         }
     };
+    // A user-supplied (disk-image) root disk carries an explicit format and
+    // rides the typed UpperSpec; the managed ext4 fast path stays on
+    // rootfs_upper. Exactly one of the two is populated.
+    let rootfs_upper_spec = match (&launch.rootfs.upper, &launch.rootfs.upper_format) {
+        (Some(upper), Some(format)) => {
+            let format = match validate_disk_format(Some(format)) {
+                Ok(format) => format,
+                Err(err) => {
+                    eprintln!("upper disk format: {err}");
+                    std::process::exit(2);
+                }
+            };
+            Some(UpperSpec {
+                primary: upper.clone(),
+                format,
+                backing: Vec::new(),
+                read_only: false,
+            })
+        }
+        _ => None,
+    };
+    let rootfs_upper = if launch.rootfs.upper_format.is_none() {
+        launch.rootfs.upper
+    } else {
+        None
+    };
     let vm_config = VmConfig {
         libkrunfw_path: launch.libkrunfw_path,
         vcpus: args.vcpus,
@@ -161,8 +187,8 @@ pub fn run(args: SandboxArgs) -> ! {
         } else {
             None
         },
-        rootfs_upper: launch.rootfs.upper,
-        rootfs_upper_spec: None,
+        rootfs_upper,
+        rootfs_upper_spec,
         rootfs_disk: if is_vmdk { None } else { launch.rootfs.disk },
         rootfs_disk_format: if is_vmdk {
             None

@@ -84,13 +84,34 @@ pub struct PyImagePruneReport {
 #[pymethods]
 impl PyImage {
     /// Create an OCI rootfs image source.
+    ///
+    /// `root_disk` accepts an int (MiB, managed sugar), a `RootDisk.*()`
+    /// config, or an equivalent dict. `upper_size_mib` is a deprecated
+    /// alias for a managed root disk of that size.
     #[staticmethod]
-    #[pyo3(signature = (reference, *, upper_size_mib = None))]
-    fn oci(py: Python<'_>, reference: String, upper_size_mib: Option<u32>) -> PyResult<PyObject> {
+    #[pyo3(signature = (reference, *, root_disk = None, upper_size_mib = None))]
+    fn oci(
+        py: Python<'_>,
+        reference: String,
+        root_disk: Option<Bound<'_, PyAny>>,
+        upper_size_mib: Option<u32>,
+    ) -> PyResult<PyObject> {
+        if root_disk.is_some() && upper_size_mib.is_some() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "pass either root_disk= or upper_size_mib=, not both",
+            ));
+        }
         let kwargs = PyDict::new(py);
         kwargs.set_item("_type", "oci")?;
         kwargs.set_item("_reference", reference)?;
-        if let Some(upper_size_mib) = upper_size_mib {
+        if let Some(root_disk) = root_disk {
+            kwargs.set_item("_root_disk", root_disk)?;
+        } else if let Some(upper_size_mib) = upper_size_mib {
+            // Deprecated alias: normalize to a managed root disk dict.
+            let managed = PyDict::new(py);
+            managed.set_item("kind", "managed")?;
+            managed.set_item("size_mib", upper_size_mib)?;
+            kwargs.set_item("_root_disk", managed)?;
             kwargs.set_item("_upper_size_mib", upper_size_mib)?;
         }
         Ok(image_source_class(py)?.call((), Some(&kwargs))?.unbind())

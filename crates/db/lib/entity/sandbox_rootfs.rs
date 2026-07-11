@@ -19,6 +19,10 @@ pub struct Model {
     pub manifest_id: Option<i32>,
     pub mode: String,
     pub upper_fstype: Option<String>,
+    /// Root disk kind tag (`managed`, `tmpfs`, `disk-image`). DB default: `managed`.
+    pub root_disk_kind: String,
+    /// Host path of the user-supplied image for `disk-image` root disks.
+    pub root_disk_path: Option<String>,
     pub created_at: Option<DateTime>,
 }
 

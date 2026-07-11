@@ -1310,7 +1310,7 @@ mod tests {
                 name: "agent-1".into(),
                 image: RootfsSource::Oci(OciRootfsSource {
                     reference: "python:3.12".into(),
-                    upper_size_mib: None,
+                    root_disk: None,
                 }),
                 ..Default::default()
             },
@@ -1404,7 +1404,7 @@ mod tests {
             name: "agent-1".into(),
             image: RootfsSource::Oci(OciRootfsSource {
                 reference: "python:3.12".into(),
-                upper_size_mib: None,
+                root_disk: None,
             }),
             env: vec![EnvVar::new("A", "B")],
             ..Default::default()

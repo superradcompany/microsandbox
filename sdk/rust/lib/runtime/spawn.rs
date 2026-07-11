@@ -694,11 +694,13 @@ pub async fn spawn_sandbox(
 
 /// Pre-boot preparation for the OCI writable upper: grow `upper.ext4` when
 /// the persisted desired size exceeds the file's current size. This is where
-/// a `--next-start` upper grow lands; ordinary starts no-op because create
-/// formats the file at the desired size. A missing upper is not this hook's
-/// problem — non-OCI rootfs and not-yet-materialized sandboxes skip it.
+/// a `--next-start` root disk grow lands; ordinary starts no-op because create
+/// formats the file at the desired size. Only the managed kind grows — tmpfs
+/// has no host file and a user disk image is user-owned. A missing upper is
+/// not this hook's problem — non-OCI rootfs and not-yet-materialized
+/// sandboxes skip it.
 async fn prepare_oci_upper(config: &SandboxConfig, sandbox_dir: &Path) -> MicrosandboxResult<()> {
-    let Some(desired_mib) = config.spec.image.oci_upper_size_mib() else {
+    let Some(desired_mib) = config.spec.image.oci_managed_root_disk_size_mib() else {
         return Ok(());
     };
     let upper_path = sandbox_dir.join("upper.ext4");
@@ -2265,7 +2267,7 @@ fn sandbox_cli_args(
             launch.rootfs.path = Some(path.clone());
             launch.rootfs.follow_root_symlinks = *follow_root_symlinks;
         }
-        RootfsSource::Oci(_) => {
+        RootfsSource::Oci(oci) => {
             // Derive VMDK + upper paths from the stored manifest digest.
             if let Some(ref digest_str) = config.manifest_digest {
                 let cache_dir = local.cache_dir();
@@ -2273,16 +2275,39 @@ fn sandbox_cli_args(
                 let digest: Digest = digest_str.parse().expect("invalid manifest digest");
                 let vmdk_path = cache.vmdk_path(&digest);
 
-                let sandbox_dir = local.sandboxes_dir().join(&config.spec.name);
-                let upper_path = sandbox_dir.join("upper.ext4");
-
-                // VMDK (fsmeta + layers) read-only + upper.ext4 writable.
+                // VMDK (fsmeta + layers) read-only.
                 launch.rootfs.disk = Some(vmdk_path);
                 launch.rootfs.disk_format = Some("vmdk".to_string());
-                launch.rootfs.upper = Some(upper_path);
 
-                // MSB_BLOCK_ROOT: always 2 devices.
-                let block_root = "kind=oci-erofs,lower=/dev/vda,upper=/dev/vdb,upper_fstype=ext4";
+                // Writable upper per root disk kind. Managed and disk-image
+                // attach /dev/vdb; tmpfs attaches no upper device and the
+                // guest assembles a RAM-backed upper itself.
+                use microsandbox_types::RootDisk;
+                let block_root = match &oci.root_disk {
+                    None | Some(RootDisk::Managed { .. }) => {
+                        let sandbox_dir = local.sandboxes_dir().join(&config.spec.name);
+                        launch.rootfs.upper = Some(sandbox_dir.join("upper.ext4"));
+                        "kind=oci-erofs,lower=/dev/vda,upper=/dev/vdb,upper_fstype=ext4".to_string()
+                    }
+                    Some(RootDisk::Tmpfs { size_mib }) => match size_mib {
+                        Some(mib) => format!(
+                            "kind=oci-erofs,lower=/dev/vda,upper=tmpfs,upper_size_mib={mib}"
+                        ),
+                        None => "kind=oci-erofs,lower=/dev/vda,upper=tmpfs".to_string(),
+                    },
+                    Some(RootDisk::DiskImage {
+                        path,
+                        format,
+                        fstype,
+                    }) => {
+                        launch.rootfs.upper = Some(path.clone());
+                        launch.rootfs.upper_format = Some(format.as_str().to_string());
+                        format!(
+                            "kind=oci-erofs,lower=/dev/vda,upper=/dev/vdb,upper_fstype={}",
+                            fstype.as_deref().unwrap_or("ext4")
+                        )
+                    }
+                };
                 launch.env.push(format!("{}={block_root}", ENV_BLOCK_ROOT));
             }
         }
@@ -3438,7 +3463,7 @@ mod tests {
                 name: "test".into(),
                 image: RootfsSource::Oci(OciRootfsSource {
                     reference: "alpine".into(),
-                    upper_size_mib: None,
+                    root_disk: None,
                 }),
                 resources: microsandbox_types::SandboxResources {
                     memory_mib: 1024,

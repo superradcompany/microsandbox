@@ -37,7 +37,7 @@ pub enum ImageSource {
 /// Used with [`crate::sandbox::SandboxBuilder::image_with`]:
 ///
 /// ```ignore
-/// .image_with(|i| i.oci("python:3.12").upper_size(8.gib()))
+/// .image_with(|i| i.oci("python:3.12").root_disk(8.gib()))
 /// .image_with(|i| i.disk("./ubuntu.qcow2").fstype("ext4"))
 /// ```
 #[derive(Default)]
@@ -81,6 +81,34 @@ enum MountKind {
     Tmpfs,
     Disk(PathBuf),
     Unset,
+}
+
+/// Builder for the writable rootfs layer (root disk) of an OCI image.
+///
+/// Used with [`ImageBuilder::root_disk_with`] or
+/// [`crate::sandbox::SandboxBuilder::root_disk_with`]:
+///
+/// ```ignore
+/// .root_disk_with(|d| d.size(8.gib()))                       // managed ext4 (default kind)
+/// .root_disk_with(|d| d.tmpfs().size(2.gib()))               // RAM-backed, ephemeral
+/// .root_disk_with(|d| d.disk_image("./scratch.img"))         // user-supplied image
+/// ```
+#[derive(Default)]
+pub struct RootDiskBuilder {
+    kind: RootDiskKind,
+    size_mib: Option<u32>,
+    format: Option<DiskImageFormat>,
+    fstype: Option<String>,
+    error: Option<crate::MicrosandboxError>,
+}
+
+/// Internal kind for the root disk builder. `Unset` resolves to managed.
+#[derive(Default)]
+enum RootDiskKind {
+    #[default]
+    Unset,
+    Tmpfs,
+    DiskImage(PathBuf),
 }
 
 /// Sub-builder for [`MountBuilder::named_with`].
@@ -693,6 +721,136 @@ impl ImageSource {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Methods: RootDiskBuilder
+//--------------------------------------------------------------------------------------------------
+
+impl RootDiskBuilder {
+    /// Set the size in MiB. Valid for the managed (default) and tmpfs kinds;
+    /// a user-supplied disk image takes its size from the image file.
+    pub fn size(mut self, size: impl Into<Mebibytes>) -> Self {
+        if matches!(self.kind, RootDiskKind::DiskImage(_)) {
+            self.set_error(
+                "size() is not valid for a disk-image root disk; the image file determines the size",
+            );
+            return self;
+        }
+        self.size_mib = Some(size.into().as_u32());
+        self
+    }
+
+    /// Use a RAM-backed tmpfs upper. Ephemeral: the rootfs is pristine on
+    /// every boot, and the size counts against guest memory.
+    pub fn tmpfs(mut self) -> Self {
+        match self.kind {
+            RootDiskKind::Unset => self.kind = RootDiskKind::Tmpfs,
+            RootDiskKind::Tmpfs => {}
+            RootDiskKind::DiskImage(_) => {
+                self.set_error("tmpfs() cannot be combined with disk_image()");
+            }
+        }
+        self
+    }
+
+    /// Use a user-supplied disk image as the upper, attached writable.
+    ///
+    /// The format is derived from the file extension (`.img`/`.raw` → raw,
+    /// `.qcow2` → qcow2) unless set explicitly with [`format`](Self::format).
+    pub fn disk_image(mut self, path: impl Into<PathBuf>) -> Self {
+        if matches!(self.kind, RootDiskKind::Tmpfs) {
+            self.set_error("disk_image() cannot be combined with tmpfs()");
+            return self;
+        }
+        if self.size_mib.is_some() {
+            self.set_error(
+                "size() is not valid for a disk-image root disk; the image file determines the size",
+            );
+            return self;
+        }
+        self.kind = RootDiskKind::DiskImage(path.into());
+        self
+    }
+
+    /// Set the disk image format explicitly. Valid only after
+    /// [`disk_image`](Self::disk_image). vmdk is not supported as a root disk.
+    pub fn format(mut self, format: DiskImageFormat) -> Self {
+        if !matches!(self.kind, RootDiskKind::DiskImage(_)) {
+            self.set_error("format() requires disk_image() to be called first");
+            return self;
+        }
+        if matches!(format, DiskImageFormat::Vmdk) {
+            self.set_error("vmdk is not supported as a root disk (writable vmdk is unavailable)");
+            return self;
+        }
+        self.format = Some(format);
+        self
+    }
+
+    /// Set the inner filesystem type of the disk image. Defaults to ext4.
+    /// Valid only after [`disk_image`](Self::disk_image).
+    pub fn fstype(mut self, fstype: impl Into<String>) -> Self {
+        if !matches!(self.kind, RootDiskKind::DiskImage(_)) {
+            self.set_error("fstype() requires disk_image() to be called first");
+            return self;
+        }
+        let fstype = fstype.into();
+        if fstype.is_empty()
+            || fstype.contains(',')
+            || fstype.contains(';')
+            || fstype.contains(':')
+            || fstype.contains('=')
+        {
+            self.set_error("fstype must be non-empty and free of ',', ';', ':', '='");
+            return self;
+        }
+        self.fstype = Some(fstype);
+        self
+    }
+
+    /// Consume the builder and return the resolved [`RootDisk`].
+    pub fn build(self) -> crate::MicrosandboxResult<RootDisk> {
+        if let Some(e) = self.error {
+            return Err(e);
+        }
+        match self.kind {
+            RootDiskKind::Unset => Ok(RootDisk::Managed {
+                size_mib: self.size_mib,
+            }),
+            RootDiskKind::Tmpfs => Ok(RootDisk::Tmpfs {
+                size_mib: self.size_mib,
+            }),
+            RootDiskKind::DiskImage(path) => {
+                let format = match self.format {
+                    Some(format) => format,
+                    None => {
+                        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                        match ext {
+                            "img" | "raw" => DiskImageFormat::Raw,
+                            "qcow2" => DiskImageFormat::Qcow2,
+                            _ => {
+                                return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                                    "unrecognized root disk image extension: {ext:?} (expected .img, .raw, or .qcow2; or set format() explicitly)"
+                                )));
+                            }
+                        }
+                    }
+                };
+                Ok(RootDisk::DiskImage {
+                    path,
+                    format,
+                    fstype: self.fstype,
+                })
+            }
+        }
+    }
+
+    fn set_error(&mut self, msg: &str) {
+        if self.error.is_none() {
+            self.error = Some(crate::MicrosandboxError::InvalidConfig(msg.into()));
+        }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Methods: ImageBuilder
 //--------------------------------------------------------------------------------------------------
 
@@ -705,31 +863,65 @@ impl ImageBuilder {
     /// Use an OCI image reference as the root filesystem.
     ///
     /// ```ignore
-    /// .image_with(|i| i.oci("python:3.12").upper_size(8.gib()))
+    /// .image_with(|i| i.oci("python:3.12").root_disk(8.gib()))
     /// ```
     pub fn oci(mut self, reference: impl Into<String>) -> Self {
         self.source = Some(RootfsSource::oci(reference));
         self
     }
 
-    /// Set the writable overlay upper size for an OCI rootfs.
+    /// Set a managed root disk of the given size for an OCI rootfs.
     ///
-    /// This is valid only after [`oci`](Self::oci).
-    pub fn upper_size(mut self, size: impl Into<Mebibytes>) -> Self {
-        let size_mib = size.into().as_u32();
+    /// Sugar for `root_disk_with(|d| d.size(size))`. Valid only after
+    /// [`oci`](Self::oci).
+    pub fn root_disk(self, size: impl Into<Mebibytes>) -> Self {
+        let size = size.into();
+        self.root_disk_with(|d| d.size(size))
+    }
+
+    /// Configure the writable rootfs layer (root disk) for an OCI rootfs.
+    ///
+    /// Valid only after [`oci`](Self::oci).
+    ///
+    /// ```ignore
+    /// .image_with(|i| i.oci("python:3.12").root_disk(8.gib()))
+    /// .image_with(|i| i.oci("python:3.12").root_disk_with(|d| d.tmpfs().size(2.gib())))
+    /// .image_with(|i| i.oci("python:3.12").root_disk_with(|d| d.disk_image("./scratch.img")))
+    /// ```
+    pub fn root_disk_with(
+        mut self,
+        configure: impl FnOnce(RootDiskBuilder) -> RootDiskBuilder,
+    ) -> Self {
+        let root_disk = match configure(RootDiskBuilder::default()).build() {
+            Ok(root_disk) => root_disk,
+            Err(e) => {
+                if self.error.is_none() {
+                    self.error = Some(e);
+                }
+                return self;
+            }
+        };
         match &mut self.source {
             Some(RootfsSource::Oci(oci)) => {
-                oci.upper_size_mib = Some(size_mib);
+                oci.root_disk = Some(root_disk);
             }
             _ => {
                 if self.error.is_none() {
                     self.error = Some(crate::MicrosandboxError::InvalidConfig(
-                        "upper_size() requires oci() to be called first".into(),
+                        "root_disk() requires oci() to be called first".into(),
                     ));
                 }
             }
         }
         self
+    }
+
+    /// Set the writable overlay upper size for an OCI rootfs.
+    ///
+    /// This is valid only after [`oci`](Self::oci).
+    #[deprecated(since = "0.6.0", note = "use `root_disk` instead")]
+    pub fn upper_size(self, size: impl Into<Mebibytes>) -> Self {
+        self.root_disk(size)
     }
 
     /// Use a disk image file as the root filesystem.
@@ -1534,14 +1726,32 @@ mod tests {
         match rootfs {
             RootfsSource::Oci(oci) => {
                 assert_eq!(oci.reference, "python");
-                assert_eq!(oci.upper_size_mib, None);
+                assert_eq!(oci.root_disk, None);
             }
             _ => panic!("expected Oci"),
         }
     }
 
     #[test]
-    fn test_image_builder_oci_with_upper_size() {
+    fn test_image_builder_oci_with_root_disk() {
+        let rootfs = ImageBuilder::new()
+            .oci("python:3.12")
+            .root_disk(8192u32)
+            .build()
+            .unwrap();
+
+        match rootfs {
+            RootfsSource::Oci(oci) => {
+                assert_eq!(oci.reference, "python:3.12");
+                assert_eq!(oci.root_disk, Some(RootDisk::managed(8192)));
+            }
+            _ => panic!("expected Oci"),
+        }
+    }
+
+    #[test]
+    fn test_image_builder_oci_with_deprecated_upper_size_alias() {
+        #[allow(deprecated)]
         let rootfs = ImageBuilder::new()
             .oci("python:3.12")
             .upper_size(8192u32)
@@ -1550,19 +1760,87 @@ mod tests {
 
         match rootfs {
             RootfsSource::Oci(oci) => {
-                assert_eq!(oci.reference, "python:3.12");
-                assert_eq!(oci.upper_size_mib, Some(8192));
+                assert_eq!(oci.root_disk, Some(RootDisk::managed(8192)));
             }
             _ => panic!("expected Oci"),
         }
     }
 
     #[test]
-    fn test_image_builder_upper_size_requires_oci() {
-        let result = ImageBuilder::new().upper_size(8192u32).build();
+    fn test_image_builder_root_disk_requires_oci() {
+        let result = ImageBuilder::new().root_disk(8192u32).build();
         let err = result.unwrap_err();
 
-        assert!(err.to_string().contains("upper_size() requires oci()"));
+        assert!(err.to_string().contains("root_disk() requires oci()"));
+    }
+
+    #[test]
+    fn test_root_disk_builder_tmpfs() {
+        let root_disk = RootDiskBuilder::default()
+            .tmpfs()
+            .size(2048u32)
+            .build()
+            .unwrap();
+        assert_eq!(root_disk, RootDisk::tmpfs(2048));
+    }
+
+    #[test]
+    fn test_root_disk_builder_disk_image_infers_format() {
+        let root_disk = RootDiskBuilder::default()
+            .disk_image("./scratch.img")
+            .fstype("ext4")
+            .build()
+            .unwrap();
+        assert_eq!(
+            root_disk,
+            RootDisk::DiskImage {
+                path: PathBuf::from("./scratch.img"),
+                format: DiskImageFormat::Raw,
+                fstype: Some("ext4".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn test_root_disk_builder_rejects_size_with_disk_image() {
+        let err = RootDiskBuilder::default()
+            .disk_image("./scratch.img")
+            .size(8192u32)
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("not valid for a disk-image"));
+    }
+
+    #[test]
+    fn test_root_disk_builder_rejects_tmpfs_with_disk_image() {
+        let err = RootDiskBuilder::default()
+            .tmpfs()
+            .disk_image("./scratch.img")
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("cannot be combined"));
+    }
+
+    #[test]
+    fn test_root_disk_builder_rejects_vmdk_format() {
+        let err = RootDiskBuilder::default()
+            .disk_image("./scratch.vmdk")
+            .format(DiskImageFormat::Vmdk)
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("vmdk is not supported"));
+    }
+
+    #[test]
+    fn test_root_disk_builder_rejects_unknown_extension_without_format() {
+        let err = RootDiskBuilder::default()
+            .disk_image("./scratch.bin")
+            .build()
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unrecognized root disk image extension")
+        );
     }
 
     #[test]
@@ -1672,6 +1950,6 @@ mod tests {
 
 pub use microsandbox_types::{
     DiskImageFormat, HostPermissions, MountOptions, NamedVolumeCreate, NamedVolumeMode,
-    OciRootfsSource, Patch, RootfsSource, SecurityProfile, StatVirtualization, VolumeKind,
-    VolumeMount,
+    OciRootfsSource, Patch, RootDisk, RootfsSource, SecurityProfile, StatVirtualization,
+    VolumeKind, VolumeMount,
 };

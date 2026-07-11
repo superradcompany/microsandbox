@@ -1430,7 +1430,7 @@ type CreateOptions struct {
 	Image                string               `json:"image,omitempty"`
 	ImageFstype          string               `json:"image_fstype,omitempty"`
 	ImageBind            string               `json:"image_bind,omitempty"`
-	OCIUpperSizeMiB      *uint32              `json:"oci_upper_size_mib,omitempty"`
+	RootDisk             *RootDiskSpec        `json:"root_disk,omitempty"`
 	Snapshot             string               `json:"snapshot,omitempty"`
 	MemoryMiB            uint32               `json:"memory_mib,omitempty"`
 	CPUs                 uint8                `json:"cpus,omitempty"`
@@ -1476,6 +1476,17 @@ type InitOptions struct {
 type RegistryAuthOptions struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
+}
+
+// RootDiskSpec describes the writable rootfs layer (root disk) of an OCI
+// image. Kind is "managed", "tmpfs", or "disk-image"; SizeMiB is a pointer
+// so an explicit zero reaches the wire for validation.
+type RootDiskSpec struct {
+	Kind    string  `json:"kind"`
+	SizeMiB *uint32 `json:"size_mib,omitempty"`
+	Path    string  `json:"path,omitempty"`
+	Format  string  `json:"format,omitempty"`
+	Fstype  string  `json:"fstype,omitempty"`
 }
 
 // MountSpec describes a volume mount for a sandbox.

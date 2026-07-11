@@ -134,8 +134,31 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
             }
         };
         ui::detail_kv("Image", &image);
-        if let Some(upper_size_mib) = config.spec.image.oci_upper_size_mib() {
-            ui::detail_kv("OCI Upper", &format!("{upper_size_mib} MiB"));
+        match config.spec.image.oci_root_disk() {
+            Some(microsandbox::sandbox::RootDisk::Managed { size_mib }) => {
+                let size = size_mib.map_or("default".to_string(), |mib| format!("{mib} MiB"));
+                ui::detail_kv("Root Disk", &format!("{size} (managed, ext4)"));
+            }
+            Some(microsandbox::sandbox::RootDisk::Tmpfs { size_mib }) => {
+                let size = size_mib.map_or("default".to_string(), |mib| format!("{mib} MiB"));
+                ui::detail_kv("Root Disk", &format!("{size} (tmpfs)"));
+            }
+            Some(microsandbox::sandbox::RootDisk::DiskImage {
+                path,
+                format,
+                fstype,
+            }) => {
+                ui::detail_kv(
+                    "Root Disk",
+                    &format!(
+                        "{} (disk-image, {}, {})",
+                        path.display(),
+                        format.as_str(),
+                        fstype.as_deref().unwrap_or("ext4")
+                    ),
+                );
+            }
+            None => {}
         }
 
         let change_for = |field: &str| pending_changes.iter().find(|c| c.field == field);

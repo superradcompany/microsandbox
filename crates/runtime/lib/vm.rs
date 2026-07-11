@@ -196,11 +196,14 @@ enum ParentWatchdogSignal {
 
 /// Specification for the writable upper layer attached as virtio-blk.
 ///
-/// Today the upper is always a flat raw ext4 file, so `format = Raw`
-/// and `backing` is empty. The shape is forward-compatible with
-/// qcow2 backing chains: when chains land, `format = Qcow2` and
-/// `backing` lists ancestor files that the VMM must also map. The
-/// runtime walks `backing` and attaches each as a read-only disk.
+/// The managed root disk is a flat raw ext4 file (`format = Raw`, empty
+/// `backing`); a user-supplied disk-image root disk carries its own path
+/// and format. A tmpfs root disk attaches no upper device at all — the
+/// caller leaves both `rootfs_upper` and `rootfs_upper_spec` unset and
+/// signals tmpfs through `MSB_BLOCK_ROOT`. The shape stays
+/// forward-compatible with qcow2 backing chains: when chains land,
+/// `backing` lists ancestor files that the runtime attaches read-only
+/// ahead of the head file.
 #[derive(Debug, Clone)]
 pub struct UpperSpec {
     /// Path to the head upper file. Mounted writable.

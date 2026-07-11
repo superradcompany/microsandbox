@@ -150,6 +150,13 @@ pub const MIGRATION_METADATA: &[MigrationMetadata] = &[
         affects_user_data: false,
         summary: "rewrite bind rootfs config back to the legacy string shape",
     },
+    MigrationMetadata {
+        id: "m20260710_000001_migrate_root_disk",
+        reversible: false,
+        affects_cache: false,
+        affects_user_data: false,
+        summary: "rewrite root disk config back to the upper size shape",
+    },
 ];
 
 //--------------------------------------------------------------------------------------------------

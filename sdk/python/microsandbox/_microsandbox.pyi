@@ -6,7 +6,15 @@ import os
 from collections.abc import AsyncIterator, Awaitable, Mapping
 from typing import Any, TypedDict
 
-from microsandbox.types import ImageSource, LogReadSource, LogSource, MountConfig, Rlimit, Stdin
+from microsandbox.types import (
+    ImageSource,
+    LogReadSource,
+    LogSource,
+    MountConfig,
+    Rlimit,
+    RootDiskConfig,
+    Stdin,
+)
 
 class SecretModifySpec(TypedDict, total=False):
     """Desired state for one secret in `modify(secrets=...)`.
@@ -545,7 +553,12 @@ class VolumeFs:
 
 class Image:
     @staticmethod
-    def oci(reference: str, *, upper_size_mib: int | None = None) -> ImageSource: ...
+    def oci(
+        reference: str,
+        *,
+        root_disk: RootDiskConfig | dict | int | None = None,
+        upper_size_mib: int | None = None,
+    ) -> ImageSource: ...
     @staticmethod
     def bind(path: str) -> ImageSource: ...
     @staticmethod

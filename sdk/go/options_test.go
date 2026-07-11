@@ -15,25 +15,72 @@ func TestWithImage(t *testing.T) {
 	}
 }
 
-func TestWithOCIUpperSize(t *testing.T) {
+func TestWithRootDiskManaged(t *testing.T) {
+	o := SandboxConfig{}
+	WithRootDisk(RootDisk.Managed(8192))(&o)
+	if o.RootDisk == nil {
+		t.Fatal("RootDisk = nil, want managed config")
+	}
+	if o.RootDisk.Kind() != RootDiskKindManaged {
+		t.Errorf("Kind = %v, want RootDiskKindManaged", o.RootDisk.Kind())
+	}
+	if o.RootDisk.SizeMiB != 8192 || !o.RootDisk.sizeSet {
+		t.Errorf("SizeMiB = %d (set=%v), want 8192 explicit", o.RootDisk.SizeMiB, o.RootDisk.sizeSet)
+	}
+}
+
+func TestWithRootDiskTmpfs(t *testing.T) {
+	o := SandboxConfig{}
+	WithRootDisk(RootDisk.Tmpfs(RootDiskTmpfsOptions{SizeMiB: 512}))(&o)
+	if o.RootDisk == nil || o.RootDisk.Kind() != RootDiskKindTmpfs {
+		t.Fatalf("RootDisk = %#v, want tmpfs config", o.RootDisk)
+	}
+	if o.RootDisk.SizeMiB != 512 {
+		t.Errorf("SizeMiB = %d, want 512", o.RootDisk.SizeMiB)
+	}
+}
+
+func TestWithRootDiskTmpfsDefaultSize(t *testing.T) {
+	o := SandboxConfig{}
+	WithRootDisk(RootDisk.Tmpfs(RootDiskTmpfsOptions{}))(&o)
+	if o.RootDisk == nil || o.RootDisk.Kind() != RootDiskKindTmpfs {
+		t.Fatalf("RootDisk = %#v, want tmpfs config", o.RootDisk)
+	}
+	if o.RootDisk.sizeSet {
+		t.Error("sizeSet = true, want false (runtime default)")
+	}
+}
+
+func TestWithRootDiskDiskImage(t *testing.T) {
+	o := SandboxConfig{}
+	WithRootDisk(RootDisk.Disk("./scratch.img", RootDiskImageOptions{Format: "raw", Fstype: "ext4"}))(&o)
+	if o.RootDisk == nil || o.RootDisk.Kind() != RootDiskKindDiskImage {
+		t.Fatalf("RootDisk = %#v, want disk-image config", o.RootDisk)
+	}
+	if o.RootDisk.Path != "./scratch.img" || o.RootDisk.Format != "raw" || o.RootDisk.Fstype != "ext4" {
+		t.Errorf("disk-image fields = %#v", o.RootDisk)
+	}
+}
+
+func TestWithOCIUpperSizeIsManagedRootDiskAlias(t *testing.T) {
 	o := SandboxConfig{}
 	WithOCIUpperSize(8192)(&o)
-	if o.OCIUpperSizeMiB != 8192 {
-		t.Errorf("OCIUpperSizeMiB = %d, want 8192", o.OCIUpperSizeMiB)
+	if o.RootDisk == nil || o.RootDisk.Kind() != RootDiskKindManaged {
+		t.Fatalf("RootDisk = %#v, want managed config", o.RootDisk)
 	}
-	if !o.ociUpperSizeSet {
-		t.Error("ociUpperSizeSet = false, want true")
+	if o.RootDisk.SizeMiB != 8192 || !o.RootDisk.sizeSet {
+		t.Errorf("SizeMiB = %d (set=%v), want 8192 explicit", o.RootDisk.SizeMiB, o.RootDisk.sizeSet)
 	}
 }
 
 func TestWithOCIUpperSizeZeroIsExplicit(t *testing.T) {
 	o := SandboxConfig{}
 	WithOCIUpperSize(0)(&o)
-	if o.OCIUpperSizeMiB != 0 {
-		t.Errorf("OCIUpperSizeMiB = %d, want 0", o.OCIUpperSizeMiB)
+	if o.RootDisk == nil || o.RootDisk.Kind() != RootDiskKindManaged {
+		t.Fatalf("RootDisk = %#v, want managed config", o.RootDisk)
 	}
-	if !o.ociUpperSizeSet {
-		t.Error("ociUpperSizeSet = false, want true")
+	if o.RootDisk.SizeMiB != 0 || !o.RootDisk.sizeSet {
+		t.Errorf("SizeMiB = %d (set=%v), want explicit 0", o.RootDisk.SizeMiB, o.RootDisk.sizeSet)
 	}
 }
 

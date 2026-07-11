@@ -7,7 +7,8 @@ use clap::Args;
 use microsandbox::VolumeKind;
 use microsandbox::backend::{Backend, LocalBackend};
 use microsandbox::sandbox::{
-    DiskImageFormat, MountBuilder, Patch, Sandbox, SandboxBuilder, SandboxFilter, SecurityProfile,
+    DiskImageFormat, MountBuilder, Patch, RootDiskBuilder, Sandbox, SandboxBuilder, SandboxFilter,
+    SecurityProfile,
 };
 
 use crate::ui;
@@ -213,8 +214,18 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub pull: Option<String>,
 
-    /// Writable overlay upper size for OCI images (e.g. 4G, 8192M).
-    #[arg(long = "oci-upper-size", value_name = "SIZE")]
+    /// Writable rootfs layer for OCI images (e.g. 8G, tmpfs:2G,
+    /// ./scratch.img, ./scratch.qcow2:format=qcow2,fstype=ext4).
+    #[arg(long = "root-disk", value_name = "SPEC")]
+    pub root_disk: Option<String>,
+
+    /// Deprecated alias for `--root-disk <SIZE>`.
+    #[arg(
+        long = "oci-upper-size",
+        value_name = "SIZE",
+        hide = true,
+        conflicts_with = "root_disk"
+    )]
     pub oci_upper_size: Option<String>,
 
     /// Log verbosity for the sandbox runtime (error, warn, info, debug, trace).
@@ -478,6 +489,7 @@ impl SandboxOpts {
             || self.hostname.is_some()
             || self.user.is_some()
             || self.pull.is_some()
+            || self.root_disk.is_some()
             || self.oci_upper_size.is_some()
             || self.log_level.is_some()
             || self.max_duration.is_some()
@@ -631,9 +643,9 @@ pub fn apply_sandbox_opts(
     if let Some(ref pull) = opts.pull {
         builder = builder.pull_policy(parse_pull_policy(pull)?);
     }
-    if let Some(ref size) = opts.oci_upper_size {
-        let size_mib = ui::parse_size_mib(size).map_err(anyhow::Error::msg)?;
-        builder = builder.oci_upper_size(size_mib);
+    if let Some(spec) = opts.root_disk.as_deref().or(opts.oci_upper_size.as_deref()) {
+        let spec = parse_root_disk_spec(spec)?;
+        builder = builder.root_disk_with(|d| spec.apply(d));
     }
     if let Some(ref security) = opts.security {
         builder = builder.security(parse_security_profile(security)?);
@@ -684,6 +696,152 @@ pub fn apply_sandbox_opts(
     }
 
     Ok(builder)
+}
+
+/// Parsed `--root-disk` value, classified before it touches the builder.
+#[derive(Debug)]
+enum RootDiskSpec {
+    Managed {
+        size_mib: u32,
+    },
+    Tmpfs {
+        size_mib: Option<u32>,
+    },
+    DiskImage {
+        path: String,
+        format: Option<DiskImageFormat>,
+        fstype: Option<String>,
+    },
+}
+
+impl RootDiskSpec {
+    fn apply(self, mut d: RootDiskBuilder) -> RootDiskBuilder {
+        match self {
+            Self::Managed { size_mib } => d.size(size_mib),
+            Self::Tmpfs { size_mib } => {
+                d = d.tmpfs();
+                if let Some(size_mib) = size_mib {
+                    d = d.size(size_mib);
+                }
+                d
+            }
+            Self::DiskImage {
+                path,
+                format,
+                fstype,
+            } => {
+                d = d.disk_image(path);
+                if let Some(format) = format {
+                    d = d.format(format);
+                }
+                if let Some(fstype) = fstype {
+                    d = d.fstype(fstype);
+                }
+                d
+            }
+        }
+    }
+}
+
+/// Classify a `--root-disk` value, following the `SOURCE[:OPTIONS]` shape of
+/// the volume flags: a bare size means the managed ext4 upper, `tmpfs[:SIZE]`
+/// a RAM-backed upper, and a path a user-supplied disk image with optional
+/// comma-separated options after a colon (`format=raw|qcow2`, `fstype=...`).
+fn parse_root_disk_spec(spec: &str) -> anyhow::Result<RootDiskSpec> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        anyhow::bail!(
+            "--root-disk requires a value (e.g. 8G, tmpfs:2G, ./scratch.qcow2:format=qcow2)"
+        );
+    }
+
+    if spec == "tmpfs" {
+        return Ok(RootDiskSpec::Tmpfs { size_mib: None });
+    }
+    if let Some(size) = spec.strip_prefix("tmpfs:") {
+        let size_mib = ui::parse_size_mib(size).map_err(anyhow::Error::msg)?;
+        return Ok(RootDiskSpec::Tmpfs {
+            size_mib: Some(size_mib),
+        });
+    }
+
+    // Split SOURCE[:OPTIONS] on the first colon that isn't a Windows drive
+    // separator, mirroring the volume flags.
+    let (source, options) = match find_root_disk_options_separator(spec) {
+        Some(index) => (&spec[..index], Some(&spec[index + 1..])),
+        None => (spec, None),
+    };
+
+    // Path detection mirrors the positional rootfs classifier: an explicit
+    // relative/absolute prefix or a path separator means a local file.
+    let looks_like_path = source.starts_with('.')
+        || source.starts_with('/')
+        || source.starts_with('~')
+        || source.contains('/')
+        || source.contains('\\');
+    if looks_like_path {
+        let (format, fstype) = parse_root_disk_image_options(options)?;
+        return Ok(RootDiskSpec::DiskImage {
+            path: source.to_string(),
+            format,
+            fstype,
+        });
+    }
+
+    if options.is_some() {
+        anyhow::bail!(
+            "--root-disk: options after ':' are only valid for a disk image path (e.g. ./scratch.qcow2:format=qcow2,fstype=ext4)"
+        );
+    }
+    let size_mib = ui::parse_size_mib(source).map_err(|err| {
+        anyhow::anyhow!("--root-disk: {err} (expected a size, tmpfs[:SIZE], or an image path)")
+    })?;
+    Ok(RootDiskSpec::Managed { size_mib })
+}
+
+/// Find the colon starting the options segment, skipping a Windows drive colon.
+fn find_root_disk_options_separator(spec: &str) -> Option<usize> {
+    spec.bytes()
+        .enumerate()
+        .find(|&(index, byte)| byte == b':' && !is_windows_drive_separator(spec, index))
+        .map(|(index, _)| index)
+}
+
+/// Parse the comma-separated options of a disk-image root disk.
+fn parse_root_disk_image_options(
+    options: Option<&str>,
+) -> anyhow::Result<(Option<DiskImageFormat>, Option<String>)> {
+    let mut format: Option<DiskImageFormat> = None;
+    let mut fstype: Option<String> = None;
+
+    let Some(options) = options else {
+        return Ok((None, None));
+    };
+    for token in options.split(',') {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        match token.split_once('=') {
+            Some(("format", value)) => {
+                format = Some(match value {
+                    "raw" => DiskImageFormat::Raw,
+                    "qcow2" => DiskImageFormat::Qcow2,
+                    other => anyhow::bail!(
+                        "--root-disk: unsupported format '{other}' (expected raw or qcow2)"
+                    ),
+                });
+            }
+            Some(("fstype", value)) => fstype = Some(value.to_string()),
+            Some(("size", _)) => anyhow::bail!(
+                "--root-disk: size= is not valid for a disk image; the image file determines the size"
+            ),
+            _ => anyhow::bail!(
+                "--root-disk: unknown option '{token}' (expected format=raw|qcow2 or fstype=...)"
+            ),
+        }
+    }
+    Ok((format, fstype))
 }
 
 /// Apply creation-time rootfs patch options to the builder.
@@ -2220,6 +2378,88 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn parse_root_disk_spec_classifies_values() {
+        use microsandbox::sandbox::RootDisk;
+
+        let build = |spec: &str| {
+            parse_root_disk_spec(spec)
+                .unwrap()
+                .apply(RootDiskBuilder::default())
+                .build()
+                .unwrap()
+        };
+
+        assert_eq!(build("8G"), RootDisk::managed(8192));
+        assert_eq!(build("tmpfs"), RootDisk::Tmpfs { size_mib: None });
+        assert_eq!(build("tmpfs:2G"), RootDisk::tmpfs(2048));
+        assert_eq!(
+            build("./scratch.img"),
+            RootDisk::DiskImage {
+                path: "./scratch.img".into(),
+                format: DiskImageFormat::Raw,
+                fstype: None,
+            }
+        );
+        assert_eq!(
+            build("./scratch.qcow2:format=qcow2,fstype=ext4"),
+            RootDisk::DiskImage {
+                path: "./scratch.qcow2".into(),
+                format: DiskImageFormat::Qcow2,
+                fstype: Some("ext4".into()),
+            }
+        );
+        assert_eq!(
+            build("./scratch.img:fstype=ext4"),
+            RootDisk::DiskImage {
+                path: "./scratch.img".into(),
+                format: DiskImageFormat::Raw,
+                fstype: Some("ext4".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_root_disk_spec_rejects_invalid_combinations() {
+        let err = parse_root_disk_spec("./scratch.img:size=8G").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("the image file determines the size")
+        );
+
+        let err = parse_root_disk_spec("8G:fstype=ext4").unwrap_err();
+        assert!(err.to_string().contains("only valid for a disk image path"));
+
+        let err = parse_root_disk_spec("./scratch.vmdk:format=vmdk").unwrap_err();
+        assert!(err.to_string().contains("unsupported format"));
+
+        let err = parse_root_disk_spec("./scratch.img:kind=tmpfs").unwrap_err();
+        assert!(err.to_string().contains("unknown option"));
+
+        assert!(parse_root_disk_spec("bogus").is_err());
+    }
+
+    #[tokio::test]
+    async fn apply_sandbox_opts_sets_root_disk() {
+        let opts = SandboxOpts {
+            root_disk: Some("tmpfs:512M".to_string()),
+            ..Default::default()
+        };
+        let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        match config.spec.image {
+            RootfsSource::Oci(oci) => assert_eq!(
+                oci.root_disk,
+                Some(microsandbox::sandbox::RootDisk::tmpfs(512))
+            ),
+            other => panic!("expected Oci, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn apply_sandbox_opts_sets_oci_upper_size() {
         let opts = SandboxOpts {
@@ -2233,7 +2473,10 @@ mod tests {
             .unwrap();
 
         match config.spec.image {
-            RootfsSource::Oci(oci) => assert_eq!(oci.upper_size_mib, Some(8192)),
+            RootfsSource::Oci(oci) => assert_eq!(
+                oci.root_disk,
+                Some(microsandbox::sandbox::RootDisk::managed(8192))
+            ),
             other => panic!("expected Oci, got {other:?}"),
         }
     }

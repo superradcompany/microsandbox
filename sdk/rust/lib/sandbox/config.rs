@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use microsandbox_image::{ImageConfig, RegistryAuth};
 use microsandbox_protocol::{HANDOFF_INIT_AUTO, HANDOFF_INIT_IMAGE_ENTRYPOINT_CANDIDATES};
 
-use super::types::{MountOptions, RootfsSource, VolumeMount};
+use super::types::{MountOptions, RootDisk, RootfsSource, VolumeMount};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -310,12 +310,31 @@ impl SandboxConfig {
     }
 
     /// Materialize rootfs defaults that should be persisted with the sandbox.
-    pub(crate) fn apply_rootfs_defaults(&mut self, upper_size_mib: Option<u32>) {
-        if self.snapshot_upper_source.is_none()
-            && let RootfsSource::Oci(oci) = &mut self.spec.image
-            && oci.upper_size_mib.is_none()
-        {
-            oci.upper_size_mib = Some(upper_size_mib.unwrap_or(DEFAULT_OCI_UPPER_SIZE_MIB));
+    ///
+    /// `default_size_mib` is the backend's configured managed root disk size,
+    /// if any; it applies only to the managed kind. An absent root disk
+    /// resolves to managed; a sizeless tmpfs resolves to half the sandbox
+    /// memory.
+    pub(crate) fn apply_rootfs_defaults(&mut self, default_size_mib: Option<u32>) {
+        if self.snapshot_upper_source.is_some() {
+            return;
+        }
+        let memory_mib = self.spec.resources.memory_mib;
+        if let RootfsSource::Oci(oci) = &mut self.spec.image {
+            match &mut oci.root_disk {
+                None => {
+                    oci.root_disk = Some(RootDisk::Managed {
+                        size_mib: Some(default_size_mib.unwrap_or(DEFAULT_OCI_UPPER_SIZE_MIB)),
+                    });
+                }
+                Some(RootDisk::Managed { size_mib }) if size_mib.is_none() => {
+                    *size_mib = Some(default_size_mib.unwrap_or(DEFAULT_OCI_UPPER_SIZE_MIB));
+                }
+                Some(RootDisk::Tmpfs { size_mib }) if size_mib.is_none() => {
+                    *size_mib = Some((memory_mib / 2).max(1));
+                }
+                _ => {}
+            }
         }
     }
 
@@ -600,7 +619,8 @@ impl Default for SandboxConfig {
 mod tests {
     use super::{SandboxConfig, merge_env};
     use crate::sandbox::{
-        HandoffInit, MountOptions, NamedVolumeMode, RootfsSource, StatVirtualization, VolumeMount,
+        HandoffInit, MountOptions, NamedVolumeMode, RootDisk, RootfsSource, StatVirtualization,
+        VolumeMount,
     };
     use microsandbox_image::ImageConfig;
     use microsandbox_types::{
@@ -1339,7 +1359,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_rootfs_defaults_sets_oci_upper_size() {
+    fn test_apply_rootfs_defaults_sets_managed_root_disk() {
         let mut config = SandboxConfig {
             spec: SandboxSpec {
                 image: RootfsSource::oci("python:3.12"),
@@ -1350,7 +1370,32 @@ mod tests {
 
         config.apply_rootfs_defaults(None);
 
-        assert_eq!(config.spec.image.oci_upper_size_mib(), Some(4096));
+        assert_eq!(
+            config.spec.image.oci_root_disk(),
+            Some(&RootDisk::managed(4096))
+        );
+    }
+
+    #[test]
+    fn test_apply_rootfs_defaults_sizes_tmpfs_from_memory() {
+        let mut config = SandboxConfig {
+            spec: SandboxSpec {
+                image: RootfsSource::Oci(microsandbox_types::OciRootfsSource {
+                    reference: "python:3.12".into(),
+                    root_disk: Some(RootDisk::Tmpfs { size_mib: None }),
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        config.spec.resources.memory_mib = 2048;
+
+        config.apply_rootfs_defaults(None);
+
+        assert_eq!(
+            config.spec.image.oci_root_disk(),
+            Some(&RootDisk::tmpfs(1024))
+        );
     }
 
     #[test]
@@ -1365,7 +1410,10 @@ mod tests {
 
         config.apply_rootfs_defaults(Some(8192));
 
-        assert_eq!(config.spec.image.oci_upper_size_mib(), Some(8192));
+        assert_eq!(
+            config.spec.image.oci_root_disk(),
+            Some(&RootDisk::managed(8192))
+        );
     }
 
     #[test]
@@ -1381,7 +1429,7 @@ mod tests {
 
         config.apply_rootfs_defaults(Some(8192));
 
-        assert_eq!(config.spec.image.oci_upper_size_mib(), None);
+        assert!(config.spec.image.oci_root_disk().is_none());
     }
 
     #[test]

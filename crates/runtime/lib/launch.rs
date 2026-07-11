@@ -132,6 +132,12 @@ pub struct RootfsConfig {
     /// Mount the disk image as read-only.
     pub disk_readonly: bool,
 
-    /// Writable upper ext4 block device for OCI rootfs overlay.
+    /// Writable upper block device for OCI rootfs overlay.
     pub upper: Option<PathBuf>,
+
+    /// Upper disk image format ("raw", "qcow2"). Absent means raw — the
+    /// managed `upper.ext4` fast path. Set for user-supplied disk-image
+    /// root disks so the runner attaches with the right format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upper_format: Option<String>,
 }

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use microsandbox_types::{EnvVar, RootfsSource};
+use microsandbox_types::{EnvVar, RootDisk, RootfsSource};
 use sea_orm::{ActiveModelTrait, Set};
 
 use crate::MicrosandboxResult;
@@ -41,7 +41,7 @@ const FUTURE_EXECS_ONLY: &str =
 const SECRETS_UNAVAILABLE_WITHOUT_NET: &str =
     "secret modification requires a build with the net feature";
 const SECRET_FIELD: &str = "secret";
-const UPPER_SIZE_FIELD: &str = "oci_upper_size";
+const ROOT_DISK_FIELD: &str = "root_disk_size";
 const ENV_FIELD: &str = "env";
 const LABEL_FIELD: &str = "label";
 const WORKDIR_FIELD: &str = "workdir";
@@ -147,18 +147,30 @@ impl SandboxModificationBuilder {
         self
     }
 
-    /// Set the desired OCI writable overlay upper size. Grow-only in v1:
-    /// shrinking an existing upper risks data loss and is rejected.
-    pub fn oci_upper_size(mut self, size: impl Into<Mebibytes>) -> Self {
-        self.patch.oci_upper_size_mib = Some(size.into().as_u32());
+    /// Set the desired root disk size. Managed kind: grow-only (shrinking an
+    /// existing upper risks data loss and is rejected). Tmpfs kind: any
+    /// direction, effective next boot. Disk-image kind: rejected (user-owned).
+    pub fn root_disk_size(mut self, size: impl Into<Mebibytes>) -> Self {
+        self.patch.root_disk_size_mib = Some(size.into().as_u32());
         self
     }
 
-    /// Set the desired OCI writable overlay upper size in MiB. Grow-only in
-    /// v1: shrinking an existing upper risks data loss and is rejected.
-    pub fn oci_upper_size_mib(mut self, size_mib: u32) -> Self {
-        self.patch.oci_upper_size_mib = Some(size_mib);
+    /// Set the desired root disk size in MiB. See [`root_disk_size`](Self::root_disk_size).
+    pub fn root_disk_size_mib(mut self, size_mib: u32) -> Self {
+        self.patch.root_disk_size_mib = Some(size_mib);
         self
+    }
+
+    /// Set the desired OCI writable overlay upper size.
+    #[deprecated(since = "0.6.0", note = "use `root_disk_size` instead")]
+    pub fn oci_upper_size(self, size: impl Into<Mebibytes>) -> Self {
+        self.root_disk_size(size)
+    }
+
+    /// Set the desired OCI writable overlay upper size in MiB.
+    #[deprecated(since = "0.6.0", note = "use `root_disk_size_mib` instead")]
+    pub fn oci_upper_size_mib(self, size_mib: u32) -> Self {
+        self.root_disk_size_mib(size_mib)
     }
 
     /// Set an environment variable for future execs.
@@ -366,7 +378,7 @@ impl SandboxModificationBuilder {
         // the persisted value may only ever claim capacity the file actually
         // has. A running sandbox under `--next-start` keeps its mounted upper
         // untouched; the pre-boot preparation step grows it on the next start.
-        if let Some(target_mib) = upper_grow_target(&plan, &self.patch)
+        if let Some(target_mib) = root_disk_grow_target(&plan, &self.patch, &config)
             && (stopped_status(status) || restart_required)
         {
             grow_upper_now(&self.backend, &self.name, target_mib).await?;
@@ -466,7 +478,7 @@ fn build_plan(
         &mut changes,
         &mut warnings,
     );
-    push_upper_size_change(status, config, &patch, policy, &mut changes);
+    push_root_disk_size_change(status, config, &patch, policy, &mut changes);
     push_spec_changes(status, config, &patch, policy, &mut changes, &mut warnings);
     push_secret_changes(
         status,
@@ -478,7 +490,7 @@ fn build_plan(
         &mut warnings,
     );
     push_resource_conflicts(config, &patch, &mut conflicts);
-    push_upper_size_conflicts(config, &patch, &mut conflicts);
+    push_root_disk_size_conflicts(config, &patch, &mut conflicts);
     push_spec_conflicts(&patch, &mut conflicts);
     push_secret_conflicts(config, &patch, &mut conflicts);
 
@@ -523,19 +535,28 @@ fn live_memory_target(
     if live_memory { patch.memory_mib } else { None }
 }
 
-/// The upper grow target in MiB, when the plan carries an upper size change.
-fn upper_grow_target(
+/// The host-side grow target in MiB, when the plan carries a root disk size
+/// change for the managed kind. Tmpfs sizes are config-only (the guest
+/// assembles the tmpfs at boot) and disk-image sizes never plan a change, so
+/// neither ever grows a host file.
+fn root_disk_grow_target(
     plan: &SandboxModificationPlan,
     patch: &SandboxModificationPatch,
+    config: &SandboxConfig,
 ) -> Option<u32> {
     let planned = plan.changes.iter().any(|change| {
         matches!(
             change,
-            PlannedChange::Config(change) if change.field == UPPER_SIZE_FIELD
+            PlannedChange::Config(change) if change.field == ROOT_DISK_FIELD
         )
     });
-    if planned {
-        patch.oci_upper_size_mib
+    if planned
+        && matches!(
+            root_disk_size_state(config),
+            Some(RootDiskSizeState::Managed { .. })
+        )
+    {
+        patch.root_disk_size_mib
     } else {
         None
     }
@@ -803,10 +824,22 @@ fn apply_patch_to_config(config: &mut SandboxConfig, patch: &SandboxModification
     if config.spec.resources.max_memory_mib < config.spec.resources.memory_mib {
         config.spec.resources.max_memory_mib = config.spec.resources.memory_mib;
     }
-    if let Some(upper_mib) = patch.oci_upper_size_mib
+    if let Some(size_mib) = patch.root_disk_size_mib
         && let RootfsSource::Oci(oci) = &mut config.spec.image
     {
-        oci.upper_size_mib = Some(upper_mib);
+        match &mut oci.root_disk {
+            Some(RootDisk::Managed { size_mib: s }) | Some(RootDisk::Tmpfs { size_mib: s }) => {
+                *s = Some(size_mib);
+            }
+            // The planner surfaces disk-image sizing as a conflict; never
+            // touch a user-owned image here.
+            Some(RootDisk::DiskImage { .. }) => {}
+            None => {
+                oci.root_disk = Some(RootDisk::Managed {
+                    size_mib: Some(size_mib),
+                });
+            }
+        }
     }
     for var in &patch.env {
         if let Some(existing) = config
@@ -1262,29 +1295,44 @@ fn push_resource_changes(
 /// persisting (stopped or restart-backed), and a running `--next-start`
 /// request defers the grow to the pre-boot preparation step. Never live: the
 /// upper is mounted by overlayfs while the sandbox runs.
-fn push_upper_size_change(
+fn push_root_disk_size_change(
     status: SandboxStatus,
     config: &SandboxConfig,
     patch: &SandboxModificationPatch,
     policy: ModificationPolicy,
     changes: &mut Vec<PlannedChange>,
 ) {
-    let Some(target_mib) = patch.oci_upper_size_mib else {
+    let Some(target_mib) = patch.root_disk_size_mib else {
         return;
     };
-    let Some(current_mib) = current_upper_size_mib(config) else {
-        // Non-OCI rootfs: surfaced as a conflict, not a change.
-        return;
+    let (before, after) = match root_disk_size_state(config) {
+        // Non-OCI rootfs and user-owned disk images surface as conflicts,
+        // not changes.
+        None | Some(RootDiskSizeState::DiskImage) => return,
+        Some(RootDiskSizeState::Managed { current_mib }) => {
+            // Shrink and same-size requests are conflicts, pushed separately.
+            if target_mib <= current_mib {
+                return;
+            }
+            (Some(format_mib(current_mib)), format_mib(target_mib))
+        }
+        Some(RootDiskSizeState::Tmpfs { current_mib }) => {
+            // Ephemeral content: any size change is fine, applied next boot.
+            // Same-size and over-memory requests are conflicts, pushed
+            // separately.
+            if current_mib == Some(target_mib)
+                || target_mib > patch.memory_mib.unwrap_or(config.spec.resources.memory_mib)
+            {
+                return;
+            }
+            (current_mib.map(format_mib), format_mib(target_mib))
+        }
     };
-    if target_mib <= current_mib {
-        // Shrink and same-size requests are conflicts, pushed separately.
-        return;
-    }
     changes.push(PlannedChange::Config(ConfigPlannedChange {
-        field: UPPER_SIZE_FIELD.to_string(),
+        field: ROOT_DISK_FIELD.to_string(),
         change: ChangeKind::Updated,
-        before: Some(format_mib(current_mib)),
-        after: Some(format_mib(target_mib)),
+        before,
+        after: Some(after),
         disposition: boot_capacity_disposition(status, policy),
         reason: upper_size_reason(status, policy),
     }));
@@ -1304,54 +1352,104 @@ fn upper_size_reason(status: SandboxStatus, policy: ModificationPolicy) -> Optio
     }
 }
 
-/// Reject upper-size requests that can never apply: a non-OCI rootfs has no
-/// upper, and shrink (or same-size) is unsupported in v1 because the upper is
-/// a real filesystem image where shrinking risks data loss.
-fn push_upper_size_conflicts(
+/// Reject root disk size requests that can never apply: a non-OCI rootfs has
+/// no root disk; a disk-image root disk is user-owned; managed shrink (or
+/// same-size) is unsupported in v1 because the upper is a real filesystem
+/// image where shrinking risks data loss; and a tmpfs size must fit in guest
+/// memory.
+fn push_root_disk_size_conflicts(
     config: &SandboxConfig,
     patch: &SandboxModificationPatch,
     conflicts: &mut Vec<ModificationConflict>,
 ) {
-    let Some(target_mib) = patch.oci_upper_size_mib else {
+    let Some(target_mib) = patch.root_disk_size_mib else {
         return;
     };
-    let Some(current_mib) = current_upper_size_mib(config) else {
-        conflicts.push(ModificationConflict {
-            field: UPPER_SIZE_FIELD.to_string(),
-            message: "oci upper size requires an OCI rootfs".to_string(),
-        });
-        return;
-    };
-    if target_mib < current_mib {
-        conflicts.push(ModificationConflict {
-            field: UPPER_SIZE_FIELD.to_string(),
-            message: format!(
-                "oci upper size {} is smaller than the current {}; shrink is not supported (recreate the sandbox instead)",
-                format_mib(target_mib),
-                format_mib(current_mib)
-            ),
-        });
-    } else if target_mib == current_mib {
-        conflicts.push(ModificationConflict {
-            field: UPPER_SIZE_FIELD.to_string(),
-            message: format!(
-                "oci upper size is already {}; only grow is supported",
-                format_mib(current_mib)
-            ),
-        });
+    match root_disk_size_state(config) {
+        None => {
+            conflicts.push(ModificationConflict {
+                field: ROOT_DISK_FIELD.to_string(),
+                message: "root disk size requires an OCI rootfs".to_string(),
+            });
+        }
+        Some(RootDiskSizeState::DiskImage) => {
+            conflicts.push(ModificationConflict {
+                field: ROOT_DISK_FIELD.to_string(),
+                message:
+                    "the root disk is a user-supplied disk image; its size is determined by the image file"
+                        .to_string(),
+            });
+        }
+        Some(RootDiskSizeState::Managed { current_mib }) => {
+            if target_mib < current_mib {
+                conflicts.push(ModificationConflict {
+                    field: ROOT_DISK_FIELD.to_string(),
+                    message: format!(
+                        "root disk size {} is smaller than the current {}; shrink is not supported (recreate the sandbox instead)",
+                        format_mib(target_mib),
+                        format_mib(current_mib)
+                    ),
+                });
+            } else if target_mib == current_mib {
+                conflicts.push(ModificationConflict {
+                    field: ROOT_DISK_FIELD.to_string(),
+                    message: format!(
+                        "root disk size is already {}; only grow is supported",
+                        format_mib(current_mib)
+                    ),
+                });
+            }
+        }
+        Some(RootDiskSizeState::Tmpfs { current_mib }) => {
+            // Compare against the desired end-state memory when the same
+            // patch also resizes memory.
+            let memory_mib = patch.memory_mib.unwrap_or(config.spec.resources.memory_mib);
+            if target_mib > memory_mib {
+                conflicts.push(ModificationConflict {
+                    field: ROOT_DISK_FIELD.to_string(),
+                    message: format!(
+                        "tmpfs root disk size {} must not exceed sandbox memory ({})",
+                        format_mib(target_mib),
+                        format_mib(memory_mib)
+                    ),
+                });
+            } else if current_mib == Some(target_mib) {
+                conflicts.push(ModificationConflict {
+                    field: ROOT_DISK_FIELD.to_string(),
+                    message: format!("root disk size is already {}", format_mib(target_mib)),
+                });
+            }
+        }
     }
 }
 
-/// Effective current upper size for an OCI rootfs: the persisted value, or
-/// the create-time default for configs that predate materialized defaults.
-fn current_upper_size_mib(config: &SandboxConfig) -> Option<u32> {
-    match &config.spec.image {
-        RootfsSource::Oci(oci) => Some(
-            oci.upper_size_mib
-                .unwrap_or(super::config::DEFAULT_OCI_UPPER_SIZE_MIB),
-        ),
-        _ => None,
-    }
+/// Size-relevant view of the configured root disk for an OCI rootfs.
+enum RootDiskSizeState {
+    /// Managed upper with its effective size (persisted value, or the
+    /// create-time default for configs that predate materialized defaults).
+    Managed { current_mib: u32 },
+    /// Tmpfs upper with its persisted size, if any.
+    Tmpfs { current_mib: Option<u32> },
+    /// User-supplied disk image: not sizable through modify.
+    DiskImage,
+}
+
+fn root_disk_size_state(config: &SandboxConfig) -> Option<RootDiskSizeState> {
+    let RootfsSource::Oci(oci) = &config.spec.image else {
+        return None;
+    };
+    Some(match &oci.root_disk {
+        None => RootDiskSizeState::Managed {
+            current_mib: super::config::DEFAULT_OCI_UPPER_SIZE_MIB,
+        },
+        Some(RootDisk::Managed { size_mib }) => RootDiskSizeState::Managed {
+            current_mib: size_mib.unwrap_or(super::config::DEFAULT_OCI_UPPER_SIZE_MIB),
+        },
+        Some(RootDisk::Tmpfs { size_mib }) => RootDiskSizeState::Tmpfs {
+            current_mib: *size_mib,
+        },
+        Some(RootDisk::DiskImage { .. }) => RootDiskSizeState::DiskImage,
+    })
 }
 
 fn push_secret_changes(
@@ -2466,7 +2564,16 @@ mod tests {
         let mut config = config(2, 1024);
         config.spec.image = RootfsSource::Oci(microsandbox_types::OciRootfsSource {
             reference: "python".to_string(),
-            upper_size_mib: Some(upper_mib),
+            root_disk: Some(RootDisk::managed(upper_mib)),
+        });
+        config
+    }
+
+    fn oci_config_with_root_disk(root_disk: RootDisk) -> SandboxConfig {
+        let mut config = config(2, 1024);
+        config.spec.image = RootfsSource::Oci(microsandbox_types::OciRootfsSource {
+            reference: "python".to_string(),
+            root_disk: Some(root_disk),
         });
         config
     }
@@ -2474,7 +2581,7 @@ mod tests {
     #[test]
     fn stopped_upper_grow_classifies_next_start() {
         let patch = SandboxModificationPatch {
-            oci_upper_size_mib: Some(8192),
+            root_disk_size_mib: Some(8192),
             ..SandboxModificationPatch::default()
         };
 
@@ -2493,20 +2600,23 @@ mod tests {
         let PlannedChange::Config(change) = &plan.changes[0] else {
             panic!("expected config change");
         };
-        assert_eq!(change.field, "oci_upper_size");
+        assert_eq!(change.field, "root_disk_size");
         assert_eq!(change.change, ChangeKind::Updated);
         assert_eq!(change.before.as_deref(), Some("4 GiB"));
         assert_eq!(change.after.as_deref(), Some("8 GiB"));
         assert_eq!(change.disposition, ModificationDisposition::NextStart);
         assert!(change.reason.is_none());
         assert!(validate_apply_supported(&plan).is_ok());
-        assert_eq!(upper_grow_target(&plan, &patch), Some(8192));
+        assert_eq!(
+            root_disk_grow_target(&plan, &patch, &oci_config_with_upper(4096)),
+            Some(8192)
+        );
     }
 
     #[test]
     fn running_upper_grow_is_restart_backed_never_live() {
         let patch = SandboxModificationPatch {
-            oci_upper_size_mib: Some(8192),
+            root_disk_size_mib: Some(8192),
             ..SandboxModificationPatch::default()
         };
 
@@ -2527,7 +2637,7 @@ mod tests {
         let PlannedChange::Config(change) = &plan.changes[0] else {
             panic!("expected config change");
         };
-        assert_eq!(change.field, "oci_upper_size");
+        assert_eq!(change.field, "root_disk_size");
         assert_eq!(change.disposition, ModificationDisposition::RequiresRestart);
         assert_eq!(
             change.reason.as_deref(),
@@ -2552,7 +2662,7 @@ mod tests {
     #[test]
     fn running_upper_grow_under_next_start_persists_desired_only() {
         let patch = SandboxModificationPatch {
-            oci_upper_size_mib: Some(8192),
+            root_disk_size_mib: Some(8192),
             ..SandboxModificationPatch::default()
         };
 
@@ -2581,7 +2691,7 @@ mod tests {
             (4096, "only grow is supported"),
         ] {
             let patch = SandboxModificationPatch {
-                oci_upper_size_mib: Some(target_mib),
+                root_disk_size_mib: Some(target_mib),
                 ..SandboxModificationPatch::default()
             };
 
@@ -2597,7 +2707,7 @@ mod tests {
 
             assert!(plan.changes.is_empty());
             assert_eq!(plan.conflicts.len(), 1);
-            assert_eq!(plan.conflicts[0].field, "oci_upper_size");
+            assert_eq!(plan.conflicts[0].field, "root_disk_size");
             assert!(
                 plan.conflicts[0].message.contains(expected),
                 "unexpected conflict for {target_mib}: {}",
@@ -2615,7 +2725,7 @@ mod tests {
             follow_root_symlinks: false,
         };
         let patch = SandboxModificationPatch {
-            oci_upper_size_mib: Some(8192),
+            root_disk_size_mib: Some(8192),
             ..SandboxModificationPatch::default()
         };
 
@@ -2631,9 +2741,9 @@ mod tests {
 
         assert!(plan.changes.is_empty());
         assert_eq!(plan.conflicts.len(), 1);
-        assert_eq!(plan.conflicts[0].field, "oci_upper_size");
+        assert_eq!(plan.conflicts[0].field, "root_disk_size");
         assert!(plan.conflicts[0].message.contains("requires an OCI rootfs"));
-        assert_eq!(upper_grow_target(&plan, &patch), None);
+        assert_eq!(root_disk_grow_target(&plan, &patch, &current), None);
     }
 
     #[test]
@@ -2641,7 +2751,7 @@ mod tests {
         // Configs that predate materialized defaults store no upper size; the
         // effective current size is the create-time default (4 GiB).
         let patch = SandboxModificationPatch {
-            oci_upper_size_mib: Some(2048),
+            root_disk_size_mib: Some(2048),
             ..SandboxModificationPatch::default()
         };
 
@@ -2667,13 +2777,104 @@ mod tests {
     fn applying_upper_patch_updates_oci_config() {
         let mut config = oci_config_with_upper(4096);
         let patch = SandboxModificationPatch {
-            oci_upper_size_mib: Some(8192),
+            root_disk_size_mib: Some(8192),
             ..SandboxModificationPatch::default()
         };
 
         apply_patch_to_config(&mut config, &patch);
 
-        assert_eq!(config.spec.image.oci_upper_size_mib(), Some(8192));
+        assert_eq!(
+            config.spec.image.oci_root_disk(),
+            Some(&RootDisk::managed(8192))
+        );
+    }
+
+    #[test]
+    fn tmpfs_root_disk_resizes_any_direction_without_host_grow() {
+        let current = oci_config_with_root_disk(RootDisk::tmpfs(1024));
+        // Shrink is fine for tmpfs: the content is ephemeral.
+        let patch = SandboxModificationPatch {
+            root_disk_size_mib: Some(512),
+            ..SandboxModificationPatch::default()
+        };
+
+        let plan = build_plan(
+            "api".to_string(),
+            SandboxStatus::Stopped,
+            &current,
+            None,
+            LiveControl::default(),
+            patch.clone(),
+            ModificationPolicy::NoRestart,
+        );
+
+        assert!(plan.conflicts.is_empty());
+        assert_eq!(plan.changes.len(), 1);
+        let PlannedChange::Config(change) = &plan.changes[0] else {
+            panic!("expected config change");
+        };
+        assert_eq!(change.field, "root_disk_size");
+        // No host file to grow for a tmpfs root disk.
+        assert_eq!(root_disk_grow_target(&plan, &patch, &current), None);
+    }
+
+    #[test]
+    fn tmpfs_root_disk_resize_over_memory_conflicts() {
+        // config() allocates 1024 MiB of guest memory.
+        let current = oci_config_with_root_disk(RootDisk::tmpfs(512));
+        let patch = SandboxModificationPatch {
+            root_disk_size_mib: Some(2048),
+            ..SandboxModificationPatch::default()
+        };
+
+        let plan = build_plan(
+            "api".to_string(),
+            SandboxStatus::Stopped,
+            &current,
+            None,
+            LiveControl::default(),
+            patch,
+            ModificationPolicy::NoRestart,
+        );
+
+        assert!(plan.changes.is_empty());
+        assert_eq!(plan.conflicts.len(), 1);
+        assert!(
+            plan.conflicts[0]
+                .message
+                .contains("must not exceed sandbox memory")
+        );
+    }
+
+    #[test]
+    fn disk_image_root_disk_resize_conflicts() {
+        let current = oci_config_with_root_disk(RootDisk::DiskImage {
+            path: "./scratch.img".into(),
+            format: microsandbox_types::DiskImageFormat::Raw,
+            fstype: None,
+        });
+        let patch = SandboxModificationPatch {
+            root_disk_size_mib: Some(8192),
+            ..SandboxModificationPatch::default()
+        };
+
+        let plan = build_plan(
+            "api".to_string(),
+            SandboxStatus::Stopped,
+            &current,
+            None,
+            LiveControl::default(),
+            patch,
+            ModificationPolicy::NoRestart,
+        );
+
+        assert!(plan.changes.is_empty());
+        assert_eq!(plan.conflicts.len(), 1);
+        assert!(
+            plan.conflicts[0]
+                .message
+                .contains("user-supplied disk image")
+        );
     }
 
     #[test]

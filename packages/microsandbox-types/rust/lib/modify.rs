@@ -40,9 +40,12 @@ pub struct SandboxModificationPatch {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_memory_mib: Option<u32>,
 
-    /// Desired OCI writable overlay upper size in MiB. Grow-only: the upper is a real ext4 image, so shrinking risks data loss and is rejected in v1.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub oci_upper_size_mib: Option<u32>,
+    /// Desired root disk size in MiB. Managed kind: grow-only (the upper is a real ext4 image,
+    /// so shrinking risks data loss and is rejected). Tmpfs kind: any direction, effective next
+    /// boot. Disk-image kind: rejected (user-owned file). Accepts the legacy
+    /// `oci_upper_size_mib` wire spelling.
+    #[serde(alias = "oci_upper_size_mib", skip_serializing_if = "Option::is_none")]
+    pub root_disk_size_mib: Option<u32>,
 
     /// Environment variables to set for future execs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
