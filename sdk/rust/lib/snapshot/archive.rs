@@ -6,9 +6,18 @@
 //! old-GNU sparse entries (type `S`): only allocated extents are read
 //! and archived, so export cost scales with the data a sandbox
 //! actually wrote instead of the upper layer's logical size. Dense
-//! files keep plain regular entries, and the image tar ingest module
-//! already handles gzip/zstd detection on the read side. Plain `.tar`
-//! archives are also accepted on import.
+//! files keep plain regular entries. Plain `.tar` archives are also
+//! accepted on import.
+//!
+//! Import walks the tar records itself rather than going through
+//! `tokio_tar::Archive`: the entry grammar is closed (regular files,
+//! directories, and old-GNU sparse entries at fixed depths, produced
+//! by our own exporter), and owning the walk lets sparse entries be
+//! restored map-driven — data runs copied straight off the wire,
+//! holes never written and kept unallocated per platform
+//! ([`extent::mark_sparse`] on NTFS, [`extent::punch_hole_aligned`]
+//! on APFS). `tokio_tar` remains the header codec and the dense-entry
+//! writer.
 
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
@@ -16,9 +25,10 @@ use std::path::{Component, Path, PathBuf};
 use async_compression::tokio::bufread::ZstdDecoder;
 use async_compression::tokio::write::ZstdEncoder;
 use microsandbox_image::snapshot::MANIFEST_FILENAME;
+use microsandbox_utils::extent::{self, ExtentMap};
 use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
-use tokio_tar::{Archive, Builder, EntryType};
+use tokio_tar::{Builder, EntryType, Header};
 
 use crate::backend::LocalBackend;
 use crate::{MicrosandboxError, MicrosandboxResult};
@@ -46,7 +56,6 @@ struct UnpackedArchive {
 }
 
 /// Allocation map of a sparse file, in tar-block granularity.
-#[cfg(unix)]
 struct SparseMap {
     /// Logical (apparent) file size.
     len: u64,
@@ -57,7 +66,6 @@ struct SparseMap {
     segments: Vec<(u64, u64)>,
 }
 
-#[cfg(unix)]
 impl SparseMap {
     /// Map entries for the GNU header: the data segments, plus the
     /// zero-length terminator GNU tar uses to mark a trailing hole.
@@ -314,7 +322,6 @@ async fn append_artifact_file<W>(
 where
     W: tokio::io::AsyncWrite + Unpin + Send,
 {
-    #[cfg(unix)]
     if try_append_sparse(builder, path, &name).await? {
         return Ok(());
     }
@@ -322,20 +329,17 @@ where
     Ok(())
 }
 
-#[cfg(unix)]
 const TAR_BLOCK: u64 = 512;
 
 // Sparse-map slots inline in a GNU header / per extended sparse block.
-#[cfg(unix)]
 const GNU_HEADER_SPARSE_SLOTS: usize = 4;
-#[cfg(unix)]
 const GNU_EXT_SPARSE_SLOTS: usize = 21;
 
 /// Append `path` as an old-GNU sparse entry if it has holes. Returns
 /// `false` without writing anything when the file is better served by
-/// the dense path (no holes, empty, no `SEEK_DATA` support, or a name
-/// too long for the fixed GNU header path field).
-#[cfg(unix)]
+/// the dense path (no holes, empty, extents not enumerable on this
+/// filesystem, or a name too long for the fixed GNU header path
+/// field).
 async fn try_append_sparse<W>(
     builder: &mut Builder<W>,
     path: &Path,
@@ -345,7 +349,7 @@ where
     W: tokio::io::AsyncWrite + Unpin + Send,
 {
     use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-    use tokio_tar::{GnuExtSparseHeader, Header, HeaderMode};
+    use tokio_tar::{GnuExtSparseHeader, HeaderMode};
 
     let meta = tokio::fs::metadata(path).await?;
     if !meta.is_file() {
@@ -353,11 +357,11 @@ where
     }
     let map = {
         let path = path.to_path_buf();
-        tokio::task::spawn_blocking(move || scan_sparse_map(&path))
+        tokio::task::spawn_blocking(move || ExtentMap::scan(&path))
             .await
             .map_err(|e| MicrosandboxError::Custom(format!("snapshot export scan task: {e}")))??
     };
-    let Some(map) = map else {
+    let Some(map) = map.as_ref().and_then(tar_sparse_map) else {
         return Ok(false);
     };
 
@@ -429,50 +433,20 @@ where
     Ok(true)
 }
 
-/// Walk `path`'s allocation map with `SEEK_DATA`/`SEEK_HOLE` (same
-/// idiom as `snapshot::verify`). `None` means "archive it dense".
-#[cfg(unix)]
-fn scan_sparse_map(path: &Path) -> std::io::Result<Option<SparseMap>> {
-    use std::os::unix::io::AsRawFd;
-
-    let file = std::fs::File::open(path)?;
-    let len = file.metadata()?.len();
+/// Round an [`ExtentMap`]'s byte extents outward to tar blocks and
+/// merge runs that touch: sparse readers require every data run before
+/// the last to be a multiple of 512. `None` means "archive it dense" —
+/// an empty or hole-free file, where a regular entry is equivalent and
+/// stays readable by older importers.
+fn tar_sparse_map(map: &ExtentMap) -> Option<SparseMap> {
+    let len = map.len;
     if len == 0 {
-        return Ok(None);
+        return None;
     }
-    let fd = file.as_raw_fd();
 
     let mut segments: Vec<(u64, u64)> = Vec::new();
-    let mut off: i64 = 0;
-    while (off as u64) < len {
-        let data_start = unsafe { libc::lseek(fd, off, libc::SEEK_DATA) };
-        if data_start < 0 {
-            let err = std::io::Error::last_os_error();
-            match err.raw_os_error() {
-                // No more data past this offset: trailing hole.
-                Some(libc::ENXIO) => break,
-                // Filesystem doesn't implement the seek flags — treat
-                // the file as dense rather than failing the export.
-                // ENOTSUP and EOPNOTSUPP are distinct on macOS / BSDs.
-                Some(libc::EINVAL) | Some(libc::ENOTSUP) => return Ok(None),
-                #[cfg(not(target_os = "linux"))]
-                Some(libc::EOPNOTSUPP) => return Ok(None),
-                _ => return Err(err),
-            }
-        }
-        let data_end = unsafe { libc::lseek(fd, data_start, libc::SEEK_HOLE) };
-        if data_end < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let data_end = (data_end as u64).min(len);
-        let data_start = data_start as u64;
-        if data_end <= data_start {
-            break;
-        }
-
-        // Round to tar blocks and merge segments that touch: sparse
-        // readers require every data run before the last to be a
-        // multiple of 512.
+    for (data_start, data_len) in &map.extents {
+        let data_end = data_start + data_len;
         let seg_start = data_start - data_start % TAR_BLOCK;
         let seg_end = data_end
             .div_ceil(TAR_BLOCK)
@@ -487,28 +461,23 @@ fn scan_sparse_map(path: &Path) -> std::io::Result<Option<SparseMap>> {
             }
             _ => segments.push((seg_start, seg_end - seg_start)),
         }
-
-        off = data_end as i64;
     }
 
-    // No holes: a regular entry is equivalent and stays readable by
-    // older importers.
     if segments.as_slice() == [(0, len)] {
-        return Ok(None);
+        return None;
     }
 
     let archived = segments.iter().map(|(_, sz)| sz).sum();
-    Ok(Some(SparseMap {
+    Some(SparseMap {
         len,
         archived,
         segments,
-    }))
+    })
 }
 
 /// Encode `value` into a 12-byte tar numeric field: zero-padded octal
 /// with a NUL terminator when it fits (what GNU tar writes), otherwise
 /// GNU base-256 (high bit set, big-endian binary).
-#[cfg(unix)]
 fn write_tar_numeric(field: &mut [u8; 12], value: u64) {
     const OCTAL_MAX: u64 = 0o77777777777; // 11 octal digits
     if value <= OCTAL_MAX {
@@ -522,6 +491,11 @@ fn write_tar_numeric(field: &mut [u8; 12], value: u64) {
     }
 }
 
+/// Walk the archive's 512-byte records directly. The grammar is closed
+/// — regular files, directories, and old-GNU sparse entries at fixed
+/// depths, produced by our own exporter — so a small owned walker
+/// replaces `tokio_tar::Archive` and lets sparse entries restore
+/// map-driven instead of through the library's opaque unpack.
 async fn unpack_archive<R>(
     reader: R,
     snapshots_dir: &Path,
@@ -530,14 +504,33 @@ async fn unpack_archive<R>(
 where
     R: tokio::io::AsyncRead + Unpin,
 {
-    let mut archive = Archive::new(reader);
-    let mut entries = archive.entries()?;
+    let mut reader = BufReader::with_capacity(256 * 1024, reader);
     let mut manifest_dirs: Vec<PathBuf> = Vec::new();
+    let mut block = [0u8; TAR_BLOCK as usize];
 
-    while let Some(entry) = tokio_stream_next(&mut entries).await? {
-        let mut entry = entry?;
-        let path_in_archive = entry.path()?.into_owned();
-        let entry_type = entry.header().entry_type();
+    loop {
+        if !read_record(&mut reader, &mut block).await? {
+            // Clean EOF without the two-zero-record terminator; accept,
+            // matching the previous reader's tolerance.
+            break;
+        }
+        if block.iter().all(|&b| b == 0) {
+            // End-of-archive marker. Tolerate EOF right after; anything
+            // non-zero next means the stream is corrupt.
+            if read_record(&mut reader, &mut block).await? && !block.iter().all(|&b| b == 0) {
+                return Err(MicrosandboxError::Custom(
+                    "archive contains a lone zero record inside the entry stream".into(),
+                ));
+            }
+            break;
+        }
+
+        let mut header = Header::new_old();
+        header.as_mut_bytes().copy_from_slice(&block);
+        verify_header_checksum(&header)?;
+
+        let entry_type = header.entry_type();
+        let path_in_archive = header.path()?.into_owned();
 
         // Reject suspicious paths (path traversal, absolute).
         if path_in_archive.is_absolute()
@@ -578,7 +571,23 @@ where
         if let Some(parent) = target.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        entry.unpack(&target).await?;
+
+        let entry_size = header.entry_size()?;
+        match entry_type {
+            EntryType::Directory => {
+                tokio::fs::create_dir_all(&target).await?;
+                skip_entry_data(&mut reader, entry_size).await?;
+            }
+            EntryType::GNUSparse => {
+                unpack_sparse_entry(&mut reader, &header, entry_size, &target).await?;
+                apply_entry_mode(&header, &target).await?;
+            }
+            // Regular / Continuous — the only other types validation lets through.
+            _ => {
+                unpack_dense_entry(&mut reader, entry_size, &target).await?;
+                apply_entry_mode(&header, &target).await?;
+            }
+        }
 
         if path_in_archive
             .file_name()
@@ -593,6 +602,261 @@ where
     }
 
     Ok(UnpackedArchive { manifest_dirs })
+}
+
+/// Read one 512-byte tar record. `Ok(false)` on clean EOF at a record
+/// boundary; a partial record is corruption.
+async fn read_record<R>(
+    reader: &mut R,
+    block: &mut [u8; TAR_BLOCK as usize],
+) -> MicrosandboxResult<bool>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut filled = 0usize;
+    while filled < block.len() {
+        let n = reader.read(&mut block[filled..]).await?;
+        if n == 0 {
+            if filled == 0 {
+                return Ok(false);
+            }
+            return Err(MicrosandboxError::Custom(
+                "archive truncated mid-record".into(),
+            ));
+        }
+        filled += n;
+    }
+    Ok(true)
+}
+
+/// Verify a header's recorded checksum: sum of the record's bytes with
+/// the checksum field itself read as spaces. Accept both the unsigned
+/// sum (what everything modern writes, including our exporter) and the
+/// legacy signed-byte sum some historic implementations produced.
+fn verify_header_checksum(header: &Header) -> MicrosandboxResult<()> {
+    let bytes = header.as_bytes();
+    let recorded = header.cksum().map_err(|e| {
+        MicrosandboxError::Custom(format!("archive header checksum unreadable: {e}"))
+    })?;
+
+    let mut unsigned: u64 = 0;
+    let mut signed: i64 = 0;
+    for (i, byte) in bytes.iter().enumerate() {
+        let value = if (148..156).contains(&i) { b' ' } else { *byte };
+        unsigned += value as u64;
+        signed += (value as i8) as i64;
+    }
+    if recorded as u64 == unsigned || recorded as i64 == signed {
+        Ok(())
+    } else {
+        Err(MicrosandboxError::Custom(
+            "archive header checksum mismatch".into(),
+        ))
+    }
+}
+
+/// Discard an entry's data plus its block padding.
+async fn skip_entry_data<R>(reader: &mut R, size: u64) -> MicrosandboxResult<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    discard_exact(reader, size + tar_pad(size)).await
+}
+
+/// Discard exactly `count` bytes from the stream.
+async fn discard_exact<R>(reader: &mut R, count: u64) -> MicrosandboxResult<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let discarded =
+        tokio::io::copy(&mut (&mut *reader).take(count), &mut tokio::io::sink()).await?;
+    if discarded != count {
+        return Err(MicrosandboxError::Custom(
+            "archive truncated mid-entry".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Bytes of zero padding that follow `size` bytes of entry data.
+fn tar_pad(size: u64) -> u64 {
+    (TAR_BLOCK - size % TAR_BLOCK) % TAR_BLOCK
+}
+
+/// Stream a dense entry's bytes into `target`.
+async fn unpack_dense_entry<R>(reader: &mut R, size: u64, target: &Path) -> MicrosandboxResult<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncWriteExt;
+
+    let mut file = tokio::fs::File::create(target).await?;
+    let copied = tokio::io::copy(&mut (&mut *reader).take(size), &mut file).await?;
+    if copied != size {
+        return Err(MicrosandboxError::Custom(
+            "archive truncated mid-entry".into(),
+        ));
+    }
+    file.flush().await?;
+    discard_exact(reader, tar_pad(size)).await
+}
+
+/// Restore an old-GNU sparse entry map-driven: parse the sparse map
+/// (inline slots plus chained extended records), enforce its
+/// invariants, then copy each data run straight off the wire to its
+/// logical offset. Hole bytes are never in the stream and never
+/// written; [`extent::mark_sparse`] / [`extent::punch_hole_aligned`]
+/// keep them unallocated on filesystems that need telling.
+async fn unpack_sparse_entry<R>(
+    reader: &mut R,
+    header: &Header,
+    archived: u64,
+    target: &Path,
+) -> MicrosandboxResult<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+    use tokio_tar::GnuExtSparseHeader;
+
+    let gnu = header.as_gnu().ok_or_else(|| {
+        MicrosandboxError::Custom("sparse entry does not carry a GNU header".into())
+    })?;
+    let realsize = gnu
+        .real_size()
+        .map_err(|e| MicrosandboxError::Custom(format!("sparse entry realsize unreadable: {e}")))?;
+
+    let mut map: Vec<(u64, u64)> = Vec::new();
+    let mut push_slot = |slot: &tokio_tar::GnuSparseHeader| -> MicrosandboxResult<()> {
+        if slot.is_empty() {
+            return Ok(());
+        }
+        let offset = slot
+            .offset()
+            .map_err(|e| MicrosandboxError::Custom(format!("sparse map slot unreadable: {e}")))?;
+        let numbytes = slot
+            .length()
+            .map_err(|e| MicrosandboxError::Custom(format!("sparse map slot unreadable: {e}")))?;
+        map.push((offset, numbytes));
+        Ok(())
+    };
+    for slot in &gnu.sparse {
+        push_slot(slot)?;
+    }
+    let mut extended = gnu.is_extended();
+    let mut block = [0u8; TAR_BLOCK as usize];
+    while extended {
+        if !read_record(reader, &mut block).await? {
+            return Err(MicrosandboxError::Custom(
+                "archive truncated inside a sparse map".into(),
+            ));
+        }
+        let mut ext = GnuExtSparseHeader::new();
+        ext.as_mut_bytes().copy_from_slice(&block);
+        for slot in &ext.sparse {
+            push_slot(slot)?;
+        }
+        extended = ext.is_extended();
+    }
+
+    // The same invariants GNU tar's readers enforce: runs sorted and
+    // non-overlapping, every run before the last 512-aligned, run bytes
+    // sum to the entry size, and the map ends exactly at realsize.
+    let mut logical_end: u64 = 0;
+    let mut consumed: u64 = 0;
+    for (offset, numbytes) in &map {
+        if *numbytes != 0 && !consumed.is_multiple_of(TAR_BLOCK) {
+            return Err(MicrosandboxError::Custom(
+                "sparse map data run not aligned to 512-byte record".into(),
+            ));
+        }
+        if *offset < logical_end {
+            return Err(MicrosandboxError::Custom(
+                "sparse map runs out of order or overlapping".into(),
+            ));
+        }
+        logical_end = offset.checked_add(*numbytes).ok_or_else(|| {
+            MicrosandboxError::Custom("sparse map run overflows file size".into())
+        })?;
+        consumed = consumed.checked_add(*numbytes).ok_or_else(|| {
+            MicrosandboxError::Custom("sparse map bytes overflow entry size".into())
+        })?;
+    }
+    if logical_end != realsize {
+        return Err(MicrosandboxError::Custom(
+            "sparse map does not end at the entry's realsize".into(),
+        ));
+    }
+    if consumed != archived {
+        return Err(MicrosandboxError::Custom(
+            "sparse map bytes disagree with the entry size".into(),
+        ));
+    }
+
+    let std_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(target)?;
+    // Allocation-only optimizations: content is correct without them,
+    // so a filesystem that rejects either just loads dense.
+    let _ = extent::mark_sparse(&std_file);
+    std_file.set_len(realsize)?;
+    let mut file = tokio::fs::File::from_std(std_file);
+
+    for (offset, numbytes) in &map {
+        if *numbytes == 0 {
+            continue;
+        }
+        file.seek(std::io::SeekFrom::Start(*offset)).await?;
+        let copied = tokio::io::copy(&mut (&mut *reader).take(*numbytes), &mut file).await?;
+        if copied != *numbytes {
+            return Err(MicrosandboxError::Custom(
+                "archive truncated mid-entry".into(),
+            ));
+        }
+    }
+    file.flush().await?;
+    discard_exact(reader, tar_pad(archived)).await?;
+
+    // APFS keeps nothing sparse on its own — punch the holes the map
+    // describes. No-op on other platforms.
+    if cfg!(target_os = "macos") {
+        let std_file = file.into_std().await;
+        let mut prev_end: u64 = 0;
+        for (offset, numbytes) in &map {
+            if *numbytes == 0 {
+                continue;
+            }
+            if *offset > prev_end {
+                let _ = extent::punch_hole_aligned(&std_file, prev_end, offset - prev_end);
+            }
+            prev_end = offset + numbytes;
+        }
+        if realsize > prev_end {
+            let _ = extent::punch_hole_aligned(&std_file, prev_end, realsize - prev_end);
+        }
+    }
+
+    Ok(())
+}
+
+/// Apply the entry's recorded permission bits to the restored file.
+async fn apply_entry_mode(header: &Header, target: &Path) -> MicrosandboxResult<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = header.mode().map_err(|e| {
+            MicrosandboxError::Custom(format!("archive header mode unreadable: {e}"))
+        })?;
+        tokio::fs::set_permissions(target, std::fs::Permissions::from_mode(mode & 0o7777)).await?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (header, target);
+    }
+    Ok(())
 }
 
 fn validate_archive_entry_type(entry_type: EntryType, path: &Path) -> MicrosandboxResult<()> {
@@ -1059,14 +1323,6 @@ fn push_required_cache_file(
         format!("cache/{archive_dir}/{}", file_name_str(path)?),
     ));
     Ok(())
-}
-
-async fn tokio_stream_next<S>(s: &mut S) -> MicrosandboxResult<Option<S::Item>>
-where
-    S: futures::stream::Stream + Unpin,
-{
-    use futures::stream::StreamExt;
-    Ok(s.next().await)
 }
 
 fn digest_prefix(digest: &str) -> String {

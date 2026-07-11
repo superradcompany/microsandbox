@@ -150,7 +150,10 @@ fn sha256_digest(bytes: &[u8]) -> String {
 /// and holes everywhere else. Records a sha256 integrity digest over
 /// the logical content. Returns `(artifact_dir, manifest_digest,
 /// logical_content)`.
-#[cfg(unix)]
+///
+/// Holes are made real per platform: `mark_sparse` before writing so
+/// NTFS keeps unwritten ranges unallocated, and explicit hole punching
+/// afterwards on APFS, which densifies seek-written files.
 fn make_sparse_artifact(
     parent: &Path,
     name: &str,
@@ -170,6 +173,7 @@ fn make_sparse_artifact(
         .truncate(true)
         .open(&upper_path)
         .unwrap();
+    microsandbox_utils::extent::mark_sparse(&f).unwrap();
     f.set_len(len).unwrap();
     let mut logical = vec![0u8; len as usize];
     for (offset, bytes) in extents {
@@ -178,6 +182,23 @@ fn make_sparse_artifact(
         logical[*offset as usize..*offset as usize + bytes.len()].copy_from_slice(bytes);
     }
     f.sync_all().unwrap();
+
+    // Punch the hole ranges explicitly (no-op outside macOS).
+    let mut sorted: Vec<(u64, u64)> = extents
+        .iter()
+        .map(|(off, bytes)| (*off, bytes.len() as u64))
+        .collect();
+    sorted.sort_unstable();
+    let mut cursor = 0u64;
+    for (off, extent_len) in sorted {
+        if off > cursor {
+            microsandbox_utils::extent::punch_hole_aligned(&f, cursor, off - cursor).unwrap();
+        }
+        cursor = cursor.max(off + extent_len);
+    }
+    if len > cursor {
+        microsandbox_utils::extent::punch_hole_aligned(&f, cursor, len - cursor).unwrap();
+    }
 
     let manifest = Manifest {
         schema: SCHEMA_VERSION,
@@ -209,11 +230,22 @@ fn make_sparse_artifact(
 
 /// Bytes allocated on disk. Sparseness assertions are guarded on the
 /// source actually being sparse, since not every test filesystem
-/// sparsifies `set_len` + seek/write files.
-#[cfg(unix)]
+/// keeps holes even with `mark_sparse` + hole punching.
 fn allocated_bytes(path: &Path) -> u64 {
-    use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(path).unwrap().blocks() * 512
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path).unwrap().blocks() * 512
+    }
+    #[cfg(not(unix))]
+    {
+        // No st_blocks on Windows; the extent map's data bytes are the
+        // allocation for NTFS sparse files (dense fallback: full size).
+        match microsandbox_utils::extent::ExtentMap::scan(path).unwrap() {
+            Some(map) => map.data_bytes(),
+            None => std::fs::metadata(path).unwrap().len(),
+        }
+    }
 }
 
 async fn seed_image_cache(cache: &microsandbox_image::GlobalCache) -> SeededImageCache {
@@ -470,7 +502,6 @@ async fn export_then_import_round_trips_via_plain_tar() {
     assert_eq!(handle.digest(), original_digest);
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn export_sparse_upper_round_trips_and_preserves_holes() {
     let tmp = TempDir::new().unwrap();
@@ -514,7 +545,6 @@ async fn export_sparse_upper_round_trips_and_preserves_holes() {
     );
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn sparse_export_stores_only_data_extents_in_plain_tar() {
     let tmp = TempDir::new().unwrap();
@@ -575,7 +605,6 @@ async fn sparse_export_stores_only_data_extents_in_plain_tar() {
     assert_eq!(std::fs::read(&unpacked_upper).unwrap(), logical);
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn sparse_export_many_extents_round_trips() {
     // Enough extents to spill past the 4 inline sparse-map slots into
@@ -610,7 +639,6 @@ async fn sparse_export_many_extents_round_trips() {
     assert_eq!(std::fs::read(&imported_upper).unwrap(), logical);
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn sparse_export_all_hole_upper_round_trips() {
     let tmp = TempDir::new().unwrap();
@@ -665,6 +693,125 @@ async fn dense_upper_keeps_regular_entry() {
         }
     }
     assert_eq!(upper_entry_type, Some(EntryType::Regular));
+}
+
+/// The import walker's grammar is closed: GNU long-name entries (which
+/// our exporter never produces — archive names are two short
+/// components) must be rejected, not resolved.
+#[tokio::test]
+async fn import_rejects_long_name_entries() {
+    let tmp = TempDir::new().unwrap();
+    let long_name = format!("sha256-0000000000000000/{}", "x".repeat(120));
+
+    let mut bytes = Vec::new();
+    {
+        let mut builder = Builder::new(&mut bytes);
+        let mut header = Header::new_gnu();
+        header.set_size(4);
+        header.set_mode(0o644);
+        header.set_cksum();
+        // The sync tar Builder emits a GNU long-name ('L') entry for
+        // names beyond the 100-byte header field.
+        builder
+            .append_data(&mut header, &long_name, &b"data"[..])
+            .unwrap();
+        builder.finish().unwrap();
+    }
+    let archive = tmp.path().join("longname.tar");
+    std::fs::write(&archive, &bytes).unwrap();
+
+    let err = Snapshot::import(&archive, Some(&tmp.path().join("dest")))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("unsupported entry type"),
+        "expected long-name rejection, got: {err}"
+    );
+}
+
+/// A header whose recorded checksum disagrees with its bytes is
+/// corruption, not something to unpack around.
+#[tokio::test]
+async fn import_rejects_corrupt_header_checksum() {
+    let tmp = TempDir::new().unwrap();
+    let (dir, _) = make_artifact(tmp.path(), "src-cksum", b"upper bytes");
+
+    let archive = tmp.path().join("ok.tar");
+    Snapshot::export(
+        dir.to_string_lossy().as_ref(),
+        &archive,
+        microsandbox::snapshot::ExportOpts {
+            plain_tar: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut bytes = std::fs::read(&archive).unwrap();
+    // Flip a bit in the first header's name field without refreshing
+    // the recorded checksum.
+    bytes[0] ^= 0x01;
+    let corrupt = tmp.path().join("corrupt.tar");
+    std::fs::write(&corrupt, &bytes).unwrap();
+
+    let err = Snapshot::import(&corrupt, Some(&tmp.path().join("dest")))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("checksum mismatch"),
+        "expected checksum rejection, got: {err}"
+    );
+}
+
+/// A sparse map whose runs overlap or run backwards is malformed and
+/// must be rejected before any data is written.
+#[tokio::test]
+async fn import_rejects_overlapping_sparse_map() {
+    fn octal12(field: &mut [u8; 12], value: u64) {
+        let octal = format!("{value:011o}");
+        field[..11].copy_from_slice(octal.as_bytes());
+        field[11] = 0;
+    }
+
+    let tmp = TempDir::new().unwrap();
+
+    let mut header = Header::new_gnu();
+    header
+        .set_path("sha256-0000000000000000/upper.ext4")
+        .unwrap();
+    header.set_mode(0o644);
+    header.set_entry_type(EntryType::GNUSparse);
+    header.set_size(1024);
+    {
+        let gnu = header.as_gnu_mut().unwrap();
+        octal12(&mut gnu.realsize, 768);
+        // Two 512-byte runs that overlap: [0, 512) then [256, 768).
+        octal12(&mut gnu.sparse[0].offset, 0);
+        octal12(&mut gnu.sparse[0].numbytes, 512);
+        octal12(&mut gnu.sparse[1].offset, 256);
+        octal12(&mut gnu.sparse[1].numbytes, 512);
+    }
+    header.set_cksum();
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(header.as_bytes());
+    bytes.extend_from_slice(&[0xAAu8; 1024]); // the two data runs
+    bytes.extend_from_slice(&[0u8; 1024]); // end-of-archive marker
+
+    let archive = tmp.path().join("overlap.tar");
+    std::fs::write(&archive, &bytes).unwrap();
+
+    let err = Snapshot::import(&archive, Some(&tmp.path().join("dest")))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("out of order or overlapping"),
+        "expected sparse-map rejection, got: {err}"
+    );
 }
 
 #[tokio::test]

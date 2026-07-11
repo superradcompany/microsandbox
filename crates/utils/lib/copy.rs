@@ -28,18 +28,10 @@ use std::io;
 use std::io::{Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::io::{AsRawFd, RawFd};
-#[cfg(windows)]
-use std::os::windows::io::AsRawHandle;
 use std::path::Path;
-#[cfg(windows)]
-use std::ptr;
 
 #[cfg(windows)]
-use windows_sys::Win32::Foundation::HANDLE;
-#[cfg(windows)]
-use windows_sys::Win32::System::IO::DeviceIoControl;
-#[cfg(windows)]
-use windows_sys::Win32::System::Ioctl::FSCTL_SET_SPARSE;
+use crate::extent::mark_sparse;
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -304,28 +296,6 @@ fn read_write_extent(src_fd: RawFd, dst_fd: RawFd, off: u64, len: u64) -> io::Re
         }
         copied += n as u64;
     }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn mark_sparse(file: &File) -> io::Result<()> {
-    let mut bytes_returned = 0;
-    let ok = unsafe {
-        DeviceIoControl(
-            file.as_raw_handle() as HANDLE,
-            FSCTL_SET_SPARSE,
-            ptr::null(),
-            0,
-            ptr::null_mut(),
-            0,
-            &mut bytes_returned,
-            ptr::null_mut(),
-        )
-    };
-    if ok == 0 {
-        return Err(io::Error::last_os_error());
-    }
-
     Ok(())
 }
 

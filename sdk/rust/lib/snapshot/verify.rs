@@ -2,13 +2,11 @@
 
 use std::fs::File;
 use std::io;
-#[cfg(windows)]
-use std::io::Read;
-#[cfg(unix)]
-use std::os::unix::io::AsRawFd;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use microsandbox_image::snapshot::{SPARSE_SHA256_V1, UpperIntegrity};
+use microsandbox_utils::extent::ExtentMap;
 use sha2::{Digest as _, Sha256};
 use tokio::io::AsyncReadExt;
 
@@ -112,65 +110,44 @@ async fn sha256_file(path: &Path) -> MicrosandboxResult<String> {
     Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
 }
 
+/// Hash the file's logical content — data extents plus synthesized
+/// zeros for holes — in O(data) wherever [`ExtentMap`] can enumerate
+/// the allocation map, with a full sequential read as the fallback.
 fn sparse_integrity_blocking(path: &Path) -> io::Result<UpperIntegrity> {
-    #[cfg(unix)]
-    {
-        sparse_integrity_blocking_unix(path)
-    }
-
-    #[cfg(windows)]
-    {
-        sparse_integrity_blocking_full_read(path)
-    }
-}
-
-#[cfg(unix)]
-fn sparse_integrity_blocking_unix(path: &Path) -> io::Result<UpperIntegrity> {
-    let file = File::open(path)?;
+    let mut file = File::open(path)?;
     let len = file.metadata()?.len();
-    let fd = file.as_raw_fd();
 
     let mut hasher = Sha256::new();
     hasher.update(b"msb-sparse-sha256-v1\0");
     hasher.update(len.to_le_bytes());
 
-    let mut off: u64 = 0;
-    while off < len {
-        let seek_off = off as i64;
-        let data_start = unsafe { libc::lseek(fd, seek_off, libc::SEEK_DATA) };
-        if data_start < 0 {
-            let err = io::Error::last_os_error();
-            if err.raw_os_error() == Some(libc::ENXIO) {
-                hash_zeroes(len - off, &mut hasher);
-                off = len;
-                break;
+    match ExtentMap::scan_file(&file)? {
+        Some(map) => {
+            let mut off: u64 = 0;
+            for (start, extent_len) in &map.extents {
+                if *start > off {
+                    hash_zeroes(start - off, &mut hasher);
+                }
+                hash_extent(&mut file, *start, *extent_len, &mut hasher)?;
+                off = start + extent_len;
             }
-            return Err(err);
+            if off < len {
+                hash_zeroes(len - off, &mut hasher);
+            }
         }
-
-        let data_end = unsafe { libc::lseek(fd, data_start, libc::SEEK_HOLE) };
-        if data_end < 0 {
-            return Err(io::Error::last_os_error());
+        None => {
+            // The scan may have moved the cursor before reporting
+            // "can't enumerate"; rewind for the sequential read.
+            file.seek(SeekFrom::Start(0))?;
+            let mut buf = vec![0u8; 1024 * 1024];
+            loop {
+                let n = file.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+            }
         }
-
-        let data_start = data_start as u64;
-        let data_end = (data_end as u64).min(len);
-        if data_end <= data_start {
-            break;
-        }
-
-        if data_start > off {
-            hash_zeroes(data_start - off, &mut hasher);
-        }
-
-        let extent_len = data_end - data_start;
-        hash_extent(fd, data_start, extent_len, &mut hasher)?;
-
-        off = data_end;
-    }
-
-    if off < len {
-        hash_zeroes(len - off, &mut hasher);
     }
 
     let digest = format!("sha256:{}", hex::encode(hasher.finalize()));
@@ -180,51 +157,21 @@ fn sparse_integrity_blocking_unix(path: &Path) -> io::Result<UpperIntegrity> {
     })
 }
 
-#[cfg(windows)]
-fn sparse_integrity_blocking_full_read(path: &Path) -> io::Result<UpperIntegrity> {
-    let mut file = File::open(path)?;
-    let len = file.metadata()?.len();
-
-    let mut hasher = Sha256::new();
-    hasher.update(b"msb-sparse-sha256-v1\0");
-    hasher.update(len.to_le_bytes());
-
-    let mut buf = vec![0u8; 1024 * 1024];
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-
-    Ok(UpperIntegrity {
-        algorithm: SPARSE_SHA256_V1.into(),
-        digest: format!("sha256:{}", hex::encode(hasher.finalize())),
-    })
-}
-
-#[cfg(unix)]
-fn hash_extent(fd: i32, off: u64, len: u64, hasher: &mut Sha256) -> io::Result<()> {
+fn hash_extent(file: &mut File, off: u64, len: u64, hasher: &mut Sha256) -> io::Result<()> {
     const BUF_SIZE: usize = 1024 * 1024;
     let mut buf = vec![0u8; BUF_SIZE];
     let mut hashed = 0u64;
 
+    file.seek(SeekFrom::Start(off))?;
     while hashed < len {
         let to_read = (len - hashed).min(BUF_SIZE as u64) as usize;
-        let read_off = (off + hashed) as i64;
-        let n =
-            unsafe { libc::pread(fd, buf.as_mut_ptr() as *mut libc::c_void, to_read, read_off) };
-        if n < 0 {
-            return Err(io::Error::last_os_error());
-        }
+        let n = file.read(&mut buf[..to_read])?;
         if n == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "unexpected EOF mid-extent",
             ));
         }
-        let n = n as usize;
         hasher.update(&buf[..n]);
         hashed += n as u64;
     }
@@ -232,7 +179,6 @@ fn hash_extent(fd: i32, off: u64, len: u64, hasher: &mut Sha256) -> io::Result<(
     Ok(())
 }
 
-#[cfg(unix)]
 fn hash_zeroes(mut len: u64, hasher: &mut Sha256) {
     static ZEROES: [u8; 1024 * 1024] = [0; 1024 * 1024];
 
