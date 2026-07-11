@@ -509,6 +509,21 @@ impl ExecSink {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+pub(crate) fn initial_stdin_messages(stdin_mode: &StdinMode) -> Vec<ExecStdin> {
+    match stdin_mode {
+        StdinMode::Null => vec![ExecStdin { data: Vec::new() }],
+        StdinMode::Pipe => Vec::new(),
+        StdinMode::Bytes(data) => vec![
+            ExecStdin { data: data.clone() },
+            ExecStdin { data: Vec::new() },
+        ],
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Module: local (free fn impls called by LocalBackend's SandboxBackend impl)
 //--------------------------------------------------------------------------------------------------
 
@@ -521,7 +536,7 @@ pub(crate) mod local {
 
     use bytes::Bytes;
     use microsandbox_protocol::{
-        exec::{ExecExited, ExecStarted, ExecStderr, ExecStdin, ExecStdout},
+        exec::{ExecExited, ExecStarted, ExecStderr, ExecStdout},
         message::{Message, MessageType},
     };
     use tokio::sync::mpsc;
@@ -532,7 +547,10 @@ pub(crate) mod local {
         sandbox::{SandboxConfig, build_exec_request},
     };
 
-    use super::{ExecEvent, ExecHandle, ExecOptions, ExecOutput, ExecSink, ExitStatus, StdinMode};
+    use super::{
+        ExecEvent, ExecHandle, ExecOptions, ExecOutput, ExecSink, ExitStatus, StdinMode,
+        initial_stdin_messages,
+    };
 
     pub(crate) async fn exec_stream(
         local: &LocalBackend,
@@ -584,14 +602,13 @@ pub(crate) mod local {
             _ => None,
         };
 
-        if let StdinMode::Bytes(ref data) = stdin_mode {
-            let data = data.clone();
+        let initial_stdin = initial_stdin_messages(&stdin_mode);
+        if !initial_stdin.is_empty() {
             let bridge = Arc::clone(&client);
             tokio::spawn(async move {
-                let payload = ExecStdin { data };
-                let _ = bridge.send(id, MessageType::ExecStdin, &payload).await;
-                let close = ExecStdin { data: Vec::new() };
-                let _ = bridge.send(id, MessageType::ExecStdin, &close).await;
+                for payload in initial_stdin {
+                    let _ = bridge.send(id, MessageType::ExecStdin, &payload).await;
+                }
             });
         }
 
@@ -678,6 +695,37 @@ pub(crate) mod local {
             code,
             success: code == 0,
         }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn null_stdin_sends_eof() {
+        let messages = initial_stdin_messages(&StdinMode::Null);
+
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].data.is_empty());
+    }
+
+    #[test]
+    fn pipe_stdin_leaves_stdin_open_for_caller() {
+        assert!(initial_stdin_messages(&StdinMode::Pipe).is_empty());
+    }
+
+    #[test]
+    fn byte_stdin_sends_data_then_eof() {
+        let messages = initial_stdin_messages(&StdinMode::Bytes(b"hello".to_vec()));
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].data, b"hello");
+        assert!(messages[1].data.is_empty());
     }
 }
 
