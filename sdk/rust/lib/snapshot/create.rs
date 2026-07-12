@@ -12,7 +12,7 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 use crate::backend::LocalBackend;
 use crate::db::entity::sandbox as sandbox_entity;
-use crate::sandbox::{SandboxConfig, SandboxStatus};
+use crate::sandbox::{RootDisk, SandboxConfig, SandboxStatus};
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 use super::store::{index_upsert, looks_like_path};
@@ -62,6 +62,8 @@ pub(super) async fn create_snapshot(
         ))
     })?;
     let image_reference = oci_reference_string(&sandbox_config)?;
+
+    ensure_snapshottable_root_disk(sandbox_config.spec.image.oci_root_disk(), &source_sandbox)?;
 
     // Resolve source upper.ext4 path from the canonical sandbox layout.
     let sandbox_dir = local.sandboxes_dir().join(&source_sandbox);
@@ -175,6 +177,23 @@ pub(super) async fn create_snapshot(
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
+/// Snapshots capture the managed upper. The other root-disk kinds have nothing msb-owned on the host to capture: a tmpfs upper lives in guest RAM (until resumable snapshots
+/// capture memory), and a disk-image upper is a user-owned file msb never copies into artifacts it owns.
+fn ensure_snapshottable_root_disk(
+    root_disk: Option<&RootDisk>,
+    source_sandbox: &str,
+) -> MicrosandboxResult<()> {
+    match root_disk {
+        Some(RootDisk::Tmpfs { .. }) => Err(MicrosandboxError::InvalidConfig(format!(
+            "sandbox '{source_sandbox}' uses a tmpfs root disk, which is ephemeral and cannot be snapshotted; use the managed kind"
+        ))),
+        Some(RootDisk::DiskImage { .. }) => Err(MicrosandboxError::InvalidConfig(format!(
+            "sandbox '{source_sandbox}' uses a user-owned disk-image root disk, which microsandbox does not snapshot"
+        ))),
+        Some(RootDisk::Managed { .. }) | None => Ok(()),
+    }
+}
+
 fn oci_reference_string(config: &SandboxConfig) -> MicrosandboxResult<String> {
     use crate::sandbox::RootfsSource;
     match &config.spec.image {
@@ -204,5 +223,56 @@ fn resolve_destination(
             }
             Ok(local.snapshots_dir().join(name))
         }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use microsandbox_types::DiskImageFormat;
+
+    use super::*;
+
+    #[test]
+    fn managed_or_default_root_disk_is_snapshottable() {
+        assert!(ensure_snapshottable_root_disk(None, "sb").is_ok());
+        assert!(
+            ensure_snapshottable_root_disk(
+                Some(&RootDisk::Managed {
+                    size_mib: Some(4096)
+                }),
+                "sb"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn tmpfs_root_disk_is_rejected_with_a_purposeful_error() {
+        let err = ensure_snapshottable_root_disk(Some(&RootDisk::Tmpfs { size_mib: None }), "sb")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("tmpfs"), "unexpected error: {err}");
+        assert!(err.contains("managed"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn disk_image_root_disk_is_rejected_with_a_purposeful_error() {
+        let err = ensure_snapshottable_root_disk(
+            Some(&RootDisk::DiskImage {
+                path: PathBuf::from("./scratch.img"),
+                format: DiskImageFormat::Raw,
+                fstype: None,
+            }),
+            "sb",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("disk-image"), "unexpected error: {err}");
     }
 }
