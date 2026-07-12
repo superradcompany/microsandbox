@@ -1,5 +1,6 @@
 [workspace]
 resolver = "3"
+exclude = ["sdk/rust/fuzz"]
 members = [
     "crates/agentd",
     "crates/cli",

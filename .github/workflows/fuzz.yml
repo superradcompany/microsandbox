@@ -1,0 +1,54 @@
+name: Fuzz
+
+# Nightly coverage-guided fuzzing of the snapshot import record walker
+# (sdk/rust/fuzz). Deliberately not part of per-PR CI: a fixed nightly
+# budget on a GitHub-hosted runner finds parser bugs without adding a
+# second of PR latency or touching the shared self-hosted runners.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Fuzz snapshot import walker
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable branch tracks latest
+        with:
+          toolchain: nightly
+
+      - uses: taiki-e/install-action@ace6ebe54a6a0c86dfb5f7764b17f793b6925bc3 # v2
+        with:
+          tool: cargo-fuzz
+
+      # The sdk's build script requires a fresh guest agent binary at
+      # build/agentd; mirror the check workflow's agentd steps.
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y musl-tools libcap-ng-dev
+
+      - name: Build agentd (musl)
+        run: |
+          rustup target add --toolchain stable x86_64-unknown-linux-musl
+          cargo +stable build --release --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl
+          mkdir -p build
+          cp target/x86_64-unknown-linux-musl/release/agentd build/agentd
+
+      - name: Fuzz unpack_archive (10 min budget)
+        working-directory: sdk/rust
+        run: cargo +nightly fuzz run unpack_archive fuzz/corpus/unpack_archive fuzz/seeds/unpack_archive -- -max_total_time=600 -timeout=30
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-artifacts
+          path: sdk/rust/fuzz/artifacts/
+          if-no-files-found: ignore

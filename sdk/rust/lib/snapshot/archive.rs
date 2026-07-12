@@ -1326,3 +1326,20 @@ async fn resolve_parent_artifact(
         "parent {parent_digest} not in local index; ship it alongside or re-export with --with-parents"
     )))
 }
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Fuzzing Support
+//--------------------------------------------------------------------------------------------------
+
+/// Entry point for the archive-walker fuzz target (`sdk/rust/fuzz`): run the full import unpack over arbitrary bytes into throwaway directories. Errors are the expected outcome
+/// for malformed input; only panics, overflows, or hangs count as findings.
+#[cfg(feature = "fuzzing")]
+pub async fn fuzz_unpack_archive(data: &[u8]) {
+    let Ok(snapshots) = tempfile::tempdir() else {
+        return;
+    };
+    let Ok(cache) = tempfile::tempdir() else {
+        return;
+    };
+    let _ = unpack_archive(data, snapshots.path(), cache.path()).await;
+}

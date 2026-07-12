@@ -1,0 +1,24 @@
+[package]
+name = "microsandbox-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tokio = { version = "1", features = ["rt"] }
+microsandbox = { path = "..", default-features = false, features = ["fuzzing"] }
+
+# Standalone workspace so the fuzz crate (nightly, libFuzzer instrumentation)
+# never affects normal workspace builds.
+[workspace]
+
+[[bin]]
+name = "unpack_archive"
+path = "fuzz_targets/unpack_archive.rs"
+test = false
+doc = false
+bench = false

@@ -326,6 +326,8 @@ impl SnapshotBuilder {
 //--------------------------------------------------------------------------------------------------
 
 pub use archive::ExportOpts;
+#[cfg(feature = "fuzzing")]
+pub use archive::fuzz_unpack_archive;
 pub use microsandbox_image::snapshot::{
     ImageRef, MANIFEST_FILENAME, Manifest, SnapshotFormat, UpperIntegrity, UpperLayer,
 };

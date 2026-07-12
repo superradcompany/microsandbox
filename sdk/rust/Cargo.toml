@@ -17,6 +17,8 @@ path = "bin/main.rs"
 
 [features]
 default = ["keyring", "net", "prebuilt"]
+# Exposes the archive walker to the fuzz harness (sdk/rust/fuzz). Never enabled in shipping builds.
+fuzzing = []
 keyring = ["dep:dbus", "dep:keyring"]
 ssh = ["dep:anyhow", "dep:russh", "dep:russh-sftp"]
 prebuilt = [
