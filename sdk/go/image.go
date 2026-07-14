@@ -14,6 +14,8 @@ import (
 //	microsandbox.Image.Inspect(ctx, "python:3.12")
 //	microsandbox.Image.Remove(ctx, "old:tag", true)
 //	microsandbox.Image.Prune(ctx)
+//	microsandbox.Image.Load(ctx, "my-image.tar", "app:local")
+//	microsandbox.Image.Save(ctx, []string{"python:3.12"}, "python.tar", microsandbox.ImageArchiveDocker)
 var Image imageFactory
 
 type imageFactory struct{}
