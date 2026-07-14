@@ -3,7 +3,7 @@ title: Images
 description: Go SDK - Image cache API reference
 ---
 
-Inspect and prune the local OCI image cache: the images that sandbox creation has already pulled. Everything is reached through the package-level `Image` value, or through an [`ImageHandle`](#imagehandle) once you hold one.
+Inspect and prune the local OCI image cache: the images that sandbox creation has already pulled. Images can also be loaded into the cache from local archives and saved back out to archive files, so locally built images work without a registry. Everything is reached through the package-level `Image` value, or through an [`ImageHandle`](#imagehandle) once you hold one.
 
 ```go
 import m "github.com/superradcompany/microsandbox/sdk/go"
@@ -11,12 +11,14 @@ import m "github.com/superradcompany/microsandbox/sdk/go"
 
 <div className="msb-glance">
 
-  <p className="msb-gl"><span className="msb-dot static"></span>Functions<span className="msb-ct">5</span></p>
+  <p className="msb-gl"><span className="msb-dot static"></span>Functions<span className="msb-ct">7</span></p>
   <a className="msb-row" href="#image-get"><span className="msb-rn">Image.Get()</span><span className="msb-rg">one cached image by reference</span></a>
   <a className="msb-row" href="#image-list"><span className="msb-rn">Image.List()</span><span className="msb-rg">every cached image</span></a>
   <a className="msb-row" href="#image-inspect"><span className="msb-rn">Image.Inspect()</span><span className="msb-rg">handle + config + layers</span></a>
   <a className="msb-row" href="#image-remove"><span className="msb-rn">Image.Remove()</span><span className="msb-rg">delete a cached image</span></a>
   <a className="msb-row" href="#image-prune"><span className="msb-rn">Image.Prune()</span><span className="msb-rg">reclaim unused image data</span></a>
+  <a className="msb-row" href="#image-load"><span className="msb-rn">Image.Load()</span><span className="msb-rg">import from archive</span></a>
+  <a className="msb-row" href="#image-save"><span className="msb-rn">Image.Save()</span><span className="msb-rg">export to archive</span></a>
 
   <p className="msb-gl"><span className="msb-dot instance"></span>Methods · ImageHandle<span className="msb-ct">10</span></p>
   <a className="msb-row" href="#h-reference"><span className="msb-rn">h.Reference()</span><span className="msb-rg">image reference</span></a>
@@ -37,6 +39,7 @@ import m "github.com/superradcompany/microsandbox/sdk/go"
     <a className="msb-typepill" href="#imageconfig">ImageConfig</a>
     <a className="msb-typepill" href="#imagelayer">ImageLayer</a>
     <a className="msb-typepill" href="#imageprunereport">ImagePruneReport</a>
+    <a className="msb-typepill" href="#imagearchiveformat">ImageArchiveFormat</a>
   </div>
 
 </div>
@@ -296,6 +299,114 @@ if err != nil {
     return err
 }
 fmt.Println(report.LayersRemoved, "layers removed")
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">Image.</span><span className="msb-hn">Load()</span>
+<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
+
+```go
+func (imageFactory) Load(ctx context.Context, inputPath string, tags ...string) ([]*ImageHandle, error)
+```
+
+Import images from a local archive — a `docker save` tarball or an OCI Image Layout archive — into the cache, so locally built images can be used without a registry. Variadic `tags` apply extra references to the first image in the archive.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the import.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>inputPath</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Path to the archive file.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>tags</code><span className="msb-type">...string</span></div>
+    <div className="msb-param-desc">Extra references applied to the first image in the archive.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#imagehandle">[]*ImageHandle</a></div>
+    <div className="msb-param-desc">One handle for every image reference imported.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">error</span></div>
+    <div className="msb-param-desc">Non-nil on failure.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+// docker save my-image:latest -o my-image.tar
+images, err := m.Image.Load(ctx, "my-image.tar", "app:local")
+if err != nil {
+    return err
+}
+for _, img := range images {
+    fmt.Println(img.Reference())
+}
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">Image.</span><span className="msb-hn">Save()</span>
+<div className="msb-tags"><span className="msb-tag is-static">function</span></div>
+
+```go
+func (imageFactory) Save(ctx context.Context, references []string, outputPath string, format ImageArchiveFormat) error
+```
+
+Export one or more cached images to an archive file at `outputPath`. `ImageArchiveDocker` (the default; `""` behaves the same) writes an archive loadable with `docker load`; `ImageArchiveOCI` writes an OCI Image Layout archive. Returns `ErrImageNotFound` when any reference is missing from the local cache.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the export.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>references</code><span className="msb-type">[]string</span></div>
+    <div className="msb-param-desc">Image references to export, e.g. <code>"python:3.12"</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>outputPath</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Path of the archive file to write.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>format</code><a className="msb-type" href="#imagearchiveformat">ImageArchiveFormat</a></div>
+    <div className="msb-param-desc"><code>ImageArchiveDocker</code> (default; <code>""</code> behaves the same) or <code>ImageArchiveOCI</code>.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">error</span></div>
+    <div className="msb-param-desc"><code>ErrImageNotFound</code> when any reference is not cached.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+err := m.Image.Save(ctx, []string{"python:3.12"}, "python.tar", m.ImageArchiveDocker)
+if err != nil {
+    return err
+}
 ```
 
 </Accordion>
@@ -661,3 +772,20 @@ Summarizes the artifacts removed by [`Image.Prune`](#image-prune).
 | FsmetaRemoved | `uint32` | Fsmeta files removed |
 | VMDKRemoved | `uint32` | VMDK files removed |
 | BytesReclaimed | `*uint64` | Bytes reclaimed, or `nil` when unknown |
+
+### ImageArchiveFormat
+
+<div className="msb-tags"><span className="msb-tag is-type">type</span></div>
+
+<p className="msb-backref">Used by <a href="#image-save">Image.Save()</a></p>
+
+Selects the archive layout written by [`Image.Save`](#image-save).
+
+```go
+type ImageArchiveFormat string
+```
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `ImageArchiveDocker` | `"docker"` | `docker save` compatible archive, loadable with `docker load` (the default; the empty string means the same) |
+| `ImageArchiveOCI` | `"oci"` | OCI Image Layout archive |

@@ -191,6 +191,41 @@ impl<W> DigestingWriter<W> {
     }
 }
 
+impl ImageSaveRequest {
+    /// Build a save request for `reference` from its cached metadata.
+    ///
+    /// Extracts `architecture`/`os` from the raw config JSON and carries the
+    /// runtime config fields and ordered layer diff IDs over verbatim.
+    pub fn from_cached(reference: impl Into<String>, metadata: CachedImageMetadata) -> Self {
+        let (architecture, os) = raw_config_platform(&metadata.raw_config_json);
+
+        let layers = metadata
+            .layers
+            .iter()
+            .map(|layer| ImageSaveLayer {
+                diff_id: layer.diff_id.clone(),
+            })
+            .collect();
+
+        let config = metadata.config;
+        Self {
+            reference: reference.into(),
+            config: ImageSaveConfig {
+                architecture,
+                os,
+                env: config.env,
+                entrypoint: config.entrypoint,
+                cmd: config.cmd,
+                working_dir: config.working_dir,
+                user: config.user,
+                labels: config.labels.into_iter().collect(),
+            },
+            raw_config_json: metadata.raw_config_json,
+            layers,
+        }
+    }
+}
+
 impl StagedLayerGuard {
     fn new() -> Self {
         Self {
@@ -247,6 +282,24 @@ impl Drop for StagedLayerGuard {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Extract `architecture` and `os` from a raw OCI config JSON document.
+fn raw_config_platform(raw_config_json: &str) -> (Option<String>, Option<String>) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw_config_json) else {
+        return (None, None);
+    };
+
+    let architecture = value
+        .get("architecture")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
+    let os = value
+        .get("os")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
+
+    (architecture, os)
+}
 
 /// Load a Docker image archive into the microsandbox image cache.
 pub async fn load_archive(

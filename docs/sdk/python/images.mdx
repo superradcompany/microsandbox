@@ -419,17 +419,17 @@ images = await Image.load(input_path="-")
 
 ```python
 @staticmethod
-async def save(reference: str, *, output_path: str, format: str = "docker") -> None
+async def save(reference: str | Sequence[str], *, output_path: str, format: str = "docker") -> None
 ```
 
-Export a cached image to an archive file. Raises [`ImageNotFoundError`](#errors) when the reference is not in the local cache, and `ValueError` for an unknown `format`.
+Export one or more cached images to an archive file. Raises [`ImageNotFoundError`](#errors) when any reference is not in the local cache, and `ValueError` for an unknown `format` or an empty reference list.
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><code>reference</code><span className="msb-type">str</span></div>
-    <div className="msb-param-desc">Cached image reference to export.</div>
+    <div className="msb-param-key"><code>reference</code><span className="msb-type">str | Sequence[str]</span></div>
+    <div className="msb-param-desc">Cached image reference to export, or a sequence of references written into the same archive.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>output_path</code><span className="msb-type">str</span></div>
@@ -446,6 +446,7 @@ Export a cached image to an archive file. Raises [`ImageNotFoundError`](#errors)
 ```python
 await Image.save("python:3.12", output_path="python.tar")
 await Image.save("python:3.12", output_path="python-oci.tar", format="oci")
+await Image.save(["python:3.12", "app:local"], output_path="bundle.tar")
 ```
 
 </Accordion>

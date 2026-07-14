@@ -30,3 +30,21 @@ describe("native Sandbox lifecycle contract", () => {
     }
   });
 });
+
+describe("native image cache contract", () => {
+  it("exports the image functions used by the TS wrapper", () => {
+    const fns = napi as unknown as Record<string, unknown>;
+
+    for (const fn of [
+      "imageGet",
+      "imageList",
+      "imageInspect",
+      "imageRemove",
+      "imagePrune",
+      "imageLoad",
+      "imageSave",
+    ]) {
+      expect(typeof fns[fn], fn).toBe("function");
+    }
+  });
+});

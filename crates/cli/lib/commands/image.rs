@@ -8,10 +8,7 @@ use std::time::Instant;
 use clap::{Args, Subcommand, ValueEnum};
 use console::style;
 use microsandbox::image::Image;
-use microsandbox_image::{
-    CachedImageMetadata, ImageArchiveFormat, ImageLoadOptions, ImageSaveConfig, ImageSaveLayer,
-    ImageSaveRequest, Registry,
-};
+use microsandbox_image::{ImageArchiveFormat, ImageLoadOptions, Registry};
 
 use crate::ui;
 
@@ -664,31 +661,6 @@ pub async fn run_load(args: ImageLoadArgs) -> anyhow::Result<()> {
 pub async fn run_save(args: ImageSaveArgs) -> anyhow::Result<()> {
     let backend = crate::commands::common::resolve_local_backend()?;
     let local = crate::commands::common::local_backend_ref(&backend)?;
-    let cache_dir = local.cache_dir();
-    let cache = microsandbox_image::GlobalCache::new(&cache_dir)?;
-    let mut requests = Vec::with_capacity(args.references.len());
-
-    for reference in &args.references {
-        let parsed: microsandbox_image::Reference = reference.parse()?;
-        let metadata = cache
-            .read_image_metadata(&parsed)?
-            .ok_or_else(|| anyhow::anyhow!("image metadata not cached: {reference}"))?;
-        let config = save_config_from_metadata(&metadata);
-        let layers = metadata
-            .layers
-            .iter()
-            .map(|layer| ImageSaveLayer {
-                diff_id: layer.diff_id.clone(),
-            })
-            .collect();
-
-        requests.push(ImageSaveRequest {
-            reference: reference.clone(),
-            config,
-            raw_config_json: metadata.raw_config_json,
-            layers,
-        });
-    }
 
     let temp_output;
     let output_path = if let Some(path) = args.output.as_ref() {
@@ -697,18 +669,12 @@ pub async fn run_save(args: ImageSaveArgs) -> anyhow::Result<()> {
         temp_output = tempfile::NamedTempFile::new()?;
         temp_output.path()
     };
-    let output_path_for_task = output_path.to_path_buf();
     let format = match args.format {
         ImageSaveFormat::Docker => ImageArchiveFormat::Docker,
         ImageSaveFormat::Oci => ImageArchiveFormat::Oci,
     };
 
-    tokio::task::spawn_blocking(move || {
-        let cache = microsandbox_image::GlobalCache::new(&cache_dir)?;
-        microsandbox_image::save_archive(&cache, &output_path_for_task, &requests, format)
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("save task panicked: {e}"))??;
+    Image::save_local(local, &args.references, output_path, format).await?;
 
     if args.output.is_none() {
         let mut file = std::fs::File::open(output_path)?;
@@ -861,41 +827,4 @@ fn truncate_digest(digest: &str) -> String {
     } else {
         digest.chars().take(19).collect()
     }
-}
-
-fn save_config_from_metadata(metadata: &CachedImageMetadata) -> ImageSaveConfig {
-    let (architecture, os) = raw_config_platform(&metadata.raw_config_json);
-
-    ImageSaveConfig {
-        architecture,
-        os,
-        env: metadata.config.env.clone(),
-        entrypoint: metadata.config.entrypoint.clone(),
-        cmd: metadata.config.cmd.clone(),
-        working_dir: metadata.config.working_dir.clone(),
-        user: metadata.config.user.clone(),
-        labels: metadata
-            .config
-            .labels
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect(),
-    }
-}
-
-fn raw_config_platform(raw_config_json: &str) -> (Option<String>, Option<String>) {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw_config_json) else {
-        return (None, None);
-    };
-
-    let architecture = value
-        .get("architecture")
-        .and_then(serde_json::Value::as_str)
-        .map(ToOwned::to_owned);
-    let os = value
-        .get("os")
-        .and_then(serde_json::Value::as_str)
-        .map(ToOwned::to_owned);
-
-    (architecture, os)
 }

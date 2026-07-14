@@ -738,7 +738,7 @@ Attach key-value labels to the volume. When called repeatedly, the maps merge; l
 func (mountFactory) Bind(hostPath string, opts MountOptions) MountConfig
 ```
 
-Bind-mount a host directory into the sandbox. Changes in the guest are reflected on the host and vice versa. Returns a [`MountConfig`](#mountconfig) for use with [`WithMounts`](/sdk/go/sandbox#withmounts).
+Bind-mount a host directory into the sandbox. Changes in the guest are reflected on the host and vice versa. Set [`MountOptions.QuotaMiB`](#mountoptions) to bound how much the guest may write beyond the host directory's existing contents, overriding the runtime's protective default. Returns a [`MountConfig`](#mountconfig) for use with [`WithMounts`](/sdk/go/sandbox#withmounts).
 
 <p className="msb-label">Parameters</p>
 
@@ -757,6 +757,7 @@ Bind-mount a host directory into the sandbox. Changes in the guest are reflected
 
 ```go
 "/host": m.Mount.Bind("/var/data", m.MountOptions{Readonly: true})
+"/out":  m.Mount.Bind("./output", m.MountOptions{QuotaMiB: 2048})
 ```
 
 </Accordion>
@@ -1111,6 +1112,7 @@ Tuning struct for [`Mount.Bind`](#mount-bind), [`Mount.Named`](#mount-named), an
 | `Noexec` | `bool` | Prevent direct execution from the mount |
 | `Nosuid` | `bool` | Ignore setuid and setgid privilege elevation from files on the mount |
 | `Nodev` | `bool` | Ignore device files on the mount |
+| `QuotaMiB` | `uint32` | Guest-write quota in MiB, bounding growth beyond the host directory's existing contents; zero keeps the protective default (bind mounts only — named volumes use [`NamedVolumeOptions.QuotaMiB`](#namedvolumeoptions)) |
 | `StatVirtualization` | `StatVirtualization` | Per-mount stat-virtualization policy (virtiofs only) |
 | `HostPermissions` | `HostPermissions` | Per-mount host-permission propagation policy (virtiofs only) |
 

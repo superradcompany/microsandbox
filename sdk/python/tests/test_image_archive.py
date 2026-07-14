@@ -16,3 +16,8 @@ async def test_save_rejects_unknown_format(tmp_path: pathlib.Path) -> None:
             output_path=str(tmp_path / "image.tar"),
             format="zip",
         )
+
+
+async def test_save_rejects_empty_reference_list(tmp_path: pathlib.Path) -> None:
+    with pytest.raises(ValueError, match="at least one image reference"):
+        await Image.save([], output_path=str(tmp_path / "image.tar"))

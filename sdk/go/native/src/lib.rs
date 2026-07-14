@@ -1790,6 +1790,11 @@ fn apply_volume(
             "size_mib is only valid for tmpfs mounts or named volume provisioning",
         ));
     }
+    if quota_mib.is_some() && bind.is_none() && named.is_none() {
+        return Err(FfiError::invalid_argument(
+            "quota_mib is only valid for bind mounts or named volume provisioning",
+        ));
+    }
 
     Ok(builder.volume(guest_path, move |mb| {
         let mut mb = if let Some(ref host) = bind {
@@ -5050,6 +5055,90 @@ pub unsafe extern "C" fn msb_image_prune(
                 "bytes_reclaimed": report.bytes_reclaimed,
             })
             .to_string())
+        }))
+    })
+}
+
+/// Load images from a local archive (`docker save` tarball or OCI Image
+/// Layout) into the cache. `tags_json` is a JSON array of extra references
+/// applied to the first image in the archive. Returns a JSON array of image
+/// handles, one per imported reference.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_image_load(
+    cancel_id: u64,
+    input_path: *const c_char,
+    tags_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let input_path = unsafe { cstr(input_path) }?;
+        let raw_tags = unsafe { cstr(tags_json) }?;
+        let tags: Vec<String> = serde_json::from_str(&raw_tags)
+            .map_err(|e| FfiError::invalid_argument(format!("invalid tags payload: {e}")))?;
+        Ok(Box::pin(async move {
+            let backend = microsandbox::backend::default_backend();
+            let local = backend
+                .as_local()
+                .ok_or_else(|| FfiError::invalid_argument("image ops require a local backend"))?;
+            let handles = microsandbox::image::Image::load_local(
+                local,
+                std::path::Path::new(&input_path),
+                tags,
+            )
+            .await
+            .map_err(FfiError::from)?;
+            let arr: Vec<serde_json::Value> = handles.iter().map(image_handle_json).collect();
+            Ok(serde_json::Value::Array(arr).to_string())
+        }))
+    })
+}
+
+/// Save cached images to an archive file. `references_json` is a JSON array
+/// of image references; `format` is `"docker"` or `"oci"` (empty/null means
+/// docker).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_image_save(
+    cancel_id: u64,
+    references_json: *const c_char,
+    output_path: *const c_char,
+    format: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let raw_references = unsafe { cstr(references_json) }?;
+        let references: Vec<String> = serde_json::from_str(&raw_references)
+            .map_err(|e| FfiError::invalid_argument(format!("invalid references payload: {e}")))?;
+        if references.is_empty() {
+            return Err(FfiError::invalid_argument(
+                "at least one image reference is required",
+            ));
+        }
+        let output_path = unsafe { cstr(output_path) }?;
+        let format = match unsafe { cstr(format) }?.as_str() {
+            "" | "docker" => microsandbox::ImageArchiveFormat::Docker,
+            "oci" => microsandbox::ImageArchiveFormat::Oci,
+            other => {
+                return Err(FfiError::invalid_argument(format!(
+                    "invalid archive format '{other}': expected 'docker' or 'oci'"
+                )));
+            }
+        };
+        Ok(Box::pin(async move {
+            let backend = microsandbox::backend::default_backend();
+            let local = backend
+                .as_local()
+                .ok_or_else(|| FfiError::invalid_argument("image ops require a local backend"))?;
+            microsandbox::image::Image::save_local(
+                local,
+                &references,
+                std::path::Path::new(&output_path),
+                format,
+            )
+            .await
+            .map_err(FfiError::from)?;
+            Ok(r#"{"ok":true}"#.into())
         }))
     })
 }

@@ -1759,6 +1759,13 @@ export interface ImageLayerDetail {
 /** List all cached images. */
 export declare function imageList(): Promise<Array<ImageInfo>>
 
+/**
+ * Load images from a local archive (`docker save` tarball or OCI Image
+ * Layout) into the image cache. `tag` applies an extra reference to the
+ * first image in the archive.
+ */
+export declare function imageLoad(inputPath: string, tag?: string | undefined | null): Promise<Array<ImageInfo>>
+
 /** Remove cached image data that is not used by any sandbox or indexed snapshot. */
 export declare function imagePrune(): Promise<ImagePruneReportJs>
 
@@ -1777,6 +1784,12 @@ export interface ImagePruneReportJs {
  * sandbox references it.
  */
 export declare function imageRemove(reference: string, force?: boolean | undefined | null): Promise<void>
+
+/**
+ * Save cached images to an archive file. `format` selects the layout:
+ * `"docker"` (default, loadable with `docker load`) or `"oci"`.
+ */
+export declare function imageSave(references: Array<string>, outputPath: string, format?: string | undefined | null): Promise<void>
 
 /** Download and install msb + libkrunfw to ~/.microsandbox/. */
 export declare function install(): Promise<void>

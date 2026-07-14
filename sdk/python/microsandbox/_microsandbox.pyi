@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator, Awaitable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Mapping, Sequence
 from typing import Any, TypedDict
 
 from microsandbox.types import (
@@ -577,7 +577,7 @@ class Image:
     async def load(input_path: str, *, tag: str | None = None) -> list[ImageHandle]: ...
     @staticmethod
     async def save(
-        reference: str, *, output_path: str, format: str = "docker"
+        reference: str | Sequence[str], *, output_path: str, format: str = "docker"
     ) -> None: ...
 
 class ImageHandle:

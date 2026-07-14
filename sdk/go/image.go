@@ -66,9 +66,42 @@ func (imageFactory) Prune(ctx context.Context) (*ImagePruneReport, error) {
 	return imagePruneReportFromInfo(info), nil
 }
 
+// Load imports images from a local archive (a `docker save` tarball or an
+// OCI Image Layout archive) into the cache and returns a handle for every
+// image reference imported. tags apply extra references to the first image
+// in the archive.
+func (imageFactory) Load(ctx context.Context, inputPath string, tags ...string) ([]*ImageHandle, error) {
+	infos, err := ffi.ImageLoad(ctx, inputPath, tags)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	out := make([]*ImageHandle, len(infos))
+	for i, info := range infos {
+		out[i] = imageHandleFromInfo(info)
+	}
+	return out, nil
+}
+
+// Save exports cached images to an archive file at outputPath. Returns
+// ErrImageNotFound when any reference is missing from the local cache.
+func (imageFactory) Save(ctx context.Context, references []string, outputPath string, format ImageArchiveFormat) error {
+	return wrapFFI(ffi.ImageSave(ctx, references, outputPath, string(format)))
+}
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
+
+// ImageArchiveFormat selects the archive layout written by Image.Save.
+type ImageArchiveFormat string
+
+const (
+	// ImageArchiveDocker is a `docker save` compatible archive (the default;
+	// the empty string means the same).
+	ImageArchiveDocker ImageArchiveFormat = "docker"
+	// ImageArchiveOCI is an OCI Image Layout archive.
+	ImageArchiveOCI ImageArchiveFormat = "oci"
+)
 
 // ImageHandle is a lightweight metadata reference to a cached OCI image.
 // Obtain via Image.Get / Image.List.

@@ -21,6 +21,19 @@ use crate::error::to_py_err;
 #[pyclass(name = "Image")]
 pub struct PyImage;
 
+/// One image reference or a sequence of them.
+///
+/// `One` must come first: an untagged extraction tries variants in order, and
+/// a Python `str` is itself a sequence of 1-char strings, so trying
+/// `Vec<String>` first would happily shred `"python:3.12"` into characters.
+#[derive(FromPyObject)]
+pub enum ReferenceArg {
+    /// A single image reference.
+    One(String),
+    /// Multiple image references.
+    Many(Vec<String>),
+}
+
 /// A lightweight handle to a cached OCI image.
 #[pyclass(name = "ImageHandle")]
 #[derive(Clone)]
@@ -241,15 +254,17 @@ impl PyImage {
         })
     }
 
-    /// Save a cached image to an archive file.
+    /// Save one or more cached images to an archive file.
     ///
-    /// `format` selects the archive layout: `"docker"` (default, compatible
-    /// with `docker load`) or `"oci"` (OCI Image Layout).
+    /// `reference` accepts a single reference string or a sequence of them;
+    /// every referenced image is written into the same archive. `format`
+    /// selects the archive layout: `"docker"` (default, compatible with
+    /// `docker load`) or `"oci"` (OCI Image Layout).
     #[staticmethod]
     #[pyo3(signature = (reference, *, output_path, format = None))]
     fn save<'py>(
         py: Python<'py>,
-        reference: String,
+        reference: ReferenceArg,
         output_path: String,
         format: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
@@ -262,11 +277,19 @@ impl PyImage {
                 )));
             }
         };
+        let references = match reference {
+            ReferenceArg::One(reference) => vec![reference],
+            ReferenceArg::Many(references) => references,
+        };
+        if references.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "at least one image reference is required",
+            ));
+        }
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let backend = resolve_local().map_err(to_py_err)?;
             let local = backend.as_local().expect("checked above");
-            let references = vec![reference];
             RustImage::save_local(
                 local,
                 &references,

@@ -38,17 +38,17 @@ async def test_image_save_and_load_round_trips_archive(sandbox_factory, tmp_path
 
     extra_tag = "python-sdk/archive-roundtrip:latest"
     loaded = await Image.load(input_path=str(archive_path), tag=extra_tag)
+    try:
+        references = {handle.reference for handle in loaded}
+        assert IMAGE in references
+        assert extra_tag in references
+        for handle in loaded:
+            assert handle.layer_count > 0
 
-    references = {handle.reference for handle in loaded}
-    assert IMAGE in references
-    assert extra_tag in references
-    for handle in loaded:
-        assert handle.layer_count > 0
-
-    tagged = await Image.get(extra_tag)
-    assert tagged.manifest_digest == (await Image.get(IMAGE)).manifest_digest
-
-    await Image.remove(extra_tag, force=True)
+        tagged = await Image.get(extra_tag)
+        assert tagged.manifest_digest == (await Image.get(IMAGE)).manifest_digest
+    finally:
+        await Image.remove(extra_tag, force=True)
 
 
 async def test_image_management_round_trips_pulled_sandbox_image(sandbox_factory) -> None:

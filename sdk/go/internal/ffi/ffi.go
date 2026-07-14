@@ -168,6 +168,8 @@ typedef char *(*msb_image_list_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_
 typedef char *(*msb_image_inspect_fn)(uint64_t cancel_id, const char *reference, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_image_remove_fn)(uint64_t cancel_id, const char *reference, bool force, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_image_prune_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_image_load_fn)(uint64_t cancel_id, const char *input_path, const char *tags_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_image_save_fn)(uint64_t cancel_id, const char *references_json, const char *output_path, const char *format, uint8_t *buf, size_t buf_len);
 
 typedef char *(*msb_sandbox_handle_snapshot_fn)(uint64_t cancel_id, const char *sandbox_name, const char *snapshot_name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_snapshot_to_fn)(uint64_t cancel_id, const char *sandbox_name, const char *path, uint8_t *buf, size_t buf_len);
@@ -317,6 +319,8 @@ static msb_image_list_fn           ptr_msb_image_list           = NULL;
 static msb_image_inspect_fn        ptr_msb_image_inspect        = NULL;
 static msb_image_remove_fn         ptr_msb_image_remove         = NULL;
 static msb_image_prune_fn         ptr_msb_image_prune         = NULL;
+static msb_image_load_fn           ptr_msb_image_load           = NULL;
+static msb_image_save_fn           ptr_msb_image_save           = NULL;
 static msb_sandbox_handle_snapshot_fn ptr_msb_sandbox_handle_snapshot = NULL;
 static msb_sandbox_handle_snapshot_to_fn ptr_msb_sandbox_handle_snapshot_to = NULL;
 static msb_snapshot_create_fn      ptr_msb_snapshot_create      = NULL;
@@ -476,6 +480,8 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_image_inspect);
 	RESOLVE(msb_image_remove);
 	RESOLVE(msb_image_prune);
+	RESOLVE(msb_image_load);
+	RESOLVE(msb_image_save);
 	RESOLVE(msb_sandbox_handle_snapshot);
 	RESOLVE(msb_sandbox_handle_snapshot_to);
 	RESOLVE(msb_snapshot_create);
@@ -842,6 +848,12 @@ char *call_msb_image_remove(uint64_t cancel_id, const char *reference, bool forc
 }
 char *call_msb_image_prune(uint64_t cancel_id, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_image_prune ? ptr_msb_image_prune(cancel_id, buf, buf_len) : NULL;
+}
+char *call_msb_image_load(uint64_t cancel_id, const char *input_path, const char *tags_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_image_load ? ptr_msb_image_load(cancel_id, input_path, tags_json, buf, buf_len) : NULL;
+}
+char *call_msb_image_save(uint64_t cancel_id, const char *references_json, const char *output_path, const char *format, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_image_save ? ptr_msb_image_save(cancel_id, references_json, output_path, format, buf, buf_len) : NULL;
 }
 char *call_msb_sandbox_handle_snapshot(uint64_t cancel_id, const char *sandbox_name, const char *snapshot_name, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_handle_snapshot ? ptr_msb_sandbox_handle_snapshot(cancel_id, sandbox_name, snapshot_name, buf, buf_len) : NULL;
@@ -4148,6 +4160,62 @@ func ImagePrune(ctx context.Context) (*ImagePruneReportInfo, error) {
 		return nil, fmt.Errorf("parse image_prune: %w", err)
 	}
 	return &info, nil
+}
+
+// ImageLoad imports images from a local archive into the cache and returns
+// a handle per imported reference. tags apply extra references to the first
+// image in the archive.
+func ImageLoad(ctx context.Context, inputPath string, tags []string) ([]*ImageHandleInfo, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	if tags == nil {
+		tags = []string{}
+	}
+	tagsJSON, err := json.Marshal(tags)
+	if err != nil {
+		return nil, fmt.Errorf("encode tags: %w", err)
+	}
+	cPath := C.CString(inputPath)
+	defer C.free(unsafe.Pointer(cPath))
+	cTags := C.CString(string(tagsJSON))
+	defer C.free(unsafe.Pointer(cTags))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_image_load(cancelID, cPath, cTags, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var infos []*ImageHandleInfo
+	if err := json.Unmarshal([]byte(out), &infos); err != nil {
+		return nil, fmt.Errorf("parse image_load: %w", err)
+	}
+	return infos, nil
+}
+
+// ImageSave exports cached images to an archive file. format is "docker" or
+// "oci"; empty means docker.
+func ImageSave(ctx context.Context, references []string, outputPath string, format string) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	if references == nil {
+		references = []string{}
+	}
+	referencesJSON, err := json.Marshal(references)
+	if err != nil {
+		return fmt.Errorf("encode references: %w", err)
+	}
+	cRefs := C.CString(string(referencesJSON))
+	defer C.free(unsafe.Pointer(cRefs))
+	cPath := C.CString(outputPath)
+	defer C.free(unsafe.Pointer(cPath))
+	cFormat := C.CString(format)
+	defer C.free(unsafe.Pointer(cFormat))
+	_, err = call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_image_save(cancelID, cRefs, cPath, cFormat, buf, bufLen)
+	})
+	return err
 }
 
 // ---------------------------------------------------------------------------

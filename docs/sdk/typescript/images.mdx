@@ -3,7 +3,7 @@ title: Images
 description: TypeScript SDK - Image cache API reference
 ---
 
-Inspect, remove, and prune the local OCI image cache: the images that sandbox creation has already pulled. These APIs are exposed through the public `Image` class and require a local backend; cloud backends report `Unsupported`.
+Inspect, remove, prune, and archive the local OCI image cache: the images that sandbox creation has already pulled. These APIs are exposed through the public `Image` class and require a local backend; cloud backends report `Unsupported`.
 
 ```typescript
 import { Image, ImageHandle } from "microsandbox";
@@ -12,12 +12,14 @@ import type { ImageDetail, ImagePruneReport } from "microsandbox";
 
 <div className="msb-glance">
 
-  <p className="msb-gl"><span className="msb-dot static"></span>Static · Image<span className="msb-ct">5</span></p>
+  <p className="msb-gl"><span className="msb-dot static"></span>Static · Image<span className="msb-ct">7</span></p>
   <a className="msb-row" href="#image-get"><span className="msb-rn">Image.get()</span><span className="msb-rg">one cached image</span></a>
   <a className="msb-row" href="#image-list"><span className="msb-rn">Image.list()</span><span className="msb-rg">all cached images</span></a>
   <a className="msb-row" href="#image-inspect"><span className="msb-rn">Image.inspect()</span><span className="msb-rg">config + layer detail</span></a>
   <a className="msb-row" href="#image-remove"><span className="msb-rn">Image.remove()</span><span className="msb-rg">delete a cached image</span></a>
   <a className="msb-row" href="#image-prune"><span className="msb-rn">Image.prune()</span><span className="msb-rg">reclaim unused data</span></a>
+  <a className="msb-row" href="#image-load"><span className="msb-rn">Image.load()</span><span className="msb-rg">import from archive</span></a>
+  <a className="msb-row" href="#image-save"><span className="msb-rn">Image.save()</span><span className="msb-rg">export to archive</span></a>
 
   <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
   <div className="msb-chiprow">
@@ -149,13 +151,56 @@ console.log(report.imageRefsRemoved, report.bytesReclaimed);
 
 </Accordion>
 
+---
+
+#### <span className="msb-recv">Image.</span><span className="msb-hn">load()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
+
+```typescript
+static load(inputPath: string, opts?: { tag?: string }): Promise<ImageHandle[]>
+```
+
+Import images from a local archive into the cache. Accepts `docker save` tarballs and OCI Image Layout archives, so locally built images can be used without going through a registry. `tag` applies an extra reference to the first image in the archive. Returns a handle for every image reference imported.
+
+<Accordion title="Example">
+
+```typescript
+// docker save my-image:latest -o my-image.tar
+const images = await Image.load("my-image.tar", { tag: "app:local" });
+for (const image of images) {
+  console.log(image.reference);
+}
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">Image.</span><span className="msb-hn">save()</span>
+<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
+
+```typescript
+static save(reference: string | readonly string[], opts: { outputPath: string; format?: "docker" | "oci" }): Promise<void>
+```
+
+Export one or more cached images to an archive file. `format` selects the archive layout: `"docker"` (default, loadable with `docker load`) or `"oci"` (OCI Image Layout). Throws `ImageNotFoundError` when any reference is not in the local cache.
+
+<Accordion title="Example">
+
+```typescript
+await Image.save("python:3.12", { outputPath: "python.tar" });
+await Image.save("python:3.12", { outputPath: "python-oci.tar", format: "oci" });
+```
+
+</Accordion>
+
 ## Types
 
 ### ImageHandle
 
 <div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
-<p className="msb-backref">Returned by <a href="#image-get">get()</a> · <a href="#image-list">list()</a></p>
+<p className="msb-backref">Returned by <a href="#image-get">get()</a> · <a href="#image-list">list()</a> · <a href="#image-load">load()</a></p>
 
 A lightweight metadata handle for a cached OCI image. Properties are read-only.
 

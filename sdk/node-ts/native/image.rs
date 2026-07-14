@@ -195,6 +195,54 @@ pub async fn image_prune() -> Result<ImagePruneReportJs> {
         .map_err(to_napi_error)
 }
 
+/// Load images from a local archive (`docker save` tarball or OCI Image
+/// Layout) into the image cache. `tag` applies an extra reference to the
+/// first image in the archive.
+#[napi(js_name = "imageLoad")]
+pub async fn image_load(input_path: String, tag: Option<String>) -> Result<Vec<ImageInfo>> {
+    let backend = resolve_local()?;
+    let local = backend.as_local().expect("checked above");
+    let tags: Vec<String> = tag.into_iter().collect();
+    let handles = msb_image::Image::load_local(local, std::path::Path::new(&input_path), tags)
+        .await
+        .map_err(to_napi_error)?;
+    Ok(handles.iter().map(image_handle_to_info).collect())
+}
+
+/// Save cached images to an archive file. `format` selects the layout:
+/// `"docker"` (default, loadable with `docker load`) or `"oci"`.
+#[napi(js_name = "imageSave")]
+pub async fn image_save(
+    references: Vec<String>,
+    output_path: String,
+    format: Option<String>,
+) -> Result<()> {
+    let format = match format.as_deref().unwrap_or("docker") {
+        "docker" => microsandbox::ImageArchiveFormat::Docker,
+        "oci" => microsandbox::ImageArchiveFormat::Oci,
+        other => {
+            return Err(napi::Error::from_reason(format!(
+                "invalid archive format '{other}': expected 'docker' or 'oci'"
+            )));
+        }
+    };
+    if references.is_empty() {
+        return Err(napi::Error::from_reason(
+            "at least one image reference is required".to_string(),
+        ));
+    }
+    let backend = resolve_local()?;
+    let local = backend.as_local().expect("checked above");
+    msb_image::Image::save_local(
+        local,
+        &references,
+        std::path::Path::new(&output_path),
+        format,
+    )
+    .await
+    .map_err(to_napi_error)
+}
+
 fn image_handle_to_info(h: &ImageHandle) -> ImageInfo {
     ImageInfo {
         reference: h.reference().to_string(),

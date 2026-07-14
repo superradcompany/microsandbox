@@ -108,6 +108,36 @@ export class Image {
       bytesReclaimed: numOrNull(raw.bytesReclaimed),
     };
   }
+
+  /**
+   * Import images from a local archive (`docker save` tarball or OCI Image
+   * Layout) into the cache. `tag` applies an extra reference to the first
+   * image in the archive. Returns a handle for every reference imported.
+   */
+  static async load(
+    inputPath: string,
+    opts: { tag?: string } = {},
+  ): Promise<ImageHandle[]> {
+    const infos = await withMappedErrors(() =>
+      napi.imageLoad(inputPath, opts.tag),
+    );
+    return infos.map((i) => new ImageHandle(i));
+  }
+
+  /**
+   * Export one or more cached images to an archive file. `format` selects
+   * the layout: `"docker"` (default, loadable with `docker load`) or
+   * `"oci"` (OCI Image Layout).
+   */
+  static async save(
+    reference: string | readonly string[],
+    opts: { outputPath: string; format?: "docker" | "oci" },
+  ): Promise<void> {
+    const references = typeof reference === "string" ? [reference] : reference;
+    await withMappedErrors(() =>
+      napi.imageSave([...references], opts.outputPath, opts.format),
+    );
+  }
 }
 
 function numOrNull(v: number | null | undefined): number | null {

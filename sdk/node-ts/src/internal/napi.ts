@@ -70,6 +70,15 @@ export interface NativeBindings {
   readonly imageInspect: (reference: string) => Promise<NapiImageDetail>;
   readonly imageRemove: (reference: string, force?: boolean) => Promise<void>;
   readonly imagePrune: () => Promise<NapiImagePruneReport>;
+  readonly imageLoad: (
+    inputPath: string,
+    tag?: string,
+  ) => Promise<NapiImageInfo[]>;
+  readonly imageSave: (
+    references: string[],
+    outputPath: string,
+    format?: string,
+  ) => Promise<void>;
   readonly install: () => Promise<void>;
   readonly isInstalled: () => boolean;
   readonly allSandboxMetrics: () => Promise<Record<string, NapiSandboxMetrics>>;
