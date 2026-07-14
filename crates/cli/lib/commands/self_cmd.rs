@@ -2464,11 +2464,9 @@ mod tests {
         .unwrap();
         Migrator::up(db.inner(), None).await.unwrap();
 
-        // Three steps: the two latest migrations (root disk, bind rootfs shape)
-        // have no-op downs; `snapshot_index.scope` sits directly below them.
-        // Roll back through all three so the newest observable schema change
-        // (the scope column) is undone while everything older stays intact.
-        rollback_schema(db.inner(), 3).await.unwrap();
+        // The scope migration is the latest; one step must drop the column
+        // while everything older (including root disk) stays intact.
+        rollback_schema(db.inner(), 1).await.unwrap();
 
         let columns = db
             .query_all(Statement::from_string(

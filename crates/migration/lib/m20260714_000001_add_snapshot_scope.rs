@@ -24,7 +24,7 @@ enum SnapshotIndex {
 
 impl MigrationName for Migration {
     fn name(&self) -> &str {
-        "m20260705_000001_add_snapshot_scope"
+        "m20260714_000001_add_snapshot_scope"
     }
 }
 

@@ -22,7 +22,7 @@ pub const MAINTENANCE_LEASE_MIGRATION_ID: &str = "m20260621_000002_create_mainte
 pub const ACTIVE_CONFIG_MIGRATION_ID: &str = "m20260703_000001_add_sandbox_active_config";
 
 /// Migration that adds payload scope metadata to the snapshot index.
-pub const SNAPSHOT_SCOPE_MIGRATION_ID: &str = "m20260705_000001_add_snapshot_scope";
+pub const SNAPSHOT_SCOPE_MIGRATION_ID: &str = "m20260714_000001_add_snapshot_scope";
 
 /// Frozen migration baseline for the transitional 0.6.0 release.
 ///
@@ -147,13 +147,6 @@ pub const MIGRATION_METADATA: &[MigrationMetadata] = &[
         summary: "remove active sandbox config snapshots",
     },
     MigrationMetadata {
-        id: SNAPSHOT_SCOPE_MIGRATION_ID,
-        reversible: true,
-        affects_cache: false,
-        affects_user_data: false,
-        summary: "remove snapshot scope index metadata",
-    },
-    MigrationMetadata {
         id: "m20260708_000001_migrate_bind_rootfs_source",
         reversible: false,
         affects_cache: false,
@@ -166,6 +159,13 @@ pub const MIGRATION_METADATA: &[MigrationMetadata] = &[
         affects_cache: false,
         affects_user_data: false,
         summary: "rewrite root disk config back to the upper size shape",
+    },
+    MigrationMetadata {
+        id: SNAPSHOT_SCOPE_MIGRATION_ID,
+        reversible: true,
+        affects_cache: false,
+        affects_user_data: false,
+        summary: "remove snapshot scope index metadata",
     },
 ];
 
