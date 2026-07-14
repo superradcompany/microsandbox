@@ -54,7 +54,7 @@ use microsandbox::{
     logs::{LogOptions, LogSource},
     sandbox::{
         FsEntryKind, PullPolicy, SecurityProfile, all_sandbox_metrics_local,
-        exec::{ExecEvent, ExecHandle, ExecSink},
+        exec::{ExecControl, ExecEvent, ExecHandle, ExecSink},
         fs::{FsReadStream, FsWriteSink},
         ssh::{SftpClient, SshClient, SshServer, SshStdioStream},
     },
@@ -141,12 +141,16 @@ fn remove(handle: Handle) -> Result<Option<std::sync::Arc<Sandbox>>, FfiError> {
 // a Mutex to satisfy the RwLock<HashMap<…>> bound.
 // ---------------------------------------------------------------------------
 
-// Exec handles are stored behind `Arc<Mutex<…>>`. The Arc lets callers
-// (`msb_exec_recv`, `msb_exec_signal`) clone a reference out of the registry
-// and drop the RwLock read guard before entering a potentially long-running
-// `block_on(eh.recv())`. Holding the read guard across that await would block
-// any goroutine trying to acquire the write lock (`register_exec` / `remove_exec`).
-type ExecEntry = std::sync::Arc<std::sync::Mutex<ExecHandle>>;
+// Exec handles and their cloneable controls share one registry entry. Receive
+// and wait operations lock only the handle, while signal/kill/resize clone the
+// control without waiting for a blocked receive. Keeping both in one entry
+// gives registration and removal a single lifecycle boundary.
+struct ExecState {
+    handle: std::sync::Mutex<ExecHandle>,
+    control: ExecControl,
+}
+
+type ExecEntry = std::sync::Arc<ExecState>;
 
 fn exec_registry() -> &'static RwLock<HashMap<Handle, ExecEntry>> {
     static EXEC_REG: OnceLock<RwLock<HashMap<Handle, ExecEntry>>> = OnceLock::new();
@@ -189,10 +193,17 @@ fn remove_stdin(handle: Handle) {
 
 fn register_exec(handle: ExecHandle) -> Result<Handle, FfiError> {
     let h = NEXT_EXEC_HANDLE.fetch_add(1, Ordering::Relaxed);
+    let control = handle.control();
     exec_registry()
         .write()
         .map_err(|_| FfiError::internal("exec registry lock poisoned"))?
-        .insert(h, std::sync::Arc::new(std::sync::Mutex::new(handle)));
+        .insert(
+            h,
+            std::sync::Arc::new(ExecState {
+                handle: std::sync::Mutex::new(handle),
+                control,
+            }),
+        );
     Ok(h)
 }
 
@@ -210,6 +221,10 @@ fn remove_exec(handle: Handle) -> Result<Option<ExecEntry>, FfiError> {
         .write()
         .map_err(|_| FfiError::internal("exec registry lock poisoned"))?
         .remove(&handle))
+}
+
+fn get_exec_control(handle: Handle) -> Result<ExecControl, FfiError> {
+    Ok(get_exec(handle)?.control.clone())
 }
 
 // ---------------------------------------------------------------------------
@@ -3618,6 +3633,7 @@ struct ExecOpts {
     cwd: Option<String>,
     timeout_secs: Option<u64>,
     stdin_pipe: Option<bool>,
+    tty: Option<bool>,
     user: Option<String>,
     #[serde(default)]
     env: HashMap<String, String>,
@@ -3646,6 +3662,9 @@ pub unsafe extern "C" fn msb_sandbox_exec(
                     }
                     if let Some(cwd) = opts.cwd {
                         b = b.cwd(cwd);
+                    }
+                    if let Some(tty) = opts.tty {
+                        b = b.tty(tty);
                     }
                     if let Some(secs) = opts.timeout_secs {
                         b = b.timeout(Duration::from_secs(secs));
@@ -4440,6 +4459,9 @@ pub unsafe extern "C" fn msb_sandbox_exec_stream(
                     if stdin_pipe {
                         b = b.stdin_pipe();
                     }
+                    if let Some(tty) = opts.tty {
+                        b = b.tty(tty);
+                    }
                     if let Some(cwd) = opts.cwd {
                         b = b.cwd(cwd);
                     }
@@ -4459,7 +4481,7 @@ pub unsafe extern "C" fn msb_sandbox_exec_stream(
             let exec_h = register_exec(exec_handle)?;
             if stdin_pipe
                 && let Ok(eh) = get_exec(exec_h)
-                && let Ok(mut guard) = eh.lock()
+                && let Ok(mut guard) = eh.handle.lock()
                 && let Some(sink) = guard.take_stdin()
             {
                 let _ = register_stdin(exec_h, sink);
@@ -4490,6 +4512,7 @@ pub unsafe extern "C" fn msb_exec_recv(
         // while this recv blocks waiting for data.
         let entry = get_exec(exec_handle)?;
         let mut eh = entry
+            .handle
             .lock()
             .map_err(|_| FfiError::internal("exec handle mutex poisoned"))?;
         let json = rt().block_on(async {
@@ -4568,6 +4591,7 @@ pub unsafe extern "C" fn msb_exec_id(
     run(buf, buf_len, || {
         let entry = get_exec(exec_handle)?;
         let eh = entry
+            .handle
             .lock()
             .map_err(|_| FfiError::internal("exec handle mutex poisoned"))?;
         let id = eh.id();
@@ -4587,13 +4611,38 @@ pub unsafe extern "C" fn msb_exec_signal(
 ) -> *mut c_char {
     let result: Result<(), FfiError> = (|| -> Result<(), FfiError> {
         let token = lookup_cancel_token(cancel_id)?;
-        let entry = get_exec(exec_handle)?;
-        let eh = entry
-            .lock()
-            .map_err(|_| FfiError::internal("exec handle mutex poisoned"))?;
+        let control = get_exec_control(exec_handle)?;
         rt().block_on(async {
             tokio::select! {
-                r = eh.signal(signal) => r.map_err(FfiError::from),
+                r = control.signal(signal) => r.map_err(FfiError::from),
+                _ = token.cancelled() => Err(FfiError::new(error_kind::CANCELLED, "cancelled")),
+            }
+        })?;
+        write_output(buf, buf_len, r#"{"ok":true}"#)
+    })();
+    cancel_unregister(cancel_id);
+    match result {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => err_ptr(e),
+    }
+}
+
+/// Resize the pseudo-terminal for a running exec session.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_exec_resize(
+    cancel_id: u64,
+    exec_handle: Handle,
+    rows: u16,
+    cols: u16,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    let result: Result<(), FfiError> = (|| -> Result<(), FfiError> {
+        let token = lookup_cancel_token(cancel_id)?;
+        let control = get_exec_control(exec_handle)?;
+        rt().block_on(async {
+            tokio::select! {
+                r = control.resize(rows, cols) => r.map_err(FfiError::from),
                 _ = token.cancelled() => Err(FfiError::new(error_kind::CANCELLED, "cancelled")),
             }
         })?;
@@ -4689,6 +4738,7 @@ pub unsafe extern "C" fn msb_exec_collect(
         let token = lookup_cancel_token(cancel_id)?;
         let entry = get_exec(exec_handle)?;
         let mut eh = entry
+            .handle
             .lock()
             .map_err(|_| FfiError::internal("exec handle mutex poisoned"))?;
         let output = rt().block_on(async {
@@ -4724,6 +4774,7 @@ pub unsafe extern "C" fn msb_exec_wait(
         let token = lookup_cancel_token(cancel_id)?;
         let entry = get_exec(exec_handle)?;
         let mut eh = entry
+            .handle
             .lock()
             .map_err(|_| FfiError::internal("exec handle mutex poisoned"))?;
         let status = rt().block_on(async {
@@ -4752,13 +4803,10 @@ pub unsafe extern "C" fn msb_exec_kill(
 ) -> *mut c_char {
     let result: Result<(), FfiError> = (|| -> Result<(), FfiError> {
         let token = lookup_cancel_token(cancel_id)?;
-        let entry = get_exec(exec_handle)?;
-        let eh = entry
-            .lock()
-            .map_err(|_| FfiError::internal("exec handle mutex poisoned"))?;
+        let control = get_exec_control(exec_handle)?;
         rt().block_on(async {
             tokio::select! {
-                r = eh.kill() => r.map_err(FfiError::from),
+                r = control.kill() => r.map_err(FfiError::from),
                 _ = token.cancelled() => Err(FfiError::new(error_kind::CANCELLED, "cancelled")),
             }
         })?;
@@ -6137,6 +6185,13 @@ mod tests {
             serde_json::from_str(r#"{"image":"python:3.12","oci_upper_size_mib":0}"#).unwrap();
 
         assert_eq!(opts.oci_upper_size_mib, Some(0));
+    }
+
+    #[test]
+    fn exec_opts_parses_tty() {
+        let opts: ExecOpts = serde_json::from_str(r#"{"tty":true}"#).unwrap();
+
+        assert_eq!(opts.tty, Some(true));
     }
 
     #[test]
