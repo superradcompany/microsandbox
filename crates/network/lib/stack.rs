@@ -1508,4 +1508,525 @@ mod tests {
             "external ICMP should not be answered locally"
         );
     }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Guest-initiated TCP teardown.
+    //
+    // These tests drive the real `ConnectionTracker` + smoltcp interface
+    // through a full TCP handshake and then a guest-initiated teardown,
+    // asserting the observable the proxy task sees on its channel:
+    //   - guest FIN => half-close propagated (channel EOF), server → guest
+    //     stays open, and the slot is reclaimed once the proxy task exits
+    //   - guest RST => immediate clean teardown
+    // Regression tests for the CLOSE_WAIT orphan leak: without close
+    // propagation, a guest FIN left the socket in CLOSE_WAIT forever, the
+    // proxy task blocked on `from_smoltcp.recv()`, the upstream socket
+    // open, and the connection-table slot consumed until the table filled.
+    // ─────────────────────────────────────────────────────────────────────
+
+    use smoltcp::socket::tcp;
+    use smoltcp::wire::{TcpControl, TcpPacket, TcpRepr, TcpSeqNumber};
+
+    const GUEST_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x02];
+    const GATEWAY_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
+    const GUEST_IP: [u8; 4] = [100, 96, 0, 2];
+    const GATEWAY_IP: [u8; 4] = [100, 96, 0, 1];
+    // Off-subnet external destination reached via the default route.
+    const SERVER_IP: [u8; 4] = [93, 184, 216, 34];
+
+    fn leak_poll_config() -> PollLoopConfig {
+        PollLoopConfig {
+            gateway_mac: GATEWAY_MAC,
+            guest_mac: GUEST_MAC,
+            gateway: GatewayIps {
+                ipv4: Some(Ipv4Addr::from(GATEWAY_IP)),
+                ipv6: None,
+            },
+            guest_ipv4: Some(Ipv4Addr::from(GUEST_IP)),
+            guest_ipv6: None,
+            mtu: 1500,
+        }
+    }
+
+    /// Build an Ethernet+IPv4+TCP frame from the guest with correct checksums.
+    #[allow(clippy::too_many_arguments)]
+    fn build_tcp_frame(
+        src_port: u16,
+        dst_port: u16,
+        control: TcpControl,
+        seq: i32,
+        ack: Option<i32>,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let src_ip = Ipv4Addr::from(GUEST_IP);
+        let dst_ip = Ipv4Addr::from(SERVER_IP);
+
+        let tcp_repr = TcpRepr {
+            src_port,
+            dst_port,
+            control,
+            seq_number: TcpSeqNumber(seq),
+            ack_number: ack.map(TcpSeqNumber),
+            window_len: 65535,
+            window_scale: None,
+            max_seg_size: None,
+            sack_permitted: false,
+            sack_ranges: [None, None, None],
+            timestamp: None,
+            payload,
+        };
+        let ipv4_repr = Ipv4Repr {
+            src_addr: src_ip,
+            dst_addr: dst_ip,
+            next_header: IpProtocol::Tcp,
+            payload_len: tcp_repr.buffer_len(),
+            hop_limit: 64,
+        };
+
+        let frame_len = 14 + ipv4_repr.buffer_len() + tcp_repr.buffer_len();
+        let mut frame = vec![0u8; frame_len];
+
+        let mut eth = EthernetFrame::new_unchecked(&mut frame);
+        EthernetRepr {
+            src_addr: EthernetAddress(GUEST_MAC),
+            dst_addr: EthernetAddress(GATEWAY_MAC),
+            ethertype: EthernetProtocol::Ipv4,
+        }
+        .emit(&mut eth);
+
+        let ip_end = 14 + ipv4_repr.buffer_len();
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut frame[14..ip_end]),
+            &ChecksumCapabilities::default(),
+        );
+        tcp_repr.emit(
+            &mut TcpPacket::new_unchecked(&mut frame[ip_end..]),
+            &IpAddress::Ipv4(src_ip),
+            &IpAddress::Ipv4(dst_ip),
+            &ChecksumCapabilities::default(),
+        );
+
+        frame
+    }
+
+    /// Push one guest frame, run a single ingress pass, then drain egress.
+    fn ingress(
+        frame: Vec<u8>,
+        device: &mut SmoltcpDevice,
+        iface: &mut Interface,
+        sockets: &mut SocketSet<'_>,
+        shared: &Arc<SharedState>,
+        now: Instant,
+    ) {
+        shared.tx_ring.push(frame).unwrap();
+        device.stage_next_frame().expect("frame should stage");
+        iface.poll_ingress_single(now, device, sockets);
+        loop {
+            let r = iface.poll_egress(now, device, sockets);
+            if matches!(r, smoltcp::iface::PollResult::None) {
+                break;
+            }
+        }
+    }
+
+    /// Pop the newest smoltcp→guest reply and return its (seq, ack, is_syn,
+    /// is_fin, is_rst). Drains all queued replies, returning the last TCP one.
+    fn last_tcp_reply(shared: &Arc<SharedState>) -> Option<(i32, i32, bool, bool, bool)> {
+        let mut out = None;
+        while let Some(frame) = shared.rx_ring.pop() {
+            if frame.len() < 34 {
+                continue;
+            }
+            // eth(14) + ipv4(20) then TCP.
+            if frame[23] != 6 {
+                continue; // not TCP (e.g. ARP reply passes as non-IPv4)
+            }
+            let tcp = match TcpPacket::new_checked(&frame[34..]) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            out = Some((
+                tcp.seq_number().0,
+                tcp.ack_number().0,
+                tcp.syn(),
+                tcp.fin(),
+                tcp.rst(),
+            ));
+        }
+        out
+    }
+
+    /// Find the single tracked TCP socket's state.
+    fn only_tcp_state(sockets: &SocketSet<'_>) -> Option<tcp::State> {
+        for (_h, sock) in sockets.iter() {
+            if let smoltcp::socket::Socket::Tcp(s) = sock {
+                return Some(s.state());
+            }
+        }
+        None
+    }
+
+    /// Drive guest→server handshake to ESTABLISHED, returning (server_isn,
+    /// guest_seq_after_handshake) and the spawned NewConnection channels.
+    fn establish(
+        tracker: &mut ConnectionTracker,
+        device: &mut SmoltcpDevice,
+        iface: &mut Interface,
+        sockets: &mut SocketSet<'_>,
+        shared: &Arc<SharedState>,
+        now: Instant,
+        guest_port: u16,
+    ) -> (i32, i32, Vec<crate::conn::NewConnection>) {
+        let src = SocketAddr::new(Ipv4Addr::from(GUEST_IP).into(), guest_port);
+        let dst = SocketAddr::new(Ipv4Addr::from(SERVER_IP).into(), 443);
+
+        // Pre-populate neighbor cache so smoltcp can address replies to the
+        // guest without stalling on ARP.
+        ingress(
+            build_arp_request_frame(GUEST_MAC, GUEST_IP, GATEWAY_IP),
+            device,
+            iface,
+            sockets,
+            shared,
+            now,
+        );
+        let _ = shared.rx_ring.pop(); // ARP reply
+
+        let guest_isn = 1000i32;
+
+        // 1) Guest SYN — tracker creates the listening socket first (as the
+        //    real poll loop does), then smoltcp completes the handshake.
+        assert!(
+            tracker.create_tcp_socket(src, dst, sockets),
+            "socket creation should succeed under the limit"
+        );
+        ingress(
+            build_tcp_frame(guest_port, 443, TcpControl::Syn, guest_isn, None, &[]),
+            device,
+            iface,
+            sockets,
+            shared,
+            now,
+        );
+        let (server_isn, ack, is_syn, _, _) =
+            last_tcp_reply(shared).expect("expected SYN-ACK from smoltcp");
+        assert!(is_syn, "expected SYN flag on handshake reply");
+        assert_eq!(ack, guest_isn + 1, "SYN-ACK should ack guest ISN+1");
+
+        // 2) Guest ACK — completes the handshake.
+        ingress(
+            build_tcp_frame(
+                guest_port,
+                443,
+                TcpControl::None,
+                guest_isn + 1,
+                Some(server_isn + 1),
+                &[],
+            ),
+            device,
+            iface,
+            sockets,
+            shared,
+            now,
+        );
+        assert_eq!(
+            only_tcp_state(sockets),
+            Some(tcp::State::Established),
+            "socket should be ESTABLISHED after handshake",
+        );
+
+        // 3) Poll loop detects the established connection and spawns a proxy.
+        let new_conns = tracker.take_new_connections(sockets);
+        assert_eq!(
+            new_conns.len(),
+            1,
+            "one new connection should be handed off"
+        );
+
+        (server_isn, guest_isn + 1, new_conns)
+    }
+
+    #[test]
+    fn guest_fin_propagates_half_close_without_killing_the_connection() {
+        let shared = Arc::new(SharedState::new(64));
+        let poll_config = leak_poll_config();
+        let mut device = SmoltcpDevice::new(shared.clone(), poll_config.mtu);
+        let mut iface = create_interface(&mut device, &poll_config);
+        let mut sockets = SocketSet::new(vec![]);
+        let mut tracker = ConnectionTracker::new(None);
+        let now = smoltcp_now();
+
+        let (server_isn, guest_seq, mut new_conns) = establish(
+            &mut tracker,
+            &mut device,
+            &mut iface,
+            &mut sockets,
+            &shared,
+            now,
+            54321,
+        );
+        // The proxy side of the channel: a real proxy task blocks on
+        // `from_smoltcp.recv()` while the connection is idle.
+        let conn = new_conns.remove(0);
+        let mut from_smoltcp = conn.from_smoltcp;
+        let to_smoltcp = conn.to_smoltcp;
+
+        // Guest half-closes (shutdown(SHUT_WR), or its process exits while
+        // holding an idle keep-alive: no unread data => FIN, not RST).
+        ingress(
+            build_tcp_frame(
+                54321,
+                443,
+                TcpControl::Fin,
+                guest_seq,
+                Some(server_isn + 1),
+                &[],
+            ),
+            &mut device,
+            &mut iface,
+            &mut sockets,
+            &shared,
+            now,
+        );
+        assert_eq!(
+            only_tcp_state(&sockets),
+            Some(tcp::State::CloseWait),
+            "guest FIN should move the smoltcp socket to CLOSE_WAIT",
+        );
+
+        // One relay pass propagates the half-close: the proxy task's
+        // receiver disconnects, so its `recv()` returns `None` and it can
+        // shut down the guest → server direction upstream.
+        tracker.relay_data(&mut sockets);
+        assert!(
+            matches!(
+                from_smoltcp.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+            ),
+            "guest FIN must propagate EOF to the proxy task",
+        );
+
+        // The connection must NOT be torn down: a half-closed guest can
+        // still receive. Pending server → guest data is still delivered.
+        assert!(
+            tracker.has_socket_for(
+                &SocketAddr::new(Ipv4Addr::from(GUEST_IP).into(), 54321),
+                &SocketAddr::new(Ipv4Addr::from(SERVER_IP).into(), 443),
+            ),
+            "half-closed connection must stay tracked while the proxy runs",
+        );
+        let payload = b"pending server response";
+        to_smoltcp
+            .try_send(bytes::Bytes::from_static(payload))
+            .expect("server → guest channel should accept data");
+        while shared.rx_ring.pop().is_some() {} // drain handshake/ACK frames
+        tracker.relay_data(&mut sockets);
+        loop {
+            let r = iface.poll_egress(now, &mut device, &mut sockets);
+            if matches!(r, smoltcp::iface::PollResult::None) {
+                break;
+            }
+        }
+        let mut delivered = false;
+        while let Some(frame) = shared.rx_ring.pop() {
+            if frame.windows(payload.len()).any(|w| w == payload) {
+                delivered = true;
+            }
+        }
+        assert!(
+            delivered,
+            "server data must still reach a half-closed guest",
+        );
+        assert_eq!(
+            only_tcp_state(&sockets),
+            Some(tcp::State::CloseWait),
+            "socket must stay open (CLOSE_WAIT) while the proxy is alive",
+        );
+    }
+
+    #[test]
+    fn guest_fin_connection_is_reaped_after_proxy_exit() {
+        let shared = Arc::new(SharedState::new(64));
+        let poll_config = leak_poll_config();
+        let mut device = SmoltcpDevice::new(shared.clone(), poll_config.mtu);
+        let mut iface = create_interface(&mut device, &poll_config);
+        let mut sockets = SocketSet::new(vec![]);
+        let mut tracker = ConnectionTracker::new(None);
+        let now = smoltcp_now();
+
+        let (server_isn, guest_seq, mut new_conns) = establish(
+            &mut tracker,
+            &mut device,
+            &mut iface,
+            &mut sockets,
+            &shared,
+            now,
+            54321,
+        );
+        let conn = new_conns.remove(0);
+        let from_smoltcp = conn.from_smoltcp;
+        let to_smoltcp = conn.to_smoltcp;
+
+        // Guest FIN, then a relay pass to propagate the half-close.
+        ingress(
+            build_tcp_frame(
+                54321,
+                443,
+                TcpControl::Fin,
+                guest_seq,
+                Some(server_isn + 1),
+                &[],
+            ),
+            &mut device,
+            &mut iface,
+            &mut sockets,
+            &shared,
+            now,
+        );
+        tracker.relay_data(&mut sockets);
+
+        // The proxy task exits (upstream closed after seeing our FIN) and
+        // drops its channel ends.
+        drop(from_smoltcp);
+        drop(to_smoltcp);
+
+        // The tracker detects the proxy exit and closes the socket: the
+        // guest gets our FIN (CLOSE_WAIT → LAST_ACK)...
+        while shared.rx_ring.pop().is_some() {} // drain handshake/ACK frames
+        tracker.relay_data(&mut sockets);
+        loop {
+            let r = iface.poll_egress(now, &mut device, &mut sockets);
+            if matches!(r, smoltcp::iface::PollResult::None) {
+                break;
+            }
+        }
+        let (fin_seq, _, _, is_fin, _) =
+            last_tcp_reply(&shared).expect("expected FIN toward the guest");
+        assert!(is_fin, "proxy exit after guest FIN must FIN the guest side");
+
+        // ...and the guest's final ACK completes the close.
+        ingress(
+            build_tcp_frame(
+                54321,
+                443,
+                TcpControl::None,
+                guest_seq + 1,
+                Some(fin_seq + 1),
+                &[],
+            ),
+            &mut device,
+            &mut iface,
+            &mut sockets,
+            &shared,
+            now,
+        );
+        tracker.relay_data(&mut sockets);
+        tracker.cleanup_closed(&mut sockets);
+
+        // The socket is reaped and the table slot is free again — no
+        // CLOSE_WAIT orphan pinning a slot until the table fills.
+        assert!(
+            !tracker.has_socket_for(
+                &SocketAddr::new(Ipv4Addr::from(GUEST_IP).into(), 54321),
+                &SocketAddr::new(Ipv4Addr::from(SERVER_IP).into(), 443),
+            ),
+            "connection must be evicted after FIN + proxy exit",
+        );
+        assert_eq!(
+            only_tcp_state(&sockets),
+            None,
+            "socket must be removed from the socket set",
+        );
+    }
+
+    #[test]
+    fn guest_rst_is_cleaned_up() {
+        let shared = Arc::new(SharedState::new(64));
+        let poll_config = leak_poll_config();
+        let mut device = SmoltcpDevice::new(shared.clone(), poll_config.mtu);
+        let mut iface = create_interface(&mut device, &poll_config);
+        let mut sockets = SocketSet::new(vec![]);
+        let mut tracker = ConnectionTracker::new(None);
+        let now = smoltcp_now();
+
+        let (server_isn, guest_seq, mut new_conns) = establish(
+            &mut tracker,
+            &mut device,
+            &mut iface,
+            &mut sockets,
+            &shared,
+            now,
+            54322,
+        );
+        let conn = new_conns.remove(0);
+        let mut from_smoltcp = conn.from_smoltcp;
+        let _to_smoltcp = conn.to_smoltcp;
+
+        // Guest aborts the connection (RST) instead of closing it cleanly.
+        ingress(
+            build_tcp_frame(
+                54322,
+                443,
+                TcpControl::Rst,
+                guest_seq,
+                Some(server_isn + 1),
+                &[],
+            ),
+            &mut device,
+            &mut iface,
+            &mut sockets,
+            &shared,
+            now,
+        );
+
+        // Maintenance reaps the Closed socket and drops the proxy channel.
+        for _ in 0..8 {
+            tracker.relay_data(&mut sockets);
+            tracker.cleanup_closed(&mut sockets);
+            let _ = iface.poll_egress(now, &mut device, &mut sockets);
+        }
+
+        assert!(
+            !tracker.has_socket_for(
+                &SocketAddr::new(Ipv4Addr::from(GUEST_IP).into(), 54322),
+                &SocketAddr::new(Ipv4Addr::from(SERVER_IP).into(), 443),
+            ),
+            "RST connection should be evicted from the tracker",
+        );
+        // The proxy task's receiver IS disconnected => `recv()` returns None
+        // => the proxy breaks its relay loop => the upstream socket is closed.
+        assert!(
+            matches!(
+                from_smoltcp.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+            ),
+            "RST teardown must close the proxy channel (clean, no orphan)",
+        );
+    }
+
+    #[test]
+    fn full_connection_table_refuses_new_sockets() {
+        // Once the table is full, new guest connections are refused. Uses a
+        // small max to avoid 256 full handshakes; the gating logic is
+        // identical to the 256 default.
+        let mut tracker = ConnectionTracker::new(Some(4));
+        let mut sockets = SocketSet::new(vec![]);
+        let dst = SocketAddr::new(Ipv4Addr::from(SERVER_IP).into(), 443);
+
+        for port in 40000u16..40004 {
+            let src = SocketAddr::new(Ipv4Addr::from(GUEST_IP).into(), port);
+            assert!(
+                tracker.create_tcp_socket(src, dst, &mut sockets),
+                "creation under the limit must succeed",
+            );
+        }
+        // Table full (4 slots held). The 5th guest SYN gets no socket — which
+        // in the poll loop means smoltcp emits RST / no reply => the guest
+        // sees egress as unreachable.
+        let src = SocketAddr::new(Ipv4Addr::from(GUEST_IP).into(), 40004);
+        assert!(
+            !tracker.create_tcp_socket(src, dst, &mut sockets),
+            "creation at the limit must be refused",
+        );
+    }
 }
