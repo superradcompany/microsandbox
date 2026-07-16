@@ -230,7 +230,7 @@ Live resize is not necessarily instant. When an accepted resize has not fully se
 
 Env and workdir changes on a running sandbox apply to future execs only — running processes keep their current environment. The plan reports this as a warning.
 
-`--secret NAME@HOST` adds or rotates a secret from the same-named host environment variable, recording a source reference — the value itself never rides in the command. The inline `NAME=VALUE@HOST` form is rejected, same as on `msb create`: shell history and process listings would leak the value, so providing a raw value is SDK-only.
+`--secret NAME@HOST[,HOST...]` adds or rotates a secret from the same-named host environment variable, recording a source reference — the value itself never rides in the command. The inline `NAME=VALUE@HOST` form is rejected, same as on `msb create`: shell history and process listings would leak the value, so providing a raw value is SDK-only.
 
 | Flag | Description |
 |------|-------------|
@@ -241,7 +241,7 @@ Env and workdir changes on a running sandbox apply to future execs only — runn
 | `--env`, `--env-rm` | Set (`KEY=VALUE`) or remove an environment variable for future execs |
 | `--label`, `--label-rm` | Set (`KEY=VALUE`) or remove a label |
 | `--workdir` | Working directory for future execs |
-| `--secret`, `--secret-rm` | Add or rotate a secret from a host environment variable (`NAME@HOST`), or remove one |
+| `--secret`, `--secret-rm` | Add or rotate a secret from a host environment variable (`NAME@HOST[,HOST...]`), or remove one |
 | `--dry-run` | Show the plan without applying anything |
 | `--next-start` | Save changes for the next start without mutating a running VM |
 | `--restart` | Restart if needed so restart-required changes become active now |

@@ -391,10 +391,11 @@ pub struct SandboxOpts {
     pub tls_no_verify_upstream_for: Vec<String>,
 
     // --- Secrets ---
-    /// Inject a secret that is only sent to an allowed host (ENV@HOST). The
-    /// value is read from the host environment variable ENV at start time and
-    /// stored only as a source reference, never inlined in the sandbox config.
-    /// Inline `ENV=VALUE@HOST` is rejected; export the value and use `ENV@HOST`.
+    /// Inject a secret that is only sent to allowed hosts (ENV@HOST[,HOST...]).
+    /// The value is read from the host environment variable ENV at start time
+    /// and stored only as a source reference, never inlined in the sandbox
+    /// config. Inline `ENV=VALUE@HOST` is rejected; export the value and use
+    /// `ENV@HOST[,HOST...]`.
     #[cfg(feature = "net")]
     #[arg(long)]
     pub secret: Vec<String>,
@@ -1483,12 +1484,28 @@ fn apply_network_opts(
     // Secrets. `create` persists a host-side source reference, not the raw
     // value: the plaintext is read from the host environment at spawn time so
     // the durable config never stores secret material at rest.
+    let mut secret_specs: Vec<(String, Vec<String>)> = Vec::new();
     for secret_str in &opts.secret {
-        let (env_var, host) = parse_secret(secret_str, "create")?;
+        let (env_var, hosts) = parse_secret(secret_str, "create")?;
+        match secret_specs
+            .iter_mut()
+            .find(|(existing, _)| *existing == env_var)
+        {
+            Some((_, existing_hosts)) => existing_hosts.extend(hosts),
+            None => secret_specs.push((env_var, hosts)),
+        }
+    }
+    for (env_var, hosts) in secret_specs {
         let source = microsandbox::sandbox::SecretSource::Env {
             var: env_var.clone(),
         };
-        builder = builder.secret(|s| s.env(&env_var).source(source).allow_host(host));
+        builder = builder.secret(|mut s| {
+            s = s.env(&env_var).source(source);
+            for host in hosts {
+                s = allow_secret_host(s, &host);
+            }
+            s
+        });
     }
 
     // DNS, TLS, and other network configuration.
@@ -1826,8 +1843,8 @@ fn parse_port_mapping(spec: &str) -> anyhow::Result<(std::net::IpAddr, u16, u16,
     Ok((bind, host, guest, udp))
 }
 
-/// Parse a `--secret ENV@HOST` spec into `(env_var, host)` for `command`
-/// (`create` or `modify`).
+/// Parse a `--secret ENV@HOST[,HOST...]` spec into `(env_var, hosts)` for
+/// `command` (`create` or `modify`).
 ///
 /// The value is NOT read here: the CLI records a host-side source reference
 /// (`{kind: env, var: ENV}`) that is resolved from the host environment when
@@ -1836,8 +1853,8 @@ fn parse_port_mapping(spec: &str) -> anyhow::Result<(std::net::IpAddr, u16, u16,
 ///
 /// The inline `ENV=VALUE@HOST` form is rejected loudly: the shell would leak
 /// the value regardless, so the value path is SDK-only. Users are pointed at
-/// the `ENV@HOST` env-var form instead.
-pub(crate) fn parse_secret(spec: &str, command: &str) -> anyhow::Result<(String, String)> {
+/// the `ENV@HOST[,HOST...]` env-var form instead.
+pub(crate) fn parse_secret(spec: &str, command: &str) -> anyhow::Result<(String, Vec<String>)> {
     if let Some(eq_pos) = spec.find('=') {
         let env_var = &spec[..eq_pos];
         anyhow::bail!(
@@ -1850,15 +1867,36 @@ pub(crate) fn parse_secret(spec: &str, command: &str) -> anyhow::Result<(String,
 
     let at_pos = spec
         .rfind('@')
-        .ok_or_else(|| anyhow::anyhow!("secret must be in format ENV@HOST"))?;
+        .ok_or_else(|| anyhow::anyhow!("secret must be in format ENV@HOST[,HOST...]"))?;
     let env_var = spec[..at_pos].to_string();
-    let host = spec[at_pos + 1..].to_string();
+    let hosts: Vec<String> = spec[at_pos + 1..]
+        .split(',')
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+        .map(ToString::to_string)
+        .collect();
 
-    if env_var.is_empty() || host.is_empty() {
-        anyhow::bail!("secret must be in format ENV@HOST (all parts required)");
+    if env_var.is_empty() || hosts.is_empty() {
+        anyhow::bail!("secret must be in format ENV@HOST[,HOST...] (all parts required)");
     }
 
-    Ok((env_var, host))
+    Ok((env_var, hosts))
+}
+
+#[cfg(feature = "net")]
+fn allow_secret_host(
+    builder: microsandbox::sandbox::SecretBuilder,
+    host: &str,
+) -> microsandbox::sandbox::SecretBuilder {
+    match microsandbox_network::secrets::config::HostPattern::parse(host) {
+        microsandbox_network::secrets::config::HostPattern::Exact(host) => builder.allow_host(host),
+        microsandbox_network::secrets::config::HostPattern::Wildcard(host) => {
+            builder.allow_host_pattern(host)
+        }
+        microsandbox_network::secrets::config::HostPattern::Any => {
+            builder.allow_any_host_dangerous(true)
+        }
+    }
 }
 
 /// Parse a scoped upstream CA spec: `PATTERN=PATH`.
@@ -2312,11 +2350,23 @@ mod tests {
     fn parse_secret_returns_env_and_host_reference() {
         // The value is NOT read here: `create` persists a source reference and
         // the spawn resolver reads the host env at start time.
-        let (env_var, host) =
+        let (env_var, hosts) =
             parse_secret("MSB_PARSE_SECRET_TOKEN@api.example.com", "create").unwrap();
 
         assert_eq!(env_var, "MSB_PARSE_SECRET_TOKEN");
-        assert_eq!(host, "api.example.com");
+        assert_eq!(hosts, vec!["api.example.com"]);
+    }
+
+    #[test]
+    fn parse_secret_accepts_multiple_hosts() {
+        let (env_var, hosts) = parse_secret(
+            "MSB_PARSE_SECRET_TOKEN@api.example.com, *.example.org, *",
+            "create",
+        )
+        .unwrap();
+
+        assert_eq!(env_var, "MSB_PARSE_SECRET_TOKEN");
+        assert_eq!(hosts, vec!["api.example.com", "*.example.org", "*"]);
     }
 
     #[test]
@@ -2343,6 +2393,43 @@ mod tests {
         assert!(parse_secret("API_KEY", "create").is_err());
         assert!(parse_secret("@api.example.com", "create").is_err());
         assert!(parse_secret("API_KEY@", "create").is_err());
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn apply_sandbox_opts_groups_secret_hosts_and_parses_patterns() {
+        use microsandbox_network::secrets::config::HostPattern;
+
+        let opts = SandboxOpts {
+            secret: vec![
+                "API_KEY@api.example.com,*.example.org".into(),
+                "API_KEY@*".into(),
+            ],
+            ..Default::default()
+        };
+
+        let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let secrets = config
+            .spec
+            .network
+            .secrets
+            .expect("network secrets")
+            .secrets;
+
+        assert_eq!(secrets.len(), 1);
+        assert_eq!(secrets[0].env_var, "API_KEY");
+        assert_eq!(
+            secrets[0].allowed_hosts,
+            vec![
+                HostPattern::Exact("api.example.com".into()),
+                HostPattern::Wildcard("*.example.org".into()),
+                HostPattern::Any,
+            ]
+        );
     }
 
     #[cfg(feature = "net")]
