@@ -166,3 +166,8 @@ parking_lot = "0.12"
 rpassword = "7"
 russh = "0.61.1"
 russh-sftp = "2.3.0"
+
+# Keep the v0.6.6 benchmark surface unchanged while replacing only the libkrun block stack.
+[patch.crates-io]
+msb_krun = { git = "https://github.com/superradcompany/libkrun.git", rev = "dbbde5cfa494dfde69667d9ac369a2c34bc1c70d" }
+msb_krun_utils = { git = "https://github.com/superradcompany/libkrun.git", rev = "dbbde5cfa494dfde69667d9ac369a2c34bc1c70d" }
