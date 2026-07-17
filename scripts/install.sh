@@ -14,7 +14,7 @@ LIB_DIR="$INSTALL_DIR/lib"
 LOCAL_BIN_DIR="$HOME/.local/bin"
 
 # libkrunfw versioned filenames (must match the build)
-LIBKRUNFW_VERSION="5.5.0"
+LIBKRUNFW_VERSION="5.6.0"
 LIBKRUNFW_ABI="5"
 
 # Current Linux release bundles are built on GitHub Actions ubuntu-latest,
