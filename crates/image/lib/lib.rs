@@ -45,7 +45,7 @@ pub use archive::{
     LoadedImage, load_archive, save_archive, save_docker_archive,
 };
 pub use auth::RegistryAuth;
-pub use cache::{CachedImageMetadata, CachedLayerMetadata, GlobalCache};
+pub use cache::{CachedImageMetadata, CachedLayerMetadata, FlatRootfsRef, GlobalCache};
 pub use config::ImageConfig;
 pub use digest::Digest;
 pub use error::{ImageError, ImageResult};

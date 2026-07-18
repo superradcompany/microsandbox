@@ -25,6 +25,12 @@ const FSMETA_DIR: &str = "fsmeta";
 /// Subdirectory for VMDK descriptors (keyed by manifest digest).
 const VMDK_DIR: &str = "vmdk";
 
+/// Root directory for reusable flat ext4 artifacts.
+const FLAT_DIR: &str = "flat";
+const FLAT_REFS_DIR: &str = "refs";
+const FLAT_BLOBS_DIR: &str = "blobs";
+const FLAT_LOCKS_DIR: &str = "locks";
+
 /// Subdirectory for cached manifest + config metadata.
 const MANIFESTS_DIR: &str = "manifests";
 
@@ -63,6 +69,15 @@ pub struct GlobalCache {
     /// Root of the VMDK descriptor cache (`~/.microsandbox/cache/vmdk/`).
     vmdk_dir: PathBuf,
 
+    /// Manifest-keyed references to immutable flat artifacts.
+    flat_refs_dir: PathBuf,
+
+    /// Content-addressed immutable raw ext4 artifacts.
+    flat_blobs_dir: PathBuf,
+
+    /// Per-derivation materialization locks.
+    flat_locks_dir: PathBuf,
+
     /// Root of the manifest metadata cache (`~/.microsandbox/cache/manifests/`).
     manifests_dir: PathBuf,
 
@@ -100,6 +115,29 @@ pub struct CachedLayerMetadata {
     pub diff_id: String,
 }
 
+/// Manifest-keyed reference to one validated immutable flat rootfs artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlatRootfsRef {
+    /// Reference schema version.
+    pub schema: u32,
+    /// Resolved OCI manifest digest used as the requested input.
+    pub manifest_digest: String,
+    /// Complete derivation digest including platform and materializer profile.
+    pub derivation_digest: String,
+    /// SHA-256 digest of the validated raw ext4 bytes.
+    pub artifact_digest: String,
+    /// Pure-Rust materializer ABI.
+    pub materializer_abi: u32,
+    /// Deterministic ext4 UUID as lowercase hexadecimal.
+    pub uuid: String,
+    /// Logical sparse image size.
+    pub virtual_size_bytes: u64,
+    /// Unique inode count in the materialized rootfs.
+    pub inode_count: u64,
+    /// Unique regular-file content bytes.
+    pub content_bytes: u64,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -112,6 +150,10 @@ impl GlobalCache {
         let layers_dir = cache_dir.join(LAYERS_DIR);
         let fsmeta_dir = cache_dir.join(FSMETA_DIR);
         let vmdk_dir = cache_dir.join(VMDK_DIR);
+        let flat_dir = cache_dir.join(FLAT_DIR);
+        let flat_refs_dir = flat_dir.join(FLAT_REFS_DIR);
+        let flat_blobs_dir = flat_dir.join(FLAT_BLOBS_DIR);
+        let flat_locks_dir = flat_dir.join(FLAT_LOCKS_DIR);
         let manifests_dir = cache_dir.join(MANIFESTS_DIR);
         let tmp_dir = cache_dir.join(TMP_DIR);
 
@@ -119,6 +161,9 @@ impl GlobalCache {
             &layers_dir,
             &fsmeta_dir,
             &vmdk_dir,
+            &flat_refs_dir,
+            &flat_blobs_dir,
+            &flat_locks_dir,
             &manifests_dir,
             &tmp_dir,
         ] {
@@ -132,6 +177,9 @@ impl GlobalCache {
             layers_dir,
             fsmeta_dir,
             vmdk_dir,
+            flat_refs_dir,
+            flat_blobs_dir,
+            flat_locks_dir,
             manifests_dir,
             tmp_dir,
         })
@@ -142,6 +190,10 @@ impl GlobalCache {
         let layers_dir = cache_dir.join(LAYERS_DIR);
         let fsmeta_dir = cache_dir.join(FSMETA_DIR);
         let vmdk_dir = cache_dir.join(VMDK_DIR);
+        let flat_dir = cache_dir.join(FLAT_DIR);
+        let flat_refs_dir = flat_dir.join(FLAT_REFS_DIR);
+        let flat_blobs_dir = flat_dir.join(FLAT_BLOBS_DIR);
+        let flat_locks_dir = flat_dir.join(FLAT_LOCKS_DIR);
         let manifests_dir = cache_dir.join(MANIFESTS_DIR);
         let tmp_dir = cache_dir.join(TMP_DIR);
 
@@ -149,6 +201,9 @@ impl GlobalCache {
             &layers_dir,
             &fsmeta_dir,
             &vmdk_dir,
+            &flat_refs_dir,
+            &flat_blobs_dir,
+            &flat_locks_dir,
             &manifests_dir,
             &tmp_dir,
         ] {
@@ -164,6 +219,9 @@ impl GlobalCache {
             layers_dir,
             fsmeta_dir,
             vmdk_dir,
+            flat_refs_dir,
+            flat_blobs_dir,
+            flat_locks_dir,
             manifests_dir,
             tmp_dir,
         })
@@ -244,6 +302,86 @@ impl GlobalCache {
     /// Check if a VMDK descriptor exists for a given manifest digest.
     pub fn is_vmdk_materialized(&self, manifest_digest: &Digest) -> bool {
         self.vmdk_path(manifest_digest).exists()
+    }
+
+    // ── Flat ext4 artifact paths (manifest ref → content blob) ───────
+
+    /// Path to the manifest-keyed flat rootfs reference.
+    pub fn flat_ref_path(&self, manifest_digest: &Digest) -> PathBuf {
+        self.flat_refs_dir
+            .join(format!("{}.json", manifest_digest.to_path_safe()))
+    }
+
+    /// Path to the immutable content-addressed raw ext4 artifact.
+    pub fn flat_blob_path(&self, artifact_digest: &Digest) -> PathBuf {
+        self.flat_blobs_dir
+            .join(format!("{}.raw", artifact_digest.to_path_safe()))
+    }
+
+    /// Path to the per-derivation flat materialization lock.
+    pub fn flat_lock_path(&self, derivation_digest: &Digest) -> PathBuf {
+        self.flat_locks_dir
+            .join(format!("{}.lock", derivation_digest.to_path_safe()))
+    }
+
+    /// Read and validate the manifest-keyed flat rootfs reference.
+    pub fn read_flat_ref(&self, manifest_digest: &Digest) -> ImageResult<Option<FlatRootfsRef>> {
+        let path = self.flat_ref_path(manifest_digest);
+        let data = match std::fs::read_to_string(&path) {
+            Ok(data) => data,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(ImageError::Cache { path, source }),
+        };
+        let reference = match serde_json::from_str::<FlatRootfsRef>(&data) {
+            Ok(reference) if reference.schema == 1 => reference,
+            Ok(_) => return Ok(None),
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "corrupt flat rootfs ref, ignoring");
+                return Ok(None);
+            }
+        };
+        let artifact_digest = match reference.artifact_digest.parse::<Digest>() {
+            Ok(digest) => digest,
+            Err(_) => return Ok(None),
+        };
+        let blob_path = self.flat_blob_path(&artifact_digest);
+        match std::fs::metadata(&blob_path) {
+            Ok(metadata) if metadata.len() == reference.virtual_size_bytes => Ok(Some(reference)),
+            Ok(_) | Err(_) => Ok(None),
+        }
+    }
+
+    /// Atomically replace a flat rootfs reference after its immutable blob is durable.
+    pub fn write_flat_ref(
+        &self,
+        manifest_digest: &Digest,
+        reference: &FlatRootfsRef,
+    ) -> ImageResult<()> {
+        let path = self.flat_ref_path(manifest_digest);
+        let temp_path = path.with_extension("json.part");
+        let payload = serde_json::to_vec_pretty(reference).map_err(|error| {
+            ImageError::ConfigParse(format!("failed to serialize flat rootfs ref: {error}"))
+        })?;
+        let mut temp = std::fs::File::create(&temp_path).map_err(|source| ImageError::Cache {
+            path: temp_path.clone(),
+            source,
+        })?;
+        use std::io::Write;
+        temp.write_all(&payload)
+            .map_err(|source| ImageError::Cache {
+                path: temp_path.clone(),
+                source,
+            })?;
+        temp.sync_all().map_err(|source| ImageError::Cache {
+            path: temp_path.clone(),
+            source,
+        })?;
+        std::fs::rename(&temp_path, &path).map_err(|source| ImageError::Cache {
+            path: path.clone(),
+            source,
+        })?;
+        sync_directory(&self.flat_refs_dir)?;
+        Ok(())
     }
 
     // ── Staging/tmp paths (downloads, work dirs) ─────────────────────
@@ -407,6 +545,23 @@ fn image_cache_key(reference: &Reference) -> String {
     hex::encode(hasher.finalize())
 }
 
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> ImageResult<()> {
+    let directory = std::fs::File::open(path).map_err(|source| ImageError::Cache {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    directory.sync_all().map_err(|source| ImageError::Cache {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> ImageResult<()> {
+    Ok(())
+}
+
 pub(crate) fn parse_cached_image_metadata(
     path: &Path,
     data: &str,
@@ -441,5 +596,57 @@ pub(crate) async fn is_valid_erofs_artifact_async(path: &Path) -> bool {
             len > 0 && len % EROFS_ALIGNMENT_BYTES == 0
         }
         Err(_) => false,
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn digest(byte: char) -> Digest {
+        format!("sha256:{}", byte.to_string().repeat(64))
+            .parse()
+            .unwrap()
+    }
+
+    #[test]
+    fn flat_cache_separates_manifest_refs_from_content_blobs() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = GlobalCache::new(directory.path()).unwrap();
+        let manifest = digest('a');
+        let derivation = digest('b');
+        let artifact = digest('c');
+
+        assert!(cache.flat_ref_path(&manifest).ends_with(
+            "flat/refs/sha256_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"
+        ));
+        assert!(cache.flat_blob_path(&artifact).ends_with(
+            "flat/blobs/sha256_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.raw"
+        ));
+        assert!(cache.flat_lock_path(&derivation).ends_with(
+            "flat/locks/sha256_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.lock"
+        ));
+
+        let blob_path = cache.flat_blob_path(&artifact);
+        let blob = std::fs::File::create(&blob_path).unwrap();
+        blob.set_len(4096).unwrap();
+        let reference = FlatRootfsRef {
+            schema: 1,
+            manifest_digest: manifest.to_string(),
+            derivation_digest: derivation.to_string(),
+            artifact_digest: artifact.to_string(),
+            materializer_abi: 1,
+            uuid: "00".repeat(16),
+            virtual_size_bytes: 4096,
+            inode_count: 2,
+            content_bytes: 7,
+        };
+        cache.write_flat_ref(&manifest, &reference).unwrap();
+
+        assert_eq!(cache.read_flat_ref(&manifest).unwrap(), Some(reference));
     }
 }
