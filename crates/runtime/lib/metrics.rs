@@ -134,6 +134,7 @@ pub async fn run_metrics_sampler(spec: MetricsSamplerSpec) {
             tracing::warn!(sandbox_id, pid, error = %err, "failed to write initial sandbox metrics");
         }
     }
+    log_block_io_profile(sandbox_id, pid, &krun_metrics);
 
     loop {
         tokio::time::sleep(interval).await;
@@ -191,6 +192,7 @@ pub async fn run_metrics_sampler(spec: MetricsSamplerSpec) {
                 tracing::warn!(sandbox_id, pid, error = %err, "failed to write sandbox metrics");
             }
         }
+        log_block_io_profile(sandbox_id, pid, &krun_metrics);
 
         previous = current;
     }
@@ -222,6 +224,142 @@ fn paired_snapshot(krun_metrics: &msb_krun::MetricsHandle) -> PairedSnapshot {
         at: before + uncertainty / 2,
         uncertainty,
     }
+}
+
+/// Emit cumulative diagnostic histograms for the opt-in libkrun profiler.
+///
+/// The full buckets are retained so two samples can be subtracted to isolate a workload interval;
+/// summary percentiles alone cannot be differenced correctly.
+fn log_block_io_profile(sandbox_id: i32, pid: u32, krun_metrics: &msb_krun::MetricsHandle) {
+    let Some(profile) = krun_metrics.block_io_profile() else {
+        return;
+    };
+    let profile = block_io_profile_json(&profile);
+    tracing::info!(
+        target: "msb_block_io_profile",
+        sandbox_id,
+        pid,
+        profile = %profile,
+        "block I/O profile snapshot"
+    );
+}
+
+fn block_io_profile_json(profile: &msb_krun::BlockIoProfile) -> serde_json::Value {
+    let devices = profile
+        .devices
+        .iter()
+        .map(|device| {
+            let mut value = block_io_counts_and_latencies_json(
+                device.read_requests,
+                device.write_requests,
+                device.flush_requests,
+                device.other_requests,
+                device.failed_requests,
+                device.completions,
+                device.interrupts,
+                device.scratch_vectors,
+                &device.worker_backlog,
+                &device.descriptor_parse,
+                &device.request,
+                &device.iovec_prepare,
+                &device.format_read,
+                &device.format_write,
+                &device.storage_read,
+                &device.storage_write,
+                &device.flush,
+                &device.storage_flush,
+                &device.sync,
+                &device.completion,
+            );
+            value["id"] = serde_json::Value::String(device.id.clone());
+            value
+        })
+        .collect::<Vec<_>>();
+
+    let mut aggregate = block_io_counts_and_latencies_json(
+        profile.read_requests,
+        profile.write_requests,
+        profile.flush_requests,
+        profile.other_requests,
+        profile.failed_requests,
+        profile.completions,
+        profile.interrupts,
+        profile.scratch_vectors,
+        &profile.worker_backlog,
+        &profile.descriptor_parse,
+        &profile.request,
+        &profile.iovec_prepare,
+        &profile.format_read,
+        &profile.format_write,
+        &profile.storage_read,
+        &profile.storage_write,
+        &profile.flush,
+        &profile.storage_flush,
+        &profile.sync,
+        &profile.completion,
+    );
+    aggregate["devices"] = serde_json::Value::Array(devices);
+    aggregate
+}
+
+#[allow(clippy::too_many_arguments)]
+fn block_io_counts_and_latencies_json(
+    read_requests: u64,
+    write_requests: u64,
+    flush_requests: u64,
+    other_requests: u64,
+    failed_requests: u64,
+    completions: u64,
+    interrupts: u64,
+    scratch_vectors: u64,
+    worker_backlog: &msb_krun::LatencyHistogram,
+    descriptor_parse: &msb_krun::LatencyHistogram,
+    request: &msb_krun::LatencyHistogram,
+    iovec_prepare: &msb_krun::LatencyHistogram,
+    format_read: &msb_krun::LatencyHistogram,
+    format_write: &msb_krun::LatencyHistogram,
+    storage_read: &msb_krun::LatencyHistogram,
+    storage_write: &msb_krun::LatencyHistogram,
+    flush: &msb_krun::LatencyHistogram,
+    storage_flush: &msb_krun::LatencyHistogram,
+    sync: &msb_krun::LatencyHistogram,
+    completion: &msb_krun::LatencyHistogram,
+) -> serde_json::Value {
+    serde_json::json!({
+        "requests": {
+            "read": read_requests,
+            "write": write_requests,
+            "flush": flush_requests,
+            "other": other_requests,
+            "failed": failed_requests,
+        },
+        "completions": completions,
+        "interrupts": interrupts,
+        "scratch_vectors": scratch_vectors,
+        "latency_ns": {
+            "worker_backlog": latency_histogram_json(worker_backlog),
+            "descriptor_parse": latency_histogram_json(descriptor_parse),
+            "request": latency_histogram_json(request),
+            "iovec_prepare": latency_histogram_json(iovec_prepare),
+            "format_read": latency_histogram_json(format_read),
+            "format_write": latency_histogram_json(format_write),
+            "storage_read": latency_histogram_json(storage_read),
+            "storage_write": latency_histogram_json(storage_write),
+            "flush": latency_histogram_json(flush),
+            "storage_flush": latency_histogram_json(storage_flush),
+            "sync": latency_histogram_json(sync),
+            "completion": latency_histogram_json(completion),
+        },
+    })
+}
+
+fn latency_histogram_json(histogram: &msb_krun::LatencyHistogram) -> serde_json::Value {
+    serde_json::json!({
+        "count": histogram.count,
+        "total": histogram.total_ns,
+        "max": histogram.max_ns,
+        "buckets": histogram.buckets.as_slice(),
+    })
 }
 
 /// Whether the counter/clock pairing error is small enough for the window's
@@ -383,8 +521,31 @@ mod tests {
     #[cfg(unix)]
     use std::ffi::CString;
 
-    use super::*;
     use microsandbox_metrics::{ActivateSlot, MetricsRegistry, ReserveSlot};
+
+    use super::*;
+
+    #[test]
+    fn block_io_profile_json_retains_raw_histogram_buckets() {
+        let mut profile = msb_krun::BlockIoProfile {
+            read_requests: 3,
+            scratch_vectors: 21,
+            ..Default::default()
+        };
+        profile.request.count = 3;
+        profile.request.total_ns = 11;
+        profile.request.max_ns = 8;
+        profile.request.buckets[1] = 1;
+        profile.request.buckets[2] = 1;
+        profile.request.buckets[4] = 1;
+
+        let json = block_io_profile_json(&profile);
+
+        assert_eq!(json["requests"]["read"], 3);
+        assert_eq!(json["scratch_vectors"], 21);
+        assert_eq!(json["latency_ns"]["request"]["count"], 3);
+        assert_eq!(json["latency_ns"]["request"]["buckets"][4], 1);
+    }
 
     fn unique_shm_name(tag: &str) -> String {
         let nanos = std::time::SystemTime::now()

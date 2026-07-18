@@ -3581,7 +3581,7 @@ dependencies = [
 [[package]]
 name = "msb_krun"
 version = "0.1.25"
-source = "git+https://github.com/superradcompany/libkrun.git?rev=dbbde5cfa494dfde69667d9ac369a2c34bc1c70d#dbbde5cfa494dfde69667d9ac369a2c34bc1c70d"
+source = "git+https://github.com/superradcompany/libkrun.git?rev=0faa5a1fd6591fbb0006a3a6bc27244bd94cc07d#0faa5a1fd6591fbb0006a3a6bc27244bd94cc07d"
 dependencies = [
  "crossbeam-channel",
  "kvm-bindings",
@@ -3600,7 +3600,7 @@ dependencies = [
 [[package]]
 name = "msb_krun_arch"
 version = "0.1.25"
-source = "git+https://github.com/superradcompany/libkrun.git?rev=dbbde5cfa494dfde69667d9ac369a2c34bc1c70d#dbbde5cfa494dfde69667d9ac369a2c34bc1c70d"
+source = "git+https://github.com/superradcompany/libkrun.git?rev=0faa5a1fd6591fbb0006a3a6bc27244bd94cc07d#0faa5a1fd6591fbb0006a3a6bc27244bd94cc07d"
 dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
@@ -3614,12 +3614,12 @@ dependencies = [
 [[package]]
 name = "msb_krun_arch_gen"
 version = "0.1.25"
-source = "git+https://github.com/superradcompany/libkrun.git?rev=dbbde5cfa494dfde69667d9ac369a2c34bc1c70d#dbbde5cfa494dfde69667d9ac369a2c34bc1c70d"
+source = "git+https://github.com/superradcompany/libkrun.git?rev=0faa5a1fd6591fbb0006a3a6bc27244bd94cc07d#0faa5a1fd6591fbb0006a3a6bc27244bd94cc07d"
 
 [[package]]
 name = "msb_krun_cpuid"
 version = "0.1.25"
-source = "git+https://github.com/superradcompany/libkrun.git?rev=dbbde5cfa494dfde69667d9ac369a2c34bc1c70d#dbbde5cfa494dfde69667d9ac369a2c34bc1c70d"
+source = "git+https://github.com/superradcompany/libkrun.git?rev=0faa5a1fd6591fbb0006a3a6bc27244bd94cc07d#0faa5a1fd6591fbb0006a3a6bc27244bd94cc07d"
 dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
@@ -3629,7 +3629,7 @@ dependencies = [
 [[package]]
 name = "msb_krun_devices"
 version = "0.1.25"
-source = "git+https://github.com/superradcompany/libkrun.git?rev=dbbde5cfa494dfde69667d9ac369a2c34bc1c70d#dbbde5cfa494dfde69667d9ac369a2c34bc1c70d"
+source = "git+https://github.com/superradcompany/libkrun.git?rev=0faa5a1fd6591fbb0006a3a6bc27244bd94cc07d#0faa5a1fd6591fbb0006a3a6bc27244bd94cc07d"
 dependencies = [
  "bitflags 1.3.2",
  "capng",
@@ -3657,7 +3657,7 @@ dependencies = [
 [[package]]
 name = "msb_krun_hvf"
 version = "0.1.25"
-source = "git+https://github.com/superradcompany/libkrun.git?rev=dbbde5cfa494dfde69667d9ac369a2c34bc1c70d#dbbde5cfa494dfde69667d9ac369a2c34bc1c70d"
+source = "git+https://github.com/superradcompany/libkrun.git?rev=0faa5a1fd6591fbb0006a3a6bc27244bd94cc07d#0faa5a1fd6591fbb0006a3a6bc27244bd94cc07d"
 dependencies = [
  "crossbeam-channel",
  "libloading 0.8.9",
@@ -3668,7 +3668,7 @@ dependencies = [
 [[package]]
 name = "msb_krun_kernel"
 version = "0.1.25"
-source = "git+https://github.com/superradcompany/libkrun.git?rev=dbbde5cfa494dfde69667d9ac369a2c34bc1c70d#dbbde5cfa494dfde69667d9ac369a2c34bc1c70d"
+source = "git+https://github.com/superradcompany/libkrun.git?rev=0faa5a1fd6591fbb0006a3a6bc27244bd94cc07d#0faa5a1fd6591fbb0006a3a6bc27244bd94cc07d"
 dependencies = [
  "msb_krun_utils",
  "vm-memory",
@@ -3677,7 +3677,7 @@ dependencies = [
 [[package]]
 name = "msb_krun_polly"
 version = "0.1.25"
-source = "git+https://github.com/superradcompany/libkrun.git?rev=dbbde5cfa494dfde69667d9ac369a2c34bc1c70d#dbbde5cfa494dfde69667d9ac369a2c34bc1c70d"
+source = "git+https://github.com/superradcompany/libkrun.git?rev=0faa5a1fd6591fbb0006a3a6bc27244bd94cc07d#0faa5a1fd6591fbb0006a3a6bc27244bd94cc07d"
 dependencies = [
  "libc",
  "msb_krun_utils",
@@ -3686,7 +3686,7 @@ dependencies = [
 [[package]]
 name = "msb_krun_smbios"
 version = "0.1.25"
-source = "git+https://github.com/superradcompany/libkrun.git?rev=dbbde5cfa494dfde69667d9ac369a2c34bc1c70d#dbbde5cfa494dfde69667d9ac369a2c34bc1c70d"
+source = "git+https://github.com/superradcompany/libkrun.git?rev=0faa5a1fd6591fbb0006a3a6bc27244bd94cc07d#0faa5a1fd6591fbb0006a3a6bc27244bd94cc07d"
 dependencies = [
  "vm-memory",
 ]
@@ -3694,7 +3694,7 @@ dependencies = [
 [[package]]
 name = "msb_krun_utils"
 version = "0.1.25"
-source = "git+https://github.com/superradcompany/libkrun.git?rev=dbbde5cfa494dfde69667d9ac369a2c34bc1c70d#dbbde5cfa494dfde69667d9ac369a2c34bc1c70d"
+source = "git+https://github.com/superradcompany/libkrun.git?rev=0faa5a1fd6591fbb0006a3a6bc27244bd94cc07d#0faa5a1fd6591fbb0006a3a6bc27244bd94cc07d"
 dependencies = [
  "bitflags 1.3.2",
  "crossbeam-channel",
@@ -3709,7 +3709,7 @@ dependencies = [
 [[package]]
 name = "msb_krun_vmm"
 version = "0.1.25"
-source = "git+https://github.com/superradcompany/libkrun.git?rev=dbbde5cfa494dfde69667d9ac369a2c34bc1c70d#dbbde5cfa494dfde69667d9ac369a2c34bc1c70d"
+source = "git+https://github.com/superradcompany/libkrun.git?rev=0faa5a1fd6591fbb0006a3a6bc27244bd94cc07d#0faa5a1fd6591fbb0006a3a6bc27244bd94cc07d"
 dependencies = [
  "bzip2",
  "crossbeam-channel",
