@@ -2,6 +2,7 @@ mod format;
 mod formatter;
 mod jbd2;
 mod layout;
+mod resize_inode;
 mod resizer;
 mod rootfs;
 

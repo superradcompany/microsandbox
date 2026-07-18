@@ -15,13 +15,14 @@ use std::path::Path;
 use super::format::{
     EXT4_BG_INODE_ZEROED, EXT4_BLOCK_SIZE, EXT4_BLOCKS_PER_GROUP, EXT4_DESC_SIZE, EXT4_EH_MAGIC,
     EXT4_EXTENTS_FL, EXT4_FEATURE_COMPAT_DIR_INDEX, EXT4_FEATURE_COMPAT_EXT_ATTR,
-    EXT4_FEATURE_COMPAT_HAS_JOURNAL, EXT4_FEATURE_INCOMPAT_64BIT, EXT4_FEATURE_INCOMPAT_EXTENTS,
-    EXT4_FEATURE_INCOMPAT_FILETYPE, EXT4_FEATURE_INCOMPAT_RECOVER,
+    EXT4_FEATURE_COMPAT_HAS_JOURNAL, EXT4_FEATURE_COMPAT_RESIZE_INODE, EXT4_FEATURE_INCOMPAT_64BIT,
+    EXT4_FEATURE_INCOMPAT_EXTENTS, EXT4_FEATURE_INCOMPAT_FILETYPE, EXT4_FEATURE_INCOMPAT_RECOVER,
     EXT4_FEATURE_RO_COMPAT_DIR_NLINK, EXT4_FEATURE_RO_COMPAT_EXTRA_ISIZE,
     EXT4_FEATURE_RO_COMPAT_HUGE_FILE, EXT4_FEATURE_RO_COMPAT_LARGE_FILE,
     EXT4_FEATURE_RO_COMPAT_METADATA_CSUM, EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER, EXT4_FIRST_INO,
     EXT4_INODE_SIZE, EXT4_INODES_PER_GROUP, EXT4_JOURNAL_INO, EXT4_LOG_BLOCK_SIZE, EXT4_ROOT_INO,
-    EXT4_SUPER_MAGIC, sparse_super_group,
+    EXT4_SB_ERROR_COUNT_OFFSET, EXT4_SB_OVERHEAD_BLOCKS_OFFSET, EXT4_SUPER_MAGIC,
+    sparse_super_group,
 };
 use super::formatter::{Ext4Error, mark_sparse};
 use super::jbd2;
@@ -31,6 +32,7 @@ use super::layout::{
     gdt_checksum, get_le16, get_le32, inode_checksum, put_le16, put_le32, superblock_checksum,
     write_backup_superblock_at, write_gdt_at,
 };
+use super::resize_inode::{validate_resize_inode, write_resize_inode};
 use crate::crc32c;
 
 //--------------------------------------------------------------------------------------------------
@@ -84,6 +86,7 @@ struct ParsedImage {
     free_blocks: u64,
     free_inodes: u32,
     overhead_blocks: u32,
+    resize_inode_block: u64,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -125,9 +128,10 @@ impl ParsedImage {
 /// log replayed and the flag cleared everywhere before growing; any journal inconsistency aborts
 /// with the image untouched.
 ///
-/// Crash safety: all new-group metadata, backup superblocks, and backup GDTs are written and
-/// fsynced before the primary superblock is rewritten, so a torn grow leaves the image valid at
-/// its old size.
+/// Publish ordering: all new-group metadata, backup superblocks, backup GDTs, and resize-inode
+/// metadata are written and fsynced before the primary superblock advertises the larger geometry.
+/// This is not a transactional rollback boundary: if the in-place grow returns an error or the
+/// process is interrupted, callers must discard and recreate the artifact rather than use it.
 pub fn grow_image(path: &Path, new_size_bytes: u64) -> Result<GrowOutcome, Ext4Error> {
     let mut file = OpenOptions::new().read(true).write(true).open(path)?;
     let mut img = parse_and_validate(&mut file)?;
@@ -291,7 +295,7 @@ pub fn grow_image(path: &Path, new_size_bytes: u64) -> Result<GrowOutcome, Ext4E
         img.free_inodes + added_groups * EXT4_INODES_PER_GROUP,
     );
     put_le16(&mut new_sb, 0xCE, new_reserved as u16);
-    put_le32(&mut new_sb, 0x194, overhead as u32);
+    put_le32(&mut new_sb, EXT4_SB_OVERHEAD_BLOCKS_OFFSET, overhead as u32);
     let new_sb_csum = superblock_checksum(&new_sb);
     put_le32(&mut new_sb, 0x3FC, new_sb_csum);
 
@@ -313,6 +317,16 @@ pub fn grow_image(path: &Path, new_size_bytes: u64) -> Result<GrowOutcome, Ext4E
         write_backup_superblock_at(&mut file, new_geo.group_start_block(group), &backup_sb)?;
         write_gdt_at(&mut file, new_geo.group_start_block(group), &gdt)?;
     }
+    // Consuming reserved headroom shifts the live pointer range in inode 7. Rebuild the complete
+    // structure after all descriptor copies are in place so no consumed GDT block is overwritten.
+    write_resize_inode(
+        &mut file,
+        &new_geo,
+        new_geo.group_inode_table_block(0),
+        img.resize_inode_block,
+        img.csum_seed,
+        new_groups,
+    )?;
     file.sync_all()?;
 
     // Phase 2: the only pre-publish writes visible at the old size (the old final group's
@@ -395,6 +409,14 @@ pub(super) fn validate_rootfs_image(path: &Path) -> Result<(), Ext4Error> {
             "superblock free-space counters do not match bitmaps",
         ));
     }
+    validate_resize_inode(
+        &mut file,
+        &geometry,
+        geometry.group_inode_table_block(0),
+        img.csum_seed,
+        img.num_groups,
+        img.num_blocks,
+    )?;
     validate_backup_metadata(&mut file, &img)?;
     Ok(())
 }
@@ -423,6 +445,7 @@ fn parse_and_validate(file: &mut File) -> Result<ParsedImage, Ext4Error> {
     let ro_compat = get_le32(&sb, 0x64);
     let expected_compat = EXT4_FEATURE_COMPAT_HAS_JOURNAL
         | EXT4_FEATURE_COMPAT_EXT_ATTR
+        | EXT4_FEATURE_COMPAT_RESIZE_INODE
         | EXT4_FEATURE_COMPAT_DIR_INDEX;
     let expected_incompat = EXT4_FEATURE_INCOMPAT_FILETYPE
         | EXT4_FEATURE_INCOMPAT_EXTENTS
@@ -445,7 +468,7 @@ fn parse_and_validate(file: &mut File) -> Result<ParsedImage, Ext4Error> {
         )));
     }
 
-    let checks: [(bool, &str); 13] = [
+    let checks: [(bool, &str); 14] = [
         (get_le32(&sb, 0x4C) == 1, "unexpected revision level"),
         (
             get_le32(&sb, 0x18) == EXT4_LOG_BLOCK_SIZE,
@@ -485,6 +508,10 @@ fn parse_and_validate(file: &mut File) -> Result<ParsedImage, Ext4Error> {
         (
             sb[0x174] == 0 && get_le32(&sb, 0x104) == 0,
             "unexpected flex_bg/meta_bg layout",
+        ),
+        (
+            get_le32(&sb, EXT4_SB_ERROR_COUNT_OFFSET) == 0,
+            "superblock error count is nonzero",
         ),
     ];
     for (ok, message) in checks {
@@ -532,7 +559,8 @@ fn parse_and_validate(file: &mut File) -> Result<ParsedImage, Ext4Error> {
         csum_seed,
         free_blocks: get_le32(&sb, 0x0C) as u64 | ((get_le32(&sb, 0x158) as u64) << 32),
         free_inodes: get_le32(&sb, 0x10),
-        overhead_blocks: get_le32(&sb, 0x194),
+        overhead_blocks: get_le32(&sb, EXT4_SB_OVERHEAD_BLOCKS_OFFSET),
+        resize_inode_block: 0,
         gdt: Vec::new(),
         needs_recovery,
         sb,
@@ -584,7 +612,20 @@ fn parse_and_validate(file: &mut File) -> Result<ParsedImage, Ext4Error> {
         }
     }
 
-    Ok(ParsedImage { gdt, ..img })
+    let resize_inode_block = validate_resize_inode(
+        file,
+        &geo,
+        geo.group_inode_table_block(0),
+        img.csum_seed,
+        img.num_groups,
+        img.num_blocks,
+    )?;
+
+    Ok(ParsedImage {
+        gdt,
+        resize_inode_block,
+        ..img
+    })
 }
 
 /// Replay the pending jbd2 log, then clear `EXT4_FEATURE_INCOMPAT_RECOVER` from the primary and every backup superblock.
@@ -1089,6 +1130,8 @@ mod tests {
     /// of each backup-super group — the only pre-existing regions a grow may rewrite.
     fn hash_stable_prefix(path: &Path, blocks: u64, gdt_span: u32) -> [u8; 32] {
         let mut file = File::open(path).unwrap();
+        let img = parse_and_validate(&mut file).unwrap();
+        let resize_inode_table_block = img.geometry().group_inode_table_block(0);
         let mut hasher = Sha256::new();
         let mut buf = vec![0u8; EXT4_BLOCK_SIZE as usize];
         for block in 0..blocks {
@@ -1096,6 +1139,11 @@ mod tests {
             let offset_in_group = block % EXT4_BLOCKS_PER_GROUP as u64;
             let has_super = group == 0 || sparse_super_group(group);
             if has_super && offset_in_group < 1 + gdt_span as u64 {
+                continue;
+            }
+            // A grow legitimately refreshes inode 7 and its double-indirect block so that the
+            // reserved-GDT ownership graph includes newly created sparse-super backups.
+            if block == resize_inode_table_block || block == img.resize_inode_block {
                 continue;
             }
             file.seek(SeekFrom::Start(block * EXT4_BLOCK_SIZE as u64))
@@ -1218,6 +1266,13 @@ mod tests {
         assert_eq!(img.num_groups, 2);
         assert_eq!(img.gdt_blocks, 1);
         assert_eq!(img.reserved_gdt_blocks, RESERVED_GDT_BLOCKS);
+        assert_eq!(get_le32(&img.sb, EXT4_SB_ERROR_COUNT_OFFSET), 0);
+        assert_eq!(
+            get_le32(&img.sb, EXT4_SB_OVERHEAD_BLOCKS_OFFSET),
+            (0..img.num_groups)
+                .map(|group| img.geometry().group_metadata_blocks(group))
+                .sum::<u32>()
+        );
         assert_image_invariants(&path);
     }
 
@@ -1281,6 +1336,37 @@ mod tests {
         assert_eq!(img.gdt_blocks, 2);
         assert_eq!(img.reserved_gdt_blocks, RESERVED_GDT_BLOCKS - 1);
         assert_image_invariants(&path);
+    }
+
+    #[test]
+    fn test_grow_rejects_corrupted_resize_inode_pointers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("corrupt-resize-inode.ext4");
+        format_image(&path, 256 * MIB);
+
+        let img = parse(&path);
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        file.seek(SeekFrom::Start(
+            img.resize_inode_block * u64::from(EXT4_BLOCK_SIZE) + u64::from(img.gdt_blocks) * 4,
+        ))
+        .unwrap();
+        file.write_all(&0u32.to_le_bytes()).unwrap();
+        drop(file);
+
+        let result = grow_image(&path, 512 * MIB);
+        match result {
+            Err(Ext4Error::Unsupported(message)) => {
+                assert!(
+                    message.contains("double-indirect pointer"),
+                    "message: {message}"
+                )
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1444,18 +1530,17 @@ mod tests {
         format_image(&path, 256 * MIB);
 
         let (location, _) = journal_location(&path);
-        // Block 2 is the first reserved-GDT block, directly adjacent to the superblock + GDT; it stays reserved after this grow so the replayed content must survive verbatim.
-        let reserved_gdt_target = 2u64;
         let data_target = location.start_block + location.len_blocks as u64 + 16;
-        let reserved_data = pattern_block(0xA5);
+        let second_data_target = data_target + 1;
+        let second_file_data = pattern_block(0xA5);
         let file_data = pattern_block(0x5A);
         write_dirty_journal(
             &path,
             2,
             &[TestTransaction {
                 writes: vec![
-                    (reserved_gdt_target, reserved_data.clone()),
                     (data_target, file_data.clone()),
+                    (second_data_target, second_file_data.clone()),
                 ],
                 revokes: vec![],
                 corrupt_commit: false,
@@ -1467,14 +1552,14 @@ mod tests {
 
         let mut file = File::open(&path).unwrap();
         assert_eq!(
-            read_block_at(&mut file, reserved_gdt_target).unwrap(),
-            reserved_data,
-            "journaled superblock-adjacent write was not replayed"
-        );
-        assert_eq!(
             read_block_at(&mut file, data_target).unwrap(),
             file_data,
             "journaled data-block write was not replayed"
+        );
+        assert_eq!(
+            read_block_at(&mut file, second_data_target).unwrap(),
+            second_file_data,
+            "second journaled data-block write was not replayed"
         );
         drop(file);
 
@@ -1760,6 +1845,36 @@ mod tests {
         run_e2fsck("grow to 1 GiB");
     }
 
+    /// Cross a 64-group descriptor boundary so one reserved-GDT block becomes a live GDT block,
+    /// then let the reference checker validate the rebuilt resize inode and all backup pointers.
+    #[test]
+    #[ignore]
+    fn test_e2fsck_validates_consumed_reserved_gdt_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fsck-consumed-gdt.ext4");
+        format_image(&path, 256 * MIB);
+
+        grow_image(&path, 68 * 128 * MIB).unwrap();
+        let output = match std::process::Command::new("e2fsck")
+            .arg("-fn")
+            .arg(&path)
+            .output()
+        {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("e2fsck not found; skipping");
+                return;
+            }
+            Err(error) => panic!("failed to run e2fsck: {error}"),
+        };
+        assert!(
+            output.status.success(),
+            "e2fsck failed after consuming reserved GDT headroom:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     /// Same e2fsck gate for the recovery path: a dirty image (pending journal with escaped and revoked blocks) must replay, grow, and still be fully clean to `e2fsck -fn`.
     #[test]
     #[ignore]
@@ -1777,7 +1892,7 @@ mod tests {
             2,
             &[
                 TestTransaction {
-                    writes: vec![(2, pattern_block(0xA5)), (data_start, escaped)],
+                    writes: vec![(data_start + 2, pattern_block(0xA5)), (data_start, escaped)],
                     revokes: vec![],
                     corrupt_commit: false,
                 },

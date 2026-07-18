@@ -9,12 +9,13 @@ use std::ptr;
 use super::format::{
     EXT4_BLOCK_SIZE, EXT4_BLOCKS_PER_GROUP, EXT4_DESC_SIZE, EXT4_EH_MAGIC, EXT4_EXTENTS_FL,
     EXT4_FEATURE_COMPAT_DIR_INDEX, EXT4_FEATURE_COMPAT_EXT_ATTR, EXT4_FEATURE_COMPAT_HAS_JOURNAL,
-    EXT4_FEATURE_INCOMPAT_64BIT, EXT4_FEATURE_INCOMPAT_EXTENTS, EXT4_FEATURE_INCOMPAT_FILETYPE,
-    EXT4_FEATURE_RO_COMPAT_DIR_NLINK, EXT4_FEATURE_RO_COMPAT_EXTRA_ISIZE,
-    EXT4_FEATURE_RO_COMPAT_HUGE_FILE, EXT4_FEATURE_RO_COMPAT_LARGE_FILE,
-    EXT4_FEATURE_RO_COMPAT_METADATA_CSUM, EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER, EXT4_FIRST_INO,
-    EXT4_INODE_SIZE, EXT4_INODES_PER_GROUP, EXT4_JOURNAL_INO, EXT4_LOG_BLOCK_SIZE,
-    EXT4_MIN_EXTRA_ISIZE, EXT4_ROOT_INO, EXT4_SUPER_MAGIC, JBD2_MAGIC, JBD2_SUPERBLOCK_V2, S_IFBLK,
+    EXT4_FEATURE_COMPAT_RESIZE_INODE, EXT4_FEATURE_INCOMPAT_64BIT, EXT4_FEATURE_INCOMPAT_EXTENTS,
+    EXT4_FEATURE_INCOMPAT_FILETYPE, EXT4_FEATURE_RO_COMPAT_DIR_NLINK,
+    EXT4_FEATURE_RO_COMPAT_EXTRA_ISIZE, EXT4_FEATURE_RO_COMPAT_HUGE_FILE,
+    EXT4_FEATURE_RO_COMPAT_LARGE_FILE, EXT4_FEATURE_RO_COMPAT_METADATA_CSUM,
+    EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER, EXT4_FIRST_INO, EXT4_INODE_SIZE, EXT4_INODES_PER_GROUP,
+    EXT4_JOURNAL_INO, EXT4_LOG_BLOCK_SIZE, EXT4_MIN_EXTRA_ISIZE, EXT4_ROOT_INO,
+    EXT4_SB_OVERHEAD_BLOCKS_OFFSET, EXT4_SUPER_MAGIC, JBD2_MAGIC, JBD2_SUPERBLOCK_V2, S_IFBLK,
     S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFREG, S_IFSOCK,
 };
 use super::layout::{
@@ -23,6 +24,7 @@ use super::layout::{
     dir_block_checksum, inode_checksum, put_be32, put_le16, put_le32, superblock_checksum,
     write_backup_superblock_at, write_gdt_at,
 };
+use super::resize_inode::write_resize_inode;
 use crate::crc32c;
 use crate::path_bytes::os_str_bytes;
 use crate::tree::{
@@ -146,6 +148,8 @@ struct Layout {
     inode_table_blocks: u32,
     /// First data block after inode table (root dir block).
     first_data_block: u64,
+    /// Double-indirect block owned by the reserved-GDT inode.
+    resize_inode_block: u64,
     /// First block of the journal region.
     journal_start_block: u64,
     /// Total journal blocks.
@@ -168,7 +172,7 @@ struct FsStats {
     inode_bitmap_checksums: Vec<u32>,
     total_free_blocks: u64,
     total_free_inodes: u64,
-    total_used_blocks: u64,
+    overhead_blocks: u64,
 }
 
 struct BitmapPlan {
@@ -364,6 +368,7 @@ impl Layout {
         //   next block: block bitmap
         //   next block: inode bitmap
         //   next N blocks: inode table
+        //   next block: resize-inode double-indirect block
         //   next block: root dir data block
         //   next M blocks: journal
 
@@ -371,7 +376,8 @@ impl Layout {
         let block_bitmap_block = overhead_blocks;
         let inode_bitmap_block = block_bitmap_block + 1;
         let inode_table_block = inode_bitmap_block + 1;
-        let first_data_block = inode_table_block + inode_table_blocks as u64;
+        let resize_inode_block = inode_table_block + inode_table_blocks as u64;
+        let first_data_block = resize_inode_block + 1;
         let journal_start_block = first_data_block + root_dir_blocks as u64;
 
         let min_blocks = journal_start_block + opts.journal_blocks as u64 + 1; // +1 slack
@@ -387,6 +393,7 @@ impl Layout {
 
         let feature_compat = EXT4_FEATURE_COMPAT_HAS_JOURNAL
             | EXT4_FEATURE_COMPAT_EXT_ATTR
+            | EXT4_FEATURE_COMPAT_RESIZE_INODE
             | EXT4_FEATURE_COMPAT_DIR_INDEX;
 
         let feature_incompat = EXT4_FEATURE_INCOMPAT_FILETYPE
@@ -408,6 +415,7 @@ impl Layout {
             reserved_gdt_blocks,
             inode_table_blocks,
             first_data_block,
+            resize_inode_block,
             journal_start_block,
             journal_blocks: opts.journal_blocks,
             csum_seed,
@@ -486,7 +494,7 @@ impl Layout {
     fn group_used_blocks(&self, group: u32) -> u32 {
         let mut used = self.group_metadata_blocks(group);
         if group == 0 {
-            used += 1 + self.journal_blocks; // root dir + journal
+            used += 2 + self.journal_blocks; // resize inode block + root dir + journal
         }
         used.min(self.blocks_in_group(group))
     }
@@ -521,9 +529,9 @@ impl Layout {
             .sum()
     }
 
-    fn total_used_blocks(&self) -> u64 {
+    fn total_overhead_blocks(&self) -> u64 {
         (0..self.num_groups)
-            .map(|group| self.group_used_blocks(group) as u64)
+            .map(|group| u64::from(self.group_metadata_blocks(group)))
             .sum()
     }
 
@@ -545,6 +553,7 @@ impl Layout {
 impl BitmapPlan {
     fn new(layout: &Layout, plans: &[NodePlan]) -> Self {
         let mut block_extents = Vec::new();
+        block_extents.push((layout.resize_inode_block, 1));
         block_extents.push((
             layout.first_data_block,
             (layout.journal_start_block - layout.first_data_block) as u32,
@@ -738,6 +747,14 @@ fn format_ext4_with_tree_and_reserved_uuid(
     write_bitmaps(&mut file, &layout, &bitmap_plan)?;
     write_tree_data(&mut file, &layout, &all_plans)?;
     write_inode_table_with_plan(&mut file, &layout, &all_plans)?;
+    write_resize_inode(
+        &mut file,
+        &layout.geometry(),
+        layout.group_inode_table_block(0),
+        layout.resize_inode_block,
+        layout.csum_seed,
+        layout.num_groups,
+    )?;
     write_journal(&mut file, &layout)?;
 
     let sb_bytes = build_superblock_with_stats(&layout, &stats)?;
@@ -1374,7 +1391,6 @@ fn compute_fs_stats(layout: &Layout, plan: &BitmapPlan) -> FsStats {
     let mut inode_bitmap_checksums = Vec::with_capacity(layout.num_groups as usize);
 
     let mut total_free_blocks = 0u64;
-    let mut total_used_blocks = 0u64;
     for group in 0..layout.num_groups {
         let block_bitmap = build_block_bitmap_for_plan(layout, plan, group);
         let inode_bitmap = build_inode_bitmap_for_plan(layout, plan, group);
@@ -1393,7 +1409,6 @@ fn compute_fs_stats(layout: &Layout, plan: &BitmapPlan) -> FsStats {
             (EXT4_INODES_PER_GROUP / 8) as usize,
         ));
         total_free_blocks += free as u64;
-        total_used_blocks += used as u64;
     }
 
     let group_free_inodes = (0..layout.num_groups)
@@ -1420,7 +1435,7 @@ fn compute_fs_stats(layout: &Layout, plan: &BitmapPlan) -> FsStats {
         inode_bitmap_checksums,
         total_free_blocks,
         total_free_inodes,
-        total_used_blocks,
+        overhead_blocks: layout.total_overhead_blocks(),
     }
 }
 
@@ -1745,7 +1760,11 @@ fn build_superblock_with_stats_for_group(
     put_le32(sb, 0x0C, stats.total_free_blocks as u32);
     put_le32(sb, 0x10, stats.total_free_inodes as u32);
     put_le32(sb, 0x158, (stats.total_free_blocks >> 32) as u32);
-    put_le32(sb, 0x194, stats.total_used_blocks as u32);
+    put_le32(
+        sb,
+        EXT4_SB_OVERHEAD_BLOCKS_OFFSET,
+        stats.overhead_blocks as u32,
+    );
     let checksum = superblock_checksum(sb);
     put_le32(sb, 0x3FC, checksum);
     Ok(block)
@@ -2449,8 +2468,12 @@ fn build_superblock(
     // s_kbytes_written (0x178, u64) -- 0
     // s_snapshot_inum, etc. -- leave zeroed
 
-    // s_overhead_clusters (0x194, u32)
-    put_le32(sb, 0x194, layout.total_used_blocks() as u32);
+    // s_overhead_clusters (0x248, u32)
+    put_le32(
+        sb,
+        EXT4_SB_OVERHEAD_BLOCKS_OFFSET,
+        layout.total_overhead_blocks() as u32,
+    );
 
     // s_checksum_seed (0x270, u32) -- crc32c::crc32c_raw(~0, uuid)
     // Only used if INCOMPAT_CSUM_SEED is set. For METADATA_CSUM without
