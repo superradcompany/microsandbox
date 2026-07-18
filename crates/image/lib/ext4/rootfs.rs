@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use super::formatter::{Ext4Error, Ext4FormatOptions, format_ext4_rootfs_with_tree_and_uuid};
+use super::resizer::validate_rootfs_image;
 use crate::tree::FileTree;
 
 //--------------------------------------------------------------------------------------------------
@@ -71,6 +72,7 @@ pub fn materialize_ext4_rootfs(
     let uuid = deterministic_uuid(&options.derivation_digest);
 
     format_ext4_rootfs_with_tree_and_uuid(path, &format_options, tree, uuid)?;
+    validate_rootfs_image(path)?;
 
     // Rootfs artifacts enter a shared cache, unlike ephemeral upper creation. Durably persist the
     // complete candidate before a later cache transaction can hash and atomically publish it.
@@ -97,7 +99,7 @@ fn deterministic_uuid(digest: &[u8; 32]) -> [u8; 16] {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read, Seek, SeekFrom};
+    use std::io::{Read, Seek, SeekFrom, Write};
 
     use super::*;
     use crate::tree::{FileData, InodeMetadata, RegularFileNode, TreeNode, Xattr};
@@ -248,5 +250,60 @@ mod tests {
         assert_eq!(le_u32(&block, 0), 0xEA02_0000);
         assert_eq!(block[33], 6);
         assert_eq!(&block[48..58], b"capability");
+    }
+
+    #[test]
+    fn validator_rejects_corrupted_inode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rootfs.raw");
+        let mut tree = FileTree::new();
+        tree.insert(
+            b"payload",
+            TreeNode::RegularFile(regular_file(crate::tree::RegularFileId::new())),
+        )
+        .unwrap();
+        materialize_ext4_rootfs(&path, tree, &test_options([13u8; 32])).unwrap();
+
+        let root_mode_offset = inode_table_block() * 4096 + 256;
+        let mut image = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        image.seek(SeekFrom::Start(root_mode_offset)).unwrap();
+        image.write_all(&[0]).unwrap();
+        image.flush().unwrap();
+
+        assert!(validate_rootfs_image(&path).is_err());
+    }
+
+    #[test]
+    fn validator_rejects_corrupted_external_xattr() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rootfs.raw");
+        let mut tree = FileTree::new();
+        let mut file = regular_file(crate::tree::RegularFileId::new());
+        file.xattrs.push(Xattr {
+            name: b"security.capability".to_vec(),
+            value: vec![0x5a; 128],
+        });
+        tree.insert(b"payload", TreeNode::RegularFile(file))
+            .unwrap();
+        materialize_ext4_rootfs(&path, tree, &test_options([15u8; 32])).unwrap();
+
+        let inode = read_inode(&path, 11);
+        let xattr_block = u64::from(le_u32(&inode, 0x68)) | (u64::from(le_u16(&inode, 0x76)) << 32);
+        let mut image = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        image
+            .seek(SeekFrom::Start(xattr_block * 4096 + 32))
+            .unwrap();
+        image.write_all(&[0xff]).unwrap();
+        image.flush().unwrap();
+
+        assert!(validate_rootfs_image(&path).is_err());
     }
 }
