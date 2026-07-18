@@ -85,7 +85,7 @@ pub const MSB_BINARY: &str = "msb";
 pub const PREBUILT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// libkrunfw release version. Keep in sync with justfile.
-pub const LIBKRUNFW_VERSION: &str = "5.5.0";
+pub const LIBKRUNFW_VERSION: &str = "5.6.0";
 
 /// libkrunfw ABI version (soname major). Keep in sync with justfile.
 pub const LIBKRUNFW_ABI: &str = "5";

@@ -1422,7 +1422,7 @@ mod tests {
         } else if cfg!(target_os = "macos") {
             assert!(filename.ends_with(".dylib"));
         } else {
-            assert!(filename.ends_with(".so.5.5.0"));
+            assert!(filename.ends_with(".so.5.6.0"));
         }
     }
 
