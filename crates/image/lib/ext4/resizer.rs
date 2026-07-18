@@ -1805,6 +1805,43 @@ mod tests {
         );
     }
 
+    /// Run the reference checker and reject diagnostics that `e2fsck -n` can emit without making
+    /// its process status the only source of truth. In particular, a declined `Fix? no` means the
+    /// image is not clean enough to publish even if the local e2fsprogs version exits successfully.
+    fn assert_e2fsck_clean(path: &Path, label: &str) -> bool {
+        let output = match std::process::Command::new("e2fsck")
+            .arg("-fn")
+            .arg(path)
+            .output()
+        {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("e2fsck not found; skipping");
+                return false;
+            }
+            Err(error) => panic!("failed to run e2fsck: {error}"),
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let diagnostics = format!("{stdout}\n{stderr}");
+        let rejected_diagnostics = [
+            "Fix? no",
+            "WARNING:",
+            "UNEXPECTED INCONSISTENCY",
+            "Filesystem still has errors",
+            "does not have resize_inode enabled",
+        ];
+        assert!(
+            output.status.success()
+                && rejected_diagnostics
+                    .iter()
+                    .all(|diagnostic| !diagnostics.contains(diagnostic)),
+            "e2fsck found an inconsistency after {label}:\nstdout: {stdout}\nstderr: {stderr}"
+        );
+        true
+    }
+
     /// Full `e2fsck -fn` validation of a formatted and grown image. Gated behind `--ignored`
     /// because e2fsprogs is only guaranteed on Linux CI; skips cleanly when the binary is absent.
     #[test]
@@ -1814,35 +1851,13 @@ mod tests {
         let path = dir.path().join("fsck.ext4");
         format_image(&path, 256 * MIB);
 
-        let run_e2fsck = |label: &str| {
-            let output = match std::process::Command::new("e2fsck")
-                .arg("-fn")
-                .arg(&path)
-                .output()
-            {
-                Ok(output) => output,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    eprintln!("e2fsck not found; skipping");
-                    return false;
-                }
-                Err(error) => panic!("failed to run e2fsck: {error}"),
-            };
-            assert!(
-                output.status.success(),
-                "e2fsck failed after {label}:\nstdout: {}\nstderr: {}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            true
-        };
-
-        if !run_e2fsck("format") {
+        if !assert_e2fsck_clean(&path, "format") {
             return;
         }
         grow_image(&path, 512 * MIB).unwrap();
-        run_e2fsck("grow to 512 MiB");
+        assert_e2fsck_clean(&path, "grow to 512 MiB");
         grow_image(&path, 1024 * MIB).unwrap();
-        run_e2fsck("grow to 1 GiB");
+        assert_e2fsck_clean(&path, "grow to 1 GiB");
     }
 
     /// Cross a 64-group descriptor boundary so one reserved-GDT block becomes a live GDT block,
@@ -1855,24 +1870,7 @@ mod tests {
         format_image(&path, 256 * MIB);
 
         grow_image(&path, 68 * 128 * MIB).unwrap();
-        let output = match std::process::Command::new("e2fsck")
-            .arg("-fn")
-            .arg(&path)
-            .output()
-        {
-            Ok(output) => output,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                eprintln!("e2fsck not found; skipping");
-                return;
-            }
-            Err(error) => panic!("failed to run e2fsck: {error}"),
-        };
-        assert!(
-            output.status.success(),
-            "e2fsck failed after consuming reserved GDT headroom:\nstdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        assert_e2fsck_clean(&path, "consuming reserved GDT headroom");
     }
 
     /// Same e2fsck gate for the recovery path: a dirty image (pending journal with escaped and revoked blocks) must replay, grow, and still be fully clean to `e2fsck -fn`.
@@ -1905,24 +1903,6 @@ mod tests {
         );
 
         grow_image(&path, 512 * MIB).unwrap();
-
-        let output = match std::process::Command::new("e2fsck")
-            .arg("-fn")
-            .arg(&path)
-            .output()
-        {
-            Ok(output) => output,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                eprintln!("e2fsck not found; skipping");
-                return;
-            }
-            Err(error) => panic!("failed to run e2fsck: {error}"),
-        };
-        assert!(
-            output.status.success(),
-            "e2fsck failed after replay + grow:\nstdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        assert_e2fsck_clean(&path, "replay + grow");
     }
 }
