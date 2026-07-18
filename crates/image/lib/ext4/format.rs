@@ -50,6 +50,9 @@ pub const S_IFREG: u16 = 0o100000;
 pub const S_IFDIR: u16 = 0o040000;
 pub const S_IFLNK: u16 = 0o120000;
 pub const S_IFCHR: u16 = 0o020000;
+pub const S_IFBLK: u16 = 0o060000;
+pub const S_IFIFO: u16 = 0o010000;
+pub const S_IFSOCK: u16 = 0o140000;
 
 // Inode flags
 pub const EXT4_EXTENTS_FL: u32 = 0x00080000;
