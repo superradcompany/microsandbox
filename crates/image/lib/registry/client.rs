@@ -193,6 +193,30 @@ impl Registry {
             .await
     }
 
+    /// Materialize a reusable flat ext4 rootfs from already cached EROFS layers.
+    pub async fn materialize_flat_rootfs(
+        &self,
+        manifest_digest: &Digest,
+        layer_diff_ids: &[Digest],
+        force: bool,
+    ) -> ImageResult<crate::FlatRootfsRef> {
+        let cache = self.cache.clone();
+        let platform = self.platform.clone();
+        let manifest_digest = manifest_digest.clone();
+        let layer_diff_ids = layer_diff_ids.to_vec();
+        tokio::task::spawn_blocking(move || {
+            crate::flat::materialize_flat_rootfs(
+                &cache,
+                &manifest_digest,
+                &layer_diff_ids,
+                &platform,
+                force,
+            )
+        })
+        .await
+        .map_err(|error| ImageError::Io(io::Error::other(error)))?
+    }
+
     pub(crate) async fn materialize_cached_layers_from_paths(
         &self,
         reference: &oci_client::Reference,

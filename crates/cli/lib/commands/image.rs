@@ -168,6 +168,7 @@ pub async fn run(args: ImageArgs) -> anyhow::Result<()> {
                 args.insecure,
                 args.ca_certs,
                 microsandbox_image::PullPolicy::IfMissing,
+                args.materialize,
             )
             .await
         }
@@ -189,6 +190,7 @@ pub async fn run_pull(args: pull::PullArgs) -> anyhow::Result<()> {
         args.insecure,
         args.ca_certs,
         microsandbox_image::PullPolicy::IfMissing,
+        args.materialize,
     )
     .await
 }
@@ -201,6 +203,7 @@ async fn run_pull_inner(
     insecure: bool,
     cli_ca_certs: Option<String>,
     pull_policy: microsandbox_image::PullPolicy,
+    materialization: pull::PullMaterialization,
 ) -> anyhow::Result<()> {
     let start = Instant::now();
 
@@ -215,8 +218,9 @@ async fn run_pull_inner(
 
     let options = microsandbox_image::PullOptions { pull_policy, force };
 
-    if let Some((result, metadata)) =
-        microsandbox_image::Registry::pull_cached(&cache, &image_ref, &options)?
+    if !materialization.includes_flat()
+        && let Some((result, metadata)) =
+            microsandbox_image::Registry::pull_cached(&cache, &image_ref, &options)?
     {
         if let Err(e) = Image::persist(local, &reference, metadata).await {
             tracing::warn!(error = %e, "failed to persist image metadata to database");
@@ -296,6 +300,12 @@ async fn run_pull_inner(
             return Err(anyhow::anyhow!("pull task panicked: {e}"));
         }
     };
+
+    if materialization.includes_flat() {
+        registry
+            .materialize_flat_rootfs(&result.manifest_digest, &result.layer_diff_ids, force)
+            .await?;
+    }
 
     match display_thread.join() {
         Ok(Ok(())) => {}
@@ -388,6 +398,7 @@ pub(crate) async fn pull_if_missing(reference: &str, quiet: bool) -> anyhow::Res
         false,
         None,
         microsandbox_image::PullPolicy::IfMissing,
+        pull::PullMaterialization::Layered,
     )
     .await
 }

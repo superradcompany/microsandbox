@@ -25,6 +25,7 @@ mod digest;
 pub mod erofs;
 mod error;
 pub mod ext4;
+mod flat;
 pub(crate) mod layer;
 pub(crate) mod path_bytes;
 mod platform;

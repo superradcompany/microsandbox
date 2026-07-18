@@ -59,6 +59,7 @@ const EROFS_ALIGNMENT_BYTES: u64 = 4096;
 /// ~/.microsandbox/cache/vmdk/<manifest_safe>.vmdk            # VMDK descriptor
 /// ~/.microsandbox/cache/vmdk/<manifest_safe>.vmdk.lock       # materialization flock
 /// ```
+#[derive(Clone)]
 pub struct GlobalCache {
     /// Root of the layer EROFS cache (`~/.microsandbox/cache/layers/`).
     layers_dir: PathBuf,
@@ -322,6 +323,41 @@ impl GlobalCache {
     pub fn flat_lock_path(&self, derivation_digest: &Digest) -> PathBuf {
         self.flat_locks_dir
             .join(format!("{}.lock", derivation_digest.to_path_safe()))
+    }
+
+    /// Same-filesystem work directory for one flat-rootfs derivation.
+    pub fn flat_work_dir(&self, derivation_digest: &Digest) -> PathBuf {
+        self.tmp_dir
+            .join(format!("{}.flat.work", derivation_digest.to_path_safe()))
+    }
+
+    /// Publish a synchronized candidate as an immutable content-addressed blob.
+    pub fn publish_flat_blob(
+        &self,
+        candidate: &Path,
+        artifact_digest: &Digest,
+        expected_size: u64,
+    ) -> ImageResult<PathBuf> {
+        let destination = self.flat_blob_path(artifact_digest);
+        if let Ok(metadata) = std::fs::metadata(&destination) {
+            if metadata.len() != expected_size {
+                return Err(ImageError::Cache {
+                    path: destination,
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "content-addressed flat blob has an unexpected size",
+                    ),
+                });
+            }
+            let _ = std::fs::remove_file(candidate);
+            return Ok(destination);
+        }
+        std::fs::rename(candidate, &destination).map_err(|source| ImageError::Cache {
+            path: destination.clone(),
+            source,
+        })?;
+        sync_directory(&self.flat_blobs_dir)?;
+        Ok(destination)
     }
 
     /// Read and validate the manifest-keyed flat rootfs reference.
