@@ -15,7 +15,7 @@ use crate::tree::FileTree;
 //--------------------------------------------------------------------------------------------------
 
 /// Version of the on-disk materializer behavior implemented by this module.
-pub const EXT4_ROOTFS_MATERIALIZER_ABI: u32 = 1;
+pub const EXT4_ROOTFS_MATERIALIZER_ABI: u32 = 2;
 
 /// Profile-v1 journal size: 64 MiB with 4 KiB filesystem blocks.
 const DEFAULT_ROOTFS_JOURNAL_BLOCKS: u32 = 16_384;
