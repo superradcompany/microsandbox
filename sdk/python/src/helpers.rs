@@ -160,20 +160,8 @@ pub fn sandbox_builder_from_args(
             None
         };
         let root_disk = extract_root_disk(&image_obj)?;
-        let rootfs_layout = image_obj
-            .getattr("_layout")
-            .ok()
-            .filter(|value| !value.is_none())
-            .map(|value| value.extract::<String>())
-            .transpose()?
-            .unwrap_or_else(|| "layered".to_string());
-        if !matches!(rootfs_layout.as_str(), "layered" | "flat") {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "layout must be 'layered' or 'flat'",
-            ));
-        }
 
-        if root_disk.is_some() || rootfs_layout == "flat" {
+        if root_disk.is_some() {
             let image_type = image_obj
                 .getattr("_type")
                 .ok()
@@ -201,9 +189,6 @@ pub fn sandbox_builder_from_args(
                 builder = builder.image(image_str.as_str());
             }
         };
-        if rootfs_layout == "flat" {
-            builder = builder.rootfs_layout(microsandbox::sandbox::OciRootfsLayout::Flat);
-        }
     }
 
     if let Some(memory) = extract_opt::<u32>(kwargs, "memory")? {
@@ -511,6 +496,7 @@ struct RootDiskSpec {
     path: Option<String>,
     format: Option<microsandbox::sandbox::DiskImageFormat>,
     fstype: Option<String>,
+    clone: Option<microsandbox::sandbox::FlatClone>,
 }
 
 impl RootDiskSpec {
@@ -523,6 +509,7 @@ impl RootDiskSpec {
             match self.kind.as_str() {
                 "managed" => {}
                 "tmpfs" => d = d.tmpfs(),
+                "flat" => d = d.flat(),
                 // Path presence is validated in `extract_root_disk`.
                 "disk-image" => d = d.disk_image(self.path.as_deref().unwrap_or_default()),
                 _ => unreachable!("validated root disk kind"),
@@ -535,6 +522,9 @@ impl RootDiskSpec {
             }
             if let Some(fstype) = self.fstype {
                 d = d.fstype(fstype);
+            }
+            if let Some(clone) = self.clone {
+                d = d.clone_strategy(clone);
             }
             d
         })
@@ -560,6 +550,7 @@ fn extract_root_disk(image_obj: &Bound<'_, PyAny>) -> PyResult<Option<RootDiskSp
                 path: None,
                 format: None,
                 fstype: None,
+                clone: None,
             }));
         }
         return Ok(None);
@@ -573,6 +564,7 @@ fn extract_root_disk(image_obj: &Bound<'_, PyAny>) -> PyResult<Option<RootDiskSp
             path: None,
             format: None,
             fstype: None,
+            clone: None,
         }));
     }
 
@@ -587,13 +579,30 @@ fn extract_root_disk(image_obj: &Bound<'_, PyAny>) -> PyResult<Option<RootDiskSp
         })
         .transpose()?;
     let fstype = extract_opt::<String>(&dict, "fstype")?;
+    let clone = extract_opt::<String>(&dict, "clone")?
+        .map(|value| match value.as_str() {
+            "auto" => Ok(microsandbox::sandbox::FlatClone::Auto),
+            "copy" => Ok(microsandbox::sandbox::FlatClone::Copy),
+            "reflink" => Ok(microsandbox::sandbox::FlatClone::Reflink),
+            other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "invalid flat clone strategy: {other} (expected auto, copy, or reflink)"
+            ))),
+        })
+        .transpose()?;
 
     match kind.as_str() {
         "managed" | "tmpfs" => {
-            if path.is_some() || format.is_some() || fstype.is_some() {
+            if path.is_some() || format.is_some() || fstype.is_some() || clone.is_some() {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "path/format/fstype are only valid for a disk-image root disk (got kind={kind})"
+                    "path/format/fstype/clone are not valid for a {kind} root disk"
                 )));
+            }
+        }
+        "flat" => {
+            if path.is_some() || format.is_some() {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "path/format are not valid for a flat root disk",
+                ));
             }
         }
         "disk-image" => {
@@ -607,10 +616,15 @@ fn extract_root_disk(image_obj: &Bound<'_, PyAny>) -> PyResult<Option<RootDiskSp
                     "size_mib is not valid for a disk-image root disk; resize the image file itself",
                 ));
             }
+            if clone.is_some() {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "clone is only valid for a flat root disk",
+                ));
+            }
         }
         other => {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "unknown root disk kind: {other} (expected managed, tmpfs, disk-image)"
+                "unknown root disk kind: {other} (expected managed, tmpfs, flat, disk-image)"
             )));
         }
     }
@@ -621,6 +635,7 @@ fn extract_root_disk(image_obj: &Bound<'_, PyAny>) -> PyResult<Option<RootDiskSp
         path,
         format,
         fstype,
+        clone,
     }))
 }
 

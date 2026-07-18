@@ -94,14 +94,16 @@ const (
 	PullPolicyNever     PullPolicy = "never"
 )
 
-// RootfsLayout selects how an OCI image is presented to the guest.
-type RootfsLayout string
+// FlatClone selects how a canonical flat rootfs artifact is cloned for a sandbox.
+type FlatClone string
 
 const (
-	// RootfsLayoutLayered uses EROFS lowers with a writable OverlayFS upper.
-	RootfsLayoutLayered RootfsLayout = "layered"
-	// RootfsLayoutFlat uses one private writable ext4 root disk.
-	RootfsLayoutFlat RootfsLayout = "flat"
+	// FlatCloneAuto prefers a reflink and falls back to a sparse copy.
+	FlatCloneAuto FlatClone = "auto"
+	// FlatCloneCopy always creates a sparse byte copy.
+	FlatCloneCopy FlatClone = "copy"
+	// FlatCloneReflink requires a copy-on-write reflink clone.
+	FlatCloneReflink FlatClone = "reflink"
 )
 
 // LogLevel selects the sandbox process log verbosity.

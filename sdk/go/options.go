@@ -17,9 +17,7 @@ type SandboxConfig struct {
 	Image       string
 	ImageFstype string
 	ImageBind   string
-	// RootfsLayout selects layered (default) or flat for an OCI image.
-	RootfsLayout RootfsLayout
-	// RootDisk configures the writable rootfs layer for an OCI image.
+	// RootDisk configures the root disk for an OCI image.
 	// Construct via the RootDisk factory and set with WithRootDisk.
 	RootDisk *RootDiskConfig
 	// OCIUpperSizeMiB is honored as a managed root disk of this size when
@@ -150,7 +148,6 @@ func (c *SandboxConfig) UnmarshalJSON(data []byte) error {
 		Name:            raw.Name,
 		Image:           image,
 		ImageFstype:     imageFstype,
-		RootfsLayout:    decodePersistedRootfsLayout(raw.Image),
 		RootDisk:        rootDisk,
 		OCIUpperSizeMiB: upperSizeMiB,
 		ociUpperSizeSet: upperSizeSet,
@@ -177,24 +174,6 @@ func (c *SandboxConfig) UnmarshalJSON(data []byte) error {
 		IdleTimeout:     time.Duration(raw.lifecycleIdleTimeoutSecs()) * time.Second,
 	}
 	return nil
-}
-
-func decodePersistedRootfsLayout(raw json.RawMessage) RootfsLayout {
-	var tagged map[string]json.RawMessage
-	if json.Unmarshal(raw, &tagged) != nil {
-		return ""
-	}
-	value, ok := tagged["Oci"]
-	if !ok {
-		return ""
-	}
-	var source struct {
-		Layout RootfsLayout `json:"layout"`
-	}
-	if json.Unmarshal(value, &source) != nil || source.Layout == "" {
-		return RootfsLayoutLayered
-	}
-	return source.Layout
 }
 
 func (c persistedSandboxConfig) cpus() uint8 {
@@ -341,11 +320,12 @@ func decodePersistedRootfsSource(raw json.RawMessage) (string, string, *RootDisk
 // `format` carries the serde variant name (`Raw` / `Qcow2`), normalized to
 // the SDK's lowercase spelling on decode.
 type persistedRootDisk struct {
-	Kind    string  `json:"kind"`
-	SizeMiB *uint32 `json:"size_mib"`
-	Path    string  `json:"path"`
-	Format  string  `json:"format"`
-	Fstype  string  `json:"fstype"`
+	Kind    string    `json:"kind"`
+	SizeMiB *uint32   `json:"size_mib"`
+	Path    string    `json:"path"`
+	Format  string    `json:"format"`
+	Fstype  string    `json:"fstype"`
+	Clone   FlatClone `json:"clone"`
 }
 
 func (p persistedRootDisk) toConfig() (*RootDiskConfig, error) {
@@ -355,6 +335,13 @@ func (p persistedRootDisk) toConfig() (*RootDiskConfig, error) {
 		cfg.kind = RootDiskKindManaged
 	case "tmpfs":
 		cfg.kind = RootDiskKindTmpfs
+	case "flat":
+		cfg.kind = RootDiskKindFlat
+		cfg.Fstype = p.Fstype
+		cfg.Clone = p.Clone
+		if cfg.Clone == "" {
+			cfg.Clone = FlatCloneAuto
+		}
 	case "disk-image":
 		cfg.kind = RootDiskKindDiskImage
 		cfg.Path = p.Path
@@ -385,27 +372,22 @@ func WithImage(image string) SandboxOption {
 	return func(o *SandboxConfig) { o.Image = image }
 }
 
-// WithRootfsLayout selects how an OCI image is presented to the guest.
-// The zero value and RootfsLayoutLayered preserve the current layered layout.
-func WithRootfsLayout(layout RootfsLayout) SandboxOption {
-	return func(o *SandboxConfig) { o.RootfsLayout = layout }
-}
-
-// RootDiskConfig describes the writable rootfs layer (root disk) of an OCI
+// RootDiskConfig describes the root disk of an OCI
 // image. Construct via the RootDisk factory:
 //
 //	microsandbox.RootDisk.Managed(8192)
 //	microsandbox.RootDisk.Tmpfs(microsandbox.RootDiskTmpfsOptions{SizeMiB: 512})
+//	microsandbox.RootDisk.Flat(microsandbox.RootDiskFlatOptions{SizeMiB: 8192})
 //	microsandbox.RootDisk.Disk("./scratch.img", microsandbox.RootDiskImageOptions{Fstype: "ext4"})
 //
 // Use the factory rather than constructing the struct directly: it enforces
-// the mutually-exclusive kinds (managed / tmpfs / disk-image).
+// the mutually-exclusive kinds (managed / tmpfs / flat / disk-image).
 type RootDiskConfig struct {
 	// kind is the discriminator. Exposed via Kind() for callers that need
 	// to introspect; setting fields below directly is discouraged.
 	kind RootDiskKind
 
-	// SizeMiB is the size in MiB for managed and tmpfs root disks. A
+	// SizeMiB is the size in MiB for managed, tmpfs, and flat root disks. A
 	// user-supplied disk image is sized by the image file itself.
 	SizeMiB uint32
 	sizeSet bool
@@ -414,12 +396,14 @@ type RootDiskConfig struct {
 	// Format is the disk image format ("raw" or "qcow2"); derived from the
 	// path extension when empty. vmdk is not supported as a root disk.
 	Format string
-	// Fstype is the inner filesystem type of a disk-image root disk
+	// Fstype is the inner filesystem type of a flat or disk-image root disk
 	// (e.g. "ext4"). Empty means ext4.
 	Fstype string
+	// Clone selects how a flat root disk is cloned from its canonical artifact.
+	Clone FlatClone
 }
 
-// RootDiskKind discriminates between the three root disk flavours.
+// RootDiskKind discriminates between the root disk flavours.
 type RootDiskKind uint8
 
 const (
@@ -429,6 +413,9 @@ const (
 	// RootDiskKindTmpfs is a RAM-backed upper: ephemeral, pristine on
 	// every boot, and its size counts against guest memory.
 	RootDiskKindTmpfs
+	// RootDiskKindFlat is one private writable filesystem containing the
+	// complete OCI image.
+	RootDiskKindFlat
 	// RootDiskKindDiskImage is a user-supplied disk image attached
 	// writable as the upper. User-owned lifecycle.
 	RootDiskKindDiskImage
@@ -442,6 +429,16 @@ type RootDiskTmpfsOptions struct {
 	// SizeMiB caps the tmpfs upper. Zero means the runtime default
 	// (half the sandbox memory).
 	SizeMiB uint32
+}
+
+// RootDiskFlatOptions tunes the RootDisk.Flat factory.
+type RootDiskFlatOptions struct {
+	// SizeMiB is the private filesystem size. Zero selects the runtime default.
+	SizeMiB uint32
+	// Fstype selects the generated filesystem type; currently only ext4 is supported.
+	Fstype string
+	// Clone selects auto, copy, or reflink. Empty is equivalent to auto.
+	Clone FlatClone
 }
 
 // RootDiskImageOptions tunes the RootDisk.Disk factory.
@@ -461,6 +458,7 @@ type rootDiskFactory struct{}
 //
 //	microsandbox.WithRootDisk(microsandbox.RootDisk.Managed(8192))
 //	microsandbox.WithRootDisk(microsandbox.RootDisk.Tmpfs(microsandbox.RootDiskTmpfsOptions{SizeMiB: 512}))
+//	microsandbox.WithRootDisk(microsandbox.RootDisk.Flat(microsandbox.RootDiskFlatOptions{Clone: microsandbox.FlatCloneAuto}))
 var RootDisk rootDiskFactory
 
 // Managed returns a managed root disk of the given size in MiB: a sparse
@@ -482,6 +480,21 @@ func (rootDiskFactory) Tmpfs(opts RootDiskTmpfsOptions) RootDiskConfig {
 	}
 }
 
+// Flat returns one private writable filesystem containing the complete OCI image.
+func (rootDiskFactory) Flat(opts RootDiskFlatOptions) RootDiskConfig {
+	clone := opts.Clone
+	if clone == "" {
+		clone = FlatCloneAuto
+	}
+	return RootDiskConfig{
+		kind:    RootDiskKindFlat,
+		SizeMiB: opts.SizeMiB,
+		sizeSet: opts.SizeMiB != 0,
+		Fstype:  opts.Fstype,
+		Clone:   clone,
+	}
+}
+
 // Disk returns a root disk backed by a user-supplied disk image, attached
 // writable. microsandbox never creates, resizes, or deletes the image.
 func (rootDiskFactory) Disk(path string, opts RootDiskImageOptions) RootDiskConfig {
@@ -493,7 +506,7 @@ func (rootDiskFactory) Disk(path string, opts RootDiskImageOptions) RootDiskConf
 	}
 }
 
-// WithRootDisk configures the writable rootfs layer for an OCI image.
+// WithRootDisk configures the root disk for an OCI image.
 // It is valid only with WithImage when the image resolves to an OCI reference.
 func WithRootDisk(disk RootDiskConfig) SandboxOption {
 	return func(o *SandboxConfig) { o.RootDisk = &disk }

@@ -398,12 +398,13 @@ def _enum_value(value: enum.Enum | str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class RootDiskConfig:
-    """Writable rootfs layer (root disk) for an OCI image. Construct via RootDisk."""
+    """Root disk for an OCI image. Construct via RootDisk."""
     kind: str
     size_mib: int | None = None
     path: str | None = None
     format: DiskImageFormat | str | None = None
     fstype: str | None = None
+    clone: Literal["auto", "copy", "reflink"] | None = None
 
     def _to_dict(self) -> dict:
         d: dict = {"kind": self.kind}
@@ -415,6 +416,8 @@ class RootDiskConfig:
             d["format"] = _enum_value(self.format)
         if self.fstype is not None:
             d["fstype"] = self.fstype
+        if self.clone is not None:
+            d["clone"] = self.clone
         return d
 
 class RootDisk:
@@ -433,6 +436,24 @@ class RootDisk:
         return RootDiskConfig(kind="tmpfs", size_mib=size_mib)
 
     @staticmethod
+    def flat(
+        size_mib: int | None = None,
+        *,
+        fstype: str | None = None,
+        clone: Literal["auto", "copy", "reflink"] = "auto",
+    ) -> RootDiskConfig:
+        """One private writable filesystem containing the complete OCI image.
+
+        ``auto`` prefers a reflink and falls back to a sparse copy; ``copy``
+        forces a sparse copy; ``reflink`` requires reflink support.
+        """
+        if clone not in ("auto", "copy", "reflink"):
+            raise ValueError("clone must be 'auto', 'copy', or 'reflink'")
+        return RootDiskConfig(
+            kind="flat", size_mib=size_mib, fstype=fstype, clone=clone,
+        )
+
+    @staticmethod
     def disk(
         path: str,
         *,
@@ -449,7 +470,6 @@ class ImageSource:
     _type: str
     _path: str | None = None
     _reference: str | None = None
-    _layout: Literal["layered", "flat"] = "layered"
     _root_disk: RootDiskConfig | dict | int | None = None
     _upper_size_mib: int | None = None  # deprecated: use _root_disk
     _fstype: str | None = None
@@ -472,12 +492,9 @@ class Image:
     def oci(
         reference: str,
         *,
-        layout: Literal["layered", "flat"] = "layered",
         root_disk: RootDiskConfig | dict | int | None = None,
         upper_size_mib: int | None = None,
     ) -> ImageSource:
-        if layout not in ("layered", "flat"):
-            raise ValueError("layout must be 'layered' or 'flat'")
         if root_disk is not None and upper_size_mib is not None:
             raise ValueError("pass either root_disk= or upper_size_mib=, not both")
         if root_disk is None and upper_size_mib is not None:
@@ -486,7 +503,6 @@ class Image:
         return ImageSource(
             _type="oci",
             _reference=reference,
-            _layout=layout,
             _root_disk=root_disk,
             _upper_size_mib=upper_size_mib,
         )

@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use sea_orm::EntityTrait;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 use crate::{
     MicrosandboxResult,
@@ -16,10 +16,12 @@ use crate::{
         Backend, CloudCreateSandboxResponse, SandboxHandleCloudState, SandboxHandleInner,
         SandboxHandleLocalState,
     },
-    db::entity::sandbox as sandbox_entity,
+    db::entity::{sandbox as sandbox_entity, sandbox_rootfs as sandbox_rootfs_entity},
 };
 
-use super::{Sandbox, SandboxConfig, SandboxModificationBuilder, SandboxStatus, SandboxStopResult};
+use super::{
+    FlatClone, Sandbox, SandboxConfig, SandboxModificationBuilder, SandboxStatus, SandboxStopResult,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -214,6 +216,34 @@ impl SandboxHandle {
             .map(serde_json::from_str)
             .transpose()
             .map_err(Into::into)
+    }
+
+    /// Return the clone mechanism that actually created a local flat root disk.
+    ///
+    /// `FlatClone::Auto` is a request policy, so the resolved value is always
+    /// either [`FlatClone::Copy`] or [`FlatClone::Reflink`]. Non-flat and cloud
+    /// sandboxes return `None`.
+    pub async fn resolved_flat_clone(&self) -> MicrosandboxResult<Option<FlatClone>> {
+        let Some(local_state) = self.local() else {
+            return Ok(None);
+        };
+        let local_backend = self.backend.as_local().ok_or_else(|| {
+            crate::MicrosandboxError::Custom("local sandbox handle has no local backend".into())
+        })?;
+        let db = local_backend.db().await?;
+        let row = sandbox_rootfs_entity::Entity::find()
+            .filter(sandbox_rootfs_entity::Column::SandboxId.eq(local_state.db_id))
+            .one(db.read())
+            .await?;
+        row.and_then(|row| row.resolved_clone)
+            .map(|clone| match clone.as_str() {
+                "copy" => Ok(FlatClone::Copy),
+                "reflink" => Ok(FlatClone::Reflink),
+                other => Err(crate::MicrosandboxError::Custom(format!(
+                    "invalid persisted flat clone strategy: {other}"
+                ))),
+            })
+            .transpose()
     }
 
     /// Start planning a sandbox modification from this handle.

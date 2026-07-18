@@ -923,17 +923,19 @@ struct RegistryAuthOpts {
 
 #[derive(serde::Deserialize)]
 struct RootDiskOpts {
-    /// "managed" | "tmpfs" | "disk-image".
+    /// "managed" | "tmpfs" | "flat" | "disk-image".
     kind: String,
-    /// Size in MiB for the managed and tmpfs kinds.
+    /// Size in MiB for the managed, tmpfs, and flat kinds.
     size_mib: Option<u32>,
     /// Host path of a disk-image root disk.
     path: Option<String>,
     /// Disk image format ("raw" | "qcow2"); derived from the path
     /// extension when absent. vmdk is not supported as a root disk.
     format: Option<String>,
-    /// Inner filesystem type of a disk-image root disk (default ext4).
+    /// Inner filesystem type of a flat or disk-image root disk (default ext4).
     fstype: Option<String>,
+    /// Clone policy for a flat root disk ("auto" | "copy" | "reflink").
+    clone: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -943,8 +945,6 @@ struct SandboxCreateOpts {
     /// Host directory used directly as the root filesystem (bind rootfs).
     /// Mutually exclusive with `image` and `snapshot`.
     image_bind: Option<String>,
-    /// OCI rootfs layout (`layered` or `flat`).
-    rootfs_layout: Option<String>,
     /// Structured root disk config for an OCI rootfs.
     root_disk: Option<RootDiskOpts>,
     /// Deprecated flat spelling of a managed root disk size. Still
@@ -1543,12 +1543,22 @@ fn apply_root_disk(
 ) -> Result<microsandbox::sandbox::SandboxBuilder, FfiError> {
     match root_disk.kind.as_str() {
         "managed" | "tmpfs" => {
-            if root_disk.path.is_some() || root_disk.format.is_some() || root_disk.fstype.is_some()
+            if root_disk.path.is_some()
+                || root_disk.format.is_some()
+                || root_disk.fstype.is_some()
+                || root_disk.clone.is_some()
             {
                 return Err(FfiError::invalid_argument(format!(
-                    "path/format/fstype are only valid for a disk-image root disk (got kind={})",
+                    "path/format/fstype/clone are not valid for a {} root disk",
                     root_disk.kind
                 )));
+            }
+        }
+        "flat" => {
+            if root_disk.path.is_some() || root_disk.format.is_some() {
+                return Err(FfiError::invalid_argument(
+                    "path/format are not valid for a flat root disk",
+                ));
             }
         }
         "disk-image" => {
@@ -1562,10 +1572,15 @@ fn apply_root_disk(
                     "size_mib is not valid for a disk-image root disk; resize the image file itself",
                 ));
             }
+            if root_disk.clone.is_some() {
+                return Err(FfiError::invalid_argument(
+                    "clone is only valid for a flat root disk",
+                ));
+            }
         }
         other => {
             return Err(FfiError::invalid_argument(format!(
-                "unknown root disk kind: {other} (expected managed, tmpfs, disk-image)"
+                "unknown root disk kind: {other} (expected managed, tmpfs, flat, disk-image)"
             )));
         }
     }
@@ -1577,10 +1592,23 @@ fn apply_root_disk(
                 .map_err(FfiError::invalid_argument)
         })
         .transpose()?;
+    let clone = root_disk
+        .clone
+        .as_deref()
+        .map(|clone| match clone {
+            "auto" => Ok(microsandbox::sandbox::FlatClone::Auto),
+            "copy" => Ok(microsandbox::sandbox::FlatClone::Copy),
+            "reflink" => Ok(microsandbox::sandbox::FlatClone::Reflink),
+            other => Err(FfiError::invalid_argument(format!(
+                "invalid flat clone strategy: {other} (expected auto, copy, or reflink)"
+            ))),
+        })
+        .transpose()?;
 
     Ok(builder.root_disk_with(|mut d| {
         match root_disk.kind.as_str() {
             "tmpfs" => d = d.tmpfs(),
+            "flat" => d = d.flat(),
             "disk-image" => d = d.disk_image(root_disk.path.as_deref().unwrap_or_default()),
             _ => {}
         }
@@ -1592,6 +1620,9 @@ fn apply_root_disk(
         }
         if let Some(fstype) = root_disk.fstype {
             d = d.fstype(fstype);
+        }
+        if let Some(clone) = clone {
+            d = d.clone_strategy(clone);
         }
         d
     }))
@@ -1972,16 +2003,6 @@ pub unsafe extern "C" fn msb_sandbox_create(
             Some(s) => Some(parse_security_profile(s)?),
             None => None,
         };
-        let rootfs_layout = match opts.rootfs_layout.as_deref() {
-            Some("layered") | None => None,
-            Some("flat") => Some(microsandbox::sandbox::OciRootfsLayout::Flat),
-            Some(other) => {
-                return Err(FfiError::invalid_argument(format!(
-                    "invalid rootfs_layout `{other}` (expected layered or flat)"
-                )));
-            }
-        };
-
         Ok(Box::pin(async move {
             let mut builder = Sandbox::builder(&name);
             if opts.image.is_some() && opts.snapshot.is_some() {
@@ -2015,9 +2036,6 @@ pub unsafe extern "C" fn msb_sandbox_create(
             }
             if let Some(bind_path) = opts.image_bind {
                 builder = builder.image_with(|i| i.bind(bind_path));
-            }
-            if let Some(layout) = rootfs_layout {
-                builder = builder.rootfs_layout(layout);
             }
             if let Some(root_disk) = opts.root_disk {
                 builder = apply_root_disk(builder, root_disk)?;
@@ -6175,11 +6193,16 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_create_opts_parses_flat_rootfs_layout() {
-        let opts: SandboxCreateOpts =
-            serde_json::from_str(r#"{"image":"python:3.12","rootfs_layout":"flat"}"#).unwrap();
+    fn sandbox_create_opts_parses_flat_root_disk() {
+        let opts: SandboxCreateOpts = serde_json::from_str(
+            r#"{"image":"python:3.12","root_disk":{"kind":"flat","size_mib":8192,"fstype":"ext4","clone":"reflink"}}"#,
+        )
+        .unwrap();
 
-        assert_eq!(opts.rootfs_layout.as_deref(), Some("flat"));
+        let root_disk = opts.root_disk.expect("root_disk parsed");
+        assert_eq!(root_disk.kind, "flat");
+        assert_eq!(root_disk.size_mib, Some(8192));
+        assert_eq!(root_disk.clone.as_deref(), Some("reflink"));
     }
 
     #[test]
@@ -6191,6 +6214,7 @@ mod tests {
             path: None,
             format: None,
             fstype: None,
+            clone: None,
         };
 
         let err = match apply_root_disk(builder, opts) {
@@ -6214,6 +6238,7 @@ mod tests {
             path: None,
             format: None,
             fstype: None,
+            clone: None,
         };
 
         let err = match apply_root_disk(builder, opts) {

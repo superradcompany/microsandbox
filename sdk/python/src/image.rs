@@ -106,19 +106,13 @@ impl PyImage {
     /// config, or an equivalent dict. `upper_size_mib` is a deprecated
     /// alias for a managed root disk of that size.
     #[staticmethod]
-    #[pyo3(signature = (reference, *, layout = "layered", root_disk = None, upper_size_mib = None))]
+    #[pyo3(signature = (reference, *, root_disk = None, upper_size_mib = None))]
     fn oci(
         py: Python<'_>,
         reference: String,
-        layout: &str,
         root_disk: Option<Bound<'_, PyAny>>,
         upper_size_mib: Option<u32>,
     ) -> PyResult<PyObject> {
-        if !matches!(layout, "layered" | "flat") {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "layout must be 'layered' or 'flat'",
-            ));
-        }
         if root_disk.is_some() && upper_size_mib.is_some() {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "pass either root_disk= or upper_size_mib=, not both",
@@ -127,7 +121,6 @@ impl PyImage {
         let kwargs = PyDict::new(py);
         kwargs.set_item("_type", "oci")?;
         kwargs.set_item("_reference", reference)?;
-        kwargs.set_item("_layout", layout)?;
         if let Some(root_disk) = root_disk {
             kwargs.set_item("_root_disk", root_disk)?;
         } else if let Some(upper_size_mib) = upper_size_mib {

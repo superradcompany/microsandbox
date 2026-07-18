@@ -926,7 +926,6 @@ impl TryFrom<CloudSandboxSpec> for SandboxSpec {
             // disk-image root disks are local-only until the wire grows a kind field.
             CloudRootfsSource::Oci { reference } => RootfsSource::Oci(OciRootfsSource {
                 reference,
-                layout: Default::default(),
                 root_disk: disk_size_mib.map(RootDisk::managed),
             }),
             CloudRootfsSource::Bind { .. } | CloudRootfsSource::DiskImage { .. }
@@ -1491,7 +1490,6 @@ mod tests {
             name: "agent-1".into(),
             image: RootfsSource::Oci(OciRootfsSource {
                 reference: "python:3.12".into(),
-                layout: Default::default(),
                 root_disk: Some(RootDisk::managed(8192)),
             }),
             ..Default::default()

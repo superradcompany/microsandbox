@@ -575,9 +575,9 @@ describe("NetworkBuilder ports", () => {
 });
 
 describe("ImageBuilder root disk", () => {
-  it("selects a flat OCI rootfs", () => {
+  it("selects a flat root disk via the builder callback", () => {
     const i = new ImageBuilder().oci("python:3.12");
-    expect(i.flat()).toBe(i);
+    expect(i.rootDisk((d) => d.flat().size(8192).fstype("ext4").cloneStrategy("reflink"))).toBe(i);
   });
 
   it("accepts a managed size in MiB", () => {
@@ -601,6 +601,12 @@ describe("ImageBuilder root disk", () => {
     );
   });
 
+  it("rejects an unknown flat clone strategy eagerly", () => {
+    expect(() => new RootDiskBuilder().flat().cloneStrategy("qcow2" as "auto")).toThrow(
+      /invalid flat clone strategy/,
+    );
+  });
+
   it("keeps the deprecated upperSize alias working", () => {
     const i = new ImageBuilder().oci("python:3.12");
     expect(i.upperSize(8192)).toBe(i);
@@ -608,12 +614,14 @@ describe("ImageBuilder root disk", () => {
 });
 
 describe("SandboxBuilder top-level rootDisk", () => {
-  it("selects a flat OCI rootfs layout", async () => {
+  it("selects a flat OCI root disk", async () => {
     const cfg = await Sandbox.builder("x")
       .image("alpine")
-      .rootfsLayout("flat")
+      .rootDisk((d) => d.flat().size(8192).cloneStrategy("copy"))
       .build();
-    expect(cfg.image).toMatchObject({ Oci: { layout: "flat" } });
+    expect(cfg.image).toMatchObject({
+      Oci: { rootDisk: { kind: "flat", sizeMib: 8192, clone: "copy" } },
+    });
   });
 
   it("sets a managed root disk on the OCI image", async () => {

@@ -17,15 +17,24 @@ def test_oci_accepts_root_disk_int() -> None:
     assert image._to_image_str() == "python:3.12"
 
 
-def test_oci_accepts_flat_layout() -> None:
-    image = Image.oci("python:3.12", layout="flat")
+def test_oci_accepts_flat_root_disk() -> None:
+    image = Image.oci(
+        "python:3.12",
+        root_disk=RootDisk.flat(8192, fstype="ext4", clone="reflink"),
+    )
 
-    assert image._layout == "flat"
+    assert isinstance(image._root_disk, RootDiskConfig)
+    assert image._root_disk._to_dict() == {
+        "kind": "flat",
+        "size_mib": 8192,
+        "fstype": "ext4",
+        "clone": "reflink",
+    }
 
 
-def test_oci_rejects_unknown_layout() -> None:
-    with pytest.raises(ValueError, match="layout"):
-        Image.oci("python:3.12", layout="unknown")  # type: ignore[arg-type]
+def test_flat_root_disk_rejects_unknown_clone_strategy() -> None:
+    with pytest.raises(ValueError, match="clone"):
+        RootDisk.flat(clone="qcow2")  # type: ignore[arg-type]
 
 
 def test_oci_accepts_managed_root_disk() -> None:

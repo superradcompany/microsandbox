@@ -578,7 +578,8 @@ async fn grow_root_disk_now(
     let sandbox_dir = local_backend.sandboxes_dir().join(name);
     if matches!(
         &config.spec.image,
-        RootfsSource::Oci(oci) if oci.layout == microsandbox_types::OciRootfsLayout::Flat
+        RootfsSource::Oci(oci)
+            if matches!(oci.root_disk, Some(RootDisk::Flat { .. }))
     ) {
         return super::flat_rootfs::grow_private_flat_rootfs(
             sandbox_dir.join(super::flat_rootfs::FLAT_ROOTFS_FILENAME),
@@ -836,7 +837,9 @@ fn apply_patch_to_config(config: &mut SandboxConfig, patch: &SandboxModification
         && let RootfsSource::Oci(oci) = &mut config.spec.image
     {
         match &mut oci.root_disk {
-            Some(RootDisk::Managed { size_mib: s }) | Some(RootDisk::Tmpfs { size_mib: s }) => {
+            Some(RootDisk::Managed { size_mib: s })
+            | Some(RootDisk::Tmpfs { size_mib: s })
+            | Some(RootDisk::Flat { size_mib: s, .. }) => {
                 *s = Some(size_mib);
             }
             // The planner surfaces disk-image sizing as a conflict; never
@@ -1434,8 +1437,7 @@ fn push_root_disk_size_conflicts(
 
 /// Size-relevant view of the configured root disk for an OCI rootfs.
 enum RootDiskSizeState {
-    /// Managed upper with its effective size (persisted value, or the
-    /// create-time default for configs that predate materialized defaults).
+    /// Microsandbox-owned disk with its effective size: a layered upper or complete flat root.
     Managed { current_mib: u32 },
     /// Tmpfs upper with its persisted size, if any.
     Tmpfs { current_mib: Option<u32> },
@@ -1452,6 +1454,9 @@ fn root_disk_size_state(config: &SandboxConfig) -> Option<RootDiskSizeState> {
             current_mib: super::config::DEFAULT_OCI_UPPER_SIZE_MIB,
         },
         Some(RootDisk::Managed { size_mib }) => RootDiskSizeState::Managed {
+            current_mib: size_mib.unwrap_or(super::config::DEFAULT_OCI_UPPER_SIZE_MIB),
+        },
+        Some(RootDisk::Flat { size_mib, .. }) => RootDiskSizeState::Managed {
             current_mib: size_mib.unwrap_or(super::config::DEFAULT_OCI_UPPER_SIZE_MIB),
         },
         Some(RootDisk::Tmpfs { size_mib }) => RootDiskSizeState::Tmpfs {
@@ -2573,7 +2578,6 @@ mod tests {
         let mut config = config(2, 1024);
         config.spec.image = RootfsSource::Oci(microsandbox_types::OciRootfsSource {
             reference: "python".to_string(),
-            layout: Default::default(),
             root_disk: Some(RootDisk::managed(upper_mib)),
         });
         config
@@ -2583,7 +2587,6 @@ mod tests {
         let mut config = config(2, 1024);
         config.spec.image = RootfsSource::Oci(microsandbox_types::OciRootfsSource {
             reference: "python".to_string(),
-            layout: Default::default(),
             root_disk: Some(root_disk),
         });
         config

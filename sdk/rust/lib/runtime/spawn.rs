@@ -694,24 +694,31 @@ pub async fn spawn_sandbox(
 
 /// Grow the sandbox-owned OCI root disk before boot when its persisted target increased.
 async fn prepare_oci_upper(config: &SandboxConfig, sandbox_dir: &Path) -> MicrosandboxResult<()> {
-    let Some(desired_mib) = config.spec.image.oci_managed_root_disk_size_mib() else {
+    let RootfsSource::Oci(oci) = &config.spec.image else {
         return Ok(());
     };
-    if matches!(
-        &config.spec.image,
-        RootfsSource::Oci(oci) if oci.layout == microsandbox_types::OciRootfsLayout::Flat
-    ) {
-        let path = sandbox_dir.join(crate::sandbox::flat_rootfs::FLAT_ROOTFS_FILENAME);
-        if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
-            return Ok(());
+    match &oci.root_disk {
+        Some(microsandbox_types::RootDisk::Flat { size_mib, .. }) => {
+            let Some(desired_mib) = size_mib else {
+                return Ok(());
+            };
+            let path = sandbox_dir.join(crate::sandbox::flat_rootfs::FLAT_ROOTFS_FILENAME);
+            if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+                return Ok(());
+            }
+            crate::sandbox::flat_rootfs::grow_private_flat_rootfs(path, *desired_mib).await
         }
-        return crate::sandbox::flat_rootfs::grow_private_flat_rootfs(path, desired_mib).await;
+        Some(microsandbox_types::RootDisk::Managed {
+            size_mib: Some(desired_mib),
+        }) => {
+            let upper_path = sandbox_dir.join("upper.ext4");
+            if !tokio::fs::try_exists(&upper_path).await.unwrap_or(false) {
+                return Ok(());
+            }
+            crate::sandbox::upper::grow_upper_to_mib(upper_path, *desired_mib).await
+        }
+        _ => Ok(()),
     }
-    let upper_path = sandbox_dir.join("upper.ext4");
-    if !tokio::fs::try_exists(&upper_path).await.unwrap_or(false) {
-        return Ok(());
-    }
-    crate::sandbox::upper::grow_upper_to_mib(upper_path, desired_mib).await
 }
 
 fn reserve_metrics_slot(
@@ -2272,14 +2279,15 @@ fn sandbox_cli_args(
             launch.rootfs.follow_root_symlinks = *follow_root_symlinks;
         }
         RootfsSource::Oci(oci) => {
-            if oci.layout == microsandbox_types::OciRootfsLayout::Flat {
+            if let Some(microsandbox_types::RootDisk::Flat { fstype, .. }) = &oci.root_disk {
                 let sandbox_dir = local.sandboxes_dir().join(&config.spec.name);
                 launch.rootfs.disk =
                     Some(sandbox_dir.join(crate::sandbox::flat_rootfs::FLAT_ROOTFS_FILENAME));
                 launch.rootfs.disk_format = Some("raw".to_string());
                 launch.env.push(format!(
-                    "{}=kind=disk-image,device=/dev/vda,fstype=ext4",
-                    ENV_BLOCK_ROOT
+                    "{}=kind=disk-image,device=/dev/vda,fstype={}",
+                    ENV_BLOCK_ROOT,
+                    fstype.as_deref().unwrap_or("ext4")
                 ));
             // Derive VMDK + upper paths from the stored manifest digest.
             } else if let Some(ref digest_str) = config.manifest_digest {
@@ -2319,6 +2327,9 @@ fn sandbox_cli_args(
                             "kind=oci-erofs,lower=/dev/vda,upper=/dev/vdb,upper_fstype={}",
                             fstype.as_deref().unwrap_or("ext4")
                         )
+                    }
+                    Some(RootDisk::Flat { .. }) => {
+                        unreachable!("flat root disks are handled before layered root assembly")
                     }
                 };
                 launch.env.push(format!("{}={block_root}", ENV_BLOCK_ROOT));
@@ -3443,7 +3454,11 @@ mod tests {
     #[tokio::test]
     async fn test_sandbox_cli_args_flat_oci_uses_private_raw_root_disk() {
         let config = SandboxBuilder::new("test")
-            .image_with(|image| image.oci("alpine").flat())
+            .image_with(|image| {
+                image
+                    .oci("alpine")
+                    .root_disk_with(|disk| disk.flat().fstype("ext4"))
+            })
             .build()
             .await
             .unwrap();
@@ -3498,7 +3513,6 @@ mod tests {
                 name: "test".into(),
                 image: RootfsSource::Oci(OciRootfsSource {
                     reference: "alpine".into(),
-                    layout: Default::default(),
                     root_disk: None,
                 }),
                 resources: microsandbox_types::SandboxResources {

@@ -42,18 +42,21 @@ pub enum DiskImageFormat {
     Vmdk,
 }
 
-/// On-disk layout used to present an OCI image as a guest root filesystem.
+/// Strategy used to create a sandbox-owned instance of a cached flat rootfs.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "kebab-case")]
-pub enum OciRootfsLayout {
-    /// Preserve OCI layers as EROFS lowers under a writable OverlayFS upper.
+pub enum FlatClone {
+    /// Use reflink when supported by the destination filesystem, otherwise make a sparse copy.
     #[default]
-    Layered,
+    Auto,
 
-    /// Materialize the merged OCI filesystem into one private writable ext4 disk.
-    Flat,
+    /// Always create an independent sparse-aware copy.
+    Copy,
+
+    /// Require a copy-on-write filesystem clone and fail when it is unavailable.
+    Reflink,
 }
 
 /// Root filesystem source for a sandbox.
@@ -75,7 +78,7 @@ pub enum RootfsSource {
         follow_root_symlinks: bool,
     },
 
-    /// Use an OCI image reference with a selectable layered or flat filesystem layout.
+    /// Use an OCI image reference with configurable writable root storage.
     Oci(OciRootfsSource),
 
     /// Use a disk image file as the root filesystem via virtio-blk.
@@ -98,10 +101,6 @@ pub struct OciRootfsSource {
     /// OCI image reference (e.g. `python`).
     pub reference: String,
 
-    /// Filesystem layout presented to the guest. Defaults to [`OciRootfsLayout::Layered`].
-    #[serde(default, skip_serializing_if = "OciRootfsLayout::is_layered")]
-    pub layout: OciRootfsLayout,
-
     /// Writable rootfs storage. `None` resolves to a managed 4 GiB disk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_disk: Option<RootDisk>,
@@ -117,9 +116,8 @@ pub struct OciRootfsSource {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum RootDisk {
-    /// Sparse ext4 created and owned by microsandbox in the sandbox dir. It is the OverlayFS
-    /// upper in layered mode and the complete private root disk in flat mode. Default. Persistent;
-    /// grow-only via modify; deleted with the sandbox.
+    /// Sparse ext4 created and owned by microsandbox as the writable OverlayFS upper. Default.
+    /// Persistent; grow-only via modify; deleted with the sandbox.
     Managed {
         /// Virtual size in MiB. `None` resolves to 4096.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -146,6 +144,23 @@ pub enum RootDisk {
         /// Inner filesystem type. `None` resolves to ext4.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fstype: Option<String>,
+    },
+
+    /// A complete OCI root filesystem materialized into one private writable filesystem.
+    ///
+    /// This is microsandbox-owned like [`RootDisk::Managed`], but it replaces the layered
+    /// EROFS-plus-OverlayFS topology rather than supplying only its writable upper.
+    Flat {
+        /// Final guest filesystem capacity in MiB. `None` resolves to the greater of 4096 MiB
+        /// and the materialized image's minimum size.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size_mib: Option<u32>,
+        /// Generated filesystem type. `None` resolves to ext4.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fstype: Option<String>,
+        /// Requested private-instance strategy.
+        #[serde(default, skip_serializing_if = "FlatClone::is_auto")]
+        clone: FlatClone,
     },
 }
 
@@ -915,16 +930,24 @@ impl OciRootfsSource {
     pub fn new(reference: impl Into<String>) -> Self {
         Self {
             reference: reference.into(),
-            layout: OciRootfsLayout::Layered,
             root_disk: None,
         }
     }
 }
 
-impl OciRootfsLayout {
-    /// Whether this is the backwards-compatible layered layout.
-    pub fn is_layered(&self) -> bool {
-        matches!(self, Self::Layered)
+impl FlatClone {
+    /// Whether this is the default automatic strategy.
+    pub fn is_auto(&self) -> bool {
+        matches!(self, Self::Auto)
+    }
+
+    /// Return the lowercase representation used by CLI and inspection output.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Copy => "copy",
+            Self::Reflink => "reflink",
+        }
     }
 }
 
@@ -943,10 +966,21 @@ impl RootDisk {
         }
     }
 
+    /// Create a flat root disk with the given final capacity in MiB.
+    pub fn flat(size_mib: u32) -> Self {
+        Self::Flat {
+            size_mib: Some(size_mib),
+            fstype: None,
+            clone: FlatClone::Auto,
+        }
+    }
+
     /// Return the configured size in MiB, if this kind carries one.
     pub fn size_mib(&self) -> Option<u32> {
         match self {
-            Self::Managed { size_mib } | Self::Tmpfs { size_mib } => *size_mib,
+            Self::Managed { size_mib } | Self::Tmpfs { size_mib } | Self::Flat { size_mib, .. } => {
+                *size_mib
+            }
             Self::DiskImage { .. } => None,
         }
     }
@@ -957,6 +991,7 @@ impl RootDisk {
             Self::Managed { .. } => "managed",
             Self::Tmpfs { .. } => "tmpfs",
             Self::DiskImage { .. } => "disk-image",
+            Self::Flat { .. } => "flat",
         }
     }
 
@@ -984,19 +1019,6 @@ impl RootfsSource {
     pub fn oci_root_disk(&self) -> Option<&RootDisk> {
         match self {
             Self::Oci(oci) => oci.root_disk.as_ref(),
-            _ => None,
-        }
-    }
-
-    /// Return the managed root disk size in MiB if this is an OCI rootfs with a managed
-    /// (or unset, i.e. default-managed) root disk. Non-managed kinds return `None`.
-    pub fn oci_managed_root_disk_size_mib(&self) -> Option<u32> {
-        match self {
-            Self::Oci(oci) => match &oci.root_disk {
-                Some(RootDisk::Managed { size_mib }) => *size_mib,
-                Some(_) => None,
-                None => None,
-            },
             _ => None,
         }
     }
@@ -2345,10 +2367,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn oci_rootfs_layout_defaults_to_layered_for_old_payloads() {
+    fn oci_rootfs_without_root_disk_remains_backward_compatible() {
         let source: OciRootfsSource = serde_json::from_str(r#"{"reference":"alpine"}"#).unwrap();
 
-        assert_eq!(source.layout, OciRootfsLayout::Layered);
+        assert_eq!(source.root_disk, None);
         assert_eq!(
             serde_json::to_value(source).unwrap(),
             serde_json::json!({"reference": "alpine"})
@@ -2356,18 +2378,22 @@ mod tests {
     }
 
     #[test]
-    fn oci_rootfs_layout_persists_flat_selection() {
+    fn flat_root_disk_persists_clone_policy() {
         let source = OciRootfsSource {
             reference: "alpine".into(),
-            layout: OciRootfsLayout::Flat,
-            root_disk: None,
+            root_disk: Some(RootDisk::Flat {
+                size_mib: Some(8192),
+                fstype: Some("ext4".into()),
+                clone: FlatClone::Reflink,
+            }),
         };
 
         let json = serde_json::to_string(&source).unwrap();
         let decoded: OciRootfsSource = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(decoded.layout, OciRootfsLayout::Flat);
-        assert!(json.contains(r#""layout":"flat""#));
+        assert_eq!(decoded.root_disk, source.root_disk);
+        assert!(json.contains(r#""kind":"flat""#));
+        assert!(json.contains(r#""clone":"reflink""#));
     }
 
     #[test]

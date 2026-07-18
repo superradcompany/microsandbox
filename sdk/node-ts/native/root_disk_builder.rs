@@ -4,7 +4,8 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use microsandbox::sandbox::{
-    DiskImageFormat as RustDiskImageFormat, RootDiskBuilder as RustRootDiskBuilder,
+    DiskImageFormat as RustDiskImageFormat, FlatClone as RustFlatClone,
+    RootDiskBuilder as RustRootDiskBuilder,
 };
 use microsandbox::size::Mebibytes;
 
@@ -12,13 +13,14 @@ use microsandbox::size::Mebibytes;
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Fluent builder for the writable rootfs layer (root disk) of an OCI image.
+/// Fluent builder for the root disk of an OCI image.
 ///
 /// Used inside `ImageBuilder.rootDisk((d) => ...)`:
 ///
 /// ```ts
 /// .imageWith((i) => i.oci("python:3.12").rootDisk(8192))                       // managed, sized
 /// .imageWith((i) => i.oci("python:3.12").rootDisk((d) => d.tmpfs().size(512))) // RAM-backed
+/// .imageWith((i) => i.oci("python:3.12").rootDisk((d) => d.flat().cloneStrategy("auto")))
 /// .imageWith((i) => i.oci("python:3.12").rootDisk((d) => d.disk("./scratch.img").fstype("ext4")))
 /// ```
 #[napi(js_name = "RootDiskBuilder")]
@@ -40,7 +42,7 @@ impl JsRootDiskBuilder {
         }
     }
 
-    /// Size in MiB. Valid for the managed (default) and tmpfs kinds; a
+    /// Size in MiB. Valid for managed, tmpfs, and flat kinds; a
     /// user-supplied disk image is sized by the image file itself.
     #[napi]
     pub fn size(&mut self, mib: u32) -> &Self {
@@ -56,6 +58,35 @@ impl JsRootDiskBuilder {
         let prev = self.take_inner();
         self.inner = Some(prev.tmpfs());
         self
+    }
+
+    /// Use one private writable filesystem containing the complete OCI image.
+    #[napi]
+    pub fn flat(&mut self) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.flat());
+        self
+    }
+
+    /// Select how the canonical flat artifact is cloned for this sandbox.
+    #[napi(
+        js_name = "cloneStrategy",
+        ts_args_type = "clone: \"auto\" | \"copy\" | \"reflink\""
+    )]
+    pub fn clone_strategy(&mut self, clone: String) -> Result<&Self> {
+        let clone = match clone.as_str() {
+            "auto" => RustFlatClone::Auto,
+            "copy" => RustFlatClone::Copy,
+            "reflink" => RustFlatClone::Reflink,
+            other => {
+                return Err(napi::Error::from_reason(format!(
+                    "invalid flat clone strategy `{other}` (expected auto | copy | reflink)"
+                )));
+            }
+        };
+        let prev = self.take_inner();
+        self.inner = Some(prev.clone_strategy(clone));
+        Ok(self)
     }
 
     /// Use a user-supplied disk image as the upper, attached writable. The
@@ -87,8 +118,7 @@ impl JsRootDiskBuilder {
         Ok(self)
     }
 
-    /// Inner filesystem type of the disk image (e.g. `"ext4"`). Only valid
-    /// after `.disk()`.
+    /// Inner filesystem type (e.g. `"ext4"`). Valid after `.flat()` or `.disk()`.
     #[napi]
     pub fn fstype(&mut self, fstype: String) -> &Self {
         let prev = self.take_inner();

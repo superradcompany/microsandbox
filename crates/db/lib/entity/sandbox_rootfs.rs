@@ -19,10 +19,12 @@ pub struct Model {
     pub manifest_id: Option<i32>,
     pub mode: String,
     pub upper_fstype: Option<String>,
-    /// Root disk kind tag (`managed`, `tmpfs`, `disk-image`). DB default: `managed`.
+    /// Root disk kind tag (`managed`, `tmpfs`, `flat`, `disk-image`). DB default: `managed`.
     pub root_disk_kind: String,
     /// Host path of the user-supplied image for `disk-image` root disks.
     pub root_disk_path: Option<String>,
+    /// Clone mechanism that actually created a flat sandbox root (`copy` or `reflink`).
+    pub resolved_clone: Option<String>,
     pub created_at: Option<DateTime>,
 }
 
@@ -31,6 +33,8 @@ pub struct Model {
 pub enum SandboxRootfsMode {
     /// EROFS fsmerge + VMDK (always 2 block devices).
     Erofs,
+    /// One complete generated filesystem attached directly as the root disk.
+    Flat,
     /// Host directory bind mount.
     Bind,
     /// Pre-existing disk image (qcow2/raw/vmdk).
@@ -46,6 +50,7 @@ impl SandboxRootfsMode {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Erofs => "erofs",
+            Self::Flat => "flat",
             Self::Bind => "bind",
             Self::DiskImage => "disk_image",
         }
@@ -55,6 +60,7 @@ impl SandboxRootfsMode {
     pub fn parse_str(s: &str) -> Option<Self> {
         match s {
             "erofs" => Some(Self::Erofs),
+            "flat" => Some(Self::Flat),
             "bind" => Some(Self::Bind),
             "disk_image" => Some(Self::DiskImage),
             _ => None,

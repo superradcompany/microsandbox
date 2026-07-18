@@ -8,14 +8,15 @@ Before a sandbox starts doing real work, you can prepare it three ways. **Script
 
 ## Flat OCI rootfs
 
-OCI sandboxes use the layered EROFS plus OverlayFS layout by default. Flat layout is an explicit alternative that materializes the merged image into one ext4 base, creates a private sparse or reflink clone for the sandbox, grows that clone to the requested root-disk capacity, and mounts it directly without guest OverlayFS.
+OCI sandboxes use EROFS layers plus an OverlayFS upper by default. A flat root disk is an explicit alternative that materializes the merged image into one ext4 base, creates a private sparse or reflink clone for the sandbox, grows that clone to the requested capacity, and mounts it directly without guest OverlayFS.
 
 <CodeGroup>
 ```rust Rust
-use microsandbox::Sandbox;
+use microsandbox::sandbox::{FlatClone, Sandbox};
 
 let sb = Sandbox::builder("worker")
-    .image_with(|image| image.oci("python:3.12").flat().root_disk(8192))
+    .image("python:3.12")
+    .root_disk_with(|disk| disk.flat().size(8192).clone_strategy(FlatClone::Auto))
     .create()
     .await?;
 ```
@@ -25,8 +26,7 @@ import { Sandbox } from "microsandbox";
 
 await using sb = await Sandbox.builder("worker")
     .image("python:3.12")
-    .rootfsLayout("flat")
-    .rootDisk(8192)
+    .rootDisk((disk) => disk.flat().size(8192).cloneStrategy("auto"))
     .create();
 ```
 
@@ -35,20 +35,19 @@ from microsandbox import Image, RootDisk, Sandbox
 
 sb = await Sandbox.create(
     "worker",
-    image=Image.oci("python:3.12", layout="flat", root_disk=RootDisk.managed(8192)),
+    image=Image.oci("python:3.12", root_disk=RootDisk.flat(8192, clone="auto")),
 )
 ```
 
 ```go Go
 sb, err := m.CreateSandbox(ctx, "worker",
     m.WithImage("python:3.12"),
-    m.WithRootfsLayout(m.RootfsLayoutFlat),
-    m.WithRootDisk(m.RootDisk.Managed(8192)),
+    m.WithRootDisk(m.RootDisk.Flat(m.RootDiskFlatOptions{SizeMiB: 8192, Clone: m.FlatCloneAuto})),
 )
 ```
 </CodeGroup>
 
-The first flat version supports managed root disks. Rootfs patches, tmpfs or user-supplied root disks, snapshots, and cloud execution are rejected. Layered remains the default for compatibility.
+`clone=auto` prefers a reflink and falls back to a sparse copy. Choose `copy` for deterministic cross-filesystem behavior, or `reflink` when sharing extents is mandatory and failure is preferable to copying. The first flat version supports ext4; rootfs patches, snapshots, and cloud execution are rejected. The layered root remains the default for compatibility.
 
 ## Scripts
 

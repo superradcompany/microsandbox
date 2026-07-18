@@ -6,8 +6,8 @@ use napi_derive::napi;
 
 use microsandbox::sandbox::LogLevel as RustLogLevel;
 use microsandbox::sandbox::{
-    OciRootfsLayout as RustOciRootfsLayout, PullPolicy as RustPullPolicy, Sandbox as RustSandbox,
-    SandboxBuilder as RustSandboxBuilder, SecurityProfile as RustSecurityProfile,
+    PullPolicy as RustPullPolicy, Sandbox as RustSandbox, SandboxBuilder as RustSandboxBuilder,
+    SecurityProfile as RustSecurityProfile,
 };
 use microsandbox::size::Mebibytes;
 
@@ -86,32 +86,12 @@ impl JsSandboxBuilder {
         Ok(self)
     }
 
-    /// Select `"layered"` (default) or `"flat"` for an OCI rootfs.
-    #[napi(
-        js_name = "rootfsLayout",
-        ts_args_type = "layout: \"layered\" | \"flat\""
-    )]
-    pub fn rootfs_layout(&mut self, layout: String) -> Result<&Self> {
-        let layout = match layout.as_str() {
-            "layered" => RustOciRootfsLayout::Layered,
-            "flat" => RustOciRootfsLayout::Flat,
-            other => {
-                return Err(napi::Error::from_reason(format!(
-                    "invalid rootfs layout `{other}` (expected layered or flat)"
-                )));
-            }
-        };
-        let prev = self.take_inner();
-        self.inner = Some(prev.rootfs_layout(layout));
-        Ok(self)
-    }
-
-    /// Configure the writable rootfs layer (root disk) for the OCI image.
+    /// Configure the root disk for the OCI image.
     ///
     /// Sugar over `imageWith((i) => i.oci(...).rootDisk(...))` — the root
     /// disk lives on the OCI rootfs source, so an OCI image must be set
     /// first. Pass a number of MiB for a managed root disk, or a callback
-    /// for the tmpfs and disk-image kinds:
+    /// for the tmpfs, flat, and disk-image kinds:
     ///
     /// ```ts
     /// .image("python").rootDisk(8192)

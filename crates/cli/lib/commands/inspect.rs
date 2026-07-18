@@ -84,6 +84,7 @@ struct PendingConfigChange {
 /// Execute the `msb inspect` command.
 pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
     let handle = Sandbox::get(&args.name).await?;
+    let resolved_flat_clone = handle.resolved_flat_clone().await?;
     let desired_config = handle.config().ok();
     let active_config = handle.active_config().ok().flatten();
     let pending_changes = pending_config_changes(
@@ -108,6 +109,9 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
             .unwrap_or(serde_json::Value::Null);
         json["active_config"] = active_config_json;
         json["pending_changes"] = serde_json::to_value(&pending_changes)?;
+        json["resolved_flat_clone"] = resolved_flat_clone
+            .map(|clone| serde_json::Value::String(clone.as_str().to_string()))
+            .unwrap_or(serde_json::Value::Null);
         println!("{}", serde_json::to_string_pretty(&json)?);
         return Ok(());
     }
@@ -134,13 +138,6 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
             }
         };
         ui::detail_kv("Image", &image);
-        if let microsandbox::sandbox::RootfsSource::Oci(oci) = &config.spec.image {
-            let layout = match oci.layout {
-                microsandbox::sandbox::OciRootfsLayout::Layered => "layered",
-                microsandbox::sandbox::OciRootfsLayout::Flat => "flat",
-            };
-            ui::detail_kv("Rootfs Layout", layout);
-        }
         match config.spec.image.oci_root_disk() {
             Some(microsandbox::sandbox::RootDisk::Managed { size_mib }) => {
                 let size = size_mib.map_or("default".to_string(), |mib| format!("{mib} MiB"));
@@ -162,6 +159,28 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
                         path.display(),
                         format.as_str(),
                         fstype.as_deref().unwrap_or("ext4")
+                    ),
+                );
+            }
+            Some(microsandbox::sandbox::RootDisk::Flat {
+                size_mib,
+                fstype,
+                clone,
+            }) => {
+                let size = size_mib.map_or("default".to_string(), |mib| format!("{mib} MiB"));
+                let clone = match resolved_flat_clone {
+                    Some(resolved) if resolved != *clone => {
+                        format!("{} -> {}", clone.as_str(), resolved.as_str())
+                    }
+                    Some(resolved) => resolved.as_str().to_string(),
+                    None => clone.as_str().to_string(),
+                };
+                ui::detail_kv(
+                    "Root Disk",
+                    &format!(
+                        "{size} (flat, {}, clone={})",
+                        fstype.as_deref().unwrap_or("ext4"),
+                        clone
                     ),
                 );
             }

@@ -44,18 +44,10 @@ impl JsImageBuilder {
         self
     }
 
-    /// Materialize the OCI image as one writable ext4 root disk.
-    #[napi]
-    pub fn flat(&mut self) -> &Self {
-        let prev = self.take_inner();
-        self.inner = Some(prev.flat());
-        self
-    }
-
-    /// Configure the writable rootfs layer (root disk) for an OCI rootfs.
+    /// Configure the root disk for an OCI rootfs.
     ///
     /// Pass a number of MiB for a managed root disk, or a callback for the
-    /// tmpfs and disk-image kinds:
+    /// tmpfs, flat, and disk-image kinds:
     ///
     /// ```ts
     /// .imageWith((i) => i.oci("python:3.12").rootDisk(8192))

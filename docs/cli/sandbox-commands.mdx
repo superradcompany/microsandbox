@@ -43,8 +43,7 @@ Common flags:
 | `--max-cpus` | Boot-time maximum possible virtual CPUs for future resize capacity |
 | `-m`, `--memory` | Memory limit, such as `512M` or `1G` |
 | `--max-memory` | Boot-time maximum hotpluggable memory, such as `2G` or `8G` |
-| `--rootfs-layout` | OCI rootfs layout: `layered` (default) or `flat` |
-| `--root-disk` | Writable root disk capacity or backing, such as `8G`, `tmpfs:2G`, or `./rootfs.qcow2:format=qcow2,fstype=ext4` |
+| `--root-disk` | OCI root storage, such as `8G`, `tmpfs:2G`, `flat:8G,clone=auto`, or `./rootfs.qcow2:format=qcow2,fstype=ext4` |
 | `-v`, `--volume` | Mount a host path or named volume, such as `./src:/app:ro` |
 | `--mount-dir`, `--mount-file`, `--mount-disk`, `--mount-named` | Mount a source with an explicit kind (`SOURCE:DEST[:OPTIONS]` or `NAME:DEST[:OPTIONS]`). `--mount-named` creates missing named volumes idempotently and accepts `kind=dir\|disk`, `size=...`, and `quota=...` |
 | `-p`, `--port` | Publish a port, such as `8000:8000` for loopback-only or `0.0.0.0:8000:8000` for all host interfaces |
@@ -64,14 +63,14 @@ Use `msb run --help` for the full flag list.
 
 ### Flat OCI rootfs
 
-Flat layout merges the OCI layers into one reusable ext4 base, clones that base into the sandbox as `rootfs.raw`, grows the private clone to `--root-disk`, and attaches it directly through virtio-blk. The guest mounts ext4 as its root without OverlayFS.
+A flat root disk merges the OCI layers into one reusable ext4 base, clones that base into the sandbox as `rootfs.raw`, grows the private clone to the requested capacity, and attaches it directly through virtio-blk. The guest mounts ext4 as its root without OverlayFS.
 
 ```bash
 msb pull python --materialize flat
-msb run --rootfs-layout flat --root-disk 8G python -- python -c "print('hello')"
+msb run --root-disk flat:8G,clone=auto python -- python -c "print('hello')"
 ```
 
-The pre-pull is optional: creating the first flat sandbox lazily materializes a missing flat artifact from the normal OCI layer cache. Flat v1 supports managed root disks only; rootfs patches, tmpfs or user-supplied root disks, and snapshots are rejected instead of silently changing their semantics. Layered remains the default.
+The pre-pull is optional: creating the first flat sandbox lazily materializes a missing flat artifact from the normal OCI layer cache. `clone=auto` prefers a copy-on-write reflink and falls back to a sparse copy, `clone=copy` forces the portable sparse-copy path, and `clone=reflink` requires reflink support and fails clearly if the destination filesystem cannot provide it. Flat v1 supports ext4; rootfs patches, snapshots, and cloud execution are rejected instead of silently changing their semantics. The normal layered root remains the default.
 
 Published ports bind to `127.0.0.1` by default. Use an explicit bind address only when the sandbox service should be reachable beyond localhost. On Windows, opening a published port can trigger a Windows Defender Firewall prompt for `msb.exe`; keep the bind on `127.0.0.1` for local-only development, and allow private/public network access only when you intentionally bind beyond loopback.
 

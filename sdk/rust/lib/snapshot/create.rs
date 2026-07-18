@@ -81,16 +81,6 @@ pub(super) async fn create_snapshot(
     })?;
     let image_reference = oci_reference_string(&sandbox_config)?;
 
-    if matches!(
-        &sandbox_config.spec.image,
-        crate::sandbox::RootfsSource::Oci(oci)
-            if oci.layout == microsandbox_types::OciRootfsLayout::Flat
-    ) {
-        return Err(MicrosandboxError::InvalidConfig(format!(
-            "sandbox '{source_sandbox}' uses a flat rootfs, which snapshots do not yet support"
-        )));
-    }
-
     ensure_snapshottable_root_disk(sandbox_config.spec.image.oci_root_disk(), &source_sandbox)?;
 
     // Resolve source upper.ext4 path from the canonical sandbox layout.
@@ -271,6 +261,9 @@ fn ensure_snapshottable_root_disk(
         Some(RootDisk::DiskImage { .. }) => Err(MicrosandboxError::InvalidConfig(format!(
             "sandbox '{source_sandbox}' uses a user-owned disk-image root disk, which microsandbox does not snapshot"
         ))),
+        Some(RootDisk::Flat { .. }) => Err(MicrosandboxError::InvalidConfig(format!(
+            "sandbox '{source_sandbox}' uses a flat root disk, which snapshots do not yet support"
+        ))),
         Some(RootDisk::Managed { .. }) | None => Ok(()),
     }
 }
@@ -319,7 +312,7 @@ fn resolve_destination(
 mod tests {
     use std::path::PathBuf;
 
-    use microsandbox_types::DiskImageFormat;
+    use microsandbox_types::{DiskImageFormat, FlatClone};
 
     use super::*;
 
@@ -359,5 +352,21 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("disk-image"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn flat_root_disk_is_rejected_with_a_purposeful_error() {
+        let err = ensure_snapshottable_root_disk(
+            Some(&RootDisk::Flat {
+                size_mib: Some(8192),
+                fstype: None,
+                clone: FlatClone::Auto,
+            }),
+            "sb",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("flat"), "unexpected error: {err}");
+        assert!(err.contains("not yet support"), "unexpected error: {err}");
     }
 }

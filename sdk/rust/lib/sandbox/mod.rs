@@ -163,8 +163,8 @@ pub use ssh::{
     SshServerOptionsBuilder, SshStdioStream,
 };
 pub use types::{
-    DiskImageFormat, HostPermissions, ImageBuilder, ImageSource, IntoImage, MountBuilder,
-    MountOptions, NamedVolumeMode, OciRootfsLayout, OciRootfsSource, Patch, PatchBuilder, RootDisk,
+    DiskImageFormat, FlatClone, HostPermissions, ImageBuilder, ImageSource, IntoImage,
+    MountBuilder, MountOptions, NamedVolumeMode, OciRootfsSource, Patch, PatchBuilder, RootDisk,
     RootDiskBuilder, RootfsSource, SecurityProfile, StatVirtualization, VolumeMount,
 };
 
@@ -512,6 +512,7 @@ pub(crate) async fn create_local(
 
     let mut pinned_manifest_digest: Option<String> = None;
     let mut pinned_reference: Option<String> = None;
+    let mut resolved_flat_clone: Option<types::FlatClone> = None;
 
     config.apply_runtime_defaults();
     validate_sandbox_name_for_runtime_with_backend(local_backend, &config.spec.name)?;
@@ -533,7 +534,6 @@ pub(crate) async fn create_local(
     // Resolve OCI images before spawning the sandbox process.
     if let RootfsSource::Oci(oci) = config.spec.image.clone() {
         let reference = oci.reference;
-        let rootfs_layout = oci.layout;
         let expected_snapshot_manifest_digest = config
             .snapshot_upper_source
             .as_ref()
@@ -600,7 +600,16 @@ pub(crate) async fn create_local(
             .map(|d| cache.layer_erofs_path(d))
             .collect();
 
-        let flat_blob_path = if rootfs_layout == types::OciRootfsLayout::Flat {
+        let flat_spec = match &root_disk {
+            types::RootDisk::Flat {
+                size_mib, clone, ..
+            } => Some((
+                size_mib.unwrap_or(config::DEFAULT_OCI_UPPER_SIZE_MIB),
+                *clone,
+            )),
+            _ => None,
+        };
+        let flat_blob_path = if flat_spec.is_some() {
             if config.snapshot_upper_source.is_some() {
                 return Err(crate::MicrosandboxError::InvalidConfig(
                     "from_snapshot is not yet compatible with flat OCI rootfs".into(),
@@ -611,12 +620,6 @@ pub(crate) async fn create_local(
                     "patches are not yet compatible with flat OCI rootfs".into(),
                 ));
             }
-            if !matches!(root_disk, types::RootDisk::Managed { .. }) {
-                return Err(crate::MicrosandboxError::InvalidConfig(
-                    "flat OCI rootfs currently requires a managed root disk".into(),
-                ));
-            }
-
             // Flat materialization consumes the same validated EROFS layers as
             // layered mode, then publishes one immutable ext4 cache artifact.
             let registry =
@@ -649,18 +652,21 @@ pub(crate) async fn create_local(
         tokio::fs::create_dir_all(&sandbox_dir).await?;
         let upper_path = sandbox_dir.join("upper.ext4");
         if let Some(base) = flat_blob_path {
-            let target_mib = match root_disk {
-                types::RootDisk::Managed { size_mib } => {
-                    size_mib.unwrap_or(config::DEFAULT_OCI_UPPER_SIZE_MIB)
-                }
-                _ => unreachable!("flat rootfs kind validated above"),
-            };
-            flat_rootfs::create_private_flat_rootfs(
+            let (target_mib, requested_clone) =
+                flat_spec.expect("flat artifact requires a flat root disk spec");
+            let resolved_clone = flat_rootfs::create_private_flat_rootfs(
                 base,
                 sandbox_dir.join(flat_rootfs::FLAT_ROOTFS_FILENAME),
                 target_mib,
+                requested_clone,
             )
             .await?;
+            tracing::info!(
+                requested_clone = requested_clone.as_str(),
+                resolved_clone = resolved_clone.as_str(),
+                "created private flat rootfs"
+            );
+            resolved_flat_clone = Some(resolved_clone);
         } else if let Some(snap_upper) = config.snapshot_upper_source.take() {
             // Booting from a snapshot: copy the captured upper into
             // place, preserving sparseness. Patches are not
@@ -695,6 +701,9 @@ pub(crate) async fn create_local(
                             path.display()
                         )));
                     }
+                }
+                types::RootDisk::Flat { .. } => {
+                    unreachable!("flat root disks are materialized before layered root handling")
                 }
             }
         }
@@ -788,16 +797,31 @@ pub(crate) async fn create_local(
     if let (Some(_reference), Some(manifest_digest)) = (
         pinned_reference.as_deref(),
         pinned_manifest_digest.as_deref(),
-    ) && let Err(err) = persist_oci_manifest_pin(write_db, sandbox_id, manifest_digest).await
-    {
-        let _ = sandbox.stop().await;
-        if created_named_volumes.is_empty() {
-            let _ = update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
-        } else {
-            rollback_created_named_volumes(local_backend, &created_named_volumes).await;
-            let _ = delete_sandbox_record(write_db, sandbox_id).await;
+    ) {
+        let root_disk = match &sandbox.config.spec.image {
+            RootfsSource::Oci(oci) => oci.root_disk.clone().unwrap_or(types::RootDisk::Managed {
+                size_mib: Some(config::DEFAULT_OCI_UPPER_SIZE_MIB),
+            }),
+            _ => unreachable!("a pinned OCI manifest must have an OCI rootfs source"),
+        };
+        if let Err(err) = persist_oci_manifest_pin(
+            write_db,
+            sandbox_id,
+            manifest_digest,
+            &root_disk,
+            resolved_flat_clone,
+        )
+        .await
+        {
+            let _ = sandbox.stop().await;
+            if created_named_volumes.is_empty() {
+                let _ = update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
+            } else {
+                rollback_created_named_volumes(local_backend, &created_named_volumes).await;
+                let _ = delete_sandbox_record(write_db, sandbox_id).await;
+            }
+            return Err(err);
         }
-        return Err(err);
     }
 
     // Validate that the configured workdir exists inside the guest and is a
@@ -3231,9 +3255,12 @@ async fn persist_oci_manifest_pin(
     db: &DbWriteConnection,
     sandbox_id: i32,
     manifest_digest: &str,
+    root_disk: &types::RootDisk,
+    resolved_clone: Option<types::FlatClone>,
 ) -> MicrosandboxResult<()> {
     db.transaction(|txn| async move {
-        replace_oci_manifest_pin(&txn, sandbox_id, manifest_digest).await?;
+        replace_oci_manifest_pin(&txn, sandbox_id, manifest_digest, root_disk, resolved_clone)
+            .await?;
         Ok((txn, ()))
     })
     .await
@@ -3244,6 +3271,8 @@ async fn replace_oci_manifest_pin<C: ConnectionTrait>(
     db: &C,
     sandbox_id: i32,
     manifest_digest: &str,
+    root_disk: &types::RootDisk,
+    resolved_clone: Option<types::FlatClone>,
 ) -> MicrosandboxResult<()> {
     use crate::db::entity::manifest as manifest_entity;
 
@@ -3255,6 +3284,20 @@ async fn replace_oci_manifest_pin<C: ConnectionTrait>(
         .await?;
 
     let manifest_id = manifest.map(|m| m.id);
+    let (mode, upper_fstype, root_disk_path) = match root_disk {
+        types::RootDisk::Managed { .. } => ("erofs", Some("ext4".to_string()), None),
+        types::RootDisk::Tmpfs { .. } => ("erofs", None, None),
+        types::RootDisk::DiskImage { path, fstype, .. } => (
+            "erofs",
+            Some(fstype.clone().unwrap_or_else(|| "ext4".to_string())),
+            Some(path.to_string_lossy().into_owned()),
+        ),
+        types::RootDisk::Flat { fstype, .. } => (
+            "flat",
+            Some(fstype.clone().unwrap_or_else(|| "ext4".to_string())),
+            None,
+        ),
+    };
 
     sandbox_rootfs_entity::Entity::delete_many()
         .filter(sandbox_rootfs_entity::Column::SandboxId.eq(sandbox_id))
@@ -3264,8 +3307,11 @@ async fn replace_oci_manifest_pin<C: ConnectionTrait>(
     sandbox_rootfs_entity::Entity::insert(sandbox_rootfs_entity::ActiveModel {
         sandbox_id: Set(sandbox_id),
         manifest_id: Set(manifest_id),
-        mode: Set("erofs".to_string()),
-        upper_fstype: Set(Some("ext4".to_string())),
+        mode: Set(mode.to_string()),
+        upper_fstype: Set(upper_fstype),
+        root_disk_kind: Set(root_disk.kind_str().to_string()),
+        root_disk_path: Set(root_disk_path),
+        resolved_clone: Set(resolved_clone.map(|clone| clone.as_str().to_string())),
         created_at: Set(Some(now)),
         ..Default::default()
     })
@@ -3356,12 +3402,12 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, MountOptions, PullPolicy, RegistryOverrides,
-        RootfsSource, SandboxConfig, SandboxStatus, VolumeMount, digest_pinned_reference,
-        ephemeral_cleanup_stop_result, hostname_from_sandbox_name, insert_sandbox_record,
-        persist_oci_manifest_pin, prepare_create_target, reconcile_sandbox_runtime_state,
-        remove_dir_if_exists, resolve_snapshot_oci_image, sandbox_not_found_for_name,
-        validate_hostname, validate_rootfs_source,
+        FlatClone, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, MountOptions, PullPolicy,
+        RegistryOverrides, RootDisk, RootfsSource, SandboxConfig, SandboxStatus, VolumeMount,
+        digest_pinned_reference, ephemeral_cleanup_stop_result, hostname_from_sandbox_name,
+        insert_sandbox_record, persist_oci_manifest_pin, prepare_create_target,
+        reconcile_sandbox_runtime_state, remove_dir_if_exists, resolve_snapshot_oci_image,
+        sandbox_not_found_for_name, validate_hostname, validate_rootfs_source,
     };
 
     const TEST_DIGEST: &str =
@@ -3918,7 +3964,6 @@ mod tests {
             "pinned",
             RootfsSource::Oci(OciRootfsSource {
                 reference: "docker.io/library/alpine".into(),
-                layout: Default::default(),
                 root_disk: None,
             }),
         );
@@ -3930,6 +3975,8 @@ mod tests {
             pools.write(),
             sandbox_id,
             "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            &RootDisk::Managed { size_mib: None },
+            None,
         )
         .await
         .unwrap();
@@ -3939,6 +3986,8 @@ mod tests {
             pools.write(),
             sandbox_id,
             "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+            &RootDisk::Managed { size_mib: None },
+            None,
         )
         .await
         .unwrap();
@@ -3954,6 +4003,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_persist_oci_manifest_pin_records_flat_root_state() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let pools = open_test_pools(&db_path).await;
+        let config = test_config("flat-pin");
+        let sandbox_id = insert_sandbox_record(pools.write(), &config).await.unwrap();
+        let root_disk = RootDisk::Flat {
+            size_mib: Some(8192),
+            fstype: Some("ext4".to_string()),
+            clone: FlatClone::Auto,
+        };
+
+        persist_oci_manifest_pin(
+            pools.write(),
+            sandbox_id,
+            "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+            &root_disk,
+            Some(FlatClone::Reflink),
+        )
+        .await
+        .unwrap();
+
+        let pin = sandbox_rootfs_entity::Entity::find()
+            .one(pools.write())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pin.mode, "flat");
+        assert_eq!(pin.root_disk_kind, "flat");
+        assert_eq!(pin.upper_fstype.as_deref(), Some("ext4"));
+        assert_eq!(pin.resolved_clone.as_deref(), Some("reflink"));
+    }
+
+    #[tokio::test]
     async fn test_persist_oci_manifest_pin_replaces_stale_pin_for_different_digest() {
         let temp = tempdir().unwrap();
         let db_path = temp.path().join("test.db");
@@ -3963,7 +4046,6 @@ mod tests {
             "recreated",
             RootfsSource::Oci(OciRootfsSource {
                 reference: "docker.io/library/alpine".into(),
-                layout: Default::default(),
                 root_disk: None,
             }),
         );
@@ -3974,6 +4056,8 @@ mod tests {
             pools.write(),
             sandbox_id,
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            &RootDisk::Managed { size_mib: None },
+            None,
         )
         .await
         .unwrap();
@@ -3983,6 +4067,8 @@ mod tests {
             pools.write(),
             sandbox_id,
             "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            &RootDisk::Managed { size_mib: None },
+            None,
         )
         .await
         .unwrap();
@@ -4007,7 +4093,6 @@ mod tests {
             "persisted-digest",
             RootfsSource::Oci(OciRootfsSource {
                 reference: "docker.io/library/alpine".into(),
-                layout: Default::default(),
                 root_disk: None,
             }),
         );
@@ -4297,7 +4382,6 @@ mod tests {
             "persisted",
             RootfsSource::Oci(OciRootfsSource {
                 reference: "docker.io/library/alpine".into(),
-                layout: Default::default(),
                 root_disk: None,
             }),
         );

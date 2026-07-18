@@ -51,6 +51,21 @@ func TestWithRootDiskTmpfsDefaultSize(t *testing.T) {
 	}
 }
 
+func TestWithRootDiskFlat(t *testing.T) {
+	o := SandboxConfig{}
+	WithRootDisk(RootDisk.Flat(RootDiskFlatOptions{
+		SizeMiB: 8192,
+		Fstype:  "ext4",
+		Clone:   FlatCloneReflink,
+	}))(&o)
+	if o.RootDisk == nil || o.RootDisk.Kind() != RootDiskKindFlat {
+		t.Fatalf("RootDisk = %#v, want flat config", o.RootDisk)
+	}
+	if o.RootDisk.SizeMiB != 8192 || o.RootDisk.Fstype != "ext4" || o.RootDisk.Clone != FlatCloneReflink {
+		t.Errorf("flat fields = %#v", o.RootDisk)
+	}
+}
+
 func TestWithRootDiskDiskImage(t *testing.T) {
 	o := SandboxConfig{}
 	WithRootDisk(RootDisk.Disk("./scratch.img", RootDiskImageOptions{Format: "raw", Fstype: "ext4"}))(&o)
@@ -631,14 +646,6 @@ func TestWithPullPolicy(t *testing.T) {
 	WithPullPolicy(PullPolicyAlways)(&o)
 	if o.PullPolicy != PullPolicyAlways {
 		t.Errorf("PullPolicy: got %q", o.PullPolicy)
-	}
-}
-
-func TestWithRootfsLayout(t *testing.T) {
-	o := SandboxConfig{}
-	WithRootfsLayout(RootfsLayoutFlat)(&o)
-	if o.RootfsLayout != RootfsLayoutFlat {
-		t.Errorf("RootfsLayout: got %q", o.RootfsLayout)
 	}
 }
 

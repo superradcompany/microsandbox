@@ -236,13 +236,11 @@ export declare class ImageBuilder {
   constructor()
   /** Use an OCI image reference as the root filesystem. */
   oci(reference: string): this
-  /** Materialize the OCI image as one writable ext4 root disk. */
-  flat(): this
   /**
-   * Configure the writable rootfs layer (root disk) for an OCI rootfs.
+   * Configure the root disk for an OCI rootfs.
    *
    * Pass a number of MiB for a managed root disk, or a callback for the
-   * tmpfs and disk-image kinds:
+   * tmpfs, flat, and disk-image kinds:
    *
    * ```ts
    * .imageWith((i) => i.oci("python:3.12").rootDisk(8192))
@@ -655,20 +653,21 @@ export declare class RegistryConfigBuilder {
 export type JsRegistryConfigBuilder = RegistryConfigBuilder
 
 /**
- * Fluent builder for the writable rootfs layer (root disk) of an OCI image.
+ * Fluent builder for the root disk of an OCI image.
  *
  * Used inside `ImageBuilder.rootDisk((d) => ...)`:
  *
  * ```ts
  * .imageWith((i) => i.oci("python:3.12").rootDisk(8192))                       // managed, sized
  * .imageWith((i) => i.oci("python:3.12").rootDisk((d) => d.tmpfs().size(512))) // RAM-backed
+ * .imageWith((i) => i.oci("python:3.12").rootDisk((d) => d.flat().cloneStrategy("auto")))
  * .imageWith((i) => i.oci("python:3.12").rootDisk((d) => d.disk("./scratch.img").fstype("ext4")))
  * ```
  */
 export declare class RootDiskBuilder {
   constructor()
   /**
-   * Size in MiB. Valid for the managed (default) and tmpfs kinds; a
+   * Size in MiB. Valid for managed, tmpfs, and flat kinds; a
    * user-supplied disk image is sized by the image file itself.
    */
   size(mib: number): this
@@ -677,6 +676,10 @@ export declare class RootDiskBuilder {
    * every boot, and the size counts against guest memory.
    */
   tmpfs(): this
+  /** Use one private writable filesystem containing the complete OCI image. */
+  flat(): this
+  /** Select how the canonical flat artifact is cloned for this sandbox. */
+  cloneStrategy(clone: "auto" | "copy" | "reflink"): this
   /**
    * Use a user-supplied disk image as the upper, attached writable. The
    * format is derived from the file extension (`.img`/`.raw` → raw,
@@ -688,10 +691,7 @@ export declare class RootDiskBuilder {
    * after `.disk()`; vmdk is not supported as a root disk.
    */
   format(format: string): this
-  /**
-   * Inner filesystem type of the disk image (e.g. `"ext4"`). Only valid
-   * after `.disk()`.
-   */
+  /** Inner filesystem type (e.g. `"ext4"`). Valid after `.flat()` or `.disk()`. */
   fstype(fstype: string): this
 }
 export type JsRootDiskBuilder = RootDiskBuilder
@@ -975,15 +975,13 @@ export declare class SandboxBuilder {
   image(image: string): this
   /** Configure a disk-image rootfs explicitly via a callback. */
   imageWith(configure: (arg: ImageBuilder) => ImageBuilder): this
-  /** Select `"layered"` (default) or `"flat"` for an OCI rootfs. */
-  rootfsLayout(layout: "layered" | "flat"): this
   /**
-   * Configure the writable rootfs layer (root disk) for the OCI image.
+   * Configure the root disk for the OCI image.
    *
    * Sugar over `imageWith((i) => i.oci(...).rootDisk(...))` — the root
    * disk lives on the OCI rootfs source, so an OCI image must be set
    * first. Pass a number of MiB for a managed root disk, or a callback
-   * for the tmpfs and disk-image kinds:
+   * for the tmpfs, flat, and disk-image kinds:
    *
    * ```ts
    * .image("python").rootDisk(8192)

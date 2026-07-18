@@ -39,8 +39,7 @@ func TestSandboxConfigUnmarshalPersistedRootfsSource(t *testing.T) {
 		"image": {
 			"Oci": {
 				"reference": "mirror.gcr.io/library/alpine",
-				"layout": "flat",
-				"root_disk": {"kind": "managed", "size_mib": 4096}
+				"root_disk": {"kind": "flat", "size_mib": 4096, "fstype": "ext4", "clone": "reflink"}
 			}
 		},
 		"cpus": 1,
@@ -61,14 +60,14 @@ func TestSandboxConfigUnmarshalPersistedRootfsSource(t *testing.T) {
 	if cfg.Image != "mirror.gcr.io/library/alpine" {
 		t.Fatalf("Image = %q", cfg.Image)
 	}
-	if cfg.RootfsLayout != RootfsLayoutFlat {
-		t.Fatalf("RootfsLayout = %q, want flat", cfg.RootfsLayout)
+	if cfg.RootDisk == nil || cfg.RootDisk.Kind() != RootDiskKindFlat || cfg.RootDisk.SizeMiB != 4096 {
+		t.Fatalf("RootDisk = %#v, want flat 4096", cfg.RootDisk)
 	}
-	if cfg.RootDisk == nil || cfg.RootDisk.Kind() != RootDiskKindManaged || cfg.RootDisk.SizeMiB != 4096 {
-		t.Fatalf("RootDisk = %#v, want managed 4096", cfg.RootDisk)
+	if cfg.RootDisk.Fstype != "ext4" || cfg.RootDisk.Clone != FlatCloneReflink {
+		t.Fatalf("flat root disk fields = %#v", cfg.RootDisk)
 	}
-	if cfg.OCIUpperSizeMiB != 4096 || !cfg.ociUpperSizeSet {
-		t.Fatalf("legacy OCI upper mirror = %d, set = %v", cfg.OCIUpperSizeMiB, cfg.ociUpperSizeSet)
+	if cfg.ociUpperSizeSet {
+		t.Fatal("legacy OCI upper mirror must stay unset for flat root disks")
 	}
 	if cfg.CPUs != 1 || cfg.MemoryMiB != 512 || cfg.Workdir != "/" {
 		t.Fatalf("scalar config mismatch: %#v", cfg)
@@ -228,10 +227,14 @@ func TestFFIWireShape_WithRootDiskManaged(t *testing.T) {
 	}
 }
 
-func TestFFIWireShape_WithFlatRootfsLayout(t *testing.T) {
-	got := marshalCreateOptions(t, WithImage("python:3.12"), WithRootfsLayout(RootfsLayoutFlat))
-	if v := mustField(t, got, "rootfs_layout"); v != "flat" {
-		t.Fatalf("rootfs_layout = %v, want flat", v)
+func TestFFIWireShape_WithFlatRootDisk(t *testing.T) {
+	got := marshalCreateOptions(t,
+		WithImage("python:3.12"),
+		WithRootDisk(RootDisk.Flat(RootDiskFlatOptions{SizeMiB: 8192, Fstype: "ext4", Clone: FlatCloneReflink})),
+	)
+	rd := mustField(t, got, "root_disk").(map[string]any)
+	if rd["kind"] != "flat" || rd["size_mib"] != float64(8192) || rd["fstype"] != "ext4" || rd["clone"] != "reflink" {
+		t.Fatalf("root_disk = %v, want flat fields", rd)
 	}
 }
 

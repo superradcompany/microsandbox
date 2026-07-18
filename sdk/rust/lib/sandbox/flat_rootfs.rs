@@ -2,6 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
+use microsandbox_types::FlatClone;
+use microsandbox_utils::copy::FastCopyStrategy;
+
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -22,7 +25,8 @@ pub(crate) async fn create_private_flat_rootfs(
     base: PathBuf,
     destination: PathBuf,
     target_mib: u32,
-) -> MicrosandboxResult<()> {
+    clone: FlatClone,
+) -> MicrosandboxResult<FlatClone> {
     let base_size = tokio::fs::metadata(&base)
         .await
         .map_err(|error| {
@@ -43,7 +47,7 @@ pub(crate) async fn create_private_flat_rootfs(
     }
 
     tokio::task::spawn_blocking(move || {
-        create_private_flat_rootfs_sync(&base, &destination, target_bytes)
+        create_private_flat_rootfs_sync(&base, &destination, target_bytes, clone)
     })
     .await
     .map_err(|error| {
@@ -84,7 +88,8 @@ fn create_private_flat_rootfs_sync(
     base: &Path,
     destination: &Path,
     target_bytes: u64,
-) -> MicrosandboxResult<()> {
+    clone: FlatClone,
+) -> MicrosandboxResult<FlatClone> {
     if destination.exists() {
         return Err(MicrosandboxError::Custom(format!(
             "flat rootfs already exists at {}",
@@ -97,7 +102,27 @@ fn create_private_flat_rootfs_sync(
     }
 
     let result = (|| {
-        microsandbox_utils::copy::fast_copy(base, &temp)?;
+        let resolved_clone = match clone {
+            FlatClone::Auto => {
+                let (_, strategy) = microsandbox_utils::copy::fast_copy_with_strategy(base, &temp)?;
+                match strategy {
+                    FastCopyStrategy::Reflink => FlatClone::Reflink,
+                    FastCopyStrategy::SparseCopy => FlatClone::Copy,
+                }
+            }
+            FlatClone::Copy => {
+                microsandbox_utils::copy::sparse_copy(base, &temp)?;
+                FlatClone::Copy
+            }
+            FlatClone::Reflink => {
+                microsandbox_utils::copy::reflink(base, &temp).map_err(|error| {
+                    MicrosandboxError::Custom(format!(
+                        "flat rootfs requested clone=reflink, but the clone failed: {error}"
+                    ))
+                })?;
+                FlatClone::Reflink
+            }
+        };
         if std::fs::metadata(&temp)?.len() < target_bytes {
             microsandbox_image::ext4::grow_image(&temp, target_bytes).map_err(|error| {
                 MicrosandboxError::Custom(format!("failed to grow cloned flat rootfs: {error}"))
@@ -109,7 +134,7 @@ fn create_private_flat_rootfs_sync(
             .open(&temp)?
             .sync_all()?;
         std::fs::rename(&temp, destination)?;
-        Ok(())
+        Ok(resolved_clone)
     })();
 
     if result.is_err() {
@@ -138,9 +163,14 @@ mod tests {
         let destination = dir.path().join(FLAT_ROOTFS_FILENAME);
         let target_mib = u32::try_from(artifact.virtual_size_bytes / BYTES_PER_MIB).unwrap() + 128;
 
-        create_private_flat_rootfs(base.clone(), destination.clone(), target_mib)
-            .await
-            .unwrap();
+        create_private_flat_rootfs(
+            base.clone(),
+            destination.clone(),
+            target_mib,
+            FlatClone::Copy,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             std::fs::metadata(destination).unwrap().len(),
@@ -159,9 +189,14 @@ mod tests {
         let base = dir.path().join("base.raw");
         materialize_ext4_rootfs(&base, FileTree::new(), &Ext4RootfsOptions::default()).unwrap();
 
-        let error = create_private_flat_rootfs(base, dir.path().join(FLAT_ROOTFS_FILENAME), 1)
-            .await
-            .unwrap_err();
+        let error = create_private_flat_rootfs(
+            base,
+            dir.path().join(FLAT_ROOTFS_FILENAME),
+            1,
+            FlatClone::Copy,
+        )
+        .await
+        .unwrap_err();
 
         assert!(error.to_string().contains("must be at least"));
     }

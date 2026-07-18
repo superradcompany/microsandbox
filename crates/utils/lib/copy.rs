@@ -34,6 +34,19 @@ use std::path::Path;
 use crate::extent::mark_sparse;
 
 //--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+/// Strategy that successfully created a destination in [`fast_copy_with_strategy`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FastCopyStrategy {
+    /// The destination shares source extents through filesystem copy-on-write.
+    Reflink,
+    /// The destination is an independent sparse-aware copy.
+    SparseCopy,
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
@@ -47,6 +60,11 @@ use crate::extent::mark_sparse;
 /// **Blocking.** Callers in async contexts should wrap in
 /// `tokio::task::spawn_blocking`.
 pub fn fast_copy(src: &Path, dst: &Path) -> io::Result<u64> {
+    fast_copy_with_strategy(src, dst).map(|(len, _)| len)
+}
+
+/// Copy `src` to `dst` using the fastest safe strategy and report which strategy resolved.
+pub fn fast_copy_with_strategy(src: &Path, dst: &Path) -> io::Result<(u64, FastCopyStrategy)> {
     // Stat the source up front. This makes the missing-source error
     // kind platform-consistent (`NotFound` everywhere); without it,
     // reflink-copy on Linux surfaces `InvalidInput` with no errno
@@ -58,14 +76,21 @@ pub fn fast_copy(src: &Path, dst: &Path) -> io::Result<u64> {
     // Tier 2. We do NOT use `reflink_or_copy`, which densifies on
     // fallback via `std::fs::copy`.
     match reflink_copy::reflink(src, dst) {
-        Ok(()) => return Ok(src_len),
+        Ok(()) => return Ok((src_len, FastCopyStrategy::Reflink)),
         Err(e) if is_reflink_unsupported(&e) => {
             // fall through to sparse copy
         }
         Err(e) => return Err(e),
     }
 
-    sparse_copy(src, dst)
+    sparse_copy(src, dst).map(|len| (len, FastCopyStrategy::SparseCopy))
+}
+
+/// Require a filesystem copy-on-write clone with no fallback.
+pub fn reflink(src: &Path, dst: &Path) -> io::Result<u64> {
+    let src_len = std::fs::metadata(src)?.len();
+    reflink_copy::reflink(src, dst)?;
+    Ok(src_len)
 }
 
 /// Sparse-aware copy via `SEEK_DATA`/`SEEK_HOLE` and per-extent copy.

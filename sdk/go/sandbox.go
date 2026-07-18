@@ -50,7 +50,6 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		Image:           o.Image,
 		ImageFstype:     o.ImageFstype,
 		ImageBind:       o.ImageBind,
-		RootfsLayout:    string(o.RootfsLayout),
 		Snapshot:        o.Snapshot,
 		MemoryMiB:       o.MemoryMiB,
 		CPUs:            o.CPUs,
@@ -171,6 +170,10 @@ func buildFFIRootDisk(rd RootDiskConfig) *ffi.RootDiskSpec {
 	switch rd.Kind() {
 	case RootDiskKindTmpfs:
 		spec.Kind = "tmpfs"
+	case RootDiskKindFlat:
+		spec.Kind = "flat"
+		spec.Fstype = rd.Fstype
+		spec.Clone = string(rd.Clone)
 	case RootDiskKindDiskImage:
 		spec.Kind = "disk-image"
 		spec.Path = rd.Path

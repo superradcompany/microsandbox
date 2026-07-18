@@ -2464,21 +2464,34 @@ mod tests {
         .unwrap();
         Migrator::up(db.inner(), None).await.unwrap();
 
-        // The scope migration is the latest; one step must drop the column
-        // while everything older (including root disk) stays intact.
+        // The flat-root state migration is the latest; one step must drop its
+        // column while everything older (including snapshot scope) stays intact.
         rollback_schema(db.inner(), 1).await.unwrap();
 
         let columns = db
+            .query_all(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "PRAGMA table_info(sandbox_rootfs)",
+            ))
+            .await
+            .unwrap();
+        let has_resolved_clone = columns
+            .iter()
+            .any(|row| row.try_get_by_index::<String>(1).unwrap() == "resolved_clone");
+        assert!(!has_resolved_clone);
+
+        let snapshot_columns = db
             .query_all(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "PRAGMA table_info(snapshot_index)",
             ))
             .await
             .unwrap();
-        let has_scope = columns
-            .iter()
-            .any(|row| row.try_get_by_index::<String>(1).unwrap() == "scope");
-        assert!(!has_scope);
+        assert!(
+            snapshot_columns
+                .iter()
+                .any(|row| row.try_get_by_index::<String>(1).unwrap() == "scope")
+        );
 
         let rows = db
             .query_all(Statement::from_string(

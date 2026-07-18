@@ -311,10 +311,9 @@ impl SandboxConfig {
 
     /// Materialize rootfs defaults that should be persisted with the sandbox.
     ///
-    /// `default_size_mib` is the backend's configured managed root disk size,
-    /// if any; it applies only to the managed kind. An absent root disk
-    /// resolves to managed; a sizeless tmpfs resolves to half the sandbox
-    /// memory.
+    /// `default_size_mib` is the backend's configured microsandbox-owned root disk size. It
+    /// applies to managed layered uppers and flat roots. An absent root disk resolves to managed;
+    /// a sizeless tmpfs resolves to half the sandbox memory.
     pub(crate) fn apply_rootfs_defaults(&mut self, default_size_mib: Option<u32>) {
         if self.snapshot_upper_source.is_some() {
             return;
@@ -332,6 +331,9 @@ impl SandboxConfig {
                 }
                 Some(RootDisk::Tmpfs { size_mib }) if size_mib.is_none() => {
                     *size_mib = Some((memory_mib / 2).max(1));
+                }
+                Some(RootDisk::Flat { size_mib, .. }) if size_mib.is_none() => {
+                    *size_mib = Some(default_size_mib.unwrap_or(DEFAULT_OCI_UPPER_SIZE_MIB));
                 }
                 _ => {}
             }
@@ -1382,7 +1384,6 @@ mod tests {
             spec: SandboxSpec {
                 image: RootfsSource::Oci(microsandbox_types::OciRootfsSource {
                     reference: "python:3.12".into(),
-                    layout: Default::default(),
                     root_disk: Some(RootDisk::Tmpfs { size_mib: None }),
                 }),
                 ..Default::default()

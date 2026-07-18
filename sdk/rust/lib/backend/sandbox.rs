@@ -1182,7 +1182,12 @@ pub(super) fn cloud_create_request_from_config(
     // Cloud only supports OCI rootfs; reject the local-only rootfs kinds before
     // handing the spec to the control plane. Borrow so the spec isn't moved.
     match &config.spec.image {
-        RootfsSource::Oci(oci) if oci.layout == microsandbox_types::OciRootfsLayout::Flat => {
+        RootfsSource::Oci(oci)
+            if matches!(
+                oci.root_disk,
+                Some(microsandbox_types::RootDisk::Flat { .. })
+            ) =>
+        {
             return Err(unsupported(
                 "flat OCI rootfs",
                 "when cloud flat-rootfs support lands",
@@ -1316,7 +1321,6 @@ mod tests {
                 name: "agent-1".into(),
                 image: RootfsSource::Oci(OciRootfsSource {
                     reference: "python:3.12".into(),
-                    layout: Default::default(),
                     root_disk: None,
                 }),
                 ..Default::default()
@@ -1339,7 +1343,7 @@ mod tests {
         let RootfsSource::Oci(oci) = &mut config.spec.image else {
             unreachable!();
         };
-        oci.layout = microsandbox_types::OciRootfsLayout::Flat;
+        oci.root_disk = Some(microsandbox_types::RootDisk::flat(4096));
 
         let err = cloud_create_request_from_config(config).unwrap_err();
         assert!(matches!(err, MicrosandboxError::Unsupported { .. }));
@@ -1423,7 +1427,6 @@ mod tests {
             name: "agent-1".into(),
             image: RootfsSource::Oci(OciRootfsSource {
                 reference: "python:3.12".into(),
-                layout: Default::default(),
                 root_disk: None,
             }),
             env: vec![EnvVar::new("A", "B")],

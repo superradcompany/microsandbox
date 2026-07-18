@@ -147,7 +147,6 @@ export type NapiSandboxBuilderCtor = new (name: string) => NapiSandboxBuilder;
  * not preserve `this` correctly. */
 export interface NapiSandboxBuilderSetters {
   image(s: string): this;
-  rootfsLayout(layout: "layered" | "flat"): this;
   fromSnapshot(pathOrName: string): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   imageWith(configure: (b: any) => any): this;
@@ -1099,8 +1098,6 @@ export interface NapiRegistryConfigBuilder {
 
 export interface NapiImageBuilder {
   oci(reference: string): this;
-  /** Materialize the OCI image as one writable ext4 root disk. */
-  flat(): this;
   /** Managed root disk of the given size, in MiB. */
   rootDisk(sizeMiB: number): this;
   /** Configure the root disk via a builder callback (tmpfs / disk-image kinds). */
@@ -1113,14 +1110,18 @@ export interface NapiImageBuilder {
 }
 
 export interface NapiRootDiskBuilder {
-  /** Size in MiB (managed and tmpfs kinds only). */
+  /** Size in MiB (managed, tmpfs, and flat kinds). */
   size(mib: number): this;
   /** RAM-backed tmpfs upper: ephemeral, counts against guest memory. */
   tmpfs(): this;
+  /** One private writable filesystem containing the complete OCI image. */
+  flat(): this;
+  /** Clone policy for a flat root disk. */
+  cloneStrategy(strategy: "auto" | "copy" | "reflink"): this;
   /** User-supplied disk image attached writable as the upper. */
   disk(path: string): this;
   /** Disk image format (`"raw" | "qcow2"`); only valid after `.disk()`. */
   format(format: "raw" | "qcow2"): this;
-  /** Inner filesystem type (e.g. `"ext4"`); only valid after `.disk()`. */
+  /** Inner filesystem type (e.g. `"ext4"`); valid after `.flat()` or `.disk()`. */
   fstype(fstype: string): this;
 }
