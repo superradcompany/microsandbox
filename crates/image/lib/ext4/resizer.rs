@@ -13,21 +13,23 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use super::format::{
-    EXT4_BG_INODE_ZEROED, EXT4_BLOCK_SIZE, EXT4_BLOCKS_PER_GROUP, EXT4_DESC_SIZE,
-    EXT4_FEATURE_COMPAT_DIR_INDEX, EXT4_FEATURE_COMPAT_EXT_ATTR, EXT4_FEATURE_COMPAT_HAS_JOURNAL,
-    EXT4_FEATURE_INCOMPAT_64BIT, EXT4_FEATURE_INCOMPAT_EXTENTS, EXT4_FEATURE_INCOMPAT_FILETYPE,
-    EXT4_FEATURE_INCOMPAT_RECOVER, EXT4_FEATURE_RO_COMPAT_DIR_NLINK,
-    EXT4_FEATURE_RO_COMPAT_EXTRA_ISIZE, EXT4_FEATURE_RO_COMPAT_HUGE_FILE,
-    EXT4_FEATURE_RO_COMPAT_LARGE_FILE, EXT4_FEATURE_RO_COMPAT_METADATA_CSUM,
-    EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER, EXT4_FIRST_INO, EXT4_INODE_SIZE, EXT4_INODES_PER_GROUP,
-    EXT4_LOG_BLOCK_SIZE, EXT4_SUPER_MAGIC, sparse_super_group,
+    EXT4_BG_INODE_ZEROED, EXT4_BLOCK_SIZE, EXT4_BLOCKS_PER_GROUP, EXT4_DESC_SIZE, EXT4_EH_MAGIC,
+    EXT4_EXTENTS_FL, EXT4_FEATURE_COMPAT_DIR_INDEX, EXT4_FEATURE_COMPAT_EXT_ATTR,
+    EXT4_FEATURE_COMPAT_HAS_JOURNAL, EXT4_FEATURE_INCOMPAT_64BIT, EXT4_FEATURE_INCOMPAT_EXTENTS,
+    EXT4_FEATURE_INCOMPAT_FILETYPE, EXT4_FEATURE_INCOMPAT_RECOVER,
+    EXT4_FEATURE_RO_COMPAT_DIR_NLINK, EXT4_FEATURE_RO_COMPAT_EXTRA_ISIZE,
+    EXT4_FEATURE_RO_COMPAT_HUGE_FILE, EXT4_FEATURE_RO_COMPAT_LARGE_FILE,
+    EXT4_FEATURE_RO_COMPAT_METADATA_CSUM, EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER, EXT4_FIRST_INO,
+    EXT4_INODE_SIZE, EXT4_INODES_PER_GROUP, EXT4_JOURNAL_INO, EXT4_LOG_BLOCK_SIZE, EXT4_ROOT_INO,
+    EXT4_SUPER_MAGIC, sparse_super_group,
 };
 use super::formatter::{Ext4Error, mark_sparse};
 use super::jbd2;
 use super::layout::{
     GroupDescStats, GroupGeometry, MAX_BLOCKS, bitmap_checksum, build_block_bitmap_base,
-    build_group_descriptor, build_inode_bitmap_base, gdt_checksum, get_le16, get_le32, put_le16,
-    put_le32, superblock_checksum, write_backup_superblock_at, write_gdt_at,
+    build_group_descriptor, build_inode_bitmap_base, count_used_bits, dir_block_checksum,
+    gdt_checksum, get_le16, get_le32, inode_checksum, put_le16, put_le32, superblock_checksum,
+    write_backup_superblock_at, write_gdt_at,
 };
 use crate::crc32c;
 
@@ -341,6 +343,62 @@ pub fn grow_image(path: &Path, new_size_bytes: u64) -> Result<GrowOutcome, Ext4E
     })
 }
 
+/// Validate a newly materialized rootfs without mounting it or trusting host filesystem tools.
+pub(super) fn validate_rootfs_image(path: &Path) -> Result<(), Ext4Error> {
+    let mut file = File::open(path)?;
+    let img = parse_and_validate(&mut file)?;
+    if img.needs_recovery {
+        return Err(unsupported(
+            "new rootfs unexpectedly requires journal recovery",
+        ));
+    }
+    let geometry = img.geometry();
+    let mut total_free_blocks = 0u64;
+    let mut total_free_inodes = 0u64;
+
+    for group in 0..img.num_groups {
+        let descriptor =
+            &img.gdt[group as usize * EXT4_DESC_SIZE as usize..][..EXT4_DESC_SIZE as usize];
+        let block_bitmap = read_block_at(&mut file, geometry.group_block_bitmap_block(group))?;
+        let inode_bitmap = read_block_at(&mut file, geometry.group_inode_bitmap_block(group))?;
+        validate_group_bitmaps(&img, group, descriptor, &block_bitmap, &inode_bitmap)?;
+
+        let used_blocks = count_used_bits(&block_bitmap, geometry.blocks_in_group(group) as usize);
+        total_free_blocks += u64::from(geometry.blocks_in_group(group)) - used_blocks as u64;
+        let used_inodes = count_used_bits(&inode_bitmap, EXT4_INODES_PER_GROUP as usize);
+        total_free_inodes += u64::from(EXT4_INODES_PER_GROUP) - used_inodes as u64;
+
+        for local_inode in 0..EXT4_INODES_PER_GROUP {
+            if inode_bitmap[(local_inode / 8) as usize] & (1 << (local_inode % 8)) == 0 {
+                continue;
+            }
+            let inode_number = group * EXT4_INODES_PER_GROUP + local_inode + 1;
+            if inode_number < EXT4_FIRST_INO
+                && inode_number != EXT4_ROOT_INO
+                && inode_number != EXT4_JOURNAL_INO
+            {
+                continue;
+            }
+            validate_allocated_inode(
+                &mut file,
+                &img,
+                group,
+                local_inode,
+                inode_number,
+                &block_bitmap,
+            )?;
+        }
+    }
+
+    if total_free_blocks != img.free_blocks || total_free_inodes != u64::from(img.free_inodes) {
+        return Err(unsupported(
+            "superblock free-space counters do not match bitmaps",
+        ));
+    }
+    validate_backup_metadata(&mut file, &img)?;
+    Ok(())
+}
+
 /// Parse the primary superblock and GDT, refusing anything that does not match exactly what this
 /// crate's formatter writes (geometry, feature masks, per-group layout, checksums).
 fn parse_and_validate(file: &mut File) -> Result<ParsedImage, Ext4Error> {
@@ -600,6 +658,296 @@ fn clear_recover_flag(sb: &mut [u8]) {
 
 fn unsupported(message: impl Into<String>) -> Ext4Error {
     Ext4Error::Unsupported(message.into())
+}
+
+fn validate_group_bitmaps(
+    img: &ParsedImage,
+    group: u32,
+    descriptor: &[u8],
+    block_bitmap: &[u8],
+    inode_bitmap: &[u8],
+) -> Result<(), Ext4Error> {
+    let geometry = img.geometry();
+    let expected_block_checksum =
+        get_le16(descriptor, 0x18) as u32 | (u32::from(get_le16(descriptor, 0x38)) << 16);
+    let expected_inode_checksum =
+        get_le16(descriptor, 0x1A) as u32 | (u32::from(get_le16(descriptor, 0x3A)) << 16);
+    if bitmap_checksum(img.csum_seed, block_bitmap, EXT4_BLOCK_SIZE as usize)
+        != expected_block_checksum
+        || bitmap_checksum(
+            img.csum_seed,
+            inode_bitmap,
+            (EXT4_INODES_PER_GROUP / 8) as usize,
+        ) != expected_inode_checksum
+    {
+        return Err(unsupported(format!(
+            "group {group} bitmap checksum mismatch"
+        )));
+    }
+
+    let blocks_in_group = geometry.blocks_in_group(group);
+    for bit in 0..geometry.group_metadata_blocks(group) {
+        if block_bitmap[(bit / 8) as usize] & (1 << (bit % 8)) == 0 {
+            return Err(unsupported(format!(
+                "group {group} metadata block {bit} is marked free"
+            )));
+        }
+    }
+    for bit in blocks_in_group..EXT4_BLOCKS_PER_GROUP {
+        if block_bitmap[(bit / 8) as usize] & (1 << (bit % 8)) == 0 {
+            return Err(unsupported(format!(
+                "group {group} block-bitmap padding is marked free"
+            )));
+        }
+    }
+    for bit in EXT4_INODES_PER_GROUP..(EXT4_BLOCK_SIZE * 8) {
+        if inode_bitmap[(bit / 8) as usize] & (1 << (bit % 8)) == 0 {
+            return Err(unsupported(format!(
+                "group {group} inode-bitmap padding is marked free"
+            )));
+        }
+    }
+
+    let free_blocks =
+        u32::from(get_le16(descriptor, 0x0C)) | (u32::from(get_le16(descriptor, 0x2C)) << 16);
+    let free_inodes =
+        u32::from(get_le16(descriptor, 0x0E)) | (u32::from(get_le16(descriptor, 0x2E)) << 16);
+    if free_blocks as usize
+        != blocks_in_group as usize - count_used_bits(block_bitmap, blocks_in_group as usize)
+        || free_inodes as usize
+            != EXT4_INODES_PER_GROUP as usize
+                - count_used_bits(inode_bitmap, EXT4_INODES_PER_GROUP as usize)
+    {
+        return Err(unsupported(format!(
+            "group {group} free-space counters do not match bitmaps"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_allocated_inode(
+    file: &mut File,
+    img: &ParsedImage,
+    group: u32,
+    local_inode: u32,
+    inode_number: u32,
+    _block_bitmap: &[u8],
+) -> Result<(), Ext4Error> {
+    let inode_offset = img.geometry().group_inode_table_block(group) * EXT4_BLOCK_SIZE as u64
+        + u64::from(local_inode) * u64::from(EXT4_INODE_SIZE);
+    let mut inode = vec![0u8; EXT4_INODE_SIZE as usize];
+    file.seek(SeekFrom::Start(inode_offset))?;
+    file.read_exact(&mut inode)?;
+    let stored_checksum =
+        u32::from(get_le16(&inode, 0x7C)) | (u32::from(get_le16(&inode, 0x82)) << 16);
+    if inode_checksum(img.csum_seed, inode_number, get_le32(&inode, 0x64), &inode)
+        != stored_checksum
+    {
+        return Err(unsupported(format!(
+            "inode {inode_number} checksum mismatch"
+        )));
+    }
+    if get_le16(&inode, 0) == 0 {
+        return Err(unsupported(format!(
+            "allocated inode {inode_number} has no mode"
+        )));
+    }
+
+    if get_le32(&inode, 0x20) & EXT4_EXTENTS_FL != 0 {
+        validate_inode_extent_tree(file, img, inode_number, &inode)?;
+    }
+    let xattr_block = u64::from(get_le32(&inode, 0x68)) | (u64::from(get_le16(&inode, 0x76)) << 32);
+    if xattr_block != 0 {
+        validate_external_xattrs(file, img, xattr_block, inode_number)?;
+    }
+    if get_le32(&inode, 0xA0) == 0xEA02_0000 {
+        validate_xattr_entries(&inode[0xA4..], 0xA4, inode.len(), inode_number)?;
+    }
+    Ok(())
+}
+
+fn validate_inode_extent_tree(
+    file: &mut File,
+    img: &ParsedImage,
+    inode_number: u32,
+    inode: &[u8],
+) -> Result<(), Ext4Error> {
+    let root = &inode[0x28..0x64];
+    if get_le16(root, 0) != EXT4_EH_MAGIC {
+        return Err(unsupported(format!(
+            "inode {inode_number} has bad extent magic"
+        )));
+    }
+    let entries = usize::from(get_le16(root, 2));
+    let max = usize::from(get_le16(root, 4));
+    let depth = get_le16(root, 6);
+    if entries > max || max > 4 || depth > 1 {
+        return Err(unsupported(format!(
+            "inode {inode_number} has invalid extent header"
+        )));
+    }
+    if depth == 0 {
+        validate_extent_entries(img, inode_number, &root[12..], entries)
+    } else {
+        if entries != 1 {
+            return Err(unsupported(format!(
+                "inode {inode_number} has an unsupported extent index fanout"
+            )));
+        }
+        let leaf_block = u64::from(get_le32(root, 16)) | (u64::from(get_le16(root, 20)) << 32);
+        if leaf_block >= img.num_blocks {
+            return Err(unsupported(format!(
+                "inode {inode_number} extent leaf is out of bounds"
+            )));
+        }
+        let leaf = read_block_at(file, leaf_block)?;
+        let tail = EXT4_BLOCK_SIZE as usize - 4;
+        if get_le32(&leaf, tail)
+            != dir_block_checksum(
+                img.csum_seed,
+                inode_number,
+                get_le32(inode, 0x64),
+                &leaf[..tail],
+            )
+            || get_le16(&leaf, 0) != EXT4_EH_MAGIC
+            || get_le16(&leaf, 6) != 0
+        {
+            return Err(unsupported(format!(
+                "inode {inode_number} has an invalid extent leaf"
+            )));
+        }
+        let leaf_entries = usize::from(get_le16(&leaf, 2));
+        let leaf_max = usize::from(get_le16(&leaf, 4));
+        if leaf_entries > leaf_max || 12 + leaf_entries * 12 > tail {
+            return Err(unsupported(format!(
+                "inode {inode_number} extent leaf overflows"
+            )));
+        }
+        validate_extent_entries(img, inode_number, &leaf[12..], leaf_entries)
+    }
+}
+
+fn validate_extent_entries(
+    img: &ParsedImage,
+    inode_number: u32,
+    entries: &[u8],
+    count: usize,
+) -> Result<(), Ext4Error> {
+    let mut logical_end = 0u64;
+    for index in 0..count {
+        let entry = &entries[index * 12..][..12];
+        let logical = u64::from(get_le32(entry, 0));
+        let raw_len = get_le16(entry, 4);
+        if raw_len == 0 || raw_len > 0x8000 || logical < logical_end {
+            return Err(unsupported(format!(
+                "inode {inode_number} has invalid extent ordering"
+            )));
+        }
+        let block_count = if raw_len == 0x8000 {
+            32768
+        } else {
+            u64::from(raw_len)
+        };
+        let physical = u64::from(get_le32(entry, 8)) | (u64::from(get_le16(entry, 6)) << 32);
+        if physical
+            .checked_add(block_count)
+            .is_none_or(|end| end > img.num_blocks)
+        {
+            return Err(unsupported(format!(
+                "inode {inode_number} extent is out of bounds"
+            )));
+        }
+        logical_end = logical + block_count;
+    }
+    Ok(())
+}
+
+fn validate_external_xattrs(
+    file: &mut File,
+    img: &ParsedImage,
+    block_number: u64,
+    inode_number: u32,
+) -> Result<(), Ext4Error> {
+    if block_number >= img.num_blocks {
+        return Err(unsupported(format!(
+            "inode {inode_number} xattr block is out of bounds"
+        )));
+    }
+    let block = read_block_at(file, block_number)?;
+    if get_le32(&block, 0) != 0xEA02_0000 || get_le32(&block, 8) != 1 {
+        return Err(unsupported(format!(
+            "inode {inode_number} has a bad xattr header"
+        )));
+    }
+    let mut checksum_input = block.clone();
+    put_le32(&mut checksum_input, 16, 0);
+    let mut checksum = crc32c::crc32c_raw(img.csum_seed, &block_number.to_le_bytes());
+    checksum = crc32c::crc32c_raw(checksum, &checksum_input);
+    if checksum != get_le32(&block, 16) {
+        return Err(unsupported(format!(
+            "inode {inode_number} xattr checksum mismatch"
+        )));
+    }
+    validate_xattr_entries(&block[32..], 0, block.len(), inode_number)
+}
+
+fn validate_xattr_entries(
+    entries: &[u8],
+    base_offset: usize,
+    end_offset: usize,
+    inode_number: u32,
+) -> Result<(), Ext4Error> {
+    let mut cursor = 0usize;
+    while cursor + 4 <= entries.len() && get_le32(entries, cursor) != 0 {
+        if cursor + 16 > entries.len() {
+            return Err(unsupported(format!(
+                "inode {inode_number} has truncated xattrs"
+            )));
+        }
+        let name_len = entries[cursor] as usize;
+        let name_index = entries[cursor + 1];
+        let value_offset = usize::from(get_le16(entries, cursor + 2));
+        let value_size = get_le32(entries, cursor + 8) as usize;
+        let entry_len = (16 + name_len + 3) & !3;
+        if !matches!(name_index, 1 | 2 | 3 | 4 | 6)
+            || cursor + entry_len > entries.len()
+            || base_offset + value_offset + value_size > end_offset
+        {
+            return Err(unsupported(format!(
+                "inode {inode_number} has malformed xattrs"
+            )));
+        }
+        cursor += entry_len;
+    }
+    if cursor + 4 > entries.len() {
+        return Err(unsupported(format!(
+            "inode {inode_number} xattrs lack a terminator"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_backup_metadata(file: &mut File, img: &ParsedImage) -> Result<(), Ext4Error> {
+    let geometry = img.geometry();
+    for group in 1..img.num_groups {
+        if !sparse_super_group(group) {
+            continue;
+        }
+        let start = geometry.group_start_block(group) * EXT4_BLOCK_SIZE as u64;
+        let backup = read_superblock_at(file, start, &format!("group {group} backup"))?;
+        if get_le16(&backup, 0x5A) != group as u16 || backup[0..0x18] != img.sb[0..0x18] {
+            return Err(unsupported(format!(
+                "group {group} backup superblock differs"
+            )));
+        }
+        let mut backup_gdt = vec![0u8; img.gdt.len()];
+        file.seek(SeekFrom::Start(start + EXT4_BLOCK_SIZE as u64))?;
+        file.read_exact(&mut backup_gdt)?;
+        if backup_gdt != img.gdt {
+            return Err(unsupported(format!("group {group} backup GDT differs")));
+        }
+    }
+    Ok(())
 }
 
 fn read_block_at(file: &mut File, block: u64) -> Result<Vec<u8>, Ext4Error> {
