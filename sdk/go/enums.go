@@ -94,6 +94,16 @@ const (
 	PullPolicyNever     PullPolicy = "never"
 )
 
+// RootfsLayout selects how an OCI image is presented to the guest.
+type RootfsLayout string
+
+const (
+	// RootfsLayoutLayered uses EROFS lowers with a writable OverlayFS upper.
+	RootfsLayoutLayered RootfsLayout = "layered"
+	// RootfsLayoutFlat uses one private writable ext4 root disk.
+	RootfsLayoutFlat RootfsLayout = "flat"
+)
+
 // LogLevel selects the sandbox process log verbosity.
 type LogLevel string
 

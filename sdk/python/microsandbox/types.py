@@ -449,6 +449,7 @@ class ImageSource:
     _type: str
     _path: str | None = None
     _reference: str | None = None
+    _layout: Literal["layered", "flat"] = "layered"
     _root_disk: RootDiskConfig | dict | int | None = None
     _upper_size_mib: int | None = None  # deprecated: use _root_disk
     _fstype: str | None = None
@@ -471,9 +472,12 @@ class Image:
     def oci(
         reference: str,
         *,
+        layout: Literal["layered", "flat"] = "layered",
         root_disk: RootDiskConfig | dict | int | None = None,
         upper_size_mib: int | None = None,
     ) -> ImageSource:
+        if layout not in ("layered", "flat"):
+            raise ValueError("layout must be 'layered' or 'flat'")
         if root_disk is not None and upper_size_mib is not None:
             raise ValueError("pass either root_disk= or upper_size_mib=, not both")
         if root_disk is None and upper_size_mib is not None:
@@ -482,6 +486,7 @@ class Image:
         return ImageSource(
             _type="oci",
             _reference=reference,
+            _layout=layout,
             _root_disk=root_disk,
             _upper_size_mib=upper_size_mib,
         )

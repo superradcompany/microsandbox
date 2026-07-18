@@ -160,8 +160,20 @@ pub fn sandbox_builder_from_args(
             None
         };
         let root_disk = extract_root_disk(&image_obj)?;
+        let rootfs_layout = image_obj
+            .getattr("_layout")
+            .ok()
+            .filter(|value| !value.is_none())
+            .map(|value| value.extract::<String>())
+            .transpose()?
+            .unwrap_or_else(|| "layered".to_string());
+        if !matches!(rootfs_layout.as_str(), "layered" | "flat") {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "layout must be 'layered' or 'flat'",
+            ));
+        }
 
-        if root_disk.is_some() {
+        if root_disk.is_some() || rootfs_layout == "flat" {
             let image_type = image_obj
                 .getattr("_type")
                 .ok()
@@ -189,6 +201,9 @@ pub fn sandbox_builder_from_args(
                 builder = builder.image(image_str.as_str());
             }
         };
+        if rootfs_layout == "flat" {
+            builder = builder.rootfs_layout(microsandbox::sandbox::OciRootfsLayout::Flat);
+        }
     }
 
     if let Some(memory) = extract_opt::<u32>(kwargs, "memory")? {

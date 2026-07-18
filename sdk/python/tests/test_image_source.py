@@ -17,6 +17,17 @@ def test_oci_accepts_root_disk_int() -> None:
     assert image._to_image_str() == "python:3.12"
 
 
+def test_oci_accepts_flat_layout() -> None:
+    image = Image.oci("python:3.12", layout="flat")
+
+    assert image._layout == "flat"
+
+
+def test_oci_rejects_unknown_layout() -> None:
+    with pytest.raises(ValueError, match="layout"):
+        Image.oci("python:3.12", layout="unknown")  # type: ignore[arg-type]
+
+
 def test_oci_accepts_managed_root_disk() -> None:
     image = Image.oci("python:3.12", root_disk=RootDisk.managed(8192))
 

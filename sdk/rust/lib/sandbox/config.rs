@@ -1382,6 +1382,7 @@ mod tests {
             spec: SandboxSpec {
                 image: RootfsSource::Oci(microsandbox_types::OciRootfsSource {
                     reference: "python:3.12".into(),
+                    layout: Default::default(),
                     root_disk: Some(RootDisk::Tmpfs { size_mib: None }),
                 }),
                 ..Default::default()

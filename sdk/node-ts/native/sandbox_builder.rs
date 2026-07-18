@@ -6,8 +6,8 @@ use napi_derive::napi;
 
 use microsandbox::sandbox::LogLevel as RustLogLevel;
 use microsandbox::sandbox::{
-    PullPolicy as RustPullPolicy, Sandbox as RustSandbox, SandboxBuilder as RustSandboxBuilder,
-    SecurityProfile as RustSecurityProfile,
+    OciRootfsLayout as RustOciRootfsLayout, PullPolicy as RustPullPolicy, Sandbox as RustSandbox,
+    SandboxBuilder as RustSandboxBuilder, SecurityProfile as RustSecurityProfile,
 };
 use microsandbox::size::Mebibytes;
 
@@ -83,6 +83,26 @@ impl JsSandboxBuilder {
         let img_builder = returned.take_inner_builder()?;
         let prev = self.take_inner();
         self.inner = Some(prev.image_with(|_default| img_builder));
+        Ok(self)
+    }
+
+    /// Select `"layered"` (default) or `"flat"` for an OCI rootfs.
+    #[napi(
+        js_name = "rootfsLayout",
+        ts_args_type = "layout: \"layered\" | \"flat\""
+    )]
+    pub fn rootfs_layout(&mut self, layout: String) -> Result<&Self> {
+        let layout = match layout.as_str() {
+            "layered" => RustOciRootfsLayout::Layered,
+            "flat" => RustOciRootfsLayout::Flat,
+            other => {
+                return Err(napi::Error::from_reason(format!(
+                    "invalid rootfs layout `{other}` (expected layered or flat)"
+                )));
+            }
+        };
+        let prev = self.take_inner();
+        self.inner = Some(prev.rootfs_layout(layout));
         Ok(self)
     }
 

@@ -575,6 +575,11 @@ describe("NetworkBuilder ports", () => {
 });
 
 describe("ImageBuilder root disk", () => {
+  it("selects a flat OCI rootfs", () => {
+    const i = new ImageBuilder().oci("python:3.12");
+    expect(i.flat()).toBe(i);
+  });
+
   it("accepts a managed size in MiB", () => {
     const i = new ImageBuilder().oci("python:3.12");
     expect(i.rootDisk(8192)).toBe(i);
@@ -603,6 +608,14 @@ describe("ImageBuilder root disk", () => {
 });
 
 describe("SandboxBuilder top-level rootDisk", () => {
+  it("selects a flat OCI rootfs layout", async () => {
+    const cfg = await Sandbox.builder("x")
+      .image("alpine")
+      .rootfsLayout("flat")
+      .build();
+    expect(cfg.image).toMatchObject({ Oci: { layout: "flat" } });
+  });
+
   it("sets a managed root disk on the OCI image", async () => {
     const cfg = await Sandbox.builder("x")
       .image("alpine")

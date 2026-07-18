@@ -50,6 +50,7 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		Image:           o.Image,
 		ImageFstype:     o.ImageFstype,
 		ImageBind:       o.ImageBind,
+		RootfsLayout:    string(o.RootfsLayout),
 		Snapshot:        o.Snapshot,
 		MemoryMiB:       o.MemoryMiB,
 		CPUs:            o.CPUs,

@@ -214,6 +214,10 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub pull: Option<String>,
 
+    /// OCI rootfs layout: layered (default) or flat (single writable ext4 disk).
+    #[arg(long = "rootfs-layout", value_name = "LAYOUT", value_parser = ["layered", "flat"])]
+    pub rootfs_layout: Option<String>,
+
     /// Writable rootfs layer for OCI images (e.g. 8G, tmpfs:2G,
     /// ./scratch.img, ./scratch.qcow2:format=qcow2,fstype=ext4).
     #[arg(long = "root-disk", value_name = "SPEC")]
@@ -643,6 +647,14 @@ pub fn apply_sandbox_opts(
     }
     if let Some(ref pull) = opts.pull {
         builder = builder.pull_policy(parse_pull_policy(pull)?);
+    }
+    if let Some(layout) = opts.rootfs_layout.as_deref() {
+        let layout = match layout {
+            "layered" => microsandbox::sandbox::OciRootfsLayout::Layered,
+            "flat" => microsandbox::sandbox::OciRootfsLayout::Flat,
+            _ => unreachable!("clap validates rootfs layouts"),
+        };
+        builder = builder.rootfs_layout(layout);
     }
     if let Some(spec) = opts.root_disk.as_deref().or(opts.oci_upper_size.as_deref()) {
         let spec = parse_root_disk_spec(spec)?;
@@ -2545,6 +2557,24 @@ mod tests {
             ),
             other => panic!("expected Oci, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn apply_sandbox_opts_sets_flat_rootfs_layout() {
+        let opts = SandboxOpts {
+            rootfs_layout: Some("flat".to_string()),
+            ..Default::default()
+        };
+        let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        let RootfsSource::Oci(oci) = config.spec.image else {
+            panic!("expected Oci");
+        };
+        assert_eq!(oci.layout, microsandbox::sandbox::OciRootfsLayout::Flat);
     }
 
     #[tokio::test]

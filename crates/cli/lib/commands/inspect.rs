@@ -134,6 +134,13 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
             }
         };
         ui::detail_kv("Image", &image);
+        if let microsandbox::sandbox::RootfsSource::Oci(oci) = &config.spec.image {
+            let layout = match oci.layout {
+                microsandbox::sandbox::OciRootfsLayout::Layered => "layered",
+                microsandbox::sandbox::OciRootfsLayout::Flat => "flat",
+            };
+            ui::detail_kv("Rootfs Layout", layout);
+        }
         match config.spec.image.oci_root_disk() {
             Some(microsandbox::sandbox::RootDisk::Managed { size_mib }) => {
                 let size = size_mib.map_or("default".to_string(), |mib| format!("{mib} MiB"));

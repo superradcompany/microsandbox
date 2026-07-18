@@ -81,6 +81,16 @@ pub(super) async fn create_snapshot(
     })?;
     let image_reference = oci_reference_string(&sandbox_config)?;
 
+    if matches!(
+        &sandbox_config.spec.image,
+        crate::sandbox::RootfsSource::Oci(oci)
+            if oci.layout == microsandbox_types::OciRootfsLayout::Flat
+    ) {
+        return Err(MicrosandboxError::InvalidConfig(format!(
+            "sandbox '{source_sandbox}' uses a flat rootfs, which snapshots do not yet support"
+        )));
+    }
+
     ensure_snapshottable_root_disk(sandbox_config.spec.image.oci_root_disk(), &source_sandbox)?;
 
     // Resolve source upper.ext4 path from the canonical sandbox layout.

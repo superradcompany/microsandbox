@@ -39,6 +39,7 @@ func TestSandboxConfigUnmarshalPersistedRootfsSource(t *testing.T) {
 		"image": {
 			"Oci": {
 				"reference": "mirror.gcr.io/library/alpine",
+				"layout": "flat",
 				"root_disk": {"kind": "managed", "size_mib": 4096}
 			}
 		},
@@ -59,6 +60,9 @@ func TestSandboxConfigUnmarshalPersistedRootfsSource(t *testing.T) {
 	}
 	if cfg.Image != "mirror.gcr.io/library/alpine" {
 		t.Fatalf("Image = %q", cfg.Image)
+	}
+	if cfg.RootfsLayout != RootfsLayoutFlat {
+		t.Fatalf("RootfsLayout = %q, want flat", cfg.RootfsLayout)
 	}
 	if cfg.RootDisk == nil || cfg.RootDisk.Kind() != RootDiskKindManaged || cfg.RootDisk.SizeMiB != 4096 {
 		t.Fatalf("RootDisk = %#v, want managed 4096", cfg.RootDisk)
@@ -221,6 +225,13 @@ func TestFFIWireShape_WithRootDiskManaged(t *testing.T) {
 	rd := mustField(t, got, "root_disk").(map[string]any)
 	if rd["kind"] != "managed" || rd["size_mib"] != float64(8192) {
 		t.Fatalf("root_disk = %v, want managed 8192", rd)
+	}
+}
+
+func TestFFIWireShape_WithFlatRootfsLayout(t *testing.T) {
+	got := marshalCreateOptions(t, WithImage("python:3.12"), WithRootfsLayout(RootfsLayoutFlat))
+	if v := mustField(t, got, "rootfs_layout"); v != "flat" {
+		t.Fatalf("rootfs_layout = %v, want flat", v)
 	}
 }
 

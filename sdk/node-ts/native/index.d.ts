@@ -236,6 +236,8 @@ export declare class ImageBuilder {
   constructor()
   /** Use an OCI image reference as the root filesystem. */
   oci(reference: string): this
+  /** Materialize the OCI image as one writable ext4 root disk. */
+  flat(): this
   /**
    * Configure the writable rootfs layer (root disk) for an OCI rootfs.
    *
@@ -973,6 +975,8 @@ export declare class SandboxBuilder {
   image(image: string): this
   /** Configure a disk-image rootfs explicitly via a callback. */
   imageWith(configure: (arg: ImageBuilder) => ImageBuilder): this
+  /** Select `"layered"` (default) or `"flat"` for an OCI rootfs. */
+  rootfsLayout(layout: "layered" | "flat"): this
   /**
    * Configure the writable rootfs layer (root disk) for the OCI image.
    *

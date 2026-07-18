@@ -634,6 +634,14 @@ func TestWithPullPolicy(t *testing.T) {
 	}
 }
 
+func TestWithRootfsLayout(t *testing.T) {
+	o := SandboxConfig{}
+	WithRootfsLayout(RootfsLayoutFlat)(&o)
+	if o.RootfsLayout != RootfsLayoutFlat {
+		t.Errorf("RootfsLayout: got %q", o.RootfsLayout)
+	}
+}
+
 func TestWithMaxDurationAndIdleTimeout(t *testing.T) {
 	o := SandboxConfig{}
 	WithMaxDuration(90 * time.Second)(&o)

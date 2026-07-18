@@ -147,6 +147,7 @@ export type NapiSandboxBuilderCtor = new (name: string) => NapiSandboxBuilder;
  * not preserve `this` correctly. */
 export interface NapiSandboxBuilderSetters {
   image(s: string): this;
+  rootfsLayout(layout: "layered" | "flat"): this;
   fromSnapshot(pathOrName: string): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   imageWith(configure: (b: any) => any): this;
@@ -1098,6 +1099,8 @@ export interface NapiRegistryConfigBuilder {
 
 export interface NapiImageBuilder {
   oci(reference: string): this;
+  /** Materialize the OCI image as one writable ext4 root disk. */
+  flat(): this;
   /** Managed root disk of the given size, in MiB. */
   rootDisk(sizeMiB: number): this;
   /** Configure the root disk via a builder callback (tmpfs / disk-image kinds). */

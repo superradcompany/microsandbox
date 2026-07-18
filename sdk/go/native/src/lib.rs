@@ -943,6 +943,8 @@ struct SandboxCreateOpts {
     /// Host directory used directly as the root filesystem (bind rootfs).
     /// Mutually exclusive with `image` and `snapshot`.
     image_bind: Option<String>,
+    /// OCI rootfs layout (`layered` or `flat`).
+    rootfs_layout: Option<String>,
     /// Structured root disk config for an OCI rootfs.
     root_disk: Option<RootDiskOpts>,
     /// Deprecated flat spelling of a managed root disk size. Still
@@ -1970,6 +1972,15 @@ pub unsafe extern "C" fn msb_sandbox_create(
             Some(s) => Some(parse_security_profile(s)?),
             None => None,
         };
+        let rootfs_layout = match opts.rootfs_layout.as_deref() {
+            Some("layered") | None => None,
+            Some("flat") => Some(microsandbox::sandbox::OciRootfsLayout::Flat),
+            Some(other) => {
+                return Err(FfiError::invalid_argument(format!(
+                    "invalid rootfs_layout `{other}` (expected layered or flat)"
+                )));
+            }
+        };
 
         Ok(Box::pin(async move {
             let mut builder = Sandbox::builder(&name);
@@ -2004,6 +2015,9 @@ pub unsafe extern "C" fn msb_sandbox_create(
             }
             if let Some(bind_path) = opts.image_bind {
                 builder = builder.image_with(|i| i.bind(bind_path));
+            }
+            if let Some(layout) = rootfs_layout {
+                builder = builder.rootfs_layout(layout);
             }
             if let Some(root_disk) = opts.root_disk {
                 builder = apply_root_disk(builder, root_disk)?;
@@ -6158,6 +6172,14 @@ mod tests {
         assert_eq!(root_disk.kind, "tmpfs");
         assert_eq!(root_disk.size_mib, Some(512));
         assert!(root_disk.path.is_none());
+    }
+
+    #[test]
+    fn sandbox_create_opts_parses_flat_rootfs_layout() {
+        let opts: SandboxCreateOpts =
+            serde_json::from_str(r#"{"image":"python:3.12","rootfs_layout":"flat"}"#).unwrap();
+
+        assert_eq!(opts.rootfs_layout.as_deref(), Some("flat"));
     }
 
     #[test]

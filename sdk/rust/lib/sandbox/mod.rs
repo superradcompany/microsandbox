@@ -9,6 +9,7 @@ pub(crate) mod attach;
 mod builder;
 pub(crate) mod config;
 pub mod exec;
+pub(crate) mod flat_rootfs;
 pub mod fs;
 mod handle;
 pub mod init;
@@ -163,8 +164,8 @@ pub use ssh::{
 };
 pub use types::{
     DiskImageFormat, HostPermissions, ImageBuilder, ImageSource, IntoImage, MountBuilder,
-    MountOptions, NamedVolumeMode, OciRootfsSource, Patch, PatchBuilder, RootDisk, RootDiskBuilder,
-    RootfsSource, SecurityProfile, StatVirtualization, VolumeMount,
+    MountOptions, NamedVolumeMode, OciRootfsLayout, OciRootfsSource, Patch, PatchBuilder, RootDisk,
+    RootDiskBuilder, RootfsSource, SecurityProfile, StatVirtualization, VolumeMount,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -532,6 +533,7 @@ pub(crate) async fn create_local(
     // Resolve OCI images before spawning the sandbox process.
     if let RootfsSource::Oci(oci) = config.spec.image.clone() {
         let reference = oci.reference;
+        let rootfs_layout = oci.layout;
         let expected_snapshot_manifest_digest = config
             .snapshot_upper_source
             .as_ref()
@@ -598,6 +600,45 @@ pub(crate) async fn create_local(
             .map(|d| cache.layer_erofs_path(d))
             .collect();
 
+        let flat_blob_path = if rootfs_layout == types::OciRootfsLayout::Flat {
+            if config.snapshot_upper_source.is_some() {
+                return Err(crate::MicrosandboxError::InvalidConfig(
+                    "from_snapshot is not yet compatible with flat OCI rootfs".into(),
+                ));
+            }
+            if !config.spec.patches.is_empty() {
+                return Err(crate::MicrosandboxError::InvalidConfig(
+                    "patches are not yet compatible with flat OCI rootfs".into(),
+                ));
+            }
+            if !matches!(root_disk, types::RootDisk::Managed { .. }) {
+                return Err(crate::MicrosandboxError::InvalidConfig(
+                    "flat OCI rootfs currently requires a managed root disk".into(),
+                ));
+            }
+
+            // Flat materialization consumes the same validated EROFS layers as
+            // layered mode, then publishes one immutable ext4 cache artifact.
+            let registry =
+                Registry::builder(microsandbox_image::Platform::host_linux(), cache.clone())
+                    .build()?;
+            let flat_ref = registry
+                .materialize_flat_rootfs(
+                    &pull_result.manifest_digest,
+                    &pull_result.layer_diff_ids,
+                    false,
+                )
+                .await?;
+            let artifact_digest: Digest = flat_ref.artifact_digest.parse().map_err(|error| {
+                crate::MicrosandboxError::Custom(format!(
+                    "invalid flat rootfs artifact digest in cache: {error}"
+                ))
+            })?;
+            Some(cache.flat_blob_path(&artifact_digest))
+        } else {
+            None
+        };
+
         let upper_tree = if !config.spec.patches.is_empty() {
             Some(patch::build_upper_tree(&config.spec.patches, &layer_erofs_paths).await?)
         } else {
@@ -607,7 +648,20 @@ pub(crate) async fn create_local(
         // Materialize the writable layer per root disk kind.
         tokio::fs::create_dir_all(&sandbox_dir).await?;
         let upper_path = sandbox_dir.join("upper.ext4");
-        if let Some(snap_upper) = config.snapshot_upper_source.take() {
+        if let Some(base) = flat_blob_path {
+            let target_mib = match root_disk {
+                types::RootDisk::Managed { size_mib } => {
+                    size_mib.unwrap_or(config::DEFAULT_OCI_UPPER_SIZE_MIB)
+                }
+                _ => unreachable!("flat rootfs kind validated above"),
+            };
+            flat_rootfs::create_private_flat_rootfs(
+                base,
+                sandbox_dir.join(flat_rootfs::FLAT_ROOTFS_FILENAME),
+                target_mib,
+            )
+            .await?;
+        } else if let Some(snap_upper) = config.snapshot_upper_source.take() {
             // Booting from a snapshot: copy the captured upper into
             // place, preserving sparseness. Patches are not
             // compatible with this path because they'd need to be
@@ -3864,6 +3918,7 @@ mod tests {
             "pinned",
             RootfsSource::Oci(OciRootfsSource {
                 reference: "docker.io/library/alpine".into(),
+                layout: Default::default(),
                 root_disk: None,
             }),
         );
@@ -3908,6 +3963,7 @@ mod tests {
             "recreated",
             RootfsSource::Oci(OciRootfsSource {
                 reference: "docker.io/library/alpine".into(),
+                layout: Default::default(),
                 root_disk: None,
             }),
         );
@@ -3951,6 +4007,7 @@ mod tests {
             "persisted-digest",
             RootfsSource::Oci(OciRootfsSource {
                 reference: "docker.io/library/alpine".into(),
+                layout: Default::default(),
                 root_disk: None,
             }),
         );
@@ -4240,6 +4297,7 @@ mod tests {
             "persisted",
             RootfsSource::Oci(OciRootfsSource {
                 reference: "docker.io/library/alpine".into(),
+                layout: Default::default(),
                 root_disk: None,
             }),
         );

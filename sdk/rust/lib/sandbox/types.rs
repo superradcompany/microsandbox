@@ -870,6 +870,23 @@ impl ImageBuilder {
         self
     }
 
+    /// Materialize the OCI image as one writable ext4 root disk.
+    ///
+    /// Flat layout is opt-in and valid only after [`oci`](Self::oci).
+    pub fn flat(mut self) -> Self {
+        match &mut self.source {
+            Some(RootfsSource::Oci(oci)) => oci.layout = OciRootfsLayout::Flat,
+            _ => {
+                if self.error.is_none() {
+                    self.error = Some(crate::MicrosandboxError::InvalidConfig(
+                        "flat() requires oci() to be called first".into(),
+                    ));
+                }
+            }
+        }
+        self
+    }
+
     /// Set a managed root disk of the given size for an OCI rootfs.
     ///
     /// Sugar for `root_disk_with(|d| d.size(size))`. Valid only after
@@ -1750,6 +1767,26 @@ mod tests {
     }
 
     #[test]
+    fn test_image_builder_selects_flat_oci_layout() {
+        let rootfs = ImageBuilder::new()
+            .oci("python:3.12")
+            .flat()
+            .build()
+            .unwrap();
+
+        match rootfs {
+            RootfsSource::Oci(oci) => assert_eq!(oci.layout, OciRootfsLayout::Flat),
+            _ => panic!("expected Oci"),
+        }
+    }
+
+    #[test]
+    fn test_image_builder_flat_requires_oci() {
+        let error = ImageBuilder::new().flat().build().unwrap_err();
+        assert!(error.to_string().contains("flat() requires oci()"));
+    }
+
+    #[test]
     fn test_image_builder_oci_with_deprecated_upper_size_alias() {
         #[allow(deprecated)]
         let rootfs = ImageBuilder::new()
@@ -1950,6 +1987,6 @@ mod tests {
 
 pub use microsandbox_types::{
     DiskImageFormat, HostPermissions, MountOptions, NamedVolumeCreate, NamedVolumeMode,
-    OciRootfsSource, Patch, RootDisk, RootfsSource, SecurityProfile, StatVirtualization,
-    VolumeKind, VolumeMount,
+    OciRootfsLayout, OciRootfsSource, Patch, RootDisk, RootfsSource, SecurityProfile,
+    StatVirtualization, VolumeKind, VolumeMount,
 };

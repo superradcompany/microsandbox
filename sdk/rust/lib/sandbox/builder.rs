@@ -142,6 +142,31 @@ impl SandboxBuilder {
         self
     }
 
+    /// Select how an OCI image is presented as the guest root filesystem.
+    ///
+    /// [`OciRootfsLayout::Layered`](super::types::OciRootfsLayout::Layered) is the default.
+    /// Flat layout uses one private writable ext4 disk and avoids guest OverlayFS.
+    pub fn rootfs_layout(mut self, layout: super::types::OciRootfsLayout) -> Self {
+        match &mut self.config.spec.image {
+            RootfsSource::Oci(oci) if !oci.reference.is_empty() => oci.layout = layout,
+            RootfsSource::Oci(_) => {
+                if self.build_error.is_none() {
+                    self.build_error = Some(crate::MicrosandboxError::InvalidConfig(
+                        "rootfs_layout() requires an OCI image to be set first".into(),
+                    ));
+                }
+            }
+            _ => {
+                if self.build_error.is_none() {
+                    self.build_error = Some(crate::MicrosandboxError::InvalidConfig(
+                        "rootfs_layout() is only valid for OCI images".into(),
+                    ));
+                }
+            }
+        }
+        self
+    }
+
     /// Set a managed root disk of the given size for an OCI rootfs.
     ///
     /// Sugar for `root_disk_with(|d| d.size(size))`.
@@ -1120,6 +1145,26 @@ impl SandboxBuilder {
             }
             RootfsSource::Oci(oci) => {
                 self.validate_root_disk(oci.root_disk.as_ref())?;
+                if oci.layout == super::types::OciRootfsLayout::Flat {
+                    if !matches!(
+                        oci.root_disk,
+                        None | Some(super::types::RootDisk::Managed { .. })
+                    ) {
+                        return Err(crate::MicrosandboxError::InvalidConfig(
+                            "flat OCI rootfs currently requires a managed root disk".into(),
+                        ));
+                    }
+                    if !self.config.spec.patches.is_empty() {
+                        return Err(crate::MicrosandboxError::InvalidConfig(
+                            "patches are not yet compatible with flat OCI rootfs".into(),
+                        ));
+                    }
+                    if self.config.snapshot_upper_source.is_some() {
+                        return Err(crate::MicrosandboxError::InvalidConfig(
+                            "from_snapshot is not yet compatible with flat OCI rootfs".into(),
+                        ));
+                    }
+                }
             }
             RootfsSource::DiskImage { .. } if !self.config.spec.patches.is_empty() => {
                 return Err(crate::MicrosandboxError::InvalidConfig(
@@ -1470,6 +1515,33 @@ mod tests {
             }
             other => panic!("expected Oci, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_builder_selects_flat_rootfs_layout() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .rootfs_layout(crate::sandbox::OciRootfsLayout::Flat)
+            .build()
+            .await
+            .unwrap();
+
+        let super::RootfsSource::Oci(oci) = config.spec.image else {
+            panic!("expected Oci");
+        };
+        assert_eq!(oci.layout, crate::sandbox::OciRootfsLayout::Flat);
+    }
+
+    #[tokio::test]
+    async fn test_builder_flat_rootfs_rejects_tmpfs_root_disk() {
+        let error = SandboxBuilder::new("test")
+            .image_with(|image| image.oci("alpine").flat())
+            .root_disk_with(|disk| disk.tmpfs())
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("requires a managed root disk"));
     }
 
     #[tokio::test]

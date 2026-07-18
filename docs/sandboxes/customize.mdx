@@ -6,6 +6,50 @@ icon: "wand-magic-sparkles"
 
 Before a sandbox starts doing real work, you can prepare it three ways. **Scripts** bundle reusable commands. **Patches** modify the rootfs before the VM boots. A **custom init system** (systemd, OpenRC, s6) can run as PID 1 instead of microsandbox's minimal agent. All three are defined at creation time and keep the base image untouched.
 
+## Flat OCI rootfs
+
+OCI sandboxes use the layered EROFS plus OverlayFS layout by default. Flat layout is an explicit alternative that materializes the merged image into one ext4 base, creates a private sparse or reflink clone for the sandbox, grows that clone to the requested root-disk capacity, and mounts it directly without guest OverlayFS.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::Sandbox;
+
+let sb = Sandbox::builder("worker")
+    .image_with(|image| image.oci("python:3.12").flat().root_disk(8192))
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("worker")
+    .image("python:3.12")
+    .rootfsLayout("flat")
+    .rootDisk(8192)
+    .create();
+```
+
+```python Python
+from microsandbox import Image, RootDisk, Sandbox
+
+sb = await Sandbox.create(
+    "worker",
+    image=Image.oci("python:3.12", layout="flat", root_disk=RootDisk.managed(8192)),
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python:3.12"),
+    m.WithRootfsLayout(m.RootfsLayoutFlat),
+    m.WithRootDisk(m.RootDisk.Managed(8192)),
+)
+```
+</CodeGroup>
+
+The first flat version supports managed root disks. Rootfs patches, tmpfs or user-supplied root disks, snapshots, and cloud execution are rejected. Layered remains the default for compatibility.
+
 ## Scripts
 
 Scripts are files mounted at `/.msb/scripts/` inside the sandbox. The directory is on `PATH`, so each script is callable by name through `exec()` or `shell()`.

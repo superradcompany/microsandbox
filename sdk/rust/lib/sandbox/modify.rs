@@ -32,9 +32,9 @@ const LIVE_EXEC_DEFAULT_UPDATE_UNAVAILABLE: &str =
 const LIVE_LABEL_UPDATE_UNAVAILABLE: &str =
     "live label updates are not available in this runtime yet";
 const UPPER_LIVE_RESIZE_UNAVAILABLE: &str =
-    "the mounted upper filesystem cannot be resized while the sandbox is running";
+    "the mounted root disk cannot be resized while the sandbox is running";
 const UPPER_GROWS_ON_NEXT_START: &str =
-    "the upper.ext4 file grows during the next start's pre-boot preparation";
+    "the managed root disk grows during the next start's pre-boot preparation";
 const FUTURE_EXECS_ONLY: &str =
     "applies to future execs only; running processes keep their current environment";
 #[cfg(not(feature = "net"))]
@@ -374,14 +374,13 @@ impl SandboxModificationBuilder {
                 }
             }
         }
-        // Grow the real upper.ext4 before persisting the new desired size:
-        // the persisted value may only ever claim capacity the file actually
-        // has. A running sandbox under `--next-start` keeps its mounted upper
-        // untouched; the pre-boot preparation step grows it on the next start.
+        // Grow the real layered upper or flat root disk before persisting the
+        // new desired size. A running sandbox under `--next-start` keeps its
+        // mounted filesystem untouched until pre-boot preparation.
         if let Some(target_mib) = root_disk_grow_target(&plan, &self.patch, &config)
             && (stopped_status(status) || restart_required)
         {
-            grow_upper_now(&self.backend, &self.name, target_mib).await?;
+            grow_root_disk_now(&self.backend, &self.name, &config, target_mib).await?;
         }
         if !plan.changes.is_empty() {
             apply_patch_to_config(&mut config, &self.patch);
@@ -562,12 +561,11 @@ fn root_disk_grow_target(
     }
 }
 
-/// Grow the sandbox's canonical `upper.ext4` to `target_mib`. Callers only
-/// invoke this while the sandbox is stopped; the caller persists the new
-/// desired size after this succeeds.
-async fn grow_upper_now(
+/// Grow the sandbox-owned layered upper or flat root disk while it is stopped.
+async fn grow_root_disk_now(
     backend: &Arc<dyn Backend>,
     name: &str,
+    config: &SandboxConfig,
     target_mib: u32,
 ) -> MicrosandboxResult<()> {
     let local_backend =
@@ -577,8 +575,18 @@ async fn grow_upper_now(
                 feature: "oci upper grow on cloud".into(),
                 available_when: "when cloud modify lands".into(),
             })?;
-    let upper_path = local_backend.sandboxes_dir().join(name).join("upper.ext4");
-    super::upper::grow_upper_to_mib(upper_path, target_mib).await
+    let sandbox_dir = local_backend.sandboxes_dir().join(name);
+    if matches!(
+        &config.spec.image,
+        RootfsSource::Oci(oci) if oci.layout == microsandbox_types::OciRootfsLayout::Flat
+    ) {
+        return super::flat_rootfs::grow_private_flat_rootfs(
+            sandbox_dir.join(super::flat_rootfs::FLAT_ROOTFS_FILENAME),
+            target_mib,
+        )
+        .await;
+    }
+    super::upper::grow_upper_to_mib(sandbox_dir.join("upper.ext4"), target_mib).await
 }
 
 /// Path of the sandbox's host-side runtime control socket.
@@ -2565,6 +2573,7 @@ mod tests {
         let mut config = config(2, 1024);
         config.spec.image = RootfsSource::Oci(microsandbox_types::OciRootfsSource {
             reference: "python".to_string(),
+            layout: Default::default(),
             root_disk: Some(RootDisk::managed(upper_mib)),
         });
         config
@@ -2574,6 +2583,7 @@ mod tests {
         let mut config = config(2, 1024);
         config.spec.image = RootfsSource::Oci(microsandbox_types::OciRootfsSource {
             reference: "python".to_string(),
+            layout: Default::default(),
             root_disk: Some(root_disk),
         });
         config

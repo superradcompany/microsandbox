@@ -17,6 +17,8 @@ type SandboxConfig struct {
 	Image       string
 	ImageFstype string
 	ImageBind   string
+	// RootfsLayout selects layered (default) or flat for an OCI image.
+	RootfsLayout RootfsLayout
 	// RootDisk configures the writable rootfs layer for an OCI image.
 	// Construct via the RootDisk factory and set with WithRootDisk.
 	RootDisk *RootDiskConfig
@@ -148,6 +150,7 @@ func (c *SandboxConfig) UnmarshalJSON(data []byte) error {
 		Name:            raw.Name,
 		Image:           image,
 		ImageFstype:     imageFstype,
+		RootfsLayout:    decodePersistedRootfsLayout(raw.Image),
 		RootDisk:        rootDisk,
 		OCIUpperSizeMiB: upperSizeMiB,
 		ociUpperSizeSet: upperSizeSet,
@@ -174,6 +177,24 @@ func (c *SandboxConfig) UnmarshalJSON(data []byte) error {
 		IdleTimeout:     time.Duration(raw.lifecycleIdleTimeoutSecs()) * time.Second,
 	}
 	return nil
+}
+
+func decodePersistedRootfsLayout(raw json.RawMessage) RootfsLayout {
+	var tagged map[string]json.RawMessage
+	if json.Unmarshal(raw, &tagged) != nil {
+		return ""
+	}
+	value, ok := tagged["Oci"]
+	if !ok {
+		return ""
+	}
+	var source struct {
+		Layout RootfsLayout `json:"layout"`
+	}
+	if json.Unmarshal(value, &source) != nil || source.Layout == "" {
+		return RootfsLayoutLayered
+	}
+	return source.Layout
 }
 
 func (c persistedSandboxConfig) cpus() uint8 {
@@ -362,6 +383,12 @@ const (
 // WithImage sets the container image to use (e.g. "python:3.12").
 func WithImage(image string) SandboxOption {
 	return func(o *SandboxConfig) { o.Image = image }
+}
+
+// WithRootfsLayout selects how an OCI image is presented to the guest.
+// The zero value and RootfsLayoutLayered preserve the current layered layout.
+func WithRootfsLayout(layout RootfsLayout) SandboxOption {
+	return func(o *SandboxConfig) { o.RootfsLayout = layout }
 }
 
 // RootDiskConfig describes the writable rootfs layer (root disk) of an OCI

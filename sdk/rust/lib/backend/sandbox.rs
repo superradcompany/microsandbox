@@ -1182,6 +1182,12 @@ pub(super) fn cloud_create_request_from_config(
     // Cloud only supports OCI rootfs; reject the local-only rootfs kinds before
     // handing the spec to the control plane. Borrow so the spec isn't moved.
     match &config.spec.image {
+        RootfsSource::Oci(oci) if oci.layout == microsandbox_types::OciRootfsLayout::Flat => {
+            return Err(unsupported(
+                "flat OCI rootfs",
+                "when cloud flat-rootfs support lands",
+            ));
+        }
         RootfsSource::Oci(_) => {}
         RootfsSource::Bind { .. } => {
             return Err(unsupported(
@@ -1310,6 +1316,7 @@ mod tests {
                 name: "agent-1".into(),
                 image: RootfsSource::Oci(OciRootfsSource {
                     reference: "python:3.12".into(),
+                    layout: Default::default(),
                     root_disk: None,
                 }),
                 ..Default::default()
@@ -1322,6 +1329,18 @@ mod tests {
     fn cloud_create_request_rejects_replace_existing() {
         let mut config = base_cloud_config();
         config.replace_existing = true;
+        let err = cloud_create_request_from_config(config).unwrap_err();
+        assert!(matches!(err, MicrosandboxError::Unsupported { .. }));
+    }
+
+    #[test]
+    fn cloud_create_request_rejects_flat_rootfs() {
+        let mut config = base_cloud_config();
+        let RootfsSource::Oci(oci) = &mut config.spec.image else {
+            unreachable!();
+        };
+        oci.layout = microsandbox_types::OciRootfsLayout::Flat;
+
         let err = cloud_create_request_from_config(config).unwrap_err();
         assert!(matches!(err, MicrosandboxError::Unsupported { .. }));
     }
@@ -1404,6 +1423,7 @@ mod tests {
             name: "agent-1".into(),
             image: RootfsSource::Oci(OciRootfsSource {
                 reference: "python:3.12".into(),
+                layout: Default::default(),
                 root_disk: None,
             }),
             env: vec![EnvVar::new("A", "B")],

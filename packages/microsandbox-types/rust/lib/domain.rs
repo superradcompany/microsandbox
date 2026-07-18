@@ -42,6 +42,20 @@ pub enum DiskImageFormat {
     Vmdk,
 }
 
+/// On-disk layout used to present an OCI image as a guest root filesystem.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "kebab-case")]
+pub enum OciRootfsLayout {
+    /// Preserve OCI layers as EROFS lowers under a writable OverlayFS upper.
+    #[default]
+    Layered,
+
+    /// Materialize the merged OCI filesystem into one private writable ext4 disk.
+    Flat,
+}
+
 /// Root filesystem source for a sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -61,7 +75,7 @@ pub enum RootfsSource {
         follow_root_symlinks: bool,
     },
 
-    /// Use an OCI image reference with an EROFS lower and ext4 overlay upper.
+    /// Use an OCI image reference with a selectable layered or flat filesystem layout.
     Oci(OciRootfsSource),
 
     /// Use a disk image file as the root filesystem via virtio-blk.
@@ -84,12 +98,16 @@ pub struct OciRootfsSource {
     /// OCI image reference (e.g. `python`).
     pub reference: String,
 
-    /// Writable rootfs layer backing. `None` resolves to a managed 4 GiB upper.
+    /// Filesystem layout presented to the guest. Defaults to [`OciRootfsLayout::Layered`].
+    #[serde(default, skip_serializing_if = "OciRootfsLayout::is_layered")]
+    pub layout: OciRootfsLayout,
+
+    /// Writable rootfs storage. `None` resolves to a managed 4 GiB disk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_disk: Option<RootDisk>,
 }
 
-/// Backing for the writable rootfs layer (overlay upper) of an OCI sandbox.
+/// Backing for writable OCI rootfs storage.
 ///
 /// This lives only on [`OciRootfsSource`]: the root disk is a property of how an OCI image
 /// becomes a rootfs. Every user surface (CLI `--root-disk`, SDK builders) is sugar resolving
@@ -99,7 +117,8 @@ pub struct OciRootfsSource {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum RootDisk {
-    /// Sparse ext4 created and owned by microsandbox in the sandbox dir. Default. Persistent;
+    /// Sparse ext4 created and owned by microsandbox in the sandbox dir. It is the OverlayFS
+    /// upper in layered mode and the complete private root disk in flat mode. Default. Persistent;
     /// grow-only via modify; deleted with the sandbox.
     Managed {
         /// Virtual size in MiB. `None` resolves to 4096.
@@ -896,8 +915,16 @@ impl OciRootfsSource {
     pub fn new(reference: impl Into<String>) -> Self {
         Self {
             reference: reference.into(),
+            layout: OciRootfsLayout::Layered,
             root_disk: None,
         }
+    }
+}
+
+impl OciRootfsLayout {
+    /// Whether this is the backwards-compatible layered layout.
+    pub fn is_layered(&self) -> bool {
+        matches!(self, Self::Layered)
     }
 }
 
@@ -2316,6 +2343,32 @@ fn empty_secret_value() -> Zeroizing<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oci_rootfs_layout_defaults_to_layered_for_old_payloads() {
+        let source: OciRootfsSource = serde_json::from_str(r#"{"reference":"alpine"}"#).unwrap();
+
+        assert_eq!(source.layout, OciRootfsLayout::Layered);
+        assert_eq!(
+            serde_json::to_value(source).unwrap(),
+            serde_json::json!({"reference": "alpine"})
+        );
+    }
+
+    #[test]
+    fn oci_rootfs_layout_persists_flat_selection() {
+        let source = OciRootfsSource {
+            reference: "alpine".into(),
+            layout: OciRootfsLayout::Flat,
+            root_disk: None,
+        };
+
+        let json = serde_json::to_string(&source).unwrap();
+        let decoded: OciRootfsSource = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.layout, OciRootfsLayout::Flat);
+        assert!(json.contains(r#""layout":"flat""#));
+    }
 
     #[test]
     fn disk_image_format_from_extension() {

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator, Awaitable, Mapping, Sequence
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 from microsandbox.types import (
     ImageSource,
@@ -555,6 +555,7 @@ class Image:
     def oci(
         reference: str,
         *,
+        layout: Literal["layered", "flat"] = "layered",
         root_disk: RootDiskConfig | dict | int | None = None,
         upper_size_mib: int | None = None,
     ) -> ImageSource: ...
