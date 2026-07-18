@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::{self, BufWriter, SeekFrom, Write};
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
@@ -13,8 +14,8 @@ use super::format::{
     EXT4_FEATURE_RO_COMPAT_HUGE_FILE, EXT4_FEATURE_RO_COMPAT_LARGE_FILE,
     EXT4_FEATURE_RO_COMPAT_METADATA_CSUM, EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER, EXT4_FIRST_INO,
     EXT4_INODE_SIZE, EXT4_INODES_PER_GROUP, EXT4_JOURNAL_INO, EXT4_LOG_BLOCK_SIZE,
-    EXT4_MIN_EXTRA_ISIZE, EXT4_ROOT_INO, EXT4_SUPER_MAGIC, JBD2_MAGIC, JBD2_SUPERBLOCK_V2, S_IFCHR,
-    S_IFDIR, S_IFLNK, S_IFREG,
+    EXT4_MIN_EXTRA_ISIZE, EXT4_ROOT_INO, EXT4_SUPER_MAGIC, JBD2_MAGIC, JBD2_SUPERBLOCK_V2, S_IFBLK,
+    S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFREG, S_IFSOCK,
 };
 use super::layout::{
     GroupDescStats, GroupGeometry, MAX_BLOCKS, RESERVED_GDT_BLOCKS, bitmap_checksum,
@@ -23,7 +24,10 @@ use super::layout::{
     write_backup_superblock_at, write_gdt_at,
 };
 use crate::crc32c;
-use crate::tree::{DirectoryNode, FileTree, TreeNode};
+use crate::path_bytes::os_str_bytes;
+use crate::tree::{
+    DirectoryNode, FileData, FileTree, InodeMetadata, RegularFileId, TreeNode, Xattr,
+};
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::HANDLE;
 #[cfg(windows)]
@@ -43,6 +47,12 @@ const DEFAULT_JOURNAL_BLOCKS: u32 = 16384;
 
 /// Maximum initialized extent length that fits in one ext4 extent record.
 const MAX_INITIALIZED_EXTENT_BLOCKS: u32 = 32768;
+const INLINE_EXTENT_CAPACITY: usize = 4;
+const EXTENT_BLOCK_CAPACITY: usize =
+    (EXT4_BLOCK_SIZE as usize - 12 - std::mem::size_of::<u32>()) / 12;
+const EXT4_XATTR_MAGIC: u32 = 0xEA02_0000;
+const EXT4_XATTR_HEADER_SIZE: usize = 32;
+const EXT4_XATTR_ENTRY_SIZE: usize = 16;
 
 /// ext4 directory entry file type: directory.
 const EXT4_FT_DIR: u8 = 2;
@@ -53,6 +63,15 @@ const EXT4_FT_REG_FILE: u8 = 1;
 
 /// ext4 directory entry file type: character device.
 const EXT4_FT_CHRDEV: u8 = 3;
+
+/// ext4 directory entry file type: block device.
+const EXT4_FT_BLKDEV: u8 = 4;
+
+/// ext4 directory entry file type: FIFO.
+const EXT4_FT_FIFO: u8 = 5;
+
+/// ext4 directory entry file type: socket.
+const EXT4_FT_SOCK: u8 = 6;
 
 /// ext4 directory entry file type: symbolic link.
 const EXT4_FT_SYMLINK: u8 = 7;
@@ -123,8 +142,6 @@ struct Layout {
     gdt_blocks: u32,
     /// Blocks reserved after the GDT for future offline growth.
     reserved_gdt_blocks: u32,
-    /// First block of the inode table in group 0.
-    inode_table_block: u64,
     /// Number of blocks occupied by the inode table in group 0.
     inode_table_blocks: u32,
     /// First data block after inode table (root dir block).
@@ -157,30 +174,63 @@ struct FsStats {
 struct BitmapPlan {
     block_extents: Vec<(u64, u32)>,
     max_used_inode: u32,
-    dir_count: u32,
+    group_used_dirs: Vec<u32>,
 }
 
 enum NodeKind {
-    Directory { children: u16, data: Vec<u8> },
-    RegularFile { data: Vec<u8> },
+    Directory { data: Vec<u8> },
+    RegularFile { data: FileData },
     Symlink { target: Vec<u8>, inline: bool },
     CharDevice { major: u32, minor: u32 },
+    BlockDevice { major: u32, minor: u32 },
+    Fifo,
+    Socket,
 }
 
 struct NodePlan {
     inode: u32,
     path: String,
-    permissions: u16,
-    uid: u16,
-    gid: u16,
+    metadata: InodeMetadata,
+    links_count: u32,
     kind: NodeKind,
-    block_start: Option<u64>,
     block_count: u32,
+    data_extents: Vec<AllocatedExtent>,
+    extent_tree_block: Option<u64>,
+    xattrs: Vec<Xattr>,
+    inline_xattrs: Option<Vec<u8>>,
+    xattr_block: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AllocatedExtent {
+    logical_block: u32,
+    physical_start: u64,
+    block_count: u32,
+}
+
+#[derive(Clone, Copy)]
+enum TreeEncodingMode {
+    Upper,
+    Rootfs,
 }
 
 struct DraftDirectory {
     children: u16,
     data: Vec<u8>,
+    xattrs: Vec<Xattr>,
+}
+
+struct DraftContext<'a> {
+    next_inode: &'a mut u32,
+    plans: &'a mut Vec<NodePlan>,
+    hardlinks: &'a mut HashMap<RegularFileId, (u32, usize)>,
+    encoding_mode: TreeEncodingMode,
+}
+
+struct EncodedXattr<'a> {
+    name_index: u8,
+    name: &'a [u8],
+    value: &'a [u8],
 }
 
 struct DirEntrySpec {
@@ -258,10 +308,20 @@ impl Layout {
         Self::compute_with_root_blocks(opts, 1, RESERVED_GDT_BLOCKS)
     }
 
+    #[cfg(test)]
     fn compute_with_root_blocks(
         opts: &Ext4FormatOptions,
         root_dir_blocks: u32,
         reserved_gdt_blocks: u32,
+    ) -> Result<Self, Ext4Error> {
+        Self::compute_with_root_blocks_and_uuid(opts, root_dir_blocks, reserved_gdt_blocks, None)
+    }
+
+    fn compute_with_root_blocks_and_uuid(
+        opts: &Ext4FormatOptions,
+        root_dir_blocks: u32,
+        reserved_gdt_blocks: u32,
+        uuid: Option<[u8; 16]>,
     ) -> Result<Self, Ext4Error> {
         let block_size = EXT4_BLOCK_SIZE as u64;
         if !opts.size_bytes.is_multiple_of(block_size) {
@@ -319,8 +379,9 @@ impl Layout {
             return Err(Ext4Error::TooSmall);
         }
 
-        // Generate a random UUID
-        let uuid = Self::generate_uuid();
+        // Ephemeral uppers retain random identity while shared rootfs artifacts provide a stable
+        // UUID derived from their complete materialization inputs.
+        let uuid = uuid.unwrap_or_else(Self::generate_uuid);
 
         let csum_seed = crc32c::crc32c_raw(0xFFFF_FFFF, &uuid);
 
@@ -345,7 +406,6 @@ impl Layout {
             uuid,
             gdt_blocks,
             reserved_gdt_blocks,
-            inode_table_block,
             inode_table_blocks,
             first_data_block,
             journal_start_block,
@@ -405,6 +465,10 @@ impl Layout {
 
     fn group_inode_bitmap_block(&self, group: u32) -> u64 {
         self.geometry().group_inode_bitmap_block(group)
+    }
+
+    fn group_inode_table_block(&self, group: u32) -> u64 {
+        self.geometry().group_inode_table_block(group)
     }
 
     fn group_data_start_block(&self, group: u32) -> u64 {
@@ -488,10 +552,14 @@ impl BitmapPlan {
         block_extents.push((layout.journal_start_block, layout.journal_blocks));
 
         for plan in plans {
-            if let Some(start) = plan.block_start
-                && plan.block_count > 0
-            {
-                block_extents.push((start, plan.block_count));
+            for extent in &plan.data_extents {
+                block_extents.push((extent.physical_start, extent.block_count));
+            }
+            if let Some(block) = plan.extent_tree_block {
+                block_extents.push((block, 1));
+            }
+            if let Some(block) = plan.xattr_block {
+                block_extents.push((block, 1));
             }
         }
 
@@ -501,15 +569,19 @@ impl BitmapPlan {
             .max()
             .unwrap_or(EXT4_JOURNAL_INO)
             .max(EXT4_FIRST_INO - 1);
-        let dir_count = plans
+        let mut group_used_dirs = vec![0u32; layout.num_groups as usize];
+        for plan in plans
             .iter()
             .filter(|plan| matches!(plan.kind, NodeKind::Directory { .. }))
-            .count() as u32;
+        {
+            let group = (plan.inode - 1) / EXT4_INODES_PER_GROUP;
+            group_used_dirs[group as usize] += 1;
+        }
 
         Self {
             block_extents,
             max_used_inode,
-            dir_count,
+            group_used_dirs,
         }
     }
 }
@@ -553,21 +625,83 @@ fn format_ext4_with_tree_and_reserved(
     tree: FileTree,
     reserved_gdt_blocks: u32,
 ) -> Result<(), Ext4Error> {
+    format_ext4_with_tree_and_reserved_uuid(
+        path,
+        options,
+        tree,
+        reserved_gdt_blocks,
+        None,
+        TreeEncodingMode::Upper,
+    )
+}
+
+pub(super) fn format_ext4_rootfs_with_tree_and_uuid(
+    path: &Path,
+    options: &Ext4FormatOptions,
+    tree: FileTree,
+    uuid: [u8; 16],
+) -> Result<(), Ext4Error> {
+    format_ext4_with_tree_and_reserved_uuid(
+        path,
+        options,
+        tree,
+        RESERVED_GDT_BLOCKS,
+        Some(uuid),
+        TreeEncodingMode::Rootfs,
+    )
+}
+
+fn format_ext4_with_tree_and_reserved_uuid(
+    path: &Path,
+    options: &Ext4FormatOptions,
+    tree: FileTree,
+    reserved_gdt_blocks: u32,
+    uuid: Option<[u8; 16]>,
+    encoding_mode: TreeEncodingMode,
+) -> Result<(), Ext4Error> {
     let mut next_inode = EXT4_FIRST_INO;
     let mut plans = Vec::new();
-    let root_mode = tree.root.metadata.mode;
+    let root_metadata = planned_metadata(&tree.root.metadata, true, encoding_mode);
+    let mut hardlinks = HashMap::new();
     let root_draft = draft_directory(
         "/",
         tree.root,
         EXT4_ROOT_INO,
         EXT4_ROOT_INO,
-        &mut next_inode,
-        &mut plans,
+        &mut DraftContext {
+            next_inode: &mut next_inode,
+            plans: &mut plans,
+            hardlinks: &mut hardlinks,
+            encoding_mode,
+        },
     )?;
     let root_dir_blocks = blocks_for_len(root_draft.data.len());
-    let layout =
-        Layout::compute_with_root_blocks(options, root_dir_blocks.max(1), reserved_gdt_blocks)?;
+    let layout = Layout::compute_with_root_blocks_and_uuid(
+        options,
+        root_dir_blocks.max(1),
+        reserved_gdt_blocks,
+        uuid,
+    )?;
+    let max_inode = next_inode.saturating_sub(1);
+    let available_inodes = layout.num_groups.saturating_mul(EXT4_INODES_PER_GROUP);
+    if max_inode > available_inodes {
+        return Err(Ext4Error::Layout(format!(
+            "rootfs needs inode {max_inode}, but the filesystem geometry provides only {available_inodes} inodes"
+        )));
+    }
     let mut allocator = DataAllocator::new(&layout);
+    let root_data_extents = split_physical_range(layout.first_data_block, root_dir_blocks.max(1));
+    let root_extent_tree_block = if root_data_extents.len() > INLINE_EXTENT_CAPACITY {
+        Some(allocator.allocate_block("/")?)
+    } else {
+        None
+    };
+    let root_inline_xattrs = build_inline_xattrs(&root_draft.xattrs, "/")?;
+    let root_xattr_block = if root_draft.xattrs.is_empty() || root_inline_xattrs.is_some() {
+        None
+    } else {
+        Some(allocator.allocate_block("/")?)
+    };
 
     for plan in &mut plans {
         allocate_node_data(&mut allocator, plan)?;
@@ -577,15 +711,17 @@ fn format_ext4_with_tree_and_reserved(
     all_plans.push(NodePlan {
         inode: EXT4_ROOT_INO,
         path: "/".to_string(),
-        permissions: normalize_dir_permissions(root_mode),
-        uid: 0,
-        gid: 0,
+        metadata: root_metadata,
+        links_count: 2 + u32::from(root_draft.children),
         kind: NodeKind::Directory {
-            children: root_draft.children,
             data: root_draft.data,
         },
-        block_start: Some(layout.first_data_block),
         block_count: root_dir_blocks.max(1),
+        data_extents: root_data_extents,
+        extent_tree_block: root_extent_tree_block,
+        xattrs: root_draft.xattrs,
+        inline_xattrs: root_inline_xattrs,
+        xattr_block: root_xattr_block,
     });
     all_plans.extend(plans);
     all_plans.sort_by_key(|plan| plan.inode);
@@ -657,54 +793,67 @@ fn draft_directory(
     dir: DirectoryNode,
     inode: u32,
     parent_inode: u32,
-    next_inode: &mut u32,
-    plans: &mut Vec<NodePlan>,
+    context: &mut DraftContext<'_>,
 ) -> Result<DraftDirectory, Ext4Error> {
-    if !dir.xattrs.is_empty() {
-        return Err(Ext4Error::Layout(format!(
-            "ext4 patch baking does not yet support xattrs on '{path}'"
-        )));
-    }
+    let DirectoryNode {
+        entries, xattrs, ..
+    } = dir;
 
     let mut children = Vec::new();
     let mut child_dir_count = 0u16;
 
-    for (name, node) in dir.entries {
-        let name_bytes = name.as_os_str().as_encoded_bytes().to_vec();
+    for (name, node) in entries {
+        let name_bytes = os_str_bytes(name.as_os_str()).to_vec();
         let child_path = child_path(path, &name_bytes);
-        let child_inode = *next_inode;
-        if child_inode >= EXT4_INODES_PER_GROUP {
-            return Err(Ext4Error::Layout(
-                "too many upper-layer inodes for group 0 inode table".to_string(),
-            ));
+
+        // A hardlink alias adds another directory entry to the existing inode. It must not consume
+        // a new inode or duplicate the file's data blocks.
+        if let TreeNode::RegularFile(file) = &node
+            && let Some((inode, plan_index)) = context.hardlinks.get(&file.id).copied()
+        {
+            let plan = &mut context.plans[plan_index];
+            if !hardlink_matches_plan(plan, file, context.encoding_mode) {
+                return Err(Ext4Error::Layout(format!(
+                    "hardlink alias '{child_path}' conflicts with the metadata or content of inode {inode}"
+                )));
+            }
+            plan.links_count = plan.links_count.checked_add(1).ok_or_else(|| {
+                Ext4Error::Layout(format!("too many hardlinks for '{child_path}'"))
+            })?;
+            children.push(DirEntrySpec {
+                inode,
+                file_type: EXT4_FT_REG_FILE,
+                name: name_bytes,
+            });
+            continue;
         }
-        *next_inode += 1;
+
+        let child_inode = *context.next_inode;
+        *context.next_inode = child_inode.checked_add(1).ok_or_else(|| {
+            Ext4Error::Layout("rootfs inode numbering overflowed u32".to_string())
+        })?;
 
         match node {
             TreeNode::Directory(child_dir) => {
                 child_dir_count = child_dir_count.saturating_add(1);
-                let dir_mode = child_dir.metadata.mode;
-                let child_draft = draft_directory(
-                    &child_path,
-                    child_dir,
-                    child_inode,
-                    inode,
-                    next_inode,
-                    plans,
-                )?;
+                let metadata = planned_metadata(&child_dir.metadata, true, context.encoding_mode);
+                let child_draft =
+                    draft_directory(&child_path, child_dir, child_inode, inode, context)?;
                 let block_count = blocks_for_len(child_draft.data.len());
-                plans.push(NodePlan {
+                context.plans.push(NodePlan {
                     inode: child_inode,
                     path: child_path.clone(),
-                    permissions: normalize_dir_permissions(dir_mode),
-                    uid: 0,
-                    gid: 0,
+                    metadata,
+                    links_count: 2 + u32::from(child_draft.children),
                     kind: NodeKind::Directory {
-                        children: child_draft.children,
                         data: child_draft.data,
                     },
-                    block_start: None,
                     block_count,
+                    data_extents: Vec::new(),
+                    extent_tree_block: None,
+                    xattrs: child_draft.xattrs,
+                    inline_xattrs: None,
+                    xattr_block: None,
                 });
                 children.push(DirEntrySpec {
                     inode: child_inode,
@@ -713,23 +862,22 @@ fn draft_directory(
                 });
             }
             TreeNode::RegularFile(file) => {
-                if !file.xattrs.is_empty() {
-                    return Err(Ext4Error::Layout(format!(
-                        "ext4 patch baking does not yet support xattrs on '{child_path}'"
-                    )));
-                }
-                plans.push(NodePlan {
+                let plan_index = context.plans.len();
+                let file_id = file.id;
+                context.plans.push(NodePlan {
                     inode: child_inode,
                     path: child_path.clone(),
-                    permissions: normalize_file_permissions(file.metadata.mode),
-                    uid: 0,
-                    gid: 0,
+                    metadata: planned_metadata(&file.metadata, false, context.encoding_mode),
+                    links_count: 1,
                     block_count: blocks_for_len(file.data.len()),
-                    kind: NodeKind::RegularFile {
-                        data: file.data.read_all().map_err(Ext4Error::Io)?,
-                    },
-                    block_start: None,
+                    kind: NodeKind::RegularFile { data: file.data },
+                    data_extents: Vec::new(),
+                    extent_tree_block: None,
+                    xattrs: file.xattrs,
+                    inline_xattrs: None,
+                    xattr_block: None,
                 });
+                context.hardlinks.insert(file_id, (child_inode, plan_index));
                 children.push(DirEntrySpec {
                     inode: child_inode,
                     file_type: EXT4_FT_REG_FILE,
@@ -744,18 +892,21 @@ fn draft_directory(
                 } else {
                     blocks_for_len(target_len)
                 };
-                plans.push(NodePlan {
+                context.plans.push(NodePlan {
                     inode: child_inode,
                     path: child_path.clone(),
-                    permissions: 0o777,
-                    uid: 0,
-                    gid: 0,
+                    metadata: planned_metadata(&symlink.metadata, false, context.encoding_mode),
+                    links_count: 1,
                     kind: NodeKind::Symlink {
                         target: symlink.target,
                         inline,
                     },
-                    block_start: None,
                     block_count,
+                    data_extents: Vec::new(),
+                    extent_tree_block: None,
+                    xattrs: Vec::new(),
+                    inline_xattrs: None,
+                    xattr_block: None,
                 });
                 children.push(DirEntrySpec {
                     inode: child_inode,
@@ -764,18 +915,21 @@ fn draft_directory(
                 });
             }
             TreeNode::CharDevice(device) => {
-                plans.push(NodePlan {
+                context.plans.push(NodePlan {
                     inode: child_inode,
                     path: child_path.clone(),
-                    permissions: 0,
-                    uid: 0,
-                    gid: 0,
+                    metadata: planned_metadata(&device.metadata, false, context.encoding_mode),
+                    links_count: 1,
                     kind: NodeKind::CharDevice {
                         major: device.major,
                         minor: device.minor,
                     },
-                    block_start: None,
                     block_count: 0,
+                    data_extents: Vec::new(),
+                    extent_tree_block: None,
+                    xattrs: Vec::new(),
+                    inline_xattrs: None,
+                    xattr_block: None,
                 });
                 children.push(DirEntrySpec {
                     inode: child_inode,
@@ -783,10 +937,68 @@ fn draft_directory(
                     name: name_bytes,
                 });
             }
-            _ => {
-                return Err(Ext4Error::Layout(format!(
-                    "unsupported upper-layer node at '{child_path}'"
-                )));
+            TreeNode::BlockDevice(device) => {
+                context.plans.push(NodePlan {
+                    inode: child_inode,
+                    path: child_path.clone(),
+                    metadata: planned_metadata(&device.metadata, false, context.encoding_mode),
+                    links_count: 1,
+                    kind: NodeKind::BlockDevice {
+                        major: device.major,
+                        minor: device.minor,
+                    },
+                    block_count: 0,
+                    data_extents: Vec::new(),
+                    extent_tree_block: None,
+                    xattrs: Vec::new(),
+                    inline_xattrs: None,
+                    xattr_block: None,
+                });
+                children.push(DirEntrySpec {
+                    inode: child_inode,
+                    file_type: EXT4_FT_BLKDEV,
+                    name: name_bytes,
+                });
+            }
+            TreeNode::Fifo(metadata) => {
+                context.plans.push(NodePlan {
+                    inode: child_inode,
+                    path: child_path.clone(),
+                    metadata: planned_metadata(&metadata, false, context.encoding_mode),
+                    links_count: 1,
+                    kind: NodeKind::Fifo,
+                    block_count: 0,
+                    data_extents: Vec::new(),
+                    extent_tree_block: None,
+                    xattrs: Vec::new(),
+                    inline_xattrs: None,
+                    xattr_block: None,
+                });
+                children.push(DirEntrySpec {
+                    inode: child_inode,
+                    file_type: EXT4_FT_FIFO,
+                    name: name_bytes,
+                });
+            }
+            TreeNode::Socket(metadata) => {
+                context.plans.push(NodePlan {
+                    inode: child_inode,
+                    path: child_path.clone(),
+                    metadata: planned_metadata(&metadata, false, context.encoding_mode),
+                    links_count: 1,
+                    kind: NodeKind::Socket,
+                    block_count: 0,
+                    data_extents: Vec::new(),
+                    extent_tree_block: None,
+                    xattrs: Vec::new(),
+                    inline_xattrs: None,
+                    xattr_block: None,
+                });
+                children.push(DirEntrySpec {
+                    inode: child_inode,
+                    file_type: EXT4_FT_SOCK,
+                    name: name_bytes,
+                });
             }
         }
     }
@@ -795,7 +1007,35 @@ fn draft_directory(
     Ok(DraftDirectory {
         children: child_dir_count,
         data,
+        xattrs,
     })
+}
+
+fn planned_metadata(
+    metadata: &InodeMetadata,
+    directory: bool,
+    encoding_mode: TreeEncodingMode,
+) -> InodeMetadata {
+    match encoding_mode {
+        TreeEncodingMode::Upper => InodeMetadata {
+            uid: 0,
+            gid: 0,
+            mode: if directory {
+                normalize_dir_permissions(metadata.mode)
+            } else {
+                normalize_file_permissions(metadata.mode)
+            },
+            mtime: 0,
+            mtime_nsec: 0,
+        },
+        TreeEncodingMode::Rootfs => InodeMetadata {
+            uid: metadata.uid,
+            gid: metadata.gid,
+            mode: metadata.mode & 0o7777,
+            mtime: metadata.mtime,
+            mtime_nsec: metadata.mtime_nsec,
+        },
+    }
 }
 
 fn child_path(parent: &str, name: &[u8]) -> String {
@@ -810,6 +1050,61 @@ fn child_path(parent: &str, name: &[u8]) -> String {
 fn normalize_file_permissions(mode: u16) -> u16 {
     let perms = mode & 0o7777;
     if perms == 0 { 0o644 } else { perms }
+}
+
+fn hardlink_matches_plan(
+    plan: &NodePlan,
+    file: &crate::tree::RegularFileNode,
+    encoding_mode: TreeEncodingMode,
+) -> bool {
+    let metadata = &plan.metadata;
+    let candidate = planned_metadata(&file.metadata, false, encoding_mode);
+    let metadata_matches = metadata.uid == candidate.uid
+        && metadata.gid == candidate.gid
+        && metadata.mode == candidate.mode
+        && metadata.mtime == candidate.mtime
+        && metadata.mtime_nsec == candidate.mtime_nsec;
+    let xattrs_match = plan.xattrs.len() == file.xattrs.len()
+        && plan.xattrs.iter().all(|left| {
+            file.xattrs
+                .iter()
+                .any(|right| left.name == right.name && left.value == right.value)
+        });
+    let data_matches = match (&plan.kind, &file.data) {
+        (NodeKind::RegularFile { data: left }, right) => same_file_data(left, right),
+        _ => false,
+    };
+    metadata_matches && xattrs_match && data_matches
+}
+
+fn same_file_data(left: &FileData, right: &FileData) -> bool {
+    match (left, right) {
+        (FileData::Memory(left), FileData::Memory(right)) => left == right,
+        (FileData::SharedMemory(left), FileData::SharedMemory(right)) => {
+            std::sync::Arc::ptr_eq(left, right) || left.as_ref() == right.as_ref()
+        }
+        (FileData::Memory(left), FileData::SharedMemory(right))
+        | (FileData::SharedMemory(right), FileData::Memory(left)) => {
+            left.as_slice() == right.as_ref()
+        }
+        (
+            FileData::Spool {
+                spool: left_spool,
+                offset: left_offset,
+                len: left_len,
+            },
+            FileData::Spool {
+                spool: right_spool,
+                offset: right_offset,
+                len: right_len,
+            },
+        ) => {
+            std::sync::Arc::ptr_eq(left_spool, right_spool)
+                && left_offset == right_offset
+                && left_len == right_len
+        }
+        _ => false,
+    }
 }
 
 fn normalize_dir_permissions(mode: u16) -> u16 {
@@ -827,7 +1122,16 @@ fn blocks_for_len(len: usize) -> u32 {
 
 fn validate_node_extents(plans: &[NodePlan]) -> Result<(), Ext4Error> {
     for plan in plans {
-        validate_extent_block_count(plan.block_count, &plan.path)?;
+        if plan.data_extents.len() > EXTENT_BLOCK_CAPACITY {
+            return Err(Ext4Error::Layout(format!(
+                "'{}' needs {} extents, but a depth-one ext4 extent tree holds at most {EXTENT_BLOCK_CAPACITY}",
+                plan.path,
+                plan.data_extents.len()
+            )));
+        }
+        for extent in &plan.data_extents {
+            validate_extent_block_count(extent.block_count, &plan.path)?;
+        }
     }
 
     Ok(())
@@ -841,6 +1145,25 @@ fn validate_extent_block_count(block_count: u32, label: &str) -> Result<(), Ext4
     }
 
     Ok(())
+}
+
+fn split_physical_range(start: u64, blocks: u32) -> Vec<AllocatedExtent> {
+    let mut extents = Vec::new();
+    let mut remaining = blocks;
+    let mut logical_block = 0u32;
+    let mut physical_start = start;
+    while remaining > 0 {
+        let block_count = remaining.min(MAX_INITIALIZED_EXTENT_BLOCKS);
+        extents.push(AllocatedExtent {
+            logical_block,
+            physical_start,
+            block_count,
+        });
+        logical_block += block_count;
+        physical_start += u64::from(block_count);
+        remaining -= block_count;
+    }
+    extents
 }
 
 fn build_directory_data(
@@ -941,12 +1264,19 @@ fn dir_entry_len(name_len: usize) -> usize {
 }
 
 fn allocate_node_data(allocator: &mut DataAllocator, plan: &mut NodePlan) -> Result<(), Ext4Error> {
-    if plan.block_count == 0 {
-        plan.block_start = None;
-        return Ok(());
+    if plan.block_count > 0 {
+        plan.data_extents = allocator.allocate_extents(plan.block_count, &plan.path)?;
+        if plan.data_extents.len() > INLINE_EXTENT_CAPACITY {
+            plan.extent_tree_block = Some(allocator.allocate_block(&plan.path)?);
+        }
     }
 
-    plan.block_start = allocator.allocate(plan.block_count, &plan.path)?;
+    if !plan.xattrs.is_empty() {
+        plan.inline_xattrs = build_inline_xattrs(&plan.xattrs, &plan.path)?;
+        if plan.inline_xattrs.is_none() {
+            plan.xattr_block = Some(allocator.allocate_block(&plan.path)?);
+        }
+    }
     Ok(())
 }
 
@@ -964,23 +1294,45 @@ impl DataAllocator {
         Self { regions }
     }
 
-    fn allocate(&mut self, blocks: u32, path: &str) -> Result<Option<u64>, Ext4Error> {
-        if blocks == 0 {
-            return Ok(None);
-        }
+    fn allocate_extents(
+        &mut self,
+        blocks: u32,
+        path: &str,
+    ) -> Result<Vec<AllocatedExtent>, Ext4Error> {
+        let mut extents = Vec::new();
+        let mut remaining = blocks;
+        let mut logical_block = 0u32;
 
         for region in &mut self.regions {
-            if region.1 >= blocks {
-                let start = region.0;
-                region.0 += blocks as u64;
-                region.1 -= blocks;
-                return Ok(Some(start));
+            while remaining > 0 && region.1 > 0 {
+                let block_count = remaining.min(region.1).min(MAX_INITIALIZED_EXTENT_BLOCKS);
+                extents.push(AllocatedExtent {
+                    logical_block,
+                    physical_start: region.0,
+                    block_count,
+                });
+                region.0 += u64::from(block_count);
+                region.1 -= block_count;
+                remaining -= block_count;
+                logical_block += block_count;
+            }
+            if remaining == 0 {
+                return Ok(extents);
             }
         }
 
         Err(Ext4Error::Layout(format!(
-            "not enough space in upper.ext4 for '{path}'"
+            "not enough space in ext4 image for '{path}'"
         )))
+    }
+
+    fn allocate_block(&mut self, path: &str) -> Result<u64, Ext4Error> {
+        self.allocate_extents(1, path)?
+            .first()
+            .map(|extent| extent.physical_start)
+            .ok_or_else(|| {
+                Ext4Error::Layout(format!("could not allocate extent tree for '{path}'"))
+            })
     }
 }
 
@@ -1006,7 +1358,14 @@ fn build_block_bitmap_for_plan(layout: &Layout, plan: &BitmapPlan, group: u32) -
 }
 
 fn build_inode_bitmap_for_plan(_layout: &Layout, plan: &BitmapPlan, group: u32) -> Vec<u8> {
-    build_inode_bitmap_base(if group == 0 { plan.max_used_inode } else { 0 })
+    let first_inode = group * EXT4_INODES_PER_GROUP + 1;
+    let last_inode = first_inode + EXT4_INODES_PER_GROUP - 1;
+    let used_inodes = if plan.max_used_inode < first_inode {
+        0
+    } else {
+        plan.max_used_inode.min(last_inode) - first_inode + 1
+    };
+    build_inode_bitmap_base(used_inodes)
 }
 
 fn compute_fs_stats(layout: &Layout, plan: &BitmapPlan) -> FsStats {
@@ -1037,12 +1396,21 @@ fn compute_fs_stats(layout: &Layout, plan: &BitmapPlan) -> FsStats {
         total_used_blocks += used as u64;
     }
 
-    let mut group_free_inodes = vec![EXT4_INODES_PER_GROUP; layout.num_groups as usize];
-    group_free_inodes[0] = EXT4_INODES_PER_GROUP - plan.max_used_inode;
+    let group_free_inodes = (0..layout.num_groups)
+        .map(|group| {
+            let first_inode = group * EXT4_INODES_PER_GROUP + 1;
+            let last_inode = first_inode + EXT4_INODES_PER_GROUP - 1;
+            let used_inodes = if plan.max_used_inode < first_inode {
+                0
+            } else {
+                plan.max_used_inode.min(last_inode) - first_inode + 1
+            };
+            EXT4_INODES_PER_GROUP - used_inodes
+        })
+        .collect::<Vec<_>>();
     let total_free_inodes = group_free_inodes.iter().map(|count| *count as u64).sum();
 
-    let mut group_used_dirs = vec![0u32; layout.num_groups as usize];
-    group_used_dirs[0] = plan.dir_count;
+    let group_used_dirs = plan.group_used_dirs.clone();
 
     FsStats {
         group_free_blocks,
@@ -1064,25 +1432,89 @@ fn write_tree_data(
     for plan in plans {
         match &plan.kind {
             NodeKind::Directory { data, .. } => {
-                let start = plan.block_start.unwrap_or(layout.first_data_block);
                 let mut bytes = data.clone();
                 update_dir_block_checksums(layout.csum_seed, plan.inode, &mut bytes);
-                write_extent_bytes(file, start, &bytes)?;
+                write_bytes_to_extents(file, &plan.data_extents, &bytes)?;
             }
             NodeKind::RegularFile { data } => {
-                if let Some(start) = plan.block_start {
-                    write_extent_bytes(file, start, data)?;
-                }
+                write_file_data(file, &plan.data_extents, data)?;
             }
             NodeKind::Symlink { target, inline } => {
-                if !inline && let Some(start) = plan.block_start {
-                    write_extent_bytes(file, start, target)?;
+                if !inline {
+                    write_bytes_to_extents(file, &plan.data_extents, target)?;
                 }
             }
-            NodeKind::CharDevice { .. } => {}
+            NodeKind::CharDevice { .. }
+            | NodeKind::BlockDevice { .. }
+            | NodeKind::Fifo
+            | NodeKind::Socket => {}
+        }
+
+        if let Some(block) = plan.extent_tree_block {
+            let bytes = build_extent_leaf_block(layout, plan)?;
+            write_extent_bytes(file, block, &bytes)?;
+        }
+        if let Some(block) = plan.xattr_block {
+            let bytes = build_xattr_block(layout, block, &plan.xattrs, &plan.path)?;
+            write_extent_bytes(file, block, &bytes)?;
         }
     }
 
+    Ok(())
+}
+
+fn write_file_data(
+    file: &mut (impl std::io::Write + std::io::Seek),
+    extents: &[AllocatedExtent],
+    data: &FileData,
+) -> Result<(), Ext4Error> {
+    let mut data_offset = 0usize;
+    for extent in extents {
+        let remaining = data.len().saturating_sub(data_offset);
+        let extent_bytes = extent.block_count as usize * EXT4_BLOCK_SIZE as usize;
+        let write_len = remaining.min(extent_bytes);
+        file.seek(SeekFrom::Start(
+            extent.physical_start * EXT4_BLOCK_SIZE as u64,
+        ))?;
+        data.write_range(data_offset, write_len, file)?;
+        write_zero_padding(file, extent_bytes - write_len)?;
+        data_offset += write_len;
+    }
+
+    debug_assert_eq!(data_offset, data.len());
+
+    Ok(())
+}
+
+fn write_bytes_to_extents(
+    file: &mut (impl std::io::Write + std::io::Seek),
+    extents: &[AllocatedExtent],
+    data: &[u8],
+) -> Result<(), Ext4Error> {
+    let mut data_offset = 0usize;
+    for extent in extents {
+        let remaining = data.len().saturating_sub(data_offset);
+        let extent_bytes = extent.block_count as usize * EXT4_BLOCK_SIZE as usize;
+        let write_len = remaining.min(extent_bytes);
+        file.seek(SeekFrom::Start(
+            extent.physical_start * EXT4_BLOCK_SIZE as u64,
+        ))?;
+        file.write_all(&data[data_offset..data_offset + write_len])?;
+        write_zero_padding(file, extent_bytes - write_len)?;
+        data_offset += write_len;
+    }
+
+    debug_assert_eq!(data_offset, data.len());
+    Ok(())
+}
+
+fn write_zero_padding(file: &mut impl std::io::Write, mut len: usize) -> Result<(), Ext4Error> {
+    static ZEROS: [u8; EXT4_BLOCK_SIZE as usize] = [0u8; EXT4_BLOCK_SIZE as usize];
+    while len > 0 {
+        let chunk = len.min(ZEROS.len());
+        file.write_all(&ZEROS[..chunk])?;
+        len -= chunk;
+    }
     Ok(())
 }
 
@@ -1118,86 +1550,167 @@ fn write_inode_table_with_plan(
     layout: &Layout,
     plans: &[NodePlan],
 ) -> Result<(), Ext4Error> {
-    let table_offset = layout.inode_table_block * EXT4_BLOCK_SIZE as u64;
-
     let root_inode = build_inode_from_plan(layout, &plans[0])?;
-    let root_offset = table_offset + (EXT4_ROOT_INO as u64 - 1) * EXT4_INODE_SIZE as u64;
+    let root_offset = inode_offset(layout, EXT4_ROOT_INO);
     file.seek(SeekFrom::Start(root_offset))?;
     file.write_all(&root_inode)?;
 
     let journal_inode = build_journal_inode(layout)?;
-    let journal_offset = table_offset + (EXT4_JOURNAL_INO as u64 - 1) * EXT4_INODE_SIZE as u64;
+    let journal_offset = inode_offset(layout, EXT4_JOURNAL_INO);
     file.seek(SeekFrom::Start(journal_offset))?;
     file.write_all(&journal_inode)?;
 
     for plan in plans.iter().filter(|plan| plan.inode >= EXT4_FIRST_INO) {
         let inode_bytes = build_inode_from_plan(layout, plan)?;
-        let inode_offset = table_offset + (plan.inode as u64 - 1) * EXT4_INODE_SIZE as u64;
-        file.seek(SeekFrom::Start(inode_offset))?;
+        file.seek(SeekFrom::Start(inode_offset(layout, plan.inode)))?;
         file.write_all(&inode_bytes)?;
     }
 
     Ok(())
 }
 
+fn inode_offset(layout: &Layout, inode: u32) -> u64 {
+    let zero_based = inode - 1;
+    let group = zero_based / EXT4_INODES_PER_GROUP;
+    let index = zero_based % EXT4_INODES_PER_GROUP;
+    layout.group_inode_table_block(group) * EXT4_BLOCK_SIZE as u64
+        + u64::from(index) * EXT4_INODE_SIZE as u64
+}
+
 fn build_inode_from_plan(layout: &Layout, plan: &NodePlan) -> Result<Vec<u8>, Ext4Error> {
     let mut inode = vec![0u8; EXT4_INODE_SIZE as usize];
     let (mode, size, links_count, extents) = match &plan.kind {
-        NodeKind::Directory { children, data } => (
-            S_IFDIR | normalize_dir_permissions(plan.permissions),
+        NodeKind::Directory { data, .. } => (
+            S_IFDIR | plan.metadata.mode,
             data.len() as u64,
-            2 + *children,
+            plan.links_count,
             true,
         ),
         NodeKind::RegularFile { data } => (
-            S_IFREG | normalize_file_permissions(plan.permissions),
+            S_IFREG | plan.metadata.mode,
             data.len() as u64,
-            1,
+            plan.links_count,
             true,
         ),
-        NodeKind::Symlink { target, inline } => (S_IFLNK | 0o777, target.len() as u64, 1, !inline),
-        NodeKind::CharDevice { .. } => (S_IFCHR | plan.permissions, 0, 1, false),
+        NodeKind::Symlink { target, inline } => (
+            S_IFLNK | plan.metadata.mode,
+            target.len() as u64,
+            plan.links_count,
+            !inline,
+        ),
+        NodeKind::CharDevice { .. } => (S_IFCHR | plan.metadata.mode, 0, plan.links_count, false),
+        NodeKind::BlockDevice { .. } => (S_IFBLK | plan.metadata.mode, 0, plan.links_count, false),
+        NodeKind::Fifo => (S_IFIFO | plan.metadata.mode, 0, plan.links_count, false),
+        NodeKind::Socket => (S_IFSOCK | plan.metadata.mode, 0, plan.links_count, false),
     };
 
     put_le16(&mut inode, 0x00, mode);
-    put_le16(&mut inode, 0x02, plan.uid);
+    put_le16(&mut inode, 0x02, plan.metadata.uid as u16);
     put_le32(&mut inode, 0x04, size as u32);
-    put_le16(&mut inode, 0x18, plan.gid);
-    put_le16(&mut inode, 0x1A, links_count);
-    put_le32(&mut inode, 0x1C, plan.block_count * (EXT4_BLOCK_SIZE / 512));
+    write_inode_time(&mut inode, 0x08, 0x8c, &plan.metadata)?;
+    write_inode_time(&mut inode, 0x0c, 0x84, &plan.metadata)?;
+    write_inode_time(&mut inode, 0x10, 0x88, &plan.metadata)?;
+    put_le16(&mut inode, 0x18, plan.metadata.gid as u16);
+    put_le16(
+        &mut inode,
+        0x1A,
+        u16::try_from(links_count).map_err(|_| {
+            Ext4Error::Layout(format!(
+                "link count exceeds ext4 inode field for '{}'",
+                plan.path
+            ))
+        })?,
+    );
+    let allocated_blocks = plan.block_count
+        + u32::from(plan.extent_tree_block.is_some())
+        + u32::from(plan.xattr_block.is_some());
+    put_le32(&mut inode, 0x1C, allocated_blocks * (EXT4_BLOCK_SIZE / 512));
     if extents {
         put_le32(&mut inode, 0x20, EXT4_EXTENTS_FL);
     }
 
     match &plan.kind {
         NodeKind::Directory { .. } | NodeKind::RegularFile { .. } => {
-            if let Some(start) = plan.block_start {
-                write_extent_tree(&mut inode, 0x28, start, plan.block_count, &plan.path)?;
-            } else {
-                write_empty_extent_tree(&mut inode, 0x28);
-            }
+            write_extent_plan(&mut inode, 0x28, plan)?;
         }
         NodeKind::Symlink { target, inline } => {
             if *inline {
                 inode[0x28..0x28 + target.len()].copy_from_slice(target);
-            } else if let Some(start) = plan.block_start {
-                write_extent_tree(&mut inode, 0x28, start, plan.block_count, &plan.path)?;
+            } else {
+                write_extent_plan(&mut inode, 0x28, plan)?;
             }
         }
-        NodeKind::CharDevice { major, minor } => {
-            put_le32(&mut inode, 0x28, (*minor & 0xFF) | (major << 8));
+        NodeKind::CharDevice { major, minor } | NodeKind::BlockDevice { major, minor } => {
+            write_device_number(&mut inode, *major, *minor, &plan.path)?;
         }
+        NodeKind::Fifo | NodeKind::Socket => {}
     }
 
     put_le32(&mut inode, 0x64, 0);
+    if let Some(block) = plan.xattr_block {
+        put_le32(&mut inode, 0x68, block as u32);
+        put_le16(&mut inode, 0x76, (block >> 32) as u16);
+    }
     put_le32(&mut inode, 0x6C, (size >> 32) as u32);
+    put_le16(&mut inode, 0x78, (plan.metadata.uid >> 16) as u16);
+    put_le16(&mut inode, 0x7A, (plan.metadata.gid >> 16) as u16);
     put_le16(&mut inode, 0x80, EXT4_MIN_EXTRA_ISIZE);
+    write_inode_time(&mut inode, 0x90, 0x94, &plan.metadata)?;
+    if let Some(xattrs) = &plan.inline_xattrs {
+        inode[0xA0..0xA0 + xattrs.len()].copy_from_slice(xattrs);
+    }
 
     let csum = inode_checksum(layout.csum_seed, plan.inode, 0, &inode);
     put_le16(&mut inode, 0x7C, csum as u16);
     put_le16(&mut inode, 0x82, (csum >> 16) as u16);
 
     Ok(inode)
+}
+
+fn write_inode_time(
+    inode: &mut [u8],
+    seconds_offset: usize,
+    extra_offset: usize,
+    metadata: &InodeMetadata,
+) -> Result<(), Ext4Error> {
+    if metadata.mtime_nsec >= 1_000_000_000 {
+        return Err(Ext4Error::Layout(format!(
+            "inode timestamp nanoseconds are out of range: {}",
+            metadata.mtime_nsec
+        )));
+    }
+    if metadata.mtime > 0x3_ffff_ffff {
+        return Err(Ext4Error::Layout(format!(
+            "inode timestamp seconds exceed ext4 epoch range: {}",
+            metadata.mtime
+        )));
+    }
+
+    put_le32(inode, seconds_offset, metadata.mtime as u32);
+    let epoch = ((metadata.mtime >> 32) & 0x3) as u32;
+    put_le32(inode, extra_offset, (metadata.mtime_nsec << 2) | epoch);
+    Ok(())
+}
+
+fn write_device_number(
+    inode: &mut [u8],
+    major: u32,
+    minor: u32,
+    path: &str,
+) -> Result<(), Ext4Error> {
+    if major > 0x0fff || minor > 0x0f_ffff {
+        return Err(Ext4Error::Layout(format!(
+            "device number is out of Linux ext4 range for '{path}': {major}:{minor}"
+        )));
+    }
+
+    if major < 256 && minor < 256 {
+        put_le32(inode, 0x28, (major << 8) | minor);
+    } else {
+        let encoded = (minor & 0xff) | (major << 8) | ((minor & !0xff) << 12);
+        put_le32(inode, 0x2c, encoded);
+    }
+    Ok(())
 }
 
 fn write_empty_extent_tree(buf: &mut [u8], offset: usize) {
@@ -1414,6 +1927,257 @@ fn write_extent_tree(
     put_le16(buf, ext_off + 6, (start_block >> 32) as u16); // ee_start_hi
     put_le32(buf, ext_off + 8, start_block as u32); // ee_start_lo
 
+    Ok(())
+}
+
+fn write_extent_plan(buf: &mut [u8], offset: usize, plan: &NodePlan) -> Result<(), Ext4Error> {
+    if plan.data_extents.is_empty() {
+        write_empty_extent_tree(buf, offset);
+        return Ok(());
+    }
+
+    if plan.data_extents.len() <= INLINE_EXTENT_CAPACITY {
+        write_extent_header(
+            buf,
+            offset,
+            plan.data_extents.len() as u16,
+            INLINE_EXTENT_CAPACITY as u16,
+            0,
+        );
+        for (index, extent) in plan.data_extents.iter().enumerate() {
+            write_extent_entry(buf, offset + 12 + index * 12, extent, &plan.path)?;
+        }
+        return Ok(());
+    }
+
+    let leaf = plan.extent_tree_block.ok_or_else(|| {
+        Ext4Error::Layout(format!("missing extent-tree block for '{}'", plan.path))
+    })?;
+    write_extent_header(buf, offset, 1, INLINE_EXTENT_CAPACITY as u16, 1);
+    let index_offset = offset + 12;
+    put_le32(buf, index_offset, plan.data_extents[0].logical_block);
+    put_le32(buf, index_offset + 4, leaf as u32);
+    put_le16(buf, index_offset + 8, (leaf >> 32) as u16);
+    put_le16(buf, index_offset + 10, 0);
+    Ok(())
+}
+
+fn build_extent_leaf_block(layout: &Layout, plan: &NodePlan) -> Result<Vec<u8>, Ext4Error> {
+    if plan.data_extents.len() > EXTENT_BLOCK_CAPACITY {
+        return Err(Ext4Error::Layout(format!(
+            "'{}' exceeds the depth-one extent-tree capacity",
+            plan.path
+        )));
+    }
+
+    let mut block = vec![0u8; EXT4_BLOCK_SIZE as usize];
+    write_extent_header(
+        &mut block,
+        0,
+        plan.data_extents.len() as u16,
+        EXTENT_BLOCK_CAPACITY as u16,
+        0,
+    );
+    for (index, extent) in plan.data_extents.iter().enumerate() {
+        write_extent_entry(&mut block, 12 + index * 12, extent, &plan.path)?;
+    }
+
+    let tail = EXT4_BLOCK_SIZE as usize - std::mem::size_of::<u32>();
+    let checksum = dir_block_checksum(layout.csum_seed, plan.inode, 0, &block[..tail]);
+    put_le32(&mut block, tail, checksum);
+    Ok(block)
+}
+
+fn build_xattr_block(
+    layout: &Layout,
+    block_number: u64,
+    xattrs: &[Xattr],
+    path: &str,
+) -> Result<Vec<u8>, Ext4Error> {
+    let encoded = encode_xattrs(xattrs, path)?;
+
+    let mut block = vec![0u8; EXT4_BLOCK_SIZE as usize];
+    put_le32(&mut block, 0, EXT4_XATTR_MAGIC);
+    put_le32(&mut block, 4, 1);
+    put_le32(&mut block, 8, 1);
+
+    let mut entry_offset = EXT4_XATTR_HEADER_SIZE;
+    let mut value_offset = EXT4_BLOCK_SIZE as usize;
+    let mut block_hash = 0u32;
+    for xattr in encoded {
+        let entry_len = align_four(EXT4_XATTR_ENTRY_SIZE + xattr.name.len());
+        let padded_value_len = align_four(xattr.value.len());
+        value_offset = value_offset.checked_sub(padded_value_len).ok_or_else(|| {
+            Ext4Error::Layout(format!(
+                "extended attributes on '{path}' exceed an ext4 block"
+            ))
+        })?;
+        if entry_offset + entry_len + 4 > value_offset {
+            return Err(Ext4Error::Layout(format!(
+                "extended attributes on '{path}' do not fit in one ext4 xattr block"
+            )));
+        }
+
+        block[value_offset..value_offset + xattr.value.len()].copy_from_slice(xattr.value);
+        let entry_hash = xattr_entry_hash(
+            xattr.name,
+            &block[value_offset..value_offset + padded_value_len],
+        );
+        block[entry_offset] = xattr.name.len() as u8;
+        block[entry_offset + 1] = xattr.name_index;
+        put_le16(&mut block, entry_offset + 2, value_offset as u16);
+        put_le32(&mut block, entry_offset + 4, 0);
+        put_le32(&mut block, entry_offset + 8, xattr.value.len() as u32);
+        put_le32(&mut block, entry_offset + 12, entry_hash);
+        block[entry_offset + 16..entry_offset + 16 + xattr.name.len()].copy_from_slice(xattr.name);
+        entry_offset += entry_len;
+        block_hash = block_hash.rotate_left(16) ^ entry_hash;
+    }
+
+    put_le32(&mut block, 12, block_hash);
+    let checksum = xattr_block_checksum(layout.csum_seed, block_number, &block);
+    put_le32(&mut block, 16, checksum);
+    Ok(block)
+}
+
+fn build_inline_xattrs(xattrs: &[Xattr], path: &str) -> Result<Option<Vec<u8>>, Ext4Error> {
+    if xattrs.is_empty() {
+        return Ok(None);
+    }
+
+    let encoded = encode_xattrs(xattrs, path)?;
+    let mut bytes = vec![0u8; EXT4_INODE_SIZE as usize - 0xA0];
+    put_le32(&mut bytes, 0, EXT4_XATTR_MAGIC);
+    let first_entry = 4usize;
+    let mut entry_offset = first_entry;
+    let mut value_offset = bytes.len();
+    for xattr in encoded {
+        let entry_len = align_four(EXT4_XATTR_ENTRY_SIZE + xattr.name.len());
+        let padded_value_len = align_four(xattr.value.len());
+        let Some(next_value_offset) = value_offset.checked_sub(padded_value_len) else {
+            return Ok(None);
+        };
+        if entry_offset + entry_len + 4 > next_value_offset {
+            return Ok(None);
+        }
+        value_offset = next_value_offset;
+        bytes[value_offset..value_offset + xattr.value.len()].copy_from_slice(xattr.value);
+        bytes[entry_offset] = xattr.name.len() as u8;
+        bytes[entry_offset + 1] = xattr.name_index;
+        put_le16(
+            &mut bytes,
+            entry_offset + 2,
+            (value_offset - first_entry) as u16,
+        );
+        put_le32(&mut bytes, entry_offset + 4, 0);
+        put_le32(&mut bytes, entry_offset + 8, xattr.value.len() as u32);
+        put_le32(&mut bytes, entry_offset + 12, 0);
+        bytes[entry_offset + 16..entry_offset + 16 + xattr.name.len()].copy_from_slice(xattr.name);
+        entry_offset += entry_len;
+    }
+
+    Ok(Some(bytes))
+}
+
+fn encode_xattrs<'a>(xattrs: &'a [Xattr], path: &str) -> Result<Vec<EncodedXattr<'a>>, Ext4Error> {
+    let mut encoded = xattrs
+        .iter()
+        .map(|xattr| encode_xattr_name(xattr, path))
+        .collect::<Result<Vec<_>, _>>()?;
+    encoded.sort_by(|left, right| {
+        (left.name_index, left.name.len(), left.name).cmp(&(
+            right.name_index,
+            right.name.len(),
+            right.name,
+        ))
+    });
+    if encoded
+        .windows(2)
+        .any(|pair| pair[0].name_index == pair[1].name_index && pair[0].name == pair[1].name)
+    {
+        return Err(Ext4Error::Layout(format!(
+            "duplicate extended attribute on '{path}'"
+        )));
+    }
+    Ok(encoded)
+}
+
+fn encode_xattr_name<'a>(xattr: &'a Xattr, path: &str) -> Result<EncodedXattr<'a>, Ext4Error> {
+    if xattr.name.is_empty() || xattr.name.len() > 255 || xattr.name.contains(&0) {
+        return Err(Ext4Error::Layout(format!(
+            "invalid extended-attribute name on '{path}'"
+        )));
+    }
+
+    let (name_index, name) = if xattr.name.as_slice() == b"system.posix_acl_access" {
+        (2, &[][..])
+    } else if xattr.name.as_slice() == b"system.posix_acl_default" {
+        (3, &[][..])
+    } else if let Some(name) = xattr.name.strip_prefix(b"user.") {
+        (1, name)
+    } else if let Some(name) = xattr.name.strip_prefix(b"trusted.") {
+        (4, name)
+    } else if let Some(name) = xattr.name.strip_prefix(b"security.") {
+        (6, name)
+    } else {
+        return Err(Ext4Error::Layout(format!(
+            "unsupported extended-attribute namespace on '{path}'"
+        )));
+    };
+    if name.is_empty() && name_index != 2 && name_index != 3 {
+        return Err(Ext4Error::Layout(format!(
+            "extended-attribute namespace has an empty name on '{path}'"
+        )));
+    }
+
+    Ok(EncodedXattr {
+        name_index,
+        name,
+        value: &xattr.value,
+    })
+}
+
+fn xattr_entry_hash(name: &[u8], padded_value: &[u8]) -> u32 {
+    let mut hash = 0u32;
+    for byte in name {
+        hash = hash.rotate_left(5) ^ u32::from(*byte);
+    }
+    for word in padded_value.chunks_exact(4) {
+        hash = hash.rotate_left(16) ^ u32::from_le_bytes(word.try_into().unwrap());
+    }
+    hash
+}
+
+fn xattr_block_checksum(csum_seed: u32, block_number: u64, block: &[u8]) -> u32 {
+    let mut checksum = crc32c::crc32c_raw(csum_seed, &block_number.to_le_bytes());
+    checksum = crc32c::crc32c_raw(checksum, &block[..16]);
+    checksum = crc32c::crc32c_raw(checksum, &[0u8; 4]);
+    crc32c::crc32c_raw(checksum, &block[20..])
+}
+
+fn align_four(value: usize) -> usize {
+    (value + 3) & !3
+}
+
+fn write_extent_header(buf: &mut [u8], offset: usize, entries: u16, max: u16, depth: u16) {
+    put_le16(buf, offset, EXT4_EH_MAGIC);
+    put_le16(buf, offset + 2, entries);
+    put_le16(buf, offset + 4, max);
+    put_le16(buf, offset + 6, depth);
+    put_le32(buf, offset + 8, 0);
+}
+
+fn write_extent_entry(
+    buf: &mut [u8],
+    offset: usize,
+    extent: &AllocatedExtent,
+    label: &str,
+) -> Result<(), Ext4Error> {
+    validate_extent_block_count(extent.block_count, label)?;
+    put_le32(buf, offset, extent.logical_block);
+    put_le16(buf, offset + 4, extent.block_count as u16);
+    put_le16(buf, offset + 6, (extent.physical_start >> 32) as u16);
+    put_le32(buf, offset + 8, extent.physical_start as u32);
     Ok(())
 }
 
@@ -1828,6 +2592,145 @@ mod tests {
     }
 
     #[test]
+    fn test_inode_allocation_crosses_block_group_boundary() {
+        let opts = Ext4FormatOptions {
+            size_bytes: 256 * 1024 * 1024,
+            journal_blocks: 4096,
+        };
+        let layout = Layout::compute(&opts).unwrap();
+        let plan = BitmapPlan {
+            block_extents: Vec::new(),
+            max_used_inode: EXT4_INODES_PER_GROUP + 1,
+            group_used_dirs: vec![1, 0],
+        };
+
+        let first_bitmap = build_inode_bitmap_for_plan(&layout, &plan, 0);
+        let second_bitmap = build_inode_bitmap_for_plan(&layout, &plan, 1);
+        assert!(
+            first_bitmap[..(EXT4_INODES_PER_GROUP / 8) as usize]
+                .iter()
+                .all(|byte| *byte == 0xff)
+        );
+        assert_eq!(second_bitmap[0] & 0x01, 0x01);
+        assert_eq!(second_bitmap[0] & 0xfe, 0);
+
+        assert_eq!(
+            inode_offset(&layout, EXT4_INODES_PER_GROUP + 1),
+            layout.group_inode_table_block(1) * EXT4_BLOCK_SIZE as u64
+        );
+    }
+
+    #[test]
+    fn test_allocator_builds_depth_one_extent_tree_across_groups() {
+        let opts = Ext4FormatOptions {
+            size_bytes: 1024 * 1024 * 1024,
+            journal_blocks: 4096,
+        };
+        let layout = Layout::compute(&opts).unwrap();
+        let mut allocator = DataAllocator::new(&layout);
+        let block_count = 150_000;
+        let data_extents = allocator
+            .allocate_extents(block_count, "/large-layer")
+            .unwrap();
+        assert!(data_extents.len() > INLINE_EXTENT_CAPACITY);
+        assert_eq!(
+            data_extents
+                .iter()
+                .map(|extent| extent.block_count)
+                .sum::<u32>(),
+            block_count
+        );
+        for pair in data_extents.windows(2) {
+            assert_eq!(
+                pair[1].logical_block,
+                pair[0].logical_block + pair[0].block_count
+            );
+        }
+
+        let extent_tree_block = allocator.allocate_block("/large-layer").unwrap();
+        let plan = NodePlan {
+            inode: EXT4_FIRST_INO,
+            path: "/large-layer".to_string(),
+            metadata: InodeMetadata::default(),
+            links_count: 1,
+            kind: NodeKind::RegularFile {
+                data: FileData::Memory(Vec::new()),
+            },
+            block_count,
+            data_extents,
+            extent_tree_block: Some(extent_tree_block),
+            xattrs: Vec::new(),
+            inline_xattrs: None,
+            xattr_block: None,
+        };
+        let mut inode_block = [0u8; 60];
+        write_extent_plan(&mut inode_block, 0, &plan).unwrap();
+        assert_eq!(le_u16(&inode_block, 0), EXT4_EH_MAGIC);
+        assert_eq!(le_u16(&inode_block, 2), 1);
+        assert_eq!(le_u16(&inode_block, 6), 1);
+
+        let leaf = build_extent_leaf_block(&layout, &plan).unwrap();
+        assert_eq!(le_u16(&leaf, 0), EXT4_EH_MAGIC);
+        assert_eq!(le_u16(&leaf, 2) as usize, plan.data_extents.len());
+        assert_eq!(le_u16(&leaf, 6), 0);
+        let tail = EXT4_BLOCK_SIZE as usize - 4;
+        assert_eq!(
+            le_u32(&leaf, tail),
+            dir_block_checksum(layout.csum_seed, plan.inode, 0, &leaf[..tail])
+        );
+    }
+
+    #[test]
+    fn test_xattr_block_is_sorted_and_checksummed() {
+        let opts = Ext4FormatOptions {
+            size_bytes: 256 * 1024 * 1024,
+            journal_blocks: 4096,
+        };
+        let layout = Layout::compute(&opts).unwrap();
+        let block_number = layout.group_data_start_block(1);
+        let xattrs = vec![
+            Xattr {
+                name: b"security.capability".to_vec(),
+                value: (0u8..20).collect(),
+            },
+            Xattr {
+                name: b"user.owner".to_vec(),
+                value: b"microsandbox".to_vec(),
+            },
+        ];
+
+        let block = build_xattr_block(&layout, block_number, &xattrs, "/bin/tool").unwrap();
+        assert_eq!(le_u32(&block, 0), EXT4_XATTR_MAGIC);
+        assert_eq!(le_u32(&block, 4), 1);
+        assert_eq!(le_u32(&block, 8), 1);
+        assert_eq!(block[EXT4_XATTR_HEADER_SIZE + 1], 1);
+        let second_entry = EXT4_XATTR_HEADER_SIZE + align_four(EXT4_XATTR_ENTRY_SIZE + 5);
+        assert_eq!(block[second_entry + 1], 6);
+
+        let stored_checksum = le_u32(&block, 16);
+        let mut checksum_input = block.clone();
+        put_le32(&mut checksum_input, 16, 0);
+        assert_eq!(
+            stored_checksum,
+            xattr_block_checksum(layout.csum_seed, block_number, &checksum_input)
+        );
+    }
+
+    #[test]
+    fn test_small_xattr_is_encoded_in_inode_body() {
+        let xattrs = vec![Xattr {
+            name: b"security.capability".to_vec(),
+            value: (0u8..20).collect(),
+        }];
+
+        let bytes = build_inline_xattrs(&xattrs, "/bin/tool").unwrap().unwrap();
+        assert_eq!(le_u32(&bytes, 0), EXT4_XATTR_MAGIC);
+        assert_eq!(bytes[5], 6);
+        assert_eq!(&bytes[20..30], b"capability");
+        assert_eq!(le_u32(&bytes, 16), 0);
+    }
+
+    #[test]
     fn test_format_too_small() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tiny.ext4");
@@ -1957,7 +2860,7 @@ mod tests {
         let data = std::fs::read(&path).unwrap();
 
         // Root inode at inode_table_block * 4096 + (2-1)*256
-        let inode_offset = layout.inode_table_block as usize * EXT4_BLOCK_SIZE as usize
+        let inode_offset = layout.group_inode_table_block(0) as usize * EXT4_BLOCK_SIZE as usize
             + (EXT4_INODE_SIZE as usize);
         let mode = u16::from_le_bytes([data[inode_offset], data[inode_offset + 1]]);
         assert_eq!(mode, S_IFDIR | 0o755);
