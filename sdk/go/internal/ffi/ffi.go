@@ -1442,6 +1442,7 @@ type CreateOptions struct {
 	CPUs                 uint8                `json:"cpus,omitempty"`
 	MaxMemoryMiB         uint32               `json:"max_memory_mib,omitempty"`
 	MaxCPUs              uint8                `json:"max_cpus,omitempty"`
+	THP                  string               `json:"thp,omitempty"`
 	Workdir              string               `json:"workdir,omitempty"`
 	Shell                string               `json:"shell,omitempty"`
 	SecurityProfile      string               `json:"security_profile,omitempty"`

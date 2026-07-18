@@ -7,7 +7,7 @@ use napi_derive::napi;
 use microsandbox::sandbox::LogLevel as RustLogLevel;
 use microsandbox::sandbox::{
     PullPolicy as RustPullPolicy, Sandbox as RustSandbox, SandboxBuilder as RustSandboxBuilder,
-    SecurityProfile as RustSecurityProfile,
+    SecurityProfile as RustSecurityProfile, TransparentHugePagePolicy as RustThpPolicy,
 };
 use microsandbox::size::Mebibytes;
 
@@ -174,6 +174,24 @@ impl JsSandboxBuilder {
         let prev = self.take_inner();
         self.inner = Some(prev.max_memory(Mebibytes::from(mib)));
         self
+    }
+
+    /// Guest transparent huge-page policy selected at boot.
+    #[napi(ts_args_type = "policy: 'always' | 'madvise' | 'never'")]
+    pub fn thp(&mut self, policy: String) -> Result<&Self> {
+        let policy = match policy.as_str() {
+            "always" => RustThpPolicy::Always,
+            "madvise" => RustThpPolicy::Madvise,
+            "never" => RustThpPolicy::Never,
+            other => {
+                return Err(napi::Error::from_reason(format!(
+                    "invalid THP policy `{other}`; expected always, madvise, or never"
+                )));
+            }
+        };
+        let prev = self.take_inner();
+        self.inner = Some(prev.thp(policy));
+        Ok(self)
     }
 
     /// Override log verbosity: `"trace" | "debug" | "info" | "warn" | "error"`.

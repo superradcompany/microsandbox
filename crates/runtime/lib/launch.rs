@@ -12,6 +12,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use microsandbox_types::TransparentHugePagePolicy;
+
 #[cfg(feature = "net")]
 use microsandbox_network::config::NetworkConfig;
 
@@ -44,6 +46,10 @@ pub struct LaunchConfig {
 
     /// Path to the libkrunfw shared library.
     pub libkrunfw_path: PathBuf,
+
+    /// Guest transparent huge-page policy selected at boot.
+    #[serde(default)]
+    pub thp: TransparentHugePagePolicy,
 
     /// User workload to start after boot, if any.
     pub startup: Option<StartupCommand>,

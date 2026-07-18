@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use microsandbox_runtime::logging::LogLevel;
 use microsandbox_types::{
     EnvVar, SandboxLogLevel, SandboxResources, SandboxRuntimeOptions, SandboxSpec,
+    TransparentHugePagePolicy,
 };
 use serde::{Deserialize, Serialize};
 
@@ -590,6 +591,7 @@ impl Default for SandboxConfig {
                     memory_mib: default_memory_mib(),
                     max_cpus: default_cpus(),
                     max_memory_mib: default_memory_mib(),
+                    thp: TransparentHugePagePolicy::Madvise,
                 },
                 runtime: SandboxRuntimeOptions {
                     log_level: default_log_level(),
@@ -627,7 +629,7 @@ mod tests {
     use microsandbox_image::ImageConfig;
     use microsandbox_types::{
         EnvVar, NamedVolumeCreate, SandboxLogLevel, SandboxPolicy, SandboxResources,
-        SandboxRuntimeOptions, SandboxSpec, SecurityProfile, VolumeKind,
+        SandboxRuntimeOptions, SandboxSpec, SecurityProfile, TransparentHugePagePolicy, VolumeKind,
     };
 
     #[test]
@@ -1261,6 +1263,7 @@ mod tests {
                 memory_mib: 1024,
                 max_cpus: 2,
                 max_memory_mib: 1024,
+                thp: TransparentHugePagePolicy::Madvise,
             },
             runtime: SandboxRuntimeOptions {
                 workdir: Some("/app".into()),

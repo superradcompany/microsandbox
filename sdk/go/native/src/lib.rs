@@ -748,7 +748,7 @@ pub unsafe extern "C" fn msb_cancel_unregister(id: u64) {
 // Input:
 //   name: null-terminated C string, owned by caller (Go), borrowed for call.
 //   opts_json: JSON object with optional fields (image, memory_mib, cpus,
-//     max_memory_mib, max_cpus, workdir, env). Owned by caller, borrowed for call.
+//     max_memory_mib, max_cpus, thp, workdir, env). Owned by caller, borrowed for call.
 // Output on success: {"handle": <u64>}
 // The caller MUST eventually call `msb_sandbox_close(handle)` to release.
 // ---------------------------------------------------------------------------
@@ -955,6 +955,7 @@ struct SandboxCreateOpts {
     cpus: Option<u8>,
     max_memory_mib: Option<u32>,
     max_cpus: Option<u8>,
+    thp: Option<String>,
     workdir: Option<String>,
     shell: Option<String>,
     env: Option<HashMap<String, String>>,
@@ -2058,6 +2059,12 @@ pub unsafe extern "C" fn msb_sandbox_create(
             }
             if let Some(c) = opts.max_cpus {
                 builder = builder.max_cpus(c);
+            }
+            if let Some(thp) = opts.thp {
+                let policy = thp
+                    .parse::<microsandbox::sandbox::TransparentHugePagePolicy>()
+                    .map_err(FfiError::invalid_argument)?;
+                builder = builder.thp(policy);
             }
             if let Some(w) = opts.workdir {
                 builder = builder.workdir(w);

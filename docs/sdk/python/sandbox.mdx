@@ -1205,6 +1205,7 @@ The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_wit
 | max_cpus | `int` | same as `cpus` | Boot-time maximum possible virtual CPUs |
 | memory | `int` | `512` | Guest memory in MiB. This is a limit, not a reservation |
 | max_memory | `int` | same as `memory` | Boot-time maximum hotpluggable memory in MiB |
+| thp | `"always" \| "madvise" \| "never"` | `"madvise"` | Guest transparent huge-page policy selected at boot |
 | workdir | `str` | - | Default working directory for commands |
 | shell | `str` | `"/bin/sh"` | Shell for `shell()` calls |
 | security | [`SecurityProfile`](#securityprofile) `\| str` | `"default"` | In-guest security profile. `"restricted"` sets `no_new_privs`, drops mount-admin capability from user commands, and forces `nosuid,nodev` on user mounts |

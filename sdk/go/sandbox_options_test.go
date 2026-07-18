@@ -639,6 +639,7 @@ func TestFFIWireShape_EmptyConfigOmitsOptionalFields(t *testing.T) {
 
 	for _, key := range []string{
 		"image", "snapshot", "memory_mib", "cpus", "max_memory_mib", "max_cpus", "workdir", "shell",
+		"thp",
 		"hostname", "user", "replace", "detached", "env", "scripts",
 		"ports", "ports_udp", "network", "secrets", "patches", "volumes",
 		"init", "registry_auth", "root_disk",
@@ -647,6 +648,13 @@ func TestFFIWireShape_EmptyConfigOmitsOptionalFields(t *testing.T) {
 			body, _ := json.Marshal(got)
 			t.Errorf("empty config emitted key %q; payload = %s", key, body)
 		}
+	}
+}
+
+func TestFFIWireShape_THPPolicy(t *testing.T) {
+	got := marshalCreateOptions(t, WithImage("python:3.12"), WithTHP(THPAlways))
+	if got["thp"] != "always" {
+		t.Fatalf("thp = %v, want always", got["thp"])
 	}
 }
 

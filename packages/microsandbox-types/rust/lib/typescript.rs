@@ -16,7 +16,7 @@ use crate::{
     CloudSecretSource, CloudSecretsConfig, CloudViolationAction, CloudVolumeMount, Destination,
     DestinationGroup, Direction, EnvVar, HandoffInit, HostPermissions, MountOptions, NetworkPolicy,
     PortRange, Protocol, Rule, SandboxLogLevel, SandboxPolicy, SecretInjection, SecurityProfile,
-    StatVirtualization,
+    StatVirtualization, TransparentHugePagePolicy,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -46,6 +46,7 @@ const DOMAIN_TYPE_NAMES: &[&str] = &[
     "SecretInjection",
     "SecurityProfile",
     "StatVirtualization",
+    "TransparentHugePagePolicy",
 ];
 
 //--------------------------------------------------------------------------------------------------
@@ -114,6 +115,7 @@ pub fn domain_declarations() -> Vec<String> {
         SandboxLogLevel::decl(&cfg),
         MountOptions::decl(&cfg),
         StatVirtualization::decl(&cfg),
+        TransparentHugePagePolicy::decl(&cfg),
         HostPermissions::decl(&cfg),
         SecretInjection::decl(&cfg),
         NetworkPolicy::decl(&cfg),

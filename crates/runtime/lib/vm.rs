@@ -249,6 +249,9 @@ pub struct VmConfig {
     /// Path to the libkrunfw shared library.
     pub libkrunfw_path: PathBuf,
 
+    /// Guest transparent huge-page policy selected at boot.
+    pub thp: microsandbox_types::TransparentHugePagePolicy,
+
     /// Number of virtual CPUs online at boot.
     pub vcpus: u8,
 
@@ -397,6 +400,7 @@ impl std::fmt::Debug for VmConfig {
         let mut debug = f.debug_struct("VmConfig");
         debug
             .field("libkrunfw_path", &self.libkrunfw_path)
+            .field("thp", &self.thp)
             .field("vcpus", &self.vcpus)
             .field("memory_mib", &self.memory_mib)
             .field("max_cpus", &self.max_cpus)
@@ -1119,7 +1123,11 @@ fn build_vm(
             }
         })
         .kernel(|k| {
-            let k = k.krunfw_path(&vm.libkrunfw_path);
+            // Apply the typed policy before PID 1 starts. Keeping the raw
+            // kernel command line internal avoids exposing a general-purpose
+            // boot-argument escape hatch to sandbox users.
+            let thp = thp_kernel_cmdline(vm.thp);
+            let k = k.krunfw_path(&vm.libkrunfw_path).cmdline(&thp);
             if let Some(ref init_path) = vm.init_path {
                 k.init_path(init_path)
             } else {
@@ -2113,6 +2121,11 @@ pub fn prepend_scripts_path(env: &mut Vec<String>) {
     }
 }
 
+/// Render the validated THP policy as the single Linux boot parameter the VMM appends.
+fn thp_kernel_cmdline(policy: microsandbox_types::TransparentHugePagePolicy) -> String {
+    format!("transparent_hugepage={}", policy.as_str())
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -2128,7 +2141,8 @@ mod tests {
         ConsoleSharedState, HostPermissions, StatVirtualization, append_block_root_env,
         bind_rootfs_backend, guest_shutdown_flush_timeout,
         guest_shutdown_flush_timeout_with_override, parse_mount_spec, prepend_scripts_path,
-        request_guest_shutdown, request_guest_shutdown_with_timeout, validate_disk_format,
+        request_guest_shutdown, request_guest_shutdown_with_timeout, thp_kernel_cmdline,
+        validate_disk_format,
     };
 
     use microsandbox_filesystem::{Context, DynFileSystem, FsOptions};
@@ -2145,6 +2159,24 @@ mod tests {
             gid: 0,
             pid: 1,
         }
+    }
+
+    #[test]
+    fn transparent_huge_page_policy_maps_to_kernel_boot_parameter() {
+        use microsandbox_types::TransparentHugePagePolicy;
+
+        assert_eq!(
+            thp_kernel_cmdline(TransparentHugePagePolicy::Always),
+            "transparent_hugepage=always"
+        );
+        assert_eq!(
+            thp_kernel_cmdline(TransparentHugePagePolicy::Madvise),
+            "transparent_hugepage=madvise"
+        );
+        assert_eq!(
+            thp_kernel_cmdline(TransparentHugePagePolicy::Never),
+            "transparent_hugepage=never"
+        );
     }
 
     #[test]

@@ -1,4 +1,6 @@
-use microsandbox::sandbox::{NetworkPolicy, Patch, PullPolicy, SandboxBuilder, SecurityProfile};
+use microsandbox::sandbox::{
+    NetworkPolicy, Patch, PullPolicy, SandboxBuilder, SecurityProfile, TransparentHugePagePolicy,
+};
 use microsandbox::{LogLevel, RegistryAuth};
 use microsandbox_network::dns::Nameserver;
 use pyo3::prelude::*;
@@ -17,6 +19,7 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
     "cpus",
     "max_memory",
     "max_cpus",
+    "thp",
     "workdir",
     "shell",
     "security",
@@ -202,6 +205,12 @@ pub fn sandbox_builder_from_args(
     }
     if let Some(max_cpus) = extract_opt::<u8>(kwargs, "max_cpus")? {
         builder = builder.max_cpus(max_cpus);
+    }
+    if let Some(thp) = extract_opt::<String>(kwargs, "thp")? {
+        let policy = thp
+            .parse::<TransparentHugePagePolicy>()
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        builder = builder.thp(policy);
     }
     if let Some(workdir) = extract_opt::<String>(kwargs, "workdir")? {
         builder = builder.workdir(workdir);

@@ -18,8 +18,8 @@ use crate::domain::{
     NetworkPolicy, NetworkSpec, OciRootfsSource, Patch, PullPolicy, Rlimit, RlimitResource,
     RootDisk, RootfsSource, SandboxLogLevel, SandboxPolicy, SandboxResources,
     SandboxRuntimeOptions, SandboxSpec, SecretEntry, SecretInjection, SecretsConfig,
-    SecurityProfile, StatVirtualization, ViolationAction, VolumeMount, default_private,
-    default_strict,
+    SecurityProfile, StatVirtualization, TransparentHugePagePolicy, ViolationAction, VolumeMount,
+    default_private, default_strict,
 };
 use crate::modify::SecretSource;
 use crate::{TypesError, TypesResult};
@@ -103,6 +103,10 @@ pub struct CloudSandboxResources {
 
     /// Guest memory in MiB.
     pub memory_mib: u32,
+
+    /// Guest transparent huge-page policy selected at boot.
+    #[serde(default, skip_serializing_if = "TransparentHugePagePolicy::is_madvise")]
+    pub thp: TransparentHugePagePolicy,
 
     /// Writable disk size in MiB. Applies only to OCI root filesystems.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -958,6 +962,7 @@ impl TryFrom<CloudSandboxSpec> for SandboxSpec {
             // deserialization for legacy configs).
             max_cpus: spec.resources.vcpus,
             max_memory_mib: spec.resources.memory_mib,
+            thp: spec.resources.thp,
         };
 
         // Fields not present on `CloudNetworkSpec` are defaulted here, listed
@@ -1047,6 +1052,7 @@ impl From<SandboxSpec> for CloudSandboxSpec {
             resources: CloudSandboxResources {
                 vcpus: spec.resources.cpus,
                 memory_mib: spec.resources.memory_mib,
+                thp: spec.resources.thp,
                 disk_size_mib,
             },
             runtime: CloudSandboxRuntimeOptions {
@@ -1083,6 +1089,7 @@ impl Default for CloudSandboxResources {
         Self {
             vcpus: resources.cpus,
             memory_mib: resources.memory_mib,
+            thp: resources.thp,
             disk_size_mib: None,
         }
     }
@@ -1460,6 +1467,7 @@ mod tests {
 
         assert_eq!(domain.resources.cpus, DEFAULT_SANDBOX_CPUS);
         assert_eq!(domain.resources.memory_mib, DEFAULT_SANDBOX_MEMORY_MIB);
+        assert_eq!(domain.resources.thp, TransparentHugePagePolicy::Madvise);
         match domain.image {
             RootfsSource::Oci(oci) => {
                 assert_eq!(oci.reference, "python:3.12");
@@ -1467,6 +1475,20 @@ mod tests {
             }
             other => panic!("expected OCI rootfs, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cloud_resources_preserve_transparent_huge_page_policy() {
+        let mut req = CloudCreateSandboxRequest {
+            spec: spec("agent-1"),
+        };
+        req.spec.resources.thp = TransparentHugePagePolicy::Always;
+
+        let domain = SandboxSpec::try_from(req).unwrap();
+        assert_eq!(domain.resources.thp, TransparentHugePagePolicy::Always);
+
+        let cloud = CloudSandboxSpec::from(domain);
+        assert_eq!(cloud.resources.thp, TransparentHugePagePolicy::Always);
     }
 
     #[test]

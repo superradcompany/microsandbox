@@ -11,6 +11,7 @@ import type {
   SecretInjection,
   SecurityProfile,
   StatVirtualization,
+  TransparentHugePagePolicy,
 } from "./domain.js";
 export type * from "./domain.js";
 
@@ -196,6 +197,10 @@ export type CloudSandboxResources = {
    * Guest memory in MiB.
    */
   memory_mib: number;
+  /**
+   * Guest transparent huge-page policy selected at boot.
+   */
+  thp?: TransparentHugePagePolicy;
   /**
    * Writable disk size in MiB. Applies only to OCI root filesystems.
    */

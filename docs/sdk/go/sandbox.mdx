@@ -49,11 +49,12 @@ For local sandboxes, call [`EnsureInstalled`](#m-ensureinstalled) once at proces
   <a className="msb-row" href="#sb-ownslifecycle"><span className="msb-rn">sb.OwnsLifecycle()</span><span className="msb-rg">attached vs detached</span></a>
   <a className="msb-row" href="#sb-ownslifecycleorfalse"><span className="msb-rn">sb.OwnsLifecycleOrFalse()</span><span className="msb-rg">attached, false on error</span></a>
 
-  <p className="msb-gl"><span className="msb-dot builder"></span>Options<span className="msb-ct">39</span></p>
+  <p className="msb-gl"><span className="msb-dot builder"></span>Options<span className="msb-ct">40</span></p>
   <div className="msb-chiprow">
     <a className="msb-chip" href="#withimage">WithImage()</a>
     <a className="msb-chip" href="#withmemory">WithMemory()</a>
     <a className="msb-chip" href="#withmaxmemory">WithMaxMemory()</a>
+    <a className="msb-chip" href="#withthp">WithTHP()</a>
     <a className="msb-chip" href="#withcpus">WithCPUs()</a>
     <a className="msb-chip" href="#withmaxcpus">WithMaxCPUs()</a>
     <a className="msb-chip" href="#withenv">WithEnv()</a>
@@ -1231,6 +1232,26 @@ Set the boot-time maximum hotpluggable guest memory in MiB. This reserves the en
   <div className="msb-param">
     <div className="msb-param-key"><code>mebibytes</code><span className="msb-type">uint32</span></div>
     <div className="msb-param-desc">Maximum memory in MiB.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithTHP()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">option</span></div>
+
+```go
+func WithTHP(policy THPPolicy) SandboxOption
+```
+
+Select the guest transparent huge-page policy applied through the kernel command line at boot. Default: `THPMadvise`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>policy</code><span className="msb-type">THPPolicy</span></div>
+    <div className="msb-param-desc"><code>THPAlways</code>, <code>THPMadvise</code>, or <code>THPNever</code>.</div>
   </div>
 </div>
 

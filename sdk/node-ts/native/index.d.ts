@@ -1004,6 +1004,8 @@ export declare class SandboxBuilder {
   memory(mib: number): this
   /** Boot-time maximum hotpluggable guest memory in MiB. */
   maxMemory(mib: number): this
+  /** Guest transparent huge-page policy selected at boot. */
+  thp(policy: 'always' | 'madvise' | 'never'): this
   /** Override log verbosity: `"trace" | "debug" | "info" | "warn" | "error"`. */
   logLevel(level: string): this
   /** Suppress sandbox logs. */

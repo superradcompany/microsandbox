@@ -31,6 +31,7 @@ type SandboxConfig struct {
 	CPUs            uint8
 	MaxMemoryMiB    uint32
 	MaxCPUs         uint8
+	THP             THPPolicy
 	Workdir         string
 	Shell           string
 	SecurityProfile SecurityProfile
@@ -102,10 +103,11 @@ type persistedInitConfig struct {
 }
 
 type persistedResources struct {
-	CPUs         uint8  `json:"cpus"`
-	MemoryMiB    uint32 `json:"memory_mib"`
-	MaxCPUs      uint8  `json:"max_cpus"`
-	MaxMemoryMiB uint32 `json:"max_memory_mib"`
+	CPUs         uint8     `json:"cpus"`
+	MemoryMiB    uint32    `json:"memory_mib"`
+	MaxCPUs      uint8     `json:"max_cpus"`
+	MaxMemoryMiB uint32    `json:"max_memory_mib"`
+	THP          THPPolicy `json:"thp"`
 }
 
 type persistedLifecycle struct {
@@ -155,6 +157,7 @@ func (c *SandboxConfig) UnmarshalJSON(data []byte) error {
 		CPUs:            raw.cpus(),
 		MaxMemoryMiB:    raw.maxMemoryMiB(),
 		MaxCPUs:         raw.maxCPUs(),
+		THP:             raw.thp(),
 		Workdir:         raw.Workdir,
 		Shell:           raw.Shell,
 		SecurityProfile: raw.SecurityProfile,
@@ -214,6 +217,13 @@ func (c persistedSandboxConfig) maxMemoryMiB() uint32 {
 		return c.MaxMemoryMiB
 	}
 	return c.MemoryMiB
+}
+
+func (c persistedSandboxConfig) thp() THPPolicy {
+	if c.Resources != nil && c.Resources.THP != "" {
+		return c.Resources.THP
+	}
+	return THPMadvise
 }
 
 func (c persistedSandboxConfig) lifecycleEphemeral() bool {
@@ -365,6 +375,18 @@ const (
 	SecurityProfileDefault SecurityProfile = "default"
 	// SecurityProfileRestricted applies stronger in-guest hardening.
 	SecurityProfileRestricted SecurityProfile = "restricted"
+)
+
+// THPPolicy selects the guest transparent huge-page policy at boot.
+type THPPolicy string
+
+const (
+	// THPAlways transparently uses huge pages for eligible anonymous mappings.
+	THPAlways THPPolicy = "always"
+	// THPMadvise uses huge pages only for mappings that explicitly request them.
+	THPMadvise THPPolicy = "madvise"
+	// THPNever disables transparent huge pages for anonymous mappings.
+	THPNever THPPolicy = "never"
 )
 
 // WithImage sets the container image to use (e.g. "python:3.12").
@@ -561,6 +583,11 @@ func WithMaxMemory(mebibytes uint32) SandboxOption {
 // WithMaxCPUs sets the boot-time maximum possible vCPU count.
 func WithMaxCPUs(cpus uint8) SandboxOption {
 	return func(o *SandboxConfig) { o.MaxCPUs = cpus }
+}
+
+// WithTHP selects the guest transparent huge-page policy applied at boot.
+func WithTHP(policy THPPolicy) SandboxOption {
+	return func(o *SandboxConfig) { o.THP = policy }
 }
 
 // WithWorkdir sets the working directory inside the sandbox.
