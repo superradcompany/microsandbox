@@ -168,3 +168,8 @@ parking_lot = "0.12"
 rpassword = "7"
 russh = "0.61.1"
 russh-sftp = "2.3.0"
+
+# Diagnostic-only block profiler for the flat-rootfs hardlink attribution pass.
+[patch.crates-io]
+msb_krun = { git = "https://github.com/superradcompany/libkrun.git", rev = "0faa5a1fd6591fbb0006a3a6bc27244bd94cc07d" }
+msb_krun_utils = { git = "https://github.com/superradcompany/libkrun.git", rev = "0faa5a1fd6591fbb0006a3a6bc27244bd94cc07d" }
