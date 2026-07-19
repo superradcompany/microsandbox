@@ -49,6 +49,12 @@ pub enum FileData {
         offset: u64,
         len: u64,
     },
+    /// Content location in a cached EROFS layer, before cold materialization selects survivors.
+    DeferredErofs {
+        image: Arc<std::path::PathBuf>,
+        nid: u32,
+        len: u64,
+    },
 }
 
 impl std::fmt::Debug for FileData {
@@ -61,6 +67,12 @@ impl std::fmt::Debug for FileData {
             FileData::Spool { offset, len, .. } => f
                 .debug_struct("Spool")
                 .field("offset", offset)
+                .field("len", len)
+                .finish(),
+            FileData::DeferredErofs { image, nid, len } => f
+                .debug_struct("DeferredErofs")
+                .field("image", image)
+                .field("nid", nid)
                 .field("len", len)
                 .finish(),
         }
@@ -182,6 +194,7 @@ impl FileData {
             FileData::Memory(v) => v.len(),
             FileData::SharedMemory(v) => v.len(),
             FileData::Spool { len, .. } => *len as usize,
+            FileData::DeferredErofs { len, .. } => *len as usize,
         }
     }
 
@@ -204,6 +217,9 @@ impl FileData {
                 file.read_exact(&mut buf)?;
                 Ok(buf)
             }
+            FileData::DeferredErofs { .. } => Err(std::io::Error::other(
+                "deferred EROFS data must be materialized before reading",
+            )),
         }
     }
 
@@ -213,6 +229,7 @@ impl FileData {
             FileData::Memory(v) => Some(v),
             FileData::SharedMemory(v) => Some(v),
             FileData::Spool { .. } => None,
+            FileData::DeferredErofs { .. } => None,
         }
     }
 
@@ -247,6 +264,9 @@ impl FileData {
                 }
                 Ok(())
             }
+            FileData::DeferredErofs { .. } => Err(std::io::Error::other(
+                "deferred EROFS data must be materialized before writing",
+            )),
         }
     }
 
@@ -262,6 +282,11 @@ impl FileData {
             FileData::Spool { spool, offset, len } => FileData::Spool {
                 spool: Arc::clone(spool),
                 offset: *offset,
+                len: *len,
+            },
+            FileData::DeferredErofs { image, nid, len } => FileData::DeferredErofs {
+                image: Arc::clone(image),
+                nid: *nid,
                 len: *len,
             },
         }

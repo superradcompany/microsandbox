@@ -1120,6 +1120,23 @@ fn same_file_data(left: &FileData, right: &FileData) -> bool {
                 && left_offset == right_offset
                 && left_len == right_len
         }
+        (
+            FileData::DeferredErofs {
+                image: left_image,
+                nid: left_nid,
+                len: left_len,
+            },
+            FileData::DeferredErofs {
+                image: right_image,
+                nid: right_nid,
+                len: right_len,
+            },
+        ) => {
+            (std::sync::Arc::ptr_eq(left_image, right_image)
+                || left_image.as_ref() == right_image.as_ref())
+                && left_nid == right_nid
+                && left_len == right_len
+        }
         _ => false,
     }
 }

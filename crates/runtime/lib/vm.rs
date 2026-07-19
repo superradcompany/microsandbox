@@ -26,8 +26,10 @@ use microsandbox_metrics::{ActivateSlot, MetricsRegistry, ReleaseMode};
 use microsandbox_protocol::{
     codec,
     message::{Message, MessageType},
+    shutdown::ShutdownRequest,
 };
 use microsandbox_types::CpuPlacement;
+use microsandbox_utils::performance::PerfExperiment;
 use msb_krun::VmBuilder;
 use sea_orm::{ColumnTrait, EntityTrait, Set};
 use serde::{Deserialize, Serialize};
@@ -861,6 +863,9 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     // Spawn background tasks.
     let (_relay_shutdown_tx, relay_shutdown_rx) = tokio::sync::watch::channel(false);
     let (relay_drain_tx, mut relay_drain_rx) = tokio::sync::mpsc::channel::<()>(1);
+    let (shutdown_ready_tx, _) = tokio::sync::broadcast::channel::<()>(4);
+    let mut relay_shutdown_ready_rx = shutdown_ready_tx.subscribe();
+    let relay_shutdown_ready_tx = shutdown_ready_tx.clone();
 
     // Relay: spawn a blocking task for wait_ready, then run the accept loop.
     // wait_ready() must run AFTER enter() starts the VM (agentd sends core.ready),
@@ -897,7 +902,10 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                         upper_host_path,
                     }));
                 }
-                if let Err(e) = relay.run(relay_shutdown_rx, relay_drain_tx).await {
+                if let Err(e) = relay
+                    .run(relay_shutdown_rx, relay_drain_tx, relay_shutdown_ready_tx)
+                    .await
+                {
                     tracing::error!("agent relay error: {e}");
                 }
             }
@@ -932,6 +940,8 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     {
         let shutdown_exit_handle = exit_handle.clone();
         let shutdown_reason = Arc::clone(&exit_reason);
+        let honor_shutdown_ready =
+            PerfExperiment::ShutdownReady.enabled() && config.vm.init_path.is_none();
         tokio_rt.spawn(async move {
             if relay_drain_rx.recv().await.is_some() {
                 shutdown_reason.store(
@@ -941,8 +951,24 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                 tracing::info!(
                     "core.shutdown forwarded to agentd, allowing flush window before host fallback"
                 );
-                tokio::time::sleep(shutdown_flush_timeout).await;
-                tracing::info!("flush window elapsed, triggering host exit");
+                if honor_shutdown_ready {
+                    match tokio::time::timeout(
+                        shutdown_flush_timeout,
+                        relay_shutdown_ready_rx.recv(),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {
+                            tracing::info!("verified shutdown-ready received, triggering host exit")
+                        }
+                        _ => tracing::info!(
+                            "shutdown-ready deadline elapsed, triggering host fallback"
+                        ),
+                    }
+                } else {
+                    tokio::time::sleep(shutdown_flush_timeout).await;
+                    tracing::info!("flush window elapsed, triggering host exit");
+                }
                 shutdown_exit_handle.trigger();
             }
         });
@@ -1266,7 +1292,15 @@ fn build_vm(
             .map_err(|e| RuntimeError::Custom(format!("disk format: {e}")))?;
         let disk_path = disk_path.clone();
         let readonly = vm.rootfs_disk_readonly;
-        builder = builder.disk(move |d| d.path(&disk_path).format(format).read_only(readonly));
+        let direct_io = PerfExperiment::FlatDirectIo.enabled()
+            && format == msb_krun::DiskImageFormat::Raw
+            && !readonly;
+        builder = builder.disk(move |d| {
+            d.path(&disk_path)
+                .format(format)
+                .read_only(readonly)
+                .direct_io(direct_io)
+        });
         append_block_root_env(&mut exec_env);
     }
 
@@ -1766,8 +1800,14 @@ fn request_guest_shutdown_with_timeout(
     shared: &ConsoleSharedState,
     timeout: Duration,
 ) -> RuntimeResult<()> {
-    let msg = Message::with_payload(MessageType::Shutdown, 0, &())
-        .map_err(|e| RuntimeError::Custom(format!("encode idle shutdown: {e}")))?;
+    let msg = Message::with_payload(
+        MessageType::Shutdown,
+        0,
+        &ShutdownRequest {
+            ready_ack: PerfExperiment::ShutdownReady.enabled(),
+        },
+    )
+    .map_err(|e| RuntimeError::Custom(format!("encode idle shutdown: {e}")))?;
     let mut frame = Vec::new();
     codec::encode_to_buf(&msg, &mut frame)
         .map_err(|e| RuntimeError::Custom(format!("encode idle shutdown frame: {e}")))?;

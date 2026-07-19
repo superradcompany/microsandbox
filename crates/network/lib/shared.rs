@@ -7,11 +7,12 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{
     Arc, Mutex, OnceLock,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
 
 use crossbeam_queue::ArrayQueue;
+use microsandbox_utils::performance::PerfExperiment;
 use microsandbox_utils::ttl_reverse_index::TtlReverseIndex;
 pub use microsandbox_utils::wake_pipe::WakePipe;
 use parking_lot::RwLock;
@@ -63,6 +64,18 @@ pub struct SharedState {
     /// poll loop.
     pub proxy_wake: WakePipe,
 
+    /// Reusable frame storage shared by the network producer and consumer threads.
+    frame_pool: ArrayQueue<Vec<u8>>,
+
+    /// Whether frame recycling is active for this sandbox.
+    reuse_frame_buffers: bool,
+
+    /// Whether guest-to-stack wakes are coalesced until the stack drains them.
+    batch_tx_wakes: bool,
+
+    /// Whether a guest-to-stack wake notification is already outstanding.
+    tx_wake_pending: AtomicBool,
+
     /// Optional host-side termination hook used for fatal policy violations.
     termination_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 
@@ -111,18 +124,77 @@ struct ResolvedHostnameKey {
 impl SharedState {
     /// Create shared state with the given queue capacity.
     pub fn new(queue_capacity: usize) -> Self {
+        Self::new_with_performance(
+            queue_capacity,
+            PerfExperiment::NetworkBuffers.enabled(),
+            PerfExperiment::NetworkWakes.enabled(),
+        )
+    }
+
+    /// Create shared state with explicit development performance policies.
+    pub(crate) fn new_with_performance(
+        queue_capacity: usize,
+        reuse_frame_buffers: bool,
+        batch_tx_wakes: bool,
+    ) -> Self {
         Self {
             tx_ring: ArrayQueue::new(queue_capacity),
             rx_ring: ArrayQueue::new(queue_capacity),
             rx_wake: WakePipe::new(),
             tx_wake: WakePipe::new(),
             proxy_wake: WakePipe::new(),
+            frame_pool: ArrayQueue::new(queue_capacity.saturating_mul(2).max(1)),
+            reuse_frame_buffers,
+            batch_tx_wakes,
+            tx_wake_pending: AtomicBool::new(false),
             termination_hook: Mutex::new(None),
             resolved_hostnames: RwLock::new(TtlReverseIndex::default()),
             gateway_ipv4: OnceLock::new(),
             gateway_ipv6: OnceLock::new(),
             metrics: NetworkMetrics::default(),
         }
+    }
+
+    /// Obtain a frame buffer sized for a producer write.
+    pub(crate) fn take_frame_buffer(&self, len: usize) -> Vec<u8> {
+        let mut frame = if self.reuse_frame_buffers {
+            self.frame_pool.pop().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        frame.clear();
+        frame.resize(len, 0);
+        frame
+    }
+
+    /// Return a consumed frame buffer to the bounded pool.
+    pub(crate) fn recycle_frame_buffer(&self, mut frame: Vec<u8>) {
+        if !self.reuse_frame_buffers {
+            return;
+        }
+        frame.clear();
+        let _ = self.frame_pool.push(frame);
+    }
+
+    /// Notify the stack that guest frames are pending, coalescing redundant wakes when enabled.
+    pub(crate) fn notify_tx(&self) {
+        if !self.batch_tx_wakes || !self.tx_wake_pending.swap(true, Ordering::AcqRel) {
+            self.tx_wake.wake();
+        }
+    }
+
+    /// Drain and re-arm the coalesced guest-to-stack wake edge.
+    pub(crate) fn drain_tx_wake(&self) {
+        self.tx_wake.drain();
+        if !self.batch_tx_wakes {
+            return;
+        }
+
+        // The stack calls this only after poll has returned, then immediately begins another loop
+        // iteration by draining tx_ring. Clearing the bit here is therefore race-safe: a producer
+        // that arrives after the clear emits a fresh edge, while a producer that observed the old
+        // bit is already covered by the imminent queue drain.
+        self.tx_wake_pending.store(false, Ordering::Release);
     }
 
     /// Set the per-sandbox gateway IPs. Called once at boot. Each family is
@@ -222,7 +294,8 @@ impl SharedState {
     /// Push a runtime -> guest ethernet frame and update RX metrics on success.
     pub(crate) fn push_rx_frame(&self, frame: Vec<u8>) -> bool {
         let frame_len = frame.len();
-        if self.rx_ring.push(frame).is_err() {
+        if let Err(frame) = self.rx_ring.push(frame) {
+            self.recycle_frame_buffer(frame);
             return false;
         }
 
@@ -305,6 +378,31 @@ mod tests {
 
         assert!(!state.push_rx_frame(vec![4, 5]));
         assert_eq!(state.rx_bytes(), 3);
+    }
+
+    #[test]
+    fn reusable_frame_pool_retains_capacity_between_packets() {
+        let state = SharedState::new_with_performance(4, true, false);
+        let frame = state.take_frame_buffer(1500);
+        let capacity = frame.capacity();
+        state.recycle_frame_buffer(frame);
+
+        let reused = state.take_frame_buffer(128);
+        assert!(reused.capacity() >= capacity);
+        assert_eq!(reused.len(), 128);
+    }
+
+    #[test]
+    fn batched_tx_wake_clears_after_queue_is_drained() {
+        let state = SharedState::new_with_performance(4, false, true);
+        state.tx_ring.push(vec![1]).unwrap();
+        state.notify_tx();
+        state.notify_tx();
+        assert!(state.tx_wake.wait_timeout(Duration::ZERO));
+
+        assert_eq!(state.tx_ring.pop(), Some(vec![1]));
+        state.drain_tx_wake();
+        assert!(!state.tx_wake.wait_timeout(Duration::ZERO));
     }
 
     #[test]

@@ -54,4 +54,8 @@ pub enum AgentdError {
     /// Graceful shutdown requested.
     #[error("shutdown")]
     Shutdown,
+
+    /// Filesystems are durable and a shutdown-ready frame must be flushed before poweroff.
+    #[error("shutdown prepared")]
+    ShutdownPrepared,
 }

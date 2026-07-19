@@ -439,6 +439,7 @@ pub mod exec;
 pub mod fs;
 pub mod heartbeat;
 pub mod message;
+pub mod shutdown;
 pub mod tcp;
 
 pub use error::*;

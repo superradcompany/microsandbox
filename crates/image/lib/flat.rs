@@ -2,9 +2,11 @@
 
 use std::collections::HashMap;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
+use microsandbox_utils::performance::PerfExperiment;
 use sha2::{Digest as Sha2Digest, Sha256};
 
 use crate::cache::lock::{flock_unlock, lock_exclusive, open_lock_file};
@@ -92,6 +94,7 @@ pub(crate) fn materialize_flat_rootfs(
     });
     let spool_path = work_dir.join("merged.spool");
     let mut spool = DataSpool::new(&spool_path).map_err(ImageError::Io)?;
+    let optimize_cold_materialization = PerfExperiment::ColdMaterialization.enabled();
     let mut layers = Vec::with_capacity(layer_diff_ids.len());
     let reconstruct_started_at = Instant::now();
     let mut layer_apparent_bytes = 0u64;
@@ -102,20 +105,32 @@ pub(crate) fn materialize_flat_rootfs(
                 .map(|metadata| metadata.len())
                 .unwrap_or(0),
         );
-        layers.push(read_erofs_layer(&layer_path, &mut spool).map_err(|source| {
-            ImageError::Materialize {
-                digest: diff_id.to_string(),
-                message: "failed to reconstruct cached EROFS layer for flat materialization"
-                    .to_string(),
-                source: Some(Box::new(source)),
-            }
+        let layer = if optimize_cold_materialization {
+            read_erofs_layer(&layer_path, None)
+        } else {
+            read_erofs_layer(&layer_path, Some(&mut spool))
+        };
+        layers.push(layer.map_err(|source| ImageError::Materialize {
+            digest: diff_id.to_string(),
+            message:
+                "failed to reconstruct cached EROFS layer for flat materialization".to_string(),
+            source: Some(Box::new(source)),
         })?);
     }
     let reconstruct_us = reconstruct_started_at.elapsed().as_micros();
-    let spool_bytes = spool.current_offset();
     let merge_started_at = Instant::now();
-    let (tree, _) = merge_layers_with_provenance(layers);
+    let (mut tree, _) = merge_layers_with_provenance(layers);
     let merge_us = merge_started_at.elapsed().as_micros();
+    if optimize_cold_materialization {
+        spool_surviving_erofs_data(&mut tree, &mut spool).map_err(|source| {
+            ImageError::Materialize {
+                digest: manifest_digest.to_string(),
+                message: "failed to spool surviving flat-root file data".to_string(),
+                source: Some(Box::new(source)),
+            }
+        })?;
+    }
+    let spool_bytes = spool.current_offset();
 
     let candidate = work_dir.join("rootfs.raw.part");
     let format_started_at = Instant::now();
@@ -208,37 +223,29 @@ fn flat_derivation_digest(
     (digest, bytes)
 }
 
-fn read_erofs_layer(path: &Path, spool: &mut DataSpool) -> std::io::Result<FileTree> {
+fn read_erofs_layer(path: &Path, mut spool: Option<&mut DataSpool>) -> std::io::Result<FileTree> {
     let file = std::fs::File::open(path)?;
     let mut reader = ErofsReader::new(file)?;
     let mut tree = FileTree::new();
     let mut hardlinks: HashMap<u32, (RegularFileId, FileData)> = HashMap::new();
+    let image = Arc::new(path.to_path_buf());
     reader.walk_entries::<std::io::Error, _>(|reader, entry| {
         let node = match entry.kind {
             ErofsEntryKind::RegularFile => {
                 let (id, data) = if let Some((id, data)) = hardlinks.get(&entry.nid) {
                     (*id, data.clone())
-                } else {
-                    let offset = spool.current_offset();
-                    let mut contents = reader.file_data_reader(entry.nid)?;
-                    let mut buffer = [0u8; 64 * 1024];
-                    let mut written = 0u64;
-                    loop {
-                        let len = contents.read(&mut buffer)?;
-                        if len == 0 {
-                            break;
-                        }
-                        spool.write_chunk(&buffer[..len])?;
-                        written += len as u64;
-                    }
-                    if written != entry.size {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::UnexpectedEof,
-                            "EROFS regular-file length changed while reconstructing layer",
-                        ));
-                    }
+                } else if let Some(spool) = spool.as_deref_mut() {
                     let id = RegularFileId::new();
-                    let data = spool.data_ref(offset, written);
+                    let data = spool_erofs_file(reader, entry.nid, entry.size, spool)?;
+                    hardlinks.insert(entry.nid, (id, data.clone()));
+                    (id, data)
+                } else {
+                    let id = RegularFileId::new();
+                    let data = FileData::DeferredErofs {
+                        image: Arc::clone(&image),
+                        nid: entry.nid,
+                        len: entry.size,
+                    };
                     hardlinks.insert(entry.nid, (id, data.clone()));
                     (id, data)
                 };
@@ -284,6 +291,75 @@ fn read_erofs_layer(path: &Path, spool: &mut DataSpool) -> std::io::Result<FileT
             .map_err(std::io::Error::other)
     })?;
     Ok(tree)
+}
+
+fn spool_surviving_erofs_data(tree: &mut FileTree, spool: &mut DataSpool) -> std::io::Result<()> {
+    let mut materialized = HashMap::new();
+    let mut readers = HashMap::new();
+    spool_surviving_directory(&mut tree.root, spool, &mut materialized, &mut readers)
+}
+
+fn spool_surviving_directory(
+    directory: &mut DirectoryNode,
+    spool: &mut DataSpool,
+    materialized: &mut HashMap<RegularFileId, FileData>,
+    readers: &mut HashMap<PathBuf, ErofsReader>,
+) -> std::io::Result<()> {
+    for node in directory.entries.values_mut() {
+        match node {
+            TreeNode::RegularFile(file) => {
+                if let Some(data) = materialized.get(&file.id) {
+                    file.data = data.clone();
+                    continue;
+                }
+                let FileData::DeferredErofs { image, nid, len } = &file.data else {
+                    continue;
+                };
+                let image = PathBuf::from(image.as_ref());
+                let (nid, len) = (*nid, *len);
+                if !readers.contains_key(&image) {
+                    let source = std::fs::File::open(&image)?;
+                    readers.insert(image.clone(), ErofsReader::new(source)?);
+                }
+                let reader = readers.get_mut(&image).expect("EROFS reader was inserted");
+                let data = spool_erofs_file(reader, nid, len, spool)?;
+                file.data = data.clone();
+                materialized.insert(file.id, data);
+            }
+            TreeNode::Directory(child) => {
+                spool_surviving_directory(child, spool, materialized, readers)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn spool_erofs_file(
+    reader: &mut ErofsReader,
+    nid: u32,
+    expected_len: u64,
+    spool: &mut DataSpool,
+) -> std::io::Result<FileData> {
+    let offset = spool.current_offset();
+    let mut contents = reader.file_data_reader(nid)?;
+    let mut buffer = [0u8; 64 * 1024];
+    let mut written = 0u64;
+    loop {
+        let len = contents.read(&mut buffer)?;
+        if len == 0 {
+            break;
+        }
+        spool.write_chunk(&buffer[..len])?;
+        written += len as u64;
+    }
+    if written != expected_len {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "EROFS regular-file length changed while reconstructing layer",
+        ));
+    }
+    Ok(spool.data_ref(offset, written))
 }
 
 //--------------------------------------------------------------------------------------------------

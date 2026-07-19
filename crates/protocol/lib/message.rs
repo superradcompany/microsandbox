@@ -9,7 +9,7 @@ use crate::error::ProtocolResult;
 //--------------------------------------------------------------------------------------------------
 
 /// Current protocol version.
-pub const PROTOCOL_VERSION: u8 = 6;
+pub const PROTOCOL_VERSION: u8 = 7;
 
 /// Frame flag: this is the last message for the given correlation ID.
 ///
@@ -109,6 +109,10 @@ pub enum MessageType {
     /// Host requests shutdown.
     #[strum(serialize = "core.shutdown")]
     Shutdown,
+
+    /// Guest confirms that shutdown durability work completed.
+    #[strum(serialize = "core.shutdown.ready")]
+    ShutdownReady,
 
     /// Host relay reports that one SDK client disconnected.
     #[strum(serialize = "core.relay.client.disconnected")]
@@ -297,7 +301,8 @@ impl MessageType {
     /// (generation 1), so the `Fs*` types require generation 2 or newer.
     /// TCP forwarding was introduced in generation 4. `core.error` was
     /// introduced in generation 5. Reachability checks and explicit idle
-    /// refreshes were introduced in generation 6.
+    /// refreshes were introduced in generation 6. Verified shutdown acknowledgement was
+    /// introduced in generation 7.
     ///
     /// There is deliberately no wildcard arm: adding a new `MessageType` must
     /// force a conscious choice of the generation that introduced it (and a
@@ -324,6 +329,7 @@ impl MessageType {
             Self::FsRequest | Self::FsResponse | Self::FsData => 2,
             Self::CoreError => 5,
             Self::Ping | Self::Pong | Self::Touch | Self::Touched => 6,
+            Self::ShutdownReady => 7,
             Self::TcpConnect
             | Self::TcpConnected
             | Self::TcpData
@@ -400,6 +406,7 @@ mod tests {
             (MessageType::InitResolved, "core.init.resolved"),
             (MessageType::InitAck, "core.init.ack"),
             (MessageType::Shutdown, "core.shutdown"),
+            (MessageType::ShutdownReady, "core.shutdown.ready"),
             (
                 MessageType::RelayClientDisconnected,
                 "core.relay.client.disconnected",

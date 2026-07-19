@@ -626,7 +626,7 @@ fn sleep_until_stack_wake(shared: &SharedState, timeout_ms: i32, poll_fds: &mut 
     }
 
     if poll_fds[0].revents & libc::POLLIN != 0 {
-        shared.tx_wake.drain();
+        shared.drain_tx_wake();
     }
     if poll_fds[1].revents & libc::POLLIN != 0 {
         shared.proxy_wake.drain();
@@ -664,7 +664,7 @@ fn sleep_until_stack_wake_windows(
 
     for event in events.iter().take(count) {
         match event.token() {
-            TX_WAKE_TOKEN => shared.tx_wake.drain(),
+            TX_WAKE_TOKEN => shared.drain_tx_wake(),
             PROXY_WAKE_TOKEN => shared.proxy_wake.drain(),
             token => tracing::warn!(token, "network poll loop: unknown wake token"),
         }

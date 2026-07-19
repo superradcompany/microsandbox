@@ -26,6 +26,7 @@ use microsandbox_protocol::exec::{
 use microsandbox_protocol::fs::{FsData, FsRequest};
 use microsandbox_protocol::heartbeat::{ActivityCounters, Heartbeat};
 use microsandbox_protocol::message::{Message, MessageType};
+use microsandbox_protocol::shutdown::{ShutdownReady, ShutdownRequest};
 use microsandbox_protocol::tcp::{TcpClose, TcpConnect, TcpData, TcpEof, TcpFailed};
 
 use crate::config::AgentdConfig;
@@ -266,20 +267,29 @@ pub async fn run(
                                 }
 
                                 let out_before = serial_out_buf.len();
-                                handle_message(
+                                let outcome = handle_message(
                                     msg,
                                     &mut state,
                                     &mut activity,
                                     &session_tx,
                                     &mut serial_out_buf,
                                     config,
-                                ).await?;
+                                ).await;
                                 record_encoded_guest_messages(
                                     &serial_out_buf,
                                     out_before,
                                     &mut activity,
                                 );
                                 publish_heartbeat_snapshot(&heartbeat_tx, &state, &activity);
+                                if matches!(outcome, Err(AgentdError::ShutdownPrepared)) {
+                                    // The acknowledgement is meaningful only after the teardown
+                                    // barrier, and the host cannot observe it until this explicit
+                                    // serial flush completes.
+                                    flush_write_buf(&async_port, &mut serial_out_buf).await?;
+                                    finish_prepared_guest_poweroff()?;
+                                    return Err(AgentdError::Shutdown);
+                                }
+                                outcome?;
                             }
 
                             // Flush any outgoing messages.
@@ -666,6 +676,26 @@ async fn handle_message(
                 session.close();
             }
             state.fs.clear();
+
+            let ready_ack = msg
+                .payload::<ShutdownRequest>()
+                .map(|request| request.ready_ack)
+                .unwrap_or(false);
+            if ready_ack && crate::handoff::is_pid_1() {
+                // PID-1 agentd owns every mount, so it can finish the full teardown before
+                // acknowledging. Handoff-init sandboxes retain the conservative timed fallback
+                // because agentd cannot prove that another init has unmounted its filesystems.
+                crate::teardown::teardown_filesystems(true);
+                let ready =
+                    Message::with_payload(MessageType::ShutdownReady, msg.id, &ShutdownReady {})
+                        .map_err(|e| {
+                            AgentdError::ExecSession(format!("encode shutdown ready: {e}"))
+                        })?;
+                codec::encode_to_buf(&ready, out_buf).map_err(|e| {
+                    AgentdError::ExecSession(format!("encode shutdown ready frame: {e}"))
+                })?;
+                return Err(AgentdError::ShutdownPrepared);
+            }
 
             request_guest_poweroff()?;
             return Err(AgentdError::Shutdown);
@@ -1213,6 +1243,15 @@ fn request_guest_poweroff() -> AgentdResult<()> {
     crate::teardown::teardown_filesystems(false);
 
     let _ = crate::handoff::signal_init_term();
+    Ok(())
+}
+
+/// Power off after the PID-1 teardown barrier and acknowledgement flush have completed.
+fn finish_prepared_guest_poweroff() -> AgentdResult<()> {
+    let ret = unsafe { libc::reboot(libc::RB_POWER_OFF) };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
     Ok(())
 }
 

@@ -10,6 +10,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use microsandbox_metrics::{MetricsError, MetricsSlotWriter, SampleWrite};
+use microsandbox_utils::performance::PerfExperiment;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -26,6 +27,9 @@ const MIN_UPPER_FILESYSTEM_STALE_AFTER: Duration = Duration::from_secs(3);
 /// microseconds against a 1s window; anything past this ratio means the
 /// sampler was descheduled mid-read and the window's ratio is unusable.
 const MAX_PAIRING_SKEW_RATIO: f64 = 0.05;
+
+/// Coarse host-residency refresh cadence used by the decoupled metrics experiment.
+const RESIDENCY_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -100,7 +104,12 @@ pub async fn run_metrics_sampler(spec: MetricsSamplerSpec) {
     } = spec;
     let interval = Duration::from_millis(interval_ms.get());
     let upper_stale_after = upper_filesystem_stale_after(interval);
-    let mut previous = paired_snapshot(&krun_metrics);
+    let decouple_residency = PerfExperiment::MetricsResidency.enabled();
+    // Preserve an immediately useful first memory reading. Subsequent expensive residency scans
+    // move to a coarse background cadence while ordinary counters remain at the requested cadence.
+    let mut previous = paired_snapshot(&krun_metrics, true);
+    let mut last_residency_refresh = Instant::now();
+    let mut residency_refresh_task = None;
     let upper_host_path = upper_host_path.as_deref();
     let mut last_cpu_percent: Option<f32> = None;
 
@@ -129,7 +138,24 @@ pub async fn run_metrics_sampler(spec: MetricsSamplerSpec) {
     loop {
         tokio::time::sleep(interval).await;
 
-        let current = paired_snapshot(&krun_metrics);
+        if residency_refresh_task
+            .as_ref()
+            .is_some_and(tokio::task::JoinHandle::is_finished)
+        {
+            let _ = residency_refresh_task.take().unwrap().await;
+        }
+        if decouple_residency
+            && residency_refresh_task.is_none()
+            && last_residency_refresh.elapsed() >= RESIDENCY_REFRESH_INTERVAL
+        {
+            let refresh_handle = krun_metrics.clone();
+            residency_refresh_task = Some(tokio::task::spawn_blocking(move || {
+                let _ = refresh_handle.refresh_host_resident_memory();
+            }));
+            last_residency_refresh = Instant::now();
+        }
+
+        let current = paired_snapshot(&krun_metrics, !decouple_residency);
         let wall_secs = current
             .at
             .checked_duration_since(previous.at)
@@ -203,9 +229,16 @@ struct PairedSnapshot {
     uncertainty: Duration,
 }
 
-fn paired_snapshot(krun_metrics: &msb_krun::MetricsHandle) -> PairedSnapshot {
+fn paired_snapshot(
+    krun_metrics: &msb_krun::MetricsHandle,
+    refresh_residency: bool,
+) -> PairedSnapshot {
     let before = Instant::now();
-    let metrics = krun_metrics.aggregate_snapshot();
+    let metrics = if refresh_residency {
+        krun_metrics.aggregate_snapshot()
+    } else {
+        krun_metrics.aggregate_snapshot_cached_residency()
+    };
     let after = Instant::now();
     let uncertainty = after.saturating_duration_since(before);
     PairedSnapshot {

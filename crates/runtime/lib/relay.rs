@@ -23,7 +23,9 @@ use microsandbox_protocol::exec::{ExecRequest, ExecSignal, ExecStderr, ExecStdou
 use microsandbox_protocol::message::{
     FLAG_SESSION_START, FLAG_SHUTDOWN, FLAG_TERMINAL, FRAME_HEADER_SIZE, Message, MessageType,
 };
+use microsandbox_protocol::shutdown::ShutdownRequest;
 use microsandbox_protocol::{AGENT_RELAY_ID_RANGE_STEP, AGENT_RELAY_MAX_CLIENTS};
+use microsandbox_utils::performance::PerfExperiment;
 #[cfg(unix)]
 use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -31,7 +33,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::{NamedPipeServer, PipeMode, ServerOptions};
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{Mutex, broadcast, mpsc, watch};
 
 use crate::clock::spawn_clock_sync_task;
 use crate::console::ConsoleSharedState;
@@ -399,6 +401,7 @@ impl AgentRelay {
         mut self,
         mut shutdown: watch::Receiver<bool>,
         drain_tx: mpsc::Sender<()>,
+        shutdown_ready_tx: broadcast::Sender<()>,
     ) -> RuntimeResult<()> {
         let ready_frame = self.ready_frame.ok_or_else(|| {
             RuntimeError::Custom("agent relay: run() called before wait_ready()".into())
@@ -445,6 +448,7 @@ impl AgentRelay {
             clients_for_reader,
             log_writer_for_reader,
             registry_for_reader,
+            shutdown_ready_tx,
         ));
 
         // Accept loop.
@@ -765,6 +769,7 @@ async fn ring_reader_task(
     clients: Arc<Mutex<HashMap<u32, ClientState>>>,
     log_writer: Option<Arc<LogWriter>>,
     session_registry: Arc<SessionRegistry>,
+    shutdown_ready_tx: broadcast::Sender<()>,
 ) {
     // Wrap the tx_wake read fd in AsyncFd for tokio-driven notification.
     #[cfg(unix)]
@@ -823,6 +828,14 @@ async fn ring_reader_task(
         }
 
         for frame in frames.drain(..) {
+            if decode_frame(frame.data.as_ref())
+                .is_ok_and(|message| message.t == MessageType::ShutdownReady)
+            {
+                tracing::info!("agent relay: received verified shutdown-ready acknowledgement");
+                let _ = shutdown_ready_tx.send(());
+                continue;
+            }
+
             let client_slot = frame.id / AGENT_RELAY_ID_RANGE_STEP;
             let client_slot = client_slot.min(AGENT_RELAY_MAX_CLIENTS - 1);
 
@@ -1014,7 +1027,28 @@ async fn client_reader_task(
         }
 
         // Forward frame to ring writer (bounded — applies backpressure).
-        if agent_tx.send(frame.data.to_vec()).await.is_err() {
+        let forwarded = if is_shutdown && PerfExperiment::ShutdownReady.enabled() {
+            let message = Message::with_payload(
+                MessageType::Shutdown,
+                frame.id,
+                &ShutdownRequest { ready_ack: true },
+            );
+            match message.and_then(|message| {
+                let mut encoded = Vec::new();
+                codec::encode_to_buf(&message, &mut encoded)?;
+                Ok(encoded)
+            }) {
+                Ok(encoded) => encoded,
+                Err(error) => {
+                    tracing::error!(%error, "agent relay: failed to encode shutdown-ready request");
+                    break;
+                }
+            }
+        } else {
+            frame.data.to_vec()
+        };
+
+        if agent_tx.send(forwarded).await.is_err() {
             tracing::error!("agent relay: ring writer channel closed");
             break;
         }

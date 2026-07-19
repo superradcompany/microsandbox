@@ -66,10 +66,12 @@ impl NetBackend for SmoltcpBackend {
     /// Guest is sending a frame. Strip the virtio-net header and enqueue
     /// the raw ethernet frame for smoltcp.
     fn write_frame(&mut self, hdr_len: usize, buf: &mut [u8]) -> Result<(), WriteError> {
-        let ethernet_frame = buf[hdr_len..].to_vec();
+        let mut ethernet_frame = self.shared.take_frame_buffer(buf.len() - hdr_len);
+        ethernet_frame.copy_from_slice(&buf[hdr_len..]);
         let frame_len = ethernet_frame.len();
 
-        if self.shared.tx_ring.push(ethernet_frame).is_err() {
+        if let Err(ethernet_frame) = self.shared.tx_ring.push(ethernet_frame) {
+            self.shared.recycle_frame_buffer(ethernet_frame);
             // This backend exposes a wake pipe to libkrun, not a real writable
             // socket. Returning NothingWritten would make the virtio worker
             // undo the TX pop and wait for write readiness that cannot signal
@@ -80,7 +82,7 @@ impl NetBackend for SmoltcpBackend {
         }
 
         self.shared.add_tx_bytes(frame_len);
-        self.shared.tx_wake.wake();
+        self.shared.notify_tx();
         Ok(())
     }
 
@@ -99,12 +101,14 @@ impl NetBackend for SmoltcpBackend {
                 buf_len = buf.len(),
                 "dropping oversized frame from rx_ring"
             );
+            self.shared.recycle_frame_buffer(frame);
             return Err(ReadError::NothingRead);
         }
 
         // Prepend zeroed virtio-net header.
         buf[..VIRTIO_NET_HDR_LEN].fill(0);
         buf[VIRTIO_NET_HDR_LEN..total_len].copy_from_slice(&frame);
+        self.shared.recycle_frame_buffer(frame);
 
         Ok(total_len)
     }

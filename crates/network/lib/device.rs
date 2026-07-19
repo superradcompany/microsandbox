@@ -48,6 +48,7 @@ pub struct SmoltcpDevice {
 /// frame from the guest to smoltcp.
 pub struct SmoltcpRxToken {
     frame: Vec<u8>,
+    shared: Arc<SharedState>,
 }
 
 /// Token returned by the `Device::receive()` and `Device::transmit()`
@@ -90,7 +91,9 @@ impl SmoltcpDevice {
     ///
     /// Used for frames handled outside smoltcp (e.g. non-DNS UDP relay).
     pub fn drop_staged_frame(&mut self) {
-        self.pending_rx = None;
+        if let Some(frame) = self.pending_rx.take() {
+            self.shared.recycle_frame_buffer(frame);
+        }
     }
 
     /// Replace the currently staged frame with a synthetic one for smoltcp.
@@ -99,7 +102,9 @@ impl SmoltcpDevice {
     /// original fragment must not reach smoltcp, but a completed UDP/53
     /// datagram should still use the normal DNS socket/interceptor path.
     pub(crate) fn replace_staged_frame(&mut self, frame: Vec<u8>) {
-        self.pending_rx = Some(frame);
+        if let Some(replaced) = self.pending_rx.replace(frame) {
+            self.shared.recycle_frame_buffer(replaced);
+        }
     }
 }
 
@@ -113,7 +118,13 @@ impl phy::Device for SmoltcpDevice {
 
     fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         let frame = self.pending_rx.take()?;
-        Some((SmoltcpRxToken { frame }, SmoltcpTxToken { device: self }))
+        Some((
+            SmoltcpRxToken {
+                frame,
+                shared: Arc::clone(&self.shared),
+            },
+            SmoltcpTxToken { device: self },
+        ))
     }
 
     fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
@@ -142,7 +153,9 @@ impl phy::RxToken for SmoltcpRxToken {
     where
         F: FnOnce(&[u8]) -> R,
     {
-        f(&self.frame)
+        let result = f(&self.frame);
+        self.shared.recycle_frame_buffer(self.frame);
+        result
     }
 }
 
@@ -151,7 +164,7 @@ impl<'a> phy::TxToken for SmoltcpTxToken<'a> {
     where
         F: FnOnce(&mut [u8]) -> R,
     {
-        let mut buf = vec![0u8; len];
+        let mut buf = self.device.shared.take_frame_buffer(len);
         let result = f(&mut buf);
         // Push the frame to rx_ring for the guest. Don't wake yet —
         // the poll loop will coalesce wakes after the egress loop.
