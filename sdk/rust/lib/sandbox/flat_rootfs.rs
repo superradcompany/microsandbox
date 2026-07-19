@@ -107,19 +107,14 @@ fn create_private_flat_rootfs_sync(
         let clone_started_at = Instant::now();
         let resolved_clone = match clone {
             FlatClone::Auto => {
-                let (_, strategy) =
-                    microsandbox_utils::copy::staged_fast_copy_with_strategy(base, &temp)?;
+                let (_, strategy) = microsandbox_utils::copy::fast_copy_with_strategy(base, &temp)?;
                 match strategy {
                     FastCopyStrategy::Reflink => FlatClone::Reflink,
                     FastCopyStrategy::SparseCopy => FlatClone::Copy,
                 }
             }
             FlatClone::Copy => {
-                // The clone remains an unpublished `.part`. A grow synchronizes all copied data in
-                // its first crash-ordering phase; without a grow, the final sync below does so.
-                // Avoiding an intermediate sync preserves the same publication boundary while
-                // coalescing the clone and resize writes into one storage flush.
-                microsandbox_utils::copy::staged_sparse_copy(base, &temp)?;
+                microsandbox_utils::copy::sparse_copy(base, &temp)?;
                 FlatClone::Copy
             }
             FlatClone::Reflink => {
@@ -198,8 +193,6 @@ fn host_allocated_bytes(_path: &Path) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read, Seek, SeekFrom};
-
     use microsandbox_image::ext4::{Ext4RootfsOptions, materialize_ext4_rootfs};
     use microsandbox_image::tree::FileTree;
 
@@ -232,63 +225,6 @@ mod tests {
             artifact.virtual_size_bytes,
             "growing a private clone must not mutate the cached base"
         );
-    }
-
-    #[tokio::test]
-    async fn clones_without_growing_before_publication() {
-        let dir = tempfile::tempdir().unwrap();
-        let base = dir.path().join("base.raw");
-        let artifact =
-            materialize_ext4_rootfs(&base, FileTree::new(), &Ext4RootfsOptions::default()).unwrap();
-        let destination = dir.path().join(FLAT_ROOTFS_FILENAME);
-        let target_mib = u32::try_from(artifact.virtual_size_bytes / BYTES_PER_MIB).unwrap();
-
-        create_private_flat_rootfs(
-            base.clone(),
-            destination.clone(),
-            target_mib,
-            FlatClone::Copy,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            std::fs::metadata(&destination).unwrap().len(),
-            artifact.virtual_size_bytes
-        );
-        let mut base_file = std::fs::File::open(base).unwrap();
-        let mut destination_file = std::fs::File::open(&destination).unwrap();
-        for offset in [0, 1024, artifact.virtual_size_bytes - 4096] {
-            let mut expected = [0u8; 4096];
-            let mut actual = [0u8; 4096];
-            base_file.seek(SeekFrom::Start(offset)).unwrap();
-            destination_file.seek(SeekFrom::Start(offset)).unwrap();
-            base_file.read_exact(&mut expected).unwrap();
-            destination_file.read_exact(&mut actual).unwrap();
-            assert_eq!(actual, expected, "clone differed at byte offset {offset}");
-        }
-        assert!(!destination.with_extension("raw.part").exists());
-    }
-
-    #[tokio::test]
-    async fn removes_unpublished_clone_when_growth_fails() {
-        let dir = tempfile::tempdir().unwrap();
-        let base = dir.path().join("invalid.raw");
-        std::fs::write(&base, vec![0xAB; BYTES_PER_MIB as usize]).unwrap();
-        let destination = dir.path().join(FLAT_ROOTFS_FILENAME);
-        let temp = destination.with_extension("raw.part");
-
-        let error = create_private_flat_rootfs(base, destination.clone(), 2, FlatClone::Copy)
-            .await
-            .unwrap_err();
-
-        assert!(
-            error
-                .to_string()
-                .contains("failed to grow cloned flat rootfs")
-        );
-        assert!(!destination.exists());
-        assert!(!temp.exists());
     }
 
     #[tokio::test]
