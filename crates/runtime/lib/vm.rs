@@ -27,6 +27,7 @@ use microsandbox_protocol::{
     codec,
     message::{Message, MessageType},
 };
+use microsandbox_types::CpuPlacement;
 use msb_krun::VmBuilder;
 use sea_orm::{ColumnTrait, EntityTrait, Set};
 use serde::{Deserialize, Serialize};
@@ -109,6 +110,9 @@ pub struct Config {
     /// lifecycle maintenance can remove ephemeral sandbox directories without
     /// inferring the path from `log_dir`.
     pub sandboxes_dir: PathBuf,
+
+    /// Internal directory containing process-held CPU allocation leases.
+    pub cpu_lease_dir: PathBuf,
 
     /// Path to the Unix domain socket for the agent relay.
     pub agent_sock_path: PathBuf,
@@ -260,6 +264,9 @@ pub struct VmConfig {
 
     /// Maximum guest memory in MiB reserved for future hotplug (virtio-mem).
     pub max_memory_mib: u32,
+
+    /// Requested host CPU placement policy.
+    pub cpu_placement: CpuPlacement,
 
     /// Root filesystem path for direct passthrough mounts.
     pub rootfs_path: Option<PathBuf>,
@@ -508,6 +515,20 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         Ok::<_, RuntimeError>((relay, db, run_db_id))
     })?;
 
+    let cpu_guard = match tokio_rt.block_on(crate::cpu::acquire(
+        &db,
+        run_db_id,
+        &config.cpu_lease_dir,
+        config.vm.cpu_placement,
+        config.vm.max_cpus.max(config.vm.vcpus),
+    )) {
+        Ok(guard) => Arc::new(guard),
+        Err(error) => {
+            let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+            return Err(error);
+        }
+    };
+
     // Attach the exec.log writer so the ring reader can capture the
     // primary session's stdout/stderr. Failure to open the file is
     // non-fatal — log capture is best-effort and must not block boot.
@@ -564,6 +585,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     // without re-opening the registry (saving two mmap syscalls and a
     // potential `wait_for_ready` round-trip on the VMM's exit path).
     let exit_metrics_writer = metrics_writer.clone();
+    let exit_cpu_guard = Arc::clone(&cpu_guard);
     #[cfg(windows)]
     let _agent_console_pipe_bridge = AgentConsolePipeBridge::spawn(
         agent_console_pipe_name(config.sandbox_id),
@@ -595,6 +617,10 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
 
             rt_handle.block_on(async {
                 let now = chrono::Utc::now().naive_utc();
+
+                if let Err(error) = exit_cpu_guard.release(&exit_db).await {
+                    tracing::warn!(%error, "release CPU placement at VM exit");
+                }
 
                 // Mark run as terminated with exit code and reason.
                 let _ = run_entity::Entity::update_many()
@@ -670,6 +696,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
             let _ = std::fs::remove_file(&exit_sock_path);
         },
         tokio_rt.handle().clone(),
+        cpu_guard.vcpu_targets(),
     );
     let (
         vm,
@@ -680,6 +707,9 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     ) = match build_result {
         Ok(vm) => vm,
         Err(e) => {
+            if let Err(error) = tokio_rt.block_on(cpu_guard.release(&db)) {
+                tracing::warn!(%error, "release CPU placement after VM build failure");
+            }
             let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
             // Free the slot: build_vm never started the sampler, so no live
             // sample is worth preserving. Prefer the writer (already holds
@@ -1048,6 +1078,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     }
 
     // Forget the tokio runtime (keep background tasks alive).
+    let cleanup_rt_handle = tokio_rt.handle().clone();
     std::mem::forget(tokio_rt);
 
     // Enter the VM (never returns).
@@ -1055,6 +1086,9 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     match vm.enter() {
         Ok(infallible) => Ok(infallible),
         Err(e) => {
+            if let Err(error) = cleanup_rt_handle.block_on(cpu_guard.release(&db)) {
+                tracing::warn!(%error, "release CPU placement after VM enter failure");
+            }
             if let Some(writer) = metrics_writer {
                 let _ = writer.release(ReleaseMode::Free);
             }
@@ -1090,6 +1124,7 @@ fn build_vm(
     console_backend: AgentConsoleBackend,
     on_exit: impl Fn(i32) + Send + 'static,
     tokio_handle: tokio::runtime::Handle,
+    vcpu_targets: Option<&[crate::cpu::LogicalCpuId]>,
 ) -> RuntimeResult<VmBuildOutput> {
     let mut exec_env = config.vm.env.clone();
     let vm = &config.vm;
@@ -1103,12 +1138,21 @@ fn build_vm(
 
     let mut builder = VmBuilder::new()
         .machine(|m| {
-            let m = m
+            let mut m = m
                 .vcpus(vm.vcpus)
                 .memory_mib(vm.memory_mib as usize)
                 .max_vcpus(vm.max_cpus.max(vm.vcpus))
                 .max_memory_mib((vm.max_memory_mib.max(vm.memory_mib)) as usize)
                 .balloon_stats_interval(balloon_stats_interval);
+            if let Some(targets) = vcpu_targets {
+                m = m.vcpu_affinity(
+                    targets
+                        .iter()
+                        .copied()
+                        .map(|cpu| msb_krun::HostCpuId::in_group(cpu.group, cpu.index))
+                        .collect(),
+                );
+            }
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             {
                 m.split_irqchip(true)

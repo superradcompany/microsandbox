@@ -10,6 +10,7 @@
 
 use std::path::PathBuf;
 
+use microsandbox_types::CpuPlacement;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "net")]
@@ -38,6 +39,12 @@ pub struct LaunchConfig {
 
     /// Root directory holding every sandbox's persisted state.
     pub sandboxes_dir: PathBuf,
+
+    /// Internal directory containing process-held CPU allocation leases.
+    pub cpu_lease_dir: PathBuf,
+
+    /// Requested host CPU placement policy.
+    pub cpu_placement: CpuPlacement,
 
     /// Path to the Unix domain socket for the agent relay.
     pub agent_sock: PathBuf,

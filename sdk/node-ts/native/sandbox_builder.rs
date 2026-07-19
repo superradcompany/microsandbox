@@ -6,8 +6,8 @@ use napi_derive::napi;
 
 use microsandbox::sandbox::LogLevel as RustLogLevel;
 use microsandbox::sandbox::{
-    PullPolicy as RustPullPolicy, Sandbox as RustSandbox, SandboxBuilder as RustSandboxBuilder,
-    SecurityProfile as RustSecurityProfile,
+    CpuPlacement as RustCpuPlacement, PullPolicy as RustPullPolicy, Sandbox as RustSandbox,
+    SandboxBuilder as RustSandboxBuilder, SecurityProfile as RustSecurityProfile,
 };
 use microsandbox::size::Mebibytes;
 
@@ -157,6 +157,17 @@ impl JsSandboxBuilder {
             u8::try_from(count).map_err(|_| napi::Error::from_reason("maxCpus out of u8 range"))?;
         let prev = self.take_inner();
         self.inner = Some(prev.max_cpus(n));
+        Ok(self)
+    }
+
+    /// Host CPU placement policy.
+    #[napi(js_name = "cpuPlacement")]
+    pub fn cpu_placement(&mut self, policy: String) -> Result<&Self> {
+        let policy = policy
+            .parse::<RustCpuPlacement>()
+            .map_err(napi::Error::from_reason)?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.cpu_placement(policy));
         Ok(self)
     }
 

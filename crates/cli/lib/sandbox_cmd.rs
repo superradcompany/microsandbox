@@ -180,6 +180,7 @@ pub fn run(args: SandboxArgs) -> ! {
             .max_memory_mib
             .unwrap_or(args.memory_mib)
             .max(args.memory_mib),
+        cpu_placement: launch.cpu_placement,
         rootfs_path: launch.rootfs.path,
         rootfs_follow_root_symlinks: launch.rootfs.follow_root_symlinks,
         rootfs_vmdk: if is_vmdk {
@@ -220,6 +221,7 @@ pub fn run(args: SandboxArgs) -> ! {
         log_dir: launch.log_dir,
         runtime_dir: launch.runtime_dir,
         sandboxes_dir: launch.sandboxes_dir,
+        cpu_lease_dir: launch.cpu_lease_dir,
         agent_sock_path: launch.agent_sock,
         startup_command: launch.startup,
         #[cfg(unix)]

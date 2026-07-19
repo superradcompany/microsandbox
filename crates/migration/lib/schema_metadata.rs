@@ -27,6 +27,9 @@ pub const SNAPSHOT_SCOPE_MIGRATION_ID: &str = "m20260714_000001_add_snapshot_sco
 /// Migration that records the clone mechanism resolved for flat root disks.
 pub const FLAT_ROOTFS_STATE_MIGRATION_ID: &str = "m20260718_000001_add_flat_rootfs_state";
 
+/// Migration that introduces cooperative host CPU allocation state.
+pub const CPU_ALLOCATION_MIGRATION_ID: &str = "m20260719_000001_create_cpu_allocations";
+
 /// Frozen migration baseline for the transitional 0.6.0 release.
 ///
 /// The released 0.6.0 binary predates `msb __schema-baseline --json`, so
@@ -176,6 +179,13 @@ pub const MIGRATION_METADATA: &[MigrationMetadata] = &[
         affects_cache: false,
         affects_user_data: false,
         summary: "remove resolved flat root clone metadata",
+    },
+    MigrationMetadata {
+        id: CPU_ALLOCATION_MIGRATION_ID,
+        reversible: true,
+        affects_cache: false,
+        affects_user_data: false,
+        summary: "remove cooperative host CPU allocation tables",
     },
 ];
 

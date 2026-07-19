@@ -8,7 +8,7 @@ use std::time::Duration;
 use microsandbox_image::{PullProgressHandle, RegistryAuth};
 #[cfg(feature = "net")]
 use microsandbox_network::builder::{NetworkBuilder, SecretBuilder};
-use microsandbox_types::{EnvVar, PullPolicy};
+use microsandbox_types::{CpuPlacement, EnvVar, PullPolicy};
 #[cfg(feature = "net")]
 use microsandbox_types::{PortProtocol, PublishedPortSpec};
 
@@ -219,6 +219,12 @@ impl SandboxBuilder {
     /// itself; use [`cpus`](Self::cpus) for the initial effective count.
     pub fn max_cpus(mut self, count: u8) -> Self {
         self.config.spec.resources.max_cpus = count;
+        self
+    }
+
+    /// Select how vCPU threads are placed on host processors.
+    pub fn cpu_placement(mut self, policy: CpuPlacement) -> Self {
+        self.config.spec.resources.cpu_placement = policy;
         self
     }
 
@@ -1307,7 +1313,7 @@ mod tests {
     use microsandbox_network::secrets::config::{HostPattern, SecretEntry, SecretInjection};
     #[cfg(feature = "net")]
     use microsandbox_types::PortProtocol;
-    use microsandbox_types::SandboxLogLevel;
+    use microsandbox_types::{CpuPlacement, SandboxLogLevel};
     #[cfg(feature = "net")]
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -1329,6 +1335,7 @@ mod tests {
             .image("alpine")
             .cpus(2)
             .max_cpus(4)
+            .cpu_placement(CpuPlacement::Spread)
             .memory(1024)
             .max_memory(4096)
             .log_level(LogLevel::Info)
@@ -1342,6 +1349,7 @@ mod tests {
         assert_eq!(config.spec.name, "test");
         assert_eq!(config.spec.resources.cpus, 2);
         assert_eq!(config.spec.resources.max_cpus, 4);
+        assert_eq!(config.spec.resources.cpu_placement, CpuPlacement::Spread);
         assert_eq!(config.spec.resources.memory_mib, 1024);
         assert_eq!(config.spec.resources.max_memory_mib, 4096);
         assert_eq!(config.spec.runtime.log_level, Some(SandboxLogLevel::Info));

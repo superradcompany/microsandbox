@@ -156,6 +156,7 @@ export interface NapiSandboxBuilderSetters {
   rootDisk(configure: (d: NapiRootDiskBuilder) => NapiRootDiskBuilder): this;
   cpus(n: number): this;
   maxCpus(n: number): this;
+  cpuPlacement(policy: "inherit" | "auto" | "spread" | "compact"): this;
   memory(mib: number): this;
   maxMemory(mib: number): this;
   logLevel(level: string): this;

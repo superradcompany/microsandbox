@@ -744,6 +744,30 @@ pub struct SandboxResources {
 
     /// Maximum guest memory the sandbox may expose after boot-time hotplug support lands, in MiB.
     pub max_memory_mib: u32,
+
+    /// Host CPU placement requested for this sandbox.
+    #[serde(default, skip_serializing_if = "CpuPlacement::is_inherit")]
+    pub cpu_placement: CpuPlacement,
+}
+
+/// Controls how Microsandbox places vCPU threads on host processors.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "lowercase")]
+pub enum CpuPlacement {
+    /// Preserve the invoking process's existing scheduler and affinity behavior.
+    #[default]
+    Inherit,
+
+    /// Select a managed placement policy from the available host topology.
+    Auto,
+
+    /// Prefer distinct physical cores before assigning SMT siblings.
+    Spread,
+
+    /// Prefer SMT siblings and minimize the number of physical cores used.
+    Compact,
 }
 
 /// Guest runtime options for a sandbox.
@@ -1214,6 +1238,7 @@ impl Default for SandboxResources {
             memory_mib: DEFAULT_SANDBOX_MEMORY_MIB,
             max_cpus: DEFAULT_SANDBOX_CPUS,
             max_memory_mib: DEFAULT_SANDBOX_MEMORY_MIB,
+            cpu_placement: CpuPlacement::Inherit,
         }
     }
 }
@@ -1231,6 +1256,8 @@ impl<'de> Deserialize<'de> for SandboxResources {
             memory_mib: u32,
             max_cpus: Option<u8>,
             max_memory_mib: Option<u32>,
+            #[serde(default)]
+            cpu_placement: CpuPlacement,
         }
 
         let raw = RawResources::deserialize(deserializer)?;
@@ -1242,7 +1269,42 @@ impl<'de> Deserialize<'de> for SandboxResources {
             // deserialize into an impossible cpus > max_cpus state.
             max_cpus: raw.max_cpus.unwrap_or(raw.cpus),
             max_memory_mib: raw.max_memory_mib.unwrap_or(raw.memory_mib),
+            cpu_placement: raw.cpu_placement,
         })
+    }
+}
+
+impl CpuPlacement {
+    /// Returns whether this policy preserves the inherited host placement.
+    pub const fn is_inherit(&self) -> bool {
+        matches!(self, Self::Inherit)
+    }
+}
+
+impl std::fmt::Display for CpuPlacement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Inherit => "inherit",
+            Self::Auto => "auto",
+            Self::Spread => "spread",
+            Self::Compact => "compact",
+        })
+    }
+}
+
+impl FromStr for CpuPlacement {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "inherit" => Ok(Self::Inherit),
+            "auto" => Ok(Self::Auto),
+            "spread" => Ok(Self::Spread),
+            "compact" => Ok(Self::Compact),
+            _ => Err(format!(
+                "unknown CPU placement: {value} (expected: inherit, auto, spread, compact)"
+            )),
+        }
     }
 }
 
@@ -2423,6 +2485,29 @@ mod tests {
         assert_eq!(resources.max_cpus, 4);
         assert_eq!(resources.memory_mib, 2048);
         assert_eq!(resources.max_memory_mib, 2048);
+        assert_eq!(resources.cpu_placement, CpuPlacement::Inherit);
+    }
+
+    #[test]
+    fn cpu_placement_omits_inherit_and_roundtrips_managed_policies() {
+        let inherited = serde_json::to_value(SandboxResources::default()).unwrap();
+        assert!(inherited.get("cpu_placement").is_none());
+
+        for policy in [
+            CpuPlacement::Auto,
+            CpuPlacement::Spread,
+            CpuPlacement::Compact,
+        ] {
+            let resources = SandboxResources {
+                cpu_placement: policy,
+                ..Default::default()
+            };
+            let json = serde_json::to_string(&resources).unwrap();
+            let decoded: SandboxResources = serde_json::from_str(&json).unwrap();
+
+            assert_eq!(decoded.cpu_placement, policy);
+            assert_eq!(policy.to_string().parse::<CpuPlacement>().unwrap(), policy);
+        }
     }
 
     #[test]

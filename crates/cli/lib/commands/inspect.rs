@@ -201,6 +201,10 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
             ),
         );
         ui::detail_kv_indent(
+            "CPU Placement",
+            &config.spec.resources.cpu_placement.to_string(),
+        );
+        ui::detail_kv_indent(
             "Memory",
             &resource_value(
                 &format!("{} MiB", config.spec.resources.memory_mib),

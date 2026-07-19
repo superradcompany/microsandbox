@@ -16,6 +16,7 @@ mod error;
 pub mod boot_error;
 pub mod console;
 pub mod control;
+pub mod cpu;
 pub mod exec_log;
 pub mod heartbeat;
 pub mod launch;
