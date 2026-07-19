@@ -626,6 +626,7 @@ impl Default for SandboxConfig {
                     memory_mib: default_memory_mib(),
                     max_cpus: default_cpus(),
                     max_memory_mib: default_memory_mib(),
+                    cpu_placement: Default::default(),
                 },
                 runtime: SandboxRuntimeOptions {
                     log_level: default_log_level(),
@@ -1327,6 +1328,7 @@ mod tests {
                 memory_mib: 1024,
                 max_cpus: 2,
                 max_memory_mib: 1024,
+                cpu_placement: Default::default(),
             },
             runtime: SandboxRuntimeOptions {
                 workdir: Some("/app".into()),

@@ -3399,9 +3399,22 @@ mod tests {
         .unwrap();
         Migrator::up(db.inner(), None).await.unwrap();
 
-        // The snapshot artifact transition is latest; one step must restore
-        // the preceding file-only index while everything older stays intact.
+        // CPU allocation state is the latest migration; one step must drop its
+        // coordination tables while everything older stays intact.
         rollback_schema(db.inner(), 1).await.unwrap();
+
+        for table in ["cpu_allocation", "cpu_allocation_cpu"] {
+            let rows = db
+                .query_all(Statement::from_string(
+                    DatabaseBackend::Sqlite,
+                    format!(
+                        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '{table}'"
+                    ),
+                ))
+                .await
+                .unwrap();
+            assert!(rows.is_empty(), "{table} should be rolled back");
+        }
 
         let columns = db
             .query_all_raw(Statement::from_string(
@@ -3417,7 +3430,7 @@ mod tests {
             .iter()
             .any(|row| row.try_get_by_index::<String>(1).unwrap() == "state_kind");
         assert!(has_scope);
-        assert!(!has_state_kind);
+        assert!(has_state_kind);
 
         let rows = db
             .query_all_raw(Statement::from_string(

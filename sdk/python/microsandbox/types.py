@@ -40,6 +40,15 @@ class PullPolicy(StrEnum):
     NEVER = "never"
 
 
+class CpuPlacement(StrEnum):
+    """Host placement policy for sandbox vCPU threads."""
+
+    INHERIT = "inherit"
+    AUTO = "auto"
+    SPREAD = "spread"
+    COMPACT = "compact"
+
+
 class LogLevel(StrEnum):
     TRACE = "trace"
     DEBUG = "debug"

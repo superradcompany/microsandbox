@@ -2247,6 +2247,8 @@ fn sandbox_cli_args(
         log_dir: log_dir.to_path_buf(),
         runtime_dir: runtime_dir.to_path_buf(),
         sandboxes_dir: local.sandboxes_dir(),
+        cpu_lease_dir: local.config().run_dir().join("cpu-leases"),
+        cpu_placement: config.spec.resources.cpu_placement,
         agent_sock: agent_sock_path.to_path_buf(),
         libkrunfw_path: libkrunfw_path.to_path_buf(),
         startup: startup_command(config),
