@@ -20,6 +20,10 @@ Snapshots are **disk-only** and require a sandbox that is not running. Stopped a
 
 Booting from a snapshot is a cold boot of a fresh VM that starts from the captured filesystem changes.
 
+For the default layered root, the artifact carries the writable `upper.ext4` and pins the immutable OCI lower layers. For a flat root, it carries the complete `rootfs.raw` and records a required layout capability in `snapshot.json`; older runtimes refuse that artifact instead of interpreting it as a layered upper. Both restore paths create a private writable copy for the new sandbox.
+
+Flat snapshot creation works on a private staged copy. Microsandbox replays any pending ext4 journal, validates the formatter-owned filesystem metadata and checksums, and then asks the host filesystem to deallocate ext4 blocks proven free. Linux uses hole punching, macOS uses APFS range deallocation, and Windows uses sparse zero-data ranges. If the host filesystem cannot deallocate ranges, snapshot creation retains the correct dense artifact rather than weakening validation or mutating the stopped sandbox disk.
+
 ## Quick start
 
 You'll usually reach for the CLI first:

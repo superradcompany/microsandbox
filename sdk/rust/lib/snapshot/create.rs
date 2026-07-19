@@ -208,6 +208,24 @@ async fn build_artifact(
     .await
     .map_err(|e| MicrosandboxError::Custom(format!("snapshot copy task: {e}")))??;
 
+    if payload == SnapshotPayload::FlatRootfs {
+        let trim_path = destination.clone();
+        let trim = tokio::task::spawn_blocking(move || {
+            microsandbox_image::ext4::trim_snapshot_image(&trim_path)
+        })
+        .await
+        .map_err(|error| MicrosandboxError::Custom(format!("snapshot trim task: {error}")))?
+        .map_err(|error| MicrosandboxError::Custom(format!("snapshot trim failed: {error}")))?;
+        tracing::info!(
+            journal_replayed = trim.journal_replayed,
+            free_bytes = trim.free_bytes,
+            deallocated_bytes = trim.deallocated_bytes,
+            ranges = trim.ranges,
+            trim_supported = trim.trim_supported,
+            "prepared flat rootfs snapshot payload"
+        );
+    }
+
     let destination_for_sync = destination.clone();
     tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         let f = std::fs::OpenOptions::new()

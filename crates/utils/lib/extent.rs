@@ -20,14 +20,17 @@ use std::os::windows::io::AsRawHandle;
 use std::ptr;
 
 #[cfg(windows)]
-use windows_sys::Win32::Foundation::{ERROR_MORE_DATA, GetLastError, HANDLE, NO_ERROR};
+use windows_sys::Win32::Foundation::{
+    ERROR_INVALID_FUNCTION, ERROR_MORE_DATA, ERROR_NOT_SUPPORTED, GetLastError, HANDLE, NO_ERROR,
+};
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::GetCompressedFileSizeW;
 #[cfg(windows)]
 use windows_sys::Win32::System::IO::DeviceIoControl;
 #[cfg(windows)]
 use windows_sys::Win32::System::Ioctl::{
-    FILE_ALLOCATED_RANGE_BUFFER, FSCTL_QUERY_ALLOCATED_RANGES, FSCTL_SET_SPARSE,
+    FILE_ALLOCATED_RANGE_BUFFER, FILE_ZERO_DATA_INFORMATION, FSCTL_QUERY_ALLOCATED_RANGES,
+    FSCTL_SET_SPARSE, FSCTL_SET_ZERO_DATA,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -124,6 +127,26 @@ pub fn allocated_file_bytes(path: &Path) -> io::Result<u64> {
     }
 }
 
+/// Deallocate a byte range while preserving the file's logical length and zero-read semantics.
+///
+/// Callers must establish that the bytes are semantically free before invoking this operation. Unsupported host filesystems return [`io::ErrorKind::Unsupported`] so callers can retain a correct dense fallback.
+pub fn deallocate_file_range(file: &File, offset: u64, len: u64) -> io::Result<()> {
+    if len == 0 {
+        return Ok(());
+    }
+    let end = offset
+        .checked_add(len)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "deallocate range overflows"))?;
+    let file_len = file.metadata()?.len();
+    if end > file_len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("deallocate range {offset}..{end} exceeds file length {file_len}"),
+        ));
+    }
+    deallocate_file_range_impl(file, offset, len)
+}
+
 /// Flag `file` as sparse so NTFS keeps unwritten ranges unallocated. No-op semantics on filesystems where files are implicitly hole-capable is handled by the unix definition
 /// below.
 #[cfg(windows)]
@@ -185,6 +208,91 @@ pub fn punch_hole_aligned(_file: &File, _offset: u64, _len: u64) -> io::Result<(
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+fn deallocate_file_range_impl(file: &File, offset: u64, len: u64) -> io::Result<()> {
+    let rc = unsafe {
+        libc::fallocate64(
+            file.as_raw_fd(),
+            libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
+            offset as libc::off64_t,
+            len as libc::off64_t,
+        )
+    };
+    if rc == 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::EOPNOTSUPP) | Some(libc::ENOSYS) | Some(libc::EINVAL) => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("host filesystem cannot deallocate file ranges: {error}"),
+        )),
+        _ => Err(error),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn deallocate_file_range_impl(file: &File, offset: u64, len: u64) -> io::Result<()> {
+    punch_hole_aligned(file, offset, len).map_err(|error| match error.raw_os_error() {
+        Some(libc::ENOTSUP) | Some(libc::EINVAL) => io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("host filesystem cannot deallocate file ranges: {error}"),
+        ),
+        _ => error,
+    })
+}
+
+#[cfg(windows)]
+fn deallocate_file_range_impl(file: &File, offset: u64, len: u64) -> io::Result<()> {
+    mark_sparse(file).map_err(|error| map_deallocation_unsupported(error))?;
+    let params = FILE_ZERO_DATA_INFORMATION {
+        FileOffset: offset as i64,
+        BeyondFinalZero: (offset + len) as i64,
+    };
+    let mut bytes_returned = 0u32;
+    let ok = unsafe {
+        DeviceIoControl(
+            file.as_raw_handle() as HANDLE,
+            FSCTL_SET_ZERO_DATA,
+            (&params as *const FILE_ZERO_DATA_INFORMATION).cast(),
+            std::mem::size_of::<FILE_ZERO_DATA_INFORMATION>() as u32,
+            ptr::null_mut(),
+            0,
+            &mut bytes_returned,
+            ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        let error = io::Error::last_os_error();
+        return Err(map_deallocation_unsupported(error));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn map_deallocation_unsupported(error: io::Error) -> io::Error {
+    let kind = if matches!(
+        error.raw_os_error(),
+        Some(code) if code == ERROR_INVALID_FUNCTION as i32 || code == ERROR_NOT_SUPPORTED as i32
+    ) {
+        io::ErrorKind::Unsupported
+    } else {
+        error.kind()
+    };
+    io::Error::new(
+        kind,
+        format!("host filesystem cannot deallocate file ranges: {error}"),
+    )
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn deallocate_file_range_impl(_file: &File, _offset: u64, _len: u64) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "host filesystem cannot deallocate file ranges on this platform",
+    ))
+}
 
 #[cfg(unix)]
 fn scan_impl(file: &File, len: u64) -> io::Result<Option<ExtentMap>> {
@@ -303,7 +411,7 @@ fn allocation_block_size(file: &File) -> io::Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Seek, SeekFrom, Write};
+    use std::io::{Read, Seek, SeekFrom, Write};
 
     use super::*;
 
@@ -387,5 +495,36 @@ mod tests {
             "extent map misses data at 4 MiB: {:?}",
             map.extents
         );
+    }
+
+    #[test]
+    fn deallocate_preserves_length_and_zeroes_range_when_supported() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deallocate.bin");
+        let len = 4 * 1024 * 1024u64;
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        mark_sparse(&file).unwrap();
+        file.set_len(len).unwrap();
+        file.seek(SeekFrom::Start(1024 * 1024)).unwrap();
+        file.write_all(&vec![0xA5; 1024 * 1024]).unwrap();
+        file.sync_all().unwrap();
+
+        match deallocate_file_range(&file, 1024 * 1024, 1024 * 1024) {
+            Ok(()) => {
+                let mut bytes = vec![0xFF; 4096];
+                file.seek(SeekFrom::Start(1024 * 1024)).unwrap();
+                file.read_exact(&mut bytes).unwrap();
+                assert!(bytes.iter().all(|byte| *byte == 0));
+                assert_eq!(file.metadata().unwrap().len(), len);
+            }
+            Err(error) if error.kind() == io::ErrorKind::Unsupported => {}
+            Err(error) => panic!("deallocate failed unexpectedly: {error}"),
+        }
     }
 }
