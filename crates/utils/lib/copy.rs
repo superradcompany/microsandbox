@@ -65,6 +65,29 @@ pub fn fast_copy(src: &Path, dst: &Path) -> io::Result<u64> {
 
 /// Copy `src` to `dst` using the fastest safe strategy and report which strategy resolved.
 pub fn fast_copy_with_strategy(src: &Path, dst: &Path) -> io::Result<(u64, FastCopyStrategy)> {
+    fast_copy_with_strategy_impl(src, dst, true)
+}
+
+/// Copy `src` into an unpublished staging path and report which strategy resolved.
+///
+/// Unlike [`fast_copy_with_strategy`], the sparse-copy fallback deliberately does not synchronize
+/// `dst`. The caller must keep the destination private and call `sync_all` after all subsequent
+/// mutations before publishing it. This avoids an otherwise redundant storage flush when a staged
+/// disk is immediately resized and synchronized as one transaction.
+///
+/// **Blocking.** Callers in async contexts should wrap in `tokio::task::spawn_blocking`.
+pub fn staged_fast_copy_with_strategy(
+    src: &Path,
+    dst: &Path,
+) -> io::Result<(u64, FastCopyStrategy)> {
+    fast_copy_with_strategy_impl(src, dst, false)
+}
+
+fn fast_copy_with_strategy_impl(
+    src: &Path,
+    dst: &Path,
+    sync_destination: bool,
+) -> io::Result<(u64, FastCopyStrategy)> {
     // Stat the source up front. This makes the missing-source error
     // kind platform-consistent (`NotFound` everywhere); without it,
     // reflink-copy on Linux surfaces `InvalidInput` with no errno
@@ -83,7 +106,7 @@ pub fn fast_copy_with_strategy(src: &Path, dst: &Path) -> io::Result<(u64, FastC
         Err(e) => return Err(e),
     }
 
-    sparse_copy(src, dst).map(|len| (len, FastCopyStrategy::SparseCopy))
+    sparse_copy_impl(src, dst, sync_destination).map(|len| (len, FastCopyStrategy::SparseCopy))
 }
 
 /// Require a filesystem copy-on-write clone with no fallback.
@@ -99,11 +122,19 @@ pub fn reflink(src: &Path, dst: &Path) -> io::Result<u64> {
 /// when they already know the destination filesystem doesn't support
 /// reflinks, or for tests that want to exercise the fallback path.
 pub fn sparse_copy(src: &Path, dst: &Path) -> io::Result<u64> {
-    sparse_copy_impl(src, dst)
+    sparse_copy_impl(src, dst, true)
+}
+
+/// Sparse-copy `src` into an unpublished staging path without synchronizing `dst`.
+///
+/// The caller must keep `dst` private and call `sync_all` after all subsequent mutations before
+/// publishing it. Prefer [`sparse_copy`] unless a surrounding transaction owns that final sync.
+pub fn staged_sparse_copy(src: &Path, dst: &Path) -> io::Result<u64> {
+    sparse_copy_impl(src, dst, false)
 }
 
 #[cfg(unix)]
-fn sparse_copy_impl(src: &Path, dst: &Path) -> io::Result<u64> {
+fn sparse_copy_impl(src: &Path, dst: &Path, sync_destination: bool) -> io::Result<u64> {
     let src_file = File::open(src)?;
     let len = src_file.metadata()?.len();
 
@@ -147,12 +178,14 @@ fn sparse_copy_impl(src: &Path, dst: &Path) -> io::Result<u64> {
         off = data_end as i64;
     }
 
-    dst_file.sync_all()?;
+    if sync_destination {
+        dst_file.sync_all()?;
+    }
     Ok(len)
 }
 
 #[cfg(windows)]
-fn sparse_copy_impl(src: &Path, dst: &Path) -> io::Result<u64> {
+fn sparse_copy_impl(src: &Path, dst: &Path, sync_destination: bool) -> io::Result<u64> {
     const BUF_SIZE: usize = 1024 * 1024;
 
     let mut src_file = File::open(src)?;
@@ -179,7 +212,9 @@ fn sparse_copy_impl(src: &Path, dst: &Path) -> io::Result<u64> {
         offset += n as u64;
     }
 
-    dst_file.sync_all()?;
+    if sync_destination {
+        dst_file.sync_all()?;
+    }
     Ok(len)
 }
 
@@ -466,6 +501,32 @@ mod tests {
         let n = fast_copy(&src, &dst).unwrap();
         assert_eq!(n, len);
         assert_eq!(std::fs::metadata(&dst).unwrap().len(), len);
+    }
+
+    #[test]
+    fn staged_sparse_copy_matches_source_before_caller_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.bin");
+        let dst = dir.path().join("dst.bin.part");
+
+        let len: u64 = 4 * 1024 * 1024;
+        make_sparse(&src, len, &[0, 2 * 1024 * 1024]).unwrap();
+
+        let n = staged_sparse_copy(&src, &dst).unwrap();
+        assert_eq!(n, len);
+        assert_eq!(std::fs::metadata(&dst).unwrap().len(), len);
+
+        // Model the owner of a staged transaction: validate the bytes while private, then issue
+        // the one durability barrier required before atomically publishing the destination.
+        let mut dst_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&dst)
+            .unwrap();
+        let mut first_extent = [0u8; 64 * 1024];
+        dst_file.read_exact(&mut first_extent).unwrap();
+        assert!(first_extent.iter().all(|&byte| byte == 0xAB));
+        dst_file.sync_all().unwrap();
     }
 
     #[test]
