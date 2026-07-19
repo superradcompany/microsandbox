@@ -1057,17 +1057,67 @@ fn validate_backup_metadata(file: &mut File, img: &ParsedImage) -> Result<(), Ex
         }
         let start = geometry.group_start_block(group) * EXT4_BLOCK_SIZE as u64;
         let backup = read_superblock_at(file, start, &format!("group {group} backup"))?;
-        if get_le16(&backup, 0x5A) != group as u16 || backup[0..0x18] != img.sb[0..0x18] {
-            return Err(unsupported(format!(
-                "group {group} backup superblock differs"
-            )));
-        }
+        validate_backup_superblock(img, group, &backup)?;
         let mut backup_gdt = vec![0u8; img.gdt.len()];
         file.seek(SeekFrom::Start(start + EXT4_BLOCK_SIZE as u64))?;
         file.read_exact(&mut backup_gdt)?;
-        if backup_gdt != img.gdt {
-            return Err(unsupported(format!("group {group} backup GDT differs")));
+        for described_group in 0..img.num_groups {
+            let descriptor = &backup_gdt[described_group as usize * EXT4_DESC_SIZE as usize..]
+                [..EXT4_DESC_SIZE as usize];
+            let bb =
+                get_le32(descriptor, 0x00) as u64 | ((get_le32(descriptor, 0x20) as u64) << 32);
+            let ib =
+                get_le32(descriptor, 0x04) as u64 | ((get_le32(descriptor, 0x24) as u64) << 32);
+            let it =
+                get_le32(descriptor, 0x08) as u64 | ((get_le32(descriptor, 0x28) as u64) << 32);
+            if bb != geometry.group_block_bitmap_block(described_group)
+                || ib != geometry.group_inode_bitmap_block(described_group)
+                || it != geometry.group_inode_table_block(described_group)
+                || get_le16(descriptor, 0x12) != EXT4_BG_INODE_ZEROED
+            {
+                return Err(unsupported(format!(
+                    "group {group} backup GDT has invalid geometry for group {described_group}"
+                )));
+            }
+            let mut descriptor_copy = descriptor.to_vec();
+            put_le16(&mut descriptor_copy, 0x1E, 0);
+            if gdt_checksum(img.csum_seed, described_group, &descriptor_copy)
+                != get_le16(descriptor, 0x1E)
+            {
+                return Err(unsupported(format!(
+                    "group {group} backup GDT checksum mismatch for group {described_group}"
+                )));
+            }
         }
+    }
+    Ok(())
+}
+
+/// Backups are recovery metadata, not mirrors of the live allocation counters. Linux updates free
+/// block/inode counts and descriptor bitmap checksums in the primary copies during normal mounts,
+/// while backups can legitimately retain the formatter-era values. Require every immutable layout
+/// field and the backup's own checksum, but do not compare mutable counters byte-for-byte.
+fn validate_backup_superblock(
+    img: &ParsedImage,
+    group: u32,
+    backup: &[u8],
+) -> Result<(), Ext4Error> {
+    let same_u32 = |offset| get_le32(backup, offset) == get_le32(&img.sb, offset);
+    let same_u16 = |offset| get_le16(backup, offset) == get_le16(&img.sb, offset);
+    let immutable_u32 = [
+        0x00, 0x04, 0x08, 0x14, 0x18, 0x1C, 0x20, 0x24, 0x28, 0x4C, 0x54, 0x5C, 0x60, 0x64, 0x104,
+        0x150,
+    ];
+    let immutable_u16 = [0x58, 0xCE, 0xFE];
+    if get_le16(backup, 0x5A) != group as u16
+        || immutable_u32.into_iter().any(|offset| !same_u32(offset))
+        || immutable_u16.into_iter().any(|offset| !same_u16(offset))
+        || backup[0x68..0x78] != img.sb[0x68..0x78]
+        || backup[0x174] != img.sb[0x174]
+    {
+        return Err(unsupported(format!(
+            "group {group} backup superblock has incompatible geometry"
+        )));
     }
     Ok(())
 }
@@ -1843,6 +1893,79 @@ mod tests {
             assert!(outcome.ranges > 0);
             assert!(outcome.deallocated_bytes > 0);
         }
+    }
+
+    #[test]
+    fn test_snapshot_trim_accepts_stale_backup_allocation_counters() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("snapshot-stale-backups.ext4");
+        format_image(&path, 256 * MIB);
+
+        let img = parse(&path);
+        let backup_start = img.geometry().group_start_block(1) * u64::from(EXT4_BLOCK_SIZE);
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+
+        // Normal ext4 allocation updates the primary superblock/GDT but not every sparse-super
+        // backup. Simulate the resulting stale (but checksummed) recovery counters in group 1.
+        let mut backup_sb = read_superblock_at(&mut file, backup_start, "test backup").unwrap();
+        put_le32(
+            &mut backup_sb,
+            0x0C,
+            get_le32(&img.sb, 0x0C).saturating_sub(1),
+        );
+        put_le32(&mut backup_sb, 0x3FC, 0);
+        let checksum = superblock_checksum(&backup_sb);
+        put_le32(&mut backup_sb, 0x3FC, checksum);
+        file.seek(SeekFrom::Start(backup_start)).unwrap();
+        file.write_all(&backup_sb).unwrap();
+
+        let mut backup_gdt = img.gdt.clone();
+        let descriptor = &mut backup_gdt[..EXT4_DESC_SIZE as usize];
+        put_le16(
+            descriptor,
+            0x0C,
+            get_le16(descriptor, 0x0C).saturating_sub(1),
+        );
+        put_le16(descriptor, 0x1E, 0);
+        let checksum = gdt_checksum(img.csum_seed, 0, descriptor);
+        put_le16(descriptor, 0x1E, checksum);
+        file.seek(SeekFrom::Start(backup_start + u64::from(EXT4_BLOCK_SIZE)))
+            .unwrap();
+        file.write_all(&backup_gdt).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        trim_snapshot_image(&path).unwrap();
+    }
+
+    #[test]
+    fn test_snapshot_trim_rejects_backup_descriptor_geometry_corruption() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("snapshot-bad-backup.ext4");
+        format_image(&path, 256 * MIB);
+
+        let img = parse(&path);
+        let backup_start = img.geometry().group_start_block(1) * u64::from(EXT4_BLOCK_SIZE);
+        let mut backup_gdt = img.gdt.clone();
+        let descriptor = &mut backup_gdt[..EXT4_DESC_SIZE as usize];
+        put_le32(descriptor, 0x00, get_le32(descriptor, 0x00) + 1);
+        put_le16(descriptor, 0x1E, 0);
+        let checksum = gdt_checksum(img.csum_seed, 0, descriptor);
+        put_le16(descriptor, 0x1E, checksum);
+
+        let mut file = OpenOptions::new().write(true).open(&path).unwrap();
+        file.seek(SeekFrom::Start(backup_start + u64::from(EXT4_BLOCK_SIZE)))
+            .unwrap();
+        file.write_all(&backup_gdt).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        let error = trim_snapshot_image(&path).unwrap_err().to_string();
+        assert!(error.contains("backup GDT has invalid geometry"), "{error}");
     }
 
     #[test]
