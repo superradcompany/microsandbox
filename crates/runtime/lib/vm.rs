@@ -1157,6 +1157,12 @@ fn build_vm(
                         .collect(),
                 );
             }
+            #[cfg(target_os = "linux")]
+            {
+                // Keep this host-side experiment independent from the guest THP policy: the
+                // customer A/B changes only whether libkrun advises its anonymous RAM mappings.
+                m = m.host_memory_policy(msb_krun::HostMemoryPolicy::PreferHugePages);
+            }
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             {
                 m.split_irqchip(true)
