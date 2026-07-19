@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
+use std::time::Instant;
 
 use sha2::{Digest as Sha2Digest, Sha256};
 
@@ -34,17 +35,31 @@ pub(crate) fn materialize_flat_rootfs(
     platform: &Platform,
     force: bool,
 ) -> ImageResult<FlatRootfsRef> {
+    let total_started_at = Instant::now();
     let (derivation_digest, derivation_bytes) =
         flat_derivation_digest(manifest_digest, layer_diff_ids, platform);
     if !force
         && let Some(reference) = cache.read_flat_ref(manifest_digest)?
         && reference.derivation_digest == derivation_digest.to_string()
     {
+        tracing::debug!(
+            manifest = %manifest_digest,
+            derivation = %derivation_digest,
+            cache_hit = true,
+            waited_for_lock = false,
+            layer_count = layer_diff_ids.len(),
+            virtual_bytes = reference.virtual_size_bytes,
+            content_bytes = reference.content_bytes,
+            total_us = total_started_at.elapsed().as_micros(),
+            "flat rootfs materialization attribution"
+        );
         return Ok(reference);
     }
 
+    let lock_started_at = Instant::now();
     let lock_file = open_lock_file(&cache.flat_lock_path(&derivation_digest))?;
     lock_exclusive(&lock_file)?;
+    let lock_wait_us = lock_started_at.elapsed().as_micros();
     let _lock_guard = scopeguard::guard(lock_file, |file| {
         let _ = flock_unlock(&file);
     });
@@ -52,6 +67,18 @@ pub(crate) fn materialize_flat_rootfs(
         && let Some(reference) = cache.read_flat_ref(manifest_digest)?
         && reference.derivation_digest == derivation_digest.to_string()
     {
+        tracing::debug!(
+            manifest = %manifest_digest,
+            derivation = %derivation_digest,
+            cache_hit = true,
+            waited_for_lock = true,
+            layer_count = layer_diff_ids.len(),
+            lock_wait_us,
+            virtual_bytes = reference.virtual_size_bytes,
+            content_bytes = reference.content_bytes,
+            total_us = total_started_at.elapsed().as_micros(),
+            "flat rootfs materialization attribution"
+        );
         return Ok(reference);
     }
 
@@ -66,8 +93,15 @@ pub(crate) fn materialize_flat_rootfs(
     let spool_path = work_dir.join("merged.spool");
     let mut spool = DataSpool::new(&spool_path).map_err(ImageError::Io)?;
     let mut layers = Vec::with_capacity(layer_diff_ids.len());
+    let reconstruct_started_at = Instant::now();
+    let mut layer_apparent_bytes = 0u64;
     for diff_id in layer_diff_ids {
         let layer_path = cache.layer_erofs_path(diff_id);
+        layer_apparent_bytes = layer_apparent_bytes.saturating_add(
+            std::fs::metadata(&layer_path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0),
+        );
         layers.push(read_erofs_layer(&layer_path, &mut spool).map_err(|source| {
             ImageError::Materialize {
                 digest: diff_id.to_string(),
@@ -77,9 +111,14 @@ pub(crate) fn materialize_flat_rootfs(
             }
         })?);
     }
+    let reconstruct_us = reconstruct_started_at.elapsed().as_micros();
+    let spool_bytes = spool.current_offset();
+    let merge_started_at = Instant::now();
     let (tree, _) = merge_layers_with_provenance(layers);
+    let merge_us = merge_started_at.elapsed().as_micros();
 
     let candidate = work_dir.join("rootfs.raw.part");
+    let format_started_at = Instant::now();
     let artifact = materialize_ext4_rootfs(
         &candidate,
         tree,
@@ -93,9 +132,11 @@ pub(crate) fn materialize_flat_rootfs(
         message: format!("flat ext4 materialization failed: {error}"),
         source: Some(Box::new(error)),
     })?;
+    let format_us = format_started_at.elapsed().as_micros();
     let artifact_digest: Digest = format!("sha256:{}", hex::encode(artifact.sha256))
         .parse()
         .map_err(|_| ImageError::ManifestParse("invalid flat artifact digest".to_string()))?;
+    let publish_started_at = Instant::now();
     cache.publish_flat_blob(&candidate, &artifact_digest, artifact.virtual_size_bytes)?;
 
     let reference = FlatRootfsRef {
@@ -110,7 +151,34 @@ pub(crate) fn materialize_flat_rootfs(
         content_bytes: artifact.content_bytes,
     };
     cache.write_flat_ref(manifest_digest, &reference)?;
+    let publish_us = publish_started_at.elapsed().as_micros();
+    let allocated_bytes = tracing::enabled!(tracing::Level::DEBUG)
+        .then(|| host_allocated_bytes(&cache.flat_blob_path(&artifact_digest)))
+        .flatten();
+    tracing::debug!(
+        manifest = %manifest_digest,
+        derivation = %derivation_digest,
+        artifact = %artifact_digest,
+        cache_hit = false,
+        layer_count = layer_diff_ids.len(),
+        layer_apparent_bytes,
+        spool_bytes,
+        virtual_bytes = artifact.virtual_size_bytes,
+        allocated_bytes,
+        content_bytes = artifact.content_bytes,
+        lock_wait_us,
+        reconstruct_us,
+        merge_us,
+        format_us,
+        publish_us,
+        total_us = total_started_at.elapsed().as_micros(),
+        "flat rootfs materialization attribution"
+    );
     Ok(reference)
+}
+
+fn host_allocated_bytes(path: &Path) -> Option<u64> {
+    microsandbox_utils::extent::allocated_file_bytes(path).ok()
 }
 
 fn flat_derivation_digest(

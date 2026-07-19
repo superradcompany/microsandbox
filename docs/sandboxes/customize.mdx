@@ -47,7 +47,7 @@ sb, err := m.CreateSandbox(ctx, "worker",
 ```
 </CodeGroup>
 
-`clone=auto` prefers a reflink and falls back to a sparse copy. Choose `copy` for deterministic cross-filesystem behavior, or `reflink` when sharing extents is mandatory and failure is preferable to copying. The first flat version supports ext4; rootfs patches, snapshots, and cloud execution are rejected. The layered root remains the default for compatibility.
+`clone=auto` prefers a native copy-on-write clone and falls back to a sparse copy. It uses `FICLONE` on Linux, `clonefile` on macOS, and block cloning on Windows volumes that advertise block refcounting, including supported ReFS and Dev Drive configurations. Choose `copy` for deterministic cross-filesystem behavior, or `reflink` when sharing extents is mandatory and failure is preferable to copying. Strict `reflink` never silently copies the full image; `auto` remains safe on ext4, NTFS, cross-volume destinations, and other unsupported filesystems. The first flat version supports ext4; rootfs patches, snapshots, and cloud execution are rejected. The layered root remains the default for compatibility.
 
 ## Scripts
 
