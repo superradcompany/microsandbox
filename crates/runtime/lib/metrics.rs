@@ -6,19 +6,10 @@
 //! per-sample path; lifecycle rows still flow through `DbWriteConnection`.
 
 use std::num::NonZero;
-#[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
-#[cfg(windows)]
-use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use microsandbox_metrics::{MetricsError, MetricsSlotWriter, SampleWrite};
-#[cfg(windows)]
-use windows_sys::Win32::{
-    Foundation::{GetLastError, NO_ERROR},
-    Storage::FileSystem::GetCompressedFileSizeW,
-};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -272,35 +263,7 @@ fn write_sample(
 }
 
 fn upper_host_allocated_bytes(path: Option<&Path>) -> Option<u64> {
-    let path = path?;
-    #[cfg(unix)]
-    {
-        let metadata = std::fs::metadata(path).ok()?;
-        Some(metadata.blocks().saturating_mul(512))
-    }
-    #[cfg(windows)]
-    {
-        windows_allocated_file_bytes(path).ok()
-    }
-}
-
-#[cfg(windows)]
-fn windows_allocated_file_bytes(path: &Path) -> std::io::Result<u64> {
-    let mut high = 0_u32;
-    let path_wide = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let low = unsafe { GetCompressedFileSizeW(path_wide.as_ptr(), &mut high) };
-    if low == u32::MAX {
-        let error = unsafe { GetLastError() };
-        if error != NO_ERROR {
-            return Err(std::io::Error::from_raw_os_error(error as i32));
-        }
-    }
-
-    Ok((u64::from(high) << 32) | u64::from(low))
+    microsandbox_utils::extent::allocated_file_bytes(path?).ok()
 }
 
 fn upper_filesystem_metrics(
@@ -452,6 +415,8 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn upper_host_allocated_bytes_uses_allocated_blocks() {
+        use std::os::unix::fs::MetadataExt;
+
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), vec![1_u8; 8192]).unwrap();
 

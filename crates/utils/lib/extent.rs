@@ -13,12 +13,16 @@ use std::path::Path;
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 #[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+#[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
 #[cfg(windows)]
 use std::ptr;
 
 #[cfg(windows)]
-use windows_sys::Win32::Foundation::{ERROR_MORE_DATA, HANDLE};
+use windows_sys::Win32::Foundation::{ERROR_MORE_DATA, GetLastError, HANDLE, NO_ERROR};
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::GetCompressedFileSizeW;
 #[cfg(windows)]
 use windows_sys::Win32::System::IO::DeviceIoControl;
 #[cfg(windows)]
@@ -81,6 +85,44 @@ impl ExtentMap {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Return the filesystem allocation charged to a file rather than its logical length.
+///
+/// Unix reads allocated blocks from `stat`; Windows uses `GetCompressedFileSizeW`, which reports
+/// the physical allocation for sparse, compressed, and block-cloned files.
+pub fn allocated_file_bytes(path: &Path) -> io::Result<u64> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        Ok(std::fs::metadata(path)?.blocks().saturating_mul(512))
+    }
+    #[cfg(windows)]
+    {
+        let mut high = 0u32;
+        let path_wide = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let low = unsafe { GetCompressedFileSizeW(path_wide.as_ptr(), &mut high) };
+        if low == u32::MAX {
+            let error = unsafe { GetLastError() };
+            if error != NO_ERROR {
+                return Err(io::Error::from_raw_os_error(error as i32));
+            }
+        }
+        Ok((u64::from(high) << 32) | u64::from(low))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "allocated file size is unsupported on this platform",
+        ))
+    }
+}
 
 /// Flag `file` as sparse so NTFS keeps unwritten ranges unallocated. No-op semantics on filesystems where files are implicitly hole-capable is handled by the unix definition
 /// below.
@@ -264,6 +306,17 @@ mod tests {
     use std::io::{Seek, SeekFrom, Write};
 
     use super::*;
+
+    #[test]
+    fn allocated_size_does_not_exceed_dense_file_length_by_more_than_one_extent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("allocated.bin");
+        std::fs::write(&path, vec![0xAB; 128 * 1024]).unwrap();
+
+        let allocated = allocated_file_bytes(&path).unwrap();
+        assert!(allocated >= 128 * 1024);
+        assert!(allocated <= 192 * 1024);
+    }
 
     #[test]
     fn dense_file_scans_as_single_extent_or_unsupported() {

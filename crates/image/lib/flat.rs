@@ -177,20 +177,8 @@ pub(crate) fn materialize_flat_rootfs(
     Ok(reference)
 }
 
-#[cfg(unix)]
 fn host_allocated_bytes(path: &Path) -> Option<u64> {
-    use std::os::unix::fs::MetadataExt;
-
-    std::fs::metadata(path)
-        .ok()
-        .map(|metadata| metadata.blocks().saturating_mul(512))
-}
-
-#[cfg(not(unix))]
-fn host_allocated_bytes(_path: &Path) -> Option<u64> {
-    // Windows does not expose allocation size through std::fs::Metadata. Keep attribution
-    // available there without pretending that the apparent file length is physical usage.
-    None
+    microsandbox_utils::extent::allocated_file_bytes(path).ok()
 }
 
 fn flat_derivation_digest(

@@ -172,19 +172,8 @@ fn create_private_flat_rootfs_sync(
     result
 }
 
-#[cfg(unix)]
 fn host_allocated_bytes(path: &Path) -> Option<u64> {
-    use std::os::unix::fs::MetadataExt;
-
-    std::fs::metadata(path)
-        .ok()
-        .map(|metadata| metadata.blocks().saturating_mul(512))
-}
-
-#[cfg(not(unix))]
-fn host_allocated_bytes(_path: &Path) -> Option<u64> {
-    // Keep Windows attribution honest until allocation size is exposed by a shared host helper.
-    None
+    microsandbox_utils::extent::allocated_file_bytes(path).ok()
 }
 
 //--------------------------------------------------------------------------------------------------
