@@ -633,6 +633,69 @@ pub struct SandboxPolicy {
 // Types: Snapshots
 //--------------------------------------------------------------------------------------------------
 
+/// Policy for compacting free space while creating a disk snapshot.
+///
+/// Compaction is currently meaningful for complete flat ext4 root disks. Layered snapshots retain
+/// their existing upper-layer copy behavior.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "lowercase")]
+pub enum SnapshotCompaction {
+    /// Do not scan or deallocate filesystem free space.
+    #[default]
+    Off,
+
+    /// Compact a flat snapshot when the host supports range deallocation, otherwise publish a
+    /// correct dense artifact.
+    Auto,
+
+    /// Require successful flat-snapshot compaction and fail creation when it is inapplicable or
+    /// unsupported by the host filesystem.
+    On,
+}
+
+/// Resolved result recorded for a snapshot compaction request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotCompactionStatus {
+    /// Compaction was disabled explicitly.
+    Skipped,
+
+    /// The staged flat filesystem was validated and its free ranges were submitted for host
+    /// deallocation.
+    Compacted,
+
+    /// Best-effort compaction was requested, but the host filesystem could not deallocate ranges.
+    Unsupported,
+
+    /// Best-effort compaction was requested for a snapshot layout to which it does not apply.
+    NotApplicable,
+}
+
+/// Persisted outcome of snapshot compaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct SnapshotCompactionInfo {
+    /// Policy requested by the caller.
+    pub requested: SnapshotCompaction,
+
+    /// Resolved result of applying the policy.
+    pub status: SnapshotCompactionStatus,
+
+    /// Whether a pending ext4 journal was replayed in the private staged artifact.
+    pub journal_replayed: bool,
+
+    /// Bytes described as free by the validated ext4 block bitmaps.
+    pub free_bytes: u64,
+
+    /// Physical host allocation removed from the staged artifact.
+    pub deallocated_bytes: u64,
+
+    /// Number of free ranges successfully submitted to the host filesystem.
+    pub ranges: u64,
+}
+
 /// Inputs to create a snapshot.
 ///
 /// The snapshot's name is its identity; the artifact directory is
@@ -662,6 +725,11 @@ pub struct SnapshotSpec {
 
     /// Compute and record upper-layer content integrity at creation time.
     pub record_integrity: bool,
+
+    /// Free-space compaction policy. Defaults to [`SnapshotCompaction::Off`] so ordinary snapshot
+    /// creation does not pay the full-filesystem validation and trim cost unexpectedly.
+    #[serde(default)]
+    pub compaction: SnapshotCompaction,
 
     /// Request a future resumable snapshot that includes memory/device state.
     ///

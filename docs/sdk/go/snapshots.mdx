@@ -901,7 +901,10 @@ Configures [`Snapshot.Create`](#snapshot-create). `Name` and `FromSandbox` are b
 | Labels | `map[string]string` | Arbitrary user labels recorded in the manifest |
 | Force | `bool` | Overwrite an existing artifact with the same name |
 | RecordIntegrity | `bool` | Record content hashes so [`Verify`](#s-verify) can recompute them later |
+| Compaction | `SnapshotCompaction` | Flat-snapshot compaction: `SnapshotCompactionOff` (default), `SnapshotCompactionAuto` (best effort), or `SnapshotCompactionOn` (required) |
 | Resumable | `bool` | Request a resumable snapshot; returns an unsupported-feature error today |
+
+The created artifact's `Compaction()` method returns `*SnapshotCompactionInfo`, including the requested policy, resolved status, journal replay flag, validated free bytes, physically deallocated bytes, and range count. It returns `nil` for artifacts created by older producers.
 
 ### SnapshotSaveOptions<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
 

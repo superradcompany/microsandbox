@@ -6,7 +6,8 @@ use pyo3::types::PyDict;
 
 use microsandbox::snapshot::SaveOpts as RustSaveOpts;
 use microsandbox::{
-    Snapshot as RustSnapshot, SnapshotFormat as RustSnapshotFormat,
+    Snapshot as RustSnapshot, SnapshotCompaction as RustSnapshotCompaction,
+    SnapshotCompactionStatus as RustSnapshotCompactionStatus, SnapshotFormat as RustSnapshotFormat,
     SnapshotHandle as RustSnapshotHandle, SnapshotScope as RustSnapshotScope,
     UpperVerifyStatus as RustUpperVerifyStatus,
 };
@@ -50,6 +51,7 @@ impl PySnapshot {
         labels = None,
         force = false,
         record_integrity = false,
+        compaction = "off",
         resumable = false,
     ))]
     fn create<'py>(
@@ -60,10 +62,14 @@ impl PySnapshot {
         labels: Option<HashMap<String, String>>,
         force: bool,
         record_integrity: bool,
+        compaction: &str,
         resumable: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let compaction = parse_compaction(compaction)?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut builder = RustSnapshot::builder(name).from_sandbox(&from_sandbox);
+            let mut builder = RustSnapshot::builder(name)
+                .from_sandbox(&from_sandbox)
+                .compaction(compaction);
             if let Some(dest_dir) = dest_dir {
                 builder = builder.dest_dir(dest_dir);
             }
@@ -303,6 +309,24 @@ impl PySnapshot {
         self.inner.manifest().source_sandbox.as_deref()
     }
 
+    /// Requested and resolved free-space compaction result.
+    ///
+    /// Returns `None` for snapshots from older producers that did not record the outcome.
+    #[getter]
+    fn compaction<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let Some(info) = self.inner.compaction().map_err(to_py_err)? else {
+            return Ok(None);
+        };
+        let out = PyDict::new(py);
+        out.set_item("requested", format_compaction(info.requested))?;
+        out.set_item("status", format_compaction_status(info.status))?;
+        out.set_item("journal_replayed", info.journal_replayed)?;
+        out.set_item("free_bytes", info.free_bytes)?;
+        out.set_item("deallocated_bytes", info.deallocated_bytes)?;
+        out.set_item("ranges", info.ranges)?;
+        Ok(Some(out))
+    }
+
     /// Verify recorded content integrity.
     ///
     /// Returns a dict with `kind` (`"not_recorded"` or `"verified"`)
@@ -431,5 +455,33 @@ fn format_scope(scope: RustSnapshotScope) -> &'static str {
     match scope {
         RustSnapshotScope::Disk => "disk",
         RustSnapshotScope::Resumable => "resumable",
+    }
+}
+
+fn parse_compaction(value: &str) -> PyResult<RustSnapshotCompaction> {
+    match value {
+        "off" => Ok(RustSnapshotCompaction::Off),
+        "auto" => Ok(RustSnapshotCompaction::Auto),
+        "on" => Ok(RustSnapshotCompaction::On),
+        value => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "compaction must be 'off', 'auto', or 'on', got '{value}'"
+        ))),
+    }
+}
+
+fn format_compaction(value: RustSnapshotCompaction) -> &'static str {
+    match value {
+        RustSnapshotCompaction::Off => "off",
+        RustSnapshotCompaction::Auto => "auto",
+        RustSnapshotCompaction::On => "on",
+    }
+}
+
+fn format_compaction_status(value: RustSnapshotCompactionStatus) -> &'static str {
+    match value {
+        RustSnapshotCompactionStatus::Skipped => "skipped",
+        RustSnapshotCompactionStatus::Compacted => "compacted",
+        RustSnapshotCompactionStatus::Unsupported => "unsupported",
+        RustSnapshotCompactionStatus::NotApplicable => "not_applicable",
     }
 }

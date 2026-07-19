@@ -113,6 +113,7 @@ async def create(
     labels: dict[str, str] | None = None,
     force: bool = False,
     record_integrity: bool = False,
+    compaction: Literal["off", "auto", "on"] = "off",
     resumable: bool = False,
 ) -> Snapshot
 ```
@@ -145,6 +146,10 @@ Create a snapshot from a stopped or crashed sandbox. `name` is resolved under th
   <div className="msb-param">
     <div className="msb-param-key"><code>record_integrity</code><span className="msb-type">bool</span></div>
     <div className="msb-param-desc">Record an integrity hash in the manifest so the artifact can be verified later. Default <code>False</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>compaction</code><span className="msb-type">Literal["off", "auto", "on"]</span></div>
+    <div className="msb-param-desc">Flat-snapshot free-space compaction. <code>"off"</code> is the default, <code>"auto"</code> is best effort, and <code>"on"</code> requires compaction to succeed.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>resumable</code><span className="msb-type">bool</span></div>

@@ -67,3 +67,13 @@ func TestFFIWireShape_SnapshotCreateDestDir(t *testing.T) {
 		t.Fatal("resumable must not appear in payload when unset")
 	}
 }
+
+func TestFFIWireShape_SnapshotCreateCompaction(t *testing.T) {
+	got := marshalSnapshotCreateOptions(t, ffi.SnapshotCreateOptions{
+		Name:       "after-pip-install",
+		Compaction: "auto",
+	})
+	if v := mustField(t, got, "compaction"); v != "auto" {
+		t.Fatalf("compaction = %v, want auto", v)
+	}
+}

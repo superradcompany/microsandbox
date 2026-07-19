@@ -1,7 +1,7 @@
 //! `msb snapshot` command — manage disk snapshots.
 
-use clap::{Args, Subcommand};
-use microsandbox::Snapshot;
+use clap::{Args, Subcommand, ValueEnum};
+use microsandbox::{Snapshot, SnapshotCompaction};
 
 use crate::ui;
 
@@ -75,6 +75,13 @@ pub struct SnapshotCreateArgs {
     #[arg(long)]
     pub integrity: bool,
 
+    /// Compact free ext4 space in a flat snapshot.
+    ///
+    /// `off` avoids the filesystem scan, `auto` is best effort, and `on`
+    /// requires both a flat root disk and host range-deallocation support.
+    #[arg(long, value_enum, default_value_t = SnapshotCompactionArg::Off)]
+    pub compaction: SnapshotCompactionArg,
+
     /// Request a resumable snapshot with memory/device state.
     ///
     /// This flag is reserved by the public contract. Current runtimes
@@ -86,6 +93,20 @@ pub struct SnapshotCreateArgs {
     /// Suppress output.
     #[arg(short, long)]
     pub quiet: bool,
+}
+
+/// CLI spelling of the public snapshot compaction policy.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SnapshotCompactionArg {
+    /// Do not scan or deallocate free space.
+    #[default]
+    Off,
+
+    /// Compact flat snapshots when supported.
+    Auto,
+
+    /// Require compaction to succeed.
+    On,
 }
 
 /// Arguments for `msb snapshot list`.
@@ -194,7 +215,9 @@ pub async fn run(args: SnapshotArgs) -> anyhow::Result<()> {
 }
 
 async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
-    let mut builder = Snapshot::builder(&args.name).from_sandbox(&args.from);
+    let mut builder = Snapshot::builder(&args.name)
+        .from_sandbox(&args.from)
+        .compaction(args.compaction.into());
     if let Some(ref dest_dir) = args.dest_dir {
         builder = builder.dest_dir(dest_dir);
     }
@@ -310,6 +333,32 @@ async fn inspect(args: SnapshotInspectArgs) -> anyhow::Result<()> {
     ui::detail_kv("Upper File", &m.upper.file);
     ui::detail_kv("Upper Size", &format_size(m.upper.size_bytes));
     ui::detail_kv("Integrity", &format_integrity(m.upper.integrity.as_ref()));
+    if let Some(compaction) = snap.compaction()? {
+        ui::detail_kv(
+            "Compaction Requested",
+            format_compaction(compaction.requested),
+        );
+        ui::detail_kv(
+            "Compaction Status",
+            format_compaction_status(compaction.status),
+        );
+        ui::detail_kv("Compaction Free", &format_size(compaction.free_bytes));
+        ui::detail_kv(
+            "Compaction Reclaimed",
+            &format_size(compaction.deallocated_bytes),
+        );
+        ui::detail_kv("Compaction Ranges", &compaction.ranges.to_string());
+        ui::detail_kv(
+            "Journal Replayed",
+            if compaction.journal_replayed {
+                "yes"
+            } else {
+                "no"
+            },
+        );
+    } else {
+        ui::detail_kv("Compaction", "not recorded (legacy producer)");
+    }
     if !m.requires.is_empty() {
         ui::detail_kv("Requires", &m.requires.join(", "));
         let unsupported = m.unsupported_requires();
@@ -423,6 +472,33 @@ fn format_scope(scope: microsandbox::SnapshotScope) -> &'static str {
     }
 }
 
+fn format_compaction(compaction: microsandbox::SnapshotCompaction) -> &'static str {
+    match compaction {
+        microsandbox::SnapshotCompaction::Off => "off",
+        microsandbox::SnapshotCompaction::Auto => "auto",
+        microsandbox::SnapshotCompaction::On => "on",
+    }
+}
+
+fn format_compaction_status(status: microsandbox::SnapshotCompactionStatus) -> &'static str {
+    match status {
+        microsandbox::SnapshotCompactionStatus::Skipped => "skipped",
+        microsandbox::SnapshotCompactionStatus::Compacted => "compacted",
+        microsandbox::SnapshotCompactionStatus::Unsupported => "unsupported",
+        microsandbox::SnapshotCompactionStatus::NotApplicable => "not_applicable",
+    }
+}
+
+impl From<SnapshotCompactionArg> for SnapshotCompaction {
+    fn from(value: SnapshotCompactionArg) -> Self {
+        match value {
+            SnapshotCompactionArg::Off => Self::Off,
+            SnapshotCompactionArg::Auto => Self::Auto,
+            SnapshotCompactionArg::On => Self::On,
+        }
+    }
+}
+
 fn format_size(bytes: u64) -> String {
     const KIB: u64 = 1024;
     const MIB: u64 = KIB * 1024;
@@ -493,6 +569,17 @@ mod tests {
         assert_eq!(args.name, "clean");
         assert_eq!(args.from, "box");
         assert!(args.resumable);
+        assert_eq!(args.compaction, SnapshotCompactionArg::Off);
+    }
+
+    #[test]
+    fn create_parses_compaction_policy() {
+        let args =
+            parse_snapshot_args(&["create", "clean", "--from", "box", "--compaction", "auto"]);
+        let SnapshotCommands::Create(args) = args.command else {
+            panic!("expected create command");
+        };
+        assert_eq!(args.compaction, SnapshotCompactionArg::Auto);
     }
 
     #[test]

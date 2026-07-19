@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::path::{Component, Path};
 
+use microsandbox_types::SnapshotCompactionInfo;
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest as _, Sha256};
 
@@ -38,8 +39,14 @@ pub const SPARSE_SHA256_V1: &str = "msb-sparse-sha256-v1";
 /// Its value is the JSON string `"flat"`. Absence retains the original layered-upper meaning.
 pub const ROOTFS_LAYOUT_EXTENSION: &str = "msb.rootfs-layout/1";
 
+/// Optional schema-1 extension that records the requested and resolved free-space compaction result.
+///
+/// The extension is informational rather than restore-critical, so producers do not list it in
+/// [`Manifest::requires`]. Older readers may ignore it and still restore the same filesystem bytes.
+pub const SNAPSHOT_COMPACTION_EXTENSION: &str = "msb.snapshot-compaction/1";
+
 /// Extension keys this runtime understands (see [`Manifest::requires`]).
-pub const SUPPORTED_REQUIRES: &[&str] = &[ROOTFS_LAYOUT_EXTENSION];
+pub const SUPPORTED_REQUIRES: &[&str] = &[ROOTFS_LAYOUT_EXTENSION, SNAPSHOT_COMPACTION_EXTENSION];
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -249,6 +256,9 @@ impl Manifest {
                 "snapshot descriptor: flat rootfs layout must list {ROOTFS_LAYOUT_EXTENSION} in requires"
             )));
         }
+        // This metadata is optional for restore, but a producer that emits the known extension must
+        // still emit its exact typed shape so inspection never reports invented compaction results.
+        self.compaction()?;
         Ok(())
     }
 
@@ -263,6 +273,20 @@ impl Manifest {
                 "snapshot descriptor: {ROOTFS_LAYOUT_EXTENSION} must be the string \"flat\", got {value}"
             ))),
         }
+    }
+
+    /// Return the recorded snapshot compaction result, when produced by a compaction-aware runtime.
+    pub fn compaction(&self) -> ImageResult<Option<SnapshotCompactionInfo>> {
+        self.extensions
+            .get(SNAPSHOT_COMPACTION_EXTENSION)
+            .map(|value| {
+                serde_json::from_value(value.clone()).map_err(|error| {
+                    ImageError::ManifestParse(format!(
+                        "snapshot descriptor: invalid {SNAPSHOT_COMPACTION_EXTENSION}: {error}"
+                    ))
+                })
+            })
+            .transpose()
     }
 
     /// Extension keys named in `requires` that this runtime does not
@@ -467,6 +491,43 @@ mod tests {
         let error = manifest.validate().unwrap_err().to_string();
         assert!(error.contains(ROOTFS_LAYOUT_EXTENSION));
         assert!(error.contains("string \"flat\""));
+    }
+
+    #[test]
+    fn compaction_metadata_round_trips_without_becoming_a_restore_requirement() {
+        let mut manifest = sample_manifest();
+        let info = SnapshotCompactionInfo {
+            requested: microsandbox_types::SnapshotCompaction::Auto,
+            status: microsandbox_types::SnapshotCompactionStatus::Compacted,
+            journal_replayed: true,
+            free_bytes: 4096,
+            deallocated_bytes: 4096,
+            ranges: 1,
+        };
+        manifest.extensions.insert(
+            SNAPSHOT_COMPACTION_EXTENSION.into(),
+            serde_json::to_value(&info).unwrap(),
+        );
+
+        manifest.validate().unwrap();
+        assert_eq!(manifest.compaction().unwrap(), Some(info));
+        assert!(
+            !manifest
+                .requires
+                .contains(&SNAPSHOT_COMPACTION_EXTENSION.into())
+        );
+    }
+
+    #[test]
+    fn malformed_compaction_metadata_is_rejected() {
+        let mut manifest = sample_manifest();
+        manifest.extensions.insert(
+            SNAPSHOT_COMPACTION_EXTENSION.into(),
+            serde_json::json!({ "requested": "sometimes" }),
+        );
+
+        let error = manifest.validate().unwrap_err().to_string();
+        assert!(error.contains(SNAPSHOT_COMPACTION_EXTENSION));
     }
 
     #[test]

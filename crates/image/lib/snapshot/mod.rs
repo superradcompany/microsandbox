@@ -16,6 +16,7 @@ pub mod manifest;
 
 pub use manifest::{
     DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, ImageRef, Manifest, ROOTFS_LAYOUT_EXTENSION,
-    SCHEMA_VERSION, SNAPSHOT_ARTIFACT_KIND, SPARSE_SHA256_V1, SUPPORTED_REQUIRES, SnapshotFormat,
-    SnapshotRootfsLayout, SnapshotScope, UpperIntegrity, UpperLayer,
+    SCHEMA_VERSION, SNAPSHOT_ARTIFACT_KIND, SNAPSHOT_COMPACTION_EXTENSION, SPARSE_SHA256_V1,
+    SUPPORTED_REQUIRES, SnapshotFormat, SnapshotRootfsLayout, SnapshotScope, UpperIntegrity,
+    UpperLayer,
 };

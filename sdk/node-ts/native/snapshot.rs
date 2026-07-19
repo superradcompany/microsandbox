@@ -3,7 +3,8 @@ use std::path::PathBuf;
 
 use microsandbox::snapshot::SaveOpts as RustSaveOpts;
 use microsandbox::{
-    Snapshot as RustSnapshot, SnapshotFormat as RustSnapshotFormat,
+    Snapshot as RustSnapshot, SnapshotCompaction as RustSnapshotCompaction,
+    SnapshotCompactionStatus as RustSnapshotCompactionStatus, SnapshotFormat as RustSnapshotFormat,
     SnapshotHandle as RustSnapshotHandle, SnapshotScope as RustSnapshotScope,
     UpperVerifyStatus as RustUpperVerifyStatus,
 };
@@ -53,6 +54,17 @@ pub struct JsSnapshotVerifyReport {
     pub upper_kind: String,
     pub upper_algorithm: Option<String>,
     pub upper_digest: Option<String>,
+}
+
+/// Requested and resolved snapshot free-space compaction result.
+#[napi(object, js_name = "SnapshotCompactionInfo")]
+pub struct JsSnapshotCompactionInfo {
+    pub requested: String,
+    pub status: String,
+    pub journal_replayed: bool,
+    pub free_bytes: BigInt,
+    pub deallocated_bytes: BigInt,
+    pub ranges: BigInt,
 }
 
 /// Options for `Snapshot.remove()` (instance and static).
@@ -240,6 +252,15 @@ impl JsSnapshot {
         self.inner.manifest().source_sandbox.clone()
     }
 
+    /// Requested and resolved compaction result, or `null` for a legacy artifact.
+    #[napi(getter)]
+    pub fn compaction(&self) -> Result<Option<JsSnapshotCompactionInfo>> {
+        self.inner
+            .compaction()
+            .map(|info| info.map(compaction_info_to_js))
+            .map_err(to_napi_error)
+    }
+
     #[napi]
     pub async fn verify(&self) -> Result<JsSnapshotVerifyReport> {
         let report = self.inner.verify().await.map_err(to_napi_error)?;
@@ -336,6 +357,34 @@ fn format_scope(scope: RustSnapshotScope) -> &'static str {
     match scope {
         RustSnapshotScope::Disk => "disk",
         RustSnapshotScope::Resumable => "resumable",
+    }
+}
+
+fn format_compaction(value: RustSnapshotCompaction) -> &'static str {
+    match value {
+        RustSnapshotCompaction::Off => "off",
+        RustSnapshotCompaction::Auto => "auto",
+        RustSnapshotCompaction::On => "on",
+    }
+}
+
+fn format_compaction_status(value: RustSnapshotCompactionStatus) -> &'static str {
+    match value {
+        RustSnapshotCompactionStatus::Skipped => "skipped",
+        RustSnapshotCompactionStatus::Compacted => "compacted",
+        RustSnapshotCompactionStatus::Unsupported => "unsupported",
+        RustSnapshotCompactionStatus::NotApplicable => "not_applicable",
+    }
+}
+
+fn compaction_info_to_js(info: microsandbox::SnapshotCompactionInfo) -> JsSnapshotCompactionInfo {
+    JsSnapshotCompactionInfo {
+        requested: format_compaction(info.requested).into(),
+        status: format_compaction_status(info.status).into(),
+        journal_replayed: info.journal_replayed,
+        free_bytes: BigInt::from(info.free_bytes),
+        deallocated_bytes: BigInt::from(info.deallocated_bytes),
+        ranges: BigInt::from(info.ranges),
     }
 }
 

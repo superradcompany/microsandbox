@@ -6,7 +6,8 @@ use std::path::PathBuf;
 use chrono::Utc;
 use microsandbox_image::snapshot::{
     DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, ImageRef, Manifest, ROOTFS_LAYOUT_EXTENSION,
-    SCHEMA_VERSION, SNAPSHOT_ARTIFACT_KIND, SnapshotFormat, SnapshotScope, UpperLayer,
+    SCHEMA_VERSION, SNAPSHOT_ARTIFACT_KIND, SNAPSHOT_COMPACTION_EXTENSION, SnapshotFormat,
+    SnapshotScope, UpperLayer,
 };
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
@@ -16,7 +17,9 @@ use crate::sandbox::{RootDisk, SandboxConfig, SandboxStatus};
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 use super::store::index_upsert;
-use super::{Snapshot, SnapshotConfig};
+use super::{
+    Snapshot, SnapshotCompaction, SnapshotCompactionInfo, SnapshotCompactionStatus, SnapshotConfig,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -69,6 +72,7 @@ pub(super) async fn create_snapshot(
         labels,
         force,
         record_integrity,
+        compaction,
         resumable,
     } = config;
 
@@ -119,6 +123,11 @@ pub(super) async fn create_snapshot(
 
     let payload =
         ensure_snapshottable_root_disk(sandbox_config.spec.image.oci_root_disk(), &source_sandbox)?;
+    if compaction == SnapshotCompaction::On && payload != SnapshotPayload::FlatRootfs {
+        return Err(MicrosandboxError::InvalidConfig(
+            "snapshot compaction=on requires a flat ext4 root disk".into(),
+        ));
+    }
 
     // Resolve the payload path from the canonical sandbox layout. Layered OCI captures only its writable upper; flat OCI captures the complete private root disk.
     let sandbox_dir = local.sandboxes_dir().join(&source_sandbox);
@@ -154,6 +163,7 @@ pub(super) async fn create_snapshot(
         &staging_dir,
         &source,
         payload,
+        compaction,
         record_integrity,
         SnapshotArtifactMetadata {
             labels,
@@ -195,6 +205,7 @@ async fn build_artifact(
     dir: &std::path::Path,
     source: &std::path::Path,
     payload: SnapshotPayload,
+    compaction: SnapshotCompaction,
     record_integrity: bool,
     metadata: SnapshotArtifactMetadata,
 ) -> MicrosandboxResult<(String, Manifest)> {
@@ -208,23 +219,60 @@ async fn build_artifact(
     .await
     .map_err(|e| MicrosandboxError::Custom(format!("snapshot copy task: {e}")))??;
 
-    if payload == SnapshotPayload::FlatRootfs {
-        let trim_path = destination.clone();
-        let trim = tokio::task::spawn_blocking(move || {
-            microsandbox_image::ext4::trim_snapshot_image(&trim_path)
-        })
-        .await
-        .map_err(|error| MicrosandboxError::Custom(format!("snapshot trim task: {error}")))?
-        .map_err(|error| MicrosandboxError::Custom(format!("snapshot trim failed: {error}")))?;
-        tracing::info!(
-            journal_replayed = trim.journal_replayed,
-            free_bytes = trim.free_bytes,
-            deallocated_bytes = trim.deallocated_bytes,
-            ranges = trim.ranges,
-            trim_supported = trim.trim_supported,
-            "prepared flat rootfs snapshot payload"
-        );
-    }
+    let compaction_info = match (payload, compaction) {
+        (_, SnapshotCompaction::Off) => {
+            empty_compaction_info(SnapshotCompaction::Off, SnapshotCompactionStatus::Skipped)
+        }
+        (SnapshotPayload::LayeredUpper, SnapshotCompaction::Auto) => empty_compaction_info(
+            SnapshotCompaction::Auto,
+            SnapshotCompactionStatus::NotApplicable,
+        ),
+        // `create_snapshot` rejects this before staging so this arm documents and defends the
+        // invariant if another internal caller reaches the builder directly later.
+        (SnapshotPayload::LayeredUpper, SnapshotCompaction::On) => {
+            return Err(MicrosandboxError::InvalidConfig(
+                "snapshot compaction=on requires a flat ext4 root disk".into(),
+            ));
+        }
+        (SnapshotPayload::FlatRootfs, requested) => {
+            let trim_path = destination.clone();
+            let trim = tokio::task::spawn_blocking(move || {
+                microsandbox_image::ext4::trim_snapshot_image(&trim_path)
+            })
+            .await
+            .map_err(|error| MicrosandboxError::Custom(format!("snapshot trim task: {error}")))?
+            .map_err(|error| MicrosandboxError::Custom(format!("snapshot trim failed: {error}")))?;
+            if requested == SnapshotCompaction::On && !trim.trim_supported {
+                return Err(MicrosandboxError::Unsupported {
+                    feature: "Required snapshot compaction".into(),
+                    available_when:
+                        "the snapshot store filesystem supports sparse range deallocation".into(),
+                });
+            }
+            let status = if trim.trim_supported {
+                SnapshotCompactionStatus::Compacted
+            } else {
+                SnapshotCompactionStatus::Unsupported
+            };
+            tracing::info!(
+                ?requested,
+                ?status,
+                journal_replayed = trim.journal_replayed,
+                free_bytes = trim.free_bytes,
+                deallocated_bytes = trim.deallocated_bytes,
+                ranges = trim.ranges,
+                "prepared flat rootfs snapshot payload"
+            );
+            SnapshotCompactionInfo {
+                requested,
+                status,
+                journal_replayed: trim.journal_replayed,
+                free_bytes: trim.free_bytes,
+                deallocated_bytes: trim.deallocated_bytes,
+                ranges: trim.ranges as u64,
+            }
+        }
+    };
 
     let destination_for_sync = destination.clone();
     tokio::task::spawn_blocking(move || -> std::io::Result<()> {
@@ -259,6 +307,12 @@ async fn build_artifact(
         );
         requires.push(ROOTFS_LAYOUT_EXTENSION.into());
     }
+    extensions.insert(
+        SNAPSHOT_COMPACTION_EXTENSION.into(),
+        serde_json::to_value(&compaction_info).map_err(|error| {
+            MicrosandboxError::Custom(format!("snapshot compaction metadata: {error}"))
+        })?,
+    );
 
     let manifest = Manifest {
         schema: SCHEMA_VERSION,
@@ -308,6 +362,21 @@ async fn build_artifact(
     tokio::fs::rename(&tmp_path, &manifest_path).await?;
 
     Ok((digest, manifest))
+}
+
+/// Construct a zero-cost outcome for policies that do not invoke the ext4 compactor.
+fn empty_compaction_info(
+    requested: SnapshotCompaction,
+    status: SnapshotCompactionStatus,
+) -> SnapshotCompactionInfo {
+    SnapshotCompactionInfo {
+        requested,
+        status,
+        journal_replayed: false,
+        free_bytes: 0,
+        deallocated_bytes: 0,
+        ranges: 0,
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -457,6 +526,7 @@ mod tests {
                 &staging,
                 &source,
                 SnapshotPayload::FlatRootfs,
+                SnapshotCompaction::Off,
                 false,
                 SnapshotArtifactMetadata {
                     labels: Vec::new(),
@@ -475,6 +545,13 @@ mod tests {
             SnapshotRootfsLayout::Flat
         );
         assert_eq!(manifest.upper.file, FLAT_ROOTFS_SNAPSHOT_FILE);
+        assert_eq!(
+            manifest.compaction().unwrap(),
+            Some(empty_compaction_info(
+                SnapshotCompaction::Off,
+                SnapshotCompactionStatus::Skipped,
+            ))
+        );
         assert!(manifest.requires.contains(&ROOTFS_LAYOUT_EXTENSION.into()));
         assert!(staging.join(FLAT_ROOTFS_SNAPSHOT_FILE).is_file());
         assert!(!staging.join(DEFAULT_UPPER_FILE).exists());

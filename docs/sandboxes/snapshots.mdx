@@ -22,7 +22,11 @@ Booting from a snapshot is a cold boot of a fresh VM that starts from the captur
 
 For the default layered root, the artifact carries the writable `upper.ext4` and pins the immutable OCI lower layers. For a flat root, it carries the complete `rootfs.raw` and records a required layout capability in `snapshot.json`; older runtimes refuse that artifact instead of interpreting it as a layered upper. Both restore paths create a private writable copy for the new sandbox.
 
-Flat snapshot creation works on a private staged copy. Microsandbox replays any pending ext4 journal, validates the formatter-owned filesystem metadata and checksums, and then asks the host filesystem to deallocate ext4 blocks proven free. Linux uses hole punching, macOS uses APFS range deallocation, and Windows uses sparse zero-data ranges. If the host filesystem cannot deallocate ranges, snapshot creation retains the correct dense artifact rather than weakening validation or mutating the stopped sandbox disk.
+<Note>
+Flat snapshot compaction is **opt in**. Ordinary snapshot creation defaults to `off`, so it does not scan the complete ext4 filesystem or add trim work to the foreground path.
+</Note>
+
+When compaction is requested, it runs on a private staged copy. Microsandbox replays any pending ext4 journal, validates the formatter-owned filesystem metadata and checksums, and only then asks the host filesystem to deallocate ext4 blocks proven free. Linux uses hole punching, macOS uses APFS range deallocation, and Windows uses sparse zero-data ranges. The stopped sandbox disk is never trimmed or mutated.
 
 ## Quick start
 
@@ -107,6 +111,75 @@ msb snapshot create after-pip-install --from baseline --dest-dir /mnt/big
 </CodeGroup>
 
 The sandbox must be stopped or crashed; running sandboxes are rejected.
+
+## Compact a flat snapshot
+
+Compaction trades snapshot creation time for a smaller physical artifact. It applies to flat ext4 roots because those snapshots carry the complete filesystem, including free ext4 blocks that may still occupy host storage.
+
+| Policy | Behavior |
+| ------ | -------- |
+| `off` | Default. Do not scan or deallocate free space. |
+| `auto` | Validate and compact a flat snapshot when the host supports range deallocation. Publish the correct dense artifact if it does not. Layered snapshots are reported as `not_applicable`. |
+| `on` | Require a flat root and successful host deallocation. Fail snapshot creation instead of silently publishing an uncompacted artifact. |
+
+<CodeGroup>
+```rust Rust
+use microsandbox::{Snapshot, SnapshotCompaction};
+
+let snap = Snapshot::builder("compact-baseline")
+    .from_sandbox("baseline")
+    .compaction(SnapshotCompaction::Auto)
+    .create()
+    .await?;
+
+if let Some(result) = snap.compaction()? {
+    println!("{:?}: {} bytes reclaimed", result.status, result.deallocated_bytes);
+}
+```
+
+```typescript TypeScript
+import { Snapshot } from "microsandbox";
+
+const snap = await Snapshot.builder("compact-baseline")
+  .fromSandbox("baseline")
+  .compaction("auto")
+  .create();
+
+console.log(snap.compaction?.status, snap.compaction?.deallocatedBytes);
+```
+
+```python Python
+from microsandbox import Snapshot
+
+snap = await Snapshot.create(
+    "compact-baseline",
+    from_sandbox="baseline",
+    compaction="auto",
+)
+
+print(snap.compaction)
+```
+
+```go Go
+snap, err := m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
+    Name:        "compact-baseline",
+    FromSandbox: "baseline",
+    Compaction:  m.SnapshotCompactionAuto,
+})
+if err != nil {
+    return err
+}
+
+result := snap.Compaction()
+```
+
+```bash CLI
+msb snapshot create compact-baseline --from baseline --compaction auto
+msb snapshot inspect compact-baseline
+```
+</CodeGroup>
+
+Every compaction-aware producer records the requested policy and the resolved result in `snapshot.json`. Inspection reports `status`, `journal_replayed`, `free_bytes`, `deallocated_bytes`, and `ranges`; snapshots created by older producers return no compaction result. This metadata is informational and is not a restore requirement.
 
 ## Boot from a snapshot
 

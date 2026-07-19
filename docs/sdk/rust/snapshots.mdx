@@ -873,6 +873,7 @@ let snap = Snapshot::builder("after-pip-install")
     .label("stage", "post-deps")
     .force()                       // overwrite if it exists
     .record_integrity()            // hash the upper layer
+    .compaction(SnapshotCompaction::Auto)
     .create()
     .await?;
 ```
@@ -965,6 +966,17 @@ Compute and record an upper-layer content-integrity hash during creation. Record
 
 ---
 
+#### <span className="msb-recv">.</span><span className="msb-hn">compaction()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```rust
+fn compaction(self, compaction: SnapshotCompaction) -> Self
+```
+
+Select flat-snapshot free-space compaction. `Off` is the default and avoids the ext4 scan, `Auto` is best effort, and `On` requires a flat root and successful host deallocation. The created [`Snapshot`](#instance-methods) exposes the resolved [`SnapshotCompactionInfo`](#snapshotcompactioninfo) through `snap.compaction()`.
+
+---
+
 #### <span className="msb-recv">.</span><span className="msb-hn">resumable()</span>
 <div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
@@ -1017,6 +1029,10 @@ Build and execute the snapshot in one step. Equivalent to [`Snapshot::create(sel
 ---
 
 ## Types
+
+### SnapshotCompactionInfo
+
+Records the requested `SnapshotCompaction` policy, resolved status (`skipped`, `compacted`, `unsupported`, or `not_applicable`), whether the ext4 journal was replayed, validated free bytes, physically deallocated bytes, and submitted range count. `Snapshot::compaction()` returns `None` only for artifacts created by older producers.
 
 ### SnapshotHandle
 

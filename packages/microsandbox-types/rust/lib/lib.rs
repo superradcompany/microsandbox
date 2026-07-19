@@ -32,7 +32,8 @@ pub use domain::{
     Protocol, PublishedPortSpec, PullPolicy, Rlimit, RlimitResource, RootDisk, RootfsSource, Rule,
     SandboxLogLevel, SandboxPolicy, SandboxResources, SandboxRuntimeOptions, SandboxSpec,
     ScopedUpstreamCaCert, ScopedVerifyUpstream, SecretConfigError, SecretEntry, SecretInjection,
-    SecretsConfig, SecurityProfile, SnapshotSpec, StatVirtualization, TlsConfig, ViolationAction,
+    SecretsConfig, SecurityProfile, SnapshotCompaction, SnapshotCompactionInfo,
+    SnapshotCompactionStatus, SnapshotSpec, StatVirtualization, TlsConfig, ViolationAction,
     VolumeKind, VolumeMount, VolumeSpec,
 };
 pub use error::{TypesError, TypesResult};

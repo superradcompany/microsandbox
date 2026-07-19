@@ -1410,6 +1410,8 @@ export declare class Snapshot {
   get createdAt(): string
   get labels(): Record<string, string>
   get sourceSandbox(): string | null
+  /** Requested and resolved compaction result, or `null` for a legacy artifact. */
+  get compaction(): SnapshotCompactionInfo | null
   verify(): Promise<SnapshotVerifyReport>
 }
 export type JsSnapshot = Snapshot
@@ -1433,6 +1435,8 @@ export declare class SnapshotBuilder {
   force(): this
   /** Compute and record content integrity at create time. */
   recordIntegrity(): this
+  /** Select free-space compaction for flat snapshots. */
+  compaction(value: string): this
   /** Request a future resumable snapshot. */
   resumable(): this
   /** Snapshot the accumulated configuration. */
@@ -2196,6 +2200,16 @@ export declare function setRuntimeLibkrunfwPath(path: string): void
  */
 export declare function setRuntimeMsbPath(path: string): void
 
+/** Requested and resolved snapshot free-space compaction result. */
+export interface SnapshotCompactionInfo {
+  requested: string
+  status: string
+  journalReplayed: boolean
+  freeBytes: bigint
+  deallocatedBytes: bigint
+  ranges: bigint
+}
+
 /** Built snapshot configuration produced by `SnapshotBuilder.build()`. */
 export interface SnapshotConfig {
   name: string
@@ -2204,6 +2218,7 @@ export interface SnapshotConfig {
   labels: Array<JsSnapshotLabel>
   force: boolean
   recordIntegrity: boolean
+  compaction: string
   resumable: boolean
 }
 

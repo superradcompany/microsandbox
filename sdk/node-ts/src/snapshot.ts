@@ -16,6 +16,26 @@ import {
  */
 export type SnapshotScope = "disk" | "resumable";
 
+/** Free-space compaction policy used while creating a snapshot. */
+export type SnapshotCompaction = "off" | "auto" | "on";
+
+/** Resolved compaction status recorded by the snapshot producer. */
+export type SnapshotCompactionStatus =
+  | "skipped"
+  | "compacted"
+  | "unsupported"
+  | "not_applicable";
+
+/** Requested policy and observed free-space reclamation. */
+export interface SnapshotCompactionInfo {
+  readonly requested: SnapshotCompaction;
+  readonly status: SnapshotCompactionStatus;
+  readonly journalReplayed: boolean;
+  readonly freeBytes: bigint;
+  readonly deallocatedBytes: bigint;
+  readonly ranges: bigint;
+}
+
 /**
  * Bundle options for `Snapshot.save`.
  */
@@ -237,6 +257,20 @@ export class Snapshot {
   /** Best-effort source-sandbox name, if recorded. */
   get sourceSandbox(): string | null {
     return this.inner.sourceSandbox ?? null;
+  }
+
+  /** Requested and resolved compaction result, or `null` for a legacy artifact. */
+  get compaction(): SnapshotCompactionInfo | null {
+    const info = this.inner.compaction;
+    if (!info) return null;
+    return {
+      requested: info.requested as SnapshotCompaction,
+      status: info.status as SnapshotCompactionStatus,
+      journalReplayed: info.journalReplayed,
+      freeBytes: info.freeBytes,
+      deallocatedBytes: info.deallocatedBytes,
+      ranges: info.ranges,
+    };
   }
 
   /**

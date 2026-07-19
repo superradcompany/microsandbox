@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator, Awaitable, Mapping, Sequence
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 from microsandbox.types import (
     ImageSource,
@@ -28,6 +28,16 @@ class SecretModifySpec(TypedDict, total=False):
     store: str
     placeholder: str
     allowed_hosts: list[str]
+
+class SnapshotCompactionInfo(TypedDict):
+    """Requested snapshot compaction policy and its resolved result."""
+
+    requested: Literal["off", "auto", "on"]
+    status: Literal["skipped", "compacted", "unsupported", "not_applicable"]
+    journal_replayed: bool
+    free_bytes: int
+    deallocated_bytes: int
+    ranges: int
 
 class PyAgentClient:
     """Raw agent client.
@@ -663,6 +673,7 @@ class Snapshot:
         labels: dict[str, str] | None = None,
         force: bool = False,
         record_integrity: bool = False,
+        compaction: Literal["off", "auto", "on"] = "off",
         resumable: bool = False,
     ) -> Snapshot: ...
     @staticmethod
@@ -716,6 +727,8 @@ class Snapshot:
     def labels(self) -> dict[str, str]: ...
     @property
     def source_sandbox(self) -> str | None: ...
+    @property
+    def compaction(self) -> SnapshotCompactionInfo | None: ...
     async def verify(self) -> dict[str, Any]: ...
 
 class SnapshotHandle:
