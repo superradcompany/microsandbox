@@ -12,7 +12,7 @@ use sea_orm::entity::prelude::*;
 pub struct Model {
     /// Host logical processor identifier and global conflict key.
     #[sea_orm(primary_key, auto_increment = false)]
-    pub logical_cpu: i32,
+    pub logical_cpu: i64,
     /// Owning allocation identifier.
     pub allocation_id: String,
     /// Possible guest vCPU index, or `None` for policy-only sibling reservations.

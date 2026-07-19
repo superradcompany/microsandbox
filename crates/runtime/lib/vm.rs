@@ -1124,7 +1124,7 @@ fn build_vm(
     console_backend: AgentConsoleBackend,
     on_exit: impl Fn(i32) + Send + 'static,
     tokio_handle: tokio::runtime::Handle,
-    vcpu_targets: Option<&[u16]>,
+    vcpu_targets: Option<&[crate::cpu::LogicalCpuId]>,
 ) -> RuntimeResult<VmBuildOutput> {
     let mut exec_env = config.vm.env.clone();
     let vm = &config.vm;
@@ -1149,7 +1149,7 @@ fn build_vm(
                     targets
                         .iter()
                         .copied()
-                        .map(msb_krun::HostCpuId::new)
+                        .map(|cpu| msb_krun::HostCpuId::in_group(cpu.group, cpu.index))
                         .collect(),
                 );
             }

@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use microsandbox_types::CpuPlacement;
 
-use super::topology::{CpuTopology, LogicalCpu};
+use super::topology::{CpuTopology, LogicalCpu, LogicalCpuId};
 use crate::{RuntimeError, RuntimeResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -13,7 +13,7 @@ use crate::{RuntimeError, RuntimeResult};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CpuReservation {
-    pub(crate) logical_cpu: u16,
+    pub(crate) logical_cpu: LogicalCpuId,
     pub(crate) vcpu_index: Option<u8>,
     pub(crate) role: &'static str,
 }
@@ -22,7 +22,7 @@ pub(crate) struct CpuReservation {
 pub(crate) struct ResolvedPlacement {
     pub(crate) requested: CpuPlacement,
     pub(crate) resolved: CpuPlacement,
-    pub(crate) vcpu_targets: Vec<u16>,
+    pub(crate) vcpu_targets: Vec<LogicalCpuId>,
     pub(crate) reservations: Vec<CpuReservation>,
 }
 
@@ -32,7 +32,7 @@ pub(crate) struct ResolvedPlacement {
 
 pub(crate) fn plan(
     topology: &CpuTopology,
-    occupied: &HashSet<u16>,
+    occupied: &HashSet<LogicalCpuId>,
     requested: CpuPlacement,
     max_vcpus: u8,
 ) -> RuntimeResult<ResolvedPlacement> {
@@ -72,11 +72,12 @@ struct AvailableCore<'a> {
     logical: Vec<&'a LogicalCpu>,
     free: Vec<&'a LogicalCpu>,
     all_free: bool,
+    performance_class: u8,
 }
 
 fn available_cores<'a>(
     topology: &'a CpuTopology,
-    occupied: &HashSet<u16>,
+    occupied: &HashSet<LogicalCpuId>,
 ) -> Vec<AvailableCore<'a>> {
     let mut grouped: BTreeMap<(i32, i32, i32), Vec<&LogicalCpu>> = BTreeMap::new();
     for cpu in &topology.logical_cpus {
@@ -86,7 +87,7 @@ fn available_cores<'a>(
             .push(cpu);
     }
 
-    grouped
+    let mut cores = grouped
         .into_values()
         .map(|mut logical| {
             logical.sort_by_key(|cpu| cpu.id);
@@ -97,12 +98,15 @@ fn available_cores<'a>(
                 .collect::<Vec<_>>();
             let all_free = free.len() == logical.len();
             AvailableCore {
+                performance_class: logical[0].performance_class,
                 logical,
                 free,
                 all_free,
             }
         })
-        .collect()
+        .collect::<Vec<_>>();
+    cores.sort_by_key(|core| std::cmp::Reverse(core.performance_class));
+    cores
 }
 
 fn plan_spread(
@@ -219,25 +223,34 @@ mod tests {
     }
 
     fn cpu(id: u16, core: i32) -> LogicalCpu {
+        cpu_with_class(id, core, 0)
+    }
+
+    fn cpu_with_class(id: u16, core: i32, performance_class: u8) -> LogicalCpu {
         LogicalCpu {
-            id,
+            id: LogicalCpuId::new(id),
             package: 0,
             die: 0,
             core,
+            performance_class,
         }
+    }
+
+    fn id(index: u16) -> LogicalCpuId {
+        LogicalCpuId::new(index)
     }
 
     #[test]
     fn spread_uses_distinct_cores_and_reserves_siblings() {
         let plan = plan(&topology(), &HashSet::new(), CpuPlacement::Spread, 2).unwrap();
 
-        assert_eq!(plan.vcpu_targets, vec![0, 1]);
+        assert_eq!(plan.vcpu_targets, vec![id(0), id(1)]);
         assert_eq!(
             plan.reservations
                 .iter()
                 .map(|reservation| reservation.logical_cpu)
                 .collect::<Vec<_>>(),
-            vec![0, 6, 1, 7]
+            vec![id(0), id(6), id(1), id(7)]
         );
     }
 
@@ -245,7 +258,7 @@ mod tests {
     fn compact_consumes_smt_siblings_first() {
         let plan = plan(&topology(), &HashSet::new(), CpuPlacement::Compact, 2).unwrap();
 
-        assert_eq!(plan.vcpu_targets, vec![0, 6]);
+        assert_eq!(plan.vcpu_targets, vec![id(0), id(6)]);
         assert_eq!(plan.reservations.len(), 2);
     }
 
@@ -260,9 +273,21 @@ mod tests {
 
     #[test]
     fn spread_does_not_share_a_partially_occupied_core() {
-        let occupied = HashSet::from([6]);
+        let occupied = HashSet::from([id(6)]);
         let plan = plan(&topology(), &occupied, CpuPlacement::Spread, 2).unwrap();
 
-        assert_eq!(plan.vcpu_targets, vec![1, 2]);
+        assert_eq!(plan.vcpu_targets, vec![id(1), id(2)]);
+    }
+
+    #[test]
+    fn managed_policies_prefer_windows_performance_cores() {
+        let topology = CpuTopology {
+            logical_cpus: vec![cpu_with_class(0, 0, 1), cpu_with_class(1, 1, 4)],
+            fingerprint: "heterogeneous".into(),
+        };
+
+        let plan = plan(&topology, &HashSet::new(), CpuPlacement::Compact, 1).unwrap();
+
+        assert_eq!(plan.vcpu_targets, vec![id(1)]);
     }
 }

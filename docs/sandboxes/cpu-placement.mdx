@@ -4,7 +4,7 @@ description: Place sandbox vCPU threads across or within host physical cores
 icon: "microchip"
 ---
 
-Microsandbox normally inherits the CPU scheduling and affinity constraints of the process that starts it. On a Linux host, you can instead ask Microsandbox to coordinate its own vCPU placement across sandboxes that share the same `MSB_HOME`.
+Microsandbox normally inherits the CPU scheduling and affinity constraints of the process that starts it. On Linux and Windows hosts, you can instead ask Microsandbox to coordinate its own vCPU placement across sandboxes that share the same `MSB_HOME`.
 
 ## Policies
 
@@ -65,8 +65,10 @@ sb, err := m.CreateSandbox(ctx, "worker",
 
 ## Scope and guarantees
 
-The first implementation is Linux-only and applies hard affinity to libkrun's vCPU threads before they enter guest execution. It does not isolate unrelated host processes, pin VMM or device-worker threads, bind guest RAM to a NUMA node, or promise dedicated cores.
+Managed placement applies hard affinity to libkrun's vCPU threads before they enter guest execution: Linux uses the process affinity mask and `sched_setaffinity`, while Windows uses the calling runtime thread's processor-group affinity and `SetThreadGroupAffinity`. On heterogeneous Windows processors, the planner prefers the higher-performance core class reported by Windows. Placement does not isolate unrelated host processes, pin VMM or device-worker threads, bind guest RAM to a NUMA node, or promise dedicated cores.
+
+Windows planning currently stays within the runtime thread's inherited primary processor group. Processor-group coordinates are preserved in the allocation catalog and libkrun affinity map, but one runtime process does not spread a sandbox across multiple Windows processor groups. This is immaterial on hosts with at most 64 logical processors and avoids expanding an affinity boundary inherited from the caller.
 
 Coordination is local to one Microsandbox catalog and lease directory. Sandboxes using different `MSB_HOME` values do not share reservations. Provider deployments that need machine-wide cooperative placement should configure one machine-wide allocation domain.
 
-On macOS and Windows, `inherit` remains available. `auto`, `spread`, and `compact` currently return an unsupported-platform error rather than claiming enforcement that was not applied.
+On macOS, `inherit` remains available. `auto`, `spread`, and `compact` return an unsupported-platform error because Apple does not expose an equivalent public hard-affinity API; Microsandbox does not claim enforcement that was not applied.

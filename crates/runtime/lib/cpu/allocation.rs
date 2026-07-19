@@ -14,7 +14,7 @@ use microsandbox_utils::process_lock;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 
 use super::planner::{self, ResolvedPlacement};
-use super::topology::CpuTopology;
+use super::topology::{CpuTopology, LogicalCpuId};
 use crate::{RuntimeError, RuntimeResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -107,9 +107,9 @@ pub(crate) async fn acquire(
             .iter()
             .filter(|row| !stale_ids.contains(row.allocation_id.as_str()))
             .map(|row| {
-                u16::try_from(row.logical_cpu).map_err(|_| {
+                LogicalCpuId::from_catalog_key(row.logical_cpu).map_err(|error| {
                     RuntimeError::Custom(format!(
-                        "CPU allocation {} contains invalid logical CPU {}",
+                        "CPU allocation {} contains invalid logical CPU {}: {error}",
                         row.allocation_id, row.logical_cpu
                     ))
                 })
@@ -166,7 +166,7 @@ pub(crate) async fn acquire(
 
                     for reservation in reservations {
                         cpu_allocation_cpu::Entity::insert(cpu_allocation_cpu::ActiveModel {
-                            logical_cpu: Set(i32::from(reservation.logical_cpu)),
+                            logical_cpu: Set(reservation.logical_cpu.catalog_key()),
                             allocation_id: Set(allocation_id.clone()),
                             vcpu_index: Set(reservation.vcpu_index.map(i32::from)),
                             role: Set(reservation.role.into()),

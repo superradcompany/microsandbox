@@ -10,6 +10,7 @@ use std::time::Instant;
 use microsandbox_db::DbWriteConnection;
 use microsandbox_types::CpuPlacement;
 
+pub(crate) use self::topology::LogicalCpuId;
 use crate::RuntimeResult;
 
 //--------------------------------------------------------------------------------------------------
@@ -27,8 +28,8 @@ pub struct CpuPlacementGuard {
 //--------------------------------------------------------------------------------------------------
 
 impl CpuPlacementGuard {
-    /// Returns the resolved Linux logical CPU for every possible vCPU.
-    pub fn vcpu_targets(&self) -> Option<&[u16]> {
+    /// Returns the resolved host processor-group coordinate for every possible vCPU.
+    pub(crate) fn vcpu_targets(&self) -> Option<&[LogicalCpuId]> {
         self.resolved
             .as_ref()
             .map(|resolved| resolved.vcpu_targets.as_slice())
