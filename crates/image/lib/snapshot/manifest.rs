@@ -33,9 +33,13 @@ pub const DEFAULT_UPPER_FILE: &str = "upper.ext4";
 /// Sparse representation-aware digest for raw upper files.
 pub const SPARSE_SHA256_V1: &str = "msb-sparse-sha256-v1";
 
+/// Required schema-1 extension that marks a snapshot payload as a complete flat root filesystem.
+///
+/// Its value is the JSON string `"flat"`. Absence retains the original layered-upper meaning.
+pub const ROOTFS_LAYOUT_EXTENSION: &str = "msb.rootfs-layout/1";
+
 /// Extension keys this runtime understands (see [`Manifest::requires`]).
-/// Empty today; resumable-era capabilities register here as they land.
-pub const SUPPORTED_REQUIRES: &[&str] = &[];
+pub const SUPPORTED_REQUIRES: &[&str] = &[ROOTFS_LAYOUT_EXTENSION];
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -65,6 +69,15 @@ pub enum SnapshotScope {
     Disk,
     /// Resumable snapshot. Reserved for future memory/device-state capture.
     Resumable,
+}
+
+/// Meaning of the raw filesystem payload stored by a disk snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotRootfsLayout {
+    /// A writable ext4 upper paired with the immutable OCI lower layers pinned by the manifest.
+    Layered,
+    /// A complete ext4 root filesystem that boots directly as the sandbox root disk.
+    Flat,
 }
 
 /// Reference to the OCI image the snapshot was taken from.
@@ -223,7 +236,33 @@ impl Manifest {
             }
             prev = Some(key);
         }
+        // Known extensions are validated even when a producer forgot to mark them required. Flat
+        // layout must be required so an older runtime refuses instead of treating the complete
+        // root filesystem as a layered upper.
+        if self.rootfs_layout()? == SnapshotRootfsLayout::Flat
+            && !self
+                .requires
+                .iter()
+                .any(|requirement| requirement == ROOTFS_LAYOUT_EXTENSION)
+        {
+            return Err(ImageError::ManifestParse(format!(
+                "snapshot descriptor: flat rootfs layout must list {ROOTFS_LAYOUT_EXTENSION} in requires"
+            )));
+        }
         Ok(())
+    }
+
+    /// Return whether the payload is a layered upper or a complete flat root filesystem.
+    pub fn rootfs_layout(&self) -> ImageResult<SnapshotRootfsLayout> {
+        match self.extensions.get(ROOTFS_LAYOUT_EXTENSION) {
+            None => Ok(SnapshotRootfsLayout::Layered),
+            Some(serde_json::Value::String(value)) if value == "flat" => {
+                Ok(SnapshotRootfsLayout::Flat)
+            }
+            Some(value) => Err(ImageError::ManifestParse(format!(
+                "snapshot descriptor: {ROOTFS_LAYOUT_EXTENSION} must be the string \"flat\", got {value}"
+            ))),
+        }
     }
 
     /// Extension keys named in `requires` that this runtime does not
@@ -397,6 +436,50 @@ mod tests {
         m2.labels.insert("a".into(), "1".into());
 
         assert_eq!(m1.digest().unwrap(), m2.digest().unwrap());
+    }
+
+    #[test]
+    fn flat_rootfs_layout_is_required_and_round_trips() {
+        let mut manifest = sample_manifest();
+        manifest.extensions.insert(
+            ROOTFS_LAYOUT_EXTENSION.into(),
+            serde_json::Value::String("flat".into()),
+        );
+        manifest.requires.push(ROOTFS_LAYOUT_EXTENSION.into());
+
+        manifest.validate().unwrap();
+        assert_eq!(
+            manifest.rootfs_layout().unwrap(),
+            SnapshotRootfsLayout::Flat
+        );
+        let parsed = Manifest::from_bytes(&manifest.to_canonical_bytes().unwrap()).unwrap();
+        assert_eq!(parsed.rootfs_layout().unwrap(), SnapshotRootfsLayout::Flat);
+    }
+
+    #[test]
+    fn malformed_flat_rootfs_layout_is_rejected() {
+        let mut manifest = sample_manifest();
+        manifest.extensions.insert(
+            ROOTFS_LAYOUT_EXTENSION.into(),
+            serde_json::json!({ "layout": "flat" }),
+        );
+
+        let error = manifest.validate().unwrap_err().to_string();
+        assert!(error.contains(ROOTFS_LAYOUT_EXTENSION));
+        assert!(error.contains("string \"flat\""));
+    }
+
+    #[test]
+    fn flat_rootfs_layout_without_required_gate_is_rejected() {
+        let mut manifest = sample_manifest();
+        manifest.extensions.insert(
+            ROOTFS_LAYOUT_EXTENSION.into(),
+            serde_json::Value::String("flat".into()),
+        );
+
+        let error = manifest.validate().unwrap_err().to_string();
+        assert!(error.contains(ROOTFS_LAYOUT_EXTENSION));
+        assert!(error.contains("requires"));
     }
 
     #[test]

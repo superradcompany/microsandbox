@@ -126,6 +126,13 @@ pub fn sandbox_builder_from_args(
                 "restoring non-disk snapshots is not supported by this runtime",
             ));
         }
+        let unsupported = manifest.unsupported_requires();
+        if !unsupported.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "snapshot requires capabilities this runtime does not have: {}",
+                unsupported.join(", ")
+            )));
+        }
         let upper_path = snap_dir.join(&manifest.upper.file);
         if !upper_path.exists() {
             return Err(pyo3::exceptions::PyFileNotFoundError::new_err(format!(
@@ -134,6 +141,21 @@ pub fn sandbox_builder_from_args(
             )));
         }
         builder = builder.image(manifest.image.reference.as_str());
+        if manifest.rootfs_layout().map_err(|error| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "snapshot rootfs layout is invalid: {error}"
+            ))
+        })? == microsandbox::snapshot::SnapshotRootfsLayout::Flat
+        {
+            let size_mib =
+                u32::try_from(manifest.upper.size_bytes.div_ceil(1024 * 1024)).map_err(|_| {
+                    pyo3::exceptions::PyValueError::new_err(
+                        "flat snapshot root disk exceeds the supported size",
+                    )
+                })?;
+            let fstype = manifest.fstype.clone();
+            builder = builder.root_disk_with(|disk| disk.flat().size(size_mib).fstype(fstype));
+        }
         builder = builder.snapshot_resolved(manifest.image.manifest_digest.clone(), upper_path);
     } else {
         let image_obj = kwargs.get_item("image")?.unwrap();

@@ -952,6 +952,27 @@ impl SandboxBuilder {
         let snap_ref = snap.manifest().image.reference.clone();
 
         self.config.spec.image = RootfsSource::oci(snap_ref);
+        if snap
+            .manifest()
+            .rootfs_layout()
+            .map_err(|error| crate::MicrosandboxError::SnapshotIntegrity(format!("{error}")))?
+            == microsandbox_image::snapshot::SnapshotRootfsLayout::Flat
+        {
+            let size_mib = u32::try_from(snap.manifest().upper.size_bytes.div_ceil(1024 * 1024))
+                .map_err(|_| {
+                    crate::MicrosandboxError::InvalidConfig(
+                        "flat snapshot root disk exceeds the supported size".into(),
+                    )
+                })?;
+            let RootfsSource::Oci(oci) = &mut self.config.spec.image else {
+                unreachable!("snapshot image was constructed as OCI")
+            };
+            oci.root_disk = Some(super::types::RootDisk::Flat {
+                size_mib: Some(size_mib),
+                fstype: Some(snap.manifest().fstype.clone()),
+                clone: super::types::FlatClone::Auto,
+            });
+        }
         self.config.manifest_digest = Some(snap.manifest().image.manifest_digest.clone());
         self.config.snapshot_upper_source = Some(snap.path().join(&snap.manifest().upper.file));
         Ok(())
@@ -1266,11 +1287,6 @@ impl SandboxBuilder {
                 if !self.config.spec.patches.is_empty() {
                     return Err(crate::MicrosandboxError::InvalidConfig(
                         "patches are not yet compatible with flat root disks".into(),
-                    ));
-                }
-                if self.config.snapshot_upper_source.is_some() {
-                    return Err(crate::MicrosandboxError::InvalidConfig(
-                        "from_snapshot is not yet compatible with flat root disks".into(),
                     ));
                 }
                 Ok(())

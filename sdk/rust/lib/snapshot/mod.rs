@@ -1,10 +1,9 @@
 //! Disk snapshot creation, inspection, and consumption.
 //!
 //! A snapshot is a self-describing, content-addressed directory on
-//! disk. It captures a stopped sandbox's writable upper layer plus
-//! the metadata needed to pin the immutable lower (image). The
-//! artifact is the source of truth; the local DB index is just a
-//! cache of "snapshots I happen to know about on this machine."
+//! disk. Layered roots capture the writable upper and pin their immutable OCI lower; flat roots
+//! capture the complete private root filesystem. The artifact is the source of truth; the local DB
+//! index is just a cache of "snapshots I happen to know about on this machine."
 //!
 //! See `planning/microsandbox/implementation/snapshot-api-resumable-cloning.md` for the
 //! full design. Today snapshots are stopped-sandbox / raw-format only;
@@ -82,8 +81,9 @@ impl Snapshot {
 
     /// Create a snapshot artifact from a stopped sandbox.
     ///
-    /// Writes `snapshot.json` and the captured `upper.ext4` into the
-    /// destination directory atomically (manifest renamed last). On
+    /// Writes `snapshot.json` and the captured filesystem payload into the destination directory
+    /// atomically (manifest renamed last). Layered roots use `upper.ext4`; flat roots use
+    /// `rootfs.raw`. On
     /// success, also upserts a row into the local `snapshot_index`
     /// cache; index failures are logged but do not fail the call —
     /// the artifact is the source of truth.
@@ -359,8 +359,8 @@ pub use archive::SaveOpts;
 #[cfg(feature = "fuzzing")]
 pub use archive::fuzz_unpack_archive;
 pub use microsandbox_image::snapshot::{
-    DESCRIPTOR_FILENAME, ImageRef, Manifest, SnapshotFormat, SnapshotScope, UpperIntegrity,
-    UpperLayer,
+    DESCRIPTOR_FILENAME, ImageRef, Manifest, SnapshotFormat, SnapshotRootfsLayout, SnapshotScope,
+    UpperIntegrity, UpperLayer,
 };
 pub use microsandbox_types::{SnapshotSpec, SnapshotSpec as SnapshotConfig};
 pub use verify::{SnapshotVerifyReport, UpperVerifyStatus};

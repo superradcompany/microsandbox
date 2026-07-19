@@ -13,8 +13,9 @@ use std::sync::Arc;
 use microsandbox::Snapshot;
 use microsandbox::backend::{Backend, LocalBackend};
 use microsandbox_image::snapshot::{
-    DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, ImageRef, Manifest, SCHEMA_VERSION,
-    SNAPSHOT_ARTIFACT_KIND, SnapshotFormat, SnapshotScope, UpperIntegrity, UpperLayer,
+    DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, ImageRef, Manifest, ROOTFS_LAYOUT_EXTENSION,
+    SCHEMA_VERSION, SNAPSHOT_ARTIFACT_KIND, SnapshotFormat, SnapshotScope, UpperIntegrity,
+    UpperLayer,
 };
 use sha2::{Digest, Sha256};
 use tar::{Builder, EntryType, Header};
@@ -103,6 +104,29 @@ fn make_artifact_with_unknown_require(
         .extensions
         .insert("msb.future/1".into(), serde_json::json!({}));
     manifest.requires = vec!["msb.future/1".into()];
+    let bytes = manifest.to_canonical_bytes().unwrap();
+    let digest = manifest.digest().unwrap();
+    std::fs::write(dir.join(DESCRIPTOR_FILENAME), bytes).unwrap();
+    (dir, digest)
+}
+
+/// Build a schema-1 flat snapshot artifact. The `upper` descriptor field is retained for schema
+/// compatibility, but the extension makes its payload a complete root filesystem.
+fn make_flat_artifact(parent: &Path, name: &str, size_bytes: u64) -> (std::path::PathBuf, String) {
+    const FLAT_ROOTFS_FILE: &str = "rootfs.raw";
+
+    let dir = parent.join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    let rootfs = std::fs::File::create(dir.join(FLAT_ROOTFS_FILE)).unwrap();
+    rootfs.set_len(size_bytes).unwrap();
+
+    let mut manifest = sample_manifest(size_bytes);
+    manifest.upper.file = FLAT_ROOTFS_FILE.into();
+    manifest.extensions.insert(
+        ROOTFS_LAYOUT_EXTENSION.into(),
+        serde_json::Value::String("flat".into()),
+    );
+    manifest.requires = vec![ROOTFS_LAYOUT_EXTENSION.into()];
     let bytes = manifest.to_canonical_bytes().unwrap();
     let digest = manifest.digest().unwrap();
     std::fs::write(dir.join(DESCRIPTOR_FILENAME), bytes).unwrap();
@@ -480,6 +504,30 @@ async fn from_snapshot_rejects_resumable_scope_at_restore() {
     assert!(
         err.to_string().contains("non-disk"),
         "unexpected error: {err}"
+    );
+}
+
+#[tokio::test]
+async fn from_snapshot_restores_flat_layout_and_exact_capacity() {
+    use microsandbox::sandbox::{FlatClone, RootDisk};
+
+    let tmp = TempDir::new().unwrap();
+    let size_bytes = 9 * 1024 * 1024 + 1;
+    let (dir, _) = make_flat_artifact(tmp.path(), "flat-snap", size_bytes);
+
+    let config = microsandbox::Sandbox::builder("restore-flat-test")
+        .from_snapshot(dir.to_string_lossy().to_string())
+        .build()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        config.spec.image.oci_root_disk(),
+        Some(&RootDisk::Flat {
+            size_mib: Some(10),
+            fstype: Some("ext4".into()),
+            clone: FlatClone::Auto,
+        })
     );
 }
 

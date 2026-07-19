@@ -5,8 +5,8 @@ use std::path::PathBuf;
 
 use chrono::Utc;
 use microsandbox_image::snapshot::{
-    DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, ImageRef, Manifest, SCHEMA_VERSION,
-    SNAPSHOT_ARTIFACT_KIND, SnapshotFormat, SnapshotScope, UpperLayer,
+    DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, ImageRef, Manifest, ROOTFS_LAYOUT_EXTENSION,
+    SCHEMA_VERSION, SNAPSHOT_ARTIFACT_KIND, SnapshotFormat, SnapshotScope, UpperLayer,
 };
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
@@ -17,6 +17,42 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 
 use super::store::index_upsert;
 use super::{Snapshot, SnapshotConfig};
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+const FLAT_ROOTFS_SNAPSHOT_FILE: &str = "rootfs.raw";
+
+//--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapshotPayload {
+    LayeredUpper,
+    FlatRootfs,
+}
+
+struct SnapshotArtifactMetadata {
+    labels: Vec<(String, String)>,
+    image_reference: String,
+    manifest_digest: String,
+    source_sandbox: String,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl SnapshotPayload {
+    fn filename(self) -> &'static str {
+        match self {
+            Self::LayeredUpper => DEFAULT_UPPER_FILE,
+            Self::FlatRootfs => FLAT_ROOTFS_SNAPSHOT_FILE,
+        }
+    }
+}
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -81,15 +117,16 @@ pub(super) async fn create_snapshot(
     })?;
     let image_reference = oci_reference_string(&sandbox_config)?;
 
-    ensure_snapshottable_root_disk(sandbox_config.spec.image.oci_root_disk(), &source_sandbox)?;
+    let payload =
+        ensure_snapshottable_root_disk(sandbox_config.spec.image.oci_root_disk(), &source_sandbox)?;
 
-    // Resolve source upper.ext4 path from the canonical sandbox layout.
+    // Resolve the payload path from the canonical sandbox layout. Layered OCI captures only its writable upper; flat OCI captures the complete private root disk.
     let sandbox_dir = local.sandboxes_dir().join(&source_sandbox);
-    let src_upper = sandbox_dir.join("upper.ext4");
-    if !src_upper.exists() {
+    let source = sandbox_dir.join(payload.filename());
+    if !source.exists() {
         return Err(MicrosandboxError::Custom(format!(
-            "source sandbox '{source_sandbox}' has no upper.ext4 at {}",
-            src_upper.display()
+            "source sandbox '{source_sandbox}' has no snapshot payload at {}",
+            source.display()
         )));
     }
 
@@ -115,12 +152,15 @@ pub(super) async fn create_snapshot(
 
     let built = build_artifact(
         &staging_dir,
-        &src_upper,
+        &source,
+        payload,
         record_integrity,
-        labels,
-        image_reference,
-        manifest_digest_str,
-        &source_sandbox,
+        SnapshotArtifactMetadata {
+            labels,
+            image_reference,
+            manifest_digest: manifest_digest_str,
+            source_sandbox: source_sandbox.clone(),
+        },
     )
     .await;
     let (digest, manifest) = match built {
@@ -153,29 +193,27 @@ pub(super) async fn create_snapshot(
 /// `dir`. Pure staging: the caller promotes or discards the directory.
 async fn build_artifact(
     dir: &std::path::Path,
-    src_upper: &std::path::Path,
+    source: &std::path::Path,
+    payload: SnapshotPayload,
     record_integrity: bool,
-    labels: Vec<(String, String)>,
-    image_reference: String,
-    manifest_digest_str: String,
-    source_sandbox: &str,
+    metadata: SnapshotArtifactMetadata,
 ) -> MicrosandboxResult<(String, Manifest)> {
-    // Copy the upper layer (sparse-aware, see microsandbox_utils::copy).
-    let dst_upper = dir.join(DEFAULT_UPPER_FILE);
-    let src_upper_clone = src_upper.to_path_buf();
-    let dst_upper_clone = dst_upper.clone();
+    // Snapshot into a private staged file so artifact preparation cannot mutate the stopped sandbox disk or an immutable cached base, even when the copy uses shared COW extents.
+    let destination = dir.join(payload.filename());
+    let source_clone = source.to_path_buf();
+    let destination_clone = destination.clone();
     let copied_len = tokio::task::spawn_blocking(move || {
-        microsandbox_utils::copy::fast_copy(&src_upper_clone, &dst_upper_clone)
+        microsandbox_utils::copy::fast_copy(&source_clone, &destination_clone)
     })
     .await
     .map_err(|e| MicrosandboxError::Custom(format!("snapshot copy task: {e}")))??;
 
-    let dst_upper_for_sync = dst_upper.clone();
+    let destination_for_sync = destination.clone();
     tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         let f = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .open(&dst_upper_for_sync)?;
+            .open(&destination_for_sync)?;
         f.sync_all()?;
         Ok(())
     })
@@ -183,15 +221,25 @@ async fn build_artifact(
     .map_err(|e| MicrosandboxError::Custom(format!("snapshot upper fsync task: {e}")))??;
 
     let integrity = if record_integrity {
-        Some(super::verify::compute_sparse_integrity(&dst_upper).await?)
+        Some(super::verify::compute_sparse_integrity(&destination).await?)
     } else {
         None
     };
 
     // Build the manifest.
     let mut label_map: BTreeMap<String, String> = BTreeMap::new();
-    for (k, v) in labels {
+    for (k, v) in metadata.labels {
         label_map.insert(k, v);
+    }
+
+    let mut extensions = BTreeMap::new();
+    let mut requires = Vec::new();
+    if payload == SnapshotPayload::FlatRootfs {
+        extensions.insert(
+            ROOTFS_LAYOUT_EXTENSION.into(),
+            serde_json::Value::String("flat".into()),
+        );
+        requires.push(ROOTFS_LAYOUT_EXTENSION.into());
     }
 
     let manifest = Manifest {
@@ -201,20 +249,20 @@ async fn build_artifact(
         format: SnapshotFormat::Raw,
         fstype: "ext4".into(),
         image: ImageRef {
-            reference: image_reference,
-            manifest_digest: manifest_digest_str,
+            reference: metadata.image_reference,
+            manifest_digest: metadata.manifest_digest,
         },
         parent: None,
         created_at: Utc::now().to_rfc3339(),
         labels: label_map,
         upper: UpperLayer {
-            file: DEFAULT_UPPER_FILE.into(),
+            file: payload.filename().into(),
             size_bytes: copied_len,
             integrity,
         },
-        source_sandbox: Some(source_sandbox.to_string()),
-        extensions: BTreeMap::new(),
-        requires: Vec::new(),
+        source_sandbox: Some(metadata.source_sandbox),
+        extensions,
+        requires,
     };
     manifest.validate()?;
     let canonical = manifest
@@ -248,12 +296,12 @@ async fn build_artifact(
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
-/// Snapshots capture the managed upper. The other root-disk kinds have nothing msb-owned on the host to capture: a tmpfs upper lives in guest RAM (until resumable snapshots
-/// capture memory), and a disk-image upper is a user-owned file msb never copies into artifacts it owns.
+/// Snapshots capture the complete microsandbox-owned writable state: the managed upper for a layered root or the private complete filesystem for a flat root. A tmpfs upper lives
+/// in guest RAM (until resumable snapshots capture memory), while a disk-image upper is a user-owned file microsandbox never copies into artifacts it owns.
 fn ensure_snapshottable_root_disk(
     root_disk: Option<&RootDisk>,
     source_sandbox: &str,
-) -> MicrosandboxResult<()> {
+) -> MicrosandboxResult<SnapshotPayload> {
     match root_disk {
         Some(RootDisk::Tmpfs { .. }) => Err(MicrosandboxError::InvalidConfig(format!(
             "sandbox '{source_sandbox}' uses a tmpfs root disk, which is ephemeral and cannot be snapshotted; use the managed kind"
@@ -261,10 +309,8 @@ fn ensure_snapshottable_root_disk(
         Some(RootDisk::DiskImage { .. }) => Err(MicrosandboxError::InvalidConfig(format!(
             "sandbox '{source_sandbox}' uses a user-owned disk-image root disk, which microsandbox does not snapshot"
         ))),
-        Some(RootDisk::Flat { .. }) => Err(MicrosandboxError::InvalidConfig(format!(
-            "sandbox '{source_sandbox}' uses a flat root disk, which snapshots do not yet support"
-        ))),
-        Some(RootDisk::Managed { .. }) | None => Ok(()),
+        Some(RootDisk::Flat { .. }) => Ok(SnapshotPayload::FlatRootfs),
+        Some(RootDisk::Managed { .. }) | None => Ok(SnapshotPayload::LayeredUpper),
     }
 }
 
@@ -310,23 +356,32 @@ fn resolve_destination(
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
     use std::path::PathBuf;
 
+    use microsandbox_image::ext4::{Ext4RootfsOptions, materialize_ext4_rootfs};
+    use microsandbox_image::snapshot::SnapshotRootfsLayout;
+    use microsandbox_image::tree::FileTree;
     use microsandbox_types::{DiskImageFormat, FlatClone};
+    use sha2::{Digest, Sha256};
 
     use super::*;
 
     #[test]
     fn managed_or_default_root_disk_is_snapshottable() {
-        assert!(ensure_snapshottable_root_disk(None, "sb").is_ok());
-        assert!(
+        assert_eq!(
+            ensure_snapshottable_root_disk(None, "sb").unwrap(),
+            SnapshotPayload::LayeredUpper
+        );
+        assert_eq!(
             ensure_snapshottable_root_disk(
                 Some(&RootDisk::Managed {
                     size_mib: Some(4096)
                 }),
                 "sb"
             )
-            .is_ok()
+            .unwrap(),
+            SnapshotPayload::LayeredUpper
         );
     }
 
@@ -355,18 +410,70 @@ mod tests {
     }
 
     #[test]
-    fn flat_root_disk_is_rejected_with_a_purposeful_error() {
-        let err = ensure_snapshottable_root_disk(
-            Some(&RootDisk::Flat {
-                size_mib: Some(8192),
-                fstype: None,
-                clone: FlatClone::Auto,
-            }),
-            "sb",
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("flat"), "unexpected error: {err}");
-        assert!(err.contains("not yet support"), "unexpected error: {err}");
+    fn flat_root_disk_captures_the_complete_private_rootfs() {
+        assert_eq!(
+            ensure_snapshottable_root_disk(
+                Some(&RootDisk::Flat {
+                    size_mib: Some(8192),
+                    fstype: None,
+                    clone: FlatClone::Auto,
+                }),
+                "sb",
+            )
+            .unwrap(),
+            SnapshotPayload::FlatRootfs
+        );
+    }
+
+    #[tokio::test]
+    async fn flat_artifact_is_self_describing_and_never_mutates_the_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.raw");
+        materialize_ext4_rootfs(&source, FileTree::new(), &Ext4RootfsOptions::default()).unwrap();
+        let source_digest = file_digest(&source);
+        let staging = dir.path().join("staging");
+        std::fs::create_dir(&staging).unwrap();
+
+        let (_, manifest) =
+            build_artifact(
+                &staging,
+                &source,
+                SnapshotPayload::FlatRootfs,
+                false,
+                SnapshotArtifactMetadata {
+                    labels: Vec::new(),
+                    image_reference: "docker.io/library/alpine:3.20".into(),
+                    manifest_digest:
+                        "sha256:0000000000000000000000000000000000000000000000000000000000000001"
+                            .into(),
+                    source_sandbox: "flat-source".into(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            manifest.rootfs_layout().unwrap(),
+            SnapshotRootfsLayout::Flat
+        );
+        assert_eq!(manifest.upper.file, FLAT_ROOTFS_SNAPSHOT_FILE);
+        assert!(manifest.requires.contains(&ROOTFS_LAYOUT_EXTENSION.into()));
+        assert!(staging.join(FLAT_ROOTFS_SNAPSHOT_FILE).is_file());
+        assert!(!staging.join(DEFAULT_UPPER_FILE).exists());
+        assert_eq!(file_digest(&source), source_digest);
+    }
+
+    fn file_digest(path: &std::path::Path) -> [u8; 32] {
+        let mut file = std::fs::File::open(path).unwrap();
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0u8; 1024 * 1024];
+        loop {
+            let read = file.read(&mut buffer).unwrap();
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        hasher.finalize().into()
     }
 }
