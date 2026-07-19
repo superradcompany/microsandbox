@@ -9,11 +9,12 @@
 //!    operation on APFS, btrfs, reflink-enabled XFS, bcachefs, and
 //!    supported ReFS/Dev Drive volumes.
 //!
-//! 2. **Sparse-aware copy**. POSIX `SEEK_DATA` / `SEEK_HOLE` walk of
-//!    the source's allocation map, with `copy_file_range(2)` on Linux
-//!    for in-kernel zero-copy of data extents. The destination is
-//!    `ftruncate`d to the source size up front so unallocated regions
-//!    stay holes.
+//! 2. **Sparse-aware copy**. POSIX `SEEK_DATA` / `SEEK_HOLE` walks the
+//!    source allocation map and transfers data extents through explicit
+//!    reads and writes. The destination is `ftruncate`d to the source
+//!    size up front so unallocated regions stay holes. Linux deliberately
+//!    avoids `copy_file_range(2)` because reflink-capable filesystems may
+//!    implement it as a COW clone, violating the explicit copy contract.
 //!
 //! Never falls back to a naive byte-for-byte copy — that would
 //! densify a 4 GiB sparse file with a few MB of data into 4 GiB on
@@ -472,55 +473,21 @@ fn is_reflink_unsupported(e: &io::Error) -> bool {
     aliases.contains(&code)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn copy_extent(src_fd: RawFd, dst_fd: RawFd, off: u64, len: u64) -> io::Result<()> {
-    let mut src_off = off as i64;
-    let mut dst_off = off as i64;
-    let mut remaining = len;
-
-    while remaining > 0 {
-        let chunk = remaining.min(usize::MAX as u64 / 2) as usize;
-        let n =
-            unsafe { libc::copy_file_range(src_fd, &mut src_off, dst_fd, &mut dst_off, chunk, 0) };
-        if n < 0 {
-            let err = io::Error::last_os_error();
-            // copy_file_range may not be supported on every kernel/FS
-            // combination (notably across-FS prior to 5.3, or older
-            // kernels). Fall back to pread/pwrite for the remainder of
-            // this extent.
-            if matches!(
-                err.raw_os_error(),
-                Some(libc::ENOSYS)
-                    | Some(libc::EXDEV)
-                    | Some(libc::EINVAL)
-                    | Some(libc::EOPNOTSUPP)
-            ) {
-                let consumed = len - remaining;
-                return read_write_extent(src_fd, dst_fd, off + consumed, remaining);
-            }
-            return Err(err);
-        }
-        if n == 0 {
-            // EOF — should not happen for a valid extent, but guard.
-            break;
-        }
-        remaining -= n as u64;
-    }
-    Ok(())
-}
-
-#[cfg(all(unix, not(target_os = "linux")))]
-fn copy_extent(src_fd: RawFd, dst_fd: RawFd, off: u64, len: u64) -> io::Result<()> {
+    // Do not substitute copy_file_range here. Linux permits the filesystem to satisfy that API
+    // with shared COW extents, which makes explicit clone=copy indistinguishable from reflink on
+    // XFS and btrfs. Reads and writes preserve the cross-platform independent-copy contract.
     read_write_extent(src_fd, dst_fd, off, len)
 }
 
 /// Copy `len` bytes from `src_fd` at `off` to `dst_fd` at `off` using
-/// `pread`/`pwrite`. Universal fallback for `copy_extent` on platforms
-/// or filesystems where `copy_file_range` doesn't apply.
+/// `pread`/`pwrite` without asking the filesystem to share extents.
 #[cfg(unix)]
 fn read_write_extent(src_fd: RawFd, dst_fd: RawFd, off: u64, len: u64) -> io::Result<()> {
-    const BUF_SIZE: usize = 64 * 1024;
-    let mut buf = [0u8; BUF_SIZE];
+    const BUF_SIZE: usize = 1024 * 1024;
+    // Keep the larger transfer buffer off the comparatively small worker-thread stack.
+    let mut buf = vec![0u8; BUF_SIZE];
     let mut copied: u64 = 0;
 
     while copied < len {
@@ -700,6 +667,29 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn sparse_copy_is_independent_after_source_and_destination_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.bin");
+        let dst = dir.path().join("dst.bin");
+        let len = 4 * 1024 * 1024;
+        make_sparse(&src, len, &[0, 2 * 1024 * 1024]).unwrap();
+
+        sparse_copy(&src, &dst).unwrap();
+        let original_dst = std::fs::read(&dst).unwrap();
+
+        std::fs::write(&src, vec![0xCD; len as usize]).unwrap();
+        assert_eq!(std::fs::read(&dst).unwrap(), original_dst);
+
+        std::fs::write(&dst, vec![0xEF; len as usize]).unwrap();
+        assert!(
+            std::fs::read(&src)
+                .unwrap()
+                .iter()
+                .all(|byte| *byte == 0xCD)
+        );
     }
 
     #[test]
