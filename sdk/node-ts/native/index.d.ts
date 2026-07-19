@@ -1000,6 +1000,8 @@ export declare class SandboxBuilder {
   cpus(count: number): this
   /** Boot-time maximum possible virtual CPUs. */
   maxCpus(count: number): this
+  /** Host CPU placement policy. */
+  cpuPlacement(policy: string): this
   /** Guest memory in MiB. */
   memory(mib: number): this
   /** Boot-time maximum hotpluggable guest memory in MiB. */

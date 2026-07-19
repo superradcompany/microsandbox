@@ -24,6 +24,15 @@ class PullPolicy(enum.StrEnum):
     NEVER = "never"
 
 
+class CpuPlacement(enum.StrEnum):
+    """Host placement policy for sandbox vCPU threads."""
+
+    INHERIT = "inherit"
+    AUTO = "auto"
+    SPREAD = "spread"
+    COMPACT = "compact"
+
+
 class LogLevel(enum.StrEnum):
     TRACE = "trace"
     DEBUG = "debug"

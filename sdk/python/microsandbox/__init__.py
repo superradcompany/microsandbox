@@ -103,6 +103,7 @@ from microsandbox.events import (
 )
 from microsandbox.types import (
     Action,
+    CpuPlacement,
     DestGroup,
     Destination,
     Direction,
@@ -256,6 +257,7 @@ __all__ = [
     "RootDiskConfig",
     "DiskImageFormat",
     "PullPolicy",
+    "CpuPlacement",
     "RegistryAuth",
     "LogLevel",
     "SecurityProfile",

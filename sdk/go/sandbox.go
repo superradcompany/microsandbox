@@ -55,6 +55,7 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		CPUs:            o.CPUs,
 		MaxMemoryMiB:    o.MaxMemoryMiB,
 		MaxCPUs:         o.MaxCPUs,
+		CPUPlacement:    string(o.CPUPlacement),
 		Workdir:         o.Workdir,
 		Shell:           o.Shell,
 		SecurityProfile: string(o.SecurityProfile),

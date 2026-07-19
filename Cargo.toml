@@ -168,3 +168,6 @@ parking_lot = "0.12"
 rpassword = "7"
 russh = "0.61.1"
 russh-sftp = "2.3.0"
+
+[patch.crates-io]
+msb_krun = { git = "https://github.com/superradcompany/libkrun.git", rev = "d0de9fd52261eb9c204d9e4ebf6fbd97b88d39fb" }

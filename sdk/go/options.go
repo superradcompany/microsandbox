@@ -31,6 +31,7 @@ type SandboxConfig struct {
 	CPUs            uint8
 	MaxMemoryMiB    uint32
 	MaxCPUs         uint8
+	CPUPlacement    CPUPlacement
 	Workdir         string
 	Shell           string
 	SecurityProfile SecurityProfile
@@ -68,6 +69,16 @@ type SandboxConfig struct {
 // SandboxOption is a functional option for configuring a sandbox.
 type SandboxOption func(*SandboxConfig)
 
+// CPUPlacement controls how sandbox vCPU threads are placed on host processors.
+type CPUPlacement string
+
+const (
+	CPUPlacementInherit CPUPlacement = "inherit"
+	CPUPlacementAuto    CPUPlacement = "auto"
+	CPUPlacementSpread  CPUPlacement = "spread"
+	CPUPlacementCompact CPUPlacement = "compact"
+)
+
 type persistedSandboxConfig struct {
 	Name            string               `json:"name"`
 	Image           json.RawMessage      `json:"image"`
@@ -77,6 +88,7 @@ type persistedSandboxConfig struct {
 	CPUs            uint8                `json:"cpus"`
 	MaxMemoryMiB    uint32               `json:"max_memory_mib"`
 	MaxCPUs         uint8                `json:"max_cpus"`
+	CPUPlacement    CPUPlacement         `json:"cpu_placement"`
 	Resources       *persistedResources  `json:"resources"`
 	Workdir         string               `json:"workdir"`
 	Shell           string               `json:"shell"`
@@ -102,10 +114,11 @@ type persistedInitConfig struct {
 }
 
 type persistedResources struct {
-	CPUs         uint8  `json:"cpus"`
-	MemoryMiB    uint32 `json:"memory_mib"`
-	MaxCPUs      uint8  `json:"max_cpus"`
-	MaxMemoryMiB uint32 `json:"max_memory_mib"`
+	CPUs         uint8        `json:"cpus"`
+	MemoryMiB    uint32       `json:"memory_mib"`
+	MaxCPUs      uint8        `json:"max_cpus"`
+	MaxMemoryMiB uint32       `json:"max_memory_mib"`
+	CPUPlacement CPUPlacement `json:"cpu_placement"`
 }
 
 type persistedLifecycle struct {
@@ -155,6 +168,7 @@ func (c *SandboxConfig) UnmarshalJSON(data []byte) error {
 		CPUs:            raw.cpus(),
 		MaxMemoryMiB:    raw.maxMemoryMiB(),
 		MaxCPUs:         raw.maxCPUs(),
+		CPUPlacement:    raw.cpuPlacement(),
 		Workdir:         raw.Workdir,
 		Shell:           raw.Shell,
 		SecurityProfile: raw.SecurityProfile,
@@ -214,6 +228,16 @@ func (c persistedSandboxConfig) maxMemoryMiB() uint32 {
 		return c.MaxMemoryMiB
 	}
 	return c.MemoryMiB
+}
+
+func (c persistedSandboxConfig) cpuPlacement() CPUPlacement {
+	if c.Resources != nil && c.Resources.CPUPlacement != "" {
+		return c.Resources.CPUPlacement
+	}
+	if c.CPUPlacement != "" {
+		return c.CPUPlacement
+	}
+	return CPUPlacementInherit
 }
 
 func (c persistedSandboxConfig) lifecycleEphemeral() bool {
@@ -561,6 +585,11 @@ func WithMaxMemory(mebibytes uint32) SandboxOption {
 // WithMaxCPUs sets the boot-time maximum possible vCPU count.
 func WithMaxCPUs(cpus uint8) SandboxOption {
 	return func(o *SandboxConfig) { o.MaxCPUs = cpus }
+}
+
+// WithCPUPlacement selects the host placement policy for sandbox vCPU threads.
+func WithCPUPlacement(policy CPUPlacement) SandboxOption {
+	return func(o *SandboxConfig) { o.CPUPlacement = policy }
 }
 
 // WithWorkdir sets the working directory inside the sandbox.

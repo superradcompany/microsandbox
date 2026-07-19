@@ -7,8 +7,8 @@ use clap::Args;
 use microsandbox::VolumeKind;
 use microsandbox::backend::{Backend, LocalBackend};
 use microsandbox::sandbox::{
-    DiskImageFormat, FlatClone, MountBuilder, Patch, RootDiskBuilder, Sandbox, SandboxBuilder,
-    SandboxFilter, SecurityProfile,
+    CpuPlacement, DiskImageFormat, FlatClone, MountBuilder, Patch, RootDiskBuilder, Sandbox,
+    SandboxBuilder, SandboxFilter, SecurityProfile,
 };
 
 use crate::ui;
@@ -60,6 +60,10 @@ pub struct SandboxOpts {
     /// Boot-time maximum possible virtual CPUs.
     #[arg(long = "max-cpus")]
     pub max_cpus: Option<u8>,
+
+    /// Host CPU placement policy (inherit, auto, spread, compact).
+    #[arg(long = "cpu-placement", value_name = "POLICY")]
+    pub cpu_placement: Option<CpuPlacement>,
 
     /// Amount of memory to allocate (e.g. 512M, 1G).
     #[arg(short, long)]
@@ -465,6 +469,7 @@ impl SandboxOpts {
     pub fn has_creation_flags(&self) -> bool {
         let base = self.cpus.is_some()
             || self.max_cpus.is_some()
+            || self.cpu_placement.is_some()
             || self.memory.is_some()
             || self.max_memory.is_some()
             || !self.volume.is_empty()
@@ -544,6 +549,9 @@ pub fn apply_sandbox_opts(
     }
     if let Some(max_cpus) = opts.max_cpus {
         builder = builder.max_cpus(max_cpus);
+    }
+    if let Some(cpu_placement) = opts.cpu_placement {
+        builder = builder.cpu_placement(cpu_placement);
     }
     if let Some(ref mem) = opts.memory {
         builder = builder.memory(ui::parse_size_mib(mem).map_err(anyhow::Error::msg)?);
@@ -2722,6 +2730,21 @@ mod tests {
             .unwrap();
 
         assert_eq!(config.spec.security_profile, SecurityProfile::Restricted);
+    }
+
+    #[tokio::test]
+    async fn apply_sandbox_opts_sets_cpu_placement() {
+        let opts = SandboxOpts {
+            cpu_placement: Some(CpuPlacement::Spread),
+            ..Default::default()
+        };
+        let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(config.spec.resources.cpu_placement, CpuPlacement::Spread);
     }
 
     #[tokio::test]

@@ -39,6 +39,7 @@
             "icon": "box",
             "pages": [
               "sandboxes/overview",
+              "sandboxes/cpu-placement",
               "sandboxes/lifecycle",
               "sandboxes/commands",
               "sandboxes/ssh",

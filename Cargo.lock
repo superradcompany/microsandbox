@@ -3609,7 +3609,7 @@ dependencies = [
  "microsandbox-types",
  "microsandbox-utils",
  "msb_krun",
- "msb_krun_utils",
+ "msb_krun_utils 0.1.25 (registry+https://github.com/rust-lang/crates.io-index)",
  "parking_lot",
  "pem",
  "percent-encoding",
@@ -3701,6 +3701,7 @@ dependencies = [
  "microsandbox-utils",
  "msb_krun",
  "nix 0.31.3",
+ "rand 0.10.2",
  "rustls",
  "sea-orm",
  "serde",
@@ -3824,8 +3825,7 @@ dependencies = [
 [[package]]
 name = "msb_krun"
 version = "0.1.25"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70bc09516a8ed366b6f20504f434d619991dc879101462d86b24ae133937bd3b"
+source = "git+https://github.com/superradcompany/libkrun.git?rev=d0de9fd52261eb9c204d9e4ebf6fbd97b88d39fb#d0de9fd52261eb9c204d9e4ebf6fbd97b88d39fb"
 dependencies = [
  "crossbeam-channel",
  "kvm-bindings",
@@ -3836,7 +3836,7 @@ dependencies = [
  "msb_krun_devices",
  "msb_krun_hvf",
  "msb_krun_polly",
- "msb_krun_utils",
+ "msb_krun_utils 0.1.25 (git+https://github.com/superradcompany/libkrun.git?rev=d0de9fd52261eb9c204d9e4ebf6fbd97b88d39fb)",
  "msb_krun_vmm",
  "vm-memory",
 ]
@@ -3844,29 +3844,26 @@ dependencies = [
 [[package]]
 name = "msb_krun_arch"
 version = "0.1.25"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d63ddae3ce5ba871a2b90bad6d789bf43583b8e587620580376222aed65e96a"
+source = "git+https://github.com/superradcompany/libkrun.git?rev=d0de9fd52261eb9c204d9e4ebf6fbd97b88d39fb#d0de9fd52261eb9c204d9e4ebf6fbd97b88d39fb"
 dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
  "libc",
  "msb_krun_arch_gen",
  "msb_krun_smbios",
- "msb_krun_utils",
+ "msb_krun_utils 0.1.25 (git+https://github.com/superradcompany/libkrun.git?rev=d0de9fd52261eb9c204d9e4ebf6fbd97b88d39fb)",
  "vm-memory",
 ]
 
 [[package]]
 name = "msb_krun_arch_gen"
 version = "0.1.25"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b14a030e7cd5740010a9d6eedd1002d2d42cc1481670cfa22a4dc5a89143048f"
+source = "git+https://github.com/superradcompany/libkrun.git?rev=d0de9fd52261eb9c204d9e4ebf6fbd97b88d39fb#d0de9fd52261eb9c204d9e4ebf6fbd97b88d39fb"
 
 [[package]]
 name = "msb_krun_cpuid"
 version = "0.1.25"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f33e9fbcbf5e27657d62177689a499a0dd64d4321afde53463f17b66c1acc2d7"
+source = "git+https://github.com/superradcompany/libkrun.git?rev=d0de9fd52261eb9c204d9e4ebf6fbd97b88d39fb#d0de9fd52261eb9c204d9e4ebf6fbd97b88d39fb"
 dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
@@ -3876,8 +3873,7 @@ dependencies = [
 [[package]]
 name = "msb_krun_devices"
 version = "0.1.25"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca9d5c0ea156c5253c18c880aa29f038e639e9f5526d93ebb848e60d46b2bdca"
+source = "git+https://github.com/superradcompany/libkrun.git?rev=d0de9fd52261eb9c204d9e4ebf6fbd97b88d39fb#d0de9fd52261eb9c204d9e4ebf6fbd97b88d39fb"
 dependencies = [
  "bitflags 1.3.2",
  "capng",
@@ -3893,7 +3889,7 @@ dependencies = [
  "msb_krun_arch",
  "msb_krun_hvf",
  "msb_krun_polly",
- "msb_krun_utils",
+ "msb_krun_utils 0.1.25 (git+https://github.com/superradcompany/libkrun.git?rev=d0de9fd52261eb9c204d9e4ebf6fbd97b88d39fb)",
  "nix 0.30.1",
  "rand 0.9.4",
  "tokio",
@@ -3906,8 +3902,7 @@ dependencies = [
 [[package]]
 name = "msb_krun_hvf"
 version = "0.1.25"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "500d2d1d56525119b374ca622c351115eade0a75fb4ff8a16d1cc7117b29d169"
+source = "git+https://github.com/superradcompany/libkrun.git?rev=d0de9fd52261eb9c204d9e4ebf6fbd97b88d39fb#d0de9fd52261eb9c204d9e4ebf6fbd97b88d39fb"
 dependencies = [
  "crossbeam-channel",
  "libloading 0.8.9",
@@ -3918,28 +3913,25 @@ dependencies = [
 [[package]]
 name = "msb_krun_kernel"
 version = "0.1.25"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "836b43c16a0932baebf32b657f34153fd90f2e839a33e0002d54c6f91b4019b7"
+source = "git+https://github.com/superradcompany/libkrun.git?rev=d0de9fd52261eb9c204d9e4ebf6fbd97b88d39fb#d0de9fd52261eb9c204d9e4ebf6fbd97b88d39fb"
 dependencies = [
- "msb_krun_utils",
+ "msb_krun_utils 0.1.25 (git+https://github.com/superradcompany/libkrun.git?rev=d0de9fd52261eb9c204d9e4ebf6fbd97b88d39fb)",
  "vm-memory",
 ]
 
 [[package]]
 name = "msb_krun_polly"
 version = "0.1.25"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6457213dc30bdb1a8bcb3ceba3a548f442fc913874f11b970745f779a6bf4842"
+source = "git+https://github.com/superradcompany/libkrun.git?rev=d0de9fd52261eb9c204d9e4ebf6fbd97b88d39fb#d0de9fd52261eb9c204d9e4ebf6fbd97b88d39fb"
 dependencies = [
  "libc",
- "msb_krun_utils",
+ "msb_krun_utils 0.1.25 (git+https://github.com/superradcompany/libkrun.git?rev=d0de9fd52261eb9c204d9e4ebf6fbd97b88d39fb)",
 ]
 
 [[package]]
 name = "msb_krun_smbios"
 version = "0.1.25"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91f33a174635431e57a0d59a4aed487599c2ff2ac9ca1ea2346626112a2499af"
+source = "git+https://github.com/superradcompany/libkrun.git?rev=d0de9fd52261eb9c204d9e4ebf6fbd97b88d39fb#d0de9fd52261eb9c204d9e4ebf6fbd97b88d39fb"
 dependencies = [
  "vm-memory",
 ]
@@ -3961,10 +3953,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "msb_krun_utils"
+version = "0.1.25"
+source = "git+https://github.com/superradcompany/libkrun.git?rev=d0de9fd52261eb9c204d9e4ebf6fbd97b88d39fb#d0de9fd52261eb9c204d9e4ebf6fbd97b88d39fb"
+dependencies = [
+ "bitflags 1.3.2",
+ "crossbeam-channel",
+ "kvm-bindings",
+ "libc",
+ "log",
+ "nix 0.30.1",
+ "vmm-sys-util",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "msb_krun_vmm"
 version = "0.1.25"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "816b34f9bf7eef3f101e84452e663cf9ac6e173377d5ff277192fb8c82cf3199"
+source = "git+https://github.com/superradcompany/libkrun.git?rev=d0de9fd52261eb9c204d9e4ebf6fbd97b88d39fb#d0de9fd52261eb9c204d9e4ebf6fbd97b88d39fb"
 dependencies = [
  "bzip2",
  "crossbeam-channel",
@@ -3981,7 +3987,7 @@ dependencies = [
  "msb_krun_hvf",
  "msb_krun_kernel",
  "msb_krun_polly",
- "msb_krun_utils",
+ "msb_krun_utils 0.1.25 (git+https://github.com/superradcompany/libkrun.git?rev=d0de9fd52261eb9c204d9e4ebf6fbd97b88d39fb)",
  "nix 0.30.1",
  "vm-memory",
  "windows-sys 0.61.2",

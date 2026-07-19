@@ -1,0 +1,72 @@
+---
+title: CPU placement
+description: Place sandbox vCPU threads across or within host physical cores
+icon: "microchip"
+---
+
+Microsandbox normally inherits the CPU scheduling and affinity constraints of the process that starts it. On a Linux host, you can instead ask Microsandbox to coordinate its own vCPU placement across sandboxes that share the same `MSB_HOME`.
+
+## Policies
+
+| Policy | Behavior |
+| --- | --- |
+| `inherit` | Default. Performs no topology discovery, allocation work, lease creation, or affinity calls. |
+| `auto` | Uses `spread` when the requested maximum vCPU count fits on distinct physical cores while leaving one core outside the allocation; otherwise uses `compact`. |
+| `spread` | Assigns each vCPU to a different physical core before using SMT siblings. SMT siblings of selected cores are reserved from other cooperating `spread` sandboxes. |
+| `compact` | Assigns SMT siblings first to minimize the number of physical cores used. |
+
+Managed placement reserves enough host targets for `max_cpus`, including guest CPUs that are offline at boot. Explicit managed policies fail when the host cannot enforce them or has insufficient cooperative capacity; they never silently fall back to `inherit`.
+
+<CodeGroup>
+```bash CLI
+msb create python:3.12 --name worker --cpus 2 --cpu-placement spread
+```
+
+```rust Rust
+use microsandbox::sandbox::{CpuPlacement, Sandbox};
+
+let sb = Sandbox::builder("worker")
+    .image("python:3.12")
+    .cpus(2)
+    .cpu_placement(CpuPlacement::Spread)
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("worker")
+  .image("python:3.12")
+  .cpus(2)
+  .cpuPlacement("spread")
+  .create();
+```
+
+```python Python
+from microsandbox import CpuPlacement, Sandbox
+
+sb = await Sandbox.create(
+    "worker",
+    image="python:3.12",
+    cpus=2,
+    cpu_placement=CpuPlacement.SPREAD,
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python:3.12"),
+    m.WithCPUs(2),
+    m.WithCPUPlacement(m.CPUPlacementSpread),
+)
+```
+</CodeGroup>
+
+## Scope and guarantees
+
+The first implementation is Linux-only and applies hard affinity to libkrun's vCPU threads before they enter guest execution. It does not isolate unrelated host processes, pin VMM or device-worker threads, bind guest RAM to a NUMA node, or promise dedicated cores.
+
+Coordination is local to one Microsandbox catalog and lease directory. Sandboxes using different `MSB_HOME` values do not share reservations. Provider deployments that need machine-wide cooperative placement should configure one machine-wide allocation domain.
+
+On macOS and Windows, `inherit` remains available. `auto`, `spread`, and `compact` currently return an unsupported-platform error rather than claiming enforcement that was not applied.

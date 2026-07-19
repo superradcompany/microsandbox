@@ -54,6 +54,8 @@ import { SandboxSshOps } from "./ssh.js";
 // `Promise<NapiSandbox>`.
 export type SandboxConfig = NapiSandboxConfig;
 
+export type CpuPlacement = "inherit" | "auto" | "spread" | "compact";
+
 export interface SandboxBuilder extends NapiSandboxBuilderSetters {
   create(): Promise<Sandbox>;
   createWithPullProgress(): Promise<PullProgressCreate>;

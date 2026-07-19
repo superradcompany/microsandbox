@@ -608,6 +608,8 @@ mod tests {
 
         let expected = vec![
             "config",
+            "cpu_allocation",
+            "cpu_allocation_cpu",
             "image_ref",
             "layer",
             "maintenance_lease",

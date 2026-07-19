@@ -35,6 +35,7 @@ export const SandboxBuilder = function SandboxBuilder(
 } as unknown as new (name: string) => _SBT;
 export type SandboxBuilder = _SBT;
 export type {
+  CpuPlacement,
   SandboxConfig,
   SandboxPingResult,
   SandboxTouchResult,

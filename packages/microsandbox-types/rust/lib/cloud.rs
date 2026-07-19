@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::domain::{
-    DiskImageFormat, EnvVar, HandoffInit, HostPattern, HostPermissions, MountOptions,
+    CpuPlacement, DiskImageFormat, EnvVar, HandoffInit, HostPattern, HostPermissions, MountOptions,
     NetworkPolicy, NetworkSpec, OciRootfsSource, Patch, PullPolicy, Rlimit, RlimitResource,
     RootDisk, RootfsSource, SandboxLogLevel, SandboxPolicy, SandboxResources,
     SandboxRuntimeOptions, SandboxSpec, SecretEntry, SecretInjection, SecretsConfig,
@@ -103,6 +103,10 @@ pub struct CloudSandboxResources {
 
     /// Guest memory in MiB.
     pub memory_mib: u32,
+
+    /// Host CPU placement requested for the sandbox.
+    #[serde(default, skip_serializing_if = "CpuPlacement::is_inherit")]
+    pub cpu_placement: CpuPlacement,
 
     /// Writable disk size in MiB. Applies only to OCI root filesystems.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -958,6 +962,7 @@ impl TryFrom<CloudSandboxSpec> for SandboxSpec {
             // deserialization for legacy configs).
             max_cpus: spec.resources.vcpus,
             max_memory_mib: spec.resources.memory_mib,
+            cpu_placement: spec.resources.cpu_placement,
         };
 
         // Fields not present on `CloudNetworkSpec` are defaulted here, listed
@@ -1047,6 +1052,7 @@ impl From<SandboxSpec> for CloudSandboxSpec {
             resources: CloudSandboxResources {
                 vcpus: spec.resources.cpus,
                 memory_mib: spec.resources.memory_mib,
+                cpu_placement: spec.resources.cpu_placement,
                 disk_size_mib,
             },
             runtime: CloudSandboxRuntimeOptions {
@@ -1083,6 +1089,7 @@ impl Default for CloudSandboxResources {
         Self {
             vcpus: resources.cpus,
             memory_mib: resources.memory_mib,
+            cpu_placement: resources.cpu_placement,
             disk_size_mib: None,
         }
     }

@@ -2464,9 +2464,22 @@ mod tests {
         .unwrap();
         Migrator::up(db.inner(), None).await.unwrap();
 
-        // The flat-root state migration is the latest; one step must drop its
-        // column while everything older (including snapshot scope) stays intact.
+        // CPU allocation state is the latest migration; one step must drop its
+        // coordination tables while everything older stays intact.
         rollback_schema(db.inner(), 1).await.unwrap();
+
+        for table in ["cpu_allocation", "cpu_allocation_cpu"] {
+            let rows = db
+                .query_all(Statement::from_string(
+                    DatabaseBackend::Sqlite,
+                    format!(
+                        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '{table}'"
+                    ),
+                ))
+                .await
+                .unwrap();
+            assert!(rows.is_empty(), "{table} should be rolled back");
+        }
 
         let columns = db
             .query_all(Statement::from_string(
@@ -2478,7 +2491,7 @@ mod tests {
         let has_resolved_clone = columns
             .iter()
             .any(|row| row.try_get_by_index::<String>(1).unwrap() == "resolved_clone");
-        assert!(!has_resolved_clone);
+        assert!(has_resolved_clone);
 
         let snapshot_columns = db
             .query_all(Statement::from_string(

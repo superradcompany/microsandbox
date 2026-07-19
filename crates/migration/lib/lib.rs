@@ -18,6 +18,7 @@ mod m20260708_000001_migrate_bind_rootfs_source;
 mod m20260710_000001_migrate_root_disk;
 mod m20260714_000001_add_snapshot_scope;
 mod m20260718_000001_add_flat_rootfs_state;
+mod m20260719_000001_create_cpu_allocations;
 pub mod schema_metadata;
 
 use sea_orm_migration::prelude::*;
@@ -61,6 +62,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260710_000001_migrate_root_disk::Migration),
             Box::new(m20260714_000001_add_snapshot_scope::Migration),
             Box::new(m20260718_000001_add_flat_rootfs_state::Migration),
+            Box::new(m20260719_000001_create_cpu_allocations::Migration),
         ]
     }
 }
