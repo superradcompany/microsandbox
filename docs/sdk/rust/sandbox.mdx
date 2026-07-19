@@ -35,11 +35,12 @@ Create and control a microVM sandbox: boot it from an image, run commands, strea
   <a className="msb-row" href="#sb-owns_lifecycle"><span className="msb-rn">sb.owns_lifecycle()</span><span className="msb-rg">attached vs detached</span></a>
   <a className="msb-row" href="#sb-remove_persisted"><span className="msb-rn">sb.remove_persisted()</span><span className="msb-rg">delete persisted state</span></a>
 
-  <p className="msb-gl"><span className="msb-dot builder"></span>Builder · SandboxBuilder<span className="msb-ct">32</span></p>
+  <p className="msb-gl"><span className="msb-dot builder"></span>Builder · SandboxBuilder<span className="msb-ct">33</span></p>
   <div className="msb-chiprow">
     <a className="msb-chip" href="#image">.image()</a>
     <a className="msb-chip" href="#memory">.memory()</a>
     <a className="msb-chip" href="#max_memory">.max_memory()</a>
+    <a className="msb-chip" href="#thp">.thp()</a>
     <a className="msb-chip" href="#cpus">.cpus()</a>
     <a className="msb-chip" href="#max_cpus">.max_cpus()</a>
     <a className="msb-chip" href="#port">.port()</a>
@@ -1240,6 +1241,26 @@ Set the boot-time maximum hotpluggable guest memory. This reserves the envelope 
   <div className="msb-param">
     <div className="msb-param-key"><code>size</code><span className="msb-type">impl Into&lt;Mebibytes&gt;</span></div>
     <div className="msb-param-desc">Maximum memory in MiB.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">thp()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```rust
+fn thp(self, policy: TransparentHugePagePolicy) -> Self
+```
+
+Select the guest transparent huge-page policy applied through the kernel command line at boot. Default: `TransparentHugePagePolicy::Madvise`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>policy</code><span className="msb-type">TransparentHugePagePolicy</span></div>
+    <div className="msb-param-desc"><code>Always</code>, <code>Madvise</code>, or <code>Never</code>.</div>
   </div>
 </div>
 

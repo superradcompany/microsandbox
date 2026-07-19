@@ -255,6 +255,16 @@ impl SandboxBuilder {
         self
     }
 
+    /// Select the guest transparent huge-page policy applied at boot.
+    ///
+    /// `Madvise` is the default and uses huge pages only for mappings that
+    /// request them. `Always` can improve large anonymous-memory workloads at
+    /// the cost of coarser memory allocation, while `Never` disables THP.
+    pub fn thp(mut self, policy: super::TransparentHugePagePolicy) -> Self {
+        self.config.spec.resources.thp = policy;
+        self
+    }
+
     /// Set the runtime log level for the sandbox process.
     ///
     /// This controls the verbosity of the `msb sandbox` process.
@@ -1313,7 +1323,7 @@ mod tests {
     use microsandbox_network::secrets::config::{HostPattern, SecretEntry, SecretInjection};
     #[cfg(feature = "net")]
     use microsandbox_types::PortProtocol;
-    use microsandbox_types::{CpuPlacement, SandboxLogLevel};
+    use microsandbox_types::{CpuPlacement, SandboxLogLevel, TransparentHugePagePolicy};
     #[cfg(feature = "net")]
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -1338,6 +1348,7 @@ mod tests {
             .cpu_placement(CpuPlacement::Spread)
             .memory(1024)
             .max_memory(4096)
+            .thp(TransparentHugePagePolicy::Always)
             .log_level(LogLevel::Info)
             .env("A", "B")
             .script("setup", "echo hi")
@@ -1352,6 +1363,7 @@ mod tests {
         assert_eq!(config.spec.resources.cpu_placement, CpuPlacement::Spread);
         assert_eq!(config.spec.resources.memory_mib, 1024);
         assert_eq!(config.spec.resources.max_memory_mib, 4096);
+        assert_eq!(config.spec.resources.thp, TransparentHugePagePolicy::Always);
         assert_eq!(config.spec.runtime.log_level, Some(SandboxLogLevel::Info));
         assert_eq!(config.spec.env.len(), 1);
         assert_eq!(

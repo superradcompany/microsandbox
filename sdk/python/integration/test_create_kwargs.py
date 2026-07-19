@@ -66,6 +66,7 @@ async def test_create_kwargs_round_trip_through_config_json(sandbox_name):
         max_cpus=4,
         memory=512,
         max_memory=2048,
+        thp="always",
         hostname="py-sdk-config-host",
         workdir="/var",
         shell="/bin/sh",
@@ -96,6 +97,7 @@ async def test_create_kwargs_round_trip_through_config_json(sandbox_name):
         assert config["resources"]["max_cpus"] == 4
         assert config["resources"]["memory_mib"] == 512
         assert config["resources"]["max_memory_mib"] == 2048
+        assert config["resources"]["thp"] == "always"
         assert config["runtime"]["hostname"] == "py-sdk-config-host"
         assert config["runtime"]["workdir"] == "/var"
         assert config["runtime"]["shell"] == "/bin/sh"
@@ -146,6 +148,7 @@ async def test_create_kwargs_round_trip_through_config_json(sandbox_name):
         ({"replace_with_timeout": -1.0}, "replace_with_timeout must be non-negative"),
         ({"pull_policy": "sometimes"}, "invalid pull_policy"),
         ({"log_level": "verbose"}, "invalid log_level"),
+        ({"thp": "auto"}, "unknown transparent huge-page policy"),
     ],
 )
 async def test_create_kwargs_validate_bad_values(sandbox_name, kwargs, message):

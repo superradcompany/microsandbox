@@ -211,6 +211,52 @@ For per-language signatures and option shapes, see the SDK references:
 - Python: [`Patch`](/sdk/python/sandbox#patch) (factory) and [`PatchConfig`](/sdk/python/sandbox#patchconfig) (the value type)
 - Go: [`Patch`](/sdk/go/sandbox#patch) (helpers) and [`PatchConfig`](/sdk/go/sandbox#patchconfig) (the value type)
 
+## Transparent huge pages
+
+Transparent huge pages (THP) let the guest kernel back eligible anonymous memory with larger pages. This can reduce address-translation overhead for large memory working sets, especially inside a virtual machine, but `always` may allocate memory in 2 MiB units for sparsely touched mappings. Microsandbox therefore defaults to the density-conscious `madvise` policy and lets each sandbox choose its policy at creation time.
+
+The selected value is applied as the Linux `transparent_hugepage=` kernel boot parameter before agentd or the user workload starts. It is persisted with the sandbox and takes effect again on every start. It cannot be changed with `msb modify`; create or replace the sandbox to select another policy.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::{Sandbox, sandbox::TransparentHugePagePolicy};
+
+let sb = Sandbox::builder("memory-worker")
+    .image("python:3.12")
+    .thp(TransparentHugePagePolicy::Always)
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.builder("memory-worker")
+  .image("python:3.12")
+  .thp("always")
+  .create();
+```
+
+```python Python
+sb = await Sandbox.create(
+    "memory-worker",
+    image="python:3.12",
+    thp="always",
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "memory-worker",
+    m.WithImage("python:3.12"),
+    m.WithTHP(m.THPAlways),
+)
+```
+
+```bash CLI
+msb create python:3.12 --name memory-worker --thp always
+```
+</CodeGroup>
+
+Use `always` when the workload has large, densely touched anonymous allocations and memory bandwidth or TLB pressure matters. Keep `madvise` for general-purpose and high-density sandboxes. Use `never` for diagnostics or workloads that must avoid transparent huge pages entirely.
+
 ## Custom init system
 
 By default the microsandbox agent runs as PID 1 inside the guest: small, fast, minimal. For workloads that expect a real init (systemd, OpenRC, s6, runit, etc.), `--init` hands PID 1 over to the init binary of your choice.

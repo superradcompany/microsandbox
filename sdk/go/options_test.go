@@ -158,6 +158,14 @@ func TestWithCPUPlacement(t *testing.T) {
 	}
 }
 
+func TestWithTHP(t *testing.T) {
+	o := SandboxConfig{}
+	WithTHP(THPAlways)(&o)
+	if o.THP != THPAlways {
+		t.Errorf("got %q, want %q", o.THP, THPAlways)
+	}
+}
+
 func TestWithWorkdir(t *testing.T) {
 	o := SandboxConfig{}
 	WithWorkdir("/app")(&o)

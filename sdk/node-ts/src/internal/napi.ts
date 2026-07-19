@@ -159,6 +159,7 @@ export interface NapiSandboxBuilderSetters {
   cpuPlacement(policy: "inherit" | "auto" | "spread" | "compact"): this;
   memory(mib: number): this;
   maxMemory(mib: number): this;
+  thp(policy: "always" | "madvise" | "never"): this;
   logLevel(level: string): this;
   quietLogs(): this;
   detached(enabled: boolean): this;

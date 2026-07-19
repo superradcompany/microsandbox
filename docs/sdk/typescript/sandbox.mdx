@@ -40,11 +40,12 @@ Create and control a microVM sandbox: boot it from an image, run commands, strea
   <a className="msb-row" href="#sandbox-detach"><span className="msb-rn">sandbox.detach()</span><span className="msb-rg">release, keep running</span></a>
   <a className="msb-row" href="#sandbox-symbol-asyncdispose"><span className="msb-rn">[Symbol.asyncDispose]()</span><span className="msb-rg">auto-stop on scope exit</span></a>
 
-  <p className="msb-gl"><span className="msb-dot builder"></span>Builder · SandboxBuilder<span className="msb-ct">47</span></p>
+  <p className="msb-gl"><span className="msb-dot builder"></span>Builder · SandboxBuilder<span className="msb-ct">48</span></p>
   <div className="msb-chiprow">
     <a className="msb-chip" href="#image">.image()</a>
     <a className="msb-chip" href="#memory">.memory()</a>
     <a className="msb-chip" href="#maxmemory">.maxMemory()</a>
+    <a className="msb-chip" href="#thp">.thp()</a>
     <a className="msb-chip" href="#cpus">.cpus()</a>
     <a className="msb-chip" href="#maxcpus">.maxCpus()</a>
     <a className="msb-chip" href="#port">.port()</a>
@@ -1470,6 +1471,26 @@ Set the boot-time maximum hotpluggable guest memory in MiB. This reserves the en
   <div className="msb-param">
     <div className="msb-param-key"><code>mib</code><span className="msb-type">number</span></div>
     <div className="msb-param-desc">Maximum memory in MiB.</div>
+  </div>
+</div>
+
+---
+
+#### <span className="msb-recv">.</span><span className="msb-hn">thp()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```typescript
+thp(policy: "always" | "madvise" | "never"): this
+```
+
+Select the guest transparent huge-page policy applied through the kernel command line at boot. Default: `"madvise"`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>policy</code><span className="msb-type">"always" | "madvise" | "never"</span></div>
+    <div className="msb-param-desc">The THP policy persisted for the sandbox.</div>
   </div>
 </div>
 

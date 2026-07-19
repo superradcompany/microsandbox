@@ -340,6 +340,7 @@ describe("SandboxBuilder.build", () => {
       .cpus(2)
       .maxCpus(8)
       .cpuPlacement("spread")
+      .thp("always")
       .build();
     expect((cfg.resources as { memoryMib: number }).memoryMib).toBe(2048);
     expect((cfg.resources as { maxMemoryMib: number }).maxMemoryMib).toBe(8192);
@@ -348,6 +349,7 @@ describe("SandboxBuilder.build", () => {
     expect((cfg.resources as { cpuPlacement: string }).cpuPlacement).toBe(
       "spread",
     );
+    expect((cfg.resources as { thp: string }).thp).toBe("always");
   });
 
   it("collects volumes through the MountBuilder callback", async () => {

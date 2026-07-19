@@ -12,6 +12,7 @@ import type {
   SecretInjection,
   SecurityProfile,
   StatVirtualization,
+  TransparentHugePagePolicy,
 } from "./domain.js";
 export type * from "./domain.js";
 
@@ -201,6 +202,10 @@ export type CloudSandboxResources = {
    * Host CPU placement requested for the sandbox.
    */
   cpu_placement?: CpuPlacement;
+  /**
+   * Guest transparent huge-page policy selected at boot.
+   */
+  thp?: TransparentHugePagePolicy;
   /**
    * Writable disk size in MiB. Applies only to OCI root filesystems.
    */

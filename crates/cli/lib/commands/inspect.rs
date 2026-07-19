@@ -218,6 +218,7 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
                 change_for("max_memory"),
             ),
         );
+        ui::detail_kv_indent("THP", config.spec.resources.thp.as_str());
 
         let security = match config.spec.security_profile {
             SecurityProfile::Default => "default",
