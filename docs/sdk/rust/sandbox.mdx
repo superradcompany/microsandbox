@@ -1127,6 +1127,23 @@ Set the boot-time maximum hotpluggable guest memory. This reserves the envelope 
   </div>
 </div>
 
+#### <span className="msb-recv">.</span><span className="msb-hn">thp()</span>
+
+```rust
+fn thp(self, policy: TransparentHugePagePolicy) -> Self
+```
+
+Select the guest transparent huge-page policy applied through the kernel command line at boot. Default: `TransparentHugePagePolicy::Madvise`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>policy</code><span className="msb-type">TransparentHugePagePolicy</span></div>
+    <div className="msb-param-desc"><code>Always</code>, <code>Madvise</code>, or <code>Never</code>.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">.</span><span className="msb-hn">network()</span>
 
 ```rust

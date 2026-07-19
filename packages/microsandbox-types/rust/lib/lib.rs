@@ -33,8 +33,8 @@ pub use domain::{
     PullPolicy, Rlimit, RlimitResource, RootDisk, RootfsSource, Rule, SandboxLogLevel,
     SandboxPolicy, SandboxResources, SandboxRuntimeOptions, SandboxSpec, ScopedUpstreamCaCert,
     ScopedVerifyUpstream, SecretConfigError, SecretEntry, SecretInjection, SecretsConfig,
-    SecurityProfile, SnapshotSpec, StatVirtualization, TlsConfig, ViolationAction, VolumeKind,
-    VolumeMount, VolumeSpec,
+    SecurityProfile, SnapshotSpec, StatVirtualization, TlsConfig, TransparentHugePagePolicy,
+    ViolationAction, VolumeKind, VolumeMount, VolumeSpec,
 };
 pub use error::{TypesError, TypesResult};
 pub use modify::{

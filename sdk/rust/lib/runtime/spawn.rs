@@ -2251,6 +2251,7 @@ fn sandbox_cli_args(
         cpu_placement: config.spec.resources.cpu_placement,
         agent_sock: agent_sock_path.to_path_buf(),
         libkrunfw_path: libkrunfw_path.to_path_buf(),
+        thp: config.spec.resources.thp,
         startup: startup_command(config),
         lifecycle: Lifecycle {
             max_duration_secs: config.spec.lifecycle.max_duration_secs,

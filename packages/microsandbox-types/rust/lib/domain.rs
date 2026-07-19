@@ -773,6 +773,10 @@ pub struct SandboxResources {
     /// Host CPU placement requested for this sandbox.
     #[serde(default, skip_serializing_if = "CpuPlacement::is_inherit")]
     pub cpu_placement: CpuPlacement,
+
+    /// Guest transparent huge-page policy selected at boot.
+    #[serde(default, skip_serializing_if = "TransparentHugePagePolicy::is_madvise")]
+    pub thp: TransparentHugePagePolicy,
 }
 
 /// Controls how Microsandbox places vCPU threads on host processors.
@@ -793,6 +797,23 @@ pub enum CpuPlacement {
 
     /// Prefer SMT siblings and minimize the number of physical cores used.
     Compact,
+}
+
+/// Guest transparent huge-page policy applied through the kernel command line.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "lowercase")]
+pub enum TransparentHugePagePolicy {
+    /// Transparently use huge pages for eligible anonymous mappings.
+    Always,
+
+    /// Use huge pages only for mappings that explicitly request them.
+    #[default]
+    Madvise,
+
+    /// Disable transparent huge pages for anonymous mappings.
+    Never,
 }
 
 /// Guest runtime options for a sandbox.
@@ -980,6 +1001,22 @@ impl OciRootfsSource {
         Self {
             reference: reference.into(),
             root_disk: None,
+        }
+    }
+}
+
+impl TransparentHugePagePolicy {
+    /// Whether this is the density-conscious default policy.
+    pub fn is_madvise(&self) -> bool {
+        matches!(self, Self::Madvise)
+    }
+
+    /// Return the lowercase kernel command-line representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Always => "always",
+            Self::Madvise => "madvise",
+            Self::Never => "never",
         }
     }
 }
@@ -1263,6 +1300,27 @@ impl FromStr for DiskImageFormat {
     }
 }
 
+impl fmt::Display for TransparentHugePagePolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for TransparentHugePagePolicy {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "always" => Ok(Self::Always),
+            "madvise" => Ok(Self::Madvise),
+            "never" => Ok(Self::Never),
+            _ => Err(format!(
+                "unknown transparent huge-page policy: {value}; expected always, madvise, or never"
+            )),
+        }
+    }
+}
+
 impl Default for RootfsSource {
     fn default() -> Self {
         Self::oci(String::new())
@@ -1277,6 +1335,7 @@ impl Default for SandboxResources {
             max_cpus: DEFAULT_SANDBOX_CPUS,
             max_memory_mib: DEFAULT_SANDBOX_MEMORY_MIB,
             cpu_placement: CpuPlacement::Inherit,
+            thp: TransparentHugePagePolicy::Madvise,
         }
     }
 }
@@ -1296,6 +1355,8 @@ impl<'de> Deserialize<'de> for SandboxResources {
             max_memory_mib: Option<u32>,
             #[serde(default)]
             cpu_placement: CpuPlacement,
+            #[serde(default)]
+            thp: TransparentHugePagePolicy,
         }
 
         let raw = RawResources::deserialize(deserializer)?;
@@ -1308,6 +1369,7 @@ impl<'de> Deserialize<'de> for SandboxResources {
             max_cpus: raw.max_cpus.unwrap_or(raw.cpus),
             max_memory_mib: raw.max_memory_mib.unwrap_or(raw.memory_mib),
             cpu_placement: raw.cpu_placement,
+            thp: raw.thp,
         })
     }
 }
@@ -2494,6 +2556,16 @@ mod tests {
         assert_eq!(resources.memory_mib, 2048);
         assert_eq!(resources.max_memory_mib, 2048);
         assert_eq!(resources.cpu_placement, CpuPlacement::Inherit);
+        assert_eq!(resources.thp, TransparentHugePagePolicy::Madvise);
+        assert_eq!(
+            serde_json::to_value(resources).unwrap(),
+            serde_json::json!({
+                "cpus": 4,
+                "memory_mib": 2048,
+                "max_cpus": 4,
+                "max_memory_mib": 2048
+            })
+        );
     }
 
     #[test]
@@ -2516,6 +2588,25 @@ mod tests {
             assert_eq!(decoded.cpu_placement, policy);
             assert_eq!(policy.to_string().parse::<CpuPlacement>().unwrap(), policy);
         }
+    }
+
+    #[test]
+    fn transparent_huge_page_policy_roundtrips_non_default() {
+        let resources: SandboxResources = serde_json::from_str(
+            r#"{"cpus":2,"memory_mib":8192,"max_cpus":2,"max_memory_mib":8192,"thp":"always"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(resources.thp, TransparentHugePagePolicy::Always);
+        assert_eq!(
+            serde_json::to_value(resources).unwrap()["thp"],
+            serde_json::json!("always")
+        );
+        assert_eq!(
+            "never".parse::<TransparentHugePagePolicy>().unwrap(),
+            TransparentHugePagePolicy::Never
+        );
+        assert!("auto".parse::<TransparentHugePagePolicy>().is_err());
     }
 
     #[test]

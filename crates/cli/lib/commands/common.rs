@@ -9,6 +9,7 @@ use microsandbox::backend::{Backend, LocalBackend};
 use microsandbox::sandbox::{
     CpuPlacement, DeploymentProfile, DiskImageFormat, FlatClone, MountBuilder, Patch,
     RootDiskBuilder, Sandbox, SandboxBuilder, SandboxHandle, SecurityProfile,
+    TransparentHugePagePolicy,
 };
 
 use crate::ui;
@@ -72,6 +73,10 @@ pub struct SandboxOpts {
     /// Boot-time maximum hotpluggable memory (e.g. 1G, 8G).
     #[arg(long = "max-memory", value_name = "SIZE")]
     pub max_memory: Option<String>,
+
+    /// Guest transparent huge-page policy selected at boot.
+    #[arg(long, value_name = "POLICY", value_parser = ["always", "madvise", "never"])]
+    pub thp: Option<String>,
 
     /// Mount a host path or named volume into the sandbox (`SOURCE:DEST[:OPTIONS]`).
     #[arg(short, long)]
@@ -494,6 +499,7 @@ impl SandboxOpts {
             || self.cpu_placement.is_some()
             || self.memory.is_some()
             || self.max_memory.is_some()
+            || self.thp.is_some()
             || !self.volume.is_empty()
             || !self.mount_dir.is_empty()
             || !self.mount_file.is_empty()
@@ -581,6 +587,12 @@ pub fn apply_sandbox_opts(
     }
     if let Some(ref max_memory) = opts.max_memory {
         builder = builder.max_memory(ui::parse_size_mib(max_memory).map_err(anyhow::Error::msg)?);
+    }
+    if let Some(ref thp) = opts.thp {
+        let policy = thp
+            .parse::<TransparentHugePagePolicy>()
+            .map_err(anyhow::Error::msg)?;
+        builder = builder.thp(policy);
     }
     if let Some(ref workdir) = opts.workdir {
         builder = builder.workdir(workdir);
@@ -2784,6 +2796,46 @@ mod tests {
             ),
             other => panic!("expected Oci, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn apply_sandbox_opts_sets_transparent_huge_page_policy() {
+        let opts = SandboxOpts {
+            thp: Some("always".to_string()),
+            ..Default::default()
+        };
+        let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(config.spec.resources.thp, TransparentHugePagePolicy::Always);
+    }
+
+    #[tokio::test]
+    async fn apply_sandbox_opts_sets_flat_root_disk() {
+        let opts = SandboxOpts {
+            root_disk: Some("flat:8G,fstype=ext4,clone=reflink".to_string()),
+            ..Default::default()
+        };
+        let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        let RootfsSource::Oci(oci) = config.spec.image else {
+            panic!("expected Oci");
+        };
+        assert_eq!(
+            oci.root_disk,
+            Some(microsandbox::sandbox::RootDisk::Flat {
+                size_mib: Some(8192),
+                fstype: Some("ext4".to_string()),
+                clone: FlatClone::Reflink,
+            })
+        );
     }
 
     #[tokio::test]
