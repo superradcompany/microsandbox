@@ -4220,18 +4220,28 @@ func ImageSave(ctx context.Context, references []string, outputPath string, form
 // ---------------------------------------------------------------------------
 
 type SnapshotInfo struct {
-	Path                string            `json:"path"`
-	Digest              string            `json:"digest"`
-	SizeBytes           uint64            `json:"size_bytes"`
-	ImageRef            string            `json:"image_ref"`
-	ImageManifestDigest string            `json:"image_manifest_digest"`
-	Scope               string            `json:"scope"`
-	Format              string            `json:"format"`
-	Fstype              string            `json:"fstype"`
-	Parent              *string           `json:"parent"`
-	CreatedAt           string            `json:"created_at"`
-	Labels              map[string]string `json:"labels"`
-	SourceSandbox       *string           `json:"source_sandbox"`
+	Path                string                  `json:"path"`
+	Digest              string                  `json:"digest"`
+	SizeBytes           uint64                  `json:"size_bytes"`
+	ImageRef            string                  `json:"image_ref"`
+	ImageManifestDigest string                  `json:"image_manifest_digest"`
+	Scope               string                  `json:"scope"`
+	Format              string                  `json:"format"`
+	Fstype              string                  `json:"fstype"`
+	Parent              *string                 `json:"parent"`
+	CreatedAt           string                  `json:"created_at"`
+	Labels              map[string]string       `json:"labels"`
+	SourceSandbox       *string                 `json:"source_sandbox"`
+	Compaction          *SnapshotCompactionInfo `json:"compaction"`
+}
+
+type SnapshotCompactionInfo struct {
+	Requested        string `json:"requested"`
+	Status           string `json:"status"`
+	JournalReplayed  bool   `json:"journal_replayed"`
+	FreeBytes        uint64 `json:"free_bytes"`
+	DeallocatedBytes uint64 `json:"deallocated_bytes"`
+	Ranges           uint64 `json:"ranges"`
 }
 
 type SnapshotHandleInfo struct {
@@ -4262,6 +4272,7 @@ type SnapshotCreateOptions struct {
 	Labels          map[string]string `json:"labels,omitempty"`
 	Force           bool              `json:"force,omitempty"`
 	RecordIntegrity bool              `json:"record_integrity,omitempty"`
+	Compaction      string            `json:"compaction,omitempty"`
 	Resumable       bool              `json:"resumable,omitempty"`
 }
 

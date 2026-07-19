@@ -1062,6 +1062,8 @@ struct SnapshotCreateOpts {
     #[serde(default)]
     record_integrity: bool,
     #[serde(default)]
+    compaction: String,
+    #[serde(default)]
     resumable: bool,
 }
 
@@ -5216,6 +5218,11 @@ fn snapshot_json(s: &Snapshot) -> serde_json::Value {
         .iter()
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
+    // Snapshot construction validates known manifest extensions, so malformed compaction metadata
+    // cannot reach this FFI serializer.
+    let compaction = s
+        .compaction()
+        .expect("Snapshot must hold a validated manifest");
     serde_json::json!({
         "path": s.path().display().to_string(),
         "digest": s.digest(),
@@ -5229,6 +5236,7 @@ fn snapshot_json(s: &Snapshot) -> serde_json::Value {
         "created_at": manifest.created_at,
         "labels": labels,
         "source_sandbox": manifest.source_sandbox,
+        "compaction": compaction,
     })
 }
 
@@ -5267,7 +5275,19 @@ fn snapshot_builder_from_opts(
     let Some(name) = opts.name else {
         return Err(FfiError::invalid_argument("snapshot create requires name"));
     };
-    let mut builder = Snapshot::builder(name).from_sandbox(source_sandbox);
+    let compaction = match opts.compaction.as_str() {
+        "" | "off" => microsandbox::SnapshotCompaction::Off,
+        "auto" => microsandbox::SnapshotCompaction::Auto,
+        "on" => microsandbox::SnapshotCompaction::On,
+        value => {
+            return Err(FfiError::invalid_argument(format!(
+                "snapshot compaction must be off, auto, or on, got '{value}'"
+            )));
+        }
+    };
+    let mut builder = Snapshot::builder(name)
+        .from_sandbox(source_sandbox)
+        .compaction(compaction);
     if let Some(dest_dir) = opts.dest_dir {
         builder = builder.dest_dir(PathBuf::from(dest_dir));
     }

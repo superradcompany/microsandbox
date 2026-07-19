@@ -1,10 +1,9 @@
 //! Disk snapshot creation, inspection, and consumption.
 //!
 //! A snapshot is a self-describing, content-addressed directory on
-//! disk. It captures a stopped sandbox's writable upper layer plus
-//! the metadata needed to pin the immutable lower (image). The
-//! artifact is the source of truth; the local DB index is just a
-//! cache of "snapshots I happen to know about on this machine."
+//! disk. Layered roots capture the writable upper and pin their immutable OCI lower; flat roots
+//! capture the complete private root filesystem. The artifact is the source of truth; the local DB
+//! index is just a cache of "snapshots I happen to know about on this machine."
 //!
 //! See `planning/microsandbox/implementation/snapshot-api-resumable-cloning.md` for the
 //! full design. Today snapshots are stopped-sandbox / raw-format only;
@@ -48,6 +47,7 @@ pub struct SnapshotBuilder {
     labels: Vec<(String, String)>,
     force: bool,
     record_integrity: bool,
+    compaction: SnapshotCompaction,
     resumable: bool,
 }
 
@@ -76,14 +76,16 @@ impl Snapshot {
             labels: Vec::new(),
             force: false,
             record_integrity: false,
+            compaction: SnapshotCompaction::Off,
             resumable: false,
         }
     }
 
     /// Create a snapshot artifact from a stopped sandbox.
     ///
-    /// Writes `snapshot.json` and the captured `upper.ext4` into the
-    /// destination directory atomically (manifest renamed last). On
+    /// Writes `snapshot.json` and the captured filesystem payload into the destination directory
+    /// atomically (manifest renamed last). Layered roots use `upper.ext4`; flat roots use
+    /// `rootfs.raw`. On
     /// success, also upserts a row into the local `snapshot_index`
     /// cache; index failures are logged but do not fail the call —
     /// the artifact is the source of truth.
@@ -131,6 +133,13 @@ impl Snapshot {
     /// Apparent size of the captured upper layer in bytes.
     pub fn size_bytes(&self) -> u64 {
         self.manifest.upper.size_bytes
+    }
+
+    /// Requested and resolved free-space compaction result recorded by the snapshot producer.
+    ///
+    /// Returns `None` for legacy snapshots created before compaction metadata was recorded.
+    pub fn compaction(&self) -> MicrosandboxResult<Option<SnapshotCompactionInfo>> {
+        self.manifest.compaction().map_err(Into::into)
     }
 
     /// Get a handle by digest, name, or path from the local index.
@@ -318,6 +327,16 @@ impl SnapshotBuilder {
         self
     }
 
+    /// Select how free ext4 space is compacted while creating the snapshot.
+    ///
+    /// [`SnapshotCompaction::Off`] is the default and adds no filesystem scan. `Auto` performs
+    /// best-effort compaction for flat roots while retaining a correct dense artifact on an
+    /// unsupported host filesystem. `On` requires a flat root and successful host deallocation.
+    pub fn compaction(mut self, compaction: SnapshotCompaction) -> Self {
+        self.compaction = compaction;
+        self
+    }
+
     /// Request a future resumable snapshot.
     ///
     /// The builder accepts this stable option now, but creation returns
@@ -341,6 +360,7 @@ impl SnapshotBuilder {
             labels: self.labels,
             force: self.force,
             record_integrity: self.record_integrity,
+            compaction: self.compaction,
             resumable: self.resumable,
         })
     }
@@ -352,6 +372,34 @@ impl SnapshotBuilder {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builder_defaults_compaction_to_off() {
+        let config = Snapshot::builder("clean")
+            .from_sandbox("box")
+            .build()
+            .unwrap();
+        assert_eq!(config.compaction, SnapshotCompaction::Off);
+    }
+
+    #[test]
+    fn builder_preserves_explicit_compaction() {
+        let config = Snapshot::builder("clean")
+            .from_sandbox("box")
+            .compaction(SnapshotCompaction::Auto)
+            .build()
+            .unwrap();
+        assert_eq!(config.compaction, SnapshotCompaction::Auto);
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
@@ -359,10 +407,13 @@ pub use archive::SaveOpts;
 #[cfg(feature = "fuzzing")]
 pub use archive::fuzz_unpack_archive;
 pub use microsandbox_image::snapshot::{
-    DESCRIPTOR_FILENAME, ImageRef, Manifest, SnapshotFormat, SnapshotScope, UpperIntegrity,
-    UpperLayer,
+    DESCRIPTOR_FILENAME, ImageRef, Manifest, SNAPSHOT_COMPACTION_EXTENSION, SnapshotFormat,
+    SnapshotRootfsLayout, SnapshotScope, UpperIntegrity, UpperLayer,
 };
-pub use microsandbox_types::{SnapshotSpec, SnapshotSpec as SnapshotConfig};
+pub use microsandbox_types::{
+    SnapshotCompaction, SnapshotCompactionInfo, SnapshotCompactionStatus, SnapshotSpec,
+    SnapshotSpec as SnapshotConfig,
+};
 pub use verify::{SnapshotVerifyReport, UpperVerifyStatus};
 
 //--------------------------------------------------------------------------------------------------

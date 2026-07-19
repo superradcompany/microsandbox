@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::path::{Component, Path};
 
+use microsandbox_types::SnapshotCompactionInfo;
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest as _, Sha256};
 
@@ -33,9 +34,19 @@ pub const DEFAULT_UPPER_FILE: &str = "upper.ext4";
 /// Sparse representation-aware digest for raw upper files.
 pub const SPARSE_SHA256_V1: &str = "msb-sparse-sha256-v1";
 
+/// Required schema-1 extension that marks a snapshot payload as a complete flat root filesystem.
+///
+/// Its value is the JSON string `"flat"`. Absence retains the original layered-upper meaning.
+pub const ROOTFS_LAYOUT_EXTENSION: &str = "msb.rootfs-layout/1";
+
+/// Optional schema-1 extension that records the requested and resolved free-space compaction result.
+///
+/// The extension is informational rather than restore-critical, so producers do not list it in
+/// [`Manifest::requires`]. Older readers may ignore it and still restore the same filesystem bytes.
+pub const SNAPSHOT_COMPACTION_EXTENSION: &str = "msb.snapshot-compaction/1";
+
 /// Extension keys this runtime understands (see [`Manifest::requires`]).
-/// Empty today; resumable-era capabilities register here as they land.
-pub const SUPPORTED_REQUIRES: &[&str] = &[];
+pub const SUPPORTED_REQUIRES: &[&str] = &[ROOTFS_LAYOUT_EXTENSION, SNAPSHOT_COMPACTION_EXTENSION];
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -65,6 +76,15 @@ pub enum SnapshotScope {
     Disk,
     /// Resumable snapshot. Reserved for future memory/device-state capture.
     Resumable,
+}
+
+/// Meaning of the raw filesystem payload stored by a disk snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotRootfsLayout {
+    /// A writable ext4 upper paired with the immutable OCI lower layers pinned by the manifest.
+    Layered,
+    /// A complete ext4 root filesystem that boots directly as the sandbox root disk.
+    Flat,
 }
 
 /// Reference to the OCI image the snapshot was taken from.
@@ -223,7 +243,50 @@ impl Manifest {
             }
             prev = Some(key);
         }
+        // Known extensions are validated even when a producer forgot to mark them required. Flat
+        // layout must be required so an older runtime refuses instead of treating the complete
+        // root filesystem as a layered upper.
+        if self.rootfs_layout()? == SnapshotRootfsLayout::Flat
+            && !self
+                .requires
+                .iter()
+                .any(|requirement| requirement == ROOTFS_LAYOUT_EXTENSION)
+        {
+            return Err(ImageError::ManifestParse(format!(
+                "snapshot descriptor: flat rootfs layout must list {ROOTFS_LAYOUT_EXTENSION} in requires"
+            )));
+        }
+        // This metadata is optional for restore, but a producer that emits the known extension must
+        // still emit its exact typed shape so inspection never reports invented compaction results.
+        self.compaction()?;
         Ok(())
+    }
+
+    /// Return whether the payload is a layered upper or a complete flat root filesystem.
+    pub fn rootfs_layout(&self) -> ImageResult<SnapshotRootfsLayout> {
+        match self.extensions.get(ROOTFS_LAYOUT_EXTENSION) {
+            None => Ok(SnapshotRootfsLayout::Layered),
+            Some(serde_json::Value::String(value)) if value == "flat" => {
+                Ok(SnapshotRootfsLayout::Flat)
+            }
+            Some(value) => Err(ImageError::ManifestParse(format!(
+                "snapshot descriptor: {ROOTFS_LAYOUT_EXTENSION} must be the string \"flat\", got {value}"
+            ))),
+        }
+    }
+
+    /// Return the recorded snapshot compaction result, when produced by a compaction-aware runtime.
+    pub fn compaction(&self) -> ImageResult<Option<SnapshotCompactionInfo>> {
+        self.extensions
+            .get(SNAPSHOT_COMPACTION_EXTENSION)
+            .map(|value| {
+                serde_json::from_value(value.clone()).map_err(|error| {
+                    ImageError::ManifestParse(format!(
+                        "snapshot descriptor: invalid {SNAPSHOT_COMPACTION_EXTENSION}: {error}"
+                    ))
+                })
+            })
+            .transpose()
     }
 
     /// Extension keys named in `requires` that this runtime does not
@@ -397,6 +460,87 @@ mod tests {
         m2.labels.insert("a".into(), "1".into());
 
         assert_eq!(m1.digest().unwrap(), m2.digest().unwrap());
+    }
+
+    #[test]
+    fn flat_rootfs_layout_is_required_and_round_trips() {
+        let mut manifest = sample_manifest();
+        manifest.extensions.insert(
+            ROOTFS_LAYOUT_EXTENSION.into(),
+            serde_json::Value::String("flat".into()),
+        );
+        manifest.requires.push(ROOTFS_LAYOUT_EXTENSION.into());
+
+        manifest.validate().unwrap();
+        assert_eq!(
+            manifest.rootfs_layout().unwrap(),
+            SnapshotRootfsLayout::Flat
+        );
+        let parsed = Manifest::from_bytes(&manifest.to_canonical_bytes().unwrap()).unwrap();
+        assert_eq!(parsed.rootfs_layout().unwrap(), SnapshotRootfsLayout::Flat);
+    }
+
+    #[test]
+    fn malformed_flat_rootfs_layout_is_rejected() {
+        let mut manifest = sample_manifest();
+        manifest.extensions.insert(
+            ROOTFS_LAYOUT_EXTENSION.into(),
+            serde_json::json!({ "layout": "flat" }),
+        );
+
+        let error = manifest.validate().unwrap_err().to_string();
+        assert!(error.contains(ROOTFS_LAYOUT_EXTENSION));
+        assert!(error.contains("string \"flat\""));
+    }
+
+    #[test]
+    fn compaction_metadata_round_trips_without_becoming_a_restore_requirement() {
+        let mut manifest = sample_manifest();
+        let info = SnapshotCompactionInfo {
+            requested: microsandbox_types::SnapshotCompaction::Auto,
+            status: microsandbox_types::SnapshotCompactionStatus::Compacted,
+            journal_replayed: true,
+            free_bytes: 4096,
+            deallocated_bytes: 4096,
+            ranges: 1,
+        };
+        manifest.extensions.insert(
+            SNAPSHOT_COMPACTION_EXTENSION.into(),
+            serde_json::to_value(&info).unwrap(),
+        );
+
+        manifest.validate().unwrap();
+        assert_eq!(manifest.compaction().unwrap(), Some(info));
+        assert!(
+            !manifest
+                .requires
+                .contains(&SNAPSHOT_COMPACTION_EXTENSION.into())
+        );
+    }
+
+    #[test]
+    fn malformed_compaction_metadata_is_rejected() {
+        let mut manifest = sample_manifest();
+        manifest.extensions.insert(
+            SNAPSHOT_COMPACTION_EXTENSION.into(),
+            serde_json::json!({ "requested": "sometimes" }),
+        );
+
+        let error = manifest.validate().unwrap_err().to_string();
+        assert!(error.contains(SNAPSHOT_COMPACTION_EXTENSION));
+    }
+
+    #[test]
+    fn flat_rootfs_layout_without_required_gate_is_rejected() {
+        let mut manifest = sample_manifest();
+        manifest.extensions.insert(
+            ROOTFS_LAYOUT_EXTENSION.into(),
+            serde_json::Value::String("flat".into()),
+        );
+
+        let error = manifest.validate().unwrap_err().to_string();
+        assert!(error.contains(ROOTFS_LAYOUT_EXTENSION));
+        assert!(error.contains("requires"));
     }
 
     #[test]

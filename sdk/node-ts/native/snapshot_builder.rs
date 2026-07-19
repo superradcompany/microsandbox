@@ -1,3 +1,4 @@
+use microsandbox::SnapshotCompaction as RustSnapshotCompaction;
 use microsandbox::snapshot::{Snapshot as RustSnapshot, SnapshotBuilder as RustSnapshotBuilder};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -19,6 +20,7 @@ pub struct JsSnapshotConfig {
     pub labels: Vec<JsSnapshotLabel>,
     pub force: bool,
     pub record_integrity: bool,
+    pub compaction: String,
     pub resumable: bool,
 }
 
@@ -40,6 +42,7 @@ pub struct JsSnapshotBuilder {
     labels: Vec<(String, String)>,
     force: bool,
     record_integrity: bool,
+    compaction: RustSnapshotCompaction,
     resumable: bool,
 }
 
@@ -59,6 +62,7 @@ impl JsSnapshotBuilder {
             labels: Vec::new(),
             force: false,
             record_integrity: false,
+            compaction: RustSnapshotCompaction::Off,
             resumable: false,
         }
     }
@@ -112,6 +116,16 @@ impl JsSnapshotBuilder {
         self
     }
 
+    /// Select free-space compaction for flat snapshots.
+    #[napi]
+    pub fn compaction(&mut self, value: String) -> Result<&Self> {
+        let compaction = parse_compaction(&value)?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.compaction(compaction));
+        self.compaction = compaction;
+        Ok(self)
+    }
+
     /// Request a future resumable snapshot.
     #[napi]
     pub fn resumable(&mut self) -> &Self {
@@ -138,6 +152,7 @@ impl JsSnapshotBuilder {
                 .collect(),
             force: self.force,
             record_integrity: self.record_integrity,
+            compaction: format_compaction(self.compaction).into(),
             resumable: self.resumable,
         }
     }
@@ -165,5 +180,28 @@ impl JsSnapshotBuilder {
         self.inner
             .take()
             .expect("SnapshotBuilder used after consumption")
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+fn parse_compaction(value: &str) -> Result<RustSnapshotCompaction> {
+    match value {
+        "off" => Ok(RustSnapshotCompaction::Off),
+        "auto" => Ok(RustSnapshotCompaction::Auto),
+        "on" => Ok(RustSnapshotCompaction::On),
+        value => Err(napi::Error::from_reason(format!(
+            "compaction must be 'off', 'auto', or 'on', got '{value}'"
+        ))),
+    }
+}
+
+fn format_compaction(value: RustSnapshotCompaction) -> &'static str {
+    match value {
+        RustSnapshotCompaction::Off => "off",
+        RustSnapshotCompaction::Auto => "auto",
+        RustSnapshotCompaction::On => "on",
     }
 }

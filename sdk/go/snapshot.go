@@ -25,8 +25,42 @@ type SnapshotCreateOptions struct {
 	Labels          map[string]string
 	Force           bool
 	RecordIntegrity bool
-	Resumable       bool
+	// Compaction controls flat-snapshot free-space reclamation. The zero value is off.
+	Compaction SnapshotCompaction
+	Resumable  bool
 }
+
+// SnapshotCompaction controls free-space reclamation while creating a snapshot.
+type SnapshotCompaction string
+
+const (
+	// SnapshotCompactionOff avoids the ext4 scan and is the default.
+	SnapshotCompactionOff SnapshotCompaction = "off"
+	// SnapshotCompactionAuto compacts flat snapshots when the host supports it.
+	SnapshotCompactionAuto SnapshotCompaction = "auto"
+	// SnapshotCompactionOn requires compaction to succeed.
+	SnapshotCompactionOn SnapshotCompaction = "on"
+)
+
+// SnapshotCompactionInfo reports the requested policy and observed reclamation.
+type SnapshotCompactionInfo struct {
+	Requested        SnapshotCompaction
+	Status           SnapshotCompactionStatus
+	JournalReplayed  bool
+	FreeBytes        uint64
+	DeallocatedBytes uint64
+	Ranges           uint64
+}
+
+// SnapshotCompactionStatus is the resolved result recorded by the snapshot producer.
+type SnapshotCompactionStatus string
+
+const (
+	SnapshotCompactionSkipped       SnapshotCompactionStatus = "skipped"
+	SnapshotCompactionCompacted     SnapshotCompactionStatus = "compacted"
+	SnapshotCompactionUnsupported   SnapshotCompactionStatus = "unsupported"
+	SnapshotCompactionNotApplicable SnapshotCompactionStatus = "not_applicable"
+)
 
 // SnapshotSaveOptions configures Snapshot.Save.
 type SnapshotSaveOptions struct {
@@ -69,6 +103,7 @@ type SnapshotArtifact struct {
 	createdAt           string
 	labels              map[string]string
 	sourceSandbox       *string
+	compaction          *SnapshotCompactionInfo
 }
 
 func snapshotFromInfo(info *ffi.SnapshotInfo) *SnapshotArtifact {
@@ -85,6 +120,7 @@ func snapshotFromInfo(info *ffi.SnapshotInfo) *SnapshotArtifact {
 		createdAt:           info.CreatedAt,
 		labels:              cloneMap(info.Labels),
 		sourceSandbox:       info.SourceSandbox,
+		compaction:          snapshotCompactionFromInfo(info.Compaction),
 	}
 }
 
@@ -100,6 +136,13 @@ func (s *SnapshotArtifact) Parent() *string             { return cloneStringPtr(
 func (s *SnapshotArtifact) CreatedAt() string           { return s.createdAt }
 func (s *SnapshotArtifact) Labels() map[string]string   { return cloneMap(s.labels) }
 func (s *SnapshotArtifact) SourceSandbox() *string      { return cloneStringPtr(s.sourceSandbox) }
+func (s *SnapshotArtifact) Compaction() *SnapshotCompactionInfo {
+	if s.compaction == nil {
+		return nil
+	}
+	copy := *s.compaction
+	return &copy
+}
 
 // Verify recomputes recorded content integrity for the snapshot.
 func (s *SnapshotArtifact) Verify(ctx context.Context) (*SnapshotVerifyReport, error) {
@@ -168,12 +211,27 @@ func (snapshotFactory) Create(ctx context.Context, opts SnapshotCreateOptions) (
 		Labels:          opts.Labels,
 		Force:           opts.Force,
 		RecordIntegrity: opts.RecordIntegrity,
+		Compaction:      string(opts.Compaction),
 		Resumable:       opts.Resumable,
 	})
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
 	return snapshotFromInfo(info), nil
+}
+
+func snapshotCompactionFromInfo(info *ffi.SnapshotCompactionInfo) *SnapshotCompactionInfo {
+	if info == nil {
+		return nil
+	}
+	return &SnapshotCompactionInfo{
+		Requested:        SnapshotCompaction(info.Requested),
+		Status:           SnapshotCompactionStatus(info.Status),
+		JournalReplayed:  info.JournalReplayed,
+		FreeBytes:        info.FreeBytes,
+		DeallocatedBytes: info.DeallocatedBytes,
+		Ranges:           info.Ranges,
+	}
 }
 
 func (snapshotFactory) Open(ctx context.Context, pathOrName string) (*SnapshotArtifact, error) {

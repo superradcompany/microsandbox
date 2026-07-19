@@ -131,9 +131,8 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub(crate) manifest_digest: Option<String>,
 
-    /// Path to a snapshot's `upper.ext4` file to copy into the new
-    /// sandbox's upper layer at create time, replacing the fresh-format
-    /// step.
+    /// Path to a snapshot payload to copy into the new sandbox at create time. Layered snapshots
+    /// carry `upper.ext4`; flat snapshots carry the complete `rootfs.raw`.
     ///
     /// Transient: set by `SandboxBuilder::from_snapshot` and consumed
     /// during `create_with_mode`. Never persisted.

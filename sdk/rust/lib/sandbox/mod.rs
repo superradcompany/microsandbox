@@ -610,35 +610,39 @@ pub(crate) async fn create_local(
             )),
             _ => None,
         };
+        let flat_snapshot_source = flat_spec
+            .is_some()
+            .then(|| config.snapshot_upper_source.take())
+            .flatten();
         let flat_blob_path = if flat_spec.is_some() {
-            if config.snapshot_upper_source.is_some() {
-                return Err(crate::MicrosandboxError::InvalidConfig(
-                    "from_snapshot is not yet compatible with flat OCI rootfs".into(),
-                ));
-            }
             if !config.spec.patches.is_empty() {
                 return Err(crate::MicrosandboxError::InvalidConfig(
                     "patches are not yet compatible with flat OCI rootfs".into(),
                 ));
             }
-            // Flat materialization consumes the same validated EROFS layers as
-            // layered mode, then publishes one immutable ext4 cache artifact.
-            let registry =
-                Registry::builder(microsandbox_image::Platform::host_linux(), cache.clone())
-                    .build()?;
-            let flat_ref = registry
-                .materialize_flat_rootfs(
-                    &pull_result.manifest_digest,
-                    &pull_result.layer_diff_ids,
-                    false,
-                )
-                .await?;
-            let artifact_digest: Digest = flat_ref.artifact_digest.parse().map_err(|error| {
-                crate::MicrosandboxError::Custom(format!(
-                    "invalid flat rootfs artifact digest in cache: {error}"
-                ))
-            })?;
-            Some(cache.flat_blob_path(&artifact_digest))
+            if let Some(snapshot_source) = flat_snapshot_source {
+                Some(snapshot_source)
+            } else {
+                // Flat materialization consumes the same validated EROFS layers as
+                // layered mode, then publishes one immutable ext4 cache artifact.
+                let registry =
+                    Registry::builder(microsandbox_image::Platform::host_linux(), cache.clone())
+                        .build()?;
+                let flat_ref = registry
+                    .materialize_flat_rootfs(
+                        &pull_result.manifest_digest,
+                        &pull_result.layer_diff_ids,
+                        false,
+                    )
+                    .await?;
+                let artifact_digest: Digest =
+                    flat_ref.artifact_digest.parse().map_err(|error| {
+                        crate::MicrosandboxError::Custom(format!(
+                            "invalid flat rootfs artifact digest in cache: {error}"
+                        ))
+                    })?;
+                Some(cache.flat_blob_path(&artifact_digest))
+            }
         } else {
             None
         };

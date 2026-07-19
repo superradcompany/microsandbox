@@ -776,6 +776,17 @@ Compute and record a content-integrity hash of the upper layer at creation time,
 
 ---
 
+#### <span className="msb-recv">.</span><span className="msb-hn">compaction()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
+
+```typescript
+compaction(policy: "off" | "auto" | "on"): this
+```
+
+Select flat-snapshot free-space compaction. `off` is the default and avoids the ext4 scan, `auto` is best effort, and `on` requires a flat root and successful host deallocation. The created snapshot exposes the resolved `SnapshotCompactionInfo` through `snap.compaction`.
+
+---
+
 #### <span className="msb-recv">.</span><span className="msb-hn">resumable()</span>
 <div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 

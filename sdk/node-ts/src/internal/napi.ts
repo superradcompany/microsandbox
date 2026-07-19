@@ -515,6 +515,7 @@ export interface NapiSnapshotBuilderSetters {
   label(key: string, value: string): this;
   force(): this;
   recordIntegrity(): this;
+  compaction(policy: "off" | "auto" | "on"): this;
   resumable(): this;
 }
 
@@ -535,7 +536,17 @@ export interface NapiSnapshot {
   readonly createdAt: string; // RFC 3339 UTC
   readonly labels: Record<string, string>;
   readonly sourceSandbox: string | null | undefined;
+  readonly compaction: NapiSnapshotCompactionInfo | null | undefined;
   verify(): Promise<NapiSnapshotVerifyReport>;
+}
+
+export interface NapiSnapshotCompactionInfo {
+  readonly requested: string;
+  readonly status: string;
+  readonly journalReplayed: boolean;
+  readonly freeBytes: bigint;
+  readonly deallocatedBytes: bigint;
+  readonly ranges: bigint;
 }
 
 export interface NapiSnapshotHandle {
