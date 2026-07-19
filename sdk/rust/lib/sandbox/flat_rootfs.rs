@@ -1,6 +1,7 @@
 //! Private runtime disks cloned from immutable flat OCI rootfs artifacts.
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use microsandbox_types::FlatClone;
 use microsandbox_utils::copy::FastCopyStrategy;
@@ -90,6 +91,7 @@ fn create_private_flat_rootfs_sync(
     target_bytes: u64,
     clone: FlatClone,
 ) -> MicrosandboxResult<FlatClone> {
+    let total_started_at = Instant::now();
     if destination.exists() {
         return Err(MicrosandboxError::Custom(format!(
             "flat rootfs already exists at {}",
@@ -102,6 +104,7 @@ fn create_private_flat_rootfs_sync(
     }
 
     let result = (|| {
+        let clone_started_at = Instant::now();
         let resolved_clone = match clone {
             FlatClone::Auto => {
                 let (_, strategy) = microsandbox_utils::copy::fast_copy_with_strategy(base, &temp)?;
@@ -123,17 +126,43 @@ fn create_private_flat_rootfs_sync(
                 FlatClone::Reflink
             }
         };
-        if std::fs::metadata(&temp)?.len() < target_bytes {
+        let clone_us = clone_started_at.elapsed().as_micros();
+        let base_apparent_bytes = std::fs::metadata(base)?.len();
+        let grow_started_at = Instant::now();
+        let grew = std::fs::metadata(&temp)?.len() < target_bytes;
+        if grew {
             microsandbox_image::ext4::grow_image(&temp, target_bytes).map_err(|error| {
                 MicrosandboxError::Custom(format!("failed to grow cloned flat rootfs: {error}"))
             })?;
         }
+        let grow_us = grow_started_at.elapsed().as_micros();
+        let sync_started_at = Instant::now();
         std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(&temp)?
             .sync_all()?;
+        let sync_us = sync_started_at.elapsed().as_micros();
+        let publish_started_at = Instant::now();
         std::fs::rename(&temp, destination)?;
+        let publish_us = publish_started_at.elapsed().as_micros();
+        let allocated_bytes = tracing::enabled!(tracing::Level::DEBUG)
+            .then(|| host_allocated_bytes(destination))
+            .flatten();
+        tracing::debug!(
+            requested_clone = clone.as_str(),
+            resolved_clone = resolved_clone.as_str(),
+            base_apparent_bytes,
+            target_bytes,
+            allocated_bytes,
+            grew,
+            clone_us,
+            grow_us,
+            sync_us,
+            publish_us,
+            total_us = total_started_at.elapsed().as_micros(),
+            "private flat rootfs provisioning attribution"
+        );
         Ok(resolved_clone)
     })();
 
@@ -141,6 +170,21 @@ fn create_private_flat_rootfs_sync(
         let _ = std::fs::remove_file(&temp);
     }
     result
+}
+
+#[cfg(unix)]
+fn host_allocated_bytes(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+
+    std::fs::metadata(path)
+        .ok()
+        .map(|metadata| metadata.blocks().saturating_mul(512))
+}
+
+#[cfg(not(unix))]
+fn host_allocated_bytes(_path: &Path) -> Option<u64> {
+    // Keep Windows attribution honest until allocation size is exposed by a shared host helper.
+    None
 }
 
 //--------------------------------------------------------------------------------------------------
