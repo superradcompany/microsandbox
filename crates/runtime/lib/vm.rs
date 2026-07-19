@@ -74,6 +74,9 @@ pub const STARTUP_FD: i32 = 98;
 /// Control byte sent by the owner to stop parent-watch monitoring without stopping the sandbox.
 pub const PARENT_WATCH_DETACH: u8 = 1;
 
+/// Operator-only switch for host backing-page experiments.
+const EXPERIMENTAL_HOST_MEMORY_POLICY_ENV: &str = "MSB_EXPERIMENTAL_HOST_MEMORY_POLICY";
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -1139,6 +1142,7 @@ fn build_vm(
     let mut bind_identity_map = BindIdentityMapRegistration::new();
     #[cfg(windows)]
     let bind_identity_map = BindIdentityMapRegistration::new();
+    let host_memory_policy = host_memory_policy()?;
 
     let mut builder = VmBuilder::new()
         .machine(|m| {
@@ -1157,12 +1161,10 @@ fn build_vm(
                         .collect(),
                 );
             }
-            #[cfg(target_os = "linux")]
-            {
-                // Keep this host-side experiment independent from the guest THP policy: the
-                // customer A/B changes only whether libkrun advises its anonymous RAM mappings.
-                m = m.host_memory_policy(msb_krun::HostMemoryPolicy::PreferHugePages);
-            }
+            // Host backing is an operator concern and remains independent from the guest's THP
+            // boot policy. Explicit policies fail on unsupported hosts rather than pretending to
+            // pin a mapping policy that was never applied.
+            m = m.host_memory_policy(host_memory_policy);
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             {
                 m.split_irqchip(true)
@@ -2176,6 +2178,25 @@ fn thp_kernel_cmdline(policy: microsandbox_types::TransparentHugePagePolicy) -> 
     format!("transparent_hugepage={}", policy.as_str())
 }
 
+/// Resolve the internal host-backing experiment without changing the default runtime behavior.
+fn host_memory_policy() -> RuntimeResult<msb_krun::HostMemoryPolicy> {
+    let override_value = std::env::var(EXPERIMENTAL_HOST_MEMORY_POLICY_ENV).ok();
+    host_memory_policy_with_override(override_value.as_deref())
+}
+
+fn host_memory_policy_with_override(
+    override_value: Option<&str>,
+) -> RuntimeResult<msb_krun::HostMemoryPolicy> {
+    match override_value.unwrap_or("inherit") {
+        "inherit" => Ok(msb_krun::HostMemoryPolicy::Inherit),
+        "prefer-huge-pages" => Ok(msb_krun::HostMemoryPolicy::PreferHugePages),
+        "prefer-base-pages" => Ok(msb_krun::HostMemoryPolicy::PreferBasePages),
+        value => Err(RuntimeError::Custom(format!(
+            "invalid {EXPERIMENTAL_HOST_MEMORY_POLICY_ENV} value {value:?}; expected inherit, prefer-huge-pages, or prefer-base-pages"
+        ))),
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -2190,9 +2211,9 @@ mod tests {
     use super::{
         ConsoleSharedState, HostPermissions, StatVirtualization, append_block_root_env,
         bind_rootfs_backend, guest_shutdown_flush_timeout,
-        guest_shutdown_flush_timeout_with_override, parse_mount_spec, prepend_scripts_path,
-        request_guest_shutdown, request_guest_shutdown_with_timeout, thp_kernel_cmdline,
-        validate_disk_format,
+        guest_shutdown_flush_timeout_with_override, host_memory_policy_with_override,
+        parse_mount_spec, prepend_scripts_path, request_guest_shutdown,
+        request_guest_shutdown_with_timeout, thp_kernel_cmdline, validate_disk_format,
     };
 
     use microsandbox_filesystem::{Context, DynFileSystem, FsOptions};
@@ -2227,6 +2248,29 @@ mod tests {
             thp_kernel_cmdline(TransparentHugePagePolicy::Never),
             "transparent_hugepage=never"
         );
+    }
+
+    #[test]
+    fn host_memory_policy_defaults_to_inherit_and_parses_experiments() {
+        use msb_krun::HostMemoryPolicy;
+
+        assert_eq!(
+            host_memory_policy_with_override(None).unwrap(),
+            HostMemoryPolicy::Inherit
+        );
+        assert_eq!(
+            host_memory_policy_with_override(Some("inherit")).unwrap(),
+            HostMemoryPolicy::Inherit
+        );
+        assert_eq!(
+            host_memory_policy_with_override(Some("prefer-huge-pages")).unwrap(),
+            HostMemoryPolicy::PreferHugePages
+        );
+        assert_eq!(
+            host_memory_policy_with_override(Some("prefer-base-pages")).unwrap(),
+            HostMemoryPolicy::PreferBasePages
+        );
+        assert!(host_memory_policy_with_override(Some("huge")).is_err());
     }
 
     #[test]
