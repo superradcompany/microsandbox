@@ -152,10 +152,51 @@ msb modify worker --max-memory 16G --dry-run
 
 By default, `modify` only applies changes that do not require a restart. Use `--next-start` to save restart-backed changes for the next boot, or `--restart` to restart the sandbox and make them active now.
 
-```bash
+<CodeGroup>
+```rust Rust
+sb.modify()
+    .max_memory_mib(16 * 1024)
+    .next_start()
+    .apply()
+    .await?;
+
+sb.modify()
+    .env("MODE", "prod")
+    .restart()
+    .apply()
+    .await?;
+```
+
+```typescript TypeScript
+await sandbox.modify({ maxMemory: 16384, policy: "next_start" });
+await sandbox.modify({ env: { MODE: "prod" }, policy: "restart" });
+```
+
+```python Python
+await sb.modify(max_memory=16384, policy="next_start")
+await sb.modify(env={"MODE": "prod"}, policy="restart")
+```
+
+```go Go
+_, err := sb.Modify(ctx, m.ModifyOptions{
+    MaxMemoryMiB: 16384,
+    Policy:       m.ModificationPolicyNextStart,
+})
+if err != nil {
+    return err
+}
+
+_, err = sb.Modify(ctx, m.ModifyOptions{
+    Env:    map[string]string{"MODE": "prod"},
+    Policy: m.ModificationPolicyRestart,
+})
+```
+
+```bash CLI
 msb modify worker --max-memory 16G --next-start
 msb modify worker --env MODE=prod --restart
 ```
+</CodeGroup>
 
 ## CPU and memory
 
@@ -191,9 +232,40 @@ Use [`msb ps`](/cli/sandbox-commands#msb-ps) to see a sandbox's allocation as `e
 
 Labels can be added, changed, or removed through the same configuration path:
 
-```bash
+<CodeGroup>
+```rust Rust
+sb.modify()
+    .label("tier", "web")
+    .remove_label("stale")
+    .apply()
+    .await?;
+```
+
+```typescript TypeScript
+await sandbox.modify({
+    labels: { tier: "web" },
+    labelsRemove: ["stale"],
+});
+```
+
+```python Python
+await sb.modify(
+    labels={"tier": "web"},
+    labels_rm=["stale"],
+)
+```
+
+```go Go
+_, err := sb.Modify(ctx, m.ModifyOptions{
+    Labels:       map[string]string{"tier": "web"},
+    LabelsRemove: []string{"stale"},
+})
+```
+
+```bash CLI
 msb modify worker --label tier=web --label-rm stale
 ```
+</CodeGroup>
 
 They apply immediately because they are host-side metadata. They do not change running guest processes. For label names, bulk selection, metric attribution, and cardinality guidance, see [Labels](/sandboxes/labels).
 
@@ -201,18 +273,61 @@ They apply immediately because they are host-side metadata. They do not change r
 
 Environment and workdir changes affect future commands only. Existing guest processes keep the environment and working directory they already have.
 
-```bash
+<CodeGroup>
+```rust Rust
+sb.modify()
+    .env("MODE", "prod")
+    .workdir("/app")
+    .apply()
+    .await?;
+```
+
+```typescript TypeScript
+await sandbox.modify({
+    env: { MODE: "prod" },
+    workdir: "/app",
+});
+```
+
+```python Python
+await sb.modify(env={"MODE": "prod"}, workdir="/app")
+```
+
+```go Go
+_, err := sb.Modify(ctx, m.ModifyOptions{
+    Env:     map[string]string{"MODE": "prod"},
+    Workdir: "/app",
+})
+```
+
+```bash CLI
 msb modify worker --env MODE=prod --workdir /app
 ```
+</CodeGroup>
 
 ## Secrets
 
 Secrets can be added, rotated, or removed without recreating the sandbox. Guest code keeps using the same placeholder; only the value injected at the network boundary changes.
 
-```bash
+<CodeGroup>
+```rust Rust
+use microsandbox::sandbox::SecretSource;
+
+sb.modify()
+    .secret(|s| s
+        .env("GITHUB_TOKEN")
+        .source(SecretSource::Env { var: "GITHUB_TOKEN".into() })
+        .allow_host("api.github.com"))
+    .remove_secret("OLD_TOKEN")
+    .apply()
+    .await?;
+```
+
+```bash CLI
 msb modify worker --secret GITHUB_TOKEN@api.github.com
 msb modify worker --secret-rm OLD_TOKEN
 ```
+</CodeGroup>
 
 Secret changes through modify are Rust-SDK and CLI only for now. For the credential model and host allow lists, see [Secrets](/sandboxes/secrets).
 
