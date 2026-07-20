@@ -528,7 +528,7 @@ msb self uninstall --yes      # Skip confirmation
 
 | Subcommand | Description |
 |------------|-------------|
-| `doctor` (alias: `check`) | Check runtime files and host virtualization prerequisites such as Windows Hypervisor Platform |
+| `doctor` (alias: `check`) | Check runtime files, host virtualization prerequisites, and non-blocking host performance capabilities |
 | `update` (alias: `upgrade`) | Update msb and libkrunfw to the latest release and refresh command links |
 | `downgrade <version>` | Downgrade msb and compatible local state to a supported older release at or above 0.6.0, refusing unsafe downgrades before touching files or state |
 | `uninstall` | Remove msb, libkrunfw, and command links |
@@ -546,3 +546,7 @@ Before a downgrade changes local state, `msb` checks the target release, confirm
 | `--keep-cache` | `downgrade` | Keep the image cache even when rollback metadata marks it affected |
 | `--no-backup` | `downgrade` | Skip the database backup before rolling back local state |
 | `-y`, `--yes` | `uninstall` | Skip confirmation prompt |
+
+On Linux AMD hosts, `msb doctor` reports whether KVM AVIC is active. AVIC is an optional host-wide network-performance capability, so a disabled result is a warning and does not make the host unhealthy. Doctor never reloads `kvm_amd` automatically.
+
+Doctor also runs a short-lived clone probe inside `MSB_HOME` and reports whether flat-root `clone=auto` resolves to a native reflink or the portable sparse-copy fallback. The probe files are removed immediately and no host configuration is changed.

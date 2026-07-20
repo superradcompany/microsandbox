@@ -404,6 +404,7 @@ pub fn run_schema_baseline(args: SchemaBaselineArgs) -> anyhow::Result<()> {
 pub fn run_doctor(args: DoctorArgs) -> anyhow::Result<()> {
     let diagnosis = diagnose_host();
     render_diagnosis(&diagnosis);
+    render_performance_advisories(&diagnosis);
 
     if diagnosis.is_healthy() {
         done("Host setup is ready.");
@@ -523,6 +524,54 @@ fn render_check(check: &microsandbox::setup::Check) {
             );
         }
         CheckState::Info => info(&format!("{}: {}", check.label, check.value)),
+    }
+}
+
+/// Explain non-blocking performance checks without changing doctor's healthy exit status.
+fn render_performance_advisories(diagnosis: &microsandbox::setup::Diagnosis) {
+    use microsandbox::setup::CheckState;
+
+    for check in diagnosis
+        .sections
+        .iter()
+        .flat_map(|section| &section.checks)
+    {
+        if check.state != CheckState::Warn {
+            continue;
+        }
+
+        match check.label.as_str() {
+            "KVM AVIC" if check.value.starts_with("disabled") => ui::warn_with_lines(
+                "AMD AVIC is available but disabled",
+                &[
+                    ui::ErrorLine::Hint(
+                        "AVIC is optional; sandbox correctness and isolation are unaffected",
+                    ),
+                    ui::ErrorLine::Hint(
+                        "it is a privileged, host-wide KVM setting; stop all KVM guests first",
+                    ),
+                    ui::ErrorLine::Hint(
+                        "enable for the current boot: sudo modprobe -r kvm_amd && sudo modprobe kvm_amd avic=1",
+                    ),
+                    ui::ErrorLine::Hint("verify: cat /sys/module/kvm_amd/parameters/avic"),
+                ],
+            ),
+            "Root clone" if check.value.starts_with("copy fallback") => ui::warn_with_lines(
+                "MSB_HOME does not support reflink clones",
+                &[
+                    ui::ErrorLine::Hint(
+                        "clone=auto will use independent sparse copies for flat sandbox roots",
+                    ),
+                    ui::ErrorLine::Hint(
+                        "sandbox creation may be slower and each private root may allocate more storage",
+                    ),
+                    ui::ErrorLine::Hint(
+                        "use a reflink-capable filesystem for MSB_HOME to enable copy-on-write clones",
+                    ),
+                ],
+            ),
+            _ => {}
+        }
     }
 }
 

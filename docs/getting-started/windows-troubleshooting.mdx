@@ -30,7 +30,7 @@ If the only failure is Windows Hypervisor Platform setup, let `msb` open the ele
 msb doctor --fix
 ```
 
-`msb doctor --fix` keeps the normal doctor command read-only. The fix path opens an elevated PowerShell window and runs the Windows optional-feature command without forcing an immediate reboot.
+`msb doctor --fix` keeps the normal doctor command free of host-configuration changes. The normal check may create and immediately remove a small clone-capability probe inside `MSB_HOME`. The fix path opens an elevated PowerShell window and runs the Windows optional-feature command without forcing an immediate reboot.
 
 ## Runtime files
 
