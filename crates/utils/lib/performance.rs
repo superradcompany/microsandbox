@@ -101,12 +101,25 @@ impl PerfExperiment {
     }
 
     /// Return whether this experiment is selected by a raw comma-separated value.
+    ///
+    /// Selectors are applied from left to right. Prefix a selector with `-` to disable it after a
+    /// broader group, for example `all,-flat-direct-io`.
     pub fn enabled_in(self, raw: &str) -> bool {
-        raw.split(',').map(str::trim).any(|selector| {
-            selector.eq_ignore_ascii_case("all")
-                || selector.eq_ignore_ascii_case(self.group())
-                || selector.eq_ignore_ascii_case(self.name())
-        })
+        raw.split(',')
+            .map(str::trim)
+            .fold(false, |enabled, selector| {
+                let (selected, selector) = selector
+                    .strip_prefix('-')
+                    .map_or((true, selector), |selector| (false, selector));
+                if selector.eq_ignore_ascii_case("all")
+                    || selector.eq_ignore_ascii_case(self.group())
+                    || selector.eq_ignore_ascii_case(self.name())
+                {
+                    selected
+                } else {
+                    enabled
+                }
+            })
     }
 }
 
@@ -129,5 +142,7 @@ mod tests {
         assert!(PerfExperiment::BlockIoUring.enabled_in("block"));
         assert!(PerfExperiment::ShutdownReady.enabled_in("all"));
         assert!(!PerfExperiment::ShutdownReady.enabled_in(""));
+        assert!(!PerfExperiment::FlatDirectIo.enabled_in("all,-flat-direct-io"));
+        assert!(PerfExperiment::BlockIoUring.enabled_in("all,-flat-direct-io"));
     }
 }
