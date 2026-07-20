@@ -943,6 +943,57 @@ jobs:
         run: scripts/ci/clean-runner-disk.sh
 
   # ---------------------------------------------------------------------------
+  # Python SDK lower-bound check (Python 3.10)
+  #
+  # Every other Python job runs uv unpinned, so it always resolves a modern
+  # interpreter and never exercises the declared floor in pyproject.toml
+  # (requires-python = ">=3.10"). That let 3.11-only code ship unimportable
+  # on 3.10 (#1153). This job pins uv to 3.10 and runs the unit tests, so
+  # the support claim stays tested until the floor is raised.
+  # ---------------------------------------------------------------------------
+  python-sdk-lower-bound:
+    name: Python SDK (3.10 lower bound)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-bin: false
+
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "sdk/python/uv.lock"
+          python-version: "3.10"
+
+      - name: Sync Python dev environment
+        working-directory: sdk/python
+        run: uv sync --group dev
+
+      # Guard against the pin silently not applying — an unpinned resolve
+      # is exactly the failure mode this job exists to prevent.
+      - name: Verify interpreter is 3.10
+        working-directory: sdk/python
+        run: uv run python -c "import sys; assert sys.version_info[:2] == (3, 10), sys.version"
+
+      - name: Build Python SDK (editable)
+        working-directory: sdk/python
+        run: uv run maturin develop --release
+
+      # No runtime bundle is staged here; test_runtime_binary skips without
+      # it. Bundle-dependent behavior is covered by `check` on a modern
+      # interpreter — this job only guards the interpreter floor.
+      - name: Test Python SDK
+        working-directory: sdk/python
+        run: uv run pytest
+
+  # ---------------------------------------------------------------------------
   # Go SDK integration tests (requires KVM)
   #
   # Downloads the pre-built msb + libkrunfw + libmicrosandbox_go_ffi.so from
@@ -1058,6 +1109,7 @@ jobs:
       - integration-test
       - node-sdk-test
       - python-sdk-test
+      - python-sdk-lower-bound
       - go-sdk-test
     runs-on: ubuntu-latest
     steps:
