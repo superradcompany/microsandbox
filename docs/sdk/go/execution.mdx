@@ -887,20 +887,7 @@ Enable a stdin pipe for the exec session, allowing data to be written via [`Exec
 func WithExecTTY(enabled bool) ExecOption
 ```
 
-Control whether the command runs inside a pseudo-terminal. Enable it for interactive programs such as shells, editors, REPLs, and `top`. Default: `false`.
-
-When enabled, the guest process runs with its stdin, stdout, and stderr connected to the PTY. Streaming sessions expose the combined terminal output through [`ExecEventStdout`](#execeventkind); they do not emit a separately attributable stderr stream. Collected output similarly places the combined stream in [`Stdout`](#out-stdout) and leaves [`Stderr`](#out-stderr) empty. Add [`WithExecStdinPipe()`](#withexecstdinpipe) to write to the terminal programmatically, and use [`Resize`](#h-resize) to update its dimensions after the session starts.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>enabled</code><span className="msb-type">bool</span></div>
-    <div className="msb-param-desc"><code>true</code> to allocate a pseudo-terminal.</div>
-  </div>
-</div>
-
-<Accordion title="Programmable terminal example">
+<Accordion title="Example">
 
 ```go
 h, err := sb.ExecStream(ctx, "/bin/bash", nil,
@@ -926,6 +913,19 @@ if _, err := stdin.Write([]byte("echo hello\n")); err != nil {
 ```
 
 </Accordion>
+
+Control whether the command runs inside a pseudo-terminal. Enable it for interactive programs such as shells, editors, REPLs, and `top`. Default: `false`.
+
+When enabled, the guest process runs with its stdin, stdout, and stderr connected to the PTY. Streaming sessions expose the combined terminal output through [`ExecEventStdout`](#execeventkind); they do not emit a separately attributable stderr stream. Collected output similarly places the combined stream in [`Stdout`](#out-stdout) and leaves [`Stderr`](#out-stderr) empty. Add [`WithExecStdinPipe()`](#withexecstdinpipe) to write to the terminal programmatically, and use [`Resize`](#h-resize) to update its dimensions after the session starts.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>enabled</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc"><code>true</code> to allocate a pseudo-terminal.</div>
+  </div>
+</div>
 
 #### <span className="msb-hn">WithExecUser()</span>
 
