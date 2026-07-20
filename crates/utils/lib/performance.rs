@@ -93,6 +93,14 @@ impl PerfExperiment {
         }
     }
 
+    /// Return whether the broad `all` selector includes this experiment.
+    ///
+    /// Host direct I/O remains available for explicit development measurements, but its measured
+    /// throughput regressions exclude it from cumulative candidates.
+    const fn included_in_all(self) -> bool {
+        !matches!(self, Self::FlatDirectIo)
+    }
+
     /// Return whether this experiment is enabled in the current process.
     pub fn enabled(self) -> bool {
         std::env::var(PERF_EXPERIMENTS_ENV)
@@ -111,8 +119,13 @@ impl PerfExperiment {
                 let (selected, selector) = selector
                     .strip_prefix('-')
                     .map_or((true, selector), |selector| (false, selector));
-                if selector.eq_ignore_ascii_case("all")
-                    || selector.eq_ignore_ascii_case(self.group())
+                if selector.eq_ignore_ascii_case("all") {
+                    if self.included_in_all() {
+                        selected
+                    } else {
+                        enabled
+                    }
+                } else if selector.eq_ignore_ascii_case(self.group())
                     || selector.eq_ignore_ascii_case(self.name())
                 {
                     selected
@@ -142,7 +155,17 @@ mod tests {
         assert!(PerfExperiment::BlockIoUring.enabled_in("block"));
         assert!(PerfExperiment::ShutdownReady.enabled_in("all"));
         assert!(!PerfExperiment::ShutdownReady.enabled_in(""));
+        assert!(!PerfExperiment::FlatDirectIo.enabled_in("all"));
         assert!(!PerfExperiment::FlatDirectIo.enabled_in("all,-flat-direct-io"));
         assert!(PerfExperiment::BlockIoUring.enabled_in("all,-flat-direct-io"));
+    }
+
+    #[test]
+    fn rejected_direct_io_requires_an_explicit_selector() {
+        assert!(PerfExperiment::FlatDirectIo.enabled_in("flat-direct-io"));
+        assert!(PerfExperiment::FlatDirectIo.enabled_in("flat"));
+        assert!(PerfExperiment::FlatDirectIo.enabled_in("all,flat-direct-io"));
+        assert!(PerfExperiment::FlatDirectIo.enabled_in("flat-direct-io,all"));
+        assert!(!PerfExperiment::FlatDirectIo.enabled_in("flat-direct-io,-flat"));
     }
 }
