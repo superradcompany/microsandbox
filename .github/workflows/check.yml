@@ -984,6 +984,11 @@ jobs:
           name: msb-linux-x86_64
           path: build/
 
+      # microsandbox-runtime links against libcap-ng; GitHub-hosted
+      # runners don't ship the dev package.
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+
       - name: Sync Python dev environment
         working-directory: sdk/python
         run: uv sync --group dev
