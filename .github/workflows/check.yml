@@ -953,7 +953,7 @@ jobs:
   # ---------------------------------------------------------------------------
   python-sdk-lower-bound:
     name: Python SDK (3.10 lower bound)
-    needs: changes
+    needs: [check, changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -971,6 +971,18 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "sdk/python/uv.lock"
           python-version: "3.10"
+
+      # The sdk/rust build script provisions msb + libkrunfw during the
+      # maturin build. Between a libkrunfw version bump and the next
+      # release its fallback (downloading the released PREBUILT_VERSION
+      # bundle) ships the older libkrunfw and fails on Linux, so feed
+      # its CI escape hatch the locally built bundle from `check`, like
+      # the other SDK jobs do.
+      - name: Download build artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: msb-linux-x86_64
+          path: build/
 
       - name: Sync Python dev environment
         working-directory: sdk/python
