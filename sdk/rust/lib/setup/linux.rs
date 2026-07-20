@@ -18,6 +18,8 @@ use super::host::{Check, Fix, FixCommand, Problem, Section};
 
 const KVM_DEVICE: &str = "/dev/kvm";
 
+const KVM_AMD_AVIC_PARAMETER: &str = "/sys/module/kvm_amd/parameters/avic";
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -110,6 +112,15 @@ pub(super) fn host_section() -> (Section, Vec<Problem>) {
         }
     }
 
+    // AVIC is optional AMD/KVM acceleration rather than a sandbox correctness requirement. Keep
+    // it as a non-blocking fact so ordinary development hosts remain healthy while optimized
+    // Linux deployments can see whether they match the measured network profile.
+    if arch == "x86_64"
+        && let Some(check) = kvm_avic_check()
+    {
+        checks.push(check);
+    }
+
     (section(checks), problems)
 }
 
@@ -123,6 +134,10 @@ fn section(checks: Vec<Check>) -> Section {
 /// Return the first virtualization flag found in `/proc/cpuinfo`, if any.
 fn cpu_virt_flag() -> Option<&'static str> {
     let info = std::fs::read_to_string("/proc/cpuinfo").ok()?;
+    cpu_virt_flag_from(&info)
+}
+
+fn cpu_virt_flag_from(info: &str) -> Option<&'static str> {
     for line in info.lines() {
         if line.starts_with("flags") {
             let flags = line.split(':').nth(1).unwrap_or("");
@@ -135,6 +150,53 @@ fn cpu_virt_flag() -> Option<&'static str> {
         }
     }
     None
+}
+
+/// Inspect the live AMD KVM module without changing its host-wide state.
+fn kvm_avic_check() -> Option<Check> {
+    let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").ok()?;
+    let parameter = std::fs::read_to_string(KVM_AMD_AVIC_PARAMETER).ok();
+    kvm_avic_check_from(&cpuinfo, parameter.as_deref())
+}
+
+fn kvm_avic_check_from(cpuinfo: &str, parameter: Option<&str>) -> Option<Check> {
+    if cpu_virt_flag_from(cpuinfo) != Some("svm") {
+        return None;
+    }
+
+    if !cpu_flag_present(cpuinfo, "avic") {
+        return Some(Check::info("KVM AVIC", "not supported by this host"));
+    }
+
+    let Some(parameter) = parameter else {
+        return Some(Check::info("KVM AVIC", "status unavailable"));
+    };
+    let x2avic = cpu_flag_present(cpuinfo, "x2avic");
+
+    match parse_module_bool(parameter) {
+        Some(true) if x2avic => Some(Check::pass("KVM AVIC", "enabled (x2AVIC available)")),
+        Some(true) => Some(Check::pass("KVM AVIC", "enabled")),
+        Some(false) if x2avic => Some(Check::warn("KVM AVIC", "disabled — x2AVIC available")),
+        Some(false) => Some(Check::warn("KVM AVIC", "disabled — optional acceleration")),
+        None => Some(Check::info("KVM AVIC", "status unavailable")),
+    }
+}
+
+fn cpu_flag_present(info: &str, expected: &str) -> bool {
+    info.lines().any(|line| {
+        line.starts_with("flags")
+            && line
+                .split_once(':')
+                .is_some_and(|(_, flags)| flags.split_whitespace().any(|flag| flag == expected))
+    })
+}
+
+fn parse_module_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "on" | "y" | "yes" => Some(true),
+        "0" | "off" | "n" | "no" => Some(false),
+        _ => None,
+    }
 }
 
 /// Build the `/dev/kvm` permission failure, with a fix tailored to whether the
@@ -354,4 +416,48 @@ fn group_label(group: &DeviceGroup) -> String {
         .name
         .clone()
         .unwrap_or_else(|| format!("gid {}", group.gid))
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cpu_flags_are_read_from_the_flags_field() {
+        let cpuinfo = "processor: 0\nflags: fpu svm avic x2avic\n";
+
+        assert_eq!(cpu_virt_flag_from(cpuinfo), Some("svm"));
+        assert!(cpu_flag_present(cpuinfo, "avic"));
+        assert!(cpu_flag_present(cpuinfo, "x2avic"));
+        assert!(!cpu_flag_present(cpuinfo, "vmx"));
+    }
+
+    #[test]
+    fn module_boolean_parser_accepts_sysfs_shapes() {
+        assert_eq!(parse_module_bool("Y\n"), Some(true));
+        assert_eq!(parse_module_bool("1"), Some(true));
+        assert_eq!(parse_module_bool("N\n"), Some(false));
+        assert_eq!(parse_module_bool("0"), Some(false));
+        assert_eq!(parse_module_bool("auto"), None);
+    }
+
+    #[test]
+    fn avic_check_distinguishes_enabled_disabled_and_irrelevant_hosts() {
+        let amd = "processor: 0\nflags: fpu svm avic x2avic\n";
+        let intel = "processor: 0\nflags: fpu vmx\n";
+
+        let enabled = kvm_avic_check_from(amd, Some("Y\n")).unwrap();
+        assert_eq!(enabled.state, super::super::host::CheckState::Pass);
+        assert_eq!(enabled.value, "enabled (x2AVIC available)");
+
+        let disabled = kvm_avic_check_from(amd, Some("N\n")).unwrap();
+        assert_eq!(disabled.state, super::super::host::CheckState::Warn);
+        assert_eq!(disabled.value, "disabled — x2AVIC available");
+
+        assert!(kvm_avic_check_from(intel, None).is_none());
+    }
 }
