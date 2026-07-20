@@ -556,6 +556,23 @@ fn render_performance_advisories(diagnosis: &microsandbox::setup::Diagnosis) {
                     ui::ErrorLine::Hint("verify: cat /sys/module/kvm_amd/parameters/avic"),
                 ],
             ),
+            "KVM APICv" if check.value.starts_with("disabled") => ui::warn_with_lines(
+                "Intel APICv is disabled by KVM policy",
+                &[
+                    ui::ErrorLine::Hint(
+                        "APICv is optional; sandbox correctness and isolation are unaffected",
+                    ),
+                    ui::ErrorLine::Hint(
+                        "it is a privileged, host-wide KVM setting; stop all KVM guests first",
+                    ),
+                    ui::ErrorLine::Hint(
+                        "enable for the current boot: sudo modprobe -r kvm_intel && sudo modprobe kvm_intel enable_apicv=1",
+                    ),
+                    ui::ErrorLine::Hint(
+                        "verify: cat /sys/module/kvm_intel/parameters/enable_apicv",
+                    ),
+                ],
+            ),
             "Root clone" if check.value.starts_with("copy fallback") => ui::warn_with_lines(
                 "MSB_HOME does not support reflink clones",
                 &[

@@ -547,6 +547,6 @@ Before a downgrade changes local state, `msb` checks the target release, confirm
 | `--no-backup` | `downgrade` | Skip the database backup before rolling back local state |
 | `-y`, `--yes` | `uninstall` | Skip confirmation prompt |
 
-On Linux AMD hosts, `msb doctor` reports whether KVM AVIC is active. AVIC is an optional host-wide network-performance capability, so a disabled result is a warning and does not make the host unhealthy. Doctor never reloads `kvm_amd` automatically.
+On Linux x86 hosts, `msb doctor` reports the applicable KVM interrupt-acceleration policy: AMD AVIC when the CPU advertises that capability, or Intel APICv when the live `kvm_intel` module exposes its policy parameter. A disabled result is a non-blocking performance warning and does not make the host unhealthy. These module parameters establish host policy rather than proving per-sandbox activation; doctor never reloads `kvm_amd` or `kvm_intel` automatically. Irrelevant platforms and unavailable policy state do not produce an AVIC or APICv row.
 
 Doctor also runs a short-lived clone probe inside `MSB_HOME` and reports whether flat-root `clone=auto` resolves to a native reflink or the portable sparse-copy fallback. The probe files are removed immediately and no host configuration is changed.
