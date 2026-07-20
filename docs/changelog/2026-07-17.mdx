@@ -1,0 +1,76 @@
+---
+title: "Week of July 17, 2026"
+description: "Image archives on every SDK, a finalized snapshot API with dest_dir and --from-snapshot, hole-perfect snapshot archives across platforms, a newer guest kernel, and a batch of secret, snapshot, and SDK fixes."
+icon: "bolt"
+---
+
+## New features
+
+**Image archives on every SDK**
+
+Local image archives (`docker save` tarballs and OCI Image Layout) can now be imported and exported from the Python, TypeScript, and Go SDKs, matching what `msb image load` / `msb image save` and the Rust SDK already offered. `Image.load` accepts an optional tag and, in Python, reads from stdin when the path is `-`. `Image.save` accepts a single reference or several references bundled into one archive, and writes either Docker or OCI format.
+
+```typescript
+// docker save my-image:latest -o my-image.tar
+const images = await Image.load("my-image.tar", { tag: "app:local" });
+await Image.save(["python:3.12", "app:local"], {
+  outputPath: "bundle.tar",
+  format: "oci",
+});
+```
+
+```python
+await Image.load("my-image.tar", tag="app:local")
+await Image.save(["python:3.12", "app:local"], output_path="bundle.tar")
+```
+
+```go
+_, err := microsandbox.Image.Load(ctx, "my-image.tar", "app:local")
+err = microsandbox.Image.Save(
+    ctx,
+    []string{"python:3.12"},
+    "python.tar",
+    microsandbox.ImageArchiveDocker,
+)
+```
+
+See the [images guides](/sdk/python/images) for each SDK.
+
+**Snapshot API contract finalized**
+
+The snapshot surface is now locked in across the CLI and every SDK ahead of 1.0. `snapshot.json` is the only descriptor, `save` and `load` are the archive verbs, and `reindex` is the maintenance verb. Snapshot creation is name-first with a required source, and a new optional `dest_dir` (CLI `--dest-dir`) places the artifact on another volume without changing its identity.
+
+Booting from a snapshot is spelled the same way everywhere: `--from-snapshot`, `from_snapshot=`, `fromSnapshot`, and Go `WithFromSnapshot`.
+
+```bash
+msb snapshot create clean --from box --dest-dir /mnt/big
+msb snapshot save clean /tmp/clean.tar.zst --with-image
+msb snapshot load /tmp/clean.tar.zst
+msb run --name worker --from-snapshot clean -- python -V
+```
+
+This is a breaking change for pre-1.0 callers: `msb run --snapshot` becomes `--from-snapshot`, `Sandbox.create(snapshot=)` becomes `from_snapshot=`, the Go `WithSnapshot` option is renamed to `WithFromSnapshot`, and the `SnapshotDestination` / `snapshot_to` shapes are removed. Legacy `manifest.json` artifacts are no longer readable. See [Snapshots](/sandboxes/snapshots).
+
+**Hole-perfect snapshot archives on every platform**
+
+`msb snapshot save` and `msb snapshot load` now preserve sparse regions end to end on macOS, Linux, and Windows. Export scans the writable upper's allocation map (SEEK_DATA/SEEK_HOLE on Unix, FSCTL_QUERY_ALLOCATED_RANGES on Windows) and writes only the data extents; import restores the file with holes intact on APFS, ext4, and NTFS. A round trip of a 4 GiB upper with 3 MiB allocated produces a 3 KiB archive and re-imports with the same allocation, byte-exact.
+
+```bash
+msb snapshot save clean /tmp/clean.tar.zst
+msb snapshot load /tmp/clean.tar.zst
+```
+
+See [Snapshots](/sandboxes/snapshots).
+
+**Other features**
+
+- **Multiple hosts on one CLI secret.** `--secret 'ENV@host1,host2'` now attaches one placeholder to a comma-separated list of allowed hosts, so a single secret rule can cover several upstreams. See [Secrets](/sandboxes/secrets).
+- **Newer guest kernel.** The vendored libkrunfw is now 5.6.0 and boots Linux 6.12.95 in the guest. The libkrunfw ABI stays at version 5, so nothing on the host side changes.
+- **`MountOptions.QuotaMiB` in the Go SDK.** Go callers can now set a bind-mount write quota through `MountOptions.QuotaMiB`, matching the CLI and Rust SDK. Unset keeps the protective 4 GiB default. See the [Go volumes guide](/sdk/go/volumes).
+
+## Bug fixes
+
+- The Node SDK now works from CommonJS: `require("microsandbox")` resolves on Node 20.19+, Node 22+, and Bun instead of failing with `ERR_PACKAGE_PATH_NOT_EXPORTED`. ESM consumers are unaffected.
+- Repeated `--secret ENV@HOST` rules that share the same placeholder no longer block a request when only some of the rules match the current host. The non-matching duplicates are filtered before substitution.
+- Snapshotting a sandbox whose root disk is tmpfs or a user-supplied disk image now fails with a clear message explaining why, instead of the raw `has no upper.ext4` error. Managed root disks are unaffected.
+- The Go SDK bind path now forwards `quota_mib` through the FFI layer, so `MountOptions.QuotaMiB` is honored end to end. Callers who did not set a quota still get the protective 4 GiB default.

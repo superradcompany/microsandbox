@@ -55,16 +55,11 @@ println!("removed {} refs", report.image_refs_removed);
 
 These methods resolve the active backend with `microsandbox::backend::default_backend()`. They are convenient for normal local programs and fail with `Unsupported` when the active backend is cloud.
 
----
-
 #### <span className="msb-recv">Image::</span><span className="msb-hn">get()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn get(reference: &str) -> MicrosandboxResult<ImageHandle>
 ```
-
-Fetch one cached image by reference. Returns `ImageNotFound` when the reference is not present in the local cache.
 
 <Accordion title="Example">
 
@@ -75,16 +70,13 @@ println!("{:?}", image.manifest_digest());
 
 </Accordion>
 
----
+Fetch one cached image by reference. Returns `ImageNotFound` when the reference is not present in the local cache.
 
 #### <span className="msb-recv">Image::</span><span className="msb-hn">list()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn list() -> MicrosandboxResult<Vec<ImageHandle>>
 ```
-
-Return every cached image, ordered by creation time with newest first.
 
 <Accordion title="Example">
 
@@ -96,16 +88,13 @@ for image in Image::list().await? {
 
 </Accordion>
 
----
+Return every cached image, ordered by creation time with newest first.
 
 #### <span className="msb-recv">Image::</span><span className="msb-hn">inspect()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn inspect(reference: &str) -> MicrosandboxResult<ImageDetail>
 ```
-
-Return full detail for a cached image: handle metadata, parsed OCI config fields, and layer metadata.
 
 <Accordion title="Example">
 
@@ -118,16 +107,13 @@ for layer in &detail.layers {
 
 </Accordion>
 
----
+Return full detail for a cached image: handle metadata, parsed OCI config fields, and layer metadata.
 
 #### <span className="msb-recv">Image::</span><span className="msb-hn">remove()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn remove(reference: &str, force: bool) -> MicrosandboxResult<()>
 ```
-
-Delete a cached image. When `force` is `false`, an image still referenced by one or more sandboxes returns `ImageInUse`.
 
 <Accordion title="Example">
 
@@ -137,16 +123,13 @@ Image::remove("old:tag", false).await?;
 
 </Accordion>
 
----
+Delete a cached image. When `force` is `false`, an image still referenced by one or more sandboxes returns `ImageInUse`.
 
 #### <span className="msb-recv">Image::</span><span className="msb-hn">prune()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn prune() -> MicrosandboxResult<ImagePruneReport>
 ```
-
-Remove cached image data that is not used by any sandbox or indexed snapshot. Prune removes unused image refs, manifests that become unreachable, orphaned layers, image metadata on disk, layer EROFS artifacts, fsmeta EROFS artifacts, and VMDK descriptor artifacts. `bytes_reclaimed` is reported when deleted files could be measured.
 
 <Accordion title="Example">
 
@@ -235,8 +218,6 @@ let report = Image::prune_local(&backend).await?;
 
 ### ImageHandle
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
-
 <p className="msb-backref">Returned by <a href="#image-get">get()</a> · <a href="#image-list">list()</a></p>
 
 A lightweight metadata handle for a cached OCI image.
@@ -254,8 +235,6 @@ A lightweight metadata handle for a cached OCI image.
 
 ### ImageDetail
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
-
 <p className="msb-backref">Returned by <a href="#image-inspect">inspect()</a></p>
 
 Full detail for a cached image.
@@ -267,8 +246,6 @@ Full detail for a cached image.
 | `layers` | `Vec<`[`ImageLayerDetail`](#imagelayerdetail)`>` | Layers in bottom-to-top order |
 
 ### ImageConfigDetail
-
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Used by <a href="#imagedetail">ImageDetail.config</a></p>
 
@@ -287,8 +264,6 @@ OCI image config fields extracted from the local cache.
 
 ### ImageLayerDetail
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
-
 <p className="msb-backref">Used by <a href="#imagedetail">ImageDetail.layers</a></p>
 
 Metadata for one image layer.
@@ -303,8 +278,6 @@ Metadata for one image layer.
 | `position` | `i32` | Layer position, where `0` is the bottom |
 
 ### ImagePruneReport
-
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#image-prune">prune()</a></p>
 

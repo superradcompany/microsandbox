@@ -19,7 +19,7 @@ A DNS query is itself an egress action that the policy evaluates before the forw
 
 - **Name-based rules** (`Domain`, `DomainSuffix`) match the query name directly and ignore their protocol/port filter, so a `Domain` allow rule grants the lookup regardless of which port the rule was scoped to.
 - **`Any` rules** match the DNS transport's actual protocol and port. An `Any udp/53 allow` is the standard way to grant plain DNS broadly.
-- **IP-based rules** mostly can't match — a query has no resolved IP yet — with one exception: `Group::Host` matches because it names the gateway forwarder the query is delivered to. A `Group::Host udp/53 + tcp/53 allow` rule is the narrow way to open DNS while still denying the guest from aiming queries at arbitrary resolver IPs.
+- **IP-based rules** mostly can't match (a query has no resolved IP yet), with one exception: `Group::Host` matches because it names the gateway forwarder the query is delivered to. A `Group::Host udp/53 + tcp/53 allow` rule is the narrow way to open DNS while still denying the guest from aiming queries at arbitrary resolver IPs.
 
 Under a deny-by-default policy whose rules are all IP-based (`Cidr` / non-`Host` `Group`), nothing matches at DNS-decision time and every query is denied. The default `public_only` and `non_local` presets ship with an explicit `Group::Host udp/53 + tcp/53 allow` rule (`Rule::allow_dns()` in Rust, `Rule.allowDns()` in TypeScript, `Rule.allow_dns()` in Python) so DNS works under those policies; custom deny-by-default policies need an equivalent allow.
 
@@ -29,9 +29,9 @@ DoT (TCP/853) is a separate port; `allow_dns()` does not include it. Pair an `An
 
 Domain blocking lives in the network policy as `deny Domain(...)` / `deny DomainSuffix(...)` rules. The interceptor enforces them at three layers:
 
-1. **DNS resolution** — denied names get a local `NXDOMAIN` response (a synthetic negative, so stub resolvers fail fast instead of hanging); the upstream resolver never sees them.
-2. **TLS first-flight** — when a guest hardcodes an IP and opens a TLS connection, the SNI is checked against the same rules.
-3. **TCP egress (cache fallback)** — for non-TLS traffic, the resolved-hostname cache disambiguates by IP.
+1. **DNS resolution**: denied names get a local `NXDOMAIN` response (a synthetic negative, so stub resolvers fail fast instead of hanging); the upstream resolver never sees them.
+2. **TLS first-flight**: when a guest hardcodes an IP and opens a TLS connection, the SNI is checked against the same rules.
+3. **TCP egress (cache fallback)**: for non-TLS traffic, the resolved-hostname cache disambiguates by IP.
 
 The bulk-deny shortcuts in each SDK are convenience for `deny Domain` / `deny DomainSuffix` rules; they prepend onto whatever policy is set so the deny takes precedence over later allow rules.
 

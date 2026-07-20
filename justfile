@@ -1,6 +1,6 @@
 # Version constants for libkrunfw. Keep in sync with microsandbox-utils/lib/lib.rs.
 LIBKRUNFW_ABI := "5"
-LIBKRUNFW_VERSION := "5.5.0"
+LIBKRUNFW_VERSION := "5.6.0"
 
 # Run Windows recipes through cmd so contributors do not need sh/Git Bash/MSYS in PATH.
 set windows-shell := ["cmd.exe", "/c"]

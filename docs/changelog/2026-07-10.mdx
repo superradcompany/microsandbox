@@ -1,0 +1,72 @@
+---
+title: "Week of July 10, 2026"
+description: "Structured root disk for OCI sandboxes, default symlink protection on mount roots, secret modify across every SDK, offline OCI upper growth, cleaner guest shutdown, and a batch of snapshot, filesystem, and lifecycle fixes."
+icon: "bolt"
+---
+
+<Tip>
+  **Released this week:** [v0.6.6](https://github.com/superradcompany/microsandbox/releases/tag/v0.6.6)
+</Tip>
+
+## New features
+
+**Structured root disk for OCI sandboxes**
+
+The writable layer of an OCI sandbox is now a first-class "root disk" with three backings: the managed sparse ext4 upper (default, unchanged), a RAM-backed `tmpfs` that gives you a pristine rootfs on every boot, and a user-supplied disk image attached writable. The old `--oci-upper-size` and `upper_size` spellings still work as deprecated aliases.
+
+```bash
+# managed (default, 4 GiB), same as before
+msb run python --root-disk 8G
+
+# RAM-backed, pristine rootfs on every boot
+msb run python --root-disk tmpfs:2G
+
+# user-supplied writable image
+msb run python --root-disk ./scratch.qcow2:format=qcow2,fstype=ext4
+```
+
+`msb modify --root-disk` keeps grow-only semantics for managed disks, allows any direction for tmpfs, and rejects sizing on user disk images. All four SDKs expose the new surface with builders and deprecated aliases mapping to the managed kind. See the [tuning guide](/sandboxes/tuning).
+
+**Default symlink protection on mount roots**
+
+Every bind volume and bind rootfs now resolves its root without following symlinks and without accepting `..`, so a symlink planted at a mount root cannot redirect a sandbox out of its intended host directory. Protection is on by default for every user mount, with a per-mount `follow-root-symlinks` opt-out for host paths that legitimately traverse a symlink.
+
+```bash
+# protected by default: a symlink at the mount root is refused
+msb run alpine -v /vol/tenant-a/work:/mnt -- ls /mnt
+
+# opt out per mount when the host path is a symlink on purpose
+msb run alpine -v /vol/tenant-a/link:/mnt:follow-root-symlinks -- ls /mnt
+```
+
+Relative bind paths keep working. A one-time migration rewrites persisted bind rootfs configs to the new object shape. See the [volumes guide](/sandboxes/volumes).
+
+**Secret modify parity across every SDK**
+
+Rotating and removing secrets on a live sandbox is now available in the TypeScript, Python, and Go SDKs, matching what the Rust SDK and `msb modify --secret` already offered. Each SDK's modify options accept a declarative `secrets` map with `env` / `value` / `store` sources, an optional placeholder, and allowed hosts, plus `secretsRemove` for removals. Raw secret values never appear in plans, errors, or test output. See [Secrets](/sandboxes/secrets).
+
+**Offline OCI upper growth**
+
+`msb modify --oci-upper-size` and the new `--root-disk` size form now grow the writable ext4 upper without `resize2fs` or any external tooling. A pure-Rust resizer handles this on macOS, Linux, and Windows hosts. New images reserve about 2 TiB of growth headroom; older images can still grow within their existing slack. Stopped sandboxes grow before the size is persisted, running sandboxes grow via `--restart` or on the next start with `--next-start`, and shrink is rejected. Growth includes crash-safe ordering and journal replay for images that were mounted before, so a fresh grow is safe even without a clean guest shutdown.
+
+**Clean guest shutdown**
+
+`msb stop` and other graceful shutdowns now unmount guest filesystems before power-off, so the writable ext4 upper no longer carries a dirty journal after every run. The teardown pins the upper's directory before the guest pivots, syncs and quiesces writers, and remounts the upper read-only within the host's shutdown window. Data is unchanged; subsequent boots and image grows start from a clean journal.
+
+**`update`, `upgrade`, and `downgrade` at the top level**
+
+`msb update`, `msb upgrade`, and `msb downgrade` are now top-level aliases for the existing `msb self update` and `msb self downgrade` flows. They match the shorter commands you already reach for from other package managers. See the [CLI overview](/cli/overview).
+
+**Other features**
+
+- **Live control over a named pipe on Windows.** The host runtime now serves its live control channel through a Windows named pipe on Windows hosts, so live-attach, `msb exec`, and lifecycle calls work on Windows the same way they do on Unix sockets elsewhere.
+- **Sparse tar entries for snapshot exports.** `msb snapshot save` now stores files that contain runs of zeros as GNU sparse tar entries, so exported archives of sandboxes with large sparse files are meaningfully smaller and faster to write. Standard `tar` reads them back transparently. See [Snapshots](/sandboxes/snapshots).
+
+## Bug fixes
+
+- Windows sandbox teardown no longer leaves the runtime process alive when Windows Hypervisor Platform shutdown stalls. `msb stop`, `msb kill`, and `msb remove` now verify the process identity by creation time and image name before terminating it. Recycled PIDs are never touched, and future same-named sandboxes reach a fresh VM instead of a stale named pipe.
+- Passthrough virtiofs mounts survive host file-descriptor exhaustion. Large directory listings and heavy concurrent I/O no longer stall the sandbox when the host runs out of open file slots.
+- `msb exec` no longer stalls on very large directories. `readdir` results are streamed page by page instead of collected into a single response, so listing directories with many entries returns promptly.
+- Guest paths in the SDKs are now typed as plain strings, so paths sent from a Windows host to a Linux guest are no longer mangled by host path rules. Existing callers that were already passing strings continue to work; typed `Path` values must be converted to strings.
+- `msb snapshot restore` now checks the local snapshot cache before hitting the registry, so restores are fast and work offline when the base image is already on disk.
+- `msb snapshot restore` also pins snapshots to an immutable content digest instead of the mutable tag, so restoring a snapshot returns the exact base that was captured even if the tag has since moved.

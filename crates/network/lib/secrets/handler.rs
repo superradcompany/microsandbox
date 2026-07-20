@@ -612,6 +612,14 @@ impl SecretsHandler {
             });
         }
 
+        // Do not block a placeholder that another rule allows for this host.
+        let eligible_placeholders: HashSet<&str> = eligible_for_substitution
+            .iter()
+            .map(|secret| secret.placeholder.as_str())
+            .collect();
+        ineligible_for_substitution
+            .retain(|secret| !eligible_placeholders.contains(secret.placeholder.as_str()));
+
         Self {
             eligible_for_substitution,
             ineligible_for_substitution,
@@ -3277,6 +3285,24 @@ mod tests {
         assert_eq!(
             String::from_utf8(output.into_owned()).unwrap(),
             "GET / HTTP/1.1\r\nAuthorization: Bearer allowed-secret\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn same_placeholder_substitutes_when_duplicate_secret_is_ineligible() {
+        let allowed = make_secret("$KEY", "real-secret", "api.github.com");
+        let mut duplicate_host = make_secret("$KEY", "real-secret", "unused.example.com");
+        duplicate_host.allowed_hosts =
+            vec![HostPattern::Wildcard("*.githubusercontent.com".into())];
+        let config = make_config(vec![allowed, duplicate_host]);
+        let mut handler = SecretsHandler::new(&config, "api.github.com", true);
+
+        let input = b"GET /user HTTP/1.1\r\nAuthorization: Bearer $KEY\r\n\r\n";
+        let output = handler.substitute(input).unwrap();
+
+        assert_eq!(
+            String::from_utf8(output.into_owned()).unwrap(),
+            "GET /user HTTP/1.1\r\nAuthorization: Bearer real-secret\r\n\r\n"
         );
     }
 

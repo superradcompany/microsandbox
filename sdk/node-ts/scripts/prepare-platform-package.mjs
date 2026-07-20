@@ -128,7 +128,7 @@ if (triple === "darwin-arm64") {
 }
 
 // 3. libkrunfw shared library --------------------------------------------
-// `just build` lays down one real file (e.g. libkrunfw.so.5.5.0 or
+// `just build` lays down one real file (e.g. libkrunfw.so.5.6.0 or
 // libkrunfw.5.dylib) plus SONAME / unversioned symlinks pointing at it.
 // We pick any matching entry, follow symlinks to the real file, and ship
 // it under its canonical name — no version constants in this script.

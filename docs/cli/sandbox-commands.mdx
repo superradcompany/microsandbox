@@ -145,7 +145,7 @@ sandbox aren't lost across a later `msb start`. If the sandbox is
 still running after the timeout, it is force-killed.
 
 `--force` and a timeout that elapses both end in a force-kill. Pending
-writes that the workload hasn't `fsync`'d at that point may be lost —
+writes that the workload hasn't `fsync`'d at that point may be lost, with the
 same durability semantics as a sudden power loss on a physical
 machine. For durable writes, workloads should `fsync` important data
 themselves.
@@ -214,14 +214,13 @@ msb touch --label app=engine
 
 ## msb modify
 
-Change a sandbox's configuration. `msb modify` plans every requested change, classifies each one (live, next start, requires restart, unsupported), and applies all-or-nothing. CPU count and memory apply live to a running sandbox when the target fits inside the boot-time capacity (`max_cpus` / `max_memory`); raising the capacity itself requires a restart or `--next-start`.
+Change a running sandbox's configuration. Every change is planned and applied all-or-nothing. CPU and memory resize live within the `max_cpus` / `max_memory` ceilings; other changes that can't apply live need `--restart` or `--next-start`.
 
 ```bash
-msb modify api --cpus 4                    # live when 4 <= max_cpus
-msb modify api --memory 4G                 # live when 4G <= max_memory
-msb modify api --env MODE=prod --restart   # restart so the change is active now
-msb modify api --max-memory 16G --next-start
-msb modify api --cpus 8 --dry-run          # show the plan, apply nothing
+msb modify api --cpus 4                     # live when 4 <= max_cpus
+msb modify api --env MODE=prod --restart    # restart to apply now
+msb modify api --max-memory 16G --next-start # raise the ceiling on next start
+msb modify api --cpus 8 --dry-run           # show the plan, apply nothing
 ```
 
 `max_cpus` and `max_memory` are boot-time reservations chosen at create time. They default to the effective `cpus`/`memory`, which leaves no headroom — live growth beyond them is impossible without a restart. Reserving capacity costs almost nothing (parked vCPUs and lazily-backed memory), so set them above the initial values at create time if the sandbox may need to grow.
@@ -230,7 +229,7 @@ Live resize is not necessarily instant. When an accepted resize has not fully se
 
 Env and workdir changes on a running sandbox apply to future execs only — running processes keep their current environment. The plan reports this as a warning.
 
-`--secret NAME@HOST` adds or rotates a secret from the same-named host environment variable, recording a source reference — the value itself never rides in the command. The inline `NAME=VALUE@HOST` form is rejected, same as on `msb create`: shell history and process listings would leak the value, so providing a raw value is SDK-only.
+`--secret NAME@HOST[,HOST...]` adds or rotates a secret from the same-named host environment variable, recording a source reference — the value itself never rides in the command. The inline `NAME=VALUE@HOST` form is rejected, same as on `msb create`: shell history and process listings would leak the value, so providing a raw value is SDK-only.
 
 | Flag | Description |
 |------|-------------|
@@ -241,11 +240,13 @@ Env and workdir changes on a running sandbox apply to future execs only — runn
 | `--env`, `--env-rm` | Set (`KEY=VALUE`) or remove an environment variable for future execs |
 | `--label`, `--label-rm` | Set (`KEY=VALUE`) or remove a label |
 | `--workdir` | Working directory for future execs |
-| `--secret`, `--secret-rm` | Add or rotate a secret from a host environment variable (`NAME@HOST`), or remove one |
+| `--secret`, `--secret-rm` | Add or rotate a secret from a host environment variable (`NAME@HOST[,HOST...]`), or remove one |
 | `--dry-run` | Show the plan without applying anything |
 | `--next-start` | Save changes for the next start without mutating a running VM |
 | `--restart` | Restart if needed so restart-required changes become active now |
 | `--format json` | Emit the plan/result as JSON |
+
+A live resize may not apply instantly; `--format json` reports a per-resource `resize_status`. See [Tuning](/sandboxes/tuning) for the change model, or use `msb modify --help` for the full flag list.
 
 ## msb exec
 
@@ -292,7 +293,7 @@ Host-to-sandbox and sandbox-to-host forms follow `docker cp` syntax. Same-sandbo
 
 ## msb logs
 
-Read captured output from a sandbox. Each sandbox stores its captured stdio under `<sandbox-dir>/logs/exec.log` as JSON Lines, plus runtime/kernel diagnostics in `runtime.log`/`kernel.log`. The command works on running and stopped sandboxes alike — there is no protocol traffic, just a file read.
+Read captured output from a sandbox. Each sandbox stores its captured stdio under `<sandbox-dir>/logs/exec.log` as JSON Lines, plus runtime/kernel diagnostics in `runtime.log`/`kernel.log`. The command works on running and stopped sandboxes alike; there is no protocol traffic, just a file read.
 
 ```bash
 # Captured user-program output (default sources: stdout + stderr + output)
@@ -306,7 +307,7 @@ msb logs devbox -f --grep ERROR
 msb logs devbox --since 5m
 msb logs devbox --since 2026-04-30T20:00:00Z --until 5m
 
-# JSON Lines passthrough — feed to jq, vector, etc.
+# JSON Lines passthrough: feed to jq, vector, etc.
 msb logs devbox --json | jq 'select(.s == "stderr")'
 
 # Multi-session view: prefix each line with [id:N] so you can tell sessions apart
@@ -338,12 +339,12 @@ msb logs devbox --source all                # everything, chronologically merged
 
 **Source tags** (the `s` field in `--json` output):
 
-- `stdout` / `stderr` — captured from the session's pipes when running in **pipe mode** (streams stay separated end to end).
-- `output` — captured from the session in **pty mode**. pty allocation merges stdout and stderr at the kernel level inside the guest, so they arrive as a single stream — tagged `output` rather than mislabelled as `stdout`.
-- `system` — synthetic lifecycle markers (`--- sandbox started ---` / `--- sandbox stopped ---`) plus diagnostic lines from `runtime.log`/`kernel.log` when `--source system` is requested.
+- `stdout` / `stderr`: captured from the session's pipes when running in **pipe mode** (streams stay separated end to end).
+- `output`: captured from the session in **pty mode**. pty allocation merges stdout and stderr at the kernel level inside the guest, so they arrive as a single stream, tagged `output` rather than mislabelled as `stdout`.
+- `system`: synthetic lifecycle markers (`--- sandbox started ---` / `--- sandbox stopped ---`) plus diagnostic lines from `runtime.log`/`kernel.log` when `--source system` is requested.
 
 <Tip>
-  If a sandbox failed to start, `msb logs` prepends a styled error block reconstructed from `boot-error.json`. The block tells you the failure stage, errno, and a hint — even though no user-program output was ever captured.
+  If a sandbox failed to start, `msb logs` prepends a styled error block reconstructed from `boot-error.json`. The block tells you the failure stage, errno, and a hint, even though no user-program output was ever captured.
 </Tip>
 
 ## msb ls
@@ -385,7 +386,7 @@ msb ps --format json      # JSON output
 | `--format` | Output format (`json`) |
 | `-q`, `--quiet` | Show only sandbox names |
 
-The `CPUS` and `MEM` columns show the sandbox's allocation as `effective / max`, where max is the boot-time hotplug ceiling — the headroom available to a [live resize](/cli/sandbox-commands#msb-modify). Values come from the active config for running sandboxes (so an accepted `msb modify` shows immediately) and from the stored config for stopped ones. For *usage* rather than allocation, see [`msb metrics`](/cli/sandbox-commands#msb-metrics).
+The `CPUS` and `MEM` columns show the sandbox's allocation as `effective / max`, where max is the boot-time hotplug ceiling, the headroom available to a [live resize](/cli/sandbox-commands#msb-modify). Values come from the active config for running sandboxes (so an accepted `msb modify` shows immediately) and from the stored config for stopped ones. For *usage* rather than allocation, see [`msb metrics`](/cli/sandbox-commands#msb-metrics).
 
 ## msb metrics
 
@@ -406,16 +407,16 @@ msb metrics --format json   # One-shot JSON output
 | `-w`, `--watch` | Continuously refresh the table in place. Ctrl-C to quit. Requires a terminal |
 | `-f`, `--follow` | Stream one JSON Lines object per sandbox per interval to stdout |
 | `--interval` | Refresh interval for `--watch`/`--follow` (e.g. `500ms`, `2s`). Default `1s` |
-| `-a`, `--all` | Include `exited` rows — terminal metrics preserved in the registry until the slot is reused |
+| `-a`, `--all` | Include `exited` rows: terminal metrics preserved in the registry until the slot is reused |
 | `--sort` | Sort rows by `name` (default), `cpu`, or `mem` |
 | `--format` | Output format (`json`) |
 
 **Columns.** `--watch` and the one-shot table render identically:
 
-- `STATE` — `running` (fresh sample from a live runtime), `stalled` (runtime alive but no sample within 3× its sampling interval; the row shows how long ago the last sample landed), or `exited` (the preserved terminal sample of a stopped or crashed sandbox).
-- `CPU` — vCPU-seconds per wall-second over the allocation, e.g. `0.80 / 2c` means 0.8 cores busy out of 2 allocated.
-- `MEM` — guest-used memory over the configured limit.
-- `DISK R/W /s`, `NET RX/TX /s` — per-second rates derived from two consecutive samples. The one-shot form samples twice ~500 ms apart to compute them; `exited` rows show cumulative totals instead.
+- `STATE`: `running` (fresh sample from a live runtime), `stalled` (runtime alive but no sample within 3× its sampling interval; the row shows how long ago the last sample landed), or `exited` (the preserved terminal sample of a stopped or crashed sandbox).
+- `CPU`: vCPU-seconds per wall-second over the allocation, e.g. `0.80 / 2c` means 0.8 cores busy out of 2 allocated.
+- `MEM`: guest-used memory over the configured limit.
+- `DISK R/W /s`, `NET RX/TX /s`: per-second rates derived from two consecutive samples. The one-shot form samples twice ~500 ms apart to compute them; `exited` rows show cumulative totals instead.
 
 The `CPU` and `MEM` denominators come from the catalog's **active config**, so they track [live resizes](/cli/sandbox-commands#msb-modify) immediately. Sandboxes whose runtime crashed without cleanup are detected by owner-PID liveness and reported as `exited`, not `running`.
 
@@ -503,7 +504,7 @@ Manage the msb installation itself.
 ```bash
 msb doctor                   # Alias for msb self doctor
 msb doctor --fix             # Try supported host setup fixes
-msb self doctor              # Check runtime and host virtualization prerequisites
+msb self doctor              # Check runtime files and supported host prerequisites
 msb self check               # Alias for doctor
 msb self update               # Update msb and libkrunfw to latest
 msb self update --force       # Re-download even if up to date
@@ -515,14 +516,14 @@ msb self uninstall --yes      # Skip confirmation
 
 | Subcommand | Description |
 |------------|-------------|
-| `doctor` (alias: `check`) | Check runtime files and host virtualization prerequisites such as Windows Hypervisor Platform |
+| `doctor` (alias: `check`) | Check runtime files and supported host prerequisites, including Windows Hypervisor Platform on Windows |
 | `update` (alias: `upgrade`) | Update msb and libkrunfw to the latest release and refresh command links |
 | `downgrade <version>` | Downgrade msb and compatible local state to a supported older release at or above 0.6.0, refusing unsafe downgrades before touching files or state |
 | `uninstall` | Remove msb, libkrunfw, and command links |
 
 `msb self update` always targets the latest release; it does not accept a version argument. Use `msb self downgrade <version>` to move to a supported older release.
 
-Before a downgrade changes local state, `msb` checks the target release, confirms it can understand the current local database, refuses targets below 0.6.0, refuses irreversible state changes, and blocks the operation while matching running sandboxes are active. When a database rollback is needed, `msb` creates a retained SQLite backup under `~/.microsandbox/db/` unless `--no-backup` is passed. If rollback metadata marks the image cache affected, `msb` purges the cache after the database rollback unless `--keep-cache` is passed. The target binary is always installed fresh and checked with `msb --version` before command links are refreshed.
+Before a downgrade changes local state, `msb` runs several safety checks. It verifies the target release and confirms it can read the current local database. It refuses targets below 0.6.0, refuses irreversible state changes, and blocks the operation while matching running sandboxes are active. When a database rollback is needed, `msb` creates a retained SQLite backup under `~/.microsandbox/db/` unless you pass `--no-backup`. If rollback metadata marks the image cache affected, `msb` purges the cache after the database rollback unless you pass `--keep-cache`. `msb` always installs the target binary fresh and checks it with `msb --version` before refreshing command links.
 
 | Flag | Subcommand | Description |
 |------|------------|-------------|
