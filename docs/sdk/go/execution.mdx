@@ -3,7 +3,7 @@ title: Execution
 description: Go SDK - Command execution API reference
 ---
 
-Run commands inside a running sandbox, collect their output, or stream events live. See [Commands](/sandboxes/commands) for usage examples.
+Run commands inside a running sandbox, collect their output, stream events live, or drive an interactive pseudo-terminal programmatically. See [Commands](/sandboxes/commands) for usage examples.
 
 The exec API mirrors `os/exec` conventions: a **non-zero exit code is not a Go error**. Transport, timeout, and spawn-failure paths return an `error`; a program that ran and exited non-zero is a normal [`*ExecOutput`](#execoutput) result, inspect [`Success()`](#out-success) or [`ExitCode()`](#out-exitcode).
 
@@ -15,7 +15,7 @@ The exec API mirrors `os/exec` conventions: a **non-zero exit code is not a Go e
   <a className="msb-row" href="#sb-execstream"><span className="msb-rn">sb.ExecStream()</span><span className="msb-rg">run with streaming events</span></a>
   <a className="msb-row" href="#sb-shellstream"><span className="msb-rn">sb.ShellStream()</span><span className="msb-rg">streaming shell</span></a>
 
-  <p className="msb-gl"><span className="msb-dot instance"></span>Methods · *ExecHandle<span className="msb-ct">8</span></p>
+  <p className="msb-gl"><span className="msb-dot instance"></span>Methods · *ExecHandle<span className="msb-ct">9</span></p>
   <a className="msb-row" href="#h-recv"><span className="msb-rn">h.Recv()</span><span className="msb-rg">next streamed event</span></a>
   <a className="msb-row" href="#h-collect"><span className="msb-rn">h.Collect()</span><span className="msb-rg">drain into ExecOutput</span></a>
   <a className="msb-row" href="#h-wait"><span className="msb-rn">h.Wait()</span><span className="msb-rg">wait for exit code</span></a>
@@ -23,6 +23,7 @@ The exec API mirrors `os/exec` conventions: a **non-zero exit code is not a Go e
   <a className="msb-row" href="#h-id"><span className="msb-rn">h.ID()</span><span className="msb-rg">session correlation id</span></a>
   <a className="msb-row" href="#h-signal"><span className="msb-rn">h.Signal()</span><span className="msb-rg">send a Unix signal</span></a>
   <a className="msb-row" href="#h-kill"><span className="msb-rn">h.Kill()</span><span className="msb-rg">send SIGKILL</span></a>
+  <a className="msb-row" href="#h-resize"><span className="msb-rn">h.Resize()</span><span className="msb-rg">resize the pseudo-terminal</span></a>
   <a className="msb-row" href="#h-close"><span className="msb-rn">h.Close()</span><span className="msb-rg">release the handle</span></a>
 
   <p className="msb-gl"><span className="msb-dot instance"></span>Methods · *ExecOutput<span className="msb-ct">6</span></p>
@@ -36,13 +37,14 @@ The exec API mirrors `os/exec` conventions: a **non-zero exit code is not a Go e
   <p className="msb-gl"><span className="msb-dot instance"></span>Methods · *ExecSink<span className="msb-ct">3</span></p>
   <a className="msb-row" href="#sink-write"><span className="msb-rn">sink.Write()</span><span className="msb-rg">write to stdin (io.Writer)</span></a>
   <a className="msb-row" href="#sink-writectx"><span className="msb-rn">sink.WriteCtx()</span><span className="msb-rg">write with explicit ctx</span></a>
-  <a className="msb-row" href="#sink-close"><span className="msb-rn">sink.Close()</span><span className="msb-rg">send EOF, finalize</span></a>
+  <a className="msb-row" href="#sink-close"><span className="msb-rn">sink.Close()</span><span className="msb-rg">close the stdin sink</span></a>
 
-  <p className="msb-gl"><span className="msb-dot builder"></span>Options · ExecOption<span className="msb-ct">5</span></p>
+  <p className="msb-gl"><span className="msb-dot builder"></span>Options · ExecOption<span className="msb-ct">6</span></p>
   <div className="msb-chiprow">
     <a className="msb-chip" href="#withexeccwd">WithExecCwd()</a>
     <a className="msb-chip" href="#withexectimeout">WithExecTimeout()</a>
     <a className="msb-chip" href="#withexecstdinpipe">WithExecStdinPipe()</a>
+    <a className="msb-chip" href="#withexectty">WithExecTTY()</a>
     <a className="msb-chip" href="#withexecuser">WithExecUser()</a>
     <a className="msb-chip" href="#withexecenv">WithExecEnv()</a>
   </div>
@@ -108,7 +110,7 @@ Run a command in the sandbox and return its collected output. Blocks until the c
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#execoption">...ExecOption</a></div>
-    <div className="msb-param-desc">Per-command cwd, timeout, user, and env.</div>
+    <div className="msb-param-desc">Per-command cwd, timeout, TTY allocation, user, and env.</div>
   </div>
 </div>
 
@@ -156,7 +158,7 @@ Run `/bin/sh -c command` in the sandbox and collect its output. Blocks until the
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#execoption">...ExecOption</a></div>
-    <div className="msb-param-desc">Per-command cwd, timeout, user, and env.</div>
+    <div className="msb-param-desc">Per-command cwd, timeout, TTY allocation, user, and env.</div>
   </div>
 </div>
 
@@ -211,7 +213,7 @@ Start a streaming exec session and return an [`*ExecHandle`](#exechandle). The h
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#execoption">...ExecOption</a></div>
-    <div className="msb-param-desc">Per-command options; add <a className="msb-type" href="#withexecstdinpipe">WithExecStdinPipe()</a> to enable stdin.</div>
+    <div className="msb-param-desc">Per-command options; add <a className="msb-type" href="#withexecstdinpipe">WithExecStdinPipe()</a> to enable stdin and <a className="msb-type" href="#withexectty">WithExecTTY(true)</a> to allocate a pseudo-terminal.</div>
   </div>
 </div>
 
@@ -300,7 +302,7 @@ for {
 
 ## ExecHandle methods
 
-A live streaming exec session returned by [`ExecStream`](#sb-execstream) and [`ShellStream`](#sb-shellstream). Not safe for concurrent use from multiple goroutines.
+A live streaming exec session returned by [`ExecStream`](#sb-execstream) and [`ShellStream`](#sb-shellstream). [`Signal`](#h-signal), [`Kill`](#h-kill), and [`Resize`](#h-resize) may be called concurrently with [`Recv`](#h-recv), allowing a control goroutine to act while another goroutine waits for terminal output. Other method combinations, including concurrent `Recv` calls, are not supported.
 
 ---
 
@@ -526,6 +528,46 @@ Send a Unix signal to the running process. Pass values from `syscall` (e.g. `int
 import "syscall"
 
 if err := h.Signal(ctx, int(syscall.SIGTERM)); err != nil {
+    return err
+}
+```
+
+</Accordion>
+
+---
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Resize()</span>
+<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
+
+```go
+func (h *ExecHandle) Resize(ctx context.Context, rows, cols uint16) error
+```
+
+Resize the pseudo-terminal for this exec session. Use with a session started with [`WithExecTTY(true)`](#withexectty), typically when relaying a terminal-size change from a remote client.
+
+`Resize` may be called concurrently while another goroutine is blocked in [`Recv`](#h-recv).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels the resize call.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>rows</code><span className="msb-type">uint16</span></div>
+    <div className="msb-param-desc">New terminal height in character cells.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cols</code><span className="msb-type">uint16</span></div>
+    <div className="msb-param-desc">New terminal width in character cells.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```go
+if err := h.Resize(ctx, 40, 120); err != nil {
     return err
 }
 ```
@@ -769,7 +811,7 @@ Like [`Write`](#sink-write), but with a caller-controlled context, so a stuck st
 func (sk *ExecSink) Close() error
 ```
 
-Close the stdin pipe, sending EOF to the process. Implements `io.Closer`.
+Close the stdin sink. In non-TTY pipe mode this sends EOF to the process. In TTY mode it prevents further writes through this sink, but the guest PTY remains open; send the terminal's EOF control character (usually `\x04` in canonical mode) when the interactive program needs one. Implements `io.Closer`.
 
 <Accordion title="Example">
 
@@ -789,7 +831,7 @@ sink.Close()
 
 <p className="msb-backref">Returned by <a href="#sb-exec">sb.Exec()</a> · <a href="#sb-shell">sb.Shell()</a> · <a href="#h-collect">h.Collect()</a></p>
 
-The collected result of a command execution. A non-zero `ExitCode` is not treated as a Go error, callers inspect [`Success`](#out-success) or [`ExitCode`](#out-exitcode) explicitly, matching how `os/exec.Cmd.Output` works against a script that exits non-zero.
+The collected result of a command execution. A non-zero `ExitCode` is not treated as a Go error, callers inspect [`Success`](#out-success) or [`ExitCode`](#out-exitcode) explicitly, matching how `os/exec.Cmd.Output` works against a script that exits non-zero. In TTY mode, `Stdout` contains the combined terminal output and `Stderr` is empty because a PTY cannot preserve separate stdout and stderr streams.
 
 | Method | Returns | Description |
 |--------|---------|-------------|
@@ -808,7 +850,7 @@ The collected result of a command execution. A non-zero `ExitCode` is not treate
 
 <p className="msb-backref">Returned by <a href="#sb-execstream">sb.ExecStream()</a> · <a href="#sb-shellstream">sb.ShellStream()</a></p>
 
-A live streaming exec session. Must be closed with [`Close`](#h-close) when done to release Rust-side resources. Not safe for concurrent use from multiple goroutines.
+A live streaming exec session. Must be closed with [`Close`](#h-close) when done to release Rust-side resources. `Signal`, `Kill`, and `Resize` may run concurrently with `Recv`; other method combinations, including multiple concurrent `Recv` calls, are not supported.
 
 | Method | Returns | Description |
 |--------|---------|-------------|
@@ -819,6 +861,7 @@ A live streaming exec session. Must be closed with [`Close`](#h-close) when done
 | [`Wait(ctx)`](#h-wait) | `(int, error)` | Wait for exit, discarding output; returns the exit code |
 | [`Kill(ctx)`](#h-kill) | `error` | Send SIGKILL |
 | [`Signal(ctx, signal)`](#h-signal) | `error` | Send a Unix signal |
+| [`Resize(ctx, rows, cols)`](#h-resize) | `error` | Resize the pseudo-terminal |
 | [`Close()`](#h-close) | `error` | Release the Rust-side handle |
 
 ---
@@ -839,7 +882,7 @@ A write-only pipe to a running process's stdin. Implements `io.WriteCloser`.
 |--------|---------|-------------|
 | [`Write(p)`](#sink-write) | `(int, error)` | Implements `io.Writer` |
 | [`WriteCtx(ctx, p)`](#sink-writectx) | `(int, error)` | Write with explicit context |
-| [`Close()`](#sink-close) | `error` | Send EOF and finalize |
+| [`Close()`](#sink-close) | `error` | Close the sink; sends EOF in non-TTY pipe mode |
 
 ---
 
@@ -876,8 +919,8 @@ Identifies what an [`ExecEvent`](#execevent) carries.
 | Constant | Description |
 |----------|-------------|
 | `ExecEventStarted` | Sent once when the guest process starts; `PID` is valid |
-| `ExecEventStdout` | A chunk of stdout; `Data` is valid |
-| `ExecEventStderr` | A chunk of stderr; `Data` is valid |
+| `ExecEventStdout` | A chunk of stdout; in TTY mode, carries the combined terminal output stream. `Data` is valid |
+| `ExecEventStderr` | A chunk of stderr; not emitted separately in TTY mode. `Data` is valid |
 | `ExecEventExited` | The process exited; `ExitCode` is valid |
 | `ExecEventFailed` | The user program never started (binary missing, permission denied, ...); `Failure` is valid and `ExitCode` is not meaningful |
 | `ExecEventStdinError` | A stdin write failed; `Failure` is valid. Non-terminal: the process may still exit normally |
@@ -920,6 +963,7 @@ Configures a single [`Exec`](#sb-exec) or [`ExecStream`](#sb-execstream) call. M
 | `Cwd` | `string` | Working directory inside the guest |
 | `Timeout` | `time.Duration` | Kill the process after this duration; sub-second precision is rounded up |
 | `StdinPipe` | `bool` | Enable a stdin pipe; required for [`TakeStdin`](#h-takestdin) |
+| `TTY` | `bool` | Allocate a pseudo-terminal; default `false` |
 | `User` | `string` | Guest user (UID or name) |
 | `Env` | `map[string]string` | Per-command environment variables |
 
@@ -999,6 +1043,55 @@ func WithExecStdinPipe() ExecOption
 ```
 
 Enable a stdin pipe for the exec session, allowing data to be written via [`ExecHandle.TakeStdin`](#h-takestdin).
+
+---
+
+#### <span className="msb-hn">WithExecTTY()</span>
+<div className="msb-tags"><span className="msb-tag is-builder">option</span></div>
+
+```go
+func WithExecTTY(enabled bool) ExecOption
+```
+
+Control whether the command runs inside a pseudo-terminal. Enable it for interactive programs such as shells, editors, REPLs, and `top`. Default: `false`.
+
+When enabled, the guest process runs with its stdin, stdout, and stderr connected to the PTY. Streaming sessions expose the combined terminal output through [`ExecEventStdout`](#execeventkind); they do not emit a separately attributable stderr stream. Collected output similarly places the combined stream in [`Stdout`](#out-stdout) and leaves [`Stderr`](#out-stderr) empty. Add [`WithExecStdinPipe()`](#withexecstdinpipe) to write to the terminal programmatically, and use [`Resize`](#h-resize) to update its dimensions after the session starts.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>enabled</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc"><code>true</code> to allocate a pseudo-terminal.</div>
+  </div>
+</div>
+
+<Accordion title="Programmable terminal example">
+
+```go
+h, err := sb.ExecStream(ctx, "/bin/bash", nil,
+    m.WithExecStdinPipe(),
+    m.WithExecTTY(true),
+)
+if err != nil {
+    return err
+}
+defer h.Close()
+
+stdin := h.TakeStdin()
+if stdin == nil {
+    return errors.New("stdin pipe is unavailable")
+}
+
+if err := h.Resize(ctx, 40, 120); err != nil {
+    return err
+}
+if _, err := stdin.Write([]byte("echo hello\n")); err != nil {
+    return err
+}
+```
+
+</Accordion>
 
 ---
 
