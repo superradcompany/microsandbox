@@ -61,7 +61,14 @@ package ffi
 #include <windows.h>
 static void *dlopen(const char *path, int mode) {
 	(void)mode;
-	return (void *)LoadLibraryA(path);
+	// path arrives as UTF-8 from Go (it contains the user's home dir, so
+	// non-ASCII is routine). LoadLibraryA would decode it in the legacy
+	// ANSI codepage and fail on such paths; convert and use the wide API.
+	wchar_t wpath[4096];
+	if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, 4096) == 0) {
+		return NULL;
+	}
+	return (void *)LoadLibraryW(wpath);
 }
 static void *dlsym(void *handle, const char *symbol) {
 	return (void *)(intptr_t)GetProcAddress((HMODULE)handle, symbol);
