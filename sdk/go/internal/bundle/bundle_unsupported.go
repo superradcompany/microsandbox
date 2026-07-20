@@ -1,4 +1,4 @@
-//go:build !((darwin && arm64) || (linux && amd64) || (linux && arm64)) && !microsandbox_ffi_path
+//go:build !((darwin && arm64) || (linux && amd64) || (linux && arm64) || (windows && amd64) || (windows && arm64)) && !microsandbox_ffi_path
 
 package bundle
 

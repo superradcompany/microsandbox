@@ -54,7 +54,36 @@ package ffi
 #include <stdint.h>
 #include <stdio.h>
 #include <stdbool.h>
+#ifdef _WIN32
+// Windows has no dlfcn.h: provide dlopen/dlsym/dlerror equivalents via
+// LoadLibrary/GetProcAddress (only the subset this file uses: dlopen/dlsym/dlerror
+// plus RTLD_NOW/RTLD_LOCAL; no dlclose).
+#include <windows.h>
+static void *dlopen(const char *path, int mode) {
+	(void)mode;
+	return (void *)LoadLibraryA(path);
+}
+static void *dlsym(void *handle, const char *symbol) {
+	return (void *)(intptr_t)GetProcAddress((HMODULE)handle, symbol);
+}
+static const char *dlerror(void) {
+	static char buf[256];
+	DWORD e = GetLastError();
+	if (e == 0) {
+		return NULL;
+	}
+	snprintf(buf, sizeof(buf), "windows loader error %lu", (unsigned long)e);
+	return buf;
+}
+#ifndef RTLD_NOW
+#define RTLD_NOW 0
+#endif
+#ifndef RTLD_LOCAL
+#define RTLD_LOCAL 0
+#endif
+#else
 #include <dlfcn.h>
+#endif
 #include <string.h>
 
 // ---------------------------------------------------------------------------
