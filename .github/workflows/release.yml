@@ -497,6 +497,19 @@ jobs:
           New-Item -ItemType Directory -Force -Path build | Out-Null
           Copy-Item target\${{ matrix.rust_target }}\release\msb-metrics.exe build\msb-metrics.exe -Force
 
+      # -- Go FFI cdylib --
+      - name: Build microsandbox-go
+        shell: pwsh
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
+          cargo build --release -p microsandbox-go --target ${{ matrix.rust_target }}
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          Copy-Item target\${{ matrix.rust_target }}\release\microsandbox_go_ffi.dll build\microsandbox_go_ffi.dll -Force
+
       # -- Node SDK --
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -569,6 +582,11 @@ jobs:
           Copy-Item build\libkrunfw.dll artifacts\${{ matrix.libkrunfw_asset }} -Force
           Compress-Archive -Path build\msb.exe, build\libkrunfw.dll -DestinationPath artifacts\microsandbox-${{ matrix.target }}.zip -Force
           tar.exe -czf artifacts\microsandbox-${{ matrix.target }}.tar.gz -C build msb.exe libkrunfw.dll
+          # Go FFI cdylib: the Windows cargo artifact has no "lib" prefix; rename it
+          # to the unified bundle asset name (lib prefix + Go arch) that the
+          # go-sdk-tag job drops into sdk/go/internal/bundle/bundles/.
+          $goArch = if ("${{ matrix.target }}" -eq "windows-x86_64") { "amd64" } else { "arm64" }
+          Copy-Item build\microsandbox_go_ffi.dll "artifacts\libmicrosandbox_go_ffi-windows-$goArch.dll" -Force
 
       - name: Upload artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -1050,6 +1068,10 @@ jobs:
             sdk/go/internal/bundle/bundles/libmicrosandbox_go_ffi-linux-arm64.so
           install -m644 release-dl/libmicrosandbox_go_ffi-darwin-arm64.dylib \
             sdk/go/internal/bundle/bundles/libmicrosandbox_go_ffi-darwin-arm64.dylib
+          install -m644 release-dl/libmicrosandbox_go_ffi-windows-amd64.dll \
+            sdk/go/internal/bundle/bundles/libmicrosandbox_go_ffi-windows-amd64.dll
+          install -m644 release-dl/libmicrosandbox_go_ffi-windows-arm64.dll \
+            sdk/go/internal/bundle/bundles/libmicrosandbox_go_ffi-windows-arm64.dll
 
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
