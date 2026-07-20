@@ -652,6 +652,7 @@ export interface NapiExecHandle extends AsyncIterable<NapiExecEvent> {
   collect(): Promise<NapiExecOutput>;
   signal(signal: number): Promise<void>;
   kill(): Promise<void>;
+  resize(rows: number, cols: number): Promise<void>;
 }
 
 export interface NapiExecOutput {

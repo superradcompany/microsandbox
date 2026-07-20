@@ -199,7 +199,7 @@ async for event in handle:
 
 </Accordion>
 
-Run a command with streaming output. Returns an [`ExecHandle`](#exechandle) that emits stdout, stderr, and exit events as they happen rather than buffering everything. Takes the same per-call options as [`exec()`](#sandbox-exec). Pass `stdin=Stdin.pipe()` to write to the process while it runs via [`take_stdin()`](#exechandle).
+Run a command with streaming output. Returns an [`ExecHandle`](#exechandle) that emits stdout, stderr, and exit events as they happen rather than buffering everything. Takes the same per-call options as [`exec()`](#sandbox-exec). Pass `stdin=Stdin.pipe()` to write to the process while it runs via [`take_stdin()`](#exechandle). For TTY sessions, call [`resize(rows, cols)`](#exechandle) when the terminal dimensions change.
 
 <p className="msb-label">Parameters</p>
 
@@ -375,7 +375,7 @@ Bridge your terminal to the sandbox's default shell in a fully interactive PTY s
 
 <p className="msb-backref">Returned by <a href="#sandbox-exec">exec()</a> · <a href="#sandbox-shell">shell()</a> · <a href="#exechandle">ExecHandle.collect()</a></p>
 
-The result of a completed command execution: collected output plus exit status. All members are properties.
+The result of a completed command execution: collected output plus exit status. All members are properties. In TTY mode, `stdout_bytes` contains the combined terminal output and `stderr_bytes` is empty because a PTY doesn't preserve separate stdout and stderr streams.
 
 | Property | Type | Description |
 |----------|------|-------------|
@@ -390,7 +390,7 @@ The result of a completed command execution: collected output plus exit status. 
 
 <p className="msb-backref">Returned by <a href="#sandbox-exec_stream">exec_stream()</a> · <a href="#sandbox-shell_stream">shell_stream()</a></p>
 
-A handle to a running streaming execution. It is an async iterator, so `async for event in handle:` yields each [`ExecEvent`](#execevent) until the stream ends.
+A handle to a running streaming execution. It is an async iterator, so `async for event in handle:` yields each [`ExecEvent`](#execevent) until the stream ends. `signal()`, `kill()`, and `resize()` may run while another task is waiting in `recv()`; concurrent receive, wait, and collect operations are not supported.
 
 | Property / Method | Type | Description |
 |-------------------|------|-------------|
@@ -401,6 +401,7 @@ A handle to a running streaming execution. It is an async iterator, so `async fo
 | collect() | [`ExecOutput`](#execoutput) | *(async)* Drain remaining output and wait for exit |
 | signal(sig) | `None` | *(async)* Send a POSIX signal (numeric) to the process |
 | kill() | `None` | *(async)* Send SIGKILL to the process |
+| resize(rows, cols) | `None` | *(async)* Resize the PTY to the given `uint16` dimensions |
 
 ### ExecSink
 
@@ -411,7 +412,7 @@ Writer for sending data to a running process's stdin. Obtained from [`ExecHandle
 | Method | Parameters | Description |
 |--------|-----------|-------------|
 | write(data) | `data: bytes` | *(async)* Write bytes to the process's stdin |
-| close() | - | *(async)* Close stdin. The process sees EOF |
+| close() | - | *(async)* Close the sink. Sends EOF in non-TTY pipe mode; the guest PTY remains open in TTY mode |
 
 ### ExecEvent
 

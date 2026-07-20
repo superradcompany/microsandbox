@@ -239,7 +239,7 @@ await stdin?.write("task-1\n");
 
 </Accordion>
 
-Streaming variant of [`execWith()`](#sandbox-execwith): same configuration via [`ExecOptionsBuilder`](#execoptionsbuilder), but returns an [`ExecHandle`](#exechandle) instead of buffering output.
+Streaming variant of [`execWith()`](#sandbox-execwith): same configuration via [`ExecOptionsBuilder`](#execoptionsbuilder), but returns an [`ExecHandle`](#exechandle) instead of buffering output. For sessions configured with `.tty(true)`, call [`resize(rows, cols)`](#exechandle) when the terminal dimensions change.
 
 <p className="msb-label">Parameters</p>
 
@@ -389,7 +389,7 @@ Interactive PTY attach with options for arguments, environment variables, workin
 
 <p className="msb-backref">Returned by <a href="#sandbox-exec">exec()</a> · <a href="#sandbox-execwith">execWith()</a> · <a href="#sandbox-shell">shell()</a> · <a href="#exechandle">ExecHandle.collect()</a></p>
 
-The result of a completed command execution: collected output plus exit status.
+The result of a completed command execution: collected output plus exit status. In TTY mode, `stdoutBytes()` contains the combined terminal output and `stderrBytes()` is empty because a PTY doesn't preserve separate stdout and stderr streams.
 
 | Property / Method | Type | Description |
 |-------------------|------|-------------|
@@ -405,7 +405,7 @@ The result of a completed command execution: collected output plus exit status.
 
 <p className="msb-backref">Returned by <a href="#sandbox-execstream">execStream()</a> · <a href="#sandbox-execstreamwith">execStreamWith()</a> · <a href="#sandbox-shellstream">shellStream()</a></p>
 
-A handle to a running streaming execution. Implements `AsyncIterable<ExecEvent>` and `AsyncDisposable`, so it works with `for await...of` and `await using`.
+A handle to a running streaming execution. Implements `AsyncIterable<ExecEvent>` and `AsyncDisposable`, so it works with `for await...of` and `await using`. `signal()`, `kill()`, and `resize()` may run while another task is waiting in `recv()`; concurrent receive, wait, and collect operations are not supported.
 
 | Property / Method | Type | Description |
 |-------------------|------|-------------|
@@ -415,6 +415,7 @@ A handle to a running streaming execution. Implements `AsyncIterable<ExecEvent>`
 | `collect()` | `Promise<`[`ExecOutput`](#execoutput)`>` | Drain stdout/stderr and wait for exit |
 | `signal(signal)` | `Promise<void>` | Send a POSIX signal (numeric) to the process |
 | `kill()` | `Promise<void>` | Force-terminate the process |
+| `resize(rows, cols)` | `Promise<void>` | Resize the PTY to the given unsigned 16-bit dimensions |
 | `[Symbol.asyncIterator]()` | `AsyncIterator<`[`ExecEvent`](#execevent)`>` | Iterate events with `for await...of` |
 | `[Symbol.asyncDispose]()` | `Promise<void>` | Best-effort kill on `await using` scope exit |
 
@@ -427,7 +428,7 @@ Writer for sending data to a running process's stdin. Implements `AsyncDisposabl
 | Method | Type | Description |
 |--------|------|-------------|
 | `write(data)` | `(data: Uint8Array \| string) => Promise<void>` | Write bytes to the process's stdin. Strings are UTF-8 encoded |
-| `close()` | `() => Promise<void>` | Send EOF. Idempotent |
+| `close()` | `() => Promise<void>` | Close the sink. Sends EOF in non-TTY pipe mode; the guest PTY remains open in TTY mode |
 | `[Symbol.asyncDispose]()` | `() => Promise<void>` | Calls `close()` on `await using` scope exit |
 
 ### ExecEvent
