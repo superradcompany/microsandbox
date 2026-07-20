@@ -15,13 +15,23 @@ use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use hickory_client::client::Client;
-use hickory_client::proto::runtime::TokioRuntimeProvider;
-use hickory_client::proto::tcp::TcpClientStream;
-use hickory_client::proto::udp::UdpClientStream;
+use hickory_net::client::Client as GenericClient;
+use hickory_net::runtime::TokioRuntimeProvider;
+use hickory_net::tcp::TcpClientStream;
+use hickory_net::udp::UdpClientStream;
 use rustls::ClientConfig;
 
 use super::common::transport::Transport;
+
+//--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+/// Upstream DNS client over the Tokio runtime. hickory 0.26 made
+/// [`GenericClient`] generic over the runtime provider; every upstream
+/// client in this crate runs on Tokio, so the concrete type is fixed
+/// here once and the rest of the DNS code keeps using plain `Client`.
+pub(super) type Client = GenericClient<TokioRuntimeProvider>;
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -30,17 +40,13 @@ use super::common::transport::Transport;
 /// Build a hickory UDP client connected to `addr` with the given
 /// per-query timeout. Logs and returns `None` on connect error.
 pub(super) async fn build_udp_client(addr: SocketAddr, timeout: Duration) -> Option<Client> {
-    let stream =
-        UdpClientStream::<TokioRuntimeProvider>::builder(addr, TokioRuntimeProvider::new())
-            .with_timeout(Some(timeout))
-            .build();
-    let (client, bg) = match Client::connect(stream).await {
-        Ok(pair) => pair,
-        Err(e) => {
-            tracing::warn!(upstream = %addr, error = %e, "failed to build UDP DNS client");
-            return None;
-        }
-    };
+    // Since hickory 0.26 the UDP stream is handed to the client as a
+    // request sender; socket errors surface per-query instead of at
+    // build time, so this constructor is infallible.
+    let stream = UdpClientStream::builder(addr, TokioRuntimeProvider::new())
+        .with_timeout(Some(timeout))
+        .build();
+    let (client, bg) = Client::from_sender(stream);
     tokio::spawn(bg);
     Some(client)
 }
@@ -48,18 +54,19 @@ pub(super) async fn build_udp_client(addr: SocketAddr, timeout: Duration) -> Opt
 /// Build a hickory TCP client connected to `addr` with the given
 /// connect+query timeout. Logs and returns `None` on connect error.
 pub(super) async fn build_tcp_client(addr: SocketAddr, timeout: Duration) -> Option<Client> {
-    let (stream, sender) =
+    let (stream_future, sender) =
         TcpClientStream::new(addr, None, Some(timeout), TokioRuntimeProvider::new());
-    // `with_timeout` (not `new`) so the per-query response timeout honors the
-    // configured `query_timeout`; `Client::new` silently falls back to
-    // hickory's 5s default, unlike the UDP/DoT builders above/below.
-    let (client, bg) = match Client::with_timeout(stream, sender, timeout, None).await {
-        Ok(pair) => pair,
+    let stream = match stream_future.await {
+        Ok(stream) => stream,
         Err(e) => {
             tracing::warn!(upstream = %addr, error = %e, "failed to build TCP DNS client");
             return None;
         }
     };
+    // `with_timeout` (not `new`) so the per-query response timeout honors the
+    // configured `query_timeout`; `Client::new` silently falls back to
+    // hickory's 5s default, unlike the UDP/DoT builders above/below.
+    let (client, bg) = Client::with_timeout(stream, sender, timeout);
     tokio::spawn(bg);
     Some(client)
 }
@@ -72,7 +79,7 @@ pub(super) async fn build_dot_client(
     sni: String,
     timeout: Duration,
 ) -> Option<Client> {
-    use hickory_proto::rustls::tls_client_connect;
+    use hickory_net::tls::tls_client_connect;
     use rustls::pki_types::ServerName;
 
     let server_name = match ServerName::try_from(sni.clone()) {
@@ -89,13 +96,14 @@ pub(super) async fn build_dot_client(
         client_config,
         TokioRuntimeProvider::new(),
     );
-    let (client, bg) = match Client::with_timeout(stream_future, sender, timeout, None).await {
-        Ok(pair) => pair,
+    let stream = match stream_future.await {
+        Ok(stream) => stream,
         Err(e) => {
             tracing::warn!(upstream = %addr, error = %e, "failed to build DoT client");
             return None;
         }
     };
+    let (client, bg) = Client::with_timeout(stream, sender, timeout);
     tokio::spawn(bg);
     Some(client)
 }
@@ -170,15 +178,15 @@ fn dot_upstream_client_config() -> Arc<ClientConfig> {
 mod tests {
     use super::*;
     use futures::StreamExt;
-    use hickory_client::proto::op::{Message, MessageType, OpCode, Query};
-    use hickory_client::proto::rr::{Name, RecordType};
-    use hickory_client::proto::xfer::{DnsHandle, DnsRequest};
+    use hickory_net::proto::op::{DnsRequest, Message, MessageType, OpCode, Query};
+    use hickory_net::proto::rr::{Name, RecordType};
+    use hickory_net::xfer::DnsHandle;
     use std::time::Instant;
     use tokio::io::AsyncReadExt;
 
     fn example_query() -> Message {
         let mut msg = Message::new(0x4242, MessageType::Query, OpCode::Query);
-        msg.set_recursion_desired(true);
+        msg.metadata.recursion_desired = true;
         msg.add_query(Query::query(
             Name::from_ascii("example.com.").unwrap(),
             RecordType::A,

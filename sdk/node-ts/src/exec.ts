@@ -69,7 +69,7 @@ export class ExecSink implements AsyncDisposable {
     await withMappedErrors(() => this.inner.write(buf));
   }
 
-  /** Send EOF. Idempotent. */
+  /** Close the sink. Sends EOF in non-TTY pipe mode; PTY mode stays open. */
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
@@ -122,6 +122,11 @@ export class ExecHandle implements AsyncIterable<ExecEvent>, AsyncDisposable {
 
   async kill(): Promise<void> {
     await withMappedErrors(() => this.inner.kill());
+  }
+
+  /** Resize the pseudo-terminal for this exec session. */
+  async resize(rows: number, cols: number): Promise<void> {
+    await withMappedErrors(() => this.inner.resize(rows, cols));
   }
 
   [Symbol.asyncIterator](): AsyncIterator<ExecEvent> {

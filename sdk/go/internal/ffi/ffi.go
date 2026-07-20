@@ -149,6 +149,7 @@ typedef char *(*msb_sftp_close_fn)(uint64_t cancel_id, uint64_t sftp_handle, uin
 typedef char *(*msb_exec_recv_fn)(uint64_t cancel_id, uint64_t exec_handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_exec_close_fn)(uint64_t cancel_id, uint64_t exec_handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_exec_signal_fn)(uint64_t cancel_id, uint64_t exec_handle, int32_t signal, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_exec_resize_fn)(uint64_t cancel_id, uint64_t exec_handle, uint16_t rows, uint16_t cols, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_exec_collect_fn)(uint64_t cancel_id, uint64_t exec_handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_exec_wait_fn)(uint64_t cancel_id, uint64_t exec_handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_exec_kill_fn)(uint64_t cancel_id, uint64_t exec_handle, uint8_t *buf, size_t buf_len);
@@ -290,6 +291,7 @@ static msb_sftp_close_fn         ptr_msb_sftp_close         = NULL;
 static msb_exec_recv_fn          ptr_msb_exec_recv          = NULL;
 static msb_exec_close_fn         ptr_msb_exec_close         = NULL;
 static msb_exec_signal_fn        ptr_msb_exec_signal        = NULL;
+static msb_exec_resize_fn        ptr_msb_exec_resize        = NULL;
 static msb_fs_read_fn            ptr_msb_fs_read            = NULL;
 static msb_fs_write_fn           ptr_msb_fs_write           = NULL;
 static msb_fs_list_fn            ptr_msb_fs_list            = NULL;
@@ -450,6 +452,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_exec_recv);
 	RESOLVE(msb_exec_close);
 	RESOLVE(msb_exec_signal);
+	RESOLVE(msb_exec_resize);
 	RESOLVE(msb_fs_read);
 	RESOLVE(msb_fs_write);
 	RESOLVE(msb_fs_list);
@@ -689,6 +692,9 @@ char *call_msb_exec_close(uint64_t cancel_id, uint64_t exec_handle, uint8_t *buf
 }
 char *call_msb_exec_signal(uint64_t cancel_id, uint64_t exec_handle, int32_t signal, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_exec_signal ? ptr_msb_exec_signal(cancel_id, exec_handle, signal, buf, buf_len) : NULL;
+}
+char *call_msb_exec_resize(uint64_t cancel_id, uint64_t exec_handle, uint16_t rows, uint16_t cols, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_exec_resize ? ptr_msb_exec_resize(cancel_id, exec_handle, rows, cols, buf, buf_len) : NULL;
 }
 char *call_msb_fs_read(uint64_t cancel_id, uint64_t handle, const char *path, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_fs_read ? ptr_msb_fs_read(cancel_id, handle, path, buf, buf_len) : NULL;
@@ -2274,6 +2280,7 @@ type ExecOptions struct {
 	Cwd         string            `json:"cwd,omitempty"`
 	TimeoutSecs uint64            `json:"timeout_secs,omitempty"`
 	StdinPipe   bool              `json:"stdin_pipe,omitempty"`
+	TTY         bool              `json:"tty,omitempty"`
 	User        string            `json:"user,omitempty"`
 	Env         map[string]string `json:"env,omitempty"`
 }
@@ -2740,7 +2747,8 @@ func (srv *SSHServer) ServeConnection(ctx context.Context) error {
 
 // ExecStreamHandle is an opaque reference to a running streaming exec session.
 // Go owns the u64 token; Rust owns the channel resources until Close is called.
-// Not safe for concurrent use from multiple goroutines.
+// Signal, Kill, and Resize may be called concurrently with Recv. Other method
+// combinations, including concurrent Recv calls, are not supported.
 type ExecStreamHandle struct {
 	handle C.uint64_t
 	// stdinPiped reflects whether the session was started with stdin_pipe=true.
@@ -2957,6 +2965,17 @@ func (h *ExecStreamHandle) Signal(ctx context.Context, signal int) error {
 	}
 	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
 		return C.call_msb_exec_signal(cancelID, h.handle, C.int32_t(signal), buf, bufLen)
+	})
+	return err
+}
+
+// Resize changes the pseudo-terminal size for this exec session.
+func (h *ExecStreamHandle) Resize(ctx context.Context, rows, cols uint16) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_exec_resize(cancelID, h.handle, C.uint16_t(rows), C.uint16_t(cols), buf, bufLen)
 	})
 	return err
 }

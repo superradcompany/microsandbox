@@ -538,6 +538,16 @@ char *msb_exec_signal(uint64_t cancel_id,
                       uintptr_t buf_len);
 
 /**
+ * Resize the pseudo-terminal for a running exec session.
+ */
+char *msb_exec_resize(uint64_t cancel_id,
+                      Handle exec_handle,
+                      uint16_t rows,
+                      uint16_t cols,
+                      unsigned char *buf,
+                      uintptr_t buf_len);
+
+/**
  * Write data to the stdin pipe of a running exec session.
  * data_b64 is standard base64. Returns `{"ok":true}` on success.
  */

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use microsandbox::sandbox::exec::ExecControl;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use tokio::sync::Mutex;
@@ -21,6 +22,7 @@ pub struct PyExecOutput {
 pub struct PyExecHandle {
     id: String,
     inner: Arc<Mutex<microsandbox::ExecHandle>>,
+    control: ExecControl,
     stdin: Option<PyExecSink>,
 }
 
@@ -90,12 +92,14 @@ impl PyExecOutput {
 impl PyExecHandle {
     pub fn from_rust(mut inner: microsandbox::ExecHandle) -> Self {
         let id = inner.id();
+        let control = inner.control();
         let stdin = inner
             .take_stdin()
             .map(|s| PyExecSink { inner: Arc::new(s) });
         Self {
             id,
             inner: Arc::new(Mutex::new(inner)),
+            control,
             stdin,
         }
     }
@@ -151,20 +155,27 @@ impl PyExecHandle {
 
     /// Send a signal to the running process.
     fn signal<'py>(&self, py: Python<'py>, sig: i32) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.inner.clone();
+        let control = self.control.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
-            guard.signal(sig).await.map_err(to_py_err)?;
+            control.signal(sig).await.map_err(to_py_err)?;
             Ok(())
         })
     }
 
     /// Kill the running process (SIGKILL).
     fn kill<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.inner.clone();
+        let control = self.control.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
-            guard.kill().await.map_err(to_py_err)?;
+            control.kill().await.map_err(to_py_err)?;
+            Ok(())
+        })
+    }
+
+    /// Resize the pseudo-terminal for this exec session.
+    fn resize<'py>(&self, py: Python<'py>, rows: u16, cols: u16) -> PyResult<Bound<'py, PyAny>> {
+        let control = self.control.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            control.resize(rows, cols).await.map_err(to_py_err)?;
             Ok(())
         })
     }
@@ -202,7 +213,7 @@ impl PyExecSink {
         })
     }
 
-    /// Close stdin (sends EOF).
+    /// Close the sink. Sends EOF in non-TTY pipe mode; PTY mode stays open.
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {

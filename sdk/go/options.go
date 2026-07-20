@@ -1134,6 +1134,7 @@ type ExecConfig struct {
 	Cwd       string
 	Timeout   time.Duration
 	StdinPipe bool
+	TTY       bool
 	User      string
 	Env       map[string]string
 }
@@ -1157,6 +1158,12 @@ func WithExecTimeout(d time.Duration) ExecOption {
 // to be written to the process via ExecHandle.TakeStdin.
 func WithExecStdinPipe() ExecOption {
 	return func(o *ExecConfig) { o.StdinPipe = true }
+}
+
+// WithExecTTY controls whether the command runs inside a pseudo-terminal.
+// Enable it for interactive programs such as shells, editors, and top.
+func WithExecTTY(enabled bool) ExecOption {
+	return func(o *ExecConfig) { o.TTY = enabled }
 }
 
 // WithExecUser sets the user to run the command as (UID or name).

@@ -30,7 +30,6 @@
             "pages": [
               "getting-started/introduction",
               "getting-started/quickstart",
-              "getting-started/windows-troubleshooting",
               "getting-started/agents"
             ]
           },
@@ -41,14 +40,16 @@
               "sandboxes/overview",
               "sandboxes/lifecycle",
               "sandboxes/commands",
-              "sandboxes/ssh",
               "sandboxes/filesystem",
-              "sandboxes/volumes",
               "sandboxes/secrets",
-              "sandboxes/customize",
+              "sandboxes/tuning",
+              "sandboxes/ssh",
+              "sandboxes/volumes",
               "sandboxes/snapshots",
+              "sandboxes/labels",
               "sandboxes/logs",
-              "sandboxes/metrics"
+              "sandboxes/metrics",
+              "sandboxes/bootstrap"
             ]
           },
           {
@@ -74,6 +75,15 @@
             "pages": [
               "images/overview",
               "images/disk-images"
+            ]
+          },
+          {
+            "group": "Troubleshooting",
+            "icon": "screwdriver-wrench",
+            "pages": [
+              "troubleshooting/linux",
+              "troubleshooting/macos",
+              "troubleshooting/windows"
             ]
           }
         ]
@@ -229,7 +239,14 @@
       {
         "tab": "Changelog",
         "pages": [
+          "changelog/2026-07-17",
+          "changelog/2026-07-10",
           "changelog/2026-07-05",
+          "changelog/2026-06-26",
+          "changelog/2026-06-19",
+          "changelog/2026-06-12",
+          "changelog/2026-06-05",
+          "changelog/2026-05-29",
           "changelog/2026-05-22",
           "changelog/2026-05-15",
           "changelog/2026-05-01",

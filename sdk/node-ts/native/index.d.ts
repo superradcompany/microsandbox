@@ -122,6 +122,8 @@ export declare class ExecHandle {
   signal(signal: number): Promise<void>
   /** Kill the running process (SIGKILL). */
   kill(): Promise<void>
+  /** Resize the pseudo-terminal for this exec session. */
+  resize(rows: number, cols: number): Promise<void>
 }
 export type JsExecHandle = ExecHandle
 
@@ -187,7 +189,7 @@ export declare class ExecOutput {
 export declare class ExecSink {
   /** Write data to the process stdin. */
   write(data: Buffer): Promise<void>
-  /** Close stdin (sends EOF to the process). */
+  /** Close the sink. Sends EOF in non-TTY pipe mode; PTY mode stays open. */
   close(): Promise<void>
 }
 export type JsExecSink = ExecSink

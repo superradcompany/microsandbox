@@ -118,8 +118,8 @@ End-to-end setup walkthroughs live under [Recipes](/recipes):
 
 ## Labels and per-user views
 
-Labels you set at sandbox creation ride along to your backend as metric
-attributes, so you can build per-user, per-tenant, or per-environment
+[Labels](/sandboxes/labels) you set on a sandbox ride along to your backend as
+metric attributes, so you can build per-user, per-tenant, or per-environment
 views without naming every sandbox.
 
 ```bash
@@ -139,7 +139,7 @@ way: `microsandbox.cpu.utilization` becomes `microsandbox_cpu_utilization`.)
 ### Per-user dashboard queries
 
 Use the labels to slice the standard sandbox metrics. CPU is the simplest
-to start with (the same labels apply to every metric — see the
+to start with (the same labels apply to every metric; see the
 [metric table](/observability/deep-dive#metrics-emitted)):
 
 ```promql

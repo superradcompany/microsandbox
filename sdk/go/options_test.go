@@ -181,6 +181,18 @@ func TestWithExecTimeout(t *testing.T) {
 	}
 }
 
+func TestWithExecTTY(t *testing.T) {
+	o := ExecConfig{}
+	WithExecTTY(true)(&o)
+	if !o.TTY {
+		t.Fatal("TTY should be enabled")
+	}
+	WithExecTTY(false)(&o)
+	if o.TTY {
+		t.Fatal("TTY should be disabled")
+	}
+}
+
 func TestWithVolumeQuota(t *testing.T) {
 	o := VolumeConfig{}
 	WithVolumeQuota(1024)(&o)
