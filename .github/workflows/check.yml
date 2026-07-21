@@ -478,6 +478,7 @@ jobs:
             runner: windows-11-arm
             rust_target: aarch64-pc-windows-msvc
             go_arch: arm64
+            go_cc: clang
             kernel_artifact: kernel-c-aarch64
             agentd_artifact: agentd-aarch64-linux-musl
             vs_arch: arm64
@@ -486,6 +487,7 @@ jobs:
             runner: windows-latest
             rust_target: x86_64-pc-windows-msvc
             go_arch: amd64
+            go_cc: clang -fuse-ld=lld
             kernel_artifact: kernel-c-x86_64
             agentd_artifact: agentd-x86_64-linux-musl
             vs_arch: amd64
@@ -588,7 +590,7 @@ jobs:
         shell: pwsh
         working-directory: sdk/go
         env:
-          CC: clang
+          CC: ${{ matrix.go_cc }}
           CGO_ENABLED: "1"
           GOARCH: ${{ matrix.go_arch }}
           GOOS: windows
