@@ -27,8 +27,7 @@ For the full API reference and longer guides, use Go docs and the microsandbox d
 
 - Go 1.22+
 - CGO enabled and a C compiler/toolchain available
-- Linux with KVM or macOS with Apple Silicon
-- The broader microsandbox runtime has Windows preview support, but the Go SDK currently bundles FFI libraries only for macOS ARM64, Linux x86_64, and Linux ARM64.
+- Linux with KVM, macOS with Apple Silicon, or Windows 10/11 with Windows Hypervisor Platform enabled
 
 ## Supported Platforms
 
@@ -37,9 +36,9 @@ For the full API reference and longer guides, use Go docs and the microsandbox d
 | macOS | ARM64 / Apple Silicon | Embedded FFI library |
 | Linux | x86_64 | Embedded FFI library |
 | Linux | ARM64 | Embedded FFI library |
-| Windows | x86_64, ARM64 | Runtime preview exists, but no bundled Go FFI library in this SDK yet |
+| Windows | x86_64, ARM64 | Embedded FFI library; runtime support is in preview |
 
-The Go binary embeds the SDK FFI library and extracts it on first use. The `msb` runtime and `libkrunfw` are installed separately into `~/.microsandbox/` by `EnsureInstalled`.
+The Go binary embeds the SDK FFI library and extracts it on first use. The `msb` runtime and `libkrunfw` are installed separately into `~/.microsandbox/` by `EnsureInstalled` (`%USERPROFILE%\.microsandbox` on Windows).
 
 ## Installation
 

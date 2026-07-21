@@ -97,7 +97,7 @@ func autoLoadFFI() error {
 			return
 		}
 		// Pin the resolver's SDK-tier msb path to our install dir.
-		ffi.SetSdkMsbPath(filepath.Join(dir, "bin", "msb"))
+		ffi.SetSdkMsbPath(filepath.Join(dir, "bin", msbFilename()))
 	})
 	return autoLoadErr
 }
@@ -247,7 +247,7 @@ func wrapDlopenErr(err error, path string) error {
 // msbAndKrunfwInstalled reports whether msb is present at the expected
 // version and libkrunfw is present.
 func msbAndKrunfwInstalled(installDir string) bool {
-	msbBin := filepath.Join(installDir, "bin", "msb")
+	msbBin := filepath.Join(installDir, "bin", msbFilename())
 	if _, err := os.Stat(msbBin); err != nil {
 		return false
 	}
@@ -271,27 +271,54 @@ func installedMsbVersion(msbPath string) string {
 	return strings.TrimPrefix(s, "msb ")
 }
 
+// msbFilename returns the platform-specific runtime executable name.
+func msbFilename() string {
+	return msbFilenameFor(runtime.GOOS)
+}
+
+func msbFilenameFor(goos string) string {
+	if goos == "windows" {
+		return "msb.exe"
+	}
+	return "msb"
+}
+
 // libkrunfwFilename returns the exact filename of the prebuilt libkrunfw
 // for the current platform.
 func libkrunfwFilename() string {
-	if runtime.GOOS == "darwin" {
-		return fmt.Sprintf("libkrunfw.%s.dylib", libkrunfwABI)
-	}
-	return fmt.Sprintf("libkrunfw.so.%s", libkrunfwVersion)
+	return libkrunfwFilenameFor(runtime.GOOS)
 }
 
-// libkrunfwSymlinks returns (linkName, target) pairs for the libkrunfw
-// SONAME layout. Without these symlinks the dynamic linker cannot resolve
-// the libkrunfw SONAME that msb was built against.
-func libkrunfwSymlinks() [][2]string {
-	full := libkrunfwFilename()
-	if runtime.GOOS == "darwin" {
-		return [][2]string{{"libkrunfw.dylib", full}}
+func libkrunfwFilenameFor(goos string) string {
+	switch goos {
+	case "darwin":
+		return fmt.Sprintf("libkrunfw.%s.dylib", libkrunfwABI)
+	case "windows":
+		return "libkrunfw.dll"
+	default:
+		return fmt.Sprintf("libkrunfw.so.%s", libkrunfwVersion)
 	}
-	soname := fmt.Sprintf("libkrunfw.so.%s", libkrunfwABI)
-	return [][2]string{
-		{soname, full},
-		{"libkrunfw.so", soname},
+}
+
+// libkrunfwSymlinks returns (linkName, target) pairs for the Unix libkrunfw
+// SONAME layout. Windows resolves the DLL directly and needs no links.
+func libkrunfwSymlinks() [][2]string {
+	return libkrunfwSymlinksFor(runtime.GOOS)
+}
+
+func libkrunfwSymlinksFor(goos string) [][2]string {
+	full := libkrunfwFilenameFor(goos)
+	switch goos {
+	case "darwin":
+		return [][2]string{{"libkrunfw.dylib", full}}
+	case "windows":
+		return nil
+	default:
+		soname := fmt.Sprintf("libkrunfw.so.%s", libkrunfwABI)
+		return [][2]string{
+			{soname, full},
+			{"libkrunfw.so", soname},
+		}
 	}
 }
 
@@ -310,11 +337,15 @@ func archString() (string, error) {
 
 // osString converts Go's runtime.GOOS into the tag used in release assets.
 func osString() (string, error) {
-	switch runtime.GOOS {
-	case "darwin", "linux":
-		return runtime.GOOS, nil
+	return osStringFor(runtime.GOOS)
+}
+
+func osStringFor(goos string) (string, error) {
+	switch goos {
+	case "darwin", "linux", "windows":
+		return goos, nil
 	default:
-		return "", fmt.Errorf("unsupported platform: %s", runtime.GOOS)
+		return "", fmt.Errorf("unsupported platform: %s", goos)
 	}
 }
 
@@ -387,7 +418,7 @@ func downloadMsbAndKrunfw(ctx context.Context, installDir string) error {
 	}
 
 	// Sanity check.
-	if _, err := os.Stat(filepath.Join(binDir, "msb")); err != nil {
+	if _, err := os.Stat(filepath.Join(binDir, msbFilename())); err != nil {
 		return fmt.Errorf("msb not found after extraction: %w", err)
 	}
 	if _, err := os.Stat(filepath.Join(libDir, libkrunfwFilename())); err != nil {

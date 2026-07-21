@@ -342,7 +342,7 @@ if err := m.EnsureInstalled(ctx); err != nil {
 
 </Accordion>
 
-Ensure `msb` + `libkrunfw` are present under `~/.microsandbox/`, downloading them from the matching GitHub release if needed. Call this at process startup when the program will create local sandboxes so runtime download/setup failures surface before the first sandbox operation. The Go FFI library is embedded in the Go binary and loads automatically on first use; `EnsureInstalled` only governs the `msb` + `libkrunfw` runtime install. Idempotent; options apply only to the first call.
+Ensure `msb` + `libkrunfw` are present under `~/.microsandbox/` (`%USERPROFILE%\.microsandbox` on Windows), downloading them from the matching GitHub release if needed. Call this at process startup when the program will create local sandboxes so runtime download/setup failures surface before the first sandbox operation. The Go FFI library is embedded in the Go binary and loads automatically on first use; `EnsureInstalled` only governs the `msb` + `libkrunfw` runtime install. Idempotent; options apply only to the first call.
 
 <p className="msb-label">Parameters</p>
 

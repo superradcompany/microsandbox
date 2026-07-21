@@ -477,6 +477,8 @@ jobs:
           - target: windows-aarch64
             runner: windows-11-arm
             rust_target: aarch64-pc-windows-msvc
+            go_arch: arm64
+            go_cc: clang
             kernel_artifact: kernel-c-aarch64
             agentd_artifact: agentd-aarch64-linux-musl
             vs_arch: arm64
@@ -484,6 +486,8 @@ jobs:
           - target: windows-x86_64
             runner: windows-latest
             rust_target: x86_64-pc-windows-msvc
+            go_arch: amd64
+            go_cc: clang -fuse-ld=lld
             kernel_artifact: kernel-c-x86_64
             agentd_artifact: agentd-x86_64-linux-musl
             vs_arch: amd64
@@ -566,6 +570,36 @@ jobs:
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
           cargo +stable build --release --no-default-features --features net,ssh -p microsandbox-cli --target ${{ matrix.rust_target }}
+
+      - name: Build Go FFI cdylib
+        shell: pwsh
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
+          cargo +stable build --release -p microsandbox-go --target ${{ matrix.rust_target }}
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Build and test Go SDK
+        shell: pwsh
+        working-directory: sdk/go
+        env:
+          CC: ${{ matrix.go_cc }}
+          CGO_ENABLED: "1"
+          GOARCH: ${{ matrix.go_arch }}
+          GOOS: windows
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
+          go build ./...
+          go test -count=1 .
 
   # ---------------------------------------------------------------------------
   # CLI smoke tests (requires KVM)
