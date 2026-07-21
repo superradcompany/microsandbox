@@ -80,6 +80,10 @@ pub struct SandboxArgs {
     #[arg(long = "max-memory-mib")]
     pub max_memory_mib: Option<u32>,
 
+    /// Expose a virtio-gpu device with the Venus (Vulkan) renderer to the guest.
+    #[arg(long = "gpu")]
+    pub gpu: bool,
+
     /// Inherited fd carrying the JSON [`LaunchConfig`] (set by the SDK).
     #[cfg(unix)]
     #[arg(long = "config-fd", hide = true)]
@@ -180,6 +184,7 @@ pub fn run(args: SandboxArgs) -> ! {
             .max_memory_mib
             .unwrap_or(args.memory_mib)
             .max(args.memory_mib),
+        gpu: args.gpu,
         rootfs_path: launch.rootfs.path,
         rootfs_follow_root_symlinks: launch.rootfs.follow_root_symlinks,
         rootfs_vmdk: if is_vmdk {

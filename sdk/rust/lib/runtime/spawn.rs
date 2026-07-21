@@ -2229,6 +2229,9 @@ fn sandbox_cli_args(
             config.spec.resources.max_memory_mib.to_string(),
         ));
     }
+    if config.spec.runtime.gpu {
+        visible.push(OsString::from("--gpu"));
+    }
 
     let mut launch = LaunchConfig {
         db_path: db_path.to_path_buf(),

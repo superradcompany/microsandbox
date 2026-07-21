@@ -261,6 +261,9 @@ pub struct VmConfig {
     /// Maximum guest memory in MiB reserved for future hotplug (virtio-mem).
     pub max_memory_mib: u32,
 
+    /// Expose a virtio-gpu device with the Venus (Vulkan) renderer to the guest.
+    pub gpu: bool,
+
     /// Root filesystem path for direct passthrough mounts.
     pub rootfs_path: Option<PathBuf>,
 
@@ -401,6 +404,7 @@ impl std::fmt::Debug for VmConfig {
             .field("memory_mib", &self.memory_mib)
             .field("max_cpus", &self.max_cpus)
             .field("max_memory_mib", &self.max_memory_mib)
+            .field("gpu", &self.gpu)
             .field("rootfs_path", &self.rootfs_path)
             .field("rootfs_vmdk", &self.rootfs_vmdk)
             .field("rootfs_upper", &self.rootfs_upper)
@@ -1374,11 +1378,43 @@ fn build_vm(
     let kernel_log_path = config.log_dir.join("kernel.log");
     #[cfg(unix)]
     {
-        builder = builder.console(|c| {
-            c.output(&kernel_log_path).custom(
+        // Venus (Vulkan-over-virtio-gpu) renderer flags, per virglrenderer:
+        // VENUS (1 << 6) selects the Vulkan encoder, NO_VIRGL (1 << 7) drops
+        // the legacy GL path. THREAD_SYNC + USE_ASYNC_FENCE_CB select the
+        // async fence model (virglrenderer's sync thread invokes rutabaga's
+        // write_fence callback) — REQUIRED here because the device worker
+        // never calls virgl_renderer_poll, so synchronous fences would never
+        // retire and the first real GPU submission livelocks. The 8 GiB shm
+        // size is an address-space window for venus blob mappings, not a RAM
+        // reservation.
+        const VIRGLRENDERER_THREAD_SYNC: u32 = 1 << 1;
+        const VIRGLRENDERER_VENUS: u32 = 1 << 6;
+        const VIRGLRENDERER_NO_VIRGL: u32 = 1 << 7;
+        const VIRGLRENDERER_USE_ASYNC_FENCE_CB: u32 = 1 << 8;
+        // Linux + upstream virglrenderer >= 1.x: venus contexts are served
+        // exclusively by the render-server proxy (in-process vkr was removed
+        // from the dispatch) -- without this bit the venus capset fills as
+        // zeros and guests silently fall back to llvmpipe.
+        #[cfg(target_os = "linux")]
+        const VIRGLRENDERER_RENDER_SERVER: u32 = 1 << 9;
+        let gpu = vm.gpu;
+        builder = builder.console(move |c| {
+            let c = c.output(&kernel_log_path).custom(
                 microsandbox_protocol::AGENT_PORT_NAME,
                 Box::new(console_backend),
-            )
+            );
+            if gpu {
+                {
+                #[cfg(target_os = "linux")]
+                let flags = VIRGLRENDERER_VENUS | VIRGLRENDERER_NO_VIRGL | VIRGLRENDERER_THREAD_SYNC | VIRGLRENDERER_USE_ASYNC_FENCE_CB | VIRGLRENDERER_RENDER_SERVER;
+                #[cfg(not(target_os = "linux"))]
+                let flags = VIRGLRENDERER_VENUS | VIRGLRENDERER_NO_VIRGL | VIRGLRENDERER_THREAD_SYNC | VIRGLRENDERER_USE_ASYNC_FENCE_CB;
+                c.gpu_virgl_flags(flags)
+            }
+                    .gpu_shm_size(1usize << 33)
+            } else {
+                c
+            }
         });
     }
     #[cfg(windows)]
