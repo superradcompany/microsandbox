@@ -20,8 +20,8 @@ pub use cloud::{
     CloudErrorDetails, CloudHostPattern, CloudMessageResponse, CloudNetworkSpec, CloudPaginated,
     CloudPatch, CloudPullPolicy, CloudRlimit, CloudRlimitResource, CloudRootfsSource,
     CloudSandboxResources, CloudSandboxRuntimeOptions, CloudSandboxSpec, CloudSandboxStatus,
-    CloudSecretEntry, CloudSecretSource, CloudSecretsConfig, CloudViolationAction,
-    CloudVolumeMount,
+    CloudSandboxStatusReason, CloudSecretEntry, CloudSecretSource, CloudSecretsConfig,
+    CloudViolationAction, CloudVolumeMount,
 };
 pub use domain::{
     Action, CertCacheConfig, DEFAULT_METRICS_SAMPLE_INTERVAL_MS, DEFAULT_SANDBOX_CPUS,

@@ -814,6 +814,10 @@ pub struct CloudCreateSandboxResponse {
     pub slug: String,
     /// Current lifecycle status.
     pub status: CloudSandboxStatus,
+    /// Why the sandbox is not running yet, when known. Only present while
+    /// `status` is `starting`.
+    #[serde(default)]
+    pub status_reason: Option<CloudSandboxStatusReason>,
     /// The sandbox spec the cloud control plane stored for this sandbox.
     pub spec: CloudSandboxSpec,
     /// Whether the sandbox should be removed when its allocation terminates.
@@ -829,9 +833,9 @@ pub struct CloudCreateSandboxResponse {
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(type = "string | null"))]
     pub stopped_at: Option<DateTime<Utc>>,
-    /// Last failure reason, when any.
+    /// Human-readable message for the most recent failure, when any.
     #[serde(default)]
-    pub last_error: Option<String>,
+    pub last_failure_message: Option<String>,
 }
 
 /// Sandbox lifecycle status returned by the cloud control plane.
@@ -852,6 +856,20 @@ pub enum CloudSandboxStatus {
     Stopped,
     /// Sandbox failed.
     Failed,
+}
+
+/// Reason a sandbox start is still in progress. Only meaningful while
+/// `status` is `starting`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum CloudSandboxStatusReason {
+    /// The start has been accepted and is being scheduled.
+    Scheduling,
+    /// No capacity is currently available; the start proceeds when
+    /// capacity frees up.
+    InsufficientCapacity,
 }
 
 /// Wire shape of paginated list responses.
@@ -1525,12 +1543,13 @@ mod tests {
             name: "agent-1".into(),
             slug: "brave-otter".into(),
             status: CloudSandboxStatus::Created,
+            status_reason: None,
             spec: spec("agent-1"),
             ephemeral: true,
             created_at: "2026-05-17T12:00:00Z".parse().unwrap(),
             started_at: None,
             stopped_at: None,
-            last_error: None,
+            last_failure_message: None,
         };
         let json = serde_json::to_value(&sb).unwrap();
         assert_eq!(json["slug"], "brave-otter");
