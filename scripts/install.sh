@@ -13,10 +13,6 @@ BIN_DIR="$INSTALL_DIR/bin"
 LIB_DIR="$INSTALL_DIR/lib"
 LOCAL_BIN_DIR="$HOME/.local/bin"
 
-# libkrunfw versioned filenames (must match the build)
-LIBKRUNFW_VERSION="5.6.0"
-LIBKRUNFW_ABI="5"
-
 # Current Linux release bundles are built on GitHub Actions ubuntu-latest,
 # which currently maps to Ubuntu 24.04 (glibc 2.39).
 LINUX_GLIBC_MIN_VERSION="2.39"
@@ -68,6 +64,34 @@ need_cmd() {
     if ! command -v "$1" > /dev/null 2>&1; then
         error "required command not found: $1"
     fi
+}
+
+resolve_libkrunfw_artifact() {
+    if [ "$OS" = "linux" ]; then
+        # The full version belongs to the release artifact, so discover it
+        # after extraction instead of keeping another version pin here.
+        set -- libkrunfw.so.*.*.*
+        if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+            error "release bundle must contain exactly one versioned libkrunfw shared library"
+        fi
+
+        LIBKRUNFW_FILE=$1
+        _libkrunfw_version=${LIBKRUNFW_FILE#libkrunfw.so.}
+        LIBKRUNFW_ABI=${_libkrunfw_version%%.*}
+    elif [ "$OS" = "darwin" ]; then
+        set -- libkrunfw.*.dylib
+        if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+            error "release bundle must contain exactly one versioned libkrunfw shared library"
+        fi
+
+        LIBKRUNFW_FILE=$1
+        LIBKRUNFW_ABI=${LIBKRUNFW_FILE#libkrunfw.}
+        LIBKRUNFW_ABI=${LIBKRUNFW_ABI%.dylib}
+    fi
+
+    case "$LIBKRUNFW_ABI" in
+        ''|*[!0-9]*) error "release bundle contains an invalid libkrunfw ABI version" ;;
+    esac
 }
 
 link_command() {
@@ -345,6 +369,7 @@ main() {
     # Extract
     info "Extracting..."
     tar -xzf "$_bundle"
+    resolve_libkrunfw_artifact
 
     # Install binaries.
     # install(1) unlinks the target first, so the binary gets a fresh inode
@@ -361,12 +386,12 @@ main() {
     # vnode, so overwriting a running library in-place can cause issues.
     mkdir -p "$LIB_DIR"
     if [ "$OS" = "linux" ]; then
-        install -m 644 "libkrunfw.so.${LIBKRUNFW_VERSION}" "$LIB_DIR/libkrunfw.so.${LIBKRUNFW_VERSION}"
-        ln -sf "libkrunfw.so.${LIBKRUNFW_VERSION}" "$LIB_DIR/libkrunfw.so.${LIBKRUNFW_ABI}"
+        install -m 644 "$LIBKRUNFW_FILE" "$LIB_DIR/$LIBKRUNFW_FILE"
+        ln -sf "$LIBKRUNFW_FILE" "$LIB_DIR/libkrunfw.so.${LIBKRUNFW_ABI}"
         ln -sf "libkrunfw.so.${LIBKRUNFW_ABI}" "$LIB_DIR/libkrunfw.so"
     elif [ "$OS" = "darwin" ]; then
-        cp "libkrunfw.${LIBKRUNFW_ABI}.dylib" "$LIB_DIR/libkrunfw.${LIBKRUNFW_ABI}.dylib.tmp" && mv "$LIB_DIR/libkrunfw.${LIBKRUNFW_ABI}.dylib.tmp" "$LIB_DIR/libkrunfw.${LIBKRUNFW_ABI}.dylib"
-        ln -sf "libkrunfw.${LIBKRUNFW_ABI}.dylib" "$LIB_DIR/libkrunfw.dylib"
+        cp "$LIBKRUNFW_FILE" "$LIB_DIR/${LIBKRUNFW_FILE}.tmp" && mv "$LIB_DIR/${LIBKRUNFW_FILE}.tmp" "$LIB_DIR/$LIBKRUNFW_FILE"
+        ln -sf "$LIBKRUNFW_FILE" "$LIB_DIR/libkrunfw.dylib"
     fi
 
     success "Installed msb to $BIN_DIR/msb"
