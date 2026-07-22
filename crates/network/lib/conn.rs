@@ -90,7 +90,12 @@ struct Connection {
     /// Original destination (from the guest's SYN).
     dst: SocketAddr,
     /// Sends data from smoltcp socket to proxy task (guest → server).
-    to_proxy: mpsc::Sender<Bytes>,
+    ///
+    /// Set to `None` once the guest half-closes (FIN) and all its data has
+    /// been relayed: dropping the sender makes the proxy task's
+    /// `from_smoltcp.recv()` return `None`, propagating the half-close
+    /// upstream while the server → guest direction stays open.
+    to_proxy: Option<mpsc::Sender<Bytes>>,
     /// Receives data from proxy task to write to smoltcp socket (server → guest).
     from_proxy: mpsc::Receiver<Bytes>,
     /// Proxy-side channel ends, held until the connection is ESTABLISHED.
@@ -257,7 +262,7 @@ impl ConnectionTracker {
             Connection {
                 src,
                 dst,
-                to_proxy: to_proxy_tx,
+                to_proxy: Some(to_proxy_tx),
                 from_proxy: from_proxy_rx,
                 proxy_channels: Some(ProxyChannels {
                     from_smoltcp: to_proxy_rx,
@@ -302,7 +307,14 @@ impl ConnectionTracker {
             // an RST via `abort()` is instead sent so happy-eyeballs
             // clients fall back to another family instead of committing
             // to this half-open connection.
-            if conn.to_proxy.is_closed() {
+            let proxy_exited = match &conn.to_proxy {
+                Some(to_proxy) => to_proxy.is_closed(),
+                // The guest already half-closed (sender dropped below), so
+                // proxy exit is detected on the other channel instead: the
+                // proxy drops its `to_smoltcp` sender when it returns.
+                None => conn.from_proxy.is_closed(),
+            };
+            if proxy_exited {
                 if matches!(
                     conn.proxy_connect.status(),
                     ProxyConnectStatus::UpstreamConnectFailed
@@ -330,24 +342,39 @@ impl ConnectionTracker {
             }
 
             // smoltcp → proxy: flush read_buf first, then read from socket.
-            if let Some(pending) = conn.read_buf.take()
-                && let Err(e) = conn.to_proxy.try_send(pending)
-            {
-                conn.read_buf = Some(e.into_inner());
-            }
+            if let Some(to_proxy) = &conn.to_proxy {
+                if let Some(pending) = conn.read_buf.take()
+                    && let Err(e) = to_proxy.try_send(pending)
+                {
+                    conn.read_buf = Some(e.into_inner());
+                }
 
-            if conn.read_buf.is_none() {
-                while socket.can_recv() {
-                    match socket.recv_slice(&mut relay_buf) {
-                        Ok(n) if n > 0 => {
-                            let data = Bytes::copy_from_slice(&relay_buf[..n]);
-                            if let Err(e) = conn.to_proxy.try_send(data) {
-                                conn.read_buf = Some(e.into_inner());
-                                break;
+                if conn.read_buf.is_none() {
+                    while socket.can_recv() {
+                        match socket.recv_slice(&mut relay_buf) {
+                            Ok(n) if n > 0 => {
+                                let data = Bytes::copy_from_slice(&relay_buf[..n]);
+                                if let Err(e) = to_proxy.try_send(data) {
+                                    conn.read_buf = Some(e.into_inner());
+                                    break;
+                                }
                             }
+                            _ => break,
                         }
-                        _ => break,
                     }
+                }
+
+                // Guest half-close: the guest sent a FIN (CLOSE_WAIT) and
+                // everything it sent has been relayed. Drop the sender so
+                // the proxy task sees EOF and can shut down the guest →
+                // server direction upstream. The server → guest direction
+                // stays open; the socket is closed once the proxy task
+                // exits (see `proxy_exited` above).
+                if matches!(socket.state(), tcp::State::CloseWait)
+                    && conn.read_buf.is_none()
+                    && !socket.can_recv()
+                {
+                    conn.to_proxy = None;
                 }
             }
 
