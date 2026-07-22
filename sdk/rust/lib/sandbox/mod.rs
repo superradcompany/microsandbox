@@ -1427,19 +1427,19 @@ impl Sandbox {
         Ok(handle.status_snapshot())
     }
 
-    /// Live last-error string from the backend, when any. Always hits the
+    /// Live failure message from the backend, when any. Always hits the
     /// backend, never reads a cached field.
     ///
     /// Each call is a separate round-trip. If you need this alongside
     /// `status()`, fetch a fresh [`SandboxHandle`] via
     /// [`Sandbox::get`](Self::get) once and read both off the snapshot.
-    pub async fn last_error(&self) -> MicrosandboxResult<Option<String>> {
+    pub async fn last_failure_message(&self) -> MicrosandboxResult<Option<String>> {
         let handle = self
             .backend
             .sandboxes()
             .get(self.backend.clone(), &self.name)
             .await?;
-        Ok(handle.last_error_snapshot())
+        Ok(handle.last_failure_message_snapshot())
     }
 
     /// Read captured output from `exec.log` for this sandbox.

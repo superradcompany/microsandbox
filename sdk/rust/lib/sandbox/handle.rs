@@ -102,7 +102,7 @@ impl SandboxHandle {
                 created_at: Some(cloud.created_at),
                 started_at: cloud.started_at,
                 stopped_at: cloud.stopped_at,
-                last_error: cloud.last_error,
+                last_failure_message: cloud.last_failure_message,
             }),
             name,
         })
@@ -159,11 +159,11 @@ impl SandboxHandle {
         }
     }
 
-    /// Snapshot of the cloud `last_error`, if any. Returns `None` for local
-    /// handles (local error reporting flows through the typed error stack).
-    pub fn last_error_snapshot(&self) -> Option<String> {
+    /// Snapshot of the cloud `last_failure_message`, if any. Returns `None`
+    /// for local handles (local errors flow through the typed error stack).
+    pub fn last_failure_message_snapshot(&self) -> Option<String> {
         match &self.inner {
-            SandboxHandleInner::Cloud(s) => s.last_error.clone(),
+            SandboxHandleInner::Cloud(s) => s.last_failure_message.clone(),
             SandboxHandleInner::Local(_) => None,
         }
     }
