@@ -213,6 +213,8 @@ m.WithNetwork(m.NetworkPolicy.FromProfiles(
 
 Build a deny-by-default policy from `NetworkProfilePublic`, `NetworkProfilePrivate`, and `NetworkProfileHost`. Duplicate profiles are ignored, rules use canonical order, and each non-empty set receives one gateway DNS rule. An empty profile set permits no egress and adds no DNS; ingress defaults to allow.
 
+`FromProfiles` panics if passed a value other than the three package-defined `NetworkProfile` constants.
+
 <p className="msb-label">Returns</p>
 
 <div className="msb-params">

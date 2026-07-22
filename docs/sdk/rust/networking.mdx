@@ -89,6 +89,8 @@ Build a deny-by-default policy from composable [`NetworkProfile`](#networkprofil
 <Accordion title="Example">
 
 ```rust
+use microsandbox::{NetworkPolicy, NetworkProfile};
+
 let policy = NetworkPolicy::from_profiles([
     NetworkProfile::Public,
     NetworkProfile::Private,

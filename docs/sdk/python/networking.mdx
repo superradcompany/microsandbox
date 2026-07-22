@@ -14,6 +14,7 @@ from microsandbox import (
     Destination,
     Network,
     NetworkPolicy,
+    NetworkProfile,
     PortBinding,
     Protocol,
     Rule,
@@ -84,6 +85,8 @@ def from_profiles(*profiles: NetworkProfile | str) -> Network
 Build a deny-by-default network configuration from `PUBLIC`, `PRIVATE`, and `HOST` profiles. Duplicate profiles are ignored, generated rules use canonical order, and gateway DNS is added automatically for every non-empty profile set.
 
 ```python
+from microsandbox import Network, NetworkProfile
+
 network = Network.from_profiles(NetworkProfile.PUBLIC, NetworkProfile.PRIVATE)
 ```
 

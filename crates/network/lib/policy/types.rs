@@ -1594,6 +1594,9 @@ mod tests {
         assert!(egress_tcp(&policy, "127.0.0.1", &shared).is_deny());
         // Metadata is not in Public.
         assert!(egress_tcp(&policy, "169.254.169.254", &shared).is_deny());
+        // Unspecified addresses are reserved and do not belong to Public.
+        assert!(egress_tcp(&policy, "0.0.0.0", &shared).is_deny());
+        assert!(egress_tcp(&policy, "::", &shared).is_deny());
     }
 
     //----------------------------------------------------------------------------------------------

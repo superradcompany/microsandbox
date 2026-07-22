@@ -673,6 +673,18 @@ mod tests {
     }
 
     #[test]
+    fn rebind_filter_rejects_unspecified_answers_for_public_profile() {
+        let policy = NetworkPolicy::from_profiles([NetworkProfile::Public]);
+        let shared = SharedState::new(4);
+        for addr in ["0.0.0.0", "::"] {
+            assert!(
+                !policy_allows_rebind_address(&policy, &shared, addr.parse().unwrap()),
+                "expected {addr} to remain blocked by rebind protection"
+            );
+        }
+    }
+
+    #[test]
     fn rebind_filter_remains_enabled_for_allow_all_default() {
         let policy = NetworkPolicy::allow_all();
         let shared = SharedState::new(4);

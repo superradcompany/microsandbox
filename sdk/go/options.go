@@ -989,6 +989,8 @@ func (networkPolicyFactory) AllowAll() *NetworkConfig {
 
 // FromProfiles returns a canonical deny-by-default policy. Duplicate profiles
 // are ignored, gateway DNS is added once, and group rules use fixed order.
+// It panics if a profile is not one of the package-defined NetworkProfile
+// constants.
 func (networkPolicyFactory) FromProfiles(profiles ...NetworkProfile) *NetworkConfig {
 	requested := make(map[NetworkProfile]bool, len(profiles))
 	for _, profile := range profiles {

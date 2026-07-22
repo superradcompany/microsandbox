@@ -96,7 +96,7 @@ Explicit `--net-rule` entries are evaluated before profile-generated rules, so t
 
 | Form | Example | Notes |
 | ---- | ------- | ----- |
-| IP / CIDR | `198.51.100.5`, `10.0.0.0/8`, `[2001:db8::]/32` | IPv6 must be bracketed |
+| IP / CIDR | `198.51.100.5`, `10.0.0.0/8`, `[2001:db8::/32]` | IPv6 must be bracketed |
 | Domain (exact) | `example.com` | Use `domain=public` to disambiguate from the `public` group |
 | DNS | `dns` | Semantic gateway DNS target: UDP/53 + TCP/53. May be qualified with `tcp`, `udp`, or `any` |
 | Domain suffix | `*.example.com`, `suffix=example.com` | Matches the apex and any subdomain at any depth. Suffixes must be at least two labels: `*.com` and `suffix=local` are rejected to prevent accidental blast radius |
