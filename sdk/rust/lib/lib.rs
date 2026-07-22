@@ -45,8 +45,6 @@ pub use microsandbox_image::{ImageArchiveFormat, RegistryAuth};
 pub use microsandbox_protocol as protocol;
 pub use microsandbox_runtime::logging::LogLevel;
 pub use microsandbox_utils::size;
-#[cfg(feature = "net")]
-pub use sandbox::NetworkPolicy;
 pub use sandbox::exec::{ExecControl, ExecEvent, ExecHandle};
 #[cfg(feature = "ssh")]
 pub use sandbox::ssh::{
@@ -65,6 +63,8 @@ pub use sandbox::{
     all_sandbox_metrics_local, all_sandbox_metrics_reports_local, sandbox_metrics_report_local,
     validate_sandbox_name,
 };
+#[cfg(feature = "net")]
+pub use sandbox::{NetworkPolicy, NetworkProfile};
 pub use snapshot::{
     SaveOpts, Snapshot, SnapshotBuilder, SnapshotConfig, SnapshotFormat, SnapshotHandle,
     SnapshotScope, SnapshotSpec, SnapshotVerifyReport, UpperIntegrity, UpperVerifyStatus,

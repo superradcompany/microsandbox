@@ -1559,7 +1559,6 @@ type MountSpec struct {
 
 // NetworkOptions is the JSON representation of the network config block.
 type NetworkOptions struct {
-	Policy              string               `json:"policy,omitempty"`
 	CustomPolicy        *CustomNetworkPolicy `json:"custom_policy,omitempty"`
 	DNS                 *DNSOptions          `json:"dns,omitempty"`
 	DNSRebindProtection *bool                `json:"dns_rebind_protection,omitempty"`

@@ -508,7 +508,7 @@ impl SandboxBuilder {
     /// ```ignore
     /// .network(|n| n
     ///     .port(8080, 80)
-    ///     .policy(NetworkPolicy::public_only())
+    ///     .policy(NetworkPolicy::default())
     ///     .tls(|t| t.bypass("*.internal.com"))
     /// )
     /// ```

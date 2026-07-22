@@ -7,7 +7,7 @@ import {
   Rule,
 } from "../../dist/index.js";
 
-describe("NetworkPolicy presets", () => {
+describe("NetworkPolicy profiles", () => {
   it("none denies in both directions", () => {
     expect(NetworkPolicy.none()).toEqual({
       defaultEgress: "deny",
@@ -24,8 +24,8 @@ describe("NetworkPolicy presets", () => {
     });
   });
 
-  it("publicOnly denies egress by default and adds DNS + allow-public rules", () => {
-    const p = NetworkPolicy.publicOnly();
+  it("public profile denies egress by default and adds DNS + allow-public rules", () => {
+    const p = NetworkPolicy.fromProfiles(["public"]);
     expect(p.defaultEgress).toBe("deny");
     expect(p.defaultIngress).toBe("allow");
     expect(p.rules).toHaveLength(2);
@@ -43,12 +43,32 @@ describe("NetworkPolicy presets", () => {
     });
   });
 
-  it("nonLocal allows DNS + public + private egress", () => {
-    const p = NetworkPolicy.nonLocal();
-    expect(p.rules).toHaveLength(3);
+  it("deduplicates and canonically orders composed profiles", () => {
+    const p = NetworkPolicy.fromProfiles([
+      "host",
+      "private",
+      "public",
+      "private",
+    ]);
+    expect(p.rules).toHaveLength(4);
     expect(p.rules[0].destination).toMatchObject({ kind: "group", group: "host" });
     expect(p.rules[1].destination).toMatchObject({ kind: "group", group: "public" });
     expect(p.rules[2].destination).toMatchObject({ kind: "group", group: "private" });
+    expect(p.rules[3].destination).toMatchObject({ kind: "group", group: "host" });
+  });
+
+  it("does not add DNS for an empty profile set", () => {
+    expect(NetworkPolicy.fromProfiles([])).toEqual({
+      defaultEgress: "deny",
+      defaultIngress: "allow",
+      rules: [],
+    });
+  });
+
+  it("rejects unknown profiles at the runtime boundary", () => {
+    expect(() =>
+      NetworkPolicy.fromProfiles(["bogus" as never]),
+    ).toThrowError("unknown network profile: bogus");
   });
 });
 
@@ -76,6 +96,13 @@ describe("Rule factory", () => {
       protocols: ["udp", "tcp"],
       ports: [{ start: 53, end: 53 }],
       action: "allow",
+    });
+  });
+
+  it("denyDns is the action inverse of allowDns", () => {
+    expect(Rule.denyDns()).toEqual({
+      ...Rule.allowDns(),
+      action: "deny",
     });
   });
 });

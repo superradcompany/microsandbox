@@ -141,7 +141,7 @@ pub use microsandbox_network::builder::SecretBuilder;
 #[cfg(feature = "net")]
 pub use microsandbox_network::config::NetworkConfig;
 #[cfg(feature = "net")]
-pub use microsandbox_network::policy::NetworkPolicy;
+pub use microsandbox_network::policy::{NetworkPolicy, NetworkProfile};
 pub use microsandbox_runtime::logging::LogLevel;
 pub use microsandbox_types::PullPolicy;
 pub use microsandbox_types::{

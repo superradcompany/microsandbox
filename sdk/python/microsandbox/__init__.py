@@ -122,6 +122,7 @@ from microsandbox.types import (
     Network,
     NetworkDestination,
     NetworkPolicy,
+    NetworkProfile,
     Patch,
     PatchConfig,
     PortBinding,
@@ -226,6 +227,7 @@ __all__ = [
     # Network
     "Network",
     "NetworkPolicy",
+    "NetworkProfile",
     "Rule",
     "Destination",
     "NetworkDestination",

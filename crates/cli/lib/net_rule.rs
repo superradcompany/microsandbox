@@ -9,7 +9,7 @@
 //! <TOKEN>     := <action>[:<direction>]@<target>[:<proto>[:<ports>]]
 //! <action>    := allow | deny
 //! <direction> := egress | ingress | any                    (default: egress)
-//! <target>    := any | <group> | <ipv4> | [<ipv6>] | <cidr> | [<ipv6-cidr>]
+//! <target>    := any | dns | <group> | <ipv4> | [<ipv6>] | <cidr> | [<ipv6-cidr>]
 //!              | <fqdn> | domain=<name> | suffix=<domain>
 //! <group>     := public | private | loopback | link-local | meta | multicast | host
 //! <proto>     := any | tcp | udp | icmpv4 | icmpv6
@@ -74,7 +74,7 @@ pub enum RuleParseError {
     /// The target field is empty or doesn't match any recognized form.
     #[error(
         "`{raw}` is not a valid target. \
-         Expected: any, a group name (public, private, loopback, link-local, meta, multicast, host), \
+         Expected: any, dns, a group name (public, private, loopback, link-local, meta, multicast, host), \
          an IP, a CIDR, a domain (with dot), domain=<name>, or suffix=<domain>{suggestion}"
     )]
     InvalidTarget {
@@ -169,6 +169,18 @@ pub enum RuleParseError {
          port numbers don't belong in the target"
     )]
     PortInProtocolSlot { target: String, value: String },
+
+    /// The `dns` macro only describes gateway-bound egress.
+    #[error("the `dns` target only supports egress rules; omit the direction or use `:egress`")]
+    DnsMustBeEgress,
+
+    /// The `dns` macro only covers UDP and TCP DNS.
+    #[error("the `dns` target supports `tcp`, `udp`, or `any`, not `{raw}`")]
+    InvalidDnsProtocol { raw: String },
+
+    /// The `dns` macro is fixed to port 53.
+    #[error("the `dns` target is fixed to port 53; omit the port or use `53`/`any`")]
+    InvalidDnsPort,
 }
 
 /// Renders an optional Levenshtein-2 suggestion as `". Did you mean
@@ -204,6 +216,10 @@ pub fn parse_rule_token(token: &str) -> Result<Rule, RuleParseError> {
 
     let (action, direction) = parse_action_and_direction(left)?;
 
+    if right == "dns" || right.starts_with("dns:") {
+        return parse_dns_rule(right, action, direction, token);
+    }
+
     let (destination, proto_raw, ports_raw) = match right.strip_prefix('[') {
         Some(after_open) => parse_bracketed_right(after_open, token)?,
         None => parse_unbracketed_right(right, token)?,
@@ -231,6 +247,50 @@ pub fn parse_rule_token(token: &str) -> Result<Rule, RuleParseError> {
         destination,
         protocols,
         ports,
+        action,
+    })
+}
+
+/// Expand the semantic `dns` target into the gateway TCP/UDP port-53 rule.
+fn parse_dns_rule(
+    right: &str,
+    action: Action,
+    direction: Direction,
+    token: &str,
+) -> Result<Rule, RuleParseError> {
+    if direction != Direction::Egress {
+        return Err(RuleParseError::DnsMustBeEgress);
+    }
+
+    let mut parts = right.splitn(4, ':');
+    debug_assert_eq!(parts.next(), Some("dns"));
+    let proto_raw = parts.next();
+    let ports_raw = parts.next();
+    if parts.next().is_some() {
+        return Err(RuleParseError::TrailingJunk {
+            token: token.to_string(),
+        });
+    }
+
+    let protocols = match proto_raw {
+        None | Some("") | Some("any") => vec![Protocol::Udp, Protocol::Tcp],
+        Some("udp") => vec![Protocol::Udp],
+        Some("tcp") => vec![Protocol::Tcp],
+        Some(raw) => {
+            return Err(RuleParseError::InvalidDnsProtocol {
+                raw: raw.to_string(),
+            });
+        }
+    };
+    if !matches!(ports_raw, None | Some("") | Some("any") | Some("53")) {
+        return Err(RuleParseError::InvalidDnsPort);
+    }
+
+    Ok(Rule {
+        direction,
+        destination: Destination::Group(DestinationGroup::Host),
+        protocols,
+        ports: vec![PortRange::single(53)],
         action,
     })
 }
@@ -313,7 +373,8 @@ pub fn parse_rule_list(comma_separated: &str) -> Result<Vec<Rule>, RuleParseErro
 
 const ACTION_KEYWORDS: &[&str] = &["allow", "deny"];
 const DIRECTION_KEYWORDS: &[&str] = &["egress", "ingress", "any"];
-const GROUP_KEYWORDS: &[&str] = &[
+const TARGET_KEYWORDS: &[&str] = &[
+    "dns",
     "public",
     "private",
     "loopback",
@@ -428,7 +489,7 @@ fn parse_target(raw: &str) -> Result<Destination, RuleParseError> {
     }
 
     // 8. Bare single-label is ambiguous — could be a typoed group.
-    let suggestion = suggest(raw, GROUP_KEYWORDS);
+    let suggestion = suggest(raw, TARGET_KEYWORDS);
     Err(RuleParseError::AmbiguousBareToken {
         raw: raw.to_string(),
         suggestion: SuggestionDisplay(suggestion),
@@ -612,6 +673,42 @@ mod tests {
         ));
         assert!(r.protocols.is_empty());
         assert!(r.ports.is_empty());
+    }
+
+    #[test]
+    fn dns_target_expands_to_gateway_udp_and_tcp_port_53() {
+        let rule = parse_rule_token("allow@dns").unwrap();
+        assert_eq!(rule.direction, Direction::Egress);
+        assert_eq!(rule.protocols, [Protocol::Udp, Protocol::Tcp]);
+        assert_eq!(rule.ports, [PortRange::single(53)]);
+        assert!(matches!(
+            rule.destination,
+            Destination::Group(DestinationGroup::Host)
+        ));
+    }
+
+    #[test]
+    fn deny_dns_and_protocol_qualifier_are_supported() {
+        let rule = parse_rule_token("deny@dns:tcp").unwrap();
+        assert_eq!(rule.action, Action::Deny);
+        assert_eq!(rule.protocols, [Protocol::Tcp]);
+        assert_eq!(rule.ports, [PortRange::single(53)]);
+    }
+
+    #[test]
+    fn dns_target_rejects_ingress_icmp_and_non_dns_ports() {
+        assert!(matches!(
+            parse_rule_token("allow:ingress@dns"),
+            Err(RuleParseError::DnsMustBeEgress)
+        ));
+        assert!(matches!(
+            parse_rule_token("allow@dns:icmpv4"),
+            Err(RuleParseError::InvalidDnsProtocol { .. })
+        ));
+        assert!(matches!(
+            parse_rule_token("allow@dns:udp:5353"),
+            Err(RuleParseError::InvalidDnsPort)
+        ));
     }
 
     #[test]

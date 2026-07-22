@@ -806,13 +806,8 @@ type RegistryAuth struct {
 
 // NetworkConfig configures the sandbox network stack.
 type NetworkConfig struct {
-	// Policy is a preset name: "none", "public-only", "allow-all", "non-local".
-	// Mutually exclusive with custom rules.
-	Policy NetworkPolicyPreset
-
-	// Rules are custom ordered allow/deny rules (first match wins). When
-	// set, Policy is still honoured: preset rules come first, custom rules
-	// follow. Use DefaultEgress / DefaultIngress to set fall-through behaviour.
+	// Rules are custom ordered allow/deny rules (first match wins). Use
+	// DefaultEgress / DefaultIngress to set fall-through behaviour.
 	Rules []PolicyRule
 
 	// DefaultEgress is "allow" or "deny"; falls through here when no rule
@@ -895,6 +890,31 @@ type PolicyRule struct {
 	Ports []string
 }
 
+// networkRuleFactory constructs semantic low-level rules shared with the
+// other SDKs.
+type networkRuleFactory struct{}
+
+// Rule is the factory namespace for semantic low-level policy rules.
+var Rule networkRuleFactory
+
+// AllowDNS permits gateway UDP/53 and TCP/53.
+func (networkRuleFactory) AllowDNS() PolicyRule {
+	return PolicyRule{
+		Action:      PolicyActionAllow,
+		Direction:   PolicyDirectionEgress,
+		Destination: "host",
+		Protocols:   []PolicyProtocol{PolicyProtocolUDP, PolicyProtocolTCP},
+		Port:        "53",
+	}
+}
+
+// DenyDNS blocks gateway UDP/53 and TCP/53.
+func (networkRuleFactory) DenyDNS() PolicyRule {
+	rule := Rule.AllowDNS()
+	rule.Action = PolicyActionDeny
+	return rule
+}
+
 // ScopedUpstreamCACert configures an upstream CA bundle for a host pattern.
 type ScopedUpstreamCACert struct {
 	// Pattern is an exact host or "*.suffix" wildcard.
@@ -946,37 +966,58 @@ type TLSConfig struct {
 	ScopedVerifyUpstream []ScopedVerifyUpstream
 }
 
-// networkPolicyFactory is the static-method surface matching the Node
-// NetworkPolicy class and the Python Network classmethods. Invoke through
-// the package-level NetworkPolicy value, e.g. `microsandbox.NetworkPolicy.PublicOnly()`.
+// networkPolicyFactory is the static-method surface shared with the other SDKs.
 type networkPolicyFactory struct{}
 
-// NetworkPolicy is the factory namespace for common network presets.
+// NetworkPolicy is the factory namespace for high-level network policies.
 //
-//	microsandbox.WithNetwork(microsandbox.NetworkPolicy.PublicOnly())
+//	microsandbox.WithNetwork(microsandbox.NetworkPolicy.FromProfiles(
+//		microsandbox.NetworkProfilePublic,
+//		microsandbox.NetworkProfilePrivate,
+//	))
 var NetworkPolicy networkPolicyFactory
 
 // None returns a NetworkConfig that blocks all network access.
 func (networkPolicyFactory) None() *NetworkConfig {
-	return &NetworkConfig{Policy: NetworkPolicyPresetNone}
-}
-
-// PublicOnly returns a NetworkConfig that allows only public internet traffic
-// (RFC-1918 private ranges are blocked). This is the default when no network
-// configuration is supplied.
-func (networkPolicyFactory) PublicOnly() *NetworkConfig {
-	return &NetworkConfig{Policy: NetworkPolicyPresetPublicOnly}
+	return &NetworkConfig{DefaultEgress: PolicyActionDeny, DefaultIngress: PolicyActionDeny}
 }
 
 // AllowAll returns a NetworkConfig that permits all network traffic.
 func (networkPolicyFactory) AllowAll() *NetworkConfig {
-	return &NetworkConfig{Policy: NetworkPolicyPresetAllowAll}
+	return &NetworkConfig{DefaultEgress: PolicyActionAllow, DefaultIngress: PolicyActionAllow}
 }
 
-// NonLocal returns a NetworkConfig that allows public internet plus
-// private/LAN egress; blocks loopback, link-local, and metadata.
-func (networkPolicyFactory) NonLocal() *NetworkConfig {
-	return &NetworkConfig{Policy: NetworkPolicyPresetNonLocal}
+// FromProfiles returns a canonical deny-by-default policy. Duplicate profiles
+// are ignored, gateway DNS is added once, and group rules use fixed order.
+func (networkPolicyFactory) FromProfiles(profiles ...NetworkProfile) *NetworkConfig {
+	requested := make(map[NetworkProfile]bool, len(profiles))
+	for _, profile := range profiles {
+		switch profile {
+		case NetworkProfilePublic, NetworkProfilePrivate, NetworkProfileHost:
+		default:
+			panic(fmt.Sprintf("microsandbox: unknown network profile %q", profile))
+		}
+		requested[profile] = true
+	}
+	config := &NetworkConfig{DefaultEgress: PolicyActionDeny, DefaultIngress: PolicyActionAllow}
+	if len(requested) == 0 {
+		return config
+	}
+	config.Rules = append(config.Rules, Rule.AllowDNS())
+	for _, profile := range []NetworkProfile{
+		NetworkProfilePublic,
+		NetworkProfilePrivate,
+		NetworkProfileHost,
+	} {
+		if requested[profile] {
+			config.Rules = append(config.Rules, PolicyRule{
+				Action:      PolicyActionAllow,
+				Direction:   PolicyDirectionEgress,
+				Destination: string(profile),
+			})
+		}
+	}
+	return config
 }
 
 // ---------------------------------------------------------------------------

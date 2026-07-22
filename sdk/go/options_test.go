@@ -291,7 +291,7 @@ func TestWithPortBindings(t *testing.T) {
 
 func TestWithNetwork(t *testing.T) {
 	o := SandboxConfig{}
-	net := &NetworkConfig{Policy: NetworkPolicyPresetPublicOnly}
+	net := NetworkPolicy.FromProfiles(NetworkProfilePublic)
 	WithNetwork(net)(&o)
 	if o.Network != net {
 		t.Error("WithNetwork should set the Network pointer")
@@ -299,7 +299,7 @@ func TestWithNetwork(t *testing.T) {
 }
 
 func TestWithNetworkNilClearsPolicy(t *testing.T) {
-	o := SandboxConfig{Network: &NetworkConfig{Policy: NetworkPolicyPresetAllowAll}}
+	o := SandboxConfig{Network: NetworkPolicy.AllowAll()}
 	WithNetwork(nil)(&o)
 	if o.Network != nil {
 		t.Error("WithNetwork(nil) should clear Network")
@@ -307,20 +307,45 @@ func TestWithNetworkNilClearsPolicy(t *testing.T) {
 }
 
 func TestNetworkPolicyFactory(t *testing.T) {
-	cases := []struct {
-		got  *NetworkConfig
-		want NetworkPolicyPreset
-	}{
-		{NetworkPolicy.None(), NetworkPolicyPresetNone},
-		{NetworkPolicy.PublicOnly(), NetworkPolicyPresetPublicOnly},
-		{NetworkPolicy.AllowAll(), NetworkPolicyPresetAllowAll},
-		{NetworkPolicy.NonLocal(), NetworkPolicyPresetNonLocal},
+	if got := NetworkPolicy.None(); got.DefaultEgress != PolicyActionDeny || got.DefaultIngress != PolicyActionDeny {
+		t.Fatalf("None defaults = %q/%q", got.DefaultEgress, got.DefaultIngress)
 	}
-	for _, c := range cases {
-		if c.got.Policy != c.want {
-			t.Errorf("Policy: got %q, want %q", c.got.Policy, c.want)
+	if got := NetworkPolicy.AllowAll(); got.DefaultEgress != PolicyActionAllow || got.DefaultIngress != PolicyActionAllow {
+		t.Fatalf("AllowAll defaults = %q/%q", got.DefaultEgress, got.DefaultIngress)
+	}
+	got := NetworkPolicy.FromProfiles(NetworkProfileHost, NetworkProfilePrivate, NetworkProfilePublic, NetworkProfilePrivate)
+	if len(got.Rules) != 4 {
+		t.Fatalf("FromProfiles rules = %d, want 4", len(got.Rules))
+	}
+	want := []string{"host", "public", "private", "host"}
+	for i, destination := range want {
+		if got.Rules[i].Destination != destination {
+			t.Errorf("rule %d destination = %q, want %q", i, got.Rules[i].Destination, destination)
 		}
 	}
+}
+
+func TestDNSRuleFactory(t *testing.T) {
+	allow := Rule.AllowDNS()
+	deny := Rule.DenyDNS()
+	if allow.Action != PolicyActionAllow || deny.Action != PolicyActionDeny {
+		t.Fatalf("DNS actions = %q/%q", allow.Action, deny.Action)
+	}
+	if allow.Destination != "host" || allow.Port != "53" {
+		t.Fatalf("AllowDNS = %#v", allow)
+	}
+	if len(allow.Protocols) != 2 || allow.Protocols[0] != PolicyProtocolUDP || allow.Protocols[1] != PolicyProtocolTCP {
+		t.Fatalf("AllowDNS protocols = %#v", allow.Protocols)
+	}
+}
+
+func TestNetworkPolicyProfilesRejectUnknownValue(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("FromProfiles should panic for an unknown typed value")
+		}
+	}()
+	NetworkPolicy.FromProfiles(NetworkProfile("bogus"))
 }
 
 func TestWithSecrets(t *testing.T) {
@@ -448,19 +473,12 @@ func TestPatchCopyFileFields(t *testing.T) {
 	}
 }
 
-func TestNetworkConfigPreset(t *testing.T) {
-	for _, preset := range []NetworkPolicyPreset{
-		NetworkPolicyPresetNone,
-		NetworkPolicyPresetPublicOnly,
-		NetworkPolicyPresetAllowAll,
-		NetworkPolicyPresetNonLocal,
-	} {
-		n := &NetworkConfig{Policy: preset}
-		o := SandboxConfig{}
-		WithNetwork(n)(&o)
-		if o.Network.Policy != preset {
-			t.Errorf("Policy: got %q, want %q", o.Network.Policy, preset)
-		}
+func TestNetworkConfigProfiles(t *testing.T) {
+	n := NetworkPolicy.FromProfiles(NetworkProfilePublic, NetworkProfilePrivate)
+	o := SandboxConfig{}
+	WithNetwork(n)(&o)
+	if len(o.Network.Rules) != 3 {
+		t.Fatalf("Rules len = %d, want DNS + two profiles", len(o.Network.Rules))
 	}
 }
 

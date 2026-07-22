@@ -1163,7 +1163,7 @@ pub(super) fn cloud_create_request_from_config(
     #[cfg(feature = "net")]
     {
         // Only flag user-set opt-in fields. The default `NetworkConfig`
-        // ships with a baseline policy (`public_only`) and built-in DNS
+        // ships with a baseline public profile and built-in DNS
         // settings, so comparing those would always trigger; instead we
         // catch the explicit-add fields (ports, secrets, custom DNS
         // resolvers, host-CA trust).

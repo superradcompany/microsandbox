@@ -229,12 +229,20 @@ impl DnsForwarder {
         // Rebind protection: reject responses containing private/reserved IPs.
         if self.config.rebind_protection {
             for record in &response_msg.answers {
-                let is_private = match &record.data {
-                    RData::A(a) => is_private_ipv4((*a).into()),
-                    RData::AAAA(aaaa) => is_private_ipv6((*aaaa).into()),
-                    _ => false,
+                let private_addr = match &record.data {
+                    RData::A(a) => {
+                        let addr = IpAddr::V4((*a).into());
+                        is_private_ipv4((*a).into()).then_some(addr)
+                    }
+                    RData::AAAA(aaaa) => {
+                        let addr = IpAddr::V6((*aaaa).into());
+                        is_private_ipv6((*aaaa).into()).then_some(addr)
+                    }
+                    _ => None,
                 };
-                if is_private {
+                if private_addr.is_some_and(|addr| {
+                    !policy_allows_rebind_address(&self.network_policy, &self.shared, addr)
+                }) {
                     tracing::debug!(
                         domain = %domain,
                         "DNS rebind protection: response contains private IP"
@@ -437,6 +445,23 @@ impl DnsForwarder {
     }
 }
 
+/// Return whether a private/reserved DNS answer was explicitly made reachable.
+///
+/// Rebind protection remains fail-closed unless an address-only TCP or UDP
+/// policy evaluation allows the answer. Port-scoped rules do not qualify here;
+/// they cannot be evaluated safely before the guest chooses a connection port.
+fn policy_allows_rebind_address(
+    policy: &NetworkPolicy,
+    shared: &SharedState,
+    addr: IpAddr,
+) -> bool {
+    [crate::policy::Protocol::Tcp, crate::policy::Protocol::Udp]
+        .into_iter()
+        .any(|protocol| {
+            policy.evaluate_explicit_egress_ip(addr, protocol, shared) == Some(Action::Allow)
+        })
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -609,7 +634,7 @@ fn build_truncated_response(query: &Message) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::Protocol;
+    use crate::policy::{Action, Destination, NetworkProfile, Protocol, Rule};
     use hickory_net::proto::op::{Edns, MessageType, OpCode, Query};
     use hickory_net::proto::rr::{DNSClass, Name, RecordType};
 
@@ -623,6 +648,75 @@ mod tests {
         q.set_query_class(DNSClass::IN);
         msg.add_query(q);
         msg
+    }
+
+    #[test]
+    fn rebind_filter_allows_private_answers_for_private_profile() {
+        let policy = NetworkPolicy::from_profiles([NetworkProfile::Private]);
+        let shared = SharedState::new(4);
+        assert!(policy_allows_rebind_address(
+            &policy,
+            &shared,
+            "10.20.30.40".parse().unwrap()
+        ));
+    }
+
+    #[test]
+    fn rebind_filter_rejects_private_answers_for_public_profile() {
+        let policy = NetworkPolicy::from_profiles([NetworkProfile::Public]);
+        let shared = SharedState::new(4);
+        assert!(!policy_allows_rebind_address(
+            &policy,
+            &shared,
+            "10.20.30.40".parse().unwrap()
+        ));
+    }
+
+    #[test]
+    fn rebind_filter_remains_enabled_for_allow_all_default() {
+        let policy = NetworkPolicy::allow_all();
+        let shared = SharedState::new(4);
+        assert!(!policy_allows_rebind_address(
+            &policy,
+            &shared,
+            "10.20.30.40".parse().unwrap()
+        ));
+    }
+
+    #[test]
+    fn rebind_filter_does_not_treat_explicit_any_as_private_intent() {
+        let policy = NetworkPolicy {
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![Rule::allow_egress(Destination::Any)],
+        };
+        let shared = SharedState::new(4);
+        assert!(!policy_allows_rebind_address(
+            &policy,
+            &shared,
+            "10.20.30.40".parse().unwrap()
+        ));
+    }
+
+    #[test]
+    fn rebind_filter_honors_ordered_deny_before_private_allow() {
+        let mut policy = NetworkPolicy::from_profiles([NetworkProfile::Private]);
+        policy.rules.insert(
+            0,
+            Rule {
+                direction: crate::policy::Direction::Egress,
+                destination: Destination::Cidr("10.20.30.40/32".parse().unwrap()),
+                protocols: Vec::new(),
+                ports: Vec::new(),
+                action: Action::Deny,
+            },
+        );
+        let shared = SharedState::new(4);
+        assert!(!policy_allows_rebind_address(
+            &policy,
+            &shared,
+            "10.20.30.40".parse().unwrap()
+        ));
     }
 
     #[test]
@@ -816,13 +910,13 @@ mod tests {
 
     #[test]
     fn decide_upstream_policy_denied_when_policy_denies_resolver() {
-        // public_only policy denies private addresses — guest aiming at
+        // The public profile denies private addresses — guest aiming at
         // a private resolver should be routed to the denial path (a
         // synthesized NXDOMAIN) rather than silently hitting the configured
         // upstream instead.
         let gw = gateway_set();
         let shared = SharedState::new(4);
-        let policy = NetworkPolicy::public_only();
+        let policy = NetworkPolicy::default();
         let dst = Some(IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 53)));
         assert_eq!(
             decide_upstream(&gw, &policy, &shared, dst, Transport::Udp),
