@@ -58,6 +58,8 @@ sb, err := m.CreateSandbox(ctx, "worker",
 
 The normal layered root remains the default and retains layer-level deduplication. Flat v1 is local-only, ext4-only, and incompatible with rootfs patches and snapshots; unsupported combinations fail explicitly.
 
+See [Performance optimization](/optimization/overview#storage-layout-layered-or-flat) for workload tradeoffs, host filesystem expectations, and how to verify the clone strategy actually used.
+
 ## Scripts
 
 Scripts are files mounted at `/.msb/scripts/` inside the sandbox. The directory is on `PATH`, so each script is callable by name through `exec()` or `shell()`.
