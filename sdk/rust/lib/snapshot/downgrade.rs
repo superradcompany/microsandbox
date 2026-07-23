@@ -29,6 +29,7 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 
 const FORWARD_KIND: &str = "v0.6.6-manifest-to-snapshot-v1";
 const REVERSE_KIND: &str = "v0.6.7-snapshot-to-v0.6.6-manifest";
+#[cfg(unix)]
 const MIGRATION_LOCK_FILENAME: &str = ".snapshot-migration.lock";
 const MAX_DESCRIPTOR_BYTES: u64 = 1024 * 1024;
 const MAX_PARENT_DEPTH: usize = 128;
