@@ -51,10 +51,26 @@ describe("NetworkPolicy profiles", () => {
       "private",
     ]);
     expect(p.rules).toHaveLength(4);
-    expect(p.rules[0].destination).toMatchObject({ kind: "group", group: "host" });
-    expect(p.rules[1].destination).toMatchObject({ kind: "group", group: "public" });
-    expect(p.rules[2].destination).toMatchObject({ kind: "group", group: "private" });
-    expect(p.rules[3].destination).toMatchObject({ kind: "group", group: "host" });
+    expect(p.rules[0]).toMatchObject({
+      destination: { kind: "group", group: "host" },
+      protocols: ["udp", "tcp"],
+      ports: [{ start: 53, end: 53 }],
+    });
+    expect(p.rules[1]).toMatchObject({
+      destination: { kind: "group", group: "public" },
+      protocols: [],
+      ports: [],
+    });
+    expect(p.rules[2]).toMatchObject({
+      destination: { kind: "group", group: "private" },
+      protocols: [],
+      ports: [],
+    });
+    expect(p.rules[3]).toMatchObject({
+      destination: { kind: "group", group: "host" },
+      protocols: [],
+      ports: [],
+    });
   });
 
   it("does not add DNS for an empty profile set", () => {

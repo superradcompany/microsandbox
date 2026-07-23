@@ -224,6 +224,36 @@ Build a deny-by-default policy from `NetworkProfilePublic`, `NetworkProfilePriva
   </div>
 </div>
 
+When profile names come from JSON, configuration, environment variables, or other runtime input, use the checked variant instead:
+
+```go
+network, err := m.NetworkPolicy.FromProfilesChecked(profiles...)
+if err != nil {
+    return err
+}
+```
+
+#### <span className="msb-recv">NetworkPolicy.</span><span className="msb-hn">FromProfilesChecked()</span>
+
+```go
+func (networkPolicyFactory) FromProfilesChecked(profiles ...NetworkProfile) (*NetworkConfig, error)
+```
+
+Builds the same canonical deny-by-default policy as `FromProfiles`, but returns an error instead of panicking when a profile is unknown. Use this method for values derived from runtime input.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#networkconfig">*NetworkConfig</a></div>
+    <div className="msb-param-desc">Config containing canonical profile and DNS rules.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">error</span></div>
+    <div className="msb-param-desc">Non-nil when any requested profile is unknown.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">NetworkPolicy.</span><span className="msb-hn">None()</span>
 
 ```go

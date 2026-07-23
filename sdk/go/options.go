@@ -990,20 +990,33 @@ func (networkPolicyFactory) AllowAll() *NetworkConfig {
 // FromProfiles returns a canonical deny-by-default policy. Duplicate profiles
 // are ignored, gateway DNS is added once, and group rules use fixed order.
 // It panics if a profile is not one of the package-defined NetworkProfile
-// constants.
+// constants. Use FromProfilesChecked when profiles come from runtime input.
 func (networkPolicyFactory) FromProfiles(profiles ...NetworkProfile) *NetworkConfig {
+	config, err := NetworkPolicy.FromProfilesChecked(profiles...)
+	if err != nil {
+		panic(err)
+	}
+	return config
+}
+
+// FromProfilesChecked returns a canonical deny-by-default policy. Duplicate
+// profiles are ignored, gateway DNS is added once, and group rules use fixed
+// order. It returns an error for an unknown profile instead of panicking,
+// making it suitable for profiles parsed from JSON, configuration, or the
+// environment.
+func (networkPolicyFactory) FromProfilesChecked(profiles ...NetworkProfile) (*NetworkConfig, error) {
 	requested := make(map[NetworkProfile]bool, len(profiles))
 	for _, profile := range profiles {
 		switch profile {
 		case NetworkProfilePublic, NetworkProfilePrivate, NetworkProfileHost:
 		default:
-			panic(fmt.Sprintf("microsandbox: unknown network profile %q", profile))
+			return nil, fmt.Errorf("microsandbox: unknown network profile %q", profile)
 		}
 		requested[profile] = true
 	}
 	config := &NetworkConfig{DefaultEgress: PolicyActionDeny, DefaultIngress: PolicyActionAllow}
 	if len(requested) == 0 {
-		return config
+		return config, nil
 	}
 	config.Rules = append(config.Rules, Rule.AllowDNS())
 	for _, profile := range []NetworkProfile{
@@ -1019,7 +1032,7 @@ func (networkPolicyFactory) FromProfiles(profiles ...NetworkProfile) *NetworkCon
 			})
 		}
 	}
-	return config
+	return config, nil
 }
 
 // ---------------------------------------------------------------------------

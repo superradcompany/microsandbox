@@ -317,10 +317,18 @@ func TestNetworkPolicyFactory(t *testing.T) {
 	if len(got.Rules) != 4 {
 		t.Fatalf("FromProfiles rules = %d, want 4", len(got.Rules))
 	}
-	want := []string{"host", "public", "private", "host"}
-	for i, destination := range want {
-		if got.Rules[i].Destination != destination {
-			t.Errorf("rule %d destination = %q, want %q", i, got.Rules[i].Destination, destination)
+	dns := got.Rules[0]
+	if dns.Destination != "host" || dns.Port != "53" || len(dns.Protocols) != 2 || dns.Protocols[0] != PolicyProtocolUDP || dns.Protocols[1] != PolicyProtocolTCP {
+		t.Errorf("DNS rule = %#v, want host UDP+TCP/53", dns)
+	}
+	wantProfiles := []string{"public", "private", "host"}
+	for i, destination := range wantProfiles {
+		rule := got.Rules[i+1]
+		if rule.Destination != destination {
+			t.Errorf("profile rule %d destination = %q, want %q", i, rule.Destination, destination)
+		}
+		if rule.Port != "" || len(rule.Protocols) != 0 {
+			t.Errorf("profile rule %d has unexpected transport filters: %#v", i, rule)
 		}
 	}
 }
@@ -346,6 +354,30 @@ func TestNetworkPolicyProfilesRejectUnknownValue(t *testing.T) {
 		}
 	}()
 	NetworkPolicy.FromProfiles(NetworkProfile("bogus"))
+}
+
+func TestNetworkPolicyProfilesCheckedRejectsUnknownValue(t *testing.T) {
+	config, err := NetworkPolicy.FromProfilesChecked(NetworkProfilePublic, NetworkProfile("bogus"))
+	if err == nil {
+		t.Fatal("FromProfilesChecked should return an error for an unknown typed value")
+	}
+	if config != nil {
+		t.Fatalf("FromProfilesChecked config = %#v, want nil", config)
+	}
+	if got, want := err.Error(), `microsandbox: unknown network profile "bogus"`; got != want {
+		t.Fatalf("FromProfilesChecked error = %q, want %q", got, want)
+	}
+}
+
+func TestNetworkPolicyProfilesCheckedMatchesFromProfiles(t *testing.T) {
+	got, err := NetworkPolicy.FromProfilesChecked(NetworkProfileHost, NetworkProfilePublic, NetworkProfileHost)
+	if err != nil {
+		t.Fatalf("FromProfilesChecked returned an unexpected error: %v", err)
+	}
+	want := NetworkPolicy.FromProfiles(NetworkProfileHost, NetworkProfilePublic, NetworkProfileHost)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("FromProfilesChecked = %#v, want %#v", got, want)
+	}
 }
 
 func TestWithSecrets(t *testing.T) {
