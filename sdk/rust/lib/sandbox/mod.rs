@@ -237,7 +237,12 @@ pub struct SandboxTouchResult {
 impl Sandbox {
     /// Start building a new sandbox configuration.
     pub fn builder(name: impl Into<String>) -> SandboxBuilder {
-        SandboxBuilder::new(name)
+        let builder = SandboxBuilder::new(name);
+        let backend = crate::backend::default_backend();
+        match backend.as_local() {
+            Some(local) => builder.with_local_defaults(local.config()),
+            None => builder,
+        }
     }
 
     /// Create a sandbox from a config.

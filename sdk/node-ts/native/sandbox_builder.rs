@@ -58,7 +58,7 @@ impl JsSandboxBuilder {
     #[napi(constructor)]
     pub fn new(name: String) -> Self {
         Self {
-            inner: Some(RustSandboxBuilder::new(name)),
+            inner: Some(microsandbox::Sandbox::builder(name)),
         }
     }
 
