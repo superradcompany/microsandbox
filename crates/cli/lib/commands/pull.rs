@@ -32,8 +32,11 @@ pub struct PullArgs {
     pub ca_certs: Option<String>,
 
     /// Rootfs artifacts to prepare in addition to downloaded OCI content.
-    #[arg(long, value_enum, default_value_t = PullMaterialization::Layered)]
-    pub materialize: PullMaterialization,
+    ///
+    /// When omitted, a configured flat OCI root-disk default selects flat materialization;
+    /// otherwise the layered representation is prepared.
+    #[arg(long, value_enum)]
+    pub materialize: Option<PullMaterialization>,
 }
 
 /// Rootfs representation prepared by `msb pull`.
@@ -71,12 +74,12 @@ mod tests {
     }
 
     #[test]
-    fn materialization_mode_defaults_to_layered_and_accepts_flat() {
+    fn materialization_mode_distinguishes_omitted_and_explicit_flat() {
         let default = TestCli::try_parse_from(["test", "alpine"]).unwrap();
-        assert_eq!(default.pull.materialize, PullMaterialization::Layered);
+        assert_eq!(default.pull.materialize, None);
 
         let flat = TestCli::try_parse_from(["test", "alpine", "--materialize", "flat"]).unwrap();
-        assert_eq!(flat.pull.materialize, PullMaterialization::Flat);
-        assert!(flat.pull.materialize.includes_flat());
+        assert_eq!(flat.pull.materialize, Some(PullMaterialization::Flat));
+        assert!(flat.pull.materialize.unwrap().includes_flat());
     }
 }

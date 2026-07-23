@@ -51,7 +51,7 @@ impl PySnapshot {
         labels = None,
         force = false,
         record_integrity = false,
-        compaction = "off",
+        compaction = None,
         resumable = false,
     ))]
     fn create<'py>(
@@ -62,14 +62,15 @@ impl PySnapshot {
         labels: Option<HashMap<String, String>>,
         force: bool,
         record_integrity: bool,
-        compaction: &str,
+        compaction: Option<&str>,
         resumable: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let compaction = parse_compaction(compaction)?;
+        let compaction = compaction.map(parse_compaction).transpose()?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut builder = RustSnapshot::builder(name)
-                .from_sandbox(&from_sandbox)
-                .compaction(compaction);
+            let mut builder = RustSnapshot::builder(name).from_sandbox(&from_sandbox);
+            if let Some(compaction) = compaction {
+                builder = builder.compaction(compaction);
+            }
             if let Some(dest_dir) = dest_dir {
                 builder = builder.dest_dir(dest_dir);
             }

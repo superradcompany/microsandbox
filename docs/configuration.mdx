@@ -30,11 +30,23 @@ microsandbox reads its global configuration from `~/.microsandbox/config.json`. 
   "sandbox_defaults": {
     "cpus": 2,
     "memory_mib": 1024,
+    "cpu_placement": "auto",
+    "thp": "madvise",
     "oci": {
-      "upper_size_mib": 8192
+      "root_disk": {
+        "kind": "flat",
+        "size_mib": 8192,
+        "clone": "auto"
+      }
     },
     "shell": "/bin/bash",
     "workdir": "/app"
+  },
+  "snapshot_defaults": {
+    "compaction": "auto"
+  },
+  "runtime": {
+    "block_writeback_preflush": "auto"
   },
   "registries": {
     "ca_certs": "/path/to/corporate-ca.pem",
@@ -86,7 +98,9 @@ microsandbox reads its global configuration from `~/.microsandbox/config.json`. 
 | `log_level` | `null` (silent) | Log level for sandbox processes: `error`, `warn`, `info`, `debug`, `trace` |
 | `database` | [reference](#database) | Database connection settings |
 | `paths` | [reference](#paths) | Path overrides for binaries and directories |
-| `sandbox_defaults` | [reference](#sandbox_defaults) | Defaults applied to every sandbox |
+| `sandbox_defaults` | [reference](#sandbox_defaults) | Defaults applied to local sandboxes |
+| `snapshot_defaults` | [reference](#snapshot_defaults) | Defaults applied to snapshot creation |
+| `runtime` | [reference](#runtime) | Host runtime performance policy |
 | `registries` | [reference](#registries) | Container registry authentication |
 | `metrics` | [reference](#metrics) | Live metrics shared-memory registry settings |
 | `active_profile` | `null` | Default backend profile name |
@@ -144,12 +158,16 @@ let msb = cfg.resolve_msb_path()?;
 
 ## `sandbox_defaults`
 
-Defaults applied to every sandbox unless overridden per-sandbox.
+Defaults applied to local sandboxes unless overridden per-sandbox. Cloud backends retain their service-side default policy.
+
+Explicit CLI or SDK options win over `config.json`, and `config.json` wins over built-in defaults. Microsandbox resolves the effective values once when it creates a local sandbox and persists that resolved sandbox configuration; changing the global file affects future creations, not existing sandboxes.
 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `cpus` | `1` | Number of vCPUs |
 | `memory_mib` | `512` | Guest memory in MiB |
+| `cpu_placement` | `"inherit"` | Host vCPU placement: `inherit`, `auto`, `spread`, or `compact` |
+| `thp` | `"madvise"` | Guest transparent huge-page policy: `always`, `madvise`, or `never` |
 | `oci` | [reference](#sandbox_defaultsoci) | Defaults for OCI-rooted sandboxes |
 | `shell` | `"/bin/sh"` | Shell for interactive sessions and scripts |
 | `workdir` | `null` | Working directory inside the sandbox |
@@ -162,7 +180,26 @@ Defaults applied only when the sandbox rootfs is an OCI image.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `upper_size_mib` | `4096` | Writable overlay upper size in MiB |
+| `root_disk` | `null` | Default OCI root disk using the same tagged shape as the SDK: `managed`, `tmpfs`, or `flat`. A missing value preserves the managed layered root. User-owned `disk-image` defaults are rejected because they would share one writable image across sandboxes. |
+| `upper_size_mib` | `null` | Deprecated managed-layered size shorthand. When both this field and `root_disk` are absent, the resolved managed size is 4096 MiB. |
+
+`root_disk` and `upper_size_mib` are mutually exclusive. For a portable flat default, use `clone: "auto"`; it attempts a native reflink and safely falls back to a sparse copy. Use `clone: "reflink"` only when failure is preferable to copying on a host filesystem without reflink support.
+
+When the root-disk default is flat, plain `msb pull IMAGE` also prepares the reusable flat artifact. An explicit `msb pull IMAGE --materialize layered|flat|all` always wins.
+
+## `snapshot_defaults`
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `compaction` | `"off"` | Snapshot free-space compaction: `off`, `auto`, or `on`. An explicit SDK or CLI option wins. |
+
+## `runtime`
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `block_writeback_preflush` | `"auto"` | `auto` uses the platform-aware VMM policy; `off` disables advisory buffered writeback for each newly spawned VMM without weakening the guest flush durability boundary. |
+
+Hardware CRC32C, the guest kernel preemption model, x2APIC, APICv/AVIC capability, vCPU affinity mechanics, and the pure-Rust ext4 writer are implementation or capability details rather than user policy, so they intentionally have no global config keys.
 
 ## `registries`
 

@@ -21,6 +21,7 @@ use std::{
 use docker_credential::{CredentialRetrievalError, DockerCredential};
 use microsandbox_image::RegistryAuth;
 use microsandbox_runtime::logging::LogLevel;
+use microsandbox_types::{CpuPlacement, RootDisk, SnapshotCompaction, TransparentHugePagePolicy};
 use serde::{Deserialize, Serialize};
 
 use crate::{MicrosandboxError, MicrosandboxResult};
@@ -116,6 +117,12 @@ pub struct LocalConfig {
     /// Default values for sandbox configuration.
     pub sandbox_defaults: SandboxDefaults,
 
+    /// Default values for snapshot creation.
+    pub snapshot_defaults: SnapshotDefaults,
+
+    /// Host runtime performance policy.
+    pub runtime: RuntimeConfig,
+
     /// Registry authentication configuration.
     pub registries: RegistriesConfig,
 
@@ -205,6 +212,12 @@ pub struct SandboxDefaults {
     /// Default guest memory in MiB.
     pub memory_mib: u32,
 
+    /// Default host CPU placement policy.
+    pub cpu_placement: CpuPlacement,
+
+    /// Default guest transparent huge-page policy.
+    pub thp: TransparentHugePagePolicy,
+
     /// Default OCI rootfs settings.
     pub oci: OciSandboxDefaults,
 
@@ -234,6 +247,40 @@ pub struct OciSandboxDefaults {
     ///
     /// `None` uses microsandbox's built-in formatter default.
     pub upper_size_mib: Option<u32>,
+
+    /// Default writable root disk for OCI sandboxes.
+    ///
+    /// This is mutually exclusive with the deprecated [`Self::upper_size_mib`] field. `None`
+    /// preserves the managed layered root disk default.
+    pub root_disk: Option<RootDisk>,
+}
+
+/// Default values applied to snapshot creation.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SnapshotDefaults {
+    /// Default free-space compaction policy.
+    pub compaction: SnapshotCompaction,
+}
+
+/// Host runtime performance policy.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RuntimeConfig {
+    /// Advisory buffered block writeback policy.
+    pub block_writeback_preflush: BlockWritebackPreflush,
+}
+
+/// Controls advisory writeback before guest durability barriers.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BlockWritebackPreflush {
+    /// Use the runtime's platform-aware policy.
+    #[default]
+    Auto,
+
+    /// Disable advisory preflush without changing guest-visible durability semantics.
+    Off,
 }
 
 /// Registry configuration.
@@ -313,6 +360,24 @@ struct KeyringRegistryCredential {
 //--------------------------------------------------------------------------------------------------
 
 impl LocalConfig {
+    /// Validate defaults that affect sandbox construction.
+    pub(crate) fn validate_sandbox_defaults(&self) -> MicrosandboxResult<()> {
+        let oci = &self.sandbox_defaults.oci;
+        if oci.upper_size_mib.is_some() && oci.root_disk.is_some() {
+            return Err(MicrosandboxError::InvalidConfig(
+                "sandbox_defaults.oci.root_disk and deprecated sandbox_defaults.oci.upper_size_mib are mutually exclusive".into(),
+            ));
+        }
+
+        if matches!(oci.root_disk, Some(RootDisk::DiskImage { .. })) {
+            return Err(MicrosandboxError::InvalidConfig(
+                "sandbox_defaults.oci.root_disk cannot be a shared disk-image; specify user-owned disk images per sandbox".into(),
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Get the resolved home directory.
     pub fn home(&self) -> PathBuf {
         self.home.clone().unwrap_or_else(resolve_default_home)
@@ -585,6 +650,8 @@ impl Default for SandboxDefaults {
         Self {
             cpus: DEFAULT_CPUS,
             memory_mib: DEFAULT_MEMORY_MIB,
+            cpu_placement: CpuPlacement::Inherit,
+            thp: TransparentHugePagePolicy::Madvise,
             oci: OciSandboxDefaults::default(),
             shell: "/bin/sh".into(),
             workdir: None,
@@ -1155,7 +1222,10 @@ mod tests {
         let cfg = LocalConfig::default();
         assert_eq!(cfg.sandbox_defaults.cpus, 1);
         assert_eq!(cfg.sandbox_defaults.memory_mib, 512);
+        assert_eq!(cfg.sandbox_defaults.cpu_placement, CpuPlacement::Inherit);
+        assert_eq!(cfg.sandbox_defaults.thp, TransparentHugePagePolicy::Madvise);
         assert_eq!(cfg.sandbox_defaults.oci.upper_size_mib, None);
+        assert_eq!(cfg.sandbox_defaults.oci.root_disk, None);
         assert_eq!(cfg.sandbox_defaults.shell, "/bin/sh");
         assert_eq!(
             cfg.sandbox_defaults.metrics_sample_interval_ms,
@@ -1165,6 +1235,11 @@ mod tests {
         assert_eq!(cfg.database.max_connections, 5);
         assert_eq!(cfg.database.connect_timeout_secs, 30);
         assert_eq!(cfg.database.busy_timeout_secs, 5);
+        assert_eq!(cfg.snapshot_defaults.compaction, SnapshotCompaction::Off);
+        assert_eq!(
+            cfg.runtime.block_writeback_preflush,
+            BlockWritebackPreflush::Auto
+        );
     }
 
     #[test]
@@ -1180,6 +1255,58 @@ mod tests {
         let cfg: LocalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.sandbox_defaults.cpus, 4);
         assert_eq!(cfg.sandbox_defaults.memory_mib, 512);
+    }
+
+    #[test]
+    fn test_deserialize_performance_defaults() {
+        let json = r#"{
+            "sandbox_defaults": {
+                "cpu_placement": "spread",
+                "thp": "always",
+                "oci": {
+                    "root_disk": {
+                        "kind": "flat",
+                        "size_mib": 8192,
+                        "clone": "copy"
+                    }
+                }
+            },
+            "snapshot_defaults": { "compaction": "auto" },
+            "runtime": { "block_writeback_preflush": "off" }
+        }"#;
+
+        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.sandbox_defaults.cpu_placement, CpuPlacement::Spread);
+        assert_eq!(cfg.sandbox_defaults.thp, TransparentHugePagePolicy::Always);
+        assert_eq!(
+            cfg.sandbox_defaults.oci.root_disk,
+            Some(RootDisk::Flat {
+                size_mib: Some(8192),
+                fstype: None,
+                clone: microsandbox_types::FlatClone::Copy,
+            })
+        );
+        assert_eq!(cfg.snapshot_defaults.compaction, SnapshotCompaction::Auto);
+        assert_eq!(
+            cfg.runtime.block_writeback_preflush,
+            BlockWritebackPreflush::Off
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_legacy_and_typed_root_disk_defaults() {
+        let json = r#"{
+            "sandbox_defaults": {
+                "oci": {
+                    "upper_size_mib": 4096,
+                    "root_disk": { "kind": "flat" }
+                }
+            }
+        }"#;
+        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+
+        let error = cfg.validate_sandbox_defaults().unwrap_err();
+        assert!(error.to_string().contains("mutually exclusive"));
     }
 
     #[test]

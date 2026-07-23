@@ -25,7 +25,8 @@ type SnapshotCreateOptions struct {
 	Labels          map[string]string
 	Force           bool
 	RecordIntegrity bool
-	// Compaction controls flat-snapshot free-space reclamation. The zero value is off.
+	// Compaction controls flat-snapshot free-space reclamation. The zero value inherits the global
+	// snapshot default, whose built-in value is off.
 	Compaction SnapshotCompaction
 	Resumable  bool
 }
@@ -34,7 +35,7 @@ type SnapshotCreateOptions struct {
 type SnapshotCompaction string
 
 const (
-	// SnapshotCompactionOff avoids the ext4 scan and is the default.
+	// SnapshotCompactionOff explicitly avoids the ext4 scan.
 	SnapshotCompactionOff SnapshotCompaction = "off"
 	// SnapshotCompactionAuto compacts flat snapshots when the host supports it.
 	SnapshotCompactionAuto SnapshotCompaction = "auto"

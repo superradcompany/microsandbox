@@ -74,6 +74,7 @@ use crate::runtime::handle::WindowsJob;
 use crate::{
     MicrosandboxError, MicrosandboxResult,
     backend::LocalBackend,
+    config::BlockWritebackPreflush,
     db::entity::volume as volume_entity,
     runtime::handle::MetricsReservationCleanup,
     sandbox::{
@@ -96,6 +97,7 @@ static SIGCHLD_ALT_STACK_INIT: tokio::sync::OnceCell<()> = tokio::sync::OnceCell
 const AGENT_SOCKET_HASH_HEX_LEN: usize = 32;
 #[cfg(windows)]
 const STARTUP_PIPE_HASH_HEX_LEN: usize = 32;
+const BLOCK_WRITEBACK_PREFLUSH_ENV: &str = "KRUN_BLOCK_WRITEBACK_PREFLUSH_BYTES";
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -471,6 +473,11 @@ pub async fn spawn_sandbox(
 
     // Build the command.
     let mut cmd = Command::new(&msb_path);
+    if let Some(value) = block_writeback_preflush_env(global.runtime.block_writeback_preflush) {
+        // Each sandbox owns a VMM process, so this controls libkrun without mutating the SDK
+        // process environment or coupling concurrently-created sandboxes.
+        cmd.env(BLOCK_WRITEBACK_PREFLUSH_ENV, value);
+    }
     #[cfg(windows)]
     if matches!(mode, SpawnMode::Detached) {
         let flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB;
@@ -686,6 +693,13 @@ pub async fn spawn_sandbox(
     );
 
     Ok((handle, agent_sock_path))
+}
+
+fn block_writeback_preflush_env(policy: BlockWritebackPreflush) -> Option<&'static str> {
+    match policy {
+        BlockWritebackPreflush::Auto => None,
+        BlockWritebackPreflush::Off => Some("0"),
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -2654,10 +2668,11 @@ mod tests {
 
     use microsandbox_runtime::launch::LaunchConfig;
 
-    use super::sandbox_cli_args;
+    use super::{block_writeback_preflush_env, sandbox_cli_args};
     use crate::{
         LogLevel,
         backend::LocalBackend,
+        config::BlockWritebackPreflush,
         sandbox::{
             DiskImageFormat, HostPermissions, MountOptions, OciRootfsSource, Rlimit,
             RlimitResource, RootfsSource, SandboxBuilder, SandboxConfig, StatVirtualization,
@@ -4468,5 +4483,17 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{err}").contains("must not contain '='"));
+    }
+
+    #[test]
+    fn block_writeback_preflush_only_sets_an_env_override_when_disabled() {
+        assert_eq!(
+            block_writeback_preflush_env(BlockWritebackPreflush::Auto),
+            None
+        );
+        assert_eq!(
+            block_writeback_preflush_env(BlockWritebackPreflush::Off),
+            Some("0")
+        );
     }
 }

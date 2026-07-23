@@ -23,7 +23,7 @@ Booting from a snapshot is a cold boot of a fresh VM that starts from the captur
 For the default layered root, the artifact carries the writable `upper.ext4` and pins the immutable OCI lower layers. For a flat root, it carries the complete `rootfs.raw` and records a required layout capability in `snapshot.json`; older runtimes refuse that artifact instead of interpreting it as a layered upper. Both restore paths create a private writable copy for the new sandbox.
 
 <Note>
-Flat snapshot compaction is **opt in**. Ordinary snapshot creation defaults to `off`, so it does not scan the complete ext4 filesystem or add trim work to the foreground path.
+Flat snapshot compaction has a built-in default of `off`, so ordinary snapshot creation does not scan the complete ext4 filesystem or add trim work to the foreground path. Set `snapshot_defaults.compaction` in `config.json` to change the default for future snapshots, or pass an explicit per-snapshot option to override it.
 </Note>
 
 When compaction is requested, it runs on a private staged copy. Microsandbox replays any pending ext4 journal, validates the formatter-owned filesystem metadata and checksums, and only then asks the host filesystem to deallocate ext4 blocks proven free. Linux uses hole punching, macOS uses APFS range deallocation, and Windows uses sparse zero-data ranges. The stopped sandbox disk is never trimmed or mutated.

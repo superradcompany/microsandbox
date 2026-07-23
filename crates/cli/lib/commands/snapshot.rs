@@ -79,8 +79,8 @@ pub struct SnapshotCreateArgs {
     ///
     /// `off` avoids the filesystem scan, `auto` is best effort, and `on`
     /// requires both a flat root disk and host range-deallocation support.
-    #[arg(long, value_enum, default_value_t = SnapshotCompactionArg::Off)]
-    pub compaction: SnapshotCompactionArg,
+    #[arg(long, value_enum)]
+    pub compaction: Option<SnapshotCompactionArg>,
 
     /// Request a resumable snapshot with memory/device state.
     ///
@@ -215,9 +215,10 @@ pub async fn run(args: SnapshotArgs) -> anyhow::Result<()> {
 }
 
 async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
-    let mut builder = Snapshot::builder(&args.name)
-        .from_sandbox(&args.from)
-        .compaction(args.compaction.into());
+    let mut builder = Snapshot::builder(&args.name).from_sandbox(&args.from);
+    if let Some(compaction) = args.compaction {
+        builder = builder.compaction(compaction.into());
+    }
     if let Some(ref dest_dir) = args.dest_dir {
         builder = builder.dest_dir(dest_dir);
     }
@@ -569,7 +570,7 @@ mod tests {
         assert_eq!(args.name, "clean");
         assert_eq!(args.from, "box");
         assert!(args.resumable);
-        assert_eq!(args.compaction, SnapshotCompactionArg::Off);
+        assert_eq!(args.compaction, None);
     }
 
     #[test]
@@ -579,7 +580,7 @@ mod tests {
         let SnapshotCommands::Create(args) = args.command else {
             panic!("expected create command");
         };
-        assert_eq!(args.compaction, SnapshotCompactionArg::Auto);
+        assert_eq!(args.compaction, Some(SnapshotCompactionArg::Auto));
     }
 
     #[test]

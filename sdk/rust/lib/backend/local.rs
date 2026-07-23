@@ -869,6 +869,8 @@ mod tests {
             sandbox_defaults: crate::config::SandboxDefaults {
                 cpus: 4,
                 memory_mib: 2048,
+                cpu_placement: microsandbox_types::CpuPlacement::Spread,
+                thp: microsandbox_types::TransparentHugePagePolicy::Always,
                 oci: crate::config::OciSandboxDefaults::default(),
                 shell: "/bin/zsh".into(),
                 workdir: Some("/work".into()),

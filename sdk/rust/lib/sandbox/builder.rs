@@ -22,7 +22,9 @@ use super::{
         SecurityProfile, VolumeMount,
     },
 };
-use crate::{LogLevel, MicrosandboxError, MicrosandboxResult, size::Mebibytes};
+use crate::{
+    LogLevel, MicrosandboxError, MicrosandboxResult, config::LocalConfig, size::Mebibytes,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -33,6 +35,8 @@ pub struct SandboxBuilder {
     config: SandboxConfig,
     detached: bool,
     build_error: Option<crate::MicrosandboxError>,
+    max_cpus_explicit: bool,
+    max_memory_explicit: bool,
     /// Pending snapshot reference (path or bare name) supplied via
     /// [`from_snapshot`]. Resolved during async `create()`.
     pending_snapshot: Option<String>,
@@ -75,6 +79,8 @@ impl SandboxBuilder {
     ///
     /// The name must be unique among existing sandboxes (unless
     /// [`replace`](Self::replace) is set) and no longer than 128 UTF-8 bytes.
+    /// This low-level constructor starts from built-in defaults; prefer
+    /// [`Sandbox::builder`](super::Sandbox::builder) when backend-owned global defaults should apply.
     pub fn new(name: impl Into<String>) -> Self {
         let mut config = SandboxConfig::default();
         config.spec.name = name.into();
@@ -83,8 +89,38 @@ impl SandboxBuilder {
             config,
             detached: false,
             build_error: None,
+            max_cpus_explicit: false,
+            max_memory_explicit: false,
             pending_snapshot: None,
         }
+    }
+
+    /// Apply defaults owned by the selected local backend.
+    ///
+    /// This runs before caller-supplied builder methods, so explicit SDK and CLI options retain
+    /// ordinary last-write-wins behavior. Root-disk defaults remain unresolved until local create,
+    /// where the runtime knows the rootfs is OCI-backed and can persist the effective disk shape.
+    pub(crate) fn with_local_defaults(mut self, local: &LocalConfig) -> Self {
+        if let Err(error) = local.validate_sandbox_defaults() {
+            self.build_error = Some(error);
+            return self;
+        }
+
+        let defaults = &local.sandbox_defaults;
+        self.config.spec.resources.cpus = defaults.cpus;
+        self.config.spec.resources.max_cpus = defaults.cpus;
+        self.config.spec.resources.memory_mib = defaults.memory_mib;
+        self.config.spec.resources.max_memory_mib = defaults.memory_mib;
+        self.config.spec.resources.cpu_placement = defaults.cpu_placement;
+        self.config.spec.resources.thp = defaults.thp;
+        self.config.spec.runtime.shell = Some(defaults.shell.clone());
+        self.config.spec.runtime.workdir = defaults.workdir.clone();
+        self.config.spec.runtime.metrics_sample_interval_ms = defaults
+            .metrics_sample_interval_ms
+            .map(std::num::NonZero::get);
+        self.config.spec.runtime.disable_metrics_sample = defaults.disable_metrics_sample;
+        self.config.spec.runtime.log_level = local.log_level.map(sandbox_log_level_from_runtime);
+        self
     }
 
     /// Seed a builder from a full [`SandboxSpec`] JSON.
@@ -206,7 +242,7 @@ impl SandboxBuilder {
     /// Allocate virtual CPUs for this sandbox (default: 1).
     pub fn cpus(mut self, count: u8) -> Self {
         self.config.spec.resources.cpus = count;
-        if self.config.spec.resources.max_cpus < count {
+        if !self.max_cpus_explicit || self.config.spec.resources.max_cpus < count {
             self.config.spec.resources.max_cpus = count;
         }
         self
@@ -219,6 +255,7 @@ impl SandboxBuilder {
     /// itself; use [`cpus`](Self::cpus) for the initial effective count.
     pub fn max_cpus(mut self, count: u8) -> Self {
         self.config.spec.resources.max_cpus = count;
+        self.max_cpus_explicit = true;
         self
     }
 
@@ -239,7 +276,7 @@ impl SandboxBuilder {
     pub fn memory(mut self, size: impl Into<Mebibytes>) -> Self {
         let memory_mib = size.into().as_u32();
         self.config.spec.resources.memory_mib = memory_mib;
-        if self.config.spec.resources.max_memory_mib < memory_mib {
+        if !self.max_memory_explicit || self.config.spec.resources.max_memory_mib < memory_mib {
             self.config.spec.resources.max_memory_mib = memory_mib;
         }
         self
@@ -252,6 +289,7 @@ impl SandboxBuilder {
     /// [`memory`](Self::memory) for the initial effective memory.
     pub fn max_memory(mut self, size: impl Into<Mebibytes>) -> Self {
         self.config.spec.resources.max_memory_mib = size.into().as_u32();
+        self.max_memory_explicit = true;
         self
     }
 
@@ -926,7 +964,7 @@ impl SandboxBuilder {
     /// If [`from_snapshot`](Self::from_snapshot) was called, the snapshot
     /// manifest is opened here and its pinned image reference, manifest
     /// digest, and upper-layer source path are populated onto the config.
-    /// Backend-owned defaults are applied when the config is created, not here.
+    /// Backend-owned defaults were seeded before explicit builder methods were applied.
     pub async fn build(mut self) -> MicrosandboxResult<SandboxConfig> {
         self.resolve_pending().await?;
         self.validate()?;
@@ -1321,6 +1359,8 @@ impl From<SandboxConfig> for SandboxBuilder {
             config,
             detached: false,
             build_error: None,
+            max_cpus_explicit: true,
+            max_memory_explicit: true,
             pending_snapshot: None,
         }
     }
@@ -1583,6 +1623,39 @@ mod tests {
             .unwrap();
 
         assert!(config.spec.image.oci_root_disk().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_local_defaults_are_seeded_before_explicit_builder_options() {
+        let mut local = crate::config::LocalConfig::default();
+        local.sandbox_defaults.cpus = 4;
+        local.sandbox_defaults.memory_mib = 2048;
+        local.sandbox_defaults.cpu_placement = CpuPlacement::Spread;
+        local.sandbox_defaults.thp = TransparentHugePagePolicy::Always;
+        local.sandbox_defaults.shell = "/bin/bash".into();
+        local.sandbox_defaults.workdir = Some("/workspace".into());
+        local.log_level = Some(microsandbox_runtime::logging::LogLevel::Info);
+
+        let config = SandboxBuilder::new("test")
+            .with_local_defaults(&local)
+            .image("alpine")
+            .cpus(2)
+            .thp(TransparentHugePagePolicy::Never)
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(config.spec.resources.cpus, 2);
+        assert_eq!(config.spec.resources.max_cpus, 2);
+        assert_eq!(config.spec.resources.memory_mib, 2048);
+        assert_eq!(config.spec.resources.cpu_placement, CpuPlacement::Spread);
+        assert_eq!(config.spec.resources.thp, TransparentHugePagePolicy::Never);
+        assert_eq!(config.spec.runtime.shell.as_deref(), Some("/bin/bash"));
+        assert_eq!(config.spec.runtime.workdir.as_deref(), Some("/workspace"));
+        assert_eq!(
+            config.spec.runtime.log_level,
+            Some(microsandbox_types::SandboxLogLevel::Info)
+        );
     }
 
     #[tokio::test]

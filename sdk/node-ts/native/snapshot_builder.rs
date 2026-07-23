@@ -54,6 +54,10 @@ pub struct JsSnapshotBuilder {
 impl JsSnapshotBuilder {
     #[napi(constructor)]
     pub fn new(name: String) -> Self {
+        let compaction = microsandbox::config::config()
+            .map_or(RustSnapshotCompaction::Off, |config| {
+                config.snapshot_defaults.compaction
+            });
         Self {
             inner: Some(RustSnapshot::builder(&name)),
             name,
@@ -62,7 +66,7 @@ impl JsSnapshotBuilder {
             labels: Vec::new(),
             force: false,
             record_integrity: false,
-            compaction: RustSnapshotCompaction::Off,
+            compaction,
             resumable: false,
         }
     }

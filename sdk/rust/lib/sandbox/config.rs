@@ -311,15 +311,35 @@ impl SandboxConfig {
 
     /// Materialize rootfs defaults that should be persisted with the sandbox.
     ///
-    /// `default_size_mib` is the backend's configured microsandbox-owned root disk size. It
-    /// applies to managed layered uppers and flat roots. An absent root disk resolves to managed;
-    /// a sizeless tmpfs resolves to half the sandbox memory.
-    pub(crate) fn apply_rootfs_defaults(&mut self, default_size_mib: Option<u32>) {
-        if self.snapshot_upper_source.is_some() {
-            return;
+    /// The backend default may select the complete root-disk shape. The deprecated upper-size
+    /// setting remains managed-disk size sugar and cannot be combined with `root_disk`. An absent
+    /// root disk resolves to managed; a sizeless tmpfs resolves to half the sandbox memory.
+    pub(crate) fn apply_rootfs_defaults(
+        &mut self,
+        defaults: &crate::config::OciSandboxDefaults,
+    ) -> crate::MicrosandboxResult<()> {
+        if defaults.upper_size_mib.is_some() && defaults.root_disk.is_some() {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "sandbox_defaults.oci.root_disk and deprecated sandbox_defaults.oci.upper_size_mib are mutually exclusive".into(),
+            ));
         }
+        if matches!(defaults.root_disk, Some(RootDisk::DiskImage { .. })) {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "sandbox_defaults.oci.root_disk cannot be a shared disk-image; specify user-owned disk images per sandbox".into(),
+            ));
+        }
+
+        if self.snapshot_upper_source.is_some() {
+            return Ok(());
+        }
+
+        let default_size_mib = defaults.upper_size_mib;
         let memory_mib = self.spec.resources.memory_mib;
         if let RootfsSource::Oci(oci) = &mut self.spec.image {
+            if oci.root_disk.is_none() {
+                oci.root_disk = defaults.root_disk.clone();
+            }
+
             match &mut oci.root_disk {
                 None => {
                     oci.root_disk = Some(RootDisk::Managed {
@@ -338,6 +358,7 @@ impl SandboxConfig {
                 _ => {}
             }
         }
+        Ok(())
     }
 
     /// Apply runtime defaults that should exist for OCI sandboxes unless the
@@ -1374,7 +1395,9 @@ mod tests {
             ..Default::default()
         };
 
-        config.apply_rootfs_defaults(None);
+        config
+            .apply_rootfs_defaults(&crate::config::OciSandboxDefaults::default())
+            .unwrap();
 
         assert_eq!(
             config.spec.image.oci_root_disk(),
@@ -1396,7 +1419,9 @@ mod tests {
         };
         config.spec.resources.memory_mib = 2048;
 
-        config.apply_rootfs_defaults(None);
+        config
+            .apply_rootfs_defaults(&crate::config::OciSandboxDefaults::default())
+            .unwrap();
 
         assert_eq!(
             config.spec.image.oci_root_disk(),
@@ -1414,12 +1439,66 @@ mod tests {
             ..Default::default()
         };
 
-        config.apply_rootfs_defaults(Some(8192));
+        config
+            .apply_rootfs_defaults(&crate::config::OciSandboxDefaults {
+                upper_size_mib: Some(8192),
+                root_disk: None,
+            })
+            .unwrap();
 
         assert_eq!(
             config.spec.image.oci_root_disk(),
             Some(&RootDisk::managed(8192))
         );
+    }
+
+    #[test]
+    fn test_apply_rootfs_defaults_uses_flat_backend_default() {
+        let mut config = SandboxConfig {
+            spec: SandboxSpec {
+                image: RootfsSource::oci("python:3.12"),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let expected = RootDisk::Flat {
+            size_mib: Some(8192),
+            fstype: Some("ext4".into()),
+            clone: microsandbox_types::FlatClone::Copy,
+        };
+
+        config
+            .apply_rootfs_defaults(&crate::config::OciSandboxDefaults {
+                upper_size_mib: None,
+                root_disk: Some(expected.clone()),
+            })
+            .unwrap();
+
+        assert_eq!(config.spec.image.oci_root_disk(), Some(&expected));
+    }
+
+    #[test]
+    fn test_apply_rootfs_defaults_rejects_conflicting_config_fields() {
+        let mut config = SandboxConfig {
+            spec: SandboxSpec {
+                image: RootfsSource::oci("python:3.12"),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let error = config
+            .apply_rootfs_defaults(&crate::config::OciSandboxDefaults {
+                upper_size_mib: Some(8192),
+                root_disk: Some(RootDisk::Flat {
+                    size_mib: None,
+                    fstype: None,
+                    clone: microsandbox_types::FlatClone::Auto,
+                }),
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("mutually exclusive"));
     }
 
     #[test]
@@ -1433,7 +1512,12 @@ mod tests {
             ..Default::default()
         };
 
-        config.apply_rootfs_defaults(Some(8192));
+        config
+            .apply_rootfs_defaults(&crate::config::OciSandboxDefaults {
+                upper_size_mib: Some(8192),
+                root_disk: None,
+            })
+            .unwrap();
 
         assert!(config.spec.image.oci_root_disk().is_none());
     }

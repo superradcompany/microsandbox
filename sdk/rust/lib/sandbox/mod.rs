@@ -259,7 +259,12 @@ pub struct SandboxTouchResult {
 impl Sandbox {
     /// Start building a new sandbox configuration.
     pub fn builder(name: impl Into<String>) -> SandboxBuilder {
-        SandboxBuilder::new(name)
+        let builder = SandboxBuilder::new(name);
+        let backend = crate::backend::default_backend();
+        match backend.as_local() {
+            Some(local) => builder.with_local_defaults(local.config()),
+            None => builder,
+        }
     }
 
     /// Create a sandbox from a config.
@@ -509,7 +514,7 @@ pub(crate) async fn create_local(
                 available_when: "with a LocalBackend".into(),
             })?;
 
-    config.apply_rootfs_defaults(local_backend.config().sandbox_defaults.oci.upper_size_mib);
+    config.apply_rootfs_defaults(&local_backend.config().sandbox_defaults.oci)?;
 
     let mut pinned_manifest_digest: Option<String> = None;
     let mut pinned_reference: Option<String> = None;

@@ -203,13 +203,15 @@ async fn run_pull_inner(
     insecure: bool,
     cli_ca_certs: Option<String>,
     pull_policy: microsandbox_image::PullPolicy,
-    materialization: pull::PullMaterialization,
+    materialization: Option<pull::PullMaterialization>,
 ) -> anyhow::Result<()> {
     let start = Instant::now();
 
     let backend = crate::commands::common::resolve_local_backend()?;
     let local = crate::commands::common::local_backend_ref(&backend)?;
     let global = local.config();
+    let oci_defaults = &global.sandbox_defaults.oci;
+    let materialization = resolve_pull_materialization(materialization, oci_defaults)?;
     let cache = microsandbox_image::GlobalCache::new(&local.cache_dir())?;
     let platform = microsandbox_image::Platform::host_linux();
     let image_ref: microsandbox_image::Reference = reference
@@ -398,7 +400,7 @@ pub(crate) async fn pull_if_missing(reference: &str, quiet: bool) -> anyhow::Res
         false,
         None,
         microsandbox_image::PullPolicy::IfMissing,
-        pull::PullMaterialization::Layered,
+        Some(pull::PullMaterialization::Layered),
     )
     .await
 }
@@ -831,11 +833,72 @@ fn pull_failure_line(quiet: bool, reference: &str) {
     }
 }
 
+fn resolve_pull_materialization(
+    requested: Option<pull::PullMaterialization>,
+    defaults: &microsandbox::config::OciSandboxDefaults,
+) -> anyhow::Result<pull::PullMaterialization> {
+    if defaults.upper_size_mib.is_some() && defaults.root_disk.is_some() {
+        anyhow::bail!(
+            "sandbox_defaults.oci.root_disk and deprecated sandbox_defaults.oci.upper_size_mib are mutually exclusive"
+        );
+    }
+    if matches!(
+        defaults.root_disk,
+        Some(microsandbox::sandbox::RootDisk::DiskImage { .. })
+    ) {
+        anyhow::bail!(
+            "sandbox_defaults.oci.root_disk cannot be a shared disk-image; specify user-owned disk images per sandbox"
+        );
+    }
+
+    Ok(requested.unwrap_or({
+        if matches!(
+            defaults.root_disk,
+            Some(microsandbox::sandbox::RootDisk::Flat { .. })
+        ) {
+            pull::PullMaterialization::Flat
+        } else {
+            pull::PullMaterialization::Layered
+        }
+    }))
+}
+
 /// Truncate a digest to a short form (first 12 hex chars after algorithm prefix).
 fn truncate_digest(digest: &str) -> String {
     if let Some(hex) = digest.strip_prefix("sha256:") {
         format!("sha256:{}", &hex[..hex.len().min(12)])
     } else {
         digest.chars().take(19).collect()
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pull_materialization_inherits_flat_only_when_not_explicit() {
+        let defaults = microsandbox::config::OciSandboxDefaults {
+            upper_size_mib: None,
+            root_disk: Some(microsandbox::sandbox::RootDisk::Flat {
+                size_mib: Some(8192),
+                fstype: None,
+                clone: microsandbox::sandbox::FlatClone::Auto,
+            }),
+        };
+
+        assert_eq!(
+            resolve_pull_materialization(None, &defaults).unwrap(),
+            pull::PullMaterialization::Flat
+        );
+        assert_eq!(
+            resolve_pull_materialization(Some(pull::PullMaterialization::Layered), &defaults)
+                .unwrap(),
+            pull::PullMaterialization::Layered
+        );
     }
 }

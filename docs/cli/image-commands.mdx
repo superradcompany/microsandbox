@@ -25,9 +25,11 @@ Expanded form: `msb image pull`.
 | `-q`, `--quiet` | Suppress progress output |
 | `--insecure` | Connect over plain HTTP instead of HTTPS |
 | `--ca-certs <PATH>` | Path to a PEM file with additional CA root certificates |
-| `--materialize <MODE>` | Prepare `layered` (default), `flat`, or `all` rootfs artifacts |
+| `--materialize <MODE>` | Explicitly prepare `layered`, `flat`, or `all` rootfs artifacts |
 
 `flat` creates a reusable, validated raw ext4 base with no guest OverlayFS in the final rootfs. The pull path reconstructs the final OCI filesystem from the content-addressed layer cache, so it does not depend on a guest builder or host mount. `all` explicitly prepares both representations; `flat` also retains the internal layer artifacts needed for OCI cache integrity and later re-materialization.
+
+When `--materialize` is omitted, `msb pull` follows `sandbox_defaults.oci.root_disk`: a flat default prepares the flat artifact, while the built-in managed default prepares the layered representation. An explicit flag always wins.
 
 Flat artifacts live under the configured cache directory. `flat/refs/<manifest>.json` records the requested manifest and verified result, `flat/blobs/<artifact>.raw` stores immutable content-addressed ext4 bytes, and `flat/locks/<derivation>.lock` coordinates concurrent materialization. A ref whose blob is missing or has the wrong logical size is treated as a cache miss.
 

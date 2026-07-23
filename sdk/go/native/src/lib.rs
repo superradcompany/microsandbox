@@ -5276,18 +5276,20 @@ fn snapshot_builder_from_opts(
         return Err(FfiError::invalid_argument("snapshot create requires name"));
     };
     let compaction = match opts.compaction.as_str() {
-        "" | "off" => microsandbox::SnapshotCompaction::Off,
-        "auto" => microsandbox::SnapshotCompaction::Auto,
-        "on" => microsandbox::SnapshotCompaction::On,
+        "" => None,
+        "off" => Some(microsandbox::SnapshotCompaction::Off),
+        "auto" => Some(microsandbox::SnapshotCompaction::Auto),
+        "on" => Some(microsandbox::SnapshotCompaction::On),
         value => {
             return Err(FfiError::invalid_argument(format!(
                 "snapshot compaction must be off, auto, or on, got '{value}'"
             )));
         }
     };
-    let mut builder = Snapshot::builder(name)
-        .from_sandbox(source_sandbox)
-        .compaction(compaction);
+    let mut builder = Snapshot::builder(name).from_sandbox(source_sandbox);
+    if let Some(compaction) = compaction {
+        builder = builder.compaction(compaction);
+    }
     if let Some(dest_dir) = opts.dest_dir {
         builder = builder.dest_dir(PathBuf::from(dest_dir));
     }

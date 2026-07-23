@@ -973,7 +973,7 @@ Compute and record an upper-layer content-integrity hash during creation. Record
 fn compaction(self, compaction: SnapshotCompaction) -> Self
 ```
 
-Select flat-snapshot free-space compaction. `Off` is the default and avoids the ext4 scan, `Auto` is best effort, and `On` requires a flat root and successful host deallocation. The created [`Snapshot`](#instance-methods) exposes the resolved [`SnapshotCompactionInfo`](#snapshotcompactioninfo) through `snap.compaction()`.
+Select flat-snapshot free-space compaction. `Off` is the built-in default and avoids the ext4 scan, `Auto` is best effort, and `On` requires a flat root and successful host deallocation. `snapshot_defaults.compaction` can change the local default; calling this method is an explicit per-snapshot override. The created [`Snapshot`](#instance-methods) exposes the resolved [`SnapshotCompactionInfo`](#snapshotcompactioninfo) through `snap.compaction()`.
 
 ---
 

@@ -673,7 +673,7 @@ class Snapshot:
         labels: dict[str, str] | None = None,
         force: bool = False,
         record_integrity: bool = False,
-        compaction: Literal["off", "auto", "on"] = "off",
+        compaction: Literal["off", "auto", "on"] | None = None,
         resumable: bool = False,
     ) -> Snapshot: ...
     @staticmethod

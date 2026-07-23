@@ -69,6 +69,10 @@ impl Snapshot {
     /// directory. Archive movement happens through
     /// [`save`](Self::save)/[`load`](Self::load).
     pub fn builder(name: impl Into<String>) -> SnapshotBuilder {
+        let backend = crate::backend::default_backend();
+        let compaction = backend.as_local().map_or(SnapshotCompaction::Off, |local| {
+            local.config().snapshot_defaults.compaction
+        });
         SnapshotBuilder {
             name: name.into(),
             source_sandbox: None,
@@ -76,7 +80,7 @@ impl Snapshot {
             labels: Vec::new(),
             force: false,
             record_integrity: false,
-            compaction: SnapshotCompaction::Off,
+            compaction,
             resumable: false,
         }
     }
