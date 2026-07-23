@@ -181,6 +181,13 @@
             "pages": [
               "configuration"
             ]
+          },
+          {
+            "group": "Performance",
+            "icon": "bolt",
+            "pages": [
+              "optimization/overview"
+            ]
           }
         ]
       },

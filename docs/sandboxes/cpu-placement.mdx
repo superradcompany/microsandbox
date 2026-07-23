@@ -72,3 +72,5 @@ Windows planning currently stays within the runtime thread's inherited primary p
 Coordination is local to one Microsandbox catalog and lease directory. Sandboxes using different `MSB_HOME` values do not share reservations. Provider deployments that need machine-wide cooperative placement should configure one machine-wide allocation domain.
 
 On macOS, `inherit` remains available. `auto`, `spread`, and `compact` return an unsupported-platform error because Apple does not expose an equivalent public hard-affinity API; Microsandbox does not claim enforcement that was not applied.
+
+See [Performance optimization](/optimization/overview#cpu-placement) for workload selection guidance and the interaction with host topology, THP, and interrupt acceleration.

@@ -162,6 +162,8 @@ Defaults applied to local sandboxes unless overridden per-sandbox. Cloud backend
 
 Explicit CLI or SDK options win over `config.json`, and `config.json` wins over built-in defaults. Microsandbox resolves the effective values once when it creates a local sandbox and persists that resolved sandbox configuration; changing the global file affects future creations, not existing sandboxes.
 
+For workload effects, host requirements, filesystem expectations, and verification steps for these settings, see [Performance optimization](/optimization/overview).
+
 | Field | Default | Description |
 |-------|---------|-------------|
 | `cpus` | `1` | Number of vCPUs |
@@ -199,7 +201,7 @@ When the root-disk default is flat, plain `msb pull IMAGE` also prepares the reu
 |-------|---------|-------------|
 | `block_writeback_preflush` | `"auto"` | `auto` uses the platform-aware VMM policy; `off` disables advisory buffered writeback for each newly spawned VMM without weakening the guest flush durability boundary. |
 
-Hardware CRC32C, the guest kernel preemption model, x2APIC, APICv/AVIC capability, vCPU affinity mechanics, and the pure-Rust ext4 writer are implementation or capability details rather than user policy, so they intentionally have no global config keys.
+Hardware CRC32C, the guest kernel preemption model, x2APIC, APICv/AVIC capability, vCPU affinity mechanics, and the pure-Rust ext4 writer are implementation or capability details rather than user policy, so they intentionally have no global config keys. The [performance guide](/optimization/overview#optimizations-that-are-not-knobs) explains how those automatic layers interact with the configurable policy.
 
 ## `registries`
 
