@@ -152,16 +152,16 @@ pub const MIGRATION_METADATA: &[MigrationMetadata] = &[
     },
     MigrationMetadata {
         id: "m20260708_000001_migrate_bind_rootfs_source",
-        reversible: false,
+        reversible: true,
         affects_cache: false,
-        affects_user_data: false,
+        affects_user_data: true,
         summary: "rewrite bind rootfs config back to the legacy string shape",
     },
     MigrationMetadata {
         id: "m20260710_000001_migrate_root_disk",
-        reversible: false,
+        reversible: true,
         affects_cache: false,
-        affects_user_data: false,
+        affects_user_data: true,
         summary: "rewrite root disk config back to the upper size shape",
     },
     MigrationMetadata {

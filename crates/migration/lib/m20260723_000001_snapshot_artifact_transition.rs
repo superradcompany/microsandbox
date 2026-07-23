@@ -121,15 +121,15 @@ impl MigrationTrait for Migration {
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let connection = manager.get_connection();
-        let retained = connection
+        let unreversed = connection
             .query_one(Statement::from_string(
                 manager.get_database_backend(),
-                "SELECT COUNT(*) FROM snapshot_index",
+                "SELECT COUNT(*) FROM snapshot_index WHERE migration_state != 'reverse_complete'",
             ))
             .await?
             .ok_or_else(|| DbErr::Migration("snapshot downgrade preflight returned no row".into()))?
             .try_get_by_index::<i64>(0)?;
-        if retained != 0 {
+        if unreversed != 0 {
             return Err(DbErr::Migration(
                 "snapshot_downgrade_recovery_required: reverse managed snapshot artifacts before rolling back the snapshot schema"
                     .into(),

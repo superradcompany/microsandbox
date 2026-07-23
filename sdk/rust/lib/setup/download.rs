@@ -5,6 +5,7 @@ use tokio::process::Command;
 
 use flate2::read::GzDecoder;
 use futures::StreamExt;
+use sha2::{Digest as _, Sha256};
 use tar::Archive;
 
 use crate::{MicrosandboxError, MicrosandboxResult};
@@ -40,6 +41,14 @@ pub struct Setup {
     /// Allow CI to install from the workspace `build/` directory.
     #[builder(default = true)]
     allow_ci_local_bundle: bool,
+
+    /// Expected SHA-256 for the downloaded release bundle.
+    ///
+    /// Self-downgrade supplies the digest published by the GitHub release API
+    /// so target staging fails before extraction if the retained bundle bytes
+    /// do not match the release asset.
+    #[builder(default, setter(strip_option, into))]
+    expected_bundle_sha256: Option<String>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -102,6 +111,9 @@ impl Setup {
             "downloading microsandbox runtime dependencies"
         );
         let data = download_bytes(&url).await?;
+        if let Some(expected) = self.expected_bundle_sha256.as_deref() {
+            verify_bundle_digest(&data, expected)?;
+        }
         extract_bundle(&data, bin_dir, lib_dir)?;
         tracing::info!("microsandbox runtime dependencies installed");
 
@@ -217,6 +229,22 @@ async fn download_bytes(url: &str) -> MicrosandboxResult<Vec<u8>> {
     Ok(data)
 }
 
+fn verify_bundle_digest(data: &[u8], expected: &str) -> MicrosandboxResult<()> {
+    let expected = expected.strip_prefix("sha256:").unwrap_or(expected);
+    if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(MicrosandboxError::Custom(
+            "release bundle has an invalid published SHA-256 digest".into(),
+        ));
+    }
+    let actual = hex::encode(Sha256::digest(data));
+    if !actual.eq_ignore_ascii_case(expected) {
+        return Err(MicrosandboxError::Custom(format!(
+            "release bundle SHA-256 mismatch: expected {expected}, got {actual}"
+        )));
+    }
+    Ok(())
+}
+
 async fn installed_msb_version(path: &Path) -> Option<String> {
     if !path.exists() {
         return None;
@@ -293,4 +321,25 @@ fn workspace_build_dir() -> Option<PathBuf> {
         return None;
     }
     Some(workspace_root.join("build"))
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn release_bundle_digest_must_match_published_sha256() {
+        verify_bundle_digest(
+            b"hello",
+            "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        )
+        .unwrap();
+
+        let error = verify_bundle_digest(b"changed", &"0".repeat(64)).unwrap_err();
+        assert!(error.to_string().contains("SHA-256 mismatch"));
+    }
 }

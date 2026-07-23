@@ -505,6 +505,7 @@ async fn connect_and_migrate(
 ) -> MicrosandboxResult<DbPools> {
     tokio::fs::create_dir_all(db_dir).await?;
     let _migration_lock = acquire_migration_lock(db_dir).await?;
+    refuse_incomplete_self_downgrade(db_dir)?;
 
     let db_path = db_dir.join(microsandbox_utils::DB_FILENAME);
     let pools = DbPools::open(
@@ -541,6 +542,52 @@ async fn connect_and_migrate(
     clear_result?;
 
     Ok(pools)
+}
+
+/// Refuse normal startup while a durable self-downgrade operation owns local
+/// state. This check intentionally runs before opening the database or running
+/// schema-ahead/upgrade logic, including after the database has been rolled
+/// back to the target schema.
+fn refuse_incomplete_self_downgrade(db_dir: &Path) -> MicrosandboxResult<()> {
+    let operations_dir = db_dir.join("self-downgrade");
+    let entries = match std::fs::read_dir(&operations_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir()
+            || entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with('.'))
+        {
+            continue;
+        }
+        let journal_path = entry.path().join("journal.json");
+        if !journal_path.exists() {
+            return Err(MicrosandboxError::Runtime(format!(
+                "self_downgrade_recovery_required: operation directory has no journal: {}",
+                entry.path().display()
+            )));
+        }
+        let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&journal_path)?)
+            .map_err(|error| {
+                MicrosandboxError::Runtime(format!(
+                    "self_downgrade_recovery_required: invalid journal {}: {error}",
+                    journal_path.display()
+                ))
+            })?;
+        if value.get("phase").and_then(serde_json::Value::as_str) != Some("complete") {
+            return Err(MicrosandboxError::Runtime(format!(
+                "self_downgrade_recovery_required: resume the active downgrade recorded at {}",
+                journal_path.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 async fn acquire_migration_lock(db_dir: &Path) -> MicrosandboxResult<MigrationLock> {
@@ -773,6 +820,28 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("database schema is newer"));
+    }
+
+    #[test]
+    fn test_startup_refuses_incomplete_self_downgrade_before_database_open() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_dir = temp.path().join("db");
+        let operation = db_dir.join("self-downgrade/op-1");
+        std::fs::create_dir_all(&operation).unwrap();
+        std::fs::write(
+            operation.join("journal.json"),
+            br#"{"phase":"database_reverted"}"#,
+        )
+        .unwrap();
+
+        let error = refuse_incomplete_self_downgrade(&db_dir).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("self_downgrade_recovery_required")
+        );
+        assert!(!db_dir.join(microsandbox_utils::DB_FILENAME).exists());
     }
 
     #[tokio::test]

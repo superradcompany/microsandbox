@@ -1107,7 +1107,7 @@ async fn load_blocked_error(
 // Functions: File Integrity and Confinement
 //--------------------------------------------------------------------------------------------------
 
-fn hash_payload(file: &mut File) -> MicrosandboxResult<V066PayloadIdentity> {
+pub(super) fn hash_payload(file: &mut File) -> MicrosandboxResult<V066PayloadIdentity> {
     let len = file.metadata()?.len();
     let mut sparse = Sha256::new();
     sparse.update(b"msb-sparse-sha256-v1\0");

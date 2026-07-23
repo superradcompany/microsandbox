@@ -13,6 +13,8 @@
 
 mod archive;
 mod create;
+#[doc(hidden)]
+pub mod downgrade;
 pub(crate) mod migration;
 mod store;
 mod verify;
