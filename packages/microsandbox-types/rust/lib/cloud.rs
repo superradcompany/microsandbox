@@ -1003,6 +1003,8 @@ impl TryFrom<CloudSandboxSpec> for SandboxSpec {
             log_level: spec.runtime.log_level,
             metrics_sample_interval_ms: None,
             disable_metrics_sample: false,
+            // Cloud sandboxes do not expose GPU devices (local-runtime feature).
+            gpu: false,
         };
 
         Ok(Self {

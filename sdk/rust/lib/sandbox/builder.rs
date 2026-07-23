@@ -297,6 +297,15 @@ impl SandboxBuilder {
     /// (e.g., `/app`). Used by [`exec`](super::Sandbox::exec),
     /// [`shell`](super::Sandbox::shell), and [`attach`](super::Sandbox::attach)
     /// unless overridden per-command.
+    /// Expose a virtio-gpu device with the Venus (Vulkan) renderer to the guest.
+    ///
+    /// The guest image must carry Mesa's Vulkan Venus driver
+    /// (`mesa-vulkan-drivers` on most distros) for applications to reach the GPU.
+    pub fn gpu(mut self, enable: bool) -> Self {
+        self.config.spec.runtime.gpu = enable;
+        self
+    }
+
     pub fn workdir(mut self, path: impl Into<String>) -> Self {
         self.config.spec.runtime.workdir = Some(path.into());
         self

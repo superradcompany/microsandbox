@@ -88,10 +88,10 @@ build-deps: build-agentd build-libkrunfw
 [linux]
 build-agentd:
     @command -v musl-gcc >/dev/null || { echo "error: musl-gcc not found. Install your distro's musl toolchain."; exit 1; }
-    rustup target add x86_64-unknown-linux-musl 2>/dev/null || true
-    cargo build --release --manifest-path crates/agentd/Cargo.toml --target-dir target --target x86_64-unknown-linux-musl
+    rustup target add "$(uname -m)-unknown-linux-musl" 2>/dev/null || true
+    cargo build --release --manifest-path crates/agentd/Cargo.toml --target-dir target --target "$(uname -m)-unknown-linux-musl"
     mkdir -p build
-    cp target/x86_64-unknown-linux-musl/release/agentd build/agentd
+    cp "target/$(uname -m)-unknown-linux-musl/release/agentd" build/agentd
     touch build/agentd
 
 # Build agentd as a static Linux/musl binary via Docker cross-compilation. Requires: docker.
