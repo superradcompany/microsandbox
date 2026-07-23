@@ -171,7 +171,10 @@ pub enum RuleParseError {
     PortInProtocolSlot { target: String, value: String },
 
     /// The `dns` macro only describes gateway-bound egress.
-    #[error("the `dns` target only supports egress rules; omit the direction or use `:egress`")]
+    #[error(
+        "the `dns` target only supports egress rules; omit the direction or use \
+         `allow:egress@dns`/`deny:egress@dns`"
+    )]
     DnsMustBeEgress,
 
     /// The `dns` macro only covers UDP and TCP DNS.
@@ -697,10 +700,13 @@ mod tests {
 
     #[test]
     fn dns_target_rejects_ingress_icmp_and_non_dns_ports() {
-        assert!(matches!(
-            parse_rule_token("allow:ingress@dns"),
-            Err(RuleParseError::DnsMustBeEgress)
-        ));
+        let direction_error = parse_rule_token("allow:ingress@dns").unwrap_err();
+        assert!(matches!(&direction_error, RuleParseError::DnsMustBeEgress));
+        assert_eq!(
+            direction_error.to_string(),
+            "the `dns` target only supports egress rules; omit the direction or use \
+             `allow:egress@dns`/`deny:egress@dns`"
+        );
         assert!(matches!(
             parse_rule_token("allow@dns:icmpv4"),
             Err(RuleParseError::InvalidDnsProtocol { .. })

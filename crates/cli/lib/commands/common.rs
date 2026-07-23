@@ -1780,9 +1780,15 @@ fn build_network_policy(
                 "private" => profiles.push(NetworkProfile::Private),
                 "host" => profiles.push(NetworkProfile::Host),
                 "all" | "none" => {
-                    if terminal.replace(raw).is_some() {
-                        anyhow::bail!("--net `{raw}` may only be specified once");
+                    if let Some(previous) = terminal {
+                        if previous == raw {
+                            anyhow::bail!("--net `{raw}` may only be specified once");
+                        }
+                        anyhow::bail!(
+                            "--net terminal profiles `all` and `none` cannot be combined"
+                        );
                     }
+                    terminal = Some(raw);
                 }
                 other => anyhow::bail!(
                     "unknown --net profile {other:?}; expected public, private, host, all, or none"
@@ -3741,5 +3747,27 @@ mod tests {
         let err = build_network_policy(&["none,public".to_string()], &[], false, None, None, None)
             .unwrap_err();
         assert!(err.to_string().contains("cannot be combined"));
+
+        for profiles in [
+            vec!["all".to_string(), "none".to_string()],
+            vec!["none,all".to_string()],
+        ] {
+            let err = build_network_policy(&profiles, &[], false, None, None, None).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "--net terminal profiles `all` and `none` cannot be combined"
+            );
+        }
+
+        let err = build_network_policy(
+            &["all".to_string(), "all".to_string()],
+            &[],
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "--net `all` may only be specified once");
     }
 }
