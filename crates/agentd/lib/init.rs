@@ -164,6 +164,7 @@ mod linux {
             noexec_nosuid,
             None::<&str>,
         )?;
+        ensure_dev_ptmx()?;
 
         // /dev/shm — tmpfs
         mkdir_ignore_exists("/dev/shm")?;
@@ -182,6 +183,16 @@ mod linux {
         }
 
         Ok(())
+    }
+
+    fn ensure_dev_ptmx() -> AgentdResult<()> {
+        let ptmx = Path::new("/dev/ptmx");
+        if fs::symlink_metadata(ptmx).is_ok() {
+            return Ok(());
+        }
+
+        unix_fs::symlink("pts/ptmx", ptmx)
+            .map_err(|e| AgentdError::Init(format!("failed to symlink /dev/ptmx: {e}")))
     }
 
     /// Mounts the virtiofs runtime filesystem at the canonical mount point.

@@ -16,7 +16,7 @@ use bytes::Bytes;
 use futures::{SinkExt, StreamExt, stream};
 use microsandbox_protocol::{
     codec,
-    exec::{ExecExited, ExecFailed, ExecStarted, ExecStderr, ExecStdin, ExecStdout},
+    exec::{ExecExited, ExecFailed, ExecStarted, ExecStderr, ExecStdout},
     message::{Message, MessageType},
 };
 use reqwest::Response;
@@ -42,7 +42,7 @@ use super::{Backend, BackendKind, SandboxBackend, VolumeBackend, sandbox::LogStr
 use crate::logs::{LogCursor, LogEntry, LogOptions, LogSource, LogStreamOptions, LogStreamStart};
 use crate::sandbox::{
     SandboxConfig, build_exec_request,
-    exec::{ExecOptions, ExecOutput, ExitStatus, StdinMode},
+    exec::{ExecOptions, ExecOutput, ExitStatus, initial_stdin_messages},
 };
 use crate::{MicrosandboxError, MicrosandboxResult};
 use microsandbox_types::{
@@ -392,11 +392,8 @@ impl CloudBackend {
         let req = build_exec_request(config, cmd, args, cwd, user, &env, &rlimits, tty, 24, 80);
         send_cloud_exec_message(&mut writer, MessageType::ExecRequest, &req).await?;
 
-        if let StdinMode::Bytes(data) = stdin_mode {
-            let stdin = ExecStdin { data };
+        for stdin in initial_stdin_messages(&stdin_mode) {
             send_cloud_exec_message(&mut writer, MessageType::ExecStdin, &stdin).await?;
-            let close = ExecStdin { data: Vec::new() };
-            send_cloud_exec_message(&mut writer, MessageType::ExecStdin, &close).await?;
         }
 
         let mut frame_buf = Vec::new();

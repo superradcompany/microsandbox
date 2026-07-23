@@ -22,6 +22,7 @@ pub mod launch;
 pub mod logging;
 pub mod maintenance;
 pub mod metrics;
+pub mod oci;
 pub mod policy;
 pub mod relay;
 mod startup;

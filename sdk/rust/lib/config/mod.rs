@@ -878,6 +878,7 @@ pub fn resolve_libkrunfw_path() -> MicrosandboxResult<PathBuf> {
 /// 4. A sibling of the resolved `msb` binary (for `build/msb`).
 /// 5. `../lib/` next to the resolved `msb` binary (for installed layouts).
 /// 6. `{home}/lib/libkrunfw.{so,dylib}`.
+/// 7. Linux system library paths for ABI-compatible `libkrunfw.so.5`.
 fn resolve_libkrunfw_path_for_config(config: &LocalConfig) -> MicrosandboxResult<PathBuf> {
     if let Ok(env_path) = std::env::var("MSB_LIBKRUNFW_PATH") {
         let path = PathBuf::from(env_path);
@@ -908,17 +909,22 @@ fn resolve_libkrunfw_path_for_config(config: &LocalConfig) -> MicrosandboxResult
         )));
     }
 
-    let filename = microsandbox_utils::libkrunfw_filename(libkrunfw_target_os());
-    let home_fallback = config
-        .home()
-        .join(microsandbox_utils::LIB_SUBDIR)
-        .join(&filename);
+    let os = libkrunfw_target_os();
+    let filenames = libkrunfw_candidate_filenames(os);
 
     let mut candidates = Vec::new();
     if let Ok(msb_path) = config.resolve_msb_path() {
-        candidates.extend(libkrunfw_candidates_from_msb(&msb_path, &filename));
+        candidates.extend(libkrunfw_candidates_from_msb(&msb_path, &filenames));
     }
-    candidates.push(home_fallback);
+    for filename in &filenames {
+        candidates.push(
+            config
+                .home()
+                .join(microsandbox_utils::LIB_SUBDIR)
+                .join(filename),
+        );
+    }
+    candidates.extend(libkrunfw_system_candidates(os));
 
     if let Some(path) = candidates.iter().find(|path| path.is_file()) {
         tracing::debug!(path = %path.display(), "resolved libkrunfw path");
@@ -935,17 +941,49 @@ fn resolve_libkrunfw_path_for_config(config: &LocalConfig) -> MicrosandboxResult
     )))
 }
 
-fn libkrunfw_candidates_from_msb(msb_path: &Path, filename: &str) -> Vec<PathBuf> {
+fn libkrunfw_candidate_filenames(os: &str) -> Vec<String> {
+    let mut filenames = vec![microsandbox_utils::libkrunfw_filename(os)];
+
+    if os == "linux" {
+        let soname = format!("libkrunfw.so.{}", microsandbox_utils::LIBKRUNFW_ABI);
+        filenames.push(soname);
+        filenames.push("libkrunfw.so".to_string());
+    }
+
+    filenames
+}
+
+fn libkrunfw_candidates_from_msb(msb_path: &Path, filenames: &[String]) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
     if let Some(msb_dir) = msb_path.parent() {
-        candidates.push(msb_dir.join(filename));
+        for filename in filenames {
+            candidates.push(msb_dir.join(filename));
 
-        if let Some(parent) = msb_dir.parent() {
-            candidates.push(parent.join(microsandbox_utils::LIB_SUBDIR).join(filename));
+            if let Some(parent) = msb_dir.parent() {
+                candidates.push(parent.join(microsandbox_utils::LIB_SUBDIR).join(filename));
+            }
         }
     }
 
+    collect_deduped_paths(candidates)
+}
+
+fn libkrunfw_system_candidates(os: &str) -> Vec<PathBuf> {
+    if os != "linux" {
+        return Vec::new();
+    }
+
+    let soname = format!("libkrunfw.so.{}", microsandbox_utils::LIBKRUNFW_ABI);
+    collect_deduped_paths(vec![
+        PathBuf::from("/usr/lib").join(&soname),
+        PathBuf::from("/usr/local/lib").join(&soname),
+        PathBuf::from("/usr/lib/libkrunfw.so"),
+        PathBuf::from("/usr/local/lib/libkrunfw.so"),
+    ])
+}
+
+fn collect_deduped_paths(candidates: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut deduped = Vec::new();
     for path in candidates {
         if !deduped.iter().any(|existing| existing == &path) {
@@ -1393,7 +1431,7 @@ mod tests {
     #[test]
     fn test_libkrunfw_candidates_for_build_msb() {
         let msb = PathBuf::from("/repo/build/msb");
-        let paths = libkrunfw_candidates_from_msb(&msb, "libkrunfw.5.dylib");
+        let paths = libkrunfw_candidates_from_msb(&msb, &["libkrunfw.5.dylib".to_string()]);
         assert_eq!(paths[0], PathBuf::from("/repo/build/libkrunfw.5.dylib"));
         assert_eq!(paths[1], PathBuf::from("/repo/lib/libkrunfw.5.dylib"));
     }
@@ -1401,7 +1439,7 @@ mod tests {
     #[test]
     fn test_libkrunfw_candidates_for_target_msb() {
         let msb = PathBuf::from("/repo/target/debug/msb");
-        let paths = libkrunfw_candidates_from_msb(&msb, "libkrunfw.5.dylib");
+        let paths = libkrunfw_candidates_from_msb(&msb, &["libkrunfw.5.dylib".to_string()]);
         assert_eq!(
             paths[0],
             PathBuf::from("/repo/target/debug/libkrunfw.5.dylib")
@@ -1424,6 +1462,21 @@ mod tests {
         } else {
             assert!(filename.ends_with(".so.5.6.0"));
         }
+    }
+
+    #[test]
+    fn test_linux_libkrunfw_candidates_include_abi_symlinks() {
+        let filenames = libkrunfw_candidate_filenames("linux");
+        assert_eq!(
+            filenames[0],
+            microsandbox_utils::libkrunfw_filename("linux")
+        );
+        assert!(filenames.contains(&"libkrunfw.so.5".to_string()));
+        assert!(filenames.contains(&"libkrunfw.so".to_string()));
+
+        let paths = libkrunfw_system_candidates("linux");
+        assert!(paths.contains(&PathBuf::from("/usr/lib/libkrunfw.so.5")));
+        assert!(paths.contains(&PathBuf::from("/usr/local/lib/libkrunfw.so.5")));
     }
 
     #[test]
