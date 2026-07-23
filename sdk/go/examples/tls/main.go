@@ -39,18 +39,17 @@ func main() {
 
 	name := fmt.Sprintf("go-sdk-tls-%d", time.Now().Unix())
 	log.Printf("creating sandbox %q with TLS interception enabled", name)
+	network := microsandbox.NetworkPolicy.AllowAll()
+	network.TLS = &microsandbox.TLSConfig{
+		Bypass:           []string{"*.google.com"},
+		VerifyUpstream:   &verifyUpstream,
+		InterceptedPorts: []uint16{443},
+		BlockQUIC:        &blockQUIC,
+	}
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
 		microsandbox.WithImage("alpine:3.19"),
-		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
-			Policy: microsandbox.NetworkPolicyPresetAllowAll,
-			TLS: &microsandbox.TLSConfig{
-				Bypass:           []string{"*.google.com"},
-				VerifyUpstream:   &verifyUpstream,
-				InterceptedPorts: []uint16{443},
-				BlockQUIC:        &blockQUIC,
-			},
-		}),
+		microsandbox.WithNetwork(network),
 	)
 	if err != nil {
 		log.Fatalf("CreateSandbox: %v", err)

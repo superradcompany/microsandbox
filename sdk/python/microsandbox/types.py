@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import enum
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
 
@@ -87,6 +87,12 @@ class DestGroup(StrEnum):
     LINK_LOCAL = "link-local"
     METADATA = "metadata"
     MULTICAST = "multicast"
+    HOST = "host"
+
+class NetworkProfile(StrEnum):
+    """Composable high-level network access profile."""
+    PUBLIC = "public"
+    PRIVATE = "private"
     HOST = "host"
 
 class ViolationAction(StrEnum):
@@ -772,19 +778,56 @@ class Rule:
             ),
         )
 
+    @classmethod
+    def deny_dns(cls) -> tuple[Rule, Rule]:
+        """Deny gateway UDP/53 and TCP/53, for overriding profile DNS."""
+        udp, tcp = cls.allow_dns()
+        return (
+            cls(Action.DENY, udp.direction, udp.destination, udp.protocol, udp.port),
+            cls(Action.DENY, tcp.direction, tcp.destination, tcp.protocol, tcp.port),
+        )
+
 @dataclass(frozen=True, slots=True)
 class NetworkPolicy:
     """Custom network policy with rules.
 
     Mirrors Rust's `NetworkPolicy { default_egress, default_ingress, rules }`.
     The defaults are asymmetric to preserve today's behavior:
-    egress falls through to deny (today's `public_only` reachability when
-    paired with the implicit allow-public rule); ingress falls through
+    egress falls through to deny (the default public-profile reachability when
+    paired with an allow-public rule); ingress falls through
     to allow (today's unfiltered published-port behavior).
     """
     default_egress: Action = Action.DENY
     default_ingress: Action = Action.ALLOW
     rules: tuple[Rule, ...] = ()
+
+    @classmethod
+    def none(cls) -> NetworkPolicy:
+        """Deny traffic in both directions."""
+        return cls(default_egress=Action.DENY, default_ingress=Action.DENY)
+
+    @classmethod
+    def allow_all(cls) -> NetworkPolicy:
+        """Allow traffic in both directions."""
+        return cls(default_egress=Action.ALLOW, default_ingress=Action.ALLOW)
+
+    @classmethod
+    def from_profiles(
+        cls, profiles: Iterable[NetworkProfile | str]
+    ) -> NetworkPolicy:
+        """Build a canonical deny-by-default policy from profiles."""
+        requested = {NetworkProfile(profile) for profile in profiles}
+        rules: list[Rule] = []
+        if requested:
+            rules.extend(Rule.allow_dns())
+        for profile in (
+            NetworkProfile.PUBLIC,
+            NetworkProfile.PRIVATE,
+            NetworkProfile.HOST,
+        ):
+            if profile in requested:
+                rules.append(Rule.allow(destination=Destination.group(profile.value)))
+        return cls(rules=tuple(rules))
 
     def _to_dict(self) -> dict:
         def destination_fields(destination: NetworkDestinationLike) -> dict:
@@ -921,7 +964,7 @@ class PortBinding:
 @dataclass(frozen=True, slots=True)
 class Network:
     """Network configuration for a sandbox."""
-    policy: str | NetworkPolicy | None = None
+    policy: NetworkPolicy | None = None
     ports: Mapping[int, int] | Sequence[PortBinding] = field(default_factory=dict)
     deny_domains: tuple[str, ...] = ()
     """Deny egress to these exact domains. Each entry adds a
@@ -945,23 +988,26 @@ class Network:
 
     @classmethod
     def none(cls) -> Network:
-        return cls(policy="none")
+        return cls(policy=NetworkPolicy.none())
 
     @classmethod
-    def public_only(cls) -> Network:
-        return cls(policy="public_only")
+    def from_profiles(cls, *profiles: NetworkProfile | str) -> Network:
+        return cls(policy=NetworkPolicy.from_profiles(profiles))
 
     @classmethod
     def allow_all(cls) -> Network:
-        return cls(policy="allow_all")
+        return cls(policy=NetworkPolicy.allow_all())
 
 
     def _to_dict(self) -> dict:
         d: dict = {}
-        if isinstance(self.policy, str):
-            d["policy"] = self.policy
-        elif isinstance(self.policy, NetworkPolicy):
+        if isinstance(self.policy, NetworkPolicy):
             d["custom_policy"] = self.policy._to_dict()
+        elif self.policy is not None:
+            raise TypeError(
+                "Network.policy must be a NetworkPolicy; use "
+                "Network.from_profiles(...), Network.none(), or Network.allow_all()"
+            )
         if self.ports:
             if isinstance(self.ports, Mapping):
                 d["ports"] = dict(self.ports)

@@ -255,7 +255,6 @@ func sandboxTouchResultFromFFI(result *ffi.SandboxTouchResult) *SandboxTouchResu
 // buildFFINetwork converts a public NetworkConfig into its ffi counterpart.
 func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 	out := &ffi.NetworkOptions{
-		Policy:              string(n.Policy),
 		DNSRebindProtection: n.DNSRebindProtection,
 		DenyDomains:         n.DenyDomains,
 		DenyDomainSuffixes:  n.DenyDomainSuffixes,

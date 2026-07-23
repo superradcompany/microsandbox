@@ -1,6 +1,6 @@
 // Network policy example for the microsandbox Go SDK.
 //
-// Demonstrates each of the four built-in presets and a custom rule list
+// Demonstrates high-level profiles, terminal policies, and a custom rule list
 // with a port range and asymmetric egress / ingress defaults. Each
 // configuration boots a sandbox, runs a single representative shell
 // command, and prints the result.
@@ -36,8 +36,8 @@ func main() {
 
 	scenarios := []scenario{
 		{
-			name:   "public-only (default)",
-			config: microsandbox.NetworkPolicy.PublicOnly(),
+			name:   "public profile (default)",
+			config: microsandbox.NetworkPolicy.FromProfiles(microsandbox.NetworkProfilePublic),
 			probe:  "ping -c 1 -W 5 1.1.1.1 >/dev/null && echo public-OK || echo public-FAIL",
 		},
 		{
@@ -51,9 +51,12 @@ func main() {
 			probe:  "ping -c 1 -W 5 1.1.1.1 >/dev/null && echo public-OK || echo public-FAIL",
 		},
 		{
-			name:   "non-local (public + LAN)",
-			config: microsandbox.NetworkPolicy.NonLocal(),
-			probe:  "ping -c 1 -W 5 1.1.1.1 >/dev/null && echo public-OK || echo public-FAIL",
+			name: "public + private profiles",
+			config: microsandbox.NetworkPolicy.FromProfiles(
+				microsandbox.NetworkProfilePublic,
+				microsandbox.NetworkProfilePrivate,
+			),
+			probe: "ping -c 1 -W 5 1.1.1.1 >/dev/null && echo public-OK || echo public-FAIL",
 		},
 		{
 			name: "custom: deny-egress except 1.1.1.1:443 (allow public ingress)",

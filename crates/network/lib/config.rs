@@ -216,7 +216,7 @@ mod tests {
         // Exercise the tricky leaves: a domain rule (validated `DomainName`), a
         // CIDR rule (`IpNetwork`), group rules, parsed nameservers, and the
         // interface IP/MAC/pool.
-        let mut policy = NetworkPolicy::public_only()
+        let mut policy = NetworkPolicy::default()
             .allow_domain("example.com")
             .expect("valid domain")
             .allow_domain_suffix("staging.example.com")

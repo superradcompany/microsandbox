@@ -12,10 +12,10 @@ The Go SDK exposes networking as a single [`NetworkConfig`](#networkconfig) stru
 ```go
 import m "github.com/superradcompany/microsandbox/sdk/go"
 
-// Preset: public internet only
+// Public internet profile
 sb, err := m.CreateSandbox(ctx, "worker",
     m.WithImage("alpine"),
-    m.WithNetwork(m.NetworkPolicy.PublicOnly()),
+    m.WithNetwork(m.NetworkPolicy.FromProfiles(m.NetworkProfilePublic)),
 )
 
 // Or a custom first-match-wins firewall
@@ -50,13 +50,13 @@ func WithNetwork(net *NetworkConfig) SandboxOption
 ```go
 sb, err := m.CreateSandbox(ctx, "worker",
     m.WithImage("alpine"),
-    m.WithNetwork(m.NetworkPolicy.PublicOnly()),
+    m.WithNetwork(m.NetworkPolicy.FromProfiles(m.NetworkProfilePublic)),
 )
 ```
 
 </Accordion>
 
-Set the network configuration for the sandbox. Pass a preset from the [`NetworkPolicy`](#networkpolicy) factory, or a custom [`NetworkConfig`](#networkconfig) value with your own rules, DNS, TLS, and port settings.
+Set the network configuration for the sandbox. Pass a profile policy from the [`NetworkPolicy`](#networkpolicy) factory, or a custom [`NetworkConfig`](#networkconfig) value with your own rules, DNS, TLS, and port settings.
 
 <p className="msb-label">Parameters</p>
 
@@ -192,30 +192,65 @@ Make services running in the sandbox reachable on explicit host addresses and po
 
 ## NetworkPolicy
 
-Factory namespace returning common preset [`*NetworkConfig`](#networkconfig) values. Access through the package-level `NetworkPolicy` value, for example `m.NetworkPolicy.PublicOnly()`.
+Factory namespace returning high-level [`*NetworkConfig`](#networkconfig) values. Access through the package-level `NetworkPolicy` value.
 
-#### <span className="msb-recv">NetworkPolicy.</span><span className="msb-hn">PublicOnly()</span>
+#### <span className="msb-recv">NetworkPolicy.</span><span className="msb-hn">FromProfiles()</span>
 
 ```go
-func (networkPolicyFactory) PublicOnly() *NetworkConfig
+func (networkPolicyFactory) FromProfiles(profiles ...NetworkProfile) *NetworkConfig
 ```
 
 <Accordion title="Example">
 
 ```go
-m.WithNetwork(m.NetworkPolicy.PublicOnly())
+m.WithNetwork(m.NetworkPolicy.FromProfiles(
+    m.NetworkProfilePublic,
+    m.NetworkProfilePrivate,
+))
 ```
 
 </Accordion>
 
-Allow only public internet traffic; RFC-1918 private ranges are blocked. This is the **default** when no network configuration is supplied.
+Build a deny-by-default policy from `NetworkProfilePublic`, `NetworkProfilePrivate`, and `NetworkProfileHost`. Duplicate profiles are ignored, rules use canonical order, and each non-empty set receives one gateway DNS rule. An empty profile set permits no egress and adds no DNS; ingress defaults to allow.
+
+`FromProfiles` panics if passed a value other than the three package-defined `NetworkProfile` constants.
 
 <p className="msb-label">Returns</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><a className="msb-type" href="#networkconfig">*NetworkConfig</a></div>
-    <div className="msb-param-desc">Preset config with <code>Policy: "public-only"</code>.</div>
+    <div className="msb-param-desc">Config containing canonical profile and DNS rules.</div>
+  </div>
+</div>
+
+When profile names come from JSON, configuration, environment variables, or other runtime input, use the checked variant instead:
+
+```go
+network, err := m.NetworkPolicy.FromProfilesChecked(profiles...)
+if err != nil {
+    return err
+}
+```
+
+#### <span className="msb-recv">NetworkPolicy.</span><span className="msb-hn">FromProfilesChecked()</span>
+
+```go
+func (networkPolicyFactory) FromProfilesChecked(profiles ...NetworkProfile) (*NetworkConfig, error)
+```
+
+Builds the same canonical deny-by-default policy as `FromProfiles`, but returns an error instead of panicking when a profile is unknown. Use this method for values derived from runtime input.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#networkconfig">*NetworkConfig</a></div>
+    <div className="msb-param-desc">Config containing canonical profile and DNS rules.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">error</span></div>
+    <div className="msb-param-desc">Non-nil when any requested profile is unknown.</div>
   </div>
 </div>
 
@@ -233,14 +268,14 @@ m.WithNetwork(m.NetworkPolicy.None())
 
 </Accordion>
 
-Block all network access. No network interface is created; the guest is fully offline. `Exec` and `FS` still work, since they use the host-guest channel rather than the network.
+Block all network traffic in both directions. The network interface remains present; `Exec` and `FS` still work because they use the host-guest channel.
 
 <p className="msb-label">Returns</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><a className="msb-type" href="#networkconfig">*NetworkConfig</a></div>
-    <div className="msb-param-desc">Preset config with <code>Policy: "none"</code>.</div>
+    <div className="msb-param-desc">Config with deny defaults in both directions.</div>
   </div>
 </div>
 
@@ -265,34 +300,19 @@ Permit all network traffic, including private addresses and the host machine.
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><a className="msb-type" href="#networkconfig">*NetworkConfig</a></div>
-    <div className="msb-param-desc">Preset config with <code>Policy: "allow-all"</code>.</div>
+    <div className="msb-param-desc">Config with allow defaults in both directions.</div>
   </div>
 </div>
 
-#### <span className="msb-recv">NetworkPolicy.</span><span className="msb-hn">NonLocal()</span>
+## Rule
+
+The package-level `Rule` factory provides semantic low-level rules. `Rule.AllowDNS()` returns a [`PolicyRule`](#policyrule) allowing gateway UDP/53 and TCP/53; `Rule.DenyDNS()` returns its deny counterpart. Put `Rule.DenyDNS()` before profile-generated rules when you need to override automatic DNS access.
 
 ```go
-func (networkPolicyFactory) NonLocal() *NetworkConfig
+network := m.NetworkPolicy.FromProfiles(m.NetworkProfilePublic)
+network.Rules = append([]m.PolicyRule{m.Rule.DenyDNS()}, network.Rules...)
 ```
 
-<Accordion title="Example">
-
-```go
-m.WithNetwork(m.NetworkPolicy.NonLocal())
-```
-
-</Accordion>
-
-Allow public internet plus private/LAN egress; block loopback, link-local, and metadata.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#networkconfig">*NetworkConfig</a></div>
-    <div className="msb-param-desc">Preset config with <code>Policy: "non-local"</code>.</div>
-  </div>
-</div>
 
 ## Custom rules
 
@@ -329,7 +349,6 @@ The full network stack configuration passed via [`WithNetwork`](#m-withnetwork).
 
 | Field | Type | Description |
 |-------|------|-------------|
-| Policy | [`NetworkPolicyPreset`](#networkpolicypreset) | Preset name. Mutually exclusive with custom rules for canned configs; set via [`NetworkPolicy`](#networkpolicy). When set alongside `Rules`, preset rules come first and custom rules follow |
 | Rules | `[]`[`PolicyRule`](#policyrule) | Ordered custom rules (first match wins) |
 | DefaultEgress | [`PolicyAction`](#policyaction) | Fall-through action for outbound when no rule matches. Defaults to `"deny"` |
 | DefaultIngress | [`PolicyAction`](#policyaction) | Fall-through action for inbound when no rule matches. Defaults to `"allow"` |
@@ -486,18 +505,15 @@ The protocol half of a [`PolicyRule`](#policyrule).
 | `PolicyProtocolICMPv4` | `"icmpv4"` | ICMPv4 traffic (egress only) |
 | `PolicyProtocolICMPv6` | `"icmpv6"` | ICMPv6 traffic (egress only) |
 
-### NetworkPolicyPreset
+### NetworkProfile
 
-<p className="msb-backref">Used by <a href="#networkconfig">NetworkConfig.Policy</a></p>
-
-Preset names accepted by [`NetworkConfig.Policy`](#networkconfig). Prefer the [`NetworkPolicy`](#networkpolicy) factory, which returns a preconfigured `*NetworkConfig`.
+Composable profile names accepted by [`NetworkPolicy.FromProfiles()`](#networkpolicyfromprofiles).
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `NetworkPolicyPresetNone` | `"none"` | Fully airgapped |
-| `NetworkPolicyPresetPublicOnly` | `"public-only"` | Block private + metadata; allow everything else |
-| `NetworkPolicyPresetAllowAll` | `"allow-all"` | Unrestricted |
-| `NetworkPolicyPresetNonLocal` | `"non-local"` | Public + private/LAN egress; block loopback / link-local / metadata |
+| `NetworkProfilePublic` | `"public"` | Public internet addresses |
+| `NetworkProfilePrivate` | `"private"` | Private/LAN ranges |
+| `NetworkProfileHost` | `"host"` | Sandbox host gateway addresses |
 
 ### Destination groups
 
