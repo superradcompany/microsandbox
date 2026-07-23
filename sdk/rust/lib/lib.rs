@@ -66,7 +66,8 @@ pub use sandbox::{
     validate_sandbox_name,
 };
 pub use snapshot::{
-    SaveOpts, Snapshot, SnapshotBuilder, SnapshotConfig, SnapshotFormat, SnapshotHandle,
-    SnapshotScope, SnapshotSpec, SnapshotVerifyReport, UpperIntegrity, UpperVerifyStatus,
+    CheckpointSnapshotState, FileSnapshotState, SaveOpts, Snapshot, SnapshotBuilder,
+    SnapshotConfig, SnapshotDescriptor, SnapshotFormat, SnapshotHandle, SnapshotScope,
+    SnapshotSpec, SnapshotState, SnapshotVerifyReport, UpperIntegrity, UpperVerifyStatus,
 };
 pub use volume::{Volume, VolumeConfig, VolumeHandle, VolumeKind, VolumeSpec};

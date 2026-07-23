@@ -240,7 +240,7 @@ impl PySnapshot {
 
     /// Apparent size of the captured upper layer in bytes.
     #[getter]
-    fn size_bytes(&self) -> u64 {
+    fn size_bytes(&self) -> Option<u64> {
         self.inner.size_bytes()
     }
 
@@ -258,14 +258,48 @@ impl PySnapshot {
 
     /// On-disk format of the upper layer (`"raw"` or `"qcow2"`).
     #[getter]
-    fn format(&self) -> &'static str {
-        format_str(self.inner.manifest().format)
+    fn state_kind(&self) -> &'static str {
+        self.inner.manifest().state.kind()
+    }
+
+    /// On-disk format for file state.
+    #[getter]
+    fn format(&self) -> Option<&'static str> {
+        self.inner
+            .manifest()
+            .state
+            .as_file()
+            .map(|state| format_str(state.format))
     }
 
     /// Filesystem type inside the upper (e.g. `"ext4"`).
     #[getter]
-    fn fstype(&self) -> &str {
-        &self.inner.manifest().fstype
+    fn fstype(&self) -> Option<&str> {
+        self.inner
+            .manifest()
+            .state
+            .as_file()
+            .map(|state| state.fstype.as_str())
+    }
+
+    /// Checkpoint id for checkpoint state.
+    #[getter]
+    fn checkpoint_id(&self) -> Option<&str> {
+        self.inner
+            .manifest()
+            .state
+            .as_checkpoint()
+            .map(|state| state.checkpoint_id.as_str())
+    }
+
+    /// Checkpoint manifest digest for checkpoint state.
+    #[getter]
+    fn checkpoint_manifest_digest(&self) -> Option<&str> {
+        self.inner
+            .manifest()
+            .state
+            .as_checkpoint()
+            .map(|state| state.manifest.as_str())
     }
 
     /// Manifest digest of the parent snapshot, or `None` for a root.
@@ -305,8 +339,8 @@ impl PySnapshot {
 
     /// Verify recorded content integrity.
     ///
-    /// Returns a dict with `kind` (`"not_recorded"` or `"verified"`)
-    /// and, when verified, `algorithm` and `digest`.
+    /// Returns mandatory file-state integrity with `kind="verified"`,
+    /// `algorithm`, and `digest`.
     fn verify<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let snap = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -314,9 +348,6 @@ impl PySnapshot {
             Python::with_gil(|py| -> PyResult<PyObject> {
                 let upper = PyDict::new(py);
                 match report.upper {
-                    RustUpperVerifyStatus::NotRecorded => {
-                        upper.set_item("kind", "not_recorded")?;
-                    }
                     RustUpperVerifyStatus::Verified { algorithm, digest } => {
                         upper.set_item("kind", "verified")?;
                         upper.set_item("algorithm", algorithm)?;
@@ -371,13 +402,48 @@ impl PySnapshotHandle {
     }
 
     #[getter]
-    fn format(&self) -> &'static str {
-        format_str(self.inner.format())
+    fn state_kind(&self) -> &str {
+        self.inner.state_kind()
+    }
+
+    #[getter]
+    fn format(&self) -> Option<&'static str> {
+        self.inner.format().map(format_str)
+    }
+
+    #[getter]
+    fn fstype(&self) -> Option<&str> {
+        self.inner.fstype()
+    }
+
+    #[getter]
+    fn checkpoint_manifest_digest(&self) -> Option<&str> {
+        self.inner.checkpoint_manifest_digest()
     }
 
     #[getter]
     fn size_bytes(&self) -> Option<u64> {
         self.inner.size_bytes()
+    }
+
+    #[getter]
+    fn locality(&self) -> &str {
+        self.inner.locality()
+    }
+
+    #[getter]
+    fn availability(&self) -> &str {
+        self.inner.availability()
+    }
+
+    #[getter]
+    fn migration_state(&self) -> &str {
+        self.inner.migration_state()
+    }
+
+    #[getter]
+    fn migration_error_code(&self) -> Option<&str> {
+        self.inner.migration_error_code()
     }
 
     #[getter]

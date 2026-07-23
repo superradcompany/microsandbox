@@ -8,13 +8,17 @@
 //! depths, produced by our own save path), and owning the walk lets sparse entries be restored map-driven: data runs copied straight off the wire, holes never written and kept
 //! unallocated per platform ([`extent::mark_sparse`] on NTFS, [`extent::punch_hole_aligned`] on APFS). `tokio_tar` remains the header codec and the dense-entry writer.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 use async_compression::tokio::bufread::ZstdDecoder;
 use async_compression::tokio::write::ZstdEncoder;
-use microsandbox_image::snapshot::DESCRIPTOR_FILENAME;
+use microsandbox_image::snapshot::migration::V066_DESCRIPTOR_FILENAME;
+use microsandbox_image::snapshot::{
+    DESCRIPTOR_FILENAME, MAX_JSON_SAFE_INTEGER, SnapshotState, UpperIntegrity,
+};
 use microsandbox_utils::extent::{self, ExtentMap};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio_tar::{Builder, EntryType, Header};
@@ -42,6 +46,44 @@ pub struct SaveOpts {
 
 struct UnpackedArchive {
     manifest_dirs: Vec<PathBuf>,
+    head: Option<String>,
+    inventory: Option<ArchiveInventory>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArchiveInventory {
+    schema: u32,
+    artifact: String,
+    head: String,
+    suggested_name: Option<String>,
+    completeness: String,
+    with_parents: bool,
+    with_image: bool,
+    snapshots: Vec<ArchiveSnapshot>,
+    entries: Vec<ArchiveEntry>,
+    protection_requirements: Vec<serde_json::Value>,
+    extensions: BTreeMap<String, serde_json::Value>,
+    requires: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArchiveSnapshot {
+    snapshot_id: String,
+    descriptor: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArchiveEntry {
+    path: String,
+    owner_snapshot: Option<String>,
+    kind: String,
+    included: bool,
+    encoded_size: u64,
+    apparent_size: u64,
+    integrity: UpperIntegrity,
 }
 
 /// Allocation map of a sparse file, in tar-block granularity.
@@ -84,8 +126,7 @@ pub(super) async fn save_snapshot(
     // and (optionally) all ancestors via parent_digest.
     let head = store::open_snapshot(local, name_or_path).await?;
     head.verify().await?;
-    let head_prefix = digest_prefix(head.digest());
-    let mut parent_dirs: Vec<(PathBuf, String)> = Vec::new();
+    let mut parents: Vec<Snapshot> = Vec::new();
 
     if opts.with_parents {
         let mut current = head.manifest().parent.clone();
@@ -94,15 +135,14 @@ pub(super) async fn save_snapshot(
             let parent =
                 store::open_snapshot(local, parent_path.to_string_lossy().as_ref()).await?;
             parent.verify().await?;
-            let prefix = digest_prefix(parent.digest());
-            parent_dirs.push((parent.path().to_path_buf(), prefix));
+            parents.push(parent.clone());
             current = parent.manifest().parent.clone();
         }
     }
-    parent_dirs.reverse();
+    parents.reverse();
 
-    let mut dirs: Vec<(PathBuf, String)> = parent_dirs;
-    dirs.push((head.path().to_path_buf(), head_prefix));
+    let mut snapshots = parents;
+    snapshots.push(head.clone());
 
     // Optional image cache bundling.
     let mut cache_files: Vec<(PathBuf, String)> = Vec::new();
@@ -162,18 +202,41 @@ pub(super) async fn save_snapshot(
     {
         tokio::fs::create_dir_all(parent).await?;
     }
-    let out_file = tokio::fs::File::create(out).await?;
-    if opts.plain_tar {
-        let mut builder = Builder::new(out_file);
-        write_archive_entries(&mut builder, &dirs, &cache_files).await?;
-        let mut inner = builder.into_inner().await?;
-        tokio::io::AsyncWriteExt::shutdown(&mut inner).await?;
-    } else {
-        let writer = ZstdEncoder::new(out_file);
-        let mut builder = Builder::new(writer);
-        write_archive_entries(&mut builder, &dirs, &cache_files).await?;
-        let mut inner = builder.into_inner().await?;
-        tokio::io::AsyncWriteExt::shutdown(&mut inner).await?;
+    let temp_out = archive_temp_path(out)?;
+    let out_file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_out)
+        .await?;
+    let write_result: MicrosandboxResult<()> = async {
+        if opts.plain_tar {
+            let mut builder = Builder::new(out_file);
+            write_archive_entries(&mut builder, &snapshots, &cache_files, &head, &opts).await?;
+            let mut inner = builder.into_inner().await?;
+            tokio::io::AsyncWriteExt::shutdown(&mut inner).await?;
+        } else {
+            let writer = ZstdEncoder::new(out_file);
+            let mut builder = Builder::new(writer);
+            write_archive_entries(&mut builder, &snapshots, &cache_files, &head, &opts).await?;
+            let mut inner = builder.into_inner().await?;
+            tokio::io::AsyncWriteExt::shutdown(&mut inner).await?;
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = write_result {
+        let _ = tokio::fs::remove_file(&temp_out).await;
+        return Err(error);
+    }
+    let durable = tokio::fs::OpenOptions::new()
+        .read(true)
+        .open(&temp_out)
+        .await?;
+    durable.sync_all().await?;
+    tokio::fs::rename(&temp_out, out).await?;
+    #[cfg(unix)]
+    if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        std::fs::File::open(parent)?.sync_all()?;
     }
 
     Ok(())
@@ -215,13 +278,39 @@ pub(super) async fn load_snapshot(
 
     let unpacked = if is_zstd {
         let decoder = ZstdDecoder::new(buf);
-        unpack_archive(decoder, snapshot_stage.path(), cache_stage.path()).await?
+        // The decoder and archive walker both carry sizeable buffers across
+        // await points. Keep their combined future off Tokio's worker stack.
+        Box::pin(unpack_archive(
+            decoder,
+            snapshot_stage.path(),
+            cache_stage.path(),
+        ))
+        .await?
     } else {
-        unpack_archive(buf, snapshot_stage.path(), cache_stage.path()).await?
+        Box::pin(unpack_archive(
+            buf,
+            snapshot_stage.path(),
+            cache_stage.path(),
+        ))
+        .await?
     };
 
+    if unpacked.inventory.is_none() {
+        super::migration::normalize_staged(local.db().await?, &unpacked.manifest_dirs).await?;
+    }
     let imported = verify_imported_snapshots(local, &unpacked.manifest_dirs).await?;
-    let head_index = select_head_snapshot(&imported)?;
+    if let Some(inventory) = unpacked.inventory.as_ref() {
+        validate_inventory_snapshot_bindings(inventory, &imported)?;
+    }
+    let head_index = match unpacked.head.as_deref() {
+        Some(head) => imported
+            .iter()
+            .position(|snapshot| snapshot.digest() == head)
+            .ok_or_else(|| {
+                MicrosandboxError::Custom(format!("archive inventory head {head} was not imported"))
+            })?,
+        None => select_head_snapshot(&imported)?,
+    };
     let head_stage_path = imported[head_index].path().to_path_buf();
     let head_relative = head_stage_path
         .strip_prefix(snapshot_stage.path())
@@ -239,10 +328,23 @@ pub(super) async fn load_snapshot(
     // Index this and any sibling artifacts that landed in the dest dir.
     let _ = store::reindex_dir(local, &snapshots_dir).await;
 
-    let format = match snap.manifest().format {
-        microsandbox_image::snapshot::SnapshotFormat::Raw => super::SnapshotFormat::Raw,
-        microsandbox_image::snapshot::SnapshotFormat::Qcow2 => super::SnapshotFormat::Qcow2,
-    };
+    let (state_kind, format, fstype, checkpoint_manifest_digest, size_bytes) =
+        match &snap.manifest().state {
+            SnapshotState::File(state) => (
+                "file".to_string(),
+                Some(state.format),
+                Some(state.fstype.clone()),
+                None,
+                Some(state.upper.size_bytes),
+            ),
+            SnapshotState::Checkpoint(state) => (
+                "checkpoint".to_string(),
+                None,
+                None,
+                Some(state.manifest.clone()),
+                None,
+            ),
+        };
     Ok(SnapshotHandle {
         digest: snap.digest().to_string(),
         name: snap
@@ -253,8 +355,15 @@ pub(super) async fn load_snapshot(
         parent_digest: snap.manifest().parent.clone(),
         scope: snap.manifest().scope,
         image_ref: snap.manifest().image.reference.clone(),
+        state_kind,
         format,
-        size_bytes: Some(snap.manifest().upper.size_bytes),
+        fstype,
+        checkpoint_manifest_digest,
+        size_bytes,
+        locality: "embedded".into(),
+        availability: "ready".into(),
+        migration_state: "canonical".into(),
+        migration_error_code: None,
         created_at: chrono::DateTime::parse_from_rfc3339(&snap.manifest().created_at)
             .map(|d| d.naive_utc())
             .unwrap_or_else(|_| chrono::Utc::now().naive_utc()),
@@ -268,38 +377,195 @@ pub(super) async fn load_snapshot(
 
 async fn write_archive_entries<W>(
     builder: &mut Builder<W>,
-    dirs: &[(PathBuf, String)],
+    snapshots: &[Snapshot],
     cache_files: &[(PathBuf, String)],
+    head: &Snapshot,
+    opts: &SaveOpts,
 ) -> MicrosandboxResult<()>
 where
     W: tokio::io::AsyncWrite + Unpin + Send,
 {
-    for (dir, prefix) in dirs {
-        // Append the descriptor first so load can recognize the layout
-        // even on a truncated read.
-        let manifest_src = dir.join(DESCRIPTOR_FILENAME);
-        if manifest_src.exists() {
-            builder
-                .append_path_with_name(&manifest_src, format!("{prefix}/{DESCRIPTOR_FILENAME}"))
-                .await?;
-        }
-        let mut entries = tokio::fs::read_dir(dir).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            let name = entry.file_name();
-            let name_str = name
-                .to_str()
-                .ok_or_else(|| MicrosandboxError::Custom("non-utf8 artifact filename".into()))?;
-            if name_str == DESCRIPTOR_FILENAME {
-                continue;
-            }
-            append_artifact_file(builder, &path, format!("{prefix}/{name_str}")).await?;
+    let inventory = build_archive_inventory(snapshots, cache_files, head, opts).await?;
+    let inventory_bytes = serde_json::to_vec(&inventory).map_err(|error| {
+        MicrosandboxError::Custom(format!("serialize archive inventory: {error}"))
+    })?;
+    append_bytes(builder, "archive.json", &inventory_bytes).await?;
+
+    // The inventory is also the write allowlist. Never sweep artifact
+    // directories: migration backups, locks, journals and unknown files are
+    // intentionally not exportable.
+    for snapshot in snapshots {
+        let hex = digest_hex(snapshot.digest())?;
+        let descriptor = snapshot.path().join(DESCRIPTOR_FILENAME);
+        append_artifact_file(
+            builder,
+            &descriptor,
+            format!("snapshots/{hex}/{DESCRIPTOR_FILENAME}"),
+        )
+        .await?;
+        if let SnapshotState::File(file) = &snapshot.manifest().state {
+            append_artifact_file(
+                builder,
+                &snapshot.path().join(&file.upper.file),
+                format!("files/{hex}/{}", file.upper.file),
+            )
+            .await?;
         }
     }
     for (path, archive_name) in cache_files {
         append_artifact_file(builder, path, archive_name.clone()).await?;
     }
     Ok(())
+}
+
+async fn append_bytes<W>(
+    builder: &mut Builder<W>,
+    name: &str,
+    bytes: &[u8],
+) -> MicrosandboxResult<()>
+where
+    W: tokio::io::AsyncWrite + Unpin + Send,
+{
+    let mut header = Header::new_gnu();
+    header.set_path(name)?;
+    header.set_mode(0o644);
+    header.set_size(bytes.len() as u64);
+    header.set_cksum();
+    builder.append_data(&mut header, name, bytes).await?;
+    Ok(())
+}
+
+async fn build_archive_inventory(
+    snapshots: &[Snapshot],
+    cache_files: &[(PathBuf, String)],
+    head: &Snapshot,
+    opts: &SaveOpts,
+) -> MicrosandboxResult<ArchiveInventory> {
+    let mut snapshot_members = Vec::with_capacity(snapshots.len());
+    let mut entries = Vec::new();
+    for snapshot in snapshots {
+        let hex = digest_hex(snapshot.digest())?;
+        let descriptor_path = format!("snapshots/{hex}/{DESCRIPTOR_FILENAME}");
+        let descriptor_size = tokio::fs::metadata(snapshot.path().join(DESCRIPTOR_FILENAME))
+            .await?
+            .len();
+        require_json_safe_size(descriptor_size, &descriptor_path)?;
+        snapshot_members.push(ArchiveSnapshot {
+            snapshot_id: snapshot.digest().to_string(),
+            descriptor: descriptor_path.clone(),
+        });
+        entries.push(ArchiveEntry {
+            path: descriptor_path,
+            owner_snapshot: Some(snapshot.digest().to_string()),
+            kind: "snapshot-descriptor".into(),
+            included: true,
+            encoded_size: descriptor_size,
+            apparent_size: descriptor_size,
+            integrity: UpperIntegrity {
+                algorithm: "sha256".into(),
+                digest: snapshot.digest().to_string(),
+            },
+        });
+
+        if let SnapshotState::File(file) = &snapshot.manifest().state {
+            let path = snapshot.path().join(&file.upper.file);
+            let archive_path = format!("files/{hex}/{}", file.upper.file);
+            let encoded_size = archive_encoded_size(&path).await?;
+            require_json_safe_size(encoded_size, &archive_path)?;
+            require_json_safe_size(file.upper.size_bytes, &archive_path)?;
+            entries.push(ArchiveEntry {
+                path: archive_path,
+                owner_snapshot: Some(snapshot.digest().to_string()),
+                kind: "file-payload".into(),
+                included: true,
+                encoded_size,
+                apparent_size: file.upper.size_bytes,
+                integrity: file.upper.integrity.clone(),
+            });
+        }
+    }
+
+    for (path, archive_path) in cache_files {
+        let size = tokio::fs::metadata(path).await?.len();
+        require_json_safe_size(size, archive_path)?;
+        let digest = format!("sha256:{}", hex::encode(file_sha256(path).await?));
+        entries.push(ArchiveEntry {
+            path: archive_path.clone(),
+            owner_snapshot: None,
+            kind: if archive_path.contains("/manifests/") {
+                "image-metadata".into()
+            } else {
+                "image-object".into()
+            },
+            included: true,
+            encoded_size: size,
+            apparent_size: size,
+            integrity: UpperIntegrity {
+                algorithm: "sha256".into(),
+                digest,
+            },
+        });
+    }
+
+    snapshot_members.sort_by(|left, right| left.snapshot_id.cmp(&right.snapshot_id));
+    entries.sort_by(|left, right| left.path.as_bytes().cmp(right.path.as_bytes()));
+    let suggested_name = head
+        .path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty() && name.len() <= 255)
+        .map(str::to_string);
+    Ok(ArchiveInventory {
+        schema: 1,
+        artifact: "snapshot-archive".into(),
+        head: head.digest().to_string(),
+        suggested_name,
+        completeness: "boot-complete".into(),
+        with_parents: opts.with_parents,
+        with_image: opts.with_image,
+        snapshots: snapshot_members,
+        entries,
+        protection_requirements: Vec::new(),
+        extensions: BTreeMap::new(),
+        requires: Vec::new(),
+    })
+}
+
+async fn archive_encoded_size(path: &Path) -> MicrosandboxResult<u64> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let metadata = std::fs::metadata(&path)?;
+        let encoded = ExtentMap::scan(&path)?
+            .as_ref()
+            .and_then(tar_sparse_map)
+            .map(|map| map.archived)
+            .unwrap_or(metadata.len());
+        Ok::<_, std::io::Error>(encoded)
+    })
+    .await
+    .map_err(|error| MicrosandboxError::Custom(format!("archive size task: {error}")))?
+    .map_err(Into::into)
+}
+
+fn require_json_safe_size(size: u64, path: &str) -> MicrosandboxResult<()> {
+    if size > MAX_JSON_SAFE_INTEGER {
+        return Err(MicrosandboxError::Custom(format!(
+            "archive entry size exceeds JSON safe integer at {path}"
+        )));
+    }
+    Ok(())
+}
+
+fn archive_temp_path(out: &Path) -> MicrosandboxResult<PathBuf> {
+    let name = out
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| MicrosandboxError::Custom("archive path has no UTF-8 filename".into()))?;
+    Ok(out.with_file_name(format!(
+        ".{name}.tmp.{}.{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    )))
 }
 
 /// Append one file, as an old-GNU sparse entry when it has holes so
@@ -487,6 +753,9 @@ where
 {
     let mut reader = BufReader::with_capacity(256 * 1024, reader);
     let mut manifest_dirs: Vec<PathBuf> = Vec::new();
+    let mut observed_files: HashMap<String, (u64, u64)> = HashMap::new();
+    let mut extraction_targets = HashSet::new();
+    let mut inventory_path = None;
     let mut block = [0u8; TAR_BLOCK as usize];
 
     loop {
@@ -526,28 +795,68 @@ where
         }
         validate_archive_entry_type(entry_type, &path_in_archive)?;
 
-        let is_cache_entry = path_in_archive.starts_with("cache");
-        if is_cache_entry {
-            validate_cache_archive_path(&path_in_archive, entry_type)?;
-        } else {
-            validate_snapshot_archive_path(&path_in_archive, entry_type)?;
+        let components = normal_utf8_components(&path_in_archive)?;
+        if entry_type == EntryType::Directory {
+            validate_archive_directory(&components, &path_in_archive)?;
+            let size = header.entry_size()?;
+            if size != 0 {
+                return Err(MicrosandboxError::Custom(format!(
+                    "archive directory has a non-empty body: {}",
+                    path_in_archive.display()
+                )));
+            }
+            skip_entry_data(&mut reader, size).await?;
+            continue;
         }
+        let (target, descriptor, inventory) = match components.as_slice() {
+            ["archive.json"] => (snapshots_dir.join(".archive.json"), false, true),
+            ["snapshots", hex, name]
+                if valid_archive_digest_hex(hex) && *name == DESCRIPTOR_FILENAME =>
+            {
+                (snapshots_dir.join(hex).join(name), true, false)
+            }
+            ["files", hex, name]
+                if valid_archive_digest_hex(hex) && valid_archive_filename(name) =>
+            {
+                (snapshots_dir.join(hex).join(name), false, false)
+            }
+            ["images", kind, name]
+                if is_supported_cache_file(kind, name) && valid_archive_filename(name) =>
+            {
+                (cache_dir.join(kind).join(name), false, false)
+            }
+            ["cache", kind, name] if is_supported_cache_file(kind, name) => {
+                (cache_dir.join(kind).join(name), false, false)
+            }
+            [prefix, name]
+                if valid_legacy_prefix(prefix)
+                    && matches!(*name, V066_DESCRIPTOR_FILENAME | "upper.ext4") =>
+            {
+                (
+                    snapshots_dir.join(prefix).join(name),
+                    *name == V066_DESCRIPTOR_FILENAME,
+                    false,
+                )
+            }
+            _ => {
+                return Err(MicrosandboxError::Custom(format!(
+                    "archive contains unsupported path: {}",
+                    path_in_archive.display()
+                )));
+            }
+        };
 
-        let dest_root = if is_cache_entry {
-            cache_dir.to_path_buf()
-        } else {
-            snapshots_dir.to_path_buf()
-        };
-        let target = if is_cache_entry {
-            // Strip the leading "cache" component since it's already
-            // implied by `cache_dir`.
-            let stripped = path_in_archive
-                .strip_prefix("cache")
-                .map_err(|_| MicrosandboxError::Custom("malformed cache path".into()))?;
-            dest_root.join(stripped)
-        } else {
-            dest_root.join(&path_in_archive)
-        };
+        let archive_path = path_in_archive.to_string_lossy().into_owned();
+        if observed_files.contains_key(&archive_path) {
+            return Err(MicrosandboxError::Custom(format!(
+                "archive contains duplicate entry: {archive_path}"
+            )));
+        }
+        if !extraction_targets.insert(target.clone()) {
+            return Err(MicrosandboxError::Custom(format!(
+                "archive entries map to the same extraction target: {archive_path}"
+            )));
+        }
 
         if let Some(parent) = target.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -555,10 +864,7 @@ where
 
         let entry_size = header.entry_size()?;
         match entry_type {
-            EntryType::Directory => {
-                tokio::fs::create_dir_all(&target).await?;
-                skip_entry_data(&mut reader, entry_size).await?;
-            }
+            EntryType::Directory => unreachable!("directories were handled above"),
             EntryType::GNUSparse => {
                 unpack_sparse_entry(&mut reader, &header, entry_size, &target).await?;
                 apply_entry_mode(&header, &target).await?;
@@ -569,20 +875,30 @@ where
                 apply_entry_mode(&header, &target).await?;
             }
         }
+        let apparent_size = tokio::fs::metadata(&target).await?.len();
+        observed_files.insert(archive_path, (entry_size, apparent_size));
 
-        if path_in_archive
-            .file_name()
-            .and_then(|s| s.to_str())
-            .map(|n| n == DESCRIPTOR_FILENAME)
-            .unwrap_or(false)
-            && !is_cache_entry
-            && let Some(parent) = target.parent()
-        {
+        if descriptor && let Some(parent) = target.parent() {
             manifest_dirs.push(parent.to_path_buf());
+        }
+        if inventory {
+            inventory_path = Some(target);
         }
     }
 
-    Ok(UnpackedArchive { manifest_dirs })
+    let inventory = if let Some(path) = inventory_path {
+        let inventory =
+            validate_archive_inventory(&path, &observed_files, snapshots_dir, cache_dir).await?;
+        tokio::fs::remove_file(path).await?;
+        Some(inventory)
+    } else {
+        None
+    };
+    Ok(UnpackedArchive {
+        manifest_dirs,
+        head: inventory.as_ref().map(|inventory| inventory.head.clone()),
+        inventory,
+    })
 }
 
 /// Read one 512-byte tar record. `Ok(false)` on clean EOF at a record boundary; a partial record is corruption.
@@ -847,42 +1163,292 @@ fn validate_archive_entry_type(entry_type: EntryType, path: &Path) -> Microsandb
     }
 }
 
-fn validate_snapshot_archive_path(path: &Path, entry_type: EntryType) -> MicrosandboxResult<()> {
-    let components = normal_utf8_components(path)?;
-    let valid = match entry_type {
-        EntryType::Directory => components.len() == 1,
-        EntryType::Regular | EntryType::Continuous | EntryType::GNUSparse => components.len() == 2,
+fn validate_archive_directory(components: &[&str], path: &Path) -> MicrosandboxResult<()> {
+    let valid = match components {
+        ["snapshots" | "files" | "images" | "cache"] => true,
+        ["snapshots" | "files", hex] => valid_archive_digest_hex(hex),
+        ["images" | "cache", kind] => is_supported_cache_dir(kind),
+        [prefix] => valid_legacy_prefix(prefix),
         _ => false,
     };
-    if valid {
-        Ok(())
-    } else {
-        Err(MicrosandboxError::Custom(format!(
-            "archive contains unsupported snapshot path: {}",
+    if !valid {
+        return Err(MicrosandboxError::Custom(format!(
+            "archive contains unsupported directory: {}",
             path.display()
-        )))
+        )));
+    }
+    Ok(())
+}
+
+fn valid_archive_digest_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn valid_legacy_prefix(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 255
+        && value != "archive.json"
+        && value != "snapshots"
+        && value != "files"
+        && value != "images"
+        && value != "cache"
+}
+
+fn valid_archive_filename(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 255 && value != "." && value != ".."
+}
+
+async fn validate_archive_inventory(
+    path: &Path,
+    observed: &HashMap<String, (u64, u64)>,
+    snapshots_dir: &Path,
+    cache_dir: &Path,
+) -> MicrosandboxResult<ArchiveInventory> {
+    const MAX_INVENTORY_BYTES: u64 = 4 * 1024 * 1024;
+    let metadata = tokio::fs::metadata(path).await?;
+    if metadata.len() > MAX_INVENTORY_BYTES {
+        return Err(MicrosandboxError::Custom(
+            "archive inventory exceeds the size limit".into(),
+        ));
+    }
+    let bytes = tokio::fs::read(path).await?;
+    let inventory: ArchiveInventory = serde_json::from_slice(&bytes).map_err(|error| {
+        MicrosandboxError::Custom(format!("archive inventory parse failed: {error}"))
+    })?;
+    let canonical = serde_json::to_vec(&inventory).map_err(|error| {
+        MicrosandboxError::Custom(format!("archive inventory serialize failed: {error}"))
+    })?;
+    if canonical != bytes {
+        return Err(MicrosandboxError::Custom(
+            "archive inventory is not canonical".into(),
+        ));
+    }
+    if inventory.schema != 1 || inventory.artifact != "snapshot-archive" {
+        return Err(MicrosandboxError::Custom(
+            "unsupported archive inventory schema or artifact".into(),
+        ));
+    }
+    if inventory.completeness != "boot-complete" {
+        return Err(MicrosandboxError::Unsupported {
+            feature: format!("snapshot archive completeness {}", inventory.completeness),
+            available_when: "metadata-only archive bindings are implemented".into(),
+        });
+    }
+    if !inventory.requires.is_empty() {
+        return Err(MicrosandboxError::Unsupported {
+            feature: format!("snapshot archive requirements {:?}", inventory.requires),
+            available_when: "all required archive extensions are supported".into(),
+        });
+    }
+    if inventory
+        .suggested_name
+        .as_deref()
+        .is_some_and(|name| name.is_empty() || name.len() > 255 || name.contains(['/', '\\']))
+    {
+        return Err(MicrosandboxError::Custom(
+            "archive suggested_name is invalid".into(),
+        ));
+    }
+
+    let mut prior_snapshot = None;
+    let mut snapshot_map = HashMap::new();
+    for snapshot in &inventory.snapshots {
+        validate_sha256(&snapshot.snapshot_id, "archive snapshot_id")?;
+        if prior_snapshot.is_some_and(|prior: &String| prior >= &snapshot.snapshot_id) {
+            return Err(MicrosandboxError::Custom(
+                "archive snapshots are not strictly sorted".into(),
+            ));
+        }
+        let hex = digest_hex(&snapshot.snapshot_id)?;
+        let expected = format!("snapshots/{hex}/{DESCRIPTOR_FILENAME}");
+        if snapshot.descriptor != expected {
+            return Err(MicrosandboxError::Custom(format!(
+                "archive snapshot descriptor path mismatch for {}",
+                snapshot.snapshot_id
+            )));
+        }
+        snapshot_map.insert(snapshot.snapshot_id.clone(), snapshot.descriptor.clone());
+        prior_snapshot = Some(&snapshot.snapshot_id);
+    }
+    if !snapshot_map.contains_key(&inventory.head) {
+        return Err(MicrosandboxError::Custom(
+            "archive head is not exactly one listed snapshot".into(),
+        ));
+    }
+
+    let mut expected_paths = HashSet::new();
+    let mut descriptor_entries = HashMap::new();
+    let mut prior_path: Option<&str> = None;
+    for entry in &inventory.entries {
+        if prior_path.is_some_and(|prior| prior.as_bytes() >= entry.path.as_bytes()) {
+            return Err(MicrosandboxError::Custom(
+                "archive entries are not strictly sorted".into(),
+            ));
+        }
+        prior_path = Some(&entry.path);
+        if !entry.included {
+            if observed.contains_key(&entry.path) {
+                return Err(MicrosandboxError::Custom(format!(
+                    "omitted archive entry is physically present: {}",
+                    entry.path
+                )));
+            }
+            continue;
+        }
+        if !expected_paths.insert(entry.path.clone()) {
+            return Err(MicrosandboxError::Custom(format!(
+                "duplicate inventory path: {}",
+                entry.path
+            )));
+        }
+        let Some((encoded, apparent)) = observed.get(&entry.path) else {
+            return Err(MicrosandboxError::Custom(format!(
+                "inventoried entry is missing: {}",
+                entry.path
+            )));
+        };
+        if *encoded != entry.encoded_size || *apparent != entry.apparent_size {
+            return Err(MicrosandboxError::Custom(format!(
+                "archive entry size mismatch: {}",
+                entry.path
+            )));
+        }
+        if entry.integrity.algorithm == "sha256" {
+            let target = inventory_entry_target(&entry.path, snapshots_dir, cache_dir)?;
+            let actual = format!("sha256:{}", hex::encode(file_sha256(&target).await?));
+            if actual != entry.integrity.digest {
+                return Err(MicrosandboxError::Custom(format!(
+                    "archive entry integrity mismatch: {}",
+                    entry.path
+                )));
+            }
+        }
+        if entry.kind == "snapshot-descriptor" {
+            let owner = entry.owner_snapshot.as_deref().ok_or_else(|| {
+                MicrosandboxError::Custom("snapshot descriptor has no owner".into())
+            })?;
+            if entry.integrity.algorithm != "sha256" || entry.integrity.digest != owner {
+                return Err(MicrosandboxError::Custom(format!(
+                    "snapshot descriptor identity mismatch: {}",
+                    entry.path
+                )));
+            }
+            descriptor_entries.insert(owner.to_string(), entry.path.clone());
+        }
+    }
+    let physical: HashSet<String> = observed
+        .keys()
+        .filter(|entry| entry.as_str() != "archive.json")
+        .cloned()
+        .collect();
+    if physical != expected_paths {
+        return Err(MicrosandboxError::Custom(
+            "archive contains a non-inventoried file".into(),
+        ));
+    }
+    if descriptor_entries != snapshot_map {
+        return Err(MicrosandboxError::Custom(
+            "archive snapshot descriptor inventory is incomplete".into(),
+        ));
+    }
+    Ok(inventory)
+}
+
+fn inventory_entry_target(
+    archive_path: &str,
+    snapshots_dir: &Path,
+    cache_dir: &Path,
+) -> MicrosandboxResult<PathBuf> {
+    let path = Path::new(archive_path);
+    let components = normal_utf8_components(path)?;
+    match components.as_slice() {
+        ["snapshots", hex, name] if valid_archive_digest_hex(hex) => {
+            Ok(snapshots_dir.join(hex).join(name))
+        }
+        ["files", hex, name] if valid_archive_digest_hex(hex) => {
+            Ok(snapshots_dir.join(hex).join(name))
+        }
+        ["images", kind, name] if is_supported_cache_file(kind, name) => {
+            Ok(cache_dir.join(kind).join(name))
+        }
+        _ => Err(MicrosandboxError::Custom(format!(
+            "invalid inventoried archive path: {archive_path}"
+        ))),
     }
 }
 
-fn validate_cache_archive_path(path: &Path, entry_type: EntryType) -> MicrosandboxResult<()> {
-    let components = normal_utf8_components(path)?;
-    let valid = match (entry_type, components.as_slice()) {
-        (EntryType::Directory, ["cache"]) => true,
-        (EntryType::Directory, ["cache", kind]) => is_supported_cache_dir(kind),
-        (
-            EntryType::Regular | EntryType::Continuous | EntryType::GNUSparse,
-            ["cache", kind, file],
-        ) => is_supported_cache_file(kind, file),
-        _ => false,
-    };
-    if valid {
-        Ok(())
-    } else {
-        Err(MicrosandboxError::Custom(format!(
-            "archive contains unsupported cache path: {}",
-            path.display()
-        )))
+fn validate_inventory_snapshot_bindings(
+    inventory: &ArchiveInventory,
+    imported: &[Snapshot],
+) -> MicrosandboxResult<()> {
+    let snapshots: HashMap<&str, &Snapshot> = imported
+        .iter()
+        .map(|snapshot| (snapshot.digest(), snapshot))
+        .collect();
+    if snapshots.len() != inventory.snapshots.len() {
+        return Err(MicrosandboxError::Custom(
+            "archive snapshot set does not match its inventory".into(),
+        ));
     }
+    for member in &inventory.snapshots {
+        if !snapshots.contains_key(member.snapshot_id.as_str()) {
+            return Err(MicrosandboxError::Custom(format!(
+                "archive descriptor digest does not match {}",
+                member.snapshot_id
+            )));
+        }
+    }
+    for entry in inventory.entries.iter().filter(|entry| entry.included) {
+        match entry.kind.as_str() {
+            "snapshot-descriptor" => {}
+            "file-payload" => {
+                let owner = entry.owner_snapshot.as_deref().ok_or_else(|| {
+                    MicrosandboxError::Custom("file payload has no owner snapshot".into())
+                })?;
+                let snapshot = snapshots.get(owner).ok_or_else(|| {
+                    MicrosandboxError::Custom(format!(
+                        "file payload owner is not in archive: {owner}"
+                    ))
+                })?;
+                let SnapshotState::File(file) = &snapshot.manifest().state else {
+                    return Err(MicrosandboxError::Custom(format!(
+                        "checkpoint snapshot has a file payload entry: {owner}"
+                    )));
+                };
+                let expected_path = format!("files/{}/{}", digest_hex(owner)?, file.upper.file);
+                if entry.path != expected_path || entry.integrity != file.upper.integrity {
+                    return Err(MicrosandboxError::Custom(format!(
+                        "file payload binding disagrees with descriptor: {}",
+                        entry.path
+                    )));
+                }
+            }
+            "image-metadata" | "image-object" => {
+                if entry.owner_snapshot.is_some() || entry.integrity.algorithm != "sha256" {
+                    return Err(MicrosandboxError::Custom(format!(
+                        "invalid image entry binding: {}",
+                        entry.path
+                    )));
+                }
+            }
+            kind => {
+                return Err(MicrosandboxError::Unsupported {
+                    feature: format!("snapshot archive entry kind {kind}"),
+                    available_when: "the archive entry provider is implemented".into(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_sha256(value: &str, field: &str) -> MicrosandboxResult<()> {
+    digest_hex(value)
+        .map(|_| ())
+        .map_err(|_| MicrosandboxError::Custom(format!("{field} is not a lowercase sha256 digest")))
 }
 
 fn normal_utf8_components(path: &Path) -> MicrosandboxResult<Vec<&str>> {
@@ -959,13 +1525,21 @@ fn select_head_snapshot(snapshots: &[Snapshot]) -> MicrosandboxResult<usize> {
         .filter(|parent| imported_digests.contains(parent))
         .collect();
 
-    snapshots
+    let heads: Vec<usize> = snapshots
         .iter()
         .enumerate()
-        .rev()
-        .find(|(_, snap)| !parent_digests.contains(snap.digest()))
+        .filter(|(_, snap)| !parent_digests.contains(snap.digest()))
         .map(|(index, _)| index)
-        .ok_or_else(|| MicrosandboxError::Custom("archive contained no head snapshot".into()))
+        .collect();
+    match heads.as_slice() {
+        [head] => Ok(*head),
+        [] => Err(MicrosandboxError::Custom(
+            "archive parent graph has no head".into(),
+        )),
+        _ => Err(MicrosandboxError::Custom(
+            "archive parent graph has multiple heads".into(),
+        )),
+    }
 }
 
 async fn ensure_promote_targets_available(stage: &Path, dest: &Path) -> MicrosandboxResult<()> {
@@ -1295,16 +1869,23 @@ fn push_required_cache_file(
     }
     cache_files.push((
         path.to_path_buf(),
-        format!("cache/{archive_dir}/{}", file_name_str(path)?),
+        format!("images/{archive_dir}/{}", file_name_str(path)?),
     ));
     Ok(())
 }
 
-fn digest_prefix(digest: &str) -> String {
-    digest
-        .strip_prefix("sha256:")
-        .map(|h| format!("sha256-{}", &h[..h.len().min(16)]))
-        .unwrap_or_else(|| digest.replace(':', "-").chars().take(20).collect())
+fn digest_hex(digest: &str) -> MicrosandboxResult<&str> {
+    let Some(hex) = digest.strip_prefix("sha256:") else {
+        return Err(MicrosandboxError::Custom(format!(
+            "snapshot identity is not sha256: {digest}"
+        )));
+    };
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(MicrosandboxError::Custom(format!(
+            "snapshot identity is malformed: {digest}"
+        )));
+    }
+    Ok(hex)
 }
 
 fn file_name_str(p: &Path) -> MicrosandboxResult<String> {

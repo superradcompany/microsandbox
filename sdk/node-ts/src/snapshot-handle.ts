@@ -27,10 +27,24 @@ export class SnapshotHandle {
   readonly scope: SnapshotScope;
   /** Image reference the snapshot was taken from. */
   readonly imageRef: string;
-  /** On-disk format of the upper layer. */
-  readonly format: "raw" | "qcow2";
+  /** Closed descriptor state discriminant. */
+  readonly stateKind: "file" | "checkpoint";
+  /** On-disk format for file state. */
+  readonly format: "raw" | "qcow2" | null;
+  /** Filesystem type for file state. */
+  readonly fstype: string | null;
+  /** Checkpoint manifest digest for checkpoint state. */
+  readonly checkpointManifestDigest: string | null;
   /** Apparent size of the upper file at index time. */
   readonly sizeBytes: bigint | null;
+  /** Embedded versus provider-linked payload placement. */
+  readonly locality: string;
+  /** Current local availability. */
+  readonly availability: string;
+  /** Adjacent-release artifact migration status. */
+  readonly migrationState: string;
+  /** Stable migration failure code, when blocked. */
+  readonly migrationErrorCode: string | null;
   /** Snapshot creation time (from manifest). */
   readonly createdAt: Date;
   /** Local artifact directory path. */
@@ -44,8 +58,15 @@ export class SnapshotHandle {
     this.parentDigest = (inner.parentDigest ?? null) as string | null;
     this.scope = inner.scope as SnapshotScope;
     this.imageRef = inner.imageRef;
-    this.format = inner.format as "raw" | "qcow2";
+    this.stateKind = inner.stateKind as "file" | "checkpoint";
+    this.format = (inner.format as "raw" | "qcow2" | undefined) ?? null;
+    this.fstype = inner.fstype ?? null;
+    this.checkpointManifestDigest = inner.checkpointManifestDigest ?? null;
     this.sizeBytes = sizeBytesToBigInt(inner.sizeBytes);
+    this.locality = inner.locality;
+    this.availability = inner.availability;
+    this.migrationState = inner.migrationState;
+    this.migrationErrorCode = inner.migrationErrorCode ?? null;
     this.createdAt = new Date(inner.createdAt);
     this.path = inner.path;
   }

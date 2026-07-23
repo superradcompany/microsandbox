@@ -17,6 +17,7 @@ mod m20260703_000001_add_sandbox_active_config;
 mod m20260708_000001_migrate_bind_rootfs_source;
 mod m20260710_000001_migrate_root_disk;
 mod m20260714_000001_add_snapshot_scope;
+mod m20260723_000001_snapshot_artifact_transition;
 pub mod schema_metadata;
 
 use sea_orm_migration::prelude::*;
@@ -59,6 +60,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260708_000001_migrate_bind_rootfs_source::Migration),
             Box::new(m20260710_000001_migrate_root_disk::Migration),
             Box::new(m20260714_000001_add_snapshot_scope::Migration),
+            Box::new(m20260723_000001_snapshot_artifact_transition::Migration),
         ]
     }
 }

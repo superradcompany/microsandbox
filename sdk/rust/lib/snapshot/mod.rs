@@ -13,6 +13,7 @@
 
 mod archive;
 mod create;
+pub(crate) mod migration;
 mod store;
 mod verify;
 
@@ -107,7 +108,7 @@ impl Snapshot {
         store::open_snapshot(local, path_or_name.as_ref()).await
     }
 
-    /// Verify recorded content integrity for this snapshot, if present.
+    /// Verify the state closure bound by this snapshot.
     pub async fn verify(&self) -> MicrosandboxResult<SnapshotVerifyReport> {
         verify::verify_snapshot(self).await
     }
@@ -128,9 +129,17 @@ impl Snapshot {
         &self.manifest
     }
 
-    /// Apparent size of the captured upper layer in bytes.
-    pub fn size_bytes(&self) -> u64 {
-        self.manifest.upper.size_bytes
+    /// Apparent size of a file-state upper layer in bytes.
+    pub fn size_bytes(&self) -> Option<u64> {
+        self.manifest
+            .state
+            .as_file()
+            .map(|state| state.upper.size_bytes)
+    }
+
+    /// Closed state variant carried by the descriptor.
+    pub fn state(&self) -> &SnapshotState {
+        &self.manifest.state
     }
 
     /// Get a handle by digest, name, or path from the local index.
@@ -222,8 +231,15 @@ pub struct SnapshotHandle {
     pub(crate) parent_digest: Option<String>,
     pub(crate) scope: SnapshotScope,
     pub(crate) image_ref: String,
-    pub(crate) format: SnapshotFormat,
+    pub(crate) state_kind: String,
+    pub(crate) format: Option<SnapshotFormat>,
+    pub(crate) fstype: Option<String>,
+    pub(crate) checkpoint_manifest_digest: Option<String>,
     pub(crate) size_bytes: Option<u64>,
+    pub(crate) locality: String,
+    pub(crate) availability: String,
+    pub(crate) migration_state: String,
+    pub(crate) migration_error_code: Option<String>,
     pub(crate) created_at: chrono::NaiveDateTime,
     pub(crate) artifact_path: PathBuf,
 }
@@ -254,14 +270,49 @@ impl SnapshotHandle {
         &self.image_ref
     }
 
-    /// On-disk format of the upper.
-    pub fn format(&self) -> SnapshotFormat {
+    /// Stable file/checkpoint state discriminant.
+    pub fn state_kind(&self) -> &str {
+        &self.state_kind
+    }
+
+    /// On-disk format for file state.
+    pub fn format(&self) -> Option<SnapshotFormat> {
         self.format
+    }
+
+    /// Filesystem type for file state.
+    pub fn fstype(&self) -> Option<&str> {
+        self.fstype.as_deref()
+    }
+
+    /// Checkpoint manifest digest for checkpoint state.
+    pub fn checkpoint_manifest_digest(&self) -> Option<&str> {
+        self.checkpoint_manifest_digest.as_deref()
     }
 
     /// Apparent size of the upper file at index time.
     pub fn size_bytes(&self) -> Option<u64> {
         self.size_bytes
+    }
+
+    /// Whether payload state is embedded or provider-linked.
+    pub fn locality(&self) -> &str {
+        &self.locality
+    }
+
+    /// Current local availability projection.
+    pub fn availability(&self) -> &str {
+        &self.availability
+    }
+
+    /// Adjacent-release migration status for this indexed artifact.
+    pub fn migration_state(&self) -> &str {
+        &self.migration_state
+    }
+
+    /// Stable migration failure code when migration is blocked.
+    pub fn migration_error_code(&self) -> Option<&str> {
+        self.migration_error_code.as_deref()
     }
 
     /// Snapshot creation time (from manifest).
@@ -312,7 +363,10 @@ impl SnapshotBuilder {
         self
     }
 
-    /// Compute and record upper-layer content integrity during creation.
+    /// Retained source-compatibility setter.
+    ///
+    /// Final schema 1 always computes and records file-state integrity, so
+    /// calling this method no longer changes creation behavior.
     pub fn record_integrity(mut self) -> Self {
         self.record_integrity = true;
         self
@@ -359,8 +413,8 @@ pub use archive::SaveOpts;
 #[cfg(feature = "fuzzing")]
 pub use archive::fuzz_unpack_archive;
 pub use microsandbox_image::snapshot::{
-    DESCRIPTOR_FILENAME, ImageRef, Manifest, SnapshotFormat, SnapshotScope, UpperIntegrity,
-    UpperLayer,
+    CheckpointSnapshotState, DESCRIPTOR_FILENAME, FileSnapshotState, ImageRef, Manifest,
+    SnapshotDescriptor, SnapshotFormat, SnapshotScope, SnapshotState, UpperIntegrity, UpperLayer,
 };
 pub use microsandbox_types::{SnapshotSpec, SnapshotSpec as SnapshotConfig};
 pub use verify::{SnapshotVerifyReport, UpperVerifyStatus};

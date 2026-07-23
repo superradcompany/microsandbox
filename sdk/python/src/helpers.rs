@@ -126,7 +126,22 @@ pub fn sandbox_builder_from_args(
                 "restoring non-disk snapshots is not supported by this runtime",
             ));
         }
-        let upper_path = snap_dir.join(&manifest.upper.file);
+        let file_state = match &manifest.state {
+            microsandbox::snapshot::SnapshotState::File(state) => state,
+            microsandbox::snapshot::SnapshotState::Checkpoint(_) => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "restoring checkpoint-state snapshots is not supported by this runtime",
+                ));
+            }
+        };
+        if file_state.format != microsandbox::snapshot::SnapshotFormat::Raw
+            || file_state.fstype != "ext4"
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "snapshot file state is not a supported raw ext4 upper",
+            ));
+        }
+        let upper_path = snap_dir.join(&file_state.upper.file);
         if !upper_path.exists() {
             return Err(pyo3::exceptions::PyFileNotFoundError::new_err(format!(
                 "snapshot upper file missing: {}",

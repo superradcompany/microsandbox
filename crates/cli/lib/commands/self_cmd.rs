@@ -2464,8 +2464,8 @@ mod tests {
         .unwrap();
         Migrator::up(db.inner(), None).await.unwrap();
 
-        // The scope migration is the latest; one step must drop the column
-        // while everything older (including root disk) stays intact.
+        // The snapshot artifact transition is latest; one step must restore
+        // the preceding file-only index while everything older stays intact.
         rollback_schema(db.inner(), 1).await.unwrap();
 
         let columns = db
@@ -2478,7 +2478,11 @@ mod tests {
         let has_scope = columns
             .iter()
             .any(|row| row.try_get_by_index::<String>(1).unwrap() == "scope");
-        assert!(!has_scope);
+        let has_state_kind = columns
+            .iter()
+            .any(|row| row.try_get_by_index::<String>(1).unwrap() == "state_kind");
+        assert!(has_scope);
+        assert!(!has_state_kind);
 
         let rows = db
             .query_all(Statement::from_string(

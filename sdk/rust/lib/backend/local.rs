@@ -134,7 +134,8 @@ impl LocalBackend {
         self.db
             .get_or_try_init(|| async {
                 let db_dir = self.config.home().join(microsandbox_utils::DB_SUBDIR);
-                connect_and_migrate(&db_dir, &self.config.database).await
+                connect_and_migrate(&db_dir, &self.config.database, &self.config.snapshots_dir())
+                    .await
             })
             .await
     }
@@ -500,6 +501,7 @@ impl Drop for MigrationLock {
 async fn connect_and_migrate(
     db_dir: &Path,
     database: &DatabaseConfig,
+    snapshots_dir: &Path,
 ) -> MicrosandboxResult<DbPools> {
     tokio::fs::create_dir_all(db_dir).await?;
     let _migration_lock = acquire_migration_lock(db_dir).await?;
@@ -519,6 +521,24 @@ async fn connect_and_migrate(
         .map_err(|err| MicrosandboxError::Runtime(err.to_string()))?;
     refuse_schema_ahead(pools.write().inner()).await?;
     Migrator::up(pools.write().inner(), None).await?;
+
+    // Descriptor translation mutates the same installation state as schema
+    // migration. Keep both gates held until every discovered artifact is
+    // either canonical or durably journaled as blocked.
+    let install_lease =
+        microsandbox_runtime::maintenance::acquire_install_exclusive_lease(pools.write())
+            .await
+            .map_err(|err| MicrosandboxError::Runtime(err.to_string()))?;
+    let reconcile_result =
+        crate::snapshot::migration::reconcile_managed(&pools, snapshots_dir).await;
+    let clear_result = microsandbox_runtime::maintenance::clear_install_exclusive_lease(
+        pools.write(),
+        &install_lease,
+    )
+    .await
+    .map_err(|err| MicrosandboxError::Runtime(err.to_string()));
+    reconcile_result?;
+    clear_result?;
 
     Ok(pools)
 }
@@ -574,7 +594,9 @@ fn is_missing_migrations_table(err: &DbErr) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use microsandbox_image::snapshot::Manifest;
     use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement};
+    use sha2::{Digest as _, Sha256};
 
     use super::*;
     use crate::backend::with_backend;
@@ -586,7 +608,9 @@ mod tests {
         let db_dir = tmp.path().join("db");
         let database = DatabaseConfig::default();
 
-        let pools = connect_and_migrate(&db_dir, &database).await.unwrap();
+        let pools = connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
+            .await
+            .unwrap();
         let conn = pools.read();
 
         // DB file should exist on disk.
@@ -617,6 +641,7 @@ mod tests {
             "sandbox",
             "sandbox_labels",
             "sandbox_rootfs",
+            "snapshot_artifact_migration",
             "snapshot_index",
             "volume",
             "volume_attach",
@@ -631,10 +656,64 @@ mod tests {
         let db_dir = tmp.path().join("db");
         let database = DatabaseConfig::default();
 
-        let pools = connect_and_migrate(&db_dir, &database).await.unwrap();
+        let pools = connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
+            .await
+            .unwrap();
 
         // Running migrations again on the same DB should succeed.
         Migrator::up(pools.write().inner(), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_connect_and_migrate_translates_v066_parent_graph() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_dir = tmp.path().join("db");
+        let snapshots_dir = tmp.path().join("snapshots");
+        let root_dir = snapshots_dir.join("root");
+        let child_dir = snapshots_dir.join("child");
+        std::fs::create_dir_all(&root_dir).unwrap();
+        std::fs::create_dir_all(&child_dir).unwrap();
+        std::fs::write(root_dir.join("upper.ext4"), b"root!").unwrap();
+        std::fs::write(child_dir.join("upper.ext4"), b"child").unwrap();
+
+        let root = br#"{"schema":1,"format":"raw","fstype":"ext4","image":{"ref":"docker.io/library/alpine:3.20","manifest_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"parent":null,"created_at":"2026-07-01T10:00:00Z","labels":{},"upper":{"file":"upper.ext4","size_bytes":5,"integrity":null},"source_sandbox":"root"}"#;
+        let root_source_digest = format!("sha256:{}", hex::encode(Sha256::digest(root)));
+        let child = format!(
+            "{{\"schema\":1,\"format\":\"raw\",\"fstype\":\"ext4\",\"image\":{{\"ref\":\"docker.io/library/alpine:3.20\",\"manifest_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}},\"parent\":\"{root_source_digest}\",\"created_at\":\"2026-07-01T10:01:00Z\",\"labels\":{{}},\"upper\":{{\"file\":\"upper.ext4\",\"size_bytes\":5,\"integrity\":null}},\"source_sandbox\":\"child\"}}"
+        );
+        std::fs::write(root_dir.join("manifest.json"), root).unwrap();
+        std::fs::write(child_dir.join("manifest.json"), child).unwrap();
+
+        let pools = connect_and_migrate(&db_dir, &DatabaseConfig::default(), &snapshots_dir)
+            .await
+            .unwrap();
+
+        let root_manifest =
+            Manifest::from_bytes(&std::fs::read(root_dir.join("snapshot.json")).unwrap()).unwrap();
+        let child_manifest =
+            Manifest::from_bytes(&std::fs::read(child_dir.join("snapshot.json")).unwrap()).unwrap();
+        let root_target_digest = root_manifest.digest().unwrap();
+        assert_eq!(
+            child_manifest.parent.as_deref(),
+            Some(root_target_digest.as_str())
+        );
+        assert!(!root_dir.join("manifest.json").exists());
+        assert!(!child_dir.join("manifest.json").exists());
+        assert!(root_dir.join(".manifest.json.legacy").exists());
+        assert!(child_dir.join(".manifest.json.legacy").exists());
+
+        let count = pools
+            .read()
+            .query_one(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT COUNT(*) FROM snapshot_index",
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get_by_index::<i64>(0)
+            .unwrap();
+        assert_eq!(count, 2);
     }
 
     #[tokio::test]
@@ -643,7 +722,9 @@ mod tests {
         let db_dir = tmp.path().join("db");
         let database = DatabaseConfig::default();
 
-        let pools = connect_and_migrate(&db_dir, &database).await.unwrap();
+        let pools = connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
+            .await
+            .unwrap();
         let future = chrono::Utc::now().naive_utc() + chrono::Duration::minutes(10);
         pools
             .write()
@@ -661,7 +742,9 @@ mod tests {
             .unwrap();
         drop(pools);
 
-        let err = connect_and_migrate(&db_dir, &database).await.unwrap_err();
+        let err = connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("install operation in progress"));
     }
 
@@ -671,7 +754,9 @@ mod tests {
         let db_dir = tmp.path().join("db");
         let database = DatabaseConfig::default();
 
-        let pools = connect_and_migrate(&db_dir, &database).await.unwrap();
+        let pools = connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
+            .await
+            .unwrap();
         pools
             .write()
             .inner()
@@ -684,7 +769,9 @@ mod tests {
             .unwrap();
         drop(pools);
 
-        let err = connect_and_migrate(&db_dir, &database).await.unwrap_err();
+        let err = connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("database schema is newer"));
     }
 
@@ -750,7 +837,9 @@ mod tests {
         drop(conn);
 
         let database = DatabaseConfig::default();
-        let recovered = connect_and_migrate(&db_dir, &database).await.unwrap();
+        let recovered = connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
+            .await
+            .unwrap();
 
         let migration_row_count = recovered
             .read()

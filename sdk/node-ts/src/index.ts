@@ -111,6 +111,7 @@ export { SnapshotHandle } from "./snapshot-handle.js";
 export type {
   SaveOpts,
   SnapshotScope,
+  SnapshotState,
   SnapshotVerifyReport,
 } from "./snapshot.js";
 

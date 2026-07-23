@@ -949,11 +949,31 @@ impl SandboxBuilder {
                 available_when: "in a runtime that understands these snapshot extensions".into(),
             });
         }
+        let file_state = match &snap.manifest().state {
+            crate::snapshot::SnapshotState::File(state) => state,
+            crate::snapshot::SnapshotState::Checkpoint(_) => {
+                return Err(crate::MicrosandboxError::Unsupported {
+                    feature: "Restoring checkpoint-state snapshots".into(),
+                    available_when: "after checkpoint restore providers land".into(),
+                });
+            }
+        };
+        if file_state.format != crate::snapshot::SnapshotFormat::Raw || file_state.fstype != "ext4"
+        {
+            return Err(crate::MicrosandboxError::Unsupported {
+                feature: format!(
+                    "Restoring snapshot file state {:?}/{}",
+                    file_state.format, file_state.fstype
+                ),
+                available_when: "after that disk format and filesystem contract is qualified"
+                    .into(),
+            });
+        }
         let snap_ref = snap.manifest().image.reference.clone();
 
         self.config.spec.image = RootfsSource::oci(snap_ref);
         self.config.manifest_digest = Some(snap.manifest().image.manifest_digest.clone());
-        self.config.snapshot_upper_source = Some(snap.path().join(&snap.manifest().upper.file));
+        self.config.snapshot_upper_source = Some(snap.path().join(&file_state.upper.file));
         Ok(())
     }
 

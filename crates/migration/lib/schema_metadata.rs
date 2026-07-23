@@ -24,6 +24,10 @@ pub const ACTIVE_CONFIG_MIGRATION_ID: &str = "m20260703_000001_add_sandbox_activ
 /// Migration that adds payload scope metadata to the snapshot index.
 pub const SNAPSHOT_SCOPE_MIGRATION_ID: &str = "m20260714_000001_add_snapshot_scope";
 
+/// Migration that projects final snapshot state and journals legacy conversion.
+pub const SNAPSHOT_ARTIFACT_TRANSITION_MIGRATION_ID: &str =
+    "m20260723_000001_snapshot_artifact_transition";
+
 /// Frozen migration baseline for the transitional 0.6.0 release.
 ///
 /// The released 0.6.0 binary predates `msb __schema-baseline --json`, so
@@ -166,6 +170,13 @@ pub const MIGRATION_METADATA: &[MigrationMetadata] = &[
         affects_cache: false,
         affects_user_data: false,
         summary: "remove snapshot scope index metadata",
+    },
+    MigrationMetadata {
+        id: SNAPSHOT_ARTIFACT_TRANSITION_MIGRATION_ID,
+        reversible: true,
+        affects_cache: false,
+        affects_user_data: true,
+        summary: "reverse final snapshot descriptors before removing migration state",
     },
 ];
 

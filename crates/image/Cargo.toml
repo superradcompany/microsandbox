@@ -13,6 +13,7 @@ path = "lib/lib.rs"
 [dependencies]
 astral-tokio-tar = { workspace = true }
 async-compression = { workspace = true, features = ["gzip", "tokio", "zstd"] }
+chrono.workspace = true
 futures.workspace = true
 hex.workspace = true
 libc.workspace = true

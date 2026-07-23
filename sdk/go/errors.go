@@ -92,6 +92,9 @@ const (
 	// ErrSnapshotIntegrity indicates snapshot verification failed.
 	ErrSnapshotIntegrity
 
+	// ErrSnapshotMigration indicates an adjacent-release snapshot migration is blocked.
+	ErrSnapshotMigration
+
 	// ErrPatchFailed indicates a rootfs patch could not be applied before
 	// the VM booted.
 	ErrPatchFailed
@@ -188,6 +191,8 @@ func (k ErrorKind) String() string {
 		return "SnapshotImageMissing"
 	case ErrSnapshotIntegrity:
 		return "SnapshotIntegrity"
+	case ErrSnapshotMigration:
+		return "SnapshotMigration"
 	case ErrPatchFailed:
 		return "PatchFailed"
 	case ErrNetworkPolicy:
@@ -313,6 +318,8 @@ func kindFromFFI(kind string) ErrorKind {
 		return ErrSnapshotImageMissing
 	case ffi.KindSnapshotIntegrity:
 		return ErrSnapshotIntegrity
+	case ffi.KindSnapshotMigration:
+		return ErrSnapshotMigration
 	case ffi.KindPatchFailed:
 		return ErrPatchFailed
 	case ffi.KindIO:
