@@ -906,12 +906,13 @@ async fn run_downgrade_local(args: SelfDowngradeArgs) -> anyhow::Result<()> {
     .await;
 
     #[cfg(windows)]
-    if result.is_err() && operation.phase() < DowngradePhase::ArtifactsReverting {
-        if let Err(error) = cancel_windows_downgrade_recovery(&base_dir, &operation) {
-            ui::warn(&format!(
-                "failed to cancel unused Windows downgrade recovery task: {error:#}"
-            ));
-        }
+    if result.is_err()
+        && operation.phase() < DowngradePhase::ArtifactsReverting
+        && let Err(error) = cancel_windows_downgrade_recovery(&base_dir, &operation)
+    {
+        ui::warn(&format!(
+            "failed to cancel unused Windows downgrade recovery task: {error:#}"
+        ));
     }
 
     let clear_lease_in_parent = result
