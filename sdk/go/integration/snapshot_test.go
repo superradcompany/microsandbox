@@ -194,8 +194,13 @@ func TestSnapshotCreateAndSnapshotDirectoryOps(t *testing.T) {
 		t.Fatalf("Snapshot.Save: %v", err)
 	}
 
+	// VM startup and snapshot export can consume most of the shared test context on busy
+	// self-hosted runners. Keep import independently bounded so it receives the same full
+	// operation budget instead of inheriting only the time left by the preceding phases.
+	loadCtx, cancelLoad := context.WithTimeout(context.Background(), integrationTestTimeout)
+	t.Cleanup(cancelLoad)
 	importDir := filepath.Join(t.TempDir(), "imported")
-	imported, err := microsandbox.Snapshot.Load(ctx, archivePath, importDir)
+	imported, err := microsandbox.Snapshot.Load(loadCtx, archivePath, importDir)
 	if err != nil {
 		t.Fatalf("Snapshot.Load: %v", err)
 	}
