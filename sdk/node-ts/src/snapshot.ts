@@ -16,6 +16,27 @@ import {
  */
 export type SnapshotScope = "disk" | "resumable";
 
+/** Canonical closed state family from schema-1 `snapshot.json`. */
+export type SnapshotState =
+  | {
+      readonly kind: "file";
+      readonly format: "raw" | "qcow2";
+      readonly fstype: string;
+      readonly upper: {
+        readonly file: string;
+        readonly sizeBytes: bigint;
+        readonly integrity: {
+          readonly algorithm: string;
+          readonly digest: string;
+        };
+      };
+    }
+  | {
+      readonly kind: "checkpoint";
+      readonly checkpointId: string;
+      readonly manifest: string;
+    };
+
 /**
  * Bundle options for `Snapshot.save`.
  */
@@ -29,25 +50,17 @@ export interface SaveOpts {
 }
 
 /**
- * Result of `Snapshot.verify()`. The `upper` discriminant is
- * `"notRecorded"` when no integrity hash was stored at create time,
- * or `"verified"` when the recorded hash matched the recomputed one.
+ * Result of `Snapshot.verify()` for mandatory file-state integrity.
  */
-export type SnapshotVerifyReport =
-  | {
-      readonly digest: string;
-      readonly path: string;
-      readonly upper: { readonly kind: "notRecorded" };
-    }
-  | {
-      readonly digest: string;
-      readonly path: string;
-      readonly upper: {
-        readonly kind: "verified";
-        readonly algorithm: string;
-        readonly digest: string;
-      };
-    };
+export type SnapshotVerifyReport = {
+  readonly digest: string;
+  readonly path: string;
+  readonly upper: {
+    readonly kind: "verified";
+    readonly algorithm: string;
+    readonly digest: string;
+  };
+};
 
 /**
  * Fluent builder for a snapshot. Returned by `Snapshot.builder(name)`.
@@ -190,8 +203,32 @@ export class Snapshot {
   }
 
   /** Apparent size of the captured upper layer in bytes (sparse on disk). */
-  get sizeBytes(): bigint {
-    return this.inner.sizeBytes;
+  get sizeBytes(): bigint | null {
+    return this.inner.sizeBytes ?? null;
+  }
+
+  /** Closed state projection matching `snapshot.json`. */
+  get state(): SnapshotState {
+    if (this.inner.stateKind === "checkpoint") {
+      return {
+        kind: "checkpoint",
+        checkpointId: this.inner.checkpointId ?? "",
+        manifest: this.inner.checkpointManifestDigest ?? "",
+      };
+    }
+    return {
+      kind: "file",
+      format: (this.inner.format ?? "raw") as "raw" | "qcow2",
+      fstype: this.inner.fstype ?? "",
+      upper: {
+        file: this.inner.upperFile ?? "",
+        sizeBytes: this.inner.sizeBytes ?? 0n,
+        integrity: {
+          algorithm: this.inner.upperIntegrityAlgorithm ?? "",
+          digest: this.inner.upperIntegrityDigest ?? "",
+        },
+      },
+    };
   }
 
   /** Image reference the snapshot was taken from. */
@@ -205,13 +242,13 @@ export class Snapshot {
   }
 
   /** On-disk format of the upper layer. */
-  get format(): "raw" | "qcow2" {
-    return this.inner.format as "raw" | "qcow2";
+  get format(): "raw" | "qcow2" | null {
+    return (this.inner.format as "raw" | "qcow2" | undefined) ?? null;
   }
 
   /** Filesystem type inside the upper (e.g. `"ext4"`). */
-  get fstype(): string {
-    return this.inner.fstype;
+  get fstype(): string | null {
+    return this.inner.fstype ?? null;
   }
 
   /** Manifest digest of the parent snapshot, or `null` for a root. */
@@ -244,8 +281,8 @@ export class Snapshot {
    * manifest. Walks data extents only, so a 4 GiB sparse file with a
    * few MB of data verifies in milliseconds.
    *
-   * Returns `{ upper: { kind: "notRecorded" } }` when the manifest
-   * has no integrity hash recorded.
+ * Checkpoint-state verification remains unavailable until its provider
+ * closure implementation lands.
    */
   async verify(): Promise<SnapshotVerifyReport> {
     const r = await withMappedErrors(() => this.inner.verify());
@@ -265,21 +302,14 @@ function wrapBuilder(nb: InstanceType<typeof napi.SnapshotBuilder>): SnapshotBui
 
 /** @internal */
 function verifyReportToTs(r: NapiSnapshotVerifyReport): SnapshotVerifyReport {
-  if (r.upperKind === "verified") {
-    return {
-      digest: r.digest,
-      path: r.path,
-      upper: {
-        kind: "verified",
-        algorithm: r.upperAlgorithm ?? "",
-        digest: r.upperDigest ?? "",
-      },
-    };
-  }
   return {
     digest: r.digest,
     path: r.path,
-    upper: { kind: "notRecorded" },
+    upper: {
+      kind: "verified",
+      algorithm: r.upperAlgorithm ?? "",
+      digest: r.upperDigest ?? "",
+    },
   };
 }
 

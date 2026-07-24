@@ -248,9 +248,16 @@ async fn list(args: SnapshotListArgs) -> anyhow::Result<()> {
                     "name": s.name(),
                     "parent_digest": s.parent_digest(),
                     "scope": format_scope(s.scope()),
+                    "state_kind": s.state_kind(),
                     "image_ref": s.image_ref(),
-                    "format": format_str(s.format()),
+                    "format": s.format().map(format_str),
+                    "fstype": s.fstype(),
+                    "checkpoint_manifest_digest": s.checkpoint_manifest_digest(),
                     "size_bytes": s.size_bytes(),
+                    "locality": s.locality(),
+                    "availability": s.availability(),
+                    "migration_state": s.migration_state(),
+                    "migration_error_code": s.migration_error_code(),
                     "created_at": ui::format_json_datetime(&s.created_at().and_utc()),
                     "artifact_path": s.path().display().to_string(),
                 })
@@ -272,7 +279,9 @@ async fn list(args: SnapshotListArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let mut table = ui::Table::new(&["NAME", "SCOPE", "IMAGE", "SIZE", "CREATED", "DIGEST"]);
+    let mut table = ui::Table::new(&[
+        "NAME", "SCOPE", "STATE", "IMAGE", "SIZE", "CREATED", "DIGEST",
+    ]);
     for s in &snapshots {
         let name = s.name().unwrap_or("-").to_string();
         let size = s
@@ -284,6 +293,7 @@ async fn list(args: SnapshotListArgs) -> anyhow::Result<()> {
         table.add_row(vec![
             name,
             format_scope(s.scope()).to_string(),
+            s.migration_state().to_string(),
             s.image_ref().to_string(),
             size,
             created,
@@ -303,13 +313,23 @@ async fn inspect(args: SnapshotInspectArgs) -> anyhow::Result<()> {
     ui::detail_kv("Image", &m.image.reference);
     ui::detail_kv("Image Manifest", &m.image.manifest_digest);
     ui::detail_kv("Scope", format_scope(m.scope));
-    ui::detail_kv("Format", format_str(snap.manifest().format));
-    ui::detail_kv("Filesystem", &m.fstype);
     ui::detail_kv("Parent", m.parent.as_deref().unwrap_or("-"));
     ui::detail_kv("Created", &ui::format_rfc3339_datetime(&m.created_at)?);
-    ui::detail_kv("Upper File", &m.upper.file);
-    ui::detail_kv("Upper Size", &format_size(m.upper.size_bytes));
-    ui::detail_kv("Integrity", &format_integrity(m.upper.integrity.as_ref()));
+    match &m.state {
+        microsandbox::SnapshotState::File(state) => {
+            ui::detail_kv("State", "file");
+            ui::detail_kv("Format", format_str(state.format));
+            ui::detail_kv("Filesystem", &state.fstype);
+            ui::detail_kv("Upper File", &state.upper.file);
+            ui::detail_kv("Upper Size", &format_size(state.upper.size_bytes));
+            ui::detail_kv("Integrity", &format_integrity(&state.upper.integrity));
+        }
+        microsandbox::SnapshotState::Checkpoint(state) => {
+            ui::detail_kv("State", "checkpoint");
+            ui::detail_kv("Checkpoint", &state.checkpoint_id);
+            ui::detail_kv("Checkpoint Manifest", &state.manifest);
+        }
+    }
     if !m.requires.is_empty() {
         ui::detail_kv("Requires", &m.requires.join(", "));
         let unsupported = m.unsupported_requires();
@@ -446,18 +466,12 @@ fn short_digest(d: &str) -> String {
     }
 }
 
-fn format_integrity(integrity: Option<&microsandbox::UpperIntegrity>) -> String {
-    match integrity {
-        Some(integrity) => format!("{} {}", integrity.algorithm, integrity.digest),
-        None => "not recorded".into(),
-    }
+fn format_integrity(integrity: &microsandbox::UpperIntegrity) -> String {
+    format!("{} {}", integrity.algorithm, integrity.digest)
 }
 
 fn format_verify_status(status: &microsandbox::snapshot::UpperVerifyStatus) -> String {
     match status {
-        microsandbox::snapshot::UpperVerifyStatus::NotRecorded => {
-            "not recorded (metadata checks only)".into()
-        }
         microsandbox::snapshot::UpperVerifyStatus::Verified { algorithm, digest } => {
             format!("verified ({algorithm} {digest})")
         }

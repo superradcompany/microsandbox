@@ -3531,6 +3531,7 @@ version = "0.6.6"
 dependencies = [
  "astral-tokio-tar",
  "async-compression",
+ "chrono",
  "futures",
  "hex",
  "libc",

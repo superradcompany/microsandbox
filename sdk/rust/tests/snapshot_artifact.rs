@@ -13,8 +13,9 @@ use std::sync::Arc;
 use microsandbox::Snapshot;
 use microsandbox::backend::{Backend, LocalBackend};
 use microsandbox_image::snapshot::{
-    DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, ImageRef, Manifest, SCHEMA_VERSION,
-    SNAPSHOT_ARTIFACT_KIND, SnapshotFormat, SnapshotScope, UpperIntegrity, UpperLayer,
+    CheckpointSnapshotState, DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, FileSnapshotState, ImageRef,
+    Manifest, SCHEMA_VERSION, SNAPSHOT_ARTIFACT_KIND, SPARSE_SHA256_V1, SnapshotFormat,
+    SnapshotScope, SnapshotState, UpperIntegrity, UpperLayer,
 };
 use sha2::{Digest, Sha256};
 use tar::{Builder, EntryType, Header};
@@ -51,9 +52,18 @@ fn make_artifact_with_scope(
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join(DEFAULT_UPPER_FILE), upper_bytes).unwrap();
 
-    let manifest = Manifest {
-        scope,
-        ..sample_manifest(upper_bytes.len() as u64)
+    let manifest = if scope == SnapshotScope::Resumable {
+        Manifest {
+            scope,
+            state: SnapshotState::Checkpoint(CheckpointSnapshotState {
+                checkpoint_id: "ckpt_synthetic".into(),
+                manifest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    .into(),
+            }),
+            ..sample_manifest(upper_bytes.len() as u64)
+        }
+    } else {
+        sample_manifest(upper_bytes.len() as u64)
     };
     let bytes = manifest.to_canonical_bytes().unwrap();
     let digest = manifest.digest().unwrap();
@@ -66,22 +76,29 @@ fn sample_manifest(upper_size: u64) -> Manifest {
         schema: SCHEMA_VERSION,
         artifact: SNAPSHOT_ARTIFACT_KIND.into(),
         scope: SnapshotScope::Disk,
-        format: SnapshotFormat::Raw,
-        fstype: "ext4".into(),
+        created_at: "2026-05-01T12:00:00Z".into(),
+        parent: None,
         image: ImageRef {
             reference: "docker.io/library/alpine:3.20".into(),
             manifest_digest:
                 "sha256:0000000000000000000000000000000000000000000000000000000000000001".into(),
         },
-        parent: None,
-        created_at: "2026-05-01T12:00:00Z".into(),
-        labels: BTreeMap::new(),
-        upper: UpperLayer {
-            file: DEFAULT_UPPER_FILE.into(),
-            size_bytes: upper_size,
-            integrity: None,
-        },
         source_sandbox: Some("synthetic".into()),
+        state: SnapshotState::File(FileSnapshotState {
+            format: SnapshotFormat::Raw,
+            fstype: "ext4".into(),
+            upper: UpperLayer {
+                file: DEFAULT_UPPER_FILE.into(),
+                size_bytes: upper_size,
+                integrity: UpperIntegrity {
+                    algorithm: SPARSE_SHA256_V1.into(),
+                    digest:
+                        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                            .into(),
+                },
+            },
+        }),
+        labels: BTreeMap::new(),
         extensions: BTreeMap::new(),
         requires: Vec::new(),
     }
@@ -140,16 +157,22 @@ fn make_artifact_with_parent_and_integrity(
     let upper_path = dir.join(DEFAULT_UPPER_FILE);
     std::fs::write(&upper_path, upper_bytes).unwrap();
 
-    let mut hasher = Sha256::new();
-    hasher.update(upper_bytes);
-    let upper_integrity = record_integrity.then(|| UpperIntegrity {
-        algorithm: "sha256".into(),
-        digest: format!("sha256:{}", hex::encode(hasher.finalize())),
-    });
+    let _ = record_integrity;
 
     let mut manifest = sample_manifest(upper_bytes.len() as u64);
     manifest.parent = parent_digest;
-    manifest.upper.integrity = upper_integrity;
+    manifest.state = SnapshotState::File(FileSnapshotState {
+        format: SnapshotFormat::Raw,
+        fstype: "ext4".into(),
+        upper: UpperLayer {
+            file: DEFAULT_UPPER_FILE.into(),
+            size_bytes: upper_bytes.len() as u64,
+            integrity: UpperIntegrity {
+                algorithm: SPARSE_SHA256_V1.into(),
+                digest: sparse_digest(upper_bytes),
+            },
+        },
+    });
     let bytes = manifest.to_canonical_bytes().unwrap();
     let digest = manifest.digest().unwrap();
     std::fs::write(dir.join(DESCRIPTOR_FILENAME), bytes).unwrap();
@@ -172,6 +195,17 @@ fn make_artifact_with_image(
         reference: image_reference,
         manifest_digest: image_manifest_digest,
     };
+    let file = manifest.state.as_file().unwrap().clone();
+    manifest.state = SnapshotState::File(FileSnapshotState {
+        upper: UpperLayer {
+            integrity: UpperIntegrity {
+                algorithm: SPARSE_SHA256_V1.into(),
+                digest: sparse_digest(upper_bytes),
+            },
+            ..file.upper
+        },
+        ..file
+    });
     let bytes = manifest.to_canonical_bytes().unwrap();
     let digest = manifest.digest().unwrap();
     std::fs::write(dir.join(DESCRIPTOR_FILENAME), bytes).unwrap();
@@ -180,6 +214,14 @@ fn make_artifact_with_image(
 
 fn sha256_digest(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+fn sparse_digest(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"msb-sparse-sha256-v1\0");
+    hasher.update((bytes.len() as u64).to_le_bytes());
     hasher.update(bytes);
     format!("sha256:{}", hex::encode(hasher.finalize()))
 }
@@ -236,9 +278,16 @@ fn make_sparse_artifact(
     }
 
     let mut manifest = sample_manifest(len);
-    manifest.upper.integrity = Some(UpperIntegrity {
-        algorithm: "sha256".into(),
-        digest: sha256_digest(&logical),
+    let file = manifest.state.as_file().unwrap().clone();
+    manifest.state = SnapshotState::File(FileSnapshotState {
+        upper: UpperLayer {
+            integrity: UpperIntegrity {
+                algorithm: SPARSE_SHA256_V1.into(),
+                digest: sparse_digest(&logical),
+            },
+            ..file.upper
+        },
+        ..file
     });
     let bytes = manifest.to_canonical_bytes().unwrap();
     let digest = manifest.digest().unwrap();
@@ -342,6 +391,37 @@ fn write_regular_file_archive(archive: &Path, path: &str, payload: &[u8]) {
     builder.finish().unwrap();
 }
 
+fn write_v066_archive(archive: &Path, prefix: &str, upper: &[u8]) {
+    let file = std::fs::File::create(archive).unwrap();
+    let mut builder = Builder::new(file);
+    let descriptor = format!(
+        "{{\"schema\":1,\"format\":\"raw\",\"fstype\":\"ext4\",\"image\":{{\"ref\":\"docker.io/library/alpine:3.20\",\"manifest_digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000001\"}},\"parent\":null,\"created_at\":\"2026-05-01T12:00:00Z\",\"labels\":{{}},\"upper\":{{\"file\":\"upper.ext4\",\"size_bytes\":{},\"integrity\":null}},\"source_sandbox\":\"synthetic\"}}",
+        upper.len()
+    );
+    let mut descriptor_header = Header::new_gnu();
+    descriptor_header.set_entry_type(EntryType::Regular);
+    descriptor_header
+        .set_path(format!("{prefix}/manifest.json"))
+        .unwrap();
+    descriptor_header.set_mode(0o644);
+    descriptor_header.set_size(descriptor.len() as u64);
+    descriptor_header.set_cksum();
+    builder
+        .append(&descriptor_header, Cursor::new(descriptor.as_bytes()))
+        .unwrap();
+
+    let mut upper_header = Header::new_gnu();
+    upper_header.set_entry_type(EntryType::Regular);
+    upper_header
+        .set_path(format!("{prefix}/upper.ext4"))
+        .unwrap();
+    upper_header.set_mode(0o644);
+    upper_header.set_size(upper.len() as u64);
+    upper_header.set_cksum();
+    builder.append(&upper_header, Cursor::new(upper)).unwrap();
+    builder.finish().unwrap();
+}
+
 fn write_symlink_traversal_archive(archive: &Path, escape_dir: &Path) {
     let file = std::fs::File::create(archive).unwrap();
     let mut builder = Builder::new(file);
@@ -389,7 +469,10 @@ async fn open_reads_valid_artifact_metadata() {
         .unwrap();
     assert_eq!(snap.digest(), expected_digest);
     assert_eq!(snap.path(), dir);
-    assert_eq!(snap.size_bytes(), b"upper data goes here".len() as u64);
+    assert_eq!(
+        snap.size_bytes(),
+        Some(b"upper data goes here".len() as u64)
+    );
 }
 
 #[test]
@@ -426,8 +509,9 @@ fn builder_requires_source_sandbox() {
 }
 
 #[tokio::test]
-async fn legacy_manifest_json_artifacts_are_not_recognized() {
+async fn explicit_open_migrates_v066_manifest_json_artifact() {
     let tmp = TempDir::new().unwrap();
+    let backend = isolated_backend(&tmp.path().join("home")).await;
     let dir = tmp.path().join("legacy");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join(DEFAULT_UPPER_FILE), b"old upper bytes").unwrap();
@@ -437,13 +521,16 @@ async fn legacy_manifest_json_artifacts_are_not_recognized() {
     )
     .unwrap();
 
-    let err = Snapshot::open(dir.to_string_lossy().as_ref())
-        .await
-        .unwrap_err();
-    assert!(err.to_string().contains(DESCRIPTOR_FILENAME));
-
-    let snaps = Snapshot::list_dir(tmp.path()).await.unwrap();
-    assert!(snaps.is_empty());
+    let snap = microsandbox::with_backend(backend, async {
+        Snapshot::open(dir.to_string_lossy().as_ref())
+            .await
+            .unwrap()
+    })
+    .await;
+    assert_eq!(snap.state().as_file().unwrap().upper.size_bytes, 15);
+    assert!(dir.join(DESCRIPTOR_FILENAME).is_file());
+    assert!(dir.join(".manifest.json.legacy").is_file());
+    assert!(!dir.join("manifest.json").exists());
 }
 
 #[tokio::test]
@@ -692,11 +779,13 @@ async fn sparse_save_stores_only_data_extents_in_plain_tar() {
     // logical content.
     let mut ar = tar::Archive::new(std::fs::File::open(&archive).unwrap());
     let mut upper_entry_type = None;
+    let mut upper_archive_path = None;
     for entry in ar.entries().unwrap() {
         let entry = entry.unwrap();
         let path = entry.path().unwrap().to_path_buf();
         if path.file_name().and_then(|n| n.to_str()) == Some(DEFAULT_UPPER_FILE) {
             upper_entry_type = Some(entry.header().entry_type());
+            upper_archive_path = Some(path);
         }
     }
     assert_eq!(upper_entry_type, Some(EntryType::GNUSparse));
@@ -705,11 +794,7 @@ async fn sparse_save_stores_only_data_extents_in_plain_tar() {
     std::fs::create_dir_all(&unpack_dir).unwrap();
     let mut ar = tar::Archive::new(std::fs::File::open(&archive).unwrap());
     ar.unpack(&unpack_dir).unwrap();
-    let unpacked_upper = std::fs::read_dir(&unpack_dir)
-        .unwrap()
-        .map(|e| e.unwrap().path().join(DEFAULT_UPPER_FILE))
-        .find(|p| p.exists())
-        .expect("unpacked artifact dir with upper file");
+    let unpacked_upper = unpack_dir.join(upper_archive_path.unwrap());
     assert_eq!(std::fs::read(&unpacked_upper).unwrap(), logical);
 }
 
@@ -970,13 +1055,13 @@ async fn save_with_image_includes_only_pinned_cache_artifacts() {
     assert!(
         names
             .iter()
-            .any(|name| name == &format!("cache/manifests/{metadata_name}")),
+            .any(|name| name == &format!("images/manifests/{metadata_name}")),
         "archive did not include image metadata: {names:?}"
     );
     assert!(
-        names.iter().any(|name| name.starts_with("cache/layers/"))
-            && names.iter().any(|name| name.starts_with("cache/fsmeta/"))
-            && names.iter().any(|name| name.starts_with("cache/vmdk/")),
+        names.iter().any(|name| name.starts_with("images/layers/"))
+            && names.iter().any(|name| name.starts_with("images/fsmeta/"))
+            && names.iter().any(|name| name.starts_with("images/vmdk/")),
         "archive did not include required image artifacts: {names:?}"
     );
     assert!(
@@ -1034,7 +1119,9 @@ async fn load_does_not_follow_preexisting_symlink_parent() {
 
     let msg = err.to_string();
     assert!(
-        msg.contains("no snapshot manifest") || msg.contains("manifest"),
+        msg.contains("unsupported path")
+            || msg.contains("no snapshot manifest")
+            || msg.contains("manifest"),
         "unexpected error: {msg}"
     );
     assert!(
@@ -1051,20 +1138,17 @@ async fn open_rejects_manifest_upper_file_that_escapes_artifact() {
     std::fs::write(tmp.path().join("outside.ext4"), b"data").unwrap();
 
     let mut manifest = sample_manifest(4);
-    manifest.upper.file = "../outside.ext4".into();
-    std::fs::write(
-        dir.join(DESCRIPTOR_FILENAME),
-        manifest.to_canonical_bytes().unwrap(),
-    )
-    .unwrap();
+    let file = manifest.state.as_file().unwrap().clone();
+    manifest.state = SnapshotState::File(FileSnapshotState {
+        upper: UpperLayer {
+            file: "../outside.ext4".into(),
+            ..file.upper
+        },
+        ..file
+    });
+    let bytes = manifest.to_canonical_bytes().unwrap_err().to_string();
 
-    let err = Snapshot::open(dir.to_string_lossy().as_ref())
-        .await
-        .unwrap_err();
-    assert!(
-        err.to_string().contains("upper.file"),
-        "unexpected error: {err}"
-    );
+    assert!(bytes.contains("upper.file"), "unexpected error: {bytes}");
 }
 
 #[tokio::test]
@@ -1088,7 +1172,7 @@ async fn load_verifies_every_snapshot_manifest_before_indexing() {
         .expect_err("expected tampered sibling to fail import");
 
     assert!(
-        err.to_string().contains("digest mismatch"),
+        err.to_string().contains("unsupported path"),
         "unexpected error: {err}"
     );
     assert!(
@@ -1117,24 +1201,79 @@ async fn load_detects_zstd_by_magic_bytes() {
 }
 
 #[tokio::test]
+async fn load_translates_v066_plain_and_zstd_archives() {
+    use tokio::io::AsyncWriteExt;
+
+    let tmp = TempDir::new().unwrap();
+    let plain = tmp.path().join("legacy.tar");
+    write_v066_archive(&plain, "sha256-0123456789abcdef", b"legacy upper");
+    let compressed = tmp.path().join("legacy.tar.zst");
+    let mut encoder = async_compression::tokio::write::ZstdEncoder::new(
+        tokio::fs::File::create(&compressed).await.unwrap(),
+    );
+    encoder
+        .write_all(&std::fs::read(&plain).unwrap())
+        .await
+        .unwrap();
+    encoder.shutdown().await.unwrap();
+
+    for (index, archive) in [plain, compressed].iter().enumerate() {
+        let home = tmp.path().join(format!("home-{index}"));
+        let backend = isolated_backend(&home).await;
+        let dest = tmp.path().join(format!("imported-{index}"));
+        let handle = microsandbox::with_backend(backend, async {
+            Snapshot::load(archive, Some(&dest)).await.unwrap()
+        })
+        .await;
+        let manifest =
+            Manifest::from_bytes(&std::fs::read(handle.path().join(DESCRIPTOR_FILENAME)).unwrap())
+                .unwrap();
+        assert_eq!(manifest.state.as_file().unwrap().upper.size_bytes, 12);
+        assert!(handle.path().join(DESCRIPTOR_FILENAME).is_file());
+        assert!(handle.path().join(".manifest.json.legacy").is_file());
+    }
+}
+
+#[tokio::test]
 async fn load_selects_child_head_when_parents_are_present() {
     let tmp = TempDir::new().unwrap();
-    let (parent_dir, parent_digest) = make_artifact(tmp.path(), "parent", b"parent");
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+    let snapshots_dir = home.join("snapshots");
+    let (parent_dir, parent_digest) = make_artifact(&snapshots_dir, "parent", b"parent");
     let (child_dir, child_digest) =
-        make_artifact_with_parent(tmp.path(), "child", b"child", Some(parent_digest));
+        make_artifact_with_parent(&snapshots_dir, "child", b"child", Some(parent_digest));
     let archive = tmp.path().join("chain.tar");
-    write_archive_from_artifacts(
-        &archive,
-        &[
-            (child_dir.as_path(), "child"),
-            (parent_dir.as_path(), "parent"),
-        ],
-    );
-
     let dest = tmp.path().join("imported-chain");
-    let handle = Snapshot::load(&archive, Some(&dest)).await.unwrap();
+    let handle = microsandbox::with_backend(
+        backend,
+        Box::pin(async {
+            Snapshot::open(parent_dir.to_string_lossy().as_ref())
+                .await
+                .unwrap();
+            Snapshot::open(child_dir.to_string_lossy().as_ref())
+                .await
+                .unwrap();
+            Snapshot::save(
+                child_dir.to_string_lossy().as_ref(),
+                &archive,
+                microsandbox::snapshot::SaveOpts {
+                    with_parents: true,
+                    plain_tar: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            Snapshot::load(&archive, Some(&dest)).await.unwrap()
+        }),
+    )
+    .await;
     assert_eq!(handle.digest(), child_digest);
-    assert_eq!(handle.path(), dest.join("child"));
+    assert_eq!(
+        handle.path(),
+        dest.join(child_digest.strip_prefix("sha256:").unwrap())
+    );
 }
 
 #[tokio::test]

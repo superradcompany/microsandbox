@@ -50,8 +50,8 @@ func TestSandboxHandleSnapshotAndWithFromSnapshotFork(t *testing.T) {
 	if artifact.ImageRef() == "" {
 		t.Fatal("Snapshot artifact has empty image ref")
 	}
-	if artifact.SizeBytes() == 0 {
-		t.Fatal("Snapshot artifact has zero size")
+	if sizeBytes := artifact.SizeBytes(); sizeBytes == nil || *sizeBytes == 0 {
+		t.Fatalf("Snapshot artifact has invalid size: %v", sizeBytes)
 	}
 
 	report, err := artifact.Verify(ctx)
@@ -194,8 +194,13 @@ func TestSnapshotCreateAndSnapshotDirectoryOps(t *testing.T) {
 		t.Fatalf("Snapshot.Save: %v", err)
 	}
 
+	// VM startup and snapshot export can consume most of the shared test context on busy
+	// self-hosted runners. Keep import independently bounded so it receives the same full
+	// operation budget instead of inheriting only the time left by the preceding phases.
+	loadCtx, cancelLoad := context.WithTimeout(context.Background(), integrationTestTimeout)
+	t.Cleanup(cancelLoad)
 	importDir := filepath.Join(t.TempDir(), "imported")
-	imported, err := microsandbox.Snapshot.Load(ctx, archivePath, importDir)
+	imported, err := microsandbox.Snapshot.Load(loadCtx, archivePath, importDir)
 	if err != nil {
 		t.Fatalf("Snapshot.Load: %v", err)
 	}

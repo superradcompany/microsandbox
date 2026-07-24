@@ -464,6 +464,7 @@ mod error_kind {
     pub const SNAPSHOT_SANDBOX_RUNNING: &str = "snapshot_sandbox_running";
     pub const SNAPSHOT_IMAGE_MISSING: &str = "snapshot_image_missing";
     pub const SNAPSHOT_INTEGRITY: &str = "snapshot_integrity";
+    pub const SNAPSHOT_MIGRATION: &str = "snapshot_migration";
     pub const PATCH_FAILED: &str = "patch_failed";
     pub const METRICS_DISABLED: &str = "metrics_disabled";
     pub const METRICS_UNAVAILABLE: &str = "metrics_unavailable";
@@ -525,6 +526,7 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::SnapshotSandboxRunning(_) => error_kind::SNAPSHOT_SANDBOX_RUNNING,
             MicrosandboxError::SnapshotImageMissing(_) => error_kind::SNAPSHOT_IMAGE_MISSING,
             MicrosandboxError::SnapshotIntegrity(_) => error_kind::SNAPSHOT_INTEGRITY,
+            MicrosandboxError::SnapshotMigration { .. } => error_kind::SNAPSHOT_MIGRATION,
             MicrosandboxError::PatchFailed(_) => error_kind::PATCH_FAILED,
             MicrosandboxError::MetricsDisabled(_) => error_kind::METRICS_DISABLED,
             MicrosandboxError::MetricsUnavailable(_) => error_kind::METRICS_UNAVAILABLE,
@@ -5207,6 +5209,37 @@ fn snapshot_json(s: &Snapshot) -> serde_json::Value {
         .iter()
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
+    let (
+        state_kind,
+        format,
+        fstype,
+        upper_file,
+        upper_integrity_algorithm,
+        upper_integrity_digest,
+        checkpoint_id,
+        checkpoint_manifest_digest,
+    ) = match &manifest.state {
+        microsandbox::snapshot::SnapshotState::File(state) => (
+            "file",
+            Some(snapshot_format_str(state.format)),
+            Some(state.fstype.as_str()),
+            Some(state.upper.file.as_str()),
+            Some(state.upper.integrity.algorithm.as_str()),
+            Some(state.upper.integrity.digest.as_str()),
+            None,
+            None,
+        ),
+        microsandbox::snapshot::SnapshotState::Checkpoint(state) => (
+            "checkpoint",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(state.checkpoint_id.as_str()),
+            Some(state.manifest.as_str()),
+        ),
+    };
     serde_json::json!({
         "path": s.path().display().to_string(),
         "digest": s.digest(),
@@ -5214,8 +5247,14 @@ fn snapshot_json(s: &Snapshot) -> serde_json::Value {
         "image_ref": manifest.image.reference,
         "image_manifest_digest": manifest.image.manifest_digest,
         "scope": snapshot_scope_str(manifest.scope),
-        "format": snapshot_format_str(manifest.format),
-        "fstype": manifest.fstype,
+        "state_kind": state_kind,
+        "format": format,
+        "fstype": fstype,
+        "upper_file": upper_file,
+        "upper_integrity_algorithm": upper_integrity_algorithm,
+        "upper_integrity_digest": upper_integrity_digest,
+        "checkpoint_id": checkpoint_id,
+        "checkpoint_manifest_digest": checkpoint_manifest_digest,
         "parent": manifest.parent,
         "created_at": manifest.created_at,
         "labels": labels,
@@ -5230,8 +5269,15 @@ fn snapshot_handle_json(h: &microsandbox::SnapshotHandle) -> serde_json::Value {
         "parent_digest": h.parent_digest(),
         "image_ref": h.image_ref(),
         "scope": snapshot_scope_str(h.scope()),
-        "format": snapshot_format_str(h.format()),
+        "state_kind": h.state_kind(),
+        "format": h.format().map(snapshot_format_str),
+        "fstype": h.fstype(),
+        "checkpoint_manifest_digest": h.checkpoint_manifest_digest(),
         "size_bytes": h.size_bytes(),
+        "locality": h.locality(),
+        "availability": h.availability(),
+        "migration_state": h.migration_state(),
+        "migration_error_code": h.migration_error_code(),
         "created_at_unix": h.created_at().and_utc().timestamp(),
         "path": h.path().display().to_string(),
     })
@@ -5239,7 +5285,6 @@ fn snapshot_handle_json(h: &microsandbox::SnapshotHandle) -> serde_json::Value {
 
 fn verify_report_json(report: microsandbox::snapshot::SnapshotVerifyReport) -> serde_json::Value {
     let upper = match report.upper {
-        UpperVerifyStatus::NotRecorded => serde_json::json!({"kind":"not_recorded"}),
         UpperVerifyStatus::Verified { algorithm, digest } => {
             serde_json::json!({"kind":"verified","algorithm":algorithm,"digest":digest})
         }

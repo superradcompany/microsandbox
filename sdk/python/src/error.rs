@@ -39,6 +39,7 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
                 ("UnsupportedOperationError", err.to_string())
             }
             Unsupported { .. } => ("UnsupportedError", err.to_string()),
+            SnapshotMigration { .. } => ("SnapshotMigrationError", err.to_string()),
             Terminal(_) => ("MicrosandboxError", err.to_string()),
             _ => ("MicrosandboxError", err.to_string()),
         };

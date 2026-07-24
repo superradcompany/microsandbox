@@ -71,9 +71,41 @@ impl MigrationTrait for Migration {
         Ok(())
     }
 
-    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
-        // The object shape is the canonical persisted representation. Reverting
-        // would reintroduce config JSON that current code cannot read.
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let conn = manager.get_connection();
+        let rows = conn
+            .query_all(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT id, config, active_config FROM sandbox".to_owned(),
+            ))
+            .await?;
+
+        for row in rows {
+            let id = row.try_get_by_index::<i32>(0)?;
+            let config = row.try_get_by_index::<String>(1)?;
+            let active_config = row.try_get_by_index::<Option<String>>(2)?;
+
+            if let Some(updated) = downgrade_config(&config)? {
+                conn.execute(Statement::from_sql_and_values(
+                    DatabaseBackend::Sqlite,
+                    "UPDATE sandbox SET config = ? WHERE id = ?",
+                    [updated.into(), id.into()],
+                ))
+                .await?;
+            }
+
+            if let Some(active) = active_config
+                && let Some(updated) = downgrade_config(&active)?
+            {
+                conn.execute(Statement::from_sql_and_values(
+                    DatabaseBackend::Sqlite,
+                    "UPDATE sandbox SET active_config = ? WHERE id = ?",
+                    [updated.into(), id.into()],
+                ))
+                .await?;
+            }
+        }
+
         Ok(())
     }
 }
@@ -121,6 +153,53 @@ fn migrate_config(config: &str) -> Result<Option<String>, DbErr> {
         .map_err(|err| DbErr::Custom(format!("serialize sandbox config JSON: {err}")))
 }
 
+/// Project the bind object back to the externally-tagged v0.6.6 string
+/// variant. `follow_root_symlinks` is intentionally discarded because the
+/// target release has no field capable of representing it.
+fn downgrade_config(config: &str) -> Result<Option<String>, DbErr> {
+    let mut value = serde_json::from_str::<serde_json::Value>(config)
+        .map_err(|err| DbErr::Custom(format!("parse sandbox config JSON: {err}")))?;
+    let Some(image) = value
+        .get_mut("image")
+        .and_then(|image| image.as_object_mut())
+    else {
+        return Ok(None);
+    };
+    if image.contains_key("bind") && image.contains_key("Bind") {
+        return Err(DbErr::Custom(
+            "bind_rootfs_downgrade_unrepresentable: config contains both bind and Bind".into(),
+        ));
+    }
+
+    let key = if image.contains_key("bind") {
+        "bind"
+    } else if image.contains_key("Bind") {
+        "Bind"
+    } else {
+        return Ok(None);
+    };
+    let Some(bind) = image.remove(key) else {
+        return Ok(None);
+    };
+    if bind.is_string() {
+        image.insert("Bind".into(), bind);
+    } else {
+        let path = bind
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                DbErr::Custom(
+                    "bind_rootfs_downgrade_unrepresentable: bind.path is not a string".into(),
+                )
+            })?;
+        image.insert("Bind".into(), serde_json::Value::String(path.to_owned()));
+    }
+
+    serde_json::to_string(&value)
+        .map(Some)
+        .map_err(|err| DbErr::Custom(format!("serialize sandbox config JSON: {err}")))
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -160,5 +239,16 @@ mod tests {
     fn migrate_config_ignores_non_bind_rootfs() {
         let config = r#"{"name":"oci","image":{"oci":{"reference":"ubuntu"}}}"#;
         assert!(migrate_config(config).unwrap().is_none());
+    }
+
+    #[test]
+    fn downgrade_config_projects_bind_object_to_v066_string() {
+        let config =
+            r#"{"name":"new","image":{"bind":{"path":"/srv/rootfs","follow_root_symlinks":true}}}"#;
+        let updated = downgrade_config(config).unwrap().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&updated).unwrap();
+
+        assert_eq!(value["image"]["Bind"], "/srv/rootfs");
+        assert!(value["image"].get("bind").is_none());
     }
 }
