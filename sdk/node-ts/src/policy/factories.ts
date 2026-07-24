@@ -64,6 +64,11 @@ const allowDnsRule = (): Types.Rule => ({
   action: "allow",
 });
 
+const denyDnsRule = (): Types.Rule => ({
+  ...allowDnsRule(),
+  action: "deny",
+});
+
 export const Rule = {
   allowEgress: allowEgressRule,
   denyEgress: denyEgressRule,
@@ -72,6 +77,7 @@ export const Rule = {
   allowAny: allowAnyRule,
   denyAny: denyAnyRule,
   allowDns: allowDnsRule,
+  denyDns: denyDnsRule,
 };
 
 export const Destination = {
@@ -108,24 +114,30 @@ export const NetworkPolicy = {
     rules: [],
   }),
 
-  /** Egress allowed only to public destinations; ingress allowed by default. */
-  publicOnly: (): Types.NetworkPolicy => ({
-    defaultEgress: "deny",
-    defaultIngress: "allow",
-    rules: [
-      allowDnsRule(),
-      allowEgressRule({ kind: "group", group: "public" }),
-    ],
-  }),
-
-  /** Egress allowed to public + private (LAN); ingress allowed by default. */
-  nonLocal: (): Types.NetworkPolicy => ({
-    defaultEgress: "deny",
-    defaultIngress: "allow",
-    rules: [
-      allowDnsRule(),
-      allowEgressRule({ kind: "group", group: "public" }),
-      allowEgressRule({ kind: "group", group: "private" }),
-    ],
-  }),
+  /** Build a canonical deny-by-default policy from composable profiles. */
+  fromProfiles: (
+    profiles: Iterable<Types.NetworkProfile>,
+  ): Types.NetworkPolicy => {
+    const requested = new Set(profiles);
+    const canonical: readonly Types.NetworkProfile[] = [
+      "public",
+      "private",
+      "host",
+    ];
+    for (const profile of requested) {
+      if (!canonical.includes(profile)) {
+        throw new RangeError(`unknown network profile: ${String(profile)}`);
+      }
+    }
+    return {
+      defaultEgress: "deny",
+      defaultIngress: "allow",
+      rules: [
+        ...(requested.size > 0 ? [allowDnsRule()] : []),
+        ...canonical
+          .filter((profile) => requested.has(profile))
+          .map((group) => allowEgressRule({ kind: "group", group })),
+      ],
+    };
+  },
 };

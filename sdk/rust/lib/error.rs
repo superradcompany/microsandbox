@@ -171,6 +171,19 @@ pub enum MicrosandboxError {
     #[error("snapshot integrity check failed: {0}")]
     SnapshotIntegrity(String),
 
+    /// An adjacent-release snapshot artifact migration is blocked.
+    #[error("snapshot artifact migration failed for {artifact} during {phase}: {code}: {detail}")]
+    SnapshotMigration {
+        /// Stable machine-readable failure code.
+        code: String,
+        /// Last safe durable phase.
+        phase: String,
+        /// Artifact name or explicitly supplied path.
+        artifact: String,
+        /// Bounded repair-oriented detail.
+        detail: String,
+    },
+
     /// Metrics sampling is disabled for this sandbox.
     #[error("metrics disabled for sandbox: {0}")]
     MetricsDisabled(String),

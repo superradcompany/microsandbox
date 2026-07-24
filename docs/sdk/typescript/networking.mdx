@@ -31,7 +31,7 @@ The default policy denies egress except for an implicit allow-public rule (plus 
 
 ## NetworkPolicy
 
-A [`NetworkPolicy`](#networkpolicy-2) is an ordered rule list plus two per-direction defaults, evaluated first-match-wins. The presets below construct common shapes directly; for anything custom, start from [`builder()`](#networkpolicybuilder) or write a literal and pass it to [`NetworkBuilder.policy()`](#policy).
+A [`NetworkPolicy`](#networkpolicy-2) is an ordered rule list plus two per-direction defaults, evaluated first-match-wins. Compose common access shapes with [`fromProfiles()`](#networkpolicyfromprofiles); for anything custom, start from [`builder()`](#networkpolicybuilder) or write a literal and pass it to [`NetworkBuilder.policy()`](#policy).
 
 ```typescript
 import { NetworkPolicy, Rule, Destination } from "microsandbox";
@@ -126,21 +126,21 @@ allowAll(): NetworkPolicy
 
 Unrestricted network access: allow everything in both directions, no rules. Includes private addresses and the host machine.
 
-#### <span className="msb-recv">NetworkPolicy.</span><span className="msb-hn">publicOnly()</span>
+#### <span className="msb-recv">NetworkPolicy.</span><span className="msb-hn">fromProfiles()</span>
 
 ```typescript
-publicOnly(): NetworkPolicy
+fromProfiles(profiles: Iterable<NetworkProfile>): NetworkPolicy
 ```
 
-Egress allowed only to public destinations (plus DNS to the gateway); ingress allowed by default. Blocks private address ranges and cloud metadata endpoints. This is the **default** policy.
+Build a deny-by-default policy from `"public"`, `"private"`, and `"host"` profiles. Duplicate profiles are ignored, rules use canonical order, and every non-empty profile set receives one narrow gateway DNS rule. An empty set permits no egress and adds no DNS; ingress defaults to allow.
 
-#### <span className="msb-recv">NetworkPolicy.</span><span className="msb-hn">nonLocal()</span>
+<Accordion title="Example">
 
 ```typescript
-nonLocal(): NetworkPolicy
+const policy = NetworkPolicy.fromProfiles(["public", "private"]);
 ```
 
-Egress allowed to public + private (LAN) destinations (plus DNS); ingress allowed by default. Local groups (loopback, link-local, host, metadata) stay denied.
+</Accordion>
 
 ## Rule, Destination, PortRange
 
@@ -282,6 +282,14 @@ Allow plain DNS (UDP/53 and TCP/53) to the sandbox gateway, i.e. the in-process 
 
 DoT (TCP/853) is intentionally not included; add an explicit `Destination.group("host")` tcp/853 allow rule if needed (and pair with TLS interception).
 
+#### <span className="msb-recv">Rule.</span><span className="msb-hn">denyDns()</span>
+
+```typescript
+denyDns(): Rule
+```
+
+Deny plain gateway DNS (UDP/53 and TCP/53). Place this rule before profile-generated rules to override their automatic DNS access.
+
 #### <span className="msb-recv">Destination.</span><span className="msb-hn">any()</span>
 
 ```typescript
@@ -413,7 +421,7 @@ import { NetworkPolicy, Sandbox } from "microsandbox";
 
 const sb = await Sandbox.builder("api")
   .image("python")
-  .network((n) => n.policy(NetworkPolicy.publicOnly()))
+  .network((n) => n.policy(NetworkPolicy.fromProfiles(["public"])))
   .create();
 ```
 
@@ -1818,6 +1826,14 @@ interface NetworkPolicy {
   readonly defaultIngress: Action;
   readonly rules: readonly Rule[];
 }
+```
+
+### NetworkProfile
+
+Composable high-level access category accepted by [`NetworkPolicy.fromProfiles()`](#networkpolicyfromprofiles).
+
+```typescript
+type NetworkProfile = "public" | "private" | "host";
 ```
 
 ### Rule

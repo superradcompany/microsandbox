@@ -119,8 +119,8 @@ pub struct SandboxHandleCloudState {
     pub started_at: Option<DateTime<Utc>>,
     /// Last stop timestamp, when known.
     pub stopped_at: Option<DateTime<Utc>>,
-    /// Last failure reason, when any.
-    pub last_error: Option<String>,
+    /// Human-readable message for the most recent failure, when any.
+    pub last_failure_message: Option<String>,
 }
 
 /// Paginated sandbox list result returned by [`SandboxBackend::list`].
@@ -1163,7 +1163,7 @@ pub(super) fn cloud_create_request_from_config(
     #[cfg(feature = "net")]
     {
         // Only flag user-set opt-in fields. The default `NetworkConfig`
-        // ships with a baseline policy (`public_only`) and built-in DNS
+        // ships with a baseline public profile and built-in DNS
         // settings, so comparing those would always trigger; instead we
         // catch the explicit-add fields (ports, secrets, custom DNS
         // resolvers, host-CA trust).
@@ -1429,12 +1429,13 @@ mod tests {
             name: "agent-1".into(),
             slug: "brave-otter".into(),
             status: CloudSandboxStatus::Running,
+            status_reason: None,
             spec: CloudSandboxSpec::from(spec),
             ephemeral: true,
             created_at: chrono::Utc::now(),
             started_at: None,
             stopped_at: None,
-            last_error: None,
+            last_failure_message: None,
         };
 
         let config = sandbox_config_from_cloud(cloud.spec).unwrap();

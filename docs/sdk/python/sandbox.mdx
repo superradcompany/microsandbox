@@ -1162,7 +1162,7 @@ The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_wit
 | volumes | `dict[str, `[`MountConfig`](/sdk/python/volumes)`]` | `{}` | Volume mounts. See [Volumes](/sdk/python/volumes) |
 | patches | `list[`[`PatchConfig`](#patchconfig)`]` | `[]` | Rootfs modifications applied before boot |
 | ports | `dict[int, int] \| Sequence[`[`PortBinding`](/sdk/python/networking#portbinding)`]` | `{}` | Port mappings. Dict form is TCP and binds to `127.0.0.1`; use `PortBinding` for explicit bind addresses or UDP |
-| network | [`Network`](/sdk/python/networking#network) | `public_only` | Network policy and configuration |
+| network | [`Network`](/sdk/python/networking#network) | public profile | Network policy and configuration |
 | secrets | `list[`[`SecretEntry`](/sdk/python/secrets#secretentry)`]` | `[]` | Secret injection |
 | detached | `bool` | `False` | If `True`, spawn the sandbox in detached mode; call [`detach()`](#sb-detach) before dropping the returned handle when it should keep running |
 

@@ -55,16 +55,13 @@ const (
 	PolicyProtocolICMPv6 PolicyProtocol = "icmpv6"
 )
 
-// NetworkPolicyPreset is the preset name accepted by NetworkConfig.Policy.
-// Prefer the NetworkPolicy factory (NetworkPolicy.None / PublicOnly / AllowAll
-// / NonLocal) which returns a preconfigured *NetworkConfig.
-type NetworkPolicyPreset string
+// NetworkProfile is a composable high-level network access profile.
+type NetworkProfile string
 
 const (
-	NetworkPolicyPresetNone       NetworkPolicyPreset = "none"
-	NetworkPolicyPresetPublicOnly NetworkPolicyPreset = "public-only"
-	NetworkPolicyPresetAllowAll   NetworkPolicyPreset = "allow-all"
-	NetworkPolicyPresetNonLocal   NetworkPolicyPreset = "non-local"
+	NetworkProfilePublic  NetworkProfile = "public"
+	NetworkProfilePrivate NetworkProfile = "private"
+	NetworkProfileHost    NetworkProfile = "host"
 )
 
 // PatchKind is the discriminator for PatchConfig.Kind. Prefer the Patch

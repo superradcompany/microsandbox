@@ -5,7 +5,7 @@
 //
 // Run with:
 //
-//	MICROSANDBOX_FFI_PATH=/path/to/libmicrosandbox_go_ffi.{so,dylib} \
+//	MICROSANDBOX_FFI_PATH=/path/to/libmicrosandbox_go_ffi.{so,dylib,dll} \
 //	    go test -tags "smoke microsandbox_ffi_path" -count=1 ./...
 //
 // The microsandbox_ffi_path build tag swaps the embedded FFI for a

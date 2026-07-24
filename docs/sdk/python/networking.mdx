@@ -14,6 +14,7 @@ from microsandbox import (
     Destination,
     Network,
     NetworkPolicy,
+    NetworkProfile,
     PortBinding,
     Protocol,
     Rule,
@@ -46,7 +47,7 @@ The default policy denies egress except for an implicit allow-public rule, and a
 
 ## Network factory
 
-[`Network`](#network) is a frozen dataclass. The presets below return a `Network` for the common policy shapes; construct one directly for custom policies, ports, DNS, or TLS.
+[`Network`](#network) is a frozen dataclass. The profile and terminal-policy helpers below return a `Network` for common shapes; construct one directly for custom policies, ports, DNS, or TLS.
 
 #### <span className="msb-recv">Network.</span><span className="msb-hn">none()</span>
 
@@ -63,32 +64,38 @@ sb = await Sandbox.create("offline", image="python", network=Network.none())
 
 </Accordion>
 
-Deny all traffic. No network interface is created; the guest is fully offline. `exec` and `fs` still work since they use the host-guest channel, not the network.
+Deny all traffic in both directions. The network interface remains present; `exec` and `fs` still work since they use the host-guest channel, not the network.
 
 <p className="msb-label">Returns</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><a className="msb-type" href="#network">Network</a></div>
-    <div className="msb-param-desc">Fully airgapped network configuration.</div>
+    <div className="msb-param-desc">Network configuration with deny defaults in both directions.</div>
   </div>
 </div>
 
-#### <span className="msb-recv">Network.</span><span className="msb-hn">public_only()</span>
+#### <span className="msb-recv">Network.</span><span className="msb-hn">from_profiles()</span>
 
 ```python
 @classmethod
-def public_only() -> Network
+def from_profiles(*profiles: NetworkProfile | str) -> Network
 ```
 
-Block private address ranges and cloud metadata endpoints. Allow everything else. This is the **default** policy.
+Build a deny-by-default network configuration from `PUBLIC`, `PRIVATE`, and `HOST` profiles. Duplicate profiles are ignored, generated rules use canonical order, and gateway DNS is added automatically for every non-empty profile set.
+
+```python
+from microsandbox import Network, NetworkProfile
+
+network = Network.from_profiles(NetworkProfile.PUBLIC, NetworkProfile.PRIVATE)
+```
 
 <p className="msb-label">Returns</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><a className="msb-type" href="#network">Network</a></div>
-    <div className="msb-param-desc">Public-only network configuration.</div>
+    <div className="msb-param-desc">Network configuration containing the composed profiles.</div>
   </div>
 </div>
 
@@ -274,6 +281,15 @@ policy = NetworkPolicy(
 Allow plain DNS (UDP/53 and TCP/53) to the sandbox gateway, i.e. the in-process DNS forwarder. The standard one-liner for opening DNS under a deny-by-default policy. See [DNS as egress](/networking/dns#dns-as-egress) for the underlying semantics.
 
 Returns the pair `(udp_rule, tcp_rule)` since this SDK's [`Rule`](#rule) shape carries a single protocol; splat into `NetworkPolicy.rules`. DoT (TCP/853) is intentionally not included; add an explicit `Rule.allow(destination=Destination.group(DestGroup.HOST), protocol=Protocol.TCP, port=853)` if needed (and pair with TLS interception).
+
+#### <span className="msb-recv">Rule.</span><span className="msb-hn">deny_dns()</span>
+
+```python
+@classmethod
+def deny_dns() -> tuple[Rule, Rule]
+```
+
+Deny gateway UDP/53 and TCP/53. Place these rules before profile-generated rules to override their automatic DNS access.
 
 <p className="msb-label">Returns</p>
 
@@ -487,7 +503,7 @@ Publish a UDP port from the sandbox to the host.
 
 <p className="msb-backref">Used by <a href="/sdk/python/sandbox#sandbox-create">Sandbox.create(network=...)</a></p>
 
-Frozen dataclass for sandbox network configuration. Use a [class-method preset](#network-factory) for the common cases, or construct directly with custom options.
+Frozen dataclass for sandbox network configuration. Use the [profile and terminal-policy helpers](#network-factory) for common cases, or construct directly with custom options.
 
 ```python
 Network(
@@ -506,7 +522,7 @@ Network(
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| policy | `str \| `[`NetworkPolicy`](#networkpolicy)` \| None` | `None` | Preset name (`"none"`, `"public_only"`, `"allow_all"`) or a custom [`NetworkPolicy`](#networkpolicy) |
+| policy | [`NetworkPolicy`](#networkpolicy)` \| None` | `None` | Concrete network policy |
 | ports | `Mapping[int, int] \| Sequence[`[`PortBinding`](#portbinding)`]` | `{}` | Port mappings from host to guest. Mapping form binds TCP to `127.0.0.1`; [`PortBinding`](#portbinding) can set an explicit bind address or UDP |
 | deny_domains | `tuple[str, ...]` | `()` | Deny egress to these exact domains. Each entry adds a `deny Domain("...")` policy rule that fires at DNS resolution (NXDOMAIN), TLS first-flight (SNI), and TCP egress (cache fallback). Prepended onto the policy so it takes precedence over later allow rules |
 | deny_domain_suffixes | `tuple[str, ...]` | `()` | Deny egress to all subdomains of these suffixes. Adds `deny DomainSuffix("...")` rules; same enforcement layers as `deny_domains` |
@@ -519,15 +535,15 @@ Network(
 
 | Class method | Returns | Description |
 |--------------|---------|-------------|
-| [none()](#network-none) | [`Network`](#network) | Deny all traffic, no interface |
-| [public_only()](#network-public_only) | [`Network`](#network) | Public destinations only (default) |
+| [none()](#network-none) | [`Network`](#network) | Deny traffic in both directions |
+| [from_profiles()](#network-from_profiles) | [`Network`](#network) | Compose `PUBLIC`, `PRIVATE`, and `HOST` access with automatic DNS |
 | [allow_all()](#network-allow_all) | [`Network`](#network) | Unrestricted access |
 
 ### NetworkPolicy
 
 <p className="msb-backref">Used by <a href="#network">Network(policy=...)</a></p>
 
-Frozen dataclass: an ordered list of [`Rule`](#rule) values plus two per-direction defaults, evaluated first-match-wins. The defaults are asymmetric to preserve today's behavior: egress falls through to deny (public_only reachability when paired with the implicit allow-public rule); ingress falls through to allow (unfiltered published-port behavior).
+Frozen dataclass: an ordered list of [`Rule`](#rule) values plus two per-direction defaults, evaluated first-match-wins. The defaults are asymmetric: egress falls through to deny; ingress falls through to allow. Use `NetworkPolicy.from_profiles(...)` to add canonical profile and DNS rules.
 
 ```python
 NetworkPolicy(
@@ -542,6 +558,16 @@ NetworkPolicy(
 | default_egress | [`Action`](#action) | `DENY` | Action when no egress-applicable rule matches |
 | default_ingress | [`Action`](#action) | `ALLOW` | Action when no ingress-applicable rule matches |
 | rules | `tuple[`[`Rule`](#rule)`, ...]` | `()` | Rules evaluated first-match-wins per direction |
+
+Class methods `none()` and `allow_all()` construct terminal whole policies. `from_profiles(profiles)` composes [`NetworkProfile`](#networkprofile) values with canonical ordering and automatic gateway DNS.
+
+### NetworkProfile
+
+| Member | Value | Access |
+|--------|-------|--------|
+| `NetworkProfile.PUBLIC` | `"public"` | Public internet addresses |
+| `NetworkProfile.PRIVATE` | `"private"` | Private/LAN ranges |
+| `NetworkProfile.HOST` | `"host"` | Sandbox host gateway addresses |
 
 ### Rule
 
@@ -574,6 +600,7 @@ Ingress rules carrying ICMP protocols are rejected at sandbox creation; the host
 | [allow(...)](#rule-allow) | [`Rule`](#rule) | Permit matching traffic |
 | [deny(...)](#rule-deny) | [`Rule`](#rule) | Block matching traffic |
 | [allow_dns()](#rule-allow_dns) | `tuple[`[`Rule`](#rule)`, `[`Rule`](#rule)`]` | Open plain DNS to the gateway |
+| [deny_dns()](#rule-deny_dns) | `tuple[`[`Rule`](#rule)`, `[`Rule`](#rule)`]` | Block plain DNS to the gateway |
 
 ### Destination
 

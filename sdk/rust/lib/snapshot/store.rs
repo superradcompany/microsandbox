@@ -3,7 +3,8 @@
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
-use microsandbox_image::snapshot::{DESCRIPTOR_FILENAME, Manifest};
+use microsandbox_image::snapshot::migration::V066_DESCRIPTOR_FILENAME;
+use microsandbox_image::snapshot::{DESCRIPTOR_FILENAME, Manifest, SnapshotState};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter,
     QueryOrder,
@@ -47,6 +48,9 @@ pub(super) async fn open_snapshot(
     }
 
     let manifest_path = dir.join(DESCRIPTOR_FILENAME);
+    if !manifest_path.exists() && dir.join(V066_DESCRIPTOR_FILENAME).exists() {
+        super::migration::reconcile_explicit(local.db().await?, &dir).await?;
+    }
     let bytes = tokio::fs::read(&manifest_path).await.map_err(|e| {
         MicrosandboxError::SnapshotNotFound(format!("{}: {e}", manifest_path.display()))
     })?;
@@ -56,30 +60,31 @@ pub(super) async fn open_snapshot(
         .digest()
         .map_err(|e| MicrosandboxError::SnapshotIntegrity(format!("{e}")))?;
 
-    // Verify the upper file is present and matches the recorded size.
-    // Content verification is an explicit operation because raw upper
-    // files may be multi-GiB, dense files.
-    let upper_path = dir.join(&manifest.upper.file);
-    let upper_meta = tokio::fs::symlink_metadata(&upper_path)
-        .await
-        .map_err(|e| {
-            MicrosandboxError::SnapshotIntegrity(format!(
-                "missing upper file: {}: {e}",
+    if let SnapshotState::File(file_state) = &manifest.state {
+        // Metadata open proves the confined payload exists and has the bound
+        // apparent size. Explicit verify performs the potentially large hash.
+        let upper_path = dir.join(&file_state.upper.file);
+        let upper_meta = tokio::fs::symlink_metadata(&upper_path)
+            .await
+            .map_err(|e| {
+                MicrosandboxError::SnapshotIntegrity(format!(
+                    "missing upper file: {}: {e}",
+                    upper_path.display()
+                ))
+            })?;
+        if !upper_meta.file_type().is_file() {
+            return Err(MicrosandboxError::SnapshotIntegrity(format!(
+                "upper is not a regular file: {}",
                 upper_path.display()
-            ))
-        })?;
-    if !upper_meta.file_type().is_file() {
-        return Err(MicrosandboxError::SnapshotIntegrity(format!(
-            "upper is not a regular file: {}",
-            upper_path.display()
-        )));
-    }
-    let actual_size = upper_meta.len();
-    if actual_size != manifest.upper.size_bytes {
-        return Err(MicrosandboxError::SnapshotIntegrity(format!(
-            "upper size mismatch: manifest says {}, file is {}",
-            manifest.upper.size_bytes, actual_size
-        )));
+            )));
+        }
+        let actual_size = upper_meta.len();
+        if actual_size != file_state.upper.size_bytes {
+            return Err(MicrosandboxError::SnapshotIntegrity(format!(
+                "upper size mismatch: descriptor says {}, file is {}",
+                file_state.upper.size_bytes, actual_size
+            )));
+        }
     }
 
     let snap = Snapshot::from_parts(dir.clone(), digest.clone(), manifest);
@@ -150,9 +155,28 @@ pub(super) async fn index_upsert(
         .exec(db)
         .await?;
 
-    let format_str = match manifest.format {
-        microsandbox_image::snapshot::SnapshotFormat::Raw => "raw",
-        microsandbox_image::snapshot::SnapshotFormat::Qcow2 => "qcow2",
+    let (state_kind, format, fstype, checkpoint_manifest_digest, size_bytes) = match &manifest.state
+    {
+        SnapshotState::File(state) => {
+            let format = match state.format {
+                microsandbox_image::snapshot::SnapshotFormat::Raw => "raw",
+                microsandbox_image::snapshot::SnapshotFormat::Qcow2 => "qcow2",
+            };
+            (
+                "file",
+                Some(format.to_string()),
+                Some(state.fstype.clone()),
+                None,
+                Some(i64::try_from(state.upper.size_bytes).map_err(|_| {
+                    MicrosandboxError::SnapshotIntegrity(
+                        "snapshot size does not fit the local index".into(),
+                    )
+                })?),
+            )
+        }
+        SnapshotState::Checkpoint(state) => {
+            ("checkpoint", None, None, Some(state.manifest.clone()), None)
+        }
     };
     let scope_str = match manifest.scope {
         SnapshotScope::Disk => "disk",
@@ -164,12 +188,19 @@ pub(super) async fn index_upsert(
         name: Set(artifact_name),
         parent_digest: Set(manifest.parent.clone()),
         scope: Set(scope_str.into()),
+        state_kind: Set(state_kind.into()),
         image_ref: Set(manifest.image.reference.clone()),
         image_manifest_digest: Set(manifest.image.manifest_digest.clone()),
-        format: Set(format_str.into()),
-        fstype: Set(manifest.fstype.clone()),
+        format: Set(format),
+        fstype: Set(fstype),
+        checkpoint_manifest_digest: Set(checkpoint_manifest_digest),
         artifact_path: Set(artifact_path_str),
-        size_bytes: Set(Some(manifest.upper.size_bytes as i64)),
+        size_bytes: Set(size_bytes),
+        locality: Set("embedded".into()),
+        storage_binding_id: Set(None),
+        availability: Set("ready".into()),
+        migration_state: Set("canonical".into()),
+        migration_error_code: Set(None),
         created_at: Set(created_at),
         indexed_at: Set(indexed_at),
         child_count: Set(0),
@@ -247,7 +278,8 @@ pub(super) async fn list_dir(
         {
             continue;
         }
-        if !path.join(DESCRIPTOR_FILENAME).exists() {
+        if !path.join(DESCRIPTOR_FILENAME).exists() && !path.join(V066_DESCRIPTOR_FILENAME).exists()
+        {
             continue;
         }
         match open_snapshot(local, path.to_string_lossy().as_ref()).await {
@@ -397,10 +429,10 @@ pub(super) async fn lookup_by_digest(
 }
 
 fn handle_from_model(m: snapshot_entity::Model) -> SnapshotHandle {
-    let format = match m.format.as_str() {
+    let format = m.format.as_deref().map(|format| match format {
         "qcow2" => SnapshotFormat::Qcow2,
         _ => SnapshotFormat::Raw,
-    };
+    });
     let scope = match m.scope.as_str() {
         "disk" => SnapshotScope::Disk,
         "resumable" => SnapshotScope::Resumable,
@@ -415,8 +447,15 @@ fn handle_from_model(m: snapshot_entity::Model) -> SnapshotHandle {
         parent_digest: m.parent_digest,
         scope,
         image_ref: m.image_ref,
+        state_kind: m.state_kind,
         format,
+        fstype: m.fstype,
+        checkpoint_manifest_digest: m.checkpoint_manifest_digest,
         size_bytes: m.size_bytes.map(|n| n as u64),
+        locality: m.locality,
+        availability: m.availability,
+        migration_state: m.migration_state,
+        migration_error_code: m.migration_error_code,
         created_at: m.created_at,
         artifact_path: PathBuf::from(m.artifact_path),
     }

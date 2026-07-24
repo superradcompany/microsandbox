@@ -7,7 +7,7 @@ icon: "cube"
 
 ## msb run
 
-Create a sandbox and optionally run a command. Without `--name`, the sandbox is ephemeral and removed when the command finishes. With `--name`, it persists for later use.
+Create a sandbox and run its resolved OCI command. A command after `--` replaces the image CMD while preserving its entrypoint; without one, microsandbox runs the image's default `ENTRYPOINT + CMD`. Without `--name`, the sandbox is ephemeral and removed when the command finishes. With `--name`, it persists for later use.
 
 ```bash
 # Ephemeral: runs and cleans up
@@ -26,9 +26,13 @@ msb run --name api \
   -w /app \
   python
 
-# Detached (boots in background; run work later with exec)
-msb run -d --name worker python
-msb exec worker -- python worker.py
+# Detached: run the resolved command in the background
+msb run -d --name worker python -- python worker.py
+msb logs -f worker
+
+# Boot an idle sandbox for later exec calls
+msb create --name devbox python
+msb exec devbox -- python -c "print('hello')"
 
 # Publish on all IPv4 host interfaces instead of the default 127.0.0.1
 msb run --name public-api -p 0.0.0.0:8000:8000 python
@@ -49,10 +53,11 @@ Common flags:
 | `-e`, `--env` | Set an environment variable |
 | `--label` | Attach a label for metric attribution (`KEY=VALUE`, or bare `KEY`). Repeatable |
 | `-w`, `--workdir` | Set the working directory |
-| `-d`, `--detach` | Boot in the background. Run work later with `msb exec` |
+| `-d`, `--detach` | Run the resolved image command in the background and print the sandbox name |
 | `--no-tty` | Disable PTY allocation and run non-interactively |
 | `--replace` | Replace an existing sandbox with the same name |
 | `--no-net` | Disable network access |
+| `--net` | Add a high-level network profile (`public`, `private`, `host`, `all`, or `none`) |
 | `--net-rule` | Add a network policy rule |
 | `--secret` | Inject a host-held secret for an allowed destination |
 | `--tmpfs` | Mount an in-memory filesystem |
@@ -61,6 +66,19 @@ Common flags:
 Use `msb run --help` for the full flag list.
 
 Published ports bind to `127.0.0.1` by default. Use an explicit bind address only when the sandbox service should be reachable beyond localhost. On Windows, opening a published port can trigger a Windows Defender Firewall prompt for `msb.exe`; keep the bind on `127.0.0.1` for local-only development, and allow private/public network access only when you intentionally bind beyond loopback.
+
+### Network profiles
+
+`--net` is repeatable and accepts comma-separated profiles. `public`, `private`, and `host` compose; DNS through the sandbox gateway is enabled automatically and only once. `all` and `none` are terminal policies and cannot be mixed with the three positive profiles.
+
+```bash
+msb run alpine --net public
+msb run alpine --net "public,private"
+msb run alpine --net public --net private
+msb run alpine --net host --net-rule "deny@host:tcp:22"
+```
+
+Explicit `--net-rule` entries are evaluated before profile-generated rules, so they can narrow or deny part of a profile. `--net` conflicts with `--no-net` and the `--net-default*` flags because those select a different policy baseline.
 
 ### Network rule syntax
 
@@ -82,10 +100,11 @@ Published ports bind to `127.0.0.1` by default. Use an explicit bind address onl
 
 | Form | Example | Notes |
 | ---- | ------- | ----- |
-| IP / CIDR | `198.51.100.5`, `10.0.0.0/8`, `[2001:db8::]/32` | IPv6 must be bracketed |
+| IP / CIDR | `198.51.100.5`, `10.0.0.0/8`, `[2001:db8::/32]` | IPv6 must be bracketed |
 | Domain (exact) | `example.com` | Use `domain=public` to disambiguate from the `public` group |
+| DNS | `dns` | Semantic gateway DNS target: UDP/53 + TCP/53. May be qualified with `tcp`, `udp`, or `any` |
 | Domain suffix | `*.example.com`, `suffix=example.com` | Matches the apex and any subdomain at any depth. Suffixes must be at least two labels: `*.com` and `suffix=local` are rejected to prevent accidental blast radius |
-| Group | `public`, `private`, `multicast`, `loopback`, `link_local`, `metadata`, `any` | Pre-defined IP groups |
+| Group | `public`, `private`, `loopback`, `link-local`, `meta`, `multicast`, `host`, `any` | Pre-defined destination groups (`any` is the catch-all target) |
 
 Wildcard quoting: the rule grammar uses `@`, `:`, and `,` which are shell-significant, so always quote `--net-rule` values. The `*.` in suffix shorthand mirrors the syntax already used by `--tls-bypass` and `--secret`.
 
@@ -103,6 +122,9 @@ msb run alpine --no-net
 
 # Airgapped except one host (allowlist with --no-net sugar)
 msb run alpine --no-net --net-rule "allow@api.internal.corp"
+
+# Public profile with DNS disabled by a higher-priority explicit rule
+msb run alpine --net public --net-rule "deny@dns"
 ```
 
 ## msb create

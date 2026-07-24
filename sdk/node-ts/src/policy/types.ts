@@ -16,6 +16,9 @@ export type DestinationGroup =
   | "multicast"
   | "host";
 
+/** Composable high-level network access profile. */
+export type NetworkProfile = "public" | "private" | "host";
+
 export const DestinationGroups: readonly DestinationGroup[] = [
   "public",
   "loopback",

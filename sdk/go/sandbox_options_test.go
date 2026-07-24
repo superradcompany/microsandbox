@@ -550,14 +550,16 @@ func TestFFIWireShape_Secrets(t *testing.T) {
 	}
 }
 
-func TestFFIWireShape_NetworkPreset(t *testing.T) {
+func TestFFIWireShape_NetworkProfile(t *testing.T) {
 	got := marshalCreateOptions(t,
 		WithImage("alpine"),
-		WithNetwork(NetworkPolicy.PublicOnly()),
+		WithNetwork(NetworkPolicy.FromProfiles(NetworkProfilePublic)),
 	)
 	net := mustField(t, got, "network").(map[string]any)
-	if net["policy"] != "public-only" {
-		t.Fatalf("network.policy = %v", net["policy"])
+	policy := mustField(t, net, "custom_policy").(map[string]any)
+	rules := mustField(t, policy, "rules").([]any)
+	if len(rules) != 2 {
+		t.Fatalf("network.custom_policy.rules len = %d, want 2", len(rules))
 	}
 }
 

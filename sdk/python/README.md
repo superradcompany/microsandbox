@@ -172,7 +172,7 @@ web = await Sandbox.create(
     "python-readme-web",
     image="python",
     ports={8080: 80},
-    network=Network.public_only(),
+    network=Network.from_profiles("public"),
     replace=True,
 )
 ```

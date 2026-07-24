@@ -507,6 +507,11 @@ export type CloudCreateSandboxResponse = {
    */
   status: CloudSandboxStatus;
   /**
+   * Why the sandbox is not running yet, when known. Only present while
+   * `status` is `starting`.
+   */
+  status_reason: CloudSandboxStatusReason | null;
+  /**
    * The sandbox spec the cloud control plane stored for this sandbox.
    */
   spec: CloudSandboxSpec;
@@ -527,9 +532,9 @@ export type CloudCreateSandboxResponse = {
    */
   stopped_at: string | null;
   /**
-   * Last failure reason, when any.
+   * Human-readable message for the most recent failure, when any.
    */
-  last_error: string | null;
+  last_failure_message: string | null;
 };
 
 export type CloudSandboxStatus =
@@ -539,6 +544,8 @@ export type CloudSandboxStatus =
   | "stopping"
   | "stopped"
   | "failed";
+
+export type CloudSandboxStatusReason = "scheduling" | "insufficient_capacity";
 
 export type CloudPaginated<T> = {
   /**

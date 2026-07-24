@@ -2579,7 +2579,7 @@ fn startup_command(config: &SandboxConfig) -> Option<StartupCommand> {
 }
 
 fn resolve_startup_command(config: &SandboxConfig) -> Option<(String, Vec<String>)> {
-    if !config.startup_command_requested {
+    if !config.should_launch_background_command() {
         return None;
     }
 
@@ -3057,7 +3057,7 @@ mod tests {
             .env("APP_ENV", "test")
             .workdir("/workspace")
             .user("nobody")
-            .persistent_initial_command(["/bin/sh", "-lc", "echo detached"])
+            .background_command(["/bin/sh", "-lc", "echo detached"])
             .build()
             .await
             .unwrap();
@@ -3071,6 +3071,23 @@ mod tests {
         assert!(rendered.contains(&"--startup-env=APP_ENV=test".to_string()));
         assert!(rendered.contains(&"--startup-cwd=/workspace".to_string()));
         assert!(rendered.contains(&"--startup-user=nobody".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_cli_args_include_detached_image_default_command() {
+        let mut config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .entrypoint(["/entrypoint"])
+            .build()
+            .await
+            .unwrap();
+        config.spec.runtime.cmd = Some(vec!["bash".to_string()]);
+        config.set_background_command(Vec::new());
+
+        let rendered = render_args(&config);
+
+        assert!(rendered.contains(&"--startup-cmd=/entrypoint".to_string()));
+        assert!(rendered.contains(&"--startup-arg=bash".to_string()));
     }
 
     #[tokio::test]
@@ -3111,7 +3128,7 @@ mod tests {
         let mut config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .workdir("/opt/hermes")
-            .persistent_initial_command(["gateway", "run"])
+            .background_command(["gateway", "run"])
             .build()
             .await
             .unwrap();
@@ -3124,7 +3141,7 @@ mod tests {
             ],
             env: Vec::new(),
         });
-        config.startup_command_requested = false;
+        config.clear_launch_intent();
 
         let rendered = render_args(&config);
 

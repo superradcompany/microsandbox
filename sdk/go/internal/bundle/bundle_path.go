@@ -11,7 +11,7 @@ import (
 // Bytes reads the FFI library bytes from $MICROSANDBOX_FFI_PATH.
 // Builds tagged with `microsandbox_ffi_path` use this variant in place
 // of the embedded library — intended for SDK contributors testing a
-// locally-built libmicrosandbox_go_ffi.{so,dylib} without rebuilding
+// locally-built libmicrosandbox_go_ffi.{so,dylib,dll} without rebuilding
 // the embed.
 func Bytes() ([]byte, error) {
 	path := os.Getenv(FFIPathEnv)
@@ -39,8 +39,12 @@ func Bytes() ([]byte, error) {
 // current platform, so callers can write the bytes to disk under the
 // expected name.
 func Filename() string {
-	if runtime.GOOS == "darwin" {
+	switch runtime.GOOS {
+	case "darwin":
 		return "libmicrosandbox_go_ffi.dylib"
+	case "windows":
+		return "libmicrosandbox_go_ffi.dll"
+	default:
+		return "libmicrosandbox_go_ffi.so"
 	}
-	return "libmicrosandbox_go_ffi.so"
 }

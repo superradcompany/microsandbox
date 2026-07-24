@@ -12,11 +12,11 @@ use crate::{
     Action, CloudCreateSandboxResponse, CloudDiskImageFormat, CloudErrorBody, CloudErrorDetails,
     CloudHostPattern, CloudMessageResponse, CloudNetworkSpec, CloudPaginated, CloudPatch,
     CloudPullPolicy, CloudRlimit, CloudRlimitResource, CloudRootfsSource, CloudSandboxResources,
-    CloudSandboxRuntimeOptions, CloudSandboxSpec, CloudSandboxStatus, CloudSecretEntry,
-    CloudSecretSource, CloudSecretsConfig, CloudViolationAction, CloudVolumeMount, Destination,
-    DestinationGroup, Direction, EnvVar, HandoffInit, HostPermissions, MountOptions, NetworkPolicy,
-    PortRange, Protocol, Rule, SandboxLogLevel, SandboxPolicy, SecretInjection, SecurityProfile,
-    StatVirtualization,
+    CloudSandboxRuntimeOptions, CloudSandboxSpec, CloudSandboxStatus, CloudSandboxStatusReason,
+    CloudSecretEntry, CloudSecretSource, CloudSecretsConfig, CloudViolationAction,
+    CloudVolumeMount, Destination, DestinationGroup, Direction, EnvVar, HandoffInit,
+    HostPermissions, MountOptions, NetworkPolicy, PortRange, Protocol, Rule, SandboxLogLevel,
+    SandboxPolicy, SecretInjection, SecurityProfile, StatVirtualization,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -150,6 +150,7 @@ pub fn cloud_declarations() -> Vec<String> {
         CloudViolationAction::decl(&cfg),
         CloudCreateSandboxResponse::decl(&cfg),
         CloudSandboxStatus::decl(&cfg),
+        CloudSandboxStatusReason::decl(&cfg),
         CloudPaginated::<CloudCreateSandboxResponse>::decl(&cfg),
         CloudMessageResponse::decl(&cfg),
         CloudErrorBody::decl(&cfg),
@@ -232,7 +233,7 @@ mod tests {
     #[test]
     fn cloud_bindings_import_domain_and_stay_scoped() {
         assert_eq!(domain_declarations().len(), 17);
-        assert_eq!(cloud_declarations().len(), 22);
+        assert_eq!(cloud_declarations().len(), 23);
 
         let cloud = render_cloud();
         // Cloud twins live here and their domain deps are imported/re-exported.

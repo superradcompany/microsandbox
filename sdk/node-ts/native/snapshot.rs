@@ -42,10 +42,8 @@ pub struct JsSaveOpts {
 
 /// Result of `Snapshot.verify()`.
 ///
-/// `upperKind` is `"notRecorded"` when no integrity hash was stored,
-/// or `"verified"` when the recorded hash matched the recomputed one.
-/// `upperAlgorithm` and `upperDigest` are populated only when
-/// `upperKind === "verified"`.
+/// `upperKind` is `"verified"` when the mandatory file-state integrity
+/// matched. `upperAlgorithm` and `upperDigest` carry the verified binding.
 #[napi(object, js_name = "SnapshotVerifyReport")]
 pub struct JsSnapshotVerifyReport {
     pub digest: String,
@@ -72,8 +70,15 @@ pub struct JsSnapshotInfo {
     /// `"disk"` today; `"resumable"` once memory/device-state restore lands.
     pub scope: String,
     /// `"raw"` or `"qcow2"`.
-    pub format: String,
+    pub state_kind: String,
+    pub format: Option<String>,
+    pub fstype: Option<String>,
+    pub checkpoint_manifest_digest: Option<String>,
     pub size_bytes: Option<f64>,
+    pub locality: String,
+    pub availability: String,
+    pub migration_state: String,
+    pub migration_error_code: Option<String>,
     pub created_at: f64,
     pub path: String,
 }
@@ -186,8 +191,8 @@ impl JsSnapshot {
     }
 
     #[napi(getter)]
-    pub fn size_bytes(&self) -> BigInt {
-        BigInt::from(self.inner.size_bytes())
+    pub fn size_bytes(&self) -> Option<BigInt> {
+        self.inner.size_bytes().map(BigInt::from)
     }
 
     #[napi(getter)]
@@ -201,13 +206,71 @@ impl JsSnapshot {
     }
 
     #[napi(getter)]
-    pub fn format(&self) -> String {
-        format_str(self.inner.manifest().format).into()
+    pub fn state_kind(&self) -> String {
+        self.inner.manifest().state.kind().into()
     }
 
     #[napi(getter)]
-    pub fn fstype(&self) -> String {
-        self.inner.manifest().fstype.clone()
+    pub fn format(&self) -> Option<String> {
+        self.inner
+            .manifest()
+            .state
+            .as_file()
+            .map(|state| format_str(state.format).into())
+    }
+
+    #[napi(getter)]
+    pub fn fstype(&self) -> Option<String> {
+        self.inner
+            .manifest()
+            .state
+            .as_file()
+            .map(|state| state.fstype.clone())
+    }
+
+    #[napi(getter)]
+    pub fn upper_file(&self) -> Option<String> {
+        self.inner
+            .manifest()
+            .state
+            .as_file()
+            .map(|state| state.upper.file.clone())
+    }
+
+    #[napi(getter)]
+    pub fn upper_integrity_algorithm(&self) -> Option<String> {
+        self.inner
+            .manifest()
+            .state
+            .as_file()
+            .map(|state| state.upper.integrity.algorithm.clone())
+    }
+
+    #[napi(getter)]
+    pub fn upper_integrity_digest(&self) -> Option<String> {
+        self.inner
+            .manifest()
+            .state
+            .as_file()
+            .map(|state| state.upper.integrity.digest.clone())
+    }
+
+    #[napi(getter)]
+    pub fn checkpoint_id(&self) -> Option<String> {
+        self.inner
+            .manifest()
+            .state
+            .as_checkpoint()
+            .map(|state| state.checkpoint_id.clone())
+    }
+
+    #[napi(getter)]
+    pub fn checkpoint_manifest_digest(&self) -> Option<String> {
+        self.inner
+            .manifest()
+            .state
+            .as_checkpoint()
+            .map(|state| state.manifest.clone())
     }
 
     #[napi(getter)]
@@ -283,13 +346,48 @@ impl JsSnapshotHandle {
     }
 
     #[napi(getter)]
-    pub fn format(&self) -> String {
-        format_str(self.inner.format()).into()
+    pub fn state_kind(&self) -> String {
+        self.inner.state_kind().into()
+    }
+
+    #[napi(getter)]
+    pub fn format(&self) -> Option<String> {
+        self.inner.format().map(|format| format_str(format).into())
+    }
+
+    #[napi(getter)]
+    pub fn fstype(&self) -> Option<String> {
+        self.inner.fstype().map(str::to_string)
+    }
+
+    #[napi(getter)]
+    pub fn checkpoint_manifest_digest(&self) -> Option<String> {
+        self.inner.checkpoint_manifest_digest().map(str::to_string)
     }
 
     #[napi(getter)]
     pub fn size_bytes(&self) -> Option<BigInt> {
         self.inner.size_bytes().map(BigInt::from)
+    }
+
+    #[napi(getter)]
+    pub fn locality(&self) -> String {
+        self.inner.locality().into()
+    }
+
+    #[napi(getter)]
+    pub fn availability(&self) -> String {
+        self.inner.availability().into()
+    }
+
+    #[napi(getter)]
+    pub fn migration_state(&self) -> String {
+        self.inner.migration_state().into()
+    }
+
+    #[napi(getter)]
+    pub fn migration_error_code(&self) -> Option<String> {
+        self.inner.migration_error_code().map(str::to_string)
     }
 
     #[napi(getter)]
@@ -346,8 +444,15 @@ fn snapshot_handle_to_info(h: &RustSnapshotHandle) -> JsSnapshotInfo {
         parent_digest: h.parent_digest().map(|s| s.to_string()),
         image_ref: h.image_ref().to_string(),
         scope: format_scope(h.scope()).into(),
-        format: format_str(h.format()).into(),
+        state_kind: h.state_kind().into(),
+        format: h.format().map(|format| format_str(format).into()),
+        fstype: h.fstype().map(str::to_string),
+        checkpoint_manifest_digest: h.checkpoint_manifest_digest().map(str::to_string),
         size_bytes: h.size_bytes().map(|n| n as f64),
+        locality: h.locality().into(),
+        availability: h.availability().into(),
+        migration_state: h.migration_state().into(),
+        migration_error_code: h.migration_error_code().map(str::to_string),
         created_at: h.created_at().and_utc().timestamp_millis() as f64,
         path: h.path().display().to_string(),
     }
@@ -357,7 +462,6 @@ fn verify_report_to_js(
     report: microsandbox::snapshot::SnapshotVerifyReport,
 ) -> JsSnapshotVerifyReport {
     let (kind, algorithm, digest) = match report.upper {
-        RustUpperVerifyStatus::NotRecorded => ("notRecorded".to_string(), None, None),
         RustUpperVerifyStatus::Verified { algorithm, digest } => {
             ("verified".to_string(), Some(algorithm), Some(digest))
         }

@@ -271,7 +271,7 @@ async fn host_alias_denied_by_gateway_cidr_policy() {
     teardown(sb, name).await;
 }
 
-/// Default `public_only` must block host access; users opt in explicitly.
+/// The default public profile must block host access; users opt in explicitly.
 #[msb_test]
 async fn host_alias_denied_by_default_policy() {
     let server = HostHttp::start("should not see")
@@ -291,7 +291,7 @@ async fn host_alias_denied_by_default_policy() {
     let stdout = out.stdout().unwrap();
     assert!(
         stdout.contains("status=") && !stdout.trim_end().ends_with("status=0"),
-        "expected wget to fail under default public_only policy; got: {stdout:?} (stderr: {})",
+        "expected wget to fail under default public profile; got: {stdout:?} (stderr: {})",
         out.stderr().unwrap_or_default()
     );
     assert!(

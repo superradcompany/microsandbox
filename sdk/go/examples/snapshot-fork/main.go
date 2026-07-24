@@ -60,7 +60,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("Snapshot: %v", err)
 	}
-	fmt.Printf("snapshot created: digest=%s size=%d bytes\n", artifact.Digest(), artifact.SizeBytes())
+	size := "unknown"
+	if sizeBytes := artifact.SizeBytes(); sizeBytes != nil {
+		size = fmt.Sprintf("%d", *sizeBytes)
+	}
+	fmt.Printf("snapshot created: digest=%s size=%s bytes\n", artifact.Digest(), size)
 
 	report, err := artifact.Verify(ctx)
 	if err != nil {

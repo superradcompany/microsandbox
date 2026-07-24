@@ -49,7 +49,7 @@ pub struct NetworkPolicy {
 
     /// Default action for ingress traffic not matching any rule. The
     /// per-field serde default is `Deny` so partially-specified JSON
-    /// fails closed; permissive presets like [`NetworkPolicy::public_only`]
+    /// fails closed; profile policies built by [`NetworkPolicy::from_profiles`]
     /// flip this back to `Allow` explicitly.
     #[serde(default = "Action::deny")]
     pub default_ingress: Action,
@@ -57,6 +57,24 @@ pub struct NetworkPolicy {
     /// Ordered list of rules, evaluated first-match-wins per direction.
     #[serde(default)]
     pub rules: Vec<Rule>,
+}
+
+/// A composable high-level network access profile.
+///
+/// Profiles expand into ordinary first-match-wins policy rules. Every non-empty
+/// profile set includes exactly one narrow DNS rule for the sandbox gateway;
+/// the requested destination groups then follow in canonical order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkProfile {
+    /// Public internet addresses.
+    Public,
+
+    /// Private/LAN address ranges (RFC 1918, RFC 4193 ULA, and CGN).
+    Private,
+
+    /// The sandbox host via its gateway addresses.
+    Host,
 }
 
 /// Action to take on matched traffic.
@@ -267,32 +285,47 @@ impl NetworkPolicy {
         }
     }
 
-    /// Public internet only — allow egress to public IPs, deny private,
-    /// loopback, link-local, and metadata. Ingress defaults to allow
-    /// (preserves today's unfiltered published-port behavior).
-    pub fn public_only() -> Self {
-        Self {
-            default_egress: Action::Deny,
-            default_ingress: Action::Allow,
-            rules: vec![
-                Rule::allow_dns(),
-                Rule::allow_egress(Destination::Group(DestinationGroup::Public)),
-            ],
-        }
-    }
+    /// Build a deny-by-default policy from composable profiles.
+    ///
+    /// Duplicate profiles are ignored and input order does not affect the
+    /// resulting rule order. An empty profile set permits no egress and does
+    /// not add DNS; ingress remains allowed to preserve published-port
+    /// behavior.
+    pub fn from_profiles<I>(profiles: I) -> Self
+    where
+        I: IntoIterator<Item = NetworkProfile>,
+    {
+        let mut public = false;
+        let mut private = false;
+        let mut host = false;
 
-    /// Non-local network access — allow public internet and private/LAN
-    /// egress; deny loopback, link-local, and metadata. Ingress defaults
-    /// to allow.
-    pub fn non_local() -> Self {
+        for profile in profiles {
+            match profile {
+                NetworkProfile::Public => public = true,
+                NetworkProfile::Private => private = true,
+                NetworkProfile::Host => host = true,
+            }
+        }
+
+        let mut rules =
+            Vec::with_capacity(1 + usize::from(public) + usize::from(private) + usize::from(host));
+        if public || private || host {
+            rules.push(Rule::allow_dns());
+        }
+        for (enabled, group) in [
+            (public, DestinationGroup::Public),
+            (private, DestinationGroup::Private),
+            (host, DestinationGroup::Host),
+        ] {
+            if enabled {
+                rules.push(Rule::allow_egress(Destination::Group(group)));
+            }
+        }
+
         Self {
             default_egress: Action::Deny,
             default_ingress: Action::Allow,
-            rules: vec![
-                Rule::allow_dns(),
-                Rule::allow_egress(Destination::Group(DestinationGroup::Public)),
-                Rule::allow_egress(Destination::Group(DestinationGroup::Private)),
-            ],
+            rules,
         }
     }
 
@@ -328,6 +361,34 @@ impl NetworkPolicy {
     ) -> Action {
         self.egress_walk(dst, None, protocol, shared, HostnameSource::CacheOnly)
             .into()
+    }
+
+    /// Evaluate only explicit, address-only egress rules and ignore the
+    /// policy default. DNS rebinding protection uses this distinction so an
+    /// explicit private profile can admit internal answers without making an
+    /// `allow_all` default disable rebinding protection implicitly.
+    pub(crate) fn evaluate_explicit_egress_ip(
+        &self,
+        addr: IpAddr,
+        protocol: Protocol,
+        shared: &SharedState,
+    ) -> Option<Action> {
+        for rule in &self.rules {
+            if !matches!(rule.direction, Direction::Egress | Direction::Any)
+                || !matches!(
+                    rule.destination,
+                    Destination::Cidr(_) | Destination::Group(_)
+                )
+                || !rule.ports.is_empty()
+                || (!rule.protocols.is_empty() && !rule.protocols.contains(&protocol))
+            {
+                continue;
+            }
+            if matches_destination(&rule.destination, addr, shared) {
+                return Some(rule.action);
+            }
+        }
+        None
     }
 
     /// Evaluate an outbound connection with an explicit
@@ -610,7 +671,7 @@ impl From<EgressEvaluation> for Action {
 
 impl Default for NetworkPolicy {
     fn default() -> Self {
-        Self::public_only()
+        Self::from_profiles([NetworkProfile::Public])
     }
 }
 
@@ -681,6 +742,17 @@ impl Rule {
             protocols: vec![Protocol::Udp, Protocol::Tcp],
             ports: vec![PortRange::single(53)],
             action: Action::Allow,
+        }
+    }
+
+    /// Deny plain DNS (UDP/53 and TCP/53) to the sandbox gateway.
+    ///
+    /// This is the deny counterpart to [`Self::allow_dns`] and is useful as
+    /// an override placed before profile-generated rules.
+    pub fn deny_dns() -> Self {
+        Self {
+            action: Action::Deny,
+            ..Self::allow_dns()
         }
     }
 }
@@ -917,6 +989,73 @@ mod tests {
             default_ingress: Action::Allow,
             rules: vec![Rule::allow_egress(dest)],
         }
+    }
+
+    #[test]
+    fn profiles_are_deduplicated_and_expanded_in_canonical_order() {
+        let policy = NetworkPolicy::from_profiles([
+            NetworkProfile::Host,
+            NetworkProfile::Private,
+            NetworkProfile::Public,
+            NetworkProfile::Private,
+        ]);
+
+        assert_eq!(policy.default_egress, Action::Deny);
+        assert_eq!(policy.default_ingress, Action::Allow);
+        assert_eq!(policy.rules.len(), 4);
+        assert_eq!(policy.rules[0].protocols, [Protocol::Udp, Protocol::Tcp]);
+        assert_eq!(policy.rules[0].ports, [PortRange::single(53)]);
+        for (rule, expected) in policy.rules[1..].iter().zip([
+            DestinationGroup::Public,
+            DestinationGroup::Private,
+            DestinationGroup::Host,
+        ]) {
+            assert!(matches!(rule.destination, Destination::Group(group) if group == expected));
+        }
+    }
+
+    #[test]
+    fn empty_profile_set_has_no_implicit_dns_or_egress() {
+        let policy = NetworkPolicy::from_profiles([]);
+        assert_eq!(policy.default_egress, Action::Deny);
+        assert_eq!(policy.default_ingress, Action::Allow);
+        assert!(policy.rules.is_empty());
+    }
+
+    #[test]
+    fn default_policy_is_the_public_profile() {
+        let policy = NetworkPolicy::default();
+        assert_eq!(policy.rules.len(), 2);
+        assert!(matches!(
+            policy.rules[1].destination,
+            Destination::Group(DestinationGroup::Public)
+        ));
+    }
+
+    #[test]
+    fn profile_wire_names_are_stable() {
+        assert_eq!(
+            serde_json::to_string(&NetworkProfile::Public).unwrap(),
+            "\"public\""
+        );
+        assert_eq!(
+            serde_json::from_str::<NetworkProfile>("\"private\"").unwrap(),
+            NetworkProfile::Private
+        );
+    }
+
+    #[test]
+    fn deny_dns_is_the_exact_action_inverse_of_allow_dns() {
+        let allow = Rule::allow_dns();
+        let deny = Rule::deny_dns();
+        assert_eq!(deny.action, Action::Deny);
+        assert_eq!(deny.direction, allow.direction);
+        assert_eq!(deny.protocols, allow.protocols);
+        assert_eq!(deny.ports, allow.ports);
+        assert!(matches!(
+            deny.destination,
+            Destination::Group(DestinationGroup::Host)
+        ));
     }
 
     /// Outbound TCP/443 allow rule pinned to a specific hostname,
@@ -1191,9 +1330,9 @@ mod tests {
     }
 
     #[test]
-    fn public_only_preset_denies_host_gateway() {
+    fn public_profile_denies_host_gateway() {
         let (shared, gw4, gw6) = shared_with_gateway();
-        let policy = NetworkPolicy::public_only();
+        let policy = NetworkPolicy::from_profiles([NetworkProfile::Public]);
 
         let v4 = SocketAddr::new(IpAddr::V4(gw4), 80);
         assert_eq!(
@@ -1211,7 +1350,7 @@ mod tests {
     }
 
     #[test]
-    fn allow_all_preset_permits_host_gateway() {
+    fn allow_all_policy_permits_host_gateway() {
         let (shared, gw4, _) = shared_with_gateway();
         let policy = NetworkPolicy::allow_all();
         let v4 = SocketAddr::new(IpAddr::V4(gw4), 80);
@@ -1224,7 +1363,7 @@ mod tests {
     #[test]
     fn group_host_allow_overrides_private_deny_when_ordered_first() {
         let (shared, gw4, _) = shared_with_gateway();
-        let mut policy = NetworkPolicy::public_only();
+        let mut policy = NetworkPolicy::from_profiles([NetworkProfile::Public]);
         policy.rules.insert(
             0,
             Rule::allow_egress(Destination::Group(DestinationGroup::Host)),
@@ -1455,6 +1594,9 @@ mod tests {
         assert!(egress_tcp(&policy, "127.0.0.1", &shared).is_deny());
         // Metadata is not in Public.
         assert!(egress_tcp(&policy, "169.254.169.254", &shared).is_deny());
+        // Unspecified addresses are reserved and do not belong to Public.
+        assert!(egress_tcp(&policy, "0.0.0.0", &shared).is_deny());
+        assert!(egress_tcp(&policy, "::", &shared).is_deny());
     }
 
     //----------------------------------------------------------------------------------------------

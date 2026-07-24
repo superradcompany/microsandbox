@@ -577,7 +577,7 @@ func TestNetworkPolicyNone(t *testing.T) {
 
 	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
-		microsandbox.WithNetwork(&microsandbox.NetworkConfig{Policy: "none"}),
+		microsandbox.WithNetwork(microsandbox.NetworkPolicy.None()),
 	)
 	if err != nil {
 		t.Fatalf("CreateSandbox with network none: %v", err)
@@ -590,7 +590,7 @@ func TestNetworkPolicyNone(t *testing.T) {
 	})
 
 	// TCP egress check (wget) rather than ICMP — see comment in
-	// TestNetworkPolicyNonLocal. Should fail under policy=none regardless.
+	// TestNetworkPolicyProfiles. Should fail under policy=none regardless.
 	out, err := sb.Shell(ctx, "wget -q -O - --timeout=3 http://1.1.1.1/",
 		microsandbox.WithExecTimeout(10*time.Second))
 	if err != nil {
@@ -611,7 +611,7 @@ func TestNetworkPolicyAllowAll(t *testing.T) {
 
 	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
-		microsandbox.WithNetwork(&microsandbox.NetworkConfig{Policy: "allow-all"}),
+		microsandbox.WithNetwork(microsandbox.NetworkPolicy.AllowAll()),
 	)
 	if err != nil {
 		t.Fatalf("CreateSandbox allow-all: %v", err)
@@ -642,13 +642,12 @@ func TestNetworkPolicyAllowAll(t *testing.T) {
 func TestDNSBlockDomain(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-dns-" + t.Name()
+	network := microsandbox.NetworkPolicy.AllowAll()
+	network.DenyDomains = []string{"blocked-domain-test.example.com"}
 
 	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
-		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
-			Policy:      microsandbox.NetworkPolicyPresetAllowAll,
-			DenyDomains: []string{"blocked-domain-test.example.com"},
-		}),
+		microsandbox.WithNetwork(network),
 	)
 	if err != nil {
 		t.Fatalf("CreateSandbox with block_domains: %v", err)
@@ -679,13 +678,12 @@ func TestDNSBlockDomain(t *testing.T) {
 func TestDNSBlockDomainSuffix(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-dnssuffix-" + t.Name()
+	network := microsandbox.NetworkPolicy.AllowAll()
+	network.DenyDomainSuffixes = []string{".blocked-suffix-test.invalid"}
 
 	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
-		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
-			Policy:             microsandbox.NetworkPolicyPresetAllowAll,
-			DenyDomainSuffixes: []string{".blocked-suffix-test.invalid"},
-		}),
+		microsandbox.WithNetwork(network),
 	)
 	if err != nil {
 		t.Fatalf("CreateSandbox with block_domain_suffixes: %v", err)

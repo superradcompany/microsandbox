@@ -11,7 +11,7 @@
 //
 // Build modes selected at compile time:
 //
-//	default                       — //go:embed of the matching platform .so
+//	default                       — //go:embed of the matching shared library
 //	-tags microsandbox_ffi_path   — reads from $MICROSANDBOX_FFI_PATH
 //	                                (no embed; used by integration/smoke
 //	                                tests and SDK contributors iterating
@@ -22,7 +22,7 @@ package bundle
 
 // FFIPathEnv is the env var consulted by builds tagged with
 // `microsandbox_ffi_path`. It must point at a locally-built
-// libmicrosandbox_go_ffi.{so,dylib}. The variable is undocumented in
+// libmicrosandbox_go_ffi.{so,dylib,dll}. The variable is undocumented in
 // user-facing docs because it has no effect on default builds.
 const FFIPathEnv = "MICROSANDBOX_FFI_PATH"
 
