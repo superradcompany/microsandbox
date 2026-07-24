@@ -256,7 +256,7 @@ impl PySnapshot {
         &self.inner.manifest().image.manifest_digest
     }
 
-    /// On-disk format of the upper layer (`"raw"` or `"qcow2"`).
+    /// Closed descriptor state kind (`"file"` or `"checkpoint"`).
     #[getter]
     fn state_kind(&self) -> &'static str {
         self.inner.manifest().state.kind()

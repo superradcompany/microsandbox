@@ -42,6 +42,14 @@ pub const MAX_JSON_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 /// Extension keys understood by this runtime.
 pub const SUPPORTED_REQUIRES: &[&str] = &[];
 
+/// Filenames reserved for descriptor publication and migration bookkeeping.
+const RESERVED_ARTIFACT_FILENAMES: &[&str] = &[
+    DESCRIPTOR_FILENAME,
+    "manifest.json",
+    ".manifest.json.legacy",
+    ".snapshot-migration.lock",
+];
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -443,6 +451,11 @@ fn validate_artifact_filename(value: &str, field: &str) -> ImageResult<()> {
             "{field} must be one relative normal filename: {value}"
         ));
     }
+    // Payloads sharing a name with artifact metadata can overwrite the
+    // descriptor or disrupt the adjacent-release migration journal.
+    if RESERVED_ARTIFACT_FILENAMES.contains(&value) {
+        return descriptor_error(format!("{field} uses reserved filename: {value}"));
+    }
     Ok(())
 }
 
@@ -657,6 +670,27 @@ mod tests {
             ..file
         });
         assert!(manifest.to_canonical_bytes().is_err());
+    }
+
+    #[test]
+    fn rejects_reserved_upper_filenames() {
+        for reserved in RESERVED_ARTIFACT_FILENAMES {
+            let mut manifest = sample_manifest();
+            let file = manifest.state.as_file().unwrap().clone();
+            manifest.state = SnapshotState::File(FileSnapshotState {
+                upper: UpperLayer {
+                    file: (*reserved).into(),
+                    ..file.upper
+                },
+                ..file
+            });
+
+            let error = manifest.to_canonical_bytes().unwrap_err().to_string();
+            assert!(
+                error.contains("reserved filename"),
+                "unexpected error for {reserved}: {error}"
+            );
+        }
     }
 
     #[test]

@@ -1130,13 +1130,8 @@ async fn load_does_not_follow_preexisting_symlink_parent() {
     );
 }
 
-#[tokio::test]
-async fn open_rejects_manifest_upper_file_that_escapes_artifact() {
-    let tmp = TempDir::new().unwrap();
-    let dir = tmp.path().join("bad-upper-path");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(tmp.path().join("outside.ext4"), b"data").unwrap();
-
+#[test]
+fn manifest_validation_rejects_upper_file_that_escapes_artifact() {
     let mut manifest = sample_manifest(4);
     let file = manifest.state.as_file().unwrap().clone();
     manifest.state = SnapshotState::File(FileSnapshotState {

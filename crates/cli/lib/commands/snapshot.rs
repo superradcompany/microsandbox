@@ -280,7 +280,13 @@ async fn list(args: SnapshotListArgs) -> anyhow::Result<()> {
     }
 
     let mut table = ui::Table::new(&[
-        "NAME", "SCOPE", "STATE", "IMAGE", "SIZE", "CREATED", "DIGEST",
+        "NAME",
+        "SCOPE",
+        "MIGRATION",
+        "IMAGE",
+        "SIZE",
+        "CREATED",
+        "DIGEST",
     ]);
     for s in &snapshots {
         let name = s.name().unwrap_or("-").to_string();

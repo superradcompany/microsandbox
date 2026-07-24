@@ -60,7 +60,7 @@ pub struct V066SourceInfo {
 /// Deterministic forward translation result.
 #[derive(Debug, Clone)]
 pub struct V066ForwardTranslation {
-    /// Canonical exact-shape legacy bytes retained for downgrade.
+    /// Canonical v0.6.6 bytes used to compute the legacy identity.
     pub source_bytes: Vec<u8>,
     /// Identity of the legacy descriptor.
     pub source_digest: String,
@@ -111,8 +111,10 @@ struct V066UpperLayer {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Translate exact v0.6.6 descriptor bytes into final schema-1 file state.
+/// Translate a v0.6.6 descriptor into final schema-1 file state.
 ///
+/// The returned `source_bytes` are the canonical legacy encoding; callers that
+/// need byte-exact downgrade recovery must retain the original input separately.
 /// `target_parent_digest` must already contain the parent-first graph mapping.
 pub fn translate_v066_forward(
     source: &[u8],
@@ -388,6 +390,18 @@ mod tests {
             translated.target_digest,
             translated.target.digest().unwrap()
         );
+    }
+
+    #[test]
+    fn forward_translation_reports_canonical_legacy_bytes() {
+        let mut formatted = b"\n  ".to_vec();
+        formatted.extend_from_slice(LEGACY);
+        formatted.push(b'\n');
+
+        let translated = translate_v066_forward(&formatted, &payload(), None).unwrap();
+
+        assert_eq!(translated.source_bytes, LEGACY);
+        assert_ne!(translated.source_bytes, formatted);
     }
 
     #[test]

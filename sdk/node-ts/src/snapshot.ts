@@ -212,20 +212,45 @@ export class Snapshot {
     if (this.inner.stateKind === "checkpoint") {
       return {
         kind: "checkpoint",
-        checkpointId: this.inner.checkpointId ?? "",
-        manifest: this.inner.checkpointManifestDigest ?? "",
+        checkpointId: requiredProjectionString(
+          this.inner.checkpointId,
+          "checkpointId",
+        ),
+        manifest: requiredProjectionString(
+          this.inner.checkpointManifestDigest,
+          "checkpointManifestDigest",
+        ),
       };
     }
+    if (this.inner.stateKind !== "file") {
+      throw invalidProjection(`unknown stateKind ${this.inner.stateKind}`);
+    }
+
+    const format = requiredProjectionString(this.inner.format, "format");
+    if (format !== "raw" && format !== "qcow2") {
+      throw invalidProjection(`unknown file-state format ${format}`);
+    }
+    const sizeBytes = this.inner.sizeBytes;
+    if (typeof sizeBytes !== "bigint") {
+      throw invalidProjection("missing file-state sizeBytes");
+    }
+
     return {
       kind: "file",
-      format: (this.inner.format ?? "raw") as "raw" | "qcow2",
-      fstype: this.inner.fstype ?? "",
+      format,
+      fstype: requiredProjectionString(this.inner.fstype, "fstype"),
       upper: {
-        file: this.inner.upperFile ?? "",
-        sizeBytes: this.inner.sizeBytes ?? 0n,
+        file: requiredProjectionString(this.inner.upperFile, "upperFile"),
+        sizeBytes,
         integrity: {
-          algorithm: this.inner.upperIntegrityAlgorithm ?? "",
-          digest: this.inner.upperIntegrityDigest ?? "",
+          algorithm: requiredProjectionString(
+            this.inner.upperIntegrityAlgorithm,
+            "upperIntegrityAlgorithm",
+          ),
+          digest: requiredProjectionString(
+            this.inner.upperIntegrityDigest,
+            "upperIntegrityDigest",
+          ),
         },
       },
     };
@@ -302,15 +327,37 @@ function wrapBuilder(nb: InstanceType<typeof napi.SnapshotBuilder>): SnapshotBui
 
 /** @internal */
 function verifyReportToTs(r: NapiSnapshotVerifyReport): SnapshotVerifyReport {
+  if (r.upperKind !== "verified") {
+    throw invalidProjection(`unknown verification kind ${r.upperKind}`);
+  }
   return {
     digest: r.digest,
     path: r.path,
     upper: {
       kind: "verified",
-      algorithm: r.upperAlgorithm ?? "",
-      digest: r.upperDigest ?? "",
+      algorithm: requiredProjectionString(
+        r.upperAlgorithm,
+        "verify.upperAlgorithm",
+      ),
+      digest: requiredProjectionString(r.upperDigest, "verify.upperDigest"),
     },
   };
+}
+
+/** @internal */
+function requiredProjectionString(
+  value: string | null | undefined,
+  field: string,
+): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw invalidProjection(`missing ${field}`);
+  }
+  return value;
+}
+
+/** @internal */
+function invalidProjection(detail: string): Error {
+  return new Error(`invalid native snapshot projection: ${detail}`);
 }
 
 /** @internal */

@@ -9,6 +9,10 @@
 //! unallocated per platform ([`extent::mark_sparse`] on NTFS, [`extent::punch_hole_aligned`] on APFS). `tokio_tar` remains the header codec and the dense-entry writer.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+#[cfg(windows)]
+use std::iter;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 
 use async_compression::tokio::bufread::ZstdDecoder;
@@ -22,6 +26,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio_tar::{Builder, EntryType, Header};
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::{
+    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+};
 
 use crate::backend::LocalBackend;
 use crate::{MicrosandboxError, MicrosandboxResult};
@@ -233,7 +241,7 @@ pub(super) async fn save_snapshot(
         .open(&temp_out)
         .await?;
     durable.sync_all().await?;
-    tokio::fs::rename(&temp_out, out).await?;
+    replace_archive(&temp_out, out).await?;
     #[cfg(unix)]
     if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
         std::fs::File::open(parent)?.sync_all()?;
@@ -1880,12 +1888,51 @@ fn digest_hex(digest: &str) -> MicrosandboxResult<&str> {
             "snapshot identity is not sha256: {digest}"
         )));
     };
-    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if hex.len() != 64
+        || !hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
         return Err(MicrosandboxError::Custom(format!(
             "snapshot identity is malformed: {digest}"
         )));
     }
     Ok(hex)
+}
+
+async fn replace_archive(temp_out: &Path, out: &Path) -> MicrosandboxResult<()> {
+    #[cfg(windows)]
+    {
+        let source = temp_out
+            .as_os_str()
+            .encode_wide()
+            .chain(iter::once(0))
+            .collect::<Vec<_>>();
+        let destination = out
+            .as_os_str()
+            .encode_wide()
+            .chain(iter::once(0))
+            .collect::<Vec<_>>();
+
+        // SAFETY: Both paths are live, NUL-terminated UTF-16 buffers for the
+        // duration of the call. The temp file is created beside the target,
+        // so replacement stays on one volume and remains atomic.
+        let replaced = unsafe {
+            MoveFileExW(
+                source.as_ptr(),
+                destination.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if replaced == 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+    }
+
+    #[cfg(not(windows))]
+    tokio::fs::rename(temp_out, out).await?;
+
+    Ok(())
 }
 
 fn file_name_str(p: &Path) -> MicrosandboxResult<String> {
@@ -1924,4 +1971,33 @@ pub async fn fuzz_unpack_archive(data: &[u8]) {
         return;
     };
     let _ = unpack_archive(data, snapshots.path(), cache.path()).await;
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn digest_hex_rejects_uppercase_identity() {
+        let uppercase = format!("sha256:{}", "A".repeat(64));
+        assert!(digest_hex(&uppercase).is_err());
+    }
+
+    #[tokio::test]
+    async fn replace_archive_overwrites_existing_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let temp_out = directory.path().join("bundle.tar.zst.tmp");
+        let out = directory.path().join("bundle.tar.zst");
+        std::fs::write(&temp_out, b"new archive").unwrap();
+        std::fs::write(&out, b"old archive").unwrap();
+
+        replace_archive(&temp_out, &out).await.unwrap();
+
+        assert_eq!(std::fs::read(&out).unwrap(), b"new archive");
+        assert!(!temp_out.exists());
+    }
 }
