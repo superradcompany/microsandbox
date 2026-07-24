@@ -7,7 +7,7 @@ icon: "cube"
 
 ## msb run
 
-Create a sandbox and optionally run a command. Without `--name`, the sandbox is ephemeral and removed when the command finishes. With `--name`, it persists for later use.
+Create a sandbox and run its resolved OCI command. A command after `--` replaces the image CMD while preserving its entrypoint; without one, microsandbox runs the image's default `ENTRYPOINT + CMD`. Without `--name`, the sandbox is ephemeral and removed when the command finishes. With `--name`, it persists for later use.
 
 ```bash
 # Ephemeral: runs and cleans up
@@ -26,9 +26,13 @@ msb run --name api \
   -w /app \
   python
 
-# Detached (boots in background; run work later with exec)
-msb run -d --name worker python
-msb exec worker -- python worker.py
+# Detached: run the resolved command in the background
+msb run -d --name worker python -- python worker.py
+msb logs -f worker
+
+# Boot an idle sandbox for later exec calls
+msb create --name devbox python
+msb exec devbox -- python -c "print('hello')"
 
 # Publish on all IPv4 host interfaces instead of the default 127.0.0.1
 msb run --name public-api -p 0.0.0.0:8000:8000 python
@@ -49,7 +53,7 @@ Common flags:
 | `-e`, `--env` | Set an environment variable |
 | `--label` | Attach a label for metric attribution (`KEY=VALUE`, or bare `KEY`). Repeatable |
 | `-w`, `--workdir` | Set the working directory |
-| `-d`, `--detach` | Boot in the background. Run work later with `msb exec` |
+| `-d`, `--detach` | Run the resolved image command in the background and print the sandbox name |
 | `--no-tty` | Disable PTY allocation and run non-interactively |
 | `--replace` | Replace an existing sandbox with the same name |
 | `--no-net` | Disable network access |

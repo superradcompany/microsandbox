@@ -379,22 +379,28 @@ impl SandboxBuilder {
         self
     }
 
-    /// Clear detached startup intent for attached CLI `run`.
+    /// Select the foreground command for attached CLI `run`.
     #[doc(hidden)]
-    pub fn initial_command(mut self, command: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.config
-            .set_initial_command(command.into_iter().map(Into::into).collect());
-        self
-    }
-
-    /// Set the persisted startup command for detached CLI `run`.
-    #[doc(hidden)]
-    pub fn persistent_initial_command(
+    pub fn foreground_command(
         mut self,
         command: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         self.config
-            .set_persistent_initial_command(command.into_iter().map(Into::into).collect());
+            .set_foreground_command(command.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Select the background command for detached CLI `run`.
+    ///
+    /// An empty command uses the image's default CMD. A non-empty command replaces CMD while
+    /// preserving the effective OCI entrypoint.
+    #[doc(hidden)]
+    pub fn background_command(
+        mut self,
+        command: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.config
+            .set_background_command(command.into_iter().map(Into::into).collect());
         self
     }
 

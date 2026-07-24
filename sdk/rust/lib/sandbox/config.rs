@@ -75,6 +75,27 @@ fn default_disable_metrics_sample() -> bool {
 // Types
 //--------------------------------------------------------------------------------------------------
 
+/// Transient intent for the initial process requested by a CLI operation.
+///
+/// Foreground commands remain separate from the durable OCI command because an attached
+/// `msb run` is one-shot. Background commands use `runtime.cmd` so the resolved startup shape is
+/// visible through inspect and preserved with the sandbox configuration.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) enum LaunchIntent {
+    /// Boot the sandbox without starting an initial workload.
+    #[default]
+    None,
+
+    /// Run the resolved OCI command through the foreground attach/exec path.
+    Foreground {
+        /// Optional one-shot CMD override supplied after `--`.
+        command: Option<Vec<String>>,
+    },
+
+    /// Run the resolved OCI command in the background after the guest agent is ready.
+    Background,
+}
+
 /// Configuration for a sandbox.
 ///
 /// The durable task description lives in [`SandboxSpec`]. This type keeps
@@ -139,13 +160,9 @@ pub struct SandboxConfig {
     #[serde(skip)]
     pub(crate) snapshot_upper_source: Option<PathBuf>,
 
-    /// Whether `runtime.cmd` should be launched by the sandbox process after boot.
+    /// Transient process-launch intent for the current create operation.
     #[serde(skip)]
-    pub(crate) startup_command_requested: bool,
-
-    /// One-shot foreground command requested by attached `msb run`.
-    #[serde(skip)]
-    pub(crate) initial_command: Option<Vec<String>>,
+    pub(crate) launch_intent: LaunchIntent,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -172,8 +189,7 @@ impl SandboxConfig {
     /// image-declared init entrypoints, passed to the init handoff as the container startup argv.
     pub(crate) fn clone_for_persistence(&self) -> Self {
         let mut config = self.clone();
-        config.startup_command_requested = false;
-        config.initial_command = None;
+        config.launch_intent = LaunchIntent::None;
         for mount in &mut config.spec.mounts {
             if let VolumeMount::Named { create, .. } = mount {
                 *create = None;
@@ -182,21 +198,33 @@ impl SandboxConfig {
         config
     }
 
-    /// Clear detached startup intent for attached `msb run`.
-    pub(crate) fn set_initial_command(&mut self, command: Vec<String>) {
-        self.initial_command = (!command.is_empty()).then_some(command);
-        self.startup_command_requested = false;
+    /// Select the foreground launch path for attached `msb run`.
+    pub(crate) fn set_foreground_command(&mut self, command: Vec<String>) {
+        self.launch_intent = LaunchIntent::Foreground {
+            command: (!command.is_empty()).then_some(command),
+        };
     }
 
-    /// Set startup initial command intent for detached `msb run -d`.
-    pub(crate) fn set_persistent_initial_command(&mut self, command: Vec<String>) {
+    /// Select the background launch path for detached `msb run -d`.
+    ///
+    /// A non-empty command replaces the image CMD while preserving the effective entrypoint. An
+    /// empty command intentionally keeps the image CMD so detached and attached runs resolve the
+    /// same OCI process.
+    pub(crate) fn set_background_command(&mut self, command: Vec<String>) {
         if !command.is_empty() {
-            self.spec.runtime.cmd = Some(command.clone());
-            self.startup_command_requested = true;
-        } else {
-            self.startup_command_requested = false;
+            self.spec.runtime.cmd = Some(command);
         }
-        self.initial_command = None;
+        self.launch_intent = LaunchIntent::Background;
+    }
+
+    /// Return whether this create operation should launch the resolved command in the background.
+    pub(crate) fn should_launch_background_command(&self) -> bool {
+        self.launch_intent == LaunchIntent::Background
+    }
+
+    /// Clear process-launch intent after another mechanism takes ownership of the command.
+    pub(crate) fn clear_launch_intent(&mut self) {
+        self.launch_intent = LaunchIntent::None;
     }
 
     /// Apply OCI image config as defaults. User-provided values take precedence.
@@ -286,10 +314,11 @@ impl SandboxConfig {
         {
             entrypoint.remove(0);
         }
-        let runtime_cmd = self
-            .initial_command
-            .as_deref()
-            .or(self.spec.runtime.cmd.as_deref());
+        let foreground_command = match &self.launch_intent {
+            LaunchIntent::Foreground { command } => command.as_deref(),
+            LaunchIntent::None | LaunchIntent::Background => None,
+        };
+        let runtime_cmd = foreground_command.or(self.spec.runtime.cmd.as_deref());
         let init_args = resolved_container_argv(&entrypoint, runtime_cmd);
 
         let init = self
@@ -303,8 +332,8 @@ impl SandboxConfig {
 
         // The startup command is now part of the PID 1 argv. Running it again through agentd would
         // both duplicate execution and bypass any state the image init establishes before execing.
-        if self.startup_command_requested {
-            self.startup_command_requested = false;
+        if self.should_launch_background_command() {
+            self.clear_launch_intent();
         }
         self.spec.runtime.entrypoint = (!entrypoint.is_empty()).then_some(entrypoint);
     }
@@ -605,8 +634,7 @@ impl Default for SandboxConfig {
             replace_with_timeout: DEFAULT_REPLACE_TIMEOUT,
             manifest_digest: None,
             snapshot_upper_source: None,
-            startup_command_requested: false,
-            initial_command: None,
+            launch_intent: LaunchIntent::None,
         }
     }
 }
@@ -792,7 +820,7 @@ mod tests {
             },
             ..Default::default()
         };
-        config.set_initial_command(vec!["gateway".to_string(), "run".to_string()]);
+        config.set_foreground_command(vec!["gateway".to_string(), "run".to_string()]);
         config.merge_image_defaults(&image);
 
         let init = config
@@ -848,7 +876,7 @@ mod tests {
             },
             ..Default::default()
         };
-        config.set_initial_command(vec!["gateway".to_string(), "run".to_string()]);
+        config.set_foreground_command(vec!["gateway".to_string(), "run".to_string()]);
         config.merge_image_defaults(&image);
 
         let init = config
@@ -889,7 +917,7 @@ mod tests {
             },
             ..Default::default()
         };
-        config.set_persistent_initial_command(vec!["gateway".to_string(), "run".to_string()]);
+        config.set_background_command(vec!["gateway".to_string(), "run".to_string()]);
         config.merge_image_defaults(&image);
 
         let init = config.spec.init.as_ref().expect("runtime init");
@@ -910,14 +938,14 @@ mod tests {
             config.spec.runtime.cmd,
             Some(vec!["gateway".to_string(), "run".to_string()])
         );
-        assert!(!config.startup_command_requested);
+        assert!(!config.should_launch_background_command());
     }
 
     #[test]
-    fn test_persistent_initial_command_sets_runtime_cmd() {
+    fn test_background_command_sets_runtime_cmd() {
         let mut config = SandboxConfig::default();
 
-        config.set_persistent_initial_command(vec![
+        config.set_background_command(vec![
             "/bin/sh".to_string(),
             "-lc".to_string(),
             "echo detached".to_string(),
@@ -931,10 +959,11 @@ mod tests {
                 "echo detached".to_string(),
             ])
         );
+        assert!(config.should_launch_background_command());
     }
 
     #[test]
-    fn test_empty_persistent_initial_command_keeps_runtime_cmd() {
+    fn test_empty_background_command_keeps_runtime_cmd() {
         let mut config = SandboxConfig {
             spec: SandboxSpec {
                 runtime: SandboxRuntimeOptions {
@@ -946,9 +975,38 @@ mod tests {
             ..Default::default()
         };
 
-        config.set_persistent_initial_command(Vec::new());
+        config.set_background_command(Vec::new());
 
         assert_eq!(config.spec.runtime.cmd, Some(vec!["python3".to_string()]));
+        assert!(config.should_launch_background_command());
+    }
+
+    #[test]
+    fn test_empty_background_command_uses_merged_image_cmd() {
+        let image = ImageConfig {
+            cmd: Some(vec!["bash".to_string()]),
+            ..Default::default()
+        };
+        let mut config = SandboxConfig {
+            spec: SandboxSpec {
+                runtime: SandboxRuntimeOptions {
+                    entrypoint: Some(vec!["start-desktop".to_string()]),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        config.set_background_command(Vec::new());
+        config.merge_image_defaults(&image);
+
+        assert_eq!(
+            config.spec.runtime.entrypoint,
+            Some(vec!["start-desktop".to_string()])
+        );
+        assert_eq!(config.spec.runtime.cmd, Some(vec!["bash".to_string()]));
+        assert!(config.should_launch_background_command());
     }
 
     #[test]
@@ -1029,7 +1087,7 @@ mod tests {
             },
             ..Default::default()
         };
-        config.set_initial_command(Vec::new());
+        config.set_foreground_command(Vec::new());
         config.merge_image_defaults(&image);
 
         let init = config
@@ -1067,7 +1125,7 @@ mod tests {
             },
             ..Default::default()
         };
-        config.set_initial_command(vec!["bash".to_string()]);
+        config.set_foreground_command(vec!["bash".to_string()]);
         config.merge_image_defaults(&image);
 
         let init = config
@@ -1105,7 +1163,7 @@ mod tests {
             },
             ..Default::default()
         };
-        config.set_initial_command(vec!["gateway".to_string(), "run".to_string()]);
+        config.set_foreground_command(vec!["gateway".to_string(), "run".to_string()]);
         config.merge_image_defaults(&image);
 
         let init = config

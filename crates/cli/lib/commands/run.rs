@@ -37,9 +37,9 @@ pub struct RunArgs {
     )]
     pub from_snapshot: Option<String>,
 
-    /// Start the sandbox in the background and print its name.
+    /// Run the resolved image command in the background and print the sandbox name.
     ///
-    /// Use `msb exec` to run commands in a detached sandbox.
+    /// Use `msb create` to boot an idle sandbox without starting the image command.
     #[arg(short, long)]
     pub detach: bool,
 
@@ -63,7 +63,9 @@ pub struct RunArgs {
     #[arg(long)]
     pub detach_keys: Option<String>,
 
-    /// Command to run inside the sandbox in attached mode (after --).
+    /// Command to run inside the sandbox (after --).
+    ///
+    /// Replaces the image CMD while preserving its effective entrypoint.
     #[arg(last = true)]
     pub command: Vec<String>,
 
@@ -190,9 +192,9 @@ async fn run_new(
         builder = builder.ephemeral(true);
     }
     if args.detach {
-        builder = builder.persistent_initial_command(args.command.clone());
+        builder = builder.background_command(args.command.clone());
     } else {
-        builder = builder.initial_command(args.command.clone());
+        builder = builder.foreground_command(args.command.clone());
     }
 
     // Create sandbox with pull progress — select attached vs detached mode.
@@ -417,6 +419,31 @@ mod tests {
             TestCli::try_parse_from(["msb", "--tty", "--no-tty", "python:3-alpine"]).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn detached_entrypoint_can_use_image_cmd() {
+        let args = parse_run_args(&[
+            "--detach",
+            "--entrypoint",
+            "start-desktop",
+            "debian:bookworm-slim",
+        ]);
+
+        assert!(args.detach);
+        assert_eq!(args.sandbox.entrypoint.as_deref(), Some("start-desktop"));
+        assert!(args.command.is_empty());
+    }
+
+    #[test]
+    fn detach_help_points_idle_workloads_to_create() {
+        let mut help = Vec::new();
+        <TestCli as clap::CommandFactory>::command()
+            .write_long_help(&mut help)
+            .unwrap();
+        let help = String::from_utf8(help).unwrap();
+
+        assert!(help.contains("Use `msb create` to boot an idle sandbox"));
     }
 
     #[cfg(feature = "net")]
