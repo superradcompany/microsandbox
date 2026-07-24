@@ -245,11 +245,12 @@ async fn plain_http_invalid_host_blocks_host_bound_secret() {
     );
 
     // Test: no Host header. The exec outcome is irrelevant (the proxy drops the
-    // connection, which can break the guest pipe) — only what the server sees.
+    // connection, which can leave `nc` waiting for a response) — only what the
+    // server sees.
     let _ = sb
         .shell(format!(
-            "printf 'GET / HTTP/1.0\\r\\nAuthorization: Bearer %s\\r\\n\\r\\n' \"$API_KEY\" \
-             | nc host.microsandbox.internal {test_port} || true"
+            "timeout 5 sh -c 'printf \"GET / HTTP/1.0\\r\\nAuthorization: Bearer %s\\r\\n\\r\\n\" \
+             \"$API_KEY\" | nc host.microsandbox.internal {test_port}' || true"
         ))
         .await;
 
