@@ -30,7 +30,7 @@ The default policy denies egress except for an implicit allow-public rule (plus 
 
 ## NetworkPolicy static methods
 
-A [`NetworkPolicy`](#networkpolicy) is an ordered rule list plus two per-direction defaults, evaluated first-match-wins. The presets below construct common shapes directly; for anything custom, start from [`builder()`](#networkpolicybuilder).
+A [`NetworkPolicy`](#networkpolicy) is an ordered rule list plus two per-direction defaults, evaluated first-match-wins. Compose common access shapes with [`from_profiles()`](#networkpolicyfrom_profiles); for anything custom, start from [`builder()`](#networkpolicybuilder).
 
 #### <span className="msb-recv">NetworkPolicy::</span><span className="msb-hn">builder()</span>
 
@@ -78,25 +78,30 @@ fn allow_all() -> NetworkPolicy
 
 Unrestricted network access: allow everything in both directions, no rules.
 
-#### <span className="msb-recv">NetworkPolicy::</span><span className="msb-hn">public_only()</span>
+#### <span className="msb-recv">NetworkPolicy::</span><span className="msb-hn">from_profiles()</span>
 
 ```rust
-fn public_only() -> NetworkPolicy
+fn from_profiles<I: IntoIterator<Item = NetworkProfile>>(profiles: I) -> NetworkPolicy
 ```
 
-Public internet only, and the [`Default`](#networkpolicy) policy. Egress defaults to deny but allows DNS to the gateway forwarder and any [`Public`](#destinationgroup) destination; private, loopback, link-local, and metadata are denied. Ingress defaults to allow, preserving unfiltered published-port behavior.
+Build a deny-by-default policy from composable [`NetworkProfile`](#networkprofile) values. Duplicate profiles are ignored, the generated rules use canonical `Public`, `Private`, `Host` order, and every non-empty profile set receives exactly one narrow gateway DNS rule. An empty profile set permits no egress and adds no DNS. Ingress defaults to allow, preserving published-port behavior.
 
-#### <span className="msb-recv">NetworkPolicy::</span><span className="msb-hn">non_local()</span>
+<Accordion title="Example">
 
 ```rust
-fn non_local() -> NetworkPolicy
+use microsandbox::{NetworkPolicy, NetworkProfile};
+
+let policy = NetworkPolicy::from_profiles([
+    NetworkProfile::Public,
+    NetworkProfile::Private,
+]);
 ```
 
-Non-local access: like [`public_only()`](#networkpolicypublic_only) but also allows egress to [`Private`](#destinationgroup) / LAN ranges. Loopback, link-local, and metadata stay denied; ingress defaults to allow.
+</Accordion>
 
 ## NetworkPolicy instance methods
 
-These methods consume `self` and return a modified policy, so they chain off a preset or a built policy. Each **prepends** its rules, so a later deny outranks a catch-all allow like `allow public` under first-match-wins. All return [`Result<NetworkPolicy, DomainNameError>`](#domainname) because the names are parsed eagerly.
+These methods consume `self` and return a modified policy, so they chain off a profile or a built policy. Each **prepends** its rules, so a later deny outranks a catch-all allow like `allow public` under first-match-wins. All return [`Result<NetworkPolicy, DomainNameError>`](#domainname) because the names are parsed eagerly.
 
 #### <span className="msb-recv">policy.</span><span className="msb-hn">allow_domain()</span>
 
@@ -107,7 +112,7 @@ fn allow_domain<S: AsRef<str>>(self, name: S) -> Result<NetworkPolicy, DomainNam
 <Accordion title="Example">
 
 ```rust
-let policy = NetworkPolicy::public_only().allow_domain("api.openai.com")?;
+let policy = NetworkPolicy::default().allow_domain("api.openai.com")?;
 ```
 
 </Accordion>
@@ -718,7 +723,7 @@ fn policy(self, policy: NetworkPolicy) -> Self
 
 </Accordion>
 
-Set the network access policy. Pass a preset or a builder-constructed [`NetworkPolicy`](#networkpolicy).
+Set the network access policy. Pass a profile-composed or builder-constructed [`NetworkPolicy`](#networkpolicy).
 
 <p className="msb-label">Parameters</p>
 
@@ -1149,13 +1154,23 @@ Allow **any** host to receive placeholders unchanged. Takes effect only when `i_
 
 <p className="msb-backref">Built by <a href="#networkpolicybuilder">NetworkPolicy::builder()</a> · used by <a href="#policy">policy()</a></p>
 
-An ordered rule list plus two per-direction defaults, evaluated first-match-wins. Egress evaluation considers rules where `direction ∈ {Egress, Any}`; ingress considers `{Ingress, Any}`. If no rule matches, the direction-specific default applies. `Default` is [`public_only()`](#networkpolicypublic_only).
+An ordered rule list plus two per-direction defaults, evaluated first-match-wins. Egress evaluation considers rules where `direction ∈ {Egress, Any}`; ingress considers `{Ingress, Any}`. If no rule matches, the direction-specific default applies. `Default` is [`from_profiles([NetworkProfile::Public])`](#networkpolicyfrom_profiles).
 
 | Field | Type | Description |
 |-------|------|-------------|
 | default_egress | [`Action`](#action) | Action when no egress-applicable rule matches |
 | default_ingress | [`Action`](#action) | Action when no ingress-applicable rule matches |
 | rules | `Vec<`[`Rule`](#rule)`>` | Ordered rules; first match wins per direction |
+
+### NetworkProfile
+
+Composable high-level access category accepted by [`NetworkPolicy::from_profiles()`](#networkpolicyfrom_profiles).
+
+| Variant | Access |
+|---------|--------|
+| `Public` | Public internet addresses |
+| `Private` | Private/LAN ranges (RFC 1918, RFC 4193 ULA, and CGN) |
+| `Host` | The sandbox host via its gateway addresses |
 
 ### Rule
 
@@ -1182,6 +1197,7 @@ Convenience constructors build any-protocol, any-port rules:
 | `Rule::allow_any(destination)` | Allow rule, direction `Any` |
 | `Rule::deny_any(destination)` | Deny rule, direction `Any` |
 | `Rule::allow_dns()` | Allow plain DNS (UDP/53 + TCP/53) to the gateway forwarder (`Group::Host`); the one-liner for opening DNS under deny-by-default. See [DNS as egress](/networking/dns#dns-as-egress) |
+| `Rule::deny_dns()` | Deny plain DNS (UDP/53 + TCP/53) to the gateway forwarder; place before profile-generated rules to override automatic DNS |
 
 ### Action
 

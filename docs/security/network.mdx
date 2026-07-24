@@ -63,7 +63,7 @@ NetworkPolicy::builder()
 
 An attacker who controls a domain can make it resolve to a public IP during the allowlist check, then flip to a private IP on a later lookup. The guest ends up making a request that *looked* bound for `evil.example.com` but actually lands on `192.168.1.10`.
 
-Rebind protection catches this at the response level: when the DNS interceptor sees an answer resolving a name to a private, loopback, or link-local address, it rewrites the response to `NXDOMAIN` and the connection is never made. It's on by default. You can disable it when you genuinely need names to resolve to internal hosts, such as local development or split-horizon DNS. See [DNS](/networking/dns).
+Rebind protection catches this at the response level. A private, loopback, or link-local answer is rewritten to `NXDOMAIN` unless the first matching explicit, address-only egress rule permits the returned address. For example, the `private` profile allows private DNS answers while retaining protection against loopback, link-local, metadata, and unspecified addresses. Ordered address-specific denies still win; policy defaults, `Any` rules, and port-scoped rules do not disable the check. Disable rebind protection globally only when policy-aware exceptions cannot represent the intended access. See [DNS](/networking/dns).
 
 ## DNS-to-IP binding (TOCTOU)
 

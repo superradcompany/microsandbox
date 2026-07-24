@@ -808,7 +808,7 @@ fn default_port_protocol() -> String {
 
 /// Custom policy. Parity-aligned with Node/Python: `default_egress` and
 /// `default_ingress` are the asymmetric default actions. Empty defaults to
-/// deny egress / allow ingress (matching upstream `public_only`).
+/// deny egress / allow ingress (matching the default public profile).
 #[derive(serde::Deserialize, Default)]
 struct CustomNetworkPolicy {
     default_egress: Option<String>,
@@ -859,7 +859,10 @@ struct DnsOpts {
 
 #[derive(serde::Deserialize, Default)]
 struct NetworkOpts {
-    policy: Option<String>,
+    /// Removed preset field retained only to return migration guidance instead
+    /// of silently accepting JSON from an older Go SDK.
+    #[serde(rename = "policy")]
+    removed_policy: Option<String>,
     custom_policy: Option<CustomNetworkPolicy>,
     /// DNS configuration. Replaces the legacy flat `dns_rebind_protection`.
     dns: Option<DnsOpts>,
@@ -1155,24 +1158,10 @@ fn apply_network(
 
     let mut policy_set = false;
 
-    // Preset policy string.
-    if let Some(ref preset) = net.policy {
-        let mut policy = match preset.as_str() {
-            "none" => NetworkPolicy::none(),
-            "public_only" | "public-only" => NetworkPolicy::public_only(),
-            "allow_all" | "allow-all" => NetworkPolicy::allow_all(),
-            "non_local" | "non-local" => NetworkPolicy::non_local(),
-            other => {
-                return Err(FfiError::invalid_argument(format!(
-                    "unknown network policy preset: {other}"
-                )));
-            }
-        };
-        let mut combined = bulk_deny.clone();
-        combined.extend(policy.rules);
-        policy.rules = combined;
-        builder = builder.network(|n| n.policy(policy));
-        policy_set = true;
+    if net.removed_policy.is_some() {
+        return Err(FfiError::invalid_argument(
+            "string network policy presets were removed; use NetworkPolicy.FromProfiles, NetworkPolicy.None, or NetworkPolicy.AllowAll",
+        ));
     }
 
     // Custom policy.
@@ -1220,7 +1209,7 @@ fn apply_network(
         policy_set = true;
     }
 
-    // No preset / custom policy was specified, but legacy DNS deny entries
+    // No custom policy was specified, but legacy DNS deny entries
     // were. Use permissive defaults so the rest of the network keeps
     // working — preserves the legacy "full network minus blocked domains"
     // semantics.

@@ -1522,13 +1522,13 @@ func WithNetwork(net *NetworkConfig) SandboxOption
 ```go
 sb, err := m.CreateSandbox(ctx, "api",
     m.WithImage("python"),
-    m.WithNetwork(m.NetworkPolicy.PublicOnly()),
+    m.WithNetwork(m.NetworkPolicy.FromProfiles(m.NetworkProfilePublic)),
 )
 ```
 
 </Accordion>
 
-Configure the network stack: preset, custom rules, DNS, and TLS interception. Build via the [`NetworkPolicy`](/sdk/go/networking) factory or a [`*NetworkConfig`](/sdk/go/networking#networkconfig) literal. See [Networking](/sdk/go/networking).
+Configure the network stack: profiles, custom rules, DNS, and TLS interception. Build via the [`NetworkPolicy`](/sdk/go/networking) factory or a [`*NetworkConfig`](/sdk/go/networking#networkconfig) literal. See [Networking](/sdk/go/networking).
 
 <p className="msb-label">Parameters</p>
 

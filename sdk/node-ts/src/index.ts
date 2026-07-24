@@ -142,8 +142,8 @@ export { MetricsStream } from "./metrics-stream.js";
 
 // Attach a JS-side `policy(NetworkPolicy)` method to the native
 // `NetworkBuilder.prototype` so callers can pass the plain
-// `NetworkPolicy` object produced by `NetworkPolicy.publicOnly()` /
-// `.allowAll()` / `.none()` / `.nonLocal()` and the custom-rule
+// `NetworkPolicy` object produced by `NetworkPolicy.fromProfiles()` /
+// `.allowAll()` / `.none()` and the custom-rule
 // factories. Native exposes `policyJson(string)`; this shim
 // serializes once.
 // Wrap a class's prototype method so any thrown error gets remapped
@@ -523,10 +523,11 @@ export type {
   Action,
   DestinationGroup,
   Direction,
+  NetworkProfile,
   Protocol,
 } from "./policy/types.js";
 
-// `Destination`, `NetworkPolicy`, `PortRange`, `Rule` each merge an
+// `Destination`, `NetworkPolicy`, `PortRange`, and `Rule` each merge an
 // interface (the value shape) with a factory namespace (the constructors)
 // under one name.
 import * as _Factories from "./policy/factories.js";

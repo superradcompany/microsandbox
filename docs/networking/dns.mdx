@@ -21,9 +21,11 @@ A DNS query is itself an egress action that the policy evaluates before the forw
 - **`Any` rules** match the DNS transport's actual protocol and port. An `Any udp/53 allow` is the standard way to grant plain DNS broadly.
 - **IP-based rules** mostly can't match (a query has no resolved IP yet), with one exception: `Group::Host` matches because it names the gateway forwarder the query is delivered to. A `Group::Host udp/53 + tcp/53 allow` rule is the narrow way to open DNS while still denying the guest from aiming queries at arbitrary resolver IPs.
 
-Under a deny-by-default policy whose rules are all IP-based (`Cidr` / non-`Host` `Group`), nothing matches at DNS-decision time and every query is denied. The default `public_only` and `non_local` presets ship with an explicit `Group::Host udp/53 + tcp/53 allow` rule (`Rule::allow_dns()` in Rust, `Rule.allowDns()` in TypeScript, `Rule.allow_dns()` in Python) so DNS works under those policies; custom deny-by-default policies need an equivalent allow.
+Under a deny-by-default policy whose rules are all IP-based (`Cidr` / non-`Host` `Group`), nothing matches at DNS-decision time and every query is denied. Policies built from the `public`, `private`, or `host` profiles include an explicit `Group::Host udp/53 + tcp/53 allow` rule (`Rule::allow_dns()` in Rust, `Rule.allowDns()` in TypeScript, `Rule.allow_dns()` in Python) so DNS works automatically; custom deny-by-default policies need an equivalent allow. In the CLI, `allow@dns` and `deny@dns` are semantic shortcuts for that gateway DNS rule.
 
 DoT (TCP/853) is a separate port; `allow_dns()` does not include it. Pair an `Any tcp/853 allow` (or `Group::Host tcp/853 allow`) with [TLS interception](/networking/tls) if you need DoT.
+
+DNS rebinding protection remains enabled independently of DNS query access. Private/reserved answers are rejected unless an explicit address-only egress rule, such as the generated `private` profile rule, permits the returned address. Ordered denies still win, port-scoped rules do not qualify before a connection port is known, and an `allow_all` default alone does not silently disable rebinding protection. Use the explicit rebind-protection setting only when you intend to disable that check globally.
 
 ## Blocking domains
 

@@ -10,7 +10,7 @@ All sandbox traffic flows through a host-controlled networking stack. From insid
 
 By default, sandboxes can reach the public internet but cannot reach private networks, loopback, link-local addresses, or cloud metadata endpoints. Only published ports accept inbound traffic.
 
-To turn networking off entirely:
+To block network access:
 
 <CodeGroup>
 ```rust Rust
@@ -46,7 +46,43 @@ msb create python --name isolated --no-net
 ```
 </CodeGroup>
 
-## Custom policies
+The Rust and TypeScript examples disable the network device. Python `Network.none()`, Go `NetworkPolicy.None()`, and CLI `--no-net` retain the device but deny traffic in both directions through policy.
+
+## High-level profiles
+
+For common access shapes, compose high-level profiles. Every non-empty profile set automatically adds narrow DNS access through the sandbox gateway.
+
+<CodeGroup>
+```rust Rust
+let policy = NetworkPolicy::from_profiles([
+    NetworkProfile::Public,
+    NetworkProfile::Private,
+]);
+```
+
+```typescript TypeScript
+const policy = NetworkPolicy.fromProfiles(["public", "private"]);
+```
+
+```python Python
+network = Network.from_profiles(NetworkProfile.PUBLIC, NetworkProfile.PRIVATE)
+```
+
+```go Go
+network := m.NetworkPolicy.FromProfiles(
+    m.NetworkProfilePublic,
+    m.NetworkProfilePrivate,
+)
+```
+
+```bash CLI
+msb run alpine --net "public,private"
+```
+</CodeGroup>
+
+The composable profiles are `public`, `private`, and `host`. `none` and `all` remain terminal whole-policy choices rather than profiles. Duplicate profiles are ignored, generated rules use a stable order, and explicit low-level rules can be placed before generated profile rules to override them.
+
+## Low-level custom policies
 
 A policy has two defaults and an ordered list of rules. The first matching rule wins.
 
@@ -89,20 +125,18 @@ await using sb = await Sandbox.builder("restricted-worker")
 ```
 
 ```python Python
-from microsandbox import Network, Sandbox
+from microsandbox import Action, DestGroup, Destination, Network, NetworkPolicy, Protocol, Rule, Sandbox
 
 sb = await Sandbox.create(
     "restricted-worker",
     image="alpine",
-    network={
-        "policy": {
-            "default_egress": "deny",
-            "rules": [
-                {"action": "allow", "direction": "egress", "destination": "public", "protocol": "tcp", "port": "443"},
-                {"action": "allow", "direction": "egress", "destination": "host", "protocol": "udp", "port": "53"},
-            ],
-        },
-    },
+    network=Network(policy=NetworkPolicy(
+        default_egress=Action.DENY,
+        rules=(
+            Rule.allow(destination=Destination.group(DestGroup.PUBLIC), protocol=Protocol.TCP, port=443),
+            *Rule.allow_dns(),
+        ),
+    )),
 )
 ```
 
@@ -113,7 +147,7 @@ sb, err := m.CreateSandbox(ctx, "restricted-worker",
         DefaultEgress: m.PolicyActionDeny,
         Rules: []m.PolicyRule{
             {Action: m.PolicyActionAllow, Direction: m.PolicyDirectionEgress, Destination: "public", Protocol: m.PolicyProtocolTCP, Port: "443"},
-            {Action: m.PolicyActionAllow, Direction: m.PolicyDirectionEgress, Destination: "host", Protocol: m.PolicyProtocolUDP, Port: "53"},
+            m.Rule.AllowDNS(),
         },
     }),
 )
@@ -122,7 +156,7 @@ sb, err := m.CreateSandbox(ctx, "restricted-worker",
 ```bash CLI
 msb create alpine --name restricted-worker \
   --net-default-egress deny \
-  --net-rule "allow@public:tcp:443,allow@host:udp:53"
+  --net-rule "allow@public:tcp:443,allow@dns"
 ```
 </CodeGroup>
 
@@ -175,8 +209,7 @@ On Windows, the first published port may trigger a Windows Defender Firewall pro
 From inside the sandbox, `host.microsandbox.internal` resolves to the host machine. The default policy denies host access, so allow the `host` group when a sandbox needs to call a dev server, database, or other local service.
 
 ```bash
-msb create python --name devbox \
-  --net-rule "allow@public,allow@host"
+msb create python --name devbox --net "public,host"
 ```
 
 `loopback` means the sandbox's own `127.0.0.1`, not your laptop's localhost. Use `host` for `host.microsandbox.internal`.

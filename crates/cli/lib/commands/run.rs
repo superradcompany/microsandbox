@@ -419,6 +419,27 @@ mod tests {
         assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
     }
 
+    #[cfg(feature = "net")]
+    #[test]
+    fn net_profiles_are_repeatable_and_preserve_comma_groups() {
+        let args = parse_run_args(&["--net", "public,private", "--net", "host", "alpine"]);
+        assert_eq!(args.sandbox.net, ["public,private", "host"]);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn net_profile_conflicts_with_low_level_default_baselines() {
+        for conflicting in ["--no-net", "--net-default"] {
+            let mut argv = vec!["msb", "--net", "public", conflicting];
+            if conflicting == "--net-default" {
+                argv.push("deny");
+            }
+            argv.push("alpine");
+            let err = TestCli::try_parse_from(argv).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+        }
+    }
+
     #[test]
     fn existing_reuse_does_not_warn_for_required_image() {
         let args = parse_run_args(&["--name", "box", "alpine", "--", "echo", "hello"]);
