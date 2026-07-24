@@ -559,6 +559,30 @@ pub async fn clear_install_exclusive_lease(
     Ok(())
 }
 
+/// Clear an install-exclusive lease, accepting an already released or expired
+/// row as success so a crash-restarted installer can repeat its cleanup.
+pub async fn clear_install_exclusive_lease_idempotent(
+    db: &DbWriteConnection,
+    lease: &InstallExclusiveLease,
+) -> RuntimeResult<()> {
+    match clear_install_exclusive_lease(db, lease).await {
+        Ok(()) => Ok(()),
+        Err(clear_error) => {
+            let current = lease_entity::Entity::find_by_id(lease_entity::INSTALL_EXCLUSIVE)
+                .one(db)
+                .await?;
+            let now = chrono::Utc::now().naive_utc();
+            if current
+                .as_ref()
+                .is_none_or(|row| row.holder_pid.is_none() || row.lease_expires_at <= now)
+            {
+                return Ok(());
+            }
+            Err(clear_error)
+        }
+    }
+}
+
 /// Refuse startup/migration when an install-mutating command is active.
 ///
 /// A missing table means the database has not reached the maintenance-lease
@@ -971,6 +995,9 @@ mod tests {
         );
 
         clear_install_exclusive_lease(&db, &lease).await.unwrap();
+        clear_install_exclusive_lease_idempotent(&db, &lease)
+            .await
+            .unwrap();
         refuse_if_install_exclusive_held(&db).await.unwrap();
     }
 
@@ -999,8 +1026,16 @@ mod tests {
                 .contains("install-exclusive lease is no longer held")
         );
         assert!(refuse_if_install_exclusive_held(&db).await.is_err());
+        assert!(
+            clear_install_exclusive_lease_idempotent(&db, &stale_lease)
+                .await
+                .is_err()
+        );
 
         clear_install_exclusive_lease(&db, &lease).await.unwrap();
+        clear_install_exclusive_lease_idempotent(&db, &lease)
+            .await
+            .unwrap();
         refuse_if_install_exclusive_held(&db).await.unwrap();
     }
 
