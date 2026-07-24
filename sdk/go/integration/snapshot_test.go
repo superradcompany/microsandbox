@@ -50,8 +50,8 @@ func TestSandboxHandleSnapshotAndWithFromSnapshotFork(t *testing.T) {
 	if artifact.ImageRef() == "" {
 		t.Fatal("Snapshot artifact has empty image ref")
 	}
-	if artifact.SizeBytes() == 0 {
-		t.Fatal("Snapshot artifact has zero size")
+	if sizeBytes := artifact.SizeBytes(); sizeBytes == nil || *sizeBytes == 0 {
+		t.Fatalf("Snapshot artifact has invalid size: %v", sizeBytes)
 	}
 
 	report, err := artifact.Verify(ctx)
