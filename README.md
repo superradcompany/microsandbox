@@ -1,3 +1,5 @@
+[![MCP Toplist](https://mcptoplist.com/badge/glama%2Fsuperradcompany%2Fmicrosandbox.svg)](https://mcptoplist.com/server/glama%2Fsuperradcompany%2Fmicrosandbox)
+
 <div align="center">
     <a href="./#gh-dark-mode-only" target="_blank" align="center">
         <img width="35%" src="./assets/microsandbox-gh-banner-dark.png" alt="microsandbox-banner-xl-dark">
