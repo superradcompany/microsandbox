@@ -23,19 +23,23 @@ const INITIAL_DELAY: Duration = Duration::from_millis(10);
 const MAX_DELAY: Duration = Duration::from_millis(500);
 
 /// Returns `true` if `err` is a SQLite `BUSY` / `BUSY_SNAPSHOT` error
-/// from any of the sea-orm variants that wrap a sqlx database error.
+/// from any of the sea-orm variants that wrap a sqlx database error, or a
+/// busy condition reported by a remote database server (tagged with an
+/// `SQLITE_BUSY` prefix by the libsql backend's error mapping).
 pub fn is_sqlite_busy(err: &DbErr) -> bool {
     let runtime_err = match err {
         DbErr::Conn(e) | DbErr::Exec(e) | DbErr::Query(e) => e,
         _ => return false,
     };
-    let RuntimeErr::SqlxError(sqlx::Error::Database(db_err)) = runtime_err else {
-        return false;
-    };
-    matches!(
-        db_err.code().as_deref(),
-        Some(SQLITE_BUSY) | Some(SQLITE_BUSY_SNAPSHOT)
-    )
+
+    match runtime_err {
+        RuntimeErr::SqlxError(sqlx::Error::Database(db_err)) => matches!(
+            db_err.code().as_deref(),
+            Some(SQLITE_BUSY) | Some(SQLITE_BUSY_SNAPSHOT)
+        ),
+        RuntimeErr::Internal(message) => message.starts_with("SQLITE_BUSY"),
+        _ => false,
+    }
 }
 
 /// Returns `true` if `err` is a pool-acquisition timeout — the pool had no

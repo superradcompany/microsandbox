@@ -53,6 +53,12 @@ pub struct DbWriteConnection {
     stats: DbStats,
 }
 
+/// How long a single remote database request may run, derived from the
+/// busy timeout so server-side lock waits fit inside the request bound.
+fn remote_request_timeout(busy_timeout: Duration) -> Duration {
+    busy_timeout.max(Duration::from_secs(crate::pool::DEFAULT_BUSY_TIMEOUT_SECS)) * 6
+}
+
 /// When `err` is a pool-acquisition timeout: count it, log the pool's live
 /// occupancy, and rewrite the message to name the pool that was exhausted.
 /// Every other error (including `SQLITE_BUSY`) passes through untouched so
@@ -74,14 +80,14 @@ fn note_pool_timeout(
                 pool = kind,
                 connections = size,
                 idle,
-                "catalog pool acquisition timed out"
+                "db pool acquisition timed out"
             );
             DbErr::Custom(format!(
                 "{kind} pool exhausted ({size} connections, {idle} idle): {err}"
             ))
         }
         None => {
-            tracing::warn!(pool = kind, "catalog pool acquisition timed out");
+            tracing::warn!(pool = kind, "db pool acquisition timed out");
             DbErr::Custom(format!("{kind} pool exhausted: {err}"))
         }
     }
@@ -100,7 +106,7 @@ impl DbReadConnection {
     /// Open a stand-alone read pool at `db_path` with shared PRAGMAs.
     ///
     /// Read-only: opening a non-existent DB fails rather than creating it, so a
-    /// read consumer never authors or pre-empts the catalog owned by `msb`.
+    /// read consumer never authors or pre-empts the database owned by `msb`.
     pub async fn open(
         db_path: &Path,
         max_connections: u32,
@@ -118,6 +124,27 @@ impl DbReadConnection {
         Ok(Self {
             inner,
             pool: Some(pool),
+            stats: DbStats::new(),
+        })
+    }
+
+    /// Open a read proxy to a remote database server (`sqld`) at `url`.
+    ///
+    /// `max_connections` bounds concurrent in-flight reads exactly like the
+    /// file backend's pool size; `connect_timeout` bounds admission waits.
+    pub async fn open_url(
+        url: &str,
+        max_connections: u32,
+        connect_timeout: Duration,
+        busy_timeout: Duration,
+    ) -> Result<Self, DbErr> {
+        let request_timeout = remote_request_timeout(busy_timeout);
+        let inner =
+            crate::remote::open_read(url, max_connections, connect_timeout, request_timeout)
+                .await?;
+        Ok(Self {
+            inner,
+            pool: None,
             stats: DbStats::new(),
         })
     }
@@ -141,6 +168,24 @@ impl DbWriteConnection {
             pool: None,
             stats: DbStats::new(),
         }
+    }
+
+    /// Open a write proxy to a remote database server (`sqld`) at `url`.
+    ///
+    /// Single-connection like the file backend; `connect_timeout` bounds
+    /// admission waits and `busy_timeout` derives the per-request bound.
+    pub async fn open_url(
+        url: &str,
+        connect_timeout: Duration,
+        busy_timeout: Duration,
+    ) -> Result<Self, DbErr> {
+        let request_timeout = remote_request_timeout(busy_timeout);
+        let inner = crate::remote::open_write(url, connect_timeout, request_timeout).await?;
+        Ok(Self {
+            inner,
+            pool: None,
+            stats: DbStats::new(),
+        })
     }
 
     /// Open a stand-alone single-connection write pool at `db_path`.
@@ -193,12 +238,61 @@ impl DbWriteConnection {
         T: Send,
         E: From<DbErr> + IsSqliteBusy,
     {
+        if matches!(
+            self.inner,
+            sea_orm::DatabaseConnection::ProxyDatabaseConnection(_)
+        ) {
+            return self.remote_transaction(f).await;
+        }
+
         retry::retry_on_busy_with_stats(
             || async {
                 let txn = self.inner.begin().await?;
                 let (txn, value) = f(txn).await?;
                 txn.commit().await?;
                 Ok(value)
+            },
+            Some(&self.stats),
+        )
+        .await
+    }
+
+    /// Transaction path for the remote backend.
+    ///
+    /// sea-orm's proxy transaction hooks cannot return errors, so a hook-run
+    /// COMMIT could fail silently and report a non-durable write as
+    /// committed. BEGIN/COMMIT/ROLLBACK therefore run as ordinary statements
+    /// here — their failures propagate — while the admission permit is held
+    /// across the whole transaction so no other writer interleaves.
+    async fn remote_transaction<F, Fut, T, E>(&self, f: F) -> Result<T, E>
+    where
+        F: Fn(DatabaseTransaction) -> Fut,
+        Fut: Future<Output = Result<(DatabaseTransaction, T), E>> + Send,
+        T: Send,
+        E: From<DbErr> + IsSqliteBusy,
+    {
+        retry::retry_on_busy_with_stats(
+            || async {
+                self.inner
+                    .execute_unprepared("BEGIN IMMEDIATE")
+                    .await
+                    .map_err(E::from)?;
+
+                let txn = self.inner.begin().await.map_err(E::from)?;
+                match f(txn).await {
+                    Ok((txn, value)) => {
+                        txn.commit().await.map_err(E::from)?;
+                        if let Err(err) = self.inner.execute_unprepared("COMMIT").await {
+                            let _ = self.inner.execute_unprepared("ROLLBACK").await;
+                            return Err(E::from(err));
+                        }
+                        Ok(value)
+                    }
+                    Err(err) => {
+                        let _ = self.inner.execute_unprepared("ROLLBACK").await;
+                        Err(err)
+                    }
+                }
             },
             Some(&self.stats),
         )

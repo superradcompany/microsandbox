@@ -1,6 +1,6 @@
 [package]
-name = "microsandbox-db"
-description = "Shared database entity definitions and connection helpers for the microsandbox project."
+name = "microsandbox-libsql"
+description = "libSQL server proxy backend for microsandbox-db."
 version.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -8,18 +8,13 @@ authors.workspace = true
 edition.workspace = true
 
 [lib]
-name = "microsandbox_db"
+name = "microsandbox_libsql"
 path = "lib/lib.rs"
 
 [dependencies]
 async-trait = "0.1"
 chrono.workspace = true
-microsandbox-libsql = { path = "../libsql" }
+libsql = { version = "0.9", default-features = false, features = ["remote", "tls"] }
 sea-orm = { workspace = true, features = ["proxy"] }
-sqlx.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-
-[dev-dependencies]
-microsandbox-migration = { path = "../migration" }
-tempfile.workspace = true

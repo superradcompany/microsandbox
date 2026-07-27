@@ -2,6 +2,7 @@
 resolver = "3"
 exclude = ["sdk/rust/fuzz"]
 members = [
+    "crates/libsql",
     "crates/agentd",
     "crates/cli",
     "crates/db",
@@ -68,6 +69,7 @@ panic = "abort"
 microsandbox = { version = "=0.6.7", path = "sdk/rust", default-features = false }
 microsandbox-agent-client = { version = "=0.6.7", path = "packages/agent-client/rust" }
 microsandbox-db = { version = "=0.6.7", path = "crates/db" }
+microsandbox-libsql = { version = "=0.6.7", path = "crates/libsql" }
 microsandbox-filesystem = { version = "=0.6.7", path = "crates/filesystem", default-features = false }
 microsandbox-image = { version = "=0.6.7", path = "crates/image" }
 microsandbox-metrics = { version = "=0.6.7", path = "crates/metrics" }

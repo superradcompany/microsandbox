@@ -52,6 +52,40 @@ impl DbPools {
         Ok(Self { read, write })
     }
 
+    /// Open both pools for a database target: a SQLite file path, or a remote
+    /// server URL (`http://`, `https://`, `libsql://`).
+    ///
+    /// The remote backend reuses `connect_timeout` as its admission timeout
+    /// and derives a per-request bound from `busy_timeout` (see
+    /// `DbWriteConnection::open_url`).
+    pub async fn open_target(
+        target: &str,
+        max_read_connections: u32,
+        connect_timeout: Duration,
+        busy_timeout: Duration,
+    ) -> Result<Self, sea_orm::DbErr> {
+        let is_url = target.starts_with("http://")
+            || target.starts_with("https://")
+            || target.starts_with("libsql://");
+
+        if !is_url {
+            return Self::open(
+                Path::new(target),
+                max_read_connections,
+                connect_timeout,
+                busy_timeout,
+            )
+            .await
+            .map_err(|e| sea_orm::DbErr::Conn(sea_orm::RuntimeErr::SqlxError(e)));
+        }
+
+        let write = DbWriteConnection::open_url(target, connect_timeout, busy_timeout).await?;
+        let read =
+            DbReadConnection::open_url(target, max_read_connections, connect_timeout, busy_timeout)
+                .await?;
+        Ok(Self { read, write })
+    }
+
     /// Borrow the read pool (multi-connection).
     pub fn read(&self) -> &DbReadConnection {
         &self.read
@@ -74,7 +108,7 @@ impl DbPools {
 /// volume at the cost of higher tail latency on contention.
 ///
 /// `create_if_missing` controls whether opening a non-existent DB file creates
-/// it. The write side (owned by `msb`) creates the catalog; read-only consumers
+/// it. The write side (owned by `msb`) creates the database; read-only consumers
 /// (e.g. `msb-metrics`) pass `false` so they never author or pre-empt it.
 ///
 /// Returns the sea-orm connection plus the underlying sqlx pool handle, so

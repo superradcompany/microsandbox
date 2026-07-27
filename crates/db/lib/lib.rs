@@ -15,6 +15,7 @@ pub mod connection;
 #[allow(missing_docs)]
 pub mod entity;
 pub mod pool;
+mod remote;
 pub mod retry;
 pub mod stats;
 

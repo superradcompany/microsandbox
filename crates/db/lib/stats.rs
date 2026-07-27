@@ -1,6 +1,6 @@
-//! Lightweight counters for catalog database health.
+//! Lightweight counters for database health.
 //!
-//! Hosts running many sandboxes can exhaust the catalog connection pools;
+//! Hosts running many sandboxes can exhaust the database connection pools;
 //! these counters let host processes export how often pool acquisition
 //! timed out or writes had to retry on `SQLITE_BUSY`, without pulling a
 //! metrics framework into this crate.
