@@ -746,27 +746,27 @@ jobs:
   #   - WINGET_RELEASE_ENABLED: set this repository variable to `true` only
   #     after the first package version is accepted into winget-pkgs.
   #
-  # The submit step is a no-op unless publishing is enabled and WINGET_TOKEN is
-  # set, so releases never fail before the initial package is accepted or for
-  # forks that have not configured winget publishing. Prerelease tags
-  # (rc/alpha/beta/dev) are skipped to match the assemble job's --prerelease
-  # detection.
+  # The job is skipped unless publishing is enabled, and the submit step is a
+  # no-op when WINGET_TOKEN is unset. This keeps releases from failing before
+  # the initial package is accepted or for forks that have not configured
+  # winget publishing. Prerelease tags (rc/alpha/beta/dev) are skipped to match
+  # the assemble job's --prerelease detection.
   # ---------------------------------------------------------------------------
   update-winget:
     name: Update winget package
     needs: assemble
+    if: >-
+      vars.WINGET_RELEASE_ENABLED == 'true'
+      && !contains(github.ref_name, '-rc')
+      && !contains(github.ref_name, '-alpha')
+      && !contains(github.ref_name, '-beta')
+      && !contains(github.ref_name, '-dev')
     runs-on: ubuntu-latest
     env:
       WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
     steps:
       - name: Submit to winget-pkgs
-        if: >-
-          vars.WINGET_RELEASE_ENABLED == 'true'
-          && env.WINGET_TOKEN != ''
-          && !contains(github.ref_name, '-rc')
-          && !contains(github.ref_name, '-alpha')
-          && !contains(github.ref_name, '-beta')
-          && !contains(github.ref_name, '-dev')
+        if: env.WINGET_TOKEN != ''
         uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e # v2
         with:
           identifier: SuperRadCompany.Microsandbox
