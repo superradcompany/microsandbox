@@ -18,6 +18,16 @@ pub mod pool;
 mod remote;
 pub mod retry;
 pub mod stats;
+pub mod target;
 
 pub use connection::{DbReadConnection, DbWriteConnection};
 pub use stats::{DbStats, DbStatsSnapshot};
+pub use target::DbTarget;
+
+/// The error returned for a database target whose scheme this crate does not
+/// recognize.
+pub(crate) fn unsupported_target(target: &str) -> sea_orm::DbErr {
+    sea_orm::DbErr::Custom(format!(
+        "'{target}' is not a supported database target: use a file path, sqlite://, or libsql://"
+    ))
+}

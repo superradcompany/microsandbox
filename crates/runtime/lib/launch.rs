@@ -24,8 +24,10 @@ use crate::vm::{MetricsSlotHandoff, StartupCommand};
 /// The bulk `msb sandbox` configuration delivered over the config fd.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct LaunchConfig {
-    /// Path to the sandbox database file.
-    pub db_path: PathBuf,
+    /// Database target: the sandbox database file path, or a `libsql://`
+    /// server URL. Serialized as `db_path` — a plain path, the original
+    /// form of the field, is still valid.
+    pub db_path: String,
 
     /// Timeout when acquiring a sandbox database connection from the pool.
     pub db_connect_timeout_secs: u64,
@@ -140,4 +142,26 @@ pub struct RootfsConfig {
     /// root disks so the runner attaches with the right format.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upper_format: Option<String>,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn launch_config_db_path_accepts_plain_paths_and_urls() {
+        let mut serialized = serde_json::to_value(LaunchConfig::default()).unwrap();
+
+        serialized["db_path"] = "/home/user/.microsandbox/db/msb.db".into();
+        let launch: LaunchConfig = serde_json::from_value(serialized.clone()).unwrap();
+        assert_eq!(launch.db_path, "/home/user/.microsandbox/db/msb.db");
+
+        serialized["db_path"] = "libsql://127.0.0.1:8890".into();
+        let launch: LaunchConfig = serde_json::from_value(serialized).unwrap();
+        assert_eq!(launch.db_path, "libsql://127.0.0.1:8890");
+    }
 }

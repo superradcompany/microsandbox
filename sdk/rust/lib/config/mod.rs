@@ -35,6 +35,10 @@ pub(crate) const DEFAULT_CPUS: u8 = 1;
 /// Default guest memory in MiB.
 pub(crate) const DEFAULT_MEMORY_MIB: u32 = 512;
 
+/// Environment variable overriding the database target (`libsql://` server
+/// URL, or `sqlite://`/bare file path).
+pub const DATABASE_URL_ENV: &str = "MSB_DATABASE_URL";
+
 /// Default database max connections.
 pub(crate) const DEFAULT_MAX_CONNECTIONS: u32 = 5;
 
@@ -149,7 +153,9 @@ pub struct MetricsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DatabaseConfig {
-    /// Database connection URL. `None` uses the default SQLite path.
+    /// Database target: a `libsql://host:port` server URL, or a `sqlite://`
+    /// (or bare) file path. `None` uses the default SQLite file. Overridden
+    /// by `MSB_DATABASE_URL`; see [`DatabaseConfig::effective_url`].
     pub url: Option<String>,
 
     /// Maximum connection pool size.
@@ -568,6 +574,25 @@ impl LocalConfig {
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
+
+impl DatabaseConfig {
+    /// The effective database target override, if any.
+    ///
+    /// Precedence: the `MSB_DATABASE_URL` environment variable, then the
+    /// persisted `database.url` config field. `None` means the default
+    /// SQLite file path. The value is one connection string: `libsql://`
+    /// selects the server backend, `sqlite://` or a bare path the file
+    /// backend.
+    pub fn effective_url(&self) -> Option<String> {
+        if let Ok(url) = std::env::var(DATABASE_URL_ENV)
+            && !url.trim().is_empty()
+        {
+            return Some(url);
+        }
+
+        self.url.clone()
+    }
+}
 
 impl Default for DatabaseConfig {
     fn default() -> Self {
@@ -1147,6 +1172,29 @@ fn keyring_unavailable_message(hostname: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn database_effective_url_prefers_env_over_config() {
+        // No other test reads MSB_DATABASE_URL, so mutating it here is safe.
+        let config = DatabaseConfig {
+            url: Some("http://config.example:8890".into()),
+            ..DatabaseConfig::default()
+        };
+
+        unsafe { std::env::remove_var(DATABASE_URL_ENV) };
+        assert_eq!(
+            config.effective_url().as_deref(),
+            Some("http://config.example:8890")
+        );
+
+        unsafe { std::env::set_var(DATABASE_URL_ENV, "http://env.example:8890") };
+        assert_eq!(
+            config.effective_url().as_deref(),
+            Some("http://env.example:8890")
+        );
+
+        unsafe { std::env::remove_var(DATABASE_URL_ENV) };
+    }
 
     use std::collections::VecDeque;
 

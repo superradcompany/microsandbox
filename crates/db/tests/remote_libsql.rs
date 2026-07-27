@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! sqld --db-path /tmp/msb-libsql-test --http-listen-addr 127.0.0.1:8890
-//! MSB_TEST_LIBSQL_URL=http://127.0.0.1:8890 cargo test -p microsandbox-db --test remote_libsql -- --ignored
+//! MSB_TEST_LIBSQL_URL=libsql://127.0.0.1:8890 cargo test -p microsandbox-db --test remote_libsql -- --ignored
 //! ```
 
 mod tests {
@@ -69,7 +69,7 @@ mod tests {
     async fn setup() -> (DbReadConnection, DbWriteConnection) {
         let url = server_url();
 
-        let write = DbWriteConnection::open_url(&url, ACQUIRE_TIMEOUT, BUSY_TIMEOUT)
+        let write = DbWriteConnection::open(&url, ACQUIRE_TIMEOUT, BUSY_TIMEOUT)
             .await
             .expect("open write proxy");
 
@@ -82,10 +82,9 @@ mod tests {
             })
             .await;
 
-        let read =
-            DbReadConnection::open_url(&url, READ_CONNECTIONS, ACQUIRE_TIMEOUT, BUSY_TIMEOUT)
-                .await
-                .expect("open read proxy");
+        let read = DbReadConnection::open(&url, READ_CONNECTIONS, ACQUIRE_TIMEOUT, BUSY_TIMEOUT)
+            .await
+            .expect("open read proxy");
 
         (read, write)
     }
@@ -276,7 +275,7 @@ mod tests {
         }
 
         fn url(&self) -> String {
-            format!("http://127.0.0.1:{}", self.port)
+            format!("libsql://127.0.0.1:{}", self.port)
         }
 
         /// SIGKILL the server, then bring it back on the same database.
@@ -292,7 +291,7 @@ mod tests {
         async fn wait_ready(&self) {
             let deadline = std::time::Instant::now() + Duration::from_secs(30);
             loop {
-                let probe = DbWriteConnection::open_url(
+                let probe = DbWriteConnection::open(
                     &self.url(),
                     Duration::from_secs(1),
                     Duration::from_secs(1),
@@ -326,7 +325,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut server = TestServer::spawn(dir.path().to_owned(), 18901).await;
 
-        let write = DbWriteConnection::open_url(&server.url(), ACQUIRE_TIMEOUT, BUSY_TIMEOUT)
+        let write = DbWriteConnection::open(&server.url(), ACQUIRE_TIMEOUT, BUSY_TIMEOUT)
             .await
             .expect("open write proxy");
         write
@@ -340,7 +339,7 @@ mod tests {
             .await
             .expect("insert before restart");
 
-        let read = DbReadConnection::open_url(&server.url(), 2, ACQUIRE_TIMEOUT, BUSY_TIMEOUT)
+        let read = DbReadConnection::open(&server.url(), 2, ACQUIRE_TIMEOUT, BUSY_TIMEOUT)
             .await
             .expect("open read proxy");
 
@@ -377,7 +376,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let server = TestServer::spawn(dir.path().to_owned(), 18902).await;
 
-        let write = DbWriteConnection::open_url(&server.url(), ACQUIRE_TIMEOUT, BUSY_TIMEOUT)
+        let write = DbWriteConnection::open(&server.url(), ACQUIRE_TIMEOUT, BUSY_TIMEOUT)
             .await
             .expect("open write proxy");
         write
@@ -447,7 +446,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let server = TestServer::spawn(dir.path().to_owned(), 18903).await;
 
-        let write = DbWriteConnection::open_url(&server.url(), ACQUIRE_TIMEOUT, BUSY_TIMEOUT)
+        let write = DbWriteConnection::open(&server.url(), ACQUIRE_TIMEOUT, BUSY_TIMEOUT)
             .await
             .expect("open write proxy");
         write

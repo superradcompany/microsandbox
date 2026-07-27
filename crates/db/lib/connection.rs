@@ -19,7 +19,7 @@ use sea_orm::{
 };
 use sqlx::SqlitePool;
 
-use crate::{pool, retry, retry::IsSqliteBusy, stats::DbStats};
+use crate::{DbTarget, pool, retry, retry::IsSqliteBusy, stats::DbStats, target::TargetKind};
 
 /// Read pool. Multi-connection; concurrent reads enabled by WAL mode.
 ///
@@ -103,16 +103,37 @@ impl DbReadConnection {
         }
     }
 
-    /// Open a stand-alone read pool at `db_path` with shared PRAGMAs.
+    /// Open a stand-alone read pool for a database target — a SQLite file
+    /// path (bare or `sqlite://`), or a `libsql://` server URL.
     ///
-    /// Read-only: opening a non-existent DB fails rather than creating it, so a
-    /// read consumer never authors or pre-empts the database owned by `msb`.
+    /// The file backend is read-only: opening a non-existent DB fails rather
+    /// than creating it, so a read consumer never authors or pre-empts the
+    /// database owned by `msb`. On a server target, `max_connections` bounds
+    /// concurrent in-flight reads and `connect_timeout` bounds admission.
     pub async fn open(
+        target: impl Into<DbTarget>,
+        max_connections: u32,
+        connect_timeout: Duration,
+        busy_timeout: Duration,
+    ) -> Result<Self, DbErr> {
+        match target.into().kind() {
+            TargetKind::File(path) => {
+                Self::open_file(path, max_connections, connect_timeout, busy_timeout).await
+            }
+            TargetKind::Remote(url) => {
+                Self::open_remote(url, max_connections, connect_timeout, busy_timeout).await
+            }
+            TargetKind::Unsupported(raw) => Err(crate::unsupported_target(raw)),
+        }
+    }
+
+    /// Open the read side of the file backend at `db_path`.
+    async fn open_file(
         db_path: &Path,
         max_connections: u32,
         connect_timeout: Duration,
         busy_timeout: Duration,
-    ) -> Result<Self, sqlx::Error> {
+    ) -> Result<Self, DbErr> {
         let (inner, pool) = pool::build_pool(
             db_path,
             max_connections,
@@ -120,7 +141,8 @@ impl DbReadConnection {
             busy_timeout,
             false,
         )
-        .await?;
+        .await
+        .map_err(|e| DbErr::Conn(sea_orm::RuntimeErr::SqlxError(e)))?;
         Ok(Self {
             inner,
             pool: Some(pool),
@@ -128,11 +150,8 @@ impl DbReadConnection {
         })
     }
 
-    /// Open a read proxy to a remote database server (`sqld`) at `url`.
-    ///
-    /// `max_connections` bounds concurrent in-flight reads exactly like the
-    /// file backend's pool size; `connect_timeout` bounds admission waits.
-    pub async fn open_url(
+    /// Open the read side of the remote backend at the normalized `url`.
+    async fn open_remote(
         url: &str,
         max_connections: u32,
         connect_timeout: Duration,
@@ -170,11 +189,43 @@ impl DbWriteConnection {
         }
     }
 
-    /// Open a write proxy to a remote database server (`sqld`) at `url`.
+    /// Open a stand-alone single-connection write pool for a database target —
+    /// a SQLite file path (bare or `sqlite://`), or a `libsql://` server URL.
     ///
-    /// Single-connection like the file backend; `connect_timeout` bounds
-    /// admission waits and `busy_timeout` derives the per-request bound.
-    pub async fn open_url(
+    /// Used by callers that don't need a paired read pool (e.g. the in-VM
+    /// runtime, which only writes run records). Single-connection on both
+    /// backends; on a server target `connect_timeout` bounds admission waits
+    /// and `busy_timeout` derives the per-request bound.
+    pub async fn open(
+        target: impl Into<DbTarget>,
+        connect_timeout: Duration,
+        busy_timeout: Duration,
+    ) -> Result<Self, DbErr> {
+        match target.into().kind() {
+            TargetKind::File(path) => Self::open_file(path, connect_timeout, busy_timeout).await,
+            TargetKind::Remote(url) => Self::open_remote(url, connect_timeout, busy_timeout).await,
+            TargetKind::Unsupported(raw) => Err(crate::unsupported_target(raw)),
+        }
+    }
+
+    /// Open the write side of the file backend at `db_path`.
+    async fn open_file(
+        db_path: &Path,
+        connect_timeout: Duration,
+        busy_timeout: Duration,
+    ) -> Result<Self, DbErr> {
+        let (inner, pool) = pool::build_pool(db_path, 1, connect_timeout, busy_timeout, true)
+            .await
+            .map_err(|e| DbErr::Conn(sea_orm::RuntimeErr::SqlxError(e)))?;
+        Ok(Self {
+            inner,
+            pool: Some(pool),
+            stats: DbStats::new(),
+        })
+    }
+
+    /// Open the write side of the remote backend at the normalized `url`.
+    async fn open_remote(
         url: &str,
         connect_timeout: Duration,
         busy_timeout: Duration,
@@ -184,24 +235,6 @@ impl DbWriteConnection {
         Ok(Self {
             inner,
             pool: None,
-            stats: DbStats::new(),
-        })
-    }
-
-    /// Open a stand-alone single-connection write pool at `db_path`.
-    ///
-    /// Used by callers that don't need a paired read pool (e.g. the in-VM
-    /// runtime, which only writes run records).
-    pub async fn open(
-        db_path: &Path,
-        connect_timeout: Duration,
-        busy_timeout: Duration,
-    ) -> Result<Self, sqlx::Error> {
-        let (inner, pool) =
-            pool::build_pool(db_path, 1, connect_timeout, busy_timeout, true).await?;
-        Ok(Self {
-            inner,
-            pool: Some(pool),
             stats: DbStats::new(),
         })
     }
@@ -416,10 +449,67 @@ mod tests {
     const TIMEOUT: Duration = Duration::from_secs(5);
 
     #[tokio::test]
+    async fn write_open_accepts_bare_string_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("msb.db");
+
+        let target = db_path.to_string_lossy().into_owned();
+        DbWriteConnection::open(&target, TIMEOUT, TIMEOUT)
+            .await
+            .unwrap();
+        assert!(db_path.exists());
+    }
+
+    #[tokio::test]
+    async fn write_open_accepts_sqlite_scheme_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("msb.db");
+
+        let target = format!("sqlite://{}", db_path.display());
+        DbWriteConnection::open(&target, TIMEOUT, TIMEOUT)
+            .await
+            .unwrap();
+        assert!(db_path.exists());
+    }
+
+    #[tokio::test]
+    async fn open_unknown_scheme_is_a_clear_error() {
+        let err = DbWriteConnection::open("postgres://127.0.0.1:5432/db", TIMEOUT, TIMEOUT)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not a supported database target"),
+            "got: {err}"
+        );
+    }
+
+    // A remote target must reach the connect path (and fail there when
+    // nothing listens), not die in parsing.
+    #[tokio::test]
+    async fn open_libsql_url_dispatches_to_the_remote_backend() {
+        let err = DbWriteConnection::open(
+            "libsql://127.0.0.1:9",
+            Duration::from_millis(300),
+            Duration::from_millis(300),
+        )
+        .await
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            !message.contains("not a supported database target"),
+            "libsql target must not be rejected as unsupported: {message}"
+        );
+        assert!(
+            !message.contains("`libsql` feature"),
+            "libsql target must not hit the missing-feature error: {message}"
+        );
+    }
+
+    #[tokio::test]
     async fn read_open_does_not_create_db() {
         // Existing directory, missing DB file.
         let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("catalog.db");
+        let db_path = dir.path().join("msb.db");
 
         let result = DbReadConnection::open(&db_path, 1, TIMEOUT, TIMEOUT).await;
 
@@ -433,7 +523,7 @@ mod tests {
     #[tokio::test]
     async fn write_open_creates_db() {
         let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("catalog.db");
+        let db_path = dir.path().join("msb.db");
 
         let conn = DbWriteConnection::open(&db_path, TIMEOUT, TIMEOUT).await;
 
@@ -447,7 +537,7 @@ mod tests {
     #[tokio::test]
     async fn pool_timeout_is_attributed_and_counted() {
         let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("catalog.db");
+        let db_path = dir.path().join("msb.db");
 
         // Single-connection write pool with a short acquire timeout.
         let conn = DbWriteConnection::open(&db_path, Duration::from_millis(100), TIMEOUT)
@@ -475,7 +565,7 @@ mod tests {
     #[tokio::test]
     async fn sqlite_busy_passes_through_unchanged() {
         let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("catalog.db");
+        let db_path = dir.path().join("msb.db");
 
         let a = DbWriteConnection::open(&db_path, TIMEOUT, Duration::from_millis(10))
             .await

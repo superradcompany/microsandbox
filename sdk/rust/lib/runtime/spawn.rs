@@ -2230,8 +2230,17 @@ fn sandbox_cli_args(
         ));
     }
 
+    // The database target: the configured override (env or config), or this
+    // host's database file. Spawned supervisors use the same database as
+    // the host that spawned them.
+    let db_target = local
+        .config()
+        .database
+        .effective_url()
+        .unwrap_or_else(|| db_path.to_string_lossy().into_owned());
+
     let mut launch = LaunchConfig {
-        db_path: db_path.to_path_buf(),
+        db_path: db_target,
         db_connect_timeout_secs,
         log_dir: log_dir.to_path_buf(),
         runtime_dir: runtime_dir.to_path_buf(),
@@ -2719,7 +2728,7 @@ mod tests {
         }
 
         let mut out: Vec<String> = Vec::new();
-        pair(&mut out, "--db-path", path(&launch.db_path));
+        pair(&mut out, "--db-path", launch.db_path.clone());
         pair(
             &mut out,
             "--db-connect-timeout-secs",

@@ -19,7 +19,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use microsandbox_metrics_collector::exporters::{
     OtelExporter, OtlpCompression, OtlpProtocol, StdoutExporter,
 };
-use microsandbox_metrics_collector::{CatalogLabelSource, MetricsCollector};
+use microsandbox_metrics_collector::{DbLabelSource, MetricsCollector};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -368,9 +368,9 @@ fn resolve_registry_name(msb_home: Option<&std::path::Path>) -> anyhow::Result<S
     ))
 }
 
-/// Path to the catalog DB (`$MSB_HOME/db/msb.db`) used for label lookups. The
-/// connection is opened lazily (and retried) by [`CatalogLabelSource`], so a
-/// catalog that does not exist yet is fine: enrichment switches on once it
+/// Path to the database (`$MSB_HOME/db/msb.db`) used for label lookups. The
+/// connection is opened lazily (and retried) by [`DbLabelSource`], so a
+/// database that does not exist yet is fine: enrichment switches on once it
 /// appears.
 fn label_db_path(msb_home: Option<&std::path::Path>) -> anyhow::Result<PathBuf> {
     Ok(resolve_msb_home(msb_home)?
@@ -378,14 +378,22 @@ fn label_db_path(msb_home: Option<&std::path::Path>) -> anyhow::Result<PathBuf> 
         .join(microsandbox_utils::DB_FILENAME))
 }
 
-/// Build the catalog label source for `opts`, or `None` when `--no-labels`
+/// Build the database label source for `opts`, or `None` when `--no-labels`
 /// disables enrichment entirely. Applies the `--exclude-label-keys` denylist.
-fn label_source(opts: &CollectorOpts) -> anyhow::Result<Option<CatalogLabelSource>> {
+fn label_source(opts: &CollectorOpts) -> anyhow::Result<Option<DbLabelSource>> {
     if opts.no_labels {
         return Ok(None);
     }
-    let db_path = label_db_path(opts.msb_home.as_deref())?;
-    Ok(Some(CatalogLabelSource::new(db_path).with_excluded_keys(
+
+    // MSB_DATABASE_URL points this host's processes at a database target
+    // (`libsql://` server or an alternate file) — same override the msb CLI
+    // honours.
+    let source = match std::env::var("MSB_DATABASE_URL") {
+        Ok(url) if !url.trim().is_empty() => DbLabelSource::new(url),
+        _ => DbLabelSource::new(label_db_path(opts.msb_home.as_deref())?),
+    };
+
+    Ok(Some(source.with_excluded_keys(
         opts.exclude_label_keys.iter().cloned(),
     )))
 }

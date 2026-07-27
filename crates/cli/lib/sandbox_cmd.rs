@@ -569,7 +569,7 @@ mod tests {
         use std::io::Write;
 
         let launch = LaunchConfig {
-            db_path: PathBuf::from("/tmp/x.db"),
+            db_path: "/tmp/x.db".to_string(),
             env: vec!["TOKEN=secret".to_string()],
             ..Default::default()
         };
@@ -580,7 +580,7 @@ mod tests {
         let args = args_with(None, Some(file.path().to_path_buf()));
         let loaded = load_launch_config(&args).unwrap();
 
-        assert_eq!(loaded.db_path, PathBuf::from("/tmp/x.db"));
+        assert_eq!(loaded.db_path, "/tmp/x.db");
         assert_eq!(loaded.env, vec!["TOKEN=secret".to_string()]);
     }
 

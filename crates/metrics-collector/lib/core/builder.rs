@@ -153,7 +153,7 @@ impl MetricsCollectorBuilder {
     }
 
     /// Enrich each collection with per-sandbox labels from a [`LabelSource`]
-    /// (e.g. [`CatalogLabelSource`](super::CatalogLabelSource)). Labels are
+    /// (e.g. [`DbLabelSource`](super::DbLabelSource)). Labels are
     /// attached as attributes by label-aware exporters (e.g. OTel). Without
     /// this, collections carry no labels.
     pub fn enrich_labels(mut self, source: Arc<dyn LabelSource>) -> Self {

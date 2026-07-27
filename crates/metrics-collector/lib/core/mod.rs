@@ -25,7 +25,7 @@ pub use builder::{
     DEFAULT_MAX_BUFFERED_COLLECTIONS, MetricsCollectorBuilder, MetricsExporterConfig,
 };
 pub use driver::{MetricsCollector, MetricsErrorPolicy, RunningCollector};
-pub use label_source::{CatalogLabelSource, LabelSource};
+pub use label_source::{DbLabelSource, LabelSource};
 pub use types::{
     MetricsCollection, MetricsExportBatch, MetricsExporter, SandboxLabels, SandboxMetricSnapshot,
 };

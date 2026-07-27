@@ -92,8 +92,9 @@ pub struct Config {
     /// Selected tracing verbosity.
     pub log_level: Option<LogLevel>,
 
-    /// Path to the sandbox database file.
-    pub sandbox_db_path: PathBuf,
+    /// Database target: the sandbox database file path, or a `libsql://`
+    /// server URL.
+    pub sandbox_db_path: String,
 
     /// Timeout when acquiring a sandbox database connection from the pool.
     pub sandbox_db_connect_timeout_secs: u64,
@@ -1652,17 +1653,13 @@ fn write_startup_info(startup_pipe: Option<&str>, json: &str) -> RuntimeResult<(
 /// Busy timeout uses [`microsandbox_db::pool::DEFAULT_BUSY_TIMEOUT_SECS`]:
 /// the in-VM runtime is not user-configurable, so DB tuning policy lives
 /// with the host (which honours `~/.microsandbox/config.json`).
-async fn connect_db(
-    db_path: &std::path::Path,
-    connect_timeout_secs: u64,
-) -> RuntimeResult<DbWriteConnection> {
-    DbWriteConnection::open(
-        db_path,
-        Duration::from_secs(connect_timeout_secs),
-        Duration::from_secs(microsandbox_db::pool::DEFAULT_BUSY_TIMEOUT_SECS),
-    )
-    .await
-    .map_err(|e| RuntimeError::Custom(format!("database connect: {e}")))
+async fn connect_db(target: &str, connect_timeout_secs: u64) -> RuntimeResult<DbWriteConnection> {
+    let connect_timeout = Duration::from_secs(connect_timeout_secs);
+    let busy_timeout = Duration::from_secs(microsandbox_db::pool::DEFAULT_BUSY_TIMEOUT_SECS);
+
+    DbWriteConnection::open(target, connect_timeout, busy_timeout)
+        .await
+        .map_err(|e| RuntimeError::Custom(format!("database connect: {e}")))
 }
 
 /// Insert a run record into the database.

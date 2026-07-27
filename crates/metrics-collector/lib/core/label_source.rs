@@ -2,17 +2,16 @@
 //!
 //! [`LabelSource`] abstracts *where* labels come from, so the collect loop and
 //! the builder depend on a trait rather than a database connection. The
-//! production implementation ([`CatalogLabelSource`]) reads the sqlite catalog
+//! production implementation ([`DbLabelSource`]) reads the sqlite database
 //! and caches per sandbox; tests can inject an in-memory map instead.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use microsandbox_db::DbReadConnection;
 use microsandbox_db::pool::DEFAULT_BUSY_TIMEOUT_SECS;
+use microsandbox_db::{DbReadConnection, DbTarget};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
@@ -25,10 +24,10 @@ use super::types::SandboxLabels;
 // Constants
 //--------------------------------------------------------------------------------------------------
 
-/// Read connections opened against the catalog for label lookups.
+/// Read connections opened against the database for label lookups.
 const READ_CONNECTIONS: u32 = 2;
 
-/// How long to wait for a catalog connection before giving up for this tick
+/// How long to wait for a database connection before giving up for this tick
 /// (retried on the next one).
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -52,17 +51,19 @@ pub trait LabelSource: Send + Sync {
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// A [`LabelSource`] backed by the sqlite catalog.
+/// A [`LabelSource`] backed by the sqlite database.
 ///
-/// Connects lazily and retries: if the catalog DB is not yet present (e.g.
+/// Connects lazily and retries: if the database is not yet present (e.g.
 /// msb-metrics started before msb initialized `$MSB_HOME`), each tick emits no
 /// labels and tries again, so enrichment switches on automatically once the
-/// catalog appears. Reads go through an internal cache (one sqlite read per
+/// database appears. Reads go through an internal cache (one sqlite read per
 /// newly-seen sandbox, presence-based eviction).
-pub struct CatalogLabelSource {
-    db_path: PathBuf,
+pub struct DbLabelSource {
+    /// Database target: the sqlite file path, or a `libsql://` server URL
+    /// when `MSB_DATABASE_URL` points this host at a database server.
+    target: DbTarget,
 
-    /// Label keys dropped from emitted metrics. The labels stay in the catalog
+    /// Label keys dropped from emitted metrics. The labels stay in the database
     /// (still visible to `msb inspect`); they are only withheld from metric
     /// attributes so an operator can cap series cardinality on noisy keys.
     exclude_keys: HashSet<String>,
@@ -73,23 +74,24 @@ pub struct CatalogLabelSource {
 /// Mutable state guarded by a single lock; the collect loop is sequential, so
 /// there is never contention.
 struct State {
-    /// The catalog connection, opened on first successful use.
+    /// The database connection, opened on first successful use.
     db: Option<DbReadConnection>,
 
     /// Per-sandbox label cache.
     cache: LabelCache,
 
-    /// True while emitting without labels because the catalog is unavailable.
+    /// True while emitting without labels because the database is unavailable.
     /// Gates logging so a persistent outage warns once, not every tick.
     degraded: bool,
 }
 
-impl CatalogLabelSource {
-    /// Build a catalog-backed source over the catalog DB at `db_path`. The
-    /// connection is opened lazily on first use.
-    pub fn new(db_path: PathBuf) -> Self {
+impl DbLabelSource {
+    /// Build a database-backed source over a database target: the sqlite file
+    /// path, or a `libsql://` server URL. The connection is opened lazily on
+    /// first use.
+    pub fn new(target: impl Into<DbTarget>) -> Self {
         Self {
-            db_path,
+            target: target.into(),
             exclude_keys: HashSet::new(),
             state: Mutex::new(State {
                 db: None,
@@ -108,7 +110,7 @@ impl CatalogLabelSource {
 }
 
 #[async_trait]
-impl LabelSource for CatalogLabelSource {
+impl LabelSource for DbLabelSource {
     async fn labels_for(&self, sandbox_ids: HashSet<i32>) -> MetricsCollectorResult<SandboxLabels> {
         let mut state = self.state.lock().await;
 
@@ -117,7 +119,7 @@ impl LabelSource for CatalogLabelSource {
         // rather than disabling enrichment for the process lifetime.
         if state.db.is_none() {
             match DbReadConnection::open(
-                &self.db_path,
+                self.target.clone(),
                 READ_CONNECTIONS,
                 CONNECT_TIMEOUT,
                 Duration::from_secs(DEFAULT_BUSY_TIMEOUT_SECS),
@@ -129,8 +131,8 @@ impl LabelSource for CatalogLabelSource {
                     if !state.degraded {
                         warn!(
                             %error,
-                            db = %self.db_path.display(),
-                            "catalog unavailable; emitting metrics without labels (will retry)"
+                            db = %self.target,
+                            "database unavailable; emitting metrics without labels (will retry)"
                         );
                         state.degraded = true;
                     }
@@ -150,7 +152,7 @@ impl LabelSource for CatalogLabelSource {
         match resolved {
             Ok(labels) => {
                 if state.degraded {
-                    info!("catalog available again; resuming label enrichment");
+                    info!("database available again; resuming label enrichment");
                     state.degraded = false;
                 }
                 Ok(labels)
@@ -160,7 +162,7 @@ impl LabelSource for CatalogLabelSource {
                 // non-fatal: emit without labels and retry. The connection is
                 // kept; it will see the table once msb migrates the same file.
                 if !state.degraded {
-                    warn!(%error, "catalog query failed; emitting metrics without labels (will retry)");
+                    warn!(%error, "database query failed; emitting metrics without labels (will retry)");
                     state.degraded = true;
                 }
                 Ok(SandboxLabels::new())
@@ -223,7 +225,7 @@ mod tests {
 
     use super::*;
 
-    /// Create the catalog at `db_path` with one labelled sandbox.
+    /// Create the database at `db_path` with one labelled sandbox.
     async fn seed_catalog(db_path: &std::path::Path) {
         std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
         let write = DbWriteConnection::open(
@@ -310,7 +312,7 @@ mod tests {
         .await
         .unwrap();
 
-        let source = CatalogLabelSource::new(db_path)
+        let source = DbLabelSource::new(db_path)
             .with_excluded_keys(["org.opencontainers.image.revision".to_string()]);
 
         let labels = source.labels_for(HashSet::from([1])).await.unwrap();
@@ -321,17 +323,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn emits_no_labels_until_catalog_appears_then_recovers() {
+    async fn emits_no_labels_until_db_appears_then_recovers() {
         let dir = tempfile::tempdir().unwrap();
-        // Parent `db/` dir does not exist yet → the catalog is absent.
+        // Parent `db/` dir does not exist yet → the database is absent.
         let db_path = dir.path().join("db").join("msb.db");
-        let source = CatalogLabelSource::new(db_path.clone());
+        let source = DbLabelSource::new(db_path.clone());
 
-        // Absent catalog: no labels, but no error (the tick still ships metrics).
+        // Absent database: no labels, but no error (the tick still ships metrics).
         let labels = source.labels_for(HashSet::from([1])).await.unwrap();
         assert!(labels.is_empty());
 
-        // The catalog comes up with a labelled sandbox.
+        // The database comes up with a labelled sandbox.
         seed_catalog(&db_path).await;
 
         // The next tick picks it up without a restart.

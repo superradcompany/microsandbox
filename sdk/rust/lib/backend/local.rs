@@ -494,28 +494,46 @@ impl Drop for MigrationLock {
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
-/// Open both pools for `db_dir/msb.db` and run migrations on the writer.
+/// Open both pools and run migrations on the writer.
 ///
-/// The write pool connects first so WAL mode (persisted in the database
-/// header) is set before the read pool opens.
+/// For a file target (`sqlite://` or bare path), the write pool connects first
+/// so WAL mode (persisted in the header) is set before the read pool opens,
+/// and a cross-process file lock serializes concurrent migrators. For a remote
+/// `libsql://` target the server serializes migrations itself and the file
+/// lock is skipped.
 async fn connect_and_migrate(
     db_dir: &Path,
     database: &DatabaseConfig,
     snapshots_dir: &Path,
 ) -> MicrosandboxResult<DbPools> {
     tokio::fs::create_dir_all(db_dir).await?;
-    let _migration_lock = acquire_migration_lock(db_dir).await?;
-    refuse_incomplete_self_downgrade(db_dir)?;
 
-    let db_path = db_dir.join(microsandbox_utils::DB_FILENAME);
+    // One connection string covers both backends: a `libsql://` target goes
+    // to the shared database server; a `sqlite://` or bare-path override (or
+    // the default file) stays on the file backend.
+    let db_target = database.effective_url().unwrap_or_else(|| {
+        db_dir
+            .join(microsandbox_utils::DB_FILENAME)
+            .display()
+            .to_string()
+    });
+    let is_remote = microsandbox_db::DbTarget::from(db_target.as_str()).is_remote();
+
+    let _migration_lock = if is_remote {
+        None
+    } else {
+        refuse_incomplete_self_downgrade(db_dir)?;
+        Some(acquire_migration_lock(db_dir).await?)
+    };
+
     let pools = DbPools::open(
-        &db_path,
+        &db_target,
         database.max_connections,
         Duration::from_secs(database.connect_timeout_secs),
         Duration::from_secs(database.busy_timeout_secs),
     )
     .await
-    .map_err(|e| MicrosandboxError::Custom(format!("connect to {}: {e}", db_path.display())))?;
+    .map_err(|e| MicrosandboxError::Custom(format!("connect to {db_target}: {e}")))?;
 
     microsandbox_runtime::maintenance::refuse_if_install_exclusive_held(pools.write())
         .await
@@ -523,15 +541,26 @@ async fn connect_and_migrate(
     refuse_schema_ahead(pools.write().inner()).await?;
     Migrator::up(pools.write().inner(), None).await?;
 
-    // Descriptor translation mutates the same installation state as schema
-    // migration. Keep both gates held until every discovered artifact is
-    // either canonical or durably journaled as blocked.
+    reconcile_snapshots_with_lease(&pools, snapshots_dir).await?;
+
+    Ok(pools)
+}
+
+/// Reconcile snapshot descriptors under the install-exclusive lease.
+///
+/// Descriptor translation mutates the same installation state as schema
+/// migration. Keep both gates held until every discovered artifact is
+/// either canonical or durably journaled as blocked.
+async fn reconcile_snapshots_with_lease(
+    pools: &DbPools,
+    snapshots_dir: &Path,
+) -> MicrosandboxResult<()> {
     let install_lease =
         microsandbox_runtime::maintenance::acquire_install_exclusive_lease(pools.write())
             .await
             .map_err(|err| MicrosandboxError::Runtime(err.to_string()))?;
     let reconcile_result =
-        crate::snapshot::migration::reconcile_managed(&pools, snapshots_dir).await;
+        crate::snapshot::migration::reconcile_managed(pools, snapshots_dir).await;
     let clear_result = microsandbox_runtime::maintenance::clear_install_exclusive_lease(
         pools.write(),
         &install_lease,
@@ -541,7 +570,7 @@ async fn connect_and_migrate(
     reconcile_result?;
     clear_result?;
 
-    Ok(pools)
+    Ok(())
 }
 
 /// Refuse normal startup while a durable self-downgrade operation owns local

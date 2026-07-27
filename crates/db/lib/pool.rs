@@ -11,7 +11,10 @@ use sea_orm::{DatabaseConnection, SqlxSqliteConnector};
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 
-use crate::connection::{DbReadConnection, DbWriteConnection};
+use crate::{
+    DbTarget,
+    connection::{DbReadConnection, DbWriteConnection},
+};
 
 /// Default `busy_timeout` PRAGMA value used when a caller has no
 /// user-facing knob to plumb (e.g. the in-VM runtime, where the host
@@ -33,55 +36,25 @@ pub struct DbPools {
 }
 
 impl DbPools {
-    /// Open both pools for the SQLite file at `db_path` with shared PRAGMAs.
+    /// Open both pools for a database target — a SQLite file path (bare or
+    /// `sqlite://`), or a `libsql://` server URL.
     ///
     /// The write pool connects first so WAL mode (persisted in the database
     /// header) is set before the read pool opens. `max_read_connections`
     /// sizes only the read pool; the write pool is always single-connection
-    /// by design.
+    /// by design. On a server target, `connect_timeout` doubles as the
+    /// admission timeout and `busy_timeout` derives the per-request bound.
     pub async fn open(
-        db_path: &Path,
-        max_read_connections: u32,
-        connect_timeout: Duration,
-        busy_timeout: Duration,
-    ) -> Result<Self, sqlx::Error> {
-        let write = DbWriteConnection::open(db_path, connect_timeout, busy_timeout).await?;
-        let read =
-            DbReadConnection::open(db_path, max_read_connections, connect_timeout, busy_timeout)
-                .await?;
-        Ok(Self { read, write })
-    }
-
-    /// Open both pools for a database target: a SQLite file path, or a remote
-    /// server URL (`http://`, `https://`, `libsql://`).
-    ///
-    /// The remote backend reuses `connect_timeout` as its admission timeout
-    /// and derives a per-request bound from `busy_timeout` (see
-    /// `DbWriteConnection::open_url`).
-    pub async fn open_target(
-        target: &str,
+        target: impl Into<DbTarget>,
         max_read_connections: u32,
         connect_timeout: Duration,
         busy_timeout: Duration,
     ) -> Result<Self, sea_orm::DbErr> {
-        let is_url = target.starts_with("http://")
-            || target.starts_with("https://")
-            || target.starts_with("libsql://");
+        let target = target.into();
 
-        if !is_url {
-            return Self::open(
-                Path::new(target),
-                max_read_connections,
-                connect_timeout,
-                busy_timeout,
-            )
-            .await
-            .map_err(|e| sea_orm::DbErr::Conn(sea_orm::RuntimeErr::SqlxError(e)));
-        }
-
-        let write = DbWriteConnection::open_url(target, connect_timeout, busy_timeout).await?;
+        let write = DbWriteConnection::open(target.clone(), connect_timeout, busy_timeout).await?;
         let read =
-            DbReadConnection::open_url(target, max_read_connections, connect_timeout, busy_timeout)
+            DbReadConnection::open(target, max_read_connections, connect_timeout, busy_timeout)
                 .await?;
         Ok(Self { read, write })
     }
