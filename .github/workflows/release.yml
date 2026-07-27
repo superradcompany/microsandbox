@@ -743,9 +743,12 @@ jobs:
   #     fork of microsoft/winget-pkgs. Set the WINGET_FORK_USER repository
   #     variable if that fork lives under a different account than this repo's
   #     owner.
+  #   - WINGET_RELEASE_ENABLED: set this repository variable to `true` only
+  #     after the first package version is accepted into winget-pkgs.
   #
-  # The submit step is a no-op when WINGET_TOKEN is unset, so releases never
-  # fail for forks that have not configured winget publishing. Prerelease tags
+  # The submit step is a no-op unless publishing is enabled and WINGET_TOKEN is
+  # set, so releases never fail before the initial package is accepted or for
+  # forks that have not configured winget publishing. Prerelease tags
   # (rc/alpha/beta/dev) are skipped to match the assemble job's --prerelease
   # detection.
   # ---------------------------------------------------------------------------
@@ -758,7 +761,8 @@ jobs:
     steps:
       - name: Submit to winget-pkgs
         if: >-
-          env.WINGET_TOKEN != ''
+          vars.WINGET_RELEASE_ENABLED == 'true'
+          && env.WINGET_TOKEN != ''
           && !contains(github.ref_name, '-rc')
           && !contains(github.ref_name, '-alpha')
           && !contains(github.ref_name, '-beta')
