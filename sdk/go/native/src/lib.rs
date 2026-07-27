@@ -904,11 +904,21 @@ struct SecretOpts {
     allow_host_patterns: Vec<String>,
     placeholder: Option<String>,
     require_tls: Option<bool>,
+    inject_headers: Option<bool>,
+    inject_basic_auth: Option<bool>,
+    #[serde(default)]
+    exact_headers: Vec<SecretExactHeaderOpts>,
     /// Per-network (sandbox-wide) violation action override. The Node/Python
     /// SDKs accept this as a per-secret field on `SecretEntry`; it ends up
     /// applied at the network builder level. We honour it the same way:
     /// the last seen non-null value wins.
     on_violation: Option<String>,
+}
+
+#[derive(Clone, serde::Deserialize)]
+struct SecretExactHeaderOpts {
+    name: String,
+    scheme: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1626,6 +1636,9 @@ fn apply_secret(
     }
     let placeholder = s.placeholder.clone();
     let require_tls = s.require_tls;
+    let inject_headers = s.inject_headers;
+    let inject_basic_auth = s.inject_basic_auth;
+    let exact_headers = s.exact_headers.clone();
     let on_violation = s
         .on_violation
         .as_ref()
@@ -1645,6 +1658,15 @@ fn apply_secret(
         }
         if let Some(req) = require_tls {
             sb = sb.require_tls_identity(req);
+        }
+        if let Some(enabled) = inject_headers {
+            sb = sb.inject_headers(enabled);
+        }
+        if let Some(enabled) = inject_basic_auth {
+            sb = sb.inject_basic_auth(enabled);
+        }
+        for header in &exact_headers {
+            sb = sb.exact_header(header.name.clone(), header.scheme.clone());
         }
         if let Some(action) = on_violation {
             sb = sb.on_violation(move |_| ViolationActionBuilder::from_action(action));

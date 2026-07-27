@@ -38,8 +38,17 @@ pub struct JsSecretEntry {
 pub struct JsSecretInjection {
     pub headers: bool,
     pub basic_auth: bool,
+    pub exact_headers: Option<Vec<JsSecretExactHeader>>,
     pub query_params: bool,
     pub body: bool,
+}
+
+/// One provider-neutral exact request-header placement.
+#[derive(Clone)]
+#[napi(object, js_name = "SecretExactHeader")]
+pub struct JsSecretExactHeader {
+    pub name: String,
+    pub scheme: Option<String>,
 }
 
 /// Fluent builder for a single secret entry.
@@ -131,6 +140,14 @@ impl JsSecretBuilder {
     pub fn inject_basic_auth(&mut self, enabled: bool) -> &Self {
         let prev = self.take_inner();
         self.inner = Some(prev.inject_basic_auth(enabled));
+        self
+    }
+
+    /// Add one provider-neutral exact request-header placement.
+    #[napi(js_name = "exactHeader")]
+    pub fn exact_header(&mut self, name: String, scheme: Option<String>) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.exact_header(name, scheme));
         self
     }
 
@@ -243,6 +260,17 @@ pub(crate) fn to_js_secret_entry(entry: RustSecretEntry) -> JsSecretEntry {
         injection: JsSecretInjection {
             headers: entry.injection.headers,
             basic_auth: entry.injection.basic_auth,
+            exact_headers: (!entry.injection.exact_headers.is_empty()).then(|| {
+                entry
+                    .injection
+                    .exact_headers
+                    .into_iter()
+                    .map(|header| JsSecretExactHeader {
+                        name: header.name,
+                        scheme: header.scheme,
+                    })
+                    .collect()
+            }),
             query_params: entry.injection.query_params,
             body: entry.injection.body,
         },

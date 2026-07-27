@@ -1,12 +1,20 @@
 import { Sandbox } from "microsandbox";
 
-// Secret with placeholder substitution and host allowlist. The 3-arg
-// shorthand auto-generates the placeholder as `$MSB_API_KEY`.
+// Exact-header-only secret with a host allowlist. The placeholder is
+// auto-generated as `$MSB_API_KEY`.
 await using sandbox = await Sandbox.builder("net-secrets")
   .image("alpine")
   .cpus(1)
   .memory(512)
-  .secretEnv("API_KEY", "sk-real-secret-123", "example.com")
+  .secret((s) =>
+    s
+      .env("API_KEY")
+      .value("sk-real-secret-123")
+      .allowHost("example.com")
+      .injectHeaders(false)
+      .injectBasicAuth(false)
+      .exactHeader("Authorization", "Bearer"),
+  )
   .replace()
   .create();
 

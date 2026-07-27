@@ -59,10 +59,10 @@ pub use sandbox::{
     PlannedChange, ResourceConvergenceState, ResourceKind, ResourceResizeStatus, Sandbox,
     SandboxConfig, SandboxListBuilder, SandboxMetrics, SandboxMetricsReport, SandboxMetricsState,
     SandboxModificationBuilder, SandboxModificationPatch, SandboxModificationPlan, SandboxPage,
-    SandboxPingResult, SandboxTouchResult, SecretChangeKind, SecretModificationPatch,
-    SecretPatchBuilder, SecretPlannedChange, SecretSource, all_sandbox_metrics,
-    all_sandbox_metrics_local, all_sandbox_metrics_reports_local, sandbox_metrics_report_local,
-    validate_sandbox_name,
+    SandboxPingResult, SandboxTouchResult, SecretChangeKind, SecretExactHeader,
+    SecretModificationPatch, SecretPatchBuilder, SecretPlannedChange, SecretSource,
+    all_sandbox_metrics, all_sandbox_metrics_local, all_sandbox_metrics_reports_local,
+    sandbox_metrics_report_local, validate_sandbox_name,
 };
 #[cfg(feature = "net")]
 pub use sandbox::{NetworkPolicy, NetworkProfile};

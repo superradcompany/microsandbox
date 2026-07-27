@@ -16,7 +16,7 @@ use crate::policy::{BuildError, NetworkPolicy};
 use zeroize::Zeroizing;
 
 use crate::secrets::config::{
-    HostPattern, SecretEntry, SecretInjection, SecretSource, ViolationAction,
+    HostPattern, SecretEntry, SecretExactHeader, SecretInjection, SecretSource, ViolationAction,
 };
 use microsandbox_types::{ScopedUpstreamCaCert, ScopedVerifyUpstream, TlsConfig};
 
@@ -542,6 +542,20 @@ impl SecretBuilder {
     /// Configure Basic Auth injection (default: true).
     pub fn inject_basic_auth(mut self, enabled: bool) -> Self {
         self.injection.basic_auth = enabled;
+        self
+    }
+
+    /// Add a provider-neutral exact request-header placement.
+    ///
+    /// Set `scheme` to `Some("Bearer")` for
+    /// `Authorization: Bearer <placeholder>`, or `None` for a header whose
+    /// complete value is the placeholder. To make the secret exact-header
+    /// only, also disable broad header and Basic Auth injection.
+    pub fn exact_header(mut self, name: impl Into<String>, scheme: Option<String>) -> Self {
+        self.injection.exact_headers.push(SecretExactHeader {
+            name: name.into(),
+            scheme,
+        });
         self
     }
 

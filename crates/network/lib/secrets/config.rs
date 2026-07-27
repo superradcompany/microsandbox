@@ -7,8 +7,8 @@
 //! engine-internal query helpers used by the proxy.
 
 pub use microsandbox_types::{
-    HostPattern, MAX_SECRET_PLACEHOLDER_BYTES, SecretConfigError, SecretEntry, SecretInjection,
-    SecretSource, SecretsConfig, ViolationAction,
+    HostPattern, MAX_SECRET_PLACEHOLDER_BYTES, SecretConfigError, SecretEntry, SecretExactHeader,
+    SecretInjection, SecretSource, SecretsConfig, ViolationAction,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -38,6 +38,7 @@ impl SecretsConfigExt for SecretsConfig {
             !secret.require_tls_identity
                 && (secret.injection.headers
                     || secret.injection.basic_auth
+                    || !secret.injection.exact_headers.is_empty()
                     || secret.injection.query_params
                     || secret.injection.body)
         })

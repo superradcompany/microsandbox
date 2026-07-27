@@ -3640,7 +3640,20 @@ mod tests {
     #[cfg(feature = "net")]
     #[test]
     fn applying_source_rotate_drops_inlined_value_and_keeps_placeholder() {
+        use microsandbox_network::secrets::config::SecretExactHeader;
+
         let mut config = config_with_secret("API_KEY", SECRET_SENTINEL);
+        let mut network = config.local_network_config().unwrap();
+        network.secrets.secrets[0].injection.headers = false;
+        network.secrets.secrets[0].injection.basic_auth = false;
+        network.secrets.secrets[0]
+            .injection
+            .exact_headers
+            .push(SecretExactHeader {
+                name: "Authorization".into(),
+                scheme: Some("Bearer".into()),
+            });
+        config.set_local_network_config(network).unwrap();
         let patch = patch_with_specs(vec![source_spec("API_KEY", &[])]);
 
         apply_secret_patch_to_config(&mut config, &patch).unwrap();
@@ -3657,6 +3670,14 @@ mod tests {
         // Rotation keeps the guest-visible placeholder and host allow-list.
         assert_eq!(entry.placeholder, "$MSB_API_KEY");
         assert_eq!(entry.allowed_hosts.len(), 1);
+        assert!(!entry.injection.headers);
+        assert!(!entry.injection.basic_auth);
+        assert_eq!(entry.injection.exact_headers.len(), 1);
+        assert_eq!(entry.injection.exact_headers[0].name, "Authorization");
+        assert_eq!(
+            entry.injection.exact_headers[0].scheme.as_deref(),
+            Some("Bearer")
+        );
     }
 
     #[cfg(feature = "net")]

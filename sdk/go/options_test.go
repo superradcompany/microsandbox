@@ -463,6 +463,28 @@ func TestSecretEnvFactory(t *testing.T) {
 	}
 }
 
+func TestSecretExactHeaderFactory(t *testing.T) {
+	s := Secret.ExactHeader(
+		"TOK",
+		"synthetic-token",
+		"Proxy-Authorization",
+		"Token",
+		SecretEnvOptions{AllowHosts: []string{"api.example.com"}},
+	)
+
+	if s.InjectHeaders == nil || *s.InjectHeaders {
+		t.Fatal("InjectHeaders should be explicitly false")
+	}
+	if s.InjectBasicAuth == nil || *s.InjectBasicAuth {
+		t.Fatal("InjectBasicAuth should be explicitly false")
+	}
+	if len(s.ExactHeaders) != 1 ||
+		s.ExactHeaders[0].Name != "Proxy-Authorization" ||
+		s.ExactHeaders[0].Scheme != "Token" {
+		t.Fatalf("ExactHeaders = %#v", s.ExactHeaders)
+	}
+}
+
 func TestWithPatches(t *testing.T) {
 	o := SandboxConfig{}
 	p1 := Patch.Text("/etc/foo", "bar\n", PatchOptions{})
