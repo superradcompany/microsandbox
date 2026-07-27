@@ -24,7 +24,7 @@ After that first version lands, set the `WINGET_RELEASE_ENABLED` repository vari
 
 One-time setup for the automation:
 
-- After the first version is accepted into `microsoft/winget-pkgs`, set the `WINGET_RELEASE_ENABLED` repository variable to `true`. Keep it unset before then so release workflows skip the submission step.
+- After the first version is accepted into `microsoft/winget-pkgs`, set the `WINGET_RELEASE_ENABLED` repository variable to `true`. Keep it unset before then so release workflows skip the `update-winget` job.
 - Add a `WINGET_TOKEN` repository secret: a classic PAT with `public_repo` scope whose owner has a fork of `microsoft/winget-pkgs`. The submit step is skipped when this secret is absent.
 - If that fork lives under an account other than `superradcompany`, set a `WINGET_FORK_USER` repository variable to the fork owner's username.
 
