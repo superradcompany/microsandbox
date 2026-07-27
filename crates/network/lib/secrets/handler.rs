@@ -7,13 +7,15 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
+use std::ops::Range;
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use httlib_hpack::{Decoder as HpackDecoder, Encoder as HpackEncoder};
 use percent_encoding::percent_decode;
 
 use super::config::{
-    HostPattern, MAX_SECRET_PLACEHOLDER_BYTES, SecretEntry, SecretsConfig, ViolationAction,
+    HostPattern, MAX_SECRET_PLACEHOLDER_BYTES, SecretEntry, SecretExactHeader, SecretsConfig,
+    ViolationAction,
 };
 use crate::netstack::shared::SharedState;
 
@@ -148,6 +150,7 @@ struct Http2State {
     preface_seen: bool,
     buffer: Vec<u8>,
     header_block: Option<Http2HeaderBlock>,
+    highest_client_stream_id: u32,
     open_request_streams: HashSet<u32>,
     data_tails: HashMap<u32, Vec<u8>>,
     request_summaries: HashMap<u32, RequestSummary>,
@@ -233,6 +236,7 @@ struct EligibleSecret {
     value: zeroize::Zeroizing<String>,
     inject_headers: bool,
     inject_basic_auth: bool,
+    exact_headers: Vec<SecretExactHeader>,
     inject_query_params: bool,
     inject_body: bool,
     require_tls_identity: bool,
@@ -308,37 +312,62 @@ enum PlaceholderMatchForm {
 
 impl EligibleSecret {
     /// Returns true if any of the header-side injection scopes is enabled
-    /// (`headers`, `basic_auth`, or `query_params`).
+    /// (`headers`, `basic_auth`, exact headers, or query parameters).
     fn wants_header_injection(&self) -> bool {
-        self.inject_headers || self.inject_basic_auth || self.inject_query_params
+        self.inject_headers
+            || self.inject_basic_auth
+            || !self.exact_headers.is_empty()
+            || self.inject_query_params
     }
 
     /// Returns true when the current header bytes contain this secret's
     /// placeholder in a header-substitution scope.
-    fn may_substitute_in_headers(&self, headers: &[u8]) -> bool {
+    fn may_substitute_in_headers(&self, headers: &[u8], initial_http1_headers: bool) -> bool {
         if !self.wants_header_injection() {
             return false;
         }
 
         let needle = self.placeholder.as_bytes();
-        if (self.inject_headers || self.inject_query_params) && contains_bytes(headers, needle) {
+        if self.inject_query_params && contains_bytes(headers, needle) {
             return true;
         }
 
-        // Search decoded Basic auth credentials, not the raw header value.
-        if self.inject_basic_auth {
-            return basic_auth_decoded_contains(
+        if self.inject_headers && contains_bytes(headers, needle) {
+            return true;
+        }
+        if self.inject_basic_auth
+            && basic_auth_decoded_contains(
                 String::from_utf8_lossy(headers).as_ref(),
                 &self.placeholder,
-            );
+            )
+        {
+            return true;
         }
 
-        false
+        initial_http1_headers
+            && exact_header_http1_credential_range(headers, needle, &self.exact_headers).is_some()
     }
 
     /// Substitute this secret's placeholder in the headers portion, scoped by
-    /// the secret's `headers` / `basic_auth` / `query_params` flags.
-    fn substitute_in_headers(&self, headers: &str) -> String {
+    /// its header placement and query-parameter settings.
+    fn substitute_in_headers(&self, headers: &[u8], initial_http1_headers: bool) -> Vec<u8> {
+        let mut bytes = headers.to_vec();
+
+        if initial_http1_headers
+            && let Some(range) = exact_header_http1_credential_range(
+                &bytes,
+                self.placeholder.as_bytes(),
+                &self.exact_headers,
+            )
+        {
+            bytes.splice(range, self.value.as_bytes().iter().copied());
+        }
+
+        if !self.inject_headers && !self.inject_basic_auth && !self.inject_query_params {
+            return bytes;
+        }
+
+        let headers = String::from_utf8_lossy(&bytes);
         let mut result = String::with_capacity(headers.len());
         for (i, line) in headers.split("\r\n").enumerate() {
             if i > 0 {
@@ -349,7 +378,7 @@ impl EligibleSecret {
                 None => result.push_str(line),
             }
         }
-        result
+        result.into_bytes()
     }
 
     /// Substitute this secret's placeholder in a single header line. Returns
@@ -378,8 +407,7 @@ impl EligibleSecret {
     /// Decode `Basic <base64>` credentials, substitute the placeholder in the
     /// decoded `user:password`, and return the re-encoded line. Returns `None`
     /// if the line isn't `Basic` scheme or the decoded credentials don't
-    /// contain the placeholder. Non-Basic schemes (e.g. `Bearer`) are handled
-    /// by `inject_headers` instead.
+    /// contain the placeholder.
     fn substitute_basic_auth_header(&self, line: &str) -> Option<String> {
         let decoded = decode_basic_credentials(line)?;
         if !decoded.contains(&self.placeholder) {
@@ -465,6 +493,7 @@ impl Default for Http2State {
             preface_seen: false,
             buffer: Vec::new(),
             header_block: None,
+            highest_client_stream_id: 0,
             open_request_streams: HashSet::new(),
             data_tails: HashMap::new(),
             request_summaries: HashMap::new(),
@@ -592,6 +621,7 @@ impl SecretsHandler {
                     value: secret.value.clone(),
                     inject_headers: secret.injection.headers,
                     inject_basic_auth: secret.injection.basic_auth,
+                    exact_headers: secret.injection.exact_headers.clone(),
                     inject_query_params: secret.injection.query_params,
                     inject_body: secret.injection.body,
                     require_tls_identity: secret.require_tls_identity,
@@ -655,8 +685,7 @@ impl SecretsHandler {
     /// Substitute secrets in plaintext data (guest → server direction).
     ///
     /// Splits the HTTP message on `\r\n\r\n` to scope substitution:
-    /// - `headers`: substitutes in the header portion (before boundary)
-    /// - `basic_auth`: substitutes in Authorization headers specifically
+    /// - `headers`: applies the configured closed header-placement mode
     /// - `query_params`: substitutes in the request line (first line, query portion)
     /// - `body`: substitutes in the body portion (after boundary)
     ///
@@ -868,7 +897,7 @@ impl SecretsHandler {
         }
 
         // Start with borrowed bytes; allocate only when a substitution is needed.
-        let mut header_str = None;
+        let mut header_out: Option<Vec<u8>> = None;
         let mut body = None;
 
         for secret in &self.eligible_for_substitution {
@@ -877,11 +906,9 @@ impl SecretsHandler {
                 continue;
             }
 
-            // Header substitution still uses string helpers after a scoped match.
-            if secret.may_substitute_in_headers(header_bytes) {
-                let current = header_str
-                    .get_or_insert_with(|| String::from_utf8_lossy(header_bytes).into_owned());
-                *current = secret.substitute_in_headers(current);
+            let current = header_out.as_deref().unwrap_or(header_bytes);
+            if secret.may_substitute_in_headers(current, boundary.is_some()) {
+                header_out = Some(secret.substitute_in_headers(current, boundary.is_some()));
             }
 
             // Body substitution works on bytes so encoded payloads stay valid.
@@ -897,9 +924,9 @@ impl SecretsHandler {
             }
         }
 
-        let header_changed = header_str
+        let header_changed = header_out
             .as_ref()
-            .is_some_and(|headers| headers.as_bytes() != header_bytes);
+            .is_some_and(|headers| headers.as_slice() != header_bytes);
         let body_changed = body.is_some();
 
         // No header or body replacement was produced. Forward this request
@@ -908,7 +935,7 @@ impl SecretsHandler {
             return self.append_pipelined_spillover(data, this_request, spillover);
         }
 
-        let header_len = header_str
+        let header_len = header_out
             .as_ref()
             .map_or(header_bytes.len(), |headers| headers.len());
         let body_len = body.as_ref().map_or(body_bytes.len(), Vec::len);
@@ -917,16 +944,19 @@ impl SecretsHandler {
         let body_bytes_out = body.as_deref().unwrap_or(body_bytes);
         // Update Content-Length only when body substitution changed the size.
         if body_changed && body_bytes_out.len() != body_bytes.len() {
-            let headers = match header_str {
-                Some(headers) => update_content_length(&headers, body_bytes_out.len()),
+            let headers = match header_out {
+                Some(headers) => update_content_length(
+                    String::from_utf8_lossy(&headers).as_ref(),
+                    body_bytes_out.len(),
+                ),
                 None => update_content_length(
                     String::from_utf8_lossy(header_bytes).as_ref(),
                     body_bytes_out.len(),
                 ),
             };
             output.extend_from_slice(headers.as_bytes());
-        } else if let Some(headers) = header_str {
-            output.extend_from_slice(headers.as_bytes());
+        } else if let Some(headers) = header_out {
+            output.extend_from_slice(&headers);
         } else {
             output.extend_from_slice(header_bytes);
         }
@@ -1038,9 +1068,9 @@ impl SecretsHandler {
             HttpState::InChunkedBody { state }
         };
 
-        if let Some(headers) = self.substitute_header_bytes(header_bytes) {
+        if let Some(headers) = self.substitute_header_bytes(header_bytes, true) {
             let mut output = Vec::with_capacity(headers.len() + body_part.len() + spillover.len());
-            output.extend_from_slice(headers.as_bytes());
+            output.extend_from_slice(&headers);
             output.extend_from_slice(body_part);
             if !spillover.is_empty() {
                 let next_out = self.substitute(spillover)?;
@@ -1084,7 +1114,7 @@ impl SecretsHandler {
         };
 
         let header_len = header_bytes.len();
-        let header_out = self.substitute_header_bytes(header_bytes);
+        let header_out = self.substitute_header_bytes(header_bytes, true);
         let mut output = Vec::with_capacity(
             header_out
                 .as_ref()
@@ -1093,7 +1123,7 @@ impl SecretsHandler {
                 + spillover.len(),
         );
         if let Some(headers) = header_out {
-            output.extend_from_slice(headers.as_bytes());
+            output.extend_from_slice(&headers);
         } else {
             output.extend_from_slice(header_bytes);
         }
@@ -1281,10 +1311,26 @@ impl SecretsHandler {
         })
     }
 
-    fn substitute_http2_headers(&self, headers: &mut [(Vec<u8>, Vec<u8>)]) {
+    fn substitute_http2_headers(
+        &self,
+        headers: &mut [(Vec<u8>, Vec<u8>)],
+        is_initial_request: bool,
+    ) {
         for secret in &self.eligible_for_substitution {
             if secret.require_tls_identity && !self.tls_intercepted {
                 continue;
+            }
+
+            if is_initial_request
+                && let Some(index) = exact_header_http2_header_index(
+                    headers,
+                    secret.placeholder.as_bytes(),
+                    &secret.exact_headers,
+                )
+            {
+                let value = &mut headers[index].1;
+                let credential_start = value.len() - secret.placeholder.len();
+                value.splice(credential_start.., secret.value.as_bytes().iter().copied());
             }
 
             for (name, value) in headers.iter_mut() {
@@ -1324,20 +1370,23 @@ impl SecretsHandler {
         }
     }
 
-    fn substitute_header_bytes(&self, header_bytes: &[u8]) -> Option<String> {
-        let mut header_str: Option<String> = None;
+    fn substitute_header_bytes(
+        &self,
+        header_bytes: &[u8],
+        initial_http1_headers: bool,
+    ) -> Option<Vec<u8>> {
+        let mut headers: Option<Vec<u8>> = None;
         for secret in &self.eligible_for_substitution {
             if secret.require_tls_identity && !self.tls_intercepted {
                 continue;
             }
-            if secret.may_substitute_in_headers(header_bytes) {
-                let current = header_str
-                    .get_or_insert_with(|| String::from_utf8_lossy(header_bytes).into_owned());
-                *current = secret.substitute_in_headers(current);
+            let current = headers.as_deref().unwrap_or(header_bytes);
+            if secret.may_substitute_in_headers(current, initial_http1_headers) {
+                headers = Some(secret.substitute_in_headers(current, initial_http1_headers));
             }
         }
 
-        header_str.filter(|headers| headers.as_bytes() != header_bytes)
+        headers.filter(|headers| headers.as_slice() != header_bytes)
     }
 
     fn consume_chunked_body_with_violation_detection(
@@ -1762,9 +1811,13 @@ impl Http2State {
         let mut headers = self.decode_headers(&block.block)?;
         let is_initial_request = !self.open_request_streams.contains(&block.stream_id);
         if is_initial_request {
+            if block.stream_id <= self.highest_client_stream_id {
+                return Err(ViolationAction::Block);
+            }
             if self.open_request_streams.len() >= MAX_HTTP2_TRACKED_STREAMS {
                 return Err(ViolationAction::Block);
             }
+            self.highest_client_stream_id = block.stream_id;
             self.open_request_streams.insert(block.stream_id);
         } else if !block.end_stream {
             return Err(ViolationAction::Block);
@@ -1787,7 +1840,7 @@ impl Http2State {
             Some(block.stream_id),
         ))?;
 
-        handler.substitute_http2_headers(&mut headers);
+        handler.substitute_http2_headers(&mut headers, is_initial_request);
         let encoded = self.encode_headers(&headers)?;
         append_http2_header_frames(output, block.stream_id, block.end_stream, &encoded)?;
         if block.end_stream {
@@ -1865,6 +1918,166 @@ fn is_authorization_header(line: &str) -> bool {
     line.as_bytes()
         .get(..14)
         .is_some_and(|b| b.eq_ignore_ascii_case(b"authorization:"))
+}
+
+/// Return the exact credential byte range for one eligible provider-neutral
+/// HTTP/1 exact-header rule.
+///
+/// Eligibility requires a valid HTTP/1 request line and exactly one
+/// matching field. The field value may start with SP/HTAB, then must contain
+/// the configured optional scheme, exactly one SP when a scheme is present,
+/// and the complete placeholder.
+fn exact_header_http1_credential_range(
+    headers: &[u8],
+    placeholder: &[u8],
+    rules: &[SecretExactHeader],
+) -> Option<Range<usize>> {
+    if placeholder.is_empty() || rules.is_empty() {
+        return None;
+    }
+
+    let request_line_end = headers.windows(2).position(|window| window == b"\r\n")?;
+    let request_line = std::str::from_utf8(&headers[..request_line_end]).ok()?;
+    let version = http_request_version(request_line)?;
+    if !version.starts_with("HTTP/1.") {
+        return None;
+    }
+
+    let mut unique_range = None;
+    for rule in rules {
+        let mut cursor = request_line_end + 2;
+        let mut matching_header_count = 0usize;
+        let mut rule_range = None;
+        let mut previous_was_matching_header = false;
+
+        while cursor < headers.len() {
+            let line_end = headers[cursor..]
+                .windows(2)
+                .position(|window| window == b"\r\n")
+                .map(|offset| cursor + offset)?;
+            if line_end == cursor {
+                break;
+            }
+
+            let line = &headers[cursor..line_end];
+            if line
+                .first()
+                .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+            {
+                if previous_was_matching_header {
+                    rule_range = None;
+                    matching_header_count = 2;
+                    break;
+                }
+                cursor = line_end + 2;
+                continue;
+            }
+
+            previous_was_matching_header = false;
+            if let Some(colon) = line.iter().position(|byte| *byte == b':')
+                && line[..colon].eq_ignore_ascii_case(rule.name.as_bytes())
+            {
+                previous_was_matching_header = true;
+                matching_header_count += 1;
+                if matching_header_count > 1 {
+                    rule_range = None;
+                    break;
+                }
+
+                let value_start = cursor + colon + 1;
+                rule_range = exact_header_credential_start(
+                    &headers[value_start..line_end],
+                    placeholder,
+                    rule.scheme.as_deref(),
+                )
+                .map(|relative| value_start + relative..line_end);
+            }
+
+            cursor = line_end + 2;
+        }
+
+        if matching_header_count == 1
+            && let Some(range) = rule_range
+        {
+            if unique_range.is_some() {
+                return None;
+            }
+            unique_range = Some(range);
+        }
+    }
+
+    unique_range
+}
+
+/// Return the unique HTTP/2 field index whose name and complete credential
+/// match one configured exact-header rule.
+fn exact_header_http2_header_index(
+    headers: &[(Vec<u8>, Vec<u8>)],
+    placeholder: &[u8],
+    rules: &[SecretExactHeader],
+) -> Option<usize> {
+    let mut unique_index = None;
+
+    for rule in rules {
+        let mut matching_header_count = 0usize;
+        let mut rule_index = None;
+        for (index, (name, value)) in headers.iter().enumerate() {
+            if !name.eq_ignore_ascii_case(rule.name.as_bytes()) {
+                continue;
+            }
+            matching_header_count += 1;
+            if matching_header_count > 1 {
+                rule_index = None;
+                break;
+            }
+            if exact_header_credential_start(value, placeholder, rule.scheme.as_deref()).is_some() {
+                rule_index = Some(index);
+            }
+        }
+        if matching_header_count == 1
+            && let Some(index) = rule_index
+        {
+            if unique_index.is_some() {
+                return None;
+            }
+            unique_index = Some(index);
+        }
+    }
+
+    unique_index
+}
+
+/// Return the offset where an exact credential starts in a header value,
+/// after optional leading SP/HTAB and an optional scheme plus one SP.
+fn exact_header_credential_start(
+    value: &[u8],
+    placeholder: &[u8],
+    scheme: Option<&str>,
+) -> Option<usize> {
+    if placeholder.is_empty() {
+        return None;
+    }
+
+    let leading = value
+        .iter()
+        .take_while(|byte| matches!(byte, b' ' | b'\t'))
+        .count();
+    let value = &value[leading..];
+    let credential_start = if let Some(scheme) = scheme {
+        let scheme_len = scheme.len();
+        if !value
+            .get(..scheme_len)?
+            .eq_ignore_ascii_case(scheme.as_bytes())
+            || value.get(scheme_len) != Some(&b' ')
+        {
+            return None;
+        }
+        scheme_len + 1
+    } else {
+        0
+    };
+    let credential = value.get(credential_start..)?;
+    (credential == placeholder).then_some(leading + credential_start)
 }
 
 fn is_http2_preface_prefix(data: &[u8]) -> bool {
@@ -3096,6 +3309,20 @@ mod tests {
         SecretInjection {
             headers: false,
             basic_auth: true,
+            exact_headers: Vec::new(),
+            query_params: false,
+            body: false,
+        }
+    }
+
+    fn exact_bearer_header_only() -> SecretInjection {
+        SecretInjection {
+            headers: false,
+            basic_auth: false,
+            exact_headers: vec![SecretExactHeader {
+                name: "Authorization".into(),
+                scheme: Some("Bearer".into()),
+            }],
             query_params: false,
             body: false,
         }
@@ -4015,7 +4242,7 @@ mod tests {
         let config = make_config(vec![secret]);
         let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
 
-        // basic_auth only handles Basic credentials; Bearer needs inject_headers.
+        // Basic-only placement does not handle Bearer or arbitrary headers.
         let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\nX-Custom: $KEY\r\n\r\n";
         let output = handler.substitute(input).unwrap();
         let result = String::from_utf8(output.into_owned()).unwrap();
@@ -4069,6 +4296,7 @@ mod tests {
         secret.injection = SecretInjection {
             headers: false,
             basic_auth: false,
+            exact_headers: Vec::new(),
             query_params: false,
             body: false,
         };
@@ -4083,11 +4311,138 @@ mod tests {
     }
 
     #[test]
+    fn exact_bearer_header_substitutes_singleton_http1_header() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.injection = exact_bearer_header_only();
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let input =
+            b"GET / HTTP/1.1\r\nHost: api.openai.com\r\naUtHoRiZaTiOn:\t BeArEr $KEY\r\nX-Other: $KEY\r\n\r\n";
+        let output = handler.substitute(input).unwrap().into_owned();
+        let output = String::from_utf8(output).unwrap();
+
+        assert!(output.contains("aUtHoRiZaTiOn:\t BeArEr real-secret"));
+        assert!(output.contains("X-Other: $KEY"));
+    }
+
+    #[test]
+    fn exact_header_only_is_not_hardwired_to_authorization_or_bearer() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.injection = SecretInjection {
+            headers: false,
+            basic_auth: false,
+            exact_headers: vec![
+                SecretExactHeader {
+                    name: "X-Api-Key".into(),
+                    scheme: None,
+                },
+                SecretExactHeader {
+                    name: "Proxy-Authorization".into(),
+                    scheme: Some("Token".into()),
+                },
+            ],
+            query_params: false,
+            body: false,
+        };
+        let config = make_config(vec![secret]);
+
+        for (header, expected) in [
+            ("X-Api-Key:\t $KEY", "X-Api-Key:\t real-secret"),
+            (
+                "Proxy-Authorization: tOkEn $KEY",
+                "Proxy-Authorization: tOkEn real-secret",
+            ),
+        ] {
+            let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+            let input = format!("GET / HTTP/1.1\r\n{header}\r\n\r\n");
+            let output = handler.substitute(input.as_bytes()).unwrap().into_owned();
+            assert!(String::from_utf8(output).unwrap().contains(expected));
+        }
+    }
+
+    #[test]
+    fn exact_bearer_header_rejects_malformed_and_wrong_http1_placements() {
+        let rejected = [
+            "GET / HTTP/1.1\r\nHost: api.openai.com\r\nX-Token: $KEY\r\n\r\n",
+            "GET / HTTP/1.1\r\nHost: api.openai.com\r\nAuthorization: Basic $KEY\r\n\r\n",
+            "GET / HTTP/1.1\r\nHost: api.openai.com\r\nAuthorization: Bearer,$KEY\r\n\r\n",
+            "GET / HTTP/1.1\r\nHost: api.openai.com\r\nAuthorization: Bearer$KEY\r\n\r\n",
+            "GET / HTTP/1.1\r\nHost: api.openai.com\r\nAuthorization: Bearer  $KEY\r\n\r\n",
+            "GET / HTTP/1.1\r\nHost: api.openai.com\r\nAuthorization: Bearer\t$KEY\r\n\r\n",
+            "GET / HTTP/1.1\r\nHost: api.openai.com\r\nAuthorization: Bearer $KEY \r\n\r\n",
+            "GET / HTTP/1.1\r\nHost: api.openai.com\r\nAuthorization: Bearer prefix$KEY\r\n\r\n",
+            "GET / HTTP/1.1\r\nHost: api.openai.com\r\nAuthorization: Bearer $KEYsuffix\r\n\r\n",
+            "GET / HTTP/1.1\r\nHost: api.openai.com\r\nAuthorization: Bearer $KEY,other\r\n\r\n",
+            "GET / HTTP/1.1\r\nHost: api.openai.com\r\nAuthorization: Bearer $KEY\r\nAuthorization: Bearer $KEY\r\n\r\n",
+            "GET / HTTP/1.1\r\nHost: api.openai.com\r\nAuthorization: Bearer $KEY\r\n continued\r\n\r\n",
+            "GET / HTTP/1.1\r\nHost: api.openai.com\r\nAuthorization: Bearer $KEY\r\n\tcontinued\r\n\r\n",
+            "Authorization: Bearer $KEY\r\n\r\n",
+        ];
+
+        for input in rejected {
+            let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+            secret.injection = exact_bearer_header_only();
+            let config = make_config(vec![secret]);
+            let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+            let output = handler.substitute(input.as_bytes()).unwrap().into_owned();
+
+            assert!(
+                !contains_bytes(&output, b"real-secret"),
+                "unexpected substitution for {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_bearer_header_never_substitutes_http1_trailers() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.injection = exact_bearer_header_only();
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+        let input = b"POST / HTTP/1.1\r\nHost: api.openai.com\r\nTransfer-Encoding: chunked\r\nTrailer: Authorization\r\n\r\n0\r\nAuthorization: Bearer $KEY\r\n\r\n";
+
+        let output = handler.substitute(input).unwrap().into_owned();
+
+        assert!(!contains_bytes(&output, b"real-secret"));
+        assert!(contains_bytes(&output, b"Authorization: Bearer $KEY"));
+    }
+
+    #[test]
+    fn exact_bearer_header_requires_tls_identity() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.injection = exact_bearer_header_only();
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", false);
+        let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\n\r\n";
+
+        let output = handler.substitute(input).unwrap().into_owned();
+
+        assert!(!contains_bytes(&output, b"real-secret"));
+        assert!(contains_bytes(&output, b"Authorization: Bearer $KEY"));
+    }
+
+    #[test]
+    fn exact_bearer_header_rejects_disallowed_destination() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.injection = exact_bearer_header_only();
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "evil.example", true);
+        let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\n\r\n";
+
+        assert_eq!(
+            handler.substitute(input).unwrap_err(),
+            ViolationAction::Block
+        );
+    }
+
+    #[test]
     fn query_params_substitution() {
         let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
         secret.injection = SecretInjection {
             headers: false,
             basic_auth: false,
+            exact_headers: Vec::new(),
             query_params: true,
             body: false,
         };
@@ -4108,6 +4463,7 @@ mod tests {
         secret.injection = SecretInjection {
             headers: false,
             basic_auth: false,
+            exact_headers: Vec::new(),
             query_params: true,
             body: false,
         };
@@ -4362,7 +4718,7 @@ mod tests {
     #[test]
     fn header_only_secret_does_not_leak_into_body_continuation_chunk() {
         // Security regression: a secret with the default injection scopes
-        // (inject_headers=true, inject_body=false) must NOT substitute its
+        // (headers=any, inject_body=false) must NOT substitute its
         // placeholder when the placeholder appears in body bytes. Without
         // the framing fix, a body-continuation chunk was parsed as headers
         // and run through `substitute_in_headers`, which replaces the
@@ -4901,6 +5257,196 @@ mod tests {
     }
 
     #[test]
+    fn exact_bearer_header_substitutes_singleton_http2_header() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.injection = exact_bearer_header_only();
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+        let request = h2_request(
+            &[
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/"),
+                (b"AuThOrIzAtIoN", b"\t BeArEr $KEY"),
+                (b"x-other", b"$KEY"),
+            ],
+            true,
+        );
+
+        let output = handler.substitute(&request).unwrap().into_owned();
+        let headers = decode_first_h2_headers(&output);
+
+        assert_eq!(
+            h2_header_value(&headers, b"authorization"),
+            "\t BeArEr real-secret"
+        );
+        assert_eq!(h2_header_value(&headers, b"x-other"), "$KEY");
+    }
+
+    #[test]
+    fn exact_bearer_header_rejects_malformed_and_duplicate_http2_headers() {
+        let rejected: &[&[(&[u8], &[u8])]] = &[
+            &[(b"x-token", b"$KEY")],
+            &[(b"authorization", b"Basic $KEY")],
+            &[(b"authorization", b"Bearer,$KEY")],
+            &[(b"authorization", b"Bearer$KEY")],
+            &[(b"authorization", b"Bearer  $KEY")],
+            &[(b"authorization", b"Bearer\t$KEY")],
+            &[(b"authorization", b"Bearer $KEY ")],
+            &[(b"authorization", b"Bearer prefix$KEY")],
+            &[(b"authorization", b"Bearer $KEYsuffix")],
+            &[(b"authorization", b"Bearer $KEY,other")],
+            &[
+                (b"authorization", b"Bearer $KEY"),
+                (b"Authorization", b"Bearer $KEY"),
+            ],
+            &[(b"authorization", b"Bearer $KEY\x7f")],
+        ];
+
+        for extra in rejected {
+            let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+            secret.injection = exact_bearer_header_only();
+            let config = make_config(vec![secret]);
+            let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+            let mut headers: Vec<(&[u8], &[u8])> = vec![
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/"),
+            ];
+            headers.extend_from_slice(extra);
+            let request = h2_request(&headers, true);
+            let output = handler.substitute(&request).unwrap().into_owned();
+            let decoded = decode_first_h2_headers(&output);
+
+            assert!(
+                decoded
+                    .iter()
+                    .all(|(_, value)| !contains_bytes(value, b"real-secret")),
+                "unexpected substitution for {extra:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_bearer_header_never_substitutes_http2_trailing_headers() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.injection = exact_bearer_header_only();
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+        let request = h2_request(
+            &[
+                (b":method", b"POST"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/"),
+            ],
+            false,
+        );
+        handler.substitute(&request).unwrap();
+
+        let mut trailers = Vec::new();
+        append_h2_headers(
+            &mut trailers,
+            1,
+            &[(b"authorization", b"Bearer $KEY")],
+            true,
+        );
+        let output = handler.substitute(&trailers).unwrap().into_owned();
+        let mut framed = HTTP2_PREFACE.to_vec();
+        framed.extend_from_slice(&output);
+        let headers = decode_first_h2_headers(&framed);
+
+        assert_eq!(h2_header_value(&headers, b"authorization"), "Bearer $KEY");
+    }
+
+    #[test]
+    fn exact_bearer_header_rejects_reused_http2_stream_after_headers_end_stream() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.injection = exact_bearer_header_only();
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+        let request = h2_request(
+            &[
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/first"),
+            ],
+            true,
+        );
+        handler.substitute(&request).unwrap();
+
+        let mut reused = Vec::new();
+        append_h2_headers(
+            &mut reused,
+            1,
+            &[
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/reused"),
+                (b"authorization", b"Bearer $KEY"),
+            ],
+            true,
+        );
+
+        assert_eq!(
+            handler.substitute(&reused).unwrap_err(),
+            ViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn exact_bearer_header_rejects_reused_http2_stream_after_data_end_stream() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.injection = exact_bearer_header_only();
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+        let request = h2_request(
+            &[
+                (b":method", b"POST"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/first"),
+            ],
+            false,
+        );
+        handler.substitute(&request).unwrap();
+
+        let mut completed = Vec::new();
+        append_http2_frame(
+            &mut completed,
+            HTTP2_FRAME_DATA,
+            HTTP2_FLAG_END_STREAM,
+            1,
+            b"",
+        )
+        .unwrap();
+        handler.substitute(&completed).unwrap();
+
+        let mut reused = Vec::new();
+        append_h2_headers(
+            &mut reused,
+            1,
+            &[
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/reused"),
+                (b"authorization", b"Bearer $KEY"),
+            ],
+            true,
+        );
+
+        assert_eq!(
+            handler.substitute(&reused).unwrap_err(),
+            ViolationAction::Block
+        );
+    }
+
+    #[test]
     fn tls_intercepted_http2_preface_can_span_tls_reads() {
         let ip = Ipv4Addr::new(203, 0, 113, 38);
         let shared = SharedState::new(16);
@@ -4939,6 +5485,7 @@ mod tests {
         secret.injection = SecretInjection {
             headers: false,
             basic_auth: true,
+            exact_headers: Vec::new(),
             query_params: true,
             body: false,
         };

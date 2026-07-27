@@ -159,6 +159,7 @@ from microsandbox.types import (
     Secret,
     SecretChangeKind,
     SecretEntry,
+    SecretExactHeader,
     SecretInjection,
     SecretModifySpec,
     SecretPlannedChange,
@@ -288,6 +289,7 @@ __all__ = [
     # Secrets & TLS
     "Secret",
     "SecretEntry",
+    "SecretExactHeader",
     "SecretInjection",
     "ScopedUpstreamCACert",
     "ScopedVerifyUpstream",

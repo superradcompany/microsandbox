@@ -1565,7 +1565,8 @@ mod tests {
                 allowed_hosts: vec![HostPattern::Any],
                 injection: SecretInjection {
                     headers: true,
-                    basic_auth: false,
+                    basic_auth: true,
+                    exact_headers: Vec::new(),
                     query_params: false,
                     body: false,
                 },
@@ -1772,7 +1773,8 @@ mod tests {
                 allowed_hosts: vec![HostPattern::Exact("example.com".into())],
                 injection: SecretInjection {
                     headers: true,
-                    basic_auth: false,
+                    basic_auth: true,
+                    exact_headers: Vec::new(),
                     query_params: false,
                     body: false,
                 },

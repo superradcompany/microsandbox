@@ -38,9 +38,11 @@ func main() {
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
 		microsandbox.WithImage("alpine:3.19"),
-		microsandbox.WithSecrets(microsandbox.Secret.Env(
+		microsandbox.WithSecrets(microsandbox.Secret.ExactHeader(
 			envVarInGuest,
 			secretValue,
+			"Authorization",
+			"Bearer",
 			microsandbox.SecretEnvOptions{
 				AllowHosts:  []string{allowedHost},
 				Placeholder: placeholder,

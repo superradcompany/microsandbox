@@ -208,7 +208,18 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 			AllowHostPatterns: s.AllowHostPatterns,
 			Placeholder:       s.Placeholder,
 			RequireTLS:        s.RequireTLS,
-			OnViolation:       string(s.OnViolation),
+			InjectHeaders:     s.InjectHeaders,
+			InjectBasicAuth:   s.InjectBasicAuth,
+			ExactHeaders: func() []ffi.SecretExactHeaderOptions {
+				headers := make([]ffi.SecretExactHeaderOptions, 0, len(s.ExactHeaders))
+				for _, header := range s.ExactHeaders {
+					headers = append(headers, ffi.SecretExactHeaderOptions{
+						Name: header.Name, Scheme: header.Scheme,
+					})
+				}
+				return headers
+			}(),
+			OnViolation: string(s.OnViolation),
 		})
 	}
 

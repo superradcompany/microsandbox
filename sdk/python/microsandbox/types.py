@@ -1125,6 +1125,18 @@ class Patch:
 
 
 @dataclass(frozen=True, slots=True)
+class SecretExactHeader:
+    """One provider-neutral exact request-header placement."""
+    name: str
+    scheme: str | None = None
+
+    def _to_dict(self) -> dict:
+        d = {"name": self.name}
+        if self.scheme is not None:
+            d["scheme"] = self.scheme
+        return d
+
+@dataclass(frozen=True, slots=True)
 class SecretInjection:
     """Where in the HTTP request the secret value can be substituted."""
 
@@ -1132,6 +1144,7 @@ class SecretInjection:
     basic_auth: bool = True
     query_params: bool = False
     body: bool = False
+    exact_headers: tuple[SecretExactHeader, ...] = ()
 
     def _to_dict(self) -> dict:
         d: dict = {}
@@ -1139,6 +1152,8 @@ class SecretInjection:
             d["headers"] = False
         if not self.basic_auth:
             d["basic_auth"] = False
+        if self.exact_headers:
+            d["exact_headers"] = [header._to_dict() for header in self.exact_headers]
         if self.query_params:
             d["query_params"] = True
         if self.body:
@@ -1206,6 +1221,34 @@ class Secret:
             injection=injection if injection is not None else SecretInjection(),
         )
 
+    @staticmethod
+    def exact_header(
+        env_var: str,
+        *,
+        value: str,
+        header: str,
+        scheme: str | None = None,
+        allow_hosts: Sequence[str] = (),
+        allow_host_patterns: Sequence[str] = (),
+        placeholder: str | None = None,
+        require_tls: bool = True,
+        on_violation: ViolationAction | ViolationPolicy = ViolationAction.BLOCK_AND_LOG,
+    ) -> SecretEntry:
+        """Create a secret restricted to one exact request header."""
+        return Secret.env(
+            env_var,
+            value=value,
+            allow_hosts=allow_hosts,
+            allow_host_patterns=allow_host_patterns,
+            placeholder=placeholder,
+            require_tls=require_tls,
+            on_violation=on_violation,
+            injection=SecretInjection(
+                headers=False,
+                basic_auth=False,
+                exact_headers=(SecretExactHeader(name=header, scheme=scheme),),
+            ),
+        )
 
 # --------------------------------------------------------------------------------------------------
 # Types: Network

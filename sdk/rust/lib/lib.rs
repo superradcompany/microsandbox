@@ -64,9 +64,10 @@ pub use sandbox::{
     SandboxMetricsReport, SandboxMetricsState, SandboxModificationBuilder,
     SandboxModificationPatch, SandboxModificationPlan, SandboxPage, SandboxPingResult,
     SandboxPolicyPatch, SandboxResourcesPatch, SandboxRuntimeOptionsPatch, SandboxTouchResult,
-    SecretChangeKind, SecretModificationPatch, SecretPatchBuilder, SecretPlannedChange,
-    SecretSource, VsockSpecPatch, all_sandbox_metrics, all_sandbox_metrics_local,
-    all_sandbox_metrics_reports_local, sandbox_metrics_report_local, validate_sandbox_name,
+    SecretChangeKind, SecretExactHeader, SecretModificationPatch, SecretPatchBuilder,
+    SecretPlannedChange, SecretSource, VsockSpecPatch, all_sandbox_metrics,
+    all_sandbox_metrics_local, all_sandbox_metrics_reports_local, sandbox_metrics_report_local,
+    validate_sandbox_name,
 };
 #[cfg(feature = "net")]
 pub use sandbox::{

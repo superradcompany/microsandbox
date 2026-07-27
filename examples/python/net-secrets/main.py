@@ -13,7 +13,13 @@ async def main():
         cpus=1,
         memory=512,
         secrets=[
-            Secret.env("API_KEY", value="sk-real-secret-123", allow_hosts=["example.com"]),
+            Secret.exact_header(
+                "API_KEY",
+                value="sk-real-secret-123",
+                header="Authorization",
+                scheme="Bearer",
+                allow_hosts=["example.com"],
+            ),
         ],
         replace=True,
     )

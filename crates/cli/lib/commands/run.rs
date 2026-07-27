@@ -524,6 +524,22 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[test]
+    fn secret_exact_header_parses_as_creation_option() {
+        let args = parse_run_args(&[
+            "--secret-exact-header",
+            "API_KEY@api.example.com;header=Authorization;scheme=Bearer",
+            "alpine",
+        ]);
+
+        assert_eq!(
+            args.sandbox.secret_exact_header,
+            ["API_KEY@api.example.com;header=Authorization;scheme=Bearer"]
+        );
+        assert!(args.sandbox.secret.is_empty());
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
     fn net_profile_conflicts_with_low_level_default_baselines() {
         for conflicting in ["--no-net", "--net-default"] {
             let mut argv = vec!["msb", "--net", "public", conflicting];

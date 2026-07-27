@@ -97,6 +97,18 @@ export type StatVirtualization = "strict" | "relaxed" | "off";
 
 export type HostPermissions = "private" | "mirror";
 
+export type SecretExactHeader = {
+  /**
+   * HTTP field name, compared ASCII case-insensitively.
+   */
+  name: string;
+  /**
+   * Optional HTTP authentication scheme, compared ASCII
+   * case-insensitively. For example, `Bearer`.
+   */
+  scheme?: string | null;
+};
+
 export type SecretInjection = {
   /**
    * Substitute in HTTP headers (default: true).
@@ -106,6 +118,14 @@ export type SecretInjection = {
    * Substitute in HTTP Basic Auth (default: true).
    */
   basic_auth: boolean;
+  /**
+   * Additional exact request-header placements.
+   *
+   * This is additive so existing serialized configurations and SDK calls
+   * keep their behavior. For a strict exact-header-only secret, disable
+   * `headers` and `basic_auth` and configure one exact header.
+   */
+  exact_headers?: Array<SecretExactHeader>;
   /**
    * Substitute in URL query parameters (default: false).
    */

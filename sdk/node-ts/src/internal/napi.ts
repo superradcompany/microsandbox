@@ -938,6 +938,7 @@ export interface NapiSecretBuilder {
   requireTlsIdentity(enabled: boolean): this;
   injectHeaders(enabled: boolean): this;
   injectBasicAuth(enabled: boolean): this;
+  exactHeader(name: string, scheme?: string): this;
   injectQuery(enabled: boolean): this;
   injectBody(enabled: boolean): this;
   onViolation(
@@ -960,8 +961,14 @@ export interface NapiSecretEntry {
 export interface NapiSecretInjection {
   readonly headers: boolean;
   readonly basicAuth: boolean;
+  readonly exactHeaders?: readonly NapiSecretExactHeader[];
   readonly queryParams: boolean;
   readonly body: boolean;
+}
+
+export interface NapiSecretExactHeader {
+  readonly name: string;
+  readonly scheme?: string;
 }
 
 export interface NapiNetworkBuilder {

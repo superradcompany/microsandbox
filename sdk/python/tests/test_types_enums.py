@@ -43,6 +43,8 @@ from microsandbox import (
     Sandbox,
     Secret,
     SecretChangeKind,
+    SecretExactHeader,
+    SecretInjection,
     SecurityProfile,
     Stdin,
     StdinMode,
@@ -311,3 +313,38 @@ def test_wrong_enum_classes_do_not_cross_matching_wire_values() -> None:
 
     with pytest.raises(TypeError, match=r"PortBinding\.protocol"):
         PortBinding(8000, 8000, protocol=Protocol.TCP)._to_dict()  # type: ignore[arg-type]
+
+
+def test_exact_header_secret_is_provider_neutral() -> None:
+    entry = Secret.exact_header(
+        "API_KEY",
+        value="synthetic-token",
+        header="Proxy-Authorization",
+        scheme="Token",
+        allow_hosts=("api.example.com",),
+    )
+
+    assert entry.injection == SecretInjection(
+        headers=False,
+        basic_auth=False,
+        exact_headers=(
+            SecretExactHeader(name="Proxy-Authorization", scheme="Token"),
+        ),
+    )
+    assert entry._to_dict()["injection"] == {
+        "headers": False,
+        "basic_auth": False,
+        "exact_headers": [
+            {"name": "Proxy-Authorization", "scheme": "Token"},
+        ],
+    }
+
+
+def test_secret_injection_preserves_legacy_positional_arguments() -> None:
+    injection = SecretInjection(False, True, True, True)
+
+    assert injection.headers is False
+    assert injection.basic_auth is True
+    assert injection.query_params is True
+    assert injection.body is True
+    assert injection.exact_headers == ()
