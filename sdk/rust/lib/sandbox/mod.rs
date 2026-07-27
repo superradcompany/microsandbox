@@ -1470,6 +1470,28 @@ impl Sandbox {
             .await
     }
 
+    /// A [`SandboxLogger`](crate::logs::SandboxLogger) over this
+    /// sandbox's on-disk logs.
+    ///
+    /// **Local backend only** — cloud sandboxes stream logs via SSE and
+    /// have no host log directory. Used directly it behaves like
+    /// [`log_stream`](Self::log_stream) (a private watcher per followed
+    /// stream); registered with a
+    /// [`LogRegistry`](crate::logs::LogRegistry) its followed
+    /// streams share one host-wide watcher instead.
+    pub fn logger(&self) -> MicrosandboxResult<crate::logs::SandboxLogger> {
+        self.require_local("logger")?;
+        let local =
+            self.backend
+                .as_local()
+                .ok_or_else(|| crate::MicrosandboxError::Unsupported {
+                    feature: "Sandbox::logger".into(),
+                    available_when: "with a LocalBackend".into(),
+                })?;
+        let log_dir = crate::logs::log_dir_for_local(local, &self.name);
+        Ok(crate::logs::SandboxLogger::new(self.name.clone(), log_dir))
+    }
+
     /// Check whether agentd is reachable without refreshing the sandbox idle timer.
     ///
     /// Local backend only. The request uses `core.ping` and returns the SDK-measured
