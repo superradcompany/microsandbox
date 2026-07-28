@@ -1,0 +1,97 @@
+---
+title: Linux
+description: Diagnose KVM, permissions, and host runtime setup on Linux
+icon: "linux"
+---
+
+microsandbox local sandboxes use hardware virtualization. On Linux, confirm that the host has a glibc-based Linux userland and that KVM is available through `/dev/kvm`.
+
+## Quick checks
+
+Start with the doctor command for the local setup checks:
+
+```bash
+msb doctor
+```
+
+If sandbox startup still fails with a KVM-related error, check the KVM module and device:
+
+```bash
+lsmod | grep kvm
+ls -l /dev/kvm
+```
+
+An enabled Intel host usually shows `kvm_intel` and `kvm`; an enabled AMD host usually shows `kvm_amd` and `kvm`.
+
+Then confirm that your current user can read and write the KVM device:
+
+```bash
+[ -r /dev/kvm ] && [ -w /dev/kvm ] && echo "OK" || echo "FAIL"
+```
+
+## Missing `/dev/kvm`
+
+If `/dev/kvm` is missing, make sure CPU virtualization is enabled in firmware/UEFI and visible to Linux:
+
+```bash
+grep -E -c '(vmx|svm)' /proc/cpuinfo
+```
+
+A `0` result usually means virtualization is disabled in firmware, unavailable on the machine, or hidden by an outer VM. After enabling virtualization in firmware, reboot and check the KVM module again.
+
+You can also try loading the host-specific KVM module:
+
+```bash
+sudo modprobe kvm_intel  # Intel
+sudo modprobe kvm_amd    # AMD
+```
+
+If you are inside a cloud VM, CI runner, or another hypervisor, the outer environment must expose nested virtualization before `/dev/kvm` can appear.
+
+## Permission denied
+
+If `/dev/kvm` exists but sandbox startup fails with a permission error, your user probably cannot open the device. Check the device owner and group:
+
+```bash
+stat -c '%U %G %a %n' /dev/kvm
+```
+
+Many distributions grant access through the `kvm` group. Check whether the group exists, whether `/dev/kvm` uses it, and whether your shell is already in that group:
+
+```bash
+getent group kvm
+ls -l /dev/kvm
+groups
+```
+
+If `/dev/kvm` belongs to `kvm`, add your user to the group:
+
+```bash
+sudo usermod -aG kvm "$USER"
+```
+
+Log out and back in after changing group membership. If you want to refresh the current shell only, `newgrp kvm` may work, but opening a new login session is the least surprising path.
+
+Some distributions use access control lists instead of group membership. If `setfacl` is available, you can grant your user read/write access directly:
+
+```bash
+sudo setfacl -m "u:$USER:rw" /dev/kvm
+```
+
+Re-run the read/write check after changing group membership or ACLs:
+
+```bash
+[ -r /dev/kvm ] && [ -w /dev/kvm ] && echo "OK" || echo "FAIL"
+```
+
+If your distribution uses a different group, udev rule, or enterprise policy for `/dev/kvm`, follow that local policy instead.
+
+## Containers and VMs
+
+When running microsandbox inside another VM or container, the outer environment must expose hardware virtualization. Many hosted CI runners and cloud VMs do not expose nested virtualization by default.
+
+For Docker-based workflows, pass `/dev/kvm` into the container. See [Docker on Linux](/recipes/docker/docker) for the container flags.
+
+## Linux userland
+
+Use a normal glibc-based Linux host for the local runtime. Minimal or musl-only environments, such as a bare Alpine host image, are not the tested path for running local microsandbox sandboxes.

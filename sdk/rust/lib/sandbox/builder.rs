@@ -379,22 +379,28 @@ impl SandboxBuilder {
         self
     }
 
-    /// Clear detached startup intent for attached CLI `run`.
+    /// Select the foreground command for attached CLI `run`.
     #[doc(hidden)]
-    pub fn initial_command(mut self, command: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.config
-            .set_initial_command(command.into_iter().map(Into::into).collect());
-        self
-    }
-
-    /// Set the persisted startup command for detached CLI `run`.
-    #[doc(hidden)]
-    pub fn persistent_initial_command(
+    pub fn foreground_command(
         mut self,
         command: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         self.config
-            .set_persistent_initial_command(command.into_iter().map(Into::into).collect());
+            .set_foreground_command(command.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Select the background command for detached CLI `run`.
+    ///
+    /// An empty command uses the image's default CMD. A non-empty command replaces CMD while
+    /// preserving the effective OCI entrypoint.
+    #[doc(hidden)]
+    pub fn background_command(
+        mut self,
+        command: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.config
+            .set_background_command(command.into_iter().map(Into::into).collect());
         self
     }
 
@@ -508,7 +514,7 @@ impl SandboxBuilder {
     /// ```ignore
     /// .network(|n| n
     ///     .port(8080, 80)
-    ///     .policy(NetworkPolicy::public_only())
+    ///     .policy(NetworkPolicy::default())
     ///     .tls(|t| t.bypass("*.internal.com"))
     /// )
     /// ```
@@ -949,11 +955,31 @@ impl SandboxBuilder {
                 available_when: "in a runtime that understands these snapshot extensions".into(),
             });
         }
+        let file_state = match &snap.manifest().state {
+            crate::snapshot::SnapshotState::File(state) => state,
+            crate::snapshot::SnapshotState::Checkpoint(_) => {
+                return Err(crate::MicrosandboxError::Unsupported {
+                    feature: "Restoring checkpoint-state snapshots".into(),
+                    available_when: "after checkpoint restore providers land".into(),
+                });
+            }
+        };
+        if file_state.format != crate::snapshot::SnapshotFormat::Raw || file_state.fstype != "ext4"
+        {
+            return Err(crate::MicrosandboxError::Unsupported {
+                feature: format!(
+                    "Restoring snapshot file state {:?}/{}",
+                    file_state.format, file_state.fstype
+                ),
+                available_when: "after that disk format and filesystem contract is qualified"
+                    .into(),
+            });
+        }
         let snap_ref = snap.manifest().image.reference.clone();
 
         self.config.spec.image = RootfsSource::oci(snap_ref);
         self.config.manifest_digest = Some(snap.manifest().image.manifest_digest.clone());
-        self.config.snapshot_upper_source = Some(snap.path().join(&snap.manifest().upper.file));
+        self.config.snapshot_upper_source = Some(snap.path().join(&file_state.upper.file));
         Ok(())
     }
 

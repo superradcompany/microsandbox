@@ -1,0 +1,39 @@
+---
+title: macOS
+description: Diagnose Apple Silicon and local runtime setup on macOS
+icon: "apple"
+---
+
+microsandbox local sandboxes on macOS require Apple Silicon. Intel Macs are not supported for the local runtime.
+
+## Quick checks
+
+Start with the doctor command for the local setup checks:
+
+```bash
+msb doctor
+```
+
+Confirm that the host is Apple Silicon:
+
+```bash
+uname -m
+```
+
+The expected result is `arm64`. If the result is `x86_64`, the machine is an Intel Mac or the command is running under an x86_64 environment. microsandbox needs Apple Silicon; Rosetta does not make an Intel Mac supported for local sandboxes.
+
+## Hardware virtualization
+
+Unlike Linux and Windows, macOS does not require enabling a separate KVM or Windows Hypervisor Platform feature. Apple Silicon Macs include the hypervisor support that microsandbox uses.
+
+If sandbox startup fails on an Apple Silicon Mac, first run `msb doctor`, then try a fresh terminal session so your current `PATH` is visible.
+
+## Runtime path
+
+The default runtime root is `~/.microsandbox`. The CLI binary lives under `bin/msb`, and the runtime library lives under `lib/libkrunfw.dylib`.
+
+If macOS is finding a stale binary, check the command path:
+
+```bash
+which msb
+```

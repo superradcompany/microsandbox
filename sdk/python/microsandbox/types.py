@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import enum
-from collections.abc import Mapping, Sequence
+import sys
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
 
@@ -18,13 +19,28 @@ GiB: int = 1024 * 1024 * 1024
 # Types: Enums
 #--------------------------------------------------------------------------------------------------
 
-class PullPolicy(enum.StrEnum):
+if sys.version_info >= (3, 11):
+    StrEnum = enum.StrEnum
+else:
+
+    class StrEnum(str, enum.Enum):
+        """Backport of `enum.StrEnum` for Python 3.10.
+
+        Matches `enum.StrEnum` semantics: `str()` and `format()` of a member
+        return the member value.
+        """
+
+        def __str__(self) -> str:
+            return str(self.value)
+
+
+class PullPolicy(StrEnum):
     ALWAYS = "always"
     IF_MISSING = "if-missing"
     NEVER = "never"
 
 
-class LogLevel(enum.StrEnum):
+class LogLevel(StrEnum):
     TRACE = "trace"
     DEBUG = "debug"
     INFO = "info"
@@ -32,12 +48,12 @@ class LogLevel(enum.StrEnum):
     ERROR = "error"
 
 
-class SecurityProfile(enum.StrEnum):
+class SecurityProfile(StrEnum):
     DEFAULT = "default"
     RESTRICTED = "restricted"
 
 
-class SandboxStatus(enum.StrEnum):
+class SandboxStatus(StrEnum):
     RUNNING = "running"
     STOPPED = "stopped"
     CRASHED = "crashed"
@@ -45,26 +61,26 @@ class SandboxStatus(enum.StrEnum):
     PAUSED = "paused"
 
 
-class Action(enum.StrEnum):
+class Action(StrEnum):
     ALLOW = "allow"
     DENY = "deny"
 
-class Direction(enum.StrEnum):
+class Direction(StrEnum):
     EGRESS = "egress"
     INGRESS = "ingress"
     ANY = "any"
 
-class Protocol(enum.StrEnum):
+class Protocol(StrEnum):
     TCP = "tcp"
     UDP = "udp"
     ICMPV4 = "icmpv4"
     ICMPV6 = "icmpv6"
 
-class PortProtocol(enum.StrEnum):
+class PortProtocol(StrEnum):
     TCP = "tcp"
     UDP = "udp"
 
-class DestGroup(enum.StrEnum):
+class DestGroup(StrEnum):
     PUBLIC = "public"
     LOOPBACK = "loopback"
     PRIVATE = "private"
@@ -73,7 +89,13 @@ class DestGroup(enum.StrEnum):
     MULTICAST = "multicast"
     HOST = "host"
 
-class ViolationAction(enum.StrEnum):
+class NetworkProfile(StrEnum):
+    """Composable high-level network access profile."""
+    PUBLIC = "public"
+    PRIVATE = "private"
+    HOST = "host"
+
+class ViolationAction(StrEnum):
     BLOCK = "block"
     BLOCK_AND_LOG = "block-and-log"
     BLOCK_AND_TERMINATE = "block-and-terminate"
@@ -130,35 +152,35 @@ class ViolationPolicy:
             passthrough["all_hosts"] = True
         return {"passthrough": passthrough}
 
-class MountKind(enum.StrEnum):
+class MountKind(StrEnum):
     BIND = "bind"
     NAMED = "named"
     TMPFS = "tmpfs"
     DISK = "disk"
 
-class StatVirtualization(enum.StrEnum):
+class StatVirtualization(StrEnum):
     """Per-mount stat-virtualization policy for virtiofs-backed mounts."""
     STRICT = "strict"
     RELAXED = "relaxed"
     OFF = "off"
 
-class HostPermissions(enum.StrEnum):
+class HostPermissions(StrEnum):
     """Per-mount host-permission policy for virtiofs-backed mounts."""
     PRIVATE = "private"
     MIRROR = "mirror"
 
-class FsEntryKind(enum.StrEnum):
+class FsEntryKind(StrEnum):
     FILE = "file"
     DIRECTORY = "directory"
     SYMLINK = "symlink"
     OTHER = "other"
 
-class DiskImageFormat(enum.StrEnum):
+class DiskImageFormat(StrEnum):
     QCOW2 = "qcow2"
     RAW = "raw"
     VMDK = "vmdk"
 
-class RlimitResource(enum.StrEnum):
+class RlimitResource(StrEnum):
     CPU = "cpu"
     FSIZE = "fsize"
     DATA = "data"
@@ -756,19 +778,56 @@ class Rule:
             ),
         )
 
+    @classmethod
+    def deny_dns(cls) -> tuple[Rule, Rule]:
+        """Deny gateway UDP/53 and TCP/53, for overriding profile DNS."""
+        udp, tcp = cls.allow_dns()
+        return (
+            cls(Action.DENY, udp.direction, udp.destination, udp.protocol, udp.port),
+            cls(Action.DENY, tcp.direction, tcp.destination, tcp.protocol, tcp.port),
+        )
+
 @dataclass(frozen=True, slots=True)
 class NetworkPolicy:
     """Custom network policy with rules.
 
     Mirrors Rust's `NetworkPolicy { default_egress, default_ingress, rules }`.
     The defaults are asymmetric to preserve today's behavior:
-    egress falls through to deny (today's `public_only` reachability when
-    paired with the implicit allow-public rule); ingress falls through
+    egress falls through to deny (the default public-profile reachability when
+    paired with an allow-public rule); ingress falls through
     to allow (today's unfiltered published-port behavior).
     """
     default_egress: Action = Action.DENY
     default_ingress: Action = Action.ALLOW
     rules: tuple[Rule, ...] = ()
+
+    @classmethod
+    def none(cls) -> NetworkPolicy:
+        """Deny traffic in both directions."""
+        return cls(default_egress=Action.DENY, default_ingress=Action.DENY)
+
+    @classmethod
+    def allow_all(cls) -> NetworkPolicy:
+        """Allow traffic in both directions."""
+        return cls(default_egress=Action.ALLOW, default_ingress=Action.ALLOW)
+
+    @classmethod
+    def from_profiles(
+        cls, profiles: Iterable[NetworkProfile | str]
+    ) -> NetworkPolicy:
+        """Build a canonical deny-by-default policy from profiles."""
+        requested = {NetworkProfile(profile) for profile in profiles}
+        rules: list[Rule] = []
+        if requested:
+            rules.extend(Rule.allow_dns())
+        for profile in (
+            NetworkProfile.PUBLIC,
+            NetworkProfile.PRIVATE,
+            NetworkProfile.HOST,
+        ):
+            if profile in requested:
+                rules.append(Rule.allow(destination=Destination.group(profile.value)))
+        return cls(rules=tuple(rules))
 
     def _to_dict(self) -> dict:
         def destination_fields(destination: NetworkDestinationLike) -> dict:
@@ -905,7 +964,7 @@ class PortBinding:
 @dataclass(frozen=True, slots=True)
 class Network:
     """Network configuration for a sandbox."""
-    policy: str | NetworkPolicy | None = None
+    policy: NetworkPolicy | None = None
     ports: Mapping[int, int] | Sequence[PortBinding] = field(default_factory=dict)
     deny_domains: tuple[str, ...] = ()
     """Deny egress to these exact domains. Each entry adds a
@@ -929,23 +988,26 @@ class Network:
 
     @classmethod
     def none(cls) -> Network:
-        return cls(policy="none")
+        return cls(policy=NetworkPolicy.none())
 
     @classmethod
-    def public_only(cls) -> Network:
-        return cls(policy="public_only")
+    def from_profiles(cls, *profiles: NetworkProfile | str) -> Network:
+        return cls(policy=NetworkPolicy.from_profiles(profiles))
 
     @classmethod
     def allow_all(cls) -> Network:
-        return cls(policy="allow_all")
+        return cls(policy=NetworkPolicy.allow_all())
 
 
     def _to_dict(self) -> dict:
         d: dict = {}
-        if isinstance(self.policy, str):
-            d["policy"] = self.policy
-        elif isinstance(self.policy, NetworkPolicy):
+        if isinstance(self.policy, NetworkPolicy):
             d["custom_policy"] = self.policy._to_dict()
+        elif self.policy is not None:
+            raise TypeError(
+                "Network.policy must be a NetworkPolicy; use "
+                "Network.from_profiles(...), Network.none(), or Network.allow_all()"
+            )
         if self.ports:
             if isinstance(self.ports, Mapping):
                 d["ports"] = dict(self.ports)

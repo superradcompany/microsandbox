@@ -54,7 +54,7 @@ use microsandbox::{
     logs::{LogOptions, LogSource},
     sandbox::{
         FsEntryKind, PullPolicy, SecurityProfile, all_sandbox_metrics_local,
-        exec::{ExecEvent, ExecHandle, ExecSink},
+        exec::{ExecControl, ExecEvent, ExecHandle, ExecSink},
         fs::{FsReadStream, FsWriteSink},
         ssh::{SftpClient, SshClient, SshServer, SshStdioStream},
     },
@@ -141,12 +141,16 @@ fn remove(handle: Handle) -> Result<Option<std::sync::Arc<Sandbox>>, FfiError> {
 // a Mutex to satisfy the RwLock<HashMap<…>> bound.
 // ---------------------------------------------------------------------------
 
-// Exec handles are stored behind `Arc<Mutex<…>>`. The Arc lets callers
-// (`msb_exec_recv`, `msb_exec_signal`) clone a reference out of the registry
-// and drop the RwLock read guard before entering a potentially long-running
-// `block_on(eh.recv())`. Holding the read guard across that await would block
-// any goroutine trying to acquire the write lock (`register_exec` / `remove_exec`).
-type ExecEntry = std::sync::Arc<std::sync::Mutex<ExecHandle>>;
+// Exec handles and their cloneable controls share one registry entry. Receive
+// and wait operations lock only the handle, while signal/kill/resize clone the
+// control without waiting for a blocked receive. Keeping both in one entry
+// gives registration and removal a single lifecycle boundary.
+struct ExecState {
+    handle: std::sync::Mutex<ExecHandle>,
+    control: ExecControl,
+}
+
+type ExecEntry = std::sync::Arc<ExecState>;
 
 fn exec_registry() -> &'static RwLock<HashMap<Handle, ExecEntry>> {
     static EXEC_REG: OnceLock<RwLock<HashMap<Handle, ExecEntry>>> = OnceLock::new();
@@ -189,10 +193,17 @@ fn remove_stdin(handle: Handle) {
 
 fn register_exec(handle: ExecHandle) -> Result<Handle, FfiError> {
     let h = NEXT_EXEC_HANDLE.fetch_add(1, Ordering::Relaxed);
+    let control = handle.control();
     exec_registry()
         .write()
         .map_err(|_| FfiError::internal("exec registry lock poisoned"))?
-        .insert(h, std::sync::Arc::new(std::sync::Mutex::new(handle)));
+        .insert(
+            h,
+            std::sync::Arc::new(ExecState {
+                handle: std::sync::Mutex::new(handle),
+                control,
+            }),
+        );
     Ok(h)
 }
 
@@ -210,6 +221,10 @@ fn remove_exec(handle: Handle) -> Result<Option<ExecEntry>, FfiError> {
         .write()
         .map_err(|_| FfiError::internal("exec registry lock poisoned"))?
         .remove(&handle))
+}
+
+fn get_exec_control(handle: Handle) -> Result<ExecControl, FfiError> {
+    Ok(get_exec(handle)?.control.clone())
 }
 
 // ---------------------------------------------------------------------------
@@ -449,6 +464,7 @@ mod error_kind {
     pub const SNAPSHOT_SANDBOX_RUNNING: &str = "snapshot_sandbox_running";
     pub const SNAPSHOT_IMAGE_MISSING: &str = "snapshot_image_missing";
     pub const SNAPSHOT_INTEGRITY: &str = "snapshot_integrity";
+    pub const SNAPSHOT_MIGRATION: &str = "snapshot_migration";
     pub const PATCH_FAILED: &str = "patch_failed";
     pub const METRICS_DISABLED: &str = "metrics_disabled";
     pub const METRICS_UNAVAILABLE: &str = "metrics_unavailable";
@@ -510,6 +526,7 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::SnapshotSandboxRunning(_) => error_kind::SNAPSHOT_SANDBOX_RUNNING,
             MicrosandboxError::SnapshotImageMissing(_) => error_kind::SNAPSHOT_IMAGE_MISSING,
             MicrosandboxError::SnapshotIntegrity(_) => error_kind::SNAPSHOT_INTEGRITY,
+            MicrosandboxError::SnapshotMigration { .. } => error_kind::SNAPSHOT_MIGRATION,
             MicrosandboxError::PatchFailed(_) => error_kind::PATCH_FAILED,
             MicrosandboxError::MetricsDisabled(_) => error_kind::METRICS_DISABLED,
             MicrosandboxError::MetricsUnavailable(_) => error_kind::METRICS_UNAVAILABLE,
@@ -791,7 +808,7 @@ fn default_port_protocol() -> String {
 
 /// Custom policy. Parity-aligned with Node/Python: `default_egress` and
 /// `default_ingress` are the asymmetric default actions. Empty defaults to
-/// deny egress / allow ingress (matching upstream `public_only`).
+/// deny egress / allow ingress (matching the default public profile).
 #[derive(serde::Deserialize, Default)]
 struct CustomNetworkPolicy {
     default_egress: Option<String>,
@@ -842,7 +859,10 @@ struct DnsOpts {
 
 #[derive(serde::Deserialize, Default)]
 struct NetworkOpts {
-    policy: Option<String>,
+    /// Removed preset field retained only to return migration guidance instead
+    /// of silently accepting JSON from an older Go SDK.
+    #[serde(rename = "policy")]
+    removed_policy: Option<String>,
     custom_policy: Option<CustomNetworkPolicy>,
     /// DNS configuration. Replaces the legacy flat `dns_rebind_protection`.
     dns: Option<DnsOpts>,
@@ -1138,24 +1158,10 @@ fn apply_network(
 
     let mut policy_set = false;
 
-    // Preset policy string.
-    if let Some(ref preset) = net.policy {
-        let mut policy = match preset.as_str() {
-            "none" => NetworkPolicy::none(),
-            "public_only" | "public-only" => NetworkPolicy::public_only(),
-            "allow_all" | "allow-all" => NetworkPolicy::allow_all(),
-            "non_local" | "non-local" => NetworkPolicy::non_local(),
-            other => {
-                return Err(FfiError::invalid_argument(format!(
-                    "unknown network policy preset: {other}"
-                )));
-            }
-        };
-        let mut combined = bulk_deny.clone();
-        combined.extend(policy.rules);
-        policy.rules = combined;
-        builder = builder.network(|n| n.policy(policy));
-        policy_set = true;
+    if net.removed_policy.is_some() {
+        return Err(FfiError::invalid_argument(
+            "string network policy presets were removed; use NetworkPolicy.FromProfiles, NetworkPolicy.None, or NetworkPolicy.AllowAll",
+        ));
     }
 
     // Custom policy.
@@ -1203,7 +1209,7 @@ fn apply_network(
         policy_set = true;
     }
 
-    // No preset / custom policy was specified, but legacy DNS deny entries
+    // No custom policy was specified, but legacy DNS deny entries
     // were. Use permissive defaults so the rest of the network keeps
     // working — preserves the legacy "full network minus blocked domains"
     // semantics.
@@ -3618,6 +3624,7 @@ struct ExecOpts {
     cwd: Option<String>,
     timeout_secs: Option<u64>,
     stdin_pipe: Option<bool>,
+    tty: Option<bool>,
     user: Option<String>,
     #[serde(default)]
     env: HashMap<String, String>,
@@ -3646,6 +3653,9 @@ pub unsafe extern "C" fn msb_sandbox_exec(
                     }
                     if let Some(cwd) = opts.cwd {
                         b = b.cwd(cwd);
+                    }
+                    if let Some(tty) = opts.tty {
+                        b = b.tty(tty);
                     }
                     if let Some(secs) = opts.timeout_secs {
                         b = b.timeout(Duration::from_secs(secs));
@@ -4440,6 +4450,9 @@ pub unsafe extern "C" fn msb_sandbox_exec_stream(
                     if stdin_pipe {
                         b = b.stdin_pipe();
                     }
+                    if let Some(tty) = opts.tty {
+                        b = b.tty(tty);
+                    }
                     if let Some(cwd) = opts.cwd {
                         b = b.cwd(cwd);
                     }
@@ -4459,7 +4472,7 @@ pub unsafe extern "C" fn msb_sandbox_exec_stream(
             let exec_h = register_exec(exec_handle)?;
             if stdin_pipe
                 && let Ok(eh) = get_exec(exec_h)
-                && let Ok(mut guard) = eh.lock()
+                && let Ok(mut guard) = eh.handle.lock()
                 && let Some(sink) = guard.take_stdin()
             {
                 let _ = register_stdin(exec_h, sink);
@@ -4490,6 +4503,7 @@ pub unsafe extern "C" fn msb_exec_recv(
         // while this recv blocks waiting for data.
         let entry = get_exec(exec_handle)?;
         let mut eh = entry
+            .handle
             .lock()
             .map_err(|_| FfiError::internal("exec handle mutex poisoned"))?;
         let json = rt().block_on(async {
@@ -4568,6 +4582,7 @@ pub unsafe extern "C" fn msb_exec_id(
     run(buf, buf_len, || {
         let entry = get_exec(exec_handle)?;
         let eh = entry
+            .handle
             .lock()
             .map_err(|_| FfiError::internal("exec handle mutex poisoned"))?;
         let id = eh.id();
@@ -4587,13 +4602,38 @@ pub unsafe extern "C" fn msb_exec_signal(
 ) -> *mut c_char {
     let result: Result<(), FfiError> = (|| -> Result<(), FfiError> {
         let token = lookup_cancel_token(cancel_id)?;
-        let entry = get_exec(exec_handle)?;
-        let eh = entry
-            .lock()
-            .map_err(|_| FfiError::internal("exec handle mutex poisoned"))?;
+        let control = get_exec_control(exec_handle)?;
         rt().block_on(async {
             tokio::select! {
-                r = eh.signal(signal) => r.map_err(FfiError::from),
+                r = control.signal(signal) => r.map_err(FfiError::from),
+                _ = token.cancelled() => Err(FfiError::new(error_kind::CANCELLED, "cancelled")),
+            }
+        })?;
+        write_output(buf, buf_len, r#"{"ok":true}"#)
+    })();
+    cancel_unregister(cancel_id);
+    match result {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => err_ptr(e),
+    }
+}
+
+/// Resize the pseudo-terminal for a running exec session.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_exec_resize(
+    cancel_id: u64,
+    exec_handle: Handle,
+    rows: u16,
+    cols: u16,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    let result: Result<(), FfiError> = (|| -> Result<(), FfiError> {
+        let token = lookup_cancel_token(cancel_id)?;
+        let control = get_exec_control(exec_handle)?;
+        rt().block_on(async {
+            tokio::select! {
+                r = control.resize(rows, cols) => r.map_err(FfiError::from),
                 _ = token.cancelled() => Err(FfiError::new(error_kind::CANCELLED, "cancelled")),
             }
         })?;
@@ -4689,6 +4729,7 @@ pub unsafe extern "C" fn msb_exec_collect(
         let token = lookup_cancel_token(cancel_id)?;
         let entry = get_exec(exec_handle)?;
         let mut eh = entry
+            .handle
             .lock()
             .map_err(|_| FfiError::internal("exec handle mutex poisoned"))?;
         let output = rt().block_on(async {
@@ -4724,6 +4765,7 @@ pub unsafe extern "C" fn msb_exec_wait(
         let token = lookup_cancel_token(cancel_id)?;
         let entry = get_exec(exec_handle)?;
         let mut eh = entry
+            .handle
             .lock()
             .map_err(|_| FfiError::internal("exec handle mutex poisoned"))?;
         let status = rt().block_on(async {
@@ -4752,13 +4794,10 @@ pub unsafe extern "C" fn msb_exec_kill(
 ) -> *mut c_char {
     let result: Result<(), FfiError> = (|| -> Result<(), FfiError> {
         let token = lookup_cancel_token(cancel_id)?;
-        let entry = get_exec(exec_handle)?;
-        let eh = entry
-            .lock()
-            .map_err(|_| FfiError::internal("exec handle mutex poisoned"))?;
+        let control = get_exec_control(exec_handle)?;
         rt().block_on(async {
             tokio::select! {
-                r = eh.kill() => r.map_err(FfiError::from),
+                r = control.kill() => r.map_err(FfiError::from),
                 _ = token.cancelled() => Err(FfiError::new(error_kind::CANCELLED, "cancelled")),
             }
         })?;
@@ -5170,6 +5209,37 @@ fn snapshot_json(s: &Snapshot) -> serde_json::Value {
         .iter()
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
+    let (
+        state_kind,
+        format,
+        fstype,
+        upper_file,
+        upper_integrity_algorithm,
+        upper_integrity_digest,
+        checkpoint_id,
+        checkpoint_manifest_digest,
+    ) = match &manifest.state {
+        microsandbox::snapshot::SnapshotState::File(state) => (
+            "file",
+            Some(snapshot_format_str(state.format)),
+            Some(state.fstype.as_str()),
+            Some(state.upper.file.as_str()),
+            Some(state.upper.integrity.algorithm.as_str()),
+            Some(state.upper.integrity.digest.as_str()),
+            None,
+            None,
+        ),
+        microsandbox::snapshot::SnapshotState::Checkpoint(state) => (
+            "checkpoint",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(state.checkpoint_id.as_str()),
+            Some(state.manifest.as_str()),
+        ),
+    };
     serde_json::json!({
         "path": s.path().display().to_string(),
         "digest": s.digest(),
@@ -5177,8 +5247,14 @@ fn snapshot_json(s: &Snapshot) -> serde_json::Value {
         "image_ref": manifest.image.reference,
         "image_manifest_digest": manifest.image.manifest_digest,
         "scope": snapshot_scope_str(manifest.scope),
-        "format": snapshot_format_str(manifest.format),
-        "fstype": manifest.fstype,
+        "state_kind": state_kind,
+        "format": format,
+        "fstype": fstype,
+        "upper_file": upper_file,
+        "upper_integrity_algorithm": upper_integrity_algorithm,
+        "upper_integrity_digest": upper_integrity_digest,
+        "checkpoint_id": checkpoint_id,
+        "checkpoint_manifest_digest": checkpoint_manifest_digest,
         "parent": manifest.parent,
         "created_at": manifest.created_at,
         "labels": labels,
@@ -5193,8 +5269,15 @@ fn snapshot_handle_json(h: &microsandbox::SnapshotHandle) -> serde_json::Value {
         "parent_digest": h.parent_digest(),
         "image_ref": h.image_ref(),
         "scope": snapshot_scope_str(h.scope()),
-        "format": snapshot_format_str(h.format()),
+        "state_kind": h.state_kind(),
+        "format": h.format().map(snapshot_format_str),
+        "fstype": h.fstype(),
+        "checkpoint_manifest_digest": h.checkpoint_manifest_digest(),
         "size_bytes": h.size_bytes(),
+        "locality": h.locality(),
+        "availability": h.availability(),
+        "migration_state": h.migration_state(),
+        "migration_error_code": h.migration_error_code(),
         "created_at_unix": h.created_at().and_utc().timestamp(),
         "path": h.path().display().to_string(),
     })
@@ -5202,7 +5285,6 @@ fn snapshot_handle_json(h: &microsandbox::SnapshotHandle) -> serde_json::Value {
 
 fn verify_report_json(report: microsandbox::snapshot::SnapshotVerifyReport) -> serde_json::Value {
     let upper = match report.upper {
-        UpperVerifyStatus::NotRecorded => serde_json::json!({"kind":"not_recorded"}),
         UpperVerifyStatus::Verified { algorithm, digest } => {
             serde_json::json!({"kind":"verified","algorithm":algorithm,"digest":digest})
         }
@@ -6137,6 +6219,13 @@ mod tests {
             serde_json::from_str(r#"{"image":"python:3.12","oci_upper_size_mib":0}"#).unwrap();
 
         assert_eq!(opts.oci_upper_size_mib, Some(0));
+    }
+
+    #[test]
+    fn exec_opts_parses_tty() {
+        let opts: ExecOpts = serde_json::from_str(r#"{"tty":true}"#).unwrap();
+
+        assert_eq!(opts.tty, Some(true));
     }
 
     #[test]

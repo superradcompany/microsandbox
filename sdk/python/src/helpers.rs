@@ -126,7 +126,22 @@ pub fn sandbox_builder_from_args(
                 "restoring non-disk snapshots is not supported by this runtime",
             ));
         }
-        let upper_path = snap_dir.join(&manifest.upper.file);
+        let file_state = match &manifest.state {
+            microsandbox::snapshot::SnapshotState::File(state) => state,
+            microsandbox::snapshot::SnapshotState::Checkpoint(_) => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "restoring checkpoint-state snapshots is not supported by this runtime",
+                ));
+            }
+        };
+        if file_state.format != microsandbox::snapshot::SnapshotFormat::Raw
+            || file_state.fstype != "ext4"
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "snapshot file state is not a supported raw ext4 upper",
+            ));
+        }
+        let upper_path = snap_dir.join(&file_state.upper.file);
         if !upper_path.exists() {
             return Err(pyo3::exceptions::PyFileNotFoundError::new_err(format!(
                 "snapshot upper file missing: {}",
@@ -903,23 +918,12 @@ fn apply_network(
     }
     let mut policy_set = false;
 
-    // Check for preset policy string.
-    if let Some(policy_str) = extract_opt::<String>(net, "policy")? {
-        let mut policy = match policy_str.as_str() {
-            "none" => NetworkPolicy::none(),
-            "public_only" | "public-only" => NetworkPolicy::public_only(),
-            "allow_all" | "allow-all" => NetworkPolicy::allow_all(),
-            _ => {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "unknown network policy preset: {policy_str}"
-                )));
-            }
-        };
-        let mut combined = bulk_deny_rules.clone();
-        combined.extend(policy.rules);
-        policy.rules = combined;
-        builder = builder.network(|n| n.policy(policy));
-        policy_set = true;
+    if let Some(legacy) = net.get_item("policy")?
+        && !legacy.is_none()
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "string network policy presets were removed; use Network.from_profiles(...), Network.none(), or Network.allow_all()",
+        ));
     }
 
     // Check for custom policy object.
@@ -941,7 +945,7 @@ fn apply_network(
             }
         };
         // Asymmetric defaults match the rest of the stack: egress falls
-        // through to Deny (preserves today's `public_only` reachability
+        // through to Deny (preserves the default public-profile reachability
         // when paired with an implicit allow-public rule); ingress falls
         // through to Allow (preserves today's unfiltered published-port
         // behavior).
@@ -1033,7 +1037,7 @@ fn apply_network(
         policy_set = true;
     }
 
-    // No preset / custom policy was specified, but legacy DNS block
+    // No custom policy was specified, but legacy DNS block
     // entries were. Use permissive defaults so the rest of the network
     // keeps working — preserves the legacy "full network minus blocked
     // domains" semantics.

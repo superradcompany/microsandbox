@@ -101,6 +101,122 @@ done:
 	}
 }
 
+// TestExecHandleTTYResize verifies that TTY allocation and resize remain
+// usable while another goroutine is blocked receiving process output.
+func TestExecHandleTTYResize(t *testing.T) {
+	sb := newTestSandbox(t)
+	ctx := integrationCtx(t)
+
+	h, err := sb.ShellStream(
+		ctx,
+		"test -t 0 && test -t 1 || exit 42; printf 'ready\\n'; read value; stty size; printf 'stderr-marker\\n' >&2",
+		microsandbox.WithExecStdinPipe(),
+		microsandbox.WithExecTTY(true),
+	)
+	if err != nil {
+		t.Fatalf("ShellStream: %v", err)
+	}
+	defer h.Close()
+
+	sink := h.TakeStdin()
+	if sink == nil {
+		t.Fatal("TakeStdin: got nil with stdin pipe enabled")
+	}
+
+	var stdout strings.Builder
+	var stderr strings.Builder
+	recv := func(stage string) *microsandbox.ExecEvent {
+		t.Helper()
+		ev, err := h.Recv(ctx)
+		if err != nil {
+			t.Fatalf("Recv %s: %v", stage, err)
+		}
+		if ev.Kind == microsandbox.ExecEventStdout {
+			stdout.Write(ev.Data)
+		}
+		if ev.Kind == microsandbox.ExecEventStderr {
+			stderr.Write(ev.Data)
+		}
+		if ev.Kind == microsandbox.ExecEventFailed {
+			t.Fatalf("exec failed during %s: %#v", stage, ev.Failure)
+		}
+		if ev.Kind == microsandbox.ExecEventExited || ev.Kind == microsandbox.ExecEventDone {
+			t.Fatalf("exec ended during %s: stdout=%q stderr=%q", stage, stdout.String(), stderr.String())
+		}
+		return ev
+	}
+
+	for !strings.Contains(stdout.String(), "ready") {
+		recv("TTY readiness")
+	}
+
+	recvStarted := make(chan struct{})
+	type recvResult struct {
+		event *microsandbox.ExecEvent
+		err   error
+	}
+	recvDone := make(chan recvResult, 1)
+	go func() {
+		close(recvStarted)
+		event, err := h.Recv(ctx)
+		recvDone <- recvResult{event: event, err: err}
+	}()
+	<-recvStarted
+	// The command emits no more output until stdin arrives, so Recv remains
+	// blocked here. This exercises control delivery independently of the event
+	// receiver lock rather than merely resizing between Recv calls.
+	time.Sleep(100 * time.Millisecond)
+
+	resizeDone := make(chan error, 1)
+	go func() { resizeDone <- h.Resize(ctx, 40, 100) }()
+	select {
+	case err := <-resizeDone:
+		if err != nil {
+			t.Fatalf("Resize: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Resize blocked behind Recv")
+	}
+
+	if _, err := sink.Write([]byte("continue\n")); err != nil {
+		t.Fatalf("stdin Write: %v", err)
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatalf("stdin Close: %v", err)
+	}
+
+	select {
+	case result := <-recvDone:
+		if result.err != nil {
+			t.Fatalf("concurrent Recv: %v", result.err)
+		}
+		if result.event.Kind == microsandbox.ExecEventStdout {
+			stdout.Write(result.event.Data)
+		}
+		if result.event.Kind == microsandbox.ExecEventStderr {
+			stderr.Write(result.event.Data)
+		}
+		if result.event.Kind == microsandbox.ExecEventFailed {
+			t.Fatalf("concurrent exec failed: %#v", result.event.Failure)
+		}
+		if result.event.Kind == microsandbox.ExecEventExited && result.event.ExitCode != 0 {
+			t.Fatalf("concurrent exec exited with code %d", result.event.ExitCode)
+		}
+		if result.event.Kind == microsandbox.ExecEventDone {
+			t.Fatalf("exec ended before resized output: stdout=%q stderr=%q", stdout.String(), stderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("concurrent Recv did not complete")
+	}
+
+	for !strings.Contains(stdout.String(), "40 100") || !strings.Contains(stdout.String(), "stderr-marker") {
+		recv("resized TTY output")
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("TTY stderr should be merged into stdout, got stderr=%q", stderr.String())
+	}
+}
+
 // TestExecHandleWaitReturnsExitCode verifies Wait blocks until the process
 // exits and returns the right code.
 func TestExecHandleWaitReturnsExitCode(t *testing.T) {

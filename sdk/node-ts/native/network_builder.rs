@@ -100,8 +100,8 @@ impl JsNetworkBuilder {
         Ok(self)
     }
 
-    /// Set a policy. Construct via the JS-side `NetworkPolicy.publicOnly()`
-    /// / `.allowAll()` / `.none()` / `.nonLocal()` factories or build a
+    /// Set a policy. Construct via the JS-side `NetworkPolicy.fromProfiles()`
+    /// / `.allowAll()` / `.none()` factories or build a
     /// custom one and pass it through `JSON.stringify`-friendly JSON. Here
     /// we accept the canonical serialized form (a JSON string) to avoid
     /// re-modeling the rule schema across the FFI; Phase 7 reconciles.

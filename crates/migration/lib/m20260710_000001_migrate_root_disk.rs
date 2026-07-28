@@ -91,10 +91,48 @@ impl MigrationTrait for Migration {
         Ok(())
     }
 
-    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
-        // The structured root_disk shape is the canonical persisted
-        // representation. Reverting would reintroduce config JSON that current
-        // code cannot read.
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let conn = manager.get_connection();
+        for column in ["config", "active_config"] {
+            let rows = conn
+                .query_all(Statement::from_string(
+                    DatabaseBackend::Sqlite,
+                    format!("SELECT id, {column} FROM sandbox WHERE {column} IS NOT NULL"),
+                ))
+                .await?;
+
+            for row in rows {
+                let id = row.try_get_by_index::<i32>(0)?;
+                let config = row.try_get_by_index::<String>(1)?;
+                let Some(updated) = downgrade_config(&config)? else {
+                    continue;
+                };
+                conn.execute(Statement::from_sql_and_values(
+                    DatabaseBackend::Sqlite,
+                    format!("UPDATE sandbox SET {column} = ? WHERE id = ?"),
+                    [updated.into(), id.into()],
+                ))
+                .await?;
+            }
+        }
+
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(SandboxRootfs::Table)
+                    .drop_column(SandboxRootfs::RootDiskPath)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(SandboxRootfs::Table)
+                    .drop_column(SandboxRootfs::RootDiskKind)
+                    .to_owned(),
+            )
+            .await?;
+
         Ok(())
     }
 }
@@ -129,6 +167,56 @@ fn migrate_config(config: &str) -> Result<Option<String>, DbErr> {
             serde_json::json!({ "kind": "managed", "size_mib": size }),
         );
     }
+
+    serde_json::to_string(&value)
+        .map(Some)
+        .map_err(|err| DbErr::Custom(format!("serialize sandbox config JSON: {err}")))
+}
+
+/// Project a managed root disk back to the v0.6.6 `upper_size_mib` field.
+/// New root-disk kinds are refused because the old runtime would otherwise
+/// interpret them as a managed ext4 upper and could start against the wrong
+/// storage.
+fn downgrade_config(config: &str) -> Result<Option<String>, DbErr> {
+    let mut value = serde_json::from_str::<serde_json::Value>(config)
+        .map_err(|err| DbErr::Custom(format!("parse sandbox config JSON: {err}")))?;
+    let Some(oci) = value
+        .get_mut("image")
+        .and_then(|image| image.get_mut("Oci"))
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return Ok(None);
+    };
+    let Some(root_disk) = oci.remove("root_disk") else {
+        return Ok(None);
+    };
+    if root_disk.is_null() {
+        return serde_json::to_string(&value)
+            .map(Some)
+            .map_err(|err| DbErr::Custom(format!("serialize sandbox config JSON: {err}")));
+    }
+    let kind = root_disk
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            DbErr::Custom("root_disk_downgrade_unrepresentable: root_disk.kind is missing".into())
+        })?;
+    if kind != "managed" {
+        return Err(DbErr::Custom(format!(
+            "root_disk_downgrade_unrepresentable: root disk kind {kind:?} is not supported by v0.6.6"
+        )));
+    }
+    let size = root_disk
+        .get("size_mib")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    if !size.is_null() && !size.is_u64() {
+        return Err(DbErr::Custom(
+            "root_disk_downgrade_unrepresentable: managed size_mib is not an unsigned integer"
+                .into(),
+        ));
+    }
+    oci.insert("upper_size_mib".into(), size);
 
     serde_json::to_string(&value)
         .map(Some)
@@ -174,5 +262,27 @@ mod tests {
 
         let bind = r#"{"name":"bind","image":{"Bind":"/tmp/rootfs"}}"#;
         assert!(migrate_config(bind).unwrap().is_none());
+    }
+
+    #[test]
+    fn downgrade_config_projects_managed_root_disk_to_upper_size() {
+        let config = r#"{"name":"new","image":{"Oci":{"reference":"ubuntu","root_disk":{"kind":"managed","size_mib":8192}}}}"#;
+        let updated = downgrade_config(config).unwrap().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&updated).unwrap();
+
+        assert_eq!(value["image"]["Oci"]["upper_size_mib"], 8192);
+        assert!(value["image"]["Oci"].get("root_disk").is_none());
+    }
+
+    #[test]
+    fn downgrade_config_refuses_newer_root_disk_kinds() {
+        let config = r#"{"name":"new","image":{"Oci":{"reference":"ubuntu","root_disk":{"kind":"tmpfs","size_mib":1024}}}}"#;
+        let error = downgrade_config(config).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("root_disk_downgrade_unrepresentable")
+        );
     }
 }

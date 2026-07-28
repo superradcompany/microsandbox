@@ -31,15 +31,14 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures::StreamExt;
-use hickory_client::client::Client;
-use hickory_client::proto::op::{Message, ResponseCode};
-use hickory_client::proto::rr::rdata::{A, AAAA};
-use hickory_client::proto::rr::{RData, Record, RecordType};
-use hickory_client::proto::serialize::binary::{BinDecodable, BinEncodable};
-use hickory_client::proto::xfer::{DnsHandle, DnsRequest};
+use hickory_net::proto::op::{DnsRequest, Message, ResponseCode};
+use hickory_net::proto::rr::rdata::{A, AAAA};
+use hickory_net::proto::rr::{RData, Record, RecordType};
+use hickory_net::proto::serialize::binary::{BinDecodable, BinEncodable};
+use hickory_net::xfer::DnsHandle;
 use tokio::sync::{OnceCell, watch};
 
-use super::client::{build_direct_client, build_tcp_client, build_udp_client};
+use super::client::{Client, build_direct_client, build_tcp_client, build_udp_client};
 use super::common::config::NormalizedDnsConfig;
 use super::common::filter::{is_private_ipv4, is_private_ipv6};
 use super::common::transport::Transport;
@@ -153,9 +152,9 @@ impl DnsForwarder {
         sni: Option<&str>,
     ) -> Option<Bytes> {
         let query_msg = Message::from_bytes(raw_query).ok()?;
-        let guest_id = query_msg.id();
+        let guest_id = query_msg.metadata.id;
 
-        let question = query_msg.queries().first()?;
+        let question = query_msg.queries.first()?;
         let query_type = question.query_type();
         let domain = question.name().to_string();
         let domain = domain.trim_end_matches('.').to_owned();
@@ -210,7 +209,7 @@ impl DnsForwarder {
             }
         };
 
-        // Forward upstream. hickory-client's multiplexer assigns its own
+        // Forward upstream. hickory's multiplexer assigns its own
         // transaction id; we rewrite the response id back to the guest's
         // below.
         let mut send = client.send(DnsRequest::from(query_msg.clone()));
@@ -229,13 +228,21 @@ impl DnsForwarder {
 
         // Rebind protection: reject responses containing private/reserved IPs.
         if self.config.rebind_protection {
-            for record in response_msg.answers() {
-                let is_private = match record.data() {
-                    RData::A(a) => is_private_ipv4((*a).into()),
-                    RData::AAAA(aaaa) => is_private_ipv6((*aaaa).into()),
-                    _ => false,
+            for record in &response_msg.answers {
+                let private_addr = match &record.data {
+                    RData::A(a) => {
+                        let addr = IpAddr::V4((*a).into());
+                        is_private_ipv4((*a).into()).then_some(addr)
+                    }
+                    RData::AAAA(aaaa) => {
+                        let addr = IpAddr::V6((*aaaa).into());
+                        is_private_ipv6((*aaaa).into()).then_some(addr)
+                    }
+                    _ => None,
                 };
-                if is_private {
+                if private_addr.is_some_and(|addr| {
+                    !policy_allows_rebind_address(&self.network_policy, &self.shared, addr)
+                }) {
                     tracing::debug!(
                         domain = %domain,
                         "DNS rebind protection: response contains private IP"
@@ -257,12 +264,8 @@ impl DnsForwarder {
             }
         }
 
-        // Preserve the guest's transaction id. `Message::set_id` is
-        // crate-private in hickory 0.26, so round-trip through `Header`,
-        // which is `Copy`.
-        let mut header = *response_msg.header();
-        header.set_id(guest_id);
-        response_msg.set_header(header);
+        // Preserve the guest's transaction id.
+        response_msg.metadata.id = guest_id;
         let response_bytes = response_msg.to_bytes().ok()?;
 
         // UDP truncation: if the wire response exceeds the buffer the
@@ -442,6 +445,23 @@ impl DnsForwarder {
     }
 }
 
+/// Return whether a private/reserved DNS answer was explicitly made reachable.
+///
+/// Rebind protection remains fail-closed unless an address-only TCP or UDP
+/// policy evaluation allows the answer. Port-scoped rules do not qualify here;
+/// they cannot be evaluated safely before the guest chooses a connection port.
+fn policy_allows_rebind_address(
+    policy: &NetworkPolicy,
+    shared: &SharedState,
+    addr: IpAddr,
+) -> bool {
+    [crate::policy::Protocol::Tcp, crate::policy::Protocol::Udp]
+        .into_iter()
+        .any(|protocol| {
+            policy.evaluate_explicit_egress_ip(addr, protocol, shared) == Some(Action::Allow)
+        })
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -501,11 +521,11 @@ fn decide_dns_action(policy: &NetworkPolicy, domain: &str, transport: Transport)
 /// rebind rejection) and SERVFAIL (upstream unreachable). The guest's
 /// transaction id, OPCODE and RD bit are echoed.
 fn build_status_response(query: &Message, rcode: ResponseCode) -> Option<Bytes> {
-    let mut response = Message::response(query.id(), query.op_code());
-    response.set_recursion_desired(query.recursion_desired());
-    response.set_response_code(rcode);
-    response.set_recursion_available(true);
-    if let Some(q) = query.queries().first() {
+    let mut response = Message::response(query.metadata.id, query.metadata.op_code);
+    response.metadata.recursion_desired = query.metadata.recursion_desired;
+    response.metadata.response_code = rcode;
+    response.metadata.recursion_available = true;
+    if let Some(q) = query.queries.first() {
         response.add_query(q.clone());
     }
     response.to_bytes().ok().map(Bytes::from)
@@ -543,15 +563,15 @@ fn extract_addrs_and_ttl(
     let mut addrs = Vec::new();
     let mut ttl: Option<Duration> = None;
 
-    for record in response.answers() {
-        let addr = match (family, record.data()) {
+    for record in &response.answers {
+        let addr = match (family, &record.data) {
             (ResolvedHostnameFamily::Ipv4, RData::A(a)) => IpAddr::V4((*a).into()),
             (ResolvedHostnameFamily::Ipv6, RData::AAAA(aaaa)) => IpAddr::V6((*aaaa).into()),
             _ => continue,
         };
         addrs.push(addr);
         let record_ttl =
-            Duration::from_secs(u64::from(record.ttl().max(RESOLVED_HOSTNAME_MIN_TTL_SECS)));
+            Duration::from_secs(u64::from(record.ttl.max(RESOLVED_HOSTNAME_MIN_TTL_SECS)));
         ttl = Some(ttl.map_or(record_ttl, |current| current.min(record_ttl)));
     }
 
@@ -572,7 +592,7 @@ fn synthesize_host_alias_response(
     gateway: GatewayIps,
     qtype: RecordType,
 ) -> Option<Bytes> {
-    let question = query.queries().first()?;
+    let question = query.queries.first()?;
     let name = question.name().clone();
 
     let rdata = match qtype {
@@ -581,11 +601,11 @@ fn synthesize_host_alias_response(
         _ => return None,
     };
 
-    let mut response = Message::response(query.id(), query.op_code());
-    response.set_recursion_desired(query.recursion_desired());
-    response.set_response_code(ResponseCode::NoError);
-    response.set_recursion_available(true);
-    response.set_authoritative(true);
+    let mut response = Message::response(query.metadata.id, query.metadata.op_code);
+    response.metadata.recursion_desired = query.metadata.recursion_desired;
+    response.metadata.response_code = ResponseCode::NoError;
+    response.metadata.recursion_available = true;
+    response.metadata.authoritative = true;
     response.add_query(question.clone());
     response.add_answer(Record::from_rdata(name, HOST_ALIAS_TTL_SECS, rdata));
 
@@ -596,12 +616,12 @@ fn synthesize_host_alias_response(
 /// servers to set TC when truncating; the guest's stub then retries the
 /// query over TCP per RFC 7766.
 fn build_truncated_response(query: &Message) -> Option<Vec<u8>> {
-    let mut response = Message::response(query.id(), query.op_code());
-    response.set_recursion_desired(query.recursion_desired());
-    response.set_response_code(ResponseCode::NoError);
-    response.set_recursion_available(true);
-    response.set_truncated(true);
-    if let Some(q) = query.queries().first() {
+    let mut response = Message::response(query.metadata.id, query.metadata.op_code);
+    response.metadata.recursion_desired = query.metadata.recursion_desired;
+    response.metadata.response_code = ResponseCode::NoError;
+    response.metadata.recursion_available = true;
+    response.metadata.truncation = true;
+    if let Some(q) = query.queries.first() {
         response.add_query(q.clone());
     }
     response.to_bytes().ok()
@@ -614,13 +634,13 @@ fn build_truncated_response(query: &Message) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::Protocol;
-    use hickory_client::proto::op::{Edns, MessageType, OpCode, Query};
-    use hickory_client::proto::rr::{DNSClass, Name, RecordType};
+    use crate::policy::{Action, Destination, NetworkProfile, Protocol, Rule};
+    use hickory_net::proto::op::{Edns, MessageType, OpCode, Query};
+    use hickory_net::proto::rr::{DNSClass, Name, RecordType};
 
     fn make_query(name: &str, qtype: RecordType) -> Message {
         let mut msg = Message::new(0x4242, MessageType::Query, OpCode::Query);
-        msg.set_recursion_desired(true);
+        msg.metadata.recursion_desired = true;
         let parsed = Name::from_ascii(name).expect("valid dns name");
         let mut q = Query::new();
         q.set_name(parsed);
@@ -631,19 +651,100 @@ mod tests {
     }
 
     #[test]
+    fn rebind_filter_allows_private_answers_for_private_profile() {
+        let policy = NetworkPolicy::from_profiles([NetworkProfile::Private]);
+        let shared = SharedState::new(4);
+        assert!(policy_allows_rebind_address(
+            &policy,
+            &shared,
+            "10.20.30.40".parse().unwrap()
+        ));
+    }
+
+    #[test]
+    fn rebind_filter_rejects_private_answers_for_public_profile() {
+        let policy = NetworkPolicy::from_profiles([NetworkProfile::Public]);
+        let shared = SharedState::new(4);
+        assert!(!policy_allows_rebind_address(
+            &policy,
+            &shared,
+            "10.20.30.40".parse().unwrap()
+        ));
+    }
+
+    #[test]
+    fn rebind_filter_rejects_unspecified_answers_for_public_profile() {
+        let policy = NetworkPolicy::from_profiles([NetworkProfile::Public]);
+        let shared = SharedState::new(4);
+        for addr in ["0.0.0.0", "::"] {
+            assert!(
+                !policy_allows_rebind_address(&policy, &shared, addr.parse().unwrap()),
+                "expected {addr} to remain blocked by rebind protection"
+            );
+        }
+    }
+
+    #[test]
+    fn rebind_filter_remains_enabled_for_allow_all_default() {
+        let policy = NetworkPolicy::allow_all();
+        let shared = SharedState::new(4);
+        assert!(!policy_allows_rebind_address(
+            &policy,
+            &shared,
+            "10.20.30.40".parse().unwrap()
+        ));
+    }
+
+    #[test]
+    fn rebind_filter_does_not_treat_explicit_any_as_private_intent() {
+        let policy = NetworkPolicy {
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![Rule::allow_egress(Destination::Any)],
+        };
+        let shared = SharedState::new(4);
+        assert!(!policy_allows_rebind_address(
+            &policy,
+            &shared,
+            "10.20.30.40".parse().unwrap()
+        ));
+    }
+
+    #[test]
+    fn rebind_filter_honors_ordered_deny_before_private_allow() {
+        let mut policy = NetworkPolicy::from_profiles([NetworkProfile::Private]);
+        policy.rules.insert(
+            0,
+            Rule {
+                direction: crate::policy::Direction::Egress,
+                destination: Destination::Cidr("10.20.30.40/32".parse().unwrap()),
+                protocols: Vec::new(),
+                ports: Vec::new(),
+                action: Action::Deny,
+            },
+        );
+        let shared = SharedState::new(4);
+        assert!(!policy_allows_rebind_address(
+            &policy,
+            &shared,
+            "10.20.30.40".parse().unwrap()
+        ));
+    }
+
+    #[test]
     fn build_status_response_preserves_header_and_question() {
         let query = make_query("slack.com.", RecordType::AAAA);
         let bytes = build_status_response(&query, ResponseCode::Refused).expect("built");
         let msg = Message::from_bytes(&bytes).expect("parse response");
-        assert_eq!(msg.id(), 0x4242);
-        assert_eq!(msg.response_code(), ResponseCode::Refused);
-        assert_eq!(msg.message_type(), MessageType::Response);
-        assert_eq!(msg.op_code(), OpCode::Query);
-        assert!(msg.recursion_desired());
-        assert!(msg.recursion_available());
-        assert_eq!(msg.queries().len(), 1);
-        assert_eq!(msg.queries()[0].query_type(), RecordType::AAAA);
-        assert_eq!(msg.answers().len(), 0);
+        assert_eq!(msg.metadata.id, 0x4242);
+        assert_eq!(msg.metadata.response_code, ResponseCode::Refused);
+        assert_eq!(msg.metadata.message_type, MessageType::Response);
+        assert_eq!(msg.metadata.op_code, OpCode::Query);
+        assert!(msg.metadata.recursion_desired);
+        assert!(msg.metadata.recursion_available);
+        assert_eq!(msg.queries.len(), 1);
+        assert_eq!(msg.queries[0].query_type(), RecordType::AAAA);
+        assert_eq!(msg.answers.len(), 0);
     }
 
     #[test]
@@ -651,8 +752,8 @@ mod tests {
         let query = make_query("example.com.", RecordType::A);
         let bytes = build_status_response(&query, ResponseCode::ServFail).expect("built");
         let msg = Message::from_bytes(&bytes).expect("parse response");
-        assert_eq!(msg.response_code(), ResponseCode::ServFail);
-        assert_eq!(msg.answers().len(), 0);
+        assert_eq!(msg.metadata.response_code, ResponseCode::ServFail);
+        assert_eq!(msg.answers.len(), 0);
     }
 
     /// Policy denials synthesize NXDOMAIN (not REFUSED) so stub resolvers
@@ -663,9 +764,9 @@ mod tests {
         let query = make_query("example.com.", RecordType::A);
         let bytes = build_status_response(&query, ResponseCode::NXDomain).expect("built");
         let msg = Message::from_bytes(&bytes).expect("parse response");
-        assert_eq!(msg.response_code(), ResponseCode::NXDomain);
-        assert_eq!(msg.answers().len(), 0);
-        assert_eq!(msg.queries().len(), 1);
+        assert_eq!(msg.metadata.response_code, ResponseCode::NXDomain);
+        assert_eq!(msg.answers.len(), 0);
+        assert_eq!(msg.queries.len(), 1);
     }
 
     #[test]
@@ -673,10 +774,10 @@ mod tests {
         let query = make_query("example.com.", RecordType::AAAA);
         let bytes = build_status_response(&query, ResponseCode::NoError).expect("built");
         let msg = Message::from_bytes(&bytes).expect("parse response");
-        assert_eq!(msg.response_code(), ResponseCode::NoError);
-        assert_eq!(msg.answers().len(), 0);
-        assert_eq!(msg.queries().len(), 1);
-        assert_eq!(msg.queries()[0].query_type(), RecordType::AAAA);
+        assert_eq!(msg.metadata.response_code, ResponseCode::NoError);
+        assert_eq!(msg.answers.len(), 0);
+        assert_eq!(msg.queries.len(), 1);
+        assert_eq!(msg.queries[0].query_type(), RecordType::AAAA);
     }
 
     #[test]
@@ -684,13 +785,13 @@ mod tests {
         let query = make_query("example.com.", RecordType::TXT);
         let bytes = build_truncated_response(&query).expect("built");
         let msg = Message::from_bytes(&bytes).expect("parse response");
-        assert_eq!(msg.id(), 0x4242);
-        assert_eq!(msg.message_type(), MessageType::Response);
-        assert_eq!(msg.response_code(), ResponseCode::NoError);
-        assert!(msg.truncated(), "TC bit should be set");
-        assert_eq!(msg.queries().len(), 1);
-        assert_eq!(msg.queries()[0].query_type(), RecordType::TXT);
-        assert!(msg.answers().is_empty());
+        assert_eq!(msg.metadata.id, 0x4242);
+        assert_eq!(msg.metadata.message_type, MessageType::Response);
+        assert_eq!(msg.metadata.response_code, ResponseCode::NoError);
+        assert!(msg.metadata.truncation, "TC bit should be set");
+        assert_eq!(msg.queries.len(), 1);
+        assert_eq!(msg.queries[0].query_type(), RecordType::TXT);
+        assert!(msg.answers.is_empty());
     }
 
     /// EDNS OPT pass-through (#2): a query parsed back from wire bytes
@@ -703,12 +804,12 @@ mod tests {
         edns.set_max_payload(4096);
         edns.set_dnssec_ok(true);
         edns.set_version(0);
-        *query.extensions_mut() = Some(edns);
+        query.edns = Some(edns);
 
         let bytes = query.to_bytes().expect("serialize");
         let parsed = Message::from_bytes(&bytes).expect("parse");
 
-        let opt = parsed.extensions().as_ref().expect("OPT preserved");
+        let opt = parsed.edns.as_ref().expect("OPT preserved");
         assert_eq!(opt.max_payload(), 4096);
         assert!(opt.flags().dnssec_ok, "DO bit preserved");
         // Message::max_payload returns OPT value (clamped to 512 floor).
@@ -720,7 +821,7 @@ mod tests {
     #[test]
     fn max_payload_defaults_to_512_without_opt() {
         let query = make_query("example.com.", RecordType::A);
-        assert!(query.extensions().is_none());
+        assert!(query.edns.is_none());
         assert_eq!(query.max_payload(), 512);
     }
 
@@ -821,13 +922,13 @@ mod tests {
 
     #[test]
     fn decide_upstream_policy_denied_when_policy_denies_resolver() {
-        // public_only policy denies private addresses — guest aiming at
+        // The public profile denies private addresses — guest aiming at
         // a private resolver should be routed to the denial path (a
         // synthesized NXDOMAIN) rather than silently hitting the configured
         // upstream instead.
         let gw = gateway_set();
         let shared = SharedState::new(4);
-        let policy = NetworkPolicy::public_only();
+        let policy = NetworkPolicy::default();
         let dst = Some(IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 53)));
         assert_eq!(
             decide_upstream(&gw, &policy, &shared, dst, Transport::Udp),

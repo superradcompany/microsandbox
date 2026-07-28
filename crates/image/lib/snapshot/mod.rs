@@ -9,13 +9,16 @@
 //! for the full design.
 
 pub mod manifest;
+#[doc(hidden)]
+pub mod migration;
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
 pub use manifest::{
-    DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, ImageRef, Manifest, SCHEMA_VERSION,
-    SNAPSHOT_ARTIFACT_KIND, SPARSE_SHA256_V1, SUPPORTED_REQUIRES, SnapshotFormat, SnapshotScope,
+    CheckpointSnapshotState, DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, FileSnapshotState, ImageRef,
+    MAX_JSON_SAFE_INTEGER, Manifest, SCHEMA_VERSION, SNAPSHOT_ARTIFACT_KIND, SPARSE_SHA256_V1,
+    SUPPORTED_REQUIRES, SnapshotDescriptor, SnapshotFormat, SnapshotScope, SnapshotState,
     UpperIntegrity, UpperLayer,
 };

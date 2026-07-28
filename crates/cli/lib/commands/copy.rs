@@ -1,6 +1,12 @@
 //! `msb copy` command — copy files between the host and a sandbox.
 
 #[cfg(unix)]
+mod host;
+#[cfg(windows)]
+#[path = "copy/host_windows.rs"]
+mod host;
+
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -9,6 +15,18 @@ use clap::Args;
 use futures::future::BoxFuture;
 use microsandbox::sandbox::{FsEntryKind, FsMetadata, FsSetAttrs, SandboxFsOps};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Maximum guest-reported symlink target accepted during copy-out.
+///
+/// The agent protocol permits frames up to 4 MiB, while host filesystems
+/// accept much smaller symlink targets. Bounding before component parsing
+/// prevents an adversarial response from causing allocation amplification.
+#[cfg(unix)]
+const MAX_COPY_SYMLINK_TARGET_BYTES: usize = 4096;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -146,7 +164,109 @@ async fn copy_sandbox_to_local(fs: &SandboxFsOps<'_>, src: &str, dst: &Path) -> 
         .with_context(|| format!("stat {src}"))?;
     let basename = guest_basename(src)?;
     let dst = local_destination(dst, basename).await?;
-    copy_sandbox_entry_to_local(fs, src.to_string(), dst, metadata).await
+
+    #[cfg(unix)]
+    {
+        copy_sandbox_to_local_unix(fs, src, &dst, metadata).await
+    }
+    #[cfg(windows)]
+    {
+        copy_sandbox_to_local_windows(fs, src, &dst, metadata).await
+    }
+}
+
+/// Copy a sandbox entry beneath a pinned host destination on Unix.
+#[cfg(unix)]
+async fn copy_sandbox_to_local_unix(
+    fs: &SandboxFsOps<'_>,
+    src: &str,
+    dst: &Path,
+    metadata: FsMetadata,
+) -> anyhow::Result<()> {
+    let parent = dst.parent().unwrap_or_else(|| Path::new("."));
+    if metadata.kind == FsEntryKind::Directory {
+        // `cp` historically created missing parents for a directory target.
+        // This path is entirely operator supplied; guest-derived traversal
+        // begins only after the resulting parent directory is pinned below.
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("create destination parent {}", parent.display()))?;
+    }
+
+    let destination_root = host::CopyRoot::open(parent)?;
+    let destination_name = dst
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("copy destination {} has no file name", dst.display()))?;
+    let destination_path = PathBuf::from(destination_name);
+
+    if metadata.kind == FsEntryKind::Directory {
+        let directory = destination_root.ensure_directory(&destination_path)?;
+        let copied_tree = host::CopyRoot::from_directory(directory);
+        return copy_sandbox_entry_to_local_unix(
+            fs,
+            src.to_string(),
+            PathBuf::new(),
+            &copied_tree,
+            metadata,
+        )
+        .await;
+    }
+
+    copy_sandbox_entry_to_local_unix(
+        fs,
+        src.to_string(),
+        destination_path,
+        &destination_root,
+        metadata,
+    )
+    .await
+}
+
+/// Copy a sandbox entry beneath a pinned host destination on Windows.
+#[cfg(windows)]
+async fn copy_sandbox_to_local_windows(
+    fs: &SandboxFsOps<'_>,
+    src: &str,
+    dst: &Path,
+    metadata: FsMetadata,
+) -> anyhow::Result<()> {
+    let parent = dst.parent().unwrap_or_else(|| Path::new("."));
+    if metadata.kind == FsEntryKind::Directory {
+        // Only the operator-selected parent is resolved through normal Win32
+        // path handling. Sandbox-derived names below the pinned handle are
+        // opened relative to that handle without processing reparse points.
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("create destination parent {}", parent.display()))?;
+    }
+
+    let destination_root = host::CopyRoot::open(parent)?;
+    let destination_name = dst
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("copy destination {} has no file name", dst.display()))?;
+    let destination_path = PathBuf::from(destination_name);
+
+    if metadata.kind == FsEntryKind::Directory {
+        let directory = destination_root.ensure_directory(&destination_path)?;
+        let copied_tree = host::CopyRoot::from_directory(directory);
+        return copy_sandbox_entry_to_local_windows(
+            fs,
+            src.to_string(),
+            PathBuf::new(),
+            &copied_tree,
+            metadata,
+        )
+        .await;
+    }
+
+    copy_sandbox_entry_to_local_windows(
+        fs,
+        src.to_string(),
+        destination_path,
+        &destination_root,
+        metadata,
+    )
+    .await
 }
 
 /// Copy a sandbox path within the same sandbox.
@@ -226,45 +346,46 @@ fn copy_local_entry_to_sandbox<'a>(
     })
 }
 
-/// Recursively copy a sandbox entry to the host.
-fn copy_sandbox_entry_to_local<'a>(
+/// Recursively copy a sandbox entry beneath a pinned Unix destination root.
+#[cfg(unix)]
+fn copy_sandbox_entry_to_local_unix<'a>(
     fs: &'a SandboxFsOps<'a>,
     src: String,
     dst: PathBuf,
+    root: &'a host::CopyRoot,
     metadata: FsMetadata,
 ) -> BoxFuture<'a, anyhow::Result<()>> {
     Box::pin(async move {
         match metadata.kind {
             FsEntryKind::Directory => {
-                tokio::fs::create_dir_all(&dst)
-                    .await
-                    .with_context(|| format!("create directory {}", dst.display()))?;
-                set_local_mode(&dst, metadata.mode).await?;
+                let directory = root.ensure_directory(&dst)?;
 
                 for entry in fs.list(&src).await? {
                     let child_name = guest_basename(&entry.path)?;
                     let child_src = guest_join(&src, child_name);
                     let child_dst = dst.join(child_name);
                     let child_metadata = fs.stat_with_follow(&child_src, false).await?;
-                    copy_sandbox_entry_to_local(fs, child_src, child_dst, child_metadata).await?;
+                    copy_sandbox_entry_to_local_unix(
+                        fs,
+                        child_src,
+                        child_dst,
+                        root,
+                        child_metadata,
+                    )
+                    .await?;
                 }
+
+                // Apply restrictive guest modes only after all children have
+                // been created, and chmod the inode already pinned above.
+                host::set_directory_mode(&directory, metadata.mode)?;
             }
             FsEntryKind::Symlink => {
                 let target = fs.read_link(&src).await?;
-                #[cfg(unix)]
-                std::os::unix::fs::symlink(&target, &dst)
-                    .with_context(|| format!("symlink {} -> {target}", dst.display()))?;
-                #[cfg(windows)]
-                {
-                    let _ = target;
-                    anyhow::bail!(
-                        "copying sandbox symlinks to the Windows host is not supported yet"
-                    );
-                }
+                let safe_target = confine_symlink_target(&dst, &target)?;
+                root.replace_symlink(&dst, &safe_target)?;
             }
             FsEntryKind::File => {
-                copy_sandbox_file_to_local(fs, &src, &dst).await?;
-                set_local_mode(&dst, metadata.mode).await?;
+                copy_sandbox_file_to_local_unix(fs, &src, root, &dst, metadata.mode).await?;
             }
             FsEntryKind::Other => {
                 anyhow::bail!("unsupported file type: {src}");
@@ -273,6 +394,133 @@ fn copy_sandbox_entry_to_local<'a>(
 
         Ok(())
     })
+}
+
+/// Recursively copy a sandbox entry beneath a pinned Windows destination root.
+#[cfg(windows)]
+fn copy_sandbox_entry_to_local_windows<'a>(
+    fs: &'a SandboxFsOps<'a>,
+    src: String,
+    dst: PathBuf,
+    root: &'a host::CopyRoot,
+    metadata: FsMetadata,
+) -> BoxFuture<'a, anyhow::Result<()>> {
+    Box::pin(async move {
+        match metadata.kind {
+            FsEntryKind::Directory => {
+                let directory = root.ensure_directory(&dst)?;
+
+                for entry in fs.list(&src).await? {
+                    let child_name = guest_basename(&entry.path)?;
+                    let child_src = guest_join(&src, child_name);
+                    let child_dst = dst.join(child_name);
+                    let child_metadata = fs.stat_with_follow(&child_src, false).await?;
+                    copy_sandbox_entry_to_local_windows(
+                        fs,
+                        child_src,
+                        child_dst,
+                        root,
+                        child_metadata,
+                    )
+                    .await?;
+                }
+
+                host::set_directory_mode(&directory, metadata.mode)?;
+            }
+            FsEntryKind::Symlink => {
+                anyhow::bail!("copying sandbox symlinks to the Windows host is not supported yet");
+            }
+            FsEntryKind::File => {
+                copy_sandbox_file_to_local_windows(fs, &src, root, &dst, metadata.mode).await?;
+            }
+            FsEntryKind::Other => {
+                anyhow::bail!("unsupported file type: {src}");
+            }
+        }
+
+        Ok(())
+    })
+}
+
+/// Resolve an untrusted symlink target within the copy tree.
+///
+/// The returned target is relative to the recreated link's parent. Absolute
+/// guest targets are rerooted inside the copy tree, and `..` is rejected if
+/// it would walk above that tree. Copy-out operations independently refuse
+/// to follow every symlink beneath the pinned destination root.
+#[cfg(unix)]
+fn confine_symlink_target(dst: &Path, target: &str) -> anyhow::Result<PathBuf> {
+    if target.is_empty() {
+        anyhow::bail!(
+            "refusing to create symlink {} with an empty target",
+            dst.display()
+        );
+    }
+    if target.len() > MAX_COPY_SYMLINK_TARGET_BYTES {
+        anyhow::bail!(
+            "refusing to create symlink {}: target is {} bytes (maximum {})",
+            dst.display(),
+            target.len(),
+            MAX_COPY_SYMLINK_TARGET_BYTES
+        );
+    }
+    if target.as_bytes().contains(&0) {
+        anyhow::bail!(
+            "refusing to create symlink {}: target contains NUL",
+            dst.display()
+        );
+    }
+
+    let parent = dst.parent().unwrap_or_else(|| Path::new(""));
+    let parent_components: Vec<std::ffi::OsString> = parent
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(name) => Ok(name.to_os_string()),
+            _ => anyhow::bail!(
+                "destination path {} is not relative to the copy root",
+                dst.display()
+            ),
+        })
+        .collect::<anyhow::Result<_>>()?;
+
+    let mut resolved = if target.starts_with('/') {
+        Vec::new()
+    } else {
+        parent_components.clone()
+    };
+
+    for component in target.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                if resolved.pop().is_none() {
+                    anyhow::bail!(
+                        "refusing to create symlink {} -> {target}: target escapes the copy destination",
+                        dst.display()
+                    );
+                }
+            }
+            other => resolved.push(std::ffi::OsString::from(other)),
+        }
+    }
+
+    let common = parent_components
+        .iter()
+        .zip(&resolved)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let mut relative_target = PathBuf::new();
+    for _ in common..parent_components.len() {
+        relative_target.push("..");
+    }
+    for component in &resolved[common..] {
+        relative_target.push(component);
+    }
+    if relative_target.as_os_str().is_empty() {
+        relative_target.push(".");
+    }
+
+    Ok(relative_target)
 }
 
 /// Recursively copy a sandbox entry within the same sandbox.
@@ -383,22 +631,43 @@ async fn copy_local_file_to_sandbox(
     Ok(())
 }
 
-/// Copy a sandbox file to the host using streaming I/O.
-async fn copy_sandbox_file_to_local(
+/// Copy a sandbox file beneath a pinned Unix root using streaming I/O.
+#[cfg(unix)]
+async fn copy_sandbox_file_to_local_unix(
     fs: &SandboxFsOps<'_>,
     src: &str,
+    root: &host::CopyRoot,
     dst: &Path,
+    mode: u32,
 ) -> anyhow::Result<()> {
     let mut stream = fs.read_stream(src).await?;
-    let mut file = tokio::fs::File::create(dst)
-        .await
-        .with_context(|| format!("create {}", dst.display()))?;
+    let mut pending = root.create_file(dst)?;
 
     while let Some(chunk) = stream.recv().await? {
-        file.write_all(&chunk).await?;
+        pending.file_mut().write_all(&chunk).await?;
     }
 
-    file.flush().await?;
+    pending.commit(mode).await?;
+    Ok(())
+}
+
+/// Copy a sandbox file to a Windows host using streaming I/O.
+#[cfg(windows)]
+async fn copy_sandbox_file_to_local_windows(
+    fs: &SandboxFsOps<'_>,
+    src: &str,
+    root: &host::CopyRoot,
+    dst: &Path,
+    mode: u32,
+) -> anyhow::Result<()> {
+    let mut stream = fs.read_stream(src).await?;
+    let mut pending = root.create_file(dst)?;
+
+    while let Some(chunk) = stream.recv().await? {
+        pending.file_mut().write_all(&chunk).await?;
+    }
+
+    pending.commit(mode).await?;
     Ok(())
 }
 
@@ -463,28 +732,6 @@ async fn set_guest_mode(
     Ok(())
 }
 
-/// Set local permission bits.
-async fn set_local_mode(path: &Path, mode: u32) -> anyhow::Result<()> {
-    #[cfg(unix)]
-    {
-        tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(permission_bits(mode)))
-            .await
-            .with_context(|| format!("chmod {}", path.display()))?;
-    }
-    #[cfg(windows)]
-    {
-        let mut permissions = tokio::fs::metadata(path)
-            .await
-            .with_context(|| format!("stat {}", path.display()))?
-            .permissions();
-        permissions.set_readonly(permission_bits(mode) & 0o222 == 0);
-        tokio::fs::set_permissions(path, permissions)
-            .await
-            .with_context(|| format!("set readonly bit on {}", path.display()))?;
-    }
-    Ok(())
-}
-
 /// Keep only Unix permission bits from a mode value.
 fn permission_bits(mode: u32) -> u32 {
     mode & 0o7777
@@ -520,11 +767,72 @@ fn local_basename(path: &Path) -> anyhow::Result<&str> {
 
 /// Return the final path component of a guest path.
 fn guest_basename(path: &str) -> anyhow::Result<&str> {
-    path.trim_end_matches('/')
+    let name = path
+        .trim_end_matches('/')
         .rsplit('/')
         .next()
         .filter(|name| !name.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("cannot infer basename for {path}"))
+        .ok_or_else(|| anyhow::anyhow!("cannot infer basename for {path}"))?;
+
+    if matches!(name, "." | "..") || name.as_bytes().contains(&0) {
+        anyhow::bail!("invalid guest path component `{name}`");
+    }
+    #[cfg(windows)]
+    if !is_valid_windows_file_name(name) {
+        anyhow::bail!("guest path component `{name}` is not a valid Windows file name");
+    }
+
+    Ok(name)
+}
+
+/// Return whether a guest component can be represented as a conventional Windows file name.
+#[cfg(any(windows, test))]
+fn is_valid_windows_file_name(name: &str) -> bool {
+    if name
+        .chars()
+        .any(|character| character < ' ' || r#"<>:"\|?*"#.contains(character))
+        || name.ends_with([' ', '.'])
+    {
+        return false;
+    }
+
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or(name)
+        .trim_end_matches(' ')
+        .to_ascii_uppercase();
+    !matches!(
+        stem.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "COM¹"
+            | "COM²"
+            | "COM³"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+            | "LPT¹"
+            | "LPT²"
+            | "LPT³"
+    )
 }
 
 /// Join a guest parent path and child name.
@@ -578,5 +886,88 @@ mod tests {
             Endpoint::Local(path) => assert_eq!(path, PathBuf::from(r"C:\Users\Stephen\file.txt")),
             other => panic!("expected local endpoint, got {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_target_within_tree_resolves_under_root() {
+        let dst = PathBuf::from("sub/link");
+        let resolved = confine_symlink_target(&dst, "../file.txt").unwrap();
+        assert_eq!(resolved, PathBuf::from("../file.txt"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_target_at_top_level_resolves_under_root() {
+        let dst = PathBuf::from("link");
+        let resolved = confine_symlink_target(&dst, "file.txt").unwrap();
+        assert_eq!(resolved, PathBuf::from("file.txt"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_guest_target_is_rerooted_under_destination() {
+        // A guest-reported absolute path must never be honored as a real
+        // host-absolute path; it is re-anchored at the copy root instead.
+        let dst = PathBuf::from("link");
+        let resolved = confine_symlink_target(&dst, "/Users/victim/.ssh/authorized_keys").unwrap();
+        assert_eq!(resolved, PathBuf::from("Users/victim/.ssh/authorized_keys"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_guest_target_in_nested_directory_is_link_relative() {
+        let dst = PathBuf::from("sub/link");
+        let resolved = confine_symlink_target(&dst, "/etc/passwd").unwrap();
+        assert_eq!(resolved, PathBuf::from("../etc/passwd"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dotdot_traversal_escaping_root_is_rejected() {
+        let dst = PathBuf::from("link");
+        let err = confine_symlink_target(&dst, "../../../../etc/passwd").unwrap_err();
+        assert!(err.to_string().contains("escapes the copy destination"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dotdot_traversal_from_nested_dir_that_stays_within_root_is_allowed() {
+        let dst = PathBuf::from("a/b/link");
+        let resolved = confine_symlink_target(&dst, "../../sibling.txt").unwrap();
+        assert_eq!(resolved, PathBuf::from("../../sibling.txt"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dotdot_traversal_from_nested_dir_that_exactly_escapes_root_is_rejected() {
+        let dst = PathBuf::from("a/link");
+        // Two levels up from `a/` is above the copy root.
+        let err = confine_symlink_target(&dst, "../../outside.txt").unwrap_err();
+        assert!(err.to_string().contains("escapes the copy destination"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn oversized_symlink_target_is_rejected_before_component_parsing() {
+        let target = "a/".repeat(MAX_COPY_SYMLINK_TARGET_BYTES);
+        let err = confine_symlink_target(Path::new("link"), &target).unwrap_err();
+        assert!(err.to_string().contains("maximum"));
+    }
+
+    #[test]
+    fn guest_basename_rejects_dot_components() {
+        assert!(guest_basename("/out/.").is_err());
+        assert!(guest_basename("/out/..").is_err());
+    }
+
+    #[test]
+    fn windows_file_name_validation_rejects_reparse_sensitive_names() {
+        assert!(is_valid_windows_file_name("ordinary.txt"));
+        assert!(!is_valid_windows_file_name("payload:stream"));
+        assert!(!is_valid_windows_file_name("..\\escape"));
+        assert!(!is_valid_windows_file_name("CON.txt"));
+        assert!(!is_valid_windows_file_name("LPT¹.log"));
+        assert!(!is_valid_windows_file_name("trailing."));
     }
 }

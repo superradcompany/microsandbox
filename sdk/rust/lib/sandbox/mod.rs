@@ -141,7 +141,7 @@ pub use microsandbox_network::builder::SecretBuilder;
 #[cfg(feature = "net")]
 pub use microsandbox_network::config::NetworkConfig;
 #[cfg(feature = "net")]
-pub use microsandbox_network::policy::NetworkPolicy;
+pub use microsandbox_network::policy::{NetworkPolicy, NetworkProfile};
 pub use microsandbox_runtime::logging::LogLevel;
 pub use microsandbox_types::PullPolicy;
 pub use microsandbox_types::{
@@ -1427,19 +1427,19 @@ impl Sandbox {
         Ok(handle.status_snapshot())
     }
 
-    /// Live last-error string from the backend, when any. Always hits the
+    /// Live failure message from the backend, when any. Always hits the
     /// backend, never reads a cached field.
     ///
     /// Each call is a separate round-trip. If you need this alongside
     /// `status()`, fetch a fresh [`SandboxHandle`] via
     /// [`Sandbox::get`](Self::get) once and read both off the snapshot.
-    pub async fn last_error(&self) -> MicrosandboxResult<Option<String>> {
+    pub async fn last_failure_message(&self) -> MicrosandboxResult<Option<String>> {
         let handle = self
             .backend
             .sandboxes()
             .get(self.backend.clone(), &self.name)
             .await?;
-        Ok(handle.last_error_snapshot())
+        Ok(handle.last_failure_message_snapshot())
     }
 
     /// Read captured output from `exec.log` for this sandbox.
@@ -1468,6 +1468,28 @@ impl Sandbox {
             .sandboxes()
             .log_stream(self.backend.clone(), &self.name, opts)
             .await
+    }
+
+    /// A [`SandboxLogger`](crate::logs::SandboxLogger) over this
+    /// sandbox's on-disk logs.
+    ///
+    /// **Local backend only** — cloud sandboxes stream logs via SSE and
+    /// have no host log directory. Used directly it behaves like
+    /// [`log_stream`](Self::log_stream) (a private watcher per followed
+    /// stream); registered with a
+    /// [`LogRegistry`](crate::logs::LogRegistry) its followed
+    /// streams share one host-wide watcher instead.
+    pub fn logger(&self) -> MicrosandboxResult<crate::logs::SandboxLogger> {
+        self.require_local("logger")?;
+        let local =
+            self.backend
+                .as_local()
+                .ok_or_else(|| crate::MicrosandboxError::Unsupported {
+                    feature: "Sandbox::logger".into(),
+                    available_when: "with a LocalBackend".into(),
+                })?;
+        let log_dir = crate::logs::log_dir_for_local(local, &self.name);
+        Ok(crate::logs::SandboxLogger::new(self.name.clone(), log_dir))
     }
 
     /// Check whether agentd is reachable without refreshing the sandbox idle timer.
@@ -2780,9 +2802,9 @@ fn emit_cached_pull_progress(
 /// Pull an OCI image and return the pull result.
 ///
 /// Auth resolution:
-/// 1. Explicit `RegistryAuth` from `SandboxBuilder::registry_auth()` (if provided)
+/// 1. Explicit `RegistryAuth` from `SandboxBuilder::registry()` (if provided)
 /// 2. OS keyring / credential store
-/// 3. Global config `registries.auth` matched by registry hostname
+/// 3. Global config `registries.hosts.<host>.auth` matched by registry hostname
 /// 4. Docker credential store/config fallback
 /// 5. Anonymous fallback
 ///

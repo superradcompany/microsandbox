@@ -1053,8 +1053,9 @@ fn live_secret_updates(
                     name: spec.name.clone(),
                     value: SecretValue(value),
                 });
-                // A rotate request may carry new hosts (e.g. `--secret NAME@HOST`
-                // on an existing secret); apply them in the same batch.
+                // A rotate request may carry new hosts (for example
+                // `--secret NAME@HOST[,HOST...]` on an existing secret);
+                // apply them in the same batch.
                 if !spec.allowed_hosts.is_empty() {
                     updates.push(SecretLiveChange::SetAllowedHosts {
                         name: spec.name.clone(),

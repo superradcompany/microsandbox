@@ -18,7 +18,7 @@ env:
   CARGO_NET_RETRY: "10"
   CARGO_HTTP_TIMEOUT: "120"
   CARGO_HTTP_MULTIPLEXING: "false"
-  LIBKRUNFW_VERSION: "5.5.0"
+  LIBKRUNFW_VERSION: "5.6.1"
   LIBKRUNFW_ABI: "5"
 
 jobs:
@@ -199,13 +199,13 @@ jobs:
             arch: x86_64
             os: linux
             agentd_target: x86_64-unknown-linux-musl
-            libkrunfw_file: libkrunfw.so.5.5.0
+            libkrunfw_file: libkrunfw.so.5.6.1
           - target: linux-aarch64
             runner: ubuntu-24.04-arm
             arch: aarch64
             os: linux
             agentd_target: aarch64-unknown-linux-musl
-            libkrunfw_file: libkrunfw.so.5.5.0
+            libkrunfw_file: libkrunfw.so.5.6.1
           - target: darwin-aarch64
             runner: macos-14
             arch: aarch64
@@ -477,6 +477,8 @@ jobs:
           - target: windows-aarch64
             runner: windows-11-arm
             rust_target: aarch64-pc-windows-msvc
+            go_arch: arm64
+            go_cc: clang
             kernel_artifact: kernel-c-aarch64
             agentd_artifact: agentd-aarch64-linux-musl
             vs_arch: arm64
@@ -484,6 +486,8 @@ jobs:
           - target: windows-x86_64
             runner: windows-latest
             rust_target: x86_64-pc-windows-msvc
+            go_arch: amd64
+            go_cc: clang -fuse-ld=lld
             kernel_artifact: kernel-c-x86_64
             agentd_artifact: agentd-x86_64-linux-musl
             vs_arch: amd64
@@ -566,6 +570,36 @@ jobs:
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
           cargo +stable build --release --no-default-features --features net,ssh -p microsandbox-cli --target ${{ matrix.rust_target }}
+
+      - name: Build Go FFI cdylib
+        shell: pwsh
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
+          cargo +stable build --release -p microsandbox-go --target ${{ matrix.rust_target }}
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Build and test Go SDK
+        shell: pwsh
+        working-directory: sdk/go
+        env:
+          CC: ${{ matrix.go_cc }}
+          CGO_ENABLED: "1"
+          GOARCH: ${{ matrix.go_arch }}
+          GOOS: windows
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
+          go build ./...
+          go test -count=1 .
 
   # ---------------------------------------------------------------------------
   # CLI smoke tests (requires KVM)
@@ -943,6 +977,74 @@ jobs:
         run: scripts/ci/clean-runner-disk.sh
 
   # ---------------------------------------------------------------------------
+  # Python SDK lower-bound check (Python 3.10)
+  #
+  # Every other Python job runs uv unpinned, so it always resolves a modern
+  # interpreter and never exercises the declared floor in pyproject.toml
+  # (requires-python = ">=3.10"). That let 3.11-only code ship unimportable
+  # on 3.10 (#1153). This job pins uv to 3.10 and runs the unit tests, so
+  # the support claim stays tested until the floor is raised.
+  # ---------------------------------------------------------------------------
+  python-sdk-lower-bound:
+    name: Python SDK (3.10 lower bound)
+    needs: [check, changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-bin: false
+
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "sdk/python/uv.lock"
+          python-version: "3.10"
+
+      # The sdk/rust build script provisions msb + libkrunfw during the
+      # maturin build. Between a libkrunfw version bump and the next
+      # release its fallback (downloading the released PREBUILT_VERSION
+      # bundle) ships the older libkrunfw and fails on Linux, so feed
+      # its CI escape hatch the locally built bundle from `check`, like
+      # the other SDK jobs do.
+      - name: Download build artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: msb-linux-x86_64
+          path: build/
+
+      # microsandbox-runtime links against libcap-ng; GitHub-hosted
+      # runners don't ship the dev package.
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+
+      - name: Sync Python dev environment
+        working-directory: sdk/python
+        run: uv sync --group dev
+
+      # Guard against the pin silently not applying — an unpinned resolve
+      # is exactly the failure mode this job exists to prevent.
+      - name: Verify interpreter is 3.10
+        working-directory: sdk/python
+        run: uv run python -c "import sys; assert sys.version_info[:2] == (3, 10), sys.version"
+
+      - name: Build Python SDK (editable)
+        working-directory: sdk/python
+        run: uv run maturin develop --release
+
+      # No runtime bundle is staged here; test_runtime_binary skips without
+      # it. Bundle-dependent behavior is covered by `check` on a modern
+      # interpreter — this job only guards the interpreter floor.
+      - name: Test Python SDK
+        working-directory: sdk/python
+        run: uv run pytest
+
+  # ---------------------------------------------------------------------------
   # Go SDK integration tests (requires KVM)
   #
   # Downloads the pre-built msb + libkrunfw + libmicrosandbox_go_ffi.so from
@@ -1058,6 +1160,7 @@ jobs:
       - integration-test
       - node-sdk-test
       - python-sdk-test
+      - python-sdk-lower-bound
       - go-sdk-test
     runs-on: ubuntu-latest
     steps:

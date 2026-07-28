@@ -59,10 +59,7 @@ sb2 = await Sandbox.create("worker", from_snapshot="after-pip-install")
 
 ## Take a snapshot
 
----
-
 #### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">SandboxHandle</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def snapshot(self, name: str) -> Snapshot
@@ -101,7 +98,6 @@ print(snap.digest)
 ---
 
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">create()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
@@ -178,10 +174,7 @@ snap = await Snapshot.create(
 
 ## Boot from a snapshot
 
----
-
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">create()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
@@ -228,15 +221,21 @@ sb = await Sandbox.create("worker", image="python:3.12")
 
 ## Manage artifacts
 
----
-
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">open()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
 async def open(path_or_name: str) -> Snapshot
 ```
+
+<Accordion title="Example">
+
+```python
+snap = await Snapshot.open("after-pip-install")
+print(snap.image_ref)
+```
+
+</Accordion>
 
 Open an existing artifact by bare name (resolved under the default snapshots directory) or path. Cheap metadata validation only; does **not** read the upper file. Use [`verify()`](#snap-verify) for content checks.
 
@@ -258,24 +257,21 @@ Open an existing artifact by bare name (resolved under the default snapshots dir
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-snap = await Snapshot.open("after-pip-install")
-print(snap.image_ref)
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">get()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
 async def get(name_or_digest: str) -> SnapshotHandle
 ```
+
+<Accordion title="Example">
+
+```python
+h = await Snapshot.get("after-pip-install")
+print(h.digest)
+```
+
+</Accordion>
 
 Look up a handle in the local index by name, digest, or path.
 
@@ -297,24 +293,21 @@ Look up a handle in the local index by name, digest, or path.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-h = await Snapshot.get("after-pip-install")
-print(h.digest)
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">list()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
 async def list() -> list[SnapshotHandle]
 ```
+
+<Accordion title="Example">
+
+```python
+for h in await Snapshot.list():
+    print(h.name, h.digest)
+```
+
+</Accordion>
 
 List indexed snapshots from the local DB cache.
 
@@ -327,19 +320,7 @@ List indexed snapshots from the local DB cache.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-for h in await Snapshot.list():
-    print(h.name, h.digest)
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">list_dir()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
@@ -366,24 +347,20 @@ Walk a directory and parse each subdirectory's manifest. Does not touch the inde
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-for snap in await Snapshot.list_dir("/mnt/artifacts"):
-    print(snap.path, snap.digest)
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">remove()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
 async def remove(path_or_name: str, *, force: bool = False) -> None
 ```
+
+<Accordion title="Example">
+
+```python
+await Snapshot.remove("after-pip-install", force=True)
+```
+
+</Accordion>
 
 Remove a snapshot artifact and its index row. Refuses if the snapshot has indexed children unless `force=True`.
 
@@ -400,23 +377,21 @@ Remove a snapshot artifact and its index row. Refuses if the snapshot has indexe
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-await Snapshot.remove("after-pip-install", force=True)
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">reindex()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 @staticmethod
 async def reindex(dir: str | os.PathLike | None = None) -> int
 ```
+
+<Accordion title="Example">
+
+```python
+count = await Snapshot.reindex()
+print(f"indexed {count} snapshots")
+```
+
+</Accordion>
 
 Walk `dir` (default: configured snapshots dir) and rebuild the local index. Returns the number of artifacts indexed.
 
@@ -463,6 +438,18 @@ async def save(
     plain_tar: bool = False,
 ) -> None
 ```
+
+<Accordion title="Example">
+
+```python
+await Snapshot.export(
+    "after-pip-install",
+    "/tmp/after-pip-install.tar.zst",
+    with_parents=True,
+)
+```
+
+</Accordion>
 
 Bundle a snapshot into a `.tar.zst` archive. The existing snapshot manifest is archived as-is; create the snapshot with recorded integrity when the archive will cross a trust boundary.
 
@@ -558,25 +545,11 @@ print(h.path)
 
 ## Inspect
 
----
-
 #### <span className="msb-recv">snap.</span><span className="msb-hn">verify()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">Snapshot</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def verify(self) -> dict[str, Any]
 ```
-
-Recompute the upper layer's content hash and compare against the manifest. Walks data extents only, so a 4 GiB sparse file with a few MB of data verifies in milliseconds.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">dict[str, Any]</span></div>
-    <div className="msb-param-desc">Verification report. The <code>upper.kind</code> field is <code>"not_recorded"</code> when no integrity hash was stored, or <code>"verified"</code> with the recomputed digest.</div>
-  </div>
-</div>
 
 <Accordion title="Example">
 
@@ -590,6 +563,17 @@ else:
 
 </Accordion>
 
+Recompute the upper layer's content hash and compare against the manifest. Walks data extents only, so a 4 GiB sparse file with a few MB of data verifies in milliseconds.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">dict[str, Any]</span></div>
+    <div className="msb-param-desc">Verification report. The <code>upper.kind</code> field is <code>"not_recorded"</code> when no integrity hash was stored, or <code>"verified"</code> with the recomputed digest.</div>
+  </div>
+</div>
+
 The report shape:
 
 ```python
@@ -601,14 +585,21 @@ The report shape:
 }
 ```
 
----
-
 #### <span className="msb-recv">handle.</span><span className="msb-hn">open()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">SnapshotHandle</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def open(self) -> Snapshot
 ```
+
+<Accordion title="Example">
+
+```python
+h = await Snapshot.get("after-pip-install")
+snap = await h.open()
+print(snap.fstype)
+```
+
+</Accordion>
 
 Load the full [`Snapshot`](#snapshot) metadata for this handle. Metadata-validated only; does not read the upper file.
 
@@ -621,24 +612,20 @@ Load the full [`Snapshot`](#snapshot) metadata for this handle. Metadata-validat
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-h = await Snapshot.get("after-pip-install")
-snap = await h.open()
-print(snap.fstype)
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">handle.</span><span className="msb-hn">remove()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">SnapshotHandle</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def remove(self, *, force: bool = False) -> None
 ```
+
+<Accordion title="Example">
+
+```python
+h = await Snapshot.get("after-pip-install")
+await h.remove(force=False)
+```
+
+</Accordion>
 
 Remove this snapshot artifact and its index row. Refuses if the snapshot has indexed children unless `force=True`.
 
@@ -650,17 +637,6 @@ Remove this snapshot artifact and its index row. Refuses if the snapshot has ind
     <div className="msb-param-desc">Remove even if the snapshot has indexed children. Default <code>False</code>.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```python
-h = await Snapshot.get("after-pip-install")
-await h.remove(force=False)
-```
-
-</Accordion>
-
----
 
 ## Types
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import signal
 
 import pytest
@@ -111,6 +112,36 @@ async def test_exec_stream_iteration_collect_wait_and_signal(sandbox_factory):
     code, success = await sleep_handle.wait()
     assert success is False
     assert code != 0
+
+
+@pytest.mark.asyncio
+async def test_exec_stream_tty_resize_while_receiving(sandbox_factory):
+    sandbox = await sandbox_factory("py-sdk-tty-resize")
+
+    handle = await sandbox.shell_stream(
+        "printf 'ready\\n'; read value; stty size",
+        stdin=Stdin.pipe(),
+        tty=True,
+    )
+    stdin = handle.take_stdin()
+    assert stdin is not None
+
+    while True:
+        event = await handle.recv()
+        assert event is not None
+        if event.event_type == "stdout" and b"ready" in (event.data or b""):
+            break
+
+    pending_event = asyncio.ensure_future(handle.recv())
+    await asyncio.wait_for(handle.resize(40, 100), timeout=5)
+    await stdin.write(b"continue\n")
+
+    events = [await pending_event]
+    events.extend([event async for event in handle])
+    output = b"".join(
+        event.data or b"" for event in events if event and event.event_type == "stdout"
+    )
+    assert b"40 100" in output
 
 
 @pytest.mark.asyncio

@@ -8,7 +8,14 @@ Volumes give a sandbox direct filesystem access to host-side storage or in-memor
 
 microsandbox supports four types of mounts: bind mounts, named volumes, tmpfs, and disk-image volumes.
 
-Mounts use normal Linux behavior by default: writable, executable, suid-enabled, and device-enabled. Add `readonly` / `ro` when the guest should not write, `noexec` when files on the mount should not be executed directly, `nosuid` when setuid/setgid bits should be ignored, and `nodev` when device files should be ignored. `noexec` does not stop interpreters from reading scripts from the mount, for example `sh /app/src/script.sh`.
+Mounts use normal Linux behavior by default: writable, executable, suid-enabled, and device-enabled. Adjust with:
+
+- `readonly` / `ro` when the guest should not write to the mount.
+- `noexec` when files on the mount should not be executed directly.
+- `nosuid` when setuid/setgid bits should be ignored.
+- `nodev` when device files should be ignored.
+
+`noexec` does not stop interpreters from reading scripts from the mount, for example `sh /app/src/script.sh`.
 
 For stronger in-guest hardening, create the sandbox with the restricted security profile. Restricted sandboxes set `no_new_privs`, drop mount-admin capability from user commands, and force `nosuid,nodev` on user mounts. This profile is incompatible with workloads such as `sudo` and Docker-in-Docker.
 
@@ -86,7 +93,7 @@ msb create alpine --name config-reader \
 
 ## Named volumes
 
-Named volumes are managed by microsandbox and stored by default under `~/.microsandbox/volumes/<name>/`. They persist independently of any sandbox, so you can create a volume, populate it, and mount it into different sandboxes over time.
+microsandbox manages named volumes and stores them by default under `~/.microsandbox/volumes/<name>/`. They persist independently of any sandbox, so you can create a volume, populate it, and mount it into different sandboxes over time.
 
 Named volumes can be directory-backed or disk-backed. Directory volumes mount through virtiofs. Disk volumes are raw ext4 disk images managed by microsandbox and mount through virtio-blk.
 

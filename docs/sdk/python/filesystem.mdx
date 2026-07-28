@@ -5,42 +5,6 @@ description: Python SDK - Filesystem API reference
 
 Read, write, and manage files inside a running sandbox. Operations go through the same host-guest channel as command execution: no SSH, no network. See [Filesystem](/sandboxes/filesystem) for usage examples. For bulk file movement, prefer a [volume](/sandboxes/volumes).
 
-<div className="msb-glance">
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Read<span className="msb-ct">3</span></p>
-  <a className="msb-row" href="#fs-read"><span className="msb-rn">fs.read()</span><span className="msb-rg">whole file as bytes</span></a>
-  <a className="msb-row" href="#fs-read_text"><span className="msb-rn">fs.read_text()</span><span className="msb-rg">whole file as UTF-8 text</span></a>
-  <a className="msb-row" href="#fs-read_stream"><span className="msb-rn">fs.read_stream()</span><span className="msb-rg">stream a large file in chunks</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Write<span className="msb-ct">2</span></p>
-  <a className="msb-row" href="#fs-write"><span className="msb-rn">fs.write()</span><span className="msb-rg">overwrite a file with bytes</span></a>
-  <a className="msb-row" href="#fs-write_stream"><span className="msb-rn">fs.write_stream()</span><span className="msb-rg">stream a large file in chunks</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Directories &amp; metadata<span className="msb-ct">5</span></p>
-  <a className="msb-row" href="#fs-list"><span className="msb-rn">fs.list()</span><span className="msb-rg">directory entries</span></a>
-  <a className="msb-row" href="#fs-mkdir"><span className="msb-rn">fs.mkdir()</span><span className="msb-rg">create a directory and parents</span></a>
-  <a className="msb-row" href="#fs-stat"><span className="msb-rn">fs.stat()</span><span className="msb-rg">file metadata</span></a>
-  <a className="msb-row" href="#fs-exists"><span className="msb-rn">fs.exists()</span><span className="msb-rg">check a path exists</span></a>
-  <a className="msb-row" href="#fs-remove_dir"><span className="msb-rn">fs.remove_dir()</span><span className="msb-rg">remove a directory recursively</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Move, copy &amp; remove<span className="msb-ct">5</span></p>
-  <a className="msb-row" href="#fs-copy"><span className="msb-rn">fs.copy()</span><span className="msb-rg">copy a file in the sandbox</span></a>
-  <a className="msb-row" href="#fs-rename"><span className="msb-rn">fs.rename()</span><span className="msb-rg">rename / move a path</span></a>
-  <a className="msb-row" href="#fs-remove"><span className="msb-rn">fs.remove()</span><span className="msb-rg">remove a file</span></a>
-  <a className="msb-row" href="#fs-copy_from_host"><span className="msb-rn">fs.copy_from_host()</span><span className="msb-rg">host file into sandbox</span></a>
-  <a className="msb-row" href="#fs-copy_to_host"><span className="msb-rn">fs.copy_to_host()</span><span className="msb-rg">sandbox file out to host</span></a>
-
-  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
-  <div className="msb-chiprow">
-    <a className="msb-typepill" href="#fsentry">FsEntry</a>
-    <a className="msb-typepill" href="#fsentrykind">FsEntryKind</a>
-    <a className="msb-typepill" href="#fsmetadata">FsMetadata</a>
-    <a className="msb-typepill" href="#fsreadstream">FsReadStream</a>
-    <a className="msb-typepill" href="#fswritesink">FsWriteSink</a>
-  </div>
-
-</div>
-
 <p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```python
@@ -60,14 +24,20 @@ The handle is reached through the `sb.fs` property on a running [`Sandbox`](/sdk
 
 ## Methods
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def read(path: str) -> bytes
 ```
+
+<Accordion title="Example">
+
+```python
+raw = await sb.fs.read("/app/data.bin")
+print(len(raw))
+```
+
+</Accordion>
 
 Read the entire contents of a file as raw bytes.
 
@@ -89,23 +59,19 @@ Read the entire contents of a file as raw bytes.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-raw = await sb.fs.read("/app/data.bin")
-print(len(raw))
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_text()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def read_text(path: str) -> str
 ```
+
+<Accordion title="Example">
+
+```python
+config = await sb.fs.read_text("/app/config.json")
+```
+
+</Accordion>
 
 Read the entire contents of a file and decode it as UTF-8.
 
@@ -127,22 +93,21 @@ Read the entire contents of a file and decode it as UTF-8.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-config = await sb.fs.read_text("/app/config.json")
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_stream()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def read_stream(path: str) -> FsReadStream
 ```
+
+<Accordion title="Example">
+
+```python
+stream = await sb.fs.read_stream("/app/large.log")
+async for chunk in stream:
+    process(chunk)
+```
+
+</Accordion>
 
 Open a streaming reader for a file. Use this for files too large to hold in memory. The returned [`FsReadStream`](#fsreadstream) is an async iterator that yields chunks of bytes, or call its `collect()` to gather everything into one `bytes`.
 
@@ -164,24 +129,19 @@ Open a streaming reader for a file. Use this for files too large to hold in memo
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-stream = await sb.fs.read_stream("/app/large.log")
-async for chunk in stream:
-    process(chunk)
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">write()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def write(path: str, data: bytes) -> None
 ```
+
+<Accordion title="Example">
+
+```python
+await sb.fs.write("/app/hello.txt", b"hi\n")
+```
+
+</Accordion>
 
 Write content to a file, creating it if it doesn't exist and overwriting it if it does.
 
@@ -198,22 +158,21 @@ Write content to a file, creating it if it doesn't exist and overwriting it if i
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-await sb.fs.write("/app/hello.txt", b"hi\n")
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">write_stream()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def write_stream(path: str) -> FsWriteSink
 ```
+
+<Accordion title="Example">
+
+```python
+async with await sb.fs.write_stream("/app/out.bin") as sink:
+    await sink.write(b"chunk one")
+    await sink.write(b"chunk two")
+```
+
+</Accordion>
 
 Open a streaming writer for a file. Use this for files too large to hold in memory. The returned [`FsWriteSink`](#fswritesink) supports the async context manager protocol, so `async with` closes and finalizes the file automatically.
 
@@ -235,24 +194,20 @@ Open a streaming writer for a file. Use this for files too large to hold in memo
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-async with await sb.fs.write_stream("/app/out.bin") as sink:
-    await sink.write(b"chunk one")
-    await sink.write(b"chunk two")
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">list()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def list(path: str) -> list[FsEntry]
 ```
+
+<Accordion title="Example">
+
+```python
+for entry in await sb.fs.list("/app"):
+    print(entry.kind, entry.path)
+```
+
+</Accordion>
 
 List the entries in a directory.
 
@@ -274,23 +229,19 @@ List the entries in a directory.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-for entry in await sb.fs.list("/app"):
-    print(entry.kind, entry.path)
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">mkdir()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def mkdir(path: str) -> None
 ```
+
+<Accordion title="Example">
+
+```python
+await sb.fs.mkdir("/app/data/cache")
+```
+
+</Accordion>
 
 Create a directory, including any missing parent directories.
 
@@ -303,22 +254,20 @@ Create a directory, including any missing parent directories.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-await sb.fs.mkdir("/app/data/cache")
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">stat()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def stat(path: str) -> FsMetadata
 ```
+
+<Accordion title="Example">
+
+```python
+meta = await sb.fs.stat("/app/config.json")
+print(meta.kind, meta.size, meta.readonly)
+```
+
+</Accordion>
 
 Get detailed metadata for a file or directory.
 
@@ -340,23 +289,20 @@ Get detailed metadata for a file or directory.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-meta = await sb.fs.stat("/app/config.json")
-print(meta.kind, meta.size, meta.readonly)
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">exists()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def exists(path: str) -> bool
 ```
+
+<Accordion title="Example">
+
+```python
+if not await sb.fs.exists("/app/config.json"):
+    await sb.fs.write("/app/config.json", b"{}")
+```
+
+</Accordion>
 
 Check whether a path exists inside the sandbox.
 
@@ -378,23 +324,19 @@ Check whether a path exists inside the sandbox.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-if not await sb.fs.exists("/app/config.json"):
-    await sb.fs.write("/app/config.json", b"{}")
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">remove_dir()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def remove_dir(path: str) -> None
 ```
+
+<Accordion title="Example">
+
+```python
+await sb.fs.remove_dir("/app/data/cache")
+```
+
+</Accordion>
 
 Remove a directory and its contents recursively.
 
@@ -407,22 +349,19 @@ Remove a directory and its contents recursively.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-await sb.fs.remove_dir("/app/data/cache")
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">copy()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def copy(src: str, dst: str) -> None
 ```
+
+<Accordion title="Example">
+
+```python
+await sb.fs.copy("/app/config.json", "/app/config.bak.json")
+```
+
+</Accordion>
 
 Copy a file within the sandbox.
 
@@ -439,22 +378,19 @@ Copy a file within the sandbox.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-await sb.fs.copy("/app/config.json", "/app/config.bak.json")
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">rename()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def rename(src: str, dst: str) -> None
 ```
+
+<Accordion title="Example">
+
+```python
+await sb.fs.rename("/app/tmp.txt", "/app/final.txt")
+```
+
+</Accordion>
 
 Rename or move a file or directory within the sandbox.
 
@@ -471,22 +407,19 @@ Rename or move a file or directory within the sandbox.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-await sb.fs.rename("/app/tmp.txt", "/app/final.txt")
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">remove()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def remove(path: str) -> None
 ```
+
+<Accordion title="Example">
+
+```python
+await sb.fs.remove("/app/config.bak.json")
+```
+
+</Accordion>
 
 Remove a file. Use [`remove_dir()`](#fs-remove_dir) for directories.
 
@@ -499,22 +432,19 @@ Remove a file. Use [`remove_dir()`](#fs-remove_dir) for directories.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-await sb.fs.remove("/app/config.bak.json")
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">copy_from_host()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def copy_from_host(host_path: str, guest_path: str) -> None
 ```
+
+<Accordion title="Example">
+
+```python
+await sb.fs.copy_from_host("./local/seed.csv", "/app/seed.csv")
+```
+
+</Accordion>
 
 Copy a file from the host machine into the sandbox. For transferring many files, consider a [bind-mounted volume](/sandboxes/volumes) instead.
 
@@ -531,22 +461,19 @@ Copy a file from the host machine into the sandbox. For transferring many files,
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-await sb.fs.copy_from_host("./local/seed.csv", "/app/seed.csv")
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">copy_to_host()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```python
 async def copy_to_host(guest_path: str, host_path: str) -> None
 ```
+
+<Accordion title="Example">
+
+```python
+await sb.fs.copy_to_host("/app/report.pdf", "./report.pdf")
+```
+
+</Accordion>
 
 Copy a file from the sandbox out to the host machine.
 
@@ -563,21 +490,9 @@ Copy a file from the sandbox out to the host machine.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-await sb.fs.copy_to_host("/app/report.pdf", "./report.pdf")
-```
-
-</Accordion>
-
----
-
 ## Types
 
 ### FsEntry
-
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#fs-list">list()</a></p>
 
@@ -593,8 +508,6 @@ Metadata for a single directory entry, returned by [`list()`](#fs-list).
 
 ### FsEntryKind
 
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
-
 <p className="msb-backref">Describes <a href="#fsentry">FsEntry.kind</a> · <a href="#fsmetadata">FsMetadata.kind</a></p>
 
 String enum ([`StrEnum`](https://docs.python.org/3/library/enum.html#enum.StrEnum)) of filesystem entry types. The `kind` fields on [`FsEntry`](#fsentry) and [`FsMetadata`](#fsmetadata) carry these string values.
@@ -607,8 +520,6 @@ String enum ([`StrEnum`](https://docs.python.org/3/library/enum.html#enum.StrEnu
 | `"other"` | Other entry type |
 
 ### FsMetadata
-
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#fs-stat">stat()</a></p>
 
@@ -625,8 +536,6 @@ Detailed file metadata, returned by [`stat()`](#fs-stat).
 
 ### FsReadStream
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
-
 <p className="msb-backref">Returned by <a href="#fs-read_stream">read_stream()</a></p>
 
 Async stream for reading a file in chunks. Obtained via [`read_stream()`](#fs-read_stream). Iterate it with `async for chunk in stream:`, or call `collect()` to gather everything at once.
@@ -637,8 +546,6 @@ Async stream for reading a file in chunks. Obtained via [`read_stream()`](#fs-re
 | collect() | `bytes` | *(async)* Collect all remaining data into a single `bytes` object |
 
 ### FsWriteSink
-
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 <p className="msb-backref">Returned by <a href="#fs-write_stream">write_stream()</a></p>
 

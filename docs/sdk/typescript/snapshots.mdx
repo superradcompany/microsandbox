@@ -94,16 +94,23 @@ const fresh = await Sandbox.builder("worker")
 
 These entry points live on `SandboxBuilder` and `SandboxHandle`; they are the bridge between sandboxes and snapshot artifacts.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">fromSnapshot()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 fromSnapshot(pathOrName: string): SandboxBuilder
 ```
 
-Boot a fresh sandbox from a snapshot artifact. Mutually exclusive with [`.image()`](/sdk/typescript/sandbox#image) — the snapshot already pins the image. Documented in full on the [Sandbox](/sdk/typescript/sandbox#fromsnapshot) page.
+<Accordion title="Example">
+
+```typescript
+const sb = await Sandbox.builder("worker")
+  .fromSnapshot("after-pip-install")
+  .create();
+```
+
+</Accordion>
+
+Boot a fresh sandbox from a snapshot artifact. Mutually exclusive with [`.image()`](/sdk/typescript/sandbox#image); the snapshot already pins the image. Documented in full on the [Sandbox](/sdk/typescript/sandbox#fromsnapshot) page.
 
 <p className="msb-label">Parameters</p>
 
@@ -123,20 +130,7 @@ Boot a fresh sandbox from a snapshot artifact. Mutually exclusive with [`.image(
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const sb = await Sandbox.builder("worker")
-  .fromSnapshot("after-pip-install")
-  .create();
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 snapshot(name: string): Promise<Snapshot>
@@ -176,10 +170,7 @@ const snap = await h.snapshot("after-pip-install");
 
 ## Snapshot static methods
 
----
-
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">builder()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span></div>
 
 ```typescript
 static builder(name: string): SnapshotBuilder
@@ -220,13 +211,21 @@ const snap = await Snapshot.builder("after-pip-install")
 ---
 
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">open()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 static open(pathOrName: string): Promise<Snapshot>
 ```
 
-Open an existing snapshot artifact. Bare names resolve under the default snapshots directory; anything else is treated as a path. Cheap metadata validation only — does not read the upper file. Use [`verify()`](#snap-verify) for content checks.
+<Accordion title="Example">
+
+```typescript
+const snap = await Snapshot.open("after-pip-install");
+console.log(snap.digest);
+```
+
+</Accordion>
+
+Open an existing snapshot artifact. Bare names resolve under the default snapshots directory; anything else is treated as a path. Cheap metadata validation only; it does not read the upper file. Use [`verify()`](#snap-verify) for content checks.
 
 <p className="msb-label">Parameters</p>
 
@@ -246,23 +245,20 @@ Open an existing snapshot artifact. Bare names resolve under the default snapsho
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const snap = await Snapshot.open("after-pip-install");
-console.log(snap.digest);
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">get()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 static get(nameOrDigest: string): Promise<SnapshotHandle>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const h = await Snapshot.get("after-pip-install");
+console.log(h.digest, h.createdAt);
+```
+
+</Accordion>
 
 Look up an indexed snapshot by digest, name, or path. Returns a lightweight [`SnapshotHandle`](#snapshothandle-class) backed by the local index row.
 
@@ -284,23 +280,21 @@ Look up an indexed snapshot by digest, name, or path. Returns a lightweight [`Sn
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const h = await Snapshot.get("after-pip-install");
-console.log(h.digest, h.createdAt);
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">list()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 static list(): Promise<SnapshotHandle[]>
 ```
+
+<Accordion title="Example">
+
+```typescript
+for (const h of await Snapshot.list()) {
+  console.log(h.name ?? h.digest, h.sizeBytes);
+}
+```
+
+</Accordion>
 
 List indexed snapshots from the local DB cache.
 
@@ -313,20 +307,7 @@ List indexed snapshots from the local DB cache.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-for (const h of await Snapshot.list()) {
-  console.log(h.name ?? h.digest, h.sizeBytes);
-}
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">listDir()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 static listDir(dir: string): Promise<Snapshot[]>
@@ -352,23 +333,19 @@ Walk a directory and parse each subdirectory's manifest. Does not touch the inde
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-const found = await Snapshot.listDir("/mnt/external/snapshots");
-console.log(`${found.length} artifacts`);
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">remove()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 static remove(pathOrName: string, opts?: { force?: boolean }): Promise<void>
 ```
+
+<Accordion title="Example">
+
+```typescript
+await Snapshot.remove("after-pip-install", { force: true });
+```
+
+</Accordion>
 
 Remove a snapshot by path, name, or digest. Refuses if the snapshot has indexed children unless `force` is set.
 
@@ -385,22 +362,20 @@ Remove a snapshot by path, name, or digest. Refuses if the snapshot has indexed 
   </div>
 </div>
 
-<Accordion title="Example">
-
-```typescript
-await Snapshot.remove("after-pip-install", { force: true });
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">reindex()</span>
-<div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 static reindex(dir?: string): Promise<number>
 ```
+
+<Accordion title="Example">
+
+```typescript
+const count = await Snapshot.reindex();
+console.log(`reindexed ${count} snapshots`);
+```
+
+</Accordion>
 
 Walk the snapshots directory (default: the configured snapshots dir) and rebuild the local index. Returns the number of artifacts indexed.
 
@@ -478,6 +453,15 @@ await Snapshot.save("after-pip-install", "./baseline.tar.zst", {
 static load(archive: string, dest?: string): Promise<SnapshotHandle>
 ```
 
+<Accordion title="Example">
+
+```typescript
+const h = await Snapshot.import("./baseline.tar.zst");
+console.log("imported", h.digest);
+```
+
+</Accordion>
+
 Unpack a snapshot archive (`.tar.zst` or `.tar`) into the snapshots directory, verifying recorded integrity on the way in. Compression is detected from magic bytes.
 
 <p className="msb-label">Parameters</p>
@@ -517,10 +501,7 @@ console.log("loaded", h.digest);
 
 A `Snapshot` is a snapshot artifact on disk. The artifact is a directory containing the `snapshot.json` descriptor and the captured `upper.ext4`. The directory is the source of truth; the local DB index is just a rebuildable cache. Returned by [`Snapshot.builder().create()`](#snapshotbuilder), [`Snapshot.open()`](#snapshot-open), and [`handle.snapshot()`](#handle-snapshot).
 
----
-
 #### <span className="msb-recv">snap.</span><span className="msb-hn">path</span>
-<div className="msb-tags"><span className="msb-tag is-instance">getter</span></div>
 
 ```typescript
 get path(): string
@@ -528,10 +509,7 @@ get path(): string
 
 Path to the artifact directory.
 
----
-
 #### <span className="msb-recv">snap.</span><span className="msb-hn">digest</span>
-<div className="msb-tags"><span className="msb-tag is-instance">getter</span></div>
 
 ```typescript
 get digest(): string
@@ -539,10 +517,7 @@ get digest(): string
 
 Canonical content digest (`sha256:hex`). The snapshot's identity.
 
----
-
 #### <span className="msb-recv">snap.</span><span className="msb-hn">sizeBytes</span>
-<div className="msb-tags"><span className="msb-tag is-instance">getter</span></div>
 
 ```typescript
 get sizeBytes(): bigint
@@ -550,10 +525,7 @@ get sizeBytes(): bigint
 
 Apparent size of the captured upper layer in bytes (sparse on disk).
 
----
-
 #### <span className="msb-recv">snap.</span><span className="msb-hn">imageRef</span>
-<div className="msb-tags"><span className="msb-tag is-instance">getter</span></div>
 
 ```typescript
 get imageRef(): string
@@ -561,10 +533,7 @@ get imageRef(): string
 
 Image reference the snapshot was taken from.
 
----
-
 #### <span className="msb-recv">snap.</span><span className="msb-hn">imageManifestDigest</span>
-<div className="msb-tags"><span className="msb-tag is-instance">getter</span></div>
 
 ```typescript
 get imageManifestDigest(): string
@@ -572,10 +541,7 @@ get imageManifestDigest(): string
 
 OCI manifest digest of the pinned image.
 
----
-
 #### <span className="msb-recv">snap.</span><span className="msb-hn">format</span>
-<div className="msb-tags"><span className="msb-tag is-instance">getter</span></div>
 
 ```typescript
 get format(): "raw" | "qcow2"
@@ -597,7 +563,6 @@ Snapshot scope: `"disk"` for a disk-only snapshot, `"resumable"` once resumable 
 ---
 
 #### <span className="msb-recv">snap.</span><span className="msb-hn">fstype</span>
-<div className="msb-tags"><span className="msb-tag is-instance">getter</span></div>
 
 ```typescript
 get fstype(): string
@@ -605,10 +570,7 @@ get fstype(): string
 
 Filesystem type inside the upper (e.g. `"ext4"`).
 
----
-
 #### <span className="msb-recv">snap.</span><span className="msb-hn">parent</span>
-<div className="msb-tags"><span className="msb-tag is-instance">getter</span></div>
 
 ```typescript
 get parent(): string | null
@@ -616,10 +578,7 @@ get parent(): string | null
 
 Manifest digest of the parent snapshot, or `null` for a root.
 
----
-
 #### <span className="msb-recv">snap.</span><span className="msb-hn">createdAt</span>
-<div className="msb-tags"><span className="msb-tag is-instance">getter</span></div>
 
 ```typescript
 get createdAt(): string
@@ -627,10 +586,7 @@ get createdAt(): string
 
 RFC 3339 timestamp when the snapshot was created.
 
----
-
 #### <span className="msb-recv">snap.</span><span className="msb-hn">labels</span>
-<div className="msb-tags"><span className="msb-tag is-instance">getter</span></div>
 
 ```typescript
 get labels(): ReadonlyArray<readonly [string, string]>
@@ -638,10 +594,7 @@ get labels(): ReadonlyArray<readonly [string, string]>
 
 User-supplied labels (sorted by key in canonical form), as `[key, value]` pairs.
 
----
-
 #### <span className="msb-recv">snap.</span><span className="msb-hn">sourceSandbox</span>
-<div className="msb-tags"><span className="msb-tag is-instance">getter</span></div>
 
 ```typescript
 get sourceSandbox(): string | null
@@ -649,25 +602,11 @@ get sourceSandbox(): string | null
 
 Best-effort source-sandbox name, if recorded. `null` when the manifest has no source recorded.
 
----
-
 #### <span className="msb-recv">snap.</span><span className="msb-hn">verify()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 verify(): Promise<SnapshotVerifyReport>
 ```
-
-Recompute the upper layer's content hash and compare against the manifest. Walks data extents only, so a 4 GiB sparse file with a few MB of data verifies in milliseconds. The report's `upper.kind` is `"notRecorded"` when the manifest has no integrity hash recorded.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshotverifyreport-union">Promise&lt;SnapshotVerifyReport&gt;</a></div>
-    <div className="msb-param-desc">Verification result.</div>
-  </div>
-</div>
 
 <Accordion title="Example">
 
@@ -682,7 +621,16 @@ if (report.upper.kind === "verified") {
 
 </Accordion>
 
----
+Recompute the upper layer's content hash and compare against the manifest. Walks data extents only, so a 4 GiB sparse file with a few MB of data verifies in milliseconds. The report's `upper.kind` is `"notRecorded"` when the manifest has no integrity hash recorded.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#snapshotverifyreport-union">Promise&lt;SnapshotVerifyReport&gt;</a></div>
+    <div className="msb-param-desc">Verification result.</div>
+  </div>
+</div>
 
 ## SnapshotBuilder
 
@@ -728,10 +676,7 @@ Create the artifact under this parent directory instead of the default snapshots
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">label()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 label(key: string, value: string): this
@@ -752,10 +697,7 @@ Add a `key=value` label to the snapshot manifest. May be called repeatedly.
   </div>
 </div>
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">force()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 force(): this
@@ -763,10 +705,7 @@ force(): this
 
 Overwrite an existing artifact with the same name instead of failing on conflict.
 
----
-
 #### <span className="msb-recv">.</span><span className="msb-hn">recordIntegrity()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
 recordIntegrity(): this
@@ -788,22 +727,10 @@ Request a `"resumable"` snapshot (disk plus VM state). Accepted by the builder, 
 ---
 
 #### <span className="msb-recv">.</span><span className="msb-hn">create()</span>
-<div className="msb-tags"><span className="msb-tag is-builder">builder</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
 create(): Promise<Snapshot>
 ```
-
-Capture the configured snapshot and return the resulting artifact.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshot-instance">Promise&lt;Snapshot&gt;</a></div>
-    <div className="msb-param-desc">The created snapshot artifact.</div>
-  </div>
-</div>
 
 <Accordion title="Example">
 
@@ -817,15 +744,22 @@ const snap = await Snapshot.builder("baseline-v2")
 
 </Accordion>
 
----
+Capture the configured snapshot and return the resulting artifact.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#snapshot-instance">Promise&lt;Snapshot&gt;</a></div>
+    <div className="msb-param-desc">The created snapshot artifact.</div>
+  </div>
+</div>
 
 ## Types
 
----
-
 ### SnapshotHandle <span className="msb-tag is-type">class</span>
 
-Lightweight handle backed by an index row. Values are snapshotted from the index at construction time — call [`Snapshot.get()`](#snapshot-get) again for a fresh reading if needed. Handles from [`Snapshot.list()`](#snapshot-list) are read-only and throw on [`open()`](#snapshothandleopen) / [`remove()`](#snapshothandleremove); fetch a live handle via [`Snapshot.get()`](#snapshot-get) for those lifecycle methods.
+Lightweight handle backed by an index row. Values are snapshotted from the index at construction time; call [`Snapshot.get()`](#snapshot-get) again for a fresh reading if needed. Handles from [`Snapshot.list()`](#snapshot-list) are read-only and throw on [`open()`](#snapshothandleopen) / [`remove()`](#snapshothandleremove); fetch a live handle via [`Snapshot.get()`](#snapshot-get) for those lifecycle methods.
 
 <p className="msb-backref">Returned by <a href="#snapshot-get">Snapshot.get()</a>, <a href="#snapshot-list">Snapshot.list()</a>, <a href="#snapshot-load">Snapshot.load()</a></p>
 
@@ -849,7 +783,7 @@ Lightweight handle backed by an index row. Values are snapshotted from the index
 open(): Promise<Snapshot>
 ```
 
-Open and metadata-validate the underlying artifact. Throws if this handle is read-only (came from [`Snapshot.list()`](#snapshot-list)) — fetch a live handle via [`Snapshot.get()`](#snapshot-get) first.
+Open and metadata-validate the underlying artifact. Throws if this handle is read-only (came from [`Snapshot.list()`](#snapshot-list)); fetch a live handle via [`Snapshot.get()`](#snapshot-get) first.
 
 <p className="msb-label" id="snapshothandleremove">snapshotHandle.remove()</p>
 

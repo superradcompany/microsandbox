@@ -160,7 +160,7 @@ For CI or other headless environments, configure `registries.hosts.<host>.auth` 
 
 When pulling from a registry, microsandbox resolves auth in this order:
 
-1. Explicit SDK auth (`.registry_auth(...)`)
+1. Explicit SDK auth (`.registry(|r| r.auth(...))`)
 2. OS credential store
 3. `registries.hosts.<host>.auth` config
 4. Docker credential store/config

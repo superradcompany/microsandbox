@@ -1,32 +1,70 @@
 ---
 title: "Week of July 5, 2026"
-description: "msb metrics overhaul: crashed sandboxes no longer report as running, a STATE column, resize-aware CPU/MEM denominators, per-second I/O rates, and live --watch / --follow modes."
+description: "Modify existing sandboxes, inspect resize headroom, trust private TLS upstreams, load images faster, and pick up CLI, network, and SDK fixes."
 icon: "bolt"
 ---
 
+<Tip>
+  **Released this week:** [v0.6.1](https://github.com/superradcompany/microsandbox/releases/tag/v0.6.1) · [v0.6.2](https://github.com/superradcompany/microsandbox/releases/tag/v0.6.2) · [v0.6.3](https://github.com/superradcompany/microsandbox/releases/tag/v0.6.3) · [v0.6.4](https://github.com/superradcompany/microsandbox/releases/tag/v0.6.4)
+</Tip>
+
 ## New features
 
-**Live metrics: `msb metrics --watch` and `--follow`**
+**Modify existing sandboxes**
 
-`msb metrics` gains a `docker stats`-style live mode. `--watch` refreshes the table in place at a configurable `--interval` (default 1s); `--follow` streams one JSON Lines object per sandbox per tick for scripting. Disk and network columns now render as per-second rates derived from consecutive samples — the one-shot table samples twice ~500 ms apart so it reads identically to a watch frame. `--sort cpu|mem` orders rows by usage.
+`msb modify` and the SDK modify APIs can update existing sandboxes without recreating them. Resize CPU and memory, update labels, set env vars or workdir for future execs, and preview the plan with `--dry-run`. Secret changes are available in the CLI and Rust SDK.
 
 ```bash
-msb metrics --watch --interval 500ms
-msb metrics --follow | jq .cpu_percent
+msb modify worker --cpus 2 --memory 1G --dry-run
+msb modify worker --secret DB_URL@db.internal.example.com
 ```
 
-See [msb metrics](/cli/sandbox-commands#msb-metrics).
+See [Tuning](/sandboxes/tuning). Also new: `msb restart`, `msb touch`, and `msb ping`.
 
-**Sandbox state in metrics output**
+**Inspect allocation and metrics**
 
-Every metrics row now carries a `STATE`: `running`, `stalled` (runtime alive but the sampler has not written a sample within three sampling intervals), or `exited` (the preserved terminal sample of a stopped sandbox). Named lookups (`msb metrics my-app`) answer in any state instead of pretending an exited sandbox is live, and `--all` opts recently exited sandboxes into the fleet view with their cumulative totals. The Rust SDK exposes the same data via `SandboxMetricsReport` / `all_sandbox_metrics_reports_local`.
+`msb ps` now shows CPU and memory as `effective / max`. `msb metrics` adds sandbox state, per-second I/O rates, sorting, live watch/follow modes, and live-resize-aware CPU and memory readings.
 
-**Resize-aware CPU and memory denominators**
+```bash
+msb ps
+msb metrics --watch --sort cpu
+```
 
-The `CPU` column shows cores busy over cores allocated (`0.80 / 2c`) and `MEM` shows usage over the configured limit — both resolved from the catalog's *active* config at read time, so `msb modify --cpus/--memory` on a running sandbox is reflected on the next tick instead of showing the boot-time limit forever.
+Crashed sandboxes now report as `exited` instead of `running`. The Rust SDK exposes the same report through `SandboxMetricsReport`.
 
-## Fixes
+**Host-scoped upstream TLS trust**
 
-**Crashed sandboxes no longer report as running**
+Trust self-signed or private HTTPS upstreams without disabling secret substitution globally. Pin a CA bundle to specific hosts, or turn verification off for a bounded set of hosts. Available in the CLI and all four SDKs.
 
-A runtime killed hard (SIGKILL, OOM, host reboot) never released its shared-memory metrics slot, so `msb metrics` — and the `msb-metrics` collector — kept reporting its frozen last sample as a running sandbox until slot pressure forced a reclaim. Registry readers now verify the slot owner's PID on every read and retire dead entries on the spot: the CLI reports them as `exited`, and collector export streams drop the series on the next tick.
+```bash
+msb create python --name agent \
+  --tls-intercept \
+  --tls-upstream-ca-cert-for 'api.internal.example.com=./certs/api-ca.pem' \
+  --tls-no-verify-upstream-for '*.preview.internal'
+```
+
+See the [TLS networking guide](/networking/tls).
+
+**Faster `msb load` and `msb pull`**
+
+Loading an image that is already on disk now takes under a second instead of around 20 seconds for a 1.3 GB image. `msb load` also shows progress while streaming from Docker.
+
+```bash
+docker save app:latest | msb load
+```
+
+`msb-imago` 0.1.1 also fixes OCI image corruption for layers over 2 GiB.
+
+**Other features**
+
+- **`msb self downgrade`.** Move a local install back to version 0.6.0 or newer, with database backup and migration rollback.
+- **`--no-tty`.** Force non-interactive captured execution in `msb run` and `msb exec`.
+
+## Bug fixes
+
+- `msb exec` now signals the full guest process group, so spawned background jobs do not survive as orphans.
+- Large and fragmented UDP packets now round-trip through the relay; IPv6 DNS answers, IPv4-mapped addresses, and generated network config files are also handled more reliably.
+- `msb stop` no longer reports `sandbox not found` when an ephemeral sandbox is cleaned up during the stop wait.
+- `MSB_SHUTDOWN_FLUSH_TIMEOUT_MS` can shorten shutdown waits for Windows WHP tests and short-lived sandboxes.
+- SSH `direct-tcpip`, image prune behavior, and Rust default-backend helpers are restored after backend-routing regressions.
+- `msb doctor` now uses the same runtime path resolution as sandbox launches, and top-level `msb --help` no longer prints raw ANSI escapes on older Windows consoles.

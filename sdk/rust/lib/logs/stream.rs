@@ -7,7 +7,6 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -20,6 +19,7 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 use super::cursor::{FilePosition, LogCursor};
 use super::parser::{FileHandle, ParsedChunk, ParserKind};
 use super::types::{LogEntry, LogSource};
+use super::watch::LogSubscription;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -203,23 +203,21 @@ struct PositionedLogEntry {
 pub(crate) struct LogEngine {
     since: Option<DateTime<Utc>>,
     until: Option<DateTime<Utc>>,
-    follow: bool,
 
     readers: Vec<ReaderState>,
     initial_positions: Vec<FilePosition>,
     pending: VecDeque<PositionedLogEntry>,
 
-    _watcher: Option<notify::RecommendedWatcher>,
-    event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>>,
+    follow: FollowMode,
 
     finished: bool,
 }
 
 impl LogEngine {
     /// Open one reader per [`LogFileConfig`] whose `produces` set
-    /// intersects `sources`. When `follow` is true, also subscribe
-    /// to filesystem change events on `log_dir` so [`step`] can wake
-    /// promptly on new writes.
+    /// intersects `sources`. When `follow` is true, also build a
+    /// private filesystem watcher on `log_dir` so [`step`] can wake
+    /// promptly on new writes (the standalone behavior).
     pub(crate) async fn new(
         log_dir: PathBuf,
         log_files: &'static [LogFileConfig],
@@ -227,6 +225,46 @@ impl LogEngine {
         start: &LogStreamStart,
         until: Option<DateTime<Utc>>,
         follow: bool,
+    ) -> MicrosandboxResult<Self> {
+        let mode = if follow {
+            FollowMode::standalone(&log_dir)?
+        } else {
+            FollowMode::Off
+        };
+        Self::assemble(log_dir, log_files, sources, start, until, mode).await
+    }
+
+    /// Like [`new`](Self::new) with `follow = true`, but wake from a
+    /// shared [`LogRegistry`](super::watch::LogRegistry)
+    /// subscription rather than a private watcher.
+    pub(crate) async fn new_registry(
+        log_dir: PathBuf,
+        log_files: &'static [LogFileConfig],
+        sources: Vec<LogSource>,
+        start: &LogStreamStart,
+        until: Option<DateTime<Utc>>,
+        subscription: LogSubscription,
+    ) -> MicrosandboxResult<Self> {
+        Self::assemble(
+            log_dir,
+            log_files,
+            sources,
+            start,
+            until,
+            FollowMode::Registry(subscription),
+        )
+        .await
+    }
+
+    /// Build readers and assemble the engine around a prepared follow
+    /// mode. Shared by the standalone and registry-backed constructors.
+    async fn assemble(
+        log_dir: PathBuf,
+        log_files: &'static [LogFileConfig],
+        sources: Vec<LogSource>,
+        start: &LogStreamStart,
+        until: Option<DateTime<Utc>>,
+        follow: FollowMode,
     ) -> MicrosandboxResult<Self> {
         let since = match start {
             LogStreamStart::Since(t) => Some(*t),
@@ -253,22 +291,13 @@ impl LogEngine {
             });
         }
 
-        let (watcher, event_rx) = if follow {
-            let (w, rx) = Self::build_watcher(&log_dir)?;
-            (Some(w), Some(rx))
-        } else {
-            (None, None)
-        };
-
         Ok(Self {
             since,
             until,
-            follow,
             readers,
             initial_positions,
             pending: VecDeque::new(),
-            _watcher: watcher,
-            event_rx,
+            follow,
             finished: false,
         })
     }
@@ -348,50 +377,15 @@ impl LogEngine {
             return StepResult::Continue;
         }
 
-        if !self.follow {
+        if !self.follow.is_following() {
             return StepResult::Terminate;
         }
 
-        let Some(rx) = self.event_rx.as_mut() else {
-            return StepResult::Terminate;
-        };
+        let follow = &mut self.follow;
         tokio::select! {
-            _ = rx.recv() => StepResult::Continue,
+            _ = follow.wait() => StepResult::Continue,
             _ = tokio::time::sleep(FALLBACK_POLL_INTERVAL) => StepResult::Continue,
         }
-    }
-
-    /// Wire up a non-recursive [`notify`] watcher on `log_dir` and
-    /// return its event receiver. The watcher's callback runs on a
-    /// background thread; we forward only the wake signal so the
-    /// async [`step`] loop can park efficiently between writes.
-    fn build_watcher(
-        log_dir: &Path,
-    ) -> MicrosandboxResult<(
-        notify::RecommendedWatcher,
-        tokio::sync::mpsc::UnboundedReceiver<()>,
-    )> {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let tx = Arc::new(tx);
-        let tx_clone = Arc::clone(&tx);
-        let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if let Ok(event) = res {
-                use notify::EventKind;
-                if matches!(
-                    event.kind,
-                    EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
-                ) {
-                    let _ = tx_clone.send(());
-                }
-            }
-        })
-        .map_err(|e| MicrosandboxError::Custom(format!("log watcher init failed: {e}")))?;
-
-        watcher
-            .watch(log_dir, notify::RecursiveMode::NonRecursive)
-            .map_err(|e| MicrosandboxError::Custom(format!("log watcher subscribe failed: {e}")))?;
-
-        Ok((watcher, rx))
     }
 
     /// Consume the engine and yield its entries as a [`futures::Stream`].
@@ -423,6 +417,79 @@ impl LogEngine {
                 }
             }
         })
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// FollowMode
+//--------------------------------------------------------------------------------------------------
+
+/// How a following engine learns the log files may have new bytes. Every
+/// variant is just a wake — "read again" — so the fallback poll still
+/// applies whenever the engine is following.
+enum FollowMode {
+    /// Not following; the stream ends at EOF.
+    Off,
+    /// Following via this stream's own private watcher.
+    Standalone {
+        _watcher: notify::RecommendedWatcher,
+        rx: tokio::sync::mpsc::UnboundedReceiver<()>,
+    },
+    /// Following via a subscription to the shared registry's watcher.
+    Registry(LogSubscription),
+}
+
+impl FollowMode {
+    /// Build this stream's own non-recursive watcher on `log_dir`. The
+    /// callback runs on a background thread and forwards only the wake
+    /// signal so the async [`step`](LogEngine::step) loop can park
+    /// between writes.
+    fn standalone(log_dir: &Path) -> MicrosandboxResult<Self> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            if let Ok(event) = res {
+                use notify::EventKind;
+                if matches!(
+                    event.kind,
+                    EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+                ) {
+                    let _ = tx.send(());
+                }
+            }
+        })
+        .map_err(|e| MicrosandboxError::Custom(format!("log watcher init failed: {e}")))?;
+
+        watcher
+            .watch(log_dir, notify::RecursiveMode::NonRecursive)
+            .map_err(|e| MicrosandboxError::Custom(format!("log watcher subscribe failed: {e}")))?;
+
+        Ok(FollowMode::Standalone {
+            _watcher: watcher,
+            rx,
+        })
+    }
+
+    fn is_following(&self) -> bool {
+        !matches!(self, FollowMode::Off)
+    }
+
+    /// Await the next wake. For a `Registry` subscription a closed sender
+    /// (`changed()` → `Err`) degrades to poll-only rather than
+    /// terminating — the stream's own registration clone keeps the
+    /// sender open, so this only guards a torn-down registry. Never
+    /// resolves for `Off`; callers gate on [`is_following`](Self::is_following).
+    async fn wait(&mut self) {
+        match self {
+            FollowMode::Off => std::future::pending::<()>().await,
+            FollowMode::Standalone { rx, .. } => {
+                let _ = rx.recv().await;
+            }
+            FollowMode::Registry(subscription) => {
+                if subscription.changed().await.is_err() {
+                    std::future::pending::<()>().await
+                }
+            }
+        }
     }
 }
 

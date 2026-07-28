@@ -74,6 +74,52 @@ describe.skipIf(!msbPath())("end-to-end smoke", () => {
     expect(code).toBe(7);
   });
 
+  it("resizes a TTY while recv() is pending", async () => {
+    const handle = await sb.execStreamWith("sh", (exec) =>
+      exec
+        .args(["-c", "printf 'ready\\n'; read value; stty size"])
+        .stdinPipe()
+        .tty(true),
+    );
+    const stdin = await handle.takeStdin();
+    expect(stdin).not.toBeNull();
+
+    while (true) {
+      const event = await handle.recv();
+      expect(event).not.toBeNull();
+      if (
+        event?.kind === "stdout" &&
+        new TextDecoder().decode(event.data).includes("ready")
+      ) {
+        break;
+      }
+    }
+
+    const pendingEvent = handle.recv();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        handle.resize(40, 100),
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error("resize timed out")), 5_000);
+        }),
+      ]);
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+    }
+
+    await stdin?.write("continue\n");
+    const events = [await pendingEvent];
+    for await (const event of handle) events.push(event);
+    let output = "";
+    for (const event of events) {
+      if (event?.kind === "stdout") {
+        output += new TextDecoder().decode(event.data);
+      }
+    }
+    expect(output).toContain("40 100");
+  });
+
   it("reads and writes files via SandboxFsOps", async () => {
     const fs = sb.fs();
     await fs.write("/tmp/x.txt", "data\n");

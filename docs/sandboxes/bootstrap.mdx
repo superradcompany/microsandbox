@@ -1,7 +1,7 @@
 ---
-title: Customize
-description: Inject scripts, modify the rootfs, and choose your own init
-icon: "wand-magic-sparkles"
+title: Bootstrap
+description: Prepare scripts, patches, and PID 1 before work starts
+icon: "power-off"
 ---
 
 Before a sandbox starts doing real work, you can prepare it three ways. **Scripts** bundle reusable commands. **Patches** modify the rootfs before the VM boots. A **custom init system** (systemd, OpenRC, s6) can run as PID 1 instead of microsandbox's minimal agent. All three are defined at creation time and keep the base image untouched.
@@ -307,4 +307,4 @@ msb run ghcr.io/superradcompany/debian-systemd:12 \
 
 Most slim Docker base images do not include systemd or another full init. Use an image that ships the init you want, or build a small custom image that installs it.
 
-`--init` controls PID 1. `--entrypoint` and the trailing command normally control the workload you run after boot, so the two can be combined. The special case is an image-declared init entrypoint such as `/init`: with `--init auto` and attached `msb run`, the trailing command is passed to PID 1 as part of the image's own launch contract.
+`--init` controls PID 1. `--entrypoint` and the trailing command normally control the workload you run after boot, so the two can be combined. An image-declared init entrypoint such as `/init` is the special case. With `--init auto` and attached `msb run`, microsandbox passes the trailing command to PID 1 as part of the image's own launch contract.

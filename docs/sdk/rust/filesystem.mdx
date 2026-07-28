@@ -5,71 +5,6 @@ description: Rust SDK - Filesystem API reference
 
 Read, write, list, and manipulate files inside a running sandbox. Obtained via [`sb.fs()`](/sdk/rust/sandbox#sb-fs). Every op dispatches through the same host-guest channel as command execution, so there is no SSH and no network involved. Path-style helpers are the usual choice; handle-style helpers are available for callers that need POSIX-like file descriptor reuse. For bulk file movement, prefer a [volume](/sdk/rust/volumes) that gives the guest direct filesystem access. See [Filesystem](/sandboxes/filesystem) for conceptual usage.
 
-<div className="msb-glance">
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Read<span className="msb-ct">3</span></p>
-  <a className="msb-row" href="#fs-read"><span className="msb-rn">fs.read()</span><span className="msb-rg">whole file as bytes</span></a>
-  <a className="msb-row" href="#fs-read_to_string"><span className="msb-rn">fs.read_to_string()</span><span className="msb-rg">whole file as UTF-8</span></a>
-  <a className="msb-row" href="#fs-read_stream"><span className="msb-rn">fs.read_stream()</span><span className="msb-rg">stream chunks in</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Write<span className="msb-ct">2</span></p>
-  <a className="msb-row" href="#fs-write"><span className="msb-rn">fs.write()</span><span className="msb-rg">overwrite a file</span></a>
-  <a className="msb-row" href="#fs-write_stream"><span className="msb-rn">fs.write_stream()</span><span className="msb-rg">stream chunks out</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Handles<span className="msb-ct">13</span></p>
-  <a className="msb-row" href="#fs-open_file"><span className="msb-rn">fs.open_file()</span><span className="msb-rg">open a file handle</span></a>
-  <a className="msb-row" href="#fs-open_dir"><span className="msb-rn">fs.open_dir()</span><span className="msb-rg">open a directory handle</span></a>
-  <a className="msb-row" href="#fs-close_handle"><span className="msb-rn">fs.close_handle()</span><span className="msb-rg">close a handle</span></a>
-  <a className="msb-row" href="#fs-read_handle"><span className="msb-rn">fs.read_handle()</span><span className="msb-rg">read by handle</span></a>
-  <a className="msb-row" href="#fs-read_handle_stream"><span className="msb-rn">fs.read_handle_stream()</span><span className="msb-rg">stream by handle</span></a>
-  <a className="msb-row" href="#fs-write_handle"><span className="msb-rn">fs.write_handle()</span><span className="msb-rg">write by handle</span></a>
-  <a className="msb-row" href="#fs-write_handle_stream"><span className="msb-rn">fs.write_handle_stream()</span><span className="msb-rg">stream writes by handle</span></a>
-  <a className="msb-row" href="#fs-read_dir_handle"><span className="msb-rn">fs.read_dir_handle()</span><span className="msb-rg">read directory entries</span></a>
-  <a className="msb-row" href="#fs-read_dir"><span className="msb-rn">fs.read_dir()</span><span className="msb-rg">directory handle alias</span></a>
-  <a className="msb-row" href="#fs-stat_handle"><span className="msb-rn">fs.stat_handle()</span><span className="msb-rg">metadata by handle</span></a>
-  <a className="msb-row" href="#fs-fstat"><span className="msb-rn">fs.fstat()</span><span className="msb-rg">metadata alias</span></a>
-  <a className="msb-row" href="#fs-set_stat_handle"><span className="msb-rn">fs.set_stat_handle()</span><span className="msb-rg">update metadata by handle</span></a>
-  <a className="msb-row" href="#fs-fset_stat"><span className="msb-rn">fs.fset_stat()</span><span className="msb-rg">metadata update alias</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Directories<span className="msb-ct">4</span></p>
-  <a className="msb-row" href="#fs-list"><span className="msb-rn">fs.list()</span><span className="msb-rg">children of a dir</span></a>
-  <a className="msb-row" href="#fs-mkdir"><span className="msb-rn">fs.mkdir()</span><span className="msb-rg">create dir + parents</span></a>
-  <a className="msb-row" href="#fs-remove_dir"><span className="msb-rn">fs.remove_dir()</span><span className="msb-rg">remove dir recursively</span></a>
-  <a className="msb-row" href="#fs-remove_empty_dir"><span className="msb-rn">fs.remove_empty_dir()</span><span className="msb-rg">remove empty dir</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Files<span className="msb-ct">3</span></p>
-  <a className="msb-row" href="#fs-remove"><span className="msb-rn">fs.remove()</span><span className="msb-rg">delete a single file</span></a>
-  <a className="msb-row" href="#fs-copy"><span className="msb-rn">fs.copy()</span><span className="msb-rg">copy within sandbox</span></a>
-  <a className="msb-row" href="#fs-rename"><span className="msb-rn">fs.rename()</span><span className="msb-rg">rename / move</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Metadata<span className="msb-ct">7</span></p>
-  <a className="msb-row" href="#fs-stat"><span className="msb-rn">fs.stat()</span><span className="msb-rg">file metadata</span></a>
-  <a className="msb-row" href="#fs-stat_with_follow"><span className="msb-rn">fs.stat_with_follow()</span><span className="msb-rg">stat, control symlinks</span></a>
-  <a className="msb-row" href="#fs-set_stat"><span className="msb-rn">fs.set_stat()</span><span className="msb-rg">update metadata</span></a>
-  <a className="msb-row" href="#fs-read_link"><span className="msb-rn">fs.read_link()</span><span className="msb-rg">resolve a symlink</span></a>
-  <a className="msb-row" href="#fs-symlink"><span className="msb-rn">fs.symlink()</span><span className="msb-rg">create a symlink</span></a>
-  <a className="msb-row" href="#fs-real_path"><span className="msb-rn">fs.real_path()</span><span className="msb-rg">canonicalize a path</span></a>
-  <a className="msb-row" href="#fs-exists"><span className="msb-rn">fs.exists()</span><span className="msb-rg">does a path exist</span></a>
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Host transfer<span className="msb-ct">2</span></p>
-  <a className="msb-row" href="#fs-copy_from_host"><span className="msb-rn">fs.copy_from_host()</span><span className="msb-rg">host file -&gt; guest</span></a>
-  <a className="msb-row" href="#fs-copy_to_host"><span className="msb-rn">fs.copy_to_host()</span><span className="msb-rg">guest file -&gt; host</span></a>
-
-  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
-  <div className="msb-chiprow">
-    <a className="msb-typepill" href="#sandboxfsops">SandboxFsOps</a>
-    <a className="msb-typepill" href="#fsentry">FsEntry</a>
-    <a className="msb-typepill" href="#fsentrykind">FsEntryKind</a>
-    <a className="msb-typepill" href="#fsmetadata">FsMetadata</a>
-    <a className="msb-typepill" href="#fsopenoptions">FsOpenOptions</a>
-    <a className="msb-typepill" href="#fssetattrs">FsSetAttrs</a>
-    <a className="msb-typepill" href="#fsreadstream">FsReadStream</a>
-    <a className="msb-typepill" href="#fswritesink">FsWriteSink</a>
-    <a className="msb-typepill" href="#fshandle">FsHandle</a>
-  </div>
-
-</div>
-
 <p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```rust
@@ -91,14 +26,20 @@ for entry in fs.list("/tmp").await? {
 
 ## Read operations
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn read(&self, path: &str) -> MicrosandboxResult<Bytes>
 ```
+
+<Accordion title="Example">
+
+```rust
+let bytes = sb.fs().read("/app/logo.png").await?;
+println!("{} bytes", bytes.len());
+```
+
+</Accordion>
 
 Read an entire file from the guest filesystem into memory as raw bytes.
 
@@ -120,23 +61,20 @@ Read an entire file from the guest filesystem into memory as raw bytes.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let bytes = sb.fs().read("/app/logo.png").await?;
-println!("{} bytes", bytes.len());
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_to_string()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn read_to_string(&self, path: &str) -> MicrosandboxResult<String>
 ```
+
+<Accordion title="Example">
+
+```rust
+let text = sb.fs().read_to_string("/etc/hostname").await?;
+println!("{}", text.trim());
+```
+
+</Accordion>
 
 Read an entire file and decode it as UTF-8. Errors if the contents are not valid UTF-8.
 
@@ -158,23 +96,24 @@ Read an entire file and decode it as UTF-8. Errors if the contents are not valid
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let text = sb.fs().read_to_string("/etc/hostname").await?;
-println!("{}", text.trim());
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_stream()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn read_stream(&self, path: &str) -> MicrosandboxResult<FsReadStream>
 ```
+
+<Accordion title="Example">
+
+```rust
+let mut stream = sb.fs().read_stream("/var/log/big.log").await?;
+let mut total = 0;
+while let Some(chunk) = stream.recv().await? {
+    total += chunk.len();
+}
+println!("read {total} bytes");
+```
+
+</Accordion>
 
 Open a streaming reader that yields chunks of file data as they arrive. Use this for files too large to hold in memory, or to process data incrementally.
 
@@ -196,31 +135,21 @@ Open a streaming reader that yields chunks of file data as they arrive. Use this
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let mut stream = sb.fs().read_stream("/var/log/big.log").await?;
-let mut total = 0;
-while let Some(chunk) = stream.recv().await? {
-    total += chunk.len();
-}
-println!("read {total} bytes");
-```
-
-</Accordion>
-
----
-
 ## Write operations
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">write()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn write(&self, path: &str, data: impl AsRef<[u8]>) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+sb.fs().write("/tmp/hello.txt", "hi there").await?;
+```
+
+</Accordion>
 
 Write data to a file in the guest, creating it if it doesn't exist and truncating it if it does. Parent directories must already exist.
 
@@ -237,22 +166,22 @@ Write data to a file in the guest, creating it if it doesn't exist and truncatin
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-sb.fs().write("/tmp/hello.txt", "hi there").await?;
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">write_stream()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn write_stream(&self, path: &str) -> MicrosandboxResult<FsWriteSink>
 ```
+
+<Accordion title="Example">
+
+```rust
+let sink = sb.fs().write_stream("/tmp/out.bin").await?;
+sink.write(&[0u8; 4096]).await?;
+sink.write(&[1u8; 4096]).await?;
+sink.close().await?;
+```
+
+</Accordion>
 
 Open a streaming writer for large files. Write chunks incrementally, then call [`FsWriteSink::close()`](#fswritesink) to flush and finalize. The file is created if missing and truncated if it exists.
 
@@ -273,19 +202,6 @@ Open a streaming writer for large files. Write chunks incrementally, then call [
     <div className="msb-param-desc">Writer for sending chunks; must be closed to finalize.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```rust
-let sink = sb.fs().write_stream("/tmp/out.bin").await?;
-sink.write(&[0u8; 4096]).await?;
-sink.write(&[1u8; 4096]).await?;
-sink.close().await?;
-```
-
-</Accordion>
-
----
 
 ## Handle operations
 
@@ -311,10 +227,7 @@ fs.close_handle(handle).await?;
 
 </Accordion>
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">open_file()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn open_file(&self, path: &str, options: FsOpenOptions) -> MicrosandboxResult<FsHandle>
@@ -322,10 +235,7 @@ async fn open_file(&self, path: &str, options: FsOpenOptions) -> MicrosandboxRes
 
 Open a file inside the guest and return an agentd-side handle. Configure read/write/create/truncate behavior with [`FsOpenOptions`](#fsopenoptions).
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">open_dir()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn open_dir(&self, path: &str) -> MicrosandboxResult<FsHandle>
@@ -333,10 +243,7 @@ async fn open_dir(&self, path: &str) -> MicrosandboxResult<FsHandle>
 
 Open a directory inside the guest and return an agentd-side handle that can be consumed with [`read_dir_handle()`](#fs-read_dir_handle).
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">close_handle()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn close_handle(&self, handle: FsHandle) -> MicrosandboxResult<()>
@@ -344,10 +251,7 @@ async fn close_handle(&self, handle: FsHandle) -> MicrosandboxResult<()>
 
 Close an open file or directory handle. Always close handles you opened directly once you are done with them.
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_handle()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn read_handle(&self, handle: FsHandle, offset: u64, len: Option<u64>) -> MicrosandboxResult<Bytes>
@@ -355,10 +259,7 @@ async fn read_handle(&self, handle: FsHandle, offset: u64, len: Option<u64>) -> 
 
 Read from an open file handle at `offset`. Passing `None` for `len` reads through EOF.
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_handle_stream()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn read_handle_stream(&self, handle: FsHandle, offset: u64, len: Option<u64>) -> MicrosandboxResult<FsReadStream>
@@ -366,10 +267,7 @@ async fn read_handle_stream(&self, handle: FsHandle, offset: u64, len: Option<u6
 
 Stream bytes from an open file handle. Use this for large reads while preserving the same open-handle semantics as [`read_handle()`](#fs-read_handle).
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">write_handle()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn write_handle(&self, handle: FsHandle, offset: u64, data: impl AsRef<[u8]>) -> MicrosandboxResult<()>
@@ -377,10 +275,7 @@ async fn write_handle(&self, handle: FsHandle, offset: u64, data: impl AsRef<[u8
 
 Write bytes to an open file handle at `offset`.
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">write_handle_stream()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn write_handle_stream(&self, handle: FsHandle, offset: u64, len: Option<u64>) -> MicrosandboxResult<FsWriteSink>
@@ -388,10 +283,7 @@ async fn write_handle_stream(&self, handle: FsHandle, offset: u64, len: Option<u
 
 Stream writes to an open file handle at `offset`. Call [`FsWriteSink::close()`](#fswritesink) to send EOF and wait for the guest to confirm the write.
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_dir_handle()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn read_dir_handle(&self, handle: FsHandle, limit: Option<u32>) -> MicrosandboxResult<Vec<FsEntry>>
@@ -399,10 +291,7 @@ async fn read_dir_handle(&self, handle: FsHandle, limit: Option<u32>) -> Microsa
 
 Read the next batch of entries from an open directory handle. `limit` caps the batch size when set.
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_dir()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn read_dir(&self, handle: FsHandle, limit: Option<u32>) -> MicrosandboxResult<Vec<FsEntry>>
@@ -410,10 +299,7 @@ async fn read_dir(&self, handle: FsHandle, limit: Option<u32>) -> MicrosandboxRe
 
 Compatibility alias for [`read_dir_handle()`](#fs-read_dir_handle).
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">stat_handle()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn stat_handle(&self, handle: FsHandle) -> MicrosandboxResult<FsMetadata>
@@ -421,10 +307,7 @@ async fn stat_handle(&self, handle: FsHandle) -> MicrosandboxResult<FsMetadata>
 
 Return metadata for an open file or directory handle.
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">fstat()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn fstat(&self, handle: FsHandle) -> MicrosandboxResult<FsMetadata>
@@ -432,10 +315,7 @@ async fn fstat(&self, handle: FsHandle) -> MicrosandboxResult<FsMetadata>
 
 Unix-style compatibility alias for [`stat_handle()`](#fs-stat_handle).
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">set_stat_handle()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn set_stat_handle(&self, handle: FsHandle, attrs: FsSetAttrs) -> MicrosandboxResult<()>
@@ -443,10 +323,7 @@ async fn set_stat_handle(&self, handle: FsHandle, attrs: FsSetAttrs) -> Microsan
 
 Update metadata for an open file handle. Only the fields set on [`FsSetAttrs`](#fssetattrs) are changed.
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">fset_stat()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn fset_stat(&self, handle: FsHandle, attrs: FsSetAttrs) -> MicrosandboxResult<()>
@@ -454,18 +331,23 @@ async fn fset_stat(&self, handle: FsHandle, attrs: FsSetAttrs) -> MicrosandboxRe
 
 Unix-style compatibility alias for [`set_stat_handle()`](#fs-set_stat_handle).
 
----
-
 ## Directory operations
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">list()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn list(&self, path: &str) -> MicrosandboxResult<Vec<FsEntry>>
 ```
+
+<Accordion title="Example">
+
+```rust
+for entry in sb.fs().list("/app").await? {
+    println!("{:?} {}", entry.kind, entry.path);
+}
+```
+
+</Accordion>
 
 List the immediate children of a directory (non-recursive). Each entry carries its path, kind, size, mode, and modification time.
 
@@ -487,24 +369,19 @@ List the immediate children of a directory (non-recursive). Each entry carries i
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-for entry in sb.fs().list("/app").await? {
-    println!("{:?} {}", entry.kind, entry.path);
-}
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">mkdir()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn mkdir(&self, path: &str) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+sb.fs().mkdir("/app/data/cache").await?;
+```
+
+</Accordion>
 
 Create a directory, including any missing parent directories.
 
@@ -517,22 +394,19 @@ Create a directory, including any missing parent directories.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-sb.fs().mkdir("/app/data/cache").await?;
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">remove_dir()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn remove_dir(&self, path: &str) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+sb.fs().remove_dir("/app/data/cache").await?;
+```
+
+</Accordion>
 
 Remove a directory and everything under it, recursively. For a single file use [`remove()`](#fs-remove).
 
@@ -545,22 +419,19 @@ Remove a directory and everything under it, recursively. For a single file use [
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-sb.fs().remove_dir("/app/data/cache").await?;
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">remove_empty_dir()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn remove_empty_dir(&self, path: &str) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+sb.fs().remove_empty_dir("/app/data/empty").await?;
+```
+
+</Accordion>
 
 Remove an empty directory. Unlike [`remove_dir()`](#fs-remove_dir), this does not remove child entries and fails when the directory is not empty.
 
@@ -573,26 +444,21 @@ Remove an empty directory. Unlike [`remove_dir()`](#fs-remove_dir), this does no
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-sb.fs().remove_empty_dir("/app/data/empty").await?;
-```
-
-</Accordion>
-
----
-
 ## File operations
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">remove()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn remove(&self, path: &str) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+sb.fs().remove("/tmp/hello.txt").await?;
+```
+
+</Accordion>
 
 Delete a single file. Use [`remove_dir()`](#fs-remove_dir) for directories.
 
@@ -605,22 +471,19 @@ Delete a single file. Use [`remove_dir()`](#fs-remove_dir) for directories.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-sb.fs().remove("/tmp/hello.txt").await?;
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">copy()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn copy(&self, from: &str, to: &str) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+sb.fs().copy("/app/config.json", "/app/config.bak.json").await?;
+```
+
+</Accordion>
 
 Copy a file from one path to another within the sandbox.
 
@@ -637,22 +500,19 @@ Copy a file from one path to another within the sandbox.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-sb.fs().copy("/app/config.json", "/app/config.bak.json").await?;
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">rename()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn rename(&self, from: &str, to: &str) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+sb.fs().rename("/tmp/draft.txt", "/tmp/final.txt").await?;
+```
+
+</Accordion>
 
 Rename or move a file or directory within the sandbox.
 
@@ -669,26 +529,22 @@ Rename or move a file or directory within the sandbox.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-sb.fs().rename("/tmp/draft.txt", "/tmp/final.txt").await?;
-```
-
-</Accordion>
-
----
-
 ## Metadata
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">stat()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn stat(&self, path: &str) -> MicrosandboxResult<FsMetadata>
 ```
+
+<Accordion title="Example">
+
+```rust
+let meta = sb.fs().stat("/app/config.json").await?;
+println!("{} bytes, mode {:o}", meta.size, meta.mode);
+```
+
+</Accordion>
 
 Get metadata for a file or directory: kind, size, mode, read-only flag, and timestamps. A final symlink is followed (equivalent to `stat_with_follow(path, true)`); use [`stat_with_follow()`](#fs-stat_with_follow) to control that.
 
@@ -710,23 +566,20 @@ Get metadata for a file or directory: kind, size, mode, read-only flag, and time
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let meta = sb.fs().stat("/app/config.json").await?;
-println!("{} bytes, mode {:o}", meta.size, meta.mode);
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">stat_with_follow()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn stat_with_follow(&self, path: &str, follow_symlink: bool) -> MicrosandboxResult<FsMetadata>
 ```
+
+<Accordion title="Example">
+
+```rust
+let link_meta = sb.fs().stat_with_follow("/app/current", false).await?;
+println!("{:?}", link_meta.kind);
+```
+
+</Accordion>
 
 Get metadata, choosing whether to follow a final symlink. With `follow_symlink = false` you stat the link itself rather than its target. Local backend only; cloud returns `Unsupported`.
 
@@ -752,23 +605,24 @@ Get metadata, choosing whether to follow a final symlink. With `follow_symlink =
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let link_meta = sb.fs().stat_with_follow("/app/current", false).await?;
-println!("{:?}", link_meta.kind);
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">set_stat()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn set_stat(&self, path: &str, follow_symlink: bool, attrs: FsSetAttrs) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+use microsandbox::sandbox::FsSetAttrs;
+
+sb.fs().set_stat("/app/run.sh", true, FsSetAttrs {
+    mode: Some(0o755),
+    ..Default::default()
+}).await?;
+```
+
+</Accordion>
 
 Update metadata on a file or directory: mode, owner uid/gid, size, and access/modification times. Only the fields you set on [`FsSetAttrs`](#fssetattrs) are applied. Local backend only; cloud returns `Unsupported`.
 
@@ -789,27 +643,20 @@ Update metadata on a file or directory: mode, owner uid/gid, size, and access/mo
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-use microsandbox::sandbox::FsSetAttrs;
-
-sb.fs().set_stat("/app/run.sh", true, FsSetAttrs {
-    mode: Some(0o755),
-    ..Default::default()
-}).await?;
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_link()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn read_link(&self, path: &str) -> MicrosandboxResult<String>
 ```
+
+<Accordion title="Example">
+
+```rust
+let target = sb.fs().read_link("/app/current").await?;
+println!("-> {target}");
+```
+
+</Accordion>
 
 Read the target of a symbolic link, returning the literal target text. Local backend only; cloud returns `Unsupported`.
 
@@ -831,23 +678,19 @@ Read the target of a symbolic link, returning the literal target text. Local bac
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let target = sb.fs().read_link("/app/current").await?;
-println!("-> {target}");
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">symlink()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn symlink(&self, target: &str, link_path: &str) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+sb.fs().symlink("/app/releases/v2", "/app/current").await?;
+```
+
+</Accordion>
 
 Create a symbolic link at `link_path` that points to `target`. Local backend only; cloud returns `Unsupported`.
 
@@ -864,22 +707,20 @@ Create a symbolic link at `link_path` that points to `target`. Local backend onl
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-sb.fs().symlink("/app/releases/v2", "/app/current").await?;
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">real_path()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn real_path(&self, path: &str) -> MicrosandboxResult<String>
 ```
+
+<Accordion title="Example">
+
+```rust
+let canonical = sb.fs().real_path("/app/../app/config.json").await?;
+println!("{canonical}");
+```
+
+</Accordion>
 
 Resolve a path to its canonical absolute path inside the guest.
 
@@ -901,23 +742,21 @@ Resolve a path to its canonical absolute path inside the guest.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-let canonical = sb.fs().real_path("/app/../app/config.json").await?;
-println!("{canonical}");
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">exists()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn exists(&self, path: &str) -> MicrosandboxResult<bool>
 ```
+
+<Accordion title="Example">
+
+```rust
+if sb.fs().exists("/app/config.json").await? {
+    println!("config present");
+}
+```
+
+</Accordion>
 
 Check whether a file or directory exists at the given path in the guest. Implemented as a `stat()` probe: a successful stat yields `true`, a filesystem-op error yields `false`, and transport errors still propagate.
 
@@ -939,28 +778,21 @@ Check whether a file or directory exists at the given path in the guest. Impleme
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-if sb.fs().exists("/app/config.json").await? {
-    println!("config present");
-}
-```
-
-</Accordion>
-
----
-
 ## Host transfer
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">copy_from_host()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn copy_from_host(&self, host_path: impl AsRef<Path>, guest_path: &str) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+sb.fs().copy_from_host("./local/model.bin", "/app/model.bin").await?;
+```
+
+</Accordion>
 
 Copy a file from the host machine into the sandbox, streaming it in chunks. For transferring many files, consider a [bind-mounted volume](/sdk/rust/volumes) instead.
 
@@ -977,22 +809,19 @@ Copy a file from the host machine into the sandbox, streaming it in chunks. For 
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-sb.fs().copy_from_host("./local/model.bin", "/app/model.bin").await?;
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">copy_to_host()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">instance</span><span className="msb-tag is-async">async</span></div>
 
 ```rust
 async fn copy_to_host(&self, guest_path: &str, host_path: impl AsRef<Path>) -> MicrosandboxResult<()>
 ```
+
+<Accordion title="Example">
+
+```rust
+sb.fs().copy_to_host("/app/out/report.pdf", "./report.pdf").await?;
+```
+
+</Accordion>
 
 Copy a file from the sandbox to the host machine.
 
@@ -1009,21 +838,9 @@ Copy a file from the sandbox to the host machine.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```rust
-sb.fs().copy_to_host("/app/out/report.pdf", "./report.pdf").await?;
-```
-
-</Accordion>
-
----
-
 ## Types
 
 ### SandboxFsOps
-
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="/sdk/rust/sandbox#sb-fs">sb.fs()</a></p>
 
@@ -1032,8 +849,6 @@ Filesystem operations handle for a running sandbox, borrowing the parent sandbox
 `with_backend(backend, name)` is a public constructor for FFI shims that re-assemble a `SandboxFsOps` per call; most callers obtain one via [`sb.fs()`](/sdk/rust/sandbox#sb-fs).
 
 ### FsEntry
-
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#fs-list">list()</a></p>
 
@@ -1052,8 +867,6 @@ Metadata for a single entry returned from a directory listing.
 
 ### FsEntryKind
 
-<div className="msb-tags"><span className="msb-tag is-type">enum</span></div>
-
 <p className="msb-backref">Used by <a href="#fsentry">FsEntry.kind</a> · <a href="#fsmetadata">FsMetadata.kind</a></p>
 
 The kind of a filesystem entry. Derives `Copy`, `PartialEq`, and `Eq`.
@@ -1066,8 +879,6 @@ The kind of a filesystem entry. Derives `Copy`, `PartialEq`, and `Eq`.
 | `Other` | Other entry type (device, socket, etc.) |
 
 ### FsMetadata
-
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#fs-stat">stat()</a> · <a href="#fs-stat_with_follow">stat_with_follow()</a></p>
 
@@ -1087,8 +898,6 @@ Detailed metadata for a file or directory.
 
 ### FsOpenOptions
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
-
 <p className="msb-backref">Used by <a href="#fs-open_file">open_file()</a></p>
 
 Options accepted by [`open_file()`](#fs-open_file). Re-exported from `microsandbox_protocol::fs`. Derives `Default`, so set only the flags you need.
@@ -1105,8 +914,6 @@ Options accepted by [`open_file()`](#fs-open_file). Re-exported from `microsandb
 
 ### FsSetAttrs
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
-
 <p className="msb-backref">Used by <a href="#fs-set_stat">set_stat()</a> · <a href="#fs-set_stat_handle">set_stat_handle()</a> · <a href="#fs-fset_stat">fset_stat()</a></p>
 
 Attributes accepted by `set_stat()`. Re-exported from `microsandbox_protocol::fs`. Derives `Default`, so set only the fields you want to change and spread the rest with `..Default::default()`. Each field is `Option`: `None` leaves that attribute unchanged.
@@ -1122,8 +929,6 @@ Attributes accepted by `set_stat()`. Re-exported from `microsandbox_protocol::fs
 
 ### FsReadStream
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
-
 <p className="msb-backref">Returned by <a href="#fs-read_stream">read_stream()</a> · <a href="#fs-read_handle_stream">read_handle_stream()</a></p>
 
 Streaming reader for file data from the sandbox. Obtained via [`read_stream()`](#fs-read_stream) or [`read_handle_stream()`](#fs-read_handle_stream).
@@ -1135,8 +940,6 @@ Streaming reader for file data from the sandbox. Obtained via [`read_stream()`](
 
 ### FsWriteSink
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
-
 <p className="msb-backref">Returned by <a href="#fs-write_stream">write_stream()</a> · <a href="#fs-write_handle_stream">write_handle_stream()</a></p>
 
 Streaming writer for file data to the sandbox. Obtained via [`write_stream()`](#fs-write_stream) or [`write_handle_stream()`](#fs-write_handle_stream).
@@ -1147,8 +950,6 @@ Streaming writer for file data to the sandbox. Obtained via [`write_stream()`](#
 | close() | `close(self) -> MicrosandboxResult<()>` | Send EOF and wait for confirmation. Must be called to finalize the write; errors if the guest reports a write failure. |
 
 ### FsHandle
-
-<div className="msb-tags"><span className="msb-tag is-type">type</span></div>
 
 <p className="msb-backref">Returned by <a href="#fs-open_file">open_file()</a> · <a href="#fs-open_dir">open_dir()</a></p>
 

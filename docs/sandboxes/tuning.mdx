@@ -1,0 +1,232 @@
+---
+title: Tuning
+description: Change sandbox settings without recreating it
+icon: "sliders"
+---
+
+A sandbox's configuration is the host-side record that says how to run it: image, CPU and memory, environment, labels, mounts, network policy, secrets, and lifecycle settings.
+
+Some configuration is fixed when the VM boots. Some can change while the sandbox is running. Use `modify` when you want to change an existing sandbox without recreating it.
+
+## Create time
+
+Most settings are chosen when you create the sandbox. If the sandbox may need more CPU or memory later, set `max_cpus` and `max_memory` above the starting size so it has live resize headroom:
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .image("python")
+    .cpus(2)
+    .memory(1024)
+    .max_cpus(8)
+    .max_memory(4096)
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.builder("worker")
+    .image("python")
+    .cpus(2)
+    .memory(1024)
+    .maxCpus(8)
+    .maxMemory(4096)
+    .create();
+```
+
+```python Python
+sb = await Sandbox.create(
+    "worker",
+    image="python",
+    cpus=2,
+    memory=1024,
+    max_cpus=8,
+    max_memory=4096,
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python"),
+    m.WithCPUs(2),
+    m.WithMemory(1024),
+    m.WithMaxCPUs(8),
+    m.WithMaxMemory(4096),
+)
+```
+
+```bash CLI
+msb create python --name worker \
+  --cpus 2 --memory 1G \
+  --max-cpus 8 --max-memory 4G
+```
+</CodeGroup>
+
+`cpus` and `memory` are the sandbox's live size. `max_cpus` and `max_memory` are the ceilings it can grow to while running. They default to the starting size, so a sandbox created without them has no growth headroom.
+
+Reserving headroom is cheap: spare vCPUs stay parked, and spare memory is only backed once the guest uses it.
+
+## Change model
+
+Use `modify` to plan or apply a patch to an existing sandbox. Every requested change is classified, and apply is all-or-nothing: if one change cannot be applied under the chosen policy, nothing changes.
+
+<CodeGroup>
+```rust Rust
+let plan = sb.modify()
+    .cpus(4)
+    .label("tier", "web")
+    .apply()
+    .await?;
+```
+
+```typescript TypeScript
+const plan = await sandbox.modify({
+    cpus: 4,
+    labels: { tier: "web" },
+});
+```
+
+```python Python
+plan = await sb.modify(
+    cpus=4,
+    labels={"tier": "web"},
+)
+```
+
+```go Go
+plan, err := sb.Modify(ctx, m.ModifyOptions{
+    CPUs:   4,
+    Labels: map[string]string{"tier": "web"},
+})
+```
+
+```bash CLI
+msb modify worker --cpus 4 --label tier=web
+```
+</CodeGroup>
+
+The plan labels each change as `live`, `next start`, `requires restart`, or `unsupported`.
+
+| Change | Effect | Notes |
+|--------|--------|-------|
+| `cpus`, `memory` | Live within the `max_*` ceilings | The guest may take a moment to converge |
+| `max_cpus`, `max_memory` | Restart or next start | These are boot-time ceilings |
+| `labels` | Live | Host-side metadata; no guest process changes |
+| `env`, `workdir` | Future execs | Running processes keep what they already have |
+| `secrets` | Live for rotation | Placeholder changes need a restart |
+| Storage | Create or mount time | Size rootfs, volumes, tmpfs, and disk images outside `modify` |
+
+## Dry runs
+
+Use a dry run to see what would happen before applying the patch:
+
+<CodeGroup>
+```rust Rust
+let plan = sb.modify()
+    .max_memory_mib(16 * 1024)
+    .dry_run()
+    .await?;
+```
+
+```typescript TypeScript
+const plan = await sandbox.modify({ maxMemory: 16384, dryRun: true });
+```
+
+```python Python
+plan = await sb.modify(max_memory=16384, dry_run=True)
+```
+
+```go Go
+plan, err := sb.Modify(ctx, m.ModifyOptions{
+    MaxMemoryMiB: 16 * 1024,
+    DryRun:       true,
+})
+```
+
+```bash CLI
+msb modify worker --max-memory 16G --dry-run
+```
+</CodeGroup>
+
+## Policies
+
+By default, `modify` only applies changes that do not require a restart. Use `--next-start` to save restart-backed changes for the next boot, or `--restart` to restart the sandbox and make them active now.
+
+```bash
+msb modify worker --max-memory 16G --next-start
+msb modify worker --env MODE=prod --restart
+```
+
+## CPU and memory
+
+Raise or lower CPUs and memory on the fly, up to the ceilings reserved at create time:
+
+<CodeGroup>
+```rust Rust
+sb.modify().cpus(4).memory(2048).apply().await?;
+```
+
+```typescript TypeScript
+await sandbox.modify({ cpus: 4, memory: 2048 });
+```
+
+```python Python
+await sb.modify(cpus=4, memory=2048)
+```
+
+```go Go
+sb.Modify(ctx, m.ModifyOptions{CPUs: 4, MemoryMiB: 2048})
+```
+
+```bash CLI
+msb modify worker --cpus 4 --memory 2G
+```
+</CodeGroup>
+
+Growing beyond `max_cpus` or `max_memory` takes a restart. A live resize does not always take hold at once, since the guest applies it in the background. The result reports per-resource progress so you can tell when it has settled.
+
+Use [`msb ps`](/cli/sandbox-commands#msb-ps) to see a sandbox's allocation as `effective / max`, and [`msb metrics`](/cli/sandbox-commands#msb-metrics) to see live usage before deciding how to resize.
+
+## Labels
+
+Labels can be added, changed, or removed through the same configuration path:
+
+```bash
+msb modify worker --label tier=web --label-rm stale
+```
+
+They apply immediately because they are host-side metadata. They do not change running guest processes. For label names, bulk selection, metric attribution, and cardinality guidance, see [Labels](/sandboxes/labels).
+
+## Env and workdir
+
+Environment and workdir changes affect future commands only. Existing guest processes keep the environment and working directory they already have.
+
+```bash
+msb modify worker --env MODE=prod --workdir /app
+```
+
+## Secrets
+
+Secrets can be added, rotated, or removed without recreating the sandbox. Guest code keeps using the same placeholder; only the value injected at the network boundary changes.
+
+```bash
+msb modify worker --secret GITHUB_TOKEN@api.github.com
+msb modify worker --secret-rm OLD_TOKEN
+```
+
+Secret changes through modify are Rust-SDK and CLI only for now. For the credential model and host allow lists, see [Secrets](/sandboxes/secrets).
+
+## Storage
+
+Storage capacity is not part of `modify` today. Choose it where the storage is defined:
+
+- OCI writable layer size on the image source
+- named volume size or quota on the volume
+- tmpfs size on the mount
+- disk image size in the disk image itself
+
+For details, see [Volumes](/sandboxes/volumes), [OCI images](/images/overview), and [Disk images](/images/disk-images).
+
+## Reference
+
+For exact flags and return fields, see [`msb modify`](/cli/sandbox-commands#msb-modify) and the SDK sandbox references.

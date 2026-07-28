@@ -134,7 +134,8 @@ impl LocalBackend {
         self.db
             .get_or_try_init(|| async {
                 let db_dir = self.config.home().join(microsandbox_utils::DB_SUBDIR);
-                connect_and_migrate(&db_dir, &self.config.database).await
+                connect_and_migrate(&db_dir, &self.config.database, &self.config.snapshots_dir())
+                    .await
             })
             .await
     }
@@ -500,9 +501,11 @@ impl Drop for MigrationLock {
 async fn connect_and_migrate(
     db_dir: &Path,
     database: &DatabaseConfig,
+    snapshots_dir: &Path,
 ) -> MicrosandboxResult<DbPools> {
     tokio::fs::create_dir_all(db_dir).await?;
     let _migration_lock = acquire_migration_lock(db_dir).await?;
+    refuse_incomplete_self_downgrade(db_dir)?;
 
     let db_path = db_dir.join(microsandbox_utils::DB_FILENAME);
     let pools = DbPools::open(
@@ -520,7 +523,71 @@ async fn connect_and_migrate(
     refuse_schema_ahead(pools.write().inner()).await?;
     Migrator::up(pools.write().inner(), None).await?;
 
+    // Descriptor translation mutates the same installation state as schema
+    // migration. Keep both gates held until every discovered artifact is
+    // either canonical or durably journaled as blocked.
+    let install_lease =
+        microsandbox_runtime::maintenance::acquire_install_exclusive_lease(pools.write())
+            .await
+            .map_err(|err| MicrosandboxError::Runtime(err.to_string()))?;
+    let reconcile_result =
+        crate::snapshot::migration::reconcile_managed(&pools, snapshots_dir).await;
+    let clear_result = microsandbox_runtime::maintenance::clear_install_exclusive_lease(
+        pools.write(),
+        &install_lease,
+    )
+    .await
+    .map_err(|err| MicrosandboxError::Runtime(err.to_string()));
+    reconcile_result?;
+    clear_result?;
+
     Ok(pools)
+}
+
+/// Refuse normal startup while a durable self-downgrade operation owns local
+/// state. This check intentionally runs before opening the database or running
+/// schema-ahead/upgrade logic, including after the database has been rolled
+/// back to the target schema.
+fn refuse_incomplete_self_downgrade(db_dir: &Path) -> MicrosandboxResult<()> {
+    let operations_dir = db_dir.join("self-downgrade");
+    let entries = match std::fs::read_dir(&operations_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir()
+            || entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with('.'))
+        {
+            continue;
+        }
+        let journal_path = entry.path().join("journal.json");
+        if !journal_path.exists() {
+            return Err(MicrosandboxError::Runtime(format!(
+                "self_downgrade_recovery_required: operation directory has no journal: {}",
+                entry.path().display()
+            )));
+        }
+        let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&journal_path)?)
+            .map_err(|error| {
+                MicrosandboxError::Runtime(format!(
+                    "self_downgrade_recovery_required: invalid journal {}: {error}",
+                    journal_path.display()
+                ))
+            })?;
+        if value.get("phase").and_then(serde_json::Value::as_str) != Some("complete") {
+            return Err(MicrosandboxError::Runtime(format!(
+                "self_downgrade_recovery_required: resume the active downgrade recorded at {}",
+                journal_path.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 async fn acquire_migration_lock(db_dir: &Path) -> MicrosandboxResult<MigrationLock> {
@@ -574,7 +641,9 @@ fn is_missing_migrations_table(err: &DbErr) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use microsandbox_image::snapshot::Manifest;
     use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement};
+    use sha2::{Digest as _, Sha256};
 
     use super::*;
     use crate::backend::with_backend;
@@ -586,7 +655,9 @@ mod tests {
         let db_dir = tmp.path().join("db");
         let database = DatabaseConfig::default();
 
-        let pools = connect_and_migrate(&db_dir, &database).await.unwrap();
+        let pools = connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
+            .await
+            .unwrap();
         let conn = pools.read();
 
         // DB file should exist on disk.
@@ -617,6 +688,7 @@ mod tests {
             "sandbox",
             "sandbox_labels",
             "sandbox_rootfs",
+            "snapshot_artifact_migration",
             "snapshot_index",
             "volume",
             "volume_attach",
@@ -631,10 +703,64 @@ mod tests {
         let db_dir = tmp.path().join("db");
         let database = DatabaseConfig::default();
 
-        let pools = connect_and_migrate(&db_dir, &database).await.unwrap();
+        let pools = connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
+            .await
+            .unwrap();
 
         // Running migrations again on the same DB should succeed.
         Migrator::up(pools.write().inner(), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_connect_and_migrate_translates_v066_parent_graph() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_dir = tmp.path().join("db");
+        let snapshots_dir = tmp.path().join("snapshots");
+        let root_dir = snapshots_dir.join("root");
+        let child_dir = snapshots_dir.join("child");
+        std::fs::create_dir_all(&root_dir).unwrap();
+        std::fs::create_dir_all(&child_dir).unwrap();
+        std::fs::write(root_dir.join("upper.ext4"), b"root!").unwrap();
+        std::fs::write(child_dir.join("upper.ext4"), b"child").unwrap();
+
+        let root = br#"{"schema":1,"format":"raw","fstype":"ext4","image":{"ref":"docker.io/library/alpine:3.20","manifest_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"parent":null,"created_at":"2026-07-01T10:00:00Z","labels":{},"upper":{"file":"upper.ext4","size_bytes":5,"integrity":null},"source_sandbox":"root"}"#;
+        let root_source_digest = format!("sha256:{}", hex::encode(Sha256::digest(root)));
+        let child = format!(
+            "{{\"schema\":1,\"format\":\"raw\",\"fstype\":\"ext4\",\"image\":{{\"ref\":\"docker.io/library/alpine:3.20\",\"manifest_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}},\"parent\":\"{root_source_digest}\",\"created_at\":\"2026-07-01T10:01:00Z\",\"labels\":{{}},\"upper\":{{\"file\":\"upper.ext4\",\"size_bytes\":5,\"integrity\":null}},\"source_sandbox\":\"child\"}}"
+        );
+        std::fs::write(root_dir.join("manifest.json"), root).unwrap();
+        std::fs::write(child_dir.join("manifest.json"), child).unwrap();
+
+        let pools = connect_and_migrate(&db_dir, &DatabaseConfig::default(), &snapshots_dir)
+            .await
+            .unwrap();
+
+        let root_manifest =
+            Manifest::from_bytes(&std::fs::read(root_dir.join("snapshot.json")).unwrap()).unwrap();
+        let child_manifest =
+            Manifest::from_bytes(&std::fs::read(child_dir.join("snapshot.json")).unwrap()).unwrap();
+        let root_target_digest = root_manifest.digest().unwrap();
+        assert_eq!(
+            child_manifest.parent.as_deref(),
+            Some(root_target_digest.as_str())
+        );
+        assert!(!root_dir.join("manifest.json").exists());
+        assert!(!child_dir.join("manifest.json").exists());
+        assert!(root_dir.join(".manifest.json.legacy").exists());
+        assert!(child_dir.join(".manifest.json.legacy").exists());
+
+        let count = pools
+            .read()
+            .query_one(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT COUNT(*) FROM snapshot_index",
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get_by_index::<i64>(0)
+            .unwrap();
+        assert_eq!(count, 2);
     }
 
     #[tokio::test]
@@ -643,7 +769,9 @@ mod tests {
         let db_dir = tmp.path().join("db");
         let database = DatabaseConfig::default();
 
-        let pools = connect_and_migrate(&db_dir, &database).await.unwrap();
+        let pools = connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
+            .await
+            .unwrap();
         let future = chrono::Utc::now().naive_utc() + chrono::Duration::minutes(10);
         pools
             .write()
@@ -661,7 +789,9 @@ mod tests {
             .unwrap();
         drop(pools);
 
-        let err = connect_and_migrate(&db_dir, &database).await.unwrap_err();
+        let err = connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("install operation in progress"));
     }
 
@@ -671,7 +801,9 @@ mod tests {
         let db_dir = tmp.path().join("db");
         let database = DatabaseConfig::default();
 
-        let pools = connect_and_migrate(&db_dir, &database).await.unwrap();
+        let pools = connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
+            .await
+            .unwrap();
         pools
             .write()
             .inner()
@@ -684,8 +816,32 @@ mod tests {
             .unwrap();
         drop(pools);
 
-        let err = connect_and_migrate(&db_dir, &database).await.unwrap_err();
+        let err = connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("database schema is newer"));
+    }
+
+    #[test]
+    fn test_startup_refuses_incomplete_self_downgrade_before_database_open() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_dir = temp.path().join("db");
+        let operation = db_dir.join("self-downgrade/op-1");
+        std::fs::create_dir_all(&operation).unwrap();
+        std::fs::write(
+            operation.join("journal.json"),
+            br#"{"phase":"database_reverted"}"#,
+        )
+        .unwrap();
+
+        let error = refuse_incomplete_self_downgrade(&db_dir).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("self_downgrade_recovery_required")
+        );
+        assert!(!db_dir.join(microsandbox_utils::DB_FILENAME).exists());
     }
 
     #[tokio::test]
@@ -750,7 +906,9 @@ mod tests {
         drop(conn);
 
         let database = DatabaseConfig::default();
-        let recovered = connect_and_migrate(&db_dir, &database).await.unwrap();
+        let recovered = connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
+            .await
+            .unwrap();
 
         let migration_row_count = recovered
             .read()

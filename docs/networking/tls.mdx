@@ -4,14 +4,14 @@ description: HTTPS inspection with an auto-generated CA
 icon: "lock"
 ---
 
-Enable HTTPS traffic inspection so policy rules, logging, and other controls can see plaintext request data. microsandbox terminates TLS on the host side and re-encrypts to the upstream server, which is how features like per-host secret injection and URL-level policy checks are able to see inside what would otherwise be an opaque stream.
+Enable HTTPS traffic inspection so policy rules, logging, and other controls can see plaintext request data. microsandbox terminates TLS on the host side and re-encrypts to the upstream server. That's how features like per-host secret injection and URL-level policy checks can see inside what would otherwise be an opaque stream.
 
 ## How it works
 
 When you enable TLS interception:
 
 1. microsandbox loads the interception CA. By default this is a host-global development CA persisted under `~/.microsandbox/tls/ca.{crt,key}` so repeated sandboxes can reuse the same trusted root. You can provide custom CA paths with `intercept_ca_cert()` and `intercept_ca_key()` when a sandbox or environment needs its own CA.
-2. The guest's trust store is updated to trust this CA.
+2. microsandbox updates the guest's trust store to trust this CA.
 3. When the guest opens an HTTPS connection, the host-side proxy intercepts the handshake, generates a leaf certificate for the target domain on the fly, and signs it with the configured interception CA.
 4. The proxy opens its own TLS connection to the upstream server and bridges the two.
 
@@ -86,7 +86,7 @@ Bypass patterns accept exact matches (`api.example.com`) and wildcards (`*.gov`,
 
 ## Upstream CA trust
 
-By default, the TLS proxy verifies upstream server certificates using the host's native root store. Add global upstream CAs when every intercepted host should trust the same private root, add scoped upstream CAs when only specific host patterns should trust a private root, or disable upstream verification for ephemeral hosts where you cannot get a PEM. Disabling upstream verification is the proxy-side equivalent of `curl -k`: interception still happens, but microsandbox does not authenticate the proxy-to-upstream TLS certificate for matching hosts.
+By default, the TLS proxy verifies upstream server certificates using the host's native root store. Add global upstream CAs when every intercepted host should trust the same private root. Add scoped upstream CAs when only specific host patterns should trust a private root. Disable upstream verification for ephemeral hosts where you cannot get a PEM. Disabling upstream verification is the proxy-side equivalent of `curl -k`: interception still happens, but microsandbox does not authenticate the proxy-to-upstream TLS certificate for matching hosts.
 
 <CodeGroup>
 ```rust Rust
@@ -120,9 +120,9 @@ msb create python --name agent \
 
 ## Trusting host CAs
 
-Corporate TLS-inspecting proxies (Cloudflare Warp Zero Trust, Zscaler, Netskope, Palo Alto, ...) terminate outbound HTTPS at the host and re-sign it with a gateway CA. That CA is installed in your macOS Keychain or Linux trust store as part of the corporate rollout, so HTTPS works silently on the host. Inside a sandbox it doesn't: the guest's stock Mozilla bundle has never seen the gateway CA, so `apk update`, `pip install`, `curl`, and any SDK fetch fail with `server certificate not trusted`.
+Corporate TLS-inspecting proxies (Cloudflare Warp Zero Trust, Zscaler, Netskope, Palo Alto, ...) terminate outbound HTTPS at the host and re-sign it with a gateway CA. The corporate rollout installs that CA in your macOS Keychain or Linux trust store, so HTTPS works silently on the host. Inside a sandbox it doesn't: the guest's stock Mozilla bundle has never seen the gateway CA, so `apk update`, `pip install`, `curl`, and any SDK fetch fail with `server certificate not trusted`.
 
-By default the sandbox does not extend host trust into the guest, so the guest validates TLS strictly against its stock Mozilla bundle. Opt in when you need the guest to trust whatever the host trusts: at sandbox boot the host's trusted root CAs are copied into the guest and appended to the system CA bundle.
+By default the sandbox does not extend host trust into the guest, so the guest validates TLS strictly against its stock Mozilla bundle. Opt in when you need the guest to trust whatever the host trusts. At sandbox boot, microsandbox copies the host's trusted root CAs into the guest and appends them to the system CA bundle.
 
 <Note>
 **Security:** this extends the guest's trust to whatever the host trusts. That's the point for MITM-proxy environments, but it also means an attacker who can plant a CA on the host now has that trust inside every sandbox.

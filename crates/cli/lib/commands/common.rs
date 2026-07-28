@@ -257,6 +257,23 @@ pub struct SandboxOpts {
     )]
     pub no_net: bool,
 
+    /// High-level network profile. Repeatable and comma-separated. Profiles
+    /// (`public`, `private`, `host`) compose and automatically enable gateway
+    /// DNS. `all` and `none` are terminal policies and cannot be combined with
+    /// profiles. Explicit `--net-rule` entries take precedence.
+    #[cfg(feature = "net")]
+    #[arg(
+        long = "net",
+        value_name = "PROFILE",
+        conflicts_with_all = [
+            "no_net",
+            "net_default",
+            "net_default_egress",
+            "net_default_ingress"
+        ]
+    )]
+    pub net: Vec<String>,
+
     /// Allow DNS responses pointing to private/internal IP addresses.
     #[cfg(feature = "net")]
     #[arg(long)]
@@ -290,7 +307,8 @@ pub struct SandboxOpts {
     ///
     /// Target kinds: IPs/CIDRs, domains (`example.com`), domain suffixes
     /// (`*.example.com` shorthand or `suffix=example.com`), and groups
-    /// (`public`, `private`, `multicast`, ...). Suffixes must be at
+    /// (`public`, `private`, `multicast`, ...), plus the semantic `dns`
+    /// target for gateway UDP/TCP port 53. Suffixes must be at
     /// least two labels (e.g. `*.example.com`, not `*.com`).
     ///
     /// Examples: --net-rule "allow@public"
@@ -391,10 +409,11 @@ pub struct SandboxOpts {
     pub tls_no_verify_upstream_for: Vec<String>,
 
     // --- Secrets ---
-    /// Inject a secret that is only sent to an allowed host (ENV@HOST). The
-    /// value is read from the host environment variable ENV at start time and
-    /// stored only as a source reference, never inlined in the sandbox config.
-    /// Inline `ENV=VALUE@HOST` is rejected; export the value and use `ENV@HOST`.
+    /// Inject a secret that is only sent to allowed hosts (ENV@HOST[,HOST...]).
+    /// The value is read from the host environment variable ENV at start time
+    /// and stored only as a source reference, never inlined in the sandbox
+    /// config. Inline `ENV=VALUE@HOST` is rejected; export the value and use
+    /// `ENV@HOST[,HOST...]`.
     #[cfg(feature = "net")]
     #[arg(long)]
     pub secret: Vec<String>,
@@ -499,6 +518,7 @@ impl SandboxOpts {
         #[cfg(feature = "net")]
         let net = !self.port.is_empty()
             || self.no_net
+            || !self.net.is_empty()
             || self.no_dns_rebind_protection
             || !self.dns_nameserver.is_empty()
             || self.dns_query_timeout_ms.is_some()
@@ -1483,12 +1503,28 @@ fn apply_network_opts(
     // Secrets. `create` persists a host-side source reference, not the raw
     // value: the plaintext is read from the host environment at spawn time so
     // the durable config never stores secret material at rest.
+    let mut secret_specs: Vec<(String, Vec<String>)> = Vec::new();
     for secret_str in &opts.secret {
-        let (env_var, host) = parse_secret(secret_str, "create")?;
+        let (env_var, hosts) = parse_secret(secret_str, "create")?;
+        match secret_specs
+            .iter_mut()
+            .find(|(existing, _)| *existing == env_var)
+        {
+            Some((_, existing_hosts)) => existing_hosts.extend(hosts),
+            None => secret_specs.push((env_var, hosts)),
+        }
+    }
+    for (env_var, hosts) in secret_specs {
         let source = microsandbox::sandbox::SecretSource::Env {
             var: env_var.clone(),
         };
-        builder = builder.secret(|s| s.env(&env_var).source(source).allow_host(host));
+        builder = builder.secret(|mut s| {
+            s = s.env(&env_var).source(source);
+            for host in hosts {
+                s = allow_secret_host(s, &host);
+            }
+            s
+        });
     }
 
     // DNS, TLS, and other network configuration.
@@ -1496,6 +1532,7 @@ fn apply_network_opts(
         || !opts.dns_nameserver.is_empty()
         || opts.dns_query_timeout_ms.is_some()
         || !opts.net_rule.is_empty()
+        || !opts.net.is_empty()
         || opts.no_net
         || opts.net_default.is_some()
         || opts.net_default_egress.is_some()
@@ -1524,6 +1561,7 @@ fn apply_network_opts(
             .collect::<anyhow::Result<Vec<_>>>()?;
         let dns_query_timeout_ms = opts.dns_query_timeout_ms;
         let network_policy = build_network_policy(
+            &opts.net,
             &opts.net_rule,
             opts.no_net,
             opts.net_default.as_deref(),
@@ -1690,26 +1728,28 @@ pub fn parse_duration(s: &str) -> anyhow::Result<std::time::Duration> {
     }
 }
 
-/// Assemble a [`NetworkPolicy`] from `--net-rule`, `--net-default*`,
-/// and `--no-net`. Returns `None` when no flag is set. Multiple
-/// `--net-rule` invocations concatenate in argv order.
+/// Assemble a [`NetworkPolicy`] from `--net`, `--net-rule`,
+/// `--net-default*`, and `--no-net`. Returns `None` when no flag is set.
+/// Multiple profile and rule invocations concatenate in argv order.
 ///
 /// `--no-net` desugars to `--net-default deny`; clap rejects combining
 /// it with the explicit defaults, so the four default-source params are
 /// mutually exclusive on the caller side.
 #[cfg(feature = "net")]
 fn build_network_policy(
+    profile_args: &[String],
     rule_args: &[String],
     no_net: bool,
     default_both: Option<&str>,
     default_egress: Option<&str>,
     default_ingress: Option<&str>,
 ) -> anyhow::Result<Option<microsandbox_network::policy::NetworkPolicy>> {
-    use microsandbox_network::policy::{Action, NetworkPolicy};
+    use microsandbox_network::policy::{Action, NetworkPolicy, NetworkProfile};
 
     use crate::net_rule::parse_rule_list;
 
-    let no_flags = rule_args.is_empty()
+    let no_flags = profile_args.is_empty()
+        && rule_args.is_empty()
         && !no_net
         && default_both.is_none()
         && default_egress.is_none()
@@ -1722,6 +1762,58 @@ fn build_network_policy(
     for arg in rule_args {
         let parsed = parse_rule_list(arg).map_err(anyhow::Error::from)?;
         rules.extend(parsed);
+    }
+
+    if !profile_args.is_empty() {
+        let mut profiles = Vec::new();
+        let mut terminal = None;
+        for raw in profile_args
+            .iter()
+            .flat_map(|arg| arg.split(','))
+            .map(str::trim)
+        {
+            if raw.is_empty() {
+                anyhow::bail!("empty --net profile; expected public, private, host, all, or none");
+            }
+            match raw {
+                "public" => profiles.push(NetworkProfile::Public),
+                "private" => profiles.push(NetworkProfile::Private),
+                "host" => profiles.push(NetworkProfile::Host),
+                "all" | "none" => {
+                    if let Some(previous) = terminal {
+                        if previous == raw {
+                            anyhow::bail!("--net `{raw}` may only be specified once");
+                        }
+                        anyhow::bail!(
+                            "--net terminal profiles `all` and `none` cannot be combined"
+                        );
+                    }
+                    terminal = Some(raw);
+                }
+                other => anyhow::bail!(
+                    "unknown --net profile {other:?}; expected public, private, host, all, or none"
+                ),
+            }
+        }
+        if let Some(terminal) = terminal {
+            if !profiles.is_empty() {
+                anyhow::bail!(
+                    "--net `{terminal}` cannot be combined with public, private, or host"
+                );
+            }
+            let mut policy = match terminal {
+                "all" => NetworkPolicy::allow_all(),
+                "none" => NetworkPolicy::none(),
+                _ => unreachable!("validated terminal profile"),
+            };
+            policy.rules = rules;
+            return Ok(Some(policy));
+        }
+
+        let mut policy = NetworkPolicy::from_profiles(profiles);
+        rules.append(&mut policy.rules);
+        policy.rules = rules;
+        return Ok(Some(policy));
     }
 
     let parse_action = |label: &str, raw: &str| -> anyhow::Result<Action> {
@@ -1745,18 +1837,18 @@ fn build_network_policy(
     };
 
     // When the user sets no defaults explicitly, fall through to
-    // NetworkPolicy::public_only's defaults so behaviour stays in sync
-    // with the preset.
-    let preset = NetworkPolicy::public_only();
+    // the default public-profile policy's direction defaults so low-level
+    // rule-only behavior remains deny-egress / allow-ingress.
+    let baseline = NetworkPolicy::default();
     let default_egress = match (symmetric, default_egress) {
         (_, Some(raw)) => parse_action("--net-default-egress", raw)?,
         (Some(action), None) => action,
-        (None, None) => preset.default_egress,
+        (None, None) => baseline.default_egress,
     };
     let default_ingress = match (symmetric, default_ingress) {
         (_, Some(raw)) => parse_action("--net-default-ingress", raw)?,
         (Some(action), None) => action,
-        (None, None) => preset.default_ingress,
+        (None, None) => baseline.default_ingress,
     };
 
     Ok(Some(NetworkPolicy {
@@ -1826,8 +1918,8 @@ fn parse_port_mapping(spec: &str) -> anyhow::Result<(std::net::IpAddr, u16, u16,
     Ok((bind, host, guest, udp))
 }
 
-/// Parse a `--secret ENV@HOST` spec into `(env_var, host)` for `command`
-/// (`create` or `modify`).
+/// Parse a `--secret ENV@HOST[,HOST...]` spec into `(env_var, hosts)` for
+/// `command` (`create` or `modify`).
 ///
 /// The value is NOT read here: the CLI records a host-side source reference
 /// (`{kind: env, var: ENV}`) that is resolved from the host environment when
@@ -1836,8 +1928,8 @@ fn parse_port_mapping(spec: &str) -> anyhow::Result<(std::net::IpAddr, u16, u16,
 ///
 /// The inline `ENV=VALUE@HOST` form is rejected loudly: the shell would leak
 /// the value regardless, so the value path is SDK-only. Users are pointed at
-/// the `ENV@HOST` env-var form instead.
-pub(crate) fn parse_secret(spec: &str, command: &str) -> anyhow::Result<(String, String)> {
+/// the `ENV@HOST[,HOST...]` env-var form instead.
+pub(crate) fn parse_secret(spec: &str, command: &str) -> anyhow::Result<(String, Vec<String>)> {
     if let Some(eq_pos) = spec.find('=') {
         let env_var = &spec[..eq_pos];
         anyhow::bail!(
@@ -1850,15 +1942,36 @@ pub(crate) fn parse_secret(spec: &str, command: &str) -> anyhow::Result<(String,
 
     let at_pos = spec
         .rfind('@')
-        .ok_or_else(|| anyhow::anyhow!("secret must be in format ENV@HOST"))?;
+        .ok_or_else(|| anyhow::anyhow!("secret must be in format ENV@HOST[,HOST...]"))?;
     let env_var = spec[..at_pos].to_string();
-    let host = spec[at_pos + 1..].to_string();
+    let hosts: Vec<String> = spec[at_pos + 1..]
+        .split(',')
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+        .map(ToString::to_string)
+        .collect();
 
-    if env_var.is_empty() || host.is_empty() {
-        anyhow::bail!("secret must be in format ENV@HOST (all parts required)");
+    if env_var.is_empty() || hosts.is_empty() {
+        anyhow::bail!("secret must be in format ENV@HOST[,HOST...] (all parts required)");
     }
 
-    Ok((env_var, host))
+    Ok((env_var, hosts))
+}
+
+#[cfg(feature = "net")]
+fn allow_secret_host(
+    builder: microsandbox::sandbox::SecretBuilder,
+    host: &str,
+) -> microsandbox::sandbox::SecretBuilder {
+    match microsandbox_network::secrets::config::HostPattern::parse(host) {
+        microsandbox_network::secrets::config::HostPattern::Exact(host) => builder.allow_host(host),
+        microsandbox_network::secrets::config::HostPattern::Wildcard(host) => {
+            builder.allow_host_pattern(host)
+        }
+        microsandbox_network::secrets::config::HostPattern::Any => {
+            builder.allow_any_host_dangerous(true)
+        }
+    }
 }
 
 /// Parse a scoped upstream CA spec: `PATTERN=PATH`.
@@ -2312,11 +2425,23 @@ mod tests {
     fn parse_secret_returns_env_and_host_reference() {
         // The value is NOT read here: `create` persists a source reference and
         // the spawn resolver reads the host env at start time.
-        let (env_var, host) =
+        let (env_var, hosts) =
             parse_secret("MSB_PARSE_SECRET_TOKEN@api.example.com", "create").unwrap();
 
         assert_eq!(env_var, "MSB_PARSE_SECRET_TOKEN");
-        assert_eq!(host, "api.example.com");
+        assert_eq!(hosts, vec!["api.example.com"]);
+    }
+
+    #[test]
+    fn parse_secret_accepts_multiple_hosts() {
+        let (env_var, hosts) = parse_secret(
+            "MSB_PARSE_SECRET_TOKEN@api.example.com, *.example.org, *",
+            "create",
+        )
+        .unwrap();
+
+        assert_eq!(env_var, "MSB_PARSE_SECRET_TOKEN");
+        assert_eq!(hosts, vec!["api.example.com", "*.example.org", "*"]);
     }
 
     #[test]
@@ -2343,6 +2468,43 @@ mod tests {
         assert!(parse_secret("API_KEY", "create").is_err());
         assert!(parse_secret("@api.example.com", "create").is_err());
         assert!(parse_secret("API_KEY@", "create").is_err());
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn apply_sandbox_opts_groups_secret_hosts_and_parses_patterns() {
+        use microsandbox_network::secrets::config::HostPattern;
+
+        let opts = SandboxOpts {
+            secret: vec![
+                "API_KEY@api.example.com,*.example.org".into(),
+                "API_KEY@*".into(),
+            ],
+            ..Default::default()
+        };
+
+        let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let secrets = config
+            .spec
+            .network
+            .secrets
+            .expect("network secrets")
+            .secrets;
+
+        assert_eq!(secrets.len(), 1);
+        assert_eq!(secrets[0].env_var, "API_KEY");
+        assert_eq!(
+            secrets[0].allowed_hosts,
+            vec![
+                HostPattern::Exact("api.example.com".into()),
+                HostPattern::Wildcard("*.example.org".into()),
+                HostPattern::Any,
+            ]
+        );
     }
 
     #[cfg(feature = "net")]
@@ -3466,14 +3628,14 @@ mod tests {
     #[cfg(feature = "net")]
     #[test]
     fn build_policy_no_flags_returns_none() {
-        let p = build_network_policy(&[], false, None, None, None).unwrap();
+        let p = build_network_policy(&[], &[], false, None, None, None).unwrap();
         assert!(p.is_none());
     }
 
     #[cfg(feature = "net")]
     #[test]
     fn build_policy_net_default_deny_sets_both_directions() {
-        let p = build_network_policy(&[], false, Some("deny"), None, None)
+        let p = build_network_policy(&[], &[], false, Some("deny"), None, None)
             .unwrap()
             .expect("policy");
         assert_eq!(p.default_egress, Action::Deny);
@@ -3484,7 +3646,7 @@ mod tests {
     #[cfg(feature = "net")]
     #[test]
     fn build_policy_net_default_allow_sets_both_directions() {
-        let p = build_network_policy(&[], false, Some("allow"), None, None)
+        let p = build_network_policy(&[], &[], false, Some("allow"), None, None)
             .unwrap()
             .expect("policy");
         assert_eq!(p.default_egress, Action::Allow);
@@ -3494,7 +3656,7 @@ mod tests {
     #[cfg(feature = "net")]
     #[test]
     fn build_policy_no_net_desugars_to_deny_both() {
-        let p = build_network_policy(&[], true, None, None, None)
+        let p = build_network_policy(&[], &[], true, None, None, None)
             .unwrap()
             .expect("policy");
         assert_eq!(p.default_egress, Action::Deny);
@@ -3505,7 +3667,7 @@ mod tests {
     #[test]
     fn build_policy_no_net_with_allow_rule_yields_allowlist() {
         let rules = vec!["allow@example.com".to_string()];
-        let p = build_network_policy(&rules, true, None, None, None)
+        let p = build_network_policy(&[], &rules, true, None, None, None)
             .unwrap()
             .expect("policy");
         assert_eq!(p.default_egress, Action::Deny);
@@ -3517,7 +3679,7 @@ mod tests {
     #[cfg(feature = "net")]
     #[test]
     fn build_policy_net_default_rejects_unknown_action() {
-        let err = build_network_policy(&[], false, Some("maybe"), None, None).unwrap_err();
+        let err = build_network_policy(&[], &[], false, Some("maybe"), None, None).unwrap_err();
         assert!(
             err.to_string().contains("--net-default"),
             "expected --net-default in error, got: {err}"
@@ -3526,17 +3688,86 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[test]
-    fn build_policy_rule_only_uses_preset_defaults() {
+    fn build_policy_rule_only_uses_default_direction_actions() {
         // Without any --net-default* flag, rules apply on top of the
-        // public_only preset (deny egress, allow ingress). Verifies the
-        // "rules alone keep the preset's defaults" path now that the
+        // public profile (deny egress, allow ingress). Verifies the
+        // "rules alone keep the default direction actions" path now that the
         // --deny-domain* flip-to-allow exception is gone.
         let rules = vec!["allow@example.com".to_string()];
-        let p = build_network_policy(&rules, false, None, None, None)
+        let p = build_network_policy(&[], &rules, false, None, None, None)
             .unwrap()
             .expect("policy");
-        let preset = microsandbox_network::policy::NetworkPolicy::public_only();
-        assert_eq!(p.default_egress, preset.default_egress);
-        assert_eq!(p.default_ingress, preset.default_ingress);
+        let baseline = microsandbox_network::policy::NetworkPolicy::default();
+        assert_eq!(p.default_egress, baseline.default_egress);
+        assert_eq!(p.default_ingress, baseline.default_ingress);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn build_policy_composes_profiles_canonically_and_deduplicates_dns() {
+        use microsandbox_network::policy::{Destination, DestinationGroup, Protocol};
+
+        let profiles = vec!["host,private".to_string(), "public,private".to_string()];
+        let p = build_network_policy(&profiles, &[], false, None, None, None)
+            .unwrap()
+            .expect("policy");
+        assert_eq!(p.rules.len(), 4);
+        assert_eq!(p.rules[0].protocols, [Protocol::Udp, Protocol::Tcp]);
+        for (rule, expected) in p.rules[1..].iter().zip([
+            DestinationGroup::Public,
+            DestinationGroup::Private,
+            DestinationGroup::Host,
+        ]) {
+            assert!(matches!(rule.destination, Destination::Group(group) if group == expected));
+        }
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn build_policy_places_explicit_rules_before_profile_rules() {
+        let profiles = vec!["public".to_string()];
+        let rules = vec!["deny@dns".to_string()];
+        let p = build_network_policy(&profiles, &rules, false, None, None, None)
+            .unwrap()
+            .expect("policy");
+        assert_eq!(p.rules[0].action, Action::Deny);
+        assert_eq!(p.rules[1].action, Action::Allow);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn build_policy_terminal_all_and_none_reject_composition() {
+        let rules = vec!["deny@private".to_string()];
+        let all = build_network_policy(&["all".to_string()], &rules, false, None, None, None)
+            .unwrap()
+            .expect("policy");
+        assert_eq!(all.default_egress, Action::Allow);
+        assert_eq!(all.rules.len(), 1);
+
+        let err = build_network_policy(&["none,public".to_string()], &[], false, None, None, None)
+            .unwrap_err();
+        assert!(err.to_string().contains("cannot be combined"));
+
+        for profiles in [
+            vec!["all".to_string(), "none".to_string()],
+            vec!["none,all".to_string()],
+        ] {
+            let err = build_network_policy(&profiles, &[], false, None, None, None).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "--net terminal profiles `all` and `none` cannot be combined"
+            );
+        }
+
+        let err = build_network_policy(
+            &["all".to_string(), "all".to_string()],
+            &[],
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "--net `all` may only be specified once");
     }
 }

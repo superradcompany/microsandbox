@@ -5,37 +5,6 @@ description: Go SDK - Filesystem API reference
 
 Read and write files inside a running sandbox over the same host-guest channel as command execution: no SSH, no network. See [Filesystem](/sandboxes/filesystem) for usage examples. For bulk file transfer, prefer a [volume](/sdk/go/volumes).
 
-<div className="msb-glance">
-
-  <p className="msb-gl"><span className="msb-dot instance"></span>Methods · SandboxFSOps<span className="msb-ct">16</span></p>
-  <a className="msb-row" href="#fs-read"><span className="msb-rn">fs.Read()</span><span className="msb-rg">read a file as bytes</span></a>
-  <a className="msb-row" href="#fs-readstring"><span className="msb-rn">fs.ReadString()</span><span className="msb-rg">read a file as a string</span></a>
-  <a className="msb-row" href="#fs-write"><span className="msb-rn">fs.Write()</span><span className="msb-rg">write bytes</span></a>
-  <a className="msb-row" href="#fs-writestring"><span className="msb-rn">fs.WriteString()</span><span className="msb-rg">write a string</span></a>
-  <a className="msb-row" href="#fs-list"><span className="msb-rn">fs.List()</span><span className="msb-rg">list a directory</span></a>
-  <a className="msb-row" href="#fs-stat"><span className="msb-rn">fs.Stat()</span><span className="msb-rg">file metadata</span></a>
-  <a className="msb-row" href="#fs-mkdir"><span className="msb-rn">fs.Mkdir()</span><span className="msb-rg">create a directory</span></a>
-  <a className="msb-row" href="#fs-remove"><span className="msb-rn">fs.Remove()</span><span className="msb-rg">delete a file</span></a>
-  <a className="msb-row" href="#fs-removedir"><span className="msb-rn">fs.RemoveDir()</span><span className="msb-rg">delete a directory</span></a>
-  <a className="msb-row" href="#fs-copy"><span className="msb-rn">fs.Copy()</span><span className="msb-rg">copy within the guest</span></a>
-  <a className="msb-row" href="#fs-rename"><span className="msb-rn">fs.Rename()</span><span className="msb-rg">rename / move</span></a>
-  <a className="msb-row" href="#fs-exists"><span className="msb-rn">fs.Exists()</span><span className="msb-rg">test a path</span></a>
-  <a className="msb-row" href="#fs-copyfromhost"><span className="msb-rn">fs.CopyFromHost()</span><span className="msb-rg">host file into guest</span></a>
-  <a className="msb-row" href="#fs-copytohost"><span className="msb-rn">fs.CopyToHost()</span><span className="msb-rg">guest file to host</span></a>
-  <a className="msb-row" href="#fs-readstream"><span className="msb-rn">fs.ReadStream()</span><span className="msb-rg">stream a large read</span></a>
-  <a className="msb-row" href="#fs-writestream"><span className="msb-rn">fs.WriteStream()</span><span className="msb-rg">stream a large write</span></a>
-
-  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
-  <div className="msb-chiprow">
-    <a className="msb-typepill" href="#fsentry">FsEntry</a>
-    <a className="msb-typepill" href="#fsentrykind">FsEntryKind</a>
-    <a className="msb-typepill" href="#fsstat">FsStat</a>
-    <a className="msb-typepill" href="#fsreadstream">FsReadStream</a>
-    <a className="msb-typepill" href="#fswritestream">FsWriteStream</a>
-  </div>
-
-</div>
-
 <p className="msb-label" id="typical-flow">Typical flow</p>
 
 ```go
@@ -59,14 +28,23 @@ fmt.Println(content)
 
 The accessor is obtained from a running sandbox via [`sb.FS()`](/sdk/go/sandbox#fs). Every method takes a `context.Context` first and returns an `error` (wrapped, inspectable with `m.IsKind`).
 
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">Read()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) Read(ctx context.Context, path string) ([]byte, error)
 ```
+
+<Accordion title="Example">
+
+```go
+data, err := fs.Read(ctx, "/etc/hostname")
+if err != nil {
+    return err
+}
+fmt.Printf("%d bytes\n", len(data))
+```
+
+</Accordion>
 
 Read the entire contents of a file as raw bytes. The default FFI buffer is 1 MiB; for files larger than ~750 KiB (after base64 inflation) the runtime returns `BufferTooSmall` on the single-shot path, and this method transparently falls back to [`ReadStream`](#fs-readstream) so callers get a uniform bytes-returning interface up to runtime memory limits.
 
@@ -92,26 +70,19 @@ Read the entire contents of a file as raw bytes. The default FFI buffer is 1 MiB
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-data, err := fs.Read(ctx, "/etc/hostname")
-if err != nil {
-    return err
-}
-fmt.Printf("%d bytes\n", len(data))
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">ReadString()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) ReadString(ctx context.Context, path string) (string, error)
 ```
+
+<Accordion title="Example">
+
+```go
+content, err := fs.ReadString(ctx, "/tmp/config.json")
+```
+
+</Accordion>
 
 Read a file and return its contents as a string. The bytes are reinterpreted as UTF-8 without validation.
 
@@ -137,22 +108,19 @@ Read a file and return its contents as a string. The bytes are reinterpreted as 
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-content, err := fs.ReadString(ctx, "/tmp/config.json")
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">Write()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) Write(ctx context.Context, path string, data []byte) error
 ```
+
+<Accordion title="Example">
+
+```go
+err := fs.Write(ctx, "/tmp/data.bin", []byte{0x00, 0x01, 0x02})
+```
+
+</Accordion>
 
 Write bytes to a file, creating it if it does not exist and truncating it if it does.
 
@@ -173,22 +141,19 @@ Write bytes to a file, creating it if it does not exist and truncating it if it 
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-err := fs.Write(ctx, "/tmp/data.bin", []byte{0x00, 0x01, 0x02})
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">WriteString()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) WriteString(ctx context.Context, path, content string) error
 ```
+
+<Accordion title="Example">
+
+```go
+err := fs.WriteString(ctx, "/tmp/hello.txt", "hi")
+```
+
+</Accordion>
 
 Write a UTF-8 string to a file. Convenience wrapper over [`Write`](#fs-write).
 
@@ -209,22 +174,25 @@ Write a UTF-8 string to a file. Convenience wrapper over [`Write`](#fs-write).
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-err := fs.WriteString(ctx, "/tmp/hello.txt", "hi")
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">List()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) List(ctx context.Context, path string) ([]FsEntry, error)
 ```
+
+<Accordion title="Example">
+
+```go
+entries, err := fs.List(ctx, "/etc")
+if err != nil {
+    return err
+}
+for _, e := range entries {
+    fmt.Printf("%s (%s, %d bytes)\n", e.Path, e.Kind, e.Size)
+}
+```
+
+</Accordion>
 
 List the entries in a directory inside the sandbox.
 
@@ -250,28 +218,23 @@ List the entries in a directory inside the sandbox.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-entries, err := fs.List(ctx, "/etc")
-if err != nil {
-    return err
-}
-for _, e := range entries {
-    fmt.Printf("%s (%s, %d bytes)\n", e.Path, e.Kind, e.Size)
-}
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">Stat()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) Stat(ctx context.Context, path string) (*FsStat, error)
 ```
+
+<Accordion title="Example">
+
+```go
+st, err := fs.Stat(ctx, "/etc/hosts")
+if err != nil {
+    return err
+}
+fmt.Printf("%d bytes, dir=%v\n", st.Size, st.IsDir)
+```
+
+</Accordion>
 
 Get detailed metadata for a file or directory.
 
@@ -297,26 +260,19 @@ Get detailed metadata for a file or directory.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-st, err := fs.Stat(ctx, "/etc/hosts")
-if err != nil {
-    return err
-}
-fmt.Printf("%d bytes, dir=%v\n", st.Size, st.IsDir)
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">Mkdir()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) Mkdir(ctx context.Context, path string) error
 ```
+
+<Accordion title="Example">
+
+```go
+err := fs.Mkdir(ctx, "/app/cache/sessions")
+```
+
+</Accordion>
 
 Create a directory and any missing parents inside the sandbox.
 
@@ -333,22 +289,19 @@ Create a directory and any missing parents inside the sandbox.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-err := fs.Mkdir(ctx, "/app/cache/sessions")
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">Remove()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) Remove(ctx context.Context, path string) error
 ```
+
+<Accordion title="Example">
+
+```go
+err := fs.Remove(ctx, "/tmp/scratch.txt")
+```
+
+</Accordion>
 
 Delete a single file. Use [`RemoveDir`](#fs-removedir) for directories.
 
@@ -365,22 +318,19 @@ Delete a single file. Use [`RemoveDir`](#fs-removedir) for directories.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-err := fs.Remove(ctx, "/tmp/scratch.txt")
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">RemoveDir()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) RemoveDir(ctx context.Context, path string) error
 ```
+
+<Accordion title="Example">
+
+```go
+err := fs.RemoveDir(ctx, "/app/cache")
+```
+
+</Accordion>
 
 Remove a directory recursively.
 
@@ -397,22 +347,19 @@ Remove a directory recursively.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-err := fs.RemoveDir(ctx, "/app/cache")
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">Copy()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) Copy(ctx context.Context, src, dst string) error
 ```
+
+<Accordion title="Example">
+
+```go
+err := fs.Copy(ctx, "/etc/hosts", "/tmp/hosts.bak")
+```
+
+</Accordion>
 
 Copy a file within the sandbox.
 
@@ -433,22 +380,19 @@ Copy a file within the sandbox.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-err := fs.Copy(ctx, "/etc/hosts", "/tmp/hosts.bak")
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">Rename()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) Rename(ctx context.Context, src, dst string) error
 ```
+
+<Accordion title="Example">
+
+```go
+err := fs.Rename(ctx, "/tmp/old.log", "/tmp/archive/old.log")
+```
+
+</Accordion>
 
 Rename or move a file or directory within the sandbox.
 
@@ -469,22 +413,25 @@ Rename or move a file or directory within the sandbox.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-err := fs.Rename(ctx, "/tmp/old.log", "/tmp/archive/old.log")
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">Exists()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) Exists(ctx context.Context, path string) (bool, error)
 ```
+
+<Accordion title="Example">
+
+```go
+ok, err := fs.Exists(ctx, "/app/.initialized")
+if err != nil {
+    return err
+}
+if !ok {
+    // first boot
+}
+```
+
+</Accordion>
 
 Report whether a file or directory exists at the given path.
 
@@ -510,28 +457,19 @@ Report whether a file or directory exists at the given path.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-ok, err := fs.Exists(ctx, "/app/.initialized")
-if err != nil {
-    return err
-}
-if !ok {
-    // first boot
-}
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">CopyFromHost()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) CopyFromHost(ctx context.Context, hostPath, guestPath string) error
 ```
+
+<Accordion title="Example">
+
+```go
+err := fs.CopyFromHost(ctx, "./seed.db", "/app/data/seed.db")
+```
+
+</Accordion>
 
 Copy a file from the host machine into the sandbox. For transferring many files, consider a [bind-mounted volume](/sdk/go/volumes#mountbind) instead.
 
@@ -552,22 +490,19 @@ Copy a file from the host machine into the sandbox. For transferring many files,
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-err := fs.CopyFromHost(ctx, "./seed.db", "/app/data/seed.db")
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">CopyToHost()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) CopyToHost(ctx context.Context, guestPath, hostPath string) error
 ```
+
+<Accordion title="Example">
+
+```go
+err := fs.CopyToHost(ctx, "/app/output/report.csv", "./report.csv")
+```
+
+</Accordion>
 
 Copy a file from the sandbox to the host machine.
 
@@ -588,46 +523,11 @@ Copy a file from the sandbox to the host machine.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-err := fs.CopyToHost(ctx, "/app/output/report.csv", "./report.csv")
-```
-
-</Accordion>
-
----
-
 #### <span className="msb-recv">fs.</span><span className="msb-hn">ReadStream()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) ReadStream(ctx context.Context, path string) (*FsReadStream, error)
 ```
-
-Open a streaming reader for a file. Use this for files too large to fit in memory; data is delivered in chunks. The caller must `Close` the returned [`*FsReadStream`](#fsreadstream). [`Read`](#fs-read) falls back to this automatically when a file exceeds the single-shot buffer.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
-    <div className="msb-param-desc">Cancels opening the stream.</div>
-  </div>
-  <div className="msb-param">
-    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Absolute path inside the guest.</div>
-  </div>
-</div>
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#fsreadstream">*FsReadStream</a></div>
-    <div className="msb-param-desc">Open read stream; close it when done.</div>
-  </div>
-</div>
 
 <Accordion title="Example">
 
@@ -655,14 +555,53 @@ _, err = rs.WriteTo(os.Stdout)
 
 </Accordion>
 
----
+Open a streaming reader for a file. Use this for files too large to fit in memory; data is delivered in chunks. The caller must `Close` the returned [`*FsReadStream`](#fsreadstream). [`Read`](#fs-read) falls back to this automatically when a file exceeds the single-shot buffer.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
+    <div className="msb-param-desc">Cancels opening the stream.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Absolute path inside the guest.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#fsreadstream">*FsReadStream</a></div>
+    <div className="msb-param-desc">Open read stream; close it when done.</div>
+  </div>
+</div>
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">WriteStream()</span>
-<div className="msb-tags"><span className="msb-tag is-instance">method</span></div>
 
 ```go
 func (fs *SandboxFSOps) WriteStream(ctx context.Context, path string) (*FsWriteStream, error)
 ```
+
+<Accordion title="Example">
+
+```go
+ws, err := fs.WriteStream(ctx, "/tmp/big.bin")
+if err != nil {
+    return err
+}
+
+if _, err := ws.Write(largeChunk); err != nil {
+    return err
+}
+if err := ws.Close(ctx); err != nil {
+    return err
+}
+```
+
+</Accordion>
 
 Open a streaming writer for a file. Use this for files too large to fit in memory. The caller must call `Close(ctx)` on the returned [`*FsWriteStream`](#fswritestream) to finalise the write.
 
@@ -688,31 +627,9 @@ Open a streaming writer for a file. Use this for files too large to fit in memor
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-ws, err := fs.WriteStream(ctx, "/tmp/big.bin")
-if err != nil {
-    return err
-}
-
-if _, err := ws.Write(largeChunk); err != nil {
-    return err
-}
-if err := ws.Close(ctx); err != nil {
-    return err
-}
-```
-
-</Accordion>
-
----
-
 ## Types
 
 ### FsEntry
-
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#fs-list">List()</a></p>
 
@@ -727,8 +644,6 @@ A single directory listing entry.
 
 ### FsEntryKind
 
-<div className="msb-tags"><span className="msb-tag is-type">type</span></div>
-
 <p className="msb-backref">Used by <a href="#fsentry">FsEntry.Kind</a></p>
 
 Classifies a directory listing entry. Defined as `type FsEntryKind string`.
@@ -741,8 +656,6 @@ Classifies a directory listing entry. Defined as `type FsEntryKind string`.
 | `FsEntryKindOther` | `"other"` | Other entry type |
 
 ### FsStat
-
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#fs-stat">Stat()</a></p>
 
@@ -758,8 +671,6 @@ Detailed file metadata.
 
 ### FsReadStream
 
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
-
 <p className="msb-backref">Returned by <a href="#fs-readstream">ReadStream()</a></p>
 
 An open streaming read from a guest file. Must be closed with `Close` when done.
@@ -774,8 +685,6 @@ An open streaming read from a guest file. Must be closed with `Close` when done.
 On a write error or partial write, `WriteTo` and `CopyTo` return the partial byte count and leave the stream open so the caller can recover; close it explicitly in either case.
 
 ### FsWriteStream
-
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
 
 <p className="msb-backref">Returned by <a href="#fs-writestream">WriteStream()</a></p>
 

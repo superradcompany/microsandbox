@@ -20,6 +20,7 @@ func TestVolumeName(t *testing.T) {
 func TestVolumeFsPathEscape(t *testing.T) {
 	root := t.TempDir()
 	fs := &VolumeFs{root: root}
+	volumeRoot := filepath.VolumeName(root) + string(filepath.Separator)
 
 	cases := []struct {
 		name string
@@ -27,7 +28,7 @@ func TestVolumeFsPathEscape(t *testing.T) {
 	}{
 		{"parent traversal", "../escape"},
 		{"deep traversal", "a/b/../../../escape"},
-		{"absolute path", "/etc/passwd"},
+		{"absolute path", filepath.Join(volumeRoot, "etc", "passwd")},
 		{"absolute under root", filepath.Join(root, "..", "escape")},
 	}
 	for _, c := range cases {

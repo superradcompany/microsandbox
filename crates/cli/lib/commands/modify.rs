@@ -72,8 +72,9 @@ pub struct ModifyArgs {
     #[arg(long, value_name = "PATH")]
     pub workdir: Option<String>,
 
-    /// Add or rotate a secret from a host environment variable (`NAME@HOST`).
-    #[arg(long = "secret", value_name = "NAME@HOST")]
+    /// Add or rotate a secret from a host environment variable
+    /// (`NAME@HOST[,HOST...]`).
+    #[arg(long = "secret", value_name = "NAME@HOST[,HOST...]")]
     pub secrets: Vec<String>,
 
     /// Remove a secret by name.
@@ -193,14 +194,14 @@ fn apply_secret_args(
     mut builder: SandboxModificationBuilder,
     args: &ModifyArgs,
 ) -> anyhow::Result<SandboxModificationBuilder> {
-    // Group hosts by secret name so repeated `--secret NAME@HOST` flags
-    // accumulate into one declarative spec per name.
+    // Group hosts by secret name so repeated `--secret NAME@HOST[,HOST...]`
+    // flags accumulate into one declarative spec per name.
     let mut specs: Vec<(String, Vec<String>)> = Vec::new();
     for secret in &args.secrets {
-        let (name, host) = common::parse_secret(secret, "modify")?;
+        let (name, hosts) = common::parse_secret(secret, "modify")?;
         match specs.iter_mut().find(|(existing, _)| *existing == name) {
-            Some((_, hosts)) => hosts.push(host),
-            None => specs.push((name, vec![host])),
+            Some((_, existing_hosts)) => existing_hosts.extend(hosts),
+            None => specs.push((name, hosts)),
         }
     }
     for (name, hosts) in specs {
@@ -600,7 +601,7 @@ fn replayed_args(args: &ModifyArgs) -> String {
     }
     for secret in &args.secrets {
         let sanitized = common::parse_secret(secret, "modify")
-            .map(|(name, host)| format!("{name}@{host}"))
+            .map(|(name, hosts)| format!("{name}@{}", hosts.join(",")))
             .unwrap_or_else(|_| "<secret>".to_string());
         rendered.push(format!("--secret {sanitized}"));
     }

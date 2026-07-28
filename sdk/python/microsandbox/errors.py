@@ -120,3 +120,8 @@ class UnsupportedOperationError(MicrosandboxError):
 class UnsupportedError(MicrosandboxError):
     """The selected backend does not support a requested feature yet."""
     code = "unsupported"
+
+
+class SnapshotMigrationError(MicrosandboxError):
+    """A snapshot could not complete its adjacent-release migration."""
+    code = "snapshot-migration"

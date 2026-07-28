@@ -23,18 +23,32 @@ pub struct Model {
     pub parent_digest: Option<String>,
     /// Snapshot payload scope (`disk` today, `resumable` in the future).
     pub scope: String,
+    /// Closed descriptor state discriminant (`file` or `checkpoint`).
+    pub state_kind: String,
     /// Human-readable image reference.
     pub image_ref: String,
     /// OCI manifest digest of the image.
     pub image_manifest_digest: String,
     /// On-disk format of the upper layer (`raw` or `qcow2`).
-    pub format: String,
+    pub format: Option<String>,
     /// Filesystem type inside the upper (e.g. `ext4`).
-    pub fstype: String,
+    pub fstype: Option<String>,
+    /// Checkpoint-manifest digest for checkpoint state.
+    pub checkpoint_manifest_digest: Option<String>,
     /// Absolute path to the artifact directory on this host.
     pub artifact_path: String,
     /// Apparent size of the upper file in bytes.
     pub size_bytes: Option<i64>,
+    /// Locality of the state closure (`embedded` or `linked`).
+    pub locality: String,
+    /// Host-local storage/provider binding identifier.
+    pub storage_binding_id: Option<String>,
+    /// Rebuildable closure availability projection.
+    pub availability: String,
+    /// Artifact migration status projection.
+    pub migration_state: String,
+    /// Stable migration failure code when blocked.
+    pub migration_error_code: Option<String>,
     /// Snapshot creation time (from manifest).
     pub created_at: DateTime,
     /// When this row was inserted/refreshed.

@@ -122,6 +122,8 @@ export declare class ExecHandle {
   signal(signal: number): Promise<void>
   /** Kill the running process (SIGKILL). */
   kill(): Promise<void>
+  /** Resize the pseudo-terminal for this exec session. */
+  resize(rows: number, cols: number): Promise<void>
 }
 export type JsExecHandle = ExecHandle
 
@@ -187,7 +189,7 @@ export declare class ExecOutput {
 export declare class ExecSink {
   /** Write data to the process stdin. */
   write(data: Buffer): Promise<void>
-  /** Close stdin (sends EOF to the process). */
+  /** Close the sink. Sends EOF in non-TTY pipe mode; PTY mode stays open. */
   close(): Promise<void>
 }
 export type JsExecSink = ExecSink
@@ -459,8 +461,8 @@ export declare class NetworkBuilder {
   /** Publish a UDP port on a specific host bind address. */
   portUdpBind(bind: string, hostPort: number, guestPort: number): this
   /**
-   * Set a policy. Construct via the JS-side `NetworkPolicy.publicOnly()`
-   * / `.allowAll()` / `.none()` / `.nonLocal()` factories or build a
+   * Set a policy. Construct via the JS-side `NetworkPolicy.fromProfiles()`
+   * / `.allowAll()` / `.none()` factories or build a
    * custom one and pass it through `JSON.stringify`-friendly JSON. Here
    * we accept the canonical serialized form (a JSON string) to avoid
    * re-modeling the rule schema across the FFI; Phase 7 reconciles.
@@ -1398,11 +1400,17 @@ export declare class Snapshot {
   static load(archive: string, dest?: string | undefined | null): Promise<SnapshotHandle>
   get path(): string
   get digest(): string
-  get sizeBytes(): bigint
+  get sizeBytes(): bigint | null
   get imageRef(): string
   get imageManifestDigest(): string
-  get format(): string
-  get fstype(): string
+  get stateKind(): string
+  get format(): string | null
+  get fstype(): string | null
+  get upperFile(): string | null
+  get upperIntegrityAlgorithm(): string | null
+  get upperIntegrityDigest(): string | null
+  get checkpointId(): string | null
+  get checkpointManifestDigest(): string | null
   get parent(): string | null
   get scope(): 'disk' | 'resumable'
   get createdAt(): string
@@ -1455,8 +1463,15 @@ export declare class SnapshotHandle {
   get parentDigest(): string | null
   get scope(): 'disk' | 'resumable'
   get imageRef(): string
-  get format(): string
+  get stateKind(): string
+  get format(): string | null
+  get fstype(): string | null
+  get checkpointManifestDigest(): string | null
   get sizeBytes(): bigint | null
+  get locality(): string
+  get availability(): string
+  get migrationState(): string
+  get migrationErrorCode(): string | null
   get createdAt(): number
   get path(): string
   open(): Promise<Snapshot>
@@ -2214,8 +2229,15 @@ export interface SnapshotInfo {
   /** `"disk"` today; `"resumable"` once memory/device-state restore lands. */
   scope: string
   /** `"raw"` or `"qcow2"`. */
-  format: string
+  stateKind: string
+  format?: string
+  fstype?: string
+  checkpointManifestDigest?: string
   sizeBytes?: number
+  locality: string
+  availability: string
+  migrationState: string
+  migrationErrorCode?: string
   createdAt: number
   path: string
 }
@@ -2233,10 +2255,8 @@ export interface SnapshotRemoveOptions {
 /**
  * Result of `Snapshot.verify()`.
  *
- * `upperKind` is `"notRecorded"` when no integrity hash was stored,
- * or `"verified"` when the recorded hash matched the recomputed one.
- * `upperAlgorithm` and `upperDigest` are populated only when
- * `upperKind === "verified"`.
+ * `upperKind` is `"verified"` when the mandatory file-state integrity
+ * matched. `upperAlgorithm` and `upperDigest` carry the verified binding.
  */
 export interface SnapshotVerifyReport {
   digest: string

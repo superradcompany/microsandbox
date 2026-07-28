@@ -5,7 +5,7 @@ use std::io;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use microsandbox_image::snapshot::{SPARSE_SHA256_V1, UpperIntegrity};
+use microsandbox_image::snapshot::{SPARSE_SHA256_V1, SnapshotState, UpperIntegrity};
 use microsandbox_utils::extent::ExtentMap;
 use sha2::{Digest as _, Sha256};
 use tokio::io::AsyncReadExt;
@@ -32,8 +32,6 @@ pub struct SnapshotVerifyReport {
 /// Upper-layer content verification result.
 #[derive(Debug, Clone)]
 pub enum UpperVerifyStatus {
-    /// No content integrity descriptor was recorded in the manifest.
-    NotRecorded,
     /// Recorded content integrity matched the computed digest.
     Verified {
         /// Digest algorithm.
@@ -48,15 +46,15 @@ pub enum UpperVerifyStatus {
 //--------------------------------------------------------------------------------------------------
 
 pub(super) async fn verify_snapshot(snap: &Snapshot) -> MicrosandboxResult<SnapshotVerifyReport> {
-    let Some(expected) = snap.manifest().upper.integrity.as_ref() else {
-        return Ok(SnapshotVerifyReport {
-            digest: snap.digest().to_string(),
-            path: snap.path().to_path_buf(),
-            upper: UpperVerifyStatus::NotRecorded,
+    let SnapshotState::File(file_state) = &snap.manifest().state else {
+        return Err(MicrosandboxError::Unsupported {
+            feature: "Checkpoint-state snapshot verification".into(),
+            available_when: "after checkpoint closure providers land".into(),
         });
     };
+    let expected = &file_state.upper.integrity;
 
-    let upper_path = snap.path().join(&snap.manifest().upper.file);
+    let upper_path = snap.path().join(&file_state.upper.file);
     let actual = match expected.algorithm.as_str() {
         "sha256" => sha256_file(&upper_path).await?,
         SPARSE_SHA256_V1 => compute_sparse_integrity(&upper_path).await?.digest,

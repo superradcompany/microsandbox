@@ -55,16 +55,41 @@ type SnapshotUpperVerifyStatus struct {
 	Digest    string
 }
 
+// SnapshotState is the closed schema-1 state family. Exactly one of File or
+// Checkpoint is populated according to Kind.
+type SnapshotState struct {
+	Kind       string
+	File       *SnapshotFileState
+	Checkpoint *SnapshotCheckpointState
+}
+
+type SnapshotFileState struct {
+	Format    string
+	Fstype    string
+	UpperFile string
+	SizeBytes uint64
+	Integrity SnapshotIntegrity
+}
+
+type SnapshotCheckpointState struct {
+	CheckpointID   string
+	ManifestDigest string
+}
+
+type SnapshotIntegrity struct {
+	Algorithm string
+	Digest    string
+}
+
 // SnapshotArtifact is a snapshot artifact on disk.
 type SnapshotArtifact struct {
 	path                string
 	digest              string
-	sizeBytes           uint64
+	sizeBytes           *uint64
 	imageRef            string
 	imageManifestDigest string
 	scope               string
-	format              string
-	fstype              string
+	state               SnapshotState
 	parent              *string
 	createdAt           string
 	labels              map[string]string
@@ -79,8 +104,7 @@ func snapshotFromInfo(info *ffi.SnapshotInfo) *SnapshotArtifact {
 		imageRef:            info.ImageRef,
 		imageManifestDigest: info.ImageManifestDigest,
 		scope:               normalizeSnapshotScope(info.Scope),
-		format:              info.Format,
-		fstype:              info.Fstype,
+		state:               snapshotStateFromInfo(info),
 		parent:              info.Parent,
 		createdAt:           info.CreatedAt,
 		labels:              cloneMap(info.Labels),
@@ -90,16 +114,27 @@ func snapshotFromInfo(info *ffi.SnapshotInfo) *SnapshotArtifact {
 
 func (s *SnapshotArtifact) Path() string                { return s.path }
 func (s *SnapshotArtifact) Digest() string              { return s.digest }
-func (s *SnapshotArtifact) SizeBytes() uint64           { return s.sizeBytes }
+func (s *SnapshotArtifact) SizeBytes() *uint64          { return cloneUint64Ptr(s.sizeBytes) }
 func (s *SnapshotArtifact) ImageRef() string            { return s.imageRef }
 func (s *SnapshotArtifact) ImageManifestDigest() string { return s.imageManifestDigest }
 func (s *SnapshotArtifact) Scope() string               { return s.scope }
-func (s *SnapshotArtifact) Format() string              { return s.format }
-func (s *SnapshotArtifact) Fstype() string              { return s.fstype }
-func (s *SnapshotArtifact) Parent() *string             { return cloneStringPtr(s.parent) }
-func (s *SnapshotArtifact) CreatedAt() string           { return s.createdAt }
-func (s *SnapshotArtifact) Labels() map[string]string   { return cloneMap(s.labels) }
-func (s *SnapshotArtifact) SourceSandbox() *string      { return cloneStringPtr(s.sourceSandbox) }
+func (s *SnapshotArtifact) State() SnapshotState        { return cloneSnapshotState(s.state) }
+func (s *SnapshotArtifact) Format() string {
+	if s.state.File != nil {
+		return s.state.File.Format
+	}
+	return ""
+}
+func (s *SnapshotArtifact) Fstype() string {
+	if s.state.File != nil {
+		return s.state.File.Fstype
+	}
+	return ""
+}
+func (s *SnapshotArtifact) Parent() *string           { return cloneStringPtr(s.parent) }
+func (s *SnapshotArtifact) CreatedAt() string         { return s.createdAt }
+func (s *SnapshotArtifact) Labels() map[string]string { return cloneMap(s.labels) }
+func (s *SnapshotArtifact) SourceSandbox() *string    { return cloneStringPtr(s.sourceSandbox) }
 
 // Verify recomputes recorded content integrity for the snapshot.
 func (s *SnapshotArtifact) Verify(ctx context.Context) (*SnapshotVerifyReport, error) {
@@ -112,28 +147,42 @@ func (s *SnapshotArtifact) Verify(ctx context.Context) (*SnapshotVerifyReport, e
 
 // SnapshotHandle is a lightweight handle backed by the snapshot index.
 type SnapshotHandle struct {
-	digest        string
-	name          *string
-	parentDigest  *string
-	scope         string
-	imageRef      string
-	format        string
-	sizeBytes     *uint64
-	createdAtUnix int64
-	path          string
+	digest                   string
+	name                     *string
+	parentDigest             *string
+	scope                    string
+	imageRef                 string
+	stateKind                string
+	format                   *string
+	fstype                   *string
+	checkpointManifestDigest *string
+	sizeBytes                *uint64
+	locality                 string
+	availability             string
+	migrationState           string
+	migrationErrorCode       *string
+	createdAtUnix            int64
+	path                     string
 }
 
 func snapshotHandleFromInfo(info *ffi.SnapshotHandleInfo) *SnapshotHandle {
 	return &SnapshotHandle{
-		digest:        info.Digest,
-		name:          info.Name,
-		parentDigest:  info.ParentDigest,
-		scope:         normalizeSnapshotScope(info.Scope),
-		imageRef:      info.ImageRef,
-		format:        info.Format,
-		sizeBytes:     info.SizeBytes,
-		createdAtUnix: info.CreatedAtUnix,
-		path:          info.Path,
+		digest:                   info.Digest,
+		name:                     info.Name,
+		parentDigest:             info.ParentDigest,
+		scope:                    normalizeSnapshotScope(info.Scope),
+		imageRef:                 info.ImageRef,
+		stateKind:                info.StateKind,
+		format:                   info.Format,
+		fstype:                   info.Fstype,
+		checkpointManifestDigest: info.CheckpointManifestDigest,
+		sizeBytes:                info.SizeBytes,
+		locality:                 info.Locality,
+		availability:             info.Availability,
+		migrationState:           info.MigrationState,
+		migrationErrorCode:       info.MigrationErrorCode,
+		createdAtUnix:            info.CreatedAtUnix,
+		path:                     info.Path,
 	}
 }
 
@@ -142,10 +191,19 @@ func (h *SnapshotHandle) Name() *string         { return cloneStringPtr(h.name) 
 func (h *SnapshotHandle) ParentDigest() *string { return cloneStringPtr(h.parentDigest) }
 func (h *SnapshotHandle) Scope() string         { return h.scope }
 func (h *SnapshotHandle) ImageRef() string      { return h.imageRef }
-func (h *SnapshotHandle) Format() string        { return h.format }
-func (h *SnapshotHandle) SizeBytes() *uint64    { return cloneUint64Ptr(h.sizeBytes) }
-func (h *SnapshotHandle) Path() string          { return h.path }
-func (h *SnapshotHandle) CreatedAt() time.Time  { return time.Unix(h.createdAtUnix, 0) }
+func (h *SnapshotHandle) StateKind() string     { return h.stateKind }
+func (h *SnapshotHandle) Format() *string       { return cloneStringPtr(h.format) }
+func (h *SnapshotHandle) Fstype() *string       { return cloneStringPtr(h.fstype) }
+func (h *SnapshotHandle) CheckpointManifestDigest() *string {
+	return cloneStringPtr(h.checkpointManifestDigest)
+}
+func (h *SnapshotHandle) SizeBytes() *uint64          { return cloneUint64Ptr(h.sizeBytes) }
+func (h *SnapshotHandle) Locality() string            { return h.locality }
+func (h *SnapshotHandle) Availability() string        { return h.availability }
+func (h *SnapshotHandle) MigrationState() string      { return h.migrationState }
+func (h *SnapshotHandle) MigrationErrorCode() *string { return cloneStringPtr(h.migrationErrorCode) }
+func (h *SnapshotHandle) Path() string                { return h.path }
+func (h *SnapshotHandle) CreatedAt() time.Time        { return time.Unix(h.createdAtUnix, 0) }
 
 func (h *SnapshotHandle) Open(ctx context.Context) (*SnapshotArtifact, error) {
 	return Snapshot.Open(ctx, h.path)
@@ -258,6 +316,52 @@ func snapshotVerifyReportFromInfo(info *ffi.SnapshotVerifyReport) *SnapshotVerif
 			Digest:    info.Upper.Digest,
 		},
 	}
+}
+
+func snapshotStateFromInfo(info *ffi.SnapshotInfo) SnapshotState {
+	if info.StateKind == "checkpoint" {
+		state := &SnapshotCheckpointState{}
+		if info.CheckpointID != nil {
+			state.CheckpointID = *info.CheckpointID
+		}
+		if info.CheckpointManifestDigest != nil {
+			state.ManifestDigest = *info.CheckpointManifestDigest
+		}
+		return SnapshotState{Kind: "checkpoint", Checkpoint: state}
+	}
+	state := &SnapshotFileState{}
+	if info.Format != nil {
+		state.Format = *info.Format
+	}
+	if info.Fstype != nil {
+		state.Fstype = *info.Fstype
+	}
+	if info.UpperFile != nil {
+		state.UpperFile = *info.UpperFile
+	}
+	if info.SizeBytes != nil {
+		state.SizeBytes = *info.SizeBytes
+	}
+	if info.UpperIntegrityAlgorithm != nil {
+		state.Integrity.Algorithm = *info.UpperIntegrityAlgorithm
+	}
+	if info.UpperIntegrityDigest != nil {
+		state.Integrity.Digest = *info.UpperIntegrityDigest
+	}
+	return SnapshotState{Kind: "file", File: state}
+}
+
+func cloneSnapshotState(in SnapshotState) SnapshotState {
+	out := SnapshotState{Kind: in.Kind}
+	if in.File != nil {
+		copy := *in.File
+		out.File = &copy
+	}
+	if in.Checkpoint != nil {
+		copy := *in.Checkpoint
+		out.Checkpoint = &copy
+	}
+	return out
 }
 
 func cloneStringPtr(in *string) *string {

@@ -11,16 +11,19 @@ import (
 	microsandbox "github.com/superradcompany/microsandbox/sdk/go"
 )
 
-// TestNetworkPolicyNonLocal verifies the new NonLocal preset accepts
+// TestNetworkPolicyProfiles verifies composed public + private profiles accept
 // public + private/LAN egress and blocks loopback/link-local/metadata.
 // We can only assert on a public reach here (LAN is environment-specific).
-func TestNetworkPolicyNonLocal(t *testing.T) {
+func TestNetworkPolicyProfiles(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-nonlocal-" + t.Name()
 
 	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
-		microsandbox.WithNetwork(microsandbox.NetworkPolicy.NonLocal()),
+		microsandbox.WithNetwork(microsandbox.NetworkPolicy.FromProfiles(
+			microsandbox.NetworkProfilePublic,
+			microsandbox.NetworkProfilePrivate,
+		)),
 	)
 	if err != nil {
 		t.Fatalf("CreateSandbox: %v", err)
@@ -41,7 +44,7 @@ func TestNetworkPolicyNonLocal(t *testing.T) {
 		t.Fatalf("Shell: %v", err)
 	}
 	if !out.Success() {
-		t.Errorf("expected NonLocal preset to permit public TCP; stdout=%q stderr=%q",
+		t.Errorf("expected composed profiles to permit public TCP; stdout=%q stderr=%q",
 			out.Stdout(), out.Stderr())
 	}
 }
@@ -279,16 +282,15 @@ func TestDNSConfigCreates(t *testing.T) {
 
 	rebind := true
 	timeoutMs := uint64(5000)
+	network := microsandbox.NetworkPolicy.AllowAll()
+	network.DNS = &microsandbox.DNSConfig{
+		RebindProtection: &rebind,
+		Nameservers:      []string{"1.1.1.1:53"},
+		QueryTimeoutMs:   &timeoutMs,
+	}
 	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
-		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
-			Policy: microsandbox.NetworkPolicyPresetAllowAll,
-			DNS: &microsandbox.DNSConfig{
-				RebindProtection: &rebind,
-				Nameservers:      []string{"1.1.1.1:53"},
-				QueryTimeoutMs:   &timeoutMs,
-			},
-		}),
+		microsandbox.WithNetwork(network),
 	)
 	if err != nil {
 		t.Fatalf("CreateSandbox: %v", err)
@@ -315,13 +317,12 @@ func TestDNSConfigCreates(t *testing.T) {
 func TestNetworkOnSecretViolationCreates(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-onviolation-" + t.Name()
+	network := microsandbox.NetworkPolicy.FromProfiles(microsandbox.NetworkProfilePublic)
+	network.OnSecretViolation = microsandbox.ViolationActionBlockAndLog
 
 	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
-		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
-			Policy:            microsandbox.NetworkPolicyPresetPublicOnly,
-			OnSecretViolation: microsandbox.ViolationActionBlockAndLog,
-		}),
+		microsandbox.WithNetwork(network),
 	)
 	if err != nil {
 		t.Fatalf("CreateSandbox: %v", err)
@@ -377,16 +378,12 @@ func TestSecretWithOnViolation(t *testing.T) {
 func TestTLSConfigUpstreamCACertsCreates(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-upstreamcas-" + t.Name()
+	network := microsandbox.NetworkPolicy.AllowAll()
+	network.TLS = &microsandbox.TLSConfig{UpstreamCACerts: []string{}}
 
 	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
-		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
-			Policy: microsandbox.NetworkPolicyPresetAllowAll,
-			TLS: &microsandbox.TLSConfig{
-				// Don't set actual paths — the runtime accepts an empty slice.
-				UpstreamCACerts: []string{},
-			},
-		}),
+		microsandbox.WithNetwork(network),
 	)
 	if err != nil {
 		t.Fatalf("CreateSandbox: %v", err)
@@ -405,12 +402,11 @@ func TestNetworkMaxConnectionsCreates(t *testing.T) {
 	name := "go-sdk-maxconn-" + t.Name()
 
 	max := uint(64)
+	network := microsandbox.NetworkPolicy.AllowAll()
+	network.MaxConnections = &max
 	sb, err := createSandbox(t, ctx, name,
 		microsandbox.WithImage(goIntegrationImage),
-		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
-			Policy:         microsandbox.NetworkPolicyPresetAllowAll,
-			MaxConnections: &max,
-		}),
+		microsandbox.WithNetwork(network),
 	)
 	if err != nil {
 		t.Fatalf("CreateSandbox: %v", err)

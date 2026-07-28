@@ -17,7 +17,7 @@ msb run ghcr.io/superradcompany/debian-systemd:12 \
   -- bash
 ```
 
-`debian-systemd` is one of the optional bases we maintain in [guest-images](https://github.com/superradcompany/guest-images) for cases like this. `--init auto` uses a known init from the image ENTRYPOINT when one is declared, then falls back to probing common distro paths. Image-declared `/init` wrappers keep their OCI launch contract for attached `msb run`; bare systemd images still run your trailing command through agentd after boot. See [Custom init system](/sandboxes/customize#custom-init-system) for the exact behavior and for pinning to an explicit path.
+`debian-systemd` is one of the optional bases we maintain in [guest-images](https://github.com/superradcompany/guest-images) for cases like this. `--init auto` uses a known init from the image ENTRYPOINT when one is declared, then falls back to probing common distro paths. Image-declared `/init` wrappers keep their OCI launch contract for attached `msb run`; bare systemd images still run your trailing command through agentd after boot. See [Custom init system](/sandboxes/bootstrap#custom-init-system) for the exact behavior and for pinning to an explicit path.
 
 ## Step 2: Confirm systemd is PID 1
 
@@ -56,7 +56,7 @@ root@msb:/# curl -s localhost | head -1
 <!DOCTYPE html>
 ```
 
-Microsandbox is detected as a container, so packages with `policy-rc.d` deferral install but don't auto-start. `systemctl enable --now <unit>` starts them in one step.
+The guest detects microsandbox as a container, so packages with `policy-rc.d` deferral install but don't auto-start. `systemctl enable --now <unit>` starts them in one step.
 
 ## Notes
 

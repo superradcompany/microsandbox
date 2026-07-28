@@ -1,4 +1,4 @@
-use microsandbox::sandbox::exec::{ExecEvent as RustExecEvent, ExecHandle, ExecSink};
+use microsandbox::sandbox::exec::{ExecControl, ExecEvent as RustExecEvent, ExecHandle, ExecSink};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use tokio::sync::Mutex;
@@ -41,6 +41,7 @@ pub struct ExecOutput {
 #[napi(js_name = "ExecHandle")]
 pub struct JsExecHandle {
     inner: Mutex<ExecHandle>,
+    control: ExecControl,
 }
 
 /// Stdin writer for a running process.
@@ -115,8 +116,10 @@ impl ExecOutput {
 
 impl JsExecHandle {
     pub fn from_rust(handle: ExecHandle) -> Self {
+        let control = handle.control();
         Self {
             inner: Mutex::new(handle),
+            control,
         }
     }
 }
@@ -169,15 +172,19 @@ impl JsExecHandle {
     /// Send a signal to the running process.
     #[napi]
     pub async fn signal(&self, signal: i32) -> Result<()> {
-        let guard = self.inner.lock().await;
-        guard.signal(signal).await.map_err(to_napi_error)
+        self.control.signal(signal).await.map_err(to_napi_error)
     }
 
     /// Kill the running process (SIGKILL).
     #[napi]
     pub async fn kill(&self) -> Result<()> {
-        let guard = self.inner.lock().await;
-        guard.kill().await.map_err(to_napi_error)
+        self.control.kill().await.map_err(to_napi_error)
+    }
+
+    /// Resize the pseudo-terminal for this exec session.
+    #[napi]
+    pub async fn resize(&self, rows: u16, cols: u16) -> Result<()> {
+        self.control.resize(rows, cols).await.map_err(to_napi_error)
     }
 }
 
@@ -190,7 +197,7 @@ impl JsExecSink {
         self.inner.write(&bytes).await.map_err(to_napi_error)
     }
 
-    /// Close stdin (sends EOF to the process).
+    /// Close the sink. Sends EOF in non-TTY pipe mode; PTY mode stays open.
     #[napi]
     pub async fn close(&self) -> Result<()> {
         self.inner.close().await.map_err(to_napi_error)
