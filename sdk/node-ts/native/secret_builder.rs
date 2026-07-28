@@ -143,7 +143,7 @@ impl JsSecretBuilder {
         self
     }
 
-    /// Add one provider-neutral exact request-header placement.
+    /// Restrict the secret to provider-neutral exact request-header placements.
     #[napi(js_name = "exactHeader")]
     pub fn exact_header(&mut self, name: String, scheme: Option<String>) -> &Self {
         let prev = self.take_inner();

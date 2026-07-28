@@ -514,8 +514,6 @@ describe("NetworkBuilder secret passthrough", () => {
       .env("API_KEY")
       .value("synthetic-token")
       .allowHost("api.example.com")
-      .injectHeaders(false)
-      .injectBasicAuth(false)
       .exactHeader(exactHeader.name, exactHeader.scheme)
       .build();
 

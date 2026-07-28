@@ -21,7 +21,7 @@ import (
 const (
 	secretValue   = "super-secret-value-abcxyz"
 	placeholder   = "$MY_API_KEY_PLACEHOLDER"
-	allowedHost   = "api.example.com"
+	allowedHost   = "example.com"
 	envVarInGuest = "MY_API_KEY"
 )
 
@@ -83,6 +83,18 @@ func main() {
 		log.Fatalf("FAIL: secret value found in full env dump")
 	}
 	fmt.Printf("  full env dump contains no secret value (%d bytes scanned)\n", len(out.Stdout()))
+
+	// 3. Allowed HTTPS request: the placeholder occupies the configured field
+	// and the proxy replaces it in flight.
+	out, err = sb.Shell(ctx,
+		"wget -q -O /dev/null --timeout=10 "+
+			"--header='Authorization: Bearer "+placeholder+"' "+
+			"https://example.com && echo OK",
+	)
+	if err != nil || !strings.Contains(out.Stdout(), "OK") {
+		log.Fatalf("FAIL: allowed exact-header request: err=%v output=%q", err, out.Stdout())
+	}
+	fmt.Println("  allowed exact-header request succeeded")
 
 	fmt.Println("OK — secrets example passed")
 }

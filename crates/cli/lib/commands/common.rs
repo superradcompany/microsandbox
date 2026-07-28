@@ -1517,7 +1517,8 @@ fn apply_network_opts(
     // Secrets. `create` persists a host-side source reference, not the raw
     // value: the plaintext is read from the host environment at spawn time so
     // the durable config never stores secret material at rest.
-    let mut secret_specs: Vec<(String, Vec<String>, Option<(String, Option<String>)>)> = Vec::new();
+    type SecretSpec = (String, Vec<String>, Option<(String, Option<String>)>);
+    let mut secret_specs: Vec<SecretSpec> = Vec::new();
     for secret_str in &opts.secret {
         let (env_var, hosts) = parse_secret(secret_str, "create")?;
         match secret_specs
@@ -1546,10 +1547,7 @@ fn apply_network_opts(
         builder = builder.secret(|mut s| {
             s = s.env(&env_var).source(source);
             if let Some((name, scheme)) = exact_header {
-                s = s
-                    .inject_headers(false)
-                    .inject_basic_auth(false)
-                    .exact_header(name, scheme);
+                s = s.exact_header(name, scheme);
             }
             for host in hosts {
                 s = allow_secret_host(s, &host);
@@ -1950,7 +1948,7 @@ fn parse_port_mapping(spec: &str) -> anyhow::Result<(std::net::IpAddr, u16, u16,
 }
 
 /// Parse a `--secret ENV@HOST[,HOST...]` spec into `(env_var, hosts)` for
-/// `command` (`create` or `modify`).
+/// `context` (the command or option that accepted the declaration).
 ///
 /// The value is NOT read here: the CLI records a host-side source reference
 /// (`{kind: env, var: ENV}`) that is resolved from the host environment when
@@ -1960,11 +1958,11 @@ fn parse_port_mapping(spec: &str) -> anyhow::Result<(std::net::IpAddr, u16, u16,
 /// The inline `ENV=VALUE@HOST` form is rejected loudly: the shell would leak
 /// the value regardless, so the value path is SDK-only. Users are pointed at
 /// the `ENV@HOST[,HOST...]` env-var form instead.
-pub(crate) fn parse_secret(spec: &str, command: &str) -> anyhow::Result<(String, Vec<String>)> {
+pub(crate) fn parse_secret(spec: &str, context: &str) -> anyhow::Result<(String, Vec<String>)> {
     if let Some(eq_pos) = spec.find('=') {
         let env_var = &spec[..eq_pos];
         anyhow::bail!(
-            "inline secret values (`{env_var}=VALUE@HOST`) are not supported by `{command}`: \
+            "inline secret values (`{env_var}=VALUE@HOST`) are not supported by `{context}`: \
              the value would be stored in the sandbox config at rest. Export the value as a \
              host environment variable and reference it with `{env_var}@HOST` instead, which \
              is resolved from the environment at start time."
@@ -1997,7 +1995,7 @@ fn parse_secret_exact_header(
 ) -> anyhow::Result<(String, Vec<String>, String, Option<String>)> {
     let mut parts = spec.split(';');
     let secret = parts.next().unwrap_or_default();
-    let (env_var, hosts) = parse_secret(secret, "create")?;
+    let (env_var, hosts) = parse_secret(secret, "--secret-exact-header")?;
     let mut header = None;
     let mut scheme = None;
 
@@ -2690,6 +2688,11 @@ mod tests {
                 None,
             )
         );
+        let inline = parse_secret_exact_header("API_KEY=value@api.example.com;header=X-Api-Key")
+            .unwrap_err()
+            .to_string();
+        assert!(inline.contains("`--secret-exact-header`"), "{inline}");
+        assert!(!inline.contains("`create`"), "{inline}");
 
         for invalid in [
             "API_KEY@api.example.com",
