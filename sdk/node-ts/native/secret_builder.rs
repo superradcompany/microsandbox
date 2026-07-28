@@ -63,9 +63,9 @@ impl JsSecretBuilder {
 
     /// Environment variable to expose the placeholder under (required).
     #[napi]
-    pub fn env(&mut self, var: String) -> &Self {
+    pub fn env(&mut self, name: String) -> &Self {
         let prev = self.take_inner();
-        self.inner = Some(prev.env(var));
+        self.inner = Some(prev.env(name));
         self
     }
 
