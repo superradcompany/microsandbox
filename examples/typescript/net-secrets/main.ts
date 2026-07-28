@@ -11,8 +11,6 @@ await using sandbox = await Sandbox.builder("net-secrets")
       .env("API_KEY")
       .value("sk-real-secret-123")
       .allowHost("example.com")
-      .injectHeaders(false)
-      .injectBasicAuth(false)
       .exactHeader("Authorization", "Bearer"),
   )
   .replace()
@@ -24,7 +22,7 @@ console.log(`Guest env: API_KEY=${env.stdout().trim()}`);
 
 // 2. HTTPS to allowed host — proxy substitutes secret, request succeeds.
 const allowed = await sandbox.shell(
-  "wget -q -O /dev/null --timeout=10 https://example.com && echo OK || echo FAIL",
+  "wget -q -O /dev/null --timeout=10 --header='Authorization: Bearer $MSB_API_KEY' https://example.com && echo OK || echo FAIL",
 );
 console.log(`HTTPS to example.com (allowed): ${allowed.stdout().trim()}`);
 

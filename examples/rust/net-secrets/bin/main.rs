@@ -14,8 +14,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             s.env("API_KEY")
                 .value("sk-real-secret-123")
                 .allow_host("example.com")
-                .inject_headers(false)
-                .inject_basic_auth(false)
                 .exact_header("Authorization", Some("Bearer".into()))
         })
         .replace()
@@ -30,7 +28,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Allowed host: the TLS proxy substitutes the placeholder for the real
     // secret in-flight, so the request goes through.
     let output = sandbox
-        .shell("wget -q -O /dev/null --timeout=10 https://example.com && echo OK || echo FAIL")
+        .shell(concat!(
+            "wget -q -O /dev/null --timeout=10 ",
+            "--header='Authorization: Bearer $MSB_API_KEY' ",
+            "https://example.com && echo OK || echo FAIL",
+        ))
         .await?;
     println!(
         "HTTPS to example.com (allowed): {}",
