@@ -1306,7 +1306,7 @@ export type JsSandboxHandle = SandboxHandle
 export declare class SecretBuilder {
   constructor()
   /** Environment variable to expose the placeholder under (required). */
-  env(var: string): this
+  env(envVar: string): this
   /** Secret value (required). */
   value(value: string): this
   /** Custom placeholder. Auto-generated as `$MSB_<env>` when unset. */

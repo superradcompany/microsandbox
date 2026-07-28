@@ -15,6 +15,8 @@ pub mod init;
 pub(crate) mod metrics;
 mod modify;
 mod patch;
+#[cfg(windows)]
+mod reap;
 #[cfg(feature = "ssh")]
 pub mod ssh;
 mod types;
@@ -79,6 +81,8 @@ pub(crate) fn reserved_label_prefix(key: &str) -> Option<&'static str> {
 // `mod patch` and `mod types` are private; re-export the entry points the
 // local backend's lifecycle and create methods under `backend/local/` call.
 pub(crate) use patch::{apply_patches, build_upper_tree};
+#[cfg(windows)]
+pub(crate) use reap::reap_leaked_runtime_process;
 pub(crate) use types::validate_named_disk_mount_options;
 pub(crate) use types::validate_volume_mounts;
 
