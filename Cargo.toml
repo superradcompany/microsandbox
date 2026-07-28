@@ -9,6 +9,7 @@ members = [
     "crates/image",
     "crates/metrics",
     "crates/metrics-collector",
+    "crates/oci-runtime",
     "packages/agent-client/rust",
     "packages/microsandbox-types/rust",
     "sdk/rust",
