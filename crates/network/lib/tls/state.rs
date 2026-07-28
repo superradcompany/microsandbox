@@ -9,7 +9,7 @@ use lru::LruCache;
 use microsandbox_utils::TLS_SUBDIR;
 use rustls::DigitallySignedStruct;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls_pki_types::{CertificateDer, ServerName, UnixTime, pem::PemObject};
 use time::{Duration, OffsetDateTime};
 use tokio_rustls::TlsConnector;
 
@@ -355,7 +355,7 @@ fn load_upstream_ca_certificates(root_store: &mut rustls::RootCertStore, paths: 
         match std::fs::read(path) {
             Ok(pem_data) => {
                 let mut extra_added = 0usize;
-                for cert in rustls_pemfile::certs(&mut pem_data.as_slice()).flatten() {
+                for cert in CertificateDer::pem_slice_iter(&pem_data).flatten() {
                     if root_store.add(cert).is_ok() {
                         extra_added += 1;
                     }

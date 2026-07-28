@@ -159,7 +159,7 @@ rustls = { version = "0.23", default-features = false, features = [
     "tls12",
 ] }
 tokio-rustls = "0.26"
-rustls-pemfile = "2"
+rustls-pki-types = "1"
 rustls-native-certs = "0.8"
 rcgen = { version = "0.14", features = ["x509-parser"] }
 lru = "0.18.0"
