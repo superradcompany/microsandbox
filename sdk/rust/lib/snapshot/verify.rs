@@ -10,7 +10,7 @@ use microsandbox_utils::extent::ExtentMap;
 use sha2::{Digest as _, Sha256};
 use tokio::io::AsyncReadExt;
 
-use crate::{MicrosandboxError, MicrosandboxResult};
+use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason};
 
 use super::Snapshot;
 
@@ -47,10 +47,12 @@ pub enum UpperVerifyStatus {
 
 pub(super) async fn verify_snapshot(snap: &Snapshot) -> MicrosandboxResult<SnapshotVerifyReport> {
     let SnapshotState::File(file_state) = &snap.manifest().state else {
-        return Err(MicrosandboxError::Unsupported {
-            feature: "Checkpoint-state snapshot verification".into(),
-            available_when: "after checkpoint closure providers land".into(),
-        });
+        return Err(MicrosandboxError::unsupported(
+            Operation::SnapshotOps,
+            UnsupportedReason::NotAvailable(
+                "checkpoint-state snapshot verification is not available".into(),
+            ),
+        ));
     };
     let expected = &file_state.upper.integrity;
 

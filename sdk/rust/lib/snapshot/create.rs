@@ -13,7 +13,7 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use crate::backend::LocalBackend;
 use crate::db::entity::sandbox as sandbox_entity;
 use crate::sandbox::{RootDisk, SandboxConfig, SandboxStatus};
-use crate::{MicrosandboxError, MicrosandboxResult};
+use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason};
 
 use super::store::index_upsert;
 use super::{Snapshot, SnapshotConfig};
@@ -37,10 +37,12 @@ pub(super) async fn create_snapshot(
     } = config;
 
     if resumable {
-        return Err(MicrosandboxError::Unsupported {
-            feature: "Resumable snapshots".into(),
-            available_when: "after VM pause/resume and resumable restore support land".into(),
-        });
+        return Err(MicrosandboxError::unsupported(
+            Operation::SnapshotOps,
+            UnsupportedReason::NotAvailable(
+                "resumable snapshots require VM pause/resume restore support".into(),
+            ),
+        ));
     }
 
     // Validate the destination before anything else so name errors surface

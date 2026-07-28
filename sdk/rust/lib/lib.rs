@@ -29,12 +29,13 @@ pub use agent::{
 pub use backend::{
     Backend, BackendKind, CloudBackend, CloudBackendBuilder, CloudCreateSandboxRequest,
     CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails, CloudMessageResponse,
-    CloudPaginated, CloudSandboxStatus, LocalBackend, LocalBackendBuilder, Profile, ProfileBackend,
-    SandboxBackend, SandboxCloudState, SandboxHandleCloudState, SandboxHandleInner,
-    SandboxHandleLocalState, SandboxInner, SandboxList, SandboxLocalState, SdkConfig,
-    VolumeBackend, VolumeCloudState, VolumeHandleCloudState, VolumeHandleInner,
-    VolumeHandleLocalState, VolumeInner, VolumeLocalState, default_backend, load_sdk_config,
-    resolve_default_backend, set_default_backend, swap_default_backend, with_backend,
+    CloudPaginated, CloudSandboxStatus, CloudSandboxStatusReason, CloudVolumeKind,
+    CloudVolumeStatus, LocalBackend, LocalBackendBuilder, Profile, ProfileBackend, SandboxBackend,
+    SandboxCloudState, SandboxHandleCloudState, SandboxHandleInner, SandboxHandleLocalState,
+    SandboxInner, SandboxLocalState, SdkConfig, VolumeBackend, VolumeCloudState,
+    VolumeHandleCloudState, VolumeHandleInner, VolumeHandleLocalState, VolumeInner,
+    VolumeLocalState, default_backend, load_sdk_config, resolve_default_backend,
+    set_default_backend, swap_default_backend, with_backend,
 };
 pub use config::set_sdk_libkrunfw_path as set_libkrunfw_path;
 pub use error::*;
@@ -56,8 +57,8 @@ pub use sandbox::{
     ChangeKind, ConfigPlannedChange, ExecOutput, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES,
     ModificationConflict, ModificationDisposition, ModificationPolicy, ModificationWarning,
     PlannedChange, ResourceConvergenceState, ResourceKind, ResourceResizeStatus, Sandbox,
-    SandboxConfig, SandboxMetrics, SandboxMetricsReport, SandboxMetricsState,
-    SandboxModificationBuilder, SandboxModificationPatch, SandboxModificationPlan,
+    SandboxConfig, SandboxListBuilder, SandboxMetrics, SandboxMetricsReport, SandboxMetricsState,
+    SandboxModificationBuilder, SandboxModificationPatch, SandboxModificationPlan, SandboxPage,
     SandboxPingResult, SandboxTouchResult, SecretChangeKind, SecretModificationPatch,
     SecretPatchBuilder, SecretPlannedChange, SecretSource, all_sandbox_metrics,
     all_sandbox_metrics_local, all_sandbox_metrics_reports_local, sandbox_metrics_report_local,

@@ -1,7 +1,7 @@
 //! `msb list` command — list all sandboxes.
 
 use clap::Args;
-use microsandbox::sandbox::{Sandbox, SandboxConfig, SandboxHandle, SandboxStatus};
+use microsandbox::sandbox::{SandboxConfig, SandboxHandle, SandboxStatus};
 
 use crate::ui;
 
@@ -42,7 +42,7 @@ pub struct ListArgs {
 
 /// Execute the `msb list` command.
 pub async fn run(args: ListArgs) -> anyhow::Result<()> {
-    let sandboxes = Sandbox::list_with(common::label_filter(&args.label)).await?;
+    let sandboxes = common::list_sandboxes(&args.label).await?;
 
     let filtered: Vec<_> = sandboxes
         .into_iter()

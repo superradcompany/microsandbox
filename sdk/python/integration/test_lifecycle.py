@@ -45,8 +45,8 @@ async def test_create_get_list_connect_stop_start_and_remove(sandbox_name):
         assert touch.name == name
         assert touch.activity_seq > 0
 
-        handles = await Sandbox.list()
-        assert any(handle.name == name for handle in handles)
+        page = await Sandbox.list()
+        assert any(handle.name == name for handle in page.sandboxes)
 
         handle = await Sandbox.get(name)
         assert handle.name == name
@@ -141,14 +141,20 @@ async def test_list_with_labels(sandbox_factory, sandbox_name):
     other_name = await other.name
 
     # Single selector → both of this owner's sandboxes, not the other's.
-    by_owner = {h.name for h in await Sandbox.list_with(labels={"owner": owner})}
+    by_owner = {
+        h.name
+        for h in (await Sandbox.list_with(labels={"owner": owner})).sandboxes
+    }
     assert web_name in by_owner
     assert job_name in by_owner
     assert other_name not in by_owner
 
     # AND of two selectors → only the web sandbox.
     by_owner_web = {
-        h.name for h in await Sandbox.list_with(labels={"owner": owner, "tier": "web"})
+        h.name
+        for h in (
+            await Sandbox.list_with(labels={"owner": owner, "tier": "web"})
+        ).sandboxes
     }
     assert web_name in by_owner_web
     assert job_name not in by_owner_web

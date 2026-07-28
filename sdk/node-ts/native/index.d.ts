@@ -839,10 +839,10 @@ export declare class Sandbox {
    * Sandbox names are limited to 128 UTF-8 bytes.
    */
   static get(name: string): Promise<JsSandboxHandle>
-  /** List all sandboxes. */
-  static list(): Promise<Array<JsSandboxHandle>>
-  /** List sandboxes matching a filter. */
-  static listWith(filter: SandboxListFilter): Promise<Array<JsSandboxHandle>>
+  /** List the first page of sandboxes. */
+  static list(): Promise<JsSandboxPage>
+  /** List a configured page of sandboxes. */
+  static listWith(options: SandboxListOptions): Promise<JsSandboxPage>
   /**
    * Remove a stopped sandbox from the database.
    *
@@ -1814,6 +1814,12 @@ export declare function install(): Promise<void>
 /** Check if msb and libkrunfw are installed and available. */
 export declare function isInstalled(): boolean
 
+/** One page returned by `Sandbox.list` / `Sandbox.listWith`. */
+export interface JsSandboxPage {
+  sandboxes: Array<JsSandboxHandle>
+  nextCursor?: string
+}
+
 /** One captured log entry from `exec.log`. */
 export interface LogEntry {
   /** Wall-clock timestamp when the chunk was captured (ms since epoch). */
@@ -2047,11 +2053,10 @@ export interface Rlimit {
   hard: number
 }
 
-/**
- * Filter for `Sandbox.list`. Matched sandboxes must carry all of `labels`
- * (AND-matched). Omit or leave empty to match every sandbox.
- */
-export interface SandboxListFilter {
+/** Options for one paginated sandbox list request. */
+export interface SandboxListOptions {
+  cursor?: string
+  limit?: number
   labels?: Record<string, string>
 }
 

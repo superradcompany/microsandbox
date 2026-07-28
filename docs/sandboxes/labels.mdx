@@ -99,22 +99,20 @@ msb ps --label app=engine --label tier=web   # only those with both
 ```
 
 ```rust Rust
-let handles = Sandbox::list_with(
-    SandboxFilter::new().label("app", "engine"),
-).await?;
+let page = Sandbox::list_with(|list| list.label("app", "engine")).await?;
 ```
 
 ```typescript TypeScript
-const handles = await Sandbox.listWith({ labels: { app: "engine" } });
+const page = await Sandbox.listWith((list) => list.label("app", "engine"));
 ```
 
 ```python Python
-handles = await Sandbox.list_with(labels={"app": "engine"})
+page = await Sandbox.list_with(labels={"app": "engine"})
 ```
 
 ```go Go
-handles, err := m.ListSandboxesWith(ctx,
-    m.NewSandboxFilter().WithLabels(map[string]string{"app": "engine"}),
+page, err := m.ListSandboxesWith(ctx,
+    m.WithListLabels(map[string]string{"app": "engine"}),
 )
 ```
 </CodeGroup>

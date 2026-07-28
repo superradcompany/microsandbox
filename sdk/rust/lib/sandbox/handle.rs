@@ -11,12 +11,13 @@ use std::sync::Arc;
 use sea_orm::EntityTrait;
 
 use crate::{
-    MicrosandboxResult,
+    MicrosandboxError, MicrosandboxResult,
     backend::{
         Backend, CloudCreateSandboxResponse, SandboxHandleCloudState, SandboxHandleInner,
         SandboxHandleLocalState,
     },
     db::entity::sandbox as sandbox_entity,
+    error::Operation,
 };
 
 use super::{Sandbox, SandboxConfig, SandboxModificationBuilder, SandboxStatus, SandboxStopResult};
@@ -81,10 +82,9 @@ impl SandboxHandle {
 
     /// Build a handle from a [`CloudCreateSandboxResponse`] HTTP response.
     ///
-    /// Returns an error if `cloud.config` cannot be re-serialised to JSON for
-    /// the `config_json()` view. Silent fallback to an empty string here would
-    /// surface later as a confusing `serde_json::Error` ("EOF while parsing")
-    /// out of [`config()`](Self::config) / [`config_json()`](Self::config_json).
+    /// Preserves the cloud's optional curated spec as JSON for the
+    /// `config_json()` inspection view. An absent spec is represented as JSON
+    /// `null`; it is not replaced with a fabricated SDK configuration.
     pub(crate) fn from_cloud(
         backend: Arc<dyn Backend>,
         cloud: CloudCreateSandboxResponse,
@@ -201,10 +201,9 @@ impl SandboxHandle {
     pub fn config(&self) -> MicrosandboxResult<SandboxConfig> {
         match &self.inner {
             SandboxHandleInner::Local(s) => Ok(serde_json::from_str(&s.config_json)?),
-            SandboxHandleInner::Cloud(_) => Err(crate::MicrosandboxError::Unsupported {
-                feature: "SandboxHandle::config on cloud".into(),
-                available_when: "when SandboxConfig is the cloud wire shape".into(),
-            }),
+            SandboxHandleInner::Cloud(_) => Err(MicrosandboxError::local_only(
+                Operation::SandboxHandleConfig,
+            )),
         }
     }
 
@@ -234,7 +233,7 @@ impl SandboxHandle {
         ) {
             return Ok(());
         }
-        Err(crate::MicrosandboxError::SandboxNotRunning(format!(
+        Err(MicrosandboxError::SandboxNotRunning(format!(
             "'{}' is not running (status: {status:?}); cannot {operation}",
             self.name
         )))
@@ -302,13 +301,10 @@ impl SandboxHandle {
     pub async fn metrics(&self) -> MicrosandboxResult<super::SandboxMetrics> {
         let local = self
             .local()
-            .ok_or_else(|| crate::MicrosandboxError::Unsupported {
-                feature: "SandboxHandle::metrics on cloud".into(),
-                available_when: "when cloud metrics land".into(),
-            })?;
+            .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxHandleMetrics))?;
 
         if local.status != SandboxStatus::Running && local.status != SandboxStatus::Draining {
-            return Err(crate::MicrosandboxError::SandboxNotRunning(format!(
+            return Err(MicrosandboxError::SandboxNotRunning(format!(
                 "'{}' is not running (status: {:?})",
                 self.name, local.status
             )));
@@ -316,16 +312,13 @@ impl SandboxHandle {
 
         let config = self.config()?;
         if config.effective_metrics_interval().is_none() {
-            return Err(crate::MicrosandboxError::MetricsDisabled(self.name.clone()));
+            return Err(MicrosandboxError::MetricsDisabled(self.name.clone()));
         }
 
-        let local_backend =
-            self.backend
-                .as_local()
-                .ok_or_else(|| crate::MicrosandboxError::Unsupported {
-                    feature: "SandboxHandle::metrics on cloud".into(),
-                    available_when: "when cloud metrics land".into(),
-                })?;
+        let local_backend = self
+            .backend
+            .as_local()
+            .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxHandleMetrics))?;
         let db = local_backend.db().await?.read();
         super::metrics::metrics_for_sandbox(db, local_backend, local.db_id, &config).await
     }
@@ -366,25 +359,19 @@ impl SandboxHandle {
     ) -> MicrosandboxResult<Sandbox> {
         let local = self
             .local()
-            .ok_or_else(|| crate::MicrosandboxError::Unsupported {
-                feature: "SandboxHandle::connect on cloud".into(),
-                available_when: "when cloud attach lands".into(),
-            })?;
+            .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxHandleConnect))?;
         if local.status != SandboxStatus::Running && local.status != SandboxStatus::Draining {
-            return Err(crate::MicrosandboxError::SandboxNotRunning(format!(
+            return Err(MicrosandboxError::SandboxNotRunning(format!(
                 "'{}' is not running (status: {:?})",
                 self.name, local.status
             )));
         }
 
-        let local_backend =
-            self.backend
-                .as_local()
-                .ok_or_else(|| crate::MicrosandboxError::Unsupported {
-                    feature: "SandboxHandle::connect on cloud".into(),
-                    available_when: "when cloud attach lands".into(),
-                })?;
-        let client = crate::sandbox::fs::local::connect_agent_with_timeout(
+        let local_backend = self
+            .backend
+            .as_local()
+            .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxHandleConnect))?;
+        let client = crate::sandbox::fs::agent::connect_agent_with_timeout(
             local_backend,
             &self.name,
             timeout,
@@ -434,10 +421,9 @@ impl SandboxHandle {
         name: &str,
     ) -> MicrosandboxResult<super::super::snapshot::Snapshot> {
         if self.local().is_none() {
-            return Err(crate::MicrosandboxError::Unsupported {
-                feature: "SandboxHandle::snapshot on cloud".into(),
-                available_when: "when cloud snapshots land".into(),
-            });
+            return Err(MicrosandboxError::local_only(
+                Operation::SandboxHandleSnapshot,
+            ));
         }
         use super::super::snapshot::Snapshot;
         Snapshot::builder(name)
@@ -488,7 +474,7 @@ impl SandboxHandle {
                 result?;
                 Ok(())
             }
-            Err(_) => Err(crate::MicrosandboxError::Runtime(format!(
+            Err(_) => Err(MicrosandboxError::Runtime(format!(
                 "timed out observing stopped state for sandbox '{}'",
                 current.name
             ))),
@@ -541,7 +527,7 @@ impl SandboxHandle {
                 result?;
                 Ok(())
             }
-            Err(_) => Err(crate::MicrosandboxError::Runtime(format!(
+            Err(_) => Err(MicrosandboxError::Runtime(format!(
                 "timed out observing stopped state for sandbox '{}'",
                 current.name
             ))),
@@ -600,29 +586,23 @@ impl SandboxHandle {
         match &self.inner {
             SandboxHandleInner::Local(_) => {
                 let refreshed = self.refresh().await?;
-                let local =
-                    refreshed
-                        .local()
-                        .ok_or_else(|| crate::MicrosandboxError::Unsupported {
-                            feature: "SandboxHandle::remove on cloud".into(),
-                            available_when: "wired via Cloud variant".into(),
-                        })?;
+                let local = refreshed
+                    .local()
+                    .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxHandleRemove))?;
                 if matches!(
                     local.status,
                     SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
                 ) {
-                    return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
+                    return Err(MicrosandboxError::SandboxStillRunning(format!(
                         "cannot remove sandbox '{}': still running",
                         self.name
                     )));
                 }
 
-                let local_backend = self.backend.as_local().ok_or_else(|| {
-                    crate::MicrosandboxError::Unsupported {
-                        feature: "SandboxHandle::remove on cloud".into(),
-                        available_when: "wired via Cloud variant".into(),
-                    }
-                })?;
+                let local_backend = self
+                    .backend
+                    .as_local()
+                    .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxHandleRemove))?;
 
                 // Windows: a terminal row can still be backed by a leaked VM
                 // process. Deleting the row and run records now would orphan
@@ -630,7 +610,6 @@ impl SandboxHandle {
                 // it (identity-checked) or fail before touching any state.
                 #[cfg(windows)]
                 super::reap_leaked_runtime_process(local_backend, local.db_id, &self.name).await?;
-
                 let pools = local_backend.db().await?;
 
                 super::remove_dir_if_exists(&local_backend.sandboxes_dir().join(&self.name))?;

@@ -15,6 +15,8 @@ import {
   type NapiSandbox,
   type NapiSandboxBuilderSetters,
   type NapiSandboxConfig,
+  type NapiSandboxListOptions,
+  type NapiSandboxPage,
 } from "./internal/napi.js";
 import { ExecHandle, ExecOutput } from "./exec.js";
 import { SandboxFsOps } from "./fs.js";
@@ -67,6 +69,50 @@ export interface SandboxPingResult {
 export interface SandboxTouchResult {
   readonly name: string;
   readonly activitySeq: number;
+}
+
+/** One page returned by `Sandbox.list()` or `Sandbox.listWith()`. */
+export interface SandboxPage {
+  sandboxes: SandboxHandle[];
+  nextCursor?: string;
+}
+
+/** Fluent options for one paginated sandbox list request. */
+export class SandboxListBuilder {
+  private readonly options: NapiSandboxListOptions = {};
+
+  limit(limit: number): this {
+    this.options.limit = limit;
+    return this;
+  }
+
+  cursor(cursor: string): this {
+    this.options.cursor = cursor;
+    return this;
+  }
+
+  label(key: string, value: string): this {
+    this.options.labels ??= {};
+    this.options.labels[key] = value;
+    return this;
+  }
+
+  labels(labels: Record<string, string>): this {
+    this.options.labels = { ...this.options.labels, ...labels };
+    return this;
+  }
+
+  /** @internal */
+  toNapi(): NapiSandboxListOptions {
+    return this.options;
+  }
+}
+
+function sandboxPageFromNapi(page: NapiSandboxPage): SandboxPage {
+  return {
+    sandboxes: page.sandboxes.map((handle) => new SandboxHandle(handle)),
+    nextCursor: page.nextCursor,
+  };
 }
 
 /**
@@ -188,21 +234,21 @@ export class Sandbox implements AsyncDisposable {
     return new SandboxHandle(h);
   }
 
-  /** List all known sandboxes. */
-  static async list(): Promise<SandboxHandle[]> {
-    const handles = await withMappedErrors(() => napi.Sandbox.list());
-    return handles.map((handle) => new SandboxHandle(handle));
+  /** List the first page of known sandboxes. */
+  static async list(): Promise<SandboxPage> {
+    const page = await withMappedErrors(() => napi.Sandbox.list());
+    return sandboxPageFromNapi(page);
   }
 
-  /**
-   * List sandboxes filtered to those carrying all of the given labels
-   * (AND-matched).
-   */
-  static async listWith(filter: {
-    labels?: Record<string, string>;
-  }): Promise<SandboxHandle[]> {
-    const handles = await withMappedErrors(() => napi.Sandbox.listWith(filter));
-    return handles.map((handle) => new SandboxHandle(handle));
+  /** List a configured page of sandboxes. */
+  static async listWith(
+    configure: (list: SandboxListBuilder) => SandboxListBuilder,
+  ): Promise<SandboxPage> {
+    const options = configure(new SandboxListBuilder()).toNapi();
+    const page = await withMappedErrors(() =>
+      napi.Sandbox.listWith(options),
+    );
+    return sandboxPageFromNapi(page);
   }
 
   /**

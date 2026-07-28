@@ -119,16 +119,23 @@ export interface NapiAgentClient {
 export type NapiBuilderCtor<T> = new () => T;
 export type NapiSandboxConfig = Record<string, unknown>;
 
-export interface NapiSandboxListFilter {
+export interface NapiSandboxListOptions {
+  cursor?: string;
+  limit?: number;
   labels?: Record<string, string>;
+}
+
+export interface NapiSandboxPage {
+  sandboxes: NapiSandboxHandle[];
+  nextCursor?: string;
 }
 
 export interface NapiSandboxStatic {
   start(name: string): Promise<NapiSandbox>;
   startDetached(name: string): Promise<NapiSandbox>;
   get(name: string): Promise<NapiSandboxHandle>;
-  list(): Promise<NapiSandboxHandle[]>;
-  listWith(filter: NapiSandboxListFilter): Promise<NapiSandboxHandle[]>;
+  list(): Promise<NapiSandboxPage>;
+  listWith(options: NapiSandboxListOptions): Promise<NapiSandboxPage>;
   remove(name: string): Promise<void>;
 }
 

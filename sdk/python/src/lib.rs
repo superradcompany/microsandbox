@@ -48,6 +48,7 @@ fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<sandbox::PySandboxStopResult>()?;
     m.add_class::<sandbox::PySandboxPingResult>()?;
     m.add_class::<sandbox::PySandboxTouchResult>()?;
+    m.add_class::<sandbox::PySandboxPage>()?;
     m.add_class::<sandbox_handle::PySandboxHandle>()?;
     m.add_class::<exec::PyExecOutput>()?;
     m.add_class::<exec::PyExecHandle>()?;
@@ -162,12 +163,9 @@ fn default_backend_kind() -> &'static str {
 #[pyfunction]
 fn resolved_msb_path() -> PyResult<String> {
     let backend = microsandbox::backend::default_backend();
-    let local = backend.as_local().ok_or_else(|| {
-        error::to_py_err(microsandbox::MicrosandboxError::Unsupported {
-            feature: "resolved_msb_path requires a local backend".into(),
-            available_when: "with a local backend".into(),
-        })
-    })?;
+    let local = backend
+        .as_local()
+        .ok_or_else(|| error::local_only("resolved_msb_path"))?;
     local
         .config()
         .resolve_msb_path()

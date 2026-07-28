@@ -104,12 +104,12 @@ func TestSmokeGetVolumeNotFound(t *testing.T) {
 
 func TestSmokeListSandboxesEmpty(t *testing.T) {
 	ctx := smokeSetup(t)
-	handles, err := ListSandboxes(ctx)
+	page, err := ListSandboxes(ctx)
 	if err != nil {
 		t.Fatalf("ListSandboxes: %v", err)
 	}
-	if len(handles) != 0 {
-		t.Fatalf("fresh MSB_HOME should have zero sandboxes, got %d", len(handles))
+	if len(page.Sandboxes) != 0 {
+		t.Fatalf("fresh MSB_HOME should have zero sandboxes, got %d", len(page.Sandboxes))
 	}
 }
 

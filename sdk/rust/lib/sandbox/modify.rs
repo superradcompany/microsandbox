@@ -8,6 +8,7 @@ use sea_orm::{ActiveModelTrait, Set};
 use crate::MicrosandboxResult;
 use crate::backend::Backend;
 use crate::db::entity::sandbox as sandbox_entity;
+use crate::error::{Operation, UnsupportedReason};
 use crate::size::Mebibytes;
 
 use super::{SandboxConfig, SandboxStatus};
@@ -570,13 +571,12 @@ async fn grow_upper_now(
     name: &str,
     target_mib: u32,
 ) -> MicrosandboxResult<()> {
-    let local_backend =
-        backend
-            .as_local()
-            .ok_or_else(|| crate::MicrosandboxError::Unsupported {
-                feature: "oci upper grow on cloud".into(),
-                available_when: "when cloud modify lands".into(),
-            })?;
+    let local_backend = backend.as_local().ok_or_else(|| {
+        crate::MicrosandboxError::unsupported(
+            Operation::SandboxModify,
+            UnsupportedReason::LocalOnly,
+        )
+    })?;
     let upper_path = local_backend.sandboxes_dir().join(name).join("upper.ext4");
     super::upper::grow_upper_to_mib(upper_path, target_mib).await
 }
@@ -908,10 +908,10 @@ fn apply_secret_patch_to_config(
     if patch.secrets.is_empty() && patch.secrets_remove.is_empty() {
         return Ok(());
     }
-    Err(crate::MicrosandboxError::Unsupported {
-        feature: "secret modification".into(),
-        available_when: "in builds with the net feature".into(),
-    })
+    Err(crate::MicrosandboxError::unsupported(
+        Operation::SandboxModify,
+        UnsupportedReason::RequiresCrateFeature("net"),
+    ))
 }
 
 /// Secret material carried by one spec: a raw value or a source reference.
@@ -1130,17 +1130,10 @@ async fn persist_config(
 ) -> MicrosandboxResult<()> {
     let local = handle
         .local()
-        .ok_or_else(|| crate::MicrosandboxError::Unsupported {
-            feature: "modify apply on cloud".into(),
-            available_when: "when cloud modify lands".into(),
-        })?;
-    let local_backend =
-        backend
-            .as_local()
-            .ok_or_else(|| crate::MicrosandboxError::Unsupported {
-                feature: "modify apply on cloud".into(),
-                available_when: "when cloud modify lands".into(),
-            })?;
+        .ok_or_else(|| crate::MicrosandboxError::local_only(Operation::SandboxModify))?;
+    let local_backend = backend
+        .as_local()
+        .ok_or_else(|| crate::MicrosandboxError::local_only(Operation::SandboxModify))?;
 
     let config_json = serde_json::to_string(config)?;
     sandbox_entity::ActiveModel {
@@ -1162,17 +1155,10 @@ async fn persist_active_config(
 ) -> MicrosandboxResult<()> {
     let local = handle
         .local()
-        .ok_or_else(|| crate::MicrosandboxError::Unsupported {
-            feature: "modify apply on cloud".into(),
-            available_when: "when cloud modify lands".into(),
-        })?;
-    let local_backend =
-        backend
-            .as_local()
-            .ok_or_else(|| crate::MicrosandboxError::Unsupported {
-                feature: "modify apply on cloud".into(),
-                available_when: "when cloud modify lands".into(),
-            })?;
+        .ok_or_else(|| crate::MicrosandboxError::local_only(Operation::SandboxModify))?;
+    let local_backend = backend
+        .as_local()
+        .ok_or_else(|| crate::MicrosandboxError::local_only(Operation::SandboxModify))?;
 
     let active_json = serde_json::to_string(active)?;
     sandbox_entity::ActiveModel {

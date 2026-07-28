@@ -55,7 +55,7 @@ pub async fn run(args: PsArgs) -> anyhow::Result<()> {
     let handles: Vec<SandboxHandle> = if let Some(name) = args.name.as_deref() {
         vec![Sandbox::get(name).await?]
     } else {
-        let mut sandboxes = Sandbox::list_with(common::label_filter(&args.label)).await?;
+        let mut sandboxes = common::list_sandboxes(&args.label).await?;
         if !args.all {
             sandboxes.retain(|s| {
                 s.status_snapshot() == SandboxStatus::Running

@@ -26,22 +26,29 @@ pub(crate) mod sandbox;
 pub(crate) mod volume;
 
 pub use cloud::{CloudBackend, CloudBackendBuilder};
+use futures::future::BoxFuture;
 pub use local::{LocalBackend, LocalBackendBuilder};
 pub use microsandbox_types::{
     CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
-    CloudMessageResponse, CloudPaginated, CloudSandboxStatus,
+    CloudMessageResponse, CloudPaginated, CloudSandboxStatus, CloudSandboxStatusReason,
 };
 pub use profile::{Profile, ProfileBackend, SdkConfig, load_sdk_config, resolve_default_backend};
 pub use sandbox::{
     SandboxBackend, SandboxCloudState, SandboxHandleCloudState, SandboxHandleInner,
-    SandboxHandleLocalState, SandboxInner, SandboxList, SandboxLocalState,
+    SandboxHandleLocalState, SandboxInner, SandboxLocalState,
 };
 pub use volume::{
-    VolumeBackend, VolumeCloudState, VolumeHandleCloudState, VolumeHandleInner,
-    VolumeHandleLocalState, VolumeInner, VolumeLocalState,
+    CloudVolumeKind, CloudVolumeStatus, VolumeBackend, VolumeCloudState, VolumeHandleCloudState,
+    VolumeHandleInner, VolumeHandleLocalState, VolumeInner, VolumeLocalState,
 };
 
-use std::sync::{Arc, OnceLock, RwLock};
+use std::{
+    sync::{Arc, OnceLock, RwLock},
+    time::Duration,
+};
+
+use crate::MicrosandboxResult;
+use crate::error::Operation;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -64,6 +71,8 @@ pub enum BackendKind {
 /// Object-safe — handles hold an `Arc<dyn Backend>`. Sub-trait accessors stay
 /// off this trait until each sub-trait's surface is finalised, which lets the
 /// scaffolding land without committing to method signatures that will change.
+/// New methods ship with default implementations, so custom backends
+/// (mocks, proxies) keep compiling as the trait grows.
 pub trait Backend: Send + Sync + 'static {
     /// Return the kind of backend this is (`Local` or `Cloud`).
     fn kind(&self) -> BackendKind;
@@ -74,13 +83,31 @@ pub trait Backend: Send + Sync + 'static {
     /// Return the volume lifecycle backend.
     fn volumes(&self) -> &dyn VolumeBackend;
 
-    /// Downcast to a concrete `&LocalBackend` when this backend is local.
+    /// Try downcast to a concrete `&LocalBackend` when in a local context.
     ///
     /// Used by helpers that need access to local-only state (DB pool, config
     /// paths) without keeping a separate `Arc<LocalBackend>` alongside the
     /// `Arc<dyn Backend>`. Returns `None` for cloud backends.
     fn as_local(&self) -> Option<&LocalBackend> {
         None
+    }
+
+    /// Open a fresh agent connection to the named sandbox with an explicit
+    /// handshake timeout. Local dials the relay socket; cloud dials the
+    /// sandbox's agent WebSocket route.
+    /// Exec, attach, and guest-filesystem operations route through this
+    /// connection. The default errors as unsupported for backends that
+    /// cannot reach a sandbox agent.
+    fn dial_agent<'a>(
+        &'a self,
+        _name: &'a str,
+        _timeout: Duration,
+    ) -> BoxFuture<'a, MicrosandboxResult<crate::agent::AgentClient>> {
+        Box::pin(async {
+            Err(crate::MicrosandboxError::local_only(
+                Operation::AgentConnect,
+            ))
+        })
     }
 }
 

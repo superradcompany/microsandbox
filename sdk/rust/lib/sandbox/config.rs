@@ -144,6 +144,15 @@ pub struct SandboxConfig {
     #[serde(skip)]
     pub replace_with_timeout: std::time::Duration,
 
+    /// Requested globally-unique slug for the sandbox (cloud backends only).
+    ///
+    /// When unset, the cloud assigns one. Create fails when the slug is
+    /// already taken.
+    ///
+    /// This is a create-time option, not persisted sandbox state.
+    #[serde(skip)]
+    pub slug: Option<String>,
+
     /// Manifest digest for the resolved OCI image.
     ///
     /// Set at create time. Used by spawn to derive VMDK and fsmeta paths
@@ -632,6 +641,7 @@ impl Default for SandboxConfig {
             ca_certs: Vec::new(),
             replace_existing: false,
             replace_with_timeout: DEFAULT_REPLACE_TIMEOUT,
+            slug: None,
             manifest_digest: None,
             snapshot_upper_source: None,
             launch_intent: LaunchIntent::None,
