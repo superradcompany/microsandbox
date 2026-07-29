@@ -29,12 +29,12 @@ use microsandbox_types::{
 // Constants
 //--------------------------------------------------------------------------------------------------
 
-/// Server-held readiness budget requested for create-and-start calls.
-const CLOUD_CREATE_WAIT_TIMEOUT_SECS: u64 = 90;
+/// Server-held readiness budget requested for lifecycle start calls.
+const CLOUD_READY_WAIT_TIMEOUT_SECS: u64 = 90;
 
 /// Network headroom beyond the server wait so the JSON response can arrive
 /// before reqwest's ordinary 30-second client timeout applies.
-const CLOUD_CREATE_HTTP_TIMEOUT: Duration = Duration::from_secs(95);
+const CLOUD_READY_HTTP_TIMEOUT: Duration = Duration::from_secs(95);
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -70,8 +70,9 @@ struct CloudSandboxListQuery<'a> {
 }
 
 #[derive(Serialize)]
-struct CloudSandboxCreateQuery {
-    start: bool,
+struct CloudSandboxWaitQuery {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start: Option<bool>,
     wait_for: &'static str,
     wait_timeout: u64,
 }
@@ -98,12 +99,12 @@ impl CloudBackend {
         let url = format!("{}/v1/sandboxes", self.url);
         let mut request = self.http.post(&url).json(req);
         if start {
-            let query = CloudSandboxCreateQuery {
-                start: true,
+            let query = CloudSandboxWaitQuery {
+                start: Some(true),
                 wait_for: "running",
-                wait_timeout: CLOUD_CREATE_WAIT_TIMEOUT_SECS,
+                wait_timeout: CLOUD_READY_WAIT_TIMEOUT_SECS,
             };
-            request = request.query(&query).timeout(CLOUD_CREATE_HTTP_TIMEOUT);
+            request = request.query(&query).timeout(CLOUD_READY_HTTP_TIMEOUT);
         }
         let resp = request
             .send()
@@ -148,7 +149,7 @@ impl CloudBackend {
         decode_json(resp, "GET /v1/sandboxes/by-name/:name").await
     }
 
-    /// `POST /v1/sandboxes/by-name/:name/start`.
+    /// `POST /v1/sandboxes/by-name/:name/start`, waiting for readiness.
     pub async fn start_sandbox(
         &self,
         name: &str,
@@ -158,10 +159,17 @@ impl CloudBackend {
             self.url,
             urlencoding(name)
         );
+        let query = CloudSandboxWaitQuery {
+            start: None,
+            wait_for: "running",
+            wait_timeout: CLOUD_READY_WAIT_TIMEOUT_SECS,
+        };
         let resp = self
             .http
             .post(&url)
             .json(&serde_json::json!({}))
+            .query(&query)
+            .timeout(CLOUD_READY_HTTP_TIMEOUT)
             .send()
             .await
             .map_err(|e| cloud_io_error("POST start", e))?;

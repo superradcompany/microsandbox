@@ -110,6 +110,7 @@ impl SandboxBackend for CloudBackend {
             let current = CloudBackend::get_sandbox(self, name).await?;
             let config = sandbox_config_from_cloud(&current);
             let cloud = CloudBackend::start_sandbox(self, name).await?;
+            ensure_cloud_sandbox_ready(&cloud)?;
             Ok(Sandbox::from_cloud(backend, cloud, config))
         })
     }
@@ -125,6 +126,7 @@ impl SandboxBackend for CloudBackend {
             let current = CloudBackend::get_sandbox(self, name).await?;
             let config = sandbox_config_from_cloud(&current);
             let cloud = CloudBackend::start_sandbox(self, name).await?;
+            ensure_cloud_sandbox_ready(&cloud)?;
             Ok(Sandbox::from_cloud(backend, cloud, config))
         })
     }
@@ -353,8 +355,8 @@ pub(crate) fn cloud_status_to_sandbox_status(s: CloudSandboxStatus) -> SandboxSt
     }
 }
 
-/// Enforce the cross-backend create contract: a successful create returns a
-/// sandbox whose agent-facing operations are immediately usable.
+/// Enforce the cross-backend lifecycle contract: a successful create or start
+/// returns a sandbox whose agent-facing operations are immediately usable.
 fn ensure_cloud_sandbox_ready(cloud: &CloudCreateSandboxResponse) -> MicrosandboxResult<()> {
     match cloud.status {
         CloudSandboxStatus::Running => Ok(()),
@@ -744,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn cloud_create_readiness_accepts_only_running() {
+    fn cloud_lifecycle_readiness_accepts_only_running() {
         assert!(ensure_cloud_sandbox_ready(&cloud_response(CloudSandboxStatus::Running)).is_ok());
 
         for status in [
