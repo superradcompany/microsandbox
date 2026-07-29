@@ -4,7 +4,9 @@
 //! plain HTTP; logs stream over SSE; exec, attach, and guest-fs ride the agent
 //! WebSocket route through the shared agent client (see the `DialAgent` impl).
 //!
-//! Construction is URL + API key first; `from_env` and `from_profile` are sugar.
+//! Construction requires an API key. Hosted-cloud callers use the default
+//! endpoint; `new`, environment configuration, and profiles can override it
+//! for development, self-hosted, and on-prem deployments.
 //! Auth is API-key-only — the same `msb_live_*` / `msb_test_*` tokens msb-cloud
 //! issues today. No OAuth or session credentials are honored here.
 
@@ -37,6 +39,9 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 // Constants
 //--------------------------------------------------------------------------------------------------
 
+/// Hosted microsandbox API endpoint used when no cloud URL is configured.
+pub const DEFAULT_CLOUD_API_URL: &str = "https://api.microsandbox.dev";
+
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Default User-Agent header value.
@@ -57,7 +62,8 @@ fn default_user_agent() -> String {
 /// Constructors:
 /// - [`CloudBackend::new`] — primary; explicit URL + key. Works for hosted SaaS,
 ///   self-hosted, and on-prem deployments identically.
-/// - [`CloudBackend::from_env`] — reads `MSB_API_URL` + `MSB_API_KEY`.
+/// - [`CloudBackend::with_api_key`] — hosted SaaS with the default API URL.
+/// - [`CloudBackend::from_env`] — reads `MSB_API_KEY`; `MSB_API_URL` is optional.
 /// - [`CloudBackend::from_profile`] — reads a named profile from the SDK config.
 /// - [`CloudBackend::builder`] — tuned construction (custom client, timeout,
 ///   user agent).
@@ -71,7 +77,6 @@ pub struct CloudBackend {
 ///
 /// ```ignore
 /// let cloud = CloudBackend::builder()
-///     .url("https://msb.example.com")
 ///     .api_key(key)
 ///     .request_timeout(Duration::from_secs(60))
 ///     .build()?;
@@ -98,21 +103,31 @@ impl CloudBackend {
         Self::builder().url(url).api_key(api_key).build()
     }
 
-    /// Construct from `MSB_API_URL` + `MSB_API_KEY` env vars.
+    /// Construct for hosted microsandbox using [`DEFAULT_CLOUD_API_URL`].
+    pub fn with_api_key(api_key: impl Into<String>) -> MicrosandboxResult<Self> {
+        Self::builder().api_key(api_key).build()
+    }
+
+    /// Construct from `MSB_API_KEY` and an optional `MSB_API_URL` override.
     ///
-    /// Returns `InvalidConfig` if either is missing or empty.
+    /// Returns `InvalidConfig` if `MSB_API_KEY` is missing or empty. A missing
+    /// or empty `MSB_API_URL` uses [`DEFAULT_CLOUD_API_URL`].
     pub fn from_env() -> MicrosandboxResult<Self> {
-        let url = std::env::var("MSB_API_URL").map_err(|_| {
-            MicrosandboxError::InvalidConfig(
-                "MSB_API_URL not set — required for cloud backend".into(),
-            )
-        })?;
         let api_key = std::env::var("MSB_API_KEY").map_err(|_| {
             MicrosandboxError::InvalidConfig(
                 "MSB_API_KEY not set — required for cloud backend".into(),
             )
         })?;
-        Self::new(url.trim(), api_key.trim())
+
+        let mut builder = Self::builder().api_key(api_key.trim());
+        if let Some(url) = std::env::var("MSB_API_URL")
+            .ok()
+            .map(|url| url.trim().to_string())
+            .filter(|url| !url.is_empty())
+        {
+            builder = builder.url(url);
+        }
+        builder.build()
     }
 
     /// Construct from a named SDK profile in `~/.microsandbox/config.json`.
@@ -195,12 +210,11 @@ impl CloudBackendBuilder {
         self
     }
 
-    /// Build the `CloudBackend`. Errors when URL or API key are missing, or
-    /// when the underlying HTTP client fails to construct.
+    /// Build the `CloudBackend`. Uses [`DEFAULT_CLOUD_API_URL`] when `.url(...)`
+    /// was not called. Errors when the API key is missing or invalid, an
+    /// explicitly supplied URL is empty, or the HTTP client fails to construct.
     pub fn build(self) -> MicrosandboxResult<CloudBackend> {
-        let url = self.url.ok_or_else(|| {
-            MicrosandboxError::InvalidConfig("CloudBackend requires a URL (call .url(...))".into())
-        })?;
+        let url = self.url.as_deref().unwrap_or(DEFAULT_CLOUD_API_URL);
         let url = url.trim();
         if url.is_empty() {
             return Err(MicrosandboxError::InvalidConfig(
@@ -364,8 +378,15 @@ mod tests {
     }
 
     #[test]
-    fn builder_rejects_missing_url() {
-        assert!(CloudBackendBuilder::default().api_key("k").build().is_err());
+    fn with_api_key_uses_default_cloud_url() {
+        let b = CloudBackend::with_api_key("msb_test_abc").unwrap();
+        assert_eq!(b.url(), DEFAULT_CLOUD_API_URL);
+    }
+
+    #[test]
+    fn builder_uses_default_cloud_url() {
+        let b = CloudBackendBuilder::default().api_key("k").build().unwrap();
+        assert_eq!(b.url(), DEFAULT_CLOUD_API_URL);
     }
 
     #[test]
@@ -396,15 +417,6 @@ mod tests {
     #[test]
     fn builder_rejects_whitespace_key() {
         assert!(CloudBackend::new("https://x", "   ").is_err());
-    }
-
-    #[test]
-    fn from_env_errors_when_url_missing() {
-        // Note: this test can race with parallel tests setting env vars. Just
-        // verify the function returns an error when MSB_API_URL is clearly absent;
-        // we don't try to scrub env state.
-        unsafe { std::env::remove_var("MSB_API_URL") };
-        assert!(CloudBackend::from_env().is_err());
     }
 
     #[test]

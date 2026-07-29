@@ -110,7 +110,7 @@ fn set_runtime_libkrunfw_path(path: String) {
 /// Set the process-wide default backend.
 ///
 /// `kind="local"` selects the local libkrun backend. `kind="cloud"` requires
-/// either `url` + `api_key`, or `profile`.
+/// either `api_key` (with an optional `url` override), or `profile`.
 #[pyfunction]
 #[pyo3(signature = (kind, *, url=None, api_key=None, profile=None))]
 fn set_default_backend(
@@ -185,17 +185,15 @@ fn build_backend(
             let cloud = if let Some(profile) = profile {
                 microsandbox::CloudBackend::from_profile(&profile)
             } else {
-                let url = url.ok_or_else(|| {
-                    pyo3::exceptions::PyValueError::new_err(
-                        "cloud backend requires url + api_key or profile",
-                    )
-                })?;
                 let api_key = api_key.ok_or_else(|| {
                     pyo3::exceptions::PyValueError::new_err(
-                        "cloud backend requires url + api_key or profile",
+                        "cloud backend requires api_key or profile",
                     )
                 })?;
-                microsandbox::CloudBackend::new(url, api_key)
+                match url {
+                    Some(url) => microsandbox::CloudBackend::new(url, api_key),
+                    None => microsandbox::CloudBackend::with_api_key(api_key),
+                }
             }
             .map_err(error::to_py_err)?;
             Ok(Arc::new(cloud))

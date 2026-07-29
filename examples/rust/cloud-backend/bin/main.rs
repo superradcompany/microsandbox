@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use futures::StreamExt;
 use microsandbox::logs::{LogSource, LogStreamOptions};
 use microsandbox::sandbox::SandboxStatus;
-use microsandbox::{BackendKind, CloudBackend, Sandbox, set_default_backend};
+use microsandbox::{BackendKind, Sandbox};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -71,16 +71,9 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn configure_cloud_backend() -> anyhow::Result<()> {
-    let cloud = if let Ok(profile) = std::env::var("MSB_PROFILE") {
-        CloudBackend::from_profile(profile.trim())?
-    } else {
-        CloudBackend::from_env()?
-    };
-    set_default_backend(cloud);
-
     let kind = microsandbox::default_backend().kind();
     if kind != BackendKind::Cloud {
-        anyhow::bail!("expected cloud backend, got {kind:?}");
+        anyhow::bail!("set MSB_API_KEY or select a cloud profile; got {kind:?}");
     }
     Ok(())
 }

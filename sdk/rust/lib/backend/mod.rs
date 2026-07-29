@@ -11,9 +11,10 @@
 //! ## Ambient default
 //!
 //! [`default_backend`] returns the process-wide default. [`set_default_backend`]
-//! installs one; if never called, the first access lazy-initialises to
-//! [`LocalBackend::lazy`]. [`with_backend`] scopes an override to one async
-//! future (and any tasks it spawns) via `tokio::task_local!`.
+//! installs one; if never called, the first access resolves environment and
+//! profile configuration before falling back to [`LocalBackend::lazy`].
+//! [`with_backend`] scopes an override to one async future (and any tasks it
+//! spawns) via `tokio::task_local!`.
 //!
 //! See `planning/microsandbox/design/api/local-cloud-backend.md` for the
 //! full trait-surface spec, and `planning/microsandbox/design/api/ambient-backend.md`
@@ -25,7 +26,7 @@ mod profile;
 pub(crate) mod sandbox;
 pub(crate) mod volume;
 
-pub use cloud::{CloudBackend, CloudBackendBuilder};
+pub use cloud::{CloudBackend, CloudBackendBuilder, DEFAULT_CLOUD_API_URL};
 use futures::future::BoxFuture;
 pub use local::{LocalBackend, LocalBackendBuilder};
 pub use microsandbox_types::{
@@ -118,8 +119,8 @@ pub trait Backend: Send + Sync + 'static {
 // Functions: Ambient default
 //--------------------------------------------------------------------------------------------------
 
-/// Process-wide default backend. Lazy-initialised to `LocalBackend::lazy()`
-/// on first access if `set_default_backend` has not been called.
+/// Process-wide default backend. Lazy-initialised from environment/profile
+/// configuration, with `LocalBackend::lazy()` as the final fallback.
 static DEFAULT: OnceLock<RwLock<Arc<dyn Backend>>> = OnceLock::new();
 
 /// Install a process-wide default backend.

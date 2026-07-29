@@ -67,7 +67,6 @@ microsandbox reads its global configuration from `~/.microsandbox/config.json`. 
   "profiles": {
     "prod": {
       "backend": "cloud",
-      "url": "https://cloud.example.com",
       "api_key_ref": "env:MSB_API_KEY"
     },
     "local": {
@@ -243,7 +242,6 @@ Backend profiles let CLI and SDK calls choose between the local runtime and a cl
   "profiles": {
     "prod": {
       "backend": "cloud",
-      "url": "https://cloud.example.com",
       "api_key_ref": "env:MSB_API_KEY"
     },
     "local": {
@@ -259,7 +257,7 @@ Use `active_profile` for the default profile. Use `MSB_PROFILE=<name>` to overri
 MSB_PROFILE=prod msb run python -- python -V
 ```
 
-Cloud profiles require `url` and `api_key_ref`. Supported credential references are:
+Cloud profiles require `api_key_ref`. The `url` field is optional and defaults to `https://api.microsandbox.dev`; set it only for a development, self-hosted, or on-prem control plane. Supported credential references are:
 
 | Prefix | Description |
 |--------|-------------|
@@ -269,7 +267,15 @@ Cloud profiles require `url` and `api_key_ref`. Supported credential references 
 Backend resolution uses this order:
 
 1. Programmatic backend set by the SDK
-2. `MSB_BACKEND=local`, or `MSB_API_URL` plus `MSB_API_KEY`
+2. `MSB_BACKEND=local`, or a non-empty `MSB_API_KEY`
 3. `MSB_PROFILE=<name>`
 4. `active_profile`
 5. Local runtime
+
+For hosted cloud usage, the API key is sufficient:
+
+```bash
+export MSB_API_KEY=msb_...
+```
+
+`MSB_API_URL` only overrides the cloud endpoint; it never selects the cloud backend without an API key.
