@@ -350,10 +350,12 @@ impl VolumeHandle {
     pub fn kind(&self) -> VolumeKind {
         match &self.inner {
             VolumeHandleInner::Local(s) => s.kind,
-            VolumeHandleInner::Cloud(s) => match s.kind {
-                crate::CloudVolumeKind::Host => VolumeKind::Directory,
-                crate::CloudVolumeKind::Managed => VolumeKind::Disk,
-            },
+            // CloudVolumeKind distinguishes the org's shared host volume from
+            // a user-created managed volume; it does not describe the storage
+            // representation. Both are directory volumes from the SDK's point
+            // of view. The cloud-specific lifecycle kind remains available
+            // through `cloud().kind`.
+            VolumeHandleInner::Cloud(_) => VolumeKind::Directory,
         }
     }
 
@@ -898,10 +900,37 @@ mod tests {
 
     use sea_orm::{ActiveModelTrait, Set};
 
-    use crate::backend::{Backend, LocalBackend};
+    use crate::backend::{
+        Backend, CloudBackend, CloudVolumeKind, CloudVolumeStatus, LocalBackend,
+        VolumeHandleCloudState,
+    };
     use crate::sandbox::{HostPermissions, MountOptions, SandboxStatus, StatVirtualization};
 
     use super::*;
+
+    #[test]
+    fn cloud_managed_volume_reports_directory_storage_kind() {
+        let backend: Arc<dyn Backend> =
+            Arc::new(CloudBackend::new("https://msb.example.com", "msb_test_abc").unwrap());
+        let now = chrono::Utc::now();
+        let handle = VolumeHandle::from_cloud(
+            backend,
+            VolumeHandleCloudState {
+                id: "volume-id".into(),
+                used_bytes: Some(0),
+                capacity_bytes: None,
+                labels: Vec::new(),
+                kind: CloudVolumeKind::Managed,
+                status: CloudVolumeStatus::Active,
+                created_at: now,
+                updated_at: now,
+            },
+            "data".into(),
+        );
+
+        assert_eq!(handle.kind(), VolumeKind::Directory);
+        assert_eq!(handle.cloud().unwrap().kind, CloudVolumeKind::Managed);
+    }
 
     #[tokio::test]
     async fn test_remove_local_rejects_active_named_volume_reference() {

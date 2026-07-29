@@ -280,34 +280,46 @@ impl Backend for CloudBackend {
         timeout: std::time::Duration,
     ) -> BoxFuture<'a, MicrosandboxResult<crate::agent::AgentClient>> {
         Box::pin(async move {
-            let sandbox = self.get_sandbox(name).await?;
-            let url = self.agent_ws_url(&sandbox.id)?;
-            let mut request = url
-                .into_client_request()
-                .map_err(|e| MicrosandboxError::Runtime(format!("cloud agent request: {e}")))?;
-            let bearer = format!("Bearer {}", self.api_key);
-            let mut auth_value = WsHeaderValue::from_str(&bearer).map_err(|e| {
-                MicrosandboxError::InvalidConfig(format!("invalid API key header value: {e}"))
-            })?;
-            auth_value.set_sensitive(true);
-            request.headers_mut().insert(WS_AUTHORIZATION, auth_value);
-            request.headers_mut().insert(
-                WS_USER_AGENT,
-                WsHeaderValue::from_str(&default_user_agent()).map_err(|e| {
-                    MicrosandboxError::InvalidConfig(format!("invalid user-agent value: {e}"))
-                })?,
-            );
+            // Treat the caller's timeout as one budget for lookup, WebSocket
+            // establishment, and the agent handshake. In particular, a peer
+            // that accepts TCP but never completes TLS/HTTP upgrade must not
+            // leave exec, filesystem, or attach calls hanging indefinitely.
+            tokio::time::timeout(timeout, async {
+                let sandbox = self.get_sandbox(name).await?;
+                let url = self.agent_ws_url(&sandbox.id)?;
+                let mut request = url
+                    .into_client_request()
+                    .map_err(|e| MicrosandboxError::Runtime(format!("cloud agent request: {e}")))?;
+                let bearer = format!("Bearer {}", self.api_key);
+                let mut auth_value = WsHeaderValue::from_str(&bearer).map_err(|e| {
+                    MicrosandboxError::InvalidConfig(format!("invalid API key header value: {e}"))
+                })?;
+                auth_value.set_sensitive(true);
+                request.headers_mut().insert(WS_AUTHORIZATION, auth_value);
+                request.headers_mut().insert(
+                    WS_USER_AGENT,
+                    WsHeaderValue::from_str(&default_user_agent()).map_err(|e| {
+                        MicrosandboxError::InvalidConfig(format!("invalid user-agent value: {e}"))
+                    })?,
+                );
 
-            let (socket, _) = connect_async(request)
+                let (socket, _) = connect_async(request).await.map_err(|e| {
+                    MicrosandboxError::Runtime(format!("cloud agent websocket: {e}"))
+                })?;
+
+                crate::agent::AgentClient::connect_stream_with_timeout(
+                    self::ws_io::WsByteStream::new(socket),
+                    timeout,
+                )
                 .await
-                .map_err(|e| MicrosandboxError::Runtime(format!("cloud agent websocket: {e}")))?;
-
-            crate::agent::AgentClient::connect_stream_with_timeout(
-                self::ws_io::WsByteStream::new(socket),
-                timeout,
-            )
+                .map_err(Into::into)
+            })
             .await
-            .map_err(Into::into)
+            .map_err(|_| {
+                MicrosandboxError::Runtime(format!(
+                    "timed out connecting to cloud sandbox agent {name:?} after {timeout:?}"
+                ))
+            })?
         })
     }
 }
