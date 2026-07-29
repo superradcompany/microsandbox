@@ -15,7 +15,6 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use microsandbox_db::DbWriteConnection;
 use microsandbox_db::entity::run as run_entity;
 #[cfg(unix)]
 use microsandbox_filesystem::{BindIdentityMapHandle, DynFileSystem};
@@ -28,7 +27,7 @@ use microsandbox_protocol::{
     message::{Message, MessageType},
 };
 use msb_krun::VmBuilder;
-use sea_orm::{ColumnTrait, EntityTrait, Set};
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, Set};
 use serde::{Deserialize, Serialize};
 
 #[cfg(windows)]
@@ -1652,21 +1651,28 @@ fn write_startup_info(startup_pipe: Option<&str>, json: &str) -> RuntimeResult<(
 /// Busy timeout uses [`microsandbox_db::pool::DEFAULT_BUSY_TIMEOUT_SECS`]:
 /// the in-VM runtime is not user-configurable, so DB tuning policy lives
 /// with the host (which honours `~/.microsandbox/config.json`).
+///
+/// Returns the raw single write connection: the runtime only writes
+/// lifecycle rows and runs maintenance sweeps, so it keeps just the write
+/// lane of the handle.
 async fn connect_db(
     db_path: &std::path::Path,
     connect_timeout_secs: u64,
-) -> RuntimeResult<DbWriteConnection> {
-    DbWriteConnection::open(
+) -> RuntimeResult<DatabaseConnection> {
+    let db = microsandbox_db::DbConnection::open(
         db_path,
+        1,
         Duration::from_secs(connect_timeout_secs),
         Duration::from_secs(microsandbox_db::pool::DEFAULT_BUSY_TIMEOUT_SECS),
     )
     .await
-    .map_err(|e| RuntimeError::Custom(format!("database connect: {e}")))
+    .map_err(|e| RuntimeError::Custom(format!("database connect: {e}")))?;
+
+    Ok(db.inner()?.clone())
 }
 
 /// Insert a run record into the database.
-async fn insert_run(db: &DbWriteConnection, sandbox_id: i32, pid: u32) -> RuntimeResult<i32> {
+async fn insert_run(db: &DatabaseConnection, sandbox_id: i32, pid: u32) -> RuntimeResult<i32> {
     let now = chrono::Utc::now().naive_utc();
     let record = run_entity::ActiveModel {
         sandbox_id: Set(sandbox_id),
@@ -1683,7 +1689,7 @@ async fn insert_run(db: &DbWriteConnection, sandbox_id: i32, pid: u32) -> Runtim
 }
 
 /// Mark a run record as failed (Terminated + InternalError) on startup error.
-async fn mark_run_failed(db: &DbWriteConnection, run_id: i32) -> RuntimeResult<()> {
+async fn mark_run_failed(db: &DatabaseConnection, run_id: i32) -> RuntimeResult<()> {
     use sea_orm::QueryFilter;
     use sea_orm::sea_query::Expr;
 

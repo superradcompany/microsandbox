@@ -52,7 +52,7 @@ pub(super) async fn create_snapshot(
         ));
     }
 
-    let db = local.db().await?.read();
+    let db = local.db().await?;
 
     // Look up the sandbox row + parse its persisted config.
     let model = sandbox_entity::Entity::find()

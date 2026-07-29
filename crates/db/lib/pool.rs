@@ -1,95 +1,91 @@
-//! Canonical SQLite connection builder shared by every microsandbox process.
+//! Canonical SQLite pool builders shared by every microsandbox process.
 //!
 //! Both the host CLI and the in-VM runtime open the same SQLite file and
-//! must apply identical PRAGMAs (WAL, busy timeout, foreign keys,
-//! synchronous=NORMAL). Centralising the builder keeps that contract in
-//! one place — when a new PRAGMA is needed, this is the only file to edit.
+//! must apply identical PRAGMAs. Centralising the builders keeps that
+//! contract in one place — when a new PRAGMA is needed, this is the only
+//! file to edit.
+//!
+//! The write side carries the writer-establishment PRAGMAs (WAL journal
+//! mode, `synchronous=NORMAL`) and may create the file. The read side opens
+//! with `SQLITE_OPEN_READONLY`, so the engine rejects writes on that lane;
+//! WAL mode persists in the database header, so read connections never need
+//! to (and must not) issue journal-mode or synchronous PRAGMAs themselves.
 
 use std::{path::Path, time::Duration};
 
 use sea_orm::{DatabaseConnection, SqlxSqliteConnector};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 
-use crate::connection::{DbReadConnection, DbWriteConnection};
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
 
 /// Default `busy_timeout` PRAGMA value used when a caller has no
 /// user-facing knob to plumb (e.g. the in-VM runtime, where the host
 /// owns DB-tuning policy and the runtime is not user-configurable).
 pub const DEFAULT_BUSY_TIMEOUT_SECS: u64 = 5;
 
-/// Read pool + dedicated single-connection write pool for the same SQLite
-/// file. SQLite is single-writer system-wide, so a multi-connection pool
-/// fighting for the writer lock just generates `SQLITE_BUSY` and (under
-/// deferred transactions) `SQLITE_BUSY_SNAPSHOT`. Funnelling all writes
-/// from one process through a single connection turns within-process
-/// contention into an in-process queue (deterministic) instead of
-/// SQLite-level lock contention (probabilistic, retry-required). Reads
-/// keep the wider pool — WAL mode lets readers run concurrently.
-#[derive(Debug)]
-pub struct DbPools {
-    read: DbReadConnection,
-    write: DbWriteConnection,
-}
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
 
-impl DbPools {
-    /// Open both pools for the SQLite file at `db_path` with shared PRAGMAs.
-    ///
-    /// The write pool connects first so WAL mode (persisted in the database
-    /// header) is set before the read pool opens. `max_read_connections`
-    /// sizes only the read pool; the write pool is always single-connection
-    /// by design.
-    pub async fn open(
-        db_path: &Path,
-        max_read_connections: u32,
-        connect_timeout: Duration,
-        busy_timeout: Duration,
-    ) -> Result<Self, sqlx::Error> {
-        let write = DbWriteConnection::open(db_path, connect_timeout, busy_timeout).await?;
-        let read =
-            DbReadConnection::open(db_path, max_read_connections, connect_timeout, busy_timeout)
-                .await?;
-        Ok(Self { read, write })
-    }
-
-    /// Borrow the read pool (multi-connection).
-    pub fn read(&self) -> &DbReadConnection {
-        &self.read
-    }
-
-    /// Borrow the write pool (single-connection, retries handled inside).
-    pub fn write(&self) -> &DbWriteConnection {
-        &self.write
-    }
-}
-
-/// Open a sqlx-backed SQLite pool wrapped as a sea-orm `DatabaseConnection`.
+/// Open the single-connection write pool for the SQLite file at `db_path`.
 ///
-/// PRAGMAs are applied to every connection in the pool via
-/// `SqliteConnectOptions`, so callers don't need to issue any setup SQL.
-///
-/// `busy_timeout` is how long SQLite will spin internally on a contended
-/// lock before returning `SQLITE_BUSY`. It interacts with the
-/// application-level retry policy: a longer busy timeout reduces retry
-/// volume at the cost of higher tail latency on contention.
-///
-/// `create_if_missing` controls whether opening a non-existent DB file creates
-/// it. The write side (owned by `msb`) creates the catalog; read-only consumers
-/// (e.g. `msb-metrics`) pass `false` so they never author or pre-empt it.
-pub(crate) async fn build_pool(
+/// Creates the file if missing and establishes WAL mode (persisted in the
+/// database header) plus `synchronous=NORMAL`. `busy_timeout` is how long
+/// SQLite spins internally on a contended lock before returning
+/// `SQLITE_BUSY`; it interacts with the application-level retry policy — a
+/// longer busy timeout reduces retry volume at the cost of higher tail
+/// latency under contention.
+pub(crate) async fn build_write_pool(
     db_path: &Path,
-    max_connections: u32,
     connect_timeout: Duration,
     busy_timeout: Duration,
-    create_if_missing: bool,
 ) -> Result<DatabaseConnection, sqlx::Error> {
     let connect_options = SqliteConnectOptions::new()
         .filename(db_path)
-        .create_if_missing(create_if_missing)
+        .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal)
         .busy_timeout(busy_timeout)
         .foreign_keys(true)
         .synchronous(SqliteSynchronous::Normal);
 
+    connect(connect_options, 1, connect_timeout).await
+}
+
+/// Open the read-only pool for the SQLite file at `db_path`.
+///
+/// `SQLITE_OPEN_READONLY` makes the engine reject writes on this lane, and a
+/// missing file is an error rather than being created. Deliberately no
+/// journal-mode or synchronous PRAGMAs: those are writer-establishment
+/// settings, and WAL is already persistent in the file.
+pub(crate) async fn build_read_pool(
+    db_path: &Path,
+    max_connections: u32,
+    connect_timeout: Duration,
+    busy_timeout: Duration,
+) -> Result<DatabaseConnection, sqlx::Error> {
+    let connect_options = SqliteConnectOptions::new()
+        .filename(db_path)
+        .read_only(true)
+        .busy_timeout(busy_timeout)
+        .foreign_keys(true);
+
+    connect(connect_options, max_connections, connect_timeout).await
+}
+
+/// Open a sqlx-backed SQLite pool wrapped as a sea-orm `DatabaseConnection`.
+///
+/// PRAGMAs are applied to every connection in the pool via
+/// `SqliteConnectOptions`, so callers don't need to issue any setup SQL. The
+/// pool eagerly establishes one connection, so open errors (missing file for
+/// read-only opens, unwritable directory) surface here rather than on first
+/// use.
+async fn connect(
+    connect_options: SqliteConnectOptions,
+    max_connections: u32,
+    connect_timeout: Duration,
+) -> Result<DatabaseConnection, sqlx::Error> {
     let pool = SqlitePoolOptions::new()
         .max_connections(max_connections)
         .acquire_timeout(connect_timeout)

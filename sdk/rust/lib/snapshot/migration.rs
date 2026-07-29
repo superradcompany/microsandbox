@@ -12,7 +12,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
-use microsandbox_db::pool::DbPools;
+use microsandbox_db::DbConnection;
 use microsandbox_image::snapshot::migration::{
     V066_BACKUP_FILENAME, V066_DESCRIPTOR_FILENAME, V066PayloadIdentity, V066SourceInfo,
     inspect_v066_source, translate_v066_forward,
@@ -96,10 +96,10 @@ struct PlannedCandidate {
 
 /// Discover and synchronously reconcile managed legacy artifacts.
 pub(crate) async fn reconcile_managed(
-    pools: &DbPools,
+    db: &DbConnection,
     snapshots_dir: &Path,
 ) -> MicrosandboxResult<MigrationReport> {
-    let mut paths = indexed_artifact_paths(pools.write().inner()).await?;
+    let mut paths = indexed_artifact_paths(db.inner()?).await?;
     if snapshots_dir.exists() {
         let mut entries = tokio::fs::read_dir(snapshots_dir).await?;
         while let Some(entry) = entries.next_entry().await? {
@@ -113,20 +113,20 @@ pub(crate) async fn reconcile_managed(
             }
         }
     }
-    reconcile_paths(pools, paths).await
+    reconcile_paths(db, paths).await
 }
 
 /// Reconcile an explicitly opened or newly staged artifact through the same
 /// migration gateway used by startup.
 pub(crate) async fn reconcile_explicit(
-    pools: &DbPools,
+    db: &DbConnection,
     artifact_path: &Path,
 ) -> MicrosandboxResult<MigrationReport> {
-    let mut paths = indexed_artifact_paths(pools.write().inner()).await?;
+    let mut paths = indexed_artifact_paths(db.inner()?).await?;
     paths.insert(artifact_path.to_path_buf());
-    let report = reconcile_paths(pools, paths).await?;
+    let report = reconcile_paths(db, paths).await?;
     if artifact_path.join(V066_DESCRIPTOR_FILENAME).exists() {
-        return Err(load_blocked_error(pools.write().inner(), artifact_path).await?);
+        return Err(load_blocked_error(db.inner()?, artifact_path).await?);
     }
     Ok(report)
 }
@@ -135,7 +135,7 @@ pub(crate) async fn reconcile_explicit(
 /// Staged paths are intentionally not journaled or indexed because failure
 /// discards the stage and promotion chooses the final installation paths.
 pub(crate) async fn normalize_staged(
-    pools: &DbPools,
+    db: &DbConnection,
     artifact_paths: &[PathBuf],
 ) -> MicrosandboxResult<()> {
     let mut pinned = Vec::new();
@@ -166,7 +166,7 @@ pub(crate) async fn normalize_staged(
                 })??,
         );
     }
-    let canonical = indexed_canonical_digests(pools.write().inner()).await?;
+    let canonical = indexed_canonical_digests(db.inner()?).await?;
     let (planned, failures) = plan_graph(hashed, &canonical);
     if let Some((_, error)) = failures.into_iter().next() {
         return Err(error);
@@ -185,10 +185,10 @@ pub(crate) async fn normalize_staged(
 //--------------------------------------------------------------------------------------------------
 
 async fn reconcile_paths(
-    pools: &DbPools,
+    db: &DbConnection,
     paths: BTreeSet<PathBuf>,
 ) -> MicrosandboxResult<MigrationReport> {
-    let db = pools.write().inner();
+    let db = db.inner()?;
     let mut report = MigrationReport::default();
     let mut pinned = Vec::new();
 

@@ -247,7 +247,7 @@ enum DowngradeRunOutcome {
 }
 
 struct DowngradeRunContext<'a> {
-    db: &'a microsandbox_db::connection::DbWriteConnection,
+    db: &'a microsandbox_db::DbConnection,
     base_dir: &'a Path,
     db_path: &'a Path,
     backup_path: Option<&'a Path>,
@@ -828,11 +828,11 @@ async fn run_downgrade_local(args: SelfDowngradeArgs) -> anyhow::Result<()> {
         };
 
     let db = open_downgrade_db(&db_path).await?;
-    let applied_migrations = applied_migrations(db.inner()).await?;
+    let applied_migrations = applied_migrations(db.inner()?).await?;
     let rollback_plan = build_rollback_plan(&target_baseline, &applied_migrations)?;
     refuse_irreversible_rollback(&rollback_plan)?;
     let user_data_warnings = if rollback_plan.affects_user_data {
-        user_data_warnings(db.inner()).await?
+        user_data_warnings(db.inner()?).await?
     } else {
         Vec::new()
     };
@@ -863,7 +863,7 @@ async fn run_downgrade_local(args: SelfDowngradeArgs) -> anyhow::Result<()> {
     }
 
     let mut install_lease = if maintenance_lease_available(&applied_migrations) {
-        Some(microsandbox_runtime::maintenance::acquire_install_exclusive_lease(&db).await?)
+        Some(microsandbox_runtime::maintenance::acquire_install_exclusive_lease(db.inner()?).await?)
     } else {
         None
     };
@@ -883,8 +883,11 @@ async fn run_downgrade_local(args: SelfDowngradeArgs) -> anyhow::Result<()> {
         install_lease.as_ref(),
     ) {
         if let Some(lease) = install_lease.as_ref() {
-            let _ =
-                microsandbox_runtime::maintenance::clear_install_exclusive_lease(&db, lease).await;
+            let _ = microsandbox_runtime::maintenance::clear_install_exclusive_lease(
+                db.inner()?,
+                lease,
+            )
+            .await;
         }
         return Err(error);
     }
@@ -921,7 +924,8 @@ async fn run_downgrade_local(args: SelfDowngradeArgs) -> anyhow::Result<()> {
         .unwrap_or(true);
     if clear_lease_in_parent && let Some(lease) = install_lease.as_ref() {
         let clear_result =
-            microsandbox_runtime::maintenance::clear_install_exclusive_lease(&db, lease).await;
+            microsandbox_runtime::maintenance::clear_install_exclusive_lease(db.inner()?, lease)
+                .await;
         if let Err(err) = clear_result {
             ui::warn(&format!("failed to clear downgrade lease: {err}"));
         }
@@ -940,14 +944,14 @@ async fn run_downgrade_with_db(
 
     {
         let _migration_lock = acquire_migration_lock(db_dir)?;
-        let fresh_applied = applied_migrations(ctx.db.inner()).await?;
+        let fresh_applied = applied_migrations(ctx.db.inner()?).await?;
         let fresh_plan = build_rollback_plan(ctx.target_baseline, &fresh_applied)?;
         refuse_irreversible_rollback(&fresh_plan)?;
         if ctx.operation.phase() < DowngradePhase::DatabaseReverted {
             ensure_applied_unchanged(ctx.planned_applied_migrations, &fresh_applied)?;
             ensure_plan_unchanged(ctx.rollback_plan, &fresh_plan)?;
         }
-        renew_install_lease_if_present(ctx.db, &mut ctx.install_lease).await?;
+        renew_install_lease_if_present(ctx.db.inner()?, &mut ctx.install_lease).await?;
         refresh_windows_downgrade_recovery(&ctx)?;
 
         if !maintenance_lease_available(&fresh_applied) && fresh_plan.steps() > 0 {
@@ -959,7 +963,7 @@ async fn run_downgrade_with_db(
         }
 
         if fresh_plan.steps() > 0 || (cfg!(windows) && !fresh_applied.is_empty()) {
-            refuse_if_active_sandboxes(ctx.db.inner()).await?;
+            refuse_if_active_sandboxes(ctx.db.inner()?).await?;
         }
 
         if ctx.operation.phase() < DowngradePhase::DatabaseReverted {
@@ -971,7 +975,7 @@ async fn run_downgrade_with_db(
             {
                 let spinner = ui::Spinner::start("Checking", "retained snapshot graph");
                 let result = microsandbox::snapshot::downgrade::preflight_managed_v066(
-                    ctx.db.inner(),
+                    ctx.db.inner()?,
                     ctx.snapshots_dir,
                 )
                 .await;
@@ -993,7 +997,7 @@ async fn run_downgrade_with_db(
                     let spinner = ui::Spinner::start("Checking", "database rollback");
                     let preflight_path = ctx.operation.recovery_dir().join("schema-preflight.db");
                     match preflight_schema_rollback(
-                        ctx.db.inner(),
+                        ctx.db.inner()?,
                         &preflight_path,
                         fresh_plan.steps(),
                     )
@@ -1017,9 +1021,9 @@ async fn run_downgrade_with_db(
                         verify_sqlite_backup(path).await
                     } else {
                         run_with_install_lease_renewal(
-                            ctx.db,
+                            ctx.db.inner()?,
                             &mut ctx.install_lease,
-                            vacuum_into(ctx.db.inner(), path),
+                            vacuum_into(ctx.db.inner()?, path),
                         )
                         .await
                     };
@@ -1030,7 +1034,7 @@ async fn run_downgrade_with_db(
                             return Err(err);
                         }
                     }
-                    renew_install_lease_if_present(ctx.db, &mut ctx.install_lease).await?;
+                    renew_install_lease_if_present(ctx.db.inner()?, &mut ctx.install_lease).await?;
                     refresh_windows_downgrade_recovery(&ctx)?;
                 }
                 ctx.operation.set_phase(DowngradePhase::BackupComplete)?;
@@ -1042,7 +1046,7 @@ async fn run_downgrade_with_db(
                 if let Some(plan) = snapshot_plan {
                     let spinner = ui::Spinner::start("Reverting", "snapshot artifacts");
                     match microsandbox::snapshot::downgrade::execute_managed_v066(
-                        ctx.db.inner(),
+                        ctx.db.inner()?,
                         ctx.operation.recovery_dir(),
                         plan,
                     )
@@ -1062,9 +1066,11 @@ async fn run_downgrade_with_db(
 
             if fresh_plan.steps() > 0 {
                 let spinner = ui::Spinner::start("Rolling back", "local database changes");
-                match run_with_install_lease_renewal(ctx.db, &mut ctx.install_lease, async {
-                    rollback_schema(ctx.db.inner(), fresh_plan.steps()).await
-                })
+                match run_with_install_lease_renewal(
+                    ctx.db.inner()?,
+                    &mut ctx.install_lease,
+                    async { rollback_schema(ctx.db.inner()?, fresh_plan.steps()).await },
+                )
                 .await
                 {
                     Ok(()) => spinner.finish_success("Rolled back"),
@@ -1073,7 +1079,7 @@ async fn run_downgrade_with_db(
                         return Err(err);
                     }
                 }
-                renew_install_lease_if_present(ctx.db, &mut ctx.install_lease).await?;
+                renew_install_lease_if_present(ctx.db.inner()?, &mut ctx.install_lease).await?;
                 refresh_windows_downgrade_recovery(&ctx)?;
             }
             ctx.operation.set_phase(DowngradePhase::DatabaseReverted)?;
@@ -1083,7 +1089,7 @@ async fn run_downgrade_with_db(
     if ctx.rollback_plan.affects_cache && !ctx.args.keep_cache {
         let spinner = ui::Spinner::start("Purging", "cache");
         let base_dir = ctx.base_dir.to_path_buf();
-        match run_with_install_lease_renewal(ctx.db, &mut ctx.install_lease, async move {
+        match run_with_install_lease_renewal(ctx.db.inner()?, &mut ctx.install_lease, async move {
             tokio::task::spawn_blocking(move || purge_cache(&base_dir)).await?
         })
         .await
@@ -1095,7 +1101,7 @@ async fn run_downgrade_with_db(
             }
         }
     }
-    renew_install_lease_if_present(ctx.db, &mut ctx.install_lease).await?;
+    renew_install_lease_if_present(ctx.db.inner()?, &mut ctx.install_lease).await?;
     refresh_windows_downgrade_recovery(&ctx)?;
 
     install_target_release(&mut ctx).await
@@ -1108,10 +1114,12 @@ async fn install_target_release(
     let spinner = ui::Spinner::start("Installing", &format!("msb v{}", ctx.target_version));
     let staged_dir = ctx.operation.target_dir().to_path_buf();
     let base_dir = ctx.base_dir.to_path_buf();
-    let result = run_with_install_lease_renewal(ctx.db, &mut ctx.install_lease, async move {
-        tokio::task::spawn_blocking(move || activate_staged_release(&staged_dir, &base_dir)).await?
-    })
-    .await;
+    let result =
+        run_with_install_lease_renewal(ctx.db.inner()?, &mut ctx.install_lease, async move {
+            tokio::task::spawn_blocking(move || activate_staged_release(&staged_dir, &base_dir))
+                .await?
+        })
+        .await;
     match result {
         Ok(()) => spinner.finish_success("Installed"),
         Err(err) => {
@@ -1534,8 +1542,11 @@ async fn clear_windows_downgrade_lease(
         .join(microsandbox_utils::DB_SUBDIR)
         .join(microsandbox_utils::DB_FILENAME);
     let db = open_downgrade_db(&db_path).await?;
-    microsandbox_runtime::maintenance::clear_install_exclusive_lease_idempotent(&db, &lease)
-        .await?;
+    microsandbox_runtime::maintenance::clear_install_exclusive_lease_idempotent(
+        db.inner()?,
+        &lease,
+    )
+    .await?;
 
     writeln!(log, "cleared install-exclusive lease")?;
     Ok(())
@@ -2161,16 +2172,15 @@ fn floor_0_6_0_baseline() -> SchemaBaseline {
     }
 }
 
-async fn open_downgrade_db(
-    db_path: &Path,
-) -> anyhow::Result<microsandbox_db::connection::DbWriteConnection> {
+async fn open_downgrade_db(db_path: &Path) -> anyhow::Result<microsandbox_db::DbConnection> {
     if let Some(parent) = db_path.parent() {
         fs::create_dir_all(parent)?;
     }
 
     let config = microsandbox::config::load_persisted_config_or_default()?;
-    let db = microsandbox_db::connection::DbWriteConnection::open(
+    let db = microsandbox_db::DbConnection::open(
         db_path,
+        config.database.max_connections,
         std::time::Duration::from_secs(config.database.connect_timeout_secs),
         std::time::Duration::from_secs(config.database.busy_timeout_secs),
     )
@@ -2413,9 +2423,8 @@ fn warn_downgrade_plan(
 }
 
 async fn refuse_if_active_sandboxes(db: &DatabaseConnection) -> anyhow::Result<()> {
-    let write = microsandbox_db::connection::DbWriteConnection::new(db.clone());
     let active =
-        microsandbox_runtime::maintenance::active_sandboxes_for_schema_rollback(&write).await?;
+        microsandbox_runtime::maintenance::active_sandboxes_for_schema_rollback(db).await?;
 
     if active.is_empty() {
         return Ok(());
@@ -2475,6 +2484,7 @@ async fn preflight_schema_rollback(
     // `down()` methods, including config projections, can be exercised before
     // any live artifact or schema mutation.
     match preflight
+        .inner()?
         .execute_unprepared("UPDATE snapshot_index SET migration_state = 'reverse_complete'")
         .await
     {
@@ -2482,7 +2492,7 @@ async fn preflight_schema_rollback(
         Err(error) if is_missing_table_or_column(&error) => {}
         Err(error) => return Err(error.into()),
     }
-    rollback_schema(preflight.inner(), steps).await?;
+    rollback_schema(preflight.inner()?, steps).await?;
     drop(preflight);
     verify_sqlite_backup(preflight_path).await
 }
@@ -2624,7 +2634,7 @@ fn sync_directory(path: &Path) -> anyhow::Result<()> {
 }
 
 async fn renew_install_lease_if_present(
-    db: &microsandbox_db::connection::DbWriteConnection,
+    db: &DatabaseConnection,
     install_lease: &mut Option<&mut microsandbox_runtime::maintenance::InstallExclusiveLease>,
 ) -> anyhow::Result<()> {
     if let Some(lease) = install_lease.as_deref_mut() {
@@ -2635,7 +2645,7 @@ async fn renew_install_lease_if_present(
 }
 
 async fn run_with_install_lease_renewal<F, T>(
-    db: &microsandbox_db::connection::DbWriteConnection,
+    db: &DatabaseConnection,
     install_lease: &mut Option<&mut microsandbox_runtime::maintenance::InstallExclusiveLease>,
     operation: F,
 ) -> anyhow::Result<T>
@@ -3135,13 +3145,15 @@ mod tests {
     async fn vacuum_into_writes_backup_file() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("msb.db");
-        let db = microsandbox_db::connection::DbWriteConnection::open(
+        let db = microsandbox_db::DbConnection::open(
             &db_path,
+            1,
             std::time::Duration::from_secs(5),
             std::time::Duration::from_secs(5),
         )
         .await
         .unwrap();
+        let db = db.inner().unwrap();
         db.execute_unprepared("CREATE TABLE sample (id INTEGER PRIMARY KEY, value TEXT NOT NULL)")
             .await
             .unwrap();
@@ -3150,12 +3162,13 @@ mod tests {
             .unwrap();
 
         let backup_path = dir.path().join("backup").join("msb.db.bak");
-        vacuum_into(db.inner(), &backup_path).await.unwrap();
+        vacuum_into(db, &backup_path).await.unwrap();
 
         assert!(backup_path.exists());
 
-        let backup_db = microsandbox_db::connection::DbWriteConnection::open(
+        let backup_db = microsandbox_db::DbConnection::open(
             &backup_path,
+            1,
             std::time::Duration::from_secs(5),
             std::time::Duration::from_secs(5),
         )
@@ -3177,18 +3190,20 @@ mod tests {
     async fn rollback_schema_rolls_back_latest_migration() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("msb.db");
-        let db = microsandbox_db::connection::DbWriteConnection::open(
+        let db = microsandbox_db::DbConnection::open(
             &db_path,
+            1,
             std::time::Duration::from_secs(5),
             std::time::Duration::from_secs(5),
         )
         .await
         .unwrap();
-        Migrator::up(db.inner(), None).await.unwrap();
+        let db = db.inner().unwrap();
+        Migrator::up(db, None).await.unwrap();
 
         // The snapshot artifact transition is latest; one step must restore
         // the preceding file-only index while everything older stays intact.
-        rollback_schema(db.inner(), 1).await.unwrap();
+        rollback_schema(db, 1).await.unwrap();
 
         let columns = db
             .query_all(Statement::from_string(
@@ -3220,13 +3235,15 @@ mod tests {
     async fn user_data_warnings_list_snapshots_and_disk_volumes() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("msb.db");
-        let db = microsandbox_db::connection::DbWriteConnection::open(
+        let db = microsandbox_db::DbConnection::open(
             &db_path,
+            1,
             std::time::Duration::from_secs(5),
             std::time::Duration::from_secs(5),
         )
         .await
         .unwrap();
+        let db = db.inner().unwrap();
         db.execute_unprepared("CREATE TABLE snapshot_index (digest TEXT PRIMARY KEY)")
             .await
             .unwrap();
@@ -3244,7 +3261,7 @@ mod tests {
         .await
         .unwrap();
 
-        let warnings = user_data_warnings(db.inner()).await.unwrap();
+        let warnings = user_data_warnings(db).await.unwrap();
 
         assert_eq!(warnings.len(), 2);
         assert!(warnings[0].contains("snapshots to project"));

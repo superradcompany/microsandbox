@@ -326,7 +326,7 @@ impl SandboxHandle {
                     feature: "SandboxHandle::metrics on cloud".into(),
                     available_when: "when cloud metrics land".into(),
                 })?;
-        let db = local_backend.db().await?.read();
+        let db = local_backend.db().await?;
         super::metrics::metrics_for_sandbox(db, local_backend, local.db_id, &config).await
     }
 
@@ -631,11 +631,11 @@ impl SandboxHandle {
                 #[cfg(windows)]
                 super::reap_leaked_runtime_process(local_backend, local.db_id, &self.name).await?;
 
-                let pools = local_backend.db().await?;
+                let db = local_backend.db().await?;
 
                 super::remove_dir_if_exists(&local_backend.sandboxes_dir().join(&self.name))?;
                 sandbox_entity::Entity::delete_by_id(local.db_id)
-                    .exec(pools.write())
+                    .exec(db.inner()?)
                     .await?;
 
                 Ok(())

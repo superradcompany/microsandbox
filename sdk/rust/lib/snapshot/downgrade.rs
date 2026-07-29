@@ -1053,7 +1053,7 @@ fn downgrade_error<T>(
 mod tests {
     use std::time::Duration;
 
-    use microsandbox_db::pool::DbPools;
+    use microsandbox_db::DbConnection;
     use microsandbox_migration::{Migrator, MigratorTrait};
     use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 
@@ -1072,10 +1072,10 @@ mod tests {
         std::fs::write(artifact.join("upper.ext4"), b"hello").unwrap();
         std::fs::write(artifact.join(V066_DESCRIPTOR_FILENAME), LEGACY).unwrap();
 
-        let pools = DbPools::open(&db_path, 2, Duration::from_secs(5), Duration::from_secs(5))
+        let pools = DbConnection::open(&db_path, 2, Duration::from_secs(5), Duration::from_secs(5))
             .await
             .unwrap();
-        Migrator::up(pools.write().inner(), None).await.unwrap();
+        Migrator::up(pools.inner().unwrap(), None).await.unwrap();
         crate::snapshot::migration::reconcile_managed(&pools, &snapshots)
             .await
             .unwrap();
@@ -1088,7 +1088,7 @@ mod tests {
             LEGACY
         );
 
-        let plan = preflight_managed_v066(pools.write().inner(), &snapshots)
+        let plan = preflight_managed_v066(pools.inner().unwrap(), &snapshots)
             .await
             .unwrap();
         drop(plan);
@@ -1098,7 +1098,7 @@ mod tests {
         )
         .unwrap();
         journal_phase(
-            pools.write().inner(),
+            pools.inner().unwrap(),
             &artifact,
             "legacy_descriptor_published",
         )
@@ -1107,10 +1107,10 @@ mod tests {
 
         // Reconstruct the plan after a crash between exact descriptor
         // publication and the index-graph commit.
-        let plan = preflight_managed_v066(pools.write().inner(), &snapshots)
+        let plan = preflight_managed_v066(pools.inner().unwrap(), &snapshots)
             .await
             .unwrap();
-        let report = execute_managed_v066(pools.write().inner(), &recovery, plan)
+        let report = execute_managed_v066(pools.inner().unwrap(), &recovery, plan)
             .await
             .unwrap();
         assert_eq!(report.artifacts, 1);
@@ -1130,8 +1130,8 @@ mod tests {
         );
 
         let row = pools
-            .write()
             .inner()
+            .unwrap()
             .query_one(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "SELECT digest, migration_state FROM snapshot_index",
@@ -1148,12 +1148,12 @@ mod tests {
             "reverse_complete"
         );
 
-        Migrator::down(pools.write().inner(), Some(1))
+        Migrator::down(pools.inner().unwrap(), Some(1))
             .await
             .unwrap();
         let count = pools
-            .write()
             .inner()
+            .unwrap()
             .query_one(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "SELECT COUNT(*) FROM snapshot_index",
@@ -1176,10 +1176,10 @@ mod tests {
         std::fs::write(artifact.join("upper.ext4"), b"hello").unwrap();
         std::fs::write(artifact.join(V066_DESCRIPTOR_FILENAME), LEGACY).unwrap();
 
-        let pools = DbPools::open(&db_path, 2, Duration::from_secs(5), Duration::from_secs(5))
+        let pools = DbConnection::open(&db_path, 2, Duration::from_secs(5), Duration::from_secs(5))
             .await
             .unwrap();
-        Migrator::up(pools.write().inner(), None).await.unwrap();
+        Migrator::up(pools.inner().unwrap(), None).await.unwrap();
         crate::snapshot::migration::reconcile_managed(&pools, &snapshots)
             .await
             .unwrap();
@@ -1190,8 +1190,8 @@ mod tests {
         // complete graph before publishing manifest.json.
         std::fs::remove_file(artifact.join(V066_BACKUP_FILENAME)).unwrap();
         pools
-            .write()
             .inner()
+            .unwrap()
             .execute(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "DELETE FROM snapshot_artifact_migration",
@@ -1209,8 +1209,8 @@ mod tests {
         let digest = manifest.digest().unwrap();
         std::fs::write(artifact.join(DESCRIPTOR_FILENAME), canonical).unwrap();
         pools
-            .write()
             .inner()
+            .unwrap()
             .execute(Statement::from_sql_and_values(
                 DatabaseBackend::Sqlite,
                 "UPDATE snapshot_index SET digest = ?, migration_state = 'canonical' WHERE artifact_path = ?",
@@ -1219,7 +1219,7 @@ mod tests {
             .await
             .unwrap();
 
-        let error = preflight_managed_v066(pools.write().inner(), &snapshots)
+        let error = preflight_managed_v066(pools.inner().unwrap(), &snapshots)
             .await
             .err()
             .unwrap();
@@ -1232,8 +1232,8 @@ mod tests {
         assert!(artifact.join(DESCRIPTOR_FILENAME).exists());
         assert!(!artifact.join(V066_DESCRIPTOR_FILENAME).exists());
         let state = pools
-            .write()
             .inner()
+            .unwrap()
             .query_one(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "SELECT migration_state FROM snapshot_index",

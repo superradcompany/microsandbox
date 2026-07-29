@@ -17,4 +17,4 @@ pub mod entity;
 pub mod pool;
 pub mod retry;
 
-pub use connection::{DbReadConnection, DbWriteConnection};
+pub use connection::DbConnection;

@@ -192,8 +192,7 @@ impl Image {
         reference: &str,
         metadata: CachedImageMetadata,
     ) -> MicrosandboxResult<i32> {
-        let pools = local.db().await?;
-        let db = pools.write();
+        let db = local.db().await?;
         let reference = reference.to_string();
 
         if let Some(image_ref_id) = try_persist_fast_path(db, &reference, &metadata).await? {
@@ -328,7 +327,7 @@ impl Image {
         local: &LocalBackend,
         reference: &str,
     ) -> MicrosandboxResult<ImageHandle> {
-        let db = local.db().await?.read();
+        let db = local.db().await?;
 
         let (image_ref_model, manifest) = image_ref_entity::Entity::find()
             .filter(image_ref_entity::Column::Reference.eq(reference))
@@ -346,7 +345,7 @@ impl Image {
 
     /// List all cached images from an explicit local backend, ordered by creation time.
     pub async fn list_local(local: &LocalBackend) -> MicrosandboxResult<Vec<ImageHandle>> {
-        let db = local.db().await?.read();
+        let db = local.db().await?;
 
         let models = image_ref_entity::Entity::find()
             .order_by_desc(image_ref_entity::Column::CreatedAt)
@@ -366,7 +365,7 @@ impl Image {
         local: &LocalBackend,
         reference: &str,
     ) -> MicrosandboxResult<ImageDetail> {
-        let db = local.db().await?.read();
+        let db = local.db().await?;
 
         let image_ref_model = image_ref_entity::Entity::find()
             .filter(image_ref_entity::Column::Reference.eq(reference))
@@ -464,12 +463,11 @@ impl Image {
         reference: &str,
         force: bool,
     ) -> MicrosandboxResult<()> {
-        let pools = local.db().await?;
-        let db = pools.write();
+        let db = local.db().await?;
 
         let image_ref_model = image_ref_entity::Entity::find()
             .filter(image_ref_entity::Column::Reference.eq(reference))
-            .one(pools.read())
+            .one(db)
             .await?
             .ok_or_else(|| MicrosandboxError::ImageNotFound(reference.into()))?;
 
@@ -588,8 +586,7 @@ impl Image {
     /// that become unreachable. Images used by existing sandboxes or snapshots
     /// are preserved.
     pub async fn prune_local(local: &LocalBackend) -> MicrosandboxResult<ImagePruneReport> {
-        let pools = local.db().await?;
-        let db = pools.write();
+        let db = local.db().await?;
 
         let (mut report, cleanup) = db
             .transaction(|txn| async move {
@@ -1028,7 +1025,7 @@ async fn upsert_layer_record<C: ConnectionTrait>(
 /// Returns `None` when the caller must fall through to the full transactional
 /// upsert (fresh DB, manifest digest changed, partially persisted state).
 async fn try_persist_fast_path(
-    db: &microsandbox_db::DbWriteConnection,
+    db: &microsandbox_db::DbConnection,
     reference: &str,
     metadata: &CachedImageMetadata,
 ) -> MicrosandboxResult<Option<i32>> {
@@ -1067,7 +1064,7 @@ async fn try_persist_fast_path(
         layer_entity::Entity::update_many()
             .col_expr(layer_entity::Column::LastUsedAt, Expr::value(now))
             .filter(layer_entity::Column::DiffId.is_in(diff_ids))
-            .exec(db)
+            .exec(db.inner()?)
             .await?;
     }
 
@@ -1075,7 +1072,7 @@ async fn try_persist_fast_path(
     image_ref_entity::Entity::update_many()
         .col_expr(image_ref_entity::Column::UpdatedAt, Expr::value(now))
         .filter(image_ref_entity::Column::Id.eq(image_ref_model.id))
-        .exec(db)
+        .exec(db.inner()?)
         .await?;
 
     Ok(Some(image_ref_model.id))

@@ -28,7 +28,7 @@ use std::{
     os::fd::AsRawFd,
 };
 
-use microsandbox_db::pool::DbPools;
+use microsandbox_db::DbConnection;
 use microsandbox_migration::{Migrator, MigratorTrait, schema_metadata};
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, DbErr, Statement};
 use tokio::sync::OnceCell;
@@ -44,12 +44,12 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 /// Local-runtime backend: spawns microVMs via libkrun on the calling host.
 ///
 /// Owns the persisted [`LocalConfig`] (paths, sandbox defaults, registry
-/// settings, database tuning) and the SQLite [`DbPools`] for this instance.
+/// settings, database tuning) and the SQLite [`DbConnection`] handle for this instance.
 /// Built via either [`LocalBackend::lazy`] (no-explicit-setup ambient
 /// default, lazily initialised) or [`LocalBackend::builder`] (programmatic).
 pub struct LocalBackend {
     config: Arc<LocalConfig>,
-    db: OnceCell<DbPools>,
+    db: OnceCell<DbConnection>,
 }
 
 /// Fluent builder for [`LocalBackend`]. Construct via [`LocalBackend::builder`].
@@ -128,9 +128,9 @@ impl LocalBackend {
         LocalBackendBuilder::default()
     }
 
-    /// Access the open DB pool, initialising it (and applying migrations) on
-    /// first call.
-    pub async fn db(&self) -> MicrosandboxResult<&DbPools> {
+    /// Access the open DB handle, initialising it (and applying migrations)
+    /// on first call.
+    pub async fn db(&self) -> MicrosandboxResult<&DbConnection> {
         self.db
             .get_or_try_init(|| async {
                 let db_dir = self.config.home().join(microsandbox_utils::DB_SUBDIR);
@@ -494,21 +494,21 @@ impl Drop for MigrationLock {
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
-/// Open both pools for `db_dir/msb.db` and run migrations on the writer.
+/// Open the DB handle for `db_dir/msb.db` and run migrations on the writer.
 ///
-/// The write pool connects first so WAL mode (persisted in the database
-/// header) is set before the read pool opens.
+/// The write connection opens first (inside [`DbConnection::open`]) so WAL mode
+/// (persisted in the database header) is set before the read-only pool opens.
 async fn connect_and_migrate(
     db_dir: &Path,
     database: &DatabaseConfig,
     snapshots_dir: &Path,
-) -> MicrosandboxResult<DbPools> {
+) -> MicrosandboxResult<DbConnection> {
     tokio::fs::create_dir_all(db_dir).await?;
     let _migration_lock = acquire_migration_lock(db_dir).await?;
     refuse_incomplete_self_downgrade(db_dir)?;
 
     let db_path = db_dir.join(microsandbox_utils::DB_FILENAME);
-    let pools = DbPools::open(
+    let db = DbConnection::open(
         &db_path,
         database.max_connections,
         Duration::from_secs(database.connect_timeout_secs),
@@ -517,23 +517,22 @@ async fn connect_and_migrate(
     .await
     .map_err(|e| MicrosandboxError::Custom(format!("connect to {}: {e}", db_path.display())))?;
 
-    microsandbox_runtime::maintenance::refuse_if_install_exclusive_held(pools.write())
+    microsandbox_runtime::maintenance::refuse_if_install_exclusive_held(db.inner()?)
         .await
         .map_err(|err| MicrosandboxError::Runtime(err.to_string()))?;
-    refuse_schema_ahead(pools.write().inner()).await?;
-    Migrator::up(pools.write().inner(), None).await?;
+    refuse_schema_ahead(db.inner()?).await?;
+    Migrator::up(db.inner()?, None).await?;
 
     // Descriptor translation mutates the same installation state as schema
     // migration. Keep both gates held until every discovered artifact is
     // either canonical or durably journaled as blocked.
     let install_lease =
-        microsandbox_runtime::maintenance::acquire_install_exclusive_lease(pools.write())
+        microsandbox_runtime::maintenance::acquire_install_exclusive_lease(db.inner()?)
             .await
             .map_err(|err| MicrosandboxError::Runtime(err.to_string()))?;
-    let reconcile_result =
-        crate::snapshot::migration::reconcile_managed(&pools, snapshots_dir).await;
+    let reconcile_result = crate::snapshot::migration::reconcile_managed(&db, snapshots_dir).await;
     let clear_result = microsandbox_runtime::maintenance::clear_install_exclusive_lease(
-        pools.write(),
+        db.inner()?,
         &install_lease,
     )
     .await
@@ -541,7 +540,7 @@ async fn connect_and_migrate(
     reconcile_result?;
     clear_result?;
 
-    Ok(pools)
+    Ok(db)
 }
 
 /// Refuse normal startup while a durable self-downgrade operation owns local
@@ -655,10 +654,10 @@ mod tests {
         let db_dir = tmp.path().join("db");
         let database = DatabaseConfig::default();
 
-        let pools = connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
+        let db = connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
             .await
             .unwrap();
-        let conn = pools.read();
+        let conn = &db;
 
         // DB file should exist on disk.
         assert!(db_dir.join(microsandbox_utils::DB_FILENAME).exists());
@@ -703,12 +702,12 @@ mod tests {
         let db_dir = tmp.path().join("db");
         let database = DatabaseConfig::default();
 
-        let pools = connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
+        let db = connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
             .await
             .unwrap();
 
         // Running migrations again on the same DB should succeed.
-        Migrator::up(pools.write().inner(), None).await.unwrap();
+        Migrator::up(db.inner().unwrap(), None).await.unwrap();
     }
 
     #[tokio::test]
@@ -731,7 +730,7 @@ mod tests {
         std::fs::write(root_dir.join("manifest.json"), root).unwrap();
         std::fs::write(child_dir.join("manifest.json"), child).unwrap();
 
-        let pools = connect_and_migrate(&db_dir, &DatabaseConfig::default(), &snapshots_dir)
+        let db = connect_and_migrate(&db_dir, &DatabaseConfig::default(), &snapshots_dir)
             .await
             .unwrap();
 
@@ -749,8 +748,7 @@ mod tests {
         assert!(root_dir.join(".manifest.json.legacy").exists());
         assert!(child_dir.join(".manifest.json.legacy").exists());
 
-        let count = pools
-            .read()
+        let count = db
             .query_one(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "SELECT COUNT(*) FROM snapshot_index",
@@ -769,13 +767,12 @@ mod tests {
         let db_dir = tmp.path().join("db");
         let database = DatabaseConfig::default();
 
-        let pools = connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
+        let db = connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
             .await
             .unwrap();
         let future = chrono::Utc::now().naive_utc() + chrono::Duration::minutes(10);
-        pools
-            .write()
-            .inner()
+        db.inner()
+            .unwrap()
             .execute(Statement::from_sql_and_values(
                 DatabaseBackend::Sqlite,
                 "INSERT OR REPLACE INTO maintenance_lease (name, holder_pid, lease_expires_at, last_completed_at) VALUES (?, ?, ?, NULL)",
@@ -787,7 +784,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        drop(pools);
+        drop(db);
 
         let err = connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
             .await
@@ -801,12 +798,11 @@ mod tests {
         let db_dir = tmp.path().join("db");
         let database = DatabaseConfig::default();
 
-        let pools = connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
+        let db = connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
             .await
             .unwrap();
-        pools
-            .write()
-            .inner()
+        db.inner()
+            .unwrap()
             .execute(Statement::from_sql_and_values(
                 DatabaseBackend::Sqlite,
                 "INSERT INTO seaql_migrations (version, applied_at) VALUES (?, ?)",
@@ -814,7 +810,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        drop(pools);
+        drop(db);
 
         let err = connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
             .await
@@ -911,7 +907,6 @@ mod tests {
             .unwrap();
 
         let migration_row_count = recovered
-            .read()
             .query_one(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "SELECT COUNT(*) FROM seaql_migrations WHERE version = 'm20260305_000003_create_storage_tables'",

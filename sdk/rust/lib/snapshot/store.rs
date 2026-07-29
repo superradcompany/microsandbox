@@ -112,7 +112,7 @@ pub(super) async fn index_upsert(
     digest: &str,
     manifest: &Manifest,
 ) -> MicrosandboxResult<()> {
-    let db = local.db().await?.write();
+    let db = local.db().await?.inner()?;
 
     let created_at = chrono::DateTime::parse_from_rfc3339(&manifest.created_at)
         .map(|d| d.naive_utc())
@@ -246,7 +246,7 @@ pub(super) fn looks_like_path(s: &str) -> bool {
 }
 
 pub(super) async fn list_indexed(local: &LocalBackend) -> MicrosandboxResult<Vec<SnapshotHandle>> {
-    let db = local.db().await?.read();
+    let db = local.db().await?;
     let rows = snapshot_entity::Entity::find()
         .order_by_desc(snapshot_entity::Column::CreatedAt)
         .all(db)
@@ -297,9 +297,9 @@ pub(super) async fn remove_snapshot(
     path_or_name: &str,
     force: bool,
 ) -> MicrosandboxResult<()> {
-    let pools = local.db().await?;
-    let read_db = pools.read();
-    let write_db = pools.write();
+    let db = local.db().await?;
+    let read_db = db;
+    let write_db = db.inner()?;
 
     // Resolve the target row. Accept digest, name, or path.
     let (digest, artifact_path) =
@@ -375,7 +375,7 @@ pub(super) async fn reindex_dir(local: &LocalBackend, dir: &Path) -> Microsandbo
     }
     // After upserts, recompute child_count from parent edges in one pass
     // to keep the cache honest about the current set of artifacts.
-    let db = local.db().await?.write();
+    let db = local.db().await?.inner()?;
     db.execute_unprepared(
         "UPDATE snapshot_index SET child_count = (\
             SELECT COUNT(*) FROM snapshot_index AS c \
@@ -390,7 +390,7 @@ pub(super) async fn get_handle(
     local: &LocalBackend,
     needle: &str,
 ) -> MicrosandboxResult<SnapshotHandle> {
-    let db = local.db().await?.read();
+    let db = local.db().await?;
 
     let row = if needle.starts_with("sha256:") || needle.starts_with("sha512:") {
         snapshot_entity::Entity::find_by_id(needle.to_string())
@@ -421,7 +421,7 @@ pub(super) async fn lookup_by_digest(
     local: &LocalBackend,
     digest: &str,
 ) -> MicrosandboxResult<Option<SnapshotHandle>> {
-    let db = local.db().await?.read();
+    let db = local.db().await?;
     let row = snapshot_entity::Entity::find_by_id(digest.to_string())
         .one(db)
         .await?;

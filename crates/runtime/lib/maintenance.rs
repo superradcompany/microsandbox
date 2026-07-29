@@ -21,13 +21,13 @@
 use std::path::Path;
 use std::time::Instant;
 
-use microsandbox_db::DbWriteConnection;
 use microsandbox_db::entity::{
     maintenance_lease as lease_entity, run as run_entity, sandbox as sandbox_entity,
 };
 use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
-    ColumnTrait, Condition, DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    ColumnTrait, Condition, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder,
+    QuerySelect, Set,
 };
 
 use crate::{RuntimeError, RuntimeResult};
@@ -156,7 +156,7 @@ impl Default for MaintenanceLimits {
 /// Best-effort: this must never abort the sandbox boot path, so all errors are
 /// logged and swallowed. When the lease is not won, returns immediately after a
 /// single indexed read.
-pub async fn run_startup_maintenance(db: &DbWriteConnection, sandboxes_dir: &Path) {
+pub async fn run_startup_maintenance(db: &DatabaseConnection, sandboxes_dir: &Path) {
     match try_acquire_lease(db).await {
         Ok(true) => {}
         Ok(false) => {
@@ -195,7 +195,7 @@ pub async fn run_startup_maintenance(db: &DbWriteConnection, sandboxes_dir: &Pat
 /// clean terminal ephemeral sandboxes. Per-row errors are counted, not
 /// propagated, so one bad row cannot abort the rest.
 pub async fn run_sandbox_lifecycle_maintenance(
-    db: &DbWriteConnection,
+    db: &DatabaseConnection,
     sandboxes_dir: &Path,
     limits: MaintenanceLimits,
 ) -> RuntimeResult<MaintenanceReport> {
@@ -269,7 +269,7 @@ pub async fn run_sandbox_lifecycle_maintenance(
 /// row with no PID is still state owned by a runtime transition and should not
 /// be mutated out from under it.
 pub async fn active_sandboxes_for_schema_rollback(
-    db: &DbWriteConnection,
+    db: &DatabaseConnection,
 ) -> RuntimeResult<Vec<ActiveSandbox>> {
     let sandboxes = sandbox_entity::Entity::find()
         .filter(sandbox_entity::Column::Status.is_in([
@@ -309,7 +309,7 @@ pub async fn active_sandboxes_for_schema_rollback(
 /// Usable both from the runtime exit observer (self-clean) and the startup
 /// sweep.
 pub async fn cleanup_terminal_ephemeral_sandbox(
-    db: &DbWriteConnection,
+    db: &DatabaseConnection,
     sandboxes_dir: &Path,
     sandbox_id: i32,
 ) -> RuntimeResult<CleanupOutcome> {
@@ -376,7 +376,7 @@ pub async fn cleanup_terminal_ephemeral_sandbox(
 /// Read-gates first: a cheap SELECT skips the write entirely when the lease is
 /// currently held or a sweep completed within the last interval. Only a
 /// genuinely stale lease triggers the conditional acquire write.
-async fn try_acquire_lease(db: &DbWriteConnection) -> RuntimeResult<bool> {
+async fn try_acquire_lease(db: &DatabaseConnection) -> RuntimeResult<bool> {
     let now = chrono::Utc::now().naive_utc();
     let recent_cutoff = now - chrono::Duration::seconds(MIN_SWEEP_INTERVAL_SECS);
 
@@ -443,7 +443,7 @@ async fn try_acquire_lease(db: &DbWriteConnection) -> RuntimeResult<bool> {
 
 /// Record successful sweep completion so the read-gate suppresses redundant
 /// sweeps for the next interval.
-async fn record_completion(db: &DbWriteConnection) -> RuntimeResult<()> {
+async fn record_completion(db: &DatabaseConnection) -> RuntimeResult<()> {
     let now = chrono::Utc::now().naive_utc();
     lease_entity::Entity::update_many()
         .col_expr(lease_entity::Column::LastCompletedAt, Expr::value(now))
@@ -456,7 +456,7 @@ async fn record_completion(db: &DbWriteConnection) -> RuntimeResult<()> {
 
 /// Acquire the install-exclusive lease if it is currently free or expired.
 pub async fn acquire_install_exclusive_lease(
-    db: &DbWriteConnection,
+    db: &DatabaseConnection,
 ) -> RuntimeResult<InstallExclusiveLease> {
     let now = chrono::Utc::now().naive_utc();
     let holder_pid = std::process::id() as i32;
@@ -503,7 +503,7 @@ pub async fn acquire_install_exclusive_lease(
 
 /// Renew an install-exclusive lease if this process still owns the exact row.
 pub async fn renew_install_exclusive_lease(
-    db: &DbWriteConnection,
+    db: &DatabaseConnection,
     lease: &mut InstallExclusiveLease,
 ) -> RuntimeResult<()> {
     let now = chrono::Utc::now().naive_utc();
@@ -536,7 +536,7 @@ pub async fn renew_install_exclusive_lease(
 
 /// Clear the install-exclusive lease after an install-mutating command exits.
 pub async fn clear_install_exclusive_lease(
-    db: &DbWriteConnection,
+    db: &DatabaseConnection,
     lease: &InstallExclusiveLease,
 ) -> RuntimeResult<()> {
     let now = chrono::Utc::now().naive_utc();
@@ -562,7 +562,7 @@ pub async fn clear_install_exclusive_lease(
 /// Clear an install-exclusive lease, accepting an already released or expired
 /// row as success so a crash-restarted installer can repeat its cleanup.
 pub async fn clear_install_exclusive_lease_idempotent(
-    db: &DbWriteConnection,
+    db: &DatabaseConnection,
     lease: &InstallExclusiveLease,
 ) -> RuntimeResult<()> {
     match clear_install_exclusive_lease(db, lease).await {
@@ -589,7 +589,7 @@ pub async fn clear_install_exclusive_lease_idempotent(
 /// migration yet. In that case startup continues so normal migrations can
 /// create it. Once the table exists, the install-exclusive row becomes a hard
 /// refusal while unexpired.
-pub async fn refuse_if_install_exclusive_held(db: &DbWriteConnection) -> RuntimeResult<()> {
+pub async fn refuse_if_install_exclusive_held(db: &DatabaseConnection) -> RuntimeResult<()> {
     let now = chrono::Utc::now().naive_utc();
     let lease = match lease_entity::Entity::find_by_id(lease_entity::INSTALL_EXCLUSIVE)
         .one(db)
@@ -617,7 +617,7 @@ pub async fn refuse_if_install_exclusive_held(db: &DbWriteConnection) -> Runtime
 //--------------------------------------------------------------------------------------------------
 
 async fn seed_install_exclusive_lease(
-    db: &DbWriteConnection,
+    db: &DatabaseConnection,
     now: chrono::NaiveDateTime,
 ) -> RuntimeResult<()> {
     let seed = lease_entity::ActiveModel {
@@ -644,7 +644,7 @@ async fn seed_install_exclusive_lease(
 /// Reconcile one active sandbox whose owning runtime may have died. Returns
 /// `true` when the sandbox was marked terminal.
 async fn reconcile_stale_active(
-    db: &DbWriteConnection,
+    db: &DatabaseConnection,
     sandbox: &sandbox_entity::Model,
 ) -> RuntimeResult<bool> {
     let run = run_entity::Entity::find()
@@ -744,7 +744,7 @@ fn stale_runtime_terminal_state(
 }
 
 /// Whether the sandbox has any run that is still Running with a live PID.
-async fn has_live_active_run(db: &DbWriteConnection, sandbox_id: i32) -> RuntimeResult<bool> {
+async fn has_live_active_run(db: &DatabaseConnection, sandbox_id: i32) -> RuntimeResult<bool> {
     let runs = run_entity::Entity::find()
         .filter(run_entity::Column::SandboxId.eq(sandbox_id))
         .filter(run_entity::Column::Status.eq(run_entity::RunStatus::Running))
@@ -798,21 +798,26 @@ mod tests {
     /// A PID that is essentially certain not to map to a live process.
     const DEAD_PID: i32 = 2_000_000_000;
 
-    async fn test_db() -> (TempDir, DbWriteConnection) {
+    async fn test_db() -> (TempDir, DatabaseConnection) {
         let dir = tempfile::tempdir().unwrap();
-        let db = DbWriteConnection::open(
+        let db = microsandbox_db::DbConnection::open(
             &dir.path().join("test.db"),
+            1,
             Duration::from_secs(5),
             Duration::from_secs(5),
         )
         .await
         .unwrap();
-        Migrator::up(db.inner(), None).await.unwrap();
+
+        // The tests exercise the write paths, so they run on the raw write
+        // connection; the read lane is not needed here.
+        let db = db.inner().unwrap().clone();
+        Migrator::up(&db, None).await.unwrap();
         (dir, db)
     }
 
     async fn insert_sandbox(
-        db: &DbWriteConnection,
+        db: &DatabaseConnection,
         name: &str,
         status: sandbox_entity::SandboxStatus,
         ephemeral: bool,
@@ -834,7 +839,7 @@ mod tests {
     }
 
     async fn insert_run(
-        db: &DbWriteConnection,
+        db: &DatabaseConnection,
         sandbox_id: i32,
         pid: Option<i32>,
         status: run_entity::RunStatus,
@@ -851,7 +856,7 @@ mod tests {
         .unwrap();
     }
 
-    async fn status_of(db: &DbWriteConnection, id: i32) -> Option<sandbox_entity::SandboxStatus> {
+    async fn status_of(db: &DatabaseConnection, id: i32) -> Option<sandbox_entity::SandboxStatus> {
         sandbox_entity::Entity::find_by_id(id)
             .one(db)
             .await

@@ -510,13 +510,13 @@ pub(crate) async fn create_local(
             feature: "Volume::create_local".into(),
             available_when: "with a LocalBackend".into(),
         })?;
-    let pools = local_backend.db().await?;
+    let db = local_backend.db().await?;
     let _name_lock = lock_volume_name(local_backend, &config.name)?;
 
     // Check for existing volume.
     let existing = volume_entity::Entity::find()
         .filter(volume_entity::Column::Name.eq(&config.name))
-        .one(pools.read())
+        .one(db)
         .await?;
     if existing.is_some() {
         return Err(MicrosandboxError::VolumeAlreadyExists(config.name));
@@ -548,10 +548,7 @@ pub(crate) async fn create_local(
         ..Default::default()
     };
 
-    if let Err(e) = volume_entity::Entity::insert(model)
-        .exec(pools.write())
-        .await
-    {
+    if let Err(e) = volume_entity::Entity::insert(model).exec(db.inner()?).await {
         let _ = tokio::fs::remove_dir_all(&path).await;
         return Err(e.into());
     }
@@ -581,7 +578,7 @@ pub(crate) async fn get_local(
             feature: "Volume::get_local".into(),
             available_when: "with a LocalBackend".into(),
         })?;
-    let db = local_backend.db().await?.read();
+    let db = local_backend.db().await?;
 
     let model = volume_entity::Entity::find()
         .filter(volume_entity::Column::Name.eq(name))
@@ -601,7 +598,7 @@ pub(crate) async fn list_local(backend: Arc<dyn Backend>) -> MicrosandboxResult<
             feature: "Volume::list_local".into(),
             available_when: "with a LocalBackend".into(),
         })?;
-    let db = local_backend.db().await?.read();
+    let db = local_backend.db().await?;
 
     let models = volume_entity::Entity::find()
         .order_by_desc(volume_entity::Column::CreatedAt)
@@ -622,20 +619,20 @@ pub(crate) async fn remove_local(backend: Arc<dyn Backend>, name: &str) -> Micro
             feature: "Volume::remove_local".into(),
             available_when: "with a LocalBackend".into(),
         })?;
-    let pools = local_backend.db().await?;
+    let db = local_backend.db().await?;
 
     let model = volume_entity::Entity::find()
         .filter(volume_entity::Column::Name.eq(name))
-        .one(pools.read())
+        .one(db)
         .await?
         .ok_or_else(|| MicrosandboxError::VolumeNotFound(name.into()))?;
     let handle = VolumeHandle::from_local_model(backend.clone(), model);
     let _name_lock = lock_volume_name(local_backend, name)?;
     let _disk_lock = lock_disk_volume_for_remove(&handle)?;
-    ensure_volume_not_referenced_by_active_sandbox(pools.read(), name).await?;
+    ensure_volume_not_referenced_by_active_sandbox(db, name).await?;
 
     volume_entity::Entity::delete_by_id(handle.local().expect("local handle").db_id)
-        .exec(pools.write())
+        .exec(db.inner()?)
         .await?;
 
     let path = local_backend.volume_path(name);
@@ -926,7 +923,7 @@ mod tests {
             updated_at: Set(Some(chrono::Utc::now().naive_utc())),
             ..Default::default()
         }
-        .insert(local.db().await.unwrap().write())
+        .insert(local.db().await.unwrap().inner().unwrap())
         .await
         .unwrap();
 

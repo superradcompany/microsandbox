@@ -1149,7 +1149,7 @@ async fn persist_config(
         updated_at: Set(Some(chrono::Utc::now().naive_utc())),
         ..Default::default()
     }
-    .update(local_backend.db().await?.write())
+    .update(local_backend.db().await?.inner()?)
     .await?;
 
     Ok(())
@@ -1181,7 +1181,7 @@ async fn persist_active_config(
         updated_at: Set(Some(chrono::Utc::now().naive_utc())),
         ..Default::default()
     }
-    .update(local_backend.db().await?.write())
+    .update(local_backend.db().await?.inner()?)
     .await?;
 
     Ok(())

@@ -3,7 +3,7 @@
 //! Samples come from `msb_krun` VMM/device counters plus the runtime network
 //! boundary counters. They are written into the process's reserved slot in the
 //! shared-memory registry. The catalog database is not touched on the
-//! per-sample path; lifecycle rows still flow through `DbWriteConnection`.
+//! per-sample path; lifecycle rows still flow through the `DbConnection` write lane.
 
 use std::num::NonZero;
 #[cfg(unix)]

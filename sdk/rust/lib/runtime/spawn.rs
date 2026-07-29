@@ -1084,10 +1084,10 @@ async fn ensure_named_volumes_inner(
         };
 
         validate_volume_name(create.name())?;
-        let pools = local.db().await?;
+        let db = local.db().await?;
         let existing = volume_entity::Entity::find()
             .filter(volume_entity::Column::Name.eq(create.name()))
-            .one(pools.read())
+            .one(db)
             .await?;
 
         if let Some(existing) = existing {
@@ -1141,14 +1141,14 @@ async fn ensure_named_volumes_inner(
             ..Default::default()
         };
         let inserted = volume_entity::Entity::insert(model)
-            .exec(pools.write())
+            .exec(db.inner()?)
             .await?;
         let volume_id = inserted.last_insert_id;
 
         let path = local.volume_path(&volume_config.name);
         if let Err(err) = materialize_volume_path(&volume_config, &path).await {
             let _ = volume_entity::Entity::delete_by_id(volume_id)
-                .exec(pools.write())
+                .exec(db.inner()?)
                 .await;
             let _ = tokio::fs::remove_dir_all(&path).await;
             return Err(err);
@@ -1182,10 +1182,12 @@ async fn rollback_created_named_volume_records(
     }
 
     let ids = volumes.iter().map(|volume| volume.id).collect::<Vec<_>>();
-    if let Ok(pools) = local.db().await {
+    if let Ok(db) = local.db().await
+        && let Ok(conn) = db.inner()
+    {
         let _ = volume_entity::Entity::delete_many()
             .filter(volume_entity::Column::Id.is_in(ids))
-            .exec(pools.write())
+            .exec(conn)
             .await;
     }
 }
@@ -1233,10 +1235,10 @@ async fn resolve_named_volumes(
             continue;
         }
 
-        let pools = local.db().await?;
+        let db = local.db().await?;
         let model = volume_entity::Entity::find()
             .filter(volume_entity::Column::Name.eq(name))
-            .one(pools.read())
+            .one(db)
             .await?
             .ok_or_else(|| MicrosandboxError::VolumeNotFound(name.clone()))?;
 
@@ -3953,10 +3955,10 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("already exists"), "got: {err}");
-        let pools = local.db().await.unwrap();
+        let db = local.db().await.unwrap();
         let existing = super::volume_entity::Entity::find()
             .filter(super::volume_entity::Column::Name.eq("broken"))
-            .one(pools.read())
+            .one(db)
             .await
             .unwrap();
         assert!(
@@ -3997,10 +3999,10 @@ mod tests {
             "got: {err}"
         );
         assert!(!local.volume_path("first-created").exists());
-        let pools = local.db().await.unwrap();
+        let db = local.db().await.unwrap();
         let existing = super::volume_entity::Entity::find()
             .filter(super::volume_entity::Column::Name.eq("first-created"))
-            .one(pools.read())
+            .one(db)
             .await
             .unwrap();
         assert!(
@@ -4017,7 +4019,7 @@ mod tests {
             .build()
             .await
             .unwrap();
-        let pools = local.db().await.unwrap();
+        let db = local.db().await.unwrap();
         super::volume_entity::ActiveModel {
             name: Set("mydata".to_string()),
             kind: Set(VolumeKind::Disk.as_str().to_string()),
@@ -4027,7 +4029,7 @@ mod tests {
             updated_at: Set(Some(chrono::Utc::now().naive_utc())),
             ..Default::default()
         }
-        .insert(pools.write())
+        .insert(db.inner().unwrap())
         .await
         .unwrap();
 
@@ -4062,7 +4064,7 @@ mod tests {
             .build()
             .await
             .unwrap();
-        let pools = local.db().await.unwrap();
+        let db = local.db().await.unwrap();
         super::volume_entity::ActiveModel {
             name: Set("docker-data".to_string()),
             kind: Set(VolumeKind::Disk.as_str().to_string()),
@@ -4073,7 +4075,7 @@ mod tests {
             updated_at: Set(Some(chrono::Utc::now().naive_utc())),
             ..Default::default()
         }
-        .insert(pools.write())
+        .insert(db.inner().unwrap())
         .await
         .unwrap();
 

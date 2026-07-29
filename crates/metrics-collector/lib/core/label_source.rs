@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use microsandbox_db::DbReadConnection;
+use microsandbox_db::DbConnection;
 use microsandbox_db::pool::DEFAULT_BUSY_TIMEOUT_SECS;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -73,8 +73,9 @@ pub struct CatalogLabelSource {
 /// Mutable state guarded by a single lock; the collect loop is sequential, so
 /// there is never contention.
 struct State {
-    /// The catalog connection, opened on first successful use.
-    db: Option<DbReadConnection>,
+    /// The catalog handle (observer: read-only, no write lane), opened on
+    /// first successful use.
+    db: Option<DbConnection>,
 
     /// Per-sandbox label cache.
     cache: LabelCache,
@@ -116,7 +117,7 @@ impl LabelSource for CatalogLabelSource {
         // initialized `$MSB_HOME`; emit no labels and retry on the next tick
         // rather than disabling enrichment for the process lifetime.
         if state.db.is_none() {
-            match DbReadConnection::open(
+            match DbConnection::open_observer(
                 &self.db_path,
                 READ_CONNECTIONS,
                 CONNECT_TIMEOUT,
@@ -175,7 +176,7 @@ impl LabelSource for CatalogLabelSource {
 
 /// Sync the cache to the active snapshot, then resolve each sandbox's labels.
 async fn resolve_labels(
-    db: &DbReadConnection,
+    db: &DbConnection,
     cache: &mut LabelCache,
     sandbox_ids: &HashSet<i32>,
     exclude_keys: &HashSet<String>,
@@ -216,7 +217,6 @@ fn apply_exclusions(set: Arc<LabelSet>, exclude_keys: &HashSet<String>) -> Arc<L
 
 #[cfg(test)]
 mod tests {
-    use microsandbox_db::DbWriteConnection;
     use microsandbox_db::entity::{sandbox, sandbox_label};
     use microsandbox_migration::{Migrator, MigratorTrait};
     use sea_orm::{ActiveModelTrait, Set};
@@ -226,14 +226,15 @@ mod tests {
     /// Create the catalog at `db_path` with one labelled sandbox.
     async fn seed_catalog(db_path: &std::path::Path) {
         std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
-        let write = DbWriteConnection::open(
+        let write = DbConnection::open(
             db_path,
+            1,
             CONNECT_TIMEOUT,
             Duration::from_secs(DEFAULT_BUSY_TIMEOUT_SECS),
         )
         .await
         .unwrap();
-        Migrator::up(write.inner(), None).await.unwrap();
+        Migrator::up(write.inner().unwrap(), None).await.unwrap();
         sandbox::ActiveModel {
             id: Set(1),
             name: Set("s1".to_string()),
@@ -244,7 +245,7 @@ mod tests {
             created_at: Set(None),
             updated_at: Set(None),
         }
-        .insert(write.inner())
+        .insert(write.inner().unwrap())
         .await
         .unwrap();
         sandbox_label::ActiveModel {
@@ -252,7 +253,7 @@ mod tests {
             key: Set("user.id".to_string()),
             value: Set("alice".to_string()),
         }
-        .insert(write.inner())
+        .insert(write.inner().unwrap())
         .await
         .unwrap();
     }
@@ -294,8 +295,9 @@ mod tests {
         seed_catalog(&db_path).await;
 
         // Add a second, noisy label to the same sandbox.
-        let write = DbWriteConnection::open(
+        let write = DbConnection::open(
             &db_path,
+            1,
             CONNECT_TIMEOUT,
             Duration::from_secs(DEFAULT_BUSY_TIMEOUT_SECS),
         )
@@ -306,7 +308,7 @@ mod tests {
             key: Set("org.opencontainers.image.revision".to_string()),
             value: Set("abc123".to_string()),
         }
-        .insert(write.inner())
+        .insert(write.inner().unwrap())
         .await
         .unwrap();
 

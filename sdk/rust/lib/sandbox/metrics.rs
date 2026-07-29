@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use futures::stream;
-use microsandbox_db::DbReadConnection;
+use microsandbox_db::DbConnection;
 use microsandbox_metrics::{LiveMetric, LiveMetricState, MetricsRegistry};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
@@ -141,16 +141,16 @@ pub(crate) async fn local_metrics(
     if config.effective_metrics_interval().is_none() {
         return Err(MicrosandboxError::MetricsDisabled(name.to_string()));
     }
-    let pools = local.db().await?;
+    let db = local.db().await?;
     let model = sandbox_entity::Entity::find()
         .filter(sandbox_entity::Column::Name.eq(name))
-        .one(pools.read())
+        .one(db)
         .await?
         .ok_or_else(|| MicrosandboxError::SandboxNotFound(name.to_string()))?;
     // Prefer the catalog's active config over the caller-supplied one so
     // limits reflect accepted live resizes, not the boot-time spec.
     let effective = model_effective_config(&model).unwrap_or_else(|| config.clone());
-    metrics_for_sandbox(pools.read(), local, model.id, &effective).await
+    metrics_for_sandbox(db, local, model.id, &effective).await
 }
 
 /// Local-backend streaming metrics. Called from the
@@ -180,15 +180,15 @@ pub(crate) fn local_metrics_stream(
             ticker.tick().await;
             let item = match backend.as_local() {
                 Some(local) => match local.db().await {
-                    Ok(pools) => match sandbox_entity::Entity::find()
+                    Ok(db) => match sandbox_entity::Entity::find()
                         .filter(sandbox_entity::Column::Name.eq(&name))
-                        .one(pools.read())
+                        .one(db)
                         .await
                     {
                         Ok(Some(model)) => {
                             let effective =
                                 model_effective_config(&model).unwrap_or_else(|| config.clone());
-                            metrics_for_sandbox(pools.read(), local, model.id, &effective).await
+                            metrics_for_sandbox(db, local, model.id, &effective).await
                         }
                         Ok(None) => Err(MicrosandboxError::SandboxNotFound(name.clone())),
                         Err(e) => Err(e.into()),
@@ -281,10 +281,10 @@ pub async fn all_sandbox_metrics_reports_local(
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let pools = local.db().await?;
+    let db = local.db().await?;
     let models = sandbox_entity::Entity::find()
         .filter(sandbox_entity::Column::Id.is_in(ids))
-        .all(pools.read())
+        .all(db)
         .await?;
     // Require the slot's inline name to match the catalog row: ids are
     // recycled after removal, so a ghost slot from a deleted sandbox can
@@ -319,10 +319,10 @@ pub async fn sandbox_metrics_report_local(
     local: &LocalBackend,
     name: &str,
 ) -> MicrosandboxResult<Option<SandboxMetricsReport>> {
-    let pools = local.db().await?;
+    let db = local.db().await?;
     let model = sandbox_entity::Entity::find()
         .filter(sandbox_entity::Column::Name.eq(name))
-        .one(pools.read())
+        .one(db)
         .await?
         .ok_or_else(|| MicrosandboxError::SandboxNotFound(name.to_string()))?;
 
@@ -342,7 +342,7 @@ pub async fn sandbox_metrics_report_local(
 }
 
 pub(super) async fn metrics_for_sandbox(
-    db: &DbReadConnection,
+    db: &DbConnection,
     local: &LocalBackend,
     sandbox_id: i32,
     config: &SandboxConfig,
