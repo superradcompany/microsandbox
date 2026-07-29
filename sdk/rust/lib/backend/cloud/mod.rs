@@ -13,13 +13,13 @@ pub(in crate::backend) mod sandbox;
 mod volume;
 mod ws_io;
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
 use tokio_tungstenite::{
-    connect_async,
+    Connector, connect_async_tls_with_config,
     tungstenite::{
         client::IntoClientRequest,
         http::{
@@ -38,6 +38,13 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 //--------------------------------------------------------------------------------------------------
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Cached TLS configuration for cloud agent WebSockets.
+///
+/// Building this explicitly avoids Rustls's process-global crypto-provider
+/// selection, which is ambiguous when an embedding application enables both
+/// Ring and AWS-LC through different dependencies.
+static CLOUD_AGENT_TLS_CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
 
 /// Default User-Agent header value.
 fn default_user_agent() -> String {
@@ -132,6 +139,37 @@ impl CloudBackend {
     pub fn url(&self) -> &str {
         &self.url
     }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Helpers
+//--------------------------------------------------------------------------------------------------
+
+/// Build the isolated Rustls connector used by cloud agent WebSockets.
+fn cloud_agent_tls_connector() -> MicrosandboxResult<Connector> {
+    let config = if let Some(config) = CLOUD_AGENT_TLS_CONFIG.get() {
+        Arc::clone(config)
+    } else {
+        let roots =
+            rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .map_err(|error| {
+                MicrosandboxError::Runtime(format!(
+                    "cloud agent TLS protocol configuration: {error}"
+                ))
+            })?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let config = Arc::new(config);
+
+        // A concurrent first connection may win initialization. Reuse its
+        // equivalent immutable config instead of changing global TLS state.
+        Arc::clone(CLOUD_AGENT_TLS_CONFIG.get_or_init(|| config))
+    };
+
+    Ok(Connector::Rustls(config))
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -303,9 +341,13 @@ impl Backend for CloudBackend {
                     })?,
                 );
 
-                let (socket, _) = connect_async(request).await.map_err(|e| {
-                    MicrosandboxError::Runtime(format!("cloud agent websocket: {e}"))
-                })?;
+                let connector = cloud_agent_tls_connector()?;
+                let (socket, _) =
+                    connect_async_tls_with_config(request, None, false, Some(connector))
+                        .await
+                        .map_err(|e| {
+                            MicrosandboxError::Runtime(format!("cloud agent websocket: {e}"))
+                        })?;
 
                 crate::agent::AgentClient::connect_stream_with_timeout(
                     self::ws_io::WsByteStream::new(socket),
@@ -349,6 +391,14 @@ impl From<CloudBackend> for Arc<dyn Backend> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_tls_connector_uses_explicit_rustls_config() {
+        assert!(matches!(
+            cloud_agent_tls_connector().unwrap(),
+            Connector::Rustls(_)
+        ));
+    }
 
     #[test]
     fn new_succeeds_with_url_and_key() {

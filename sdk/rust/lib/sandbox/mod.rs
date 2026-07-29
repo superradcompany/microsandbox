@@ -462,16 +462,28 @@ impl Sandbox {
         cloud: crate::backend::CloudCreateSandboxResponse,
         config: SandboxConfig,
     ) -> Self {
+        let state = crate::backend::SandboxCloudState {
+            id: cloud.id,
+            org_id: cloud.org_id,
+            created_at: cloud.created_at,
+        };
+        Self::from_cloud_state(backend, state, cloud.name, config)
+    }
+
+    /// Build an outer `Sandbox` from cloud state already captured by a
+    /// [`SandboxHandle`]. Cloud agent operations establish their own
+    /// authenticated WebSocket lazily, so reconnecting does not need to hold
+    /// an eager agent client.
+    pub(crate) fn from_cloud_state(
+        backend: Arc<dyn crate::backend::Backend>,
+        state: crate::backend::SandboxCloudState,
+        name: String,
+        config: SandboxConfig,
+    ) -> Self {
         Self {
             backend,
-            inner: Arc::new(crate::backend::SandboxInner::Cloud(
-                crate::backend::SandboxCloudState {
-                    id: cloud.id,
-                    org_id: cloud.org_id,
-                    created_at: cloud.created_at,
-                },
-            )),
-            name: cloud.name,
+            inner: Arc::new(crate::backend::SandboxInner::Cloud(state)),
+            name,
             config,
         }
     }
