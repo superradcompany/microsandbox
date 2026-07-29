@@ -387,9 +387,19 @@ fn ensure_cloud_sandbox_ready(cloud: &CloudCreateSandboxResponse) -> Microsandbo
 /// otherwise agent operations use SDK defaults. Lifecycle start must never
 /// depend on the optional inspection projection.
 fn sandbox_config_from_cloud(cloud: &CloudCreateSandboxResponse) -> SandboxConfig {
-    let mut config = cloud
-        .spec
-        .clone()
+    sandbox_config_from_cloud_spec(&cloud.name, cloud.spec.clone())
+}
+
+/// Decode the server-owned spec projection carried by a cloud handle.
+///
+/// Agent operations only require a best-effort runtime config. The response
+/// projection may be absent or curated, so reconnecting must preserve the
+/// lifecycle contract without requiring a complete create request.
+pub(crate) fn sandbox_config_from_cloud_spec(
+    name: &str,
+    spec: Option<serde_json::Value>,
+) -> SandboxConfig {
+    let mut config = spec
         .and_then(|value| {
             serde_json::from_value::<microsandbox_types::CloudSandboxSpec>(value).ok()
         })
@@ -402,7 +412,7 @@ fn sandbox_config_from_cloud(cloud: &CloudCreateSandboxResponse) -> SandboxConfi
 
     // The top-level response name is canonical even when a complete spec was
     // unavailable or carried stale inspection data.
-    config.spec.name = cloud.name.clone();
+    config.spec.name = name.to_string();
     config
 }
 

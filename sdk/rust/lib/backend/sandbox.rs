@@ -31,7 +31,9 @@ use crate::sandbox::{
 
 // Keep the pre-split path `crate::backend::sandbox::cloud_status_to_sandbox_status`
 // working for callers like `sandbox/handle.rs`.
-pub(crate) use super::cloud::sandbox::cloud_status_to_sandbox_status;
+pub(crate) use super::cloud::sandbox::{
+    cloud_status_to_sandbox_status, sandbox_config_from_cloud_spec,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Type Aliases
