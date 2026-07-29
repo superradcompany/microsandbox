@@ -31,9 +31,9 @@ func TestPlatformRuntimeFiles(t *testing.T) {
 			name:      "linux",
 			goos:      "linux",
 			msb:       "msb",
-			libkrunfw: "libkrunfw.so.5.6.0",
+			libkrunfw: "libkrunfw.so.5.6.1",
 			symlinks: [][2]string{
-				{"libkrunfw.so.5", "libkrunfw.so.5.6.0"},
+				{"libkrunfw.so.5", "libkrunfw.so.5.6.1"},
 				{"libkrunfw.so", "libkrunfw.so.5"},
 			},
 		},
