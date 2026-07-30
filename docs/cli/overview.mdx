@@ -112,6 +112,7 @@ msb completion zsh       # Print the zsh completion script
 
 <CodeGroup>
 ```bash bash
+mkdir -p ~/.local/share/bash-completion/completions
 msb completion bash > ~/.local/share/bash-completion/completions/msb
 ```
 
@@ -120,10 +121,12 @@ msb completion zsh > "${fpath[1]}/_msb"
 ```
 
 ```fish fish
+mkdir -p ~/.config/fish/completions
 msb completion fish > ~/.config/fish/completions/msb.fish
 ```
 
 ```powershell PowerShell
+if (-not (Test-Path $PROFILE)) { New-Item -Path $PROFILE -ItemType File -Force | Out-Null }
 msb completion powershell >> $PROFILE
 ```
 </CodeGroup>
