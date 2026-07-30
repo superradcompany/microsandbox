@@ -112,12 +112,17 @@ msb completion zsh       # Print the zsh completion script
 
 <CodeGroup>
 ```bash bash
+# Requires the bash-completion package. Without it, add this line to
+# ~/.bashrc instead:  source <(msb completion bash)
 mkdir -p ~/.local/share/bash-completion/completions
 msb completion bash > ~/.local/share/bash-completion/completions/msb
 ```
 
 ```zsh zsh
-msb completion zsh > "${fpath[1]}/_msb"
+mkdir -p ~/.zsh/completions
+msb completion zsh > ~/.zsh/completions/_msb
+# Add this line to ~/.zshrc before compinit runs:
+#   fpath=(~/.zsh/completions $fpath)
 ```
 
 ```fish fish
@@ -131,7 +136,7 @@ msb completion powershell >> $PROFILE
 ```
 </CodeGroup>
 
-Then restart your shell (for zsh, make sure `compinit` runs after the file is in place).
+Then restart your shell.
 
 ## Command tree
 

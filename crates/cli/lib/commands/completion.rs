@@ -24,8 +24,9 @@ pub struct CompletionArgs {
 /// Execute the `msb completion` command.
 ///
 /// Writes the completion script for the requested shell to stdout so users
-/// can redirect it to the location their shell expects, e.g.
-/// `msb completion zsh > "${fpath[1]}/_msb"`.
+/// can redirect it to a directory their shell loads completions from, e.g.
+/// `msb completion zsh > ~/.zsh/completions/_msb` (with that directory
+/// added to `fpath` before `compinit` runs).
 pub fn run(args: CompletionArgs, mut cmd: clap::Command) -> anyhow::Result<()> {
     let bin_name = cmd.get_name().to_string();
     clap_complete::generate(args.shell, &mut cmd, bin_name, &mut io::stdout());
