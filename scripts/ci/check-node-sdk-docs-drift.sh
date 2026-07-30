@@ -9,16 +9,23 @@
 #
 # A PR is treated as changing the public API when any of these fire:
 #   1. native/index.d.ts changed (authoritative generated surface), or
-#   2. the export-declaration lines of src/**/*.ts (excluding src/internal/)
-#      differ between base and head, or
-#   3. the #[napi] / pub declaration lines of native/*.rs differ between base
-#      and head — this also catches PRs that edit the Rust bindings but forget
-#      to commit the regenerated index.d.ts.
-#
-# Signals 2 and 3 are line-grep heuristics, deliberately: regenerating the
-# declarations for comparison would require a full Rust/NAPI toolchain build,
-# which is too heavy for this guard and would break simple local runs.
-# Body-only edits don't touch declaration lines, so they don't fire.
+#   2. the TypeScript declarations emitted by tsc from src/**/*.ts differ
+#      between base and head (dist/internal/ excluded — private
+#      implementation). Emitting real declarations, rather than grepping
+#      source lines, catches names added or removed inside multi-line
+#      `export { ... }` blocks and member changes on exported
+#      interfaces/classes, while ignoring body-only edits. Needs node+npm;
+#      only runs when src/ or tsconfig.json actually changed.
+#   3. the #[napi] attribute blocks or pub declaration signatures of
+#      native/*.rs differ between base and head — this also catches PRs that
+#      edit the Rust bindings but forget to commit the regenerated
+#      index.d.ts. Extraction is bracket-aware and multi-line: a #[napi(...)]
+#      attribute is captured until its closing bracket and a pub signature
+#      until its parameter list closes, so ts_args_type lines and parameter
+#      types on continuation lines are covered. Function bodies are not
+#      captured, so body-only edits don't fire. (Regenerating index.d.ts for
+#      comparison instead would need a full Rust/NAPI toolchain build — too
+#      heavy for this guard and impractical locally.)
 #
 # When an API signal fires, the PR must also touch docs/sdk/typescript/.
 #
@@ -26,7 +33,8 @@
 #   Diffs merge-base(base-ref, head-ref)..head-ref. head-ref defaults to HEAD.
 #
 # Escape hatches for API changes that genuinely need no docs update:
-#   - apply the `docs-skip` label to the PR (CI passes DOCS_SKIP=true), or
+#   - apply the `docs-skip` label to the PR (CI re-runs the guard and passes
+#     DOCS_SKIP=true), or
 #   - add a `docs-skip: <reason>` trailer to any commit in the PR.
 
 set -euo pipefail
@@ -40,26 +48,50 @@ DOCS_PATTERN='^docs/sdk/typescript(/|\.mdx$)'
 MERGE_BASE="$(git merge-base "$BASE" "$HEAD")"
 CHANGED="$(git diff --name-only "$MERGE_BASE" "$HEAD")"
 
-# Extract the export-declaration lines of the package-root TS surface at a
-# given revision. src/internal/ is private implementation, not re-exported.
-ts_surface() {
-  local rev="$1" f
-  git ls-tree -r --name-only "$rev" -- sdk/node-ts/src \
-    | grep -E '\.ts$' | grep -v '^sdk/node-ts/src/internal/' \
-    | while IFS= read -r f; do
-        git show "$rev:$f" | grep -E '^export ' | sed "s|^|$f: |" || true
-      done
+TOOLS=""
+cleanup() { if [[ -n "$TOOLS" ]]; then rm -rf "$TOOLS"; fi; }
+trap cleanup EXIT
+
+# Emit the TypeScript declaration surface of sdk/node-ts at a revision into
+# <workdir>/out, using the shared tsc installed under $TOOLS/node_modules
+# (resolved by walking up from the extracted tree).
+emit_ts_surface() {
+  local rev="$1" dir="$2"
+  mkdir -p "$dir"
+  git archive "$rev" sdk/node-ts | tar -x -C "$dir"
+  if ! "$TOOLS/node_modules/.bin/tsc" -p "$dir/sdk/node-ts/tsconfig.json" \
+      --emitDeclarationOnly --declarationMap false --sourceMap false \
+      --outDir "$dir/out"; then
+    echo "::error::tsc failed compiling sdk/node-ts/src at $rev; cannot compare the TS declaration surface" >&2
+    exit 1
+  fi
+  rm -rf "$dir/out/internal"
 }
 
-# Extract the #[napi] attribute and pub declaration lines of the Rust binding
-# sources at a given revision. pub(crate) items are internal and excluded.
+# Extract the #[napi] attribute blocks and pub declaration signatures of the
+# Rust binding sources at a revision. pub(crate) items are internal and
+# excluded; function bodies are never captured.
 rs_surface() {
   local rev="$1" f
   git ls-tree -r --name-only "$rev" -- sdk/node-ts/native \
     | grep -E '\.rs$' \
     | while IFS= read -r f; do
-        git show "$rev:$f" | grep -E '^[[:space:]]*(#\[napi|pub )' \
-          | sed "s|^|$f: |" || true
+        git show "$rev:$f" | awk -v fname="$f" '
+          attr { print fname ": " $0; if ($0 ~ /\][[:space:]]*$/) attr = 0; next }
+          sig  { print fname ": " $0
+                 d += gsub(/\(/, "(") - gsub(/\)/, ")")
+                 if (d <= 0) sig = 0
+                 next }
+          /^[[:space:]]*#\[napi/ {
+            print fname ": " $0
+            if ($0 !~ /\][[:space:]]*$/) attr = 1
+            next
+          }
+          /^[[:space:]]*pub / {
+            print fname ": " $0
+            d = gsub(/\(/, "(") - gsub(/\)/, ")")
+            if (d > 0) sig = 1
+          }'
       done
 }
 
@@ -70,14 +102,34 @@ if grep -qxF "$API_DTS" <<<"$CHANGED"; then
   signals+=("generated declarations changed: $API_DTS")
 fi
 
-TS_DIFF="$(diff <(ts_surface "$MERGE_BASE") <(ts_surface "$HEAD") || true)"
-if [[ -n "$TS_DIFF" ]]; then
-  signals+=("package-root export surface changed: sdk/node-ts/src/")
+TS_DIFF=""
+if grep -qE '^sdk/node-ts/(src/|tsconfig\.json$)' <<<"$CHANGED"; then
+  if ! command -v node >/dev/null || ! command -v npm >/dev/null; then
+    echo "::error::node and npm are required to compare the TS declaration surface (sdk/node-ts/src changed)" >&2
+    exit 1
+  fi
+  TOOLS="$(mktemp -d)"
+  # Pin head's own typescript/@types/node so both sides emit identically.
+  ts_ver="$(git show "$HEAD:sdk/node-ts/package.json" \
+    | node -p 'JSON.parse(require("fs").readFileSync(0,"utf8")).devDependencies.typescript')"
+  types_ver="$(git show "$HEAD:sdk/node-ts/package.json" \
+    | node -p 'JSON.parse(require("fs").readFileSync(0,"utf8")).devDependencies["@types/node"]')"
+  npm install --prefix "$TOOLS" --no-save --ignore-scripts --no-audit --no-fund \
+    "typescript@$ts_ver" "@types/node@$types_ver" >/dev/null
+  emit_ts_surface "$MERGE_BASE" "$TOOLS/base"
+  emit_ts_surface "$HEAD" "$TOOLS/head"
+  TS_DIFF="$(cd "$TOOLS" && diff -ru base/out head/out || true)"
+  if [[ -n "$TS_DIFF" ]]; then
+    signals+=("package-root TS declaration surface changed: sdk/node-ts/src/")
+  fi
 fi
 
-RS_DIFF="$(diff <(rs_surface "$MERGE_BASE") <(rs_surface "$HEAD") || true)"
-if [[ -n "$RS_DIFF" ]]; then
-  signals+=("native binding declarations changed: sdk/node-ts/native/*.rs")
+RS_DIFF=""
+if grep -qE '^sdk/node-ts/native/[^/]+\.rs$' <<<"$CHANGED"; then
+  RS_DIFF="$(diff <(rs_surface "$MERGE_BASE") <(rs_surface "$HEAD") || true)"
+  if [[ -n "$RS_DIFF" ]]; then
+    signals+=("native binding declarations changed: sdk/node-ts/native/*.rs")
+  fi
 fi
 
 if [[ ${#signals[@]} -eq 0 ]]; then
@@ -104,9 +156,9 @@ echo "::error::node-ts public API changed without a matching update under docs/s
 echo
 echo "This PR changes the node-ts SDK public surface but does not touch the"
 echo "TypeScript SDK reference docs. Update the relevant page(s) under"
-echo "docs/sdk/typescript/, or — if this API change genuinely needs no docs"
-echo "update — apply the 'docs-skip' PR label or add a 'docs-skip: <reason>'"
-echo "trailer to a commit."
+echo "docs/sdk/typescript/. If this API change genuinely needs no docs update,"
+echo "apply the 'docs-skip' PR label (the guard re-runs automatically), or add"
+echo "a 'docs-skip: <reason>' trailer to a commit."
 echo
 echo "API-change signals:"
 for s in "${signals[@]}"; do echo "  - $s"; done
@@ -128,6 +180,6 @@ if $dts_changed; then
   show_capped "Changed declarations in $API_DTS:" \
     "$(git diff "$MERGE_BASE" "$HEAD" -- "$API_DTS" | tail -n +5)"
 fi
-[[ -n "$TS_DIFF" ]] && show_capped "Changed src export lines:" "$TS_DIFF"
+[[ -n "$TS_DIFF" ]] && show_capped "Changed emitted TS declarations (base/out vs head/out):" "$TS_DIFF"
 [[ -n "$RS_DIFF" ]] && show_capped "Changed native declaration lines:" "$RS_DIFF"
 exit 1

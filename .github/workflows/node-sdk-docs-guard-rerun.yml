@@ -1,0 +1,63 @@
+name: Node SDK Docs Guard Rerun
+
+# Companion trigger for the node-sdk-docs-guard job in check.yml (issue #590).
+#
+# An unqualified pull_request trigger only fires on opened/synchronize/
+# reopened, so toggling the docs-skip label or retargeting a PR would leave a
+# stale guard result on the required Check Summary. The guard job reads the
+# label and base branch LIVE from the API, so all it needs is a re-run; this
+# workflow issues that re-run automatically:
+#   - labeled (docs-skip):   re-run failed jobs — the guard re-reads labels
+#                            and passes, clearing Check Summary
+#   - unlabeled (docs-skip): re-run the whole check run — a previously green
+#                            guard must be re-evaluated without the label
+#   - edited (base changed): re-run the whole check run — every
+#                            diff-dependent result is stale against the new
+#                            base
+#
+# SECURITY: pull_request_target grants a write-capable token (needed to
+# re-run workflows on fork PRs). This workflow must NEVER check out or
+# execute PR code — it only calls the Actions API.
+
+on:
+  pull_request_target:
+    types: [labeled, unlabeled, edited]
+
+permissions:
+  actions: write
+
+jobs:
+  rerun-guard:
+    name: Re-run docs guard after label/base change
+    if: >-
+      (github.event.action == 'edited' && github.event.changes.base) ||
+      (github.event.action != 'edited' && github.event.label.name == 'docs-skip')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Re-run the Check workflow for the PR head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          ACTION: ${{ github.event.action }}
+        run: |
+          set -euo pipefail
+          run="$(gh api \
+            "repos/$REPO/actions/workflows/check.yml/runs?event=pull_request&head_sha=$HEAD_SHA&per_page=1" \
+            --jq '.workflow_runs[0] // empty | "\(.id) \(.status)"')"
+          if [[ -z "$run" ]]; then
+            echo "No check.yml run found for $HEAD_SHA; nothing to re-run."
+            exit 0
+          fi
+          run_id="${run% *}" status="${run#* }"
+          if [[ "$status" != "completed" ]]; then
+            echo "Run $run_id is still $status; it will evaluate current PR state on its own."
+            exit 0
+          fi
+          if [[ "$ACTION" == "labeled" ]]; then
+            # docs-skip applied: only failed jobs need re-evaluation. Errors
+            # (e.g. no failed jobs) are non-fatal — nothing to clear then.
+            gh run rerun "$run_id" --failed -R "$REPO" || true
+          else
+            gh run rerun "$run_id" -R "$REPO" || true
+          fi

@@ -894,6 +894,48 @@ jobs:
           du -xhd1 /tmp 2>/dev/null | sort -h | tail -30 || true
 
   # ---------------------------------------------------------------------------
+  # Node SDK docs drift guard (issue #590)
+  #
+  # Fails PRs that change the node-ts public API surface without updating
+  # docs/sdk/typescript/. See scripts/ci/check-node-sdk-docs-drift.sh for what
+  # counts as an API change. Lives in this workflow so the existing required
+  # `Check Summary` status enforces it without branch-protection changes.
+  #
+  # The docs-skip label and the PR base branch are read LIVE from the API
+  # rather than from the (potentially stale) event payload, so any re-run of
+  # this job evaluates the PR's current state. The companion workflow
+  # node-sdk-docs-guard-rerun.yml triggers such re-runs automatically when
+  # the docs-skip label is toggled or the PR is retargeted.
+  # ---------------------------------------------------------------------------
+  node-sdk-docs-guard:
+    name: Node SDK docs drift guard
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+
+      - name: Check node-ts API changes ship with docs updates
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          base="$(gh api "repos/${{ github.repository }}/pulls/$PR_NUMBER" --jq .base.ref)"
+          skip="$(gh api "repos/${{ github.repository }}/pulls/$PR_NUMBER" \
+            --jq 'any(.labels[].name; . == "docs-skip")')"
+          echo "Evaluating against live base '$base' (docs-skip: $skip)"
+          DOCS_SKIP="$skip" scripts/ci/check-node-sdk-docs-drift.sh "origin/$base" HEAD
+
+  # ---------------------------------------------------------------------------
   # Python SDK integration tests (requires KVM)
   #
   # Downloads the pre-built msb + libkrunfw from the `check` job, then builds
@@ -1159,6 +1201,7 @@ jobs:
       - cli-smoke-test
       - integration-test
       - node-sdk-test
+      - node-sdk-docs-guard
       - python-sdk-test
       - python-sdk-lower-bound
       - go-sdk-test
