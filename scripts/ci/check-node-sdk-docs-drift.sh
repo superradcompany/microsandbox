@@ -10,32 +10,45 @@
 # A PR is treated as changing the public API when any of these fire:
 #   1. native/index.d.ts changed (authoritative generated surface), or
 #   2. the TypeScript declarations emitted by tsc from src/**/*.ts differ
-#      between base and head (dist/internal/ excluded — private
-#      implementation). Emitting real declarations, rather than grepping
-#      source lines, catches names added or removed inside multi-line
-#      `export { ... }` blocks and member changes on exported
-#      interfaces/classes, while ignoring body-only edits. Needs node+npm;
-#      only runs when src/ or tsconfig.json actually changed.
-#   3. the #[napi] attribute blocks or pub declaration signatures of
-#      native/*.rs differ between base and head — this also catches PRs that
-#      edit the Rust bindings but forget to commit the regenerated
-#      index.d.ts. Extraction is bracket-aware and multi-line: a #[napi(...)]
-#      attribute is captured until its closing bracket and a pub signature
-#      until its parameter list closes, so ts_args_type lines and parameter
-#      types on continuation lines are covered. Function bodies are not
-#      captured, so body-only edits don't fire. (Regenerating index.d.ts for
-#      comparison instead would need a full Rust/NAPI toolchain build — too
-#      heavy for this guard and impractical locally.)
+#      between base and head. Emitting real declarations, rather than
+#      grepping source lines, catches names added or removed inside
+#      multi-line `export { ... }` blocks and member changes on exported
+#      interfaces/classes, while ignoring body-only edits (declarations
+#      carry no bodies). dist/internal/ is INCLUDED: the package root
+#      publicly aliases internal declarations (e.g. RootDiskBuilder from
+#      internal/napi.ts), so excluding them would hide real API changes;
+#      the cost is that a rare internal-only declaration change also fires,
+#      which the docs-skip trailer absorbs. Each revision compiles with its
+#      own locked typescript/@types/node (from package-lock.json, falling
+#      back to package.json ranges), so toolchain-upgrade PRs whose base
+#      source predates the new compiler still evaluate; when both
+#      revisions lock the same versions the toolchain is installed once.
+#      Needs node+npm; only runs when src/ or tsconfig.json actually
+#      changed (a pure dependency bump without src changes is not an API
+#      signal and must not fire on cross-compiler formatting drift).
+#   3. the NAPI-exported declarations of native/*.rs differ between base
+#      and head — this also catches PRs that edit the Rust bindings but
+#      forget to commit the regenerated index.d.ts. The extractor is
+#      bracket-aware and napi-scoped: it captures #[napi(...)] attribute
+#      blocks (multi-line included), the annotated item's signature until
+#      its parameter list closes, pub signatures inside #[napi] impl
+#      blocks, and field/variant declarations inside #[napi] struct/enum
+#      blocks. Function bodies and un-annotated helpers (to_napi_error,
+#      datetime_to_ms, ...) are never captured, so internal-only edits
+#      don't fire. (Regenerating index.d.ts for comparison instead would
+#      need a full Rust/NAPI toolchain build — too heavy for this guard
+#      and impractical locally.)
 #
 # When an API signal fires, the PR must also touch docs/sdk/typescript/.
 #
 # Usage: check-node-sdk-docs-drift.sh <base-ref> [head-ref]
 #   Diffs merge-base(base-ref, head-ref)..head-ref. head-ref defaults to HEAD.
 #
-# Escape hatches for API changes that genuinely need no docs update:
-#   - apply the `docs-skip` label to the PR (CI re-runs the guard and passes
-#     DOCS_SKIP=true), or
-#   - add a `docs-skip: <reason>` trailer to any commit in the PR.
+# Escape hatch for API changes that genuinely need no docs update: add a
+# `docs-skip: <reason>` trailer to any commit in the PR — an empty commit
+# is fine, and pushing it re-runs CI on the exact tree being skipped:
+#   git commit --allow-empty -m "chore: skip docs check" -m "docs-skip: <reason>"
+# (DOCS_SKIP=true also short-circuits the check for local/manual runs.)
 
 set -euo pipefail
 
@@ -52,45 +65,123 @@ TOOLS=""
 cleanup() { if [[ -n "$TOOLS" ]]; then rm -rf "$TOOLS"; fi; }
 trap cleanup EXIT
 
-# Emit the TypeScript declaration surface of sdk/node-ts at a revision into
-# <workdir>/out, using the shared tsc installed under $TOOLS/node_modules
-# (resolved by walking up from the extracted tree).
-emit_ts_surface() {
-  local rev="$1" dir="$2"
-  mkdir -p "$dir"
-  git archive "$rev" sdk/node-ts | tar -x -C "$dir"
-  if ! "$TOOLS/node_modules/.bin/tsc" -p "$dir/sdk/node-ts/tsconfig.json" \
-      --emitDeclarationOnly --declarationMap false --sourceMap false \
-      --outDir "$dir/out"; then
-    echo "::error::tsc failed compiling sdk/node-ts/src at $rev; cannot compare the TS declaration surface" >&2
-    exit 1
+# Print "typescript-version @types/node-version" for a revision, preferring
+# the exact locked versions and falling back to package.json ranges.
+resolve_toolchain() {
+  local rev="$1" out
+  if out="$(git show "$rev:sdk/node-ts/package-lock.json" 2>/dev/null | node -e '
+      let s = "";
+      process.stdin.on("data", (d) => (s += d)).on("end", () => {
+        try {
+          const p = JSON.parse(s).packages;
+          console.log(p["node_modules/typescript"].version + " " +
+                      p["node_modules/@types/node"].version);
+        } catch { process.exit(1); }
+      });')"; then
+    echo "$out"
+  else
+    git show "$rev:sdk/node-ts/package.json" | node -e '
+      let s = "";
+      process.stdin.on("data", (d) => (s += d)).on("end", () => {
+        const d = JSON.parse(s).devDependencies;
+        console.log(d.typescript + " " + d["@types/node"]);
+      });'
   fi
-  rm -rf "$dir/out/internal"
 }
 
-# Extract the #[napi] attribute blocks and pub declaration signatures of the
-# Rust binding sources at a revision. pub(crate) items are internal and
-# excluded; function bodies are never captured.
+# Install typescript/@types/node into <dir> unless already present there.
+install_toolchain() {
+  local dir="$1" ts_ver="$2" types_ver="$3"
+  [[ -x "$dir/node_modules/.bin/tsc" ]] && return 0
+  mkdir -p "$dir"
+  npm install --prefix "$dir" --no-save --ignore-scripts --no-audit --no-fund \
+    "typescript@$ts_ver" "@types/node@$types_ver" >/dev/null
+}
+
+# Emit the TypeScript declaration surface of sdk/node-ts at a revision into
+# <workdir>/out, compiling with the tsc under <toolchain>/node_modules
+# (resolved by the compiler walking up from the extracted tree).
+emit_ts_surface() {
+  local rev="$1" toolchain="$2" dir="$3"
+  mkdir -p "$dir/tree"
+  git archive "$rev" sdk/node-ts | tar -x -C "$dir/tree"
+  ln -sfn "$toolchain/node_modules" "$dir/node_modules"
+  if ! "$toolchain/node_modules/.bin/tsc" -p "$dir/tree/sdk/node-ts/tsconfig.json" \
+      --emitDeclarationOnly --declarationMap false --sourceMap false \
+      --outDir "$dir/out"; then
+    echo "::error::tsc failed compiling sdk/node-ts/src at $rev with its own locked toolchain" >&2
+    exit 1
+  fi
+}
+
+# Extract the NAPI-exported declaration surface of the Rust binding sources
+# at a revision: #[napi] attributes, the annotated item's signature, pub
+# signatures inside #[napi] impl blocks, and member declarations inside
+# #[napi] struct/enum blocks. Bodies and un-annotated items are skipped.
 rs_surface() {
   local rev="$1" f
   git ls-tree -r --name-only "$rev" -- sdk/node-ts/native \
     | grep -E '\.rs$' \
     | while IFS= read -r f; do
         git show "$rev:$f" | awk -v fname="$f" '
-          attr { print fname ": " $0; if ($0 ~ /\][[:space:]]*$/) attr = 0; next }
-          sig  { print fname ": " $0
-                 d += gsub(/\(/, "(") - gsub(/\)/, ")")
-                 if (d <= 0) sig = 0
-                 next }
-          /^[[:space:]]*#\[napi/ {
-            print fname ": " $0
-            if ($0 !~ /\][[:space:]]*$/) attr = 1
-            next
-          }
-          /^[[:space:]]*pub / {
-            print fname ": " $0
-            d = gsub(/\(/, "(") - gsub(/\)/, ")")
-            if (d > 0) sig = 1
+          function pcount(s, t) { t = s; sub(/\/\/.*/, "", t)
+            return gsub(/\(/, "(", t) - gsub(/\)/, ")", t) }
+          function bcount(s, t) { t = s; sub(/\/\/.*/, "", t)
+            return gsub(/\{/, "{", t) - gsub(/\}/, "}", t) }
+          {
+            line = $0
+            if (attr) {                       # inside multi-line #[napi(...)]
+              print fname ": " line
+              if (line ~ /\][[:space:]]*$/) { attr = 0; pending = 1 }
+              next
+            }
+            if (sig) {                        # inside multi-line signature
+              print fname ": " line
+              pd += pcount(line)
+              if (pd <= 0) sig = 0
+              depth += bcount(line)
+              if (bd && depth < bd) bd = 0
+              next
+            }
+            if (line ~ /^[[:space:]]*#\[napi/) {
+              print fname ": " line
+              if (line ~ /\][[:space:]]*$/) pending = 1
+              else attr = 1
+              next
+            }
+            if (pending) {                    # first item line after #[napi]
+              if (line ~ /^[[:space:]]*($|#\[|\/\/)/) next
+              pending = 0
+              print fname ": " line
+              if (line ~ /(^|[[:space:]])impl([[:space:]<]|$)/) {
+                depth += bcount(line)
+                if (line ~ /\{/) { bd = depth; btype = "impl" }
+                next
+              }
+              if (line ~ /pub[[:space:]]+(struct|enum)/) {
+                depth += bcount(line)
+                if (line ~ /\{/) { bd = depth; btype = "data" }
+                next
+              }
+              pd = pcount(line)               # fn-like: capture signature
+              if (pd > 0) sig = 1
+              depth += bcount(line)
+              if (bd && depth < bd) bd = 0
+              next
+            }
+            if (bd && depth >= bd) {          # inside a #[napi] block
+              if (btype == "impl") {
+                if (line ~ /^[[:space:]]*pub /) {
+                  print fname ": " line
+                  pd = pcount(line)
+                  if (pd > 0) sig = 1
+                }
+              } else if (line !~ /^[[:space:]]*(\/\/|\}|$)/) {
+                print fname ": " line         # struct fields / enum variants
+              }
+            }
+            depth += bcount(line)
+            if (bd && depth < bd) bd = 0
           }'
       done
 }
@@ -105,19 +196,21 @@ fi
 TS_DIFF=""
 if grep -qE '^sdk/node-ts/(src/|tsconfig\.json$)' <<<"$CHANGED"; then
   if ! command -v node >/dev/null || ! command -v npm >/dev/null; then
-    echo "::error::node and npm are required to compare the TS declaration surface (sdk/node-ts/src changed)" >&2
+    echo "::error::node and npm are required to compare the TS declaration surface (sdk/node-ts sources changed)" >&2
     exit 1
   fi
   TOOLS="$(mktemp -d)"
-  # Pin head's own typescript/@types/node so both sides emit identically.
-  ts_ver="$(git show "$HEAD:sdk/node-ts/package.json" \
-    | node -p 'JSON.parse(require("fs").readFileSync(0,"utf8")).devDependencies.typescript')"
-  types_ver="$(git show "$HEAD:sdk/node-ts/package.json" \
-    | node -p 'JSON.parse(require("fs").readFileSync(0,"utf8")).devDependencies["@types/node"]')"
-  npm install --prefix "$TOOLS" --no-save --ignore-scripts --no-audit --no-fund \
-    "typescript@$ts_ver" "@types/node@$types_ver" >/dev/null
-  emit_ts_surface "$MERGE_BASE" "$TOOLS/base"
-  emit_ts_surface "$HEAD" "$TOOLS/head"
+  base_tc="$(resolve_toolchain "$MERGE_BASE")"
+  head_tc="$(resolve_toolchain "$HEAD")"
+  echo "TS toolchains — base: $base_tc, head: $head_tc"
+  install_toolchain "$TOOLS/tc-base" $base_tc
+  if [[ "$head_tc" == "$base_tc" ]]; then
+    ln -sn "$TOOLS/tc-base" "$TOOLS/tc-head"
+  else
+    install_toolchain "$TOOLS/tc-head" $head_tc
+  fi
+  emit_ts_surface "$MERGE_BASE" "$TOOLS/tc-base" "$TOOLS/base"
+  emit_ts_surface "$HEAD" "$TOOLS/tc-head" "$TOOLS/head"
   TS_DIFF="$(cd "$TOOLS" && diff -ru base/out head/out || true)"
   if [[ -n "$TS_DIFF" ]]; then
     signals+=("package-root TS declaration surface changed: sdk/node-ts/src/")
@@ -143,7 +236,7 @@ if grep -qE "$DOCS_PATTERN" <<<"$CHANGED"; then
 fi
 
 if [[ "${DOCS_SKIP:-}" == "true" ]]; then
-  echo "OK: docs check skipped via docs-skip label."
+  echo "OK: docs check skipped via DOCS_SKIP override."
   exit 0
 fi
 
@@ -157,8 +250,9 @@ echo
 echo "This PR changes the node-ts SDK public surface but does not touch the"
 echo "TypeScript SDK reference docs. Update the relevant page(s) under"
 echo "docs/sdk/typescript/. If this API change genuinely needs no docs update,"
-echo "apply the 'docs-skip' PR label (the guard re-runs automatically), or add"
-echo "a 'docs-skip: <reason>' trailer to a commit."
+echo "push a commit whose message carries a 'docs-skip: <reason>' trailer"
+echo "(an empty commit is fine):"
+echo "  git commit --allow-empty -m \"chore: skip docs check\" -m \"docs-skip: <reason>\""
 echo
 echo "API-change signals:"
 for s in "${signals[@]}"; do echo "  - $s"; done

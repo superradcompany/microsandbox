@@ -901,19 +901,16 @@ jobs:
   # counts as an API change. Lives in this workflow so the existing required
   # `Check Summary` status enforces it without branch-protection changes.
   #
-  # The docs-skip label and the PR base branch are read LIVE from the API
-  # rather than from the (potentially stale) event payload, so any re-run of
-  # this job evaluates the PR's current state. The companion workflow
-  # node-sdk-docs-guard-rerun.yml triggers such re-runs automatically when
-  # the docs-skip label is toggled or the PR is retargeted.
+  # The only escape hatch is a `docs-skip: <reason>` commit trailer. That is
+  # deliberate: pushing the trailer commit triggers a fresh synchronize run
+  # over the exact tree being skipped, so the skip needs no label-event
+  # plumbing (which would require a write-token companion workflow to re-run
+  # this job and brings races between label toggles and in-flight runs).
   # ---------------------------------------------------------------------------
   node-sdk-docs-guard:
     name: Node SDK docs drift guard
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -924,16 +921,7 @@ jobs:
           node-version: 22
 
       - name: Check node-ts API changes ship with docs updates
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-          base="$(gh api "repos/${{ github.repository }}/pulls/$PR_NUMBER" --jq .base.ref)"
-          skip="$(gh api "repos/${{ github.repository }}/pulls/$PR_NUMBER" \
-            --jq 'any(.labels[].name; . == "docs-skip")')"
-          echo "Evaluating against live base '$base' (docs-skip: $skip)"
-          DOCS_SKIP="$skip" scripts/ci/check-node-sdk-docs-drift.sh "origin/$base" HEAD
+        run: scripts/ci/check-node-sdk-docs-drift.sh "origin/${{ github.base_ref }}" HEAD
 
   # ---------------------------------------------------------------------------
   # Python SDK integration tests (requires KVM)
