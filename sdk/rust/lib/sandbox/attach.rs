@@ -299,6 +299,7 @@ pub(crate) mod agent {
             true,
             rows,
             cols,
+            false,
         );
         let (id, mut rx) = client.stream(MessageType::ExecRequest, &req).await?;
 
@@ -539,6 +540,7 @@ pub(crate) mod agent {
             true,
             rows,
             cols,
+            false,
         );
         let (id, mut rx) = client.stream(MessageType::ExecRequest, &req).await?;
 

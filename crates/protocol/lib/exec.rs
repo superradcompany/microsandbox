@@ -45,6 +45,13 @@ pub struct ExecRequest {
     /// POSIX resource limits to apply to the spawned process via `setrlimit()`.
     #[serde(default)]
     pub rlimits: Vec<ExecRlimit>,
+
+    /// Redirect the command's stderr into its stdout stream (like `2>&1`),
+    /// preserving the interleaved order of writes. All output is then
+    /// delivered as stdout data and no stderr data is produced. Ignored
+    /// when `tty` is true (a PTY is inherently a single combined stream).
+    #[serde(default)]
+    pub combined_output: bool,
 }
 
 /// A POSIX resource limit to apply to a spawned process.
@@ -258,7 +265,16 @@ impl FromStr for ExecRlimit {
 
 #[cfg(test)]
 mod tests {
-    use super::ExecRlimit;
+    use super::{ExecRequest, ExecRlimit};
+
+    #[test]
+    fn test_exec_request_without_combined_output_defaults_to_false() {
+        // A request encoded by an older peer that predates `combined_output`
+        // must decode with the flag off.
+        let json = r#"{"cmd": "/bin/true"}"#;
+        let req: ExecRequest = serde_json::from_str(json).unwrap();
+        assert!(!req.combined_output);
+    }
 
     #[test]
     fn test_exec_rlimit_from_str_uses_soft_for_hard_when_omitted() {

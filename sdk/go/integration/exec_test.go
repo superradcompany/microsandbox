@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -350,6 +351,86 @@ func TestExecStreamFailedEventOnMissingBinary(t *testing.T) {
 done:
 	if sawStarted && !sawFailed {
 		t.Error("missing binary should not produce Started without a Failed afterwards")
+	}
+}
+
+// TestExecCombinedOutputPreservesInterleavedOrder verifies that
+// WithExecCombinedOutput redirects stderr into the stdout pipe inside the
+// guest, so alternating writes arrive in emission order and Stderr stays
+// empty.
+func TestExecCombinedOutputPreservesInterleavedOrder(t *testing.T) {
+	ctx := integrationCtx(t)
+	name := "go-sdk-combined-" + t.Name()
+
+	sb, err := createSandbox(t, ctx, name, microsandbox.WithImage(goIntegrationImage))
+	if err != nil {
+		t.Fatalf("CreateSandbox: %v", err)
+	}
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = sb.Stop(stopCtx)
+		_ = sb.Close()
+	})
+
+	script := `i=0; while [ $i -lt 16 ]; do echo "out$i"; echo "err$i" >&2; i=$((i+1)); done`
+	out, err := sb.Exec(ctx, "sh", []string{"-c", script}, microsandbox.WithExecCombinedOutput())
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	var want strings.Builder
+	for i := 0; i < 16; i++ {
+		fmt.Fprintf(&want, "out%d\nerr%d\n", i, i)
+	}
+	if out.Stdout() != want.String() {
+		t.Errorf("combined stdout: got %q want %q", out.Stdout(), want.String())
+	}
+	if out.Stderr() != "" {
+		t.Errorf("combined stderr: got %q want empty", out.Stderr())
+	}
+}
+
+// TestExecStreamCombinedOutputEmitsNoStderrEvents verifies the streaming
+// variant delivers everything as stdout events.
+func TestExecStreamCombinedOutputEmitsNoStderrEvents(t *testing.T) {
+	ctx := integrationCtx(t)
+	name := "go-sdk-combined-stream-" + t.Name()
+
+	sb, err := createSandbox(t, ctx, name, microsandbox.WithImage(goIntegrationImage))
+	if err != nil {
+		t.Fatalf("CreateSandbox: %v", err)
+	}
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = sb.Stop(stopCtx)
+		_ = sb.Close()
+	})
+
+	h, err := sb.ExecStream(ctx, "sh", []string{"-c", "echo s; echo e >&2"},
+		microsandbox.WithExecCombinedOutput())
+	if err != nil {
+		t.Fatalf("ExecStream: %v", err)
+	}
+	defer h.Close()
+
+	var stdout []byte
+	for {
+		event, err := h.Recv(ctx)
+		if err != nil {
+			t.Fatalf("Recv: %v", err)
+		}
+		switch event.Kind {
+		case microsandbox.ExecEventStdout:
+			stdout = append(stdout, event.Data...)
+		case microsandbox.ExecEventStderr:
+			t.Errorf("unexpected stderr event: %q", event.Data)
+		case microsandbox.ExecEventDone:
+			if got := string(stdout); got != "s\ne\n" {
+				t.Errorf("combined stream stdout: got %q want %q", got, "s\ne\n")
+			}
+			return
+		}
 	}
 }
 

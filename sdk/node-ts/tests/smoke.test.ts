@@ -74,6 +74,31 @@ describe.skipIf(!msbPath())("end-to-end smoke", () => {
     expect(code).toBe(7);
   });
 
+  it("combines stderr into stdout in emission order via combinedOutput()", async () => {
+    const script =
+      'i=0; while [ $i -lt 16 ]; do echo "out$i"; echo "err$i" >&2; i=$((i+1)); done';
+    const out = await sb.execWith("sh", (e) =>
+      e.args(["-c", script]).combinedOutput(true),
+    );
+    expect(out.success).toBe(true);
+    let expected = "";
+    for (let i = 0; i < 16; i++) expected += `out${i}\nerr${i}\n`;
+    expect(out.stdout()).toBe(expected);
+    expect(out.stderr()).toBe("");
+
+    const handle = await sb.execStreamWith("sh", (e) =>
+      e.args(["-c", "echo s; echo e >&2"]).combinedOutput(true),
+    );
+    let stdout = "";
+    let sawStderr = false;
+    for await (const ev of handle) {
+      if (ev.kind === "stdout") stdout += new TextDecoder().decode(ev.data);
+      if (ev.kind === "stderr") sawStderr = true;
+    }
+    expect(sawStderr).toBe(false);
+    expect(stdout).toBe("s\ne\n");
+  });
+
   it("resizes a TTY while recv() is pending", async () => {
     const handle = await sb.execStreamWith("sh", (exec) =>
       exec
