@@ -1,0 +1,39 @@
+name: Node SDK Docs Guard
+
+# Docs drift guard for the node-ts SDK (issue #590): fail PRs that change the
+# node-ts public API surface without updating docs/sdk/typescript/. See
+# scripts/ci/check-node-sdk-docs-drift.sh for what counts as an API change.
+#
+# This lives in its own workflow (rather than check.yml) because the
+# `docs-skip` label escape hatch requires re-running on labeled/unlabeled
+# events — an unqualified pull_request trigger only fires on
+# opened/synchronize/reopened, and re-running a failed workflow keeps its
+# original event payload. Adding labeled/unlabeled to check.yml would re-run
+# the full heavyweight CI on every label change; here it re-runs only this
+# cheap job.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  node-sdk-docs-guard:
+    name: Node SDK docs drift guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Check node-ts API changes ship with docs updates
+        env:
+          DOCS_SKIP: ${{ contains(github.event.pull_request.labels.*.name, 'docs-skip') }}
+        run: scripts/ci/check-node-sdk-docs-drift.sh "origin/${{ github.base_ref }}" HEAD
