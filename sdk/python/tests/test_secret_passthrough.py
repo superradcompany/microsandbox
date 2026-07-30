@@ -57,7 +57,7 @@ def _native_create_error(**kwargs: object) -> BaseException:
     """
     try:
         Sandbox.create("violation-parse-probe", image="alpine", **kwargs)
-    except BaseException as exc:  # noqa: BLE001
+    except BaseException as exc:
         return exc
     raise AssertionError("expected Sandbox.create to raise outside an event loop")
 
