@@ -1156,7 +1156,7 @@ The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_wit
 | idle_timeout | `float` | - | Idle timeout in seconds |
 | ephemeral | `bool` | `False` | If `True`, the sandbox and all its persisted state are removed automatically once it stops, rather than left on disk for restart |
 | env | `dict[str, str]` | `{}` | Environment variables visible to all commands |
-| labels | `dict[str, str]` | `{}` | User-defined labels attached to the sandbox. Filter with [`list_with()`](#sandbox-list_with); see [Selecting sandboxes by label](/sandboxes/overview#selecting-sandboxes-by-label). Keys starting with `sandbox.`, `microsandbox.`, or `service.` are reserved and rejected |
+| labels | `dict[str, str]` | `{}` | User-defined labels attached to the sandbox. Filter with [`list_with()`](#sandbox-list_with); see [Select in bulk](/sandboxes/labels#select-in-bulk). Keys starting with `sandbox.`, `microsandbox.`, or `service.` are reserved and rejected |
 | scripts | `dict[str, str]` | `{}` | Named scripts mounted at `/.msb/scripts/` and added to `PATH` |
 | pull_policy | `str \| `[`PullPolicy`](#pullpolicy) | `"if-missing"` | Image pull behavior |
 | log_level | `str \| `[`LogLevel`](#loglevel) | - | Override log verbosity |
