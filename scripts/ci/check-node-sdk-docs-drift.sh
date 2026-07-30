@@ -26,8 +26,13 @@
 #      Needs node+npm; only runs when src/ or tsconfig.json actually
 #      changed (a pure dependency bump without src changes is not an API
 #      signal and must not fire on cross-compiler formatting drift).
+#   2b. the package.json entry points (main/module/types/exports) differ —
+#      the manifest's export map is public API even when no source file
+#      changes; unrelated manifest churn (version, deps) is ignored.
 #   3. the NAPI-exported declarations of native/*.rs differ between base
-#      and head — this also catches PRs that edit the Rust bindings but
+#      and head — including lib.rs module wiring (mod lines and their
+#      #[cfg] attributes), since un-declaring or cfg-gating a module drops
+#      its exports with every signature intact. This also catches PRs that
 #      forget to commit the regenerated index.d.ts. The extractor is
 #      bracket-aware and napi-scoped: it captures #[napi(...)] attribute
 #      blocks (multi-line included), the annotated item's signature until
@@ -61,9 +66,51 @@ DOCS_PATTERN='^docs/sdk/typescript(/|\.mdx$)'
 MERGE_BASE="$(git merge-base "$BASE" "$HEAD")"
 CHANGED="$(git diff --name-only "$MERGE_BASE" "$HEAD")"
 
+# Escape hatches run BEFORE any signal computation, deliberately: the
+# trailer (or DOCS_SKIP) skips the ENTIRE check — including a guard-self
+# failure such as tsc refusing to compile a revision — not just the docs
+# requirement. That makes it double as the escape hatch for guard
+# malfunctions, and skipped runs never pay the compile cost.
+if [[ "${DOCS_SKIP:-}" == "true" ]]; then
+  echo "OK: docs check skipped via DOCS_SKIP override."
+  exit 0
+fi
+if git log --format=%B "$MERGE_BASE..$HEAD" | grep -qiE '^docs-skip:'; then
+  echo "OK: docs check skipped via docs-skip commit trailer."
+  exit 0
+fi
+# Likewise, if the docs were touched the requirement is satisfied whatever
+# the signals would say — skip the expensive computation too.
+if grep -qE "$DOCS_PATTERN" <<<"$CHANGED"; then
+  echo "OK: TypeScript SDK docs updated in this change; no drift check needed."
+  exit 0
+fi
+
 TOOLS=""
 cleanup() { if [[ -n "$TOOLS" ]]; then rm -rf "$TOOLS"; fi; }
 trap cleanup EXIT
+
+require_node() {
+  if ! command -v node >/dev/null || ! command -v npm >/dev/null; then
+    echo "::error::node and npm are required for this check (sdk/node-ts sources changed)" >&2
+    exit 1
+  fi
+}
+
+# The manifest's entry points are public API too: the exports map and the
+# root main/module/types fields. Compare only those, so unrelated manifest
+# churn (version bumps, deps, scripts) stays quiet.
+pkg_surface() {
+  local rev="$1"
+  git show "$rev:sdk/node-ts/package.json" | node -e '
+    let s = "";
+    process.stdin.on("data", (d) => (s += d)).on("end", () => {
+      const p = JSON.parse(s);
+      console.log(JSON.stringify(
+        { main: p.main, module: p.module, types: p.types, exports: p.exports },
+        null, 2));
+    });'
+}
 
 # Print "typescript-version @types/node-version" for a revision, preferring
 # the exact locked versions and falling back to package.json ranges.
@@ -143,6 +190,25 @@ rs_surface() {
               if (bd && depth < bd) bd = 0
               next
             }
+            # Module wiring in lib.rs is surface too: removing or
+            # cfg-gating a `mod` line drops its #[napi] exports from the
+            # built binding while every signature stays intact. Capture
+            # (pub) mod declarations plus the #[cfg] lines attached to
+            # them (scoped to lib.rs so in-file test modules elsewhere
+            # stay quiet).
+            if (fname ~ /\/lib\.rs$/) {
+              if (line ~ /^[[:space:]]*#\[cfg/) {
+                cfgbuf = cfgbuf fname ": " line "\n"
+                next
+              }
+              if (line ~ /^[[:space:]]*(pub[[:space:]]+)?mod[[:space:]]+[A-Za-z0-9_]/) {
+                printf "%s", cfgbuf
+                cfgbuf = ""
+                print fname ": " line
+                next
+              }
+              cfgbuf = ""
+            }
             if (line ~ /^[[:space:]]*#\[napi/) {
               print fname ": " line
               if (line ~ /\][[:space:]]*$/) pending = 1
@@ -193,12 +259,18 @@ if grep -qxF "$API_DTS" <<<"$CHANGED"; then
   signals+=("generated declarations changed: $API_DTS")
 fi
 
+PKG_DIFF=""
+if grep -qxF 'sdk/node-ts/package.json' <<<"$CHANGED"; then
+  require_node
+  PKG_DIFF="$(diff <(pkg_surface "$MERGE_BASE") <(pkg_surface "$HEAD") || true)"
+  if [[ -n "$PKG_DIFF" ]]; then
+    signals+=("package entry points changed: sdk/node-ts/package.json (main/module/types/exports)")
+  fi
+fi
+
 TS_DIFF=""
 if grep -qE '^sdk/node-ts/(src/|tsconfig\.json$)' <<<"$CHANGED"; then
-  if ! command -v node >/dev/null || ! command -v npm >/dev/null; then
-    echo "::error::node and npm are required to compare the TS declaration surface (sdk/node-ts sources changed)" >&2
-    exit 1
-  fi
+  require_node
   TOOLS="$(mktemp -d)"
   base_tc="$(resolve_toolchain "$MERGE_BASE")"
   head_tc="$(resolve_toolchain "$HEAD")"
@@ -227,21 +299,6 @@ fi
 
 if [[ ${#signals[@]} -eq 0 ]]; then
   echo "OK: node-ts public API surface unchanged; no docs update required."
-  exit 0
-fi
-
-if grep -qE "$DOCS_PATTERN" <<<"$CHANGED"; then
-  echo "OK: node-ts API surface and TypeScript SDK docs both updated."
-  exit 0
-fi
-
-if [[ "${DOCS_SKIP:-}" == "true" ]]; then
-  echo "OK: docs check skipped via DOCS_SKIP override."
-  exit 0
-fi
-
-if git log --format=%B "$MERGE_BASE..$HEAD" | grep -qiE '^docs-skip:'; then
-  echo "OK: docs check skipped via docs-skip commit trailer."
   exit 0
 fi
 
@@ -274,6 +331,7 @@ if $dts_changed; then
   show_capped "Changed declarations in $API_DTS:" \
     "$(git diff "$MERGE_BASE" "$HEAD" -- "$API_DTS" | tail -n +5)"
 fi
+[[ -n "$PKG_DIFF" ]] && show_capped "Changed package entry points:" "$PKG_DIFF"
 [[ -n "$TS_DIFF" ]] && show_capped "Changed emitted TS declarations (base/out vs head/out):" "$TS_DIFF"
 [[ -n "$RS_DIFF" ]] && show_capped "Changed native declaration lines:" "$RS_DIFF"
 exit 1
