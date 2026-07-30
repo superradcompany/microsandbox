@@ -86,6 +86,9 @@ msb self doctor          # Check runtime files and supported host prerequisites
 msb self update          # Update msb to latest
 msb self downgrade 0.6.0 # Downgrade to a supported older release
 msb self uninstall       # Remove msb
+
+# Shell completion
+msb completion zsh       # Print the zsh completion script
 ```
 
 <Tip>
@@ -102,6 +105,30 @@ msb self uninstall       # Remove msb
 | `--info` | Show info, warnings, and errors |
 | `--debug` | Show debug output |
 | `--trace` | Show all output including trace |
+
+## Shell completion
+
+`msb completion <shell>` prints a completion script for `bash`, `zsh`, `fish`, `elvish`, or `powershell`. Write it to the location your shell loads completions from:
+
+<CodeGroup>
+```bash bash
+msb completion bash > ~/.local/share/bash-completion/completions/msb
+```
+
+```zsh zsh
+msb completion zsh > "${fpath[1]}/_msb"
+```
+
+```fish fish
+msb completion fish > ~/.config/fish/completions/msb.fish
+```
+
+```powershell PowerShell
+msb completion powershell >> $PROFILE
+```
+</CodeGroup>
+
+Then restart your shell (for zsh, make sure `compinit` runs after the file is in place).
 
 ## Command tree
 
