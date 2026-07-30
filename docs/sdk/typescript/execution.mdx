@@ -90,7 +90,7 @@ const out = await sandbox.execWith("python3", (e) =>
 
 </Accordion>
 
-Run a command with per-execution overrides. Configure working directory, environment variables, timeout, stdin, TTY allocation, and rlimits via the builder callback. These overrides apply only to this execution and don't change the sandbox's defaults.
+Run a command with per-execution overrides. Configure working directory, environment variables, timeout, stdin, TTY allocation, combined output, and rlimits via the builder callback. These overrides apply only to this execution and don't change the sandbox's defaults.
 
 <p className="msb-label">Parameters</p>
 
@@ -482,6 +482,7 @@ Fluent builder passed to the callback in `execWith(cmd, b => ...)` and `execStre
 | `stdinPipe()` | `() => this` | Open a writable stdin pipe; read it back with [`ExecHandle.takeStdin()`](#exechandle) |
 | `stdinBytes(data)` | `(data: Buffer) => this` | Pre-supply stdin bytes and close it |
 | `tty(enabled)` | `(enabled: boolean) => this` | Allocate a pseudo-terminal |
+| `combinedOutput(enabled)` | `(enabled: boolean) => this` | Redirect stderr into stdout (like `2>&1`), preserving the interleaved order of writes; stderr stays empty and no stderr events are emitted. No effect with `tty` (a PTY is already a single combined stream); ignored by sandboxes running an older guest runtime |
 | `rlimit(resource, limit)` | `(resource: `[`RlimitResource`](#rlimitresource)`, limit: number) => this` | Set both soft and hard rlimit |
 | `rlimitRange(resource, soft, hard)` | `(resource: `[`RlimitResource`](#rlimitresource)`, soft: number, hard: number) => this` | Set distinct soft and hard rlimits |
 

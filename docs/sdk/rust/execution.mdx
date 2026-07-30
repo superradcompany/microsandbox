@@ -633,6 +633,35 @@ Allocate a pseudo-terminal. Enable for interactive programs (shells, editors, `t
   </div>
 </div>
 
+#### <span className="msb-recv">.</span><span className="msb-hn">combined_output()</span>
+
+```rust
+fn combined_output(self, enabled: bool) -> Self
+```
+
+<Accordion title="Example">
+
+```rust
+let out = sb.exec_with("sh", |e| e
+    .args(["-c", "echo one; echo two >&2; echo three"])
+    .combined_output(true)
+).await?;
+assert_eq!(out.stdout()?, "one\ntwo\nthree\n");
+```
+
+</Accordion>
+
+Redirect the command's stderr into its stdout stream (like `2>&1` in a shell), preserving the interleaved order of writes. All output is then reported as stdout — stderr stays empty and streaming execs emit no stderr events. Has no effect with [`tty(true)`](#tty) (a PTY is already a single combined stream). On sandboxes running an older guest runtime the flag is ignored and the streams stay separate; restart the sandbox to pick up the current runtime. Default: `false`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>enabled</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc"><code>true</code> to merge stderr into stdout.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">.</span><span className="msb-hn">stdin_null()</span>
 
 ```rust
