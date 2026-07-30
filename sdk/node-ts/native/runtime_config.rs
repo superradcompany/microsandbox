@@ -13,6 +13,19 @@ static BACKEND_SCOPES: OnceLock<Mutex<HashMap<u32, Arc<dyn microsandbox::Backend
     OnceLock::new();
 
 //--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+/// Secret-safe backend diagnostics returned to JavaScript.
+#[napi(object, object_from_js = false)]
+pub struct JsBackendInfo {
+    pub kind: String,
+    pub api_url: Option<String>,
+    pub source: String,
+    pub profile: Option<String>,
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
@@ -84,9 +97,18 @@ pub fn pop_default_backend(token: u32) -> napi::Result<()> {
 /// Return the active default backend kind (`"local"` or `"cloud"`).
 #[napi(js_name = "defaultBackendKind")]
 pub fn default_backend_kind() -> &'static str {
-    match microsandbox::default_backend().kind() {
-        microsandbox::BackendKind::Local => "local",
-        microsandbox::BackendKind::Cloud => "cloud",
+    microsandbox::default_backend().kind().as_str()
+}
+
+/// Return secret-safe information about the active default backend.
+#[napi(js_name = "defaultBackendInfo")]
+pub fn default_backend_info() -> JsBackendInfo {
+    let info = microsandbox::default_backend_info();
+    JsBackendInfo {
+        kind: info.kind.as_str().to_string(),
+        api_url: info.api_url,
+        source: info.source.as_str().to_string(),
+        profile: info.profile,
     }
 }
 

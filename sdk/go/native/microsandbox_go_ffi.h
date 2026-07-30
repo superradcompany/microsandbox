@@ -638,6 +638,11 @@ char *msb_volume_fs_op(uint64_t cancel_id,
  */
 char *msb_version(unsigned char *buf, uintptr_t buf_len);
 
+/**
+ * Return secret-safe information about the active default backend.
+ */
+char *msb_default_backend_info(unsigned char *buf, uintptr_t buf_len);
+
 char *msb_image_get(uint64_t cancel_id,
                     const char *reference,
                     unsigned char *buf,

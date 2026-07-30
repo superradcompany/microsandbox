@@ -368,6 +368,14 @@ pub fn warn(msg: &str) {
     eprintln!("{} {msg}", style("warn:").yellow().bold());
 }
 
+/// Print a concise informational notice to stderr.
+///
+/// This uses the same action-line geometry as progress and success output so
+/// diagnostics remain visually consistent without contaminating stdout.
+pub fn notice(label: &str, detail: &str) {
+    eprintln!("   {} {:<12} {}", style("•").cyan(), label, detail);
+}
+
 /// Print a warning message with `→`-prefixed context lines.
 ///
 /// Mirrors [`error_with_lines`] but with a yellow `warn:` label. As there, the

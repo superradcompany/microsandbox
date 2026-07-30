@@ -39,6 +39,8 @@ export class SandboxHandle {
   /** Sandbox name. Names are limited to 128 UTF-8 bytes. */
   readonly name: string;
   readonly status: SandboxStatus;
+  /** Backend retained by this handle. */
+  readonly backendKind: "local" | "cloud";
   readonly configJson: string;
   readonly createdAt: Date | null;
   readonly updatedAt: Date | null;
@@ -48,6 +50,7 @@ export class SandboxHandle {
     this.inner = inner;
     this.name = inner.name;
     this.status = inner.status as SandboxStatus;
+    this.backendKind = inner.backendKind;
     this.configJson = inner.configJson;
     this.createdAt =
       typeof inner.createdAt === "number" ? new Date(inner.createdAt) : null;

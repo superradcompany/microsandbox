@@ -60,6 +60,16 @@ impl PySandboxHandle {
         )
     }
 
+    /// Backend retained by this handle (`"local"` or `"cloud"`).
+    #[getter]
+    fn backend_kind(&self) -> PyResult<String> {
+        let guard = self
+            .inner
+            .try_lock()
+            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("handle is busy"))?;
+        Ok(guard.backend_kind().as_str().to_string())
+    }
+
     /// Raw config JSON string.
     #[getter]
     fn config_json(&self) -> PyResult<String> {

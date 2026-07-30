@@ -3,6 +3,7 @@
 import os as _os
 
 from microsandbox._microsandbox import (
+    BackendInfo,
     ExecEvent,
     ExecHandle,
     ExecOutput,
@@ -41,6 +42,7 @@ from microsandbox._microsandbox import (
     VolumeHandle,
     all_sandbox_metrics,
     backend_scope,
+    default_backend_info,
     default_backend_kind,
     install,
     is_installed,
@@ -177,6 +179,9 @@ if "MSB_PATH" not in _os.environ:
         _set_runtime_msb_path(str(_bundled_msb))
 
 __all__ = [
+    # Backend selection
+    "BackendInfo",
+    "default_backend_info",
     # Sandbox lifecycle (native)
     "Sandbox",
     "SandboxHandle",

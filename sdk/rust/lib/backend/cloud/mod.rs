@@ -33,7 +33,9 @@ use tokio_tungstenite::{
 };
 
 use self::http::urlencoding;
-use super::{Backend, BackendKind, SandboxBackend, VolumeBackend};
+use super::{
+    Backend, BackendInfo, BackendKind, BackendSelectionSource, SandboxBackend, VolumeBackend,
+};
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -80,6 +82,8 @@ pub struct CloudBackend {
     url: String,
     api_key: String,
     http: reqwest::Client,
+    selection_source: BackendSelectionSource,
+    profile: Option<String>,
 }
 
 /// Fluent builder for `CloudBackend`. Use for tuned construction.
@@ -136,7 +140,9 @@ impl CloudBackend {
         {
             builder = builder.url(url);
         }
-        builder.build()
+        Ok(builder
+            .build()?
+            .with_selection(BackendSelectionSource::MsbApiKey, None))
     }
 
     /// Construct from a named SDK profile in `~/.microsandbox/config.json`.
@@ -155,6 +161,17 @@ impl CloudBackend {
     /// Configured msb-cloud endpoint URL (no trailing slash).
     pub fn url(&self) -> &str {
         &self.url
+    }
+
+    /// Attach resolver provenance without changing cloud credentials.
+    pub(crate) fn with_selection(
+        mut self,
+        selection_source: BackendSelectionSource,
+        profile: Option<String>,
+    ) -> Self {
+        self.selection_source = selection_source;
+        self.profile = profile;
+        self
     }
 }
 
@@ -306,7 +323,13 @@ impl CloudBackendBuilder {
                 })?
         };
 
-        Ok(CloudBackend { url, api_key, http })
+        Ok(CloudBackend {
+            url,
+            api_key,
+            http,
+            selection_source: BackendSelectionSource::Programmatic,
+            profile: None,
+        })
     }
 }
 
@@ -317,6 +340,15 @@ impl CloudBackendBuilder {
 impl Backend for CloudBackend {
     fn kind(&self) -> BackendKind {
         BackendKind::Cloud
+    }
+
+    fn info(&self) -> BackendInfo {
+        BackendInfo {
+            kind: BackendKind::Cloud,
+            api_url: Some(self.url.clone()),
+            source: self.selection_source,
+            profile: self.profile.clone(),
+        }
     }
 
     fn sandboxes(&self) -> &dyn SandboxBackend {
@@ -547,6 +579,17 @@ mod tests {
         let b = CloudBackend::new("https://msb.example.com", "msb_test_abc").unwrap();
         assert_eq!(b.kind(), BackendKind::Cloud);
         assert_eq!(b.url(), "https://msb.example.com");
+        assert_eq!(b.info().source, BackendSelectionSource::Programmatic);
+    }
+
+    #[test]
+    fn backend_info_never_serializes_api_key() {
+        let b = CloudBackend::new("https://msb.example.com", "msb_test_super_secret").unwrap();
+        let json = serde_json::to_string(&b.info()).unwrap();
+
+        assert!(json.contains("https://msb.example.com"));
+        assert!(!json.contains("msb_test_super_secret"));
+        assert!(!json.contains("api_key"));
     }
 
     #[test]

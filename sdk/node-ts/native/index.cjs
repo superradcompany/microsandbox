@@ -664,6 +664,7 @@ module.exports.JsVolumeFsWriteSink = nativeBinding.JsVolumeFsWriteSink
 module.exports.VolumeHandle = nativeBinding.VolumeHandle
 module.exports.JsVolumeHandle = nativeBinding.JsVolumeHandle
 module.exports.allSandboxMetrics = nativeBinding.allSandboxMetrics
+module.exports.defaultBackendInfo = nativeBinding.defaultBackendInfo
 module.exports.defaultBackendKind = nativeBinding.defaultBackendKind
 module.exports.imageGet = nativeBinding.imageGet
 module.exports.imageInspect = nativeBinding.imageInspect

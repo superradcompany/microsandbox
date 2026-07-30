@@ -215,6 +215,17 @@ impl PySandbox {
     // Static Methods — Creation
     //----------------------------------------------------------------------------------------------
 
+    /// Backend retained by this sandbox (`"local"` or `"cloud"`).
+    #[getter]
+    fn backend_kind(&self) -> PyResult<String> {
+        let guard = self
+            .inner
+            .try_lock()
+            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("sandbox is busy"))?;
+        let sandbox = guard.as_ref().ok_or_else(crate::error::consumed)?;
+        Ok(sandbox.backend_kind().as_str().to_string())
+    }
+
     /// Create a sandbox from a name and keyword-only configuration.
     ///
     /// Sandbox names are limited to 128 UTF-8 bytes.

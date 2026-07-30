@@ -27,6 +27,19 @@ struct PyBackendScope {
     previous: Option<Arc<dyn microsandbox::Backend>>,
 }
 
+/// Secret-safe information about an SDK backend.
+#[pyclass(name = "BackendInfo", frozen)]
+struct PyBackendInfo {
+    #[pyo3(get)]
+    kind: String,
+    #[pyo3(get)]
+    api_url: Option<String>,
+    #[pyo3(get)]
+    source: String,
+    #[pyo3(get)]
+    profile: Option<String>,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -42,6 +55,7 @@ fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(set_default_backend, m)?)?;
     m.add_function(wrap_pyfunction!(backend_scope, m)?)?;
     m.add_function(wrap_pyfunction!(default_backend_kind, m)?)?;
+    m.add_function(wrap_pyfunction!(default_backend_info, m)?)?;
     m.add_function(wrap_pyfunction!(resolved_msb_path, m)?)?;
     m.add_function(wrap_pyfunction!(metrics::all_sandbox_metrics, m)?)?;
     m.add_class::<sandbox::PySandbox>()?;
@@ -83,6 +97,7 @@ fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<fs::PyFsEntry>()?;
     m.add_class::<fs::PyFsMetadata>()?;
     m.add_class::<PyBackendScope>()?;
+    m.add_class::<PyBackendInfo>()?;
     Ok(())
 }
 
@@ -161,6 +176,18 @@ fn default_backend_kind(py: Python<'_>) -> PyResult<PyObject> {
         microsandbox::BackendKind::Cloud => "cloud",
     };
     crate::helpers::str_enum_member(py, "BackendKind", kind)
+}
+
+/// Return secret-safe information about the active default backend.
+#[pyfunction]
+fn default_backend_info() -> PyBackendInfo {
+    let info = microsandbox::default_backend_info();
+    PyBackendInfo {
+        kind: info.kind.as_str().to_string(),
+        api_url: info.api_url,
+        source: info.source.as_str().to_string(),
+        profile: info.profile,
+    }
 }
 
 /// Return the `msb` binary path the native resolver would currently use.

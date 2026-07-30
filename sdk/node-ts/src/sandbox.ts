@@ -164,12 +164,15 @@ export class Sandbox implements AsyncDisposable {
   /** Sandbox name. Names are limited to 128 UTF-8 bytes. */
   readonly name: string;
   readonly ownsLifecycle: boolean;
+  /** Backend retained by this sandbox. */
+  readonly backendKind: "local" | "cloud";
 
   /** @internal use `Sandbox.builder(name).create()` */
   constructor(inner: NapiSandbox, name: string, ownsLifecycle = true) {
     this.inner = inner;
     this.name = name;
     this.ownsLifecycle = ownsLifecycle;
+    this.backendKind = inner.backendKind;
   }
 
   // -- statics ------------------------------------------------------------
