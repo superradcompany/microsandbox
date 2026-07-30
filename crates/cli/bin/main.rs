@@ -84,6 +84,7 @@ enum Commands {
     SchemaBaseline(self_cmd::SchemaBaselineArgs),
 
     /// Show the active backend and its selection source.
+    #[command(visible_alias = "ctx")]
     Context(context::ContextArgs),
 
     /// Complete a deferred Windows self-update or self-downgrade swap (internal).
@@ -722,11 +723,13 @@ mod command_tests {
         let remove = Cli::try_parse_from(["msb", "remove", "demo"]).unwrap();
         let exec = Cli::try_parse_from(["msb", "exec", "demo", "--", "true"]).unwrap();
         let context = Cli::try_parse_from(["msb", "context"]).unwrap();
+        let context_alias = Cli::try_parse_from(["msb", "ctx"]).unwrap();
 
         assert!(shows_backend_notice(&create.command));
         assert!(shows_backend_notice(&remove.command));
         assert!(shows_backend_notice(&exec.command));
         assert!(!shows_backend_notice(&context.command));
+        assert!(matches!(context_alias.command, Commands::Context(_)));
     }
 
     #[cfg(feature = "ssh")]
