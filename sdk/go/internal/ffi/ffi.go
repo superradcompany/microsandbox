@@ -1496,6 +1496,7 @@ type CreateOptions struct {
 	Workdir              string               `json:"workdir,omitempty"`
 	Shell                string               `json:"shell,omitempty"`
 	SecurityProfile      string               `json:"security_profile,omitempty"`
+	DeploymentProfile    string               `json:"deployment_profile,omitempty"`
 	Hostname             string               `json:"hostname,omitempty"`
 	User                 string               `json:"user,omitempty"`
 	Replace              bool                 `json:"replace,omitempty"`

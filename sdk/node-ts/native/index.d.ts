@@ -1028,6 +1028,11 @@ export declare class SandboxBuilder {
   shell(shell: string): this
   /** In-guest security profile (`"default"` or `"restricted"`). */
   security(profile: string): this
+  /**
+   * Host-runtime deployment profile (`"single-tenant"` or `"multi-tenant"`).
+   * Managed backends may enforce their own profile.
+   */
+  deploymentProfile(profile: string): this
   /** Configure registry connection settings via a callback. */
   registry(configure: (arg: RegistryConfigBuilder) => RegistryConfigBuilder): this
   /**
@@ -2193,8 +2198,8 @@ export interface SecretModifySpec {
 /**
  * Set the process-wide default backend.
  *
- * `kind="local"` selects the local backend. `kind="cloud"` requires either
- * `url` + `api_key`, or `profile`.
+ * `kind="local"` selects the local backend. `kind="cloud"` requires either an
+ * API key (with an optional URL override), or a profile.
  */
 export declare function setDefaultBackend(kind: string, url?: string | undefined | null, apiKey?: string | undefined | null, profile?: string | undefined | null): void
 

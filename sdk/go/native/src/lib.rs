@@ -53,7 +53,7 @@ use microsandbox::{
     AgentBridge, LogLevel, MicrosandboxError, RegistryAuth, Sandbox, Snapshot, UpperVerifyStatus,
     logs::{LogOptions, LogSource},
     sandbox::{
-        FsEntryKind, PullPolicy, SecurityProfile, all_sandbox_metrics_local,
+        DeploymentProfile, FsEntryKind, PullPolicy, SecurityProfile, all_sandbox_metrics_local,
         exec::{ExecControl, ExecEvent, ExecHandle, ExecSink},
         fs::{FsReadStream, FsWriteSink},
         ssh::{SftpClient, SshClient, SshServer, SshStdioStream},
@@ -983,6 +983,7 @@ struct SandboxCreateOpts {
     hostname: Option<String>,
     user: Option<String>,
     security_profile: Option<String>,
+    deployment_profile: Option<String>,
     #[serde(default)]
     replace: bool,
     /// Timeout in milliseconds between SIGTERM and SIGKILL when
@@ -1548,6 +1549,16 @@ fn parse_security_profile(s: &str) -> Result<SecurityProfile, FfiError> {
     }
 }
 
+fn parse_deployment_profile(s: &str) -> Result<DeploymentProfile, FfiError> {
+    match s {
+        "" | "single-tenant" | "single_tenant" => Ok(DeploymentProfile::SingleTenant),
+        "multi-tenant" | "multi_tenant" => Ok(DeploymentProfile::MultiTenant),
+        _ => Err(FfiError::invalid_argument(format!(
+            "invalid deployment profile: {s} (expected single-tenant or multi-tenant)"
+        ))),
+    }
+}
+
 /// Apply a structured root disk config to the sandbox builder. Kind and
 /// per-kind field combinations are validated here so errors surface as
 /// invalid-argument; sizing/kind guards stay in the core builder.
@@ -1986,6 +1997,10 @@ pub unsafe extern "C" fn msb_sandbox_create(
             Some(s) => Some(parse_security_profile(s)?),
             None => None,
         };
+        let deployment_profile = match opts.deployment_profile.as_deref() {
+            Some(s) => Some(parse_deployment_profile(s)?),
+            None => None,
+        };
 
         Ok(Box::pin(async move {
             let mut builder = Sandbox::builder(&name);
@@ -2057,6 +2072,9 @@ pub unsafe extern "C" fn msb_sandbox_create(
             }
             if let Some(profile) = security_profile {
                 builder = builder.security(profile);
+            }
+            if let Some(profile) = deployment_profile {
+                builder = builder.deployment_profile(profile);
             }
             if let Some(timeout_ms) = opts.replace_with_timeout_ms {
                 builder =

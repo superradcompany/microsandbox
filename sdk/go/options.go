@@ -24,19 +24,20 @@ type SandboxConfig struct {
 	// RootDisk is nil.
 	//
 	// Deprecated: set RootDisk (via WithRootDisk / RootDisk.Managed) instead.
-	OCIUpperSizeMiB uint32
-	ociUpperSizeSet bool
-	Snapshot        string
-	MemoryMiB       uint32
-	CPUs            uint8
-	MaxMemoryMiB    uint32
-	MaxCPUs         uint8
-	Workdir         string
-	Shell           string
-	SecurityProfile SecurityProfile
-	Hostname        string
-	User            string
-	Replace         bool
+	OCIUpperSizeMiB   uint32
+	ociUpperSizeSet   bool
+	Snapshot          string
+	MemoryMiB         uint32
+	CPUs              uint8
+	MaxMemoryMiB      uint32
+	MaxCPUs           uint8
+	Workdir           string
+	Shell             string
+	SecurityProfile   SecurityProfile
+	DeploymentProfile DeploymentProfile
+	Hostname          string
+	User              string
+	Replace           bool
 	// ReplaceWithTimeout, if non-nil, sets a specific timeout between
 	// SIGTERM and SIGKILL when replacing an existing sandbox. nil means
 	// "use the runtime default" (10s when Replace is set). Setting this
@@ -77,30 +78,31 @@ type SandboxConfig struct {
 type SandboxOption func(*SandboxConfig)
 
 type persistedSandboxConfig struct {
-	Name            string               `json:"name"`
-	Image           json.RawMessage      `json:"image"`
-	ImageFstype     string               `json:"image_fstype"`
-	OCIUpperSizeMiB uint32               `json:"oci_upper_size_mib"`
-	MemoryMiB       uint32               `json:"memory_mib"`
-	CPUs            uint8                `json:"cpus"`
-	MaxMemoryMiB    uint32               `json:"max_memory_mib"`
-	MaxCPUs         uint8                `json:"max_cpus"`
-	Resources       *persistedResources  `json:"resources"`
-	Workdir         string               `json:"workdir"`
-	Shell           string               `json:"shell"`
-	SecurityProfile SecurityProfile      `json:"security_profile"`
-	Hostname        string               `json:"hostname"`
-	User            string               `json:"user"`
-	Replace         bool                 `json:"replace"`
-	Labels          map[string]string    `json:"labels"`
-	Detached        bool                 `json:"detached"`
-	Lifecycle       *persistedLifecycle  `json:"lifecycle"`
-	Entrypoint      []string             `json:"entrypoint"`
-	Init            *persistedInitConfig `json:"init"`
-	LogLevel        LogLevel             `json:"log_level"`
-	QuietLogs       bool                 `json:"quiet_logs"`
-	Scripts         map[string]string    `json:"scripts"`
-	PullPolicy      PullPolicy           `json:"pull_policy"`
+	Name              string               `json:"name"`
+	Image             json.RawMessage      `json:"image"`
+	ImageFstype       string               `json:"image_fstype"`
+	OCIUpperSizeMiB   uint32               `json:"oci_upper_size_mib"`
+	MemoryMiB         uint32               `json:"memory_mib"`
+	CPUs              uint8                `json:"cpus"`
+	MaxMemoryMiB      uint32               `json:"max_memory_mib"`
+	MaxCPUs           uint8                `json:"max_cpus"`
+	Resources         *persistedResources  `json:"resources"`
+	Workdir           string               `json:"workdir"`
+	Shell             string               `json:"shell"`
+	SecurityProfile   SecurityProfile      `json:"security_profile"`
+	DeploymentProfile DeploymentProfile    `json:"deployment_profile"`
+	Hostname          string               `json:"hostname"`
+	User              string               `json:"user"`
+	Replace           bool                 `json:"replace"`
+	Labels            map[string]string    `json:"labels"`
+	Detached          bool                 `json:"detached"`
+	Lifecycle         *persistedLifecycle  `json:"lifecycle"`
+	Entrypoint        []string             `json:"entrypoint"`
+	Init              *persistedInitConfig `json:"init"`
+	LogLevel          LogLevel             `json:"log_level"`
+	QuietLogs         bool                 `json:"quiet_logs"`
+	Scripts           map[string]string    `json:"scripts"`
+	PullPolicy        PullPolicy           `json:"pull_policy"`
 }
 
 type persistedInitConfig struct {
@@ -153,33 +155,34 @@ func (c *SandboxConfig) UnmarshalJSON(data []byte) error {
 	}
 
 	*c = SandboxConfig{
-		Name:            raw.Name,
-		Image:           image,
-		ImageFstype:     imageFstype,
-		RootDisk:        rootDisk,
-		OCIUpperSizeMiB: upperSizeMiB,
-		ociUpperSizeSet: upperSizeSet,
-		MemoryMiB:       raw.memoryMiB(),
-		CPUs:            raw.cpus(),
-		MaxMemoryMiB:    raw.maxMemoryMiB(),
-		MaxCPUs:         raw.maxCPUs(),
-		Workdir:         raw.Workdir,
-		Shell:           raw.Shell,
-		SecurityProfile: raw.SecurityProfile,
-		Hostname:        raw.Hostname,
-		User:            raw.User,
-		Replace:         raw.Replace,
-		Labels:          raw.Labels,
-		Detached:        raw.Detached,
-		Ephemeral:       raw.lifecycleEphemeral(),
-		Entrypoint:      raw.Entrypoint,
-		Init:            decodePersistedInit(raw.Init),
-		LogLevel:        raw.LogLevel,
-		QuietLogs:       raw.QuietLogs,
-		Scripts:         raw.Scripts,
-		PullPolicy:      raw.PullPolicy,
-		MaxDuration:     time.Duration(raw.lifecycleMaxDurationSecs()) * time.Second,
-		IdleTimeout:     time.Duration(raw.lifecycleIdleTimeoutSecs()) * time.Second,
+		Name:              raw.Name,
+		Image:             image,
+		ImageFstype:       imageFstype,
+		RootDisk:          rootDisk,
+		OCIUpperSizeMiB:   upperSizeMiB,
+		ociUpperSizeSet:   upperSizeSet,
+		MemoryMiB:         raw.memoryMiB(),
+		CPUs:              raw.cpus(),
+		MaxMemoryMiB:      raw.maxMemoryMiB(),
+		MaxCPUs:           raw.maxCPUs(),
+		Workdir:           raw.Workdir,
+		Shell:             raw.Shell,
+		SecurityProfile:   raw.SecurityProfile,
+		DeploymentProfile: normalizeDeploymentProfile(raw.DeploymentProfile),
+		Hostname:          raw.Hostname,
+		User:              raw.User,
+		Replace:           raw.Replace,
+		Labels:            raw.Labels,
+		Detached:          raw.Detached,
+		Ephemeral:         raw.lifecycleEphemeral(),
+		Entrypoint:        raw.Entrypoint,
+		Init:              decodePersistedInit(raw.Init),
+		LogLevel:          raw.LogLevel,
+		QuietLogs:         raw.QuietLogs,
+		Scripts:           raw.Scripts,
+		PullPolicy:        raw.PullPolicy,
+		MaxDuration:       time.Duration(raw.lifecycleMaxDurationSecs()) * time.Second,
+		IdleTimeout:       time.Duration(raw.lifecycleIdleTimeoutSecs()) * time.Second,
 	}
 	return nil
 }
@@ -240,6 +243,19 @@ func (c persistedSandboxConfig) lifecycleIdleTimeoutSecs() uint64 {
 		return 0
 	}
 	return c.Lifecycle.IdleTimeoutSecs
+}
+
+// normalizeDeploymentProfile translates the Rust spec's snake_case wire value
+// back to the idiomatic public Go spelling used by the functional option.
+func normalizeDeploymentProfile(profile DeploymentProfile) DeploymentProfile {
+	switch profile {
+	case "single_tenant":
+		return DeploymentProfileSingleTenant
+	case "multi_tenant":
+		return DeploymentProfileMultiTenant
+	default:
+		return profile
+	}
 }
 
 func decodePersistedInit(raw *persistedInitConfig) *InitConfig {
@@ -365,6 +381,16 @@ const (
 	SecurityProfileDefault SecurityProfile = "default"
 	// SecurityProfileRestricted applies stronger in-guest hardening.
 	SecurityProfileRestricted SecurityProfile = "restricted"
+)
+
+// DeploymentProfile selects the host-runtime isolation profile for local deployments.
+type DeploymentProfile string
+
+const (
+	// DeploymentProfileSingleTenant preserves the requested host-runtime configuration.
+	DeploymentProfileSingleTenant DeploymentProfile = "single-tenant"
+	// DeploymentProfileMultiTenant enables platform-owned isolation floors.
+	DeploymentProfileMultiTenant DeploymentProfile = "multi-tenant"
 )
 
 // WithImage sets the container image to use (e.g. "python:3.12").
@@ -545,6 +571,12 @@ func WithShell(shell string) SandboxOption {
 // WithSecurityProfile selects the in-guest security profile.
 func WithSecurityProfile(profile SecurityProfile) SandboxOption {
 	return func(o *SandboxConfig) { o.SecurityProfile = profile }
+}
+
+// WithDeploymentProfile selects the host-runtime isolation profile.
+// Managed backends may enforce their own profile.
+func WithDeploymentProfile(profile DeploymentProfile) SandboxOption {
+	return func(o *SandboxConfig) { o.DeploymentProfile = profile }
 }
 
 // WithEnv adds environment variables to the sandbox. Called repeatedly,
