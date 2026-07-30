@@ -1543,6 +1543,15 @@ fn parse_violation_action_obj(
         return parse_violation_action(&s);
     }
 
+    // ViolationPolicy._to_dict() flattens non-passthrough policies to a bare
+    // action string, which as_dict would reject; accept that shape here.
+    if let Ok(method) = obj.getattr("_to_dict")
+        && let Ok(result) = method.call0()
+        && let Ok(s) = result.extract::<String>()
+    {
+        return parse_violation_action(&s);
+    }
+
     let dict = as_dict(obj)?;
     if let Some(passthrough_obj) = dict.get_item("passthrough")?
         && !passthrough_obj.is_none()
