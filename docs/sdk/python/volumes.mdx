@@ -246,7 +246,7 @@ Mount a host directory into the sandbox. Changes in the guest are reflected on t
 def named(
     name: str,
     *,
-    mode: VolumeCreateMode | None = None,
+    mode: NamedVolumeMode | None = None,
     kind: VolumeKind | None = None,
     size_mib: int | None = None,
     quota_mib: int | None = None,
@@ -260,12 +260,18 @@ def named(
 <Accordion title="Example">
 
 ```python
+from microsandbox import NamedVolumeMode
+
 sb = await Sandbox.create(
     "worker",
     image="python",
     volumes={
         "/root/.cache/pip": Volume.named("pip-cache"),
-        "/etc/config": Volume.named("shared-config", readonly=True),
+        "/etc/config": Volume.named(
+            "shared-config",
+            mode=NamedVolumeMode.ENSURE_EXISTS,
+            readonly=True,
+        ),
     },
 )
 ```
@@ -282,7 +288,7 @@ Mount a named volume. By default the volume must already exist; set `mode` to co
     <div className="msb-param-desc">Volume name.</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>mode</code><a className="msb-type" href="#volumecreatemode">VolumeCreateMode | None</a></div>
+    <div className="msb-param-key"><code>mode</code><a className="msb-type" href="#namedvolumemode">NamedVolumeMode | None</a></div>
     <div className="msb-param-desc">Whether to require, create, or ensure the named volume.</div>
   </div>
   <div className="msb-param">
@@ -706,7 +712,7 @@ Frozen dataclass representing a mount configuration. Build one with a [mount fac
 | kind | [`MountKind`](#mountkind) | - | Type of mount (required) |
 | bind | `str \| None` | `None` | Host path for bind mounts |
 | named | `str \| None` | `None` | Volume name for named mounts |
-| named_mode | [`VolumeCreateMode`](#volumecreatemode)` \| None` | `None` | Named-volume creation behavior |
+| named_mode | [`NamedVolumeMode`](#namedvolumemode)` \| None` | `None` | Named-volume creation behavior |
 | named_kind | [`VolumeKind`](#volumekind)` \| None` | `None` | Storage kind for created named volumes |
 | quota_mib | `int \| None` | `None` | Quota in MiB for directory named volumes |
 | size_mib | `int \| None` | `None` | Size limit for tmpfs, or capacity for disk named volumes |
@@ -726,12 +732,12 @@ Frozen dataclass representing a mount configuration. Build one with a [mount fac
 
 String enum (`StrEnum`) for the type of mount.
 
-| Value | Description |
-|-------|-------------|
-| `"bind"` | Host bind mount |
-| `"named"` | Named volume mount |
-| `"tmpfs"` | In-memory filesystem |
-| `"disk"` | Host disk image mount |
+| Member | Value | Description |
+|--------|-------|-------------|
+| `MountKind.BIND` | `"bind"` | Host bind mount |
+| `MountKind.NAMED` | `"named"` | Named volume mount |
+| `MountKind.TMPFS` | `"tmpfs"` | In-memory filesystem |
+| `MountKind.DISK` | `"disk"` | Host disk image mount |
 
 ### VolumeKind
 
@@ -739,22 +745,22 @@ String enum (`StrEnum`) for the type of mount.
 
 Storage kind for a named volume.
 
-| Value | Description |
-|-------|-------------|
-| `"dir"` | Directory-backed volume mounted through virtiofs |
-| `"disk"` | Raw ext4 disk-image volume mounted through virtio-blk |
+| Member | Value | Description |
+|--------|-------|-------------|
+| `VolumeKind.DIRECTORY` | `"dir"` | Directory-backed volume mounted through virtiofs |
+| `VolumeKind.DISK` | `"disk"` | Raw ext4 disk-image volume mounted through virtio-blk |
 
-### VolumeCreateMode
+### NamedVolumeMode
 
 <p className="msb-backref">Used by <a href="#volume-named">Volume.named(mode=...)</a> · <a href="#mountconfig">MountConfig.named_mode</a></p>
 
 Creation behavior for a named volume mount.
 
-| Value | Description |
-|-------|-------------|
-| `"existing"` | Require the named volume to exist |
-| `"create"` | Create a new named volume |
-| `"ensure-exists"` | Reuse the named volume if present, otherwise create it |
+| Member | Value | Description |
+|--------|-------|-------------|
+| `NamedVolumeMode.EXISTING` | `"existing"` | Require the named volume to exist |
+| `NamedVolumeMode.CREATE` | `"create"` | Create a new named volume |
+| `NamedVolumeMode.ENSURE_EXISTS` | `"ensure-exists"` | Reuse the named volume if present, otherwise create it |
 
 ### DiskImageFormat
 
@@ -762,11 +768,11 @@ Creation behavior for a named volume mount.
 
 String enum (`StrEnum`) for the format of a backing disk image.
 
-| Value | Description |
-|-------|-------------|
-| `"qcow2"` | QEMU copy-on-write v2 image |
-| `"raw"` | Raw disk image |
-| `"vmdk"` | VMware disk image |
+| Member | Value | Description |
+|--------|-------|-------------|
+| `DiskImageFormat.QCOW2` | `"qcow2"` | QEMU copy-on-write v2 image |
+| `DiskImageFormat.RAW` | `"raw"` | Raw disk image |
+| `DiskImageFormat.VMDK` | `"vmdk"` | VMware disk image |
 
 ### StatVirtualization
 
@@ -774,11 +780,11 @@ String enum (`StrEnum`) for the format of a backing disk image.
 
 Stat virtualization policy for virtiofs-backed mounts.
 
-| Value | Description |
-|-------|-------------|
-| `"strict"` | Fully virtualize guest-visible ownership and mode metadata |
-| `"relaxed"` | Apply relaxed metadata virtualization |
-| `"off"` | Expose host stat metadata directly |
+| Member | Value | Description |
+|--------|-------|-------------|
+| `StatVirtualization.STRICT` | `"strict"` | Fully virtualize guest-visible ownership and mode metadata |
+| `StatVirtualization.RELAXED` | `"relaxed"` | Apply relaxed metadata virtualization |
+| `StatVirtualization.OFF` | `"off"` | Expose host stat metadata directly |
 
 ### HostPermissions
 
@@ -786,7 +792,7 @@ Stat virtualization policy for virtiofs-backed mounts.
 
 Host permission policy for virtiofs-backed mounts.
 
-| Value | Description |
-|-------|-------------|
-| `"private"` | Keep host-side permissions private to microsandbox |
-| `"mirror"` | Mirror relevant host permissions into the guest view |
+| Member | Value | Description |
+|--------|-------|-------------|
+| `HostPermissions.PRIVATE` | `"private"` | Keep host-side permissions private to microsandbox |
+| `HostPermissions.MIRROR` | `"mirror"` | Mirror relevant host permissions into the guest view |

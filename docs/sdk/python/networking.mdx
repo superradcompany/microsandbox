@@ -563,8 +563,8 @@ Class methods `none()` and `allow_all()` construct terminal whole policies. `fro
 
 ### NetworkProfile
 
-| Member | Value | Access |
-|--------|-------|--------|
+| Member | Value | Description |
+|--------|-------|-------------|
 | `NetworkProfile.PUBLIC` | `"public"` | Public internet addresses |
 | `NetworkProfile.PRIVATE` | `"private"` | Private/LAN ranges |
 | `NetworkProfile.HOST` | `"host"` | Sandbox host gateway addresses |
@@ -641,14 +641,14 @@ NetworkDestination(
 
 Network destination variant.
 
-| Value | Description |
-|-------|-------------|
-| `"any"` | Any destination |
-| `"ip"` | One IP address |
-| `"cidr"` | One CIDR network |
-| `"domain"` | One exact domain |
-| `"domain_suffix"` | A domain suffix and its subdomains |
-| `"group"` | A well-known [`DestGroup`](#destgroup) |
+| Member | Value | Description |
+|--------|-------|-------------|
+| `NetworkDestinationKind.ANY` | `"any"` | Any destination |
+| `NetworkDestinationKind.IP` | `"ip"` | One IP address |
+| `NetworkDestinationKind.CIDR` | `"cidr"` | One CIDR network |
+| `NetworkDestinationKind.DOMAIN` | `"domain"` | One exact domain |
+| `NetworkDestinationKind.DOMAIN_SUFFIX` | `"domain_suffix"` | A domain suffix and its subdomains |
+| `NetworkDestinationKind.GROUP` | `"group"` | A well-known [`DestGroup`](#destgroup) |
 
 ### PortBinding
 
@@ -777,10 +777,10 @@ ScopedVerifyUpstream(
 
 Policy action.
 
-| Value | Description |
-|-------|-------------|
-| `"allow"` | Permit the traffic |
-| `"deny"` | Drop the traffic silently |
+| Member | Value | Description |
+|--------|-------|-------------|
+| `Action.ALLOW` | `"allow"` | Permit the traffic |
+| `Action.DENY` | `"deny"` | Drop the traffic silently |
 
 ### Direction
 
@@ -788,11 +788,11 @@ Policy action.
 
 String enum for traffic direction.
 
-| Value | Description |
-|-------|-------------|
-| `"egress"` | Traffic leaving the sandbox |
-| `"ingress"` | Traffic entering the sandbox (via published ports) |
-| `"any"` | Rule applies in either direction |
+| Member | Value | Description |
+|--------|-------|-------------|
+| `Direction.EGRESS` | `"egress"` | Traffic leaving the sandbox |
+| `Direction.INGRESS` | `"ingress"` | Traffic entering the sandbox (via published ports) |
+| `Direction.ANY` | `"any"` | Rule applies in either direction |
 
 ### Protocol
 
@@ -800,12 +800,12 @@ String enum for traffic direction.
 
 String enum for network protocols in policy rules.
 
-| Value | Description |
-|-------|-------------|
-| `"tcp"` | TCP traffic |
-| `"udp"` | UDP traffic |
-| `"icmpv4"` | ICMPv4 traffic |
-| `"icmpv6"` | ICMPv6 traffic |
+| Member | Value | Description |
+|--------|-------|-------------|
+| `Protocol.TCP` | `"tcp"` | TCP traffic |
+| `Protocol.UDP` | `"udp"` | UDP traffic |
+| `Protocol.ICMPV4` | `"icmpv4"` | ICMPv4 traffic |
+| `Protocol.ICMPV6` | `"icmpv6"` | ICMPv6 traffic |
 
 ### PortProtocol
 
@@ -813,10 +813,10 @@ String enum for network protocols in policy rules.
 
 String enum for port-level protocol selection.
 
-| Value | Description |
-|-------|-------------|
-| `"tcp"` | TCP port |
-| `"udp"` | UDP port |
+| Member | Value | Description |
+|--------|-------|-------------|
+| `PortProtocol.TCP` | `"tcp"` | TCP port |
+| `PortProtocol.UDP` | `"udp"` | UDP port |
 
 ### DestGroup
 
@@ -824,12 +824,12 @@ String enum for port-level protocol selection.
 
 String enum for well-known destination groups used in [`Destination.group()`](#destination-group) or string-shorthand [`Rule.destination`](#rule).
 
-| Value | Description |
-|-------|-------------|
-| `"public"` | Complement of the named categories: every address not in any other group |
-| `"private"` | Private/RFC 1918 addresses + ULA + CGN (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`, `fc00::/7`) |
-| `"loopback"` | Loopback addresses (`127.0.0.0/8`, `::1`); the **guest's own** loopback, not the host. See the [loopback-vs-host watch-out](/networking/overview#loopback-vs-host-a-common-trap) |
-| `"link-local"` | Link-local addresses (`169.254.0.0/16`, `fe80::/10`) excluding metadata |
-| `"metadata"` | Cloud metadata endpoints (`169.254.169.254`) |
-| `"multicast"` | Multicast addresses (`224.0.0.0/4`, `ff00::/8`) |
-| `"host"` | The host machine, reached via `host.microsandbox.internal`. This is the right group for "let the sandbox reach my host's localhost", not `"loopback"` |
+| Member | Value | Description |
+|--------|-------|-------------|
+| `DestGroup.PUBLIC` | `"public"` | Complement of the named categories: every address not in any other group |
+| `DestGroup.PRIVATE` | `"private"` | Private/RFC 1918 addresses + ULA + CGN (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`, `fc00::/7`) |
+| `DestGroup.LOOPBACK` | `"loopback"` | Loopback addresses (`127.0.0.0/8`, `::1`); the **guest's own** loopback, not the host. See the [loopback-vs-host watch-out](/networking/overview#loopback-vs-host-a-common-trap) |
+| `DestGroup.LINK_LOCAL` | `"link-local"` | Link-local addresses (`169.254.0.0/16`, `fe80::/10`) excluding metadata |
+| `DestGroup.METADATA` | `"metadata"` | Cloud metadata endpoints (`169.254.169.254`) |
+| `DestGroup.MULTICAST` | `"multicast"` | Multicast addresses (`224.0.0.0/4`, `ff00::/8`) |
+| `DestGroup.HOST` | `"host"` | The host machine, reached via `host.microsandbox.internal`. This is the right group for "let the sandbox reach my host's localhost", not `"loopback"` |

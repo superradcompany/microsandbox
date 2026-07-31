@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use tokio::sync::Mutex;
@@ -9,7 +9,9 @@ use tokio::sync::Mutex;
 use crate::error::to_py_err;
 use crate::exec::{PyExecHandle, PyExecOutput};
 use crate::fs::PySandboxFs;
-use crate::helpers::{extract_str_enum, sandbox_builder_from_args, str_enum_member};
+use crate::helpers::{
+    extract_str_enum, is_exact_sdk_type, sandbox_builder_from_args, str_enum_member,
+};
 use crate::metrics::PyMetricsStream;
 use crate::metrics::convert_metrics;
 use crate::sandbox_handle::PySandboxHandle;
@@ -1145,7 +1147,133 @@ pub(crate) async fn run_modify(
     .map_err(to_py_err)?;
     let value = serde_json::to_value(&plan)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-    Python::with_gil(|py| crate::sandbox_handle::json_value_to_py(py, value))
+    Python::with_gil(|py| modification_plan_to_py(py, value))
+}
+
+/// Convert a serialized modification plan while restoring its closed domain types.
+///
+/// The public shape intentionally remains a dictionary, but known discriminators
+/// must not degrade back into raw strings at the native boundary.
+fn modification_plan_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<PyObject> {
+    let serde_json::Value::Object(values) = value else {
+        return Err(PyRuntimeError::new_err(
+            "serialized modification plan must be an object",
+        ));
+    };
+
+    let dict = PyDict::new(py);
+    for (key, value) in values {
+        let value = match key.as_str() {
+            "status" => serialized_enum_to_py(py, value, "SandboxStatus", "plan.status")?,
+            "policy" => serialized_enum_to_py(py, value, "ModificationPolicy", "plan.policy")?,
+            "changes" => planned_changes_to_py(py, value)?,
+            "resize_status" => resize_statuses_to_py(py, value)?,
+            _ => crate::sandbox_handle::json_value_to_py(py, value)?,
+        };
+        dict.set_item(key, value)?;
+    }
+    Ok(dict.unbind().into())
+}
+
+/// Convert planned changes, selecting the correct change enum from `kind`.
+fn planned_changes_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<PyObject> {
+    let serde_json::Value::Array(changes) = value else {
+        return Err(PyRuntimeError::new_err(
+            "serialized modification plan changes must be an array",
+        ));
+    };
+
+    let changes = changes
+        .into_iter()
+        .map(|change| planned_change_to_py(py, change))
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(PyList::new(py, changes)?.unbind().into())
+}
+
+fn planned_change_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<PyObject> {
+    let serde_json::Value::Object(values) = value else {
+        return Err(PyRuntimeError::new_err(
+            "serialized planned change must be an object",
+        ));
+    };
+    let kind = values
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| PyRuntimeError::new_err("serialized planned change must have a kind"))?;
+    let change_enum = match kind {
+        "config" => "ChangeKind",
+        "secret" => "SecretChangeKind",
+        other => {
+            return Err(PyRuntimeError::new_err(format!(
+                "unknown serialized planned change kind: {other}"
+            )));
+        }
+    };
+
+    let dict = PyDict::new(py);
+    for (key, value) in values {
+        let value = match key.as_str() {
+            "kind" => serialized_enum_to_py(py, value, "PlannedChangeKind", "change.kind")?,
+            "change" => serialized_enum_to_py(py, value, change_enum, "change.change")?,
+            "disposition" => {
+                serialized_enum_to_py(py, value, "ModificationDisposition", "change.disposition")?
+            }
+            _ => crate::sandbox_handle::json_value_to_py(py, value)?,
+        };
+        dict.set_item(key, value)?;
+    }
+    Ok(dict.unbind().into())
+}
+
+fn resize_statuses_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<PyObject> {
+    let serde_json::Value::Array(statuses) = value else {
+        return Err(PyRuntimeError::new_err(
+            "serialized modification resize_status must be an array",
+        ));
+    };
+
+    let statuses = statuses
+        .into_iter()
+        .map(|status| resize_status_to_py(py, status))
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(PyList::new(py, statuses)?.unbind().into())
+}
+
+fn resize_status_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<PyObject> {
+    let serde_json::Value::Object(values) = value else {
+        return Err(PyRuntimeError::new_err(
+            "serialized resource resize status must be an object",
+        ));
+    };
+
+    let dict = PyDict::new(py);
+    for (key, value) in values {
+        let value = match key.as_str() {
+            "resource" => {
+                serialized_enum_to_py(py, value, "ResourceKind", "resize_status.resource")?
+            }
+            "state" => {
+                serialized_enum_to_py(py, value, "ResourceConvergenceState", "resize_status.state")?
+            }
+            _ => crate::sandbox_handle::json_value_to_py(py, value)?,
+        };
+        dict.set_item(key, value)?;
+    }
+    Ok(dict.unbind().into())
+}
+
+fn serialized_enum_to_py(
+    py: Python<'_>,
+    value: serde_json::Value,
+    enum_name: &str,
+    field: &str,
+) -> PyResult<PyObject> {
+    let serde_json::Value::String(value) = value else {
+        return Err(PyRuntimeError::new_err(format!(
+            "serialized {field} must be a string"
+        )));
+    };
+    str_enum_member(py, enum_name, &value)
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1197,11 +1325,10 @@ fn parse_exec_call(
     };
 
     if let Some(args_or_options) = args {
-        if is_options_like(args_or_options) {
-            let dict = options_dict(args_or_options, "exec options")?;
-            validate_exec_options_keys(&dict)?;
-            parsed_args = parse_options_args(&dict)?;
-            apply_exec_options_dict(&mut opts, &dict)?;
+        if let Ok(dict) = args_or_options.downcast::<PyDict>() {
+            validate_exec_options_keys(dict)?;
+            parsed_args = parse_options_args(dict)?;
+            apply_exec_options_dict(&mut opts, dict)?;
         } else {
             parsed_args = parse_args(Some(args_or_options))?;
         }
@@ -1209,10 +1336,6 @@ fn parse_exec_call(
 
     validate_timeout(opts.timeout_secs)?;
     Ok((parsed_args, opts))
-}
-
-fn is_options_like(obj: &Bound<'_, PyAny>) -> bool {
-    obj.downcast::<PyDict>().is_ok() || obj.getattr("_to_dict").is_ok()
 }
 
 fn validate_exec_options_keys(dict: &Bound<'_, PyDict>) -> PyResult<()> {
@@ -1259,12 +1382,7 @@ fn apply_exec_options_dict(opts: &mut ExecOpts, dict: &Bound<'_, PyDict>) -> PyR
     if let Some(stdin) = dict.get_item("stdin")?
         && !stdin.is_none()
     {
-        let stdin_data = extract_optional_dict_value::<Vec<u8>>(dict, "stdin_data")?;
-        let (mode, data) = if let Ok(mode) = stdin.extract::<String>() {
-            normalize_stdin(mode, stdin_data)?
-        } else {
-            parse_stdin(Some(&stdin))?
-        };
+        let (mode, data) = parse_stdin(Some(&stdin))?;
         opts.stdin_mode = mode;
         opts.stdin_data = data;
     } else if let Some(stdin_data) = extract_optional_dict_value::<Vec<u8>>(dict, "stdin_data")? {
@@ -1353,19 +1471,6 @@ fn parse_args(args: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<String>> {
     list.iter().map(|item| item.extract::<String>()).collect()
 }
 
-fn options_dict<'py>(obj: &Bound<'py, PyAny>, label: &str) -> PyResult<Bound<'py, PyDict>> {
-    if let Ok(dict) = obj.downcast::<PyDict>() {
-        return Ok(dict.clone());
-    }
-    if let Ok(method) = obj.getattr("_to_dict") {
-        let result = method.call0()?;
-        return Ok(result.downcast::<PyDict>()?.clone());
-    }
-    Err(pyo3::exceptions::PyTypeError::new_err(format!(
-        "{label} must be a dict or object with _to_dict()",
-    )))
-}
-
 fn env_to_pairs(env: Option<HashMap<String, String>>) -> Vec<(String, String)> {
     env.unwrap_or_default().into_iter().collect()
 }
@@ -1378,14 +1483,13 @@ fn parse_stdin(stdin: Option<&Bound<'_, PyAny>>) -> PyResult<(Option<String>, Op
     if let Ok(bytes) = stdin.downcast::<PyBytes>() {
         return Ok((Some("bytes".to_string()), Some(bytes.as_bytes().to_vec())));
     }
-    if let Ok(mode) = stdin.extract::<String>() {
-        return normalize_stdin(mode, None);
-    }
 
-    let mode_obj = stdin.getattr("_mode").map_err(|_| {
-        pyo3::exceptions::PyTypeError::new_err("stdin must be Stdin, bytes, or a stdin mode string")
-    })?;
-    let mode: String = mode_obj.extract()?;
+    require_sdk_type(stdin, "Stdin", "stdin")?;
+
+    let mode_obj = stdin
+        .getattr("_mode")
+        .map_err(|_| PyTypeError::new_err("stdin must be Stdin, bytes, or None"))?;
+    let mode = extract_str_enum(&mode_obj, "StdinMode")?;
     let data = stdin
         .getattr("_data")
         .ok()
@@ -1424,22 +1528,30 @@ fn parse_rlimits_iter(obj: &Bound<'_, PyAny>) -> PyResult<Vec<(String, u64, u64)
 }
 
 fn parse_rlimit(obj: &Bound<'_, PyAny>) -> PyResult<(String, u64, u64)> {
-    let (resource, soft, hard) = if let Ok(dict) = options_dict(obj, "rlimit") {
-        (
-            required_string_from_dict(&dict, "resource")?,
-            required_from_dict(&dict, "soft")?,
-            required_from_dict(&dict, "hard")?,
-        )
-    } else {
-        (
-            py_value_to_string(&obj.getattr("resource")?)?,
-            obj.getattr("soft")?.extract()?,
-            obj.getattr("hard")?.extract()?,
-        )
-    };
+    require_sdk_type(obj, "Rlimit", "rlimit")?;
+    // Rlimit._to_dict validates that `resource` is the exact RlimitResource
+    // enum before exposing its wire value to the native execution builder.
+    let dict = obj.call_method0("_to_dict")?;
+    let dict = dict
+        .downcast::<PyDict>()
+        .map_err(|_| PyRuntimeError::new_err("Rlimit._to_dict() must return a dict"))?;
+    let resource = required_string_from_dict(dict, "resource")?;
+    let soft = required_from_dict(dict, "soft")?;
+    let hard = required_from_dict(dict, "hard")?;
 
     validate_rlimit_resource(&resource)?;
     Ok((resource, soft, hard))
+}
+
+/// Require the exact public SDK config class at a native API boundary.
+fn require_sdk_type(obj: &Bound<'_, PyAny>, class_name: &str, label: &str) -> PyResult<()> {
+    if is_exact_sdk_type(obj, class_name)? {
+        return Ok(());
+    }
+    Err(PyTypeError::new_err(format!(
+        "{label} must be {class_name}, got {}",
+        obj.get_type().name()?
+    )))
 }
 
 fn validate_rlimit_resource(resource: &str) -> PyResult<()> {
@@ -1578,7 +1690,7 @@ fn apply_attach_options(
 }
 
 //--------------------------------------------------------------------------------------------------
-// Types: PullSession
+// Types: Pull Progress
 //--------------------------------------------------------------------------------------------------
 
 /// Context manager for sandbox creation with pull progress.
@@ -1595,6 +1707,43 @@ pub struct PyPullSession {
         >,
     >,
 }
+
+/// Async iterator over pull-progress events.
+#[pyclass(name = "PullProgressIter")]
+struct PyPullProgressIter {
+    handle: Arc<Mutex<Option<microsandbox::sandbox::PullProgressHandle>>>,
+}
+
+/// Pull-progress event exposed to Python.
+#[pyclass(name = "PullEvent")]
+#[derive(Default)]
+pub struct PyPullEvent {
+    event_type: &'static str,
+    #[pyo3(get)]
+    reference: Option<String>,
+    #[pyo3(get)]
+    manifest_digest: Option<String>,
+    #[pyo3(get)]
+    layer_count: Option<u32>,
+    #[pyo3(get)]
+    total_download_bytes: Option<i64>,
+    #[pyo3(get)]
+    layer_index: Option<u32>,
+    #[pyo3(get)]
+    digest: Option<String>,
+    #[pyo3(get)]
+    diff_id: Option<String>,
+    #[pyo3(get)]
+    downloaded_bytes: Option<i64>,
+    #[pyo3(get)]
+    total_bytes: Option<i64>,
+    #[pyo3(get)]
+    bytes_read: Option<i64>,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods: PullSession
+//--------------------------------------------------------------------------------------------------
 
 impl PyPullSession {
     pub fn new(
@@ -1665,11 +1814,9 @@ impl PyPullSession {
     }
 }
 
-/// Async iterator over PullProgress events.
-#[pyclass(name = "PullProgressIter")]
-struct PyPullProgressIter {
-    handle: Arc<Mutex<Option<microsandbox::sandbox::PullProgressHandle>>>,
-}
+//--------------------------------------------------------------------------------------------------
+// Methods: PullProgressIter
+//--------------------------------------------------------------------------------------------------
 
 #[pymethods]
 impl PyPullProgressIter {
@@ -1696,7 +1843,24 @@ impl PyPullProgressIter {
     }
 }
 
-/// Convert a Rust PullProgress event to a Python dict.
+//--------------------------------------------------------------------------------------------------
+// Methods: PullEvent
+//--------------------------------------------------------------------------------------------------
+
+#[pymethods]
+impl PyPullEvent {
+    /// Canonical kind of pull-progress event.
+    #[getter]
+    fn event_type(&self, py: Python<'_>) -> PyResult<PyObject> {
+        str_enum_member(py, "PullEventType", self.event_type)
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Pull Progress
+//--------------------------------------------------------------------------------------------------
+
+/// Convert a Rust pull-progress event to its Python object.
 fn convert_pull_progress(event: microsandbox::sandbox::PullProgress) -> PyPullEvent {
     use microsandbox::sandbox::PullProgress;
     match event {
@@ -1814,6 +1978,10 @@ fn convert_pull_progress(event: microsandbox::sandbox::PullProgress) -> PyPullEv
     }
 }
 
+//--------------------------------------------------------------------------------------------------
+// Functions: Helpers
+//--------------------------------------------------------------------------------------------------
+
 pub fn optional_duration(value: Option<f64>) -> PyResult<Option<std::time::Duration>> {
     let Some(value) = value else {
         return Ok(None);
@@ -1824,34 +1992,6 @@ pub fn optional_duration(value: Option<f64>) -> PyResult<Option<std::time::Durat
         ));
     }
     Ok(Some(std::time::Duration::from_secs_f64(value)))
-}
-
-/// Pull progress event exposed to Python.
-#[pyclass(name = "PullEvent")]
-#[derive(Default)]
-struct PyPullEvent {
-    #[pyo3(get)]
-    event_type: &'static str,
-    #[pyo3(get)]
-    reference: Option<String>,
-    #[pyo3(get)]
-    manifest_digest: Option<String>,
-    #[pyo3(get)]
-    layer_count: Option<u32>,
-    #[pyo3(get)]
-    total_download_bytes: Option<i64>,
-    #[pyo3(get)]
-    layer_index: Option<u32>,
-    #[pyo3(get)]
-    digest: Option<String>,
-    #[pyo3(get)]
-    diff_id: Option<String>,
-    #[pyo3(get)]
-    downloaded_bytes: Option<i64>,
-    #[pyo3(get)]
-    total_bytes: Option<i64>,
-    #[pyo3(get)]
-    bytes_read: Option<i64>,
 }
 
 //--------------------------------------------------------------------------------------------------

@@ -8,6 +8,7 @@ import pytest
 
 from integration.helpers import free_tcp_port
 from microsandbox import (
+    Action,
     DestGroup,
     Destination,
     Network,
@@ -26,7 +27,7 @@ async def test_network_policy_and_port_config_create(sandbox_factory):
         "py-sdk-network",
         network=Network(
             policy=NetworkPolicy(
-                default_egress="allow",
+                default_egress=Action.ALLOW,
                 rules=(Rule.deny(protocol=Protocol.TCP, port=9, destination="public"),),
             ),
             ports=(PortBinding.tcp(host_port, 7777),),
@@ -51,8 +52,8 @@ async def test_ip_destination_allows_specific_egress(label, destination, sandbox
         f"py-sdk-network-{label}",
         network=Network(
             policy=NetworkPolicy(
-                default_egress="deny",
-                default_ingress="deny",
+                default_egress=Action.DENY,
+                default_ingress=Action.DENY,
                 rules=(
                     Rule.allow(
                         destination=destination,

@@ -15,9 +15,9 @@ icon: "bolt"
 The Rust, TypeScript, Python, and Go SDKs can now target a local microsandbox install or a hosted cloud backend from the same program. A profile-aware config under `~/.microsandbox/config.json` plus `MSB_BACKEND`, `MSB_API_URL`, `MSB_API_KEY`, and `MSB_PROFILE` environment variables select the backend, and per-sandbox overrides let you mix local and cloud sandboxes in one process. Cloud sandboxes support the create, start, get, list, stop, remove, collected exec, and live log streaming operations; streaming exec, attach, metrics, guest filesystem, volumes, snapshots, and bounded log snapshots remain local-only for now.
 
 ```python
-from microsandbox import set_default_backend, PythonSandbox
+from microsandbox import BackendKind, PythonSandbox, set_default_backend
 
-set_default_backend("cloud", profile="prod")
+set_default_backend(BackendKind.CLOUD, profile="prod")
 
 async with PythonSandbox.create(name="hello") as sb:
     print(await sb.run("print('hi from the cloud')"))

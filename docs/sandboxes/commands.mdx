@@ -161,13 +161,15 @@ for await (const event of handle) {
 ```
 
 ```python Python
+from microsandbox import ExecEventType
+
 handle = await sb.exec_stream("tail", ["-f", "/var/log/app.log"])
 
 async for event in handle:
     match event.event_type:
-        case "stdout": print(event.data.decode(), end="")
-        case "stderr": print(event.data.decode(), end="", file=sys.stderr)
-        case "exited": print(f"Exited: {event.code}")
+        case ExecEventType.STDOUT: print(event.data.decode(), end="")
+        case ExecEventType.STDERR: print(event.data.decode(), end="", file=sys.stderr)
+        case ExecEventType.EXITED: print(f"Exited: {event.code}")
 ```
 
 ```go Go

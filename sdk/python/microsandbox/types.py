@@ -6,18 +6,18 @@ import enum
 import sys
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TypeAlias
+from typing import Literal, TypeAlias, TypedDict
 
-#--------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------
 # Constants
-#--------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------
 
 MiB: int = 1024 * 1024
 GiB: int = 1024 * 1024 * 1024
 
-#--------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------
 # Types: Enums
-#--------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------
 
 if sys.version_info >= (3, 11):
     StrEnum = enum.StrEnum
@@ -72,6 +72,78 @@ class ModificationPolicy(StrEnum):
     NO_RESTART = "no_restart"
     NEXT_START = "next_start"
     RESTART = "restart"
+
+
+class PlannedChangeKind(StrEnum):
+    CONFIG = "config"
+    SECRET = "secret"
+
+
+class ChangeKind(StrEnum):
+    ADDED = "added"
+    UPDATED = "updated"
+    REMOVED = "removed"
+
+
+class SecretChangeKind(StrEnum):
+    ADDED = "added"
+    ROTATED = "rotated"
+    REMOVED = "removed"
+    RENAMED = "renamed"
+    HOSTS_UPDATED = "hosts updated"
+    PLACEHOLDER_UPDATED = "placeholder updated"
+
+
+class ModificationDisposition(StrEnum):
+    LIVE = "live"
+    NEXT_START = "next start"
+    REQUIRES_RESTART = "requires restart"
+    UNSUPPORTED = "unsupported"
+
+
+class ResourceKind(StrEnum):
+    CPUS = "cpus"
+    MEMORY = "memory"
+
+
+class ResourceConvergenceState(StrEnum):
+    ACCEPTED = "accepted"
+    CONVERGING = "converging"
+    APPLIED = "applied"
+    GUEST_REFUSED = "guest-refused"
+    FAILED = "failed"
+
+
+class StdinMode(StrEnum):
+    NULL = "null"
+    PIPE = "pipe"
+    BYTES = "bytes"
+
+
+class ExecEventType(StrEnum):
+    STARTED = "started"
+    STDOUT = "stdout"
+    STDERR = "stderr"
+    EXITED = "exited"
+    FAILED = "failed"
+    STDIN_ERROR = "stdin_error"
+
+
+class PullEventType(StrEnum):
+    RESOLVING = "resolving"
+    RESOLVED = "resolved"
+    LAYER_DOWNLOAD_PROGRESS = "layer_download_progress"
+    LAYER_DOWNLOAD_COMPLETE = "layer_download_complete"
+    LAYER_DOWNLOAD_VERIFYING = "layer_download_verifying"
+    LAYER_MATERIALIZE_STARTED = "layer_materialize_started"
+    LAYER_MATERIALIZE_PROGRESS = "layer_materialize_progress"
+    LAYER_MATERIALIZE_WRITING = "layer_materialize_writing"
+    LAYER_MATERIALIZE_COMPLETE = "layer_materialize_complete"
+    STITCH_MERGING_TREES = "stitch_merging_trees"
+    STITCH_WRITING_FSMETA = "stitch_writing_fsmeta"
+    STITCH_WRITING_VMDK = "stitch_writing_vmdk"
+    STITCH_COMPLETE = "stitch_complete"
+    COMPLETE = "complete"
 
 
 class Action(StrEnum):
@@ -158,13 +230,15 @@ class ViolationPolicy:
         )
 
     def _to_dict(self) -> ViolationAction | dict:
+        # Validate the fallback even when passthrough is selected. Ignoring a
+        # malformed enum on one serialization branch would make the public
+        # type boundary depend on unrelated host-list fields.
+        _enum_value(self.fallback, ViolationAction, "ViolationPolicy.fallback")
         if (
             not self.passthrough_hosts
             and not self.passthrough_host_patterns
             and not self.passthrough_all_hosts
         ):
-            if not isinstance(self.fallback, ViolationAction):
-                raise TypeError("ViolationPolicy.fallback must be ViolationAction")
             return self.fallback
 
         passthrough: dict = {}
@@ -217,7 +291,7 @@ class VolumeKind(StrEnum):
     DISK = "disk"
 
 
-class VolumeCreateMode(StrEnum):
+class NamedVolumeMode(StrEnum):
     EXISTING = "existing"
     CREATE = "create"
     ENSURE_EXISTS = "ensure-exists"
@@ -242,6 +316,7 @@ class ImageSourceKind(StrEnum):
 
 class PatchKind(StrEnum):
     TEXT = "text"
+    FILE = "file"
     MKDIR = "mkdir"
     APPEND = "append"
     COPY_FILE = "copy_file"
@@ -308,9 +383,127 @@ class LogReadSource(StrEnum):
     ALL = "all"
 
 
-#--------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------
+# Types: API Contracts
+# --------------------------------------------------------------------------------------------------
+
+
+class _InitOptionsRequired(TypedDict):
+    cmd: str
+
+
+class InitOptions(_InitOptionsRequired, total=False):
+    """Mapping form accepted by the ``Sandbox.create(init=...)`` shorthand."""
+
+    args: list[str]
+    env: dict[str, str]
+
+
+class SecretModifySpec(TypedDict, total=False):
+    """Desired state for one secret passed to ``Sandbox.modify``.
+
+    ``env``, ``value``, and ``store`` are mutually exclusive secret sources.
+    """
+
+    env: str
+    value: str
+    store: str
+    placeholder: str
+    allowed_hosts: list[str]
+
+
+class ModificationConflict(TypedDict):
+    """A conflict that prevents a sandbox modification from applying."""
+
+    field: str
+    message: str
+
+
+class ModificationWarning(TypedDict):
+    """A non-fatal warning about a requested sandbox modification."""
+
+    field: str
+    message: str
+
+
+class ResourceResizeStatus(TypedDict):
+    """Observed convergence state for one live resource resize."""
+
+    resource: ResourceKind
+    requested: str
+    actual: str
+    enforced: str
+    state: ResourceConvergenceState
+
+
+class _ConfigPlannedChangeRequired(TypedDict):
+    kind: Literal[PlannedChangeKind.CONFIG]
+    field: str
+    change: ChangeKind
+    disposition: ModificationDisposition
+
+
+class ConfigPlannedChange(_ConfigPlannedChangeRequired, total=False):
+    """One planned non-secret configuration change."""
+
+    before: str
+    after: str
+    reason: str
+
+
+class _SecretPlannedChangeRequired(TypedDict):
+    kind: Literal[PlannedChangeKind.SECRET]
+    field: str
+    name: str
+    change: SecretChangeKind
+    disposition: ModificationDisposition
+
+
+class SecretPlannedChange(_SecretPlannedChangeRequired, total=False):
+    """One planned secret change with secret values omitted."""
+
+    before_ref: str
+    after_ref: str
+    allow_hosts: list[str]
+    reason: str
+
+
+PlannedChange: TypeAlias = ConfigPlannedChange | SecretPlannedChange
+
+
+class _SandboxModificationPlanRequired(TypedDict):
+    sandbox: str
+    status: SandboxStatus
+    applied: bool
+    policy: ModificationPolicy
+    changes: list[PlannedChange]
+    conflicts: list[ModificationConflict]
+    warnings: list[ModificationWarning]
+
+
+class SandboxModificationPlan(_SandboxModificationPlanRequired, total=False):
+    """Typed result returned by sandbox modification operations."""
+
+    resize_status: list[ResourceResizeStatus]
+
+
+class ExecOptions(TypedDict, total=False):
+    """Options accepted in the second positional argument to exec methods."""
+
+    args: list[str]
+    cwd: str
+    user: str
+    env: Mapping[str, str]
+    timeout: float
+    stdin: Stdin | bytes
+    stdin_data: bytes
+    tty: bool
+    rlimits: list[Rlimit]
+
+
+# --------------------------------------------------------------------------------------------------
 # Types: Size
-#--------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -332,9 +525,9 @@ class Size:
         return self.bytes // MiB
 
 
-#--------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------
 # Types: ExitStatus
-#--------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -345,9 +538,9 @@ class ExitStatus:
     success: bool
 
 
-#--------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------
 # Types: Rlimit
-#--------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -394,34 +587,34 @@ class Rlimit:
         }
 
 
-#--------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------
 # Types: Stdin
-#--------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
 class Stdin:
     """Stdin mode for command execution."""
 
-    _mode: str
+    _mode: StdinMode
     _data: bytes | None = None
 
     @classmethod
     def null(cls) -> Stdin:
-        return cls("null")
+        return cls(StdinMode.NULL)
 
     @classmethod
     def pipe(cls) -> Stdin:
-        return cls("pipe")
+        return cls(StdinMode.PIPE)
 
     @classmethod
     def bytes(cls, data: bytes) -> Stdin:
-        return cls("bytes", data)
+        return cls(StdinMode.BYTES, data)
 
 
-#--------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------
 # Types: Init Handoff
-#--------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -452,9 +645,9 @@ class InitConfig:
         return d
 
 
-#--------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------
 # Types: Mount
-#--------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -469,7 +662,7 @@ class MountConfig:
     kind: MountKind
     bind: str | None = None
     named: str | None = None
-    named_mode: VolumeCreateMode | None = None
+    named_mode: NamedVolumeMode | None = None
     named_kind: VolumeKind | None = None
     quota_mib: int | None = None
     size_mib: int | None = None
@@ -484,7 +677,43 @@ class MountConfig:
     host_permissions: HostPermissions | None = None
 
     def _to_dict(self) -> dict:
+        # Validate every supplied enum before selecting a mount arm. This
+        # prevents malformed values in an inactive arm from being silently
+        # accepted and surfacing later if the mount kind changes.
         _enum_value(self.kind, MountKind, "MountConfig.kind")
+        named_mode = (
+            _enum_value(self.named_mode, NamedVolumeMode, "MountConfig.named_mode")
+            if self.named_mode is not None
+            else None
+        )
+        named_kind = (
+            _enum_value(self.named_kind, VolumeKind, "MountConfig.named_kind")
+            if self.named_kind is not None
+            else None
+        )
+        disk_format = (
+            _enum_value(self.format, DiskImageFormat, "MountConfig.format")
+            if self.format is not None
+            else None
+        )
+        stat_virtualization = (
+            _enum_value(
+                self.stat_virtualization,
+                StatVirtualization,
+                "MountConfig.stat_virtualization",
+            )
+            if self.stat_virtualization is not None
+            else None
+        )
+        host_permissions = (
+            _enum_value(
+                self.host_permissions,
+                HostPermissions,
+                "MountConfig.host_permissions",
+            )
+            if self.host_permissions is not None
+            else None
+        )
         # Drive emission off `kind` exclusively so a `MountConfig` with
         # contradictory fields (e.g. kind=DISK + bind=...) raises here
         # rather than silently letting the wrong arm of `apply_mount` win.
@@ -504,12 +733,10 @@ class MountConfig:
             if self.named is None:
                 raise ValueError("MountConfig kind=NAMED requires named=...")
             d["named"] = self.named
-            if self.named_mode is not None:
-                d["named_mode"] = _enum_value(
-                    self.named_mode, VolumeCreateMode, "MountConfig.named_mode"
-                )
-            if self.named_kind is not None:
-                d["named_kind"] = _enum_value(self.named_kind, VolumeKind, "MountConfig.named_kind")
+            if named_mode is not None:
+                d["named_mode"] = named_mode
+            if named_kind is not None:
+                d["named_kind"] = named_kind
             if self.size_mib is not None:
                 d["size_mib"] = self.size_mib
             if self.quota_mib is not None:
@@ -522,8 +749,8 @@ class MountConfig:
             if self.disk is None:
                 raise ValueError("MountConfig kind=DISK requires disk=...")
             d["disk"] = self.disk
-            if self.format is not None:
-                d["format"] = _enum_value(self.format, DiskImageFormat, "MountConfig.format")
+            if disk_format is not None:
+                d["format"] = disk_format
             if self.fstype is not None:
                 d["fstype"] = self.fstype
         else:  # pragma: no cover - StrEnum exhaustive above
@@ -531,18 +758,10 @@ class MountConfig:
 
         # Per-mount policies — only valid for virtiofs-backed kinds.
         if self.kind in (MountKind.BIND, MountKind.NAMED):
-            if self.stat_virtualization is not None:
-                d["stat_virtualization"] = _enum_value(
-                    self.stat_virtualization,
-                    StatVirtualization,
-                    "MountConfig.stat_virtualization",
-                )
-            if self.host_permissions is not None:
-                d["host_permissions"] = _enum_value(
-                    self.host_permissions,
-                    HostPermissions,
-                    "MountConfig.host_permissions",
-                )
+            if stat_virtualization is not None:
+                d["stat_virtualization"] = stat_virtualization
+            if host_permissions is not None:
+                d["host_permissions"] = host_permissions
         elif self.stat_virtualization is not None or self.host_permissions is not None:
             raise ValueError(
                 f"stat_virtualization/host_permissions are only valid for "
@@ -558,9 +777,9 @@ def _enum_value(value: enum.Enum, expected: type[enum.Enum], field_name: str) ->
     return str(value.value)
 
 
-#--------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------
 # Types: Image
-#--------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -574,13 +793,19 @@ class RootDiskConfig:
     fstype: str | None = None
 
     def _to_dict(self) -> dict:
-        d: dict = {"kind": _enum_value(self.kind, RootDiskKind, "RootDiskConfig.kind")}
+        kind = _enum_value(self.kind, RootDiskKind, "RootDiskConfig.kind")
+        disk_format = (
+            _enum_value(self.format, DiskImageFormat, "RootDiskConfig.format")
+            if self.format is not None
+            else None
+        )
+        d: dict = {"kind": kind}
         if self.size_mib is not None:
             d["size_mib"] = self.size_mib
         if self.path is not None:
             d["path"] = self.path
-        if self.format is not None:
-            d["format"] = _enum_value(self.format, DiskImageFormat, "RootDiskConfig.format")
+        if disk_format is not None:
+            d["format"] = disk_format
         if self.fstype is not None:
             d["fstype"] = self.fstype
         return d
@@ -620,7 +845,7 @@ class ImageSource:
     _type: ImageSourceKind
     _path: str | None = None
     _reference: str | None = None
-    _root_disk: RootDiskConfig | dict | int | None = None
+    _root_disk: RootDiskConfig | int | None = None
     _upper_size_mib: int | None = None  # deprecated: use _root_disk
     _fstype: str | None = None
     _format: DiskImageFormat | None = None
@@ -645,11 +870,13 @@ class Image:
     def oci(
         reference: str,
         *,
-        root_disk: RootDiskConfig | dict | int | None = None,
+        root_disk: RootDiskConfig | int | None = None,
         upper_size_mib: int | None = None,
     ) -> ImageSource:
         if root_disk is not None and upper_size_mib is not None:
             raise ValueError("pass either root_disk= or upper_size_mib=, not both")
+        if root_disk is not None and type(root_disk) not in (RootDiskConfig, int):
+            raise TypeError("root_disk must be RootDiskConfig, int, or None")
         if root_disk is None and upper_size_mib is not None:
             # Deprecated alias: upper_size_mib= is managed-root-disk sugar.
             root_disk = RootDisk.managed(upper_size_mib)
@@ -674,9 +901,9 @@ class Image:
         return ImageSource(_type=ImageSourceKind.DISK, _path=path, _fstype=fstype)
 
 
-#--------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------
 # Types: Patch
-#--------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -685,7 +912,7 @@ class PatchConfig:
 
     kind: PatchKind
     path: str | None = None
-    content: str | None = None
+    content: str | bytes | None = None
     src: str | None = None
     dst: str | None = None
     target: str | None = None
@@ -694,12 +921,51 @@ class PatchConfig:
     replace: bool = False
 
     def _to_dict(self) -> dict:
-        d: dict = {"kind": _enum_value(self.kind, PatchKind, "PatchConfig.kind")}
-        for f in ("path", "content", "src", "dst", "target", "link", "mode"):
-            v = getattr(self, f)
-            if v is not None:
-                d[f] = v
-        if self.replace:
+        kind = _enum_value(self.kind, PatchKind, "PatchConfig.kind")
+        d: dict = {"kind": kind}
+
+        if self.kind in (
+            PatchKind.TEXT,
+            PatchKind.FILE,
+            PatchKind.APPEND,
+            PatchKind.MKDIR,
+            PatchKind.REMOVE,
+        ):
+            if not isinstance(self.path, str):
+                raise TypeError(f"PatchConfig kind={kind!r} requires path to be str")
+            d["path"] = self.path
+
+        if self.kind in (PatchKind.TEXT, PatchKind.APPEND):
+            if not isinstance(self.content, str):
+                raise TypeError(f"PatchConfig kind={kind!r} requires content to be str")
+            d["content"] = self.content
+        elif self.kind is PatchKind.FILE:
+            if not isinstance(self.content, bytes):
+                raise TypeError("PatchConfig kind='file' requires content to be bytes")
+            d["content"] = self.content
+        elif self.kind in (PatchKind.COPY_FILE, PatchKind.COPY_DIR):
+            if not isinstance(self.src, str) or not isinstance(self.dst, str):
+                raise TypeError(f"PatchConfig kind={kind!r} requires src and dst to be str")
+            d.update(src=self.src, dst=self.dst)
+        elif self.kind is PatchKind.SYMLINK:
+            if not isinstance(self.target, str) or not isinstance(self.link, str):
+                raise TypeError("PatchConfig kind='symlink' requires target and link to be str")
+            d.update(target=self.target, link=self.link)
+
+        if self.mode is not None and self.kind in (
+            PatchKind.TEXT,
+            PatchKind.FILE,
+            PatchKind.COPY_FILE,
+            PatchKind.MKDIR,
+        ):
+            d["mode"] = self.mode
+        if self.replace and self.kind in (
+            PatchKind.TEXT,
+            PatchKind.FILE,
+            PatchKind.COPY_FILE,
+            PatchKind.COPY_DIR,
+            PatchKind.SYMLINK,
+        ):
             d["replace"] = True
         return d
 
@@ -717,6 +983,23 @@ class Patch:
     ) -> PatchConfig:
         return PatchConfig(
             kind=PatchKind.TEXT,
+            path=path,
+            content=content,
+            mode=mode,
+            replace=replace,
+        )
+
+    @staticmethod
+    def file(
+        path: str,
+        content: bytes,
+        *,
+        mode: int | None = None,
+        replace: bool = False,
+    ) -> PatchConfig:
+        """Write raw bytes to a file in the guest root filesystem."""
+        return PatchConfig(
+            kind=PatchKind.FILE,
             path=path,
             content=content,
             mode=mode,
@@ -760,9 +1043,9 @@ class Patch:
         return PatchConfig(kind=PatchKind.REMOVE, path=path)
 
 
-#--------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------
 # Types: Secret
-#--------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -813,6 +1096,8 @@ class SecretEntry:
         violation = violation_policy_to_dict(self.on_violation)
         if violation != str(ViolationAction.BLOCK_AND_LOG):
             d["on_violation"] = violation
+        if not isinstance(self.injection, SecretInjection):
+            raise TypeError("SecretEntry.injection must be SecretInjection")
         injection = self.injection._to_dict()
         if injection:
             d["injection"] = injection
@@ -846,9 +1131,9 @@ class Secret:
         )
 
 
-#--------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------
 # Types: Network
-#--------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -1028,7 +1313,11 @@ class NetworkPolicy:
                 return {}
             if isinstance(destination, NetworkDestination):
                 return destination._to_dict()
-            return {"destination": str(destination)}
+            # StrEnum members are strings too, so require a plain string here
+            # to keep unrelated enum classes from crossing this open grammar.
+            if type(destination) is not str:
+                raise TypeError("Rule.destination must be str, NetworkDestination, or None")
+            return {"destination": destination}
 
         d: dict = {
             "default_egress": _enum_value(
@@ -1039,6 +1328,11 @@ class NetworkPolicy:
             ),
         }
         if self.rules:
+            for rule in self.rules:
+                if not isinstance(rule, Rule):
+                    raise TypeError("NetworkPolicy.rules must contain Rule values")
+                if rule.port is not None and type(rule.port) not in (int, str):
+                    raise TypeError("Rule.port must be int, str, or None")
             d["rules"] = [
                 {
                     "action": _enum_value(r.action, Action, "Rule.action"),
@@ -1046,7 +1340,7 @@ class NetworkPolicy:
                     **destination_fields(r.destination),
                     **(
                         {"protocol": _enum_value(r.protocol, Protocol, "Rule.protocol")}
-                        if r.protocol
+                        if r.protocol is not None
                         else {}
                     ),
                     **({"port": str(r.port)} if r.port is not None else {}),
@@ -1222,16 +1516,25 @@ class Network:
             if isinstance(self.ports, Mapping):
                 d["ports"] = dict(self.ports)
             else:
-                d["ports"] = [p._to_dict() for p in self.ports]
+                port_dicts = []
+                for port in self.ports:
+                    if not isinstance(port, PortBinding):
+                        raise TypeError("Network.ports must contain PortBinding values")
+                    port_dicts.append(port._to_dict())
+                d["ports"] = port_dicts
         if self.deny_domains:
             d["deny_domains"] = list(self.deny_domains)
         if self.deny_domain_suffixes:
             d["deny_domain_suffixes"] = list(self.deny_domain_suffixes)
         if self.dns is not None:
+            if not isinstance(self.dns, DnsConfig):
+                raise TypeError("Network.dns must be DnsConfig or None")
             dns_dict = self.dns._to_dict()
             if dns_dict:
                 d["dns"] = dns_dict
         if self.tls is not None:
+            if not isinstance(self.tls, TlsConfig):
+                raise TypeError("Network.tls must be TlsConfig or None")
             d["tls"] = self.tls._to_dict()
         if self.ipv4_pool is not None:
             d["ipv4_pool"] = self.ipv4_pool
@@ -1250,12 +1553,13 @@ def violation_policy_to_dict(
 ) -> ViolationAction | dict:
     if isinstance(policy, ViolationPolicy):
         return policy._to_dict()
-    return _enum_value(policy, ViolationAction, "on_violation")
+    _enum_value(policy, ViolationAction, "on_violation")
+    return policy
 
 
-#--------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------
 # Types: Registry Auth
-#--------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)

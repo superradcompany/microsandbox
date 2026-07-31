@@ -187,7 +187,7 @@ impl PyVolume {
         kwargs.set_item("kind", mount_kind(py, "NAMED")?)?;
         kwargs.set_item("named", name)?;
         if let Some(mode) = mode {
-            extract_str_enum(mode.bind(py), "VolumeCreateMode")?;
+            extract_str_enum(mode.bind(py), "NamedVolumeMode")?;
             kwargs.set_item("named_mode", mode)?;
         }
         if let Some(kind) = kind {
@@ -232,8 +232,8 @@ impl PyVolume {
 
     /// Create a disk-image volume mount config.
     ///
-    /// `format` is the disk image format (`"qcow2"` / `"raw"` / `"vmdk"`).
-    /// When omitted it is inferred from the file extension. `fstype`
+    /// `format` is a `DiskImageFormat` member. When omitted it is inferred
+    /// from the file extension. `fstype`
     /// (e.g. `"ext4"`) is the inner filesystem agentd will mount; if
     /// omitted, agentd probes `/proc/filesystems` to find a type that
     /// mounts cleanly.

@@ -4,14 +4,22 @@ from __future__ import annotations
 
 import pytest
 
-from microsandbox import DiskImageFormat, Image, ImageSource, RootDisk, RootDiskConfig
+from microsandbox import (
+    DiskImageFormat,
+    Image,
+    ImageSource,
+    ImageSourceKind,
+    RootDisk,
+    RootDiskConfig,
+    Sandbox,
+)
 
 
 def test_oci_accepts_root_disk_int() -> None:
     image = Image.oci("python:3.12", root_disk=8192)
 
     assert isinstance(image, ImageSource)
-    assert image._type == "oci"
+    assert image._type is ImageSourceKind.OCI
     assert image._reference == "python:3.12"
     assert image._root_disk == 8192
     assert image._to_image_str() == "python:3.12"
@@ -53,14 +61,34 @@ def test_oci_accepts_deprecated_upper_size_mib_alias() -> None:
     assert image._upper_size_mib == 8192
     # The alias normalizes to a managed root disk.
     root_disk = image._root_disk
-    if isinstance(root_disk, RootDiskConfig):
-        root_disk = root_disk._to_dict()
-    assert root_disk == {"kind": "managed", "size_mib": 8192}
+    assert isinstance(root_disk, RootDiskConfig)
+    assert root_disk._to_dict() == {"kind": "managed", "size_mib": 8192}
 
 
 def test_oci_rejects_root_disk_and_upper_size_mib_together() -> None:
     with pytest.raises(ValueError):
         Image.oci("python:3.12", root_disk=8192, upper_size_mib=8192)
+
+
+def test_oci_rejects_raw_root_disk_dict() -> None:
+    with pytest.raises(TypeError, match="RootDiskConfig"):
+        Image.oci("python:3.12", root_disk={"kind": "tmpfs"})  # type: ignore[arg-type]
+
+
+def test_oci_rejects_bool_root_disk_size() -> None:
+    with pytest.raises(TypeError, match="RootDiskConfig"):
+        Image.oci("python:3.12", root_disk=True)
+
+
+def test_direct_image_source_rejects_bool_root_disk_size() -> None:
+    image = ImageSource(
+        _type=ImageSourceKind.OCI,
+        _reference="python:3.12",
+        _root_disk=True,
+    )
+
+    with pytest.raises(TypeError, match="RootDiskConfig"):
+        Sandbox.create("root-disk-boundary", image=image)
 
 
 def test_image_namespace_includes_cache_management() -> None:

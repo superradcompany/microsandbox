@@ -14,7 +14,7 @@ async def test_save_rejects_raw_format_strings(tmp_path: pathlib.Path) -> None:
         await Image.save(
             "python:3.12",
             output_path=str(tmp_path / "image.tar"),
-            format="zip",
+            format="docker",
         )
 
 

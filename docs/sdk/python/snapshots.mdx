@@ -652,13 +652,15 @@ A fully-parsed snapshot artifact. Properties are read-only attributes (not async
 |-------------------|------|-------------|
 | `path` | `str` | Path to the artifact directory |
 | `digest` | `str` | Canonical content digest (`sha256:hex`). The snapshot's identity |
-| `size_bytes` | `int` | Apparent size of the captured upper layer in bytes (sparse on disk) |
+| `size_bytes` | `int \| None` | Apparent size of the captured upper layer in bytes (sparse on disk), when recorded |
 | `image_ref` | `str` | Image reference the snapshot was taken from |
 | `image_manifest_digest` | `str` | OCI manifest digest of the pinned image |
 | `state_kind` | [`SnapshotStateKind`](#snapshotstatekind) | File-backed or checkpoint-backed state |
 | `format` | [`SnapshotFormat`](#snapshotformat)` \| None` | On-disk format for file-backed state |
 | `scope` | [`SnapshotScope`](#snapshotscope) | Captured state scope |
-| `fstype` | `str` | Filesystem type inside the upper (e.g. `"ext4"`) |
+| `fstype` | `str \| None` | Filesystem type for file-backed state (e.g. `"ext4"`) |
+| `checkpoint_id` | `str \| None` | Checkpoint identifier for checkpoint-backed state |
+| `checkpoint_manifest_digest` | `str \| None` | Checkpoint manifest digest for checkpoint-backed state |
 | `parent` | `str \| None` | Parent snapshot's digest, or `None` for a root |
 | `created_at` | `str` | RFC 3339 timestamp |
 | `labels` | `dict[str, str]` | User-supplied labels |
@@ -682,7 +684,13 @@ Lightweight handle backed by an index row. Properties are read-only attributes (
 | `state_kind` | [`SnapshotStateKind`](#snapshotstatekind) | File-backed or checkpoint-backed state |
 | `format` | [`SnapshotFormat`](#snapshotformat)` \| None` | On-disk format for file-backed state |
 | `scope` | [`SnapshotScope`](#snapshotscope) | Captured state scope |
+| `fstype` | `str \| None` | Filesystem type for file-backed state |
+| `checkpoint_manifest_digest` | `str \| None` | Checkpoint manifest digest for checkpoint-backed state |
 | `size_bytes` | `int \| None` | Apparent upper size at index time |
+| `locality` | `str` | Artifact locality reported by the index |
+| `availability` | `str` | Artifact availability reported by the index |
+| `migration_state` | `str` | Current migration state |
+| `migration_error_code` | `str \| None` | Migration error code, when migration failed |
 | `created_at` | `float` | ms since Unix epoch |
 | `path` | `str` | Local artifact directory path |
 | `open()` | `Awaitable[`[`Snapshot`](#snapshot)`]` | Load full metadata. See [`open()`](#handle-open) |
@@ -694,10 +702,10 @@ Lightweight handle backed by an index row. Properties are read-only attributes (
 
 Snapshot state representation.
 
-| Value | Description |
-|-------|-------------|
-| `"file"` | File-backed upper-layer state |
-| `"checkpoint"` | Checkpoint-manifest-backed state |
+| Member | Value | Description |
+|--------|-------|-------------|
+| `SnapshotStateKind.FILE` | `"file"` | File-backed upper-layer state |
+| `SnapshotStateKind.CHECKPOINT` | `"checkpoint"` | Checkpoint-manifest-backed state |
 
 ### SnapshotFormat
 
@@ -705,10 +713,10 @@ Snapshot state representation.
 
 On-disk format for file-backed snapshot state.
 
-| Value | Description |
-|-------|-------------|
-| `"raw"` | Raw disk image |
-| `"qcow2"` | QEMU copy-on-write v2 image |
+| Member | Value | Description |
+|--------|-------|-------------|
+| `SnapshotFormat.RAW` | `"raw"` | Raw disk image |
+| `SnapshotFormat.QCOW2` | `"qcow2"` | QEMU copy-on-write v2 image |
 
 ### SnapshotScope
 
@@ -716,7 +724,15 @@ On-disk format for file-backed snapshot state.
 
 Captured snapshot state scope.
 
-| Value | Description |
-|-------|-------------|
-| `"disk"` | Disk-only state |
-| `"resumable"` | Disk, memory, and device state |
+| Member | Value | Description |
+|--------|-------|-------------|
+| `SnapshotScope.DISK` | `"disk"` | Disk-only state |
+| `SnapshotScope.RESUMABLE` | `"resumable"` | Disk, memory, and device state |
+
+```python
+from microsandbox import SnapshotFormat, SnapshotScope, SnapshotStateKind
+
+assert snapshot.state_kind is SnapshotStateKind.FILE
+assert snapshot.format is SnapshotFormat.RAW
+assert snapshot.scope is SnapshotScope.DISK
+```

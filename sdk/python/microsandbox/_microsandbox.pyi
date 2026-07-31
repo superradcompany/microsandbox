@@ -4,41 +4,45 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator, Awaitable, Mapping, Sequence
-from typing import Any, TypedDict
+from typing import Any
 
 from microsandbox.types import (
     BackendKind,
     DiskImageFormat,
+    ExecEventType,
+    ExecOptions,
     FsEntryKind,
     ImageArchiveFormat,
     ImageSource,
+    InitConfig,
+    InitOptions,
+    LogLevel,
     LogReadSource,
     LogSource,
     ModificationPolicy,
     MountConfig,
+    NamedVolumeMode,
+    Network,
+    PatchConfig,
+    PortBinding,
+    PullEventType,
+    PullPolicy,
+    RegistryAuth,
     Rlimit,
     RootDiskConfig,
+    SandboxModificationPlan,
     SandboxStatus,
+    SecretEntry,
+    SecretModifySpec,
+    SecurityProfile,
     SnapshotFormat,
     SnapshotScope,
     SnapshotStateKind,
     Stdin,
-    VolumeCreateMode,
+    ViolationAction,
+    ViolationPolicy,
     VolumeKind,
 )
-
-class SecretModifySpec(TypedDict, total=False):
-    """Desired state for one secret in `modify(secrets=...)`.
-
-    `env`, `value`, and `store` are mutually exclusive ways to provide the
-    secret material; setting more than one raises ValueError.
-    """
-
-    env: str
-    value: str
-    store: str
-    placeholder: str
-    allowed_hosts: list[str]
 
 class PyAgentClient:
     """Raw agent client.
@@ -81,7 +85,41 @@ class Sandbox:
     """
 
     @staticmethod
-    async def create(name: str, **kwargs: Any) -> Sandbox: ...
+    async def create(
+        name: str,
+        *,
+        image: str | os.PathLike[str] | ImageSource | None = None,
+        from_snapshot: str | os.PathLike[str] | None = None,
+        memory: int | None = None,
+        cpus: int | None = None,
+        max_memory: int | None = None,
+        max_cpus: int | None = None,
+        workdir: str | None = None,
+        shell: str | None = None,
+        security: SecurityProfile | None = None,
+        hostname: str | None = None,
+        user: str | None = None,
+        entrypoint: Sequence[str] | None = None,
+        init: str | InitConfig | InitOptions | None = None,
+        replace: bool = False,
+        replace_with_timeout: float | None = None,
+        max_duration: float | None = None,
+        idle_timeout: float | None = None,
+        ephemeral: bool = False,
+        env: Mapping[str, str] | None = None,
+        labels: Mapping[str, str] | None = None,
+        scripts: Mapping[str, str] | None = None,
+        pull_policy: PullPolicy | None = None,
+        log_level: LogLevel | None = None,
+        registry_auth: RegistryAuth | None = None,
+        volumes: Mapping[str, MountConfig] | None = None,
+        patches: Sequence[PatchConfig] | None = None,
+        ports: Mapping[int, int] | Sequence[PortBinding] | None = None,
+        network: Network | None = None,
+        secrets: Sequence[SecretEntry] | None = None,
+        on_secret_violation: ViolationAction | ViolationPolicy | None = None,
+        detached: bool = False,
+    ) -> Sandbox: ...
     @staticmethod
     async def start(name: str, *, detached: bool = False) -> Sandbox: ...
     @staticmethod
@@ -98,7 +136,41 @@ class Sandbox:
     @staticmethod
     async def remove(name: str) -> None: ...
     @staticmethod
-    def create_with_progress(name: str, **kwargs: Any) -> PullSession: ...
+    def create_with_progress(
+        name: str,
+        *,
+        image: str | os.PathLike[str] | ImageSource | None = None,
+        from_snapshot: str | os.PathLike[str] | None = None,
+        memory: int | None = None,
+        cpus: int | None = None,
+        max_memory: int | None = None,
+        max_cpus: int | None = None,
+        workdir: str | None = None,
+        shell: str | None = None,
+        security: SecurityProfile | None = None,
+        hostname: str | None = None,
+        user: str | None = None,
+        entrypoint: Sequence[str] | None = None,
+        init: str | InitConfig | InitOptions | None = None,
+        replace: bool = False,
+        replace_with_timeout: float | None = None,
+        max_duration: float | None = None,
+        idle_timeout: float | None = None,
+        ephemeral: bool = False,
+        env: Mapping[str, str] | None = None,
+        labels: Mapping[str, str] | None = None,
+        scripts: Mapping[str, str] | None = None,
+        pull_policy: PullPolicy | None = None,
+        log_level: LogLevel | None = None,
+        registry_auth: RegistryAuth | None = None,
+        volumes: Mapping[str, MountConfig] | None = None,
+        patches: Sequence[PatchConfig] | None = None,
+        ports: Mapping[int, int] | Sequence[PortBinding] | None = None,
+        network: Network | None = None,
+        secrets: Sequence[SecretEntry] | None = None,
+        on_secret_violation: ViolationAction | ViolationPolicy | None = None,
+        detached: bool = False,
+    ) -> PullSession: ...
     async def name(self) -> str: ...
     @property
     def owns_lifecycle(self) -> Awaitable[bool]: ...
@@ -107,26 +179,26 @@ class Sandbox:
     async def exec(
         self,
         cmd: str,
-        args: list[str] | Mapping[str, Any] | None = None,
+        args: list[str] | ExecOptions | None = None,
         *,
         cwd: str | None = None,
         user: str | None = None,
         env: Mapping[str, str] | None = None,
         timeout: float | None = None,
-        stdin: Stdin | bytes | str | None = None,
+        stdin: Stdin | bytes | None = None,
         tty: bool = False,
         rlimits: list[Rlimit] | None = None,
     ) -> ExecOutput: ...
     async def exec_stream(
         self,
         cmd: str,
-        args: list[str] | Mapping[str, Any] | None = None,
+        args: list[str] | ExecOptions | None = None,
         *,
         cwd: str | None = None,
         user: str | None = None,
         env: Mapping[str, str] | None = None,
         timeout: float | None = None,
-        stdin: Stdin | bytes | str | None = None,
+        stdin: Stdin | bytes | None = None,
         tty: bool = False,
         rlimits: list[Rlimit] | None = None,
     ) -> ExecHandle: ...
@@ -138,7 +210,7 @@ class Sandbox:
         user: str | None = None,
         env: Mapping[str, str] | None = None,
         timeout: float | None = None,
-        stdin: Stdin | bytes | str | None = None,
+        stdin: Stdin | bytes | None = None,
         tty: bool = False,
         rlimits: list[Rlimit] | None = None,
     ) -> ExecOutput: ...
@@ -150,7 +222,7 @@ class Sandbox:
         user: str | None = None,
         env: Mapping[str, str] | None = None,
         timeout: float | None = None,
-        stdin: Stdin | bytes | str | None = None,
+        stdin: Stdin | bytes | None = None,
         tty: bool = False,
         rlimits: list[Rlimit] | None = None,
     ) -> ExecHandle: ...
@@ -185,7 +257,7 @@ class Sandbox:
         secrets_rm: list[str] | None = None,
         policy: ModificationPolicy | None = None,
         dry_run: bool = False,
-    ) -> dict[str, Any]: ...
+    ) -> SandboxModificationPlan: ...
     async def metrics_stream(self, interval: float = 1.0) -> MetricsStream: ...
     async def logs(
         self,
@@ -275,7 +347,7 @@ class SandboxHandle:
         secrets_rm: list[str] | None = None,
         policy: ModificationPolicy | None = None,
         dry_run: bool = False,
-    ) -> dict[str, Any]: ...
+    ) -> SandboxModificationPlan: ...
     async def logs(
         self,
         tail: int | None = None,
@@ -336,7 +408,7 @@ class ExecSink:
     async def close(self) -> None: ...
 
 class ExecEvent:
-    event_type: str
+    event_type: ExecEventType
     pid: int | None
     data: bytes | None
     code: int | None
@@ -507,7 +579,7 @@ class Volume:
     def named(
         name: str,
         *,
-        mode: VolumeCreateMode | None = None,
+        mode: NamedVolumeMode | None = None,
         kind: VolumeKind | None = None,
         size_mib: int | None = None,
         quota_mib: int | None = None,
@@ -578,7 +650,7 @@ class Image:
     def oci(
         reference: str,
         *,
-        root_disk: RootDiskConfig | dict | int | None = None,
+        root_disk: RootDiskConfig | int | None = None,
         upper_size_mib: int | None = None,
     ) -> ImageSource: ...
     @staticmethod
@@ -800,7 +872,7 @@ class PullProgressIter:
     async def __anext__(self) -> PullEvent: ...
 
 class PullEvent:
-    event_type: str
+    event_type: PullEventType
     reference: str | None
     manifest_digest: str | None
     layer_count: int | None

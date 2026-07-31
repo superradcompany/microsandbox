@@ -311,7 +311,7 @@ impl PySnapshot {
         self.inner.manifest().parent.as_deref()
     }
 
-    /// Snapshot payload scope (`"disk"` today).
+    /// Snapshot payload scope as a `SnapshotScope` member (`DISK` today).
     #[getter]
     fn scope(&self, py: Python<'_>) -> PyResult<PyObject> {
         str_enum_member(

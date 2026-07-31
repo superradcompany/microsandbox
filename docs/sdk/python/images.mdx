@@ -66,7 +66,7 @@ These static methods return an [`ImageSource`](#imagesource) you can pass as the
 def oci(
     reference: str,
     *,
-    root_disk: RootDiskConfig | dict | int | None = None,
+    root_disk: RootDiskConfig | int | None = None,
     upper_size_mib: int | None = None,
 ) -> ImageSource
 ```
@@ -74,9 +74,11 @@ def oci(
 <Accordion title="Example">
 
 ```python
+from microsandbox import Image, RootDisk, Sandbox
+
 sb = await Sandbox.create(
     "api",
-    image=Image.oci("python:3.12", upper_size_mib=8192),
+    image=Image.oci("python:3.12", root_disk=RootDisk.managed(8192)),
 )
 ```
 
@@ -92,12 +94,12 @@ Create an OCI image rootfs source. Use `root_disk` to configure its writable lay
     <div className="msb-param-desc">OCI image reference, e.g. <code>"python:3.12"</code>.</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>root_disk</code><span className="msb-type">RootDiskConfig | dict | int | None</span></div>
+    <div className="msb-param-key"><code>root_disk</code><span className="msb-type">RootDiskConfig | int | None</span></div>
     <div className="msb-param-desc">Writable root disk configuration or managed-disk size in MiB.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>upper_size_mib</code><span className="msb-type">int | None</span></div>
-    <div className="msb-param-desc">Writable overlay upper size in MiB. <code>None</code> keeps the default.</div>
+    <div className="msb-param-desc">Deprecated managed-disk size alias. Use <code>root_disk=RootDisk.managed(...)</code>.</div>
   </div>
 </div>
 
@@ -593,11 +595,11 @@ Summary of cached image data removed by [`Image.prune()`](#image-prune).
 
 Disk image container format.
 
-| Value | Description |
-|-------|-------------|
-| `"qcow2"` | QEMU copy-on-write v2 |
-| `"raw"` | Raw block image |
-| `"vmdk"` | VMware disk image |
+| Member | Value | Description |
+|--------|-------|-------------|
+| `DiskImageFormat.QCOW2` | `"qcow2"` | QEMU copy-on-write v2 |
+| `DiskImageFormat.RAW` | `"raw"` | Raw block image |
+| `DiskImageFormat.VMDK` | `"vmdk"` | VMware disk image |
 
 ### ImageArchiveFormat
 
@@ -605,10 +607,10 @@ Disk image container format.
 
 Archive layout used when exporting cached images.
 
-| Value | Description |
-|-------|-------------|
-| `"docker"` | Docker archive compatible with `docker load` |
-| `"oci"` | OCI Image Layout archive |
+| Member | Value | Description |
+|--------|-------|-------------|
+| `ImageArchiveFormat.DOCKER` | `"docker"` | Docker archive compatible with `docker load` |
+| `ImageArchiveFormat.OCI` | `"oci"` | OCI Image Layout archive |
 
 ### ImageSourceKind
 
@@ -616,11 +618,11 @@ Archive layout used when exporting cached images.
 
 Root filesystem source kind.
 
-| Value | Description |
-|-------|-------------|
-| `"oci"` | OCI image reference |
-| `"bind"` | Host directory bind source |
-| `"disk"` | Host disk-image source |
+| Member | Value | Description |
+|--------|-------|-------------|
+| `ImageSourceKind.OCI` | `"oci"` | OCI image reference |
+| `ImageSourceKind.BIND` | `"bind"` | Host directory bind source |
+| `ImageSourceKind.DISK` | `"disk"` | Host disk-image source |
 
 ### RootDiskKind
 
@@ -628,11 +630,11 @@ Root filesystem source kind.
 
 Writable OCI root disk implementation.
 
-| Value | Description |
-|-------|-------------|
-| `"managed"` | Microsandbox-managed sparse ext4 disk |
-| `"tmpfs"` | Ephemeral RAM-backed upper layer |
-| `"disk-image"` | User-supplied writable disk image |
+| Member | Value | Description |
+|--------|-------|-------------|
+| `RootDiskKind.MANAGED` | `"managed"` | Microsandbox-managed sparse ext4 disk |
+| `RootDiskKind.TMPFS` | `"tmpfs"` | Ephemeral RAM-backed upper layer |
+| `RootDiskKind.DISK_IMAGE` | `"disk-image"` | User-supplied writable disk image |
 
 ### Errors
 

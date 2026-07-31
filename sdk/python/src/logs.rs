@@ -20,10 +20,10 @@ pub struct PyLogEntry {
     #[pyo3(get)]
     pub timestamp_ms: f64,
 
-    /// `"stdout"`, `"stderr"`, `"output"` (pty merged), or `"system"`.
+    /// Log source as a `LogSource` member.
     pub source: String,
 
-    /// Relay-monotonic session id. `None` for `system` lifecycle
+    /// Relay-monotonic session id. `None` for system lifecycle
     /// markers (which aren't tied to a specific session).
     #[pyo3(get)]
     pub session_id: Option<u64>,

@@ -13,6 +13,7 @@ from microsandbox import (
     HostPermissions,
     MountConfig,
     MountKind,
+    NamedVolumeMode,
     SecurityProfile,
     StatVirtualization,
 )
@@ -102,6 +103,27 @@ def test_disk_rejects_stat_virt_at_serialization() -> None:
     )
     with pytest.raises(ValueError, match="only valid for BIND/NAMED"):
         mc._to_dict()
+
+
+def test_inactive_named_mode_is_validated_before_mount_dispatch() -> None:
+    mc = MountConfig(
+        kind=MountKind.BIND,
+        bind="/host/data",
+        named_mode="existing",  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(TypeError, match=r"MountConfig\.named_mode"):
+        mc._to_dict()
+
+
+def test_named_mode_uses_canonical_enum_name() -> None:
+    mc = MountConfig(
+        kind=MountKind.NAMED,
+        named="my-vol",
+        named_mode=NamedVolumeMode.ENSURE_EXISTS,
+    )
+
+    assert mc._to_dict()["named_mode"] == "ensure-exists"
 
 
 def test_stat_virtualization_str_values() -> None:

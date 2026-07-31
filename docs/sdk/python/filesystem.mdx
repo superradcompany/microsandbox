@@ -512,12 +512,18 @@ Metadata for a single directory entry, returned by [`list()`](#fs-list).
 
 Filesystem entry type returned by [`FsEntry.kind`](#fsentry) and [`FsMetadata.kind`](#fsmetadata).
 
-| Value | Description |
-|-------|-------------|
-| `"file"` | Regular file |
-| `"directory"` | Directory |
-| `"symlink"` | Symbolic link |
-| `"other"` | Other entry type |
+| Member | Value | Description |
+|--------|-------|-------------|
+| `FsEntryKind.FILE` | `"file"` | Regular file |
+| `FsEntryKind.DIRECTORY` | `"directory"` | Directory |
+| `FsEntryKind.SYMLINK` | `"symlink"` | Symbolic link |
+| `FsEntryKind.OTHER` | `"other"` | Other entry type |
+
+```python
+from microsandbox import FsEntryKind
+
+files = [entry for entry in await sb.fs.list("/app") if entry.kind is FsEntryKind.FILE]
+```
 
 ### FsMetadata
 
