@@ -617,4 +617,26 @@ mod tests {
                 .is_none()
         );
     }
+
+    #[test]
+    fn load_upstream_ca_certificates_keeps_certs_and_skips_other_sections() {
+        let ca = crate::tls::ca::CertAuthority::generate();
+        let path =
+            std::env::temp_dir().join(format!("msb-upstream-ca-test-{}.pem", std::process::id()));
+        // Bundle a private key and stray text around the certificate: only the
+        // certificate section must end up in the root store.
+        let mut bundle = ca.key_pem();
+        bundle.extend_from_slice(b"stray text between sections\n");
+        bundle.extend_from_slice(&ca.cert_pem());
+        std::fs::write(&path, &bundle).expect("write CA bundle");
+
+        let mut root_store = rustls::RootCertStore::empty();
+        load_upstream_ca_certificates(
+            &mut root_store,
+            &[path.clone(), PathBuf::from("/nonexistent/upstream-ca.pem")],
+        );
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(root_store.len(), 1);
+    }
 }
