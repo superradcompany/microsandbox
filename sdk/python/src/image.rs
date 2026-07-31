@@ -12,6 +12,7 @@ use microsandbox::image::{
 };
 
 use crate::error::to_py_err;
+use crate::helpers::{extract_str_enum, str_enum_member};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -119,7 +120,7 @@ impl PyImage {
             ));
         }
         let kwargs = PyDict::new(py);
-        kwargs.set_item("_type", "oci")?;
+        kwargs.set_item("_type", str_enum_member(py, "ImageSourceKind", "oci")?)?;
         kwargs.set_item("_reference", reference)?;
         if let Some(root_disk) = root_disk {
             kwargs.set_item("_root_disk", root_disk)?;
@@ -138,7 +139,7 @@ impl PyImage {
     #[staticmethod]
     fn bind(py: Python<'_>, path: String) -> PyResult<PyObject> {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("_type", "bind")?;
+        kwargs.set_item("_type", str_enum_member(py, "ImageSourceKind", "bind")?)?;
         kwargs.set_item("_path", path)?;
         Ok(image_source_class(py)?.call((), Some(&kwargs))?.unbind())
     }
@@ -148,7 +149,7 @@ impl PyImage {
     #[pyo3(signature = (path, *, fstype = None))]
     fn disk(py: Python<'_>, path: String, fstype: Option<String>) -> PyResult<PyObject> {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("_type", "disk")?;
+        kwargs.set_item("_type", str_enum_member(py, "ImageSourceKind", "disk")?)?;
         kwargs.set_item("_path", path)?;
         if let Some(fstype) = fstype {
             kwargs.set_item("_fstype", fstype)?;
@@ -259,17 +260,21 @@ impl PyImage {
     ///
     /// `reference` accepts a single reference string or a sequence of them;
     /// every referenced image is written into the same archive. `format`
-    /// selects the archive layout: `"docker"` (default, compatible with
-    /// `docker load`) or `"oci"` (OCI Image Layout).
+    /// selects the archive layout with `ImageArchiveFormat`.
     #[staticmethod]
     #[pyo3(signature = (reference, *, output_path, format = None))]
     fn save<'py>(
         py: Python<'py>,
         reference: ReferenceArg,
         output_path: String,
-        format: Option<String>,
+        format: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let format = match format.as_deref().unwrap_or("docker") {
+        let format = format
+            .as_ref()
+            .map(|value| extract_str_enum(value.bind(py), "ImageArchiveFormat"))
+            .transpose()?
+            .unwrap_or_else(|| "docker".to_string());
+        let format = match format.as_str() {
             "docker" => ImageArchiveFormat::Docker,
             "oci" => ImageArchiveFormat::Oci,
             other => {

@@ -149,7 +149,13 @@ const dockerData = await Volume.builder("docker-data")
 ```
 
 ```python Python
-docker_data = await Volume.create("docker-data", kind="disk", size_mib=20 * 1024)
+from microsandbox import VolumeKind
+
+docker_data = await Volume.create(
+    "docker-data",
+    kind=VolumeKind.DISK,
+    size_mib=20 * 1024,
+)
 ```
 
 ```go Go

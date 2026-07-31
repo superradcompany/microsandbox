@@ -13,6 +13,7 @@ from microsandbox import (
     SandboxAlreadyExistsError,
     SandboxNotFoundError,
     SandboxNotRunningError,
+    SandboxStatus,
 )
 
 
@@ -83,13 +84,13 @@ async def test_create_get_list_connect_stop_start_and_remove(sandbox_name):
 
         await sandbox.stop()
         result = await handle.refresh()
-        assert result.status == "stopped"
+        assert result.status is SandboxStatus.STOPPED
 
         with pytest.raises(SandboxNotRunningError):
             await handle.ping()
         with pytest.raises(SandboxNotRunningError):
             await result.touch()
-        assert (await handle.refresh()).status == "stopped"
+        assert (await handle.refresh()).status is SandboxStatus.STOPPED
 
         restarted = await Sandbox.start(name)
         try:

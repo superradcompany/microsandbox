@@ -2,7 +2,7 @@ use microsandbox::sandbox::{NetworkPolicy, Patch, PullPolicy, SandboxBuilder, Se
 use microsandbox::{LogLevel, RegistryAuth};
 use microsandbox_network::dns::Nameserver;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyDict, PyList, PyModule};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -43,6 +43,32 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
     "on_secret_violation",
     "detached",
 ];
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Python Enums
+//--------------------------------------------------------------------------------------------------
+
+/// Extract the wire value from one exact public Python `StrEnum` class.
+///
+/// Checking the class before reading `.value` is intentional: `StrEnum`
+/// members are also strings, so ordinary string extraction would silently
+/// preserve the legacy raw-string API.
+pub(crate) fn extract_str_enum(value: &Bound<'_, PyAny>, enum_name: &str) -> PyResult<String> {
+    let enum_class = PyModule::import(value.py(), "microsandbox.types")?.getattr(enum_name)?;
+    if !value.is_instance(&enum_class)? {
+        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "expected {enum_name}, got {}",
+            value.get_type().name()?
+        )));
+    }
+    value.getattr("value")?.extract()
+}
+
+/// Construct a public Python `StrEnum` member from a trusted wire value.
+pub(crate) fn str_enum_member(py: Python<'_>, enum_name: &str, value: &str) -> PyResult<PyObject> {
+    let enum_class = PyModule::import(py, "microsandbox.types")?.getattr(enum_name)?;
+    Ok(enum_class.call1((value,))?.unbind())
+}
 
 //--------------------------------------------------------------------------------------------------
 // Functions: Config Conversion
@@ -224,7 +250,8 @@ pub fn sandbox_builder_from_args(
     if let Some(shell) = extract_opt::<String>(kwargs, "shell")? {
         builder = builder.shell(shell);
     }
-    if let Some(security) = extract_opt::<String>(kwargs, "security")? {
+    if let Some(security_obj) = kwargs.get_item("security")?.filter(|v| !v.is_none()) {
+        let security = extract_str_enum(&security_obj, "SecurityProfile")?;
         let profile = match security.as_str() {
             "default" => SecurityProfile::Default,
             "restricted" => SecurityProfile::Restricted,
@@ -318,10 +345,11 @@ pub fn sandbox_builder_from_args(
     }
 
     // Pull policy.
-    if let Some(pp) = extract_opt::<String>(kwargs, "pull_policy")? {
+    if let Some(pp_obj) = kwargs.get_item("pull_policy")?.filter(|v| !v.is_none()) {
+        let pp = extract_str_enum(&pp_obj, "PullPolicy")?;
         let policy = match pp.as_str() {
             "always" => PullPolicy::Always,
-            "if-missing" | "if_missing" | "IF_MISSING" => PullPolicy::IfMissing,
+            "if-missing" => PullPolicy::IfMissing,
             "never" => PullPolicy::Never,
             _ => {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -333,13 +361,14 @@ pub fn sandbox_builder_from_args(
     }
 
     // Log level.
-    if let Some(ll) = extract_opt::<String>(kwargs, "log_level")? {
+    if let Some(ll_obj) = kwargs.get_item("log_level")?.filter(|v| !v.is_none()) {
+        let ll = extract_str_enum(&ll_obj, "LogLevel")?;
         let level = match ll.as_str() {
-            "trace" | "TRACE" => LogLevel::Trace,
-            "debug" | "DEBUG" => LogLevel::Debug,
-            "info" | "INFO" => LogLevel::Info,
-            "warn" | "WARN" => LogLevel::Warn,
-            "error" | "ERROR" => LogLevel::Error,
+            "trace" => LogLevel::Trace,
+            "debug" => LogLevel::Debug,
+            "info" => LogLevel::Info,
+            "warn" => LogLevel::Warn,
+            "error" => LogLevel::Error,
             _ => {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
                     "invalid log_level: {ll}"
@@ -1528,8 +1557,8 @@ fn parse_violation_action(
     use microsandbox_network::secrets::config::{HostPattern, ViolationAction};
     match s {
         "block" => Ok(ViolationAction::Block),
-        "block-and-log" | "block_and_log" => Ok(ViolationAction::BlockAndLog),
-        "block-and-terminate" | "block_and_terminate" => Ok(ViolationAction::BlockAndTerminate),
+        "block-and-log" => Ok(ViolationAction::BlockAndLog),
+        "block-and-terminate" => Ok(ViolationAction::BlockAndTerminate),
         "passthrough" => Ok(ViolationAction::Passthrough(vec![HostPattern::Any])),
         _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
             "unknown violation action: {s}"
@@ -1540,8 +1569,13 @@ fn parse_violation_action(
 fn parse_violation_action_obj(
     obj: &Bound<'_, PyAny>,
 ) -> PyResult<microsandbox_network::secrets::config::ViolationAction> {
-    if let Ok(s) = obj.extract::<String>() {
+    if let Ok(s) = extract_str_enum(obj, "ViolationAction") {
         return parse_violation_action(&s);
+    }
+    if obj.extract::<String>().is_ok() {
+        return Err(pyo3::exceptions::PyTypeError::new_err(
+            "expected ViolationAction or ViolationPolicy",
+        ));
     }
 
     // Convert policy objects exactly once: fallback policies flatten to a
@@ -1562,7 +1596,7 @@ fn parse_violation_action_obj(
             .downcast::<PyDict>()
             .map_err(|_| {
                 pyo3::exceptions::PyTypeError::new_err(
-                    "violation policy _to_dict() must return a string or dict",
+                    "violation policy _to_dict() must return an action value or dict",
                 )
             })?
             .clone()
@@ -1576,7 +1610,7 @@ fn parse_violation_action_obj(
     }
 
     Err(pyo3::exceptions::PyValueError::new_err(
-        "expected violation action string or {'passthrough': {...}}",
+        "expected ViolationAction or ViolationPolicy",
     ))
 }
 

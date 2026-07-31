@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 use crate::error::to_py_err;
 use crate::exec::{PyExecHandle, PyExecOutput};
 use crate::fs::PySandboxFs;
-use crate::helpers::sandbox_builder_from_args;
+use crate::helpers::{extract_str_enum, sandbox_builder_from_args, str_enum_member};
 use crate::metrics::PyMetricsStream;
 use crate::metrics::convert_metrics;
 use crate::sandbox_handle::PySandboxHandle;
@@ -156,8 +156,8 @@ impl PySandboxStopResult {
     }
 
     #[getter]
-    fn status(&self) -> &str {
-        &self.status
+    fn status(&self, py: Python<'_>) -> PyResult<PyObject> {
+        str_enum_member(py, "SandboxStatus", &self.status)
     }
 
     #[getter]
@@ -662,9 +662,9 @@ impl PySandbox {
 
     /// Plan or apply a sandbox modification. Returns the plan as a dict.
     ///
-    /// `memory` / `max_memory` are in MiB. `policy` is `"no_restart"`
-    /// (default), `"next_start"`, or `"restart"`. With `dry_run=True` the
-    /// plan is computed without applying anything.
+    /// `memory` / `max_memory` are in MiB. `policy` is a
+    /// `ModificationPolicy`; with `dry_run=True` the plan is computed without
+    /// applying anything.
     ///
     /// `secrets` maps secret names to spec dicts with at most one of
     /// `"env"` / `"value"` / `"store"`, plus optional `"placeholder"` and
@@ -700,7 +700,7 @@ impl PySandbox {
         workdir: Option<String>,
         secrets: Option<HashMap<String, HashMap<String, Py<PyAny>>>>,
         secrets_rm: Option<Vec<String>>,
-        policy: Option<String>,
+        policy: Option<Py<PyAny>>,
         dry_run: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
@@ -709,6 +709,10 @@ impl PySandbox {
             cpus, max_cpus, memory, max_memory, env, env_rm, labels, labels_rm, workdir, secrets,
             secrets_rm,
         );
+        let policy = policy
+            .as_ref()
+            .map(|value| extract_str_enum(value.bind(py), "ModificationPolicy"))
+            .transpose()?;
         let policy = parse_modify_policy(policy.as_deref())?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
@@ -732,10 +736,10 @@ impl PySandbox {
         tail: Option<usize>,
         since_ms: Option<f64>,
         until_ms: Option<f64>,
-        sources: Option<Vec<String>>,
+        sources: Option<Vec<Py<PyAny>>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let opts = crate::logs::parse_log_options(tail, since_ms, until_ms, sources)?;
+        let opts = crate::logs::parse_log_options(py, tail, since_ms, until_ms, sources)?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
             let entries = sandbox.logs(&opts).await.map_err(to_py_err)?;
@@ -774,7 +778,7 @@ impl PySandbox {
     fn log_stream<'py>(
         &self,
         py: Python<'py>,
-        sources: Option<Vec<String>>,
+        sources: Option<Vec<Py<PyAny>>>,
         since_ms: Option<f64>,
         from_cursor: Option<String>,
         until_ms: Option<f64>,
@@ -782,6 +786,7 @@ impl PySandbox {
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         let opts = crate::logs::parse_log_stream_options(
+            py,
             sources,
             since_ms,
             from_cursor,

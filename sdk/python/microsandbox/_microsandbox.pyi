@@ -7,13 +7,24 @@ from collections.abc import AsyncIterator, Awaitable, Mapping, Sequence
 from typing import Any, TypedDict
 
 from microsandbox.types import (
+    BackendKind,
+    DiskImageFormat,
+    FsEntryKind,
+    ImageArchiveFormat,
     ImageSource,
     LogReadSource,
     LogSource,
+    ModificationPolicy,
     MountConfig,
     Rlimit,
     RootDiskConfig,
+    SandboxStatus,
+    SnapshotFormat,
+    SnapshotScope,
+    SnapshotStateKind,
     Stdin,
+    VolumeCreateMode,
+    VolumeKind,
 )
 
 class SecretModifySpec(TypedDict, total=False):
@@ -87,16 +98,12 @@ class Sandbox:
     @staticmethod
     async def remove(name: str) -> None: ...
     @staticmethod
-    def create_with_progress(
-        name: str, **kwargs: Any
-    ) -> PullSession: ...
-
+    def create_with_progress(name: str, **kwargs: Any) -> PullSession: ...
     async def name(self) -> str: ...
     @property
     def owns_lifecycle(self) -> Awaitable[bool]: ...
     @property
     def fs(self) -> SandboxFsOps: ...
-
     async def exec(
         self,
         cmd: str,
@@ -176,7 +183,7 @@ class Sandbox:
         workdir: str | None = None,
         secrets: Mapping[str, SecretModifySpec] | None = None,
         secrets_rm: list[str] | None = None,
-        policy: str | None = None,
+        policy: ModificationPolicy | None = None,
         dry_run: bool = False,
     ) -> dict[str, Any]: ...
     async def metrics_stream(self, interval: float = 1.0) -> MetricsStream: ...
@@ -211,7 +218,7 @@ class SandboxStopResult:
     @property
     def name(self) -> str: ...
     @property
-    def status(self) -> str: ...
+    def status(self) -> SandboxStatus: ...
     @property
     def exit_code(self) -> int | None: ...
     @property
@@ -242,7 +249,7 @@ class SandboxHandle:
     @property
     def name(self) -> str: ...
     @property
-    def status(self) -> str: ...
+    def status(self) -> SandboxStatus: ...
     @property
     def config_json(self) -> str: ...
     @property
@@ -266,7 +273,7 @@ class SandboxHandle:
         workdir: str | None = None,
         secrets: Mapping[str, SecretModifySpec] | None = None,
         secrets_rm: list[str] | None = None,
-        policy: str | None = None,
+        policy: ModificationPolicy | None = None,
         dry_run: bool = False,
     ) -> dict[str, Any]: ...
     async def logs(
@@ -424,13 +431,13 @@ class FsWriteSink:
 
 class FsEntry:
     path: str
-    kind: str
+    kind: FsEntryKind
     size: int
     mode: int
     modified: float | None
 
 class FsMetadata:
-    kind: str
+    kind: FsEntryKind
     size: int
     mode: int
     readonly: bool
@@ -476,7 +483,7 @@ class Volume:
     async def create(
         name: str,
         *,
-        kind: str = "dir",
+        kind: VolumeKind = VolumeKind.DIRECTORY,
         size_mib: int | None = None,
         quota_mib: int | None = None,
         labels: dict[str, str] | None = None,
@@ -500,6 +507,10 @@ class Volume:
     def named(
         name: str,
         *,
+        mode: VolumeCreateMode | None = None,
+        kind: VolumeKind | None = None,
+        size_mib: int | None = None,
+        quota_mib: int | None = None,
         readonly: bool = False,
         noexec: bool = False,
         nosuid: bool = False,
@@ -518,7 +529,7 @@ class Volume:
     def disk(
         path: str,
         *,
-        format: str | None = None,
+        format: DiskImageFormat | None = None,
         fstype: str | None = None,
         readonly: bool = False,
         noexec: bool = False,
@@ -534,7 +545,7 @@ class VolumeHandle:
     @property
     def name(self) -> str: ...
     @property
-    def kind(self) -> str: ...
+    def kind(self) -> VolumeKind: ...
     @property
     def quota_mib(self) -> int | None: ...
     @property
@@ -542,7 +553,7 @@ class VolumeHandle:
     @property
     def capacity_bytes(self) -> int | None: ...
     @property
-    def disk_format(self) -> str | None: ...
+    def disk_format(self) -> DiskImageFormat | None: ...
     @property
     def disk_fstype(self) -> str | None: ...
     @property
@@ -588,7 +599,10 @@ class Image:
     async def load(input_path: str, *, tag: str | None = None) -> list[ImageHandle]: ...
     @staticmethod
     async def save(
-        reference: str | Sequence[str], *, output_path: str, format: str = "docker"
+        reference: str | Sequence[str],
+        *,
+        output_path: str,
+        format: ImageArchiveFormat = ImageArchiveFormat.DOCKER,
     ) -> None: ...
 
 class ImageHandle:
@@ -715,9 +729,9 @@ class Snapshot:
     @property
     def image_manifest_digest(self) -> str: ...
     @property
-    def state_kind(self) -> str: ...
+    def state_kind(self) -> SnapshotStateKind: ...
     @property
-    def format(self) -> str | None: ...
+    def format(self) -> SnapshotFormat | None: ...
     @property
     def fstype(self) -> str | None: ...
     @property
@@ -727,7 +741,7 @@ class Snapshot:
     @property
     def parent(self) -> str | None: ...
     @property
-    def scope(self) -> str: ...
+    def scope(self) -> SnapshotScope: ...
     @property
     def created_at(self) -> str: ...
     @property
@@ -744,13 +758,13 @@ class SnapshotHandle:
     @property
     def parent_digest(self) -> str | None: ...
     @property
-    def scope(self) -> str: ...
+    def scope(self) -> SnapshotScope: ...
     @property
     def image_ref(self) -> str: ...
     @property
-    def state_kind(self) -> str: ...
+    def state_kind(self) -> SnapshotStateKind: ...
     @property
-    def format(self) -> str | None: ...
+    def format(self) -> SnapshotFormat | None: ...
     @property
     def fstype(self) -> str | None: ...
     @property
@@ -801,6 +815,21 @@ class PullEvent:
 async def all_sandbox_metrics() -> dict[str, SandboxMetrics]: ...
 def install() -> None: ...
 def is_installed() -> bool: ...
+def set_default_backend(
+    kind: BackendKind,
+    *,
+    url: str | None = None,
+    api_key: str | None = None,
+    profile: str | None = None,
+) -> None: ...
+def backend_scope(
+    kind: BackendKind,
+    *,
+    url: str | None = None,
+    api_key: str | None = None,
+    profile: str | None = None,
+) -> Any: ...
+def default_backend_kind() -> BackendKind: ...
 def resolved_msb_path() -> str: ...
 def set_runtime_msb_path(path: str) -> None: ...
 def version() -> str: ...

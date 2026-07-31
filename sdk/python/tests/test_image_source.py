@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from microsandbox import Image, ImageSource, RootDisk, RootDiskConfig
+from microsandbox import DiskImageFormat, Image, ImageSource, RootDisk, RootDiskConfig
 
 
 def test_oci_accepts_root_disk_int() -> None:
@@ -34,7 +34,7 @@ def test_oci_accepts_tmpfs_root_disk() -> None:
 def test_oci_accepts_disk_image_root_disk() -> None:
     image = Image.oci(
         "python:3.12",
-        root_disk=RootDisk.disk("./scratch.img", format="raw", fstype="ext4"),
+        root_disk=RootDisk.disk("./scratch.img", format=DiskImageFormat.RAW, fstype="ext4"),
     )
 
     assert isinstance(image._root_disk, RootDiskConfig)

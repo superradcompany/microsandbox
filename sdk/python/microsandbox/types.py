@@ -6,7 +6,7 @@ import enum
 import sys
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Literal, TypeAlias
+from typing import TypeAlias
 
 #--------------------------------------------------------------------------------------------------
 # Constants
@@ -54,6 +54,8 @@ class SecurityProfile(StrEnum):
 
 
 class SandboxStatus(StrEnum):
+    CREATED = "created"
+    STARTING = "starting"
     RUNNING = "running"
     STOPPED = "stopped"
     CRASHED = "crashed"
@@ -61,14 +63,27 @@ class SandboxStatus(StrEnum):
     PAUSED = "paused"
 
 
+class BackendKind(StrEnum):
+    LOCAL = "local"
+    CLOUD = "cloud"
+
+
+class ModificationPolicy(StrEnum):
+    NO_RESTART = "no_restart"
+    NEXT_START = "next_start"
+    RESTART = "restart"
+
+
 class Action(StrEnum):
     ALLOW = "allow"
     DENY = "deny"
+
 
 class Direction(StrEnum):
     EGRESS = "egress"
     INGRESS = "ingress"
     ANY = "any"
+
 
 class Protocol(StrEnum):
     TCP = "tcp"
@@ -76,9 +91,11 @@ class Protocol(StrEnum):
     ICMPV4 = "icmpv4"
     ICMPV6 = "icmpv6"
 
+
 class PortProtocol(StrEnum):
     TCP = "tcp"
     UDP = "udp"
+
 
 class DestGroup(StrEnum):
     PUBLIC = "public"
@@ -89,11 +106,14 @@ class DestGroup(StrEnum):
     MULTICAST = "multicast"
     HOST = "host"
 
+
 class NetworkProfile(StrEnum):
     """Composable high-level network access profile."""
+
     PUBLIC = "public"
     PRIVATE = "private"
     HOST = "host"
+
 
 class ViolationAction(StrEnum):
     BLOCK = "block"
@@ -101,9 +121,11 @@ class ViolationAction(StrEnum):
     BLOCK_AND_TERMINATE = "block-and-terminate"
     PASSTHROUGH = "passthrough"
 
+
 @dataclass(frozen=True, slots=True)
 class ViolationPolicy:
     """Secret violation behavior, including optional passthrough hosts."""
+
     fallback: ViolationAction = ViolationAction.BLOCK_AND_LOG
     passthrough_hosts: tuple[str, ...] = ()
     passthrough_host_patterns: tuple[str, ...] = ()
@@ -135,13 +157,15 @@ class ViolationPolicy:
             passthrough_all_hosts=all_hosts,
         )
 
-    def _to_dict(self) -> str | dict:
+    def _to_dict(self) -> ViolationAction | dict:
         if (
             not self.passthrough_hosts
             and not self.passthrough_host_patterns
             and not self.passthrough_all_hosts
         ):
-            return str(self.fallback)
+            if not isinstance(self.fallback, ViolationAction):
+                raise TypeError("ViolationPolicy.fallback must be ViolationAction")
+            return self.fallback
 
         passthrough: dict = {}
         if self.passthrough_hosts:
@@ -152,22 +176,28 @@ class ViolationPolicy:
             passthrough["all_hosts"] = True
         return {"passthrough": passthrough}
 
+
 class MountKind(StrEnum):
     BIND = "bind"
     NAMED = "named"
     TMPFS = "tmpfs"
     DISK = "disk"
 
+
 class StatVirtualization(StrEnum):
     """Per-mount stat-virtualization policy for virtiofs-backed mounts."""
+
     STRICT = "strict"
     RELAXED = "relaxed"
     OFF = "off"
 
+
 class HostPermissions(StrEnum):
     """Per-mount host-permission policy for virtiofs-backed mounts."""
+
     PRIVATE = "private"
     MIRROR = "mirror"
+
 
 class FsEntryKind(StrEnum):
     FILE = "file"
@@ -175,10 +205,74 @@ class FsEntryKind(StrEnum):
     SYMLINK = "symlink"
     OTHER = "other"
 
+
 class DiskImageFormat(StrEnum):
     QCOW2 = "qcow2"
     RAW = "raw"
     VMDK = "vmdk"
+
+
+class VolumeKind(StrEnum):
+    DIRECTORY = "dir"
+    DISK = "disk"
+
+
+class VolumeCreateMode(StrEnum):
+    EXISTING = "existing"
+    CREATE = "create"
+    ENSURE_EXISTS = "ensure-exists"
+
+
+class ImageArchiveFormat(StrEnum):
+    DOCKER = "docker"
+    OCI = "oci"
+
+
+class RootDiskKind(StrEnum):
+    MANAGED = "managed"
+    TMPFS = "tmpfs"
+    DISK_IMAGE = "disk-image"
+
+
+class ImageSourceKind(StrEnum):
+    OCI = "oci"
+    BIND = "bind"
+    DISK = "disk"
+
+
+class PatchKind(StrEnum):
+    TEXT = "text"
+    MKDIR = "mkdir"
+    APPEND = "append"
+    COPY_FILE = "copy_file"
+    COPY_DIR = "copy_dir"
+    SYMLINK = "symlink"
+    REMOVE = "remove"
+
+
+class NetworkDestinationKind(StrEnum):
+    ANY = "any"
+    IP = "ip"
+    CIDR = "cidr"
+    DOMAIN = "domain"
+    DOMAIN_SUFFIX = "domain_suffix"
+    GROUP = "group"
+
+
+class SnapshotStateKind(StrEnum):
+    FILE = "file"
+    CHECKPOINT = "checkpoint"
+
+
+class SnapshotFormat(StrEnum):
+    RAW = "raw"
+    QCOW2 = "qcow2"
+
+
+class SnapshotScope(StrEnum):
+    DISK = "disk"
+    RESUMABLE = "resumable"
+
 
 class RlimitResource(StrEnum):
     CPU = "cpu"
@@ -198,16 +292,31 @@ class RlimitResource(StrEnum):
     RTPRIO = "rtprio"
     RTTIME = "rttime"
 
-LogSource: TypeAlias = Literal["stdout", "stderr", "output", "system"]
-LogReadSource: TypeAlias = Literal["stdout", "stderr", "output", "system", "all"]
+
+class LogSource(StrEnum):
+    STDOUT = "stdout"
+    STDERR = "stderr"
+    OUTPUT = "output"
+    SYSTEM = "system"
+
+
+class LogReadSource(StrEnum):
+    STDOUT = "stdout"
+    STDERR = "stderr"
+    OUTPUT = "output"
+    SYSTEM = "system"
+    ALL = "all"
+
 
 #--------------------------------------------------------------------------------------------------
 # Types: Size
 #--------------------------------------------------------------------------------------------------
 
+
 @dataclass(frozen=True, slots=True)
 class Size:
     """Memory/storage size value type."""
+
     bytes: int
 
     @classmethod
@@ -222,23 +331,29 @@ class Size:
     def mib_count(self) -> int:
         return self.bytes // MiB
 
+
 #--------------------------------------------------------------------------------------------------
 # Types: ExitStatus
 #--------------------------------------------------------------------------------------------------
 
+
 @dataclass(frozen=True, slots=True)
 class ExitStatus:
     """Process exit status."""
+
     code: int
     success: bool
+
 
 #--------------------------------------------------------------------------------------------------
 # Types: Rlimit
 #--------------------------------------------------------------------------------------------------
 
+
 @dataclass(frozen=True, slots=True)
 class Rlimit:
     """A POSIX resource limit."""
+
     resource: RlimitResource
     soft: int
     hard: int
@@ -272,15 +387,22 @@ class Rlimit:
         return cls(RlimitResource.STACK, limit, limit)
 
     def _to_dict(self) -> dict:
-        return {"resource": str(self.resource), "soft": self.soft, "hard": self.hard}
+        return {
+            "resource": _enum_value(self.resource, RlimitResource, "Rlimit.resource"),
+            "soft": self.soft,
+            "hard": self.hard,
+        }
+
 
 #--------------------------------------------------------------------------------------------------
 # Types: Stdin
 #--------------------------------------------------------------------------------------------------
 
+
 @dataclass(frozen=True, slots=True)
 class Stdin:
     """Stdin mode for command execution."""
+
     _mode: str
     _data: bytes | None = None
 
@@ -296,9 +418,11 @@ class Stdin:
     def bytes(cls, data: bytes) -> Stdin:
         return cls("bytes", data)
 
+
 #--------------------------------------------------------------------------------------------------
 # Types: Init Handoff
 #--------------------------------------------------------------------------------------------------
+
 
 @dataclass(frozen=True, slots=True)
 class InitConfig:
@@ -314,6 +438,7 @@ class InitConfig:
     probes /sbin/init, /lib/systemd/systemd, and /usr/lib/systemd/systemd
     inside the guest.
     """
+
     cmd: str
     args: tuple[str, ...] = ()
     env: Mapping[str, str] = field(default_factory=dict)
@@ -326,9 +451,11 @@ class InitConfig:
             d["env"] = dict(self.env)
         return d
 
+
 #--------------------------------------------------------------------------------------------------
 # Types: Mount
 #--------------------------------------------------------------------------------------------------
+
 
 @dataclass(frozen=True, slots=True)
 class MountConfig:
@@ -338,11 +465,12 @@ class MountConfig:
     virtiofs-backed mounts (``BIND`` and ``NAMED``). Setting either on a
     ``TMPFS`` or ``DISK`` mount raises ``ValueError`` at serialization time.
     """
+
     kind: MountKind
     bind: str | None = None
     named: str | None = None
-    named_mode: Literal["existing", "create", "ensure-exists"] | None = None
-    named_kind: Literal["dir", "directory", "disk"] | None = None
+    named_mode: VolumeCreateMode | None = None
+    named_kind: VolumeKind | None = None
     quota_mib: int | None = None
     size_mib: int | None = None
     readonly: bool = False
@@ -350,12 +478,13 @@ class MountConfig:
     nosuid: bool = False
     nodev: bool = False
     disk: str | None = None
-    format: DiskImageFormat | str | None = None
+    format: DiskImageFormat | None = None
     fstype: str | None = None
-    stat_virtualization: StatVirtualization | str | None = None
-    host_permissions: HostPermissions | str | None = None
+    stat_virtualization: StatVirtualization | None = None
+    host_permissions: HostPermissions | None = None
 
     def _to_dict(self) -> dict:
+        _enum_value(self.kind, MountKind, "MountConfig.kind")
         # Drive emission off `kind` exclusively so a `MountConfig` with
         # contradictory fields (e.g. kind=DISK + bind=...) raises here
         # rather than silently letting the wrong arm of `apply_mount` win.
@@ -376,9 +505,11 @@ class MountConfig:
                 raise ValueError("MountConfig kind=NAMED requires named=...")
             d["named"] = self.named
             if self.named_mode is not None:
-                d["named_mode"] = self.named_mode
+                d["named_mode"] = _enum_value(
+                    self.named_mode, VolumeCreateMode, "MountConfig.named_mode"
+                )
             if self.named_kind is not None:
-                d["named_kind"] = self.named_kind
+                d["named_kind"] = _enum_value(self.named_kind, VolumeKind, "MountConfig.named_kind")
             if self.size_mib is not None:
                 d["size_mib"] = self.size_mib
             if self.quota_mib is not None:
@@ -392,7 +523,7 @@ class MountConfig:
                 raise ValueError("MountConfig kind=DISK requires disk=...")
             d["disk"] = self.disk
             if self.format is not None:
-                d["format"] = _enum_value(self.format)
+                d["format"] = _enum_value(self.format, DiskImageFormat, "MountConfig.format")
             if self.fstype is not None:
                 d["fstype"] = self.fstype
         else:  # pragma: no cover - StrEnum exhaustive above
@@ -401,9 +532,17 @@ class MountConfig:
         # Per-mount policies — only valid for virtiofs-backed kinds.
         if self.kind in (MountKind.BIND, MountKind.NAMED):
             if self.stat_virtualization is not None:
-                d["stat_virtualization"] = _enum_value(self.stat_virtualization)
+                d["stat_virtualization"] = _enum_value(
+                    self.stat_virtualization,
+                    StatVirtualization,
+                    "MountConfig.stat_virtualization",
+                )
             if self.host_permissions is not None:
-                d["host_permissions"] = _enum_value(self.host_permissions)
+                d["host_permissions"] = _enum_value(
+                    self.host_permissions,
+                    HostPermissions,
+                    "MountConfig.host_permissions",
+                )
         elif self.stat_virtualization is not None or self.host_permissions is not None:
             raise ValueError(
                 f"stat_virtualization/host_permissions are only valid for "
@@ -411,33 +550,41 @@ class MountConfig:
             )
         return d
 
-def _enum_value(value: enum.Enum | str) -> str:
-    return value.value if isinstance(value, enum.Enum) else value
+
+def _enum_value(value: enum.Enum, expected: type[enum.Enum], field_name: str) -> str:
+    """Return an enum's wire value while rejecting legacy plain strings."""
+    if not isinstance(value, expected):
+        raise TypeError(f"{field_name} must be {expected.__name__}")
+    return str(value.value)
+
 
 #--------------------------------------------------------------------------------------------------
 # Types: Image
 #--------------------------------------------------------------------------------------------------
 
+
 @dataclass(frozen=True, slots=True)
 class RootDiskConfig:
     """Writable rootfs layer (root disk) for an OCI image. Construct via RootDisk."""
-    kind: str
+
+    kind: RootDiskKind
     size_mib: int | None = None
     path: str | None = None
-    format: DiskImageFormat | str | None = None
+    format: DiskImageFormat | None = None
     fstype: str | None = None
 
     def _to_dict(self) -> dict:
-        d: dict = {"kind": self.kind}
+        d: dict = {"kind": _enum_value(self.kind, RootDiskKind, "RootDiskConfig.kind")}
         if self.size_mib is not None:
             d["size_mib"] = self.size_mib
         if self.path is not None:
             d["path"] = self.path
         if self.format is not None:
-            d["format"] = _enum_value(self.format)
+            d["format"] = _enum_value(self.format, DiskImageFormat, "RootDiskConfig.format")
         if self.fstype is not None:
             d["fstype"] = self.fstype
         return d
+
 
 class RootDisk:
     """Factory for root disk configurations, used with Image.oci(root_disk=...)."""
@@ -446,29 +593,31 @@ class RootDisk:
     def managed(size_mib: int | None = None) -> RootDiskConfig:
         """Sparse ext4 created and owned by microsandbox. Default kind;
         size defaults to 4096 MiB when omitted."""
-        return RootDiskConfig(kind="managed", size_mib=size_mib)
+        return RootDiskConfig(kind=RootDiskKind.MANAGED, size_mib=size_mib)
 
     @staticmethod
     def tmpfs(size_mib: int | None = None) -> RootDiskConfig:
         """RAM-backed upper: ephemeral, pristine on every boot. The size
         counts against guest memory; defaults to half the sandbox memory."""
-        return RootDiskConfig(kind="tmpfs", size_mib=size_mib)
+        return RootDiskConfig(kind=RootDiskKind.TMPFS, size_mib=size_mib)
 
     @staticmethod
     def disk(
         path: str,
         *,
-        format: DiskImageFormat | str | None = None,
+        format: DiskImageFormat | None = None,
         fstype: str | None = None,
     ) -> RootDiskConfig:
         """User-supplied disk image attached writable as the upper. Format is
         derived from the file extension unless given (vmdk is not supported)."""
-        return RootDiskConfig(kind="disk-image", path=path, format=format, fstype=fstype)
+        return RootDiskConfig(kind=RootDiskKind.DISK_IMAGE, path=path, format=format, fstype=fstype)
+
 
 @dataclass(frozen=True, slots=True)
 class ImageSource:
     """Explicit rootfs image source."""
-    _type: str
+
+    _type: ImageSourceKind
     _path: str | None = None
     _reference: str | None = None
     _root_disk: RootDiskConfig | dict | int | None = None
@@ -478,13 +627,16 @@ class ImageSource:
 
     def _to_image_str(self) -> str:
         """Convert to the string form the Rust SDK expects."""
-        if self._type == "oci" and self._reference is not None:
+        if not isinstance(self._type, ImageSourceKind):
+            raise TypeError("ImageSource._type must be ImageSourceKind")
+        if self._type == ImageSourceKind.OCI and self._reference is not None:
             return self._reference
-        if self._type == "bind" and self._path is not None:
+        if self._type == ImageSourceKind.BIND and self._path is not None:
             return self._path
-        if self._type == "disk" and self._path is not None:
+        if self._type == ImageSourceKind.DISK and self._path is not None:
             return self._path
         raise ValueError(f"invalid ImageSource: type={self._type}")
+
 
 class Image:
     """Factory for explicit image source configuration."""
@@ -502,7 +654,7 @@ class Image:
             # Deprecated alias: upper_size_mib= is managed-root-disk sugar.
             root_disk = RootDisk.managed(upper_size_mib)
         return ImageSource(
-            _type="oci",
+            _type=ImageSourceKind.OCI,
             _reference=reference,
             _root_disk=root_disk,
             _upper_size_mib=upper_size_mib,
@@ -510,7 +662,7 @@ class Image:
 
     @staticmethod
     def bind(path: str) -> ImageSource:
-        return ImageSource(_type="bind", _path=path)
+        return ImageSource(_type=ImageSourceKind.BIND, _path=path)
 
     @staticmethod
     def disk(
@@ -519,16 +671,19 @@ class Image:
         fstype: str | None = None,
     ) -> ImageSource:
         """Create a disk image rootfs. Format auto-detected from extension."""
-        return ImageSource(_type="disk", _path=path, _fstype=fstype)
+        return ImageSource(_type=ImageSourceKind.DISK, _path=path, _fstype=fstype)
+
 
 #--------------------------------------------------------------------------------------------------
 # Types: Patch
 #--------------------------------------------------------------------------------------------------
 
+
 @dataclass(frozen=True, slots=True)
 class PatchConfig:
     """A rootfs patch applied before VM startup."""
-    kind: str
+
+    kind: PatchKind
     path: str | None = None
     content: str | None = None
     src: str | None = None
@@ -539,7 +694,7 @@ class PatchConfig:
     replace: bool = False
 
     def _to_dict(self) -> dict:
-        d: dict = {"kind": self.kind}
+        d: dict = {"kind": _enum_value(self.kind, PatchKind, "PatchConfig.kind")}
         for f in ("path", "content", "src", "dst", "target", "link", "mode"):
             v = getattr(self, f)
             if v is not None:
@@ -548,52 +703,72 @@ class PatchConfig:
             d["replace"] = True
         return d
 
+
 class Patch:
     """Factory for rootfs patch configurations."""
 
     @staticmethod
     def text(
-        path: str, content: str, *, mode: int | None = None, replace: bool = False,
+        path: str,
+        content: str,
+        *,
+        mode: int | None = None,
+        replace: bool = False,
     ) -> PatchConfig:
         return PatchConfig(
-            kind="text", path=path, content=content, mode=mode, replace=replace,
+            kind=PatchKind.TEXT,
+            path=path,
+            content=content,
+            mode=mode,
+            replace=replace,
         )
 
     @staticmethod
     def mkdir(path: str, *, mode: int | None = None) -> PatchConfig:
-        return PatchConfig(kind="mkdir", path=path, mode=mode)
+        return PatchConfig(kind=PatchKind.MKDIR, path=path, mode=mode)
 
     @staticmethod
     def append(path: str, content: str) -> PatchConfig:
-        return PatchConfig(kind="append", path=path, content=content)
+        return PatchConfig(kind=PatchKind.APPEND, path=path, content=content)
 
     @staticmethod
     def copy_file(
-        src: str, dst: str, *, mode: int | None = None, replace: bool = False,
+        src: str,
+        dst: str,
+        *,
+        mode: int | None = None,
+        replace: bool = False,
     ) -> PatchConfig:
         return PatchConfig(
-            kind="copy_file", src=src, dst=dst, mode=mode, replace=replace,
+            kind=PatchKind.COPY_FILE,
+            src=src,
+            dst=dst,
+            mode=mode,
+            replace=replace,
         )
 
     @staticmethod
     def copy_dir(src: str, dst: str, *, replace: bool = False) -> PatchConfig:
-        return PatchConfig(kind="copy_dir", src=src, dst=dst, replace=replace)
+        return PatchConfig(kind=PatchKind.COPY_DIR, src=src, dst=dst, replace=replace)
 
     @staticmethod
     def symlink(target: str, link: str, *, replace: bool = False) -> PatchConfig:
-        return PatchConfig(kind="symlink", target=target, link=link, replace=replace)
+        return PatchConfig(kind=PatchKind.SYMLINK, target=target, link=link, replace=replace)
 
     @staticmethod
     def remove(path: str) -> PatchConfig:
-        return PatchConfig(kind="remove", path=path)
+        return PatchConfig(kind=PatchKind.REMOVE, path=path)
+
 
 #--------------------------------------------------------------------------------------------------
 # Types: Secret
 #--------------------------------------------------------------------------------------------------
 
+
 @dataclass(frozen=True, slots=True)
 class SecretInjection:
     """Where in the HTTP request the secret value can be substituted."""
+
     headers: bool = True
     basic_auth: bool = True
     query_params: bool = False
@@ -611,9 +786,11 @@ class SecretInjection:
             d["body"] = True
         return d
 
+
 @dataclass(frozen=True, slots=True)
 class SecretEntry:
     """A secret entry for the secrets array."""
+
     env_var: str
     value: str
     allow_hosts: tuple[str, ...] = ()
@@ -641,6 +818,7 @@ class SecretEntry:
             d["injection"] = injection
         return d
 
+
 class Secret:
     """Factory for secret entries."""
 
@@ -667,18 +845,25 @@ class Secret:
             injection=injection if injection is not None else SecretInjection(),
         )
 
+
 #--------------------------------------------------------------------------------------------------
 # Types: Network
 #--------------------------------------------------------------------------------------------------
 
+
 @dataclass(frozen=True, slots=True)
 class NetworkDestination:
     """Typed network policy destination."""
-    kind: Literal["any", "ip", "cidr", "domain", "domain_suffix", "group"]
+
+    kind: NetworkDestinationKind
     value: str | None = None
 
     def _to_dict(self) -> dict:
-        d = {"destination_kind": self.kind}
+        d = {
+            "destination_kind": _enum_value(
+                self.kind, NetworkDestinationKind, "NetworkDestination.kind"
+            )
+        }
         if self.value is not None:
             d["destination"] = self.value
         return d
@@ -689,27 +874,30 @@ class Destination:
 
     @staticmethod
     def any() -> NetworkDestination:
-        return NetworkDestination("any")
+        return NetworkDestination(NetworkDestinationKind.ANY)
 
     @staticmethod
     def ip(ip: str) -> NetworkDestination:
-        return NetworkDestination("ip", ip)
+        return NetworkDestination(NetworkDestinationKind.IP, ip)
 
     @staticmethod
     def cidr(cidr: str) -> NetworkDestination:
-        return NetworkDestination("cidr", cidr)
+        return NetworkDestination(NetworkDestinationKind.CIDR, cidr)
 
     @staticmethod
     def domain(domain: str) -> NetworkDestination:
-        return NetworkDestination("domain", domain)
+        return NetworkDestination(NetworkDestinationKind.DOMAIN, domain)
 
     @staticmethod
     def domain_suffix(suffix: str) -> NetworkDestination:
-        return NetworkDestination("domain_suffix", suffix)
+        return NetworkDestination(NetworkDestinationKind.DOMAIN_SUFFIX, suffix)
 
     @staticmethod
-    def group(group: DestGroup | str) -> NetworkDestination:
-        return NetworkDestination("group", str(group))
+    def group(group: DestGroup) -> NetworkDestination:
+        return NetworkDestination(
+            NetworkDestinationKind.GROUP,
+            _enum_value(group, DestGroup, "Destination.group.group"),
+        )
 
 
 NetworkDestinationLike: TypeAlias = str | NetworkDestination | None
@@ -718,6 +906,7 @@ NetworkDestinationLike: TypeAlias = str | NetworkDestination | None
 @dataclass(frozen=True, slots=True)
 class Rule:
     """A network policy rule."""
+
     action: Action
     direction: Direction = Direction.EGRESS
     destination: NetworkDestinationLike = None
@@ -787,6 +976,7 @@ class Rule:
             cls(Action.DENY, tcp.direction, tcp.destination, tcp.protocol, tcp.port),
         )
 
+
 @dataclass(frozen=True, slots=True)
 class NetworkPolicy:
     """Custom network policy with rules.
@@ -797,6 +987,7 @@ class NetworkPolicy:
     paired with an allow-public rule); ingress falls through
     to allow (today's unfiltered published-port behavior).
     """
+
     default_egress: Action = Action.DENY
     default_ingress: Action = Action.ALLOW
     rules: tuple[Rule, ...] = ()
@@ -812,11 +1003,13 @@ class NetworkPolicy:
         return cls(default_egress=Action.ALLOW, default_ingress=Action.ALLOW)
 
     @classmethod
-    def from_profiles(
-        cls, profiles: Iterable[NetworkProfile | str]
-    ) -> NetworkPolicy:
+    def from_profiles(cls, profiles: Iterable[NetworkProfile]) -> NetworkPolicy:
         """Build a canonical deny-by-default policy from profiles."""
-        requested = {NetworkProfile(profile) for profile in profiles}
+        requested: set[NetworkProfile] = set()
+        for profile in profiles:
+            if not isinstance(profile, NetworkProfile):
+                raise TypeError("profiles must contain NetworkProfile members")
+            requested.add(profile)
         rules: list[Rule] = []
         if requested:
             rules.extend(Rule.allow_dns())
@@ -826,7 +1019,7 @@ class NetworkPolicy:
             NetworkProfile.HOST,
         ):
             if profile in requested:
-                rules.append(Rule.allow(destination=Destination.group(profile.value)))
+                rules.append(Rule.allow(destination=Destination.group(DestGroup(profile.value))))
         return cls(rules=tuple(rules))
 
     def _to_dict(self) -> dict:
@@ -838,43 +1031,57 @@ class NetworkPolicy:
             return {"destination": str(destination)}
 
         d: dict = {
-            "default_egress": str(self.default_egress),
-            "default_ingress": str(self.default_ingress),
+            "default_egress": _enum_value(
+                self.default_egress, Action, "NetworkPolicy.default_egress"
+            ),
+            "default_ingress": _enum_value(
+                self.default_ingress, Action, "NetworkPolicy.default_ingress"
+            ),
         }
         if self.rules:
             d["rules"] = [
                 {
-                    "action": str(r.action),
-                    "direction": str(r.direction),
+                    "action": _enum_value(r.action, Action, "Rule.action"),
+                    "direction": _enum_value(r.direction, Direction, "Rule.direction"),
                     **destination_fields(r.destination),
-                    **({"protocol": str(r.protocol)} if r.protocol else {}),
+                    **(
+                        {"protocol": _enum_value(r.protocol, Protocol, "Rule.protocol")}
+                        if r.protocol
+                        else {}
+                    ),
                     **({"port": str(r.port)} if r.port is not None else {}),
                 }
                 for r in self.rules
             ]
         return d
 
+
 @dataclass(frozen=True, slots=True)
 class ScopedUpstreamCACert:
     """Host-scoped upstream CA certificate path."""
+
     pattern: str
     path: str
 
     def _to_dict(self) -> dict:
         return {"pattern": self.pattern, "path": self.path}
 
+
 @dataclass(frozen=True, slots=True)
 class ScopedVerifyUpstream:
     """Host-scoped upstream certificate verification override."""
+
     pattern: str
     verify: bool
 
     def _to_dict(self) -> dict:
         return {"pattern": self.pattern, "verify": self.verify}
 
+
 @dataclass(frozen=True, slots=True)
 class TlsConfig:
     """TLS interception configuration."""
+
     bypass: tuple[str, ...] = ()
     verify_upstream: bool = True
     intercepted_ports: tuple[int, ...] = (443,)
@@ -914,9 +1121,11 @@ class TlsConfig:
             d["ca_cn"] = self.ca_cn
         return d
 
+
 @dataclass(frozen=True, slots=True)
 class DnsConfig:
     """DNS interception configuration."""
+
     rebind_protection: bool = True
     """Block DNS responses resolving to private IPs. Default: True."""
     nameservers: tuple[str, ...] = ()
@@ -939,6 +1148,7 @@ class DnsConfig:
 @dataclass(frozen=True, slots=True)
 class PortBinding:
     """Published host-to-guest port with an optional host bind address."""
+
     host_port: int
     guest_port: int
     bind: str = "127.0.0.1"
@@ -957,13 +1167,14 @@ class PortBinding:
             "host_port": self.host_port,
             "guest_port": self.guest_port,
             "bind": self.bind,
-            "protocol": self.protocol.value,
+            "protocol": _enum_value(self.protocol, PortProtocol, "PortBinding.protocol"),
         }
 
 
 @dataclass(frozen=True, slots=True)
 class Network:
     """Network configuration for a sandbox."""
+
     policy: NetworkPolicy | None = None
     ports: Mapping[int, int] | Sequence[PortBinding] = field(default_factory=dict)
     deny_domains: tuple[str, ...] = ()
@@ -991,13 +1202,12 @@ class Network:
         return cls(policy=NetworkPolicy.none())
 
     @classmethod
-    def from_profiles(cls, *profiles: NetworkProfile | str) -> Network:
+    def from_profiles(cls, *profiles: NetworkProfile) -> Network:
         return cls(policy=NetworkPolicy.from_profiles(profiles))
 
     @classmethod
     def allow_all(cls) -> Network:
         return cls(policy=NetworkPolicy.allow_all())
-
 
     def _to_dict(self) -> dict:
         d: dict = {}
@@ -1035,18 +1245,23 @@ class Network:
         return d
 
 
-def violation_policy_to_dict(policy: ViolationAction | ViolationPolicy) -> str | dict:
+def violation_policy_to_dict(
+    policy: ViolationAction | ViolationPolicy,
+) -> ViolationAction | dict:
     if isinstance(policy, ViolationPolicy):
         return policy._to_dict()
-    return str(policy)
+    return _enum_value(policy, ViolationAction, "on_violation")
+
 
 #--------------------------------------------------------------------------------------------------
 # Types: Registry Auth
 #--------------------------------------------------------------------------------------------------
 
+
 @dataclass(frozen=True, slots=True)
 class RegistryAuth:
     """Registry credentials for pulling private images."""
+
     username: str
     password: str
 

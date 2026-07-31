@@ -655,8 +655,9 @@ A fully-parsed snapshot artifact. Properties are read-only attributes (not async
 | `size_bytes` | `int` | Apparent size of the captured upper layer in bytes (sparse on disk) |
 | `image_ref` | `str` | Image reference the snapshot was taken from |
 | `image_manifest_digest` | `str` | OCI manifest digest of the pinned image |
-| `format` | `str` | `"raw"` or `"qcow2"` (always `"raw"` today) |
-| `scope` | `str` | `"disk"` or `"resumable"` (always `"disk"` today) |
+| `state_kind` | [`SnapshotStateKind`](#snapshotstatekind) | File-backed or checkpoint-backed state |
+| `format` | [`SnapshotFormat`](#snapshotformat)` \| None` | On-disk format for file-backed state |
+| `scope` | [`SnapshotScope`](#snapshotscope) | Captured state scope |
 | `fstype` | `str` | Filesystem type inside the upper (e.g. `"ext4"`) |
 | `parent` | `str \| None` | Parent snapshot's digest, or `None` for a root |
 | `created_at` | `str` | RFC 3339 timestamp |
@@ -678,10 +679,44 @@ Lightweight handle backed by an index row. Properties are read-only attributes (
 | `name` | `str \| None` | Convenience alias |
 | `parent_digest` | `str \| None` | Parent snapshot digest, or `None` for a root |
 | `image_ref` | `str` | Image the snapshot was taken from |
-| `format` | `str` | `"raw"` or `"qcow2"` |
-| `scope` | `str` | `"disk"` or `"resumable"` (always `"disk"` today) |
+| `state_kind` | [`SnapshotStateKind`](#snapshotstatekind) | File-backed or checkpoint-backed state |
+| `format` | [`SnapshotFormat`](#snapshotformat)` \| None` | On-disk format for file-backed state |
+| `scope` | [`SnapshotScope`](#snapshotscope) | Captured state scope |
 | `size_bytes` | `int \| None` | Apparent upper size at index time |
 | `created_at` | `float` | ms since Unix epoch |
 | `path` | `str` | Local artifact directory path |
 | `open()` | `Awaitable[`[`Snapshot`](#snapshot)`]` | Load full metadata. See [`open()`](#handle-open) |
 | `remove(force=False)` | `Awaitable[None]` | Delete the artifact and its index row. See [`remove()`](#handle-remove) |
+
+### SnapshotStateKind
+
+<p className="msb-backref">Returned by <a href="#snapshot">Snapshot.state_kind</a> · <a href="#snapshothandle">SnapshotHandle.state_kind</a></p>
+
+Snapshot state representation.
+
+| Value | Description |
+|-------|-------------|
+| `"file"` | File-backed upper-layer state |
+| `"checkpoint"` | Checkpoint-manifest-backed state |
+
+### SnapshotFormat
+
+<p className="msb-backref">Returned by <a href="#snapshot">Snapshot.format</a> · <a href="#snapshothandle">SnapshotHandle.format</a></p>
+
+On-disk format for file-backed snapshot state.
+
+| Value | Description |
+|-------|-------------|
+| `"raw"` | Raw disk image |
+| `"qcow2"` | QEMU copy-on-write v2 image |
+
+### SnapshotScope
+
+<p className="msb-backref">Returned by <a href="#snapshot">Snapshot.scope</a> · <a href="#snapshothandle">SnapshotHandle.scope</a></p>
+
+Captured snapshot state scope.
+
+| Value | Description |
+|-------|-------------|
+| `"disk"` | Disk-only state |
+| `"resumable"` | Disk, memory, and device state |

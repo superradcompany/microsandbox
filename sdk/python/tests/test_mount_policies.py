@@ -26,7 +26,7 @@ def test_bind_default_omits_policies() -> None:
     assert d["bind"] == "/host/data"
 
 
-def test_bind_accepts_policy_strings() -> None:
+def test_bind_rejects_policy_strings() -> None:
     mc = MountConfig(
         kind=MountKind.BIND,
         bind="/host/data",
@@ -34,15 +34,8 @@ def test_bind_accepts_policy_strings() -> None:
         stat_virtualization="relaxed",
         host_permissions="mirror",
     )
-    assert mc._to_dict() == {
-        "readonly": True,
-        "noexec": False,
-        "nosuid": False,
-        "nodev": False,
-        "bind": "/host/data",
-        "stat_virtualization": "relaxed",
-        "host_permissions": "mirror",
-    }
+    with pytest.raises(TypeError, match=r"MountConfig\.stat_virtualization"):
+        mc._to_dict()
 
 
 def test_bind_serializes_security_mount_flags() -> None:

@@ -7,7 +7,7 @@ from contextlib import suppress
 import pytest
 
 from integration.helpers import IMAGE, remove_sandbox
-from microsandbox import MicrosandboxError, Sandbox
+from microsandbox import MicrosandboxError, PullPolicy, Sandbox
 
 
 @pytest.mark.asyncio
@@ -21,7 +21,7 @@ async def test_create_with_progress_emits_events_and_returns_sandbox(sandbox_nam
         cpus=1,
         memory=512,
         replace=True,
-        pull_policy="always",
+        pull_policy=PullPolicy.ALWAYS,
     )
 
     sandbox = None
@@ -147,7 +147,7 @@ async def test_create_with_progress_failure_surfaces_from_result(sandbox_name):
         cpus=1,
         memory=512,
         replace=True,
-        pull_policy="never",
+        pull_policy=PullPolicy.NEVER,
     )
 
     async with session:

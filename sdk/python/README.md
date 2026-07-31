@@ -147,7 +147,7 @@ await reader.stop()
 ### Network, DNS, and Ports
 
 ```python
-from microsandbox import Network, Sandbox
+from microsandbox import Network, NetworkProfile, Sandbox
 from microsandbox.types import DnsConfig
 
 isolated = await Sandbox.create(
@@ -172,7 +172,7 @@ web = await Sandbox.create(
     "python-readme-web",
     image="python",
     ports={8080: 80},
-    network=Network.from_profiles("public"),
+    network=Network.from_profiles(NetworkProfile.PUBLIC),
     replace=True,
 )
 ```

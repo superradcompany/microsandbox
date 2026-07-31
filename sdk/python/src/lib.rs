@@ -109,16 +109,18 @@ fn set_runtime_libkrunfw_path(path: String) {
 
 /// Set the process-wide default backend.
 ///
-/// `kind="local"` selects the local libkrun backend. `kind="cloud"` requires
-/// either `api_key` (with an optional `url` override), or `profile`.
+/// `BackendKind.LOCAL` selects the local libkrun backend. `BackendKind.CLOUD`
+/// requires either `api_key` (with an optional `url` override), or `profile`.
 #[pyfunction]
 #[pyo3(signature = (kind, *, url=None, api_key=None, profile=None))]
 fn set_default_backend(
-    kind: String,
+    py: Python<'_>,
+    kind: Py<PyAny>,
     url: Option<String>,
     api_key: Option<String>,
     profile: Option<String>,
 ) -> PyResult<()> {
+    let kind = crate::helpers::extract_str_enum(kind.bind(py), "BackendKind")?;
     microsandbox::set_default_backend(build_backend(kind, url, api_key, profile)?);
     Ok(())
 }
@@ -128,7 +130,7 @@ fn set_default_backend(
 /// Use as a regular context manager, including inside async functions:
 ///
 /// ```python
-/// with backend_scope("cloud", profile="dev"):
+/// with backend_scope(BackendKind.CLOUD, profile="dev"):
 ///     sandbox = await Sandbox.create("x", image="alpine:3.19")
 /// ```
 ///
@@ -137,24 +139,27 @@ fn set_default_backend(
 #[pyfunction]
 #[pyo3(signature = (kind, *, url=None, api_key=None, profile=None))]
 fn backend_scope(
-    kind: String,
+    py: Python<'_>,
+    kind: Py<PyAny>,
     url: Option<String>,
     api_key: Option<String>,
     profile: Option<String>,
 ) -> PyResult<PyBackendScope> {
+    let kind = crate::helpers::extract_str_enum(kind.bind(py), "BackendKind")?;
     let previous = microsandbox::swap_default_backend(build_backend(kind, url, api_key, profile)?);
     Ok(PyBackendScope {
         previous: Some(previous),
     })
 }
 
-/// Return the active default backend kind (`"local"` or `"cloud"`).
+/// Return the active default backend kind.
 #[pyfunction]
-fn default_backend_kind() -> &'static str {
-    match microsandbox::default_backend().kind() {
+fn default_backend_kind(py: Python<'_>) -> PyResult<PyObject> {
+    let kind = match microsandbox::default_backend().kind() {
         microsandbox::BackendKind::Local => "local",
         microsandbox::BackendKind::Cloud => "cloud",
-    }
+    };
+    crate::helpers::str_enum_member(py, "BackendKind", kind)
 }
 
 /// Return the `msb` binary path the native resolver would currently use.

@@ -35,7 +35,7 @@ Static methods on `Volume` that manage named persistent volumes. Volumes live in
 async def create(
     name: str,
     *,
-    kind: str = "dir",
+    kind: VolumeKind = VolumeKind.DIRECTORY,
     size_mib: int | None = None,
     quota_mib: int | None = None,
     labels: dict[str, str] | None = None,
@@ -45,13 +45,15 @@ async def create(
 <Accordion title="Example">
 
 ```python
+from microsandbox import VolumeKind
+
 await Volume.create("pip-cache", quota_mib=2048)
-await Volume.create("docker-data", kind="disk", size_mib=20 * 1024)
+await Volume.create("docker-data", kind=VolumeKind.DISK, size_mib=20 * 1024)
 ```
 
 </Accordion>
 
-Create a new named volume. A `"dir"` volume is a host directory; a `"disk"` volume is a backing disk image that requires `size_mib`.
+Create a new named volume. `VolumeKind.DIRECTORY` creates a host directory; `VolumeKind.DISK` creates a backing disk image and requires `size_mib`.
 
 <p className="msb-label">Parameters</p>
 
@@ -61,12 +63,12 @@ Create a new named volume. A `"dir"` volume is a host directory; a `"disk"` volu
     <div className="msb-param-desc">Volume name.</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>kind</code><span className="msb-type">str</span></div>
-    <div className="msb-param-desc">Volume kind: <code>"dir"</code> (default) or <code>"disk"</code>.</div>
+    <div className="msb-param-key"><code>kind</code><a className="msb-type" href="#volumekind">VolumeKind</a></div>
+    <div className="msb-param-desc">Volume kind. Defaults to <code>DIRECTORY</code>.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>size_mib</code><span className="msb-type">int | None</span></div>
-    <div className="msb-param-desc">Disk capacity in MiB; required with <code>kind="disk"</code>.</div>
+    <div className="msb-param-desc">Disk capacity in MiB; required with <code>kind=VolumeKind.DISK</code>.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>quota_mib</code><span className="msb-type">int | None</span></div>
@@ -244,6 +246,10 @@ Mount a host directory into the sandbox. Changes in the guest are reflected on t
 def named(
     name: str,
     *,
+    mode: VolumeCreateMode | None = None,
+    kind: VolumeKind | None = None,
+    size_mib: int | None = None,
+    quota_mib: int | None = None,
     readonly: bool = False,
     noexec: bool = False,
     nosuid: bool = False,
@@ -266,7 +272,7 @@ sb = await Sandbox.create(
 
 </Accordion>
 
-Mount an existing named volume. The volume must already exist; create it first with [`Volume.create()`](#volume-create).
+Mount a named volume. By default the volume must already exist; set `mode` to control creation behavior and use `kind`, `size_mib`, and `quota_mib` when creating it.
 
 <p className="msb-label">Parameters</p>
 
@@ -274,6 +280,22 @@ Mount an existing named volume. The volume must already exist; create it first w
   <div className="msb-param">
     <div className="msb-param-key"><code>name</code><span className="msb-type">str</span></div>
     <div className="msb-param-desc">Volume name.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>mode</code><a className="msb-type" href="#volumecreatemode">VolumeCreateMode | None</a></div>
+    <div className="msb-param-desc">Whether to require, create, or ensure the named volume.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>kind</code><a className="msb-type" href="#volumekind">VolumeKind | None</a></div>
+    <div className="msb-param-desc">Storage kind when the mount may create the volume.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>size_mib</code><span className="msb-type">int | None</span></div>
+    <div className="msb-param-desc">Disk capacity when creating a disk volume.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>quota_mib</code><span className="msb-type">int | None</span></div>
+    <div className="msb-param-desc">Quota when creating a directory volume.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>readonly</code><span className="msb-type">bool</span></div>
@@ -369,7 +391,7 @@ Use an in-memory filesystem. Contents are discarded when the sandbox stops.
 def disk(
     path: str,
     *,
-    format: str | None = None,
+    format: DiskImageFormat | None = None,
     fstype: str | None = None,
     readonly: bool = False,
     noexec: bool = False,
@@ -400,7 +422,7 @@ Mount a host disk image as a virtio-blk device. `format` is the disk image forma
     <div className="msb-param-desc">Host path to the disk image.</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>format</code><span className="msb-type">str | None</span></div>
+    <div className="msb-param-key"><code>format</code><a className="msb-type" href="#diskimageformat">DiskImageFormat | None</a></div>
     <div className="msb-param-desc">Disk image format hint. See <a href="#diskimageformat">DiskImageFormat</a>.</div>
   </div>
   <div className="msb-param">
@@ -646,11 +668,11 @@ A lightweight handle to a named volume, with its database metadata and a host-si
 | Property / Method | Type | Description |
 |-------------------|------|-------------|
 | name | `str` | Volume name |
-| kind | `str` | Volume kind: `dir` or `disk` |
+| kind | [`VolumeKind`](#volumekind) | Volume storage kind |
 | quota_mib | `int \| None` | Storage quota in MiB |
 | used_bytes | `int` | Current disk usage in bytes |
 | capacity_bytes | `int \| None` | Disk capacity in bytes |
-| disk_format | `str \| None` | Disk image format |
+| disk_format | [`DiskImageFormat`](#diskimageformat)` \| None` | Disk image format |
 | disk_fstype | `str \| None` | Disk filesystem type |
 | labels | `dict[str, str]` | Metadata labels |
 | created_at | `float \| None` | Creation timestamp (ms since epoch) |
@@ -684,8 +706,8 @@ Frozen dataclass representing a mount configuration. Build one with a [mount fac
 | kind | [`MountKind`](#mountkind) | - | Type of mount (required) |
 | bind | `str \| None` | `None` | Host path for bind mounts |
 | named | `str \| None` | `None` | Volume name for named mounts |
-| named_mode | `"existing" \| "create" \| "ensure-exists" \| None` | `None` | Named-volume creation behavior |
-| named_kind | `"dir" \| "directory" \| "disk" \| None` | `None` | Storage kind for created named volumes |
+| named_mode | [`VolumeCreateMode`](#volumecreatemode)` \| None` | `None` | Named-volume creation behavior |
+| named_kind | [`VolumeKind`](#volumekind)` \| None` | `None` | Storage kind for created named volumes |
 | quota_mib | `int \| None` | `None` | Quota in MiB for directory named volumes |
 | size_mib | `int \| None` | `None` | Size limit for tmpfs, or capacity for disk named volumes |
 | readonly | `bool` | `False` | Whether the mount is read-only |
@@ -693,10 +715,10 @@ Frozen dataclass representing a mount configuration. Build one with a [mount fac
 | nosuid | `bool` | `False` | Whether setuid/setgid privilege elevation is ignored |
 | nodev | `bool` | `False` | Whether device files on the mount are ignored |
 | disk | `str \| None` | `None` | Host path to a disk image for disk mounts |
-| format | [`DiskImageFormat`](#diskimageformat)` \| str \| None` | `None` | Disk image format for disk mounts |
+| format | [`DiskImageFormat`](#diskimageformat)` \| None` | `None` | Disk image format for disk mounts |
 | fstype | `str \| None` | `None` | Inner filesystem type for disk mounts |
-| stat_virtualization | `StatVirtualization \| str \| None` | `None` | Per-mount stat-virtualization policy (virtiofs-backed only) |
-| host_permissions | `HostPermissions \| str \| None` | `None` | Per-mount host-permission policy (virtiofs-backed only) |
+| stat_virtualization | [`StatVirtualization`](#statvirtualization)` \| None` | `None` | Per-mount stat-virtualization policy (virtiofs-backed only) |
+| host_permissions | [`HostPermissions`](#hostpermissions)` \| None` | `None` | Per-mount host-permission policy (virtiofs-backed only) |
 
 ### MountKind
 
@@ -711,6 +733,29 @@ String enum (`StrEnum`) for the type of mount.
 | `"tmpfs"` | In-memory filesystem |
 | `"disk"` | Host disk image mount |
 
+### VolumeKind
+
+<p className="msb-backref">Used by <a href="#volume-create">Volume.create()</a> · <a href="#volume-named">Volume.named()</a> · <a href="#volumehandle">VolumeHandle.kind</a></p>
+
+Storage kind for a named volume.
+
+| Value | Description |
+|-------|-------------|
+| `"dir"` | Directory-backed volume mounted through virtiofs |
+| `"disk"` | Raw ext4 disk-image volume mounted through virtio-blk |
+
+### VolumeCreateMode
+
+<p className="msb-backref">Used by <a href="#volume-named">Volume.named(mode=...)</a> · <a href="#mountconfig">MountConfig.named_mode</a></p>
+
+Creation behavior for a named volume mount.
+
+| Value | Description |
+|-------|-------------|
+| `"existing"` | Require the named volume to exist |
+| `"create"` | Create a new named volume |
+| `"ensure-exists"` | Reuse the named volume if present, otherwise create it |
+
 ### DiskImageFormat
 
 <p className="msb-backref">Used by <a href="#volume-disk">Volume.disk()</a>, <a href="#mountconfig">MountConfig</a></p>
@@ -722,3 +767,26 @@ String enum (`StrEnum`) for the format of a backing disk image.
 | `"qcow2"` | QEMU copy-on-write v2 image |
 | `"raw"` | Raw disk image |
 | `"vmdk"` | VMware disk image |
+
+### StatVirtualization
+
+<p className="msb-backref">Used by <a href="#mountconfig">MountConfig.stat_virtualization</a></p>
+
+Stat virtualization policy for virtiofs-backed mounts.
+
+| Value | Description |
+|-------|-------------|
+| `"strict"` | Fully virtualize guest-visible ownership and mode metadata |
+| `"relaxed"` | Apply relaxed metadata virtualization |
+| `"off"` | Expose host stat metadata directly |
+
+### HostPermissions
+
+<p className="msb-backref">Used by <a href="#mountconfig">MountConfig.host_permissions</a></p>
+
+Host permission policy for virtiofs-backed mounts.
+
+| Value | Description |
+|-------|-------------|
+| `"private"` | Keep host-side permissions private to microsandbox |
+| `"mirror"` | Mirror relevant host permissions into the guest view |

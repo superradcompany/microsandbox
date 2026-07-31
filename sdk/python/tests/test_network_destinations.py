@@ -106,8 +106,8 @@ def test_terminal_policy_constructors_set_both_defaults() -> None:
 def test_unknown_profile_is_rejected() -> None:
     try:
         NetworkPolicy.from_profiles(["bogus"])
-    except ValueError as error:
-        assert "bogus" in str(error)
+    except TypeError as error:
+        assert "NetworkProfile" in str(error)
     else:
         raise AssertionError("unknown profile should be rejected")
 

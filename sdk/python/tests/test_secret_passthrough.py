@@ -89,7 +89,7 @@ def _native_create_error(**kwargs: object) -> Exception:
 
 
 def test_native_create_accepts_violation_policy_fallback_objects() -> None:
-    baseline = _native_create_error(on_secret_violation="block")
+    baseline = _native_create_error(on_secret_violation=ViolationAction.BLOCK)
     for policy in (
         ViolationPolicy.block(),
         ViolationPolicy.block_and_log(),
@@ -101,7 +101,7 @@ def test_native_create_accepts_violation_policy_fallback_objects() -> None:
 
 
 def test_native_create_accepts_violation_policy_passthrough_objects() -> None:
-    baseline = _native_create_error(on_secret_violation="block")
+    baseline = _native_create_error(on_secret_violation=ViolationAction.BLOCK)
     exc = _native_create_error(
         on_secret_violation=ViolationPolicy.passthrough(hosts=("api.example.com",)),
     )
@@ -109,7 +109,7 @@ def test_native_create_accepts_violation_policy_passthrough_objects() -> None:
 
 
 def test_native_create_accepts_network_violation_policy_fallback_objects() -> None:
-    baseline = _native_create_error(on_secret_violation="block")
+    baseline = _native_create_error(on_secret_violation=ViolationAction.BLOCK)
     for policy in (
         ViolationPolicy.block(),
         ViolationPolicy.block_and_log(),
@@ -120,7 +120,7 @@ def test_native_create_accepts_network_violation_policy_fallback_objects() -> No
 
 
 def test_native_create_accepts_secret_violation_policy_fallback_objects() -> None:
-    baseline = _native_create_error(on_secret_violation="block")
+    baseline = _native_create_error(on_secret_violation=ViolationAction.BLOCK)
     secret = Secret.env(
         "API_KEY",
         value="sk-abc",
@@ -132,7 +132,7 @@ def test_native_create_accepts_secret_violation_policy_fallback_objects() -> Non
 
 
 def test_native_create_converts_violation_policy_objects_once() -> None:
-    baseline = _native_create_error(on_secret_violation="block")
+    baseline = _native_create_error(on_secret_violation=ViolationAction.BLOCK)
     for location in ("top-level", "network", "secret"):
         policy = _OneShotViolationPolicy()
         if location == "top-level":
@@ -165,7 +165,7 @@ def test_native_create_preserves_violation_policy_conversion_errors() -> None:
     assert policy.calls == 1
 
 
-def test_native_create_rejects_unknown_violation_action() -> None:
+def test_native_create_rejects_raw_violation_action_strings() -> None:
     exc = _native_create_error(on_secret_violation="never-heard-of-it")
-    assert isinstance(exc, ValueError)
-    assert "unknown violation action" in str(exc)
+    assert isinstance(exc, TypeError)
+    assert "expected ViolationAction or ViolationPolicy" in str(exc)
