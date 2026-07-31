@@ -407,7 +407,8 @@ pub fn sandbox_builder_from_args(
         }
     }
 
-    // Secret violation action (top-level kwarg).
+    // Secret violation action (top-level kwarg). This is applied after
+    // `network=` so the explicit shorthand takes precedence when both are set.
     if let Some(violation_obj) = kwargs.get_item("on_secret_violation")?
         && !violation_obj.is_none()
     {
@@ -1543,7 +1544,31 @@ fn parse_violation_action_obj(
         return parse_violation_action(&s);
     }
 
-    let dict = as_dict(obj)?;
+    // Convert policy objects exactly once: fallback policies flatten to a
+    // string, while passthrough policies serialize to a dictionary.
+    let converted = if let Ok(method) = obj.getattr("_to_dict") {
+        Some(method.call0()?)
+    } else {
+        None
+    };
+    if let Some(result) = &converted
+        && let Ok(s) = result.extract::<String>()
+    {
+        return parse_violation_action(&s);
+    }
+
+    let dict = if let Some(result) = converted {
+        result
+            .downcast::<PyDict>()
+            .map_err(|_| {
+                pyo3::exceptions::PyTypeError::new_err(
+                    "violation policy _to_dict() must return a string or dict",
+                )
+            })?
+            .clone()
+    } else {
+        as_dict(obj)?
+    };
     if let Some(passthrough_obj) = dict.get_item("passthrough")?
         && !passthrough_obj.is_none()
     {
