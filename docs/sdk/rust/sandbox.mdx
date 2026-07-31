@@ -99,29 +99,56 @@ Get a handle to an existing sandbox (running or stopped). The handle provides st
 #### <span className="msb-recv">Sandbox::</span><span className="msb-hn">list()</span>
 
 ```rust
-async fn list() -> MicrosandboxResult<Vec<SandboxHandle>>
+async fn list() -> MicrosandboxResult<SandboxPage>
 ```
 
 <Accordion title="Example">
 
 ```rust
-for h in Sandbox::list().await? {
+let page = Sandbox::list().await?;
+for h in page.sandboxes {
     println!("{} - {:?}", h.name(), h.status());
 }
 ```
 
 </Accordion>
 
-List all sandboxes (running, stopped, and crashed).
+Return the first page of sandboxes (running, stopped, and crashed), ordered newest first. The default page size is 20.
 
 <p className="msb-label">Returns</p>
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#sandboxhandle">Vec&lt;SandboxHandle&gt;</a></div>
-    <div className="msb-param-desc">All sandbox handles.</div>
+    <div className="msb-param-key"><span className="msb-type">SandboxPage</span></div>
+    <div className="msb-param-desc">Handles in this page and an optional cursor for the next page.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">Sandbox::</span><span className="msb-hn">list_with()</span>
+
+```rust
+async fn list_with(
+    configure: impl FnOnce(SandboxListBuilder) -> SandboxListBuilder,
+) -> MicrosandboxResult<SandboxPage>
+```
+
+Return a configured page of sandboxes. Limits must be between 1 and 100. Labels are AND-matched before pagination.
+
+<Accordion title="Example">
+
+```rust
+let page = Sandbox::list_with(|list| {
+    list.limit(50).label("role", "worker")
+}).await?;
+
+if let Some(cursor) = page.next_cursor {
+    let next_page = Sandbox::list_with(|list| {
+        list.limit(50).cursor(cursor).label("role", "worker")
+    }).await?;
+}
+```
+
+</Accordion>
 
 #### <span className="msb-recv">Sandbox::</span><span className="msb-hn">remove()</span>
 
@@ -2094,6 +2121,26 @@ The full configuration of a sandbox. Obtained via [`config()`](#sb-config) or bu
 | shell | `Option<String>` | Shell for `shell()` calls |
 | volumes | `Vec<VolumeMount>` | Volume mounts |
 | workdir | `Option<String>` | Default working directory |
+
+### SandboxPage
+
+One stable, newest-first page returned by [`Sandbox::list()`](#sandboxlist) or [`Sandbox::list_with()`](#sandboxlist_with).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `sandboxes` | `Vec<SandboxHandle>` | Handles in this page |
+| `next_cursor` | `Option<String>` | Opaque continuation cursor, or `None` on the final page |
+
+### SandboxListBuilder
+
+Fluent configuration passed to [`Sandbox::list_with()`](#sandboxlist_with). Keep the labels and limit unchanged when continuing with a cursor.
+
+| Method | Description |
+|--------|-------------|
+| `limit(n)` | Set a page size from 1 through 100 |
+| `cursor(cursor)` | Continue after a previous page's `next_cursor` |
+| `label(key, value)` | Require one label; repeated calls are AND-matched |
+| `labels(iterable)` | Add several AND-matched labels |
 
 ### SandboxHandle
 

@@ -133,57 +133,71 @@ Look up a sandbox by name and return a metadata handle without connecting to it.
 #### <span className="msb-recv">m.</span><span className="msb-hn">ListSandboxes()</span>
 
 ```go
-func ListSandboxes(ctx context.Context) ([]*SandboxHandle, error)
+func ListSandboxes(ctx context.Context) (*SandboxPage, error)
 ```
 
 <Accordion title="Example">
 
 ```go
-handles, err := m.ListSandboxes(ctx)
+page, err := m.ListSandboxes(ctx)
 if err != nil {
     return err
 }
-for _, h := range handles {
+for _, h := range page.Sandboxes {
     fmt.Printf("%s - %s\n", h.Name(), h.Status())
 }
 ```
 
 </Accordion>
 
-Return metadata for every known sandbox (running, stopped, draining, crashed), ordered by creation time, newest first.
+Return the first page of known sandboxes (running, stopped, draining, crashed), ordered newest first. The default page size is 20.
 
 <p className="msb-label">Returns</p>
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#sandboxhandle">[]*SandboxHandle</a></div>
-    <div className="msb-param-desc">All sandbox handles.</div>
+    <div className="msb-param-key"><span className="msb-type">*SandboxPage</span></div>
+    <div className="msb-param-desc">Handles in this page and an optional cursor for the next page.</div>
   </div>
 </div>
 
 #### <span className="msb-recv">m.</span><span className="msb-hn">ListSandboxesWith()</span>
 
 ```go
-func ListSandboxesWith(ctx context.Context, filter SandboxFilter) ([]*SandboxHandle, error)
+func ListSandboxesWith(ctx context.Context, options ...SandboxListOption) (*SandboxPage, error)
 ```
 
 <Accordion title="Example">
 
 ```go
-filter := m.NewSandboxFilter().WithLabels(map[string]string{"user.id": "alice"})
-handles, err := m.ListSandboxesWith(ctx, filter)
+page, err := m.ListSandboxesWith(
+    ctx,
+    m.WithListLimit(50),
+    m.WithListLabels(map[string]string{"user.id": "alice"}),
+)
+if err != nil {
+    return err
+}
+if page.NextCursor != nil {
+    nextPage, err := m.ListSandboxesWith(
+        ctx,
+        m.WithListLimit(50),
+        m.WithListCursor(*page.NextCursor),
+        m.WithListLabels(map[string]string{"user.id": "alice"}),
+    )
+}
 ```
 
 </Accordion>
 
-Return sandbox metadata narrowed by a [`SandboxFilter`](#sandboxfilter). Label selectors are AND-matched: a sandbox matches only if it carries every label in the filter.
+Return a configured page of sandbox metadata. Label selectors are applied before pagination and AND-matched.
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><code>filter</code><a className="msb-type" href="#sandboxfilter">SandboxFilter</a></div>
-    <div className="msb-param-desc">Label selector. The zero value matches every sandbox.</div>
+    <div className="msb-param-key"><code>options</code><span className="msb-type">...SandboxListOption</span></div>
+    <div className="msb-param-desc"><code>WithListLimit</code>, <code>WithListCursor</code>, and/or <code>WithListLabels</code> options.</div>
   </div>
 </div>
 
@@ -191,25 +205,8 @@ Return sandbox metadata narrowed by a [`SandboxFilter`](#sandboxfilter). Label s
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#sandboxhandle">[]*SandboxHandle</a></div>
-    <div className="msb-param-desc">Matching sandbox handles.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">m.</span><span className="msb-hn">NewSandboxFilter()</span>
-
-```go
-func NewSandboxFilter() SandboxFilter
-```
-
-Return an empty [`SandboxFilter`](#sandboxfilter) that matches every sandbox. Chain [`WithLabels`](#sandboxfilter) to narrow the results passed to [`ListSandboxesWith`](#m-listsandboxeswith).
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#sandboxfilter">SandboxFilter</a></div>
-    <div className="msb-param-desc">Empty filter.</div>
+    <div className="msb-param-key"><span className="msb-type">*SandboxPage</span></div>
+    <div className="msb-param-desc">Matching handles and an optional cursor for the next page.</div>
   </div>
 </div>
 
@@ -2005,15 +2002,24 @@ Dry-run or apply plan for a sandbox modification. Values never appear in a plan:
 | Enforced | `string` | Host/VMM-enforced value |
 | State | `string` | `"applied"` when requested, actual, and enforced match; `"converging"` while the guest is still onlining CPUs or plugging memory; `"guest-refused"` when the guest would not cooperate (the host enforces the new limit anyway); `"accepted"` or `"failed"` otherwise |
 
-### SandboxFilter
+### SandboxPage
 
-<p className="msb-backref">Built by <a href="#m-newsandboxfilter">NewSandboxFilter()</a> · used by <a href="#m-listsandboxeswith">ListSandboxesWith()</a></p>
+One stable, newest-first page returned by [`ListSandboxes`](#m-listsandboxes) or [`ListSandboxesWith`](#m-listsandboxeswith). Pass `NextCursor` back through `WithListCursor` with the same filters to continue.
 
-Narrows the results of [`ListSandboxesWith`](#m-listsandboxeswith). The zero value matches every sandbox. Built fluently; `WithLabels` returns a new value so calls chain.
+| Field | Type | Description |
+|-------|------|-------------|
+| `Sandboxes` | `[]*SandboxHandle` | Handles in this page |
+| `NextCursor` | `*string` | Opaque continuation cursor, or `nil` on the final page |
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `WithLabels(labels)` | `SandboxFilter` | Require all of these labels (AND-matched). Repeated calls merge; later keys overwrite earlier ones |
+### SandboxListOption
+
+Functional options accepted by [`ListSandboxesWith`](#m-listsandboxeswith).
+
+| Function | Description |
+|----------|-------------|
+| `WithListLimit(n)` | Set a page size from 1 through 100 |
+| `WithListCursor(cursor)` | Continue after a previous page's `NextCursor` |
+| `WithListLabels(labels)` | Require every supplied label; selectors are AND-matched |
 
 ### SandboxConfig
 

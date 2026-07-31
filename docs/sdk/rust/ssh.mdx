@@ -55,7 +55,7 @@ Return the SSH namespace for this sandbox. The namespace holds the SSH client an
 
 ## SandboxSshOps
 
-SSH namespace for a sandbox, obtained from [`sb.ssh()`](#sb-ssh). SSH is only supported on local sandboxes; calls error with `Unsupported` against a cloud backend.
+SSH namespace for a sandbox, obtained from [`sb.ssh()`](#sb-ssh). Client sessions work with local and cloud sandboxes through the selected backend's authenticated agent connection. Reusable server endpoints can use explicit host-key and authorized-key paths with either backend; their implicit key-file defaults are local-only.
 
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">connect()</span>
 

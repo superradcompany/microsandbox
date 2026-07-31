@@ -316,14 +316,14 @@ msb rm worker
 
 <CodeGroup>
 ```rust Rust
-for handle in Sandbox::list().await? {
+for handle in Sandbox::list().await?.sandboxes {
     println!("{}: {:?}", handle.name(), handle.status_snapshot());
 }
 ```
 
 ```typescript TypeScript
-const sandboxes = await Sandbox.list();
-for (const handle of sandboxes) {
+const page = await Sandbox.list();
+for (const handle of page.sandboxes) {
     console.log(`${handle.name}: ${handle.status}`);
 }
 
@@ -332,7 +332,7 @@ console.log(handle.status); // "running" | "stopped" | ...
 ```
 
 ```python Python
-for handle in await Sandbox.list():
+for handle in (await Sandbox.list()).sandboxes:
     print(f"{handle.name}: {handle.status}")
 
 handle = await Sandbox.get("worker")
@@ -340,8 +340,8 @@ print(handle.status)  # "running" | "stopped" | ...
 ```
 
 ```go Go
-handles, err := m.ListSandboxes(ctx)
-for _, handle := range handles {
+page, err := m.ListSandboxes(ctx)
+for _, handle := range page.Sandboxes {
     fmt.Printf("%s: %s\n", handle.Name(), handle.Status())
 }
 

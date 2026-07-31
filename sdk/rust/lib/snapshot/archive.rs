@@ -32,7 +32,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 
 use crate::backend::LocalBackend;
-use crate::{MicrosandboxError, MicrosandboxResult};
+use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason};
 
 use super::{Snapshot, SnapshotHandle, store};
 
@@ -1240,16 +1240,22 @@ async fn validate_archive_inventory(
         ));
     }
     if inventory.completeness != "boot-complete" {
-        return Err(MicrosandboxError::Unsupported {
-            feature: format!("snapshot archive completeness {}", inventory.completeness),
-            available_when: "metadata-only archive bindings are implemented".into(),
-        });
+        return Err(MicrosandboxError::unsupported(
+            Operation::SnapshotOps,
+            UnsupportedReason::NotAvailable(format!(
+                "snapshot archive completeness {} is not supported",
+                inventory.completeness
+            )),
+        ));
     }
     if !inventory.requires.is_empty() {
-        return Err(MicrosandboxError::Unsupported {
-            feature: format!("snapshot archive requirements {:?}", inventory.requires),
-            available_when: "all required archive extensions are supported".into(),
-        });
+        return Err(MicrosandboxError::unsupported(
+            Operation::SnapshotOps,
+            UnsupportedReason::NotAvailable(format!(
+                "snapshot archive requires unsupported extensions: {:?}",
+                inventory.requires
+            )),
+        ));
     }
     if inventory
         .suggested_name
@@ -1443,10 +1449,12 @@ fn validate_inventory_snapshot_bindings(
                 }
             }
             kind => {
-                return Err(MicrosandboxError::Unsupported {
-                    feature: format!("snapshot archive entry kind {kind}"),
-                    available_when: "the archive entry provider is implemented".into(),
-                });
+                return Err(MicrosandboxError::unsupported(
+                    Operation::SnapshotOps,
+                    UnsupportedReason::NotAvailable(format!(
+                        "snapshot archive entry kind {kind} is not supported"
+                    )),
+                ));
             }
         }
     }

@@ -403,12 +403,20 @@ func AllSandboxMetrics(ctx context.Context) (map[string]*Metrics, error) {
 	return out, nil
 }
 
-// SandboxFilter narrows the results of ListSandboxes. The zero value matches
-// every sandbox. Build one fluently, e.g.
-// NewSandboxFilter().WithLabels(map[string]string{"user.id": "alice"}).
-type SandboxFilter struct {
+// SandboxPage is one page returned by ListSandboxes or ListSandboxesWith.
+type SandboxPage struct {
+	Sandboxes  []*SandboxHandle
+	NextCursor *string
+}
+
+type sandboxListOptions struct {
+	cursor *string
+	limit  *uint32
 	labels map[string]string
 }
+
+// SandboxListOption configures one paginated sandbox list request.
+type SandboxListOption func(*sandboxListOptions)
 
 type lifecycleOptions struct {
 	timeout time.Duration
@@ -452,45 +460,56 @@ func WithKillTimeout(timeout time.Duration) KillOption {
 	return func(o *lifecycleOptions) { o.timeout = timeout }
 }
 
-// NewSandboxFilter returns an empty filter that matches every sandbox.
-func NewSandboxFilter() SandboxFilter { return SandboxFilter{} }
+// WithListCursor continues after a cursor returned by a previous page.
+func WithListCursor(cursor string) SandboxListOption {
+	return func(options *sandboxListOptions) { options.cursor = &cursor }
+}
 
-// WithLabels requires matched sandboxes to carry all of these labels
-// (AND-matched). Repeated calls merge; later keys overwrite earlier ones.
-func (f SandboxFilter) WithLabels(labels map[string]string) SandboxFilter {
-	if f.labels == nil {
-		f.labels = make(map[string]string, len(labels))
+// WithListLimit sets the maximum number of sandboxes returned in one page.
+func WithListLimit(limit uint32) SandboxListOption {
+	return func(options *sandboxListOptions) { options.limit = &limit }
+}
+
+// WithListLabels requires every returned sandbox to carry all labels.
+func WithListLabels(labels map[string]string) SandboxListOption {
+	return func(options *sandboxListOptions) {
+		if options.labels == nil {
+			options.labels = make(map[string]string, len(labels))
+		}
+		for key, value := range labels {
+			options.labels[key] = value
+		}
 	}
-	for k, v := range labels {
-		f.labels[k] = v
+}
+
+// ListSandboxes returns the first page of known sandboxes.
+func ListSandboxes(ctx context.Context) (*SandboxPage, error) {
+	return listSandboxes(ctx)
+}
+
+// ListSandboxesWith returns a configured page of known sandboxes.
+func ListSandboxesWith(ctx context.Context, configure ...SandboxListOption) (*SandboxPage, error) {
+	return listSandboxes(ctx, configure...)
+}
+
+func listSandboxes(ctx context.Context, configure ...SandboxListOption) (*SandboxPage, error) {
+	options := sandboxListOptions{}
+	for _, apply := range configure {
+		apply(&options)
 	}
-	return f
-}
-
-// ListSandboxes returns metadata for every known sandbox (running or stopped),
-// ordered by creation time (newest first). Use ListSandboxesWith to narrow the
-// results by labels.
-func ListSandboxes(ctx context.Context) ([]*SandboxHandle, error) {
-	return listSandboxes(ctx, nil)
-}
-
-// ListSandboxesWith returns sandbox metadata narrowed by a SandboxFilter, e.g.
-// NewSandboxFilter().WithLabels(map[string]string{"user.id": "alice"}). Label
-// selectors are AND-matched.
-func ListSandboxesWith(ctx context.Context, filter SandboxFilter) ([]*SandboxHandle, error) {
-	return listSandboxes(ctx, filter.labels)
-}
-
-func listSandboxes(ctx context.Context, labels map[string]string) ([]*SandboxHandle, error) {
-	infos, err := ffi.ListSandboxes(ctx, labels)
+	page, err := ffi.ListSandboxes(ctx, ffi.SandboxListOptions{
+		Cursor: options.cursor,
+		Limit:  options.limit,
+		Labels: options.labels,
+	})
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
-	out := make([]*SandboxHandle, len(infos))
-	for i, info := range infos {
+	out := make([]*SandboxHandle, len(page.Sandboxes))
+	for i, info := range page.Sandboxes {
 		out[i] = newSandboxHandle(info)
 	}
-	return out, nil
+	return &SandboxPage{Sandboxes: out, NextCursor: page.NextCursor}, nil
 }
 
 // RemoveSandbox removes a stopped sandbox's persisted state by name.

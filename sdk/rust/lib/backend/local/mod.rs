@@ -15,6 +15,8 @@
 //! the bulk of the old global config singleton plus the SQLite pool, so multiple
 //! backends can hold different configurations for tests / migrations.
 
+mod sandbox;
+
 use std::{
     collections::HashMap,
     num::NonZero,
@@ -34,8 +36,11 @@ use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, DbErr, State
 use tokio::sync::OnceCell;
 
 use super::{Backend, BackendKind, SandboxBackend, VolumeBackend};
-use crate::config::{DatabaseConfig, LocalConfig, RegistryEntry, load_persisted_config_or_default};
 use crate::{MicrosandboxError, MicrosandboxResult};
+use crate::{
+    SandboxConfig,
+    config::{DatabaseConfig, LocalConfig, RegistryEntry, load_persisted_config_or_default},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -188,6 +193,17 @@ impl LocalBackend {
     /// Resolved secrets directory.
     pub fn secrets_dir(&self) -> PathBuf {
         self.config.secrets_dir()
+    }
+
+    /// Warn about create-time options only a cloud backend can honor.
+    /// These are inert locally, so the create proceeds without them.
+    pub(super) fn warn_cloud_only(&self, config: &SandboxConfig) {
+        if config.slug.is_some() {
+            tracing::warn!(
+                sandbox = %config.spec.name,
+                "SandboxBuilder::slug is only honored by cloud backends; ignoring"
+            );
+        }
     }
 }
 
@@ -469,6 +485,44 @@ impl Backend for LocalBackend {
     fn as_local(&self) -> Option<&LocalBackend> {
         Some(self)
     }
+
+    fn dial_agent<'a>(
+        &'a self,
+        name: &'a str,
+        timeout: std::time::Duration,
+    ) -> futures::future::BoxFuture<'a, MicrosandboxResult<crate::agent::AgentClient>> {
+        Box::pin(async move {
+            let mut last_error = None;
+
+            for sock_path in crate::runtime::sandbox_agent_socket_path_candidates_for(self, name) {
+                if !agent_endpoint_may_exist(&sock_path) {
+                    continue;
+                }
+
+                match crate::agent::AgentClient::connect_with_timeout(&sock_path, timeout).await {
+                    Ok(client) => return Ok(client),
+                    Err(error) => last_error = Some(error),
+                }
+            }
+
+            match last_error {
+                Some(error) => Err(error.into()),
+                None => Err(MicrosandboxError::SandboxNotRunning(format!(
+                    "{name:?} has no agent endpoint (is it running?)"
+                ))),
+            }
+        })
+    }
+}
+
+#[cfg(unix)]
+fn agent_endpoint_may_exist(path: &std::path::Path) -> bool {
+    path.exists()
+}
+
+#[cfg(windows)]
+fn agent_endpoint_may_exist(_path: &std::path::Path) -> bool {
+    true
 }
 
 impl Default for LocalBackend {

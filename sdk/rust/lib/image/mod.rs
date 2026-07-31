@@ -25,6 +25,7 @@ use crate::{
         manifest as manifest_entity, manifest_layer as manifest_layer_entity,
         sandbox_rootfs as sandbox_rootfs_entity, snapshot as snapshot_entity,
     },
+    error::Operation,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -263,21 +264,27 @@ impl Image {
     /// Get an image handle by reference from the active local backend.
     pub async fn get(reference: &str) -> MicrosandboxResult<ImageHandle> {
         let backend = crate::backend::default_backend();
-        let local = backend.as_local().ok_or_else(image_ops_unsupported)?;
+        let local = backend
+            .as_local()
+            .ok_or_else(|| MicrosandboxError::local_only(Operation::ImageGet))?;
         Self::get_local(local, reference).await
     }
 
     /// List all cached images from the active local backend, ordered by creation time.
     pub async fn list() -> MicrosandboxResult<Vec<ImageHandle>> {
         let backend = crate::backend::default_backend();
-        let local = backend.as_local().ok_or_else(image_ops_unsupported)?;
+        let local = backend
+            .as_local()
+            .ok_or_else(|| MicrosandboxError::local_only(Operation::ImageList))?;
         Self::list_local(local).await
     }
 
     /// Get full detail for an image from the active local backend.
     pub async fn inspect(reference: &str) -> MicrosandboxResult<ImageDetail> {
         let backend = crate::backend::default_backend();
-        let local = backend.as_local().ok_or_else(image_ops_unsupported)?;
+        let local = backend
+            .as_local()
+            .ok_or_else(|| MicrosandboxError::local_only(Operation::ImageInspect))?;
         Self::inspect_local(local, reference).await
     }
 
@@ -287,14 +294,18 @@ impl Image {
     /// [`MicrosandboxError::ImageInUse`].
     pub async fn remove(reference: &str, force: bool) -> MicrosandboxResult<()> {
         let backend = crate::backend::default_backend();
-        let local = backend.as_local().ok_or_else(image_ops_unsupported)?;
+        let local = backend
+            .as_local()
+            .ok_or_else(|| MicrosandboxError::local_only(Operation::ImageRemove))?;
         Self::remove_local(local, reference, force).await
     }
 
     /// Remove cached image data that is not used by any sandbox or indexed snapshot.
     pub async fn prune() -> MicrosandboxResult<ImagePruneReport> {
         let backend = crate::backend::default_backend();
-        let local = backend.as_local().ok_or_else(image_ops_unsupported)?;
+        let local = backend
+            .as_local()
+            .ok_or_else(|| MicrosandboxError::local_only(Operation::ImagePrune))?;
         Self::prune_local(local).await
     }
 
@@ -305,7 +316,9 @@ impl Image {
     /// handle for every image reference imported.
     pub async fn load(input: &Path, tags: Vec<String>) -> MicrosandboxResult<Vec<ImageHandle>> {
         let backend = crate::backend::default_backend();
-        let local = backend.as_local().ok_or_else(image_ops_unsupported)?;
+        let local = backend
+            .as_local()
+            .ok_or_else(|| MicrosandboxError::local_only(Operation::ImageLoad))?;
         Self::load_local(local, input, tags).await
     }
 
@@ -319,7 +332,9 @@ impl Image {
         format: ImageArchiveFormat,
     ) -> MicrosandboxResult<()> {
         let backend = crate::backend::default_backend();
-        let local = backend.as_local().ok_or_else(image_ops_unsupported)?;
+        let local = backend
+            .as_local()
+            .ok_or_else(|| MicrosandboxError::local_only(Operation::ImageSave))?;
         Self::save_local(local, references, output, format).await
     }
 
@@ -823,14 +838,6 @@ fn build_handle_from_parts(
         total_size_bytes: manifest.and_then(|m| m.total_size_bytes),
         created_at: model.created_at.map(|dt| dt.and_utc()),
         updated_at: model.updated_at.map(|dt| dt.and_utc()),
-    }
-}
-
-/// Error returned when local image-cache operations are used with a cloud backend.
-fn image_ops_unsupported() -> MicrosandboxError {
-    MicrosandboxError::Unsupported {
-        feature: "image ops on cloud".into(),
-        available_when: "with a local backend".into(),
     }
 }
 

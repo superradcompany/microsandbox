@@ -512,9 +512,11 @@ export type CloudCreateSandboxResponse = {
    */
   status_reason: CloudSandboxStatusReason | null;
   /**
-   * The sandbox spec the cloud control plane stored for this sandbox.
+   * Curated resolved-spec projection returned by the control plane, when
+   * available. Lifecycle and agent operations intentionally do not depend
+   * on reconstructing the create request from this server-owned view.
    */
-  spec: CloudSandboxSpec;
+  spec?: unknown | null | undefined;
   /**
    * Whether the sandbox should be removed when its allocation terminates.
    */

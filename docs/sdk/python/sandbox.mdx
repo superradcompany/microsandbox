@@ -186,26 +186,27 @@ Get a handle to an existing sandbox (running or stopped). The handle provides st
 
 ```python
 @staticmethod
-async def list() -> list[SandboxHandle]
+async def list() -> SandboxPage
 ```
 
 <Accordion title="Example">
 
 ```python
-for h in await Sandbox.list():
+page = await Sandbox.list()
+for h in page.sandboxes:
     print(h.name, h.status)
 ```
 
 </Accordion>
 
-List all sandboxes (running, stopped, and crashed).
+Return the first page of sandboxes (running, stopped, and crashed), ordered newest first. The default page size is 20.
 
 <p className="msb-label">Returns</p>
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#sandboxhandle">list[SandboxHandle]</a></div>
-    <div className="msb-param-desc">All sandbox handles.</div>
+    <div className="msb-param-key"><span className="msb-type">SandboxPage</span></div>
+    <div className="msb-param-desc">Handles in this page and an optional cursor for the next page.</div>
   </div>
 </div>
 
@@ -213,22 +214,41 @@ List all sandboxes (running, stopped, and crashed).
 
 ```python
 @staticmethod
-async def list_with(*, labels: Mapping[str, str] | None = None) -> list[SandboxHandle]
+async def list_with(
+    *,
+    cursor: str | None = None,
+    limit: int | None = None,
+    labels: Mapping[str, str] | None = None,
+) -> SandboxPage
 ```
 
 <Accordion title="Example">
 
 ```python
-workers = await Sandbox.list_with(labels={"role": "worker"})
+page = await Sandbox.list_with(limit=50, labels={"role": "worker"})
+if page.next_cursor is not None:
+    next_page = await Sandbox.list_with(
+        cursor=page.next_cursor,
+        limit=50,
+        labels={"role": "worker"},
+    )
 ```
 
 </Accordion>
 
-List sandboxes filtered by label. Only sandboxes whose labels match every supplied key/value pair are returned.
+Return a configured page of sandboxes. Label filters are applied before pagination and match every supplied key/value pair.
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cursor</code><span className="msb-type">str | None</span></div>
+    <div className="msb-param-desc">Opaque <code>next_cursor</code> from the preceding page.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>limit</code><span className="msb-type">int | None</span></div>
+    <div className="msb-param-desc">Page size from 1 through 100. Defaults to 20.</div>
+  </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>labels</code><span className="msb-type">Mapping[str, str] | None</span></div>
     <div className="msb-param-desc">Label key/value pairs to match. <code>None</code> returns every sandbox, like <a href="#sandbox-list">list()</a>.</div>
@@ -239,8 +259,8 @@ List sandboxes filtered by label. Only sandboxes whose labels match every suppli
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#sandboxhandle">list[SandboxHandle]</a></div>
-    <div className="msb-param-desc">Matching sandbox handles.</div>
+    <div className="msb-param-key"><span className="msb-type">SandboxPage</span></div>
+    <div className="msb-param-desc">Matching handles and an optional cursor for the next page.</div>
   </div>
 </div>
 
@@ -1154,7 +1174,9 @@ The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_wit
 | replace_with_timeout | `float` | `10` | Seconds to wait after `SIGTERM` before escalating to `SIGKILL` (`0` skips `SIGTERM`). Implies `replace=True` |
 | max_duration | `float` | - | Maximum sandbox lifetime in seconds |
 | idle_timeout | `float` | - | Idle timeout in seconds |
+| ephemeral | `bool` | `False` | If `True`, the sandbox and all its persisted state are removed automatically once it stops, rather than left on disk for restart |
 | env | `dict[str, str]` | `{}` | Environment variables visible to all commands |
+| labels | `dict[str, str]` | `{}` | User-defined labels attached to the sandbox. Filter with [`list_with()`](#sandbox-list_with); see [Select in bulk](/sandboxes/labels#select-in-bulk). Keys starting with `sandbox.`, `microsandbox.`, or `service.` are reserved and rejected |
 | scripts | `dict[str, str]` | `{}` | Named scripts mounted at `/.msb/scripts/` and added to `PATH` |
 | pull_policy | `str \| `[`PullPolicy`](#pullpolicy) | `"if-missing"` | Image pull behavior |
 | log_level | `str \| `[`LogLevel`](#loglevel) | - | Override log verbosity |
@@ -1164,6 +1186,7 @@ The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_wit
 | ports | `dict[int, int] \| Sequence[`[`PortBinding`](/sdk/python/networking#portbinding)`]` | `{}` | Port mappings. Dict form is TCP and binds to `127.0.0.1`; use `PortBinding` for explicit bind addresses or UDP |
 | network | [`Network`](/sdk/python/networking#network) | public profile | Network policy and configuration |
 | secrets | `list[`[`SecretEntry`](/sdk/python/secrets#secretentry)`]` | `[]` | Secret injection |
+| on_secret_violation | [`ViolationAction`](/sdk/python/secrets#violationaction)` \| `[`ViolationPolicy`](/sdk/python/secrets#violationpolicy) | `BLOCK_AND_LOG` | Sandbox-wide default action when a secret placeholder would leak to a non-eligible destination. Shorthand for `Network.on_secret_violation`; if both are provided, this top-level value takes precedence. See [Violation policy](/sdk/python/secrets#violation-policy) |
 | detached | `bool` | `False` | If `True`, spawn the sandbox in detached mode; call [`detach()`](#sb-detach) before dropping the returned handle when it should keep running |
 
 ### InitConfig
@@ -1214,6 +1237,15 @@ Sandbox-wide in-guest security profile. A `StrEnum`, so the string values are ac
 |-------|-------------|
 | `"default"` | Standard profile |
 | `"restricted"` | Sets `no_new_privs`, drops mount-admin capability from user commands, and forces `nosuid,nodev` on user mounts |
+
+### SandboxPage
+
+One stable, newest-first page returned by [`Sandbox.list()`](#sandbox-list) or [`Sandbox.list_with()`](#sandbox-list_with).
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `sandboxes` | `list[SandboxHandle]` | Handles in this page |
+| `next_cursor` | `str \| None` | Opaque continuation cursor, or `None` on the final page |
 
 ### SandboxHandle
 

@@ -2,7 +2,7 @@
 //
 // Run from sdk/go:
 //
-//	MSB_API_URL=https://cloud.example.com MSB_API_KEY=... go run ./examples/cloud-backend
+//	MSB_API_KEY=... go run ./examples/cloud-backend
 //
 // Or configure ~/.microsandbox/config.json and run:
 //
@@ -22,9 +22,8 @@ import (
 )
 
 func main() {
-	if os.Getenv("MSB_PROFILE") == "" &&
-		(os.Getenv("MSB_API_URL") == "" || os.Getenv("MSB_API_KEY") == "") {
-		log.Fatal("set MSB_PROFILE or both MSB_API_URL and MSB_API_KEY")
+	if os.Getenv("MSB_PROFILE") == "" && os.Getenv("MSB_API_KEY") == "" {
+		log.Fatal("set MSB_API_KEY or select a cloud profile")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)

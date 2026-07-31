@@ -16,6 +16,7 @@ use crate::sandbox::{
 
 /// A lightweight handle to a sandbox from the database.
 #[pyclass(name = "SandboxHandle")]
+#[derive(Clone)]
 pub struct PySandboxHandle {
     inner: Arc<Mutex<microsandbox::sandbox::SandboxHandle>>,
 }

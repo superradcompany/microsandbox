@@ -66,12 +66,12 @@ func main() {
 	fmt.Println("  detached the handle — sandbox keeps running")
 
 	// Confirm via ListSandboxes.
-	handles, err := microsandbox.ListSandboxes(ctx)
+	page, err := microsandbox.ListSandboxes(ctx)
 	if err != nil {
 		log.Fatalf("ListSandboxes: %v", err)
 	}
 	var found *microsandbox.SandboxHandle
-	for _, h := range handles {
+	for _, h := range page.Sandboxes {
 		if h.Name() == name {
 			found = h
 			break

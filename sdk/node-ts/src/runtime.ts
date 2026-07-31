@@ -4,7 +4,8 @@ export type DefaultBackend =
   | "local"
   | {
       kind: "cloud";
-      url: string;
+      /** Override the hosted API endpoint. Defaults to https://api.microsandbox.dev. */
+      url?: string;
       apiKey: string;
     }
   | {

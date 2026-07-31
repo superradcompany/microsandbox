@@ -345,7 +345,9 @@ describe.skipIf(!msbPath())("listWith by labels", () => {
   });
 
   it("filters by a single label (AND across sandboxes)", async () => {
-    const handles = await Sandbox.listWith({ labels: { owner } });
+    const { sandboxes: handles } = await Sandbox.listWith((list) =>
+      list.label("owner", owner),
+    );
     const names = handles.map((h) => h.name);
     expect(names).toContain(webName);
     expect(names).toContain(jobName);
@@ -357,9 +359,10 @@ describe.skipIf(!msbPath())("listWith by labels", () => {
   });
 
   it("AND-matches multiple labels", async () => {
-    const names = (
-      await Sandbox.listWith({ labels: { owner, tier: "web" } })
-    ).map((h) => h.name);
+    const { sandboxes } = await Sandbox.listWith((list) =>
+      list.labels({ owner, tier: "web" }),
+    );
+    const names = sandboxes.map((h) => h.name);
     expect(names).toContain(webName);
     expect(names).not.toContain(jobName);
     expect(names).not.toContain(otherName);

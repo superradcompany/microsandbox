@@ -1034,6 +1034,10 @@ struct SandboxCreateOpts {
 #[derive(serde::Deserialize, Default)]
 struct SandboxListOpts {
     #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    limit: Option<u32>,
+    #[serde(default)]
     labels: HashMap<String, String>,
 }
 
@@ -2816,8 +2820,8 @@ pub unsafe extern "C" fn msb_sandbox_owns_lifecycle(
 }
 
 // ---------------------------------------------------------------------------
-// Sandbox — list (by name; no handles are allocated here)
-// Output: ["name1","name2",...]
+// Sandbox — paginated list (by name; no handles are allocated here)
+// Output: {"sandboxes":[...],"next_cursor":"..."}
 // ---------------------------------------------------------------------------
 
 #[unsafe(no_mangle)]
@@ -2833,23 +2837,31 @@ pub unsafe extern "C" fn msb_sandbox_list(
             .map_err(|e| FfiError::invalid_argument(format!("invalid list filter JSON: {e}")))?;
 
         Ok(Box::pin(async move {
-            let handles = if opts.labels.is_empty() {
-                Sandbox::list().await.map_err(FfiError::from)?
-            } else {
-                let filter = opts.labels.into_iter().fold(
-                    microsandbox::sandbox::SandboxFilter::new(),
-                    |filter, (key, value)| filter.label(key, value),
-                );
-                Sandbox::list_with(filter).await.map_err(FfiError::from)?
-            };
-            let mut out = String::from("[");
-            for (i, h) in handles.iter().enumerate() {
+            let page = Sandbox::list_with(|list| {
+                let mut list = list;
+                if let Some(limit) = opts.limit {
+                    list = list.limit(limit);
+                }
+                if let Some(cursor) = opts.cursor {
+                    list = list.cursor(cursor);
+                }
+                list.labels(opts.labels)
+            })
+            .await
+            .map_err(FfiError::from)?;
+            let mut out = String::from("{\"sandboxes\":[");
+            for (i, h) in page.sandboxes.iter().enumerate() {
                 if i > 0 {
                     out.push(',');
                 }
                 out.push_str(&sandbox_handle_json(h));
             }
-            out.push(']');
+            out.push_str("],\"next_cursor\":");
+            out.push_str(
+                &serde_json::to_string(&page.next_cursor)
+                    .map_err(|e| FfiError::internal(e.to_string()))?,
+            );
+            out.push('}');
             Ok(out)
         }))
     })

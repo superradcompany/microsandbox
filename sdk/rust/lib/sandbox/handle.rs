@@ -11,12 +11,13 @@ use std::sync::Arc;
 use sea_orm::EntityTrait;
 
 use crate::{
-    MicrosandboxResult,
+    MicrosandboxError, MicrosandboxResult,
     backend::{
-        Backend, CloudCreateSandboxResponse, SandboxHandleCloudState, SandboxHandleInner,
-        SandboxHandleLocalState,
+        Backend, CloudCreateSandboxResponse, SandboxCloudState, SandboxHandleCloudState,
+        SandboxHandleInner, SandboxHandleLocalState,
     },
     db::entity::sandbox as sandbox_entity,
+    error::Operation,
 };
 
 use super::{Sandbox, SandboxConfig, SandboxModificationBuilder, SandboxStatus, SandboxStopResult};
@@ -25,7 +26,8 @@ use super::{Sandbox, SandboxConfig, SandboxModificationBuilder, SandboxStatus, S
 // Constants
 //--------------------------------------------------------------------------------------------------
 
-/// Default timeout for [`SandboxHandle::connect`].
+/// Default timeout for the eager local agent connection made by
+/// [`SandboxHandle::connect`].
 pub const DEFAULT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Default timeout for [`SandboxHandle::stop`] before escalation.
@@ -44,8 +46,9 @@ pub const DEFAULT_KILL_TIMEOUT: std::time::Duration = std::time::Duration::from_
 /// remove) without requiring a live agent bridge. Obtained via
 /// [`Sandbox::get`] or [`Sandbox::list`].
 ///
-/// For full runtime capabilities (exec, shell, fs), call [`start`](SandboxHandle::start)
-/// to boot the sandbox and obtain a live [`Sandbox`] handle.
+/// For full runtime capabilities (exec, shell, fs), call
+/// [`connect`](SandboxHandle::connect) when the sandbox is already running, or
+/// [`start`](SandboxHandle::start) to boot a stopped sandbox.
 pub struct SandboxHandle {
     backend: Arc<dyn Backend>,
     inner: SandboxHandleInner,
@@ -81,10 +84,9 @@ impl SandboxHandle {
 
     /// Build a handle from a [`CloudCreateSandboxResponse`] HTTP response.
     ///
-    /// Returns an error if `cloud.config` cannot be re-serialised to JSON for
-    /// the `config_json()` view. Silent fallback to an empty string here would
-    /// surface later as a confusing `serde_json::Error` ("EOF while parsing")
-    /// out of [`config()`](Self::config) / [`config_json()`](Self::config_json).
+    /// Preserves the cloud's optional curated spec as JSON for the
+    /// `config_json()` inspection view. An absent spec is represented as JSON
+    /// `null`; it is not replaced with a fabricated SDK configuration.
     pub(crate) fn from_cloud(
         backend: Arc<dyn Backend>,
         cloud: CloudCreateSandboxResponse,
@@ -201,10 +203,9 @@ impl SandboxHandle {
     pub fn config(&self) -> MicrosandboxResult<SandboxConfig> {
         match &self.inner {
             SandboxHandleInner::Local(s) => Ok(serde_json::from_str(&s.config_json)?),
-            SandboxHandleInner::Cloud(_) => Err(crate::MicrosandboxError::Unsupported {
-                feature: "SandboxHandle::config on cloud".into(),
-                available_when: "when SandboxConfig is the cloud wire shape".into(),
-            }),
+            SandboxHandleInner::Cloud(_) => Err(MicrosandboxError::local_only(
+                Operation::SandboxHandleConfig,
+            )),
         }
     }
 
@@ -234,7 +235,7 @@ impl SandboxHandle {
         ) {
             return Ok(());
         }
-        Err(crate::MicrosandboxError::SandboxNotRunning(format!(
+        Err(MicrosandboxError::SandboxNotRunning(format!(
             "'{}' is not running (status: {status:?}); cannot {operation}",
             self.name
         )))
@@ -302,13 +303,10 @@ impl SandboxHandle {
     pub async fn metrics(&self) -> MicrosandboxResult<super::SandboxMetrics> {
         let local = self
             .local()
-            .ok_or_else(|| crate::MicrosandboxError::Unsupported {
-                feature: "SandboxHandle::metrics on cloud".into(),
-                available_when: "when cloud metrics land".into(),
-            })?;
+            .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxHandleMetrics))?;
 
         if local.status != SandboxStatus::Running && local.status != SandboxStatus::Draining {
-            return Err(crate::MicrosandboxError::SandboxNotRunning(format!(
+            return Err(MicrosandboxError::SandboxNotRunning(format!(
                 "'{}' is not running (status: {:?})",
                 self.name, local.status
             )));
@@ -316,16 +314,13 @@ impl SandboxHandle {
 
         let config = self.config()?;
         if config.effective_metrics_interval().is_none() {
-            return Err(crate::MicrosandboxError::MetricsDisabled(self.name.clone()));
+            return Err(MicrosandboxError::MetricsDisabled(self.name.clone()));
         }
 
-        let local_backend =
-            self.backend
-                .as_local()
-                .ok_or_else(|| crate::MicrosandboxError::Unsupported {
-                    feature: "SandboxHandle::metrics on cloud".into(),
-                    available_when: "when cloud metrics land".into(),
-                })?;
+        let local_backend = self
+            .backend
+            .as_local()
+            .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxHandleMetrics))?;
         let db = local_backend.db().await?.read();
         super::metrics::metrics_for_sandbox(db, local_backend, local.db_id, &config).await
     }
@@ -352,55 +347,84 @@ impl SandboxHandle {
             .await
     }
 
-    /// Connect to a running sandbox via the agent relay socket. **Local
-    /// handles only** — cloud sandbox attach is HTTP/WS and not wired up in
-    /// this delegation.
+    /// Connect to a running sandbox and return a live handle.
+    ///
+    /// Local sandboxes establish the agent relay connection eagerly. Cloud
+    /// sandboxes return a backend-bound handle whose exec, SSH, and filesystem
+    /// operations open authenticated agent WebSockets on demand.
     pub async fn connect(&self) -> MicrosandboxResult<Sandbox> {
         self.connect_with_timeout(DEFAULT_CONNECT_TIMEOUT).await
     }
 
-    /// Connect to a running sandbox with an explicit agent handshake timeout.
+    /// Connect to a running sandbox with an explicit local agent handshake
+    /// timeout.
+    ///
+    /// Cloud reconnect is lazy and does not open an agent WebSocket here, so
+    /// this timeout applies only to local handles.
     pub async fn connect_with_timeout(
         &self,
         timeout: std::time::Duration,
     ) -> MicrosandboxResult<Sandbox> {
-        let local = self
-            .local()
-            .ok_or_else(|| crate::MicrosandboxError::Unsupported {
-                feature: "SandboxHandle::connect on cloud".into(),
-                available_when: "when cloud attach lands".into(),
-            })?;
-        if local.status != SandboxStatus::Running && local.status != SandboxStatus::Draining {
-            return Err(crate::MicrosandboxError::SandboxNotRunning(format!(
+        if !matches!(
+            self.status_snapshot(),
+            SandboxStatus::Running | SandboxStatus::Draining
+        ) {
+            return Err(MicrosandboxError::SandboxNotRunning(format!(
                 "'{}' is not running (status: {:?})",
-                self.name, local.status
+                self.name,
+                self.status_snapshot()
             )));
         }
 
-        let local_backend =
-            self.backend
-                .as_local()
-                .ok_or_else(|| crate::MicrosandboxError::Unsupported {
-                    feature: "SandboxHandle::connect on cloud".into(),
-                    available_when: "when cloud attach lands".into(),
+        match &self.inner {
+            SandboxHandleInner::Local(local) => {
+                let local_backend = self.backend.as_local().ok_or_else(|| {
+                    MicrosandboxError::local_only(Operation::SandboxHandleConnect)
                 })?;
-        let client = crate::sandbox::fs::local::connect_agent_with_timeout(
-            local_backend,
-            &self.name,
-            timeout,
-        )
-        .await?;
-        let config: SandboxConfig = serde_json::from_str(&local.config_json)?;
+                let client = crate::sandbox::fs::agent::connect_agent_with_timeout(
+                    local_backend,
+                    &self.name,
+                    timeout,
+                )
+                .await?;
+                let config: SandboxConfig = serde_json::from_str(&local.config_json)?;
 
-        Ok(Sandbox::from_local(
-            self.backend.clone(),
-            crate::backend::SandboxLocalState {
-                db_id: local.db_id,
-                handle: None,
-                client: Arc::new(client),
-            },
-            config,
-        ))
+                Ok(Sandbox::from_local(
+                    self.backend.clone(),
+                    crate::backend::SandboxLocalState {
+                        db_id: local.db_id,
+                        handle: None,
+                        client: Arc::new(client),
+                    },
+                    config,
+                ))
+            }
+            SandboxHandleInner::Cloud(cloud) => {
+                // The cloud handle stores the optional curated spec exactly as
+                // returned by the API. Decode it on reconnect, falling back to
+                // SDK defaults when the server intentionally omitted it.
+                let spec = serde_json::from_str(&cloud.config_json)?;
+                let config =
+                    crate::backend::sandbox::sandbox_config_from_cloud_spec(&self.name, spec);
+                let created_at = cloud.created_at.ok_or_else(|| {
+                    MicrosandboxError::Runtime(format!(
+                        "cloud sandbox {:?} is missing its creation timestamp",
+                        self.name
+                    ))
+                })?;
+
+                Ok(Sandbox::from_cloud_state(
+                    self.backend.clone(),
+                    SandboxCloudState {
+                        id: cloud.id.clone(),
+                        org_id: cloud.org_id.clone(),
+                        created_at,
+                    },
+                    self.name.clone(),
+                    config,
+                ))
+            }
+        }
     }
 
     /// Check whether agentd is reachable without refreshing the sandbox idle timer.
@@ -434,10 +458,9 @@ impl SandboxHandle {
         name: &str,
     ) -> MicrosandboxResult<super::super::snapshot::Snapshot> {
         if self.local().is_none() {
-            return Err(crate::MicrosandboxError::Unsupported {
-                feature: "SandboxHandle::snapshot on cloud".into(),
-                available_when: "when cloud snapshots land".into(),
-            });
+            return Err(MicrosandboxError::local_only(
+                Operation::SandboxHandleSnapshot,
+            ));
         }
         use super::super::snapshot::Snapshot;
         Snapshot::builder(name)
@@ -488,7 +511,7 @@ impl SandboxHandle {
                 result?;
                 Ok(())
             }
-            Err(_) => Err(crate::MicrosandboxError::Runtime(format!(
+            Err(_) => Err(MicrosandboxError::Runtime(format!(
                 "timed out observing stopped state for sandbox '{}'",
                 current.name
             ))),
@@ -541,7 +564,7 @@ impl SandboxHandle {
                 result?;
                 Ok(())
             }
-            Err(_) => Err(crate::MicrosandboxError::Runtime(format!(
+            Err(_) => Err(MicrosandboxError::Runtime(format!(
                 "timed out observing stopped state for sandbox '{}'",
                 current.name
             ))),
@@ -600,29 +623,23 @@ impl SandboxHandle {
         match &self.inner {
             SandboxHandleInner::Local(_) => {
                 let refreshed = self.refresh().await?;
-                let local =
-                    refreshed
-                        .local()
-                        .ok_or_else(|| crate::MicrosandboxError::Unsupported {
-                            feature: "SandboxHandle::remove on cloud".into(),
-                            available_when: "wired via Cloud variant".into(),
-                        })?;
+                let local = refreshed
+                    .local()
+                    .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxHandleRemove))?;
                 if matches!(
                     local.status,
                     SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
                 ) {
-                    return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
+                    return Err(MicrosandboxError::SandboxStillRunning(format!(
                         "cannot remove sandbox '{}': still running",
                         self.name
                     )));
                 }
 
-                let local_backend = self.backend.as_local().ok_or_else(|| {
-                    crate::MicrosandboxError::Unsupported {
-                        feature: "SandboxHandle::remove on cloud".into(),
-                        available_when: "wired via Cloud variant".into(),
-                    }
-                })?;
+                let local_backend = self
+                    .backend
+                    .as_local()
+                    .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxHandleRemove))?;
 
                 // Windows: a terminal row can still be backed by a leaked VM
                 // process. Deleting the row and run records now would orphan
@@ -630,7 +647,6 @@ impl SandboxHandle {
                 // it (identity-checked) or fail before touching any state.
                 #[cfg(windows)]
                 super::reap_leaked_runtime_process(local_backend, local.db_id, &self.name).await?;
-
                 let pools = local_backend.db().await?;
 
                 super::remove_dir_if_exists(&local_backend.sandboxes_dir().join(&self.name))?;
@@ -698,5 +714,62 @@ impl std::fmt::Debug for SandboxHandle {
             .field("backend_kind", &self.backend.kind())
             .field("status", &self.status_snapshot())
             .finish()
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::{BackendKind, CloudBackend, CloudSandboxStatus};
+
+    #[tokio::test]
+    async fn cloud_connect_rebuilds_live_sandbox_without_http_request() {
+        let handle = cloud_handle(CloudSandboxStatus::Running);
+
+        let sandbox = handle.connect().await.unwrap();
+
+        assert_eq!(sandbox.name(), "cloud-connect-test");
+        assert_eq!(sandbox.backend_kind(), BackendKind::Cloud);
+        assert_eq!(sandbox.cloud().unwrap().id, "sandbox-id");
+        assert_eq!(sandbox.config().spec.name, "cloud-connect-test");
+    }
+
+    #[tokio::test]
+    async fn cloud_connect_rejects_stopped_sandbox() {
+        let handle = cloud_handle(CloudSandboxStatus::Stopped);
+
+        let result = handle.connect().await;
+
+        assert!(matches!(
+            result,
+            Err(MicrosandboxError::SandboxNotRunning(_))
+        ));
+    }
+
+    fn cloud_handle(status: CloudSandboxStatus) -> SandboxHandle {
+        let backend: Arc<dyn Backend> =
+            Arc::new(CloudBackend::new("https://unused.invalid", "msb_test_connect").unwrap());
+        SandboxHandle::from_cloud(
+            backend,
+            CloudCreateSandboxResponse {
+                id: "sandbox-id".into(),
+                org_id: "org-id".into(),
+                name: "cloud-connect-test".into(),
+                slug: "cloud-connect-test".into(),
+                status,
+                status_reason: None,
+                spec: None,
+                ephemeral: false,
+                created_at: chrono::Utc::now(),
+                started_at: None,
+                stopped_at: None,
+                last_failure_message: None,
+            },
+        )
+        .unwrap()
     }
 }

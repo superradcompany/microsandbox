@@ -243,11 +243,11 @@ pub(crate) fn input_contains_detach_sequence(
 }
 
 //--------------------------------------------------------------------------------------------------
-// Module: local (free fn impls called by LocalBackend's SandboxBackend impl)
+// Module: agent (backend-agnostic ops driven over an agent connection)
 //--------------------------------------------------------------------------------------------------
 
 #[cfg(unix)]
-pub(crate) mod local {
+pub(crate) mod agent {
     //! Local attach impl: bridges the host TTY to a PTY exec session in the
     //! named sandbox. Owns the host terminal's raw mode for the duration.
 
@@ -262,7 +262,6 @@ pub(crate) mod local {
 
     use crate::{
         MicrosandboxResult,
-        backend::LocalBackend,
         sandbox::{
             AttachOptionsBuilder, SandboxConfig, build_exec_request,
             open_nonblocking_terminal_input, read_from_fd, terminal_path_for_fd,
@@ -272,7 +271,7 @@ pub(crate) mod local {
     use super::{DetachKeys, input_contains_detach_sequence};
 
     pub(crate) async fn attach(
-        local: &LocalBackend,
+        backend: &dyn crate::backend::Backend,
         name: &str,
         config: &SandboxConfig,
         cmd: String,
@@ -280,7 +279,7 @@ pub(crate) mod local {
     ) -> MicrosandboxResult<i32> {
         let opts = opts_builder.build()?;
 
-        let client = Arc::new(super::super::fs::local::connect_agent(local, name).await?);
+        let client = Arc::new(super::super::fs::agent::connect_agent(backend, name).await?);
 
         let detach_keys = match &opts.detach_keys {
             Some(spec) => DetachKeys::parse(spec)?,
@@ -440,7 +439,7 @@ pub(crate) mod local {
 }
 
 #[cfg(windows)]
-pub(crate) mod local {
+pub(crate) mod agent {
     use std::os::windows::io::AsRawHandle;
     use std::{ptr, sync::Arc, thread, time::Duration};
 
@@ -470,9 +469,9 @@ pub(crate) mod local {
         },
     };
 
+    use crate::backend::Backend;
     use crate::{
         MicrosandboxError, MicrosandboxResult,
-        backend::LocalBackend,
         sandbox::{AttachOptionsBuilder, SandboxConfig, build_exec_request},
     };
 
@@ -512,7 +511,7 @@ pub(crate) mod local {
     }
 
     pub(crate) async fn attach(
-        local: &LocalBackend,
+        backend: &dyn Backend,
         name: &str,
         config: &SandboxConfig,
         cmd: String,
@@ -520,7 +519,7 @@ pub(crate) mod local {
     ) -> MicrosandboxResult<i32> {
         let opts = opts_builder.build()?;
 
-        let client = Arc::new(super::super::fs::local::connect_agent(local, name).await?);
+        let client = Arc::new(super::super::fs::agent::connect_agent(backend, name).await?);
 
         let detach_keys = match &opts.detach_keys {
             Some(spec) => DetachKeys::parse(spec)?,

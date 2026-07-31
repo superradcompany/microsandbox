@@ -29,6 +29,13 @@ pub struct Sandbox {
     inner: Arc<Mutex<Option<microsandbox::sandbox::Sandbox>>>,
 }
 
+/// One page returned by `Sandbox.list` / `Sandbox.listWith`.
+#[napi(object, object_from_js = false)]
+pub struct JsSandboxPage {
+    pub sandboxes: Vec<JsSandboxHandle>,
+    pub next_cursor: Option<String>,
+}
+
 /// A streaming subscription for sandbox metrics at a regular interval.
 ///
 /// Supports both manual `recv()` calls and `for await...of` iteration:
@@ -116,39 +123,34 @@ impl Sandbox {
         Ok(JsSandboxHandle::from_rust(handle))
     }
 
-    /// List all sandboxes.
+    /// List the first page of sandboxes.
     #[napi]
-    pub async fn list() -> Result<Vec<JsSandboxHandle>> {
-        let handles = microsandbox::sandbox::Sandbox::list()
+    pub async fn list() -> Result<JsSandboxPage> {
+        let page = microsandbox::sandbox::Sandbox::list()
             .await
             .map_err(to_napi_error)?;
-        Ok(handles
-            .into_iter()
-            .map(JsSandboxHandle::from_rust)
-            .collect())
+        Ok(sandbox_page_to_js(page))
     }
 
-    /// List sandboxes matching a filter.
+    /// List a configured page of sandboxes.
     #[napi(js_name = "listWith")]
-    pub async fn list_with(filter: SandboxListFilter) -> Result<Vec<JsSandboxHandle>> {
-        let handles = match filter.labels {
-            Some(labels) if !labels.is_empty() => {
-                let filter = labels.into_iter().fold(
-                    microsandbox::sandbox::SandboxFilter::new(),
-                    |filter, (key, value)| filter.label(key, value),
-                );
-                microsandbox::sandbox::Sandbox::list_with(filter)
-                    .await
-                    .map_err(to_napi_error)?
+    pub async fn list_with(options: SandboxListOptions) -> Result<JsSandboxPage> {
+        let page = microsandbox::sandbox::Sandbox::list_with(|list| {
+            let mut list = list;
+            if let Some(limit) = options.limit {
+                list = list.limit(limit);
             }
-            _ => microsandbox::sandbox::Sandbox::list()
-                .await
-                .map_err(to_napi_error)?,
-        };
-        Ok(handles
-            .into_iter()
-            .map(JsSandboxHandle::from_rust)
-            .collect())
+            if let Some(cursor) = options.cursor {
+                list = list.cursor(cursor);
+            }
+            if let Some(labels) = options.labels {
+                list = list.labels(labels);
+            }
+            list
+        })
+        .await
+        .map_err(to_napi_error)?;
+        Ok(sandbox_page_to_js(page))
     }
 
     /// Remove a stopped sandbox from the database.
@@ -576,6 +578,17 @@ impl Sandbox {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+fn sandbox_page_to_js(page: microsandbox::sandbox::SandboxPage) -> JsSandboxPage {
+    JsSandboxPage {
+        sandboxes: page
+            .sandboxes
+            .into_iter()
+            .map(JsSandboxHandle::from_rust)
+            .collect(),
+        next_cursor: page.next_cursor,
+    }
+}
 
 #[napi]
 impl JsMetricsStream {

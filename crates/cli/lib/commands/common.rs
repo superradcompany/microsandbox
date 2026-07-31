@@ -7,7 +7,7 @@ use clap::Args;
 use microsandbox::VolumeKind;
 use microsandbox::backend::{Backend, LocalBackend};
 use microsandbox::sandbox::{
-    DiskImageFormat, MountBuilder, Patch, RootDiskBuilder, Sandbox, SandboxBuilder, SandboxFilter,
+    DiskImageFormat, MountBuilder, Patch, RootDiskBuilder, Sandbox, SandboxBuilder, SandboxHandle,
     SecurityProfile,
 };
 
@@ -2351,9 +2351,28 @@ pub fn parse_label_selectors(labels: &[String]) -> Vec<(String, String)> {
     labels.iter().map(|s| ui::parse_label(s)).collect()
 }
 
-/// Build a [`SandboxFilter`] from repeatable `--label KEY[=VALUE]` selector flags.
-pub fn label_filter(labels: &[String]) -> SandboxFilter {
-    SandboxFilter::new().labels(parse_label_selectors(labels))
+/// List every page of sandboxes matching repeatable `--label KEY[=VALUE]` selectors.
+pub async fn list_sandboxes(labels: &[String]) -> anyhow::Result<Vec<SandboxHandle>> {
+    let labels = parse_label_selectors(labels);
+    let mut cursor: Option<String> = None;
+    let mut sandboxes = Vec::new();
+
+    loop {
+        let page = Sandbox::list_with(|list| {
+            let list = list.limit(100).labels(labels.clone());
+            match cursor.as_ref() {
+                Some(cursor) => list.cursor(cursor.clone()),
+                None => list,
+            }
+        })
+        .await?;
+        sandboxes.extend(page.sandboxes);
+
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => return Ok(sandboxes),
+        }
+    }
 }
 
 /// Resolve the set of sandbox names a command should act on, given explicit
@@ -2374,7 +2393,7 @@ pub async fn resolve_selected_sandboxes(
     }
 
     if !labels.is_empty() {
-        for handle in Sandbox::list_with(label_filter(labels)).await? {
+        for handle in list_sandboxes(labels).await? {
             if seen.insert(handle.name().to_string()) {
                 resolved.push(handle.name().to_string());
             }
