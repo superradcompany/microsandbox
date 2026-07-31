@@ -131,8 +131,11 @@ msb completion fish > ~/.config/fish/completions/msb.fish
 ```
 
 ```powershell PowerShell
-if (-not (Test-Path $PROFILE)) { New-Item -Path $PROFILE -ItemType File -Force | Out-Null }
-msb completion powershell >> $PROFILE
+$completions = Join-Path (Split-Path $PROFILE) "completions"
+New-Item -Path $completions -ItemType Directory -Force | Out-Null
+msb completion powershell > (Join-Path $completions "msb.ps1")
+# Add this line to your profile ($PROFILE):
+#   . "$PSScriptRoot/completions/msb.ps1"
 ```
 </CodeGroup>
 
