@@ -36,7 +36,7 @@ async def test_volume_lifecycle_metadata_and_host_fs(volume_factory):
 
 @pytest.mark.asyncio
 async def test_disk_volume_metadata_uses_enums(volume_factory):
-    volume = await volume_factory("py-sdk-disk-vol", kind=VolumeKind.DISK, size_mib=64)
+    volume = await volume_factory("py-sdk-disk-vol", kind=VolumeKind.DISK, size_mib=128)
     handle = await Volume.get(volume.name)
 
     assert handle.kind is VolumeKind.DISK
