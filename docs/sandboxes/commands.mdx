@@ -244,6 +244,17 @@ if err != nil {
     return err
 }
 fmt.Println("python exited with", exitCode)
+
+// Attach with options: a different guest user and custom detach keys.
+exitCode, err = sb.AttachWith(ctx, "python", nil,
+    m.WithAttachUser("dev"),
+    m.WithAttachEnv(map[string]string{"DEBUG": "1"}),
+    m.WithAttachCwd("/app"),
+    m.WithAttachDetachKeys("ctrl-q"),
+)
+if err != nil {
+    return err
+}
 ```
 
 ```bash CLI

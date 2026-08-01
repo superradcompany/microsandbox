@@ -6124,7 +6124,8 @@ pub unsafe extern "C" fn msb_agent_free_bytes(ptr: *mut c_uchar, len: usize) {
 // Attach / AttachShell — interactive PTY sessions
 //
 // These block the calling thread until the guest process exits.
-// opts_json is `{"args":["..."]}` (args is optional).
+// opts_json is `{"args":[...],"cwd":...,"user":...,"env":{...},"detach_keys":...}`
+// (all fields optional).
 // Returns `{"exit_code":<int>}`.
 // ---------------------------------------------------------------------------
 
@@ -6132,6 +6133,11 @@ pub unsafe extern "C" fn msb_agent_free_bytes(ptr: *mut c_uchar, len: usize) {
 struct AttachOpts {
     #[serde(default)]
     args: Vec<String>,
+    cwd: Option<String>,
+    user: Option<String>,
+    #[serde(default)]
+    env: HashMap<String, String>,
+    detach_keys: Option<String>,
 }
 
 /// Attach to a sandbox with an interactive PTY session.
@@ -6158,7 +6164,22 @@ pub unsafe extern "C" fn msb_sandbox_attach(
         };
         let exit_code = rt().block_on(async {
             tokio::select! {
-                r = sb.attach(&cmd_str, opts.args) => r.map_err(FfiError::from),
+                r = sb.attach_with(&cmd_str, |mut b| {
+                    b = b.args(opts.args);
+                    if let Some(cwd) = opts.cwd {
+                        b = b.cwd(cwd);
+                    }
+                    if let Some(user) = opts.user {
+                        b = b.user(user);
+                    }
+                    for (k, v) in opts.env {
+                        b = b.env(k, v);
+                    }
+                    if let Some(keys) = opts.detach_keys {
+                        b = b.detach_keys(keys);
+                    }
+                    b
+                }) => r.map_err(FfiError::from),
                 _ = token.cancelled() => Err(FfiError::new(error_kind::CANCELLED, "cancelled")),
             }
         })?;

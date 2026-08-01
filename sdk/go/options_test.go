@@ -193,6 +193,44 @@ func TestWithExecTTY(t *testing.T) {
 	}
 }
 
+func TestWithAttachUser(t *testing.T) {
+	o := AttachConfig{}
+	WithAttachUser("dev")(&o)
+	if o.User != "dev" {
+		t.Errorf("got %q, want %q", o.User, "dev")
+	}
+}
+
+func TestWithAttachCwd(t *testing.T) {
+	o := AttachConfig{}
+	WithAttachCwd("/app")(&o)
+	if o.Cwd != "/app" {
+		t.Errorf("got %q, want %q", o.Cwd, "/app")
+	}
+}
+
+func TestWithAttachDetachKeys(t *testing.T) {
+	o := AttachConfig{}
+	WithAttachDetachKeys("ctrl-q")(&o)
+	if o.DetachKeys != "ctrl-q" {
+		t.Errorf("got %q, want %q", o.DetachKeys, "ctrl-q")
+	}
+}
+
+func TestWithAttachEnvMerges(t *testing.T) {
+	o := AttachConfig{}
+	if o.Env != nil {
+		t.Fatal("Env should start nil")
+	}
+	WithAttachEnv(map[string]string{"A": "1", "B": "2"})(&o)
+	WithAttachEnv(map[string]string{"B": "overwritten", "C": "3"})(&o)
+
+	want := map[string]string{"A": "1", "B": "overwritten", "C": "3"}
+	if !reflect.DeepEqual(o.Env, want) {
+		t.Errorf("got %v, want %v", o.Env, want)
+	}
+}
+
 func TestWithVolumeQuota(t *testing.T) {
 	o := VolumeConfig{}
 	WithVolumeQuota(1024)(&o)

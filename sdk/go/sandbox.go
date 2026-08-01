@@ -773,7 +773,25 @@ func (s *Sandbox) OwnsLifecycleOrFalse() bool {
 // The caller's terminal must be a real TTY; this is primarily useful for
 // CLI tools, not library code.
 func (s *Sandbox) Attach(ctx context.Context, cmd string, args ...string) (int, error) {
-	code, err := s.inner.Attach(ctx, cmd, args)
+	code, err := s.inner.Attach(ctx, cmd, ffi.AttachOptions{Args: args})
+	return code, wrapFFI(err)
+}
+
+// AttachWith starts an interactive PTY session running cmd with args, applying
+// the given options. Otherwise identical to Attach.
+func (s *Sandbox) AttachWith(ctx context.Context, cmd string, args []string, opts ...AttachOption) (int, error) {
+	o := AttachConfig{}
+	for _, opt := range opts {
+		opt(&o)
+	}
+
+	code, err := s.inner.Attach(ctx, cmd, ffi.AttachOptions{
+		Args:       args,
+		Cwd:        o.Cwd,
+		User:       o.User,
+		Env:        o.Env,
+		DetachKeys: o.DetachKeys,
+	})
 	return code, wrapFFI(err)
 }
 
