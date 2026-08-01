@@ -2,6 +2,7 @@ use oci_client::{
     Client,
     client::{Certificate, CertificateEncoding, ClientConfig, ClientProtocol},
 };
+use rustls_pki_types::{CertificateDer, pem::PemObject};
 
 use crate::{
     auth::RegistryAuth,
@@ -72,7 +73,7 @@ impl RegistryBuilder {
 
         let mut extra_root_certificates = Vec::new();
         for (i, pem_data) in self.extra_ca_certs.into_iter().enumerate() {
-            let certs: Vec<_> = rustls_pemfile::certs(&mut pem_data.as_slice())
+            let certs: Vec<_> = CertificateDer::pem_slice_iter(&pem_data)
                 .collect::<Result<_, _>>()
                 .map_err(|e| {
                     ImageError::InvalidCertificate(format!("entry {i}: failed to parse: {e}"))

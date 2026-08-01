@@ -1012,6 +1012,12 @@ struct SandboxCreateOpts {
     idle_timeout_secs: Option<u64>,
     /// Registry credentials for pulling private images.
     registry_auth: Option<RegistryAuthOpts>,
+    /// Pull the image over plain HTTP instead of HTTPS (registry override).
+    #[serde(default)]
+    registry_insecure: bool,
+    /// PEM-encoded CA root certificates to trust when pulling.
+    #[serde(default)]
+    registry_ca_certs: Vec<String>,
     network: Option<NetworkOpts>,
     /// Top-level ports shorthand: {host_port: guest_port} (TCP).
     #[serde(default)]
@@ -2091,12 +2097,26 @@ pub unsafe extern "C" fn msb_sandbox_create(
             {
                 builder = builder.idle_timeout(secs);
             }
-            if let Some(auth) = opts.registry_auth {
-                builder = builder.registry(|r| {
-                    r.auth(RegistryAuth::Basic {
-                        username: auth.username,
-                        password: auth.password,
-                    })
+            // `registry` overwrites insecure and ca_certs wholesale, so all
+            // three overrides have to be applied in one call.
+            let registry_auth = opts.registry_auth;
+            let registry_insecure = opts.registry_insecure;
+            let registry_ca_certs = opts.registry_ca_certs;
+            if registry_auth.is_some() || registry_insecure || !registry_ca_certs.is_empty() {
+                builder = builder.registry(|mut r| {
+                    if let Some(auth) = registry_auth {
+                        r = r.auth(RegistryAuth::Basic {
+                            username: auth.username,
+                            password: auth.password,
+                        });
+                    }
+                    if registry_insecure {
+                        r = r.insecure();
+                    }
+                    for pem in registry_ca_certs {
+                        r = r.ca_certs(pem.into_bytes());
+                    }
+                    r
                 });
             }
             for (k, v) in opts.env.unwrap_or_default() {

@@ -159,7 +159,8 @@ rustls = { version = "0.23", default-features = false, features = [
     "tls12",
 ] }
 tokio-rustls = "0.26"
-rustls-pemfile = "2"
+# 1.9 is the first release with the `pem` module (PemObject::pem_slice_iter).
+rustls-pki-types = "1.9"
 rustls-native-certs = "0.8"
 webpki-roots = "1"
 rcgen = { version = "0.14", features = ["x509-parser"] }

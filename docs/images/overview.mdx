@@ -139,7 +139,7 @@ For registries using self-signed or internal CA certificates, point `ca_certs` t
 }
 ```
 
-microsandbox adds these certificates to the default system roots, so public registries continue to work normally.
+microsandbox adds these certificates to the default system roots, so public registries continue to work normally. The same roots can be supplied per-sandbox through the SDK instead: `ca_certs` in Rust, `caCerts` in TypeScript, `registry_ca_certs` in Python, and `WithRegistryCACerts` / `WithRegistryCACertsPath` in Go.
 
 ### Combined configuration
 
@@ -178,10 +178,20 @@ await using sb = await Sandbox.builder("worker")
     .create();
 ```
 
+```python Python
+from microsandbox import Sandbox
+
+sb = await Sandbox.create(
+    "worker",
+    image="localhost:5050/my-app:latest",
+    registry_insecure=True,
+)
+```
+
 ```go Go
-// Per-registry TLS configuration is read from ~/.microsandbox/config.json.
 sb, err := m.CreateSandbox(ctx, "worker",
     m.WithImage("localhost:5050/my-app:latest"),
+    m.WithRegistryInsecure(),
 )
 ```
 </CodeGroup>

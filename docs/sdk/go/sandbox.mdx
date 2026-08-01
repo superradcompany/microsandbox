@@ -1457,6 +1457,48 @@ Set credentials for pulling from a private OCI registry. See [`RegistryAuth`](#r
   </div>
 </div>
 
+#### <span className="msb-recv"></span><span className="msb-hn">WithRegistryInsecure()</span>
+
+```go
+func WithRegistryInsecure() SandboxOption
+```
+
+Use plain HTTP for the registry instead of HTTPS, for local or self-hosted registries served without TLS such as `localhost:5050/my-app:latest`. The cloud backend rejects this override.
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithRegistryCACerts()</span>
+
+```go
+func WithRegistryCACerts(pem []byte) SandboxOption
+```
+
+Trust additional PEM-encoded CA certificates when pulling, for registries served with a private certificate authority. Called repeatedly, the bundles accumulate. The cloud backend rejects this override.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>pem</code><span className="msb-type">[]byte</span></div>
+    <div className="msb-param-desc">PEM-encoded CA certificates.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithRegistryCACertsPath()</span>
+
+```go
+func WithRegistryCACertsPath(path string) SandboxOption
+```
+
+Like [`WithRegistryCACerts`](#withregistrycacerts) but reads the PEM bundle from a file. The file is read when [`CreateSandbox`](#m-createsandbox) runs, which fails if it is unreadable. Called repeatedly, the bundles accumulate. The cloud backend rejects this override.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Path to a PEM file.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv"></span><span className="msb-hn">WithPorts()</span>
 
 ```go
