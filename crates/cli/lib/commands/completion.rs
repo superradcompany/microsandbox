@@ -1,9 +1,9 @@
 //! `msb completion` command — generate shell completion scripts.
 
-use std::io;
+use std::io::{self, Write};
 
 use clap::Args;
-use clap_complete::Shell;
+use clap_complete::{Generator, Shell};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -28,9 +28,15 @@ pub struct CompletionArgs {
 /// `msb completion zsh > ~/.zsh/completions/_msb` (with that directory
 /// added to `fpath` before `compinit` runs).
 pub fn run(args: CompletionArgs, mut cmd: clap::Command) -> anyhow::Result<()> {
-    let bin_name = cmd.get_name().to_string();
-    clap_complete::generate(args.shell, &mut cmd, bin_name, &mut io::stdout());
+    generate(args.shell, &mut cmd, &mut io::stdout())?;
     Ok(())
+}
+
+fn generate(shell: Shell, cmd: &mut clap::Command, writer: &mut dyn Write) -> io::Result<()> {
+    let bin_name = cmd.get_name().to_string();
+    cmd.set_bin_name(bin_name);
+    cmd.build();
+    shell.try_generate(cmd, writer)
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -39,9 +45,23 @@ pub fn run(args: CompletionArgs, mut cmd: clap::Command) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
+    use std::io::{self, Write};
+
+    use clap::{CommandFactory, Parser};
 
     use super::*;
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed pipe"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[derive(Parser)]
     struct TestCli {
@@ -73,5 +93,13 @@ mod tests {
         let result = TestCli::try_parse_from(["msb", "tcsh"]);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn propagates_output_errors() {
+        let mut cmd = TestCli::command();
+        let error = generate(Shell::Bash, &mut cmd, &mut FailingWriter).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
     }
 }

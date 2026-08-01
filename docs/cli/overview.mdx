@@ -130,6 +130,13 @@ mkdir -p ~/.config/fish/completions
 msb completion fish > ~/.config/fish/completions/msb.fish
 ```
 
+```elvish elvish
+mkdir -p ~/.config/elvish/completions
+msb completion elvish > ~/.config/elvish/completions/msb.elv
+# Add this line to ~/.config/elvish/rc.elv:
+#   eval (slurp < ~/.config/elvish/completions/msb.elv)
+```
+
 ```powershell PowerShell
 $completions = Join-Path (Split-Path $PROFILE) "completions"
 New-Item -Path $completions -ItemType Directory -Force | Out-Null
