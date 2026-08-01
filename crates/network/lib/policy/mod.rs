@@ -7,6 +7,7 @@
 mod builder;
 pub mod destination;
 mod name;
+mod observer;
 mod types;
 
 //--------------------------------------------------------------------------------------------------
@@ -16,4 +17,5 @@ mod types;
 pub use builder::{BuildError, NetworkPolicyBuilder, RuleBuilder, RuleDestinationBuilder};
 pub use destination::*;
 pub use name::{DomainName, DomainNameError};
+pub use observer::{DenialTarget, PolicyDenial, PolicyObserver};
 pub use types::*;

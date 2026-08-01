@@ -17,6 +17,7 @@ pub use microsandbox_utils::wake_pipe::WakePipe;
 use parking_lot::RwLock;
 
 use crate::addr::normalize_ip_addr;
+use crate::policy::{PolicyDenial, PolicyObserver};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -65,6 +66,9 @@ pub struct SharedState {
 
     /// Optional host-side termination hook used for fatal policy violations.
     termination_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+
+    /// Optional host-side observer notified of every policy denial.
+    policy_observer: Mutex<Option<Arc<dyn PolicyObserver>>>,
 
     /// Resolved hostname index used to map destination IPs back to queried hostnames.
     resolved_hostnames: RwLock<TtlReverseIndex<ResolvedHostnameKey, IpAddr>>,
@@ -118,6 +122,7 @@ impl SharedState {
             tx_wake: WakePipe::new(),
             proxy_wake: WakePipe::new(),
             termination_hook: Mutex::new(None),
+            policy_observer: Mutex::new(None),
             resolved_hostnames: RwLock::new(TtlReverseIndex::default()),
             gateway_ipv4: OnceLock::new(),
             gateway_ipv6: OnceLock::new(),
@@ -156,6 +161,25 @@ impl SharedState {
         let hook = self.termination_hook.lock().unwrap().clone();
         if let Some(hook) = hook {
             hook();
+        }
+    }
+
+    /// Install a host-side observer for policy denials.
+    pub fn set_policy_observer(&self, observer: Arc<dyn PolicyObserver>) {
+        *self.policy_observer.lock().unwrap() = Some(observer);
+    }
+
+    /// Report a policy denial to the installed observer, if any.
+    ///
+    /// Called from the policy evaluation choke points. The denial is built
+    /// lazily so no allocation happens when no observer is installed.
+    pub fn report_policy_denial<F>(&self, denial: F)
+    where
+        F: FnOnce() -> PolicyDenial,
+    {
+        let observer = self.policy_observer.lock().unwrap().clone();
+        if let Some(observer) = observer {
+            observer.on_denied(&denial());
         }
     }
 
