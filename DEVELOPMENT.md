@@ -94,6 +94,22 @@ just build release && just install
 | `just uninstall` | Remove installed binaries |
 | `just clean` | Remove `build/` artifacts and clean libkrunfw |
 
+### Using a Prebuilt agentd Binary
+
+With the default `prebuilt` feature enabled, downstream consumers of
+`microsandbox-filesystem` can set `MSB_AGENTD_PATH` to an existing guest
+`agentd` binary.
+
+The repository-local `build/agentd` takes precedence. Otherwise, the supplied
+binary is copied into Cargo's `OUT_DIR` instead of downloading the release
+artifact. If no repository-local `build/agentd` exists and `MSB_AGENTD_PATH` is
+set, it must point to an existing file or the build fails.
+The variable is ignored when the `prebuilt` feature is disabled.
+
+```bash
+MSB_AGENTD_PATH=/path/to/agentd cargo build
+```
+
 ## Project Structure
 
 ### Workspace Crates
