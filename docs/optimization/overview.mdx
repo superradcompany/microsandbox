@@ -24,7 +24,7 @@ Start with `msb doctor`, keep the workload and benchmark procedure unchanged, an
 | `sandbox_defaults.cpu_placement` | `inherit` | Coordinates and pins vCPU threads to host logical processors | Linux and Windows hosts |
 | `sandbox_defaults.thp` | `madvise` | Sets the guest Linux transparent-huge-page boot policy | Every newly booted sandbox |
 | `snapshot_defaults.compaction` | `off` | Reclaims proven-free ext4 ranges before publishing a flat snapshot | Flat stopped-sandbox snapshots |
-| `runtime.block_writeback_preflush` | `auto` | Starts bounded background writeout during long buffered-write epochs | Linux, writable raw disks using writeback caching |
+| `runtime.block_writeback_limit` | `auto` | Bounds buffered host dirty data per writable raw disk | Linux, writable raw disks using writeback caching |
 | x2APIC, CRC32C, PREEMPT_NONE | Selected by the compatible runtime and firmware | Reduces interrupt, checksum, and scheduler overhead | Applicable shipping guest builds |
 | AMD AVIC or Intel APICv | Host KVM policy | Accelerates virtual interrupt delivery used by the x86 guest | Linux x86 hosts with capable hardware |
 
@@ -36,9 +36,9 @@ Explicit CLI or SDK settings override `config.json`, which overrides built-in de
 | CPU placement | `sandbox_defaults.cpu_placement` | `--cpu-placement inherit|auto|spread|compact` |
 | Guest THP | `sandbox_defaults.thp` | `--thp always|madvise|never` |
 | Snapshot compaction | `snapshot_defaults.compaction` | `msb snapshot create ... --compaction off|auto|on` |
-| Buffered block preflush | `runtime.block_writeback_preflush` | Global runtime policy only |
+| Buffered block writeback limit | `runtime.block_writeback_limit` | Global runtime policy only |
 
-The Rust, TypeScript, Python, and Go SDK builders expose the same per-sandbox or per-snapshot choices. Runtime preflush is global because it controls the host VMM storage policy rather than one guest-visible sandbox specification.
+The Rust, TypeScript, Python, and Go SDK builders expose the same per-sandbox or per-snapshot choices. The block writeback limit is global because it controls host VMM storage policy rather than one guest-visible sandbox specification.
 
 ## A measured starting profile
 
@@ -61,12 +61,12 @@ There is no universal fastest profile. The following is a reasonable starting po
     "compaction": "auto"
   },
   "runtime": {
-    "block_writeback_preflush": "auto"
+    "block_writeback_limit": "auto"
   }
 }
 ```
 
-`cpu_placement: auto` is intentionally not a portable macOS default: managed placement is unsupported on macOS because the operating system does not expose an equivalent public hard-affinity API. Use `inherit` on macOS. Keep `thp: madvise` and preflush `auto` until a representative workload proves a different policy is better.
+`cpu_placement: auto` is intentionally not a portable macOS default: managed placement is unsupported on macOS because the operating system does not expose an equivalent public hard-affinity API. Use `inherit` on macOS. Keep `thp: madvise` and the block writeback limit on `auto` until a representative workload proves a different policy is better.
 
 ## Storage layout: layered or flat
 
@@ -171,11 +171,13 @@ Do not run either command while `/dev/kvm` has users. A distribution may build K
 
 Enabling AVIC or APICv changes interrupt-delivery performance, not the sandbox isolation or guest durability contract. Measure network packet processing, concurrent ingress, timers, and interrupt-heavy storage alongside startup and filesystem operations because the tradeoff is not necessarily uniform across workloads.
 
-## Buffered block preflush
+## Buffered block writeback limit
 
-On Linux, the optimized libkrun block path can schedule advisory background writeout for a long buffered-write epoch before the guest reaches its mandatory durability barrier. `auto` keeps the platform-aware runtime policy. The final guest flush still waits for the established full file sync after earlier block work has completed; advisory preflush does not acknowledge durability early.
+On Linux, `auto` gives each writable raw disk a 512 MiB hard budget for buffered host dirty data. Libkrun reserves exact page-aligned extents before each mutation, starts background writeback in 128 MiB batches, and applies backpressure before the per-disk budget can be exceeded. Rewritten pages remain charged until the newest generation completes, so repeatedly overwriting one region cannot release another region's credit.
 
-`off` disables this advisory preparation for newly spawned VMM processes. It may improve a workload whose dirty intervals and barriers do not benefit from early writeout, but it can also leave a larger dirty burst for the final sync and worsen flush tail latency. It is an experiment or workload-specific policy, not a generally faster mode. The setting has no effect on read-only disks, direct-I/O disks, non-raw formats, cache modes without writeback, or non-Linux VMM paths.
+The background worker releases credit only after range writeback and a same-inode data-and-allocation-metadata barrier complete. Guest `FLUSH` still performs the existing full Imago flush and sync after all earlier block work; the controller does not acknowledge guest durability early. Controller, storage, worker, or full-sync failures remain latched and fail future mutations and reactivations closed.
+
+`off` disables this VMM-owned bound for newly spawned sandboxes. It may improve peak sequential throughput, but it permits a long-running guest to accumulate more host dirty data and may worsen the final flush tail. The policy does not depend on cgroups or guest cooperation. It has no effect on read-only disks, direct-I/O disks, non-raw formats, cache modes without writeback, or non-Linux VMM paths.
 
 ## Snapshot compaction
 
@@ -204,7 +206,7 @@ Keeping these automatic avoids combinations that were never validated together a
 | Managed CPU placement | Yes | No; use `inherit` | Yes, within supported processor-group boundaries | Yes if the outer scheduler exposes a useful topology, but not dedicated cores |
 | Guest THP policy | Yes | Yes; still a guest Linux policy | Yes; still a guest Linux policy | Yes, but host backing remains controlled by the provider |
 | AVIC/APICv doctor row | Applicable KVM capability only | Not shown | Not shown; WHP owns acceleration | Shown only if the outer hypervisor exposes inspectable KVM capability |
-| Buffered block preflush | Applicable optimized raw writeback path | No effect | No effect | Applicable only when the inner Linux VMM reaches the required file path |
+| Buffered block writeback limit | Applicable optimized raw writeback path | No effect | No effect | Applicable only when the inner Linux VMM reaches the required file path |
 
 ## Verify the resolved result
 
