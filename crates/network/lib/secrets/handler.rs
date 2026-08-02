@@ -196,6 +196,13 @@ struct SecretHostIdentity<'a> {
 /// Parsed HTTP/1 request metadata needed for validation and framing.
 struct HttpRequestMetadata {
     host_headers: Vec<String>,
+    target_authority: Option<String>,
+}
+
+/// Supported request transfer-encoding after strict validation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TransferEncoding {
+    Chunked,
 }
 
 /// HTTP request framing decision for a complete header block.
@@ -770,15 +777,26 @@ impl SecretsHandler {
             let request_summary = http1_request_summary(header_text.as_ref());
             if let Some(sni) = self.http_sni.as_deref()
                 && let Some(metadata) = parse_http_request_metadata(header_bytes)?
-                && !metadata
-                    .host_headers
-                    .iter()
-                    .all(|host| authority_matches_sni(host, sni))
+                && (metadata.host_headers.len() != 1
+                    || !metadata
+                        .host_headers
+                        .iter()
+                        .all(|host| authority_matches_sni(host, sni))
+                    || metadata
+                        .target_authority
+                        .as_deref()
+                        .is_some_and(|authority| !authority_matches_sni(authority, sni)))
             {
                 return Err(ViolationAction::Block);
             }
 
-            if is_transfer_chunked(header_text.as_ref()) {
+            let transfer_encoding = parse_transfer_encoding(header_text.as_ref())?;
+            if transfer_encoding.is_some() && parse_content_length(header_text.as_ref())?.is_some()
+            {
+                return Err(ViolationAction::Block);
+            }
+
+            if transfer_encoding == Some(TransferEncoding::Chunked) {
                 return self.substitute_chunked_ready(
                     data,
                     header_bytes,
@@ -2026,30 +2044,31 @@ fn http2_header_detection_bytes(headers: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
 fn parse_http_request_metadata(
     header_bytes: &[u8],
 ) -> Result<Option<HttpRequestMetadata>, ViolationAction> {
-    let headers = String::from_utf8_lossy(header_bytes);
-    let mut lines = headers.split("\r\n");
+    let headers = std::str::from_utf8(header_bytes).map_err(|_| ViolationAction::Block)?;
+    let mut lines = headers.split("\r\n").skip_while(|line| line.is_empty());
     let Some(request_line) = lines.next() else {
         return Ok(None);
     };
-    if request_line.is_empty() {
-        return Ok(None);
-    }
 
-    let Some(version) = http_request_version(request_line) else {
-        return Ok(None);
+    let Some((method, target, version)) = split_http_request_line(request_line) else {
+        return Err(ViolationAction::Block);
     };
     if version == "HTTP/2.0" {
         return Err(ViolationAction::Block);
     }
     if !version.starts_with("HTTP/1.") {
-        return Ok(None);
+        return Err(ViolationAction::Block);
     }
 
+    let target_authority = request_target_authority(method, target)?;
     let mut host_headers = Vec::new();
     for line in lines.take_while(|line| !line.is_empty()) {
         let Some((name, value)) = line.split_once(':') else {
-            continue;
+            return Err(ViolationAction::Block);
         };
+        if name.is_empty() || !name.bytes().all(is_http_token_byte) {
+            return Err(ViolationAction::Block);
+        }
         let value = value.trim();
 
         if name.eq_ignore_ascii_case("host") {
@@ -2061,7 +2080,10 @@ fn parse_http_request_metadata(
         return Err(ViolationAction::Block);
     }
 
-    Ok(Some(HttpRequestMetadata { host_headers }))
+    Ok(Some(HttpRequestMetadata {
+        host_headers,
+        target_authority,
+    }))
 }
 
 fn http_request_version(request_line: &str) -> Option<&str> {
@@ -2077,6 +2099,41 @@ fn split_http_request_line(request_line: &str) -> Option<(&str, &str, &str)> {
         return None;
     }
     Some((method, target, version))
+}
+
+fn request_target_authority(method: &str, target: &str) -> Result<Option<String>, ViolationAction> {
+    if target.starts_with('/') || target == "*" {
+        return Ok(None);
+    }
+
+    if let Some(authority) = absolute_form_authority(target)? {
+        return Ok(Some(authority.to_string()));
+    }
+
+    if method.eq_ignore_ascii_case("CONNECT") {
+        if target.is_empty() || target.contains('/') || target.contains('@') {
+            return Err(ViolationAction::Block);
+        }
+        return Ok(Some(target.to_string()));
+    }
+
+    Err(ViolationAction::Block)
+}
+
+fn absolute_form_authority(target: &str) -> Result<Option<&str>, ViolationAction> {
+    let Some((scheme, rest)) = target.split_once("://") else {
+        return Ok(None);
+    };
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return Err(ViolationAction::Block);
+    }
+
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if authority.is_empty() || authority.contains('@') {
+        return Err(ViolationAction::Block);
+    }
+    Ok(Some(authority))
 }
 
 fn redacted_request_path(target: &str) -> String {
@@ -2138,6 +2195,11 @@ pub(crate) fn looks_like_http_request_prefix(data: &[u8]) -> bool {
         return true;
     }
 
+    let data = skip_leading_empty_http_lines(data);
+    if data.is_empty() {
+        return true;
+    }
+
     let method_end = data.iter().position(|b| *b == b' ');
     let method = match method_end {
         Some(end) => &data[..end],
@@ -2148,11 +2210,19 @@ pub(crate) fn looks_like_http_request_prefix(data: &[u8]) -> bool {
 }
 
 pub(crate) fn first_line_is_not_http_request(data: &[u8]) -> bool {
+    let data = skip_leading_empty_http_lines(data);
     let Some(line_end) = data.windows(2).position(|window| window == b"\r\n") else {
         return false;
     };
     let line = String::from_utf8_lossy(&data[..line_end]);
     http_request_version(line.as_ref()).is_none()
+}
+
+fn skip_leading_empty_http_lines(mut data: &[u8]) -> &[u8] {
+    while data.starts_with(b"\r\n") {
+        data = &data[2..];
+    }
+    data
 }
 
 fn is_http_token_byte(byte: u8) -> bool {
@@ -2393,7 +2463,13 @@ fn next_state_after_headers(
 ) -> Result<RequestFraming, ViolationAction> {
     let body_in_chunk = body_bytes.len();
     let body_substitution_allowed = !has_non_identity_content_encoding(headers);
-    if is_transfer_chunked(headers) {
+    let transfer_encoding = parse_transfer_encoding(headers)?;
+    let content_length = parse_content_length(headers)?;
+    if transfer_encoding.is_some() && content_length.is_some() {
+        return Err(ViolationAction::Block);
+    }
+
+    if transfer_encoding == Some(TransferEncoding::Chunked) {
         let mut chunked_state = ChunkedBodyState::default();
         let (state, body_in_request) = match consume_chunked_body(&mut chunked_state, body_bytes)? {
             Some(end) => (HttpState::AwaitingHeaders, end),
@@ -2410,7 +2486,7 @@ fn next_state_after_headers(
             body_substitution_allowed: false,
         });
     }
-    match parse_content_length(headers)? {
+    match content_length {
         Some(cl) if body_in_chunk >= cl => Ok(RequestFraming {
             state: HttpState::AwaitingHeaders,
             body_in_request: cl,
@@ -2460,24 +2536,33 @@ fn content_length_exceeds_buffer_limit(headers: &str) -> Result<bool, ViolationA
     Ok(parse_content_length(headers)?.is_some_and(|len| len > MAX_HTTP_BODY_BUFFER_BYTES))
 }
 
-/// True if the headers contain `Transfer-Encoding: chunked` (case-insensitive,
-/// last value in the comma-list per RFC 7230).
-fn is_transfer_chunked(headers: &str) -> bool {
+/// Parse `Transfer-Encoding` for encodings the body rewriter can safely handle.
+fn parse_transfer_encoding(headers: &str) -> Result<Option<TransferEncoding>, ViolationAction> {
+    let mut saw_chunked = false;
     for line in headers.split("\r\n") {
         let Some((name, value)) = line.split_once(':') else {
             continue;
         };
-        if name.eq_ignore_ascii_case("transfer-encoding")
-            && value
-                .split(',')
-                .next_back()
-                .map(|s| s.trim().eq_ignore_ascii_case("chunked"))
-                .unwrap_or(false)
-        {
-            return true;
+        if !name.eq_ignore_ascii_case("transfer-encoding") {
+            continue;
+        }
+
+        for coding in value.split(',') {
+            let coding = coding.trim();
+            let coding_name = coding
+                .split_once(';')
+                .map_or(coding, |(name, _)| name)
+                .trim();
+            if coding_name.is_empty() || !coding_name.eq_ignore_ascii_case("chunked") {
+                return Err(ViolationAction::Block);
+            }
+            if saw_chunked {
+                return Err(ViolationAction::Block);
+            }
+            saw_chunked = true;
         }
     }
-    false
+    Ok(saw_chunked.then_some(TransferEncoding::Chunked))
 }
 
 /// True when the request body is encoded and cannot be rewritten byte-for-byte.
@@ -3642,6 +3727,36 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_transfer_encoding_chain_is_blocked() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.injection.body = true;
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let input = b"POST / HTTP/1.1\r\nHost: api.openai.com\r\nTransfer-Encoding: gzip, chunked\r\n\r\n4\r\n$KEY\r\n0\r\n\r\n";
+
+        assert_eq!(
+            handler.substitute(input).unwrap_err(),
+            ViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn transfer_encoding_with_content_length_is_blocked() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.injection.body = true;
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let input = b"POST / HTTP/1.1\r\nHost: api.openai.com\r\nTransfer-Encoding: chunked\r\nContent-Length: 4\r\n\r\n4\r\n$KEY\r\n0\r\n\r\n";
+
+        assert_eq!(
+            handler.substitute(input).unwrap_err(),
+            ViolationAction::Block
+        );
+    }
+
+    #[test]
     fn split_chunked_body_payload_blocks_for_wrong_host() {
         let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
         let mut handler = SecretsHandler::new(&config, "evil.com", true);
@@ -4596,6 +4711,114 @@ mod tests {
             handler
                 .substitute(b"GET / HTTP/1.1\r\nHost: evil.com\r\nAuth: $KEY\r\n\r\n")
                 .unwrap_err(),
+            ViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn tls_intercepted_http_host_validation_blocks_leading_empty_request() {
+        let ip = Ipv4Addr::new(203, 0, 113, 34);
+        let shared = SharedState::new(16);
+        cache_host(&shared, "api.openai.com", ip);
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+
+        let input = b"\r\nGET / HTTP/1.1\r\nHost: evil.com\r\nAuth: $KEY\r\n\r\n";
+
+        assert_eq!(
+            handler.substitute(input).unwrap_err(),
+            ViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn tls_intercepted_http_host_validation_buffers_split_leading_empty_request() {
+        let ip = Ipv4Addr::new(203, 0, 113, 35);
+        let shared = SharedState::new(16);
+        cache_host(&shared, "api.openai.com", ip);
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+
+        let out1 = handler
+            .substitute(b"\r\nGET / HTTP/1.1\r\nHost: evil.com\r\n")
+            .unwrap();
+        assert!(out1.is_empty());
+        assert_eq!(
+            handler.substitute(b"Auth: $KEY\r\n\r\n").unwrap_err(),
+            ViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn tls_intercepted_http_blocks_malformed_request_line() {
+        let ip = Ipv4Addr::new(203, 0, 113, 36);
+        let shared = SharedState::new(16);
+        cache_host(&shared, "api.openai.com", ip);
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+
+        let input = b"GET / \r\nHost: api.openai.com\r\nAuth: $KEY\r\n\r\n";
+
+        assert_eq!(
+            handler.substitute(input).unwrap_err(),
+            ViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn tls_intercepted_http_absolute_target_must_match_sni() {
+        let ip = Ipv4Addr::new(203, 0, 113, 37);
+        let shared = SharedState::new(16);
+        cache_host(&shared, "api.openai.com", ip);
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+
+        let input =
+            b"GET https://evil.com/path HTTP/1.1\r\nHost: api.openai.com\r\nAuth: $KEY\r\n\r\n";
+
+        assert_eq!(
+            handler.substitute(input).unwrap_err(),
+            ViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn tls_intercepted_http_absolute_target_allows_matching_sni() {
+        let ip = Ipv4Addr::new(203, 0, 113, 38);
+        let shared = SharedState::new(16);
+        cache_host(&shared, "api.openai.com", ip);
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+
+        let input = b"GET https://api.openai.com/path HTTP/1.1\r\nHost: api.openai.com\r\nAuth: $KEY\r\n\r\n";
+        let output = handler.substitute(input).unwrap();
+
+        assert!(
+            String::from_utf8(output.into_owned())
+                .unwrap()
+                .contains("real-secret")
+        );
+    }
+
+    #[test]
+    fn tls_intercepted_http_duplicate_host_is_blocked() {
+        let ip = Ipv4Addr::new(203, 0, 113, 39);
+        let shared = SharedState::new(16);
+        cache_host(&shared, "api.openai.com", ip);
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+
+        let input =
+            b"GET / HTTP/1.1\r\nHost: api.openai.com\r\nHost: api.openai.com\r\nAuth: $KEY\r\n\r\n";
+
+        assert_eq!(
+            handler.substitute(input).unwrap_err(),
             ViolationAction::Block
         );
     }

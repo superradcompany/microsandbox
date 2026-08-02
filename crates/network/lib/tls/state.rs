@@ -44,6 +44,45 @@ pub struct TlsState {
     bypass_patterns: Vec<DomainPattern>,
 }
 
+/// Errors that prevent TLS interception state from being initialized safely.
+#[derive(Debug, thiserror::Error)]
+pub enum TlsStateError {
+    /// Exactly one of the intercept CA certificate/key paths was configured.
+    #[error("intercept CA config is incomplete; set both cert_path and key_path")]
+    IncompleteInterceptCaConfig,
+
+    /// The configured intercept CA certificate could not be read.
+    #[error("failed to read intercept CA certificate `{path}`: {source}")]
+    ReadInterceptCaCert {
+        /// Certificate path that failed to read.
+        path: PathBuf,
+        /// Underlying I/O error.
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// The configured intercept CA private key could not be read.
+    #[error("failed to read intercept CA key `{path}`: {source}")]
+    ReadInterceptCaKey {
+        /// Private-key path that failed to read.
+        path: PathBuf,
+        /// Underlying I/O error.
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// The configured intercept CA files were readable but did not form a usable CA.
+    #[error("failed to load intercept CA `{cert_path}` / `{key_path}`: {reason}")]
+    InvalidInterceptCa {
+        /// Certificate path that was loaded.
+        cert_path: PathBuf,
+        /// Private-key path that was loaded.
+        key_path: PathBuf,
+        /// Validation or parsing failure from the CA loader.
+        reason: String,
+    },
+}
+
 /// A pre-processed domain pattern (avoids per-connection allocations).
 enum DomainPattern {
     /// Exact domain match (lowercased).
@@ -96,8 +135,8 @@ impl TlsState {
     /// 1. User-provided paths (`config.intercept_ca.cert_path` + `config.intercept_ca.key_path`)
     /// 2. Microsandbox home TLS path (`$MSB_HOME/tls` or `~/.microsandbox/tls`)
     /// 3. Auto-generate and persist to the microsandbox home TLS path
-    pub fn new(config: TlsConfig, secrets: SecretsHandle) -> Self {
-        let ca = load_or_generate_ca(&config);
+    pub fn new(config: TlsConfig, secrets: SecretsHandle) -> Result<Self, TlsStateError> {
+        let ca = load_or_generate_ca(&config)?;
 
         let capacity =
             NonZeroUsize::new(config.cache.capacity).unwrap_or(NonZeroUsize::new(1000).unwrap());
@@ -113,7 +152,7 @@ impl TlsState {
             .map(|pattern| DomainPattern::new(pattern))
             .collect();
 
-        Self {
+        Ok(Self {
             intercept_ca: ca,
             cert_cache,
             connector,
@@ -121,7 +160,7 @@ impl TlsState {
             config,
             secrets,
             bypass_patterns,
-        }
+        })
     }
 
     /// Get or generate a certificate for the given domain.
@@ -388,40 +427,36 @@ fn normalize_domain(domain: &str) -> String {
 /// 1. User-provided paths (`cert_path` + `key_path`)
 /// 2. Microsandbox home TLS path (`$MSB_HOME/tls` or `~/.microsandbox/tls`)
 /// 3. Auto-generate and persist to the microsandbox home TLS path
-fn load_or_generate_ca(config: &TlsConfig) -> CertAuthority {
-    // Warn if only one of cert_path/key_path is set (likely a config error).
-    if config.intercept_ca.cert_path.is_some() != config.intercept_ca.key_path.is_some() {
-        tracing::warn!(
-            "incomplete CA config: both cert_path and key_path must be set together, ignoring"
-        );
-    }
-
-    // 1. Try user-provided paths.
-    if let (Some(cert_path), Some(key_path)) = (
+fn load_or_generate_ca(config: &TlsConfig) -> Result<CertAuthority, TlsStateError> {
+    match (
         &config.intercept_ca.cert_path,
         &config.intercept_ca.key_path,
     ) {
-        match (std::fs::read(cert_path), std::fs::read(key_path)) {
-            (Ok(cert_pem), Ok(key_pem)) => match CertAuthority::load(&cert_pem, &key_pem) {
-                Ok(ca) => {
-                    tracing::info!("loaded user-provided CA from {:?}", cert_path);
-                    return ca;
+        (Some(cert_path), Some(key_path)) => {
+            let cert_pem =
+                std::fs::read(cert_path).map_err(|source| TlsStateError::ReadInterceptCaCert {
+                    path: cert_path.clone(),
+                    source,
+                })?;
+            let key_pem =
+                std::fs::read(key_path).map_err(|source| TlsStateError::ReadInterceptCaKey {
+                    path: key_path.clone(),
+                    source,
+                })?;
+            let ca = CertAuthority::load(&cert_pem, &key_pem).map_err(|err| {
+                TlsStateError::InvalidInterceptCa {
+                    cert_path: cert_path.clone(),
+                    key_path: key_path.clone(),
+                    reason: err.to_string(),
                 }
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        "failed to load user-provided CA, falling back to auto-generate"
-                    );
-                }
-            },
-            _ => {
-                tracing::error!(
-                    "failed to read CA files from {:?} / {:?}, falling back to auto-generate",
-                    cert_path,
-                    key_path,
-                );
-            }
+            })?;
+            tracing::info!("loaded user-provided CA from {:?}", cert_path);
+            return Ok(ca);
         }
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(TlsStateError::IncompleteInterceptCaConfig);
+        }
+        (None, None) => {}
     }
 
     // 2. Try the same microsandbox home root used by cache/db/logs/metrics.
@@ -435,7 +470,7 @@ fn load_or_generate_ca(config: &TlsConfig) -> CertAuthority {
         && let Ok(ca) = CertAuthority::load(&cert_pem, &key_pem)
     {
         tracing::debug!("loaded persisted CA from {:?}", cert_path);
-        return ca;
+        return Ok(ca);
     }
 
     // 3. Auto-generate and persist.
@@ -452,7 +487,7 @@ fn load_or_generate_ca(config: &TlsConfig) -> CertAuthority {
             tracing::info!("generated and persisted CA to {:?}", default_dir);
         }
     }
-    ca
+    Ok(ca)
 }
 
 /// Default CA persistence directory under the resolved microsandbox home.
@@ -507,7 +542,8 @@ mod tests {
         let state = TlsState::new(
             TlsConfig::default(),
             SecretsHandle::new(SecretsConfig::default()),
-        );
+        )
+        .unwrap();
         let first = state.get_or_generate_cert("openrouter.ai").unwrap();
         let original_expires_at = first.expires_at;
 
@@ -533,7 +569,8 @@ mod tests {
         let state = TlsState::new(
             TlsConfig::default(),
             SecretsHandle::new(SecretsConfig::default()),
-        );
+        )
+        .unwrap();
 
         assert!(state.get_or_generate_cert("snowman.☃").is_err());
         assert!(state.get_or_generate_cert("openrouter.ai").is_ok());
@@ -547,6 +584,44 @@ mod tests {
             default_ca_dir_from_home(&home),
             home.join(microsandbox_utils::TLS_SUBDIR)
         );
+    }
+
+    #[test]
+    fn tls_state_rejects_incomplete_intercept_ca_config() {
+        let mut config = TlsConfig::default();
+        config.intercept_ca.cert_path = Some(PathBuf::from("/tmp/ca.crt"));
+
+        let err = match TlsState::new(config, SecretsHandle::new(SecretsConfig::default())) {
+            Ok(_) => panic!("incomplete CA config should fail"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(err, TlsStateError::IncompleteInterceptCaConfig));
+    }
+
+    #[test]
+    fn tls_state_rejects_invalid_intercept_ca_pair() {
+        let dir = std::env::temp_dir().join(format!(
+            "microsandbox-invalid-intercept-ca-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cert_path = dir.join("ca.crt");
+        let key_path = dir.join("ca.key");
+        std::fs::write(&cert_path, b"not a cert").unwrap();
+        std::fs::write(&key_path, b"not a key").unwrap();
+
+        let mut config = TlsConfig::default();
+        config.intercept_ca.cert_path = Some(cert_path);
+        config.intercept_ca.key_path = Some(key_path);
+
+        let err = match TlsState::new(config, SecretsHandle::new(SecretsConfig::default())) {
+            Ok(_) => panic!("invalid CA config should fail"),
+            Err(err) => err,
+        };
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(matches!(err, TlsStateError::InvalidInterceptCa { .. }));
     }
 
     #[test]
@@ -604,7 +679,7 @@ mod tests {
             pattern: "*.internal".to_string(),
             verify: false,
         });
-        let state = TlsState::new(config, SecretsHandle::new(SecretsConfig::default()));
+        let state = TlsState::new(config, SecretsHandle::new(SecretsConfig::default())).unwrap();
 
         assert!(
             state

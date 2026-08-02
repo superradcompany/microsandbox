@@ -2,7 +2,7 @@ use microsandbox::sandbox::{NetworkPolicy, Patch, PullPolicy, SandboxBuilder, Se
 use microsandbox::{LogLevel, RegistryAuth};
 use microsandbox_network::dns::Nameserver;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyByteArray, PyBytes, PyDict, PyList};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -35,6 +35,8 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
     "pull_policy",
     "log_level",
     "registry_auth",
+    "registry_insecure",
+    "registry_ca_certs",
     "volumes",
     "patches",
     "ports",
@@ -349,23 +351,33 @@ pub fn sandbox_builder_from_args(
         builder = builder.log_level(level);
     }
 
-    // Registry auth.
-    if let Some(auth) = kwargs.get_item("registry_auth")? {
-        let auth_dict = as_dict(&auth)?;
-        let auth_dict = &auth_dict;
-        let username: String = auth_dict
-            .get_item("username")?
-            .ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err("registry_auth.username required")
-            })?
-            .extract()?;
-        let password: String = auth_dict
-            .get_item("password")?
-            .ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err("registry_auth.password required")
-            })?
-            .extract()?;
-        builder = builder.registry(|r| r.auth(RegistryAuth::Basic { username, password }));
+    // Registry overrides: auth, plain-HTTP transport, extra CA roots.
+    // `SandboxBuilder::registry` overwrites `insecure` and `ca_certs` on every
+    // call, so all three have to be applied through a single closure.
+    {
+        let auth = parse_registry_auth(kwargs)?;
+        let insecure = match kwargs.get_item("registry_insecure")? {
+            Some(val) if !val.is_none() => val.extract::<bool>().map_err(|_| {
+                pyo3::exceptions::PyTypeError::new_err("registry_insecure must be a bool")
+            })?,
+            _ => false,
+        };
+        let ca_certs = parse_registry_ca_certs(kwargs)?;
+
+        if auth.is_some() || insecure || !ca_certs.is_empty() {
+            builder = builder.registry(|mut r| {
+                if let Some(auth) = auth {
+                    r = r.auth(auth);
+                }
+                if insecure {
+                    r = r.insecure();
+                }
+                for pem in ca_certs {
+                    r = r.ca_certs(pem);
+                }
+                r
+            });
+        }
     }
 
     // Volumes.
@@ -1356,6 +1368,62 @@ fn as_dict<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
         "expected dict or object with _to_dict(), got {}",
         obj.get_type().name()?
     )))
+}
+
+/// Parse the `registry_auth` kwarg into a `RegistryAuth`.
+fn parse_registry_auth(kwargs: &Bound<'_, PyDict>) -> PyResult<Option<RegistryAuth>> {
+    let Some(auth) = kwargs.get_item("registry_auth")? else {
+        return Ok(None);
+    };
+    let auth_dict = as_dict(&auth)?;
+    let auth_dict = &auth_dict;
+    let username: String = auth_dict
+        .get_item("username")?
+        .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("registry_auth.username required"))?
+        .extract()?;
+    let password: String = auth_dict
+        .get_item("password")?
+        .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("registry_auth.password required"))?
+        .extract()?;
+    Ok(Some(RegistryAuth::Basic { username, password }))
+}
+
+/// Parse the `registry_ca_certs` kwarg into PEM blobs. Every entry is either
+/// the PEM data itself (`bytes` / `bytearray`) or the path of a PEM file
+/// (`str` / `os.PathLike`), which is read eagerly so a bad path fails at
+/// `create()` time rather than mid-pull.
+fn parse_registry_ca_certs(kwargs: &Bound<'_, PyDict>) -> PyResult<Vec<Vec<u8>>> {
+    let Some(obj) = kwargs.get_item("registry_ca_certs")? else {
+        return Ok(Vec::new());
+    };
+    if obj.is_none() {
+        return Ok(Vec::new());
+    }
+
+    let entries: &Bound<'_, PyList> = obj.downcast()?;
+    let mut certs = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.iter().enumerate() {
+        // Check for bytes first: `os.fspath` also accepts bytes paths, so
+        // probing for a path up front would read inline PEM data as a filename.
+        if let Ok(data) = entry.downcast::<PyBytes>() {
+            certs.push(data.as_bytes().to_vec());
+        } else if let Ok(data) = entry.downcast::<PyByteArray>() {
+            certs.push(data.to_vec());
+        } else if let Ok(path) = entry.extract::<std::path::PathBuf>() {
+            let data = std::fs::read(&path).map_err(|e| {
+                pyo3::exceptions::PyOSError::new_err(format!(
+                    "failed to read registry_ca_certs entry `{}`: {e}",
+                    path.display()
+                ))
+            })?;
+            certs.push(data);
+        } else {
+            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "registry_ca_certs[{index}] must be PEM bytes or a path to a PEM file"
+            )));
+        }
+    }
+    Ok(certs)
 }
 
 fn parse_scoped_upstream_ca_certs(

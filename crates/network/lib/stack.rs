@@ -88,6 +88,13 @@ pub enum FrameAction {
     Passthrough,
 }
 
+/// Local ICMP echo reply plus the destination policy input it answers.
+struct GatewayIcmpReply {
+    dst: IpAddr,
+    protocol: Protocol,
+    frame: Vec<u8>,
+}
+
 /// Resolved network parameters for the poll loop. Created by
 /// `SmoltcpNetwork::new()` from `NetworkConfig` + sandbox slot.
 pub struct PollLoopConfig {
@@ -321,7 +328,7 @@ pub fn smoltcp_poll_loop(
 
         // ── Phase 1: Drain all guest frames with pre-inspection ──────────
         while let Some(frame) = device.stage_next_frame() {
-            if handle_gateway_icmp_echo(frame, &config, &shared) {
+            if handle_gateway_icmp_echo(frame, &config, &shared, &network_policy) {
                 device.drop_staged_frame();
                 continue;
             }
@@ -797,7 +804,12 @@ fn smoltcp_now() -> Instant {
 /// destinations, but that would make smoltcp's automatic ICMP echo replies
 /// spoof remote hosts. Handle only the real gateway IPs here and leave all
 /// other ICMP traffic untouched.
-fn handle_gateway_icmp_echo(frame: &[u8], config: &PollLoopConfig, shared: &SharedState) -> bool {
+fn handle_gateway_icmp_echo(
+    frame: &[u8],
+    config: &PollLoopConfig,
+    shared: &SharedState,
+    network_policy: &NetworkPolicy,
+) -> bool {
     let Ok(eth) = EthernetFrame::new_checked(frame) else {
         return false;
     };
@@ -811,7 +823,15 @@ fn handle_gateway_icmp_echo(frame: &[u8], config: &PollLoopConfig, shared: &Shar
         return false;
     };
 
-    shared.push_rx_frame_and_wake(reply);
+    if network_policy
+        .evaluate_egress_ip(reply.dst, reply.protocol, shared)
+        .is_deny()
+    {
+        tracing::debug!(dst = %reply.dst, "gateway ICMP echo denied by policy");
+        return true;
+    }
+
+    shared.push_rx_frame_and_wake(reply.frame);
 
     true
 }
@@ -820,7 +840,7 @@ fn handle_gateway_icmp_echo(frame: &[u8], config: &PollLoopConfig, shared: &Shar
 fn gateway_icmpv4_echo_reply(
     eth: &EthernetFrame<&[u8]>,
     config: &PollLoopConfig,
-) -> Option<Vec<u8>> {
+) -> Option<GatewayIcmpReply> {
     let gateway_ipv4 = config.gateway.ipv4?;
     let ipv4 = Ipv4Packet::new_checked(eth.payload()).ok()?;
     if ipv4.dst_addr() != gateway_ipv4 || ipv4.next_header() != IpProtocol::Icmp {
@@ -865,14 +885,18 @@ fn gateway_icmpv4_echo_reply(
         &smoltcp::phy::ChecksumCapabilities::default(),
     );
 
-    Some(reply)
+    Some(GatewayIcmpReply {
+        dst: IpAddr::V4(gateway_ipv4),
+        protocol: Protocol::Icmpv4,
+        frame: reply,
+    })
 }
 
 /// Build an IPv6 ICMP echo reply when the guest pings the gateway IPv6.
 fn gateway_icmpv6_echo_reply(
     eth: &EthernetFrame<&[u8]>,
     config: &PollLoopConfig,
-) -> Option<Vec<u8>> {
+) -> Option<GatewayIcmpReply> {
     let gateway_ipv6 = config.gateway.ipv6?;
     let ipv6 = Ipv6Packet::new_checked(eth.payload()).ok()?;
     if ipv6.dst_addr() != gateway_ipv6 || ipv6.next_header() != IpProtocol::Icmpv6 {
@@ -923,7 +947,11 @@ fn gateway_icmpv6_echo_reply(
         &smoltcp::phy::ChecksumCapabilities::default(),
     );
 
-    Some(reply)
+    Some(GatewayIcmpReply {
+        dst: IpAddr::V6(gateway_ipv6),
+        protocol: Protocol::Icmpv6,
+        frame: reply,
+    })
 }
 
 fn icmp_repr_buffer_len_v6(data: &[u8]) -> usize {
@@ -1288,7 +1316,7 @@ mod tests {
             now: Instant,
         ) {
             let frame = device.stage_next_frame().expect("expected staged frame");
-            if handle_gateway_icmp_echo(frame, poll_config, shared) {
+            if handle_gateway_icmp_echo(frame, poll_config, shared, &NetworkPolicy::allow_all()) {
                 device.drop_staged_frame();
                 return;
             }
@@ -1381,6 +1409,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn gateway_icmp_echo_respects_deny_policy() {
+        let shared = SharedState::new(4);
+        let poll_config = PollLoopConfig {
+            gateway_mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
+            guest_mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x02],
+            gateway: GatewayIps {
+                ipv4: Some(Ipv4Addr::new(100, 96, 0, 1)),
+                ipv6: None,
+            },
+            guest_ipv4: Some(Ipv4Addr::new(100, 96, 0, 2)),
+            guest_ipv6: None,
+            mtu: 1500,
+        };
+        let policy = NetworkPolicy::builder().default_deny().build().unwrap();
+        let frame = build_icmpv4_echo_frame(
+            poll_config.guest_mac,
+            poll_config.gateway_mac,
+            poll_config.guest_ipv4.unwrap().octets(),
+            poll_config.gateway.ipv4.unwrap().octets(),
+            0x1234,
+            0xABCD,
+            b"ping",
+        );
+
+        assert!(handle_gateway_icmp_echo(
+            &frame,
+            &poll_config,
+            &shared,
+            &policy
+        ));
+        assert!(
+            shared.rx_ring.pop().is_none(),
+            "denied gateway ICMP should not queue a reply"
+        );
+    }
+
     fn test_gateway() -> GatewayIps {
         GatewayIps {
             ipv4: Some(Ipv4Addr::new(100, 96, 0, 1)),
@@ -1437,7 +1502,7 @@ mod tests {
             now: Instant,
         ) {
             let frame = device.stage_next_frame().expect("expected staged frame");
-            if handle_gateway_icmp_echo(frame, poll_config, shared) {
+            if handle_gateway_icmp_echo(frame, poll_config, shared, &NetworkPolicy::allow_all()) {
                 device.drop_staged_frame();
                 return;
             }

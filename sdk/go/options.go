@@ -56,13 +56,21 @@ type SandboxConfig struct {
 	MaxDuration        time.Duration
 	IdleTimeout        time.Duration
 	RegistryAuth       *RegistryAuth
-	Ports              map[uint16]uint16 // host port → guest port (TCP)
-	PortsUDP           map[uint16]uint16 // host port → guest port (UDP)
-	PortBindings       []PortBinding     // explicit bind address host→guest ports
-	Network            *NetworkConfig
-	Secrets            []SecretEntry
-	Patches            []PatchConfig
-	Volumes            map[string]MountConfig // guest path → mount config
+	// RegistryInsecure pulls the image over plain HTTP instead of HTTPS.
+	RegistryInsecure bool
+	// RegistryCACerts holds PEM-encoded CA root certificates trusted when
+	// pulling the image.
+	RegistryCACerts [][]byte
+	// RegistryCACertPaths holds paths to PEM files whose contents are read
+	// and appended to RegistryCACerts by CreateSandbox.
+	RegistryCACertPaths []string
+	Ports               map[uint16]uint16 // host port → guest port (TCP)
+	PortsUDP            map[uint16]uint16 // host port → guest port (UDP)
+	PortBindings        []PortBinding     // explicit bind address host→guest ports
+	Network             *NetworkConfig
+	Secrets             []SecretEntry
+	Patches             []PatchConfig
+	Volumes             map[string]MountConfig // guest path → mount config
 }
 
 // SandboxOption is a functional option for configuring a sandbox.
@@ -682,6 +690,32 @@ func WithRegistryAuth(auth RegistryAuth) SandboxOption {
 	return func(o *SandboxConfig) {
 		a := auth
 		o.RegistryAuth = &a
+	}
+}
+
+// WithRegistryInsecure pulls the image over plain HTTP instead of HTTPS, for
+// local registries served without TLS (e.g. "localhost:5050/my-app:latest").
+// The cloud backend rejects this override.
+func WithRegistryInsecure() SandboxOption {
+	return func(o *SandboxConfig) { o.RegistryInsecure = true }
+}
+
+// WithRegistryCACerts trusts a PEM-encoded CA bundle when pulling the image,
+// for registries served with a private certificate authority. Called
+// repeatedly, the bundles accumulate. The cloud backend rejects this override.
+func WithRegistryCACerts(pem []byte) SandboxOption {
+	return func(o *SandboxConfig) {
+		o.RegistryCACerts = append(o.RegistryCACerts, append([]byte(nil), pem...))
+	}
+}
+
+// WithRegistryCACertsPath is WithRegistryCACerts with the PEM bundle read from
+// a file. The file is read by CreateSandbox, which fails if it is unreadable.
+// Called repeatedly, the bundles accumulate. The cloud backend rejects this
+// override.
+func WithRegistryCACertsPath(path string) SandboxOption {
+	return func(o *SandboxConfig) {
+		o.RegistryCACertPaths = append(o.RegistryCACertPaths, path)
 	}
 }
 

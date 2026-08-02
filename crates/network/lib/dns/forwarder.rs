@@ -31,8 +31,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures::StreamExt;
-use hickory_net::proto::op::{DnsRequest, Message, ResponseCode};
-use hickory_net::proto::rr::rdata::{A, AAAA};
+use hickory_net::proto::op::{DnsRequest, Message, Query, ResponseCode};
+use hickory_net::proto::rr::rdata::{A, AAAA, CNAME};
 use hickory_net::proto::rr::{RData, Record, RecordType};
 use hickory_net::proto::serialize::binary::{BinDecodable, BinEncodable};
 use hickory_net::xfer::DnsHandle;
@@ -82,16 +82,13 @@ pub(crate) type DnsForwarderHandle = watch::Receiver<Option<Arc<DnsForwarder>>>;
 /// network policy, and normalized DNS config. Cheaply cloneable via
 /// `Arc`.
 pub(crate) struct DnsForwarder {
-    /// Configured UDP upstream (operator-set nameserver or the host's
-    /// resolver). Used when the guest queried the gateway IP.
-    configured_udp: Client,
-    /// Lazy configured TCP upstream. Built on first TCP query aimed at
-    /// the gateway; many sandboxes never use TCP DNS at all, so we
-    /// don't pay the handshake cost up front.
-    configured_tcp: OnceCell<Client>,
-    /// SocketAddr of the configured upstream — needed to build
-    /// `configured_tcp` on demand and for diagnostic logging.
-    configured_upstream: SocketAddr,
+    /// Configured upstreams (operator-set nameservers or the host's
+    /// resolvers), in the order they were configured or discovered.
+    /// Used when the guest queried the gateway IP, and tried in order
+    /// so a timeout or transport failure falls over to the next one.
+    /// The guest only ever knows the gateway as its nameserver, so if
+    /// the forwarder does not try the rest, nothing else will.
+    configured: Vec<ConfiguredUpstream>,
     /// Set of gateway IPs (v4 + v6). Queries to these IPs go through
     /// the configured upstream; queries to other IPs go through the
     /// direct path subject to network egress policy.
@@ -111,11 +108,33 @@ pub(crate) struct DnsForwarder {
     config: Arc<NormalizedDnsConfig>,
 }
 
-/// Outcome of upstream selection. The query may be forwarded through a
-/// [`Client`], synthesized as NXDOMAIN (policy denied the resolver IP),
-/// or synthesized as SERVFAIL (couldn't reach upstream).
+/// One configured upstream and its per-transport clients.
+struct ConfiguredUpstream {
+    /// SocketAddr of this upstream — needed to build `tcp` on demand
+    /// and for diagnostic logging.
+    addr: SocketAddr,
+    /// UDP client, connected at startup. Cheap to build for every
+    /// upstream: since hickory 0.26 the constructor only wraps a
+    /// request sender, so socket errors surface per-query instead.
+    udp: Client,
+    /// Lazy TCP client. Built on first TCP query that reaches this
+    /// upstream; many sandboxes never use TCP DNS at all, so we don't
+    /// pay the handshake cost up front.
+    tcp: OnceCell<Client>,
+}
+
+/// Outcome of upstream selection. The query may be forwarded through
+/// the configured upstreams or one guest-chosen resolver, synthesized
+/// as NXDOMAIN (policy denied the resolver IP), or synthesized as
+/// SERVFAIL (couldn't reach upstream).
 enum UpstreamChoice {
-    Client(Client),
+    /// Walk the configured upstreams in order, falling over on timeout
+    /// or transport failure.
+    Configured,
+    /// Forward to the single resolver the guest aimed at. Not subject
+    /// to failover: substituting a different server would silently
+    /// redirect a query the guest addressed deliberately.
+    Direct(Client),
     PolicyDenied,
     ServFail,
 }
@@ -154,7 +173,10 @@ impl DnsForwarder {
         let query_msg = Message::from_bytes(raw_query).ok()?;
         let guest_id = query_msg.metadata.id;
 
-        let question = query_msg.queries.first()?;
+        let question = match single_question(&query_msg) {
+            Ok(question) => question,
+            Err(rcode) => return build_status_response(&query_msg, rcode),
+        };
         let query_type = question.query_type();
         let domain = question.name().to_string();
         let domain = domain.trim_end_matches('.').to_owned();
@@ -192,10 +214,12 @@ impl DnsForwarder {
             return Some(response);
         }
 
-        // Pick upstream client based on where the guest aimed and the
-        // network policy.
-        let client = match self.select_upstream(original_dst, transport, sni).await {
-            UpstreamChoice::Client(c) => c,
+        // Pick upstream based on where the guest aimed and the network
+        // policy, then forward. On the configured path, walk the
+        // upstreams in order so a timeout or transport failure falls
+        // over to the next one; the guest was handed the gateway as its
+        // only nameserver, so it cannot retry elsewhere itself.
+        let response = match self.select_upstream(original_dst, transport, sni).await {
             UpstreamChoice::PolicyDenied => {
                 tracing::debug!(
                     domain = %domain,
@@ -204,27 +228,16 @@ impl DnsForwarder {
                 );
                 return build_status_response(&query_msg, ResponseCode::NXDomain);
             }
-            UpstreamChoice::ServFail => {
-                return build_status_response(&query_msg, ResponseCode::ServFail);
+            UpstreamChoice::ServFail => None,
+            UpstreamChoice::Direct(client) => self.send_query(&client, &query_msg, &domain).await,
+            UpstreamChoice::Configured => {
+                self.forward_to_configured(&query_msg, &domain, transport)
+                    .await
             }
         };
-
-        // Forward upstream. hickory's multiplexer assigns its own
-        // transaction id; we rewrite the response id back to the guest's
-        // below.
-        let mut send = client.send(DnsRequest::from(query_msg.clone()));
-        let response = match send.next().await {
-            Some(Ok(resp)) => resp,
-            Some(Err(e)) => {
-                tracing::warn!(domain = %domain, error = %e, "upstream DNS send failed");
-                return build_status_response(&query_msg, ResponseCode::ServFail);
-            }
-            None => {
-                tracing::warn!(domain = %domain, "upstream DNS closed stream without a response");
-                return build_status_response(&query_msg, ResponseCode::ServFail);
-            }
+        let Some(mut response_msg) = response else {
+            return build_status_response(&query_msg, ResponseCode::ServFail);
         };
-        let mut response_msg: Message = response.into();
 
         // Rebind protection: reject responses containing private/reserved IPs.
         if self.config.rebind_protection {
@@ -256,7 +269,7 @@ impl DnsForwarder {
         // `DomainSuffix` rules can later match when the guest connects
         // to one of them.
         if let Some(family) = family_for_query_type(query_type) {
-            if let Some((addrs, ttl)) = extract_addrs_and_ttl(&response_msg, family) {
+            if let Some((addrs, ttl)) = extract_addrs_and_ttl(&response_msg, family, &domain) {
                 self.shared
                     .cache_resolved_hostname(&domain, family, addrs, ttl);
             } else {
@@ -306,38 +319,103 @@ impl DnsForwarder {
             original_dst,
             transport,
         ) {
-            UpstreamDecision::Configured => self.configured_client(transport).await,
+            UpstreamDecision::Configured => UpstreamChoice::Configured,
             UpstreamDecision::PolicyDenied => UpstreamChoice::PolicyDenied,
             UpstreamDecision::Direct(addr) => {
                 match build_direct_client(addr, transport, sni, self.config.query_timeout).await {
-                    Some(client) => UpstreamChoice::Client(client),
+                    Some(client) => UpstreamChoice::Direct(client),
                     None => UpstreamChoice::ServFail,
                 }
             }
         }
     }
 
-    /// Get the configured upstream client for `transport`. UDP is
-    /// shared (pre-connected at startup); TCP is built on first use
-    /// and cached. DoT guests reuse the TCP client — the configured
-    /// upstream is typically on the host's loopback or internal
-    /// network and serves plain DNS, so re-TLSing there is overkill.
-    async fn configured_client(&self, transport: Transport) -> UpstreamChoice {
+    /// Forward a query to the configured upstreams, in order, stopping
+    /// at the first that answers. Falls over on per-query timeout or
+    /// transport failure, which is the whole point: the guest holds the
+    /// gateway as its only nameserver and cannot try the rest itself.
+    /// `None` when every upstream is unusable.
+    async fn forward_to_configured(
+        &self,
+        query_msg: &Message,
+        domain: &str,
+        transport: Transport,
+    ) -> Option<Message> {
+        let total = self.configured.len();
+        for (index, upstream) in self.configured.iter().enumerate() {
+            let Some(client) = self.client_for(upstream, transport).await else {
+                continue;
+            };
+            if let Some(response) = self.send_query(&client, query_msg, domain).await {
+                return Some(response);
+            }
+            if index + 1 < total {
+                tracing::debug!(
+                    domain = %domain,
+                    upstream = %upstream.addr,
+                    "upstream DNS unusable, trying next configured nameserver",
+                );
+            }
+        }
+        None
+    }
+
+    /// Send one query to one upstream. `None` means this upstream did
+    /// not produce a usable answer, which is what makes the caller fall
+    /// over to the next one: a per-query timeout and a transport error
+    /// both arrive as `Some(Err)`, and a closed stream as `None`.
+    ///
+    /// A response that *arrives* is returned as-is even when it carries
+    /// SERVFAIL or REFUSED. That is an answer from a working resolver,
+    /// not an unusable server, and re-asking the next one would change
+    /// what the sandbox resolves rather than just repairing reachability.
+    async fn send_query(
+        &self,
+        client: &Client,
+        query_msg: &Message,
+        domain: &str,
+    ) -> Option<Message> {
+        let mut send = client.send(DnsRequest::from(query_msg.clone()));
+        match send.next().await {
+            Some(Ok(resp)) => Some(resp.into()),
+            Some(Err(e)) => {
+                tracing::warn!(domain = %domain, error = %e, "upstream DNS send failed");
+                None
+            }
+            None => {
+                tracing::warn!(domain = %domain, "upstream DNS closed stream without a response");
+                None
+            }
+        }
+    }
+
+    /// Get the client for one configured upstream on `transport`. UDP
+    /// is shared (pre-connected at startup); TCP is built on first use
+    /// and cached per upstream. DoT guests reuse the TCP client — the
+    /// configured upstream is typically on the host's loopback or
+    /// internal network and serves plain DNS, so re-TLSing there is
+    /// overkill.
+    ///
+    /// Called per upstream as the query walks the list, so an upstream
+    /// that is never reached never pays for a TCP handshake.
+    async fn client_for(
+        &self,
+        upstream: &ConfiguredUpstream,
+        transport: Transport,
+    ) -> Option<Client> {
         match transport {
-            Transport::Udp => UpstreamChoice::Client(self.configured_udp.clone()),
+            Transport::Udp => Some(upstream.udp.clone()),
             Transport::Tcp | Transport::Dot => {
                 let timeout = self.config.query_timeout;
-                let upstream = self.configured_upstream;
-                let result = self
-                    .configured_tcp
-                    .get_or_try_init(|| async move {
-                        build_tcp_client(upstream, timeout).await.ok_or(())
-                    })
-                    .await;
-                match result {
-                    Ok(c) => UpstreamChoice::Client(c.clone()),
-                    Err(()) => UpstreamChoice::ServFail,
-                }
+                let addr = upstream.addr;
+                upstream
+                    .tcp
+                    .get_or_try_init(
+                        || async move { build_tcp_client(addr, timeout).await.ok_or(()) },
+                    )
+                    .await
+                    .ok()
+                    .cloned()
             }
         }
     }
@@ -410,16 +488,28 @@ impl DnsForwarder {
             }
         };
 
-        // Use the first upstream. If it's unhealthy the guest's stub
-        // will observe SERVFAIL and fall through to its own next
-        // nameserver.
-        let upstream = upstreams[0];
-        let configured_udp = build_udp_client(upstream, config.query_timeout).await?;
+        // Keep every upstream. The guest is handed the gateway as its
+        // only nameserver, so it has nothing to fall through to and the
+        // forwarder has to do the failing over itself.
+        let mut configured = Vec::with_capacity(upstreams.len());
+        for addr in upstreams {
+            let Some(udp) = build_udp_client(addr, config.query_timeout).await else {
+                tracing::warn!(upstream = %addr, "skipping upstream: failed to build UDP client");
+                continue;
+            };
+            configured.push(ConfiguredUpstream {
+                addr,
+                udp,
+                tcp: OnceCell::new(),
+            });
+        }
+        if configured.is_empty() {
+            tracing::error!("no upstream DNS client could be built");
+            return None;
+        }
 
         Some(Arc::new(Self {
-            configured_udp,
-            configured_tcp: OnceCell::new(),
-            configured_upstream: upstream,
+            configured,
             gateway_ips,
             network_policy,
             shared,
@@ -531,6 +621,15 @@ fn build_status_response(query: &Message, rcode: ResponseCode) -> Option<Bytes> 
     response.to_bytes().ok().map(Bytes::from)
 }
 
+/// Return the single DNS question this forwarder is willing to policy-check.
+fn single_question(query: &Message) -> Result<&Query, ResponseCode> {
+    if query.queries.len() == 1 {
+        return Ok(&query.queries[0]);
+    }
+
+    Err(ResponseCode::FormErr)
+}
+
 /// Map a DNS query type to a [`ResolvedHostnameFamily`] for policy caching.
 fn family_for_query_type(query_type: RecordType) -> Option<ResolvedHostnameFamily> {
     match query_type {
@@ -559,23 +658,64 @@ fn inactive_query_family(
 fn extract_addrs_and_ttl(
     response: &Message,
     family: ResolvedHostnameFamily,
+    query_name: &str,
 ) -> Option<(Vec<IpAddr>, Duration)> {
-    let mut addrs = Vec::new();
+    if response.metadata.response_code != ResponseCode::NoError {
+        return None;
+    }
+
+    let mut eligible_names = HashSet::from([normalize_dns_name(query_name)]);
     let mut ttl: Option<Duration> = None;
 
+    // CNAME answers are allowed only when they start from the queried owner.
+    // Iterate to support ordinary alias chains without trusting unrelated RRs.
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for record in &response.answers {
+            let owner = normalize_dns_name(&record.name.to_string());
+            if !eligible_names.contains(&owner) {
+                continue;
+            }
+
+            if let RData::CNAME(CNAME(canonical)) = &record.data {
+                let record_ttl = dns_record_ttl(record.ttl);
+                ttl = Some(ttl.map_or(record_ttl, |current| current.min(record_ttl)));
+                changed |= eligible_names.insert(normalize_dns_name(&canonical.to_string()));
+            }
+        }
+    }
+
+    let mut addrs = Vec::new();
+
     for record in &response.answers {
+        if !eligible_names.contains(&normalize_dns_name(&record.name.to_string())) {
+            continue;
+        }
+
         let addr = match (family, &record.data) {
             (ResolvedHostnameFamily::Ipv4, RData::A(a)) => IpAddr::V4((*a).into()),
             (ResolvedHostnameFamily::Ipv6, RData::AAAA(aaaa)) => IpAddr::V6((*aaaa).into()),
             _ => continue,
         };
         addrs.push(addr);
-        let record_ttl =
-            Duration::from_secs(u64::from(record.ttl.max(RESOLVED_HOSTNAME_MIN_TTL_SECS)));
+        let record_ttl = dns_record_ttl(record.ttl);
         ttl = Some(ttl.map_or(record_ttl, |current| current.min(record_ttl)));
     }
 
-    ttl.map(|ttl| (addrs, ttl))
+    if addrs.is_empty() {
+        None
+    } else {
+        ttl.map(|ttl| (addrs, ttl))
+    }
+}
+
+fn dns_record_ttl(ttl: u32) -> Duration {
+    Duration::from_secs(u64::from(ttl.max(RESOLVED_HOSTNAME_MIN_TTL_SECS)))
+}
+
+fn normalize_dns_name(name: &str) -> String {
+    name.trim_end_matches('.').to_ascii_lowercase()
 }
 
 /// Case-insensitive match against [`crate::HOST_ALIAS`] with trailing-dot tolerance.
@@ -637,6 +777,8 @@ mod tests {
     use crate::policy::{Action, Destination, NetworkProfile, Protocol, Rule};
     use hickory_net::proto::op::{Edns, MessageType, OpCode, Query};
     use hickory_net::proto::rr::{DNSClass, Name, RecordType};
+    use std::net::Ipv4Addr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn make_query(name: &str, qtype: RecordType) -> Message {
         let mut msg = Message::new(0x4242, MessageType::Query, OpCode::Query);
@@ -648,6 +790,209 @@ mod tests {
         q.set_query_class(DNSClass::IN);
         msg.add_query(q);
         msg
+    }
+
+    /// Black-hole UDP server: recv the query, never send a reply, so the
+    /// client hits its per-query timeout. Mirrors `dns::client::tests`.
+    async fn blackhole_udp() -> SocketAddr {
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = sock.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            loop {
+                let _ = sock.recv_from(&mut buf).await;
+            }
+        });
+        addr
+    }
+
+    /// UDP server that answers every query with `answer_ip`, and reports
+    /// how many queries it received so a test can prove an upstream was
+    /// never consulted.
+    async fn responding_udp(answer_ip: Ipv4Addr) -> (SocketAddr, Arc<AtomicUsize>) {
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = sock.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&hits);
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            loop {
+                let Ok((len, from)) = sock.recv_from(&mut buf).await else {
+                    continue;
+                };
+                seen.fetch_add(1, Ordering::SeqCst);
+                let Ok(query) = Message::from_bytes(&buf[..len]) else {
+                    continue;
+                };
+                let mut resp =
+                    Message::new(query.metadata.id, MessageType::Response, OpCode::Query);
+                resp.metadata.recursion_desired = query.metadata.recursion_desired;
+                resp.metadata.recursion_available = true;
+                if let Some(q) = query.queries.first() {
+                    resp.add_query(q.clone());
+                    resp.answers.push(Record::from_rdata(
+                        q.name().clone(),
+                        60,
+                        RData::A(A::from(answer_ip)),
+                    ));
+                }
+                if let Ok(bytes) = resp.to_bytes() {
+                    let _ = sock.send_to(&bytes, from).await;
+                }
+            }
+        });
+        (addr, hits)
+    }
+
+    /// Build a forwarder over `upstreams` with a short query timeout, as
+    /// the gateway path uses it. No microVM or host resolver involved.
+    async fn forwarder_over(upstreams: &[SocketAddr]) -> Arc<DnsForwarder> {
+        let config = Arc::new(NormalizedDnsConfig {
+            rebind_protection: false,
+            nameservers: Vec::new(),
+            query_timeout: Duration::from_millis(300),
+        });
+        let mut configured = Vec::new();
+        for addr in upstreams {
+            configured.push(ConfiguredUpstream {
+                addr: *addr,
+                udp: build_udp_client(*addr, config.query_timeout)
+                    .await
+                    .expect("udp client"),
+                tcp: OnceCell::new(),
+            });
+        }
+        let gateway_ip: IpAddr = "10.0.0.1".parse().unwrap();
+        Arc::new(DnsForwarder {
+            configured,
+            gateway_ips: Arc::new(HashSet::from([gateway_ip])),
+            network_policy: Arc::new(NetworkPolicy::from_profiles([NetworkProfile::Public])),
+            shared: Arc::new(SharedState::new(4)),
+            gateway: GatewayIps {
+                ipv4: Some("10.0.0.1".parse().unwrap()),
+                ipv6: None,
+            },
+            config,
+        })
+    }
+
+    /// Resolve `example.com` through the gateway path and return the
+    /// first A answer, or `None` if the forwarder synthesized a failure.
+    async fn resolve_via_gateway(forwarder: &DnsForwarder) -> Option<Ipv4Addr> {
+        let query = make_query("example.com.", RecordType::A);
+        let raw = query.to_bytes().expect("encode query");
+        let gateway: IpAddr = "10.0.0.1".parse().unwrap();
+        let bytes = forwarder
+            .forward(&raw, Some(gateway), Transport::Udp, None)
+            .await?;
+        let msg = Message::from_bytes(&bytes).expect("parse response");
+        if msg.metadata.response_code != ResponseCode::NoError {
+            return None;
+        }
+        msg.answers.iter().find_map(|r| match &r.data {
+            RData::A(a) => Some(Ipv4Addr::from(*a)),
+            _ => None,
+        })
+    }
+
+    /// The reported bug: only the first upstream was ever tried, so an
+    /// unusable first nameserver made every lookup fail even though a
+    /// later one worked. The guest is handed the gateway as its only
+    /// nameserver, so it cannot try the rest itself.
+    #[tokio::test]
+    async fn configured_upstream_falls_over_to_the_next_on_timeout() {
+        let dead = blackhole_udp().await;
+        let (live, live_hits) = responding_udp(Ipv4Addr::new(93, 184, 216, 34)).await;
+
+        let forwarder = forwarder_over(&[dead, live]).await;
+
+        assert_eq!(
+            resolve_via_gateway(&forwarder).await,
+            Some(Ipv4Addr::new(93, 184, 216, 34)),
+            "a stalled first upstream must fall over to the next one"
+        );
+        assert_eq!(
+            live_hits.load(Ordering::SeqCst),
+            1,
+            "the working upstream should have been queried exactly once"
+        );
+    }
+
+    /// The other half of the reported reproduction: with the order
+    /// reversed the lookup already worked. It must keep working, and a
+    /// query the first upstream answers must not be sent to the rest.
+    ///
+    /// The second upstream answers too (with a different address) rather
+    /// than being a black hole, so this fails if the forwarder fans out.
+    /// With a silent second server the fan-out is invisible: the reply
+    /// never arrives, so the answer and the first server's hit count are
+    /// identical either way.
+    #[tokio::test]
+    async fn first_usable_upstream_answers_without_consulting_the_rest() {
+        let (first, first_hits) = responding_udp(Ipv4Addr::new(198, 51, 100, 7)).await;
+        let (second, second_hits) = responding_udp(Ipv4Addr::new(198, 51, 100, 8)).await;
+
+        let forwarder = forwarder_over(&[first, second]).await;
+
+        assert_eq!(
+            resolve_via_gateway(&forwarder).await,
+            Some(Ipv4Addr::new(198, 51, 100, 7)),
+            "the answer must come from the first upstream"
+        );
+        assert_eq!(
+            first_hits.load(Ordering::SeqCst),
+            1,
+            "a query answered by the first upstream must not be re-sent"
+        );
+        assert_eq!(
+            second_hits.load(Ordering::SeqCst),
+            0,
+            "later upstreams must not be consulted once one answers"
+        );
+    }
+
+    /// Failover walks the whole list, not just one extra server.
+    #[tokio::test]
+    async fn configured_upstreams_fall_over_past_several_dead_servers() {
+        let first = blackhole_udp().await;
+        let second = blackhole_udp().await;
+        let (live, _) = responding_udp(Ipv4Addr::new(203, 0, 113, 5)).await;
+
+        let forwarder = forwarder_over(&[first, second, live]).await;
+
+        assert_eq!(
+            resolve_via_gateway(&forwarder).await,
+            Some(Ipv4Addr::new(203, 0, 113, 5))
+        );
+    }
+
+    /// When every upstream is unusable the guest still gets a definite
+    /// failure rather than a hang.
+    #[tokio::test]
+    async fn all_upstreams_unusable_yields_servfail() {
+        let first = blackhole_udp().await;
+        let second = blackhole_udp().await;
+
+        let forwarder = forwarder_over(&[first, second]).await;
+
+        let query = make_query("example.com.", RecordType::A);
+        let raw = query.to_bytes().expect("encode query");
+        let gateway: IpAddr = "10.0.0.1".parse().unwrap();
+        let bytes = forwarder
+            .forward(&raw, Some(gateway), Transport::Udp, None)
+            .await
+            .expect("a synthesized response");
+        let msg = Message::from_bytes(&bytes).expect("parse response");
+        assert_eq!(msg.metadata.response_code, ResponseCode::ServFail);
+        assert_eq!(msg.metadata.id, 0x4242, "guest transaction id is preserved");
+    }
+
+    fn make_response(query: &Message) -> Message {
+        let mut response = Message::response(query.metadata.id, query.metadata.op_code);
+        response.metadata.response_code = ResponseCode::NoError;
+        response.metadata.recursion_available = true;
+        response.add_query(query.queries[0].clone());
+        response
     }
 
     #[test]
@@ -756,6 +1101,27 @@ mod tests {
         assert_eq!(msg.answers.len(), 0);
     }
 
+    #[test]
+    fn single_question_rejects_multi_question_packets() {
+        let mut query = make_query("example.com.", RecordType::A);
+        let mut extra = Query::new();
+        extra.set_name(Name::from_ascii("other.example.").unwrap());
+        extra.set_query_type(RecordType::AAAA);
+        extra.set_query_class(DNSClass::IN);
+        query.add_query(extra);
+
+        assert!(matches!(
+            single_question(&query),
+            Err(ResponseCode::FormErr)
+        ));
+
+        let bytes = build_status_response(&query, ResponseCode::FormErr).expect("built");
+        let msg = Message::from_bytes(&bytes).expect("parse response");
+        assert_eq!(msg.metadata.response_code, ResponseCode::FormErr);
+        assert_eq!(msg.queries.len(), 1);
+        assert_eq!(msg.queries[0].query_type(), RecordType::A);
+    }
+
     /// Policy denials synthesize NXDOMAIN (not REFUSED) so stub resolvers
     /// fail closed immediately instead of falling back to an unreachable
     /// next nameserver under deny-by-default egress.
@@ -861,6 +1227,77 @@ mod tests {
         };
 
         assert_eq!(inactive_query_family(RecordType::MX, gateway), None);
+    }
+
+    #[test]
+    fn extract_addrs_and_ttl_ignores_unrelated_answers() {
+        let query = make_query("example.com.", RecordType::A);
+        let mut response = make_response(&query);
+        response.add_answer(Record::from_rdata(
+            Name::from_ascii("example.com.").unwrap(),
+            30,
+            RData::A(A::from(std::net::Ipv4Addr::new(93, 184, 216, 34))),
+        ));
+        response.add_answer(Record::from_rdata(
+            Name::from_ascii("unrelated.example.").unwrap(),
+            10,
+            RData::A(A::from(std::net::Ipv4Addr::new(198, 51, 100, 7))),
+        ));
+
+        let (addrs, ttl) =
+            extract_addrs_and_ttl(&response, ResolvedHostnameFamily::Ipv4, "example.com").unwrap();
+
+        assert_eq!(
+            addrs,
+            vec![IpAddr::V4(std::net::Ipv4Addr::new(93, 184, 216, 34))]
+        );
+        assert_eq!(ttl, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn extract_addrs_and_ttl_follows_cname_chain() {
+        let query = make_query("example.com.", RecordType::A);
+        let mut response = make_response(&query);
+        response.add_answer(Record::from_rdata(
+            Name::from_ascii("example.com.").unwrap(),
+            20,
+            RData::CNAME(CNAME(Name::from_ascii("cdn.example.net.").unwrap())),
+        ));
+        response.add_answer(Record::from_rdata(
+            Name::from_ascii("cdn.example.net.").unwrap(),
+            40,
+            RData::A(A::from(std::net::Ipv4Addr::new(203, 0, 113, 10))),
+        ));
+        response.add_answer(Record::from_rdata(
+            Name::from_ascii("other.example.net.").unwrap(),
+            1,
+            RData::A(A::from(std::net::Ipv4Addr::new(203, 0, 113, 11))),
+        ));
+
+        let (addrs, ttl) =
+            extract_addrs_and_ttl(&response, ResolvedHostnameFamily::Ipv4, "example.com").unwrap();
+
+        assert_eq!(
+            addrs,
+            vec![IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 10))]
+        );
+        assert_eq!(ttl, Duration::from_secs(20));
+    }
+
+    #[test]
+    fn extract_addrs_and_ttl_ignores_error_responses() {
+        let query = make_query("example.com.", RecordType::A);
+        let mut response = make_response(&query);
+        response.metadata.response_code = ResponseCode::NXDomain;
+        response.add_answer(Record::from_rdata(
+            Name::from_ascii("example.com.").unwrap(),
+            30,
+            RData::A(A::from(std::net::Ipv4Addr::new(93, 184, 216, 34))),
+        ));
+
+        assert!(
+            extract_addrs_and_ttl(&response, ResolvedHostnameFamily::Ipv4, "example.com").is_none()
+        );
     }
 
     fn gateway_set() -> HashSet<IpAddr> {

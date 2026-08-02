@@ -1513,13 +1513,18 @@ type CreateOptions struct {
 	MaxDurationSecs      uint64               `json:"max_duration_secs,omitempty"`
 	IdleTimeoutSecs      uint64               `json:"idle_timeout_secs,omitempty"`
 	RegistryAuth         *RegistryAuthOptions `json:"registry_auth,omitempty"`
-	Ports                map[uint16]uint16    `json:"ports,omitempty"`
-	PortsUDP             map[uint16]uint16    `json:"ports_udp,omitempty"`
-	PortBindings         []PortBindingOptions `json:"port_bindings,omitempty"`
-	Network              *NetworkOptions      `json:"network,omitempty"`
-	Secrets              []SecretOptions      `json:"secrets,omitempty"`
-	Patches              []PatchOptions       `json:"patches,omitempty"`
-	Volumes              map[string]MountSpec `json:"volumes,omitempty"`
+	// RegistryInsecure pulls over plain HTTP instead of HTTPS.
+	RegistryInsecure bool `json:"registry_insecure,omitempty"`
+	// RegistryCACerts holds PEM-encoded CA root certificate bundles trusted
+	// when pulling.
+	RegistryCACerts []string             `json:"registry_ca_certs,omitempty"`
+	Ports           map[uint16]uint16    `json:"ports,omitempty"`
+	PortsUDP        map[uint16]uint16    `json:"ports_udp,omitempty"`
+	PortBindings    []PortBindingOptions `json:"port_bindings,omitempty"`
+	Network         *NetworkOptions      `json:"network,omitempty"`
+	Secrets         []SecretOptions      `json:"secrets,omitempty"`
+	Patches         []PatchOptions       `json:"patches,omitempty"`
+	Volumes         map[string]MountSpec `json:"volumes,omitempty"`
 }
 
 // InitOptions describes a guest PID-1 init handoff.

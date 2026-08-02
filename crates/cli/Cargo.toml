@@ -34,6 +34,7 @@ base64.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 clap.workspace = true
+clap_complete.workspace = true
 console.workspace = true
 dirs.workspace = true
 futures.workspace = true
