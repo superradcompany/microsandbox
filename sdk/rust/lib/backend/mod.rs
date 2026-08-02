@@ -22,6 +22,7 @@
 
 mod cloud;
 mod local;
+mod misconfigured;
 mod profile;
 pub(crate) mod sandbox;
 pub(crate) mod volume;
@@ -181,17 +182,14 @@ where
 }
 
 /// Lazy-init the OnceLock by consulting the Q1 resolution ladder
-/// ([`resolve_default_backend`]). Falls back to `LocalBackend::lazy` if the
-/// resolver itself errors (e.g. malformed config file) — error gets logged
-/// rather than panicking, so `default_backend()` never fails.
+/// ([`resolve_default_backend`]). Resolver errors install a fail-closed backend
+/// that returns the configuration error from SDK operations. This prevents an
+/// explicit but incomplete Cloud selection from silently executing locally.
 fn default_cell() -> &'static RwLock<Arc<dyn Backend>> {
     DEFAULT.get_or_init(|| {
         let resolved = profile::resolve_default_backend().unwrap_or_else(|e| {
-            tracing::warn!(
-                error = %e,
-                "default backend resolution failed; falling back to LocalBackend"
-            );
-            Arc::new(LocalBackend::lazy())
+            tracing::error!(error = %e, "default backend resolution failed");
+            Arc::new(misconfigured::ConfigurationErrorBackend::new(e))
         });
         RwLock::new(resolved)
     })

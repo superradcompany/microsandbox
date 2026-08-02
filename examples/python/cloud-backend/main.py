@@ -8,7 +8,9 @@ from microsandbox import BackendKind, LogReadSource, Sandbox, SandboxStatus, def
 
 def configure_cloud_backend():
     if default_backend_kind() is not BackendKind.CLOUD:
-        raise RuntimeError("set MSB_API_KEY or select a cloud profile")
+        raise RuntimeError(
+            "set MSB_BACKEND=cloud with MSB_API_KEY, or select a cloud profile"
+        )
 
 
 async def wait_until_stopped(name: str):
