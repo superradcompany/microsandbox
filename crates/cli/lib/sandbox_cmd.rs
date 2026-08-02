@@ -182,6 +182,7 @@ pub fn run(args: SandboxArgs) -> ! {
             .unwrap_or(args.memory_mib)
             .max(args.memory_mib),
         cpu_placement: launch.cpu_placement,
+        block_writeback_limit_bytes: launch.block_writeback_limit_bytes,
         rootfs_path: launch.rootfs.path,
         rootfs_follow_root_symlinks: launch.rootfs.follow_root_symlinks,
         rootfs_vmdk: if is_vmdk {
@@ -576,6 +577,7 @@ mod tests {
         let launch = LaunchConfig {
             db_path: PathBuf::from("/tmp/x.db"),
             env: vec!["TOKEN=secret".to_string()],
+            block_writeback_limit_bytes: Some(512 * 1024 * 1024),
             ..Default::default()
         };
         let mut file = tempfile::NamedTempFile::new().unwrap();
@@ -587,6 +589,7 @@ mod tests {
 
         assert_eq!(loaded.db_path, PathBuf::from("/tmp/x.db"));
         assert_eq!(loaded.env, vec!["TOKEN=secret".to_string()]);
+        assert_eq!(loaded.block_writeback_limit_bytes, Some(512 * 1024 * 1024));
     }
 
     #[test]

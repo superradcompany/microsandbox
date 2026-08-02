@@ -74,7 +74,7 @@ use crate::runtime::handle::WindowsJob;
 use crate::{
     MicrosandboxError, MicrosandboxResult,
     backend::LocalBackend,
-    config::BlockWritebackPreflush,
+    config::BlockWritebackLimit,
     db::entity::volume as volume_entity,
     runtime::handle::MetricsReservationCleanup,
     sandbox::{
@@ -97,7 +97,8 @@ static SIGCHLD_ALT_STACK_INIT: tokio::sync::OnceCell<()> = tokio::sync::OnceCell
 const AGENT_SOCKET_HASH_HEX_LEN: usize = 32;
 #[cfg(windows)]
 const STARTUP_PIPE_HASH_HEX_LEN: usize = 32;
-const BLOCK_WRITEBACK_PREFLUSH_ENV: &str = "KRUN_BLOCK_WRITEBACK_PREFLUSH_BYTES";
+#[cfg(target_os = "linux")]
+const AUTO_BLOCK_WRITEBACK_LIMIT_BYTES: u64 = 512 * 1024 * 1024;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -412,7 +413,7 @@ pub async fn spawn_sandbox(
     // Split the config: `visible` stays on argv, the typed `LaunchConfig` is
     // delivered over the config fd (keeps the network-config blob and
     // secret-bearing env off `ps` / `/proc/<pid>/cmdline` — see issue #997).
-    let (mut visible, launch) = sandbox_cli_args(
+    let (mut visible, mut launch) = sandbox_cli_args(
         local,
         config,
         sandbox_id,
@@ -439,6 +440,8 @@ pub async fn spawn_sandbox(
         #[cfg(windows)]
         startup_pipe_name,
     );
+    launch.block_writeback_limit_bytes =
+        block_writeback_limit_bytes(global.runtime.block_writeback_limit);
 
     #[cfg(unix)]
     let config_file = match write_launch_config_fd(&launch) {
@@ -473,11 +476,6 @@ pub async fn spawn_sandbox(
 
     // Build the command.
     let mut cmd = Command::new(&msb_path);
-    if let Some(value) = block_writeback_preflush_env(global.runtime.block_writeback_preflush) {
-        // Each sandbox owns a VMM process, so this controls libkrun without mutating the SDK
-        // process environment or coupling concurrently-created sandboxes.
-        cmd.env(BLOCK_WRITEBACK_PREFLUSH_ENV, value);
-    }
     #[cfg(windows)]
     if matches!(mode, SpawnMode::Detached) {
         let flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB;
@@ -695,10 +693,19 @@ pub async fn spawn_sandbox(
     Ok((handle, agent_sock_path))
 }
 
-fn block_writeback_preflush_env(policy: BlockWritebackPreflush) -> Option<&'static str> {
-    match policy {
-        BlockWritebackPreflush::Auto => None,
-        BlockWritebackPreflush::Off => Some("0"),
+fn block_writeback_limit_bytes(policy: BlockWritebackLimit) -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        match policy {
+            BlockWritebackLimit::Auto => Some(AUTO_BLOCK_WRITEBACK_LIMIT_BYTES),
+            BlockWritebackLimit::Off => None,
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = policy;
+        None
     }
 }
 
@@ -2670,11 +2677,13 @@ mod tests {
 
     use microsandbox_runtime::launch::LaunchConfig;
 
-    use super::{block_writeback_preflush_env, sandbox_cli_args};
+    #[cfg(target_os = "linux")]
+    use super::AUTO_BLOCK_WRITEBACK_LIMIT_BYTES;
+    use super::{block_writeback_limit_bytes, sandbox_cli_args};
     use crate::{
         LogLevel,
         backend::LocalBackend,
-        config::BlockWritebackPreflush,
+        config::BlockWritebackLimit,
         sandbox::{
             DiskImageFormat, HostPermissions, MountOptions, OciRootfsSource, Rlimit,
             RlimitResource, RootfsSource, SandboxBuilder, SandboxConfig, StatVirtualization,
@@ -4502,14 +4511,14 @@ mod tests {
     }
 
     #[test]
-    fn block_writeback_preflush_only_sets_an_env_override_when_disabled() {
+    fn block_writeback_limit_resolves_by_platform() {
+        #[cfg(target_os = "linux")]
         assert_eq!(
-            block_writeback_preflush_env(BlockWritebackPreflush::Auto),
-            None
+            block_writeback_limit_bytes(BlockWritebackLimit::Auto),
+            Some(AUTO_BLOCK_WRITEBACK_LIMIT_BYTES)
         );
-        assert_eq!(
-            block_writeback_preflush_env(BlockWritebackPreflush::Off),
-            Some("0")
-        );
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(block_writeback_limit_bytes(BlockWritebackLimit::Auto), None);
+        assert_eq!(block_writeback_limit_bytes(BlockWritebackLimit::Off), None);
     }
 }

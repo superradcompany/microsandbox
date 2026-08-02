@@ -271,6 +271,9 @@ pub struct VmConfig {
     /// Requested host CPU placement policy.
     pub cpu_placement: CpuPlacement,
 
+    /// Per-writable-raw-disk hard budget for buffered host dirty data.
+    pub block_writeback_limit_bytes: Option<u64>,
+
     /// Root filesystem path for direct passthrough mounts.
     pub rootfs_path: Option<PathBuf>,
 
@@ -416,6 +419,10 @@ impl std::fmt::Debug for VmConfig {
             .field("memory_mib", &self.memory_mib)
             .field("max_cpus", &self.max_cpus)
             .field("max_memory_mib", &self.max_memory_mib)
+            .field(
+                "block_writeback_limit_bytes",
+                &self.block_writeback_limit_bytes,
+            )
             .field("rootfs_path", &self.rootfs_path)
             .field("rootfs_vmdk", &self.rootfs_vmdk)
             .field("rootfs_upper", &self.rootfs_upper)
@@ -1126,6 +1133,21 @@ fn agent_console_pipe_name(sandbox_id: i32) -> String {
 // Functions: VM Builder
 //--------------------------------------------------------------------------------------------------
 
+fn apply_block_writeback_limit(
+    mut disk: msb_krun::DiskBuilder,
+    format: msb_krun::DiskImageFormat,
+    read_only: bool,
+    limit_bytes: Option<u64>,
+) -> msb_krun::DiskBuilder {
+    if !read_only
+        && matches!(format, msb_krun::DiskImageFormat::Raw)
+        && let Some(limit_bytes) = limit_bytes
+    {
+        disk = disk.writeback_limit_bytes(limit_bytes);
+    }
+    disk
+}
+
 /// Build the `Vm` from config with an exit observer for cleanup.
 fn build_vm(
     config: &Config,
@@ -1233,13 +1255,18 @@ fn build_vm(
             let primary = spec.primary.clone();
             let format = spec.format;
             let read_only = spec.read_only;
-            builder = builder.disk(move |d| d.path(&primary).format(format).read_only(read_only));
+            let writeback_limit_bytes = vm.block_writeback_limit_bytes;
+            builder = builder.disk(move |d| {
+                let d = d.path(&primary).format(format).read_only(read_only);
+                apply_block_writeback_limit(d, format, read_only, writeback_limit_bytes)
+            });
         } else if let Some(ref upper) = vm.rootfs_upper {
             let upper = upper.clone();
+            let format = msb_krun::DiskImageFormat::Raw;
+            let writeback_limit_bytes = vm.block_writeback_limit_bytes;
             builder = builder.disk(move |d| {
-                d.path(&upper)
-                    .format(msb_krun::DiskImageFormat::Raw)
-                    .read_only(false)
+                let d = d.path(&upper).format(format).read_only(false);
+                apply_block_writeback_limit(d, format, false, writeback_limit_bytes)
             });
         }
 
@@ -1270,7 +1297,11 @@ fn build_vm(
             .map_err(|e| RuntimeError::Custom(format!("disk format: {e}")))?;
         let disk_path = disk_path.clone();
         let readonly = vm.rootfs_disk_readonly;
-        builder = builder.disk(move |d| d.path(&disk_path).format(format).read_only(readonly));
+        let writeback_limit_bytes = vm.block_writeback_limit_bytes;
+        builder = builder.disk(move |d| {
+            let d = d.path(&disk_path).format(format).read_only(readonly);
+            apply_block_writeback_limit(d, format, readonly, writeback_limit_bytes)
+        });
         append_block_root_env(&mut exec_env);
     }
 
@@ -1346,6 +1377,7 @@ fn build_vm(
         let host = disk.host.clone();
         let format = disk.format;
         let readonly = disk.readonly;
+        let writeback_limit_bytes = vm.block_writeback_limit_bytes;
         builder = builder.disk(move |d| {
             let mut d = d.id(&id).path(&host).format(format).read_only(readonly);
             if readonly {
@@ -1354,7 +1386,7 @@ fn build_vm(
                     .cache(msb_krun::CacheMode::Unsafe)
                     .sync(msb_krun::SyncMode::None);
             }
-            d
+            apply_block_writeback_limit(d, format, readonly, writeback_limit_bytes)
         });
     }
 

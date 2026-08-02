@@ -257,19 +257,20 @@ pub struct OciSandboxDefaults {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RuntimeConfig {
-    /// Advisory buffered block writeback policy.
-    pub block_writeback_preflush: BlockWritebackPreflush,
+    /// Hard buffered block writeback policy.
+    #[serde(alias = "block_writeback_preflush")]
+    pub block_writeback_limit: BlockWritebackLimit,
 }
 
-/// Controls advisory writeback before guest durability barriers.
+/// Controls the per-disk hard limit for buffered host dirty data.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum BlockWritebackPreflush {
+pub enum BlockWritebackLimit {
     /// Use the runtime's platform-aware policy.
     #[default]
     Auto,
 
-    /// Disable advisory preflush without changing guest-visible durability semantics.
+    /// Disable bounded writeback without changing guest-visible durability semantics.
     Off,
 }
 
@@ -1222,10 +1223,7 @@ mod tests {
         assert_eq!(cfg.database.max_connections, 5);
         assert_eq!(cfg.database.connect_timeout_secs, 30);
         assert_eq!(cfg.database.busy_timeout_secs, 5);
-        assert_eq!(
-            cfg.runtime.block_writeback_preflush,
-            BlockWritebackPreflush::Auto
-        );
+        assert_eq!(cfg.runtime.block_writeback_limit, BlockWritebackLimit::Auto);
     }
 
     #[test]
@@ -1257,7 +1255,7 @@ mod tests {
                     }
                 }
             },
-            "runtime": { "block_writeback_preflush": "off" }
+            "runtime": { "block_writeback_limit": "off" }
         }"#;
 
         let cfg: LocalConfig = serde_json::from_str(json).unwrap();
@@ -1271,10 +1269,15 @@ mod tests {
                 clone: microsandbox_types::FlatClone::Copy,
             })
         );
-        assert_eq!(
-            cfg.runtime.block_writeback_preflush,
-            BlockWritebackPreflush::Off
-        );
+        assert_eq!(cfg.runtime.block_writeback_limit, BlockWritebackLimit::Off);
+    }
+
+    #[test]
+    fn test_deserialize_legacy_block_writeback_preflush_key() {
+        let json = r#"{"runtime": {"block_writeback_preflush": "off"}}"#;
+
+        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.runtime.block_writeback_limit, BlockWritebackLimit::Off);
     }
 
     #[test]

@@ -58,6 +58,10 @@ pub struct LaunchConfig {
     #[serde(default)]
     pub thp: TransparentHugePagePolicy,
 
+    /// Per-writable-raw-disk hard budget for buffered host dirty data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_writeback_limit_bytes: Option<u64>,
+
     /// User workload to start after boot, if any.
     pub startup: Option<StartupCommand>,
 
