@@ -16,5 +16,7 @@ pub mod connection;
 pub mod entity;
 pub mod pool;
 pub mod retry;
+pub mod stats;
 
 pub use connection::{DbReadConnection, DbWriteConnection};
+pub use stats::{DbStats, DbStatsSnapshot};

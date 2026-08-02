@@ -6,7 +6,9 @@
 
 use std::{future::Future, time::Duration};
 
-use sea_orm::{DbErr, RuntimeErr};
+use sea_orm::{ConnAcquireErr, DbErr, RuntimeErr};
+
+use crate::stats::DbStats;
 
 /// SQLite extended error codes for "another writer holds the lock".
 ///
@@ -34,6 +36,25 @@ pub fn is_sqlite_busy(err: &DbErr) -> bool {
         db_err.code().as_deref(),
         Some(SQLITE_BUSY) | Some(SQLITE_BUSY_SNAPSHOT)
     )
+}
+
+/// Returns `true` if `err` is a pool-acquisition timeout — the pool had no
+/// free connection within `acquire_timeout`.
+///
+/// sea-orm surfaces this as `DbErr::ConnectionAcquire(Timeout)`; sqlx
+/// errors reaching us through other variants appear as `PoolTimedOut`.
+///
+/// Distinct from [`is_sqlite_busy`]: a busy error comes from SQLite's lock
+/// after a connection was acquired, a pool timeout means acquisition itself
+/// failed. The two never overlap, so busy classification is unaffected.
+pub fn is_pool_timeout(err: &DbErr) -> bool {
+    match err {
+        DbErr::ConnectionAcquire(ConnAcquireErr::Timeout) => true,
+        DbErr::Conn(e) | DbErr::Exec(e) | DbErr::Query(e) => {
+            matches!(e, RuntimeErr::SqlxError(sqlx::Error::PoolTimedOut))
+        }
+        _ => false,
+    }
 }
 
 /// Trait for application error types so the retry layer can recognise
@@ -67,7 +88,21 @@ impl IsSqliteBusy for DbErr {
 /// should wrap the call in a `tracing::info_span!` or apply `#[instrument]`
 /// to the calling function — the warnings emitted here pick up the current
 /// span automatically.
-pub async fn retry_on_busy<F, Fut, T, E>(mut f: F) -> Result<T, E>
+pub async fn retry_on_busy<F, Fut, T, E>(f: F) -> Result<T, E>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+    E: IsSqliteBusy,
+{
+    retry_on_busy_with_stats(f, None).await
+}
+
+/// [`retry_on_busy`] variant that also records each busy retry (and retry
+/// exhaustion) into `stats`, when provided.
+pub async fn retry_on_busy_with_stats<F, Fut, T, E>(
+    mut f: F,
+    stats: Option<&DbStats>,
+) -> Result<T, E>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, E>>,
@@ -83,6 +118,9 @@ where
                 return Ok(value);
             }
             Err(err) if err.is_sqlite_busy() && attempt < MAX_BUSY_RETRY_ATTEMPTS => {
+                if let Some(stats) = stats {
+                    stats.record_busy_retry();
+                }
                 tracing::warn!(
                     attempt,
                     delay_ms = delay.as_millis() as u64,
@@ -92,6 +130,9 @@ where
                 delay = (delay * 2).min(MAX_DELAY);
             }
             Err(err) if err.is_sqlite_busy() => {
+                if let Some(stats) = stats {
+                    stats.record_retries_exhausted();
+                }
                 tracing::error!(
                     attempts = attempt,
                     "SQLITE_BUSY exhausted retries, giving up"
@@ -102,4 +143,75 @@ where
         }
     }
     unreachable!("loop returns or errors before exhausting attempts")
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct TestErr {
+        busy: bool,
+    }
+
+    impl IsSqliteBusy for TestErr {
+        fn is_sqlite_busy(&self) -> bool {
+            self.busy
+        }
+    }
+
+    #[test]
+    fn pool_timeout_classifies_distinctly_from_busy() {
+        let acquire = DbErr::ConnectionAcquire(ConnAcquireErr::Timeout);
+        let sqlx_level = DbErr::Conn(RuntimeErr::SqlxError(sqlx::Error::PoolTimedOut));
+
+        assert!(is_pool_timeout(&acquire));
+        assert!(is_pool_timeout(&sqlx_level));
+        assert!(!is_sqlite_busy(&acquire));
+        assert!(!is_sqlite_busy(&sqlx_level));
+    }
+
+    #[tokio::test]
+    async fn busy_retries_are_counted() {
+        let stats = DbStats::new();
+        let attempts = AtomicU32::new(0);
+
+        let result = retry_on_busy_with_stats(
+            || async {
+                if attempts.fetch_add(1, Ordering::SeqCst) < 2 {
+                    Err(TestErr { busy: true })
+                } else {
+                    Ok(())
+                }
+            },
+            Some(&stats),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(stats.snapshot().busy_retries, 2);
+        assert_eq!(stats.snapshot().retries_exhausted, 0);
+    }
+
+    #[tokio::test]
+    async fn exhausted_retries_are_counted() {
+        let stats = DbStats::new();
+
+        let result: Result<(), TestErr> =
+            retry_on_busy_with_stats(|| async { Err(TestErr { busy: true }) }, Some(&stats)).await;
+
+        assert!(result.is_err());
+        let snapshot = stats.snapshot();
+        assert_eq!(snapshot.retries_exhausted, 1);
+        assert_eq!(
+            snapshot.busy_retries,
+            u64::from(MAX_BUSY_RETRY_ATTEMPTS) - 1
+        );
+    }
 }

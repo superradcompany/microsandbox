@@ -17,8 +17,9 @@ use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, DbErr, ExecResult,
     QueryResult, Statement, TransactionTrait,
 };
+use sqlx::SqlitePool;
 
-use crate::{pool, retry, retry::IsSqliteBusy};
+use crate::{pool, retry, retry::IsSqliteBusy, stats::DbStats};
 
 /// Read pool. Multi-connection; concurrent reads enabled by WAL mode.
 ///
@@ -30,7 +31,11 @@ use crate::{pool, retry, retry::IsSqliteBusy};
 /// `Clone` is cheap: the inner `DatabaseConnection` holds an `Arc` over
 /// the underlying sqlx pool, so clones share connection state.
 #[derive(Debug, Clone)]
-pub struct DbReadConnection(DatabaseConnection);
+pub struct DbReadConnection {
+    inner: DatabaseConnection,
+    pool: Option<SqlitePool>,
+    stats: DbStats,
+}
 
 /// Write pool. Single connection; serialises in-process writes so the
 /// SQLite writer lock is never contested from within one process.
@@ -42,12 +47,54 @@ pub struct DbReadConnection(DatabaseConnection);
 /// `Clone` is cheap: the inner `DatabaseConnection` holds an `Arc` over
 /// the underlying sqlx pool, so clones share the same single connection.
 #[derive(Debug, Clone)]
-pub struct DbWriteConnection(DatabaseConnection);
+pub struct DbWriteConnection {
+    inner: DatabaseConnection,
+    pool: Option<SqlitePool>,
+    stats: DbStats,
+}
+
+/// When `err` is a pool-acquisition timeout: count it, log the pool's live
+/// occupancy, and rewrite the message to name the pool that was exhausted.
+/// Every other error (including `SQLITE_BUSY`) passes through untouched so
+/// busy classification keeps working.
+fn note_pool_timeout(
+    err: DbErr,
+    kind: &'static str,
+    pool: Option<&SqlitePool>,
+    stats: &DbStats,
+) -> DbErr {
+    if !retry::is_pool_timeout(&err) {
+        return err;
+    }
+    stats.record_pool_timeout();
+    match pool {
+        Some(pool) => {
+            let (size, idle) = (pool.size(), pool.num_idle());
+            tracing::warn!(
+                pool = kind,
+                connections = size,
+                idle,
+                "catalog pool acquisition timed out"
+            );
+            DbErr::Custom(format!(
+                "{kind} pool exhausted ({size} connections, {idle} idle): {err}"
+            ))
+        }
+        None => {
+            tracing::warn!(pool = kind, "catalog pool acquisition timed out");
+            DbErr::Custom(format!("{kind} pool exhausted: {err}"))
+        }
+    }
+}
 
 impl DbReadConnection {
     /// Wrap a sea-orm connection as a read pool.
     pub fn new(inner: DatabaseConnection) -> Self {
-        Self(inner)
+        Self {
+            inner,
+            pool: None,
+            stats: DbStats::new(),
+        }
     }
 
     /// Open a stand-alone read pool at `db_path` with shared PRAGMAs.
@@ -60,7 +107,7 @@ impl DbReadConnection {
         connect_timeout: Duration,
         busy_timeout: Duration,
     ) -> Result<Self, sqlx::Error> {
-        let conn = pool::build_pool(
+        let (inner, pool) = pool::build_pool(
             db_path,
             max_connections,
             connect_timeout,
@@ -68,19 +115,32 @@ impl DbReadConnection {
             false,
         )
         .await?;
-        Ok(Self(conn))
+        Ok(Self {
+            inner,
+            pool: Some(pool),
+            stats: DbStats::new(),
+        })
     }
 
     /// Borrow the underlying sea-orm connection.
     pub fn inner(&self) -> &DatabaseConnection {
-        &self.0
+        &self.inner
+    }
+
+    /// Counters recorded by this connection (shared across clones).
+    pub fn stats(&self) -> &DbStats {
+        &self.stats
     }
 }
 
 impl DbWriteConnection {
     /// Wrap a sea-orm connection as a write pool.
     pub fn new(inner: DatabaseConnection) -> Self {
-        Self(inner)
+        Self {
+            inner,
+            pool: None,
+            stats: DbStats::new(),
+        }
     }
 
     /// Open a stand-alone single-connection write pool at `db_path`.
@@ -92,13 +152,23 @@ impl DbWriteConnection {
         connect_timeout: Duration,
         busy_timeout: Duration,
     ) -> Result<Self, sqlx::Error> {
-        let conn = pool::build_pool(db_path, 1, connect_timeout, busy_timeout, true).await?;
-        Ok(Self(conn))
+        let (inner, pool) =
+            pool::build_pool(db_path, 1, connect_timeout, busy_timeout, true).await?;
+        Ok(Self {
+            inner,
+            pool: Some(pool),
+            stats: DbStats::new(),
+        })
     }
 
     /// Borrow the underlying sea-orm connection.
     pub fn inner(&self) -> &DatabaseConnection {
-        &self.0
+        &self.inner
+    }
+
+    /// Counters recorded by this connection (shared across clones).
+    pub fn stats(&self) -> &DbStats {
+        &self.stats
     }
 
     /// Run a multi-statement atomic write inside a transaction with
@@ -123,12 +193,15 @@ impl DbWriteConnection {
         T: Send,
         E: From<DbErr> + IsSqliteBusy,
     {
-        retry::retry_on_busy(|| async {
-            let txn = self.0.begin().await?;
-            let (txn, value) = f(txn).await?;
-            txn.commit().await?;
-            Ok(value)
-        })
+        retry::retry_on_busy_with_stats(
+            || async {
+                let txn = self.inner.begin().await?;
+                let (txn, value) = f(txn).await?;
+                txn.commit().await?;
+                Ok(value)
+            },
+            Some(&self.stats),
+        )
         .await
     }
 }
@@ -136,31 +209,43 @@ impl DbWriteConnection {
 #[async_trait::async_trait]
 impl ConnectionTrait for DbReadConnection {
     fn get_database_backend(&self) -> DbBackend {
-        self.0.get_database_backend()
+        self.inner.get_database_backend()
     }
 
     async fn execute(&self, stmt: Statement) -> Result<ExecResult, DbErr> {
-        self.0.execute(stmt).await
+        self.inner
+            .execute(stmt)
+            .await
+            .map_err(|e| note_pool_timeout(e, "read", self.pool.as_ref(), &self.stats))
     }
 
     async fn execute_unprepared(&self, sql: &str) -> Result<ExecResult, DbErr> {
-        self.0.execute_unprepared(sql).await
+        self.inner
+            .execute_unprepared(sql)
+            .await
+            .map_err(|e| note_pool_timeout(e, "read", self.pool.as_ref(), &self.stats))
     }
 
     async fn query_one(&self, stmt: Statement) -> Result<Option<QueryResult>, DbErr> {
-        self.0.query_one(stmt).await
+        self.inner
+            .query_one(stmt)
+            .await
+            .map_err(|e| note_pool_timeout(e, "read", self.pool.as_ref(), &self.stats))
     }
 
     async fn query_all(&self, stmt: Statement) -> Result<Vec<QueryResult>, DbErr> {
-        self.0.query_all(stmt).await
+        self.inner
+            .query_all(stmt)
+            .await
+            .map_err(|e| note_pool_timeout(e, "read", self.pool.as_ref(), &self.stats))
     }
 
     fn support_returning(&self) -> bool {
-        self.0.support_returning()
+        self.inner.support_returning()
     }
 
     fn is_mock_connection(&self) -> bool {
-        self.0.is_mock_connection()
+        self.inner.is_mock_connection()
     }
 }
 
@@ -178,31 +263,51 @@ impl ConnectionTrait for DbReadConnection {
 #[async_trait::async_trait]
 impl ConnectionTrait for DbWriteConnection {
     fn get_database_backend(&self) -> DbBackend {
-        self.0.get_database_backend()
+        self.inner.get_database_backend()
     }
 
     async fn execute(&self, stmt: Statement) -> Result<ExecResult, DbErr> {
-        retry::retry_on_busy(|| async { self.0.execute(stmt.clone()).await }).await
+        retry::retry_on_busy_with_stats(
+            || async { self.inner.execute(stmt.clone()).await },
+            Some(&self.stats),
+        )
+        .await
+        .map_err(|e| note_pool_timeout(e, "write", self.pool.as_ref(), &self.stats))
     }
 
     async fn execute_unprepared(&self, sql: &str) -> Result<ExecResult, DbErr> {
-        retry::retry_on_busy(|| async { self.0.execute_unprepared(sql).await }).await
+        retry::retry_on_busy_with_stats(
+            || async { self.inner.execute_unprepared(sql).await },
+            Some(&self.stats),
+        )
+        .await
+        .map_err(|e| note_pool_timeout(e, "write", self.pool.as_ref(), &self.stats))
     }
 
     async fn query_one(&self, stmt: Statement) -> Result<Option<QueryResult>, DbErr> {
-        retry::retry_on_busy(|| async { self.0.query_one(stmt.clone()).await }).await
+        retry::retry_on_busy_with_stats(
+            || async { self.inner.query_one(stmt.clone()).await },
+            Some(&self.stats),
+        )
+        .await
+        .map_err(|e| note_pool_timeout(e, "write", self.pool.as_ref(), &self.stats))
     }
 
     async fn query_all(&self, stmt: Statement) -> Result<Vec<QueryResult>, DbErr> {
-        retry::retry_on_busy(|| async { self.0.query_all(stmt.clone()).await }).await
+        retry::retry_on_busy_with_stats(
+            || async { self.inner.query_all(stmt.clone()).await },
+            Some(&self.stats),
+        )
+        .await
+        .map_err(|e| note_pool_timeout(e, "write", self.pool.as_ref(), &self.stats))
     }
 
     fn support_returning(&self) -> bool {
-        self.0.support_returning()
+        self.inner.support_returning()
     }
 
     fn is_mock_connection(&self) -> bool {
-        self.0.is_mock_connection()
+        self.inner.is_mock_connection()
     }
 }
 
@@ -242,6 +347,69 @@ mod tests {
         assert!(
             db_path.exists(),
             "write open should create the catalog db file"
+        );
+    }
+
+    #[tokio::test]
+    async fn pool_timeout_is_attributed_and_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("catalog.db");
+
+        // Single-connection write pool with a short acquire timeout.
+        let conn = DbWriteConnection::open(&db_path, Duration::from_millis(100), TIMEOUT)
+            .await
+            .unwrap();
+
+        // Hold the only connection so the next operation must time out
+        // acquiring from the pool.
+        let _txn = conn.inner().begin().await.unwrap();
+
+        let err = conn.execute_unprepared("SELECT 1").await.unwrap_err();
+
+        assert!(
+            err.to_string().contains("write pool exhausted"),
+            "error should name the exhausted pool, got: {err}"
+        );
+        assert!(
+            !retry::is_sqlite_busy(&err),
+            "an attributed pool timeout must not classify as SQLITE_BUSY"
+        );
+        assert_eq!(conn.stats().snapshot().pool_timeouts, 1);
+        assert_eq!(conn.stats().snapshot().busy_retries, 0);
+    }
+
+    #[tokio::test]
+    async fn sqlite_busy_passes_through_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("catalog.db");
+
+        let a = DbWriteConnection::open(&db_path, TIMEOUT, Duration::from_millis(10))
+            .await
+            .unwrap();
+        let b = DbWriteConnection::open(&db_path, TIMEOUT, Duration::from_millis(10))
+            .await
+            .unwrap();
+
+        // Hold the SQLite writer lock from `a` via an open transaction.
+        let txn = a.inner().begin().await.unwrap();
+        txn.execute_unprepared("CREATE TABLE held (x INTEGER)")
+            .await
+            .unwrap();
+
+        // Bypass the retry wrapper so we see the raw error `b` gets.
+        let err = b
+            .inner()
+            .execute_unprepared("CREATE TABLE blocked (x INTEGER)")
+            .await
+            .unwrap_err();
+
+        assert!(
+            retry::is_sqlite_busy(&err),
+            "contended write should classify as SQLITE_BUSY, got: {err}"
+        );
+        assert!(
+            !retry::is_pool_timeout(&err),
+            "SQLITE_BUSY must not classify as a pool timeout"
         );
     }
 }

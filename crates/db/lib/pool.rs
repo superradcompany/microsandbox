@@ -8,6 +8,7 @@
 use std::{path::Path, time::Duration};
 
 use sea_orm::{DatabaseConnection, SqlxSqliteConnector};
+use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 
 use crate::connection::{DbReadConnection, DbWriteConnection};
@@ -75,13 +76,17 @@ impl DbPools {
 /// `create_if_missing` controls whether opening a non-existent DB file creates
 /// it. The write side (owned by `msb`) creates the catalog; read-only consumers
 /// (e.g. `msb-metrics`) pass `false` so they never author or pre-empt it.
+///
+/// Returns the sea-orm connection plus the underlying sqlx pool handle, so
+/// the connection wrappers can report live pool occupancy when acquisition
+/// times out.
 pub(crate) async fn build_pool(
     db_path: &Path,
     max_connections: u32,
     connect_timeout: Duration,
     busy_timeout: Duration,
     create_if_missing: bool,
-) -> Result<DatabaseConnection, sqlx::Error> {
+) -> Result<(DatabaseConnection, SqlitePool), sqlx::Error> {
     let connect_options = SqliteConnectOptions::new()
         .filename(db_path)
         .create_if_missing(create_if_missing)
@@ -96,5 +101,8 @@ pub(crate) async fn build_pool(
         .connect_with(connect_options)
         .await?;
 
-    Ok(SqlxSqliteConnector::from_sqlx_sqlite_pool(pool))
+    Ok((
+        SqlxSqliteConnector::from_sqlx_sqlite_pool(pool.clone()),
+        pool,
+    ))
 }
