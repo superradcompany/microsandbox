@@ -69,6 +69,13 @@ pub struct SandboxOpts {
     #[arg(long = "max-memory", value_name = "SIZE")]
     pub max_memory: Option<String>,
 
+    /// Expose a virtio-gpu device with the Venus (Vulkan) renderer to the guest.
+    ///
+    /// The guest image must carry Mesa's Vulkan Venus driver
+    /// (`mesa-vulkan-drivers`) for applications to reach the GPU.
+    #[arg(long = "gpu")]
+    pub gpu: bool,
+
     /// Mount a host path or named volume into the sandbox (`SOURCE:DEST[:OPTIONS]`).
     #[arg(short, long)]
     pub volume: Vec<String>,
@@ -484,6 +491,7 @@ impl SandboxOpts {
             || self.max_cpus.is_some()
             || self.memory.is_some()
             || self.max_memory.is_some()
+            || self.gpu
             || !self.volume.is_empty()
             || !self.mount_dir.is_empty()
             || !self.mount_file.is_empty()
@@ -568,6 +576,9 @@ pub fn apply_sandbox_opts(
     }
     if let Some(ref max_memory) = opts.max_memory {
         builder = builder.max_memory(ui::parse_size_mib(max_memory).map_err(anyhow::Error::msg)?);
+    }
+    if opts.gpu {
+        builder = builder.gpu(true);
     }
     if let Some(ref workdir) = opts.workdir {
         builder = builder.workdir(workdir);
