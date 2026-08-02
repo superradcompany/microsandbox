@@ -32,6 +32,8 @@ EXPECTED_KWARGS = [
     "pull_policy",
     "log_level",
     "registry_auth",
+    "registry_insecure",
+    "registry_ca_certs",
     "volumes",
     "patches",
     "ports",
@@ -81,6 +83,12 @@ def test_create_closed_values_are_precisely_typed() -> None:
     assert annotations["init"] == "str | InitConfig | InitOptions | None"
     assert annotations["pull_policy"] == "PullPolicy | None"
     assert annotations["log_level"] == "LogLevel | None"
+    assert annotations["registry_auth"] == "RegistryAuth | None"
+    assert annotations["registry_insecure"] == "bool"
+    assert (
+        annotations["registry_ca_certs"]
+        == "list[bytes | bytearray | str | os.PathLike[str]] | None"
+    )
     assert annotations["volumes"] == "Mapping[str, MountConfig] | None"
     assert annotations["patches"] == "Sequence[PatchConfig] | None"
     assert annotations["network"] == "Network | None"

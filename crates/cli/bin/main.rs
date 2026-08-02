@@ -6,8 +6,9 @@ use clap::{CommandFactory, Parser, Subcommand};
 use console::style;
 use microsandbox_cli::{
     commands::{
-        copy, create, exec, image, inspect, install, list, logs, metrics, modify, ping, ps, pull,
-        registry, remove, restart, run, self_cmd, snapshot, start, stop, touch, uninstall, volume,
+        completion, copy, create, exec, image, inspect, install, list, logs, metrics, modify, ping,
+        ps, pull, registry, remove, restart, run, self_cmd, snapshot, start, stop, touch,
+        uninstall, volume,
     },
     log_args::{self, LogArgs},
     sandbox_cmd::{self, SandboxArgs},
@@ -42,6 +43,7 @@ const TOP_LEVEL_COMMAND_GROUPS: &[CommandGroup] = &[
             "update",
             "downgrade",
             "self",
+            "completion",
         ],
     },
 ];
@@ -192,6 +194,9 @@ enum Commands {
     /// Manage the msb installation.
     #[command(name = "self")]
     Self_(self_cmd::SelfArgs),
+
+    /// Generate a shell completion script.
+    Completion(completion::CompletionArgs),
 }
 
 /// A visual group for top-level command help.
@@ -658,6 +663,7 @@ fn run_async_command_anyhow(
             Commands::Update(args) => self_cmd::run_update(args).await,
             Commands::Downgrade(args) => self_cmd::run_downgrade(args).await,
             Commands::Self_(args) => self_cmd::run(args).await,
+            Commands::Completion(args) => completion::run(args, Cli::command()),
         }
     })
 }

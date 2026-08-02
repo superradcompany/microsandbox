@@ -3,6 +3,8 @@ package microsandbox
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
 	"time"
 
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
@@ -34,6 +36,10 @@ func CreateSandbox(ctx context.Context, name string, opts ...SandboxOption) (*Sa
 		opt(&o)
 	}
 
+	if err := resolveRegistryCACertPaths(&o); err != nil {
+		return nil, err
+	}
+
 	ffiOpts := buildFFICreateOptions(o)
 
 	inner, err := ffi.CreateSandbox(ctx, name, ffiOpts)
@@ -43,38 +49,53 @@ func CreateSandbox(ctx context.Context, name string, opts ...SandboxOption) (*Sa
 	return &Sandbox{inner: inner}, nil
 }
 
+// resolveRegistryCACertPaths reads every PEM file named by
+// RegistryCACertPaths and appends its contents to RegistryCACerts. The option
+// functions only record paths, since they cannot report a read failure.
+func resolveRegistryCACertPaths(o *SandboxConfig) error {
+	for _, path := range o.RegistryCACertPaths {
+		pem, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("microsandbox: reading registry CA certs %q: %w", path, err)
+		}
+		o.RegistryCACerts = append(o.RegistryCACerts, pem)
+	}
+	return nil
+}
+
 // buildFFICreateOptions translates SandboxConfig into the FFI wire shape.
 // Extracted so tests can assert the JSON envelope without booting the runtime.
 func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 	ffiOpts := ffi.CreateOptions{
-		Image:           o.Image,
-		ImageFstype:     o.ImageFstype,
-		ImageBind:       o.ImageBind,
-		Snapshot:        o.Snapshot,
-		MemoryMiB:       o.MemoryMiB,
-		CPUs:            o.CPUs,
-		MaxMemoryMiB:    o.MaxMemoryMiB,
-		MaxCPUs:         o.MaxCPUs,
-		Workdir:         o.Workdir,
-		Shell:           o.Shell,
-		SecurityProfile: string(o.SecurityProfile),
-		Hostname:        o.Hostname,
-		User:            o.User,
-		Replace:         o.Replace,
-		Env:             o.Env,
-		Labels:          o.Labels,
-		Detached:        o.Detached,
-		Ephemeral:       o.Ephemeral,
-		Entrypoint:      o.Entrypoint,
-		LogLevel:        string(o.LogLevel),
-		QuietLogs:       o.QuietLogs,
-		Scripts:         o.Scripts,
-		PullPolicy:      string(o.PullPolicy),
-		MaxDurationSecs: durationSecsCeil(o.MaxDuration),
-		IdleTimeoutSecs: durationSecsCeil(o.IdleTimeout),
-		Ports:           o.Ports,
-		PortsUDP:        o.PortsUDP,
-		PortBindings:    buildFFIPortBindings(o.PortBindings),
+		Image:            o.Image,
+		ImageFstype:      o.ImageFstype,
+		ImageBind:        o.ImageBind,
+		Snapshot:         o.Snapshot,
+		MemoryMiB:        o.MemoryMiB,
+		CPUs:             o.CPUs,
+		MaxMemoryMiB:     o.MaxMemoryMiB,
+		MaxCPUs:          o.MaxCPUs,
+		Workdir:          o.Workdir,
+		Shell:            o.Shell,
+		SecurityProfile:  string(o.SecurityProfile),
+		Hostname:         o.Hostname,
+		User:             o.User,
+		Replace:          o.Replace,
+		Env:              o.Env,
+		Labels:           o.Labels,
+		Detached:         o.Detached,
+		Ephemeral:        o.Ephemeral,
+		Entrypoint:       o.Entrypoint,
+		LogLevel:         string(o.LogLevel),
+		QuietLogs:        o.QuietLogs,
+		Scripts:          o.Scripts,
+		PullPolicy:       string(o.PullPolicy),
+		MaxDurationSecs:  durationSecsCeil(o.MaxDuration),
+		IdleTimeoutSecs:  durationSecsCeil(o.IdleTimeout),
+		Ports:            o.Ports,
+		PortsUDP:         o.PortsUDP,
+		PortBindings:     buildFFIPortBindings(o.PortBindings),
+		RegistryInsecure: o.RegistryInsecure,
 	}
 	if o.RootDisk != nil {
 		ffiOpts.RootDisk = buildFFIRootDisk(*o.RootDisk)
@@ -104,6 +125,12 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		ffiOpts.RegistryAuth = &ffi.RegistryAuthOptions{
 			Username: o.RegistryAuth.Username,
 			Password: o.RegistryAuth.Password,
+		}
+	}
+	if len(o.RegistryCACerts) > 0 {
+		ffiOpts.RegistryCACerts = make([]string, 0, len(o.RegistryCACerts))
+		for _, pem := range o.RegistryCACerts {
+			ffiOpts.RegistryCACerts = append(ffiOpts.RegistryCACerts, string(pem))
 		}
 	}
 

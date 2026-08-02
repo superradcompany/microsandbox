@@ -86,6 +86,9 @@ msb self doctor          # Check runtime files and supported host prerequisites
 msb self update          # Update msb to latest
 msb self downgrade 0.6.0 # Downgrade to a supported older release
 msb self uninstall       # Remove msb
+
+# Shell completion
+msb completion zsh       # Print the zsh completion script
 ```
 
 <Tip>
@@ -102,6 +105,48 @@ msb self uninstall       # Remove msb
 | `--info` | Show info, warnings, and errors |
 | `--debug` | Show debug output |
 | `--trace` | Show all output including trace |
+
+## Shell completion
+
+`msb completion <shell>` prints a completion script for `bash`, `zsh`, `fish`, `elvish`, or `powershell`. Write it to the location your shell loads completions from:
+
+<CodeGroup>
+```bash bash
+# Requires the bash-completion package. Without it, add this line to
+# ~/.bashrc instead:  source <(msb completion bash)
+mkdir -p ~/.local/share/bash-completion/completions
+msb completion bash > ~/.local/share/bash-completion/completions/msb
+```
+
+```zsh zsh
+mkdir -p ~/.zsh/completions
+msb completion zsh > ~/.zsh/completions/_msb
+# Add this line to ~/.zshrc before compinit runs:
+#   fpath=(~/.zsh/completions $fpath)
+```
+
+```fish fish
+mkdir -p ~/.config/fish/completions
+msb completion fish > ~/.config/fish/completions/msb.fish
+```
+
+```elvish elvish
+mkdir -p ~/.config/elvish/completions
+msb completion elvish > ~/.config/elvish/completions/msb.elv
+# Add this line to ~/.config/elvish/rc.elv:
+#   eval (slurp < ~/.config/elvish/completions/msb.elv)
+```
+
+```powershell PowerShell
+$completions = Join-Path (Split-Path $PROFILE) "completions"
+New-Item -Path $completions -ItemType Directory -Force | Out-Null
+msb completion powershell > (Join-Path $completions "msb.ps1")
+# Add this line to your profile ($PROFILE):
+#   . "$PSScriptRoot/completions/msb.ps1"
+```
+</CodeGroup>
+
+Then restart your shell.
 
 ## Command tree
 

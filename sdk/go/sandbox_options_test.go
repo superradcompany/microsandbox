@@ -2,6 +2,8 @@ package microsandbox
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -440,6 +442,55 @@ func TestFFIWireShape_RegistryAuth(t *testing.T) {
 	}
 }
 
+func TestFFIWireShape_RegistryOverrides(t *testing.T) {
+	got := marshalCreateOptions(t,
+		WithImage("localhost:5050/img"),
+		WithRegistryInsecure(),
+		WithRegistryCACerts([]byte("pem-one")),
+		WithRegistryCACerts([]byte("pem-two")),
+	)
+	if got["registry_insecure"] != true {
+		t.Fatalf("registry_insecure = %v", got["registry_insecure"])
+	}
+	certs := mustField(t, got, "registry_ca_certs").([]any)
+	if len(certs) != 2 || certs[0] != "pem-one" || certs[1] != "pem-two" {
+		t.Fatalf("registry_ca_certs = %v", certs)
+	}
+}
+
+func TestResolveRegistryCACertPaths(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ca.pem")
+	if err := os.WriteFile(path, []byte("pem-from-file"), 0o600); err != nil {
+		t.Fatalf("write ca.pem: %v", err)
+	}
+
+	cfg := SandboxConfig{}
+	WithRegistryCACerts([]byte("pem-inline"))(&cfg)
+	WithRegistryCACertsPath(path)(&cfg)
+	if err := resolveRegistryCACertPaths(&cfg); err != nil {
+		t.Fatalf("resolveRegistryCACertPaths: %v", err)
+	}
+	if len(cfg.RegistryCACerts) != 2 ||
+		string(cfg.RegistryCACerts[0]) != "pem-inline" ||
+		string(cfg.RegistryCACerts[1]) != "pem-from-file" {
+		t.Fatalf("RegistryCACerts = %q", cfg.RegistryCACerts)
+	}
+}
+
+func TestResolveRegistryCACertPathsMissingFile(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "nope.pem")
+	cfg := SandboxConfig{}
+	WithRegistryCACertsPath(missing)(&cfg)
+	err := resolveRegistryCACertPaths(&cfg)
+	if err == nil {
+		t.Fatal("resolveRegistryCACertPaths: got nil error for a missing file")
+	}
+	if !strings.Contains(err.Error(), missing) {
+		t.Errorf("error %q does not mention the path %q", err, missing)
+	}
+}
+
 func TestFFIWireShape_Init(t *testing.T) {
 	got := marshalCreateOptions(t,
 		WithImage("alpine"),
@@ -629,7 +680,7 @@ func TestFFIWireShape_EmptyConfigOmitsOptionalFields(t *testing.T) {
 		"image", "snapshot", "memory_mib", "cpus", "max_memory_mib", "max_cpus", "workdir", "shell",
 		"hostname", "user", "replace", "detached", "env", "scripts",
 		"ports", "ports_udp", "network", "secrets", "patches", "volumes",
-		"init", "registry_auth", "root_disk",
+		"init", "registry_auth", "registry_insecure", "registry_ca_certs", "root_disk",
 	} {
 		if _, present := got[key]; present {
 			body, _ := json.Marshal(got)

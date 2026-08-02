@@ -1234,6 +1234,8 @@ The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_wit
 | pull_policy | [`PullPolicy`](#pullpolicy) | `IF_MISSING` | Image pull behavior |
 | log_level | [`LogLevel`](#loglevel) | - | Override log verbosity |
 | registry_auth | [`RegistryAuth`](#registryauth) | - | Private registry credentials |
+| registry_insecure | `bool` | `False` | Pull images over plain HTTP instead of HTTPS (local or self-hosted registries) |
+| registry_ca_certs | `list[bytes \| bytearray \| str \| os.PathLike]` | `[]` | Additional CA roots for image pulls. File paths are read when `create()` is called. |
 | volumes | `Mapping[str, `[`MountConfig`](/sdk/python/volumes)`]` | `{}` | Volume mounts. See [Volumes](/sdk/python/volumes) |
 | patches | `Sequence[`[`PatchConfig`](#patchconfig)`]` | `[]` | Rootfs modifications applied before boot |
 | ports | `Mapping[int, int] \| Sequence[`[`PortBinding`](/sdk/python/networking#portbinding)`]` | `{}` | Port mappings. Mapping form is TCP and binds to `127.0.0.1`; use `PortBinding` for explicit bind addresses or UDP |

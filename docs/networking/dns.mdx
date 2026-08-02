@@ -107,6 +107,8 @@ You can override this by setting `nameservers` to pin the exact resolvers you wa
 
 Values can be plain IPs, `IP:PORT`, hostnames, or `HOST:PORT`. Hostnames are resolved once at sandbox startup using the host's OS resolver.
 
+Order matters. Resolvers are tried in the order listed, and the sandbox moves on to the next one when a query times out or the transport fails, so put your preferred resolver first. A resolver that answers is used as-is, including when it answers `SERVFAIL` or `REFUSED` — those are answers, not failures, so they do not trigger a retry against the next resolver. The same ordering applies to resolvers discovered from the host. Note that each unreachable resolver costs up to `query_timeout_ms` before the next is tried.
+
 <CodeGroup>
 ```rust Rust
 use microsandbox_network::dns::Nameserver;

@@ -91,6 +91,7 @@ bytes = "1.9"
 chrono = { version = "0.4", features = ["serde"] }
 ciborium = "0.2"
 clap = { version = "4.6", features = ["color", "derive"] }
+clap_complete = "4.6"
 console = "0.16"
 crossbeam-queue = "0.3"
 crossterm = { version = "0.29.0", features = ["events"] }
@@ -159,7 +160,8 @@ rustls = { version = "0.23", default-features = false, features = [
     "tls12",
 ] }
 tokio-rustls = "0.26"
-rustls-pemfile = "2"
+# 1.9 is the first release with the `pem` module (PemObject::pem_slice_iter).
+rustls-pki-types = "1.9"
 rustls-native-certs = "0.8"
 webpki-roots = "1"
 rcgen = { version = "0.14", features = ["x509-parser"] }

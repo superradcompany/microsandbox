@@ -724,6 +724,46 @@ func TestWithRegistryAuth(t *testing.T) {
 	}
 }
 
+func TestWithRegistryInsecure(t *testing.T) {
+	o := SandboxConfig{}
+	WithRegistryInsecure()(&o)
+	if !o.RegistryInsecure {
+		t.Error("RegistryInsecure: got false")
+	}
+}
+
+func TestWithRegistryCACerts(t *testing.T) {
+	o := SandboxConfig{}
+	first := []byte("-----BEGIN CERTIFICATE-----\nfirst\n")
+	WithRegistryCACerts(first)(&o)
+	WithRegistryCACerts([]byte("-----BEGIN CERTIFICATE-----\nsecond\n"))(&o)
+	if len(o.RegistryCACerts) != 2 {
+		t.Fatalf("RegistryCACerts: got %d bundles, want 2", len(o.RegistryCACerts))
+	}
+	if string(o.RegistryCACerts[0]) != "-----BEGIN CERTIFICATE-----\nfirst\n" {
+		t.Errorf("RegistryCACerts[0]: got %q", o.RegistryCACerts[0])
+	}
+	if string(o.RegistryCACerts[1]) != "-----BEGIN CERTIFICATE-----\nsecond\n" {
+		t.Errorf("RegistryCACerts[1]: got %q", o.RegistryCACerts[1])
+	}
+	// The option copies its input, so later caller mutations do not leak in.
+	first[0] = 'X'
+	if o.RegistryCACerts[0][0] != '-' {
+		t.Errorf("RegistryCACerts[0] aliases the caller's slice: got %q", o.RegistryCACerts[0])
+	}
+}
+
+func TestWithRegistryCACertsPath(t *testing.T) {
+	o := SandboxConfig{}
+	WithRegistryCACertsPath("/etc/ca/one.pem")(&o)
+	WithRegistryCACertsPath("/etc/ca/two.pem")(&o)
+	if len(o.RegistryCACertPaths) != 2 ||
+		o.RegistryCACertPaths[0] != "/etc/ca/one.pem" ||
+		o.RegistryCACertPaths[1] != "/etc/ca/two.pem" {
+		t.Errorf("RegistryCACertPaths: got %v", o.RegistryCACertPaths)
+	}
+}
+
 func TestWithPortsUDP(t *testing.T) {
 	o := SandboxConfig{}
 	WithPortsUDP(map[uint16]uint16{53: 53})(&o)
