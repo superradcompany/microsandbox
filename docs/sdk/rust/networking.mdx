@@ -1186,18 +1186,38 @@ A single policy rule. The `destination` interpretation is direction-dependent: e
 | ports | `Vec<`[`PortRange`](#portrange)`>` | Set semantics; empty = any port |
 | action | [`Action`](#action) | What to do on match |
 
-Convenience constructors build any-protocol, any-port rules:
+Convenience constructors build any-protocol, **any-port** rules — they leave `ports` empty, which matches every port. `Rule::allow_egress(Destination::Group(DestinationGroup::Host))` grants the guest every host port, not just the one service it needs. Reach for the `_ports` variants below when you mean a specific service.
 
 | Method | Description |
 |--------|-------------|
-| `Rule::allow_egress(destination)` | Allow rule, direction `Egress` |
-| `Rule::deny_egress(destination)` | Deny rule, direction `Egress` |
-| `Rule::allow_ingress(destination)` | Allow rule, direction `Ingress` |
-| `Rule::deny_ingress(destination)` | Deny rule, direction `Ingress` |
-| `Rule::allow_any(destination)` | Allow rule, direction `Any` |
-| `Rule::deny_any(destination)` | Deny rule, direction `Any` |
+| `Rule::allow_egress(destination)` | Allow rule, direction `Egress`, all ports |
+| `Rule::deny_egress(destination)` | Deny rule, direction `Egress`, all ports |
+| `Rule::allow_ingress(destination)` | Allow rule, direction `Ingress`, all ports |
+| `Rule::deny_ingress(destination)` | Deny rule, direction `Ingress`, all ports |
+| `Rule::allow_any(destination)` | Allow rule, direction `Any`, all ports |
+| `Rule::deny_any(destination)` | Deny rule, direction `Any`, all ports |
 | `Rule::allow_dns()` | Allow plain DNS (UDP/53 + TCP/53) to the gateway forwarder (`Group::Host`); the one-liner for opening DNS under deny-by-default. See [DNS as egress](/networking/dns#dns-as-egress) |
 | `Rule::deny_dns()` | Deny plain DNS (UDP/53 + TCP/53) to the gateway forwarder; place before profile-generated rules to override automatic DNS |
+
+Port-scoped counterparts take any `IntoIterator<Item = PortRange>` and are otherwise identical. An empty iterator degrades to the all-ports form above; a non-empty one also excludes ICMP, which carries no ports.
+
+| Method | Description |
+|--------|-------------|
+| `Rule::allow_egress_ports(destination, ports)` | Allow rule, direction `Egress`, scoped to `ports` |
+| `Rule::deny_egress_ports(destination, ports)` | Deny rule, direction `Egress`, scoped to `ports` |
+| `Rule::allow_ingress_ports(destination, ports)` | Allow rule, direction `Ingress`, scoped to `ports` |
+| `Rule::deny_ingress_ports(destination, ports)` | Deny rule, direction `Ingress`, scoped to `ports` |
+| `Rule::allow_any_ports(destination, ports)` | Allow rule, direction `Any`, scoped to `ports` |
+| `Rule::deny_any_ports(destination, ports)` | Deny rule, direction `Any`, scoped to `ports` |
+
+```rust
+use microsandbox_network::policy::{Destination, DestinationGroup, PortRange, Rule};
+
+let rule = Rule::allow_egress_ports(
+    Destination::Group(DestinationGroup::Host),
+    [PortRange::single(8080)],
+);
+```
 
 ### Action
 
