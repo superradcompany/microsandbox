@@ -238,14 +238,7 @@ if err != nil {
 }
 fmt.Println("shell exited with", exitCode)
 
-// Attach to a specific command.
-exitCode, err = sb.Attach(ctx, "python")
-if err != nil {
-    return err
-}
-fmt.Println("python exited with", exitCode)
-
-// Attach with options: a different guest user and custom detach keys.
+// Attach to a specific command with options.
 exitCode, err = sb.AttachWith(ctx, "python", nil,
     m.WithAttachUser("dev"),
     m.WithAttachEnv(map[string]string{"DEBUG": "1"}),
@@ -255,6 +248,7 @@ exitCode, err = sb.AttachWith(ctx, "python", nil,
 if err != nil {
     return err
 }
+fmt.Println("python exited with", exitCode)
 ```
 
 ```bash CLI
