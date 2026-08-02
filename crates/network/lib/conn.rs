@@ -396,7 +396,10 @@ impl ConnectionTracker {
             }
 
             let socket = sockets.get::<tcp::Socket>(handle);
-            if socket.state() == tcp::State::Established {
+            if matches!(
+                socket.state(),
+                tcp::State::Established | tcp::State::CloseWait
+            ) {
                 conn.proxy_spawned = true;
 
                 if let Some(channels) = conn.proxy_channels.take() {
