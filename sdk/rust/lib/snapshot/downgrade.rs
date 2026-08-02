@@ -229,7 +229,7 @@ async fn discover_paths(
     snapshots_dir: &Path,
 ) -> MicrosandboxResult<BTreeSet<PathBuf>> {
     let rows = db
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "SELECT artifact_path FROM snapshot_index",
         ))
@@ -618,7 +618,7 @@ async fn preflight_index(
         .map(|candidate| candidate.path.display().to_string())
         .collect();
     let rows = db
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "SELECT digest, artifact_path, state_kind, scope, format, fstype FROM snapshot_index",
         ))
@@ -657,7 +657,7 @@ async fn journal_plans(
 ) -> MicrosandboxResult<()> {
     let now = Utc::now().naive_utc();
     for candidate in candidates {
-        db.execute(Statement::from_sql_and_values(
+        db.execute_raw(Statement::from_sql_and_values(
             DatabaseBackend::Sqlite,
             "INSERT INTO snapshot_artifact_migration (kind, artifact_path, indexed_digest, source_digest, target_digest, source_parent_digest, target_parent_digest, phase, attempts, discovered_at, updated_at, recovery_member, translation_source) VALUES (?, ?, ?, ?, ?, ?, ?, 'reverse_planned', 1, ?, ?, ?, ?) ON CONFLICT(kind, artifact_path) DO UPDATE SET indexed_digest = excluded.indexed_digest, source_digest = COALESCE(snapshot_artifact_migration.source_digest, excluded.source_digest), target_digest = excluded.target_digest, source_parent_digest = COALESCE(snapshot_artifact_migration.source_parent_digest, excluded.source_parent_digest), target_parent_digest = excluded.target_parent_digest, attempts = snapshot_artifact_migration.attempts + 1, updated_at = excluded.updated_at, recovery_member = COALESCE(snapshot_artifact_migration.recovery_member, excluded.recovery_member), translation_source = COALESCE(snapshot_artifact_migration.translation_source, excluded.translation_source), error_code = NULL, error_detail = NULL",
             [
@@ -781,7 +781,7 @@ async fn publish_legacy_index(
                 .unwrap_or(&candidate.source_digest)
         );
         transaction
-            .execute(Statement::from_sql_and_values(
+            .execute_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Sqlite,
                 "UPDATE snapshot_index SET digest = ? WHERE artifact_path = ?",
                 [
@@ -796,7 +796,7 @@ async fn publish_legacy_index(
             continue;
         }
         transaction
-            .execute(Statement::from_sql_and_values(
+            .execute_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Sqlite,
                 "UPDATE snapshot_index SET digest = ?, parent_digest = ?, migration_state = 'reverse_complete', migration_error_code = NULL WHERE artifact_path = ?",
                 [
@@ -807,7 +807,7 @@ async fn publish_legacy_index(
             ))
             .await?;
         transaction
-            .execute(Statement::from_sql_and_values(
+            .execute_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Sqlite,
                 "UPDATE snapshot_artifact_migration SET phase = 'legacy_index_published', updated_at = ? WHERE kind = ? AND artifact_path = ?",
                 [
@@ -852,7 +852,7 @@ async fn indexed_digest(
     path: &Path,
 ) -> MicrosandboxResult<Option<String>> {
     let row = db
-        .query_one(Statement::from_sql_and_values(
+        .query_one_raw(Statement::from_sql_and_values(
             DatabaseBackend::Sqlite,
             "SELECT digest FROM snapshot_index WHERE artifact_path = ?",
             [path.display().to_string().into()],
@@ -867,7 +867,7 @@ async fn forward_journal(
     path: &Path,
 ) -> MicrosandboxResult<Option<ForwardJournal>> {
     let row = db
-        .query_one(Statement::from_sql_and_values(
+        .query_one_raw(Statement::from_sql_and_values(
             DatabaseBackend::Sqlite,
             "SELECT source_digest, target_digest, source_parent_digest, target_parent_digest, phase FROM snapshot_artifact_migration WHERE kind = ? AND artifact_path = ?",
             [FORWARD_KIND.into(), path.display().to_string().into()],
@@ -890,7 +890,7 @@ async fn reverse_journal(
     path: &Path,
 ) -> MicrosandboxResult<Option<ReverseJournal>> {
     let row = db
-        .query_one(Statement::from_sql_and_values(
+        .query_one_raw(Statement::from_sql_and_values(
             DatabaseBackend::Sqlite,
             "SELECT source_digest, target_digest, target_parent_digest, phase, translation_source FROM snapshot_artifact_migration WHERE kind = ? AND artifact_path = ?",
             [REVERSE_KIND.into(), path.display().to_string().into()],
@@ -913,7 +913,7 @@ async fn journal_phase(
     path: &Path,
     phase: &str,
 ) -> MicrosandboxResult<()> {
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         DatabaseBackend::Sqlite,
         "UPDATE snapshot_artifact_migration SET phase = ?, updated_at = ?, completed_at = CASE WHEN ? = 'reverse_complete' THEN ? ELSE completed_at END WHERE kind = ? AND artifact_path = ?",
         [
@@ -1132,7 +1132,7 @@ mod tests {
         let row = pools
             .write()
             .inner()
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "SELECT digest, migration_state FROM snapshot_index",
             ))
@@ -1154,7 +1154,7 @@ mod tests {
         let count = pools
             .write()
             .inner()
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "SELECT COUNT(*) FROM snapshot_index",
             ))
@@ -1192,7 +1192,7 @@ mod tests {
         pools
             .write()
             .inner()
-            .execute(Statement::from_string(
+            .execute_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "DELETE FROM snapshot_artifact_migration",
             ))
@@ -1211,7 +1211,7 @@ mod tests {
         pools
             .write()
             .inner()
-            .execute(Statement::from_sql_and_values(
+            .execute_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Sqlite,
                 "UPDATE snapshot_index SET digest = ?, migration_state = 'canonical' WHERE artifact_path = ?",
                 [digest.into(), artifact.display().to_string().into()],
@@ -1234,7 +1234,7 @@ mod tests {
         let state = pools
             .write()
             .inner()
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "SELECT migration_state FROM snapshot_index",
             ))

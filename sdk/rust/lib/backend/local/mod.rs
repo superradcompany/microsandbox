@@ -656,7 +656,7 @@ async fn acquire_migration_lock(db_dir: &Path) -> MicrosandboxResult<MigrationLo
 
 async fn refuse_schema_ahead(conn: &DatabaseConnection) -> MicrosandboxResult<()> {
     let rows = match conn
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "SELECT version FROM seaql_migrations ORDER BY applied_at ASC, version ASC",
         ))
@@ -719,7 +719,7 @@ mod tests {
 
         // All migrated tables should be present.
         let rows = conn
-            .query_all(Statement::from_string(
+            .query_all_raw(Statement::from_string(
                 sea_orm::DatabaseBackend::Sqlite,
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'seaql_%' AND name != 'sqlite_sequence' ORDER BY name",
             ))
@@ -805,7 +805,7 @@ mod tests {
 
         let count = pools
             .read()
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "SELECT COUNT(*) FROM snapshot_index",
             ))
@@ -830,7 +830,7 @@ mod tests {
         pools
             .write()
             .inner()
-            .execute(Statement::from_sql_and_values(
+            .execute_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Sqlite,
                 "INSERT OR REPLACE INTO maintenance_lease (name, holder_pid, lease_expires_at, last_completed_at) VALUES (?, ?, ?, NULL)",
                 [
@@ -861,7 +861,7 @@ mod tests {
         pools
             .write()
             .inner()
-            .execute(Statement::from_sql_and_values(
+            .execute_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Sqlite,
                 "INSERT INTO seaql_migrations (version, applied_at) VALUES (?, ?)",
                 ["m20990101_000001_future".into(), 4_102_444_800_i64.into()],
@@ -909,7 +909,7 @@ mod tests {
 
         let conn = Database::connect(&db_url).await.unwrap();
 
-        conn.execute(Statement::from_string(
+        conn.execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "PRAGMA foreign_keys = ON;",
         ))
@@ -920,7 +920,7 @@ mod tests {
         Migrator::up(&conn, Some(2)).await.unwrap();
 
         // Simulate a half-applied migration 3.
-        conn.execute(Statement::from_string(
+        conn.execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "CREATE TABLE IF NOT EXISTS volume (
                 id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
@@ -935,7 +935,7 @@ mod tests {
         .await
         .unwrap();
 
-        conn.execute(Statement::from_string(
+        conn.execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "CREATE TABLE IF NOT EXISTS snapshot (
                 id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
@@ -950,7 +950,7 @@ mod tests {
         .await
         .unwrap();
 
-        conn.execute(Statement::from_string(
+        conn.execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "CREATE UNIQUE INDEX idx_snapshots_name_sandbox_unique ON snapshot (name, sandbox_id)",
         ))
@@ -966,7 +966,7 @@ mod tests {
 
         let migration_row_count = recovered
             .read()
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "SELECT COUNT(*) FROM seaql_migrations WHERE version = 'm20260305_000003_create_storage_tables'",
             ))
