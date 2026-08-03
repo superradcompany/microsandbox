@@ -246,7 +246,7 @@ impl DotProxy {
                             self.drain_plaintext()?;
                             self.dispatch_ready_queries(&resp_tx);
                         }
-                        Ok(None) => return Ok(()),
+                        Ok(None) => break,
                         Err(_) => {
                             tracing::debug!(dst = %self.dst, "DoT: idle timeout, closing connection");
                             return Ok(());
@@ -261,6 +261,17 @@ impl DotProxy {
                 }
             }
         }
+
+        // Stop accepting queries from the guest. Dropping the root sender lets
+        // `resp_rx` close after all in-flight tasks drop their cloned senders.
+        drop(resp_tx);
+        while let Some(response) = resp_rx.recv().await {
+            self.write_plaintext(&frame(&response))?;
+            self.flush_to_guest().await?;
+        }
+
+        self.guest_tls.send_close_notify();
+        self.flush_to_guest().await
     }
 
     /// Drain all complete DNS frames from the plaintext buffer and
@@ -397,4 +408,138 @@ fn is_complete_client_hello(buf: &[u8]) -> bool {
     }
     let record_len = u16::from_be_bytes([buf[3], buf[4]]) as usize;
     buf.len() >= 5 + record_len
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use hickory_net::proto::op::{Message, MessageType, OpCode, Query};
+    use hickory_net::proto::rr::{Name, RecordType};
+    use hickory_net::proto::serialize::binary::{BinDecodable, BinEncodable};
+    use rustls::pki_types::ServerName;
+
+    use super::*;
+    use crate::dns::forwarder::DnsForwarder;
+    use crate::stack::GatewayIps;
+    use crate::tls::ca::CertAuthority;
+    use crate::tls::certgen::generate_domain_cert;
+
+    const TEST_DOMAIN: &str = "dns.test";
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn guest_eof_preserves_pending_response() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let shared = Arc::new(SharedState::new(8));
+        let gateway = GatewayIps {
+            ipv4: Some("100.96.0.1".parse().unwrap()),
+            ipv6: None,
+        };
+        let forwarder = DnsForwarder::for_proxy_test(shared.clone(), gateway).await;
+        let (guest_tls, mut client_tls) = connected_tls_pair();
+        let (from_guest_tx, from_smoltcp) = mpsc::channel(1);
+        let (to_smoltcp, mut to_guest_rx) = mpsc::channel(8);
+
+        let mut query = Message::new(0x4242, MessageType::Query, OpCode::Query);
+        query.metadata.recursion_desired = true;
+        query.add_query(Query::query(
+            Name::from_ascii(crate::HOST_ALIAS).unwrap(),
+            RecordType::A,
+        ));
+
+        let mut proxy = DotProxy {
+            guest_tls,
+            from_smoltcp,
+            to_smoltcp,
+            plaintext_buf: frame(&query.to_bytes().unwrap()),
+            tls_out_buf: Vec::with_capacity(CLIENT_HELLO_BUF_SIZE),
+            shared,
+            dst: SocketAddr::from(([100, 96, 0, 1], 853)),
+            sni: TEST_DOMAIN.to_string(),
+            forwarder,
+        };
+
+        // The guest half-closes after its complete query. On a current-thread
+        // runtime, the spawned forwarder cannot run until dispatch_loop yields.
+        drop(from_guest_tx);
+        proxy.dispatch_loop().await.unwrap();
+
+        let mut encrypted = Vec::new();
+        while let Ok(chunk) = to_guest_rx.try_recv() {
+            encrypted.extend_from_slice(&chunk);
+        }
+        assert!(
+            !encrypted.is_empty(),
+            "pending DoT response must survive guest EOF",
+        );
+
+        let mut encrypted = encrypted.as_slice();
+        while !encrypted.is_empty() {
+            client_tls.read_tls(&mut encrypted).unwrap();
+            client_tls.process_new_packets().unwrap();
+        }
+
+        let mut plaintext = Vec::new();
+        loop {
+            let mut buf = [0u8; 4096];
+            match client_tls.reader().read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => plaintext.extend_from_slice(&buf[..n]),
+                Err(ref error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("failed to read DoT response: {error}"),
+            }
+        }
+        let response = take_message(&mut plaintext).expect("framed DoT response");
+        let response = Message::from_bytes(&response).expect("valid DNS response");
+        assert_eq!(response.metadata.id, 0x4242);
+        assert_eq!(response.answers.len(), 1);
+    }
+
+    fn connected_tls_pair() -> (rustls::ServerConnection, rustls::ClientConnection) {
+        let ca = CertAuthority::generate();
+        let domain_cert = generate_domain_cert(TEST_DOMAIN, &ca, 1).unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(ca.cert_der.clone()).unwrap();
+        let client_config = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let mut client = rustls::ClientConnection::new(
+            Arc::new(client_config),
+            ServerName::try_from(TEST_DOMAIN.to_string()).unwrap(),
+        )
+        .unwrap();
+        let mut server = rustls::ServerConnection::new(domain_cert.server_config.clone()).unwrap();
+
+        for _ in 0..8 {
+            let mut client_bytes = Vec::new();
+            while client.wants_write() {
+                client.write_tls(&mut client_bytes).unwrap();
+            }
+            if !client_bytes.is_empty() {
+                server.read_tls(&mut client_bytes.as_slice()).unwrap();
+                server.process_new_packets().unwrap();
+            }
+
+            let mut server_bytes = Vec::new();
+            while server.wants_write() {
+                server.write_tls(&mut server_bytes).unwrap();
+            }
+            if !server_bytes.is_empty() {
+                client.read_tls(&mut server_bytes.as_slice()).unwrap();
+                client.process_new_packets().unwrap();
+            }
+
+            if !client.is_handshaking()
+                && !server.is_handshaking()
+                && !client.wants_write()
+                && !server.wants_write()
+            {
+                return (server, client);
+            }
+        }
+
+        panic!("TLS handshake did not complete");
+    }
 }

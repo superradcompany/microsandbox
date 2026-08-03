@@ -19,7 +19,8 @@ use microsandbox_db::{DbReadConnection, DbWriteConnection};
 use microsandbox_image::{Digest, GlobalCache};
 use microsandbox_protocol::message::MessageType;
 use sea_orm::{
-    ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder, QuerySelect, sea_query::Expr,
+    ColumnTrait, Condition, EntityTrait, ExprTrait, QueryFilter, QueryOrder, QuerySelect,
+    sea_query::Expr,
 };
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::CloseHandle;

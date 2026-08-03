@@ -139,20 +139,20 @@ impl ConnectionTrait for DbReadConnection {
         self.0.get_database_backend()
     }
 
-    async fn execute(&self, stmt: Statement) -> Result<ExecResult, DbErr> {
-        self.0.execute(stmt).await
+    async fn execute_raw(&self, stmt: Statement) -> Result<ExecResult, DbErr> {
+        self.0.execute_raw(stmt).await
     }
 
     async fn execute_unprepared(&self, sql: &str) -> Result<ExecResult, DbErr> {
         self.0.execute_unprepared(sql).await
     }
 
-    async fn query_one(&self, stmt: Statement) -> Result<Option<QueryResult>, DbErr> {
-        self.0.query_one(stmt).await
+    async fn query_one_raw(&self, stmt: Statement) -> Result<Option<QueryResult>, DbErr> {
+        self.0.query_one_raw(stmt).await
     }
 
-    async fn query_all(&self, stmt: Statement) -> Result<Vec<QueryResult>, DbErr> {
-        self.0.query_all(stmt).await
+    async fn query_all_raw(&self, stmt: Statement) -> Result<Vec<QueryResult>, DbErr> {
+        self.0.query_all_raw(stmt).await
     }
 
     fn support_returning(&self) -> bool {
@@ -166,9 +166,10 @@ impl ConnectionTrait for DbReadConnection {
 
 // Auto-retry every auto-commit operation on the writer pool. Sea-orm
 // callers (`Entity::insert(...).exec(db)` etc.) ultimately funnel through
-// these `ConnectionTrait` methods, so wrapping them in `retry_on_busy`
-// gives every single-statement write inter-process retry semantics
-// without per-call-site code.
+// these required `*_raw` methods — the provided builder-taking methods
+// (`execute`, `query_one`, `query_all`) build the statement and delegate
+// here — so wrapping them in `retry_on_busy` gives every single-statement
+// write inter-process retry semantics without per-call-site code.
 //
 // `Statement` is `Clone`, so the closure can produce a fresh future on
 // each retry. Multi-statement atomic work still uses `transaction()`
@@ -181,20 +182,20 @@ impl ConnectionTrait for DbWriteConnection {
         self.0.get_database_backend()
     }
 
-    async fn execute(&self, stmt: Statement) -> Result<ExecResult, DbErr> {
-        retry::retry_on_busy(|| async { self.0.execute(stmt.clone()).await }).await
+    async fn execute_raw(&self, stmt: Statement) -> Result<ExecResult, DbErr> {
+        retry::retry_on_busy(|| async { self.0.execute_raw(stmt.clone()).await }).await
     }
 
     async fn execute_unprepared(&self, sql: &str) -> Result<ExecResult, DbErr> {
         retry::retry_on_busy(|| async { self.0.execute_unprepared(sql).await }).await
     }
 
-    async fn query_one(&self, stmt: Statement) -> Result<Option<QueryResult>, DbErr> {
-        retry::retry_on_busy(|| async { self.0.query_one(stmt.clone()).await }).await
+    async fn query_one_raw(&self, stmt: Statement) -> Result<Option<QueryResult>, DbErr> {
+        retry::retry_on_busy(|| async { self.0.query_one_raw(stmt.clone()).await }).await
     }
 
-    async fn query_all(&self, stmt: Statement) -> Result<Vec<QueryResult>, DbErr> {
-        retry::retry_on_busy(|| async { self.0.query_all(stmt.clone()).await }).await
+    async fn query_all_raw(&self, stmt: Statement) -> Result<Vec<QueryResult>, DbErr> {
+        retry::retry_on_busy(|| async { self.0.query_all_raw(stmt.clone()).await }).await
     }
 
     fn support_returning(&self) -> bool {
