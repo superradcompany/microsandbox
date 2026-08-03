@@ -1,5 +1,6 @@
 //! Global on-disk image and layer cache.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use oci_client::Reference;
@@ -9,6 +10,7 @@ use sha2::{Digest as Sha2Digest, Sha256};
 use crate::{
     config::ImageConfig,
     digest::Digest,
+    erofs::ErofsReader,
     error::{ImageError, ImageResult},
 };
 
@@ -349,8 +351,19 @@ impl GlobalCache {
                     ),
                 });
             }
-            let _ = std::fs::remove_file(candidate);
-            return Ok(destination);
+            if flat_blob_matches_digest(&destination, artifact_digest)? {
+                let _ = std::fs::remove_file(candidate);
+                return Ok(destination);
+            }
+
+            // A content-addressed name must never retain different bytes. The
+            // candidate has already been synchronized and validated, while a
+            // missing destination makes every existing ref safely miss after
+            // a crash between removal and rename.
+            std::fs::remove_file(&destination).map_err(|source| ImageError::Cache {
+                path: destination.clone(),
+                source,
+            })?;
         }
         std::fs::rename(candidate, &destination).map_err(|source| ImageError::Cache {
             path: destination.clone(),
@@ -369,7 +382,12 @@ impl GlobalCache {
             Err(source) => return Err(ImageError::Cache { path, source }),
         };
         let reference = match serde_json::from_str::<FlatRootfsRef>(&data) {
-            Ok(reference) if reference.schema == 1 => reference,
+            Ok(reference)
+                if reference.schema == 1
+                    && reference.manifest_digest == manifest_digest.to_string() =>
+            {
+                reference
+            }
             Ok(_) => return Ok(None),
             Err(error) => {
                 tracing::warn!(path = %path.display(), %error, "corrupt flat rootfs ref, ignoring");
@@ -616,23 +634,51 @@ pub(crate) fn parse_cached_image_metadata(
 }
 
 pub(crate) fn is_valid_erofs_artifact(path: &Path) -> bool {
-    match std::fs::metadata(path) {
-        Ok(meta) => {
-            let len = meta.len();
-            len > 0 && len % EROFS_ALIGNMENT_BYTES == 0
-        }
-        Err(_) => false,
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    let len = meta.len();
+    if !meta.is_file() || len == 0 || len % EROFS_ALIGNMENT_BYTES != 0 {
+        return false;
     }
+
+    // Length alone accepts any aligned garbage as a cache hit. Parse the
+    // superblock and root inode so corrupt cached layers are re-materialized
+    // instead of failing later while composing a flat rootfs or booting a VM.
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let Ok(mut reader) = ErofsReader::new(file) else {
+        return false;
+    };
+    reader.root_directory_metadata().is_ok()
 }
 
 pub(crate) async fn is_valid_erofs_artifact_async(path: &Path) -> bool {
-    match tokio::fs::metadata(path).await {
-        Ok(meta) => {
-            let len = meta.len();
-            len > 0 && len % EROFS_ALIGNMENT_BYTES == 0
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || is_valid_erofs_artifact(&path))
+        .await
+        .unwrap_or(false)
+}
+
+fn flat_blob_matches_digest(path: &Path, expected: &Digest) -> ImageResult<bool> {
+    let mut file = std::fs::File::open(path).map_err(|source| ImageError::Cache {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 1024 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|source| ImageError::Cache {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if read == 0 {
+            break;
         }
-        Err(_) => false,
+        hasher.update(&buffer[..read]);
     }
+    Ok(format!("sha256:{}", hex::encode(hasher.finalize())) == expected.to_string())
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -684,5 +730,59 @@ mod tests {
         cache.write_flat_ref(&manifest, &reference).unwrap();
 
         assert_eq!(cache.read_flat_ref(&manifest).unwrap(), Some(reference));
+    }
+
+    #[test]
+    fn aligned_garbage_is_not_a_valid_erofs_cache_artifact() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("corrupt.erofs");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(EROFS_ALIGNMENT_BYTES).unwrap();
+
+        assert!(!is_valid_erofs_artifact(&path));
+    }
+
+    #[test]
+    fn flat_ref_must_name_the_manifest_that_indexes_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = GlobalCache::new(directory.path()).unwrap();
+        let indexed_manifest = digest('a');
+        let wrong_manifest = digest('b');
+        let artifact = digest('c');
+        std::fs::write(cache.flat_blob_path(&artifact), [0u8; 8]).unwrap();
+        let reference = FlatRootfsRef {
+            schema: 1,
+            manifest_digest: wrong_manifest.to_string(),
+            derivation_digest: digest('d').to_string(),
+            artifact_digest: artifact.to_string(),
+            materializer_abi: 1,
+            uuid: "00".repeat(16),
+            virtual_size_bytes: 8,
+            inode_count: 2,
+            content_bytes: 0,
+        };
+        cache.write_flat_ref(&indexed_manifest, &reference).unwrap();
+
+        assert_eq!(cache.read_flat_ref(&indexed_manifest).unwrap(), None);
+    }
+
+    #[test]
+    fn publishing_replaces_same_size_blob_with_wrong_content() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = GlobalCache::new(directory.path()).unwrap();
+        let candidate = directory.path().join("candidate.raw");
+        let expected_bytes = b"good";
+        std::fs::write(&candidate, expected_bytes).unwrap();
+        let expected: Digest = format!("sha256:{}", hex::encode(Sha256::digest(expected_bytes)))
+            .parse()
+            .unwrap();
+        let destination = cache.flat_blob_path(&expected);
+        std::fs::write(&destination, b"evil").unwrap();
+
+        cache
+            .publish_flat_blob(&candidate, &expected, expected_bytes.len() as u64)
+            .unwrap();
+
+        assert_eq!(std::fs::read(destination).unwrap(), expected_bytes);
     }
 }

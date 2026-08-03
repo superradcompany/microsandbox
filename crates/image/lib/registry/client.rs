@@ -2076,7 +2076,7 @@ mod tests {
         // Manually create layer files without fsmeta/VMDK.
         for (index, _) in metadata.layers.iter().enumerate() {
             let diff_id = parse_digest(&format!("sha256:{:064x}", index as u64 + 1000));
-            std::fs::write(cache.layer_erofs_path(&diff_id), vec![0u8; 4096]).unwrap();
+            write_valid_erofs_layer(&cache, &diff_id, b"cached fixture layer");
         }
         // Delete fsmeta/VMDK if they were created by the fixture.
         let _ = std::fs::remove_file(cache.fsmeta_erofs_path(&manifest_digest));
@@ -2408,16 +2408,16 @@ mod tests {
         let all_materialized = materialized_layers.iter().all(|m| *m);
         for (index, materialized) in materialized_layers.iter().copied().enumerate() {
             let diff_id = parse_digest(&format!("sha256:{:064x}", index as u64 + 1000));
-            let erofs_path = cache.layer_erofs_path(&diff_id);
             if materialized {
-                std::fs::write(&erofs_path, vec![0u8; 4096]).unwrap();
+                write_valid_erofs_layer(cache, &diff_id, b"cached fixture layer");
             }
         }
 
         // Create fsmeta + VMDK when all layers are present (fsmerge pipeline).
         if all_materialized && !materialized_layers.is_empty() {
             let manifest_digest = parse_digest(&metadata.manifest_digest);
-            std::fs::write(cache.fsmeta_erofs_path(&manifest_digest), vec![0u8; 4096]).unwrap();
+            erofs::write_erofs(&FileTree::new(), &cache.fsmeta_erofs_path(&manifest_digest))
+                .unwrap();
             std::fs::write(cache.vmdk_path(&manifest_digest), b"# VMDK fixture").unwrap();
         }
 

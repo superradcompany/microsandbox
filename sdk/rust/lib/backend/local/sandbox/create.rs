@@ -169,16 +169,20 @@ impl LocalBackend {
             pinned_manifest_digest = Some(pull_result.manifest_digest.to_string());
             pinned_reference = Some(metadata_reference.clone());
 
-            // Verify VMDK exists in the global cache.
+            // Layered roots boot through the stitched VMDK descriptor. Flat
+            // roots intentionally skip both fsmeta and VMDK materialization,
+            // so requiring the descriptor here would make a cold SDK create
+            // fail after successfully publishing its flat ext4 artifact.
             let cache_dir = self.cache_dir();
             let cache = GlobalCache::new_async(&cache_dir).await?;
-
-            let vmdk_path = cache.vmdk_path(&pull_result.manifest_digest);
-            if tokio::fs::metadata(&vmdk_path).await.is_err() {
-                return Err(crate::MicrosandboxError::Custom(format!(
-                    "VMDK not materialized: {}",
-                    vmdk_path.display()
-                )));
+            if image_materialization.includes_layered() {
+                let vmdk_path = cache.vmdk_path(&pull_result.manifest_digest);
+                if tokio::fs::metadata(&vmdk_path).await.is_err() {
+                    return Err(crate::MicrosandboxError::Custom(format!(
+                        "VMDK not materialized: {}",
+                        vmdk_path.display()
+                    )));
+                }
             }
 
             // For patches, pass per-layer EROFS paths.
