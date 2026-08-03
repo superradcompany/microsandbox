@@ -722,7 +722,10 @@ fn block_writeback_policy(
             BlockWritebackLimit::Auto => {
                 let pool_bytes = match explicit_pool_bytes {
                     Some(pool_bytes) => pool_bytes,
-                    None => linux_auto_block_writeback_pool_bytes(linux_mem_total_bytes()?)?,
+                    None => linux_auto_block_writeback_pool_bytes(
+                        linux_meminfo_bytes("MemTotal:")?,
+                        linux_meminfo_bytes("MemAvailable:")?,
+                    )?,
                 };
                 // A small host may have less aggregate dirty credit than the measured preferred
                 // per-disk threshold. Keep auto bootable by shrinking the per-disk bound to the
@@ -771,7 +774,7 @@ fn block_writeback_policy(
             )));
         }
         if let Some(pool_bytes) = pool_bytes {
-            let total_memory_bytes = linux_mem_total_bytes()?;
+            let total_memory_bytes = linux_meminfo_bytes("MemTotal:")?;
             if pool_bytes > total_memory_bytes {
                 return Err(MicrosandboxError::InvalidConfig(format!(
                     "writeback pool ({pool_bytes} bytes) exceeds physical host memory ({total_memory_bytes} bytes)"
@@ -805,6 +808,7 @@ fn block_writeback_policy(
 #[cfg(target_os = "linux")]
 fn auto_block_writeback_pool_bytes(
     total_memory_bytes: u64,
+    available_memory_bytes: u64,
     dirty_background_bytes: u64,
     dirty_background_ratio: u64,
 ) -> MicrosandboxResult<u64> {
@@ -820,7 +824,10 @@ fn auto_block_writeback_pool_bytes(
     let kernel_background = if dirty_background_bytes != 0 {
         dirty_background_bytes
     } else {
-        total_memory_bytes
+        // Linux applies the ratio to free and reclaimable memory, explicitly not total physical
+        // memory. MemAvailable is a deliberately conservative userspace estimate of that dynamic
+        // pool after reserves, so it avoids admitting against RAM the host cannot currently spare.
+        available_memory_bytes
             .checked_mul(dirty_background_ratio)
             .ok_or_else(|| {
                 MicrosandboxError::Runtime(
@@ -833,7 +840,10 @@ fn auto_block_writeback_pool_bytes(
 }
 
 #[cfg(target_os = "linux")]
-fn linux_auto_block_writeback_pool_bytes(total_memory_bytes: u64) -> MicrosandboxResult<u64> {
+fn linux_auto_block_writeback_pool_bytes(
+    total_memory_bytes: u64,
+    available_memory_bytes: u64,
+) -> MicrosandboxResult<u64> {
     let dirty_background_bytes = linux_u64_file("/proc/sys/vm/dirty_background_bytes")?;
     let dirty_background_ratio = if dirty_background_bytes == 0 {
         linux_u64_file("/proc/sys/vm/dirty_background_ratio")?
@@ -842,34 +852,35 @@ fn linux_auto_block_writeback_pool_bytes(total_memory_bytes: u64) -> Microsandbo
     };
     auto_block_writeback_pool_bytes(
         total_memory_bytes,
+        available_memory_bytes,
         dirty_background_bytes,
         dirty_background_ratio,
     )
 }
 
 #[cfg(target_os = "linux")]
-fn linux_mem_total_bytes() -> MicrosandboxResult<u64> {
+fn linux_meminfo_bytes(field: &str) -> MicrosandboxResult<u64> {
     let meminfo = std::fs::read_to_string("/proc/meminfo").map_err(|error| {
         MicrosandboxError::Runtime(format!(
             "read /proc/meminfo for writeback admission: {error}"
         ))
     })?;
-    let total_kib = meminfo
+    let value_kib = meminfo
         .lines()
         .find_map(|line| {
             let mut fields = line.split_whitespace();
-            (fields.next() == Some("MemTotal:"))
+            (fields.next() == Some(field))
                 .then(|| fields.next()?.parse::<u64>().ok())
                 .flatten()
         })
         .ok_or_else(|| {
-            MicrosandboxError::Runtime(
-                "parse MemTotal from /proc/meminfo for writeback admission".into(),
-            )
+            MicrosandboxError::Runtime(format!(
+                "parse {field} from /proc/meminfo for writeback admission"
+            ))
         })?;
-    total_kib
-        .checked_mul(1024)
-        .ok_or_else(|| MicrosandboxError::Runtime("MemTotal byte conversion overflowed u64".into()))
+    value_kib.checked_mul(1024).ok_or_else(|| {
+        MicrosandboxError::Runtime(format!("{field} byte conversion overflowed u64"))
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -4677,12 +4688,19 @@ mod tests {
             assert_eq!(automatic.0, Some(AUTO_BLOCK_WRITEBACK_LIMIT_BYTES));
             assert!(automatic.1.unwrap() >= AUTO_BLOCK_WRITEBACK_LIMIT_BYTES);
             assert_eq!(
-                auto_block_writeback_pool_bytes(64 * 1024 * 1024 * 1024, 0, 10).unwrap(),
+                auto_block_writeback_pool_bytes(
+                    64 * 1024 * 1024 * 1024,
+                    60 * 1024 * 1024 * 1024,
+                    0,
+                    10,
+                )
+                .unwrap(),
                 64 * 1024 * 1024 * 1024 / 10
             );
             assert_eq!(
                 auto_block_writeback_pool_bytes(
                     64 * 1024 * 1024 * 1024,
+                    60 * 1024 * 1024 * 1024,
                     2 * 1024 * 1024 * 1024,
                     50,
                 )
@@ -4690,14 +4708,35 @@ mod tests {
                 2 * 1024 * 1024 * 1024
             );
             assert_eq!(
-                auto_block_writeback_pool_bytes(64 * 1024 * 1024 * 1024, 0, 20).unwrap(),
+                auto_block_writeback_pool_bytes(
+                    64 * 1024 * 1024 * 1024,
+                    60 * 1024 * 1024 * 1024,
+                    0,
+                    20,
+                )
+                .unwrap(),
                 64 * 1024 * 1024 * 1024 / 10
             );
+            assert_eq!(
+                auto_block_writeback_pool_bytes(
+                    64 * 1024 * 1024 * 1024,
+                    8 * 1024 * 1024 * 1024,
+                    0,
+                    10,
+                )
+                .unwrap(),
+                8 * 1024 * 1024 * 1024 / 10
+            );
             assert!(
-                auto_block_writeback_pool_bytes(64 * 1024 * 1024 * 1024, 0, 101)
-                    .unwrap_err()
-                    .to_string()
-                    .contains("must not exceed 100")
+                auto_block_writeback_pool_bytes(
+                    64 * 1024 * 1024 * 1024,
+                    60 * 1024 * 1024 * 1024,
+                    0,
+                    101,
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("must not exceed 100")
             );
         }
         #[cfg(not(target_os = "linux"))]
