@@ -174,4 +174,4 @@ russh = "0.62.4"
 russh-sftp = "2.3.0"
 
 [patch.crates-io]
-msb_krun = { git = "https://github.com/superradcompany/libkrun.git", rev = "330d446e35c3c08eba77514bac2038ace7e344f8" }
+msb_krun = { git = "https://github.com/superradcompany/libkrun.git", rev = "be17b419fd431d94702319a8b2578e2dfc8dcf7d" }
