@@ -20,10 +20,11 @@ The package uses winget's zip + portable installer shape because the microsandbo
 
 The **first** version must be submitted to `microsoft/winget-pkgs` by hand using the staged `0.6.0` manifests (see [Submit 0.6.0](#submit-060) below). Komac, which the release automation uses, refuses to open a PR for a package that does not yet exist in the community repository.
 
-After that first version lands, **subsequent releases are automated**. The `update-winget` job in [`.github/workflows/release.yml`](../../.github/workflows/release.yml) runs on every `v*` tag: it invokes [`winget-releaser`](https://github.com/vedantmgoyal9/winget-releaser) (Komac), which copies the previously published manifests, bumps the version, rewrites the installer URLs and SHA256 hashes from the release's `microsandbox-windows-*.zip` assets, and opens a PR against `microsoft/winget-pkgs`.
+After that first version lands, set the `WINGET_RELEASE_ENABLED` repository variable to `true` to automate subsequent releases. The `update-winget` job in [`.github/workflows/release.yml`](../../.github/workflows/release.yml) then runs on every `v*` tag: it invokes [`winget-releaser`](https://github.com/vedantmgoyal9/winget-releaser) (Komac), which copies the previously published manifests, bumps the version, rewrites the installer URLs and SHA256 hashes from the release's `microsandbox-windows-*.zip` assets, and opens a PR against `microsoft/winget-pkgs`.
 
 One-time setup for the automation:
 
+- After the first version is accepted into `microsoft/winget-pkgs`, set the `WINGET_RELEASE_ENABLED` repository variable to `true`. Keep it unset before then so release workflows skip the `update-winget` job.
 - Add a `WINGET_TOKEN` repository secret: a classic PAT with `public_repo` scope whose owner has a fork of `microsoft/winget-pkgs`. The submit step is skipped when this secret is absent.
 - If that fork lives under an account other than `superradcompany`, set a `WINGET_FORK_USER` repository variable to the fork owner's username.
 

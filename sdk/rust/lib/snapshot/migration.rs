@@ -726,7 +726,7 @@ fn retire_legacy_descriptor(candidate: &PlannedCandidate) -> MicrosandboxResult<
 
 async fn indexed_artifact_paths(db: &DatabaseConnection) -> MicrosandboxResult<BTreeSet<PathBuf>> {
     let rows = db
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "SELECT artifact_path FROM snapshot_index",
         ))
@@ -740,7 +740,7 @@ async fn indexed_artifact_paths(db: &DatabaseConnection) -> MicrosandboxResult<B
 
 async fn indexed_canonical_digests(db: &DatabaseConnection) -> MicrosandboxResult<HashSet<String>> {
     let rows = db
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "SELECT digest, artifact_path FROM snapshot_index",
         ))
@@ -761,7 +761,7 @@ async fn preflight_target_collisions(
     planned: &[PlannedCandidate],
 ) -> MicrosandboxResult<()> {
     let rows = db
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "SELECT digest, artifact_path FROM snapshot_index",
         ))
@@ -811,7 +811,7 @@ async fn publish_index_component(
         revalidate_planned_candidate(candidate)?;
         let path = candidate.hashed.pinned.path.display().to_string();
         transaction
-            .execute(Statement::from_sql_and_values(
+            .execute_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Sqlite,
                 "DELETE FROM snapshot_index WHERE digest = ? OR artifact_path = ?",
                 [
@@ -822,7 +822,7 @@ async fn publish_index_component(
             .await?;
         insert_canonical_index_row(&transaction, candidate).await?;
         transaction
-            .execute(Statement::from_sql_and_values(
+            .execute_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Sqlite,
                 "UPDATE snapshot_artifact_migration SET phase = 'index_published', updated_at = ? WHERE kind = ? AND artifact_path = ?",
                 [
@@ -916,7 +916,7 @@ where
         .file_name()
         .and_then(|name| name.to_str())
         .map(str::to_string);
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         DatabaseBackend::Sqlite,
         "INSERT INTO snapshot_index (digest, name, parent_digest, scope, state_kind, image_ref, image_manifest_digest, format, fstype, checkpoint_manifest_digest, artifact_path, size_bytes, locality, storage_binding_id, availability, migration_state, migration_error_code, created_at, indexed_at, child_count) VALUES (?, ?, ?, 'disk', 'file', ?, ?, ?, ?, NULL, ?, ?, 'embedded', NULL, 'ready', 'complete', NULL, ?, ?, 0)",
         [
@@ -945,7 +945,7 @@ async fn journal_discovered(
 ) -> MicrosandboxResult<()> {
     let now = Utc::now().naive_utc();
     let path = candidate.path.display().to_string();
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         DatabaseBackend::Sqlite,
         "INSERT INTO snapshot_artifact_migration (kind, artifact_path, source_digest, source_parent_digest, phase, attempts, discovered_at, updated_at) VALUES (?, ?, ?, ?, 'discovered', 1, ?, ?) ON CONFLICT(kind, artifact_path) DO UPDATE SET attempts = attempts + 1, updated_at = excluded.updated_at, error_code = NULL, error_detail = NULL",
         [
@@ -966,7 +966,7 @@ async fn journal_planned(
     candidate: &PlannedCandidate,
 ) -> MicrosandboxResult<()> {
     let file_identity = format_file_identity(&candidate.hashed.pinned.payload_before);
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         DatabaseBackend::Sqlite,
         "UPDATE snapshot_artifact_migration SET target_digest = ?, target_parent_digest = ?, payload_integrity = ?, payload_size = ?, payload_file_identity = ?, phase = 'planned', updated_at = ?, error_code = NULL, error_detail = NULL WHERE kind = ? AND artifact_path = ?",
         [
@@ -991,7 +991,7 @@ async fn journal_phase(
     path: &Path,
     phase: &str,
 ) -> MicrosandboxResult<()> {
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         DatabaseBackend::Sqlite,
         "UPDATE snapshot_artifact_migration SET phase = ?, updated_at = ? WHERE kind = ? AND artifact_path = ?",
         [
@@ -1007,7 +1007,7 @@ async fn journal_phase(
 
 async fn journal_complete(db: &DatabaseConnection, path: &Path) -> MicrosandboxResult<()> {
     let now = Utc::now().naive_utc();
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         DatabaseBackend::Sqlite,
         "UPDATE snapshot_artifact_migration SET phase = 'complete', updated_at = ?, completed_at = ?, error_code = NULL, error_detail = NULL WHERE kind = ? AND artifact_path = ?",
         [
@@ -1047,7 +1047,7 @@ async fn record_blocked_path(
         ),
     };
     let now = Utc::now().naive_utc();
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         DatabaseBackend::Sqlite,
         "INSERT INTO snapshot_artifact_migration (kind, artifact_path, phase, attempts, error_code, error_detail, discovered_at, updated_at) VALUES (?, ?, ?, 1, ?, ?, ?, ?) ON CONFLICT(kind, artifact_path) DO UPDATE SET attempts = attempts + 1, phase = excluded.phase, error_code = excluded.error_code, error_detail = excluded.error_detail, updated_at = excluded.updated_at",
         [
@@ -1061,7 +1061,7 @@ async fn record_blocked_path(
         ],
     ))
     .await?;
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         DatabaseBackend::Sqlite,
         "UPDATE snapshot_index SET migration_state = 'blocked', migration_error_code = ? WHERE artifact_path = ?",
         [code.into(), path.display().to_string().into()],
@@ -1075,7 +1075,7 @@ async fn load_blocked_error(
     path: &Path,
 ) -> MicrosandboxResult<MicrosandboxError> {
     let row = db
-        .query_one(Statement::from_sql_and_values(
+        .query_one_raw(Statement::from_sql_and_values(
             DatabaseBackend::Sqlite,
             "SELECT phase, error_code, error_detail FROM snapshot_artifact_migration WHERE kind = ? AND artifact_path = ?",
             [

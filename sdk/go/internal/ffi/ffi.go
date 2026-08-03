@@ -1467,9 +1467,17 @@ func (c *AgentClient) CloseCtx(ctx context.Context) error {
 // Sandbox lifecycle
 // =============================================================================
 
-// SandboxListFilter matches the JSON filter shape expected by msb_sandbox_list.
-type SandboxListFilter struct {
+// SandboxListOptions matches the JSON request shape expected by msb_sandbox_list.
+type SandboxListOptions struct {
+	Cursor *string           `json:"cursor,omitempty"`
+	Limit  *uint32           `json:"limit,omitempty"`
 	Labels map[string]string `json:"labels,omitempty"`
+}
+
+// SandboxPage is the JSON page returned by msb_sandbox_list.
+type SandboxPage struct {
+	Sandboxes  []*SandboxHandleInfo `json:"sandboxes"`
+	NextCursor *string              `json:"next_cursor"`
 }
 
 // CreateOptions matches the JSON payload shape expected by msb_sandbox_create.
@@ -1505,13 +1513,18 @@ type CreateOptions struct {
 	MaxDurationSecs      uint64               `json:"max_duration_secs,omitempty"`
 	IdleTimeoutSecs      uint64               `json:"idle_timeout_secs,omitempty"`
 	RegistryAuth         *RegistryAuthOptions `json:"registry_auth,omitempty"`
-	Ports                map[uint16]uint16    `json:"ports,omitempty"`
-	PortsUDP             map[uint16]uint16    `json:"ports_udp,omitempty"`
-	PortBindings         []PortBindingOptions `json:"port_bindings,omitempty"`
-	Network              *NetworkOptions      `json:"network,omitempty"`
-	Secrets              []SecretOptions      `json:"secrets,omitempty"`
-	Patches              []PatchOptions       `json:"patches,omitempty"`
-	Volumes              map[string]MountSpec `json:"volumes,omitempty"`
+	// RegistryInsecure pulls over plain HTTP instead of HTTPS.
+	RegistryInsecure bool `json:"registry_insecure,omitempty"`
+	// RegistryCACerts holds PEM-encoded CA root certificate bundles trusted
+	// when pulling.
+	RegistryCACerts []string             `json:"registry_ca_certs,omitempty"`
+	Ports           map[uint16]uint16    `json:"ports,omitempty"`
+	PortsUDP        map[uint16]uint16    `json:"ports_udp,omitempty"`
+	PortBindings    []PortBindingOptions `json:"port_bindings,omitempty"`
+	Network         *NetworkOptions      `json:"network,omitempty"`
+	Secrets         []SecretOptions      `json:"secrets,omitempty"`
+	Patches         []PatchOptions       `json:"patches,omitempty"`
+	Volumes         map[string]MountSpec `json:"volumes,omitempty"`
 }
 
 // InitOptions describes a guest PID-1 init handoff.
@@ -2230,13 +2243,12 @@ func (s *Sandbox) Modify(ctx context.Context, optsJSON string) (string, error) {
 	})
 }
 
-// ListSandboxes returns metadata for all known sandboxes (running or stopped),
-// optionally filtered by the given labels (AND-matched).
-func ListSandboxes(ctx context.Context, labels map[string]string) ([]*SandboxHandleInfo, error) {
+// ListSandboxes returns one configured page of sandbox metadata.
+func ListSandboxes(ctx context.Context, options SandboxListOptions) (*SandboxPage, error) {
 	if err := ensureLoaded(); err != nil {
 		return nil, err
 	}
-	filterJSON, err := json.Marshal(SandboxListFilter{Labels: labels})
+	filterJSON, err := json.Marshal(options)
 	if err != nil {
 		return nil, fmt.Errorf("marshal list filter: %w", err)
 	}
@@ -2249,11 +2261,11 @@ func ListSandboxes(ctx context.Context, labels map[string]string) ([]*SandboxHan
 	if err != nil {
 		return nil, err
 	}
-	var infos []*SandboxHandleInfo
-	if err := json.Unmarshal([]byte(out), &infos); err != nil {
+	var page SandboxPage
+	if err := json.Unmarshal([]byte(out), &page); err != nil {
 		return nil, fmt.Errorf("parse sandbox list: %w", err)
 	}
-	return infos, nil
+	return &page, nil
 }
 
 // RemoveSandbox removes a stopped sandbox's persisted state by name.

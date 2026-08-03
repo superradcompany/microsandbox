@@ -23,6 +23,7 @@ use microsandbox_image::RegistryAuth;
 use microsandbox_runtime::logging::LogLevel;
 use serde::{Deserialize, Serialize};
 
+use crate::error::Operation;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -672,10 +673,7 @@ pub fn config() -> MicrosandboxResult<Arc<LocalConfig>> {
     let backend = crate::backend::default_backend();
     let local = backend
         .as_local()
-        .ok_or_else(|| MicrosandboxError::Unsupported {
-            feature: "microsandbox::config::config".into(),
-            available_when: "with a local backend".into(),
-        })?;
+        .ok_or_else(|| MicrosandboxError::local_only(Operation::Config))?;
     Ok(local.config_handle())
 }
 
@@ -1422,7 +1420,7 @@ mod tests {
         } else if cfg!(target_os = "macos") {
             assert!(filename.ends_with(".dylib"));
         } else {
-            assert!(filename.ends_with(".so.5.6.0"));
+            assert!(filename.ends_with(".so.5.6.1"));
         }
     }
 

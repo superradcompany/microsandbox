@@ -15,6 +15,17 @@ use crate::secrets::config::SecretsConfig;
 use microsandbox_types::TlsConfig;
 
 //--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Maximum accepted value for [`NetworkConfig::max_connections`].
+///
+/// The smoltcp stack allocates per-connection socket buffers, so unusually
+/// large values can become a host-memory footgun before policy has a chance
+/// to reject traffic.
+pub const MAX_NETWORK_CONNECTIONS: usize = 4096;
+
+//--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
@@ -54,7 +65,7 @@ pub struct NetworkConfig {
     #[serde(default)]
     pub secrets: SecretsConfig,
 
-    /// Max concurrent guest connections. Default: 256.
+    /// Max concurrent guest connections. Default: 256, maximum: 4096.
     #[serde(default)]
     pub max_connections: Option<usize>,
 

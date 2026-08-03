@@ -205,25 +205,305 @@ pub enum MicrosandboxError {
         dropped_from_offset: u64,
     },
 
-    /// A cursor passed to `log_stream` via `LogStreamStart::From`
-    /// could not be located in the current rotation chain.
-    /// Yielded once at stream start, then the stream ends.
-    #[error("invalid log cursor: {0}")]
+    /// An opaque cursor passed to an SDK operation could not be decoded or no longer identifies a
+    /// valid position. For log streams, this is yielded once at stream start before the stream ends.
+    #[error("invalid cursor: {0}")]
     InvalidCursor(String),
 
-    /// A backend does not support a requested SDK feature yet.
-    #[error("{feature} is not supported by this backend yet; available {available_when}")]
+    /// A backend does not support a requested SDK operation.
+    #[error("{} is not supported by this backend: {}", .op.api_path(), .reason.hint())]
     Unsupported {
-        /// Feature requested by the caller.
-        feature: String,
-        /// Human-readable note describing what unlocks support (e.g. "when cloud
-        /// volumes ship", "when the rlimits API lands on the cloud").
-        available_when: String,
+        /// Operation requested by the caller.
+        op: Operation,
+        /// Why the operation is unavailable, and what to do instead.
+        reason: UnsupportedReason,
     },
 
     /// A custom error message.
     #[error("{0}")]
     Custom(String),
+}
+
+/// An SDK operation that a backend may decline to perform.
+///
+/// Carried by [`MicrosandboxError::Unsupported`] so callers can branch on
+/// exactly which API was rejected instead of parsing a message string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Operation {
+    /// `Sandbox::create`.
+    SandboxCreate,
+    /// `Sandbox::start`.
+    SandboxStart,
+    /// `Sandbox::stop`.
+    SandboxStop,
+    /// `Sandbox::remove`.
+    SandboxRemove,
+    /// `Sandbox::remove_persisted`.
+    SandboxRemovePersisted,
+    /// `Sandbox::kill`.
+    SandboxKill,
+    /// `Sandbox::drain`.
+    SandboxDrain,
+    /// `Sandbox::ping`.
+    SandboxPing,
+    /// `Sandbox::touch`.
+    SandboxTouch,
+    /// `Sandbox::stop_and_wait`.
+    SandboxStopAndWait,
+    /// `Sandbox::wait`.
+    SandboxWait,
+    /// `Sandbox::logs`.
+    SandboxLogs,
+    /// `Sandbox::log_stream`.
+    SandboxLogStream,
+    /// `Sandbox::log_stream` with `follow: false`.
+    SandboxLogStreamNoFollow,
+    /// `Sandbox::log_stream` with `follow: true`.
+    SandboxLogStreamFollow,
+    /// `Sandbox::logger`.
+    SandboxLogger,
+    /// `Sandbox::metrics`.
+    SandboxMetrics,
+    /// `Sandbox::metrics_stream`.
+    SandboxMetricsStream,
+    /// `Sandbox::modify`.
+    SandboxModify,
+    /// `Sandbox::fs`.
+    SandboxFs,
+    /// The free function `all_sandbox_metrics`.
+    AllSandboxMetrics,
+    /// Dialing a sandbox's agent (exec, attach, and guest-fs transport).
+    AgentConnect,
+    /// `SandboxHandle::config`.
+    SandboxHandleConfig,
+    /// `SandboxHandle::connect`.
+    SandboxHandleConnect,
+    /// `SandboxHandle::metrics`.
+    SandboxHandleMetrics,
+    /// `SandboxHandle::remove`.
+    SandboxHandleRemove,
+    /// `SandboxHandle::snapshot`.
+    SandboxHandleSnapshot,
+    /// `SandboxHandle::snapshot_to`.
+    SandboxHandleSnapshotTo,
+    /// `SandboxFsOps::open_file`.
+    SandboxFsOpenFile,
+    /// `SandboxFsOps::open_dir`.
+    SandboxFsOpenDir,
+    /// `SandboxFsOps::close_handle`.
+    SandboxFsCloseHandle,
+    /// `SandboxFsOps::read_handle`.
+    SandboxFsReadHandle,
+    /// `SandboxFsOps::read_handle_stream`.
+    SandboxFsReadHandleStream,
+    /// `SandboxFsOps::write_handle`.
+    SandboxFsWriteHandle,
+    /// `SandboxFsOps::write_handle_stream`.
+    SandboxFsWriteHandleStream,
+    /// `SandboxFsOps::read_dir_handle`.
+    SandboxFsReadDirHandle,
+    /// `SandboxFsOps::stat_handle`.
+    SandboxFsStatHandle,
+    /// `SandboxFsOps::set_stat_handle`.
+    SandboxFsSetStatHandle,
+    /// `SandboxSshOps::server`.
+    SandboxSshServer,
+    /// `SshServer::serve`.
+    SshServerServe,
+    /// `Volume::create`.
+    VolumeCreate,
+    /// `Volume::get`.
+    VolumeGet,
+    /// `Volume::list`.
+    VolumeList,
+    /// `Volume::remove`.
+    VolumeRemove,
+    /// `Volume::path`.
+    VolumePath,
+    /// `VolumeFs::read`.
+    VolumeFsRead,
+    /// `VolumeFs::read_to_string`.
+    VolumeFsReadToString,
+    /// `VolumeFs::write`.
+    VolumeFsWrite,
+    /// `VolumeFs::list`.
+    VolumeFsList,
+    /// `VolumeFs::stat`.
+    VolumeFsStat,
+    /// `VolumeFs::mkdir`.
+    VolumeFsMkdir,
+    /// `VolumeFs::remove`.
+    VolumeFsRemove,
+    /// `VolumeFs::copy`.
+    VolumeFsCopy,
+    /// `VolumeFs::rename`.
+    VolumeFsRename,
+    /// `VolumeFs::exists`.
+    VolumeFsExists,
+    /// `VolumeFs::read_stream`.
+    VolumeFsReadStream,
+    /// `VolumeFs::write_stream`.
+    VolumeFsWriteStream,
+    /// `Image::get`.
+    ImageGet,
+    /// `Image::list`.
+    ImageList,
+    /// `Image::inspect`.
+    ImageInspect,
+    /// `Image::remove`.
+    ImageRemove,
+    /// `Image::prune`.
+    ImagePrune,
+    /// `Image::load`.
+    ImageLoad,
+    /// `Image::save`.
+    ImageSave,
+    /// Snapshot operations (`Snapshot::*`).
+    SnapshotOps,
+    /// The free function `config` (ambient local-config accessor).
+    Config,
+}
+
+/// Why a backend declined an [`Operation`].
+///
+/// Carried by [`MicrosandboxError::Unsupported`]; [`hint`](Self::hint)
+/// renders it as a brief remedy for error messages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UnsupportedReason {
+    /// Only local backends perform this operation.
+    LocalOnly,
+    /// Only cloud backends perform this operation.
+    CloudOnly,
+    /// Another operation covers this on the active backend.
+    UseInstead(Operation),
+    /// The operation needs a unix host.
+    RequiresUnixHost,
+    /// The operation needs a crate feature that is not enabled.
+    RequiresCrateFeature(&'static str),
+    /// The named configuration option is not accepted by this backend.
+    ConfigField(&'static str),
+    /// Volume contents are reached by mounting the volume into a sandbox.
+    MountIntoSandbox,
+    /// The operation is unavailable for the supplied state or format.
+    NotAvailable(String),
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl Operation {
+    /// The user-facing API path for this operation, e.g. `"Sandbox::kill"`.
+    pub fn api_path(&self) -> &'static str {
+        match self {
+            Operation::SandboxCreate => "Sandbox::create",
+            Operation::SandboxStart => "Sandbox::start",
+            Operation::SandboxStop => "Sandbox::stop",
+            Operation::SandboxRemove => "Sandbox::remove",
+            Operation::SandboxRemovePersisted => "Sandbox::remove_persisted",
+            Operation::SandboxKill => "Sandbox::kill",
+            Operation::SandboxDrain => "Sandbox::drain",
+            Operation::SandboxPing => "Sandbox::ping",
+            Operation::SandboxTouch => "Sandbox::touch",
+            Operation::SandboxStopAndWait => "Sandbox::stop_and_wait",
+            Operation::SandboxWait => "Sandbox::wait",
+            Operation::SandboxLogs => "Sandbox::logs",
+            Operation::SandboxLogStream => "Sandbox::log_stream",
+            Operation::SandboxLogStreamNoFollow => "Sandbox::log_stream(follow=false)",
+            Operation::SandboxLogStreamFollow => "Sandbox::log_stream(follow=true)",
+            Operation::SandboxLogger => "Sandbox::logger",
+            Operation::SandboxMetrics => "Sandbox::metrics",
+            Operation::SandboxMetricsStream => "Sandbox::metrics_stream",
+            Operation::SandboxModify => "Sandbox::modify",
+            Operation::SandboxFs => "Sandbox::fs",
+            Operation::AllSandboxMetrics => "all_sandbox_metrics",
+            Operation::AgentConnect => "agent connections",
+            Operation::SandboxHandleConfig => "SandboxHandle::config",
+            Operation::SandboxHandleConnect => "SandboxHandle::connect",
+            Operation::SandboxHandleMetrics => "SandboxHandle::metrics",
+            Operation::SandboxHandleRemove => "SandboxHandle::remove",
+            Operation::SandboxHandleSnapshot => "SandboxHandle::snapshot",
+            Operation::SandboxHandleSnapshotTo => "SandboxHandle::snapshot_to",
+            Operation::SandboxFsOpenFile => "SandboxFsOps::open_file",
+            Operation::SandboxFsOpenDir => "SandboxFsOps::open_dir",
+            Operation::SandboxFsCloseHandle => "SandboxFsOps::close_handle",
+            Operation::SandboxFsReadHandle => "SandboxFsOps::read_handle",
+            Operation::SandboxFsReadHandleStream => "SandboxFsOps::read_handle_stream",
+            Operation::SandboxFsWriteHandle => "SandboxFsOps::write_handle",
+            Operation::SandboxFsWriteHandleStream => "SandboxFsOps::write_handle_stream",
+            Operation::SandboxFsReadDirHandle => "SandboxFsOps::read_dir_handle",
+            Operation::SandboxFsStatHandle => "SandboxFsOps::stat_handle",
+            Operation::SandboxFsSetStatHandle => "SandboxFsOps::set_stat_handle",
+            Operation::SandboxSshServer => "SandboxSshOps::server",
+            Operation::SshServerServe => "SshServer::serve",
+            Operation::VolumeCreate => "Volume::create",
+            Operation::VolumeGet => "Volume::get",
+            Operation::VolumeList => "Volume::list",
+            Operation::VolumeRemove => "Volume::remove",
+            Operation::VolumePath => "Volume::path",
+            Operation::VolumeFsRead => "VolumeFs::read",
+            Operation::VolumeFsReadToString => "VolumeFs::read_to_string",
+            Operation::VolumeFsWrite => "VolumeFs::write",
+            Operation::VolumeFsList => "VolumeFs::list",
+            Operation::VolumeFsStat => "VolumeFs::stat",
+            Operation::VolumeFsMkdir => "VolumeFs::mkdir",
+            Operation::VolumeFsRemove => "VolumeFs::remove",
+            Operation::VolumeFsCopy => "VolumeFs::copy",
+            Operation::VolumeFsRename => "VolumeFs::rename",
+            Operation::VolumeFsExists => "VolumeFs::exists",
+            Operation::VolumeFsReadStream => "VolumeFs::read_stream",
+            Operation::VolumeFsWriteStream => "VolumeFs::write_stream",
+            Operation::ImageGet => "Image::get",
+            Operation::ImageList => "Image::list",
+            Operation::ImageInspect => "Image::inspect",
+            Operation::ImageRemove => "Image::remove",
+            Operation::ImagePrune => "Image::prune",
+            Operation::ImageLoad => "Image::load",
+            Operation::ImageSave => "Image::save",
+            Operation::SnapshotOps => "snapshot operations",
+            Operation::Config => "config",
+        }
+    }
+}
+
+impl UnsupportedReason {
+    /// Render this reason as a brief remedy hint for error messages.
+    pub fn hint(&self) -> String {
+        match self {
+            UnsupportedReason::LocalOnly => "use a local backend".to_string(),
+            UnsupportedReason::CloudOnly => "use a cloud backend".to_string(),
+            UnsupportedReason::UseInstead(op) => format!("use {}", op.api_path()),
+            UnsupportedReason::RequiresUnixHost => "unix hosts only".to_string(),
+            UnsupportedReason::RequiresCrateFeature(feature) => {
+                format!("enable the {feature} feature")
+            }
+            UnsupportedReason::ConfigField(field) => {
+                format!("the {field} option is not accepted here")
+            }
+            UnsupportedReason::MountIntoSandbox => "mount the volume into a sandbox".to_string(),
+            UnsupportedReason::NotAvailable(reason) => reason.clone(),
+        }
+    }
+}
+
+impl MicrosandboxError {
+    /// Build an [`Unsupported`](Self::Unsupported) error for an operation the
+    /// active backend cannot honor.
+    pub fn unsupported(op: Operation, reason: UnsupportedReason) -> MicrosandboxError {
+        MicrosandboxError::Unsupported { op, reason }
+    }
+
+    /// [`Unsupported`](Self::Unsupported) for operations only a local backend honors.
+    pub fn local_only(op: Operation) -> MicrosandboxError {
+        Self::unsupported(op, UnsupportedReason::LocalOnly)
+    }
+
+    /// [`Unsupported`](Self::Unsupported) for operations only a cloud backend honors.
+    pub fn cloud_only(op: Operation) -> MicrosandboxError {
+        Self::unsupported(op, UnsupportedReason::CloudOnly)
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -241,5 +521,41 @@ impl From<microsandbox_types::TypesError> for MicrosandboxError {
 impl microsandbox_db::retry::IsSqliteBusy for MicrosandboxError {
     fn is_sqlite_busy(&self) -> bool {
         matches!(self, MicrosandboxError::Database(db_err) if microsandbox_db::retry::is_sqlite_busy(db_err))
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_renders_operation_and_reason() {
+        let err = MicrosandboxError::unsupported(
+            Operation::SandboxKill,
+            UnsupportedReason::UseInstead(Operation::SandboxStop),
+        );
+        assert_eq!(
+            err.to_string(),
+            "Sandbox::kill is not supported by this backend: use Sandbox::stop"
+        );
+
+        let err = MicrosandboxError::local_only(Operation::ImagePrune);
+        assert_eq!(
+            err.to_string(),
+            "Image::prune is not supported by this backend: use a local backend"
+        );
+
+        let err = MicrosandboxError::unsupported(
+            Operation::SandboxCreate,
+            UnsupportedReason::ConfigField("ca_certs"),
+        );
+        assert_eq!(
+            err.to_string(),
+            "Sandbox::create is not supported by this backend: the ca_certs option is not accepted here"
+        );
     }
 }

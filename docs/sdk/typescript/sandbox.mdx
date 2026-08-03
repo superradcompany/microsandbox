@@ -101,52 +101,61 @@ Get a live handle to an existing sandbox (running or stopped). The handle provid
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">list()</span>
 
 ```typescript
-static list(): Promise<SandboxHandle[]>
+static list(): Promise<SandboxPage>
 ```
 
 <Accordion title="Example">
 
 ```typescript
-for (const h of await Sandbox.list()) {
+const page = await Sandbox.list();
+for (const h of page.sandboxes) {
   console.log(`${h.name} - ${h.status}`);
 }
 ```
 
 </Accordion>
 
-List all sandboxes (running, stopped, and crashed). Handles returned from `list()` are read-only - call [`Sandbox.get(name)`](#sandbox-get) to get a live handle for lifecycle calls.
+Return the first page of sandboxes (running, stopped, and crashed), ordered newest first. The default page size is 20. Handles are read-only - call [`Sandbox.get(name)`](#sandbox-get) to get a live handle for lifecycle calls.
 
 <p className="msb-label">Returns</p>
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#sandboxhandle">Promise&lt;SandboxHandle[]&gt;</a></div>
-    <div className="msb-param-desc">All sandboxes (read-only handles).</div>
+    <div className="msb-param-key"><span className="msb-type">Promise&lt;SandboxPage&gt;</span></div>
+    <div className="msb-param-desc">Read-only handles in this page and an optional cursor for the next page.</div>
   </div>
 </div>
 
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">listWith()</span>
 
 ```typescript
-static listWith(filter: { labels?: Record<string, string> }): Promise<SandboxHandle[]>
+static listWith(configure: (list: SandboxListBuilder) => SandboxListBuilder): Promise<SandboxPage>
 ```
 
 <Accordion title="Example">
 
 ```typescript
-const workers = await Sandbox.listWith({ labels: { role: "worker" } });
+const page = await Sandbox.listWith((list) =>
+  list.limit(50).label("role", "worker"),
+);
+
+if (page.nextCursor) {
+  const nextPage = await Sandbox.listWith((list) =>
+    list.limit(50).cursor(page.nextCursor!).label("role", "worker"),
+  );
+}
 ```
 
 </Accordion>
 
-List sandboxes filtered to those carrying all of the given labels (AND-matched). Like [`list()`](#sandbox-list), the returned handles are read-only.
+Return a configured page of sandboxes. Label filters are applied before pagination and are AND-matched. Like [`list()`](#sandbox-list), returned handles are read-only.
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><code>filter</code><span className="msb-type">&#123; labels?: Record&lt;string, string&gt; &#125;</span></div>
-    <div className="msb-param-desc">Labels that a sandbox must all carry to be included.</div>
+    <div className="msb-param-key"><code>configure</code><span className="msb-type">(list: SandboxListBuilder) =&gt; SandboxListBuilder</span></div>
+    <div className="msb-param-desc">Configure a limit (1-100), next-page cursor, and/or AND-matched labels.</div>
   </div>
 </div>
 
@@ -154,8 +163,8 @@ List sandboxes filtered to those carrying all of the given labels (AND-matched).
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#sandboxhandle">Promise&lt;SandboxHandle[]&gt;</a></div>
-    <div className="msb-param-desc">Matching sandboxes (read-only handles).</div>
+    <div className="msb-param-key"><span className="msb-type">Promise&lt;SandboxPage&gt;</span></div>
+    <div className="msb-param-desc">Matching read-only handles and an optional cursor for the next page.</div>
   </div>
 </div>
 
@@ -2144,13 +2153,33 @@ Configuration object produced by [`build()`](#build) and returned by [`config()`
 | disableNetwork | `boolean` | Disable networking entirely |
 | secrets | `SecretEntry[]` | Secret entries (top-level) |
 
+### SandboxPage
+
+One stable, newest-first page returned by [`Sandbox.list()`](#sandbox-list) or [`Sandbox.listWith()`](#sandbox-listwith).
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `sandboxes` | `SandboxHandle[]` | Handles in this page |
+| `nextCursor` | `string \| undefined` | Opaque continuation cursor, absent on the final page |
+
+### SandboxListBuilder
+
+Fluent configuration passed to [`Sandbox.listWith()`](#sandbox-listwith). Keep the labels and limit unchanged when continuing with a cursor.
+
+| Method | Description |
+|--------|-------------|
+| `limit(n)` | Set a page size from 1 through 100 |
+| `cursor(cursor)` | Continue after a previous page's `nextCursor` |
+| `label(key, value)` | Require one label; repeated calls are AND-matched |
+| `labels(record)` | Add several AND-matched labels |
+
 ### SandboxHandle
 
 <p className="msb-backref">Returned by <a href="#sandbox-get">Sandbox.get()</a> · <a href="#sandbox-list">Sandbox.list()</a> · <a href="#sandbox-listwith">Sandbox.listWith()</a></p>
 
 A lightweight handle to an existing sandbox (running or stopped). Obtained via [`Sandbox.get()`](#sandbox-get), [`Sandbox.list()`](#sandbox-list), or [`Sandbox.listWith()`](#sandbox-listwith). Provides status, configuration, and lifecycle control without an active connection to the guest agent.
 
-Handles from `Sandbox.get(name)` are **live** - they expose lifecycle methods (`start`, `stop`, `kill`, `connect`, etc). Handles in the arrays returned by `Sandbox.list()` / `Sandbox.listWith()` are **read-only**: calling lifecycle methods on them throws. Use `Sandbox.get(name)` to upgrade to a live handle.
+Handles from `Sandbox.get(name)` are **live** - they expose lifecycle methods (`start`, `stop`, `kill`, `connect`, etc). Handles in pages returned by `Sandbox.list()` / `Sandbox.listWith()` are **read-only**: calling lifecycle methods on them throws. Use `Sandbox.get(name)` to upgrade to a live handle.
 
 | Property / Method | Type | Description |
 |-------------------|------|-------------|

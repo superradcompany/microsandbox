@@ -1,23 +1,14 @@
 """Cloud backend lifecycle and live-log example."""
 
 import asyncio
-import os
 import time
 
-from microsandbox import Sandbox, default_backend_kind, set_default_backend
+from microsandbox import Sandbox, default_backend_kind
 
 
 def configure_cloud_backend():
-    profile = os.getenv("MSB_PROFILE")
-    if profile:
-        set_default_backend("cloud", profile=profile)
-    else:
-        url = os.environ["MSB_API_URL"]
-        api_key = os.environ["MSB_API_KEY"]
-        set_default_backend("cloud", url=url, api_key=api_key)
-
     if default_backend_kind() != "cloud":
-        raise RuntimeError("expected cloud backend")
+        raise RuntimeError("set MSB_API_KEY or select a cloud profile")
 
 
 async def wait_until_stopped(name: str):

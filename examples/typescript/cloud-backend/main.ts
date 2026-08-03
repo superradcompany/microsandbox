@@ -1,24 +1,11 @@
 import {
   Sandbox,
   defaultBackendKind,
-  setDefaultBackend,
 } from "microsandbox";
 
 function configureCloudBackend() {
-  const profile = process.env.MSB_PROFILE;
-  if (profile) {
-    setDefaultBackend({ kind: "cloud", profile });
-  } else {
-    const url = process.env.MSB_API_URL;
-    const apiKey = process.env.MSB_API_KEY;
-    if (!url || !apiKey) {
-      throw new Error("set MSB_PROFILE or both MSB_API_URL and MSB_API_KEY");
-    }
-    setDefaultBackend({ kind: "cloud", url, apiKey });
-  }
-
   if (defaultBackendKind() !== "cloud") {
-    throw new Error("expected cloud backend");
+    throw new Error("set MSB_API_KEY or select a cloud profile");
   }
 }
 

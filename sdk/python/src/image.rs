@@ -160,7 +160,7 @@ impl PyImage {
     #[staticmethod]
     fn get<'py>(py: Python<'py>, reference: String) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let backend = resolve_local().map_err(to_py_err)?;
+            let backend = resolve_local(microsandbox::Operation::ImageGet).map_err(to_py_err)?;
             let local = backend.as_local().expect("checked above");
             let handle = RustImage::get_local(local, &reference)
                 .await
@@ -173,7 +173,7 @@ impl PyImage {
     #[staticmethod]
     fn list<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let backend = resolve_local().map_err(to_py_err)?;
+            let backend = resolve_local(microsandbox::Operation::ImageList).map_err(to_py_err)?;
             let local = backend.as_local().expect("checked above");
             let handles = RustImage::list_local(local).await.map_err(to_py_err)?;
             let py_handles: Vec<PyImageHandle> =
@@ -186,7 +186,8 @@ impl PyImage {
     #[staticmethod]
     fn inspect<'py>(py: Python<'py>, reference: String) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let backend = resolve_local().map_err(to_py_err)?;
+            let backend =
+                resolve_local(microsandbox::Operation::ImageInspect).map_err(to_py_err)?;
             let local = backend.as_local().expect("checked above");
             let detail = RustImage::inspect_local(local, &reference)
                 .await
@@ -200,7 +201,7 @@ impl PyImage {
     #[pyo3(signature = (reference, *, force = false))]
     fn remove<'py>(py: Python<'py>, reference: String, force: bool) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let backend = resolve_local().map_err(to_py_err)?;
+            let backend = resolve_local(microsandbox::Operation::ImageRemove).map_err(to_py_err)?;
             let local = backend.as_local().expect("checked above");
             RustImage::remove_local(local, &reference, force)
                 .await
@@ -213,7 +214,7 @@ impl PyImage {
     #[staticmethod]
     fn prune<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let backend = resolve_local().map_err(to_py_err)?;
+            let backend = resolve_local(microsandbox::Operation::ImagePrune).map_err(to_py_err)?;
             let local = backend.as_local().expect("checked above");
             let report = RustImage::prune_local(local).await.map_err(to_py_err)?;
             Ok(PyImagePruneReport::from_rust(report))
@@ -233,7 +234,7 @@ impl PyImage {
         tag: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let backend = resolve_local().map_err(to_py_err)?;
+            let backend = resolve_local(microsandbox::Operation::ImageLoad).map_err(to_py_err)?;
             let local = backend.as_local().expect("checked above");
             let tags: Vec<String> = tag.into_iter().collect();
 
@@ -288,7 +289,7 @@ impl PyImage {
         }
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let backend = resolve_local().map_err(to_py_err)?;
+            let backend = resolve_local(microsandbox::Operation::ImageSave).map_err(to_py_err)?;
             let local = backend.as_local().expect("checked above");
             RustImage::save_local(
                 local,
@@ -368,7 +369,8 @@ impl PyImageHandle {
     fn inspect<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let reference = self.reference.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let backend = resolve_local().map_err(to_py_err)?;
+            let backend =
+                resolve_local(microsandbox::Operation::ImageInspect).map_err(to_py_err)?;
             let local = backend.as_local().expect("checked above");
             let detail = RustImage::inspect_local(local, &reference)
                 .await
@@ -382,7 +384,7 @@ impl PyImageHandle {
     fn remove<'py>(&self, py: Python<'py>, force: bool) -> PyResult<Bound<'py, PyAny>> {
         let reference = self.reference.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let backend = resolve_local().map_err(to_py_err)?;
+            let backend = resolve_local(microsandbox::Operation::ImageRemove).map_err(to_py_err)?;
             let local = backend.as_local().expect("checked above");
             RustImage::remove_local(local, &reference, force)
                 .await
@@ -602,13 +604,12 @@ fn image_source_class<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     types.getattr("ImageSource")
 }
 
-fn resolve_local() -> microsandbox::MicrosandboxResult<std::sync::Arc<dyn microsandbox::Backend>> {
+fn resolve_local(
+    op: microsandbox::Operation,
+) -> microsandbox::MicrosandboxResult<std::sync::Arc<dyn microsandbox::Backend>> {
     let backend = microsandbox::backend::default_backend();
     if backend.as_local().is_none() {
-        return Err(microsandbox::MicrosandboxError::Unsupported {
-            feature: "image ops on cloud".into(),
-            available_when: "with a local backend".into(),
-        });
+        return Err(microsandbox::MicrosandboxError::local_only(op));
     }
     Ok(backend)
 }

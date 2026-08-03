@@ -11,9 +11,10 @@
 //! ## Ambient default
 //!
 //! [`default_backend`] returns the process-wide default. [`set_default_backend`]
-//! installs one; if never called, the first access lazy-initialises to
-//! [`LocalBackend::lazy`]. [`with_backend`] scopes an override to one async
-//! future (and any tasks it spawns) via `tokio::task_local!`.
+//! installs one; if never called, the first access resolves environment and
+//! profile configuration before falling back to [`LocalBackend::lazy`].
+//! [`with_backend`] scopes an override to one async future (and any tasks it
+//! spawns) via `tokio::task_local!`.
 //!
 //! See `planning/microsandbox/design/api/local-cloud-backend.md` for the
 //! full trait-surface spec, and `planning/microsandbox/design/api/ambient-backend.md`
@@ -25,23 +26,30 @@ mod profile;
 pub(crate) mod sandbox;
 pub(crate) mod volume;
 
-pub use cloud::{CloudBackend, CloudBackendBuilder};
+pub use cloud::{CloudBackend, CloudBackendBuilder, DEFAULT_CLOUD_API_URL};
+use futures::future::BoxFuture;
 pub use local::{LocalBackend, LocalBackendBuilder};
 pub use microsandbox_types::{
     CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
-    CloudMessageResponse, CloudPaginated, CloudSandboxStatus,
+    CloudMessageResponse, CloudPaginated, CloudSandboxStatus, CloudSandboxStatusReason,
 };
 pub use profile::{Profile, ProfileBackend, SdkConfig, load_sdk_config, resolve_default_backend};
 pub use sandbox::{
     SandboxBackend, SandboxCloudState, SandboxHandleCloudState, SandboxHandleInner,
-    SandboxHandleLocalState, SandboxInner, SandboxList, SandboxLocalState,
+    SandboxHandleLocalState, SandboxInner, SandboxLocalState,
 };
 pub use volume::{
-    VolumeBackend, VolumeCloudState, VolumeHandleCloudState, VolumeHandleInner,
-    VolumeHandleLocalState, VolumeInner, VolumeLocalState,
+    CloudVolumeKind, CloudVolumeStatus, VolumeBackend, VolumeCloudState, VolumeHandleCloudState,
+    VolumeHandleInner, VolumeHandleLocalState, VolumeInner, VolumeLocalState,
 };
 
-use std::sync::{Arc, OnceLock, RwLock};
+use std::{
+    sync::{Arc, OnceLock, RwLock},
+    time::Duration,
+};
+
+use crate::MicrosandboxResult;
+use crate::error::{Operation, UnsupportedReason};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -64,6 +72,8 @@ pub enum BackendKind {
 /// Object-safe — handles hold an `Arc<dyn Backend>`. Sub-trait accessors stay
 /// off this trait until each sub-trait's surface is finalised, which lets the
 /// scaffolding land without committing to method signatures that will change.
+/// New methods ship with default implementations, so custom backends
+/// (mocks, proxies) keep compiling as the trait grows.
 pub trait Backend: Send + Sync + 'static {
     /// Return the kind of backend this is (`Local` or `Cloud`).
     fn kind(&self) -> BackendKind;
@@ -74,7 +84,7 @@ pub trait Backend: Send + Sync + 'static {
     /// Return the volume lifecycle backend.
     fn volumes(&self) -> &dyn VolumeBackend;
 
-    /// Downcast to a concrete `&LocalBackend` when this backend is local.
+    /// Try downcast to a concrete `&LocalBackend` when in a local context.
     ///
     /// Used by helpers that need access to local-only state (DB pool, config
     /// paths) without keeping a separate `Arc<LocalBackend>` alongside the
@@ -82,14 +92,35 @@ pub trait Backend: Send + Sync + 'static {
     fn as_local(&self) -> Option<&LocalBackend> {
         None
     }
+
+    /// Open a fresh agent connection to the named sandbox with an explicit
+    /// handshake timeout. Local dials the relay socket; cloud dials the
+    /// sandbox's agent WebSocket route.
+    /// Exec, attach, and guest-filesystem operations route through this
+    /// connection. The default errors as unsupported for backends that
+    /// cannot reach a sandbox agent.
+    fn dial_agent<'a>(
+        &'a self,
+        _name: &'a str,
+        _timeout: Duration,
+    ) -> BoxFuture<'a, MicrosandboxResult<crate::agent::AgentClient>> {
+        Box::pin(async {
+            Err(crate::MicrosandboxError::unsupported(
+                Operation::AgentConnect,
+                UnsupportedReason::NotAvailable(
+                    "this backend does not provide agent connectivity".into(),
+                ),
+            ))
+        })
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
 // Functions: Ambient default
 //--------------------------------------------------------------------------------------------------
 
-/// Process-wide default backend. Lazy-initialised to `LocalBackend::lazy()`
-/// on first access if `set_default_backend` has not been called.
+/// Process-wide default backend. Lazy-initialised from environment/profile
+/// configuration, with `LocalBackend::lazy()` as the final fallback.
 static DEFAULT: OnceLock<RwLock<Arc<dyn Backend>>> = OnceLock::new();
 
 /// Install a process-wide default backend.

@@ -1012,6 +1012,12 @@ struct SandboxCreateOpts {
     idle_timeout_secs: Option<u64>,
     /// Registry credentials for pulling private images.
     registry_auth: Option<RegistryAuthOpts>,
+    /// Pull the image over plain HTTP instead of HTTPS (registry override).
+    #[serde(default)]
+    registry_insecure: bool,
+    /// PEM-encoded CA root certificates to trust when pulling.
+    #[serde(default)]
+    registry_ca_certs: Vec<String>,
     network: Option<NetworkOpts>,
     /// Top-level ports shorthand: {host_port: guest_port} (TCP).
     #[serde(default)]
@@ -1033,6 +1039,10 @@ struct SandboxCreateOpts {
 
 #[derive(serde::Deserialize, Default)]
 struct SandboxListOpts {
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    limit: Option<u32>,
     #[serde(default)]
     labels: HashMap<String, String>,
 }
@@ -2087,12 +2097,26 @@ pub unsafe extern "C" fn msb_sandbox_create(
             {
                 builder = builder.idle_timeout(secs);
             }
-            if let Some(auth) = opts.registry_auth {
-                builder = builder.registry(|r| {
-                    r.auth(RegistryAuth::Basic {
-                        username: auth.username,
-                        password: auth.password,
-                    })
+            // `registry` overwrites insecure and ca_certs wholesale, so all
+            // three overrides have to be applied in one call.
+            let registry_auth = opts.registry_auth;
+            let registry_insecure = opts.registry_insecure;
+            let registry_ca_certs = opts.registry_ca_certs;
+            if registry_auth.is_some() || registry_insecure || !registry_ca_certs.is_empty() {
+                builder = builder.registry(|mut r| {
+                    if let Some(auth) = registry_auth {
+                        r = r.auth(RegistryAuth::Basic {
+                            username: auth.username,
+                            password: auth.password,
+                        });
+                    }
+                    if registry_insecure {
+                        r = r.insecure();
+                    }
+                    for pem in registry_ca_certs {
+                        r = r.ca_certs(pem.into_bytes());
+                    }
+                    r
                 });
             }
             for (k, v) in opts.env.unwrap_or_default() {
@@ -2816,8 +2840,8 @@ pub unsafe extern "C" fn msb_sandbox_owns_lifecycle(
 }
 
 // ---------------------------------------------------------------------------
-// Sandbox — list (by name; no handles are allocated here)
-// Output: ["name1","name2",...]
+// Sandbox — paginated list (by name; no handles are allocated here)
+// Output: {"sandboxes":[...],"next_cursor":"..."}
 // ---------------------------------------------------------------------------
 
 #[unsafe(no_mangle)]
@@ -2833,23 +2857,31 @@ pub unsafe extern "C" fn msb_sandbox_list(
             .map_err(|e| FfiError::invalid_argument(format!("invalid list filter JSON: {e}")))?;
 
         Ok(Box::pin(async move {
-            let handles = if opts.labels.is_empty() {
-                Sandbox::list().await.map_err(FfiError::from)?
-            } else {
-                let filter = opts.labels.into_iter().fold(
-                    microsandbox::sandbox::SandboxFilter::new(),
-                    |filter, (key, value)| filter.label(key, value),
-                );
-                Sandbox::list_with(filter).await.map_err(FfiError::from)?
-            };
-            let mut out = String::from("[");
-            for (i, h) in handles.iter().enumerate() {
+            let page = Sandbox::list_with(|list| {
+                let mut list = list;
+                if let Some(limit) = opts.limit {
+                    list = list.limit(limit);
+                }
+                if let Some(cursor) = opts.cursor {
+                    list = list.cursor(cursor);
+                }
+                list.labels(opts.labels)
+            })
+            .await
+            .map_err(FfiError::from)?;
+            let mut out = String::from("{\"sandboxes\":[");
+            for (i, h) in page.sandboxes.iter().enumerate() {
                 if i > 0 {
                     out.push(',');
                 }
                 out.push_str(&sandbox_handle_json(h));
             }
-            out.push(']');
+            out.push_str("],\"next_cursor\":");
+            out.push_str(
+                &serde_json::to_string(&page.next_cursor)
+                    .map_err(|e| FfiError::internal(e.to_string()))?,
+            );
+            out.push('}');
             Ok(out)
         }))
     })

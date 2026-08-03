@@ -15,6 +15,8 @@
 //! the bulk of the old global config singleton plus the SQLite pool, so multiple
 //! backends can hold different configurations for tests / migrations.
 
+mod sandbox;
+
 use std::{
     collections::HashMap,
     num::NonZero,
@@ -34,8 +36,11 @@ use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, DbErr, State
 use tokio::sync::OnceCell;
 
 use super::{Backend, BackendKind, SandboxBackend, VolumeBackend};
-use crate::config::{DatabaseConfig, LocalConfig, RegistryEntry, load_persisted_config_or_default};
 use crate::{MicrosandboxError, MicrosandboxResult};
+use crate::{
+    SandboxConfig,
+    config::{DatabaseConfig, LocalConfig, RegistryEntry, load_persisted_config_or_default},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -188,6 +193,17 @@ impl LocalBackend {
     /// Resolved secrets directory.
     pub fn secrets_dir(&self) -> PathBuf {
         self.config.secrets_dir()
+    }
+
+    /// Warn about create-time options only a cloud backend can honor.
+    /// These are inert locally, so the create proceeds without them.
+    pub(super) fn warn_cloud_only(&self, config: &SandboxConfig) {
+        if config.slug.is_some() {
+            tracing::warn!(
+                sandbox = %config.spec.name,
+                "SandboxBuilder::slug is only honored by cloud backends; ignoring"
+            );
+        }
     }
 }
 
@@ -469,6 +485,44 @@ impl Backend for LocalBackend {
     fn as_local(&self) -> Option<&LocalBackend> {
         Some(self)
     }
+
+    fn dial_agent<'a>(
+        &'a self,
+        name: &'a str,
+        timeout: std::time::Duration,
+    ) -> futures::future::BoxFuture<'a, MicrosandboxResult<crate::agent::AgentClient>> {
+        Box::pin(async move {
+            let mut last_error = None;
+
+            for sock_path in crate::runtime::sandbox_agent_socket_path_candidates_for(self, name) {
+                if !agent_endpoint_may_exist(&sock_path) {
+                    continue;
+                }
+
+                match crate::agent::AgentClient::connect_with_timeout(&sock_path, timeout).await {
+                    Ok(client) => return Ok(client),
+                    Err(error) => last_error = Some(error),
+                }
+            }
+
+            match last_error {
+                Some(error) => Err(error.into()),
+                None => Err(MicrosandboxError::SandboxNotRunning(format!(
+                    "{name:?} has no agent endpoint (is it running?)"
+                ))),
+            }
+        })
+    }
+}
+
+#[cfg(unix)]
+fn agent_endpoint_may_exist(path: &std::path::Path) -> bool {
+    path.exists()
+}
+
+#[cfg(windows)]
+fn agent_endpoint_may_exist(_path: &std::path::Path) -> bool {
+    true
 }
 
 impl Default for LocalBackend {
@@ -602,7 +656,7 @@ async fn acquire_migration_lock(db_dir: &Path) -> MicrosandboxResult<MigrationLo
 
 async fn refuse_schema_ahead(conn: &DatabaseConnection) -> MicrosandboxResult<()> {
     let rows = match conn
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "SELECT version FROM seaql_migrations ORDER BY applied_at ASC, version ASC",
         ))
@@ -665,7 +719,7 @@ mod tests {
 
         // All migrated tables should be present.
         let rows = conn
-            .query_all(Statement::from_string(
+            .query_all_raw(Statement::from_string(
                 sea_orm::DatabaseBackend::Sqlite,
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'seaql_%' AND name != 'sqlite_sequence' ORDER BY name",
             ))
@@ -751,7 +805,7 @@ mod tests {
 
         let count = pools
             .read()
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "SELECT COUNT(*) FROM snapshot_index",
             ))
@@ -776,7 +830,7 @@ mod tests {
         pools
             .write()
             .inner()
-            .execute(Statement::from_sql_and_values(
+            .execute_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Sqlite,
                 "INSERT OR REPLACE INTO maintenance_lease (name, holder_pid, lease_expires_at, last_completed_at) VALUES (?, ?, ?, NULL)",
                 [
@@ -807,7 +861,7 @@ mod tests {
         pools
             .write()
             .inner()
-            .execute(Statement::from_sql_and_values(
+            .execute_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Sqlite,
                 "INSERT INTO seaql_migrations (version, applied_at) VALUES (?, ?)",
                 ["m20990101_000001_future".into(), 4_102_444_800_i64.into()],
@@ -855,7 +909,7 @@ mod tests {
 
         let conn = Database::connect(&db_url).await.unwrap();
 
-        conn.execute(Statement::from_string(
+        conn.execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "PRAGMA foreign_keys = ON;",
         ))
@@ -866,7 +920,7 @@ mod tests {
         Migrator::up(&conn, Some(2)).await.unwrap();
 
         // Simulate a half-applied migration 3.
-        conn.execute(Statement::from_string(
+        conn.execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "CREATE TABLE IF NOT EXISTS volume (
                 id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
@@ -881,7 +935,7 @@ mod tests {
         .await
         .unwrap();
 
-        conn.execute(Statement::from_string(
+        conn.execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "CREATE TABLE IF NOT EXISTS snapshot (
                 id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
@@ -896,7 +950,7 @@ mod tests {
         .await
         .unwrap();
 
-        conn.execute(Statement::from_string(
+        conn.execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "CREATE UNIQUE INDEX idx_snapshots_name_sandbox_unique ON snapshot (name, sandbox_id)",
         ))
@@ -912,7 +966,7 @@ mod tests {
 
         let migration_row_count = recovered
             .read()
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "SELECT COUNT(*) FROM seaql_migrations WHERE version = 'm20260305_000003_create_storage_tables'",
             ))

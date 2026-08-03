@@ -122,7 +122,7 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let connection = manager.get_connection();
         let unreversed = connection
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 manager.get_database_backend(),
                 "SELECT COUNT(*) FROM snapshot_index WHERE migration_state != 'reverse_complete'",
             ))

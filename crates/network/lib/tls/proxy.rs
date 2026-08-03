@@ -206,12 +206,20 @@ async fn bypass_relay(
     let (mut server_rx, mut server_tx) = server.into_split();
     let mut buf = vec![0u8; RELAY_BUF_SIZE];
 
+    let mut guest_eof = false;
     loop {
         tokio::select! {
-            data = from_smoltcp.recv() => {
+            data = from_smoltcp.recv(), if !guest_eof => {
                 match data {
                     Some(bytes) => server_tx.write_all(&bytes).await?,
-                    None => break,
+                    // Guest half-closed (FIN): stop sending upstream but
+                    // keep relaying server → guest until the server closes.
+                    None => {
+                        guest_eof = true;
+                        if server_tx.shutdown().await.is_err() {
+                            break;
+                        }
+                    }
                 }
             }
             result = server_rx.read(&mut buf) => {
@@ -333,13 +341,25 @@ pub(crate) async fn intercept_relay(
     )
     .await?;
 
+    let mut guest_eof = false;
     loop {
         tokio::select! {
             // Guest → server: receive encrypted, decrypt, forward plaintext.
-            data = from_smoltcp.recv() => {
+            data = from_smoltcp.recv(), if !guest_eof => {
                 let data = match data {
                     Some(d) => d,
-                    None => break,
+                    // Guest half-closed (TCP FIN): propagate as a TLS
+                    // close_notify + FIN upstream, but keep relaying
+                    // server → guest until the server closes. (A TLS 1.3
+                    // server may keep sending; a TLS 1.2 server responds
+                    // with its own close_notify, ending the relay.)
+                    None => {
+                        guest_eof = true;
+                        if server_tls.shutdown().await.is_err() {
+                            break;
+                        }
+                        continue;
+                    }
                 };
                 // Feed all data to rustls.
                 let mut remaining = &data[..];

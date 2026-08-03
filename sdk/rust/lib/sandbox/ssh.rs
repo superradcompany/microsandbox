@@ -28,7 +28,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use super::attach;
 use crate::sandbox::exec::{ExecControl, ExecEvent, ExecOptions, ExecSink, StdinMode};
-use crate::{MicrosandboxError, MicrosandboxResult, Sandbox, agent::AgentClient};
+use crate::{MicrosandboxError, MicrosandboxResult, Sandbox, agent::AgentClient, error::Operation};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -105,7 +105,9 @@ pub struct SshClient {
     handle: russh::client::Handle<SshClientHandler>,
     term: String,
     server_task: Option<tokio::task::JoinHandle<MicrosandboxResult<()>>>,
-    negotiated_version: u8,
+    /// Cached local-agent protocol version for an early SFTP compatibility
+    /// error. Cloud negotiates on the server-side relay connection instead.
+    negotiated_version: Option<u8>,
 }
 
 /// High-level SFTP client session.
@@ -306,7 +308,10 @@ impl SandboxSshOps {
             handle: client,
             term,
             server_task: Some(server_task),
-            negotiated_version: self.sandbox.client().negotiated_version(),
+            negotiated_version: self
+                .sandbox
+                .local()
+                .map(|local| local.client.negotiated_version()),
         })
     }
 
@@ -333,25 +338,29 @@ impl SandboxSshOps {
         &self,
         f: impl FnOnce(SshServerOptionsBuilder) -> SshServerOptionsBuilder,
     ) -> MicrosandboxResult<SshServer> {
-        let local_backend =
-            self.sandbox
-                .backend()
-                .as_local()
-                .ok_or_else(|| MicrosandboxError::Unsupported {
-                    feature: "Sandbox::ssh on cloud".into(),
-                    available_when: "when cloud SSH proxying lands".into(),
-                })?;
         let options = f(SshServerOptionsBuilder::default()).build();
-        let authorized_keys = build_authorized_keys(&options, local_backend.config())?;
+        let local_backend = self.sandbox.backend().as_local();
+
+        // Explicit/in-memory key material is backend-neutral. Only the
+        // convenience defaults live under the local backend's config/runtime
+        // directories, so cloud `open_client()` can keep its ephemeral keys
+        // entirely in memory without weakening the public server defaults.
+        let authorized_keys =
+            build_authorized_keys(&options, local_backend.map(|backend| backend.config()))?;
         let host_key = match options.host_key {
             Some(key) => key,
             None => {
                 let (host_key_path, secure_parent) = match options.host_key_path {
                     Some(path) => (path, false),
-                    None => (
-                        default_host_key_path(local_backend, self.sandbox.name()),
-                        true,
-                    ),
+                    None => {
+                        let local_backend = local_backend.ok_or_else(|| {
+                            MicrosandboxError::local_only(Operation::SandboxSshServer)
+                        })?;
+                        (
+                            default_host_key_path(local_backend, self.sandbox.name()),
+                            true,
+                        )
+                    }
                 };
                 load_or_create_host_key(&host_key_path, secure_parent)?
             }
@@ -573,7 +582,7 @@ impl SshClient {
                 Some(spec) => attach::DetachKeys::parse(spec)?,
                 None => attach::DetachKeys::default_keys(),
             };
-            let (cols, rows) = attach::local::current_terminal_size().unwrap_or((80, 24));
+            let (cols, rows) = attach::agent::current_terminal_size().unwrap_or((80, 24));
             let mut channel = self
                 .handle
                 .channel_open_session()
@@ -598,9 +607,9 @@ impl SshClient {
                 .map_err(|e| ssh_error("request shell", e))?;
             wait_channel_success(&mut channel, "request shell").await?;
 
-            let terminal_guard = attach::local::WindowsTerminalGuard::enter()?;
+            let terminal_guard = attach::agent::WindowsTerminalGuard::enter()?;
             let mut terminal_events =
-                attach::local::WindowsTerminalEventPump::spawn_for_guard(&terminal_guard)?;
+                attach::agent::WindowsTerminalEventPump::spawn_for_guard(&terminal_guard)?;
             let detach_seq = detach_keys.sequence();
             let mut match_pos = 0usize;
             let mut exit_code = 0i32;
@@ -610,7 +619,7 @@ impl SshClient {
                 tokio::select! {
                     Some(event) = terminal_events.recv() => {
                         match event {
-                            attach::local::WindowsTerminalEvent::Input(data) => {
+                            attach::agent::WindowsTerminalEvent::Input(data) => {
                                 if attach::input_contains_detach_sequence(
                                     &data,
                                     detach_seq,
@@ -624,12 +633,12 @@ impl SshClient {
                                     .await
                                     .map_err(|e| ssh_error("write channel data", e))?;
                             }
-                            attach::local::WindowsTerminalEvent::Resize { cols, rows } => {
+                            attach::agent::WindowsTerminalEvent::Resize { cols, rows } => {
                                 let _ = channel_tx
                                     .window_change(u32::from(cols), u32::from(rows), 0, 0)
                                     .await;
                             }
-                            attach::local::WindowsTerminalEvent::Error(error) => {
+                            attach::agent::WindowsTerminalEvent::Error(error) => {
                                 return Err(MicrosandboxError::Terminal(error));
                             }
                         }
@@ -791,7 +800,9 @@ impl SshClient {
 
     /// Open an SFTP client session over this SSH connection.
     pub async fn sftp(&self) -> MicrosandboxResult<SftpClient> {
-        AgentClient::ensure_version_compat_for(MessageType::FsRequest, self.negotiated_version)?;
+        if let Some(version) = self.negotiated_version {
+            AgentClient::ensure_version_compat_for(MessageType::FsRequest, version)?;
+        }
 
         let mut channel = self
             .handle
@@ -940,15 +951,12 @@ impl SshSession {
             return Ok(Arc::clone(client));
         }
 
-        let local_backend = self.settings.sandbox.backend().as_local().ok_or_else(|| {
-            MicrosandboxError::Unsupported {
-                feature: "Sandbox::ssh on cloud".into(),
-                available_when: "when cloud SSH proxying lands".into(),
-            }
-        })?;
         let client = Arc::new(
-            crate::sandbox::fs::local::connect_agent(local_backend, self.settings.sandbox.name())
-                .await?,
+            crate::sandbox::fs::agent::connect_agent(
+                self.settings.sandbox.backend().as_ref(),
+                self.settings.sandbox.name(),
+            )
+            .await?,
         );
         self.client = Some(Arc::clone(&client));
         Ok(client)
@@ -1008,14 +1016,8 @@ impl SshSession {
         };
         let rows = pty.as_ref().map(|p| p.rows).unwrap_or(24);
         let cols = pty.as_ref().map(|p| p.cols).unwrap_or(80);
-        let local_backend = self.settings.sandbox.backend().as_local().ok_or_else(|| {
-            MicrosandboxError::Unsupported {
-                feature: "Sandbox::ssh exec on cloud".into(),
-                available_when: "when cloud SSH proxying lands".into(),
-            }
-        })?;
-        let handle = crate::sandbox::exec::local::exec_stream_with_pty_size(
-            local_backend,
+        let handle = crate::sandbox::exec::agent::exec_stream_with_pty_size(
+            self.settings.sandbox.backend().as_ref(),
             self.settings.sandbox.name(),
             self.settings.sandbox.config(),
             cmd,
@@ -1941,12 +1943,14 @@ async fn relay_tcp_to_ssh(
 
 fn build_authorized_keys(
     options: &SshServerOptions,
-    config: &crate::config::LocalConfig,
+    local_config: Option<&crate::config::LocalConfig>,
 ) -> MicrosandboxResult<Vec<String>> {
     let mut keys = Vec::new();
     if let Some(path) = &options.authorized_keys_path {
         keys.extend(load_authorized_keys(path)?);
     } else if options.authorized_keys.is_empty() {
+        let config = local_config
+            .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxSshServer))?;
         keys.extend(load_authorized_keys(&default_authorized_keys_path(config))?);
     }
     for key in &options.authorized_keys {
@@ -2529,6 +2533,38 @@ fn read_from_fd(fd: std::os::fd::RawFd, buf: &mut [u8]) -> std::io::Result<usize
 
 fn ssh_error(context: &str, error: impl std::fmt::Display) -> MicrosandboxError {
     MicrosandboxError::Custom(format!("SSH {context}: {error}"))
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_authorized_key_does_not_require_local_config() {
+        let mut rng = russh::keys::key::safe_rng();
+        let key = PrivateKey::random(&mut rng, Algorithm::Ed25519).unwrap();
+        let public_key = key.public_key().public_key_base64();
+        let options = SshServerOptionsBuilder::default()
+            .authorized_key(public_key.clone())
+            .build();
+
+        let keys = build_authorized_keys(&options, None).unwrap();
+
+        assert_eq!(keys, vec![public_key]);
+    }
+
+    #[test]
+    fn implicit_authorized_key_path_still_requires_local_config() {
+        let options = SshServerOptionsBuilder::default().build();
+
+        let error = build_authorized_keys(&options, None).unwrap_err();
+
+        assert!(matches!(error, MicrosandboxError::Unsupported { .. }));
+    }
 }
 
 //--------------------------------------------------------------------------------------------------

@@ -127,10 +127,9 @@ pub fn all_sandbox_metrics<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let backend = microsandbox::backend::default_backend();
         let local = backend.as_local().ok_or_else(|| {
-            to_py_err(microsandbox::MicrosandboxError::Unsupported {
-                feature: "all_sandbox_metrics requires a local backend".into(),
-                available_when: "when cloud metrics land".into(),
-            })
+            to_py_err(microsandbox::MicrosandboxError::local_only(
+                microsandbox::Operation::AllSandboxMetrics,
+            ))
         })?;
         let metrics = microsandbox::sandbox::all_sandbox_metrics_local(local)
             .await

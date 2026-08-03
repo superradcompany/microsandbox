@@ -22,7 +22,9 @@ use super::{
         SecurityProfile, VolumeMount,
     },
 };
-use crate::{LogLevel, MicrosandboxError, MicrosandboxResult, size::Mebibytes};
+use crate::{
+    LogLevel, MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason, size::Mebibytes,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -337,6 +339,16 @@ impl SandboxBuilder {
         }
         self.config.insecure = builder.insecure;
         self.config.ca_certs = builder.ca_certs;
+        self
+    }
+
+    /// Request a globally-unique slug for the sandbox (cloud backends only).
+    ///
+    /// Lowercase letters, digits, and single hyphens. When unset, the cloud
+    /// assigns one; create fails when the slug is already taken. The local
+    /// backend has no slugs and ignores this with a warning.
+    pub fn slug(mut self, slug: impl Into<String>) -> Self {
+        self.config.slug = Some(slug.into());
         self
     }
 
@@ -939,41 +951,43 @@ impl SandboxBuilder {
 
         let snap = crate::snapshot::Snapshot::open(&snapshot_ref).await?;
         if snap.manifest().scope != crate::snapshot::SnapshotScope::Disk {
-            return Err(crate::MicrosandboxError::Unsupported {
-                feature: "Restoring non-disk snapshots".into(),
-                available_when: "after resumable restore support lands; upgrade may be required"
-                    .into(),
-            });
+            return Err(crate::MicrosandboxError::unsupported(
+                Operation::SnapshotOps,
+                UnsupportedReason::NotAvailable(
+                    "restoring non-disk snapshots requires resumable restore support".into(),
+                ),
+            ));
         }
         let unsupported = snap.manifest().unsupported_requires();
         if !unsupported.is_empty() {
-            return Err(crate::MicrosandboxError::Unsupported {
-                feature: format!(
-                    "snapshot requires capabilities this runtime does not have: {}",
+            return Err(crate::MicrosandboxError::unsupported(
+                Operation::SnapshotOps,
+                UnsupportedReason::NotAvailable(format!(
+                    "snapshot requires unsupported runtime capabilities: {}",
                     unsupported.join(", ")
-                ),
-                available_when: "in a runtime that understands these snapshot extensions".into(),
-            });
+                )),
+            ));
         }
         let file_state = match &snap.manifest().state {
             crate::snapshot::SnapshotState::File(state) => state,
             crate::snapshot::SnapshotState::Checkpoint(_) => {
-                return Err(crate::MicrosandboxError::Unsupported {
-                    feature: "Restoring checkpoint-state snapshots".into(),
-                    available_when: "after checkpoint restore providers land".into(),
-                });
+                return Err(crate::MicrosandboxError::unsupported(
+                    Operation::SnapshotOps,
+                    UnsupportedReason::NotAvailable(
+                        "checkpoint-state restore providers are not available".into(),
+                    ),
+                ));
             }
         };
         if file_state.format != crate::snapshot::SnapshotFormat::Raw || file_state.fstype != "ext4"
         {
-            return Err(crate::MicrosandboxError::Unsupported {
-                feature: format!(
-                    "Restoring snapshot file state {:?}/{}",
+            return Err(crate::MicrosandboxError::unsupported(
+                Operation::SnapshotOps,
+                UnsupportedReason::NotAvailable(format!(
+                    "snapshot file state {:?}/{} is not qualified for restore",
                     file_state.format, file_state.fstype
-                ),
-                available_when: "after that disk format and filesystem contract is qualified"
-                    .into(),
-            });
+                )),
+            ));
         }
         let snap_ref = snap.manifest().image.reference.clone();
 
@@ -1034,7 +1048,15 @@ impl SandboxBuilder {
                     } else {
                         crate::runtime::SpawnMode::Attached
                     };
-                    crate::sandbox::create_local(backend, config, mode, Some(sender)).await
+                    // Pull progress is a local-only extension that is not part of
+                    // SandboxBackend::create, so dispatch to the local backend's
+                    // canonical create entry point explicitly.
+                    let local = backend
+                        .as_local()
+                        .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxCreate))?;
+                    local
+                        .create_sandbox(backend.clone(), config, mode, Some(sender))
+                        .await
                 }
                 crate::backend::BackendKind::Cloud => {
                     drop(sender);
@@ -1069,13 +1091,17 @@ impl SandboxBuilder {
             let backend = crate::backend::default_backend();
             match backend.kind() {
                 crate::backend::BackendKind::Local => {
-                    crate::sandbox::create_local(
-                        backend,
-                        config,
-                        crate::runtime::SpawnMode::Detached,
-                        Some(sender),
-                    )
-                    .await
+                    let local = backend
+                        .as_local()
+                        .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxCreate))?;
+                    local
+                        .create_sandbox(
+                            backend.clone(),
+                            config,
+                            crate::runtime::SpawnMode::Detached,
+                            Some(sender),
+                        )
+                        .await
                 }
                 crate::backend::BackendKind::Cloud => {
                     drop(sender);

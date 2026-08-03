@@ -13,7 +13,8 @@ use crate::error::to_py_err;
 #[pyclass(name = "Volume")]
 pub struct PyVolume {
     name: String,
-    path: String,
+    /// Local volumes expose a host path; cloud volumes deliberately do not.
+    path: Option<String>,
 }
 
 /// A lightweight handle to a volume from the database.
@@ -75,10 +76,13 @@ impl PyVolume {
                 }
             }
             let vol = builder.create().await.map_err(to_py_err)?;
-            let path = vol
-                .path()
-                .map(|p| p.display().to_string())
-                .map_err(to_py_err)?;
+            // A cloud create is still a successful volume create even though
+            // its bytes have no path on the SDK caller's machine.
+            let path = match vol.path() {
+                Ok(path) => Some(path.display().to_string()),
+                Err(microsandbox::MicrosandboxError::Unsupported { .. }) => None,
+                Err(error) => return Err(to_py_err(error)),
+            };
             Ok(PyVolume {
                 name: vol.name().to_string(),
                 path,
@@ -127,8 +131,10 @@ impl PyVolume {
 
     /// Host path of the volume.
     #[getter]
-    fn path(&self) -> &str {
-        &self.path
+    fn path(&self) -> PyResult<&str> {
+        self.path
+            .as_deref()
+            .ok_or_else(|| crate::error::local_only("volume.path"))
     }
 
     //----------------------------------------------------------------------------------------------

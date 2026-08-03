@@ -36,8 +36,8 @@ pub fn set_runtime_libkrunfw_path(path: String) {
 
 /// Set the process-wide default backend.
 ///
-/// `kind="local"` selects the local backend. `kind="cloud"` requires either
-/// `url` + `api_key`, or `profile`.
+/// `kind="local"` selects the local backend. `kind="cloud"` requires either an
+/// API key (with an optional URL override), or a profile.
 #[napi(js_name = "setDefaultBackend")]
 pub fn set_default_backend(
     kind: String,
@@ -102,13 +102,13 @@ fn build_backend(
             let cloud = if let Some(profile) = profile {
                 microsandbox::CloudBackend::from_profile(&profile)
             } else {
-                let url = url.ok_or_else(|| {
-                    napi::Error::from_reason("cloud backend requires url + apiKey or profile")
-                })?;
                 let api_key = api_key.ok_or_else(|| {
-                    napi::Error::from_reason("cloud backend requires url + apiKey or profile")
+                    napi::Error::from_reason("cloud backend requires apiKey or profile")
                 })?;
-                microsandbox::CloudBackend::new(url, api_key)
+                match url {
+                    Some(url) => microsandbox::CloudBackend::new(url, api_key),
+                    None => microsandbox::CloudBackend::with_api_key(api_key),
+                }
             }
             .map_err(|e| napi::Error::from_reason(e.to_string()))?;
             Ok(Arc::new(cloud))

@@ -2180,7 +2180,7 @@ async fn open_downgrade_db(
 
 async fn applied_migrations(db: &DatabaseConnection) -> anyhow::Result<Vec<String>> {
     let rows = match db
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "SELECT version FROM seaql_migrations ORDER BY applied_at ASC, version ASC",
         ))
@@ -2221,7 +2221,7 @@ async fn user_data_warnings(db: &DatabaseConnection) -> anyhow::Result<Vec<Strin
 
 async fn optional_count(db: &DatabaseConnection, sql: &str) -> anyhow::Result<i64> {
     let row = match db
-        .query_one(Statement::from_string(DatabaseBackend::Sqlite, sql))
+        .query_one_raw(Statement::from_string(DatabaseBackend::Sqlite, sql))
         .await
     {
         Ok(row) => row,
@@ -2445,7 +2445,7 @@ async fn vacuum_into(db: &DatabaseConnection, backup_path: &Path) -> anyhow::Res
         fs::create_dir_all(parent)?;
     }
 
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         DatabaseBackend::Sqlite,
         "VACUUM INTO ?",
         [backup_path.display().to_string().into()],
@@ -2490,7 +2490,7 @@ async fn preflight_schema_rollback(
 async fn verify_sqlite_backup(path: &Path) -> anyhow::Result<()> {
     let backup = open_downgrade_db(path).await?;
     let row = backup
-        .query_one(Statement::from_string(
+        .query_one_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "PRAGMA quick_check",
         ))
@@ -3162,7 +3162,7 @@ mod tests {
         .await
         .unwrap();
         let row = backup_db
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "SELECT value FROM sample WHERE id = 1",
             ))
@@ -3191,7 +3191,7 @@ mod tests {
         rollback_schema(db.inner(), 1).await.unwrap();
 
         let columns = db
-            .query_all(Statement::from_string(
+            .query_all_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "PRAGMA table_info(snapshot_index)",
             ))
@@ -3207,9 +3207,18 @@ mod tests {
         assert!(!has_state_kind);
 
         let rows = db
-            .query_all(Statement::from_string(
+            .query_all_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "SELECT name FROM pragma_table_info('sandbox') WHERE name = 'active_config'",
+            ))
+            .await
+            .unwrap();
+        assert!(!rows.is_empty());
+
+        let rows = db
+            .query_all_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'maintenance_lease'",
             ))
             .await
             .unwrap();

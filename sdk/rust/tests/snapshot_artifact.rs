@@ -1425,7 +1425,7 @@ async fn create_rejects_resumable_before_touching_anything() {
             .await
             .unwrap_err();
         assert!(
-            err.to_string().contains("Resumable snapshots"),
+            matches!(&err, microsandbox::MicrosandboxError::Unsupported { .. }),
             "unexpected error: {err}"
         );
     })

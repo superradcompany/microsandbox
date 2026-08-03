@@ -14,11 +14,11 @@ use microsandbox_protocol::{ENV_HOST_ALIAS, ENV_NET, ENV_NET_IPV4, ENV_NET_IPV6}
 use msb_krun::backends::net::NetBackend;
 
 use crate::backend::SmoltcpBackend;
-use crate::config::NetworkConfig;
+use crate::config::{MAX_NETWORK_CONNECTIONS, NetworkConfig};
 use crate::secrets::handle::SecretsHandle;
 use crate::shared::{DEFAULT_QUEUE_CAPACITY, SharedState};
 use crate::stack::{self, GatewayIps, PollLoopConfig};
-use crate::tls::state::TlsState;
+use crate::tls::state::{TlsState, TlsStateError};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -64,6 +64,23 @@ pub struct SmoltcpNetwork {
     secrets: SecretsHandle,
 }
 
+/// Errors that prevent the smoltcp network from being created safely.
+#[derive(Debug, thiserror::Error)]
+pub enum NetworkInitError {
+    /// The configured connection cap is above the hard safety limit.
+    #[error("max_connections {configured} exceeds hard limit {limit}")]
+    MaxConnectionsExceeded {
+        /// Requested connection limit.
+        configured: usize,
+        /// Hard cap enforced by the network stack.
+        limit: usize,
+    },
+
+    /// TLS interception state failed to initialize.
+    #[error("TLS initialization failed: {0}")]
+    Tls(#[from] TlsStateError),
+}
+
 /// Handle for installing host-side termination behavior into the network stack.
 #[derive(Clone)]
 pub struct TerminationHandle {
@@ -89,11 +106,16 @@ impl SmoltcpNetwork {
     /// and the family is omitted from the smoltcp interface, env vars, and
     /// downstream consumers.
     ///
+    /// # Errors
+    ///
+    /// Returns an error when network configuration would allocate unsafe
+    /// resources or TLS interception cannot initialize.
+    ///
     /// # Panics
     ///
     /// Panics if `slot` exceeds the address pool capacity (65535 for MAC/IPv6,
     /// 524287 for IPv4).
-    pub fn new(config: NetworkConfig, slot: u64) -> Self {
+    pub fn new(config: NetworkConfig, slot: u64) -> Result<Self, NetworkInitError> {
         Self::new_with_routes(config, slot, host_has_ipv4_route(), host_has_ipv6_route())
     }
 
@@ -102,11 +124,19 @@ impl SmoltcpNetwork {
         slot: u64,
         host_has_ipv4: bool,
         host_has_ipv6: bool,
-    ) -> Self {
+    ) -> Result<Self, NetworkInitError> {
         assert!(
             slot <= MAX_SLOT,
             "sandbox slot {slot} exceeds address pool capacity (max {MAX_SLOT})"
         );
+        if let Some(configured) = config.max_connections
+            && configured > MAX_NETWORK_CONNECTIONS
+        {
+            return Err(NetworkInitError::MaxConnectionsExceeded {
+                configured,
+                limit: MAX_NETWORK_CONNECTIONS,
+            });
+        }
 
         let guest_mac = config
             .interface
@@ -149,12 +179,15 @@ impl SmoltcpNetwork {
 
         let secrets = SecretsHandle::new(config.secrets.clone());
         let tls_state = if config.tls.enabled {
-            Some(Arc::new(TlsState::new(config.tls.clone(), secrets.clone())))
+            Some(Arc::new(TlsState::new(
+                config.tls.clone(),
+                secrets.clone(),
+            )?))
         } else {
             None
         };
 
-        Self {
+        Ok(Self {
             config,
             shared,
             backend: Some(backend),
@@ -168,7 +201,7 @@ impl SmoltcpNetwork {
             gateway_ipv6,
             tls_state,
             secrets,
-        }
+        })
     }
 
     /// Get the gateway IPs for virtio-net configuration and domain-based policy rules.
@@ -521,7 +554,8 @@ mod tests {
 
     #[test]
     fn guest_env_vars_includes_ipv4_when_host_has_v4_route() {
-        let net = SmoltcpNetwork::new_with_routes(NetworkConfig::default(), 0, true, false);
+        let net =
+            SmoltcpNetwork::new_with_routes(NetworkConfig::default(), 0, true, false).unwrap();
         let vars = net.guest_env_vars();
 
         assert_eq!(vars.len(), 3);
@@ -535,7 +569,7 @@ mod tests {
 
     #[test]
     fn guest_env_vars_includes_ipv6_when_host_has_v6_route() {
-        let net = SmoltcpNetwork::new_with_routes(NetworkConfig::default(), 0, true, true);
+        let net = SmoltcpNetwork::new_with_routes(NetworkConfig::default(), 0, true, true).unwrap();
         let vars = net.guest_env_vars();
 
         assert_eq!(vars.len(), 4);
@@ -548,7 +582,8 @@ mod tests {
 
     #[test]
     fn guest_env_vars_omit_ipv6_without_host_route() {
-        let net = SmoltcpNetwork::new_with_routes(NetworkConfig::default(), 0, true, false);
+        let net =
+            SmoltcpNetwork::new_with_routes(NetworkConfig::default(), 0, true, false).unwrap();
         let vars = net.guest_env_vars();
 
         assert!(!vars.iter().any(|(k, _)| k == ENV_NET_IPV6));
@@ -556,7 +591,8 @@ mod tests {
 
     #[test]
     fn guest_env_vars_omit_ipv4_without_host_route() {
-        let net = SmoltcpNetwork::new_with_routes(NetworkConfig::default(), 0, false, true);
+        let net =
+            SmoltcpNetwork::new_with_routes(NetworkConfig::default(), 0, false, true).unwrap();
         let vars = net.guest_env_vars();
 
         assert_eq!(vars.len(), 3);
@@ -569,7 +605,7 @@ mod tests {
     fn explicit_ipv6_address_overrides_missing_host_v6_route() {
         let mut config = NetworkConfig::default();
         config.interface.ipv6_address = Some("fd42:6d73:62:99::2".parse().unwrap());
-        let net = SmoltcpNetwork::new_with_routes(config, 0, true, false);
+        let net = SmoltcpNetwork::new_with_routes(config, 0, true, false).unwrap();
         let vars = net.guest_env_vars();
 
         let v6 = vars
@@ -581,11 +617,34 @@ mod tests {
 
     #[test]
     fn neither_family_active_emits_only_base_env_vars() {
-        let net = SmoltcpNetwork::new_with_routes(NetworkConfig::default(), 0, false, false);
+        let net =
+            SmoltcpNetwork::new_with_routes(NetworkConfig::default(), 0, false, false).unwrap();
         let vars = net.guest_env_vars();
 
         assert_eq!(vars.len(), 2);
         assert_eq!(vars[0].0, ENV_NET);
         assert_eq!(vars[1].0, ENV_HOST_ALIAS);
+    }
+
+    #[test]
+    fn new_with_routes_rejects_excessive_max_connections() {
+        let mut config = NetworkConfig {
+            max_connections: Some(MAX_NETWORK_CONNECTIONS + 1),
+            ..NetworkConfig::default()
+        };
+        config.tls.enabled = false;
+
+        let err = match SmoltcpNetwork::new_with_routes(config, 0, true, false) {
+            Ok(_) => panic!("excessive max_connections should fail"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(
+            err,
+            NetworkInitError::MaxConnectionsExceeded {
+                configured,
+                limit: MAX_NETWORK_CONNECTIONS
+            } if configured == MAX_NETWORK_CONNECTIONS + 1
+        ));
     }
 }

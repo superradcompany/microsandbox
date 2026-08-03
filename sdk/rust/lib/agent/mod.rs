@@ -9,7 +9,10 @@ mod bridge;
 use std::ops::Deref;
 use std::path::Path;
 use std::time::Duration;
-use tokio::time::Instant;
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    time::Instant,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -78,6 +81,23 @@ impl AgentClient {
     /// Connect to an arbitrary agent relay socket path.
     pub async fn connect(sock_path: impl AsRef<Path>) -> AgentClientResult<Self> {
         microsandbox_agent_client::AgentClient::connect(sock_path)
+            .await
+            .map(Self)
+    }
+
+    /// Connect over an arbitrary byte-stream transport with an explicit
+    /// handshake timeout.
+    ///
+    /// The stream must be a transparent pipe to a sandbox's agent relay,
+    /// such as the cloud's agent WebSocket route adapted to bytes.
+    pub async fn connect_stream_with_timeout<S>(
+        stream: S,
+        timeout: Duration,
+    ) -> AgentClientResult<Self>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        microsandbox_agent_client::AgentClient::connect_stream_with_timeout(stream, timeout)
             .await
             .map(Self)
     }

@@ -38,7 +38,7 @@ rcgen = { workspace = true }
 resolv-conf = { workspace = true }
 rustls = { workspace = true }
 rustls-native-certs = { workspace = true }
-rustls-pemfile = "2"
+rustls-pki-types.workspace = true
 serde = { workspace = true }
 # Used for the `SO_LINGER(0)` (RST-on-drop) trick on rejected inbound
 # connections in `publisher.rs`. tokio's `TcpStream::set_linger` is

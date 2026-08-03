@@ -75,11 +75,12 @@ pub struct ExitStatus {
     pub success: bool,
 }
 
-/// Filter for `Sandbox.list`. Matched sandboxes must carry all of `labels`
-/// (AND-matched). Omit or leave empty to match every sandbox.
+/// Options for one paginated sandbox list request.
 #[napi(object)]
 #[allow(dead_code)]
-pub struct SandboxListFilter {
+pub struct SandboxListOptions {
+    pub cursor: Option<String>,
+    pub limit: Option<u32>,
     pub labels: Option<HashMap<String, String>>,
 }
 

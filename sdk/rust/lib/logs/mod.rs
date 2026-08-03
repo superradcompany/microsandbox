@@ -55,13 +55,17 @@
 //! of the last entry successfully consumed.
 
 mod cursor;
+mod logger;
 mod parser;
 mod stream;
 mod types;
+mod watch;
 
 pub use cursor::{LogCursor, LogCursorParseError};
+pub use logger::{RegisteredSandboxLogger, SandboxLogger};
 pub use stream::{LogStreamOptions, LogStreamStart};
 pub use types::{LogEntry, LogOptions, LogSource};
+pub use watch::{LogRegistration, LogRegistry, RegistryStatsSnapshot};
 
 use std::path::PathBuf;
 
@@ -252,6 +256,33 @@ async fn log_stream_from_dir(
         &opts.start,
         opts.until,
         opts.follow,
+    )
+    .await?;
+    Ok(engine.into_stream())
+}
+
+/// Stream from an explicit directory, waking from a shared
+/// [`LogRegistry`](watch::LogRegistry) subscription rather than
+/// a private watcher. Always follows — a non-follow read has no wake
+/// source and takes [`log_stream_from_dir`] / the snapshot path.
+pub(crate) async fn log_stream_from_dir_registry(
+    name: &str,
+    log_dir: PathBuf,
+    opts: &LogStreamOptions,
+    subscription: watch::LogSubscription,
+) -> MicrosandboxResult<impl Stream<Item = MicrosandboxResult<LogEntry>> + Send + 'static + use<>> {
+    crate::sandbox::validate_sandbox_name(name)?;
+    if !tokio::fs::try_exists(&log_dir).await.unwrap_or(false) {
+        return Err(MicrosandboxError::SandboxNotFound(name.to_string()));
+    }
+    let sources = LogSource::effective(&opts.sources);
+    let engine = LogEngine::new_registry(
+        log_dir,
+        LOG_FILES,
+        sources,
+        &opts.start,
+        opts.until,
+        subscription,
     )
     .await?;
     Ok(engine.into_stream())

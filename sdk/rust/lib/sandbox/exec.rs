@@ -274,15 +274,6 @@ pub(crate) fn validate_rlimits(rlimits: &[Rlimit]) -> MicrosandboxResult<()> {
 }
 
 impl ExecOutput {
-    /// Create output from raw parts.
-    pub(crate) fn from_parts(status: ExitStatus, stdout: Bytes, stderr: Bytes) -> Self {
-        Self {
-            status,
-            stdout,
-            stderr,
-        }
-    }
-
     /// Exit code and success flag of the completed process.
     pub fn status(&self) -> ExitStatus {
         self.status
@@ -509,10 +500,10 @@ impl ExecSink {
 }
 
 //--------------------------------------------------------------------------------------------------
-// Module: local (free fn impls called by LocalBackend's SandboxBackend impl)
+// Module: agent (backend-agnostic ops driven over an agent connection)
 //--------------------------------------------------------------------------------------------------
 
-pub(crate) mod local {
+pub(crate) mod agent {
     //! Local exec dispatch keyed by `(sandbox_name, cmd, opts)`.
     //!
     //! Opens a fresh agent UDS each call (option A in the parity plan).
@@ -528,24 +519,23 @@ pub(crate) mod local {
 
     use crate::{
         MicrosandboxError, MicrosandboxResult,
-        backend::LocalBackend,
         sandbox::{SandboxConfig, build_exec_request},
     };
 
     use super::{ExecEvent, ExecHandle, ExecOptions, ExecOutput, ExecSink, ExitStatus, StdinMode};
 
     pub(crate) async fn exec_stream(
-        local: &LocalBackend,
+        backend: &dyn crate::backend::Backend,
         name: &str,
         config: &SandboxConfig,
         cmd: String,
         opts: ExecOptions,
     ) -> MicrosandboxResult<ExecHandle> {
-        exec_stream_with_pty_size(local, name, config, cmd, opts, 24, 80).await
+        exec_stream_with_pty_size(backend, name, config, cmd, opts, 24, 80).await
     }
 
     pub(crate) async fn exec_stream_with_pty_size(
-        local: &LocalBackend,
+        backend: &dyn crate::backend::Backend,
         name: &str,
         config: &SandboxConfig,
         cmd: String,
@@ -553,7 +543,7 @@ pub(crate) mod local {
         rows: u16,
         cols: u16,
     ) -> MicrosandboxResult<ExecHandle> {
-        let client = Arc::new(super::super::fs::local::connect_agent(local, name).await?);
+        let client = Arc::new(super::super::fs::agent::connect_agent(backend, name).await?);
         let ExecOptions {
             args,
             cwd,
@@ -602,14 +592,14 @@ pub(crate) mod local {
     }
 
     pub(crate) async fn exec(
-        local: &LocalBackend,
+        backend: &dyn crate::backend::Backend,
         name: &str,
         config: &SandboxConfig,
         cmd: String,
         opts: ExecOptions,
     ) -> MicrosandboxResult<ExecOutput> {
         let timeout_duration = opts.timeout;
-        let mut handle = exec_stream(local, name, config, cmd, opts).await?;
+        let mut handle = exec_stream(backend, name, config, cmd, opts).await?;
 
         match timeout_duration {
             Some(duration) => match tokio::time::timeout(duration, handle.collect()).await {

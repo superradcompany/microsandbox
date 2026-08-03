@@ -19,7 +19,7 @@ export {
 export type { DefaultBackend } from "./runtime.js";
 
 // Sandbox lifecycle and execution
-export { PullProgressCreate, Sandbox } from "./sandbox.js";
+export { PullProgressCreate, Sandbox, SandboxListBuilder } from "./sandbox.js";
 import { Sandbox as _Sandbox, type SandboxBuilder as _SBT } from "./sandbox.js";
 /**
  * Native fluent builder for a sandbox. `new SandboxBuilder(name)` is
@@ -36,6 +36,7 @@ export const SandboxBuilder = function SandboxBuilder(
 export type SandboxBuilder = _SBT;
 export type {
   SandboxConfig,
+  SandboxPage,
   SandboxPingResult,
   SandboxTouchResult,
 } from "./sandbox.js";

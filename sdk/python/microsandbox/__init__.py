@@ -24,6 +24,7 @@ from microsandbox._microsandbox import (
     SandboxFsOps,
     SandboxHandle,
     SandboxMetrics,
+    SandboxPage,
     SandboxPingResult,
     SandboxSshOps,
     SandboxStopResult,
@@ -162,6 +163,7 @@ __all__ = [
     # Sandbox lifecycle (native)
     "Sandbox",
     "SandboxHandle",
+    "SandboxPage",
     "SandboxStopResult",
     "SandboxPingResult",
     "SandboxTouchResult",

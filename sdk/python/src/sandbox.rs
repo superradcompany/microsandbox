@@ -52,6 +52,13 @@ pub struct PySandboxTouchResult {
     activity_seq: u64,
 }
 
+/// One page returned by Sandbox.list() / Sandbox.list_with().
+#[pyclass(name = "SandboxPage")]
+pub struct PySandboxPage {
+    sandboxes: Vec<PySandboxHandle>,
+    next_cursor: Option<String>,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -112,6 +119,32 @@ impl PySandboxTouchResult {
             name: inner.name,
             activity_seq: inner.activity_seq,
         }
+    }
+}
+
+impl PySandboxPage {
+    fn from_rust(page: microsandbox::sandbox::SandboxPage) -> Self {
+        Self {
+            sandboxes: page
+                .sandboxes
+                .into_iter()
+                .map(PySandboxHandle::from_rust)
+                .collect(),
+            next_cursor: page.next_cursor,
+        }
+    }
+}
+
+#[pymethods]
+impl PySandboxPage {
+    #[getter]
+    fn sandboxes(&self) -> Vec<PySandboxHandle> {
+        self.sandboxes.clone()
+    }
+
+    #[getter]
+    fn next_cursor(&self) -> Option<&str> {
+        self.next_cursor.as_deref()
     }
 }
 
@@ -278,48 +311,43 @@ impl PySandbox {
         })
     }
 
-    /// List all sandboxes.
+    /// List the first page of sandboxes.
     #[staticmethod]
     fn list<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let handles = microsandbox::sandbox::Sandbox::list()
+            let page = microsandbox::sandbox::Sandbox::list()
                 .await
                 .map_err(to_py_err)?;
-            let py_handles: Vec<PySandboxHandle> = handles
-                .into_iter()
-                .map(PySandboxHandle::from_rust)
-                .collect();
-            Ok(py_handles)
+            Ok(PySandboxPage::from_rust(page))
         })
     }
 
-    /// List sandboxes matching the given labels.
+    /// List a configured page of sandboxes.
     #[staticmethod]
-    #[pyo3(signature = (*, labels = None))]
+    #[pyo3(signature = (*, cursor = None, limit = None, labels = None))]
     fn list_with<'py>(
         py: Python<'py>,
+        cursor: Option<String>,
+        limit: Option<u32>,
         labels: Option<HashMap<String, String>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let handles = match labels {
-                Some(labels) if !labels.is_empty() => {
-                    let filter = labels.into_iter().fold(
-                        microsandbox::sandbox::SandboxFilter::new(),
-                        |filter, (key, value)| filter.label(key, value),
-                    );
-                    microsandbox::sandbox::Sandbox::list_with(filter)
-                        .await
-                        .map_err(to_py_err)?
+            let page = microsandbox::sandbox::Sandbox::list_with(|list| {
+                let mut list = list;
+                if let Some(limit) = limit {
+                    list = list.limit(limit);
                 }
-                _ => microsandbox::sandbox::Sandbox::list()
-                    .await
-                    .map_err(to_py_err)?,
-            };
-            let py_handles: Vec<PySandboxHandle> = handles
-                .into_iter()
-                .map(PySandboxHandle::from_rust)
-                .collect();
-            Ok(py_handles)
+                if let Some(cursor) = cursor {
+                    list = list.cursor(cursor);
+                }
+                if let Some(labels) = labels {
+                    list = list.labels(labels);
+                }
+                list
+            })
+            .await
+            .map_err(to_py_err)?;
+            Ok(PySandboxPage::from_rust(page))
         })
     }
 
