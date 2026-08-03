@@ -891,6 +891,14 @@ type NetworkConfig struct {
 
 	// TrustHostCAs ships the host's extra CA bundles into the guest.
 	TrustHostCAs *bool
+
+	// TransparentProxy is a SOCKS5 proxy ("host:port") that all outbound
+	// sandbox connections are dialed through, in place of connecting to the
+	// real destination directly. Applies uniformly to TLS-intercepted and
+	// bypassed/plain TCP traffic alike. Useful for pointing a sandbox's
+	// entire egress at an external inspection proxy (e.g. mitmproxy in
+	// `--mode socks5`) without the guest needing to know a proxy exists.
+	TransparentProxy string
 }
 
 // DNSConfig configures the in-VM DNS proxy.

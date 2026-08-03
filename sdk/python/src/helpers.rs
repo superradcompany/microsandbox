@@ -1119,6 +1119,16 @@ fn apply_network(
         builder = builder.network(move |n| n.trust_host_cas(trust));
     }
 
+    // SOCKS5 proxy that all outbound sandbox connections dial through.
+    if let Some(raw) = extract_opt::<String>(net, "transparent_proxy")? {
+        let proxy_addr: std::net::SocketAddr = raw.parse().map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "invalid transparent_proxy {raw:?}: {e}"
+            ))
+        })?;
+        builder = builder.network(move |n| n.transparent_proxy(proxy_addr));
+    }
+
     // Secret violation action (sandbox-level, not per-secret).
     if let Some(violation_obj) = net.get_item("on_secret_violation")?
         && !violation_obj.is_none()

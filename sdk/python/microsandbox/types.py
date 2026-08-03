@@ -985,6 +985,13 @@ class Network:
     to ``fd42:6d73:62::/48``."""
     max_connections: int | None = None
     on_secret_violation: ViolationAction | ViolationPolicy = ViolationAction.BLOCK_AND_LOG
+    transparent_proxy: str | None = None
+    """Dial all outbound sandbox connections through this SOCKS5 proxy
+    (``"host:port"``) instead of connecting to the real destination
+    directly. Applies uniformly to TLS-intercepted and bypassed/plain TCP
+    traffic. Useful for pointing a sandbox's entire egress at an external
+    inspection proxy (e.g. mitmproxy in ``--mode socks5``) without the
+    guest needing to know a proxy exists."""
 
     @classmethod
     def none(cls) -> Network:
@@ -1029,6 +1036,8 @@ class Network:
             d["ipv6_pool"] = self.ipv6_pool
         if self.max_connections is not None:
             d["max_connections"] = self.max_connections
+        if self.transparent_proxy is not None:
+            d["transparent_proxy"] = self.transparent_proxy
         violation = violation_policy_to_dict(self.on_secret_violation)
         if violation != str(ViolationAction.BLOCK_AND_LOG):
             d["on_secret_violation"] = violation

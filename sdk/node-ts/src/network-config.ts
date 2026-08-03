@@ -80,4 +80,8 @@ export interface NetworkConfig {
     readonly mtu?: number | null;
   };
   readonly trustHostCAs: boolean;
+  /** SOCKS5 proxy (`host:port`) all outbound sandbox connections dial
+   * through, in place of connecting to the real destination directly.
+   * `null` when unset. */
+  readonly transparentProxy: string | null;
 }

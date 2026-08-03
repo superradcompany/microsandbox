@@ -275,6 +275,20 @@ impl JsNetworkBuilder {
         self
     }
 
+    /// Dial all outbound sandbox connections through this SOCKS5 proxy
+    /// (`host:port`) instead of connecting to the real destination
+    /// directly. Applies uniformly to TLS-intercepted and bypassed/plain
+    /// TCP traffic.
+    #[napi(js_name = "transparentProxy")]
+    pub fn transparent_proxy(&mut self, addr: String) -> Result<&Self> {
+        let parsed: std::net::SocketAddr = addr
+            .parse()
+            .map_err(|e| napi::Error::from_reason(format!("invalid transparent_proxy `{addr}`: {e}")))?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.transparent_proxy(parsed));
+        Ok(self)
+    }
+
     /// Snapshot the accumulated configuration as a JSON string. The TS
     /// layer parses + key-remaps to camelCase before returning to the
     /// caller.

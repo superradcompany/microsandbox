@@ -926,6 +926,7 @@ export interface NapiNetworkBuilder {
   ipv4Pool(pool: string): this;
   ipv6Pool(pool: string): this;
   trustHostCAs(enabled: boolean): this;
+  transparentProxy(addr: string): this;
   build(): NetworkConfig;
 }
 

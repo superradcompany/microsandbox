@@ -508,6 +508,13 @@ export declare class NetworkBuilder {
   /** Trust the host's root CAs inside the guest. Default: false. */
   trustHostCAs(enabled: boolean): this
   /**
+   * Dial all outbound sandbox connections through this SOCKS5 proxy
+   * (`host:port`) instead of connecting to the real destination
+   * directly. Applies uniformly to TLS-intercepted and bypassed/plain
+   * TCP traffic.
+   */
+  transparentProxy(addr: string): this
+  /**
    * Snapshot the accumulated configuration as a JSON string. The TS
    * layer parses + key-remaps to camelCase before returning to the
    * caller.

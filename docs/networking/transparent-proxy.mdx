@@ -1,0 +1,100 @@
+---
+title: Transparent proxy
+description: Route all outbound sandbox TCP traffic through an external SOCKS5 proxy
+icon: "route"
+---
+
+Point a sandbox's entire outbound TCP traffic at an external SOCKS5 proxy, without the guest knowing a proxy exists. The guest keeps dialing its normal destinations; the host, on its side of the boundary, dials the configured proxy and asks it to `CONNECT` to the real destination instead of connecting directly.
+
+This is the same mechanism inspection tools like [mitmproxy](https://mitmproxy.org) expose via `--mode socks5`: point `transparent_proxy` at it and every sandbox connection flows through mitmproxy for logging or debugging, with zero guest-side configuration.
+
+## How it works
+
+Every outbound TCP connection a sandbox opens is proxied by the host regardless of whether `transparent_proxy` is set — normally the host dials the real destination directly. When `transparent_proxy` is configured, that final dial is replaced with a SOCKS5 handshake to the configured proxy, which is then asked to `CONNECT` to the real destination on the sandbox's behalf.
+
+Everything upstream of that dial is unaffected:
+
+- Network policy (allow/deny rules, domain matching, SNI-based re-evaluation) is still evaluated against the real destination before the host dials anywhere.
+- [TLS interception](/networking/tls) still terminates and re-encrypts as configured — `transparent_proxy` changes how the host reaches the upstream server, not whether the host can see inside the connection.
+- [Secret injection](/security/secrets) still applies to traffic that flows through the host.
+
+## Enabling it
+
+<CodeGroup>
+```rust Rust
+use std::net::SocketAddr;
+use microsandbox::Sandbox;
+
+let proxy_addr: SocketAddr = "127.0.0.1:8080".parse()?;
+
+let sb = Sandbox::builder("inspected")
+    .image("python")
+    .network(|n| n.transparent_proxy(proxy_addr))
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("inspected")
+    .image("python")
+    .network((n) => n.transparentProxy("127.0.0.1:8080"))
+    .create();
+```
+
+```python Python
+from microsandbox import Network, Sandbox
+
+sb = await Sandbox.create(
+    "inspected",
+    image="python",
+    network=Network(transparent_proxy="127.0.0.1:8080"),
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "inspected",
+    m.WithImage("python"),
+    m.WithNetwork(&m.NetworkConfig{
+        TransparentProxy: "127.0.0.1:8080",
+    }),
+)
+```
+
+```bash CLI
+msb create python --name inspected --transparent-proxy 127.0.0.1:8080
+```
+</CodeGroup>
+
+The proxy address is always `host:port`. In each SDK it's a plain string except Rust, which takes a typed `SocketAddr`.
+
+## Inspecting traffic with mitmproxy
+
+Run mitmproxy in SOCKS5 mode and point sandboxes at it:
+
+```bash
+mitmproxy --mode socks5 --listen-port 8080
+```
+
+```bash
+msb create python --name inspected --transparent-proxy 127.0.0.1:8080
+```
+
+Every outbound TCP connection the sandbox opens shows up in mitmproxy's UI. Combine with [TLS interception](/networking/tls) if you also want mitmproxy to see inside HTTPS rather than just the encrypted `CONNECT` tunnel.
+
+<Frame>
+  <img src="/images/networking/mitmproxy-socks5.png" alt="mitmproxy's flow list in SOCKS5 mode, showing intercepted HTTPS requests from a sandbox" />
+</Frame>
+
+## Limits
+
+- **TCP only.** UDP traffic (including plain DNS on port 53) is not routed through the transparent proxy — SOCKS5's `UDP ASSOCIATE` command isn't used here. Only the TCP relay path dials through the proxy.
+- **DNS resolution bypasses it too.** DNS-over-TCP and DNS-over-TLS both go through microsandbox's own DNS forwarder, not the configured proxy, regardless of protocol.
+- **One proxy connection per sandbox connection.** SOCKS5 has no multiplexing — each guest TCP connection opens a new TCP connection and handshake to the proxy. This mirrors how any SOCKS5 client works and isn't specific to microsandbox.
+- **No authentication.** Only the no-auth SOCKS5 handshake is supported; point this at a local or otherwise trusted proxy.
+
+## See also
+
+- [TLS interception](/networking/tls): combine with `transparent_proxy` to inspect decrypted HTTPS through an external tool
+- [Network overview](/networking/overview): policy rules, profiles, and port mapping

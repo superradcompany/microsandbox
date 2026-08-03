@@ -3,7 +3,7 @@
 //! These types represent the user-facing declarative network configuration
 //! for sandbox networking. Designed for the smoltcp in-process engine.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use ipnetwork::{Ipv4Network, Ipv6Network};
 use serde::{Deserialize, Serialize};
@@ -77,6 +77,13 @@ pub struct NetworkConfig {
     /// this is explicitly enabled. Default: false.
     #[serde(default)]
     pub trust_host_cas: bool,
+
+    /// SOCKS5 proxy that all outbound sandbox connections are dialed
+    /// through, in place of connecting to the real destination directly.
+    /// Applies to both TLS-intercepted and bypassed/plain TCP traffic,
+    /// since both funnel through [`crate::proxy::connect_upstream`].
+    #[serde(default)]
+    pub transparent_proxy: Option<SocketAddr>,
 }
 
 /// Optional overrides for the guest interface.
@@ -177,6 +184,7 @@ impl Default for NetworkConfig {
             secrets: SecretsConfig::default(),
             max_connections: None,
             trust_host_cas: false,
+            transparent_proxy: None,
         }
     }
 }
@@ -285,6 +293,42 @@ mod tests {
         assert_eq!(
             legacy_group,
             microsandbox_types::DestinationGroup::LinkLocal
+        );
+    }
+
+    /// `transparent_proxy` round-trips whole-config through the wire type the
+    /// same way `network_config_from_spec`/`network_spec_from_config`
+    /// (`sdk/rust/lib/sandbox/config.rs`) do in production: a full
+    /// `NetworkConfig` -> JSON -> `NetworkSpec` -> JSON -> `NetworkConfig`
+    /// hop, not just the field in isolation.
+    #[test]
+    fn transparent_proxy_round_trips_through_wire_network_spec() {
+        let mut config = NetworkConfig::default();
+        config.transparent_proxy = Some("127.0.0.1:1080".parse().unwrap());
+
+        let config_json = serde_json::to_value(&config).unwrap();
+        let wire: microsandbox_types::NetworkSpec =
+            serde_json::from_value(config_json.clone()).unwrap();
+        assert_eq!(wire.transparent_proxy.as_deref(), Some("127.0.0.1:1080"));
+
+        let round_tripped: NetworkConfig =
+            serde_json::from_value(serde_json::to_value(&wire).unwrap()).unwrap();
+        assert_eq!(round_tripped.transparent_proxy, config.transparent_proxy);
+    }
+
+    #[test]
+    fn transparent_proxy_omitted_when_unset() {
+        let config = NetworkConfig::default();
+        let wire: microsandbox_types::NetworkSpec =
+            serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+        assert_eq!(wire.transparent_proxy, None);
+        assert!(
+            !serde_json::to_value(&wire)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("transparent_proxy"),
+            "skip_serializing_if should omit an unset transparent_proxy from the wire form"
         );
     }
 

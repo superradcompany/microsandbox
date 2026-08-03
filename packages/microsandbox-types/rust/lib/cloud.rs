@@ -994,6 +994,7 @@ impl TryFrom<CloudSandboxSpec> for SandboxSpec {
             secrets: spec.network.secrets.map(Into::into),
             max_connections: spec.network.max_connections,
             trust_host_cas: false,
+            transparent_proxy: None,
         };
         let runtime = SandboxRuntimeOptions {
             workdir: spec.runtime.workdir,

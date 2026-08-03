@@ -2,7 +2,7 @@
 //!
 //! Used by `SandboxBuilder::network(|n| n.port(8080, 80).policy(...))`.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
 use ipnetwork::{Ipv4Network, Ipv6Network};
@@ -266,6 +266,18 @@ impl NetworkBuilder {
     /// unknown to the guest's stock Mozilla bundle.
     pub fn trust_host_cas(mut self, enabled: bool) -> Self {
         self.config.trust_host_cas = enabled;
+        self
+    }
+
+    /// Dial all outbound sandbox connections through this SOCKS5 proxy
+    /// instead of connecting to the real destination directly. Applies
+    /// uniformly to TLS-intercepted and bypassed/plain TCP traffic, since
+    /// both funnel through the same host-side dial. Useful for pointing a
+    /// sandbox's entire egress at an external inspection proxy (e.g.
+    /// mitmproxy in `--mode socks5`) without the guest needing to know a
+    /// proxy exists.
+    pub fn transparent_proxy(mut self, proxy_addr: SocketAddr) -> Self {
+        self.config.transparent_proxy = Some(proxy_addr);
         self
     }
 
@@ -767,6 +779,25 @@ mod tests {
             IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
         );
         assert_eq!(cfg.ports[1].protocol, PortProtocol::Udp);
+    }
+
+    #[test]
+    fn transparent_proxy_sets_config_field() {
+        let cfg = NetworkBuilder::new()
+            .transparent_proxy("127.0.0.1:1080".parse().unwrap())
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            cfg.transparent_proxy,
+            Some("127.0.0.1:1080".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn transparent_proxy_defaults_to_none() {
+        let cfg = NetworkBuilder::new().build().unwrap();
+        assert_eq!(cfg.transparent_proxy, None);
     }
 
     #[test]

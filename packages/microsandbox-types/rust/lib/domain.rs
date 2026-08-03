@@ -509,6 +509,16 @@ pub struct NetworkSpec {
 
     /// Whether to copy trusted host CAs into the guest at boot.
     pub trust_host_cas: bool,
+
+    /// SOCKS5 proxy (`host:port`) that all outbound sandbox connections are
+    /// dialed through, in place of connecting to the real destination
+    /// directly. Applies uniformly to TLS-intercepted and bypassed/plain TCP
+    /// traffic alike, since both paths funnel through the same host-side
+    /// dial. Useful for pointing an entire sandbox's egress at an external
+    /// inspection proxy (e.g. mitmproxy in `--mode socks5`) without the
+    /// guest needing to know a proxy exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transparent_proxy: Option<String>,
 }
 
 /// A published port mapping between host and guest.
@@ -1226,6 +1236,7 @@ impl Default for NetworkSpec {
             secrets: None,
             max_connections: None,
             trust_host_cas: false,
+            transparent_proxy: None,
         }
     }
 }

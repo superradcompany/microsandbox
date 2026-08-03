@@ -38,7 +38,7 @@
 use std::{
     collections::HashMap,
     ffi::{CStr, CString},
-    net::IpAddr,
+    net::{IpAddr, SocketAddr},
     os::raw::{c_char, c_uchar},
     path::PathBuf,
     sync::{
@@ -892,6 +892,10 @@ struct NetworkOpts {
     on_secret_violation: Option<String>,
     /// Trust the host's extra CA certificates inside the guest.
     trust_host_cas: Option<bool>,
+    /// SOCKS5 proxy (`host:port`) that all outbound sandbox connections are
+    /// dialed through, in place of connecting to the real destination
+    /// directly.
+    transparent_proxy: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1335,6 +1339,14 @@ fn apply_network(
     // Trust host CA bundles inside the guest.
     if let Some(trust) = net.trust_host_cas {
         builder = builder.network(move |n| n.trust_host_cas(trust));
+    }
+
+    // Transparent SOCKS5 proxy for outbound sandbox connections.
+    if let Some(ref raw) = net.transparent_proxy {
+        let addr: SocketAddr = raw
+            .parse()
+            .map_err(|e| FfiError::invalid_argument(format!("transparent_proxy {raw:?}: {e}")))?;
+        builder = builder.network(move |n| n.transparent_proxy(addr));
     }
 
     // Sandbox-wide secret violation action.

@@ -128,6 +128,7 @@ time = "0.3"
 tempfile = "3.15"
 thiserror = "2.0"
 tokio = { version = "1.52", features = ["full"] }
+tokio-socks = "0.5.3"
 tokio-tungstenite = { version = "0.29.0", features = ["rustls-tls-webpki-roots"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tracing = "0.1"

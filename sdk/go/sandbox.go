@@ -292,6 +292,7 @@ func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 		MaxConnections:      n.MaxConnections,
 		OnSecretViolation:   string(n.OnSecretViolation),
 		TrustHostCAs:        n.TrustHostCAs,
+		TransparentProxy:    n.TransparentProxy,
 	}
 
 	if len(n.Rules) > 0 || n.DefaultEgress != "" || n.DefaultIngress != "" {

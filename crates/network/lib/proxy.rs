@@ -17,6 +17,8 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 use crate::conn::ProxyConnectState;
+#[cfg(test)]
+use crate::conn::ProxyConnectStatus;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::secrets::config::{SecretsConfig, SecretsConfigExt, ViolationAction};
 use crate::secrets::handler::{
@@ -120,8 +122,16 @@ pub(crate) async fn connect_upstream(
     dst: SocketAddr,
     proxy_connect: &ProxyConnectState,
     shared: &SharedState,
+    transparent_proxy: Option<SocketAddr>,
 ) -> io::Result<TcpStream> {
-    match TcpStream::connect(dst).await {
+    let result = match transparent_proxy {
+        Some(proxy_addr) => tokio_socks::tcp::Socks5Stream::connect(proxy_addr, dst)
+            .await
+            .map(|s| s.into_inner())
+            .map_err(io::Error::other),
+        None => TcpStream::connect(dst).await,
+    };
+    match result {
         Ok(s) => {
             proxy_connect.mark_connected();
             Ok(s)
@@ -156,6 +166,7 @@ pub fn spawn_tcp_proxy(
     secrets: Arc<SecretsConfig>,
     tls_state: Option<Arc<TlsState>>,
     proxy_connect: Arc<ProxyConnectState>,
+    transparent_proxy: Option<SocketAddr>,
 ) {
     handle.spawn(async move {
         if let Err(e) = tcp_proxy_task(
@@ -168,6 +179,7 @@ pub fn spawn_tcp_proxy(
             secrets,
             tls_state,
             proxy_connect,
+            transparent_proxy,
         )
         .await
         {
@@ -189,6 +201,7 @@ async fn tcp_proxy_task(
     secrets: Arc<SecretsConfig>,
     tls_state: Option<Arc<TlsState>>,
     proxy_connect: Arc<ProxyConnectState>,
+    transparent_proxy: Option<SocketAddr>,
 ) -> io::Result<()> {
     // Pre-connect peek is only for domain policy: the hostname has to be known
     // before we dial upstream so a Deny never opens a connection. Secrets do
@@ -260,7 +273,7 @@ async fn tcp_proxy_task(
     // server-first protocol (SSH, SMTP, a database) sends nothing until it has
     // seen the server's banner; with the socket already open we can relay that
     // banner while we wait, instead of burning the peek budget pre-connect.
-    let stream = connect_upstream(connect_dst, &proxy_connect, &shared).await?;
+    let stream = connect_upstream(connect_dst, &proxy_connect, &shared, transparent_proxy).await?;
     let (mut server_rx, mut server_tx) = stream.into_split();
 
     // Finish classifying the first flight (TLS vs plain HTTP) and, for
@@ -576,6 +589,9 @@ async fn handle_connect_tunnel(
             network_policy,
             proxy_connect,
             upstream_stream: Some(proxy_stream),
+            // Unused: `upstream_stream` is already `Some`, so
+            // `connect_upstream` (the only consumer) never runs.
+            transparent_proxy: None,
             via_connect: expected_sni.is_some(),
             expected_sni,
         },
@@ -1086,6 +1102,90 @@ mod tests {
         record.extend_from_slice(&hs);
 
         record
+    }
+
+    #[tokio::test]
+    async fn connect_upstream_dials_target_directly_without_transparent_proxy() {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 5];
+            sock.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf, b"hello");
+        });
+
+        let shared = SharedState::new(4);
+        let proxy_connect = ProxyConnectState::new();
+        let mut stream = connect_upstream(addr, &proxy_connect, &shared, None)
+            .await
+            .unwrap();
+        stream.write_all(b"hello").await.unwrap();
+
+        accept.await.unwrap();
+        assert!(matches!(proxy_connect.status(), ProxyConnectStatus::Connected));
+    }
+
+    /// `connect_upstream` doesn't implement SOCKS5 itself (that's
+    /// `tokio_socks`) — this proves *our* wiring: the configured proxy is
+    /// dialed, asked to `CONNECT` to the real `dst` (not the guest's
+    /// original destination confused with the proxy's), and the resulting
+    /// stream carries application bytes after the handshake.
+    #[tokio::test]
+    async fn connect_upstream_dials_through_configured_socks5_proxy() {
+        use tokio::net::TcpListener;
+
+        // Never actually dialed — only its encoded address/port in the
+        // SOCKS5 CONNECT request is checked.
+        let target: SocketAddr = "93.184.216.34:443".parse().unwrap();
+
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy_listener.local_addr().unwrap();
+        let proxy_task = tokio::spawn(async move {
+            let (mut client, _) = proxy_listener.accept().await.unwrap();
+
+            // No-auth greeting.
+            let mut greeting = [0u8; 3];
+            client.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting, [0x05, 0x01, 0x00]);
+            client.write_all(&[0x05, 0x00]).await.unwrap();
+
+            // CONNECT request: VER CMD RSV ATYP(ipv4) addr(4) port(2).
+            let mut request = [0u8; 10];
+            client.read_exact(&mut request).await.unwrap();
+            assert_eq!(request[0], 0x05, "SOCKS version");
+            assert_eq!(request[1], 0x01, "CONNECT command");
+            assert_eq!(request[3], 0x01, "IPv4 address type");
+            assert_eq!(&request[4..8], &[93, 184, 216, 34]);
+            assert_eq!(u16::from_be_bytes([request[8], request[9]]), 443);
+
+            client
+                .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .await
+                .unwrap();
+
+            // Post-handshake bytes flow straight through — echo them back so
+            // the caller's stream proves usable after negotiation.
+            let mut buf = [0u8; 5];
+            client.read_exact(&mut buf).await.unwrap();
+            client.write_all(&buf).await.unwrap();
+        });
+
+        let shared = SharedState::new(4);
+        let proxy_connect = ProxyConnectState::new();
+        let mut stream = connect_upstream(target, &proxy_connect, &shared, Some(proxy_addr))
+            .await
+            .unwrap();
+
+        stream.write_all(b"hello").await.unwrap();
+        let mut echoed = [0u8; 5];
+        stream.read_exact(&mut echoed).await.unwrap();
+        assert_eq!(&echoed, b"hello");
+
+        proxy_task.await.unwrap();
+        assert!(matches!(proxy_connect.status(), ProxyConnectStatus::Connected));
     }
 
     #[test]
@@ -1664,6 +1764,7 @@ mod tests {
             secrets,
             None,
             proxy_connect,
+            None,
         )
         .await
         .unwrap();
@@ -1704,6 +1805,7 @@ mod tests {
             Arc::new(secrets),
             None,
             proxy_connect,
+            None,
         )
         .await
         .unwrap();
@@ -1774,6 +1876,7 @@ mod tests {
             Arc::new(secrets),
             None,
             proxy_connect,
+            None,
         )
         .await
         .unwrap();
@@ -1874,6 +1977,7 @@ mod tests {
             Arc::new(secrets),
             None,
             proxy_connect,
+            None,
         )
         .await
         .unwrap();

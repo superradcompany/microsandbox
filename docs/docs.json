@@ -58,7 +58,8 @@
             "pages": [
               "networking/overview",
               "networking/dns",
-              "networking/tls"
+              "networking/tls",
+              "networking/transparent-proxy"
             ]
           },
           {
