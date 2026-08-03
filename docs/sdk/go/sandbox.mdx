@@ -782,6 +782,53 @@ Bridge the caller's terminal to a process inside the sandbox for a fully interac
   </div>
 </div>
 
+#### <span className="msb-recv">sb.</span><span className="msb-hn">AttachWith()</span>
+
+```go
+func (s *Sandbox) AttachWith(ctx context.Context, cmd string, args []string, opts ...AttachOption) (int, error)
+```
+
+<Accordion title="Example">
+
+```go
+exitCode, err := sb.AttachWith(ctx, "bash", []string{"-l"},
+    m.WithAttachUser("dev"),
+    m.WithAttachCwd("/app"),
+    m.WithAttachEnv(map[string]string{"DEBUG": "1"}),
+    m.WithAttachDetachKeys("ctrl-q"),
+)
+```
+
+</Accordion>
+
+Same as [`Attach`](#sb-attach), but takes [`AttachOption`](#attachoption) values so the session can run as a different guest user, in a different working directory, with extra environment variables, or with custom detach keys.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cmd</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Command to run.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>args</code><span className="msb-type">[]string</span></div>
+    <div className="msb-param-desc">Command arguments; may be <code>nil</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#attachoption">...AttachOption</a></div>
+    <div className="msb-param-desc">Attach options.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">int</span></div>
+    <div className="msb-param-desc">Exit code of the process.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">sb.</span><span className="msb-hn">AttachShell()</span>
 
 ```go
@@ -2117,6 +2164,97 @@ type SandboxOption func(*SandboxConfig)
 ```
 
 A functional option for [`CreateSandbox`](#m-createsandbox). Every `WithX` helper in the [Options](#options) section returns one. The lifecycle setters [`WithStopTimeout`](#withstoptimeout) and [`WithKillTimeout`](#withkilltimeout) return distinct `StopOption` / `KillOption` types passed to [`Stop`](#sb-stop) and [`Kill`](#sb-kill) instead.
+
+### AttachConfig
+
+<p className="msb-backref">Populated by <a href="#attachoption">AttachOption</a></p>
+
+Configures a single [`AttachWith`](#sb-attachwith) call. Most callers set fields through the `WithAttach*` functional options; `AttachConfig` is exported for parity with the other SDKs' config types.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Cwd` | `string` | Working directory inside the guest; defaults to the sandbox workdir |
+| `User` | `string` | Guest user (UID or name, optionally `user:group`); defaults to the sandbox user |
+| `Env` | `map[string]string` | Environment variables merged on top of the sandbox env |
+| `DetachKeys` | `string` | Detach key sequence; defaults to `ctrl-]` |
+
+### AttachOption
+
+<p className="msb-backref">Accepted by <a href="#sb-attachwith">sb.AttachWith()</a></p>
+
+```go
+type AttachOption func(*AttachConfig)
+```
+
+A functional option that mutates an [`AttachConfig`](#attachconfig). Construct them with the `WithAttach*` functions below.
+
+#### <span className="msb-hn">WithAttachCwd()</span>
+
+```go
+func WithAttachCwd(path string) AttachOption
+```
+
+Set the working directory for the attached session. Defaults to the sandbox's workdir.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Absolute path inside the guest.</div>
+  </div>
+</div>
+
+#### <span className="msb-hn">WithAttachUser()</span>
+
+```go
+func WithAttachUser(user string) AttachOption
+```
+
+Run the attached session as the given guest user instead of the sandbox's default user (set via [`WithUser`](#withuser)).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>user</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Guest user as a UID or name, optionally <code>user:group</code>.</div>
+  </div>
+</div>
+
+#### <span className="msb-hn">WithAttachEnv()</span>
+
+```go
+func WithAttachEnv(env map[string]string) AttachOption
+```
+
+Add environment variables for the attached session, merged on top of the sandbox's env. Called repeatedly, maps merge; later keys overwrite earlier ones.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>env</code><span className="msb-type">map[string]string</span></div>
+    <div className="msb-param-desc">Environment variables to set.</div>
+  </div>
+</div>
+
+#### <span className="msb-hn">WithAttachDetachKeys()</span>
+
+```go
+func WithAttachDetachKeys(keys string) AttachOption
+```
+
+Set the key sequence that detaches from the session without stopping it. Uses Docker-style syntax: `ctrl-]` (the default), `ctrl-p,ctrl-q`, or a single character like `q`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>keys</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Detach key sequence.</div>
+  </div>
+</div>
 
 ### Metrics
 

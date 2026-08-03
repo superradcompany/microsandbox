@@ -3354,16 +3354,22 @@ func (h *ExecStreamHandle) Kill(ctx context.Context) error {
 // =============================================================================
 // Attach
 
-// Attach starts an interactive PTY session running cmd with args.
+// AttachOptions configures a single Attach call.
+type AttachOptions struct {
+	Args       []string          `json:"args,omitempty"`
+	Cwd        string            `json:"cwd,omitempty"`
+	User       string            `json:"user,omitempty"`
+	Env        map[string]string `json:"env,omitempty"`
+	DetachKeys string            `json:"detach_keys,omitempty"`
+}
+
+// Attach starts an interactive PTY session running cmd with the given options.
 // It blocks until the process exits and returns the exit code.
-func (s *Sandbox) Attach(ctx context.Context, cmd string, args []string) (int, error) {
+func (s *Sandbox) Attach(ctx context.Context, cmd string, opts AttachOptions) (int, error) {
 	if err := ensureLoaded(); err != nil {
 		return -1, err
 	}
-	type optsJSON struct {
-		Args []string `json:"args,omitempty"`
-	}
-	optsBytes, err := json.Marshal(optsJSON{Args: args})
+	optsBytes, err := json.Marshal(opts)
 	if err != nil {
 		return -1, fmt.Errorf("marshal attach opts: %w", err)
 	}

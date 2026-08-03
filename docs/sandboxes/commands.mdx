@@ -238,8 +238,13 @@ if err != nil {
 }
 fmt.Println("shell exited with", exitCode)
 
-// Attach to a specific command.
-exitCode, err = sb.Attach(ctx, "python")
+// Attach to a specific command with options.
+exitCode, err = sb.AttachWith(ctx, "python", nil,
+    m.WithAttachUser("dev"),
+    m.WithAttachEnv(map[string]string{"DEBUG": "1"}),
+    m.WithAttachCwd("/app"),
+    m.WithAttachDetachKeys("ctrl-q"),
+)
 if err != nil {
     return err
 }

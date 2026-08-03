@@ -1275,6 +1275,52 @@ func WithExecEnv(env map[string]string) ExecOption {
 }
 
 // ---------------------------------------------------------------------------
+// Attach options
+// ---------------------------------------------------------------------------
+
+// AttachConfig configures a single AttachWith call. Callers typically set
+// fields via the WithAttach* functional options; it is exported for parity
+// with the other SDKs' attach option types.
+type AttachConfig struct {
+	Cwd        string
+	User       string
+	Env        map[string]string
+	DetachKeys string
+}
+
+// AttachOption is a functional option for AttachWith.
+type AttachOption func(*AttachConfig)
+
+// WithAttachCwd sets the working directory for the attached session.
+func WithAttachCwd(path string) AttachOption {
+	return func(o *AttachConfig) { o.Cwd = path }
+}
+
+// WithAttachUser sets the user to run the attached session as (UID or name).
+func WithAttachUser(user string) AttachOption {
+	return func(o *AttachConfig) { o.User = user }
+}
+
+// WithAttachEnv adds environment variables for the attached session. Called
+// repeatedly, maps merge; later keys overwrite earlier ones.
+func WithAttachEnv(env map[string]string) AttachOption {
+	return func(o *AttachConfig) {
+		if o.Env == nil {
+			o.Env = make(map[string]string, len(env))
+		}
+		for k, v := range env {
+			o.Env[k] = v
+		}
+	}
+}
+
+// WithAttachDetachKeys sets the detach key sequence. Uses Docker-style syntax:
+// "ctrl-]" (the default), "ctrl-p,ctrl-q", or a single character like "q".
+func WithAttachDetachKeys(keys string) AttachOption {
+	return func(o *AttachConfig) { o.DetachKeys = keys }
+}
+
+// ---------------------------------------------------------------------------
 // Mounts
 // ---------------------------------------------------------------------------
 
