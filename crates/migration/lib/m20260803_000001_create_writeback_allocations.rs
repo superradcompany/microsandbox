@@ -18,13 +18,9 @@ enum WritebackAllocation {
     DiskCount,
     ReservedBytes,
     PoolBytes,
+    BootId,
+    BackingDevices,
     CreatedAt,
-}
-
-#[derive(Iden)]
-enum Run {
-    Table,
-    Id,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -84,15 +80,19 @@ impl MigrationTrait for Migration {
                             .not_null(),
                     )
                     .col(
+                        ColumnDef::new(WritebackAllocation::BootId)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(WritebackAllocation::BackingDevices)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
                         ColumnDef::new(WritebackAllocation::CreatedAt)
                             .date_time()
                             .not_null(),
-                    )
-                    .foreign_key(
-                        ForeignKey::create()
-                            .from(WritebackAllocation::Table, WritebackAllocation::RunId)
-                            .to(Run::Table, Run::Id)
-                            .on_delete(ForeignKeyAction::Cascade),
                     )
                     .to_owned(),
             )

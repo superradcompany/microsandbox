@@ -532,8 +532,8 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         Ok::<_, RuntimeError>((relay, db, run_db_id))
     })?;
 
-    let writeback_disk_count = match writeback_limited_disk_count(&config.vm) {
-        Ok(disk_count) => disk_count,
+    let writeback_disk_paths = match writeback_limited_disk_paths(&config.vm) {
+        Ok(disk_paths) => disk_paths,
         Err(error) => {
             let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
             return Err(error);
@@ -560,7 +560,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         &config.writeback_lease_dir,
         config.block_writeback_pool_bytes,
         config.vm.block_writeback_limit_bytes,
-        writeback_disk_count,
+        &writeback_disk_paths,
     )) {
         Ok(guard) => Arc::new(guard),
         Err(error) => {
@@ -1186,35 +1186,37 @@ fn apply_block_writeback_limit(
     disk
 }
 
-fn writeback_limited_disk_count(vm: &VmConfig) -> RuntimeResult<usize> {
+fn writeback_limited_disk_paths(vm: &VmConfig) -> RuntimeResult<Vec<PathBuf>> {
     if vm.block_writeback_limit_bytes.is_none() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
 
-    let root_count = if vm.rootfs_path.is_some() {
-        0
+    let mut paths = Vec::new();
+    if vm.rootfs_path.is_some() {
+        // Direct root filesystems do not attach a virtio-blk device.
     } else if vm.rootfs_vmdk.is_some() {
         if let Some(spec) = &vm.rootfs_upper_spec {
-            usize::from(is_writeback_limited_disk(spec.format, spec.read_only))
-        } else {
-            usize::from(vm.rootfs_upper.is_some())
+            if is_writeback_limited_disk(spec.format, spec.read_only) {
+                paths.push(spec.primary.clone());
+            }
+        } else if let Some(upper) = &vm.rootfs_upper {
+            paths.push(upper.clone());
         }
-    } else if vm.rootfs_disk.is_some() {
+    } else if let Some(rootfs_disk) = &vm.rootfs_disk {
         let format = validate_disk_format(vm.rootfs_disk_format.as_deref())
             .map_err(|error| RuntimeError::Custom(format!("disk format: {error}")))?;
-        usize::from(is_writeback_limited_disk(format, vm.rootfs_disk_readonly))
-    } else {
-        0
-    };
+        if is_writeback_limited_disk(format, vm.rootfs_disk_readonly) {
+            paths.push(rootfs_disk.clone());
+        }
+    }
 
-    vm.disks
-        .iter()
-        .filter(|disk| is_writeback_limited_disk(disk.format, disk.readonly))
-        .try_fold(root_count, |count, _| {
-            count
-                .checked_add(1)
-                .ok_or_else(|| RuntimeError::Custom("writeback disk count overflowed usize".into()))
-        })
+    paths.extend(
+        vm.disks
+            .iter()
+            .filter(|disk| is_writeback_limited_disk(disk.format, disk.readonly))
+            .map(|disk| disk.host.clone()),
+    );
+    Ok(paths)
 }
 
 fn is_writeback_limited_disk(format: msb_krun::DiskImageFormat, read_only: bool) -> bool {

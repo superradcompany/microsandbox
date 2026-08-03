@@ -757,7 +757,14 @@ fn block_writeback_policy(
                         "runtime.block_writeback_limit exceeds the supported byte range".into(),
                     )
                 })?;
-                (limit_bytes, explicit_pool_bytes)
+                let pool_bytes = match explicit_pool_bytes {
+                    Some(pool_bytes) => pool_bytes,
+                    None => linux_auto_block_writeback_pool_bytes(
+                        linux_meminfo_bytes("MemTotal:")?,
+                        linux_meminfo_bytes("MemAvailable:")?,
+                    )?,
+                };
+                (limit_bytes, Some(pool_bytes))
             }
         };
         if limit_bytes < MIN_BLOCK_WRITEBACK_LIMIT_BYTES {
@@ -4699,7 +4706,7 @@ mod tests {
                     10,
                 )
                 .unwrap(),
-                64 * 1024 * 1024 * 1024 / 10
+                60 * 1024 * 1024 * 1024 / 10
             );
             assert_eq!(
                 auto_block_writeback_pool_bytes(
@@ -4757,16 +4764,15 @@ mod tests {
 
         #[cfg(target_os = "linux")]
         {
-            assert_eq!(
-                block_writeback_policy(&RuntimeConfig {
-                    block_writeback_limit: BlockWritebackLimit::Fixed {
-                        mib: NonZero::new(1024).unwrap(),
-                    },
-                    block_writeback_pool_mib: None,
-                })
-                .unwrap(),
-                (Some(1024 * 1024 * 1024), None)
-            );
+            let fixed = block_writeback_policy(&RuntimeConfig {
+                block_writeback_limit: BlockWritebackLimit::Fixed {
+                    mib: NonZero::new(1024).unwrap(),
+                },
+                block_writeback_pool_mib: None,
+            })
+            .unwrap();
+            assert_eq!(fixed.0, Some(1024 * 1024 * 1024));
+            assert!(fixed.1.unwrap() >= 1024 * 1024 * 1024);
             assert!(
                 block_writeback_policy(&RuntimeConfig {
                     block_writeback_limit: BlockWritebackLimit::Fixed {

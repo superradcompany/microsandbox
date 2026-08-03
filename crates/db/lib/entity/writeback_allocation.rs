@@ -13,7 +13,10 @@ pub struct Model {
     /// Cryptographically random allocation identifier.
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: String,
-    /// Owning run row.
+    /// Run that originally acquired the reservation.
+    ///
+    /// This is deliberately not a foreign key: crash recovery must retain dirty credit even if
+    /// lifecycle cleanup removes the run row before another runtime can inspect the stale lease.
     pub run_id: i32,
     /// Owner-only lock-file basename held for the process lifetime.
     pub lease_name: String,
@@ -25,31 +28,20 @@ pub struct Model {
     pub reserved_bytes: i64,
     /// Host-global pool observed when the reservation was admitted.
     pub pool_bytes: i64,
+    /// Linux boot identifier recorded when dirty credit was admitted.
+    pub boot_id: String,
+    /// Sorted Linux backing-filesystem device identities (`major:minor`, comma-separated).
+    pub backing_devices: String,
     /// Allocation creation time.
     pub created_at: DateTime,
 }
 
-/// Relations for a writeback allocation.
+/// Writeback reservations intentionally have no cascading database relation.
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
-    /// The allocation belongs to one sandbox run.
-    #[sea_orm(
-        belongs_to = "super::run::Entity",
-        from = "Column::RunId",
-        to = "super::run::Column::Id",
-        on_delete = "Cascade"
-    )]
-    Run,
-}
+pub enum Relation {}
 
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
-
-impl Related<super::run::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Run.def()
-    }
-}
 
 impl ActiveModelBehavior for ActiveModel {}

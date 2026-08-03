@@ -273,8 +273,8 @@ pub struct RuntimeConfig {
 
     /// Optional host-global dirty-credit pool override in MiB.
     ///
-    /// `None` lets the `auto` policy derive a pool from physical host memory. Explicit fixed
-    /// per-disk limits remain unpooled unless this field is set.
+    /// `None` derives a conservative pool from physical host memory whenever the per-disk policy
+    /// is active. An explicit value overrides that derived aggregate capacity.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub block_writeback_pool_mib: Option<NonZero<u64>>,
 }
