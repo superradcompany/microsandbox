@@ -22,8 +22,8 @@ use microsandbox_protocol::{
 use microsandbox_types::EnvVar;
 use russh::client::Msg as ClientMsg;
 use russh::keys::{Algorithm, PrivateKey, PrivateKeyWithHashAlg, PublicKeyBase64, load_secret_key};
-use russh::server::{Auth, Msg, Session};
-use russh::{Channel, ChannelId, ChannelMsg, Sig};
+use russh::server::{Auth, ChannelOpenHandle, Msg, Session};
+use russh::{Channel, ChannelId, ChannelMsg, ChannelOpenFailure, Sig};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use super::attach;
@@ -1191,8 +1191,9 @@ impl russh::server::Handler for SshSession {
     async fn channel_open_session(
         &mut self,
         channel: Channel<Msg>,
+        reply: ChannelOpenHandle,
         _session: &mut Session,
-    ) -> Result<bool, Self::Error> {
+    ) -> Result<(), Self::Error> {
         self.channels.insert(
             channel.id(),
             ChannelState::Pending {
@@ -1201,7 +1202,8 @@ impl russh::server::Handler for SshSession {
                 env: Vec::new(),
             },
         );
-        Ok(true)
+        reply.accept().await;
+        Ok(())
     }
 
     async fn channel_open_direct_tcpip(
@@ -1211,17 +1213,27 @@ impl russh::server::Handler for SshSession {
         port_to_connect: u32,
         originator_address: &str,
         originator_port: u32,
+        reply: ChannelOpenHandle,
         session: &mut Session,
-    ) -> Result<bool, Self::Error> {
-        self.start_tcp_forward(
-            channel,
-            host_to_connect,
-            port_to_connect,
-            originator_address,
-            originator_port,
-            session,
-        )
-        .await
+    ) -> Result<(), Self::Error> {
+        let accepted = self
+            .start_tcp_forward(
+                channel,
+                host_to_connect,
+                port_to_connect,
+                originator_address,
+                originator_port,
+                session,
+            )
+            .await?;
+        if accepted {
+            reply.accept().await;
+        } else {
+            reply
+                .reject(ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
+        }
+        Ok(())
     }
 
     async fn env_request(
