@@ -3,7 +3,7 @@
 //! Wraps `oci-client` with platform resolution, caching, and progress reporting.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     io,
     path::{Path, PathBuf},
     pin::Pin,
@@ -31,9 +31,12 @@ use crate::{
     layer::Layer,
     platform::Platform,
     progress::{self, PullProgress, PullProgressHandle, PullProgressSender},
-    pull::{PullOptions, PullPolicy, PullResult},
+    pull::{PullOptions, PullPolicy, PullResult, RootfsMaterialization},
     tar::{self, Compression},
-    tree::{FileTree, ResourceLimits},
+    tree::{
+        DeviceNode, DirectoryNode, FileData, FileTree, RegularFileId, RegularFileNode,
+        ResourceLimits, SymlinkNode, TreeNode,
+    },
 };
 
 use super::{RegistryBuilder, manifest::OciManifest};
@@ -83,6 +86,7 @@ struct MaterializeLayersRequest<'a> {
     layer_descriptors: &'a [LayerDescriptor],
     diff_ids: &'a [String],
     force: bool,
+    materialization: RootfsMaterialization,
     progress: Option<PullProgressSender>,
     staged_layers: Option<Arc<HashMap<String, PathBuf>>>,
 }
@@ -261,12 +265,13 @@ impl Registry {
             .map(|layer| layer.diff_id.clone())
             .collect::<Vec<_>>();
 
-        self.materialize_layers_and_fsmeta(MaterializeLayersRequest {
+        self.materialize_layer_stage(MaterializeLayersRequest {
             oci_ref: reference,
             manifest_digest: &manifest_digest,
             layer_descriptors: &layer_descriptors,
             diff_ids: &diff_ids,
             force,
+            materialization: RootfsMaterialization::Layered,
             progress,
             staged_layers,
         })
@@ -493,17 +498,28 @@ impl Registry {
             }
         }
 
-        // Materialize per-layer EROFS images, then generate fsmeta + VMDK.
-        self.materialize_layers_and_fsmeta(MaterializeLayersRequest {
+        // Materialize the shared EROFS layer stage and requested compositions.
+        self.materialize_layer_stage(MaterializeLayersRequest {
             oci_ref,
             manifest_digest: &manifest_digest,
             layer_descriptors: &layer_descriptors,
             diff_ids: &diff_ids,
             force: options.force,
+            materialization: options.materialization,
             progress: progress.clone(),
             staged_layers: None,
         })
         .await?;
+
+        let layer_diff_ids: Vec<Digest> = diff_ids
+            .iter()
+            .map(|diff_id| diff_id.parse())
+            .collect::<ImageResult<Vec<Digest>>>()?;
+
+        if options.materialization.includes_flat() {
+            self.materialize_flat_rootfs(&manifest_digest, &layer_diff_ids, options.force)
+                .await?;
+        }
 
         // Clean up compressed tarballs after all layer tasks complete.
         // Deferred from per-task cleanup to avoid races with duplicate layer digests.
@@ -511,11 +527,6 @@ impl Registry {
             let layer = Layer::new(layer_desc.digest.clone(), &self.cache);
             let _ = tokio::fs::remove_file(&layer.tar_path_ref()).await;
         }
-
-        let layer_diff_ids: Vec<Digest> = diff_ids
-            .iter()
-            .map(|diff_id| diff_id.parse())
-            .collect::<ImageResult<Vec<Digest>>>()?;
 
         // Persist cached image metadata.
         let cached_image = CachedImageMetadata {
@@ -719,7 +730,7 @@ impl Registry {
     }
 
     /// Materialize per-layer EROFS images, then generate fsmeta + VMDK.
-    async fn materialize_layers_and_fsmeta(
+    async fn materialize_layer_stage(
         &self,
         request: MaterializeLayersRequest<'_>,
     ) -> ImageResult<()> {
@@ -729,6 +740,7 @@ impl Registry {
             layer_descriptors,
             diff_ids,
             force,
+            materialization,
             progress,
             staged_layers,
         } = request;
@@ -745,15 +757,14 @@ impl Registry {
             })
             .collect::<ImageResult<Vec<_>>>()?;
 
-        // Phase-level idempotency: decide what actually needs regen based on
-        // which artifacts already exist.
+        // Phase-level idempotency is target-aware. Per-layer EROFS images are
+        // the common verified input for both output representations.
         //
-        // - layers + fsmeta + VMDK all valid, not force: no-op.
-        // - layers + fsmeta valid, only VMDK missing: re-stitch VMDK alone.
-        // - fsmeta missing (regardless of VMDK): force layers to re-materialize
-        //   so the pipeline produces fresh trees for fsmeta generation.
-        // - layers missing (any subset): let the per-layer tasks re-materialize
-        //   the missing ones; fsmeta/VMDK regen follows if needed.
+        // - flat-only + all layers valid: no layer work; the caller builds ext4.
+        // - layered + fsmeta + VMDK valid: no-op.
+        // - layered + fsmeta valid + VMDK missing: re-stitch VMDK only.
+        // - layered + fsmeta missing: rebuild metadata from cached EROFS layers,
+        //   downloading and materializing only genuinely absent layers.
         let fsmeta_path = self.cache.fsmeta_erofs_path(manifest_digest);
         let vmdk_path = self.cache.vmdk_path(manifest_digest);
         let fsmeta_valid = cache::is_valid_erofs_artifact_async(&fsmeta_path).await;
@@ -761,27 +772,29 @@ impl Registry {
         let all_layers_valid =
             all_layers_materialized_async(&self.cache, &validated_diff_ids).await;
 
-        if all_layers_valid && fsmeta_valid && vmdk_valid && !force {
+        if all_layers_valid
+            && (!materialization.includes_layered() || (fsmeta_valid && vmdk_valid))
+            && !force
+        {
             return Ok(());
         }
 
-        if all_layers_valid && fsmeta_valid && !vmdk_valid && !force {
+        if materialization.includes_layered()
+            && all_layers_valid
+            && fsmeta_valid
+            && !vmdk_valid
+            && !force
+        {
             return self
                 .regenerate_vmdk_only(manifest_digest, &validated_diff_ids, progress.as_ref())
                 .await;
         }
 
-        // fsmeta missing or force=true → layers must produce trees. The per-
-        // layer cache check in the task body would otherwise short-circuit
-        // with tree=None for cached layer EROFSes.
-        //
-        // This is scoped to MATERIALIZATION only. Downloads are already
-        // idempotent (content-addressed, size-gated) and sharing the same
-        // blob digest across duplicate layers means forcing re-download
-        // would race: one task's `rm tar.gz` can run while another task has
-        // finished its download and is about to read the tar.
-        let layer_force = force || !fsmeta_valid;
-        let has_duplicate_diff_ids = has_duplicate_entries(diff_ids);
+        // `force` deliberately rebuilds every artifact. Otherwise a valid
+        // EROFS layer is reused even when a manifest-specific output is absent.
+        // Layer trees and block maps needed by fsmeta are reconstructed from
+        // EROFS below instead of forcing the source blob through the pipeline.
+        let layer_force = force;
         let layer_concurrency = layer_pipeline_concurrency(layer_descriptors.len());
         let semaphore = Arc::new(Semaphore::new(layer_concurrency));
 
@@ -1023,6 +1036,10 @@ impl Registry {
         let mut layer_results = wait_for_layer_tree_pipeline(layer_tasks).await?;
         layer_results.sort_by_key(|r| r.layer_index);
 
+        if !materialization.includes_layered() {
+            return Ok(());
+        }
+
         // Generate fsmeta + VMDK if not already cached.
         let fsmeta_path = self.cache.fsmeta_erofs_path(manifest_digest);
         let vmdk_path = self.cache.vmdk_path(manifest_digest);
@@ -1059,73 +1076,23 @@ impl Registry {
             return Ok(());
         }
 
-        // Extract trees and data maps from results.
-        //
-        // When an image contains duplicate layers (same diff_id at multiple
-        // positions), only the first task actually builds the EROFS — the
-        // others find the cached artifact and return tree=None. We handle
-        // this by collecting produced trees keyed by diff_id, then cloning
-        // for duplicate positions.
-        //
-        // If a diff_id has NO produced tree at all (every layer was already
-        // cached from a prior pull), fsmeta generation was expected to be
-        // cached too — but we checked above and it wasn't. This can happen
-        // if the fsmeta cache was evicted while layer caches were kept.
-        let (layer_trees, layer_data_maps) = if has_duplicate_diff_ids {
-            let mut tree_by_diff_id: HashMap<String, (FileTree, erofs::ErofsDataMap)> =
-                HashMap::new();
-            for result in &mut layer_results {
-                if let (Some(tree), Some(data_map)) = (result.tree.take(), result.data_map.take()) {
-                    let diff_id = diff_ids[result.layer_index].clone();
-                    tree_by_diff_id.entry(diff_id).or_insert((tree, data_map));
-                }
-            }
-
-            let mut layer_trees: Vec<FileTree> = Vec::with_capacity(layer_results.len());
-            let mut layer_data_maps: Vec<erofs::ErofsDataMap> =
-                Vec::with_capacity(layer_results.len());
-            for result in &layer_results {
-                let diff_id = &diff_ids[result.layer_index];
-                match tree_by_diff_id.get(diff_id) {
-                    Some((tree, data_map)) => {
-                        layer_trees.push(tree.clone());
-                        layer_data_maps.push(data_map.clone());
-                    }
-                    None => {
-                        return Err(ImageError::Materialize {
-                            digest: manifest_digest.to_string(),
-                            message: "fsmeta cache evicted but layer EROFS cached — \
-                                      re-pull with force to regenerate"
-                                .into(),
-                            source: None,
-                        });
-                    }
-                }
-            }
-
-            (layer_trees, layer_data_maps)
-        } else {
-            let mut layer_trees: Vec<FileTree> = Vec::with_capacity(layer_results.len());
-            let mut layer_data_maps: Vec<erofs::ErofsDataMap> =
-                Vec::with_capacity(layer_results.len());
-            for result in layer_results {
-                let tree = result.tree.ok_or_else(|| ImageError::Materialize {
-                    digest: manifest_digest.to_string(),
-                    message: "fsmeta generation expected uncached layer tree but found none".into(),
-                    source: None,
-                })?;
-                let data_map = result.data_map.ok_or_else(|| ImageError::Materialize {
-                    digest: manifest_digest.to_string(),
-                    message: "fsmeta generation expected uncached layer data map but found none"
-                        .into(),
-                    source: None,
-                })?;
-                layer_trees.push(tree);
-                layer_data_maps.push(data_map);
-            }
-
-            (layer_trees, layer_data_maps)
-        };
+        // Newly written layers already carry their data-stripped tree and
+        // block map. For cache hits, reconstruct the same inputs directly
+        // from EROFS. This is what lets a new image reuse shared layers even
+        // when it needs a new manifest-specific fsmeta artifact.
+        let cache = self.cache.clone();
+        let diff_ids = diff_ids.to_vec();
+        let manifest_digest_for_inputs = manifest_digest.to_string();
+        let (layer_trees, layer_data_maps) = tokio::task::spawn_blocking(move || {
+            collect_layered_inputs_from_erofs(
+                &cache,
+                &diff_ids,
+                layer_results,
+                &manifest_digest_for_inputs,
+            )
+        })
+        .await
+        .map_err(|error| ImageError::Io(io::Error::other(error)))??;
 
         // Merge layer trees with provenance tracking.
         if let Some(ref p) = progress {
@@ -1298,7 +1265,7 @@ impl Registry {
     }
 
     // NOTE: materialize_flat_image was removed — replaced by fsmeta + VMDK generation
-    // in materialize_layers_and_fsmeta().
+    // in materialize_layer_stage().
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1424,6 +1391,153 @@ fn cached_pull_result(metadata: &CachedImageMetadata) -> ImageResult<PullResult>
     })
 }
 
+/// Assemble the metadata trees and block maps needed by fsmeta in layer order.
+///
+/// A freshly materialized layer supplies these values directly. Cache hits are
+/// reconstructed from the verified EROFS artifact, so manifest-specific output
+/// generation never requires the discarded registry tarball.
+fn collect_layered_inputs_from_erofs(
+    cache: &GlobalCache,
+    diff_ids: &[String],
+    results: Vec<LayerPipelineTreeSuccess>,
+    manifest_digest: &str,
+) -> ImageResult<(Vec<FileTree>, Vec<erofs::ErofsDataMap>)> {
+    let mut inputs_by_diff_id: HashMap<String, (FileTree, erofs::ErofsDataMap)> = HashMap::new();
+    for mut result in results {
+        match (result.tree.take(), result.data_map.take()) {
+            (Some(tree), Some(data_map)) => {
+                let diff_id =
+                    diff_ids
+                        .get(result.layer_index)
+                        .ok_or_else(|| ImageError::Materialize {
+                            digest: manifest_digest.to_string(),
+                            message: "layer pipeline returned an out-of-range index".into(),
+                            source: None,
+                        })?;
+                inputs_by_diff_id
+                    .entry(diff_id.clone())
+                    .or_insert((tree, data_map));
+            }
+            (None, None) => {}
+            _ => {
+                return Err(ImageError::Materialize {
+                    digest: manifest_digest.to_string(),
+                    message: "layer pipeline returned an incomplete tree/block-map pair".into(),
+                    source: None,
+                });
+            }
+        }
+    }
+
+    for diff_id in diff_ids {
+        if inputs_by_diff_id.contains_key(diff_id) {
+            continue;
+        }
+        let digest: Digest = diff_id.parse().map_err(|_| {
+            ImageError::ManifestParse(format!("invalid cached layer diff_id: {diff_id}"))
+        })?;
+        let path = cache.layer_erofs_path(&digest);
+        let input = read_erofs_layer_metadata(&path).map_err(|source| ImageError::Materialize {
+            digest: diff_id.clone(),
+            message: "failed to reconstruct cached EROFS metadata for fsmeta".into(),
+            source: Some(Box::new(source)),
+        })?;
+        inputs_by_diff_id.insert(diff_id.clone(), input);
+    }
+
+    let mut trees = Vec::with_capacity(diff_ids.len());
+    let mut data_maps = Vec::with_capacity(diff_ids.len());
+    for diff_id in diff_ids {
+        let (tree, data_map) =
+            inputs_by_diff_id
+                .get(diff_id)
+                .ok_or_else(|| ImageError::Materialize {
+                    digest: diff_id.clone(),
+                    message: "missing reconstructed EROFS layer input".into(),
+                    source: None,
+                })?;
+        trees.push(tree.clone());
+        data_maps.push(data_map.clone());
+    }
+
+    Ok((trees, data_maps))
+}
+
+/// Read only the metadata and regular-file block placement needed by fsmeta.
+fn read_erofs_layer_metadata(path: &Path) -> io::Result<(FileTree, erofs::ErofsDataMap)> {
+    let file = std::fs::File::open(path)?;
+    let total_blocks = file
+        .metadata()?
+        .len()
+        .div_ceil(u64::from(crate::erofs::format::EROFS_BLKSIZ));
+    let total_blocks = u32::try_from(total_blocks)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "EROFS layer is too large"))?;
+    let mut reader = erofs::ErofsReader::new(file)?;
+    let (root_metadata, root_xattrs) = reader.root_directory_metadata()?;
+    let mut root = DirectoryNode::new(root_metadata);
+    root.xattrs = root_xattrs;
+    let mut tree = FileTree { root };
+    let mut hardlinks: HashMap<u32, RegularFileId> = HashMap::new();
+    let mut file_blocks = HashMap::new();
+
+    reader.walk_entries::<io::Error, _>(|reader, entry| {
+        let node = match entry.kind {
+            erofs::ErofsEntryKind::RegularFile => {
+                let id = *hardlinks.entry(entry.nid).or_default();
+                file_blocks.insert(entry.path.clone(), reader.file_block_mapping(entry.nid)?);
+                TreeNode::RegularFile(RegularFileNode {
+                    id,
+                    metadata: entry.metadata,
+                    xattrs: entry.xattrs,
+                    // Fsmeta takes the logical size and source blocks from
+                    // ErofsDataMap, so retaining file contents is unnecessary.
+                    data: FileData::Memory(Vec::new()),
+                    nlink: 1,
+                })
+            }
+            erofs::ErofsEntryKind::Directory => {
+                let mut directory = DirectoryNode::new(entry.metadata);
+                directory.xattrs = entry.xattrs;
+                TreeNode::Directory(directory)
+            }
+            erofs::ErofsEntryKind::Symlink => TreeNode::Symlink(SymlinkNode {
+                metadata: entry.metadata,
+                target: reader.read_link_by_nid(entry.nid)?,
+            }),
+            erofs::ErofsEntryKind::CharDevice | erofs::ErofsEntryKind::BlockDevice => {
+                let (major, minor) = entry.rdev.ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "EROFS device entry is missing major/minor",
+                    )
+                })?;
+                let device = DeviceNode {
+                    metadata: entry.metadata,
+                    major,
+                    minor,
+                };
+                if entry.kind == erofs::ErofsEntryKind::CharDevice {
+                    TreeNode::CharDevice(device)
+                } else {
+                    TreeNode::BlockDevice(device)
+                }
+            }
+            erofs::ErofsEntryKind::Fifo => TreeNode::Fifo(entry.metadata),
+            erofs::ErofsEntryKind::Socket => TreeNode::Socket(entry.metadata),
+        };
+        tree.insert(crate::path_bytes::path_bytes(&entry.path), node)
+            .map_err(io::Error::other)
+    })?;
+
+    Ok((
+        tree,
+        erofs::ErofsDataMap {
+            file_blocks,
+            total_blocks,
+        },
+    ))
+}
+
 fn resolve_cached_pull_result(
     cache: &GlobalCache,
     reference: &oci_client::Reference,
@@ -1451,14 +1565,17 @@ fn resolve_cached_pull_result(
         return Ok(None);
     }
 
-    // Check that fsmeta + VMDK exist.
     let manifest_digest = match metadata.manifest_digest.parse::<Digest>() {
         Ok(digest) => digest,
         Err(_) => return Ok(None),
     };
-    if !cache.is_fsmeta_materialized(&manifest_digest)
-        || !cache.is_vmdk_materialized(&manifest_digest)
+    if options.materialization.includes_layered()
+        && (!cache.is_fsmeta_materialized(&manifest_digest)
+            || !cache.is_vmdk_materialized(&manifest_digest))
     {
+        return Ok(None);
+    }
+    if options.materialization.includes_flat() && cache.read_flat_ref(&manifest_digest)?.is_none() {
         return Ok(None);
     }
 
@@ -1515,7 +1632,7 @@ async fn resolve_cached_pull_result_async(
         return Ok(None);
     };
 
-    resolve_cached_metadata_pull_result_async(cache, metadata).await
+    resolve_cached_metadata_pull_result_async(cache, metadata, options.materialization).await
 }
 
 async fn resolve_cached_pull_result_by_manifest_digest_async(
@@ -1551,7 +1668,13 @@ async fn resolve_cached_pull_result_by_manifest_digest_async(
             continue;
         }
 
-        if let Some(cached) = resolve_cached_metadata_pull_result_async(cache, metadata).await? {
+        if let Some(cached) = resolve_cached_metadata_pull_result_async(
+            cache,
+            metadata,
+            RootfsMaterialization::Layered,
+        )
+        .await?
+        {
             return Ok(Some(cached));
         }
     }
@@ -1562,6 +1685,7 @@ async fn resolve_cached_pull_result_by_manifest_digest_async(
 async fn resolve_cached_metadata_pull_result_async(
     cache: &GlobalCache,
     metadata: CachedImageMetadata,
+    materialization: RootfsMaterialization,
 ) -> ImageResult<Option<CachedPullInfo>> {
     let cached_diff_ids = match metadata
         .layers
@@ -1580,9 +1704,13 @@ async fn resolve_cached_metadata_pull_result_async(
         Ok(digest) => digest,
         Err(_) => return Ok(None),
     };
-    if !cache::is_valid_erofs_artifact_async(&cache.fsmeta_erofs_path(&manifest_digest)).await
-        || !path_exists_async(&cache.vmdk_path(&manifest_digest)).await
+    if materialization.includes_layered()
+        && (!cache::is_valid_erofs_artifact_async(&cache.fsmeta_erofs_path(&manifest_digest)).await
+            || !path_exists_async(&cache.vmdk_path(&manifest_digest)).await)
     {
+        return Ok(None);
+    }
+    if materialization.includes_flat() && cache.read_flat_ref(&manifest_digest)?.is_none() {
         return Ok(None);
     }
 
@@ -1606,17 +1734,6 @@ async fn all_layers_materialized_async(cache: &GlobalCache, diff_ids: &[Digest])
 
 async fn path_exists_async(path: &Path) -> bool {
     tokio::fs::metadata(path).await.is_ok()
-}
-
-fn has_duplicate_entries(entries: &[String]) -> bool {
-    let mut seen = HashSet::with_capacity(entries.len());
-    for entry in entries {
-        if !seen.insert(entry.as_str()) {
-            return true;
-        }
-    }
-
-    false
 }
 
 fn layer_pipeline_concurrency(layer_count: usize) -> usize {
@@ -1648,13 +1765,20 @@ mod tests {
 
     use oci_client::manifest::{ImageIndexEntry, Platform as OciPlatform};
 
-    use super::{Platform, layer_work_path, resolve_cached_pull_result, resolve_platform_digest};
+    use super::{
+        LayerDescriptor, MaterializeLayersRequest, Platform, layer_work_path,
+        read_erofs_layer_metadata, resolve_cached_pull_result, resolve_platform_digest,
+    };
     use crate::{
         cache::{CachedImageMetadata, CachedLayerMetadata, GlobalCache},
         config::ImageConfig,
         digest::Digest,
+        erofs,
         error::ImageError,
-        pull::{PullOptions, PullPolicy},
+        pull::{PullOptions, PullPolicy, RootfsMaterialization},
+        tree::{
+            FileData, FileTree, InodeMetadata, RegularFileId, RegularFileNode, TreeNode, Xattr,
+        },
     };
 
     #[test]
@@ -1722,6 +1846,7 @@ mod tests {
             &PullOptions {
                 pull_policy: PullPolicy::IfMissing,
                 force: false,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -1757,6 +1882,7 @@ mod tests {
             &PullOptions {
                 pull_policy: PullPolicy::Never,
                 force: false,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1778,6 +1904,7 @@ mod tests {
             &PullOptions {
                 pull_policy: PullPolicy::IfMissing,
                 force: false,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -1840,6 +1967,7 @@ mod tests {
             &PullOptions {
                 pull_policy: PullPolicy::Never,
                 force: false,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1852,6 +1980,7 @@ mod tests {
                 &PullOptions {
                     pull_policy: PullPolicy::Never,
                     force: false,
+                    ..Default::default()
                 },
             )
             .await;
@@ -1873,6 +2002,7 @@ mod tests {
             &PullOptions {
                 pull_policy: PullPolicy::IfMissing,
                 force: false,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1893,6 +2023,7 @@ mod tests {
             &PullOptions {
                 pull_policy: PullPolicy::IfMissing,
                 force: true,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1904,6 +2035,7 @@ mod tests {
             &PullOptions {
                 pull_policy: PullPolicy::Always,
                 force: false,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1925,6 +2057,7 @@ mod tests {
             &PullOptions {
                 pull_policy: PullPolicy::IfMissing,
                 force: false,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1955,6 +2088,7 @@ mod tests {
             &PullOptions {
                 pull_policy: PullPolicy::IfMissing,
                 force: false,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1978,6 +2112,7 @@ mod tests {
                 &PullOptions {
                     pull_policy: PullPolicy::Never,
                     force: false,
+                    ..Default::default()
                 },
             )
             .await;
@@ -1998,6 +2133,7 @@ mod tests {
             &PullOptions {
                 pull_policy: PullPolicy::IfMissing,
                 force: false,
+                ..Default::default()
             },
         );
 
@@ -2029,6 +2165,209 @@ mod tests {
                 layer_count: 2,
             } if event_ref.as_ref() == reference.to_string()
         ));
+    }
+
+    #[tokio::test]
+    async fn test_flat_cache_hit_does_not_require_layered_outputs() {
+        let temp = tempdir().unwrap();
+        let cache = GlobalCache::new(temp.path()).unwrap();
+        let reference: oci_client::Reference =
+            "docker.io/library/shared-base:flat".parse().unwrap();
+        let metadata = write_cached_image_fixture(&cache, &reference, &[true]);
+        let diff_id = parse_digest(&metadata.layers[0].diff_id);
+        write_valid_erofs_layer(&cache, &diff_id, b"shared flat contents");
+        let manifest_digest = parse_digest(&metadata.manifest_digest);
+        let registry = super::Registry::new(Platform::default(), cache.clone()).unwrap();
+        registry
+            .materialize_flat_rootfs(&manifest_digest, std::slice::from_ref(&diff_id), false)
+            .await
+            .unwrap();
+        std::fs::remove_file(cache.fsmeta_erofs_path(&manifest_digest)).unwrap();
+        std::fs::remove_file(cache.vmdk_path(&manifest_digest)).unwrap();
+
+        let flat = resolve_cached_pull_result(
+            &cache,
+            &reference,
+            &PullOptions {
+                materialization: RootfsMaterialization::Flat,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let layered = resolve_cached_pull_result(
+            &cache,
+            &reference,
+            &PullOptions {
+                materialization: RootfsMaterialization::Layered,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let all = resolve_cached_pull_result(
+            &cache,
+            &reference,
+            &PullOptions {
+                materialization: RootfsMaterialization::All,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(flat.is_some(), "flat should not depend on fsmeta or VMDK");
+        assert!(layered.is_none(), "layered still requires fsmeta and VMDK");
+        assert!(all.is_none(), "all requires both representations");
+    }
+
+    #[tokio::test]
+    async fn test_flat_layer_stage_reuses_erofs_and_skips_layered_outputs() {
+        let temp = tempdir().unwrap();
+        let cache = GlobalCache::new(temp.path()).unwrap();
+        let registry = super::Registry::new(Platform::default(), cache.clone()).unwrap();
+        let reference: oci_client::Reference =
+            "docker.io/library/shared-base:flat".parse().unwrap();
+        let manifest_digest = parse_digest(&format!("sha256:{}", "a".repeat(64)));
+        let diff_id = parse_digest(&format!("sha256:{}", "b".repeat(64)));
+        let descriptor_digest = parse_digest(&format!("sha256:{}", "c".repeat(64)));
+        let tar_path = cache.tar_path(&descriptor_digest);
+        write_valid_erofs_layer(&cache, &diff_id, b"cached shared layer");
+
+        registry
+            .materialize_layer_stage(MaterializeLayersRequest {
+                oci_ref: &reference,
+                manifest_digest: &manifest_digest,
+                layer_descriptors: &[LayerDescriptor {
+                    digest: descriptor_digest,
+                    media_type: Some("application/vnd.oci.image.layer.v1.tar+gzip".into()),
+                    size: Some(1024),
+                }],
+                diff_ids: &[diff_id.to_string()],
+                force: false,
+                materialization: RootfsMaterialization::Flat,
+                progress: None,
+                staged_layers: None,
+            })
+            .await
+            .unwrap();
+
+        assert!(!cache.is_fsmeta_materialized(&manifest_digest));
+        assert!(!cache.is_vmdk_materialized(&manifest_digest));
+        assert!(!tar_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_layered_target_rebuilds_fsmeta_from_cached_erofs() {
+        let temp = tempdir().unwrap();
+        let cache = GlobalCache::new(temp.path()).unwrap();
+        let registry = super::Registry::new(Platform::default(), cache.clone()).unwrap();
+        let reference: oci_client::Reference =
+            "docker.io/library/shared-base:layered".parse().unwrap();
+        let manifest_digest = parse_digest(&format!("sha256:{}", "d".repeat(64)));
+        let diff_id = parse_digest(&format!("sha256:{}", "e".repeat(64)));
+        let descriptor_digest = parse_digest(&format!("sha256:{}", "f".repeat(64)));
+        let tar_path = cache.tar_path(&descriptor_digest);
+        write_valid_erofs_layer(&cache, &diff_id, b"reused without source tar");
+
+        registry
+            .materialize_layer_stage(MaterializeLayersRequest {
+                oci_ref: &reference,
+                manifest_digest: &manifest_digest,
+                layer_descriptors: &[LayerDescriptor {
+                    digest: descriptor_digest,
+                    media_type: Some("application/vnd.oci.image.layer.v1.tar+gzip".into()),
+                    size: Some(2048),
+                }],
+                diff_ids: &[diff_id.to_string()],
+                force: false,
+                materialization: RootfsMaterialization::Layered,
+                progress: None,
+                staged_layers: None,
+            })
+            .await
+            .unwrap();
+
+        assert!(cache.is_fsmeta_materialized(&manifest_digest));
+        assert!(cache.is_vmdk_materialized(&manifest_digest));
+        assert!(!tar_path.exists());
+
+        let mut reader = erofs::ErofsReader::new(
+            std::fs::File::open(cache.fsmeta_erofs_path(&manifest_digest)).unwrap(),
+        )
+        .unwrap();
+        let file = reader.inode_debug_info("/shared.txt").unwrap();
+        assert_eq!(file.size, b"reused without source tar".len() as u64);
+    }
+
+    #[test]
+    fn test_erofs_metadata_reconstruction_preserves_hardlinks_and_blocks() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("layer.erofs");
+        let id = RegularFileId::new();
+        let node = || {
+            TreeNode::RegularFile(RegularFileNode {
+                id,
+                metadata: InodeMetadata::default(),
+                xattrs: Vec::new(),
+                data: FileData::Memory(b"shared hardlink data".to_vec()),
+                nlink: 2,
+            })
+        };
+        let mut tree = FileTree::new();
+        tree.root.metadata.uid = 42;
+        tree.root.xattrs.push(Xattr {
+            name: b"user.root-test".to_vec(),
+            value: b"preserved".to_vec(),
+        });
+        tree.insert(b"alpha", node()).unwrap();
+        tree.insert(b"beta", node()).unwrap();
+        erofs::write_erofs(&tree, &path).unwrap();
+
+        let (reconstructed, data_map) = read_erofs_layer_metadata(&path).unwrap();
+        let TreeNode::RegularFile(alpha) = reconstructed
+            .root
+            .entries
+            .get(std::ffi::OsStr::new("alpha"))
+            .unwrap()
+        else {
+            panic!("alpha should be a regular file");
+        };
+        let TreeNode::RegularFile(beta) = reconstructed
+            .root
+            .entries
+            .get(std::ffi::OsStr::new("beta"))
+            .unwrap()
+        else {
+            panic!("beta should be a regular file");
+        };
+
+        assert_eq!(alpha.id, beta.id);
+        assert_eq!(reconstructed.root.metadata.uid, 42);
+        assert_eq!(reconstructed.root.xattrs.len(), 1);
+        assert_eq!(reconstructed.root.xattrs[0].name, b"user.root-test");
+        assert_eq!(reconstructed.root.xattrs[0].value, b"preserved");
+        assert_eq!(
+            data_map.file_blocks.get(std::path::Path::new("alpha")),
+            data_map.file_blocks.get(std::path::Path::new("beta"))
+        );
+        assert_eq!(
+            data_map.file_blocks[std::path::Path::new("alpha")].1,
+            b"shared hardlink data".len() as u64
+        );
+    }
+
+    fn write_valid_erofs_layer(cache: &GlobalCache, diff_id: &Digest, contents: &[u8]) {
+        let mut tree = FileTree::new();
+        tree.insert(
+            b"shared.txt",
+            TreeNode::RegularFile(RegularFileNode {
+                id: RegularFileId::new(),
+                metadata: InodeMetadata::default(),
+                xattrs: Vec::new(),
+                data: FileData::Memory(contents.to_vec()),
+                nlink: 1,
+            }),
+        )
+        .unwrap();
+        erofs::write_erofs(&tree, &cache.layer_erofs_path(diff_id)).unwrap();
     }
 
     fn write_cached_image_fixture(

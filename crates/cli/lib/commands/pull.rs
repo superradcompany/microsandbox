@@ -42,15 +42,19 @@ pub enum PullMaterialization {
     /// Prepare the existing stitched layered rootfs.
     #[default]
     Layered,
-    /// Also prepare one reusable flat ext4 rootfs.
+    /// Prepare reusable EROFS layers and one flat ext4 rootfs, skipping fsmeta/VMDK.
     Flat,
     /// Prepare both layered and flat rootfs artifacts.
     All,
 }
 
 impl PullMaterialization {
-    pub(super) fn includes_flat(self) -> bool {
-        matches!(self, Self::Flat | Self::All)
+    pub(super) const fn image_materialization(self) -> microsandbox_image::RootfsMaterialization {
+        match self {
+            Self::Layered => microsandbox_image::RootfsMaterialization::Layered,
+            Self::Flat => microsandbox_image::RootfsMaterialization::Flat,
+            Self::All => microsandbox_image::RootfsMaterialization::All,
+        }
     }
 }
 
@@ -77,6 +81,9 @@ mod tests {
 
         let flat = TestCli::try_parse_from(["test", "alpine", "--materialize", "flat"]).unwrap();
         assert_eq!(flat.pull.materialize, PullMaterialization::Flat);
-        assert!(flat.pull.materialize.includes_flat());
+        assert_eq!(
+            flat.pull.materialize.image_materialization(),
+            microsandbox_image::RootfsMaterialization::Flat
+        );
     }
 }

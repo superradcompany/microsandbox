@@ -53,5 +53,5 @@ pub use error::{ImageError, ImageResult};
 pub use oci_client::Reference;
 pub use platform::{Arch, Os, Platform};
 pub use progress::{PullProgress, PullProgressHandle, PullProgressSender, progress_channel};
-pub use pull::{PullOptions, PullPolicy, PullResult};
+pub use pull::{PullOptions, PullPolicy, PullResult, RootfsMaterialization};
 pub use registry::{Registry, RegistryBuilder};

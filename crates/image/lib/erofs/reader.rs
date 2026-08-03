@@ -192,6 +192,47 @@ impl ErofsReader {
         })
     }
 
+    /// Return the block mapping recorded for a regular file in an image produced by our writer.
+    ///
+    /// Regular files are deliberately emitted as `FLAT_PLAIN`, which lets fsmeta be rebuilt from
+    /// a cached EROFS layer without retaining or re-downloading its source tarball.
+    pub(crate) fn file_block_mapping(&mut self, nid: u32) -> io::Result<(u32, u64)> {
+        let inode = self.read_inode(nid)?;
+        if (inode.mode & S_IFMT) != S_IFREG {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "block mapping is available only for regular files",
+            ));
+        }
+        if inode.size == 0 {
+            return Ok((EROFS_NULL_ADDR, 0));
+        }
+        if inode.data_layout != EROFS_INODE_FLAT_PLAIN || inode.startblk_lo == EROFS_NULL_ADDR {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "regular file does not use the expected flat-plain EROFS layout",
+            ));
+        }
+        Ok((inode.startblk_lo, inode.size))
+    }
+
+    /// Return metadata and xattrs for the filesystem root directory.
+    pub(crate) fn root_directory_metadata(&mut self) -> io::Result<(InodeMetadata, Vec<Xattr>)> {
+        let inode = self.read_inode(self.root_nid)?;
+        if (inode.mode & S_IFMT) != S_IFDIR {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "EROFS root inode is not a directory",
+            ));
+        }
+        let xattrs = self
+            .read_inode_xattrs(&inode)?
+            .into_iter()
+            .map(|(name, value)| Xattr { name, value })
+            .collect();
+        Ok((inode.metadata(), xattrs))
+    }
+
     /// Read a symlink target by NID.
     pub fn read_link_by_nid(&mut self, nid: u32) -> io::Result<Vec<u8>> {
         let inode = self.read_inode(nid)?;

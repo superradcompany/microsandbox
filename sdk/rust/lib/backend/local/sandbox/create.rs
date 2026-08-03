@@ -124,6 +124,11 @@ impl LocalBackend {
             let root_disk = oci
                 .root_disk
                 .unwrap_or(RootDisk::Managed { size_mib: None });
+            let image_materialization = if matches!(&root_disk, RootDisk::Flat { .. }) {
+                microsandbox_image::RootfsMaterialization::Flat
+            } else {
+                microsandbox_image::RootfsMaterialization::Layered
+            };
             let overrides = RegistryOverrides {
                 auth: config.registry_auth.clone(),
                 insecure: config.insecure,
@@ -139,6 +144,7 @@ impl LocalBackend {
                     config.spec.pull_policy,
                     overrides,
                     expected_snapshot_manifest_digest.as_deref(),
+                    image_materialization,
                     progress,
                 )
                 .await?;
@@ -205,18 +211,13 @@ impl LocalBackend {
                         ));
                     }
 
-                    let registry = Registry::builder(
-                        microsandbox_image::Platform::host_linux(),
-                        cache.clone(),
-                    )
-                    .build()?;
-                    let flat_ref = registry
-                        .materialize_flat_rootfs(
-                            &pull_result.manifest_digest,
-                            &pull_result.layer_diff_ids,
-                            false,
-                        )
-                        .await?;
+                    let flat_ref = cache
+                        .read_flat_ref(&pull_result.manifest_digest)?
+                        .ok_or_else(|| {
+                            crate::MicrosandboxError::Custom(
+                                "flat rootfs was not published by the image pull".into(),
+                            )
+                        })?;
                     let artifact_digest: Digest =
                         flat_ref.artifact_digest.parse().map_err(|e| {
                             crate::MicrosandboxError::Custom(format!(
@@ -642,11 +643,18 @@ impl LocalBackend {
         pull_policy: PullPolicy,
         registry_overrides: RegistryOverrides,
         expected_snapshot_manifest_digest: Option<&str>,
+        materialization: microsandbox_image::RootfsMaterialization,
         progress: Option<PullProgressSender>,
     ) -> MicrosandboxResult<ResolvedOciImage> {
         let Some(pinned_digest) = expected_snapshot_manifest_digest else {
             let pull_result = self
-                .pull_oci_image(reference, pull_policy, registry_overrides, progress)
+                .pull_oci_image(
+                    reference,
+                    pull_policy,
+                    registry_overrides,
+                    materialization,
+                    progress,
+                )
                 .await?;
             return Ok(ResolvedOciImage {
                 pull_result,
@@ -703,7 +711,13 @@ impl LocalBackend {
         // Pull by digest, never by the mutable source tag, when the exact
         // snapshot base is absent from the local cache.
         let pull_result = match self
-            .pull_oci_image(&pinned_reference, pull_policy, registry_overrides, progress)
+            .pull_oci_image(
+                &pinned_reference,
+                pull_policy,
+                registry_overrides,
+                microsandbox_image::RootfsMaterialization::Layered,
+                progress,
+            )
             .await
         {
             Ok(result) => result,
@@ -783,6 +797,7 @@ impl LocalBackend {
         reference: &str,
         pull_policy: PullPolicy,
         registry_overrides: RegistryOverrides,
+        materialization: microsandbox_image::RootfsMaterialization,
         progress: Option<PullProgressSender>,
     ) -> MicrosandboxResult<PullResult> {
         let global = self.config();
@@ -793,6 +808,7 @@ impl LocalBackend {
         })?;
         let options = PullOptions {
             pull_policy: Self::image_pull_policy(pull_policy),
+            materialization,
             ..Default::default()
         };
 

@@ -27,7 +27,7 @@ Expanded form: `msb image pull`.
 | `--ca-certs <PATH>` | Path to a PEM file with additional CA root certificates |
 | `--materialize <MODE>` | Prepare `layered` (default), `flat`, or `all` rootfs artifacts |
 
-`flat` creates a reusable, validated raw ext4 base with no guest OverlayFS in the final rootfs. The pull path reconstructs the final OCI filesystem from the content-addressed layer cache, so it does not depend on a guest builder or host mount. `all` explicitly prepares both representations; `flat` also retains the internal layer artifacts needed for OCI cache integrity and later re-materialization.
+`flat` creates a reusable, validated raw ext4 base with no guest OverlayFS in the final rootfs. Shared layers are downloaded and verified once, cached as EROFS by their uncompressed OCI `diff_id`, and reused across image manifests. Flat mode merges those EROFS inputs into ext4 without producing layered-only fsmeta or VMDK artifacts. `all` runs the shared layer stage once and prepares both representations.
 
 Flat artifacts live under the configured cache directory. `flat/refs/<manifest>.json` records the requested manifest and verified result, `flat/blobs/<artifact>.raw` stores immutable content-addressed ext4 bytes, and `flat/locks/<derivation>.lock` coordinates concurrent materialization. A ref whose blob is missing or has the wrong logical size is treated as a cache miss.
 

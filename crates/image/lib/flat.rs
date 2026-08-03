@@ -143,7 +143,10 @@ fn flat_derivation_digest(
 fn read_erofs_layer(path: &Path, spool: &mut DataSpool) -> std::io::Result<FileTree> {
     let file = std::fs::File::open(path)?;
     let mut reader = ErofsReader::new(file)?;
-    let mut tree = FileTree::new();
+    let (root_metadata, root_xattrs) = reader.root_directory_metadata()?;
+    let mut root = DirectoryNode::new(root_metadata);
+    root.xattrs = root_xattrs;
+    let mut tree = FileTree { root };
     let mut hardlinks: HashMap<u32, (RegularFileId, FileData)> = HashMap::new();
     reader.walk_entries::<std::io::Error, _>(|reader, entry| {
         let node = match entry.kind {
