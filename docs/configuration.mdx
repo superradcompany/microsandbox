@@ -199,7 +199,8 @@ When the root-disk default is flat, plain `msb pull IMAGE` also prepares the reu
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `block_writeback_limit` | `"auto"` | On Linux, `auto` gives each writable raw disk a 512 MiB VMM-enforced hard budget for buffered host dirty data; `off` disables the bound without weakening the guest flush durability boundary. Other hosts resolve `auto` to `off`. |
+| `block_writeback_limit` | `"auto"` | On Linux, `auto` prefers a 512 MiB VMM-enforced hard budget for each writable raw disk and shrinks it when the derived host pool is smaller; `{"mib": N}` sets a fixed per-disk budget of at least 128 MiB; `off` disables the bound without weakening the guest flush durability boundary. Other hosts resolve an unmodified `auto` to `off` and reject explicit active policies. |
+| `block_writeback_pool_mib` | `null` | Optional aggregate dirty-credit admission pool. With `auto`, `null` derives the pool as the lower of 10% of physical RAM and Linux's configured dirty-background threshold. A fixed per-disk limit stays unpooled unless this field is set. The pool must fit at least one per-disk budget. |
 
 Hardware CRC32C, the guest kernel preemption model, x2APIC, APICv/AVIC capability, vCPU affinity mechanics, and the pure-Rust ext4 writer are implementation or capability details rather than user policy, so they intentionally have no global config keys. The [performance guide](/optimization/overview#optimizations-that-are-not-knobs) explains how those automatic layers interact with the configurable policy.
 

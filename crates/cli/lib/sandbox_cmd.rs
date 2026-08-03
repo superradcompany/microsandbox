@@ -224,6 +224,8 @@ pub fn run(args: SandboxArgs) -> ! {
         runtime_dir: launch.runtime_dir,
         sandboxes_dir: launch.sandboxes_dir,
         cpu_lease_dir: launch.cpu_lease_dir,
+        writeback_lease_dir: launch.writeback_lease_dir,
+        block_writeback_pool_bytes: launch.block_writeback_pool_bytes,
         agent_sock_path: launch.agent_sock,
         startup_command: launch.startup,
         #[cfg(unix)]
@@ -576,6 +578,8 @@ mod tests {
             db_path: PathBuf::from("/tmp/x.db"),
             env: vec!["TOKEN=secret".to_string()],
             block_writeback_limit_bytes: Some(512 * 1024 * 1024),
+            block_writeback_pool_bytes: Some(4 * 1024 * 1024 * 1024),
+            writeback_lease_dir: PathBuf::from("/tmp/writeback-leases"),
             ..Default::default()
         };
         let mut file = tempfile::NamedTempFile::new().unwrap();
@@ -588,6 +592,14 @@ mod tests {
         assert_eq!(loaded.db_path, PathBuf::from("/tmp/x.db"));
         assert_eq!(loaded.env, vec!["TOKEN=secret".to_string()]);
         assert_eq!(loaded.block_writeback_limit_bytes, Some(512 * 1024 * 1024));
+        assert_eq!(
+            loaded.block_writeback_pool_bytes,
+            Some(4 * 1024 * 1024 * 1024)
+        );
+        assert_eq!(
+            loaded.writeback_lease_dir,
+            PathBuf::from("/tmp/writeback-leases")
+        );
     }
 
     #[test]

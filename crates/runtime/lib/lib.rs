@@ -27,5 +27,6 @@ pub mod policy;
 pub mod relay;
 mod startup;
 pub mod vm;
+pub(crate) mod writeback;
 
 pub use error::*;

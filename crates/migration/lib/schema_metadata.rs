@@ -30,6 +30,9 @@ pub const FLAT_ROOTFS_STATE_MIGRATION_ID: &str = "m20260718_000001_add_flat_root
 /// Migration that introduces cooperative host CPU allocation state.
 pub const CPU_ALLOCATION_MIGRATION_ID: &str = "m20260719_000001_create_cpu_allocations";
 
+/// Migration that introduces host-global writeback dirty-credit reservations.
+pub const WRITEBACK_ALLOCATION_MIGRATION_ID: &str = "m20260803_000001_create_writeback_allocations";
+
 /// Frozen migration baseline for the transitional 0.6.0 release.
 ///
 /// The released 0.6.0 binary predates `msb __schema-baseline --json`, so
@@ -186,6 +189,13 @@ pub const MIGRATION_METADATA: &[MigrationMetadata] = &[
         affects_cache: false,
         affects_user_data: false,
         summary: "remove cooperative host CPU allocation tables",
+    },
+    MigrationMetadata {
+        id: WRITEBACK_ALLOCATION_MIGRATION_ID,
+        reversible: true,
+        affects_cache: false,
+        affects_user_data: false,
+        summary: "remove host-global writeback allocation state",
     },
 ];
 

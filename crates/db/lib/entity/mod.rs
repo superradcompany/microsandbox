@@ -14,3 +14,4 @@ pub mod sandbox_label;
 pub mod sandbox_rootfs;
 pub mod snapshot;
 pub mod volume;
+pub mod writeback_allocation;
