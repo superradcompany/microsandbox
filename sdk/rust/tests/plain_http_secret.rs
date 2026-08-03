@@ -246,12 +246,16 @@ async fn plain_http_invalid_host_blocks_host_bound_secret() {
 
     // Test: no Host header. The exec outcome is irrelevant (the proxy drops the
     // connection, which can leave `nc` waiting for a response) — only what the
-    // server sees.
+    // server sees. Bound the exec through the SDK so agentd kills the entire
+    // process group; BusyBox `timeout` can leave a pipeline's `nc` orphaned.
     let _ = sb
-        .shell(format!(
-            "timeout 5 sh -c 'printf \"GET / HTTP/1.0\\r\\nAuthorization: Bearer %s\\r\\n\\r\\n\" \
-             \"$API_KEY\" | nc host.microsandbox.internal {test_port}' || true"
-        ))
+        .shell_with(
+            format!(
+                "printf 'GET / HTTP/1.0\\r\\nAuthorization: Bearer %s\\r\\n\\r\\n' \"$API_KEY\" \
+                 | nc host.microsandbox.internal {test_port}"
+            ),
+            |exec| exec.timeout(std::time::Duration::from_secs(5)),
+        )
         .await;
 
     // With the host unprovable the secret is ineligible, so the request is
