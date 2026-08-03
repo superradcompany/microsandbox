@@ -598,6 +598,11 @@ describe("ImageBuilder root disk", () => {
     expect(i.rootDisk((d) => d.disk("./scratch.img").format("raw").fstype("ext4"))).toBe(i);
   });
 
+  it("accepts a flat root disk via the builder callback", () => {
+    const i = new ImageBuilder().oci("python:3.12");
+    expect(i.rootDisk((d) => d.flat().size(8192).cloneStrategy("reflink"))).toBe(i);
+  });
+
   it("rejects an unknown disk-image format eagerly", () => {
     expect(() => new RootDiskBuilder().disk("./scratch.img").format("floppy")).toThrow(
       /invalid root disk image format/,

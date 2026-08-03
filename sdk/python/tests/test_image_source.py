@@ -54,6 +54,21 @@ def test_oci_accepts_disk_image_root_disk() -> None:
     }
 
 
+def test_oci_accepts_flat_root_disk() -> None:
+    image = Image.oci(
+        "python:3.12",
+        root_disk=RootDisk.flat(8192, fstype="ext4", clone="reflink"),
+    )
+
+    assert isinstance(image._root_disk, RootDiskConfig)
+    assert image._root_disk._to_dict() == {
+        "kind": "flat",
+        "size_mib": 8192,
+        "fstype": "ext4",
+        "clone": "reflink",
+    }
+
+
 def test_oci_accepts_deprecated_upper_size_mib_alias() -> None:
     image = Image.oci("python:3.12", upper_size_mib=8192)
 

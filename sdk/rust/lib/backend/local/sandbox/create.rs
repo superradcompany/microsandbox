@@ -182,6 +182,64 @@ impl LocalBackend {
                 .map(|d| cache.layer_erofs_path(d))
                 .collect();
 
+            let flat_spec = match &root_disk {
+                RootDisk::Flat {
+                    size_mib,
+                    clone,
+                    fstype,
+                } => {
+                    if fstype.as_deref().unwrap_or("ext4") != "ext4" {
+                        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                            "flat root disks currently require fstype=ext4, got {}",
+                            fstype.as_deref().unwrap_or_default()
+                        )));
+                    }
+                    if !config.spec.patches.is_empty() {
+                        return Err(crate::MicrosandboxError::InvalidConfig(
+                            "patches are not yet compatible with flat OCI rootfs".into(),
+                        ));
+                    }
+                    if config.snapshot_upper_source.is_some() {
+                        return Err(crate::MicrosandboxError::InvalidConfig(
+                            "from_snapshot is not yet compatible with flat OCI rootfs".into(),
+                        ));
+                    }
+
+                    let registry = Registry::builder(
+                        microsandbox_image::Platform::host_linux(),
+                        cache.clone(),
+                    )
+                    .build()?;
+                    let flat_ref = registry
+                        .materialize_flat_rootfs(
+                            &pull_result.manifest_digest,
+                            &pull_result.layer_diff_ids,
+                            false,
+                        )
+                        .await?;
+                    let artifact_digest: Digest =
+                        flat_ref.artifact_digest.parse().map_err(|e| {
+                            crate::MicrosandboxError::Custom(format!(
+                                "invalid flat rootfs artifact digest in cache: {e}"
+                            ))
+                        })?;
+                    let minimum_mib = flat_ref.virtual_size_bytes.div_ceil(1024 * 1024);
+                    let requested_mib = size_mib.map(u64::from).unwrap_or(u64::from(
+                        crate::sandbox::config::DEFAULT_OCI_UPPER_SIZE_MIB,
+                    ));
+                    let target_mib = size_mib
+                        .map(|_| requested_mib)
+                        .unwrap_or_else(|| requested_mib.max(minimum_mib));
+                    let target_mib = u32::try_from(target_mib).map_err(|_| {
+                        crate::MicrosandboxError::InvalidConfig(
+                            "flat root disk size exceeds supported MiB range".into(),
+                        )
+                    })?;
+                    Some((cache.flat_blob_path(&artifact_digest), target_mib, *clone))
+                }
+                _ => None,
+            };
+
             let upper_tree = if !config.spec.patches.is_empty() {
                 Some(build_upper_tree(&config.spec.patches, &layer_erofs_paths).await?)
             } else {
@@ -191,7 +249,20 @@ impl LocalBackend {
             // Create upper.ext4 for the writable overlay upper layer.
             tokio::fs::create_dir_all(&sandbox_dir).await?;
             let upper_path = sandbox_dir.join("upper.ext4");
-            if let Some(snap_upper) = config.snapshot_upper_source.take() {
+            if let Some((base, target_mib, clone)) = flat_spec {
+                crate::sandbox::flat_rootfs::create_private_flat_rootfs(
+                    base,
+                    sandbox_dir.join(crate::sandbox::flat_rootfs::FLAT_ROOTFS_FILENAME),
+                    target_mib,
+                    clone,
+                )
+                .await?;
+                if let RootfsSource::Oci(oci) = &mut config.spec.image
+                    && let Some(RootDisk::Flat { size_mib, .. }) = &mut oci.root_disk
+                {
+                    *size_mib = Some(target_mib);
+                }
+            } else if let Some(snap_upper) = config.snapshot_upper_source.take() {
                 // Booting from a snapshot: copy the captured upper into
                 // place, preserving sparseness. Patches are not
                 // compatible with this path because they'd need to be
@@ -229,6 +300,9 @@ impl LocalBackend {
                                 path.display()
                             )));
                         }
+                    }
+                    RootDisk::Flat { .. } => {
+                        unreachable!("flat root disks are provisioned before overlay handling")
                     }
                 }
             }

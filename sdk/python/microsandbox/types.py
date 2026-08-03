@@ -292,7 +292,6 @@ class DiskImageFormat(StrEnum):
     RAW = "raw"
     VMDK = "vmdk"
 
-
 class VolumeKind(StrEnum):
     DIRECTORY = "dir"
     DISK = "disk"
@@ -313,6 +312,13 @@ class RootDiskKind(StrEnum):
     MANAGED = "managed"
     TMPFS = "tmpfs"
     DISK_IMAGE = "disk-image"
+    FLAT = "flat"
+
+
+class FlatClone(StrEnum):
+    AUTO = "auto"
+    COPY = "copy"
+    REFLINK = "reflink"
 
 
 class ImageSourceKind(StrEnum):
@@ -354,7 +360,6 @@ class SnapshotFormat(StrEnum):
 class SnapshotScope(StrEnum):
     DISK = "disk"
     RESUMABLE = "resumable"
-
 
 class RlimitResource(StrEnum):
     CPU = "cpu"
@@ -798,6 +803,7 @@ class RootDiskConfig:
     path: str | None = None
     format: DiskImageFormat | None = None
     fstype: str | None = None
+    clone: FlatClone | None = None
 
     def _to_dict(self) -> dict:
         kind = _enum_value(self.kind, RootDiskKind, "RootDiskConfig.kind")
@@ -815,6 +821,8 @@ class RootDiskConfig:
             d["format"] = disk_format
         if self.fstype is not None:
             d["fstype"] = self.fstype
+        if self.clone is not None:
+            d["clone"] = _enum_value(self.clone, FlatClone, "RootDiskConfig.clone")
         return d
 
 
@@ -844,6 +852,21 @@ class RootDisk:
         derived from the file extension unless given (vmdk is not supported)."""
         return RootDiskConfig(kind=RootDiskKind.DISK_IMAGE, path=path, format=format, fstype=fstype)
 
+
+    @staticmethod
+    def flat(
+        size_mib: int | None = None,
+        *,
+        fstype: str | None = None,
+        clone: FlatClone = FlatClone.AUTO,
+    ) -> RootDiskConfig:
+        """Complete microsandbox-owned OCI rootfs mounted directly without OverlayFS."""
+        return RootDiskConfig(
+            kind=RootDiskKind.FLAT,
+            size_mib=size_mib,
+            fstype=fstype,
+            clone=clone,
+        )
 
 @dataclass(frozen=True, slots=True)
 class ImageSource:

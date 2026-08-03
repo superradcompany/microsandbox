@@ -92,11 +92,12 @@ impl JsSandboxBuilder {
     /// Sugar over `imageWith((i) => i.oci(...).rootDisk(...))` — the root
     /// disk lives on the OCI rootfs source, so an OCI image must be set
     /// first. Pass a number of MiB for a managed root disk, or a callback
-    /// for the tmpfs and disk-image kinds:
+    /// for the tmpfs, flat, and disk-image kinds:
     ///
     /// ```ts
     /// .image("python").rootDisk(8192)
     /// .image("python").rootDisk((d) => d.tmpfs().size(512))
+    /// .image("python").rootDisk((d) => d.flat().size(8192).cloneStrategy("auto"))
     /// .image("python").rootDisk((d) => d.disk("./scratch.img"))
     /// ```
     #[napi(

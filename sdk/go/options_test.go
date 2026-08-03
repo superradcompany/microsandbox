@@ -62,6 +62,21 @@ func TestWithRootDiskDiskImage(t *testing.T) {
 	}
 }
 
+func TestWithRootDiskFlat(t *testing.T) {
+	o := SandboxConfig{}
+	WithRootDisk(RootDisk.Flat(RootDiskFlatOptions{
+		SizeMiB: 8192,
+		Fstype:  "ext4",
+		Clone:   FlatCloneReflink,
+	}))(&o)
+	if o.RootDisk == nil || o.RootDisk.Kind() != RootDiskKindFlat {
+		t.Fatalf("RootDisk = %#v, want flat config", o.RootDisk)
+	}
+	if o.RootDisk.SizeMiB != 8192 || o.RootDisk.Fstype != "ext4" || o.RootDisk.Clone != FlatCloneReflink {
+		t.Errorf("flat fields = %#v", o.RootDisk)
+	}
+}
+
 func TestWithOCIUpperSizeIsManagedRootDiskAlias(t *testing.T) {
 	o := SandboxConfig{}
 	WithOCIUpperSize(8192)(&o)

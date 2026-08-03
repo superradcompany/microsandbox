@@ -692,22 +692,33 @@ pub async fn spawn_sandbox(
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
-/// Pre-boot preparation for the OCI writable upper: grow `upper.ext4` when
-/// the persisted desired size exceeds the file's current size. This is where
-/// a `--next-start` root disk grow lands; ordinary starts no-op because create
-/// formats the file at the desired size. Only the managed kind grows — tmpfs
-/// has no host file and a user disk image is user-owned. A missing upper is
-/// not this hook's problem — non-OCI rootfs and not-yet-materialized
-/// sandboxes skip it.
+/// Grow the sandbox-owned OCI root disk before boot when its persisted target increased.
 async fn prepare_oci_upper(config: &SandboxConfig, sandbox_dir: &Path) -> MicrosandboxResult<()> {
-    let Some(desired_mib) = config.spec.image.oci_managed_root_disk_size_mib() else {
+    let RootfsSource::Oci(oci) = &config.spec.image else {
         return Ok(());
     };
-    let upper_path = sandbox_dir.join("upper.ext4");
-    if !tokio::fs::try_exists(&upper_path).await.unwrap_or(false) {
-        return Ok(());
+    match &oci.root_disk {
+        Some(microsandbox_types::RootDisk::Flat { size_mib, .. }) => {
+            let Some(desired_mib) = size_mib else {
+                return Ok(());
+            };
+            let path = sandbox_dir.join(crate::sandbox::flat_rootfs::FLAT_ROOTFS_FILENAME);
+            if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+                return Ok(());
+            }
+            crate::sandbox::flat_rootfs::grow_private_flat_rootfs(path, *desired_mib).await
+        }
+        Some(microsandbox_types::RootDisk::Managed {
+            size_mib: Some(desired_mib),
+        }) => {
+            let upper_path = sandbox_dir.join("upper.ext4");
+            if !tokio::fs::try_exists(&upper_path).await.unwrap_or(false) {
+                return Ok(());
+            }
+            crate::sandbox::upper::grow_upper_to_mib(upper_path, *desired_mib).await
+        }
+        _ => Ok(()),
     }
-    crate::sandbox::upper::grow_upper_to_mib(upper_path, desired_mib).await
 }
 
 fn reserve_metrics_slot(
@@ -2270,8 +2281,18 @@ fn sandbox_cli_args(
             launch.rootfs.follow_root_symlinks = *follow_root_symlinks;
         }
         RootfsSource::Oci(oci) => {
+            if let Some(microsandbox_types::RootDisk::Flat { fstype, .. }) = &oci.root_disk {
+                let sandbox_dir = local.sandboxes_dir().join(&config.spec.name);
+                launch.rootfs.disk =
+                    Some(sandbox_dir.join(crate::sandbox::flat_rootfs::FLAT_ROOTFS_FILENAME));
+                launch.rootfs.disk_format = Some("raw".to_string());
+                launch.env.push(format!(
+                    "{}=kind=disk-image,device=/dev/vda,fstype={}",
+                    ENV_BLOCK_ROOT,
+                    fstype.as_deref().unwrap_or("ext4")
+                ));
             // Derive VMDK + upper paths from the stored manifest digest.
-            if let Some(ref digest_str) = config.manifest_digest {
+            } else if let Some(ref digest_str) = config.manifest_digest {
                 let cache_dir = local.cache_dir();
                 let cache = GlobalCache::new(&cache_dir).expect("cache init");
                 let digest: Digest = digest_str.parse().expect("invalid manifest digest");
@@ -2308,6 +2329,9 @@ fn sandbox_cli_args(
                             "kind=oci-erofs,lower=/dev/vda,upper=/dev/vdb,upper_fstype={}",
                             fstype.as_deref().unwrap_or("ext4")
                         )
+                    }
+                    Some(RootDisk::Flat { .. }) => {
+                        unreachable!("flat root disks are handled before layered root assembly")
                     }
                 };
                 launch.env.push(format!("{}={block_root}", ENV_BLOCK_ROOT));
@@ -3444,6 +3468,29 @@ mod tests {
         assert!(!rendered.contains(&"--rootfs-blk".to_string()));
         assert!(!rendered.contains(&"--rootfs-disk".to_string()));
         assert!(!rendered.iter().any(|a| a.starts_with("MSB_BLOCK_ROOT=")));
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_cli_args_flat_oci_attaches_one_raw_root_disk() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .root_disk_with(|disk| disk.flat().size(8192u32))
+            .build()
+            .await
+            .unwrap();
+
+        let rendered = render_args(&config);
+        assert!(rendered.contains(&"--rootfs-disk".to_string()));
+        assert!(rendered.iter().any(|arg| arg.ends_with("/test/rootfs.raw")));
+        assert!(rendered.contains(&"--rootfs-disk-format".to_string()));
+        assert!(rendered.contains(&"raw".to_string()));
+        assert!(
+            rendered.contains(
+                &"MSB_BLOCK_ROOT=kind=disk-image,device=/dev/vda,fstype=ext4".to_string()
+            )
+        );
+        assert!(!rendered.contains(&"--rootfs-upper".to_string()));
+        assert!(!rendered.contains(&"--rootfs-lower".to_string()));
     }
 
     #[tokio::test]

@@ -26,7 +26,7 @@ pub use cloud::{
 pub use domain::{
     Action, CertCacheConfig, DEFAULT_METRICS_SAMPLE_INTERVAL_MS, DEFAULT_SANDBOX_CPUS,
     DEFAULT_SANDBOX_MEMORY_MIB, DeploymentProfile, Destination, DestinationGroup, Direction,
-    DiskImageFormat, DnsConfig, EnvVar, HandoffInit, HostPattern, HostPermissions,
+    DiskImageFormat, DnsConfig, EnvVar, FlatClone, HandoffInit, HostPattern, HostPermissions,
     InterceptCaConfig, InterfaceOverrides, LogSource, MAX_SECRET_PLACEHOLDER_BYTES, MountOptions,
     NamedVolumeCreate, NamedVolumeMode, NetworkPolicy, NetworkSpec, OciRootfsSource, Patch,
     PortProtocol, PortRange, Protocol, PublishedPortSpec, PullPolicy, Rlimit, RlimitResource,

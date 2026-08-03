@@ -1541,8 +1541,8 @@ type RegistryAuthOptions struct {
 	Password string `json:"password"`
 }
 
-// RootDiskSpec describes the writable rootfs layer (root disk) of an OCI
-// image. Kind is "managed", "tmpfs", or "disk-image"; SizeMiB is a pointer
+// RootDiskSpec describes root storage for an OCI image. Kind is "managed",
+// "tmpfs", "disk-image", or "flat"; SizeMiB is a pointer
 // so an explicit zero reaches the wire for validation.
 type RootDiskSpec struct {
 	Kind    string  `json:"kind"`
@@ -1550,6 +1550,7 @@ type RootDiskSpec struct {
 	Path    string  `json:"path,omitempty"`
 	Format  string  `json:"format,omitempty"`
 	Fstype  string  `json:"fstype,omitempty"`
+	Clone   string  `json:"clone,omitempty"`
 }
 
 // MountSpec describes a volume mount for a sandbox.

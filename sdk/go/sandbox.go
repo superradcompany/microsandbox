@@ -203,6 +203,10 @@ func buildFFIRootDisk(rd RootDiskConfig) *ffi.RootDiskSpec {
 		spec.Path = rd.Path
 		spec.Format = rd.Format
 		spec.Fstype = rd.Fstype
+	case RootDiskKindFlat:
+		spec.Kind = "flat"
+		spec.Fstype = rd.Fstype
+		spec.Clone = string(rd.Clone)
 	default:
 		// Managed, including zero-valued configs built without the factory.
 		spec.Kind = "managed"

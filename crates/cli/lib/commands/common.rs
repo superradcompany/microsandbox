@@ -7,7 +7,7 @@ use clap::Args;
 use microsandbox::VolumeKind;
 use microsandbox::backend::{Backend, LocalBackend};
 use microsandbox::sandbox::{
-    DeploymentProfile, DiskImageFormat, MountBuilder, Patch, RootDiskBuilder, Sandbox,
+    DeploymentProfile, DiskImageFormat, FlatClone, MountBuilder, Patch, RootDiskBuilder, Sandbox,
     SandboxBuilder, SandboxHandle, SecurityProfile,
 };
 
@@ -219,7 +219,7 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub pull: Option<String>,
 
-    /// Writable rootfs layer for OCI images (e.g. 8G, tmpfs:2G,
+    /// Root disk for OCI images (e.g. 8G, tmpfs:2G, flat:8G,
     /// ./scratch.img, ./scratch.qcow2:format=qcow2,fstype=ext4).
     #[arg(long = "root-disk", value_name = "SPEC")]
     pub root_disk: Option<String>,
@@ -740,6 +740,11 @@ enum RootDiskSpec {
         format: Option<DiskImageFormat>,
         fstype: Option<String>,
     },
+    Flat {
+        size_mib: Option<u32>,
+        fstype: Option<String>,
+        clone: FlatClone,
+    },
 }
 
 impl RootDiskSpec {
@@ -767,6 +772,20 @@ impl RootDiskSpec {
                 }
                 d
             }
+            Self::Flat {
+                size_mib,
+                fstype,
+                clone,
+            } => {
+                d = d.flat().clone_strategy(clone);
+                if let Some(size_mib) = size_mib {
+                    d = d.size(size_mib);
+                }
+                if let Some(fstype) = fstype {
+                    d = d.fstype(fstype);
+                }
+                d
+            }
         }
     }
 }
@@ -775,11 +794,13 @@ impl RootDiskSpec {
 /// the volume flags: a bare size means the managed ext4 upper, `tmpfs[:SIZE]`
 /// a RAM-backed upper, and a path a user-supplied disk image with optional
 /// comma-separated options after a colon (`format=raw|qcow2`, `fstype=...`).
+/// `flat[:SIZE]` selects one complete managed root filesystem and accepts
+/// `fstype=` plus `clone=` options.
 fn parse_root_disk_spec(spec: &str) -> anyhow::Result<RootDiskSpec> {
     let spec = spec.trim();
     if spec.is_empty() {
         anyhow::bail!(
-            "--root-disk requires a value (e.g. 8G, tmpfs:2G, ./scratch.qcow2:format=qcow2)"
+            "--root-disk requires a value (e.g. 8G, tmpfs:2G, flat:8G, ./scratch.qcow2:format=qcow2)"
         );
     }
 
@@ -791,6 +812,16 @@ fn parse_root_disk_spec(spec: &str) -> anyhow::Result<RootDiskSpec> {
         return Ok(RootDiskSpec::Tmpfs {
             size_mib: Some(size_mib),
         });
+    }
+    if spec == "flat" {
+        return Ok(RootDiskSpec::Flat {
+            size_mib: None,
+            fstype: None,
+            clone: FlatClone::Auto,
+        });
+    }
+    if let Some(options) = spec.strip_prefix("flat:") {
+        return parse_flat_root_disk_options(options);
     }
 
     // Split SOURCE[:OPTIONS] on the first colon that isn't a Windows drive
@@ -818,13 +849,65 @@ fn parse_root_disk_spec(spec: &str) -> anyhow::Result<RootDiskSpec> {
 
     if options.is_some() {
         anyhow::bail!(
-            "--root-disk: options after ':' are only valid for a disk image path (e.g. ./scratch.qcow2:format=qcow2,fstype=ext4)"
+            "--root-disk: options after ':' are only valid for flat or a disk image path (e.g. flat:8G,clone=auto or ./scratch.qcow2:format=qcow2,fstype=ext4)"
         );
     }
     let size_mib = ui::parse_size_mib(source).map_err(|err| {
-        anyhow::anyhow!("--root-disk: {err} (expected a size, tmpfs[:SIZE], or an image path)")
+        anyhow::anyhow!(
+            "--root-disk: {err} (expected a size, tmpfs[:SIZE], flat[:SIZE][,OPTIONS], or an image path)"
+        )
     })?;
     Ok(RootDiskSpec::Managed { size_mib })
+}
+
+/// Parse `flat[:SIZE][,fstype=TYPE][,clone=auto|copy|reflink]`.
+fn parse_flat_root_disk_options(options: &str) -> anyhow::Result<RootDiskSpec> {
+    if options.trim().is_empty() {
+        anyhow::bail!("--root-disk: flat: requires a size or option after ':'");
+    }
+
+    let mut size_mib = None;
+    let mut fstype = None;
+    let mut clone = FlatClone::Auto;
+    let mut clone_set = false;
+    for (index, token) in options.split(',').map(str::trim).enumerate() {
+        if token.is_empty() {
+            anyhow::bail!("--root-disk: empty flat root option");
+        }
+        match token.split_once('=') {
+            Some(("fstype", value)) if !value.is_empty() => {
+                if fstype.replace(value.to_string()).is_some() {
+                    anyhow::bail!("--root-disk: duplicate fstype option");
+                }
+            }
+            Some(("clone", value)) => {
+                if clone_set {
+                    anyhow::bail!("--root-disk: duplicate clone option");
+                }
+                clone = match value {
+                    "auto" => FlatClone::Auto,
+                    "copy" => FlatClone::Copy,
+                    "reflink" => FlatClone::Reflink,
+                    other => anyhow::bail!(
+                        "--root-disk: unsupported flat clone strategy '{other}' (expected auto, copy, or reflink)"
+                    ),
+                };
+                clone_set = true;
+            }
+            None if index == 0 => {
+                size_mib = Some(ui::parse_size_mib(token).map_err(anyhow::Error::msg)?);
+            }
+            _ => anyhow::bail!(
+                "--root-disk: unknown flat option '{token}' (expected an optional leading size, fstype=..., or clone=auto|copy|reflink)"
+            ),
+        }
+    }
+
+    Ok(RootDiskSpec::Flat {
+        size_mib,
+        fstype,
+        clone,
+    })
 }
 
 /// Find the colon starting the options segment, skipping a Windows drive colon.
@@ -2591,6 +2674,30 @@ mod tests {
         assert_eq!(build("tmpfs"), RootDisk::Tmpfs { size_mib: None });
         assert_eq!(build("tmpfs:2G"), RootDisk::tmpfs(2048));
         assert_eq!(
+            build("flat"),
+            RootDisk::Flat {
+                size_mib: None,
+                fstype: None,
+                clone: FlatClone::Auto,
+            }
+        );
+        assert_eq!(
+            build("flat:8G,clone=reflink"),
+            RootDisk::Flat {
+                size_mib: Some(8192),
+                fstype: None,
+                clone: FlatClone::Reflink,
+            }
+        );
+        assert_eq!(
+            build("flat:fstype=ext4,clone=copy"),
+            RootDisk::Flat {
+                size_mib: None,
+                fstype: Some("ext4".into()),
+                clone: FlatClone::Copy,
+            }
+        );
+        assert_eq!(
             build("./scratch.img"),
             RootDisk::DiskImage {
                 path: "./scratch.img".into(),
@@ -2625,7 +2732,10 @@ mod tests {
         );
 
         let err = parse_root_disk_spec("8G:fstype=ext4").unwrap_err();
-        assert!(err.to_string().contains("only valid for a disk image path"));
+        assert!(
+            err.to_string()
+                .contains("only valid for flat or a disk image path")
+        );
 
         let err = parse_root_disk_spec("./scratch.vmdk:format=vmdk").unwrap_err();
         assert!(err.to_string().contains("unsupported format"));
