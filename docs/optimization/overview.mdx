@@ -66,7 +66,7 @@ There is no universal fastest profile. The following is a reasonable starting po
 }
 ```
 
-`cpu_placement: auto` is intentionally not a portable macOS default: managed placement is unsupported on macOS because the operating system does not expose an equivalent public hard-affinity API. Use `inherit` on macOS. Keep `thp: madvise` and the block writeback limit on `auto` until a representative workload proves a different policy is better.
+`cpu_placement: auto` is intentionally not a portable macOS default: managed placement is unsupported on macOS because the operating system does not expose an equivalent public hard-affinity API. Use `inherit` on macOS. Keep `thp: madvise` unless a representative workload and density test justify another policy. The current 512 MiB block-writeback `auto` preset is safety-first experimental policy, not a recommended universal performance default; see its measured sequential-write trade-off below.
 
 ## Storage layout: layered or flat
 
@@ -178,6 +178,8 @@ On Linux, `auto` gives each writable raw disk a 512 MiB hard budget for buffered
 The background worker kicks queued ranges before waiting for their page-cache writeback to complete, and it releases exact range credit only after that completion. It does not turn each internal batch into a durability barrier. Guest `FLUSH` still performs the existing full Imago flush and sync after all earlier block work, including the host-filesystem metadata required to retrieve the data; the controller does not acknowledge guest durability early. Controller, storage, worker, range-completion, or full-sync failures remain latched and fail future mutations and reactivations closed.
 
 `off` disables this VMM-owned bound for newly spawned sandboxes. It may improve peak sequential throughput, but it permits a long-running guest to accumulate more host dirty data and may worsen the final flush tail. The policy does not depend on cgroups or guest cooperation. It has no effect on read-only disks, direct-I/O disks, non-raw formats, cache modes without writeback, or non-Linux VMM paths.
+
+On the fixed OVH customer disk suite, both the old internal-barrier controller and the repaired range-completion controller scored 1,668 MB/s sequential write at 512 MiB; the otherwise identical `off` profile scored 9,752 MB/s while host-global Dirty reached approximately 1 GiB. The range-completion repair is the correct containment-versus-durability contract, but it cannot reproduce cache-speed throughput when the hard budget is below the workload's active dirty set. Do not promote this fixed `auto` value as a product default until a budget staircase and aggregate multi-sandbox host-admission policy are measured.
 
 ## Snapshot compaction
 
