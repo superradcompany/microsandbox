@@ -51,6 +51,7 @@ use std::{
 use base64::Engine;
 use microsandbox::{
     AgentBridge, LogLevel, MicrosandboxError, RegistryAuth, Sandbox, Snapshot, UpperVerifyStatus,
+    default_backend,
     logs::{LogOptions, LogSource},
     sandbox::{
         DeploymentProfile, FsEntryKind, PullPolicy, SecurityProfile, all_sandbox_metrics_local,
@@ -59,7 +60,7 @@ use microsandbox::{
         ssh::{SftpClient, SshClient, SshServer, SshStdioStream},
     },
     snapshot::{SaveOpts, SnapshotFormat, SnapshotScope},
-    volume::{Volume, VolumeBuilder, VolumeHandle, VolumeKind},
+    volume::{Volume, VolumeBuilder, VolumeFs, VolumeHandle, VolumeKind},
 };
 use microsandbox_network::{builder::ViolationActionBuilder, secrets::config::ViolationAction};
 use tokio::io::AsyncWriteExt;
@@ -4112,8 +4113,11 @@ fn volume_handle_json(vh: &VolumeHandle) -> String {
         .local()
         .map(|local| local.path.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let id = vh.cloud().map(|cloud| cloud.id.as_str());
     serde_json::json!({
+        "id": id,
         "name": vh.name(),
+        "is_default": vh.is_default(),
         "path": path,
         "kind": vh.kind().as_str(),
         "quota_mib": vh.quota_mib(),
@@ -4967,6 +4971,90 @@ pub unsafe extern "C" fn msb_volume_get(
         Ok(Box::pin(async move {
             let vh = Volume::get(&name_str).await.map_err(FfiError::from)?;
             Ok(volume_handle_json(&vh))
+        }))
+    })
+}
+
+/// Return the cloud account's always-present default volume metadata.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_volume_get_default(
+    cancel_id: u64,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        Ok(Box::pin(async move {
+            let vh = Volume::get_default().await.map_err(FfiError::from)?;
+            Ok(volume_handle_json(&vh))
+        }))
+    })
+}
+
+/// Dispatch a buffered volume filesystem operation for the Go binding.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_volume_fs_op(
+    cancel_id: u64,
+    target: *const c_char,
+    op: *const c_char,
+    args_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let target = unsafe { cstr(target) }?;
+        let op = unsafe { cstr(op) }?;
+        let args: serde_json::Value =
+            serde_json::from_str(&unsafe { cstr(args_json) }?).map_err(|error| {
+                FfiError::invalid_argument(format!("invalid volume fs args: {error}"))
+            })?;
+        Ok(Box::pin(async move {
+            let path = args["path"]
+                .as_str()
+                .ok_or_else(|| FfiError::invalid_argument("missing volume fs path"))?;
+            // Rust handles encode cloud volume UUIDs as `cloud-id:<uuid>`.
+            // Reusing that target here preserves handle identity across a
+            // named volume delete/recreate instead of resolving by name.
+            let backend = default_backend();
+            let fs = VolumeFs::with_backend(backend, &target);
+            match op.as_str() {
+                "read" => {
+                    let data = fs.read(path).await.map_err(FfiError::from)?;
+                    Ok(serde_json::json!({
+                        "data_b64": base64::engine::general_purpose::STANDARD.encode(data)
+                    })
+                    .to_string())
+                }
+                "write" => {
+                    let encoded = args["data_b64"]
+                        .as_str()
+                        .ok_or_else(|| FfiError::invalid_argument("missing volume fs data"))?;
+                    let data = base64::engine::general_purpose::STANDARD
+                        .decode(encoded)
+                        .map_err(|error| {
+                            FfiError::invalid_argument(format!("invalid base64 data: {error}"))
+                        })?;
+                    fs.write(path, data).await.map_err(FfiError::from)?;
+                    Ok(r#"{"ok":true}"#.into())
+                }
+                "mkdir" => {
+                    fs.mkdir(path).await.map_err(FfiError::from)?;
+                    Ok(r#"{"ok":true}"#.into())
+                }
+                "remove" => {
+                    let recursive = args["recursive"].as_bool().unwrap_or(false);
+                    if recursive {
+                        fs.remove_dir(path).await.map_err(FfiError::from)?;
+                    } else {
+                        fs.remove(path).await.map_err(FfiError::from)?;
+                    }
+                    Ok(r#"{"ok":true}"#.into())
+                }
+                "exists" => {
+                    let exists = fs.exists(path).await.map_err(FfiError::from)?;
+                    Ok(serde_json::json!({ "exists": exists }).to_string())
+                }
+                _ => Err(FfiError::invalid_argument("unknown volume fs operation")),
+            }
         }))
     })
 }

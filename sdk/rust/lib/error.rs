@@ -315,6 +315,8 @@ pub enum Operation {
     VolumeCreate,
     /// `Volume::get`.
     VolumeGet,
+    /// `Volume::get_default`.
+    VolumeGetDefault,
     /// `Volume::list`.
     VolumeList,
     /// `Volume::remove`.
@@ -440,6 +442,7 @@ impl Operation {
             Operation::SshServerServe => "SshServer::serve",
             Operation::VolumeCreate => "Volume::create",
             Operation::VolumeGet => "Volume::get",
+            Operation::VolumeGetDefault => "Volume::get_default",
             Operation::VolumeList => "Volume::list",
             Operation::VolumeRemove => "Volume::remove",
             Operation::VolumePath => "Volume::path",

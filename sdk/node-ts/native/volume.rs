@@ -34,7 +34,9 @@ pub struct JsVolumeFs {
 
 enum JsVolumeFsInner {
     Volume(Arc<Volume>),
-    Handle(VolumeHandle),
+    // Keep the enum compact: VolumeHandle owns backend state and is
+    // substantially larger than the Arc-backed Volume variant.
+    Handle(Box<VolumeHandle>),
 }
 
 #[napi(async_iterator, js_name = "VolumeFsReadStream")]
@@ -56,6 +58,12 @@ impl JsVolume {
     #[napi]
     pub async fn get(name: String) -> Result<JsVolumeHandle> {
         let handle = Volume::get(&name).await.map_err(to_napi_error)?;
+        Ok(JsVolumeHandle { inner: handle })
+    }
+
+    #[napi(js_name = "getDefault")]
+    pub async fn get_default() -> Result<JsVolumeHandle> {
+        let handle = Volume::get_default().await.map_err(to_napi_error)?;
         Ok(JsVolumeHandle { inner: handle })
     }
 
@@ -85,7 +93,7 @@ impl JsVolume {
             .to_string())
     }
 
-    /// Host-side filesystem operations on this volume's directory.
+    /// Direct filesystem operations through this volume's bound backend.
     #[napi]
     pub fn fs(&self) -> JsVolumeFs {
         JsVolumeFs {
@@ -106,6 +114,11 @@ impl JsVolumeHandle {
     #[napi(getter)]
     pub fn name(&self) -> String {
         self.inner.name().to_string()
+    }
+
+    #[napi(getter, js_name = "isDefault")]
+    pub fn is_default(&self) -> bool {
+        self.inner.is_default()
     }
 
     #[napi(getter)]
@@ -157,11 +170,11 @@ impl JsVolumeHandle {
         self.inner.remove().await.map_err(to_napi_error)
     }
 
-    /// Host-side filesystem operations on this volume's directory.
+    /// Direct filesystem operations through this volume's bound backend.
     #[napi]
     pub fn fs(&self) -> JsVolumeFs {
         JsVolumeFs {
-            inner: JsVolumeFsInner::Handle(self.inner.clone()),
+            inner: JsVolumeFsInner::Handle(Box::new(self.inner.clone())),
         }
     }
 }
@@ -328,6 +341,7 @@ impl JsVolumeFsWriteSink {
 fn volume_handle_to_info(handle: &VolumeHandle) -> VolumeInfo {
     VolumeInfo {
         name: handle.name().to_string(),
+        is_default: handle.is_default(),
         kind: handle.kind().as_str().to_string(),
         quota_mib: handle.quota_mib(),
         used_bytes: handle.used_bytes() as f64,

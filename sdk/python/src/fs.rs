@@ -406,7 +406,7 @@ pub(crate) fn convert_fs_entry(entry: microsandbox::sandbox::FsEntry) -> PyFsEnt
     }
 }
 
-fn convert_fs_metadata(meta: &microsandbox::sandbox::FsMetadata) -> PyFsMetadata {
+pub(crate) fn convert_fs_metadata(meta: &microsandbox::sandbox::FsMetadata) -> PyFsMetadata {
     PyFsMetadata {
         kind: kind_str(meta.kind).to_string(),
         size: meta.size,

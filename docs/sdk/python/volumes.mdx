@@ -29,6 +29,20 @@ print(handle.used_bytes)
 
 Static methods on `Volume` that manage named persistent volumes. Volumes live independently of any sandbox, stored by default under `~/.microsandbox/volumes/<name>/`.
 
+#### <span className="msb-recv">Volume.</span><span className="msb-hn">get_default()</span>
+
+```python
+async def get_default() -> VolumeHandle
+```
+
+Get the Cloud account's always-present default volume. It has no user-assigned name, cannot be removed, and supports direct filesystem operations through `.fs()`. The local backend raises a typed unsupported error; it never substitutes a directory from the caller's machine.
+
+```python
+volume = await Volume.get_default()
+await volume.fs().write("customers/acme.json", b'{"active": true}')
+print(await volume.fs().read_to_string("customers/acme.json"))
+```
+
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">create()</span>
 
 ```python
@@ -104,7 +118,7 @@ print(handle.kind, handle.used_bytes)
 
 </Accordion>
 
-Get a lightweight handle to an existing named volume, with its metadata and a host-side filesystem handle.
+Get a lightweight handle to an existing named volume, with its metadata and a direct filesystem handle.
 
 <p className="msb-label">Parameters</p>
 

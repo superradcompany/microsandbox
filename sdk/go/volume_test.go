@@ -1,10 +1,13 @@
 package microsandbox
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
 
 func TestVolumeName(t *testing.T) {
@@ -84,5 +87,22 @@ func TestVolumeFsEmptyRoot(t *testing.T) {
 	fs := &VolumeFs{root: ""}
 	if _, err := fs.Read("anything"); err == nil {
 		t.Error("expected error on empty root")
+	}
+}
+
+func TestCloudVolumeFsTargetUsesImmutableID(t *testing.T) {
+	id := "11111111-1111-1111-1111-111111111111"
+	info := &ffi.VolumeHandleInfo{ID: &id, Name: "reusable-name"}
+
+	if got := volumeFsTarget(info); got != "cloud-id:"+id {
+		t.Fatalf("volumeFsTarget() = %q, want immutable cloud ID", got)
+	}
+}
+
+func TestDefaultVolumeCannotBeRemoved(t *testing.T) {
+	handle := &VolumeHandle{isDefault: true}
+	err := handle.Remove(context.Background())
+	if !IsKind(err, ErrUnsupportedOperation) {
+		t.Fatalf("Remove() = %v, want ErrUnsupportedOperation", err)
 	}
 }

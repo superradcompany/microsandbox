@@ -30,6 +30,20 @@ Named volumes are managed by microsandbox and stored by default under `~/.micros
 
 ## Functions
 
+#### <span className="msb-recv"></span><span className="msb-hn">GetDefaultVolume()</span>
+
+```go
+func GetDefaultVolume(ctx context.Context) (*VolumeHandle, error)
+```
+
+Get the Cloud account's always-present default volume. It has no user-assigned name, cannot be removed, and supports direct filesystem operations through `FS()`. The local backend returns `ErrUnsupported`; it never substitutes a directory from the caller's machine.
+
+```go
+volume, err := m.GetDefaultVolume(ctx)
+err = volume.FS().WriteString("customers/acme.json", `{"active":true}`)
+contents, err := volume.FS().ReadString("customers/acme.json")
+```
+
 #### <span className="msb-recv"></span><span className="msb-hn">CreateVolume()</span>
 
 ```go
@@ -215,7 +229,7 @@ err := vfs.WriteString("seed.txt", "hello")
 
 </Accordion>
 
-Return a [`*VolumeFs`](#volumefs) for direct host-side file operations on this volume.
+Return a [`*VolumeFs`](#volumefs) for direct file operations. Local calls use the managed host directory; Cloud calls use the authenticated volume API.
 
 <p className="msb-label">Returns</p>
 

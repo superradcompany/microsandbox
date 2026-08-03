@@ -104,6 +104,17 @@ impl PyVolume {
         })
     }
 
+    /// Get the cloud account's always-present default volume.
+    #[staticmethod]
+    fn get_default<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let handle = microsandbox::Volume::get_default()
+                .await
+                .map_err(to_py_err)?;
+            Ok(PyVolumeHandle { inner: handle })
+        })
+    }
+
     /// List all volumes.
     #[staticmethod]
     fn list<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
@@ -280,6 +291,11 @@ impl PyVolumeHandle {
     }
 
     #[getter]
+    fn is_default(&self) -> bool {
+        self.inner.is_default()
+    }
+
+    #[getter]
     fn quota_mib(&self) -> Option<u32> {
         self.inner.quota_mib()
     }
@@ -419,6 +435,43 @@ impl PyVolumeFs {
             let fs = handle.fs();
             fs.remove(&path).await.map_err(to_py_err)?;
             Ok(())
+        })
+    }
+
+    fn remove_dir<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
+        let handle = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            handle.fs().remove_dir(&path).await.map_err(to_py_err)?;
+            Ok(())
+        })
+    }
+
+    fn copy<'py>(&self, py: Python<'py>, from: String, to: String) -> PyResult<Bound<'py, PyAny>> {
+        let handle = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            handle.fs().copy(&from, &to).await.map_err(to_py_err)?;
+            Ok(())
+        })
+    }
+
+    fn rename<'py>(
+        &self,
+        py: Python<'py>,
+        from: String,
+        to: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let handle = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            handle.fs().rename(&from, &to).await.map_err(to_py_err)?;
+            Ok(())
+        })
+    }
+
+    fn stat<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
+        let handle = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let metadata = handle.fs().stat(&path).await.map_err(to_py_err)?;
+            Ok(crate::fs::convert_fs_metadata(&metadata))
         })
     }
 

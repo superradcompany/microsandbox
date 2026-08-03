@@ -3,9 +3,11 @@
 
 use std::sync::Arc;
 
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
-use futures::future::BoxFuture;
+use futures::{StreamExt, future::BoxFuture, stream};
 use serde::Deserialize;
+use tokio::sync::mpsc;
 
 use super::CloudBackend;
 use crate::backend::{
@@ -15,11 +17,18 @@ use crate::backend::{
     },
 };
 use crate::error::{Operation, UnsupportedReason};
-use crate::sandbox::fs::{FsEntry, FsMetadata};
+use crate::sandbox::fs::{FsEntry, FsEntryKind, FsMetadata};
 use crate::volume::{
     Volume, VolumeConfig, VolumeFsReadStream, VolumeFsWriteSink, VolumeHandle, VolumeKind,
 };
 use crate::{MicrosandboxError, MicrosandboxResult};
+
+const FILE_PATH_HEADER: &str = "x-msb-file-path";
+const FILE_RECURSIVE_HEADER: &str = "x-msb-file-recursive";
+
+fn encoded_path(path: &str) -> String {
+    URL_SAFE_NO_PAD.encode(path.as_bytes())
+}
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -50,6 +59,45 @@ pub(in crate::backend) struct CloudVolume {
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// Last modification timestamp.
     pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CloudFileKind {
+    File,
+    Directory,
+}
+
+#[derive(Debug, Deserialize)]
+struct CloudFileInfo {
+    path: String,
+    kind: CloudFileKind,
+    size: u64,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    readonly: bool,
+    #[serde(default)]
+    accessed_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    modified_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Deserialize)]
+struct CloudFileList {
+    entries: Vec<CloudFileInfo>,
+}
+
+#[derive(Deserialize)]
+struct CloudFileStat {
+    metadata: CloudFileInfo,
+}
+
+#[derive(Deserialize)]
+struct CloudFileExists {
+    exists: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -89,6 +137,42 @@ impl CloudBackend {
         }
         Ok(Some(quota_mib / 1024))
     }
+
+    async fn volume_id_for_fs(&self, target: &str) -> MicrosandboxResult<String> {
+        // Handles capture the immutable server UUID when fetched. This avoids
+        // redirecting an existing handle if a named volume is deleted and a
+        // new volume is later created with the same display name.
+        if let Some(id) = target.strip_prefix("cloud-id:") {
+            return Ok(id.to_string());
+        }
+
+        // The empty target is retained for language-binding shims that ask
+        // for the default volume without holding the Rust handle itself.
+        if target.is_empty() {
+            return Ok(self.get_default_volume().await?.id);
+        }
+
+        Ok(self.find_volume(target).await?.id)
+    }
+
+    async fn file_json<T: serde::de::DeserializeOwned>(
+        &self,
+        method: reqwest::Method,
+        id: &str,
+        suffix: &str,
+        query: &[(&str, String)],
+        json: Option<serde_json::Value>,
+    ) -> MicrosandboxResult<T> {
+        self.volume_file_request(method, id, suffix, query, json, None)
+            .await?
+            .json()
+            .await
+            .map_err(|error| {
+                MicrosandboxError::Custom(format!(
+                    "volume filesystem response could not be decoded: {error}"
+                ))
+            })
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -127,6 +211,20 @@ impl VolumeBackend for CloudBackend {
         })
     }
 
+    fn get_default(
+        &self,
+        backend: Arc<dyn Backend>,
+    ) -> BoxFuture<'_, MicrosandboxResult<VolumeHandle>> {
+        Box::pin(async move {
+            let cloud = CloudBackend::get_default_volume(self).await?;
+            Ok(VolumeHandle::from_cloud(
+                backend,
+                cloud.into(),
+                String::new(),
+            ))
+        })
+    }
+
     fn list<'a>(
         &'a self,
         backend: Arc<dyn Backend>,
@@ -159,102 +257,262 @@ impl VolumeBackend for CloudBackend {
 
     fn fs_read<'a>(
         &'a self,
-        _name: &'a str,
-        _path: &'a str,
+        name: &'a str,
+        path: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<Bytes>> {
-        Box::pin(async move { Err(unsupported(Operation::VolumeFsRead)) })
+        Box::pin(async move {
+            let volume_id = self.volume_id_for_fs(name).await?;
+            self.volume_file_request(
+                reqwest::Method::GET,
+                &volume_id,
+                "/content",
+                &[(FILE_PATH_HEADER, encoded_path(path))],
+                None,
+                None,
+            )
+            .await?
+            .bytes()
+            .await
+            .map_err(|error| MicrosandboxError::Custom(format!("volume read failed: {error}")))
+        })
     }
 
     fn fs_read_to_string<'a>(
         &'a self,
-        _name: &'a str,
-        _path: &'a str,
+        name: &'a str,
+        path: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<String>> {
-        Box::pin(async move { Err(unsupported(Operation::VolumeFsReadToString)) })
+        Box::pin(async move {
+            let bytes = self.fs_read(name, path).await?;
+            String::from_utf8(bytes.to_vec()).map_err(|error| {
+                MicrosandboxError::Custom(format!("volume file is not valid UTF-8: {error}"))
+            })
+        })
     }
 
     fn fs_write<'a>(
         &'a self,
-        _name: &'a str,
-        _path: &'a str,
-        _data: Vec<u8>,
+        name: &'a str,
+        path: &'a str,
+        data: Vec<u8>,
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
-        Box::pin(async move { Err(unsupported(Operation::VolumeFsWrite)) })
+        Box::pin(async move {
+            let volume_id = self.volume_id_for_fs(name).await?;
+            self.volume_file_request(
+                reqwest::Method::PUT,
+                &volume_id,
+                "/content",
+                &[(FILE_PATH_HEADER, encoded_path(path))],
+                None,
+                Some(reqwest::Body::from(data)),
+            )
+            .await?;
+            Ok(())
+        })
     }
 
     fn fs_list<'a>(
         &'a self,
-        _name: &'a str,
-        _path: &'a str,
+        name: &'a str,
+        path: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<Vec<FsEntry>>> {
-        Box::pin(async move { Err(unsupported(Operation::VolumeFsList)) })
+        Box::pin(async move {
+            let volume_id = self.volume_id_for_fs(name).await?;
+            let response: CloudFileList = self
+                .file_json(
+                    reqwest::Method::GET,
+                    &volume_id,
+                    "",
+                    &[(FILE_PATH_HEADER, encoded_path(path))],
+                    None,
+                )
+                .await?;
+            Ok(response.entries.into_iter().map(Into::into).collect())
+        })
     }
 
     fn fs_stat<'a>(
         &'a self,
-        _name: &'a str,
-        _path: &'a str,
+        name: &'a str,
+        path: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<FsMetadata>> {
-        Box::pin(async move { Err(unsupported(Operation::VolumeFsStat)) })
+        Box::pin(async move {
+            let volume_id = self.volume_id_for_fs(name).await?;
+            let response: CloudFileStat = self
+                .file_json(
+                    reqwest::Method::GET,
+                    &volume_id,
+                    "/stat",
+                    &[(FILE_PATH_HEADER, encoded_path(path))],
+                    None,
+                )
+                .await?;
+            Ok(response.metadata.into())
+        })
     }
 
     fn fs_mkdir<'a>(
         &'a self,
-        _name: &'a str,
-        _path: &'a str,
+        name: &'a str,
+        path: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
-        Box::pin(async move { Err(unsupported(Operation::VolumeFsMkdir)) })
+        Box::pin(async move {
+            let volume_id = self.volume_id_for_fs(name).await?;
+            self.volume_file_request(
+                reqwest::Method::POST,
+                &volume_id,
+                "/mkdir",
+                &[],
+                Some(serde_json::json!({ "path": path })),
+                None,
+            )
+            .await?;
+            Ok(())
+        })
     }
 
     fn fs_remove<'a>(
         &'a self,
-        _name: &'a str,
-        _path: &'a str,
-        _recursive: bool,
+        name: &'a str,
+        path: &'a str,
+        recursive: bool,
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
-        Box::pin(async move { Err(unsupported(Operation::VolumeFsRemove)) })
+        Box::pin(async move {
+            let volume_id = self.volume_id_for_fs(name).await?;
+            self.volume_file_request(
+                reqwest::Method::DELETE,
+                &volume_id,
+                "",
+                &[
+                    (FILE_PATH_HEADER, encoded_path(path)),
+                    (FILE_RECURSIVE_HEADER, recursive.to_string()),
+                ],
+                None,
+                None,
+            )
+            .await?;
+            Ok(())
+        })
     }
 
     fn fs_copy<'a>(
         &'a self,
-        _name: &'a str,
-        _from: &'a str,
-        _to: &'a str,
+        name: &'a str,
+        from: &'a str,
+        to: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
-        Box::pin(async move { Err(unsupported(Operation::VolumeFsCopy)) })
+        Box::pin(async move {
+            let volume_id = self.volume_id_for_fs(name).await?;
+            self.volume_file_request(
+                reqwest::Method::POST,
+                &volume_id,
+                "/copy",
+                &[],
+                Some(serde_json::json!({ "from": from, "to": to })),
+                None,
+            )
+            .await?;
+            Ok(())
+        })
     }
 
     fn fs_rename<'a>(
         &'a self,
-        _name: &'a str,
-        _from: &'a str,
-        _to: &'a str,
+        name: &'a str,
+        from: &'a str,
+        to: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
-        Box::pin(async move { Err(unsupported(Operation::VolumeFsRename)) })
+        Box::pin(async move {
+            let volume_id = self.volume_id_for_fs(name).await?;
+            self.volume_file_request(
+                reqwest::Method::POST,
+                &volume_id,
+                "/rename",
+                &[],
+                Some(serde_json::json!({ "from": from, "to": to })),
+                None,
+            )
+            .await?;
+            Ok(())
+        })
     }
 
     fn fs_exists<'a>(
         &'a self,
-        _name: &'a str,
-        _path: &'a str,
+        name: &'a str,
+        path: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<bool>> {
-        Box::pin(async move { Err(unsupported(Operation::VolumeFsExists)) })
+        Box::pin(async move {
+            let volume_id = self.volume_id_for_fs(name).await?;
+            let response: CloudFileExists = self
+                .file_json(
+                    reqwest::Method::GET,
+                    &volume_id,
+                    "/exists",
+                    &[(FILE_PATH_HEADER, encoded_path(path))],
+                    None,
+                )
+                .await?;
+            Ok(response.exists)
+        })
     }
 
     fn fs_read_stream<'a>(
         &'a self,
-        _name: &'a str,
-        _path: &'a str,
+        name: &'a str,
+        path: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<VolumeFsReadStream>> {
-        Box::pin(async move { Err(unsupported(Operation::VolumeFsReadStream)) })
+        Box::pin(async move {
+            let volume_id = self.volume_id_for_fs(name).await?;
+            let response = self
+                .volume_file_request(
+                    reqwest::Method::GET,
+                    &volume_id,
+                    "/content",
+                    &[(FILE_PATH_HEADER, encoded_path(path))],
+                    None,
+                    None,
+                )
+                .await?;
+            let stream = response.bytes_stream().map(|chunk| {
+                chunk.map_err(|error| {
+                    MicrosandboxError::Custom(format!("volume read stream failed: {error}"))
+                })
+            });
+            Ok(VolumeFsReadStream::from_stream(Box::pin(stream)))
+        })
     }
 
     fn fs_write_stream<'a>(
         &'a self,
-        _name: &'a str,
-        _path: &'a str,
+        name: &'a str,
+        path: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<VolumeFsWriteSink>> {
-        Box::pin(async move { Err(unsupported(Operation::VolumeFsWriteStream)) })
+        Box::pin(async move {
+            let id = self.volume_id_for_fs(name).await?;
+            let path = path.to_string();
+            let backend = self.clone();
+            let (tx, rx) = mpsc::channel::<Bytes>(8);
+            let completion = tokio::spawn(async move {
+                let body_stream = stream::unfold(rx, |mut rx| async {
+                    rx.recv()
+                        .await
+                        .map(|chunk| (Ok::<_, std::io::Error>(chunk), rx))
+                });
+                backend
+                    .volume_file_request(
+                        reqwest::Method::PUT,
+                        &id,
+                        "/content",
+                        &[(FILE_PATH_HEADER, encoded_path(&path))],
+                        None,
+                        Some(reqwest::Body::wrap_stream(body_stream)),
+                    )
+                    .await?;
+                Ok(())
+            });
+            Ok(VolumeFsWriteSink::from_channel(tx, completion))
+        })
     }
 }
 
@@ -288,13 +546,46 @@ impl From<CloudVolume> for VolumeHandleCloudState {
     }
 }
 
+impl From<CloudFileKind> for FsEntryKind {
+    fn from(kind: CloudFileKind) -> Self {
+        match kind {
+            CloudFileKind::File => Self::File,
+            CloudFileKind::Directory => Self::Directory,
+        }
+    }
+}
+
+impl From<CloudFileInfo> for FsEntry {
+    fn from(info: CloudFileInfo) -> Self {
+        Self {
+            path: info.path,
+            kind: info.kind.into(),
+            size: info.size,
+            mode: info.mode,
+            uid: info.uid,
+            gid: info.gid,
+            accessed: info.accessed_at,
+            modified: info.modified_at,
+        }
+    }
+}
+
+impl From<CloudFileInfo> for FsMetadata {
+    fn from(info: CloudFileInfo) -> Self {
+        Self {
+            kind: info.kind.into(),
+            size: info.size,
+            mode: info.mode,
+            uid: info.uid,
+            gid: info.gid,
+            readonly: info.readonly,
+            accessed: info.accessed_at,
+            modified: info.modified_at,
+            created: info.created_at,
+        }
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
-
-/// Build a uniform `Unsupported` error for cloud volume filesystem ops, which
-/// are not exposed by the cloud yet — volume contents are reached by mounting
-/// the volume into a sandbox.
-fn unsupported(op: Operation) -> MicrosandboxError {
-    MicrosandboxError::unsupported(op, UnsupportedReason::MountIntoSandbox)
-}

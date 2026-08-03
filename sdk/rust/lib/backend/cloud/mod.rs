@@ -75,6 +75,7 @@ fn default_user_agent() -> String {
 /// - [`CloudBackend::from_profile`] — reads a named profile from the SDK config.
 /// - [`CloudBackend::builder`] — tuned construction (custom client, timeout,
 ///   user agent).
+#[derive(Clone)]
 pub struct CloudBackend {
     url: String,
     api_key: String,

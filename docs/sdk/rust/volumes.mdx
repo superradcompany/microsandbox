@@ -29,6 +29,20 @@ sb.stop().await?;
 
 ## Static methods
 
+#### <span className="msb-recv">Volume::</span><span className="msb-hn">get_default()</span>
+
+```rust
+async fn get_default() -> MicrosandboxResult<VolumeHandle>
+```
+
+Get the Cloud account's always-present default volume. It has no user-assigned name, cannot be removed, and supports direct filesystem operations through `.fs()`. The local backend returns a typed `Unsupported` error; it never substitutes a directory from the caller's machine.
+
+```rust
+let volume = Volume::get_default().await?;
+volume.fs().write("customers/acme.json", br#"{"active":true}"#).await?;
+println!("{}", volume.fs().read_to_string("customers/acme.json").await?);
+```
+
 #### <span className="msb-recv">Volume::</span><span className="msb-hn">builder()</span>
 
 ```rust
@@ -245,7 +259,7 @@ vol.fs().write("/seed.txt", "hello").await?;
 
 </Accordion>
 
-Get a filesystem handle for reading and writing the volume's files directly, without a running sandbox. Local volumes route to `tokio::fs`. See [`VolumeFs`](#volumefs) for the operations.
+Get a filesystem handle for reading and writing the volume's files directly, without a running sandbox. Local volumes route to `tokio::fs`; Cloud volumes route through the authenticated volume API. See [`VolumeFs`](#volumefs) for the operations.
 
 <p className="msb-label">Returns</p>
 

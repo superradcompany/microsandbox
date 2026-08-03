@@ -2,6 +2,7 @@ package microsandbox
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -13,15 +14,16 @@ import (
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
 
-// Volume is a named persistent volume. It carries the host-side path and is
-// returned by CreateVolume and Volume-from-handle conversions; lookups (via
-// GetVolume / ListVolumes) yield richer VolumeHandle values.
+// Volume is persistent storage. Local volumes carry a host-side path; Cloud
+// volumes carry an immutable server identity. Lookups yield richer
+// VolumeHandle values.
 //
 // There is no Rust-side resource to release — Remove deletes the on-disk
 // state and DB record.
 type Volume struct {
-	name string
-	path string
+	name     string
+	path     string
+	fsTarget string
 }
 
 // Name returns the volume's name.
@@ -30,9 +32,8 @@ func (v *Volume) Name() string { return v.name }
 // Path returns the host filesystem path of the volume's data directory.
 func (v *Volume) Path() string { return v.path }
 
-// FS returns a VolumeFs for direct host-side file operations on this volume.
-// Returns an error variant if Path is empty.
-func (v *Volume) FS() *VolumeFs { return &VolumeFs{root: v.path} }
+// FS returns direct filesystem operations for this volume.
+func (v *Volume) FS() *VolumeFs { return &VolumeFs{root: v.path, target: v.fsTarget} }
 
 // Remove deletes this volume. All sandboxes using it must be stopped.
 func (v *Volume) Remove(ctx context.Context) error {
@@ -55,7 +56,7 @@ func CreateVolume(ctx context.Context, name string, opts ...VolumeOption) (*Volu
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
-	return &Volume{name: info.Name, path: info.Path}, nil
+	return &Volume{name: info.Name, path: info.Path, fsTarget: volumeFsTarget(info)}, nil
 }
 
 // ListVolumes returns metadata for every named volume on the host.
@@ -84,6 +85,8 @@ func RemoveVolume(ctx context.Context, name string) error {
 // ListVolumes.
 type VolumeHandle struct {
 	name          string
+	fsTarget      string
+	isDefault     bool
 	path          string
 	kind          VolumeKind
 	quotaMiB      *uint32
@@ -98,6 +101,8 @@ type VolumeHandle struct {
 func volumeHandleFromInfo(info *ffi.VolumeHandleInfo) *VolumeHandle {
 	return &VolumeHandle{
 		name:          info.Name,
+		fsTarget:      volumeFsTarget(info),
+		isDefault:     info.IsDefault,
 		path:          info.Path,
 		kind:          VolumeKind(info.Kind),
 		quotaMiB:      info.QuotaMiB,
@@ -112,6 +117,9 @@ func volumeHandleFromInfo(info *ffi.VolumeHandleInfo) *VolumeHandle {
 
 // Name returns the volume name.
 func (h *VolumeHandle) Name() string { return h.name }
+
+// IsDefault reports whether this is the cloud account's default volume.
+func (h *VolumeHandle) IsDefault() bool { return h.isDefault }
 
 // Path returns the host filesystem path of the volume's data directory.
 func (h *VolumeHandle) Path() string { return h.path }
@@ -145,11 +153,17 @@ func (h *VolumeHandle) CreatedAt() time.Time {
 	return time.Unix(*h.createdAtUnix, 0)
 }
 
-// FS returns a VolumeFs for direct host-side file operations on this volume.
-func (h *VolumeHandle) FS() *VolumeFs { return &VolumeFs{root: h.path} }
+// FS returns direct filesystem operations for this volume.
+func (h *VolumeHandle) FS() *VolumeFs { return &VolumeFs{root: h.path, target: h.fsTarget} }
 
 // Remove deletes this volume. All sandboxes using it must be stopped.
 func (h *VolumeHandle) Remove(ctx context.Context) error {
+	if h.isDefault {
+		return &Error{
+			Kind:    ErrUnsupportedOperation,
+			Message: "the default volume cannot be removed",
+		}
+	}
 	return RemoveVolume(ctx, h.name)
 }
 
@@ -162,19 +176,37 @@ func GetVolume(ctx context.Context, name string) (*VolumeHandle, error) {
 	return volumeHandleFromInfo(info), nil
 }
 
+// GetDefaultVolume returns the cloud account's always-present default volume.
+// Local backends return ErrUnsupportedOperation rather than exposing the host filesystem.
+func GetDefaultVolume(ctx context.Context) (*VolumeHandle, error) {
+	info, err := ffi.GetDefaultVolume(ctx)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return volumeHandleFromInfo(info), nil
+}
+
 // ---------------------------------------------------------------------------
-// VolumeFs — host-side file operations on a volume directory
+// VolumeFs — direct file operations on a volume
 // ---------------------------------------------------------------------------
 
-// VolumeFs provides direct file operations on a volume's host directory.
-// All operations work directly on the host filesystem — no agent protocol.
+// VolumeFs provides direct file operations on a volume. Local operations use
+// the host directory; Cloud operations use the authenticated Cloud API.
 // Obtain via Volume.FS() or VolumeHandle.FS().
 //
 // All path arguments are relative to the volume root. Paths that would
 // escape the root via "..", absolute components, or symlink chains are
 // rejected with ErrPathEscape.
 type VolumeFs struct {
-	root string
+	root   string
+	target string
+}
+
+func volumeFsTarget(info *ffi.VolumeHandleInfo) string {
+	if info.ID != nil {
+		return "cloud-id:" + *info.ID
+	}
+	return info.Name
 }
 
 // ErrPathEscape is returned when a relative path would resolve outside the
@@ -186,6 +218,20 @@ func (fs *VolumeFs) Root() string { return fs.root }
 
 // Read reads the contents of a file relative to the volume root.
 func (fs *VolumeFs) Read(relPath string) ([]byte, error) {
+	if fs.root == "" {
+		var result struct {
+			Data string `json:"data_b64"`
+		}
+		err := ffi.VolumeFsOp(context.Background(), fs.target, "read", map[string]any{"path": relPath}, &result)
+		if err != nil {
+			return nil, wrapFFI(err)
+		}
+		data, err := base64.StdEncoding.DecodeString(result.Data)
+		if err != nil {
+			return nil, fmt.Errorf("microsandbox: decode volume data: %w", err)
+		}
+		return data, nil
+	}
 	abs, err := fs.abs(relPath)
 	if err != nil {
 		return nil, err
@@ -204,6 +250,13 @@ func (fs *VolumeFs) ReadString(relPath string) (string, error) {
 
 // Write writes data to a file, creating or truncating it.
 func (fs *VolumeFs) Write(relPath string, data []byte) error {
+	if fs.root == "" {
+		args := map[string]any{
+			"path":     relPath,
+			"data_b64": base64.StdEncoding.EncodeToString(data),
+		}
+		return wrapFFI(ffi.VolumeFsOp(context.Background(), fs.target, "write", args, nil))
+	}
 	abs, err := fs.abs(relPath)
 	if err != nil {
 		return err
@@ -218,6 +271,9 @@ func (fs *VolumeFs) WriteString(relPath, content string) error {
 
 // Mkdir creates a directory and all missing parents.
 func (fs *VolumeFs) Mkdir(relPath string) error {
+	if fs.root == "" {
+		return wrapFFI(ffi.VolumeFsOp(context.Background(), fs.target, "mkdir", map[string]any{"path": relPath}, nil))
+	}
 	abs, err := fs.abs(relPath)
 	if err != nil {
 		return err
@@ -227,6 +283,10 @@ func (fs *VolumeFs) Mkdir(relPath string) error {
 
 // Remove deletes a file or empty directory.
 func (fs *VolumeFs) Remove(relPath string) error {
+	if fs.root == "" {
+		args := map[string]any{"path": relPath, "recursive": false}
+		return wrapFFI(ffi.VolumeFsOp(context.Background(), fs.target, "remove", args, nil))
+	}
 	abs, err := fs.abs(relPath)
 	if err != nil {
 		return err
@@ -236,6 +296,10 @@ func (fs *VolumeFs) Remove(relPath string) error {
 
 // RemoveAll deletes a path and any children it contains.
 func (fs *VolumeFs) RemoveAll(relPath string) error {
+	if fs.root == "" {
+		args := map[string]any{"path": relPath, "recursive": true}
+		return wrapFFI(ffi.VolumeFsOp(context.Background(), fs.target, "remove", args, nil))
+	}
 	abs, err := fs.abs(relPath)
 	if err != nil {
 		return err
@@ -245,6 +309,13 @@ func (fs *VolumeFs) RemoveAll(relPath string) error {
 
 // Exists reports whether a file or directory exists at the given path.
 func (fs *VolumeFs) Exists(relPath string) (bool, error) {
+	if fs.root == "" {
+		var result struct {
+			Exists bool `json:"exists"`
+		}
+		err := ffi.VolumeFsOp(context.Background(), fs.target, "exists", map[string]any{"path": relPath}, &result)
+		return result.Exists, wrapFFI(err)
+	}
 	abs, err := fs.abs(relPath)
 	if err != nil {
 		return false, err

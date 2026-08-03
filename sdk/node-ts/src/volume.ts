@@ -47,6 +47,12 @@ export class Volume {
     return new VolumeHandle(raw);
   }
 
+  /** Get the cloud account's always-present default volume. */
+  static async getDefault(): Promise<VolumeHandle> {
+    const raw = await withMappedErrors(() => napi.Volume.getDefault());
+    return new VolumeHandle(raw);
+  }
+
   /** List all volumes. */
   static async list(): Promise<VolumeHandle[]> {
     const infos = await withMappedErrors(() => napi.Volume.list());
@@ -66,7 +72,7 @@ export class Volume {
     return this.inner.path;
   }
 
-  /** Host-side filesystem operations on this volume's directory. */
+  /** Direct filesystem operations through the volume's bound backend. */
   fs(): VolumeFs {
     return new VolumeFs(this.inner.fs());
   }

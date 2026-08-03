@@ -197,6 +197,8 @@ typedef char *(*msb_volume_create_fn)(uint64_t cancel_id, const char *name, cons
 typedef char *(*msb_volume_remove_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_volume_list_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_volume_get_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_volume_get_default_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_volume_fs_op_fn)(uint64_t cancel_id, const char *name, const char *op, const char *args_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_version_fn)(uint8_t *buf, size_t buf_len);
 typedef char *(*msb_agent_socket_path_fn)(const char *name, uint8_t *buf, size_t buf_len);
 
@@ -333,6 +335,8 @@ static msb_volume_create_fn       ptr_msb_volume_create       = NULL;
 static msb_volume_remove_fn       ptr_msb_volume_remove       = NULL;
 static msb_volume_list_fn         ptr_msb_volume_list         = NULL;
 static msb_volume_get_fn          ptr_msb_volume_get          = NULL;
+static msb_volume_get_default_fn  ptr_msb_volume_get_default  = NULL;
+static msb_volume_fs_op_fn        ptr_msb_volume_fs_op        = NULL;
 static msb_fs_read_stream_fn       ptr_msb_fs_read_stream       = NULL;
 static msb_fs_read_stream_recv_fn  ptr_msb_fs_read_stream_recv  = NULL;
 static msb_fs_read_stream_close_fn ptr_msb_fs_read_stream_close = NULL;
@@ -494,6 +498,8 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_volume_remove);
 	RESOLVE(msb_volume_list);
 	RESOLVE(msb_volume_get);
+	RESOLVE(msb_volume_get_default);
+	RESOLVE(msb_volume_fs_op);
 	RESOLVE(msb_fs_read_stream);
 	RESOLVE(msb_fs_read_stream_recv);
 	RESOLVE(msb_fs_read_stream_close);
@@ -818,6 +824,12 @@ char *call_msb_volume_list(uint64_t cancel_id, uint8_t *buf, size_t buf_len) {
 }
 char *call_msb_volume_get(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_volume_get ? ptr_msb_volume_get(cancel_id, name, buf, buf_len) : NULL;
+}
+char *call_msb_volume_get_default(uint64_t cancel_id, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_volume_get_default ? ptr_msb_volume_get_default(cancel_id, buf, buf_len) : NULL;
+}
+char *call_msb_volume_fs_op(uint64_t cancel_id, const char *name, const char *op, const char *args_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_volume_fs_op ? ptr_msb_volume_fs_op(cancel_id, name, op, args_json, buf, buf_len) : NULL;
 }
 char *call_msb_fs_read_stream(uint64_t cancel_id, uint64_t handle, const char *path, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_fs_read_stream ? ptr_msb_fs_read_stream(cancel_id, handle, path, buf, buf_len) : NULL;
@@ -3908,7 +3920,9 @@ func CreateVolume(ctx context.Context, name string, opts VolumeCreateOptions) (*
 // Rust side into a VolumeHandleInfo.
 func parseVolumeHandle(s string) (*VolumeHandleInfo, error) {
 	var raw struct {
+		ID            *string           `json:"id"`
 		Name          string            `json:"name"`
+		IsDefault     bool              `json:"is_default"`
 		Path          string            `json:"path"`
 		Kind          string            `json:"kind"`
 		QuotaMiB      *uint32           `json:"quota_mib"`
@@ -3923,7 +3937,9 @@ func parseVolumeHandle(s string) (*VolumeHandleInfo, error) {
 		return nil, fmt.Errorf("parse volume handle: %w", err)
 	}
 	return &VolumeHandleInfo{
+		ID:            raw.ID,
 		Name:          raw.Name,
+		IsDefault:     raw.IsDefault,
 		Path:          raw.Path,
 		Kind:          raw.Kind,
 		QuotaMiB:      raw.QuotaMiB,
@@ -4031,7 +4047,9 @@ func AgentSocketPath(name string) (string, error) {
 
 // VolumeHandleInfo carries metadata for a volume returned by GetVolume.
 type VolumeHandleInfo struct {
+	ID            *string           `json:"id"`
 	Name          string            `json:"name"`
+	IsDefault     bool              `json:"is_default"`
 	Path          string            `json:"path"`
 	Kind          string            `json:"kind"`
 	QuotaMiB      *uint32           `json:"quota_mib"`
@@ -4057,7 +4075,9 @@ func GetVolume(ctx context.Context, name string) (*VolumeHandleInfo, error) {
 		return nil, err
 	}
 	var raw struct {
+		ID            *string           `json:"id"`
 		Name          string            `json:"name"`
+		IsDefault     bool              `json:"is_default"`
 		Path          string            `json:"path"`
 		Kind          string            `json:"kind"`
 		QuotaMiB      *uint32           `json:"quota_mib"`
@@ -4072,7 +4092,9 @@ func GetVolume(ctx context.Context, name string) (*VolumeHandleInfo, error) {
 		return nil, fmt.Errorf("parse volume_get: %w", err)
 	}
 	return &VolumeHandleInfo{
+		ID:            raw.ID,
 		Name:          raw.Name,
+		IsDefault:     raw.IsDefault,
 		Path:          raw.Path,
 		Kind:          raw.Kind,
 		QuotaMiB:      raw.QuotaMiB,
@@ -4083,6 +4105,54 @@ func GetVolume(ctx context.Context, name string) (*VolumeHandleInfo, error) {
 		Labels:        raw.Labels,
 		CreatedAtUnix: raw.CreatedAtUnix,
 	}, nil
+}
+
+// GetDefaultVolume returns the cloud account's always-present default volume.
+func GetDefaultVolume(ctx context.Context) (*VolumeHandleInfo, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_volume_get_default(cancelID, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var info VolumeHandleInfo
+	if err := json.Unmarshal([]byte(out), &info); err != nil {
+		return nil, fmt.Errorf("parse volume_get_default: %w", err)
+	}
+	return &info, nil
+}
+
+// VolumeFsOp dispatches a buffered filesystem operation through the active backend.
+func VolumeFsOp(ctx context.Context, name, op string, args any, result any) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(args)
+	if err != nil {
+		return fmt.Errorf("marshal volume fs args: %w", err)
+	}
+	cName := C.CString(name)
+	cOp := C.CString(op)
+	cArgs := C.CString(string(encoded))
+	defer C.free(unsafe.Pointer(cName))
+	defer C.free(unsafe.Pointer(cOp))
+	defer C.free(unsafe.Pointer(cArgs))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_volume_fs_op(cancelID, cName, cOp, cArgs, buf, bufLen)
+	})
+	if err != nil {
+		return err
+	}
+	if result == nil {
+		return nil
+	}
+	if err := json.Unmarshal([]byte(out), result); err != nil {
+		return fmt.Errorf("parse volume fs response: %w", err)
+	}
+	return nil
 }
 
 // =============================================================================

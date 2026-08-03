@@ -412,6 +412,7 @@ export interface NapiSshServer {
 
 export interface NapiVolumeStatic {
   get(name: string): Promise<NapiVolumeHandle>;
+  getDefault(): Promise<NapiVolumeHandle>;
   list(): Promise<NapiVolumeInfo[]>;
   remove(name: string): Promise<void>;
 }
@@ -449,6 +450,7 @@ export interface NapiVolumeConfig {
 
 export interface NapiVolumeHandle {
   readonly name: string;
+  readonly isDefault: boolean;
   readonly kind: string;
   readonly quotaMib: number | null | undefined;
   readonly usedBytes: number;
@@ -488,6 +490,7 @@ export interface NapiVolumeFsWriteSink {
 
 export interface NapiVolumeInfo {
   readonly name: string;
+  readonly isDefault: boolean;
   readonly kind: string;
   readonly quotaMib: number | null | undefined;
   readonly usedBytes: number;
