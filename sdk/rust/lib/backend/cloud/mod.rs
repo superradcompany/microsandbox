@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use futures::future::BoxFuture;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
+use rustls_platform_verifier::BuilderVerifierExt;
 use tokio_tungstenite::{
     Connector, connect_async_tls_with_config,
     tungstenite::{
@@ -165,8 +166,6 @@ fn cloud_agent_tls_connector() -> MicrosandboxResult<Connector> {
     let config = if let Some(config) = CLOUD_AGENT_TLS_CONFIG.get() {
         Arc::clone(config)
     } else {
-        let roots =
-            rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let config = rustls::ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
@@ -175,7 +174,12 @@ fn cloud_agent_tls_connector() -> MicrosandboxResult<Connector> {
                     "cloud agent TLS protocol configuration: {error}"
                 ))
             })?
-            .with_root_certificates(roots)
+            .with_platform_verifier()
+            .map_err(|error| {
+                MicrosandboxError::Runtime(format!(
+                    "cloud agent TLS verifier configuration: {error}"
+                ))
+            })?
             .with_no_client_auth();
         let config = Arc::new(config);
 
@@ -404,7 +408,84 @@ impl From<CloudBackend> for Arc<dyn Backend> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::process::Command;
+
+    #[cfg(unix)]
+    use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair, KeyUsagePurpose};
+    #[cfg(unix)]
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    #[cfg(unix)]
+    use tempfile::TempDir;
+    #[cfg(unix)]
+    use tokio::net::TcpListener;
+    #[cfg(unix)]
+    use tokio_rustls::TlsAcceptor;
+
     use super::*;
+
+    #[cfg(unix)]
+    const TLS_TEST_CHILD_URL: &str = "MSB_TEST_CLOUD_AGENT_TLS_CHILD_URL";
+
+    #[cfg(unix)]
+    struct SystemCaWebSocket {
+        url: String,
+        ca_path: std::path::PathBuf,
+        _temp_dir: TempDir,
+        server: tokio::task::JoinHandle<()>,
+    }
+
+    #[cfg(unix)]
+    impl SystemCaWebSocket {
+        async fn start() -> Self {
+            let mut ca_params = CertificateParams::default();
+            ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+            ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+            let ca_key = KeyPair::generate().expect("generate CA key");
+            let ca_cert = ca_params.self_signed(&ca_key).expect("self-sign CA");
+            let issuer = Issuer::new(ca_params, ca_key);
+
+            let leaf_key = KeyPair::generate().expect("generate server key");
+            let leaf_params = CertificateParams::new(vec!["localhost".to_string()])
+                .expect("server certificate params");
+            let leaf_cert = leaf_params
+                .signed_by(&leaf_key, &issuer)
+                .expect("sign server certificate");
+            let chain = vec![
+                CertificateDer::from(leaf_cert.der().to_vec()),
+                CertificateDer::from(ca_cert.der().to_vec()),
+            ];
+            let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der()));
+            let server_config = rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(chain, key)
+                .expect("server TLS config");
+
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind test server");
+            let port = listener.local_addr().expect("test server address").port();
+            let acceptor = TlsAcceptor::from(Arc::new(server_config));
+            let server = tokio::spawn(async move {
+                let (tcp, _) = listener.accept().await.expect("accept test connection");
+                let tls = acceptor.accept(tcp).await.expect("accept test TLS");
+                tokio_tungstenite::accept_async(tls)
+                    .await
+                    .expect("accept test WebSocket");
+            });
+
+            let temp_dir = tempfile::tempdir().expect("create CA directory");
+            let ca_path = temp_dir.path().join("ca.pem");
+            std::fs::write(&ca_path, ca_cert.pem()).expect("write test CA");
+
+            Self {
+                url: format!("wss://localhost:{port}"),
+                ca_path,
+                _temp_dir: temp_dir,
+                server,
+            }
+        }
+    }
 
     #[test]
     fn agent_tls_connector_uses_explicit_rustls_config() {
@@ -412,6 +493,49 @@ mod tests {
             cloud_agent_tls_connector().unwrap(),
             Connector::Rustls(_)
         ));
+    }
+
+    #[cfg(unix)]
+    #[cfg_attr(
+        target_vendor = "apple",
+        ignore = "macOS uses Keychain rather than SSL_CERT_FILE for platform trust"
+    )]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_tls_connector_trusts_ssl_cert_file() {
+        if let Ok(url) = std::env::var(TLS_TEST_CHILD_URL) {
+            connect_async_tls_with_config(
+                url,
+                None,
+                false,
+                Some(cloud_agent_tls_connector().expect("cloud TLS connector")),
+            )
+            .await
+            .expect("connect with CA from SSL_CERT_FILE");
+            return;
+        }
+
+        let fixture = SystemCaWebSocket::start().await;
+        let url = fixture.url.clone();
+        let ca_path = fixture.ca_path.clone();
+        let child = tokio::task::spawn_blocking(move || {
+            Command::new(std::env::current_exe().expect("current test executable"))
+                .arg("agent_tls_connector_trusts_ssl_cert_file")
+                .arg("--nocapture")
+                .env(TLS_TEST_CHILD_URL, url)
+                .env("SSL_CERT_FILE", ca_path)
+                .output()
+                .expect("run isolated TLS test")
+        })
+        .await
+        .expect("join isolated TLS test");
+
+        assert!(
+            child.status.success(),
+            "isolated TLS test failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr),
+        );
+        fixture.server.await.expect("join test server");
     }
 
     #[test]
