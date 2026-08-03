@@ -263,8 +263,7 @@ pub struct RuntimeConfig {
 }
 
 /// Controls the per-disk hard limit for buffered host dirty data.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum BlockWritebackLimit {
     /// Use the runtime's platform-aware policy.
     #[default]
@@ -272,6 +271,31 @@ pub enum BlockWritebackLimit {
 
     /// Disable bounded writeback without changing guest-visible durability semantics.
     Off,
+
+    /// Use an explicit per-disk limit in MiB.
+    Fixed {
+        /// Maximum page-aligned dirty data charged to one writable raw disk.
+        mib: NonZero<u64>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum BlockWritebackLimitKeyword {
+    Auto,
+    Off,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct FixedBlockWritebackLimit {
+    mib: NonZero<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(untagged)]
+enum BlockWritebackLimitWire {
+    Keyword(BlockWritebackLimitKeyword),
+    Fixed(FixedBlockWritebackLimit),
 }
 
 /// Registry configuration.
@@ -649,6 +673,33 @@ impl Default for SandboxDefaults {
             metrics_sample_interval_ms: default_metrics_sample_interval(),
             disable_metrics_sample: false,
         }
+    }
+}
+
+impl Serialize for BlockWritebackLimit {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let wire = match *self {
+            Self::Auto => BlockWritebackLimitWire::Keyword(BlockWritebackLimitKeyword::Auto),
+            Self::Off => BlockWritebackLimitWire::Keyword(BlockWritebackLimitKeyword::Off),
+            Self::Fixed { mib } => BlockWritebackLimitWire::Fixed(FixedBlockWritebackLimit { mib }),
+        };
+        wire.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for BlockWritebackLimit {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match BlockWritebackLimitWire::deserialize(deserializer)? {
+            BlockWritebackLimitWire::Keyword(BlockWritebackLimitKeyword::Auto) => Self::Auto,
+            BlockWritebackLimitWire::Keyword(BlockWritebackLimitKeyword::Off) => Self::Off,
+            BlockWritebackLimitWire::Fixed(FixedBlockWritebackLimit { mib }) => Self::Fixed { mib },
+        })
     }
 }
 
@@ -1270,6 +1321,22 @@ mod tests {
             })
         );
         assert_eq!(cfg.runtime.block_writeback_limit, BlockWritebackLimit::Off);
+    }
+
+    #[test]
+    fn test_block_writeback_limit_fixed_mib_round_trip() {
+        let json = r#"{"runtime":{"block_writeback_limit":{"mib":1280}}}"#;
+        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(
+            cfg.runtime.block_writeback_limit,
+            BlockWritebackLimit::Fixed {
+                mib: NonZero::new(1280).unwrap(),
+            }
+        );
+
+        let serialized = serde_json::to_value(&cfg.runtime.block_writeback_limit).unwrap();
+        assert_eq!(serialized, serde_json::json!({ "mib": 1280 }));
     }
 
     #[test]

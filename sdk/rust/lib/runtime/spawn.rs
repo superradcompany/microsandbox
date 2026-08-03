@@ -441,7 +441,7 @@ pub async fn spawn_sandbox(
         startup_pipe_name,
     );
     launch.block_writeback_limit_bytes =
-        block_writeback_limit_bytes(global.runtime.block_writeback_limit);
+        block_writeback_limit_bytes(global.runtime.block_writeback_limit)?;
 
     #[cfg(unix)]
     let config_file = match write_launch_config_fd(&launch) {
@@ -693,19 +693,34 @@ pub async fn spawn_sandbox(
     Ok((handle, agent_sock_path))
 }
 
-fn block_writeback_limit_bytes(policy: BlockWritebackLimit) -> Option<u64> {
+fn block_writeback_limit_bytes(policy: BlockWritebackLimit) -> MicrosandboxResult<Option<u64>> {
     #[cfg(target_os = "linux")]
     {
-        match policy {
+        const MIN_BLOCK_WRITEBACK_LIMIT_MIB: u64 = 128;
+
+        let bytes = match policy {
             BlockWritebackLimit::Auto => Some(AUTO_BLOCK_WRITEBACK_LIMIT_BYTES),
             BlockWritebackLimit::Off => None,
-        }
+            BlockWritebackLimit::Fixed { mib } => {
+                if mib.get() < MIN_BLOCK_WRITEBACK_LIMIT_MIB {
+                    return Err(MicrosandboxError::InvalidConfig(format!(
+                        "runtime.block_writeback_limit must be at least {MIN_BLOCK_WRITEBACK_LIMIT_MIB} MiB"
+                    )));
+                }
+                Some(mib.get().checked_mul(1024 * 1024).ok_or_else(|| {
+                    MicrosandboxError::InvalidConfig(
+                        "runtime.block_writeback_limit exceeds the supported byte range".into(),
+                    )
+                })?)
+            }
+        };
+        Ok(bytes)
     }
 
     #[cfg(not(target_os = "linux"))]
     {
         let _ = policy;
-        None
+        Ok(None)
     }
 }
 
@@ -4514,11 +4529,36 @@ mod tests {
     fn block_writeback_limit_resolves_by_platform() {
         #[cfg(target_os = "linux")]
         assert_eq!(
-            block_writeback_limit_bytes(BlockWritebackLimit::Auto),
+            block_writeback_limit_bytes(BlockWritebackLimit::Auto).unwrap(),
             Some(AUTO_BLOCK_WRITEBACK_LIMIT_BYTES)
         );
         #[cfg(not(target_os = "linux"))]
-        assert_eq!(block_writeback_limit_bytes(BlockWritebackLimit::Auto), None);
-        assert_eq!(block_writeback_limit_bytes(BlockWritebackLimit::Off), None);
+        assert_eq!(
+            block_writeback_limit_bytes(BlockWritebackLimit::Auto).unwrap(),
+            None
+        );
+        assert_eq!(
+            block_writeback_limit_bytes(BlockWritebackLimit::Off).unwrap(),
+            None
+        );
+
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(
+                block_writeback_limit_bytes(BlockWritebackLimit::Fixed {
+                    mib: NonZero::new(1024).unwrap(),
+                })
+                .unwrap(),
+                Some(1024 * 1024 * 1024)
+            );
+            assert!(
+                block_writeback_limit_bytes(BlockWritebackLimit::Fixed {
+                    mib: NonZero::new(127).unwrap(),
+                })
+                .unwrap_err()
+                .to_string()
+                .contains("at least 128 MiB")
+            );
+        }
     }
 }
