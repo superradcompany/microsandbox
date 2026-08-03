@@ -37,8 +37,6 @@ fn build_agentd(workspace_root: &Path, out_dir: &Path) {
             return;
         }
 
-        // Track MSB_AGENTD_PATH only once it can influence selection: a
-        // repository-local build/agentd takes precedence and ignores it.
         println!("cargo:rerun-if-env-changed=MSB_AGENTD_PATH");
 
         // A caller-supplied agentd stages the binary instead of using the cache or downloading.
