@@ -24,7 +24,7 @@ Start with `msb doctor`, keep the workload and benchmark procedure unchanged, an
 | `sandbox_defaults.cpu_placement` | `inherit` | Coordinates and pins vCPU threads to host logical processors | Linux and Windows hosts |
 | `sandbox_defaults.thp` | `madvise` | Sets the guest Linux transparent-huge-page boot policy | Every newly booted sandbox |
 | `snapshot_defaults.compaction` | `off` | Reclaims proven-free ext4 ranges before publishing a flat snapshot | Flat stopped-sandbox snapshots |
-| `runtime.block_writeback_limit` and `runtime.block_writeback_pool_mib` | `auto` and derived | Bounds buffered host dirty data per writable raw disk and admission across active VMs | Linux, writable raw disks using writeback caching |
+| `runtime.block_writeback_limit` and `runtime.block_writeback_pool_mib` | `off` and unset | Opt-in bound for buffered host dirty data per writable raw disk and admission across active VMs | Linux, writable raw disks using writeback caching |
 | x2APIC, CRC32C, PREEMPT_NONE | Selected by the compatible runtime and firmware | Reduces interrupt, checksum, and scheduler overhead | Applicable shipping guest builds |
 | AMD AVIC or Intel APICv | Host KVM policy | Accelerates virtual interrupt delivery used by the x86 guest | Linux x86 hosts with capable hardware |
 
@@ -61,12 +61,12 @@ There is no universal fastest profile. The following is a reasonable starting po
     "compaction": "auto"
   },
   "runtime": {
-    "block_writeback_limit": "auto"
+    "block_writeback_limit": "off"
   }
 }
 ```
 
-`cpu_placement: auto` is intentionally not a portable macOS default: managed placement is unsupported on macOS because the operating system does not expose an equivalent public hard-affinity API. Use `inherit` on macOS. Keep `thp: madvise` unless a representative workload and density test justify another policy. The 512 MiB block-writeback `auto` preset is a containment policy rather than a universal performance preset; see its measured sequential-write trade-off below.
+`cpu_placement: auto` is intentionally not a portable macOS default: managed placement is unsupported on macOS because the operating system does not expose an equivalent public hard-affinity API. Use `inherit` on macOS. Keep `thp: madvise` unless a representative workload and density test justify another policy. Buffered-writeback containment remains `off` by default because the measured 512 MiB through 1.5 GiB staircase does not recover sequential throughput; opt into `auto` only when the bounded host-dirty contract is worth that trade-off.
 
 ## Storage layout: layered or flat
 
@@ -173,7 +173,7 @@ Enabling AVIC or APICv changes interrupt-delivery performance, not the sandbox i
 
 ## Buffered block writeback limit
 
-On Linux, `auto` prefers a 512 MiB hard budget for each writable raw disk. Libkrun reserves exact page-aligned extents before each mutation, starts background writeback in bounded batches, and applies backpressure before the per-disk budget can be exceeded. Rewritten pages remain charged until the newest generation completes, so repeatedly overwriting one region cannot release another region's credit.
+The default `off` policy leaves the controller and admission path unused. On Linux, explicit `auto` prefers a 512 MiB hard budget for each writable raw disk. Libkrun reserves exact page-aligned extents before each mutation, starts background writeback in bounded batches, and applies backpressure before the per-disk budget can be exceeded. Rewritten pages remain charged until the newest generation completes, so repeatedly overwriting one region cannot release another region's credit.
 
 The background worker kicks queued ranges before waiting for their page-cache writeback to complete, and it releases exact range credit only after that completion. It does not turn each internal batch into a durability barrier. Guest `FLUSH` still performs the existing full Imago flush and sync after all earlier block work, including the host-filesystem metadata required to retrieve the data; the controller does not acknowledge guest durability early. Controller, storage, worker, range-completion, or full-sync failures remain latched and fail future mutations and reactivations closed.
 
@@ -207,7 +207,7 @@ The allocation catalog and leases are shared by processes using the same `MSB_HO
 
 `off` disables both the VMM-owned bound and admission for newly spawned sandboxes. It may improve peak sequential throughput, but it permits a long-running guest to accumulate more host dirty data and may worsen the final flush tail. Neither the per-disk controller nor admission depends on cgroups or guest cooperation. The policy has no effect on read-only disks, direct-I/O disks, non-raw formats, cache modes without writeback, or non-Linux VMM paths.
 
-The fixed OVH customer disk suite is being used to measure 512 MiB, 1 GiB, 1.25 GiB, and 1.5 GiB against `off`. Keep the controller disabled by default until that staircase and real multi-VM admission validation are complete; the final measured policy and trade-off will replace this note before the branch is proposed for merge.
+The fixed OVH customer disk suite measured 512 MiB, 1 GiB, 1.25 GiB and 1.5 GiB at approximately 1,668 MB/s sequential write against 8,783 MB/s with the controller off. Raising only the hard ceiling did not alter the early 128–256 MiB writeback-generation schedule, so the 1.5 GiB profile consumed three times the potential host admission credit of 512 MiB without recovering throughput. The dated planning report records the complete staircase and multi-VM validation; keep the controller opt-in until its high-water scheduling is redesigned and remeasured.
 
 ## Snapshot compaction
 

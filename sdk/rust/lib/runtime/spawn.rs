@@ -4682,7 +4682,11 @@ mod tests {
 
     #[test]
     fn block_writeback_policy_resolves_by_platform() {
-        let automatic = block_writeback_policy(&RuntimeConfig::default()).unwrap();
+        let automatic = block_writeback_policy(&RuntimeConfig {
+            block_writeback_limit: BlockWritebackLimit::Auto,
+            block_writeback_pool_mib: None,
+        })
+        .unwrap();
         #[cfg(target_os = "linux")]
         {
             assert_eq!(automatic.0, Some(AUTO_BLOCK_WRITEBACK_LIMIT_BYTES));

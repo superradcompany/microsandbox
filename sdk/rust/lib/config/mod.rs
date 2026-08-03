@@ -282,11 +282,11 @@ pub struct RuntimeConfig {
 /// Controls the per-disk hard limit for buffered host dirty data.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum BlockWritebackLimit {
-    /// Use the runtime's platform-aware policy.
-    #[default]
+    /// Use the runtime's platform-aware bounded-writeback and admission policy.
     Auto,
 
     /// Disable bounded writeback without changing guest-visible durability semantics.
+    #[default]
     Off,
 
     /// Use an explicit per-disk limit in MiB.
@@ -1295,7 +1295,7 @@ mod tests {
         assert_eq!(cfg.database.connect_timeout_secs, 30);
         assert_eq!(cfg.database.busy_timeout_secs, 5);
         assert_eq!(cfg.snapshot_defaults.compaction, SnapshotCompaction::Off);
-        assert_eq!(cfg.runtime.block_writeback_limit, BlockWritebackLimit::Auto);
+        assert_eq!(cfg.runtime.block_writeback_limit, BlockWritebackLimit::Off);
         assert_eq!(cfg.runtime.block_writeback_pool_mib, None);
     }
 
