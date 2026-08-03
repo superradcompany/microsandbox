@@ -27,7 +27,10 @@ pub fn is_sqlite_busy(err: &DbErr) -> bool {
         DbErr::Conn(e) | DbErr::Exec(e) | DbErr::Query(e) => e,
         _ => return false,
     };
-    let RuntimeErr::SqlxError(sqlx::Error::Database(db_err)) = runtime_err else {
+    let RuntimeErr::SqlxError(sqlx_err) = runtime_err else {
+        return false;
+    };
+    let sqlx::Error::Database(db_err) = sqlx_err.as_ref() else {
         return false;
     };
     matches!(
@@ -102,4 +105,81 @@ where
         }
     }
     unreachable!("loop returns or errors before exhausting attempts")
+}
+
+#[cfg(test)]
+mod tests {
+    use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, TransactionTrait};
+
+    use super::*;
+
+    #[test]
+    fn non_sqlite_errors_are_not_busy() {
+        assert!(!is_sqlite_busy(&DbErr::Custom("not a driver error".into())));
+        assert!(!is_sqlite_busy(&DbErr::Exec(RuntimeErr::Internal(
+            "not a sqlx error".into()
+        ))));
+    }
+
+    /// Drives a genuine `SQLITE_BUSY` through the sqlx driver so this test
+    /// pins the exact error shape the current sea-orm/sqlx versions produce
+    /// (`DbErr::Exec(RuntimeErr::SqlxError(Arc<sqlx::Error::Database>))`
+    /// with code "5"). A hand-built error would keep passing even if a
+    /// driver upgrade changed how busy surfaces — and then the retry layer
+    /// would silently stop retrying under cross-process contention.
+    #[tokio::test]
+    async fn real_sqlite_busy_is_classified() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("busy.db");
+
+        let holder = crate::connection::DbWriteConnection::open(
+            &db_path,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        holder
+            .inner()
+            .execute_unprepared("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+            .await
+            .unwrap();
+
+        // Take the SQLite write lock and hold it: an INSERT inside an
+        // uncommitted transaction keeps the lock until commit/rollback.
+        let txn = holder.inner().begin().await.unwrap();
+        txn.execute_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "INSERT INTO t (id) VALUES (1)",
+        ))
+        .await
+        .unwrap();
+
+        // Second connection with a near-zero busy_timeout so BUSY surfaces
+        // immediately instead of spinning inside SQLite. Bypass the
+        // retry-wrapped `ConnectionTrait` impl via `inner()` — the point is
+        // to classify the raw error, not to exercise the backoff loop.
+        let contender = crate::connection::DbWriteConnection::open(
+            &db_path,
+            Duration::from_secs(5),
+            Duration::from_millis(1),
+        )
+        .await
+        .unwrap();
+        let err = contender
+            .inner()
+            .execute_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "INSERT INTO t (id) VALUES (2)",
+            ))
+            .await
+            .unwrap_err();
+
+        assert!(
+            is_sqlite_busy(&err),
+            "expected SQLITE_BUSY classification, got: {err:?}"
+        );
+
+        txn.rollback().await.unwrap();
+    }
 }

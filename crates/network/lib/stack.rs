@@ -1732,8 +1732,8 @@ mod tests {
     }
 
     /// Drive guest→server handshake to ESTABLISHED, returning (server_isn,
-    /// guest_seq_after_handshake) and the spawned NewConnection channels.
-    fn establish(
+    /// guest_seq_after_handshake).
+    fn handshake(
         tracker: &mut ConnectionTracker,
         device: &mut SmoltcpDevice,
         iface: &mut Interface,
@@ -1741,7 +1741,7 @@ mod tests {
         shared: &Arc<SharedState>,
         now: Instant,
         guest_port: u16,
-    ) -> (i32, i32, Vec<crate::conn::NewConnection>) {
+    ) -> (i32, i32) {
         let src = SocketAddr::new(Ipv4Addr::from(GUEST_IP).into(), guest_port);
         let dst = SocketAddr::new(Ipv4Addr::from(SERVER_IP).into(), 443);
 
@@ -1800,7 +1800,23 @@ mod tests {
             "socket should be ESTABLISHED after handshake",
         );
 
-        // 3) Poll loop detects the established connection and spawns a proxy.
+        (server_isn, guest_isn + 1)
+    }
+
+    /// Complete a guest→server handshake and hand the connection to a proxy.
+    fn establish(
+        tracker: &mut ConnectionTracker,
+        device: &mut SmoltcpDevice,
+        iface: &mut Interface,
+        sockets: &mut SocketSet<'_>,
+        shared: &Arc<SharedState>,
+        now: Instant,
+        guest_port: u16,
+    ) -> (i32, i32, Vec<crate::conn::NewConnection>) {
+        let (server_isn, guest_seq) =
+            handshake(tracker, device, iface, sockets, shared, now, guest_port);
+
+        // Poll loop detects the established connection and spawns a proxy.
         let new_conns = tracker.take_new_connections(sockets);
         assert_eq!(
             new_conns.len(),
@@ -1808,7 +1824,7 @@ mod tests {
             "one new connection should be handed off"
         );
 
-        (server_isn, guest_isn + 1, new_conns)
+        (server_isn, guest_seq, new_conns)
     }
 
     #[test]
@@ -2092,6 +2108,58 @@ mod tests {
         assert!(
             !tracker.create_tcp_socket(src, dst, &mut sockets),
             "creation at the limit must be refused",
+        );
+    }
+
+    #[test]
+    fn guest_fin_before_proxy_spawn_is_handed_off() {
+        let shared = Arc::new(SharedState::new(64));
+        let poll_config = leak_poll_config();
+        let mut device = SmoltcpDevice::new(shared.clone(), poll_config.mtu);
+        let mut iface = create_interface(&mut device, &poll_config);
+        let mut sockets = SocketSet::new(vec![]);
+        let mut tracker = ConnectionTracker::new(None);
+        let now = smoltcp_now();
+        let guest_port = 54323;
+        let (server_isn, guest_seq) = handshake(
+            &mut tracker,
+            &mut device,
+            &mut iface,
+            &mut sockets,
+            &shared,
+            now,
+            guest_port,
+        );
+
+        // The production poll loop drains every queued guest frame before
+        // taking new connections, so the FIN can be processed before the
+        // proxy task is spawned.
+        ingress(
+            build_tcp_frame(
+                guest_port,
+                443,
+                TcpControl::Fin,
+                guest_seq,
+                Some(server_isn + 1),
+                &[],
+            ),
+            &mut device,
+            &mut iface,
+            &mut sockets,
+            &shared,
+            now,
+        );
+        assert_eq!(
+            only_tcp_state(&sockets),
+            Some(tcp::State::CloseWait),
+            "guest FIN should arrive before the proxy handoff",
+        );
+
+        let new_conns = tracker.take_new_connections(&mut sockets);
+        assert_eq!(
+            new_conns.len(),
+            1,
+            "a connection that reached CLOSE_WAIT still needs a proxy task",
         );
     }
 }
