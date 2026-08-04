@@ -1480,7 +1480,7 @@ fn read_erofs_layer_metadata(path: &Path) -> io::Result<(FileTree, erofs::ErofsD
     let mut hardlinks: HashMap<u32, RegularFileId> = HashMap::new();
     let mut file_blocks = HashMap::new();
 
-    reader.walk_entries::<io::Error, _>(|reader, entry| {
+    reader.walk_entries_with_path_bytes::<io::Error, _>(|reader, path, entry| {
         let node = match entry.kind {
             erofs::ErofsEntryKind::RegularFile => {
                 let id = *hardlinks.entry(entry.nid).or_default();
@@ -1525,8 +1525,7 @@ fn read_erofs_layer_metadata(path: &Path) -> io::Result<(FileTree, erofs::ErofsD
             erofs::ErofsEntryKind::Fifo => TreeNode::Fifo(entry.metadata),
             erofs::ErofsEntryKind::Socket => TreeNode::Socket(entry.metadata),
         };
-        tree.insert(crate::path_bytes::path_bytes(&entry.path), node)
-            .map_err(io::Error::other)
+        tree.insert(path, node).map_err(io::Error::other)
     })?;
 
     Ok((
@@ -2317,25 +2316,15 @@ mod tests {
             name: b"user.root-test".to_vec(),
             value: b"preserved".to_vec(),
         });
-        tree.insert(b"alpha", node()).unwrap();
-        tree.insert(b"beta", node()).unwrap();
+        tree.insert(b"nested/alpha", node()).unwrap();
+        tree.insert(b"nested/beta", node()).unwrap();
         erofs::write_erofs(&tree, &path).unwrap();
 
         let (reconstructed, data_map) = read_erofs_layer_metadata(&path).unwrap();
-        let TreeNode::RegularFile(alpha) = reconstructed
-            .root
-            .entries
-            .get(std::ffi::OsStr::new("alpha"))
-            .unwrap()
-        else {
+        let TreeNode::RegularFile(alpha) = reconstructed.get(b"nested/alpha").unwrap() else {
             panic!("alpha should be a regular file");
         };
-        let TreeNode::RegularFile(beta) = reconstructed
-            .root
-            .entries
-            .get(std::ffi::OsStr::new("beta"))
-            .unwrap()
-        else {
+        let TreeNode::RegularFile(beta) = reconstructed.get(b"nested/beta").unwrap() else {
             panic!("beta should be a regular file");
         };
 
@@ -2345,11 +2334,15 @@ mod tests {
         assert_eq!(reconstructed.root.xattrs[0].name, b"user.root-test");
         assert_eq!(reconstructed.root.xattrs[0].value, b"preserved");
         assert_eq!(
-            data_map.file_blocks.get(std::path::Path::new("alpha")),
-            data_map.file_blocks.get(std::path::Path::new("beta"))
+            data_map
+                .file_blocks
+                .get(std::path::Path::new("nested/alpha")),
+            data_map
+                .file_blocks
+                .get(std::path::Path::new("nested/beta"))
         );
         assert_eq!(
-            data_map.file_blocks[std::path::Path::new("alpha")].1,
+            data_map.file_blocks[std::path::Path::new("nested/alpha")].1,
             b"shared hardlink data".len() as u64
         );
     }

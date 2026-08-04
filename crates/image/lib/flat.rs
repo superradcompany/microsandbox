@@ -9,7 +9,6 @@ use sha2::{Digest as Sha2Digest, Sha256};
 use crate::cache::lock::{flock_unlock, lock_exclusive, open_lock_file};
 use crate::erofs::{ErofsEntryKind, ErofsReader};
 use crate::ext4::{EXT4_ROOTFS_MATERIALIZER_ABI, Ext4RootfsOptions, materialize_ext4_rootfs};
-use crate::path_bytes::path_bytes;
 use crate::tree::{
     DataSpool, DeviceNode, DirectoryNode, FileData, FileTree, RegularFileId, RegularFileNode,
     SymlinkNode, TreeNode, merge_layers_with_provenance,
@@ -148,7 +147,7 @@ fn read_erofs_layer(path: &Path, spool: &mut DataSpool) -> std::io::Result<FileT
     root.xattrs = root_xattrs;
     let mut tree = FileTree { root };
     let mut hardlinks: HashMap<u32, (RegularFileId, FileData)> = HashMap::new();
-    reader.walk_entries::<std::io::Error, _>(|reader, entry| {
+    reader.walk_entries_with_path_bytes::<std::io::Error, _>(|reader, path, entry| {
         let node = match entry.kind {
             ErofsEntryKind::RegularFile => {
                 let (id, data) = if let Some((id, data)) = hardlinks.get(&entry.nid) {
@@ -215,8 +214,7 @@ fn read_erofs_layer(path: &Path, spool: &mut DataSpool) -> std::io::Result<FileT
             ErofsEntryKind::Fifo => TreeNode::Fifo(entry.metadata),
             ErofsEntryKind::Socket => TreeNode::Socket(entry.metadata),
         };
-        tree.insert(path_bytes(&entry.path), node)
-            .map_err(std::io::Error::other)
+        tree.insert(path, node).map_err(std::io::Error::other)
     })?;
     Ok(tree)
 }
