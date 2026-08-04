@@ -382,6 +382,10 @@ export const InterfaceOverridesBuilder = napi.InterfaceOverridesBuilder;
 export type InterfaceOverridesBuilder = NapiInterfaceOverridesBuilder;
 export type PullProgressEvent = NapiPullProgressEvent;
 export type PullProgressStream = NapiPullProgressStream;
+export type {
+  SecretExactHeader,
+  SecretInjection,
+} from "./network-config.js";
 
 // Setup + module-level helpers
 export { Setup, install, isInstalled, setup } from "./setup.js";

@@ -601,6 +601,29 @@ func TestFFIWireShape_Secrets(t *testing.T) {
 	}
 }
 
+func TestFFIWireShape_ExactHeaderSecretPlacement(t *testing.T) {
+	got := marshalCreateOptions(t,
+		WithImage("alpine"),
+		WithSecrets(Secret.ExactHeader(
+			"API_KEY",
+			"synthetic-token",
+			"Proxy-Authorization",
+			"Token",
+			SecretEnvOptions{AllowHosts: []string{"api.example.com"}},
+		)),
+	)
+	secs := mustField(t, got, "secrets").([]any)
+	s := secs[0].(map[string]any)
+	if s["inject_headers"] != false || s["inject_basic_auth"] != false {
+		t.Fatalf("legacy header toggles = %v/%v", s["inject_headers"], s["inject_basic_auth"])
+	}
+	headers := s["exact_headers"].([]any)
+	header := headers[0].(map[string]any)
+	if header["name"] != "Proxy-Authorization" || header["scheme"] != "Token" {
+		t.Fatalf("exact_headers = %v", headers)
+	}
+}
+
 func TestFFIWireShape_NetworkProfile(t *testing.T) {
 	got := marshalCreateOptions(t,
 		WithImage("alpine"),

@@ -14,7 +14,10 @@ import {
   SecretBuilder,
   Stdin,
 } from "../../dist/index.js";
-
+import type {
+  SecretExactHeader,
+  SecretInjection,
+} from "../../dist/index.js";
 
 describe("intoRootfsSource", () => {
   it("treats absolute paths as bind mounts", () => {
@@ -497,6 +500,33 @@ describe("NetworkBuilder.secretEnvSimple (3-arg shorthand)", () => {
 });
 
 describe("NetworkBuilder secret passthrough", () => {
+  it("builds a provider-neutral exact-header-only placement", () => {
+    const exactHeader: SecretExactHeader = {
+      name: "Proxy-Authorization",
+      scheme: "Token",
+    };
+    const injection: SecretInjection = {
+      headers: false,
+      basicAuth: false,
+      exactHeaders: [exactHeader],
+    };
+    const secret = new SecretBuilder()
+      .env("API_KEY")
+      .value("synthetic-token")
+      .allowHost("api.example.com")
+      .exactHeader(exactHeader.name, exactHeader.scheme)
+      .build();
+
+    expect(injection.exactHeaders).toEqual([exactHeader]);
+    expect(secret.injection).toMatchObject({
+      headers: false,
+      basicAuth: false,
+      exactHeaders: [exactHeader],
+      queryParams: false,
+      body: false,
+    });
+  });
+
   it("builds global passthrough violation policy", () => {
     const cfg = new NetworkBuilder()
       .onSecretViolation((v) =>

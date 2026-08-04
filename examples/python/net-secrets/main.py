@@ -13,7 +13,13 @@ async def main():
         cpus=1,
         memory=512,
         secrets=[
-            Secret.env("API_KEY", value="sk-real-secret-123", allow_hosts=["example.com"]),
+            Secret.exact_header(
+                "API_KEY",
+                value="sk-real-secret-123",
+                header="Authorization",
+                scheme="Bearer",
+                allow_hosts=["example.com"],
+            ),
         ],
         replace=True,
     )
@@ -25,7 +31,9 @@ async def main():
 
     # 2. HTTPS to allowed host — proxy substitutes secret, request succeeds.
     output = await sb.shell(
-        "wget -q -O /dev/null --timeout=10 https://example.com && echo OK || echo FAIL"
+        "wget -q -O /dev/null --timeout=10 "
+        "--header='Authorization: Bearer $MSB_API_KEY' "
+        "https://example.com && echo OK || echo FAIL"
     )
     print(f"HTTPS to example.com (allowed): {output.stdout_text.strip()}")
 
@@ -36,7 +44,9 @@ async def main():
         "https://cloudflare.com 2>&1 && echo OK || echo BLOCKED"
     )
     lines = output.stdout_text.strip().splitlines()
-    print(f"HTTPS to cloudflare.com with placeholder (disallowed): {lines[-1] if lines else '?'}")
+    print(
+        f"HTTPS to cloudflare.com with placeholder (disallowed): {lines[-1] if lines else '?'}"
+    )
 
     await sb.stop()
     await Sandbox.remove("net-secrets")

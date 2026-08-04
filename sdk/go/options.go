@@ -1100,6 +1100,17 @@ type SecretEntry struct {
 	// Defaults to true when nil.
 	RequireTLS *bool
 
+	// InjectHeaders controls broad HTTP header substitution. Nil preserves the
+	// runtime default (true).
+	InjectHeaders *bool
+
+	// InjectBasicAuth controls decoded HTTP Basic Auth substitution. Nil
+	// preserves the runtime default (true).
+	InjectBasicAuth *bool
+
+	// ExactHeaders adds provider-neutral exact request-header placements.
+	ExactHeaders []SecretExactHeader
+
 	// OnViolation overrides the sandbox-level action when this secret is
 	// detected going to a disallowed host. The last non-empty value across
 	// all secrets wins (matches Node/Python behaviour, since the runtime
@@ -1113,7 +1124,18 @@ type SecretEnvOptions struct {
 	AllowHostPatterns []string
 	Placeholder       string
 	RequireTLS        *bool
+	InjectHeaders     *bool
+	InjectBasicAuth   *bool
+	ExactHeaders      []SecretExactHeader
 	OnViolation       ViolationAction
+}
+
+// SecretExactHeader is one provider-neutral exact request-header placement.
+// Scheme is optional; when set, exactly one space separates it from the
+// placeholder.
+type SecretExactHeader struct {
+	Name   string
+	Scheme string
 }
 
 // secretFactory is the factory namespace matching Node's `Secret.env(...)` and
@@ -1138,8 +1160,24 @@ func (secretFactory) Env(envVar, value string, opts SecretEnvOptions) SecretEntr
 		AllowHostPatterns: opts.AllowHostPatterns,
 		Placeholder:       opts.Placeholder,
 		RequireTLS:        opts.RequireTLS,
+		InjectHeaders:     opts.InjectHeaders,
+		InjectBasicAuth:   opts.InjectBasicAuth,
+		ExactHeaders:      opts.ExactHeaders,
 		OnViolation:       opts.OnViolation,
 	}
+}
+
+// ExactHeader returns a SecretEntry restricted to one exact request header.
+// Other SecretEnvOptions retain their ordinary meaning.
+func (secretFactory) ExactHeader(
+	envVar, value, name, scheme string,
+	opts SecretEnvOptions,
+) SecretEntry {
+	disabled := false
+	opts.InjectHeaders = &disabled
+	opts.InjectBasicAuth = &disabled
+	opts.ExactHeaders = []SecretExactHeader{{Name: name, Scheme: scheme}}
+	return Secret.Env(envVar, value, opts)
 }
 
 // ---------------------------------------------------------------------------

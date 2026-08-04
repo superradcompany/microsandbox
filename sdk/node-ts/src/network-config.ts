@@ -41,10 +41,17 @@ export interface TlsConfig {
   readonly interceptCaKeyPath: string | null;
 }
 
+/** One provider-neutral exact request-header placement. */
+export interface SecretExactHeader {
+  readonly name: string;
+  readonly scheme?: string;
+}
+
 /** Where in the HTTP request the secret value can be substituted. */
 export interface SecretInjection {
   readonly headers?: boolean;
   readonly basicAuth?: boolean;
+  readonly exactHeaders?: readonly SecretExactHeader[];
   readonly queryParams?: boolean;
   readonly body?: boolean;
 }

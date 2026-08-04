@@ -142,6 +142,7 @@ from microsandbox.types import (
     ScopedVerifyUpstream,
     Secret,
     SecretEntry,
+    SecretExactHeader,
     SecretInjection,
     SecurityProfile,
     Size,
@@ -243,6 +244,7 @@ __all__ = [
     # Secrets & TLS
     "Secret",
     "SecretEntry",
+    "SecretExactHeader",
     "SecretInjection",
     "ScopedUpstreamCACert",
     "ScopedVerifyUpstream",
