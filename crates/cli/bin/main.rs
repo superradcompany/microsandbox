@@ -633,15 +633,17 @@ fn run_async_command_anyhow(
         // runtime processes (`msb sandbox`) now, not the CLI; see
         // `microsandbox_runtime::maintenance`. The CLI no longer spawns a
         // reaper here.
-        // Resolve once, fallibly, before dispatch. Unlike the SDK's ambient
-        // convenience fallback, the CLI must not run locally after an invalid
-        // explicit cloud selection.
-        let backend = microsandbox::resolve_default_backend()?;
-        let backend_info = backend.info();
-        microsandbox::set_default_backend(backend);
+        if !is_backend_independent_maintenance_command(&command) {
+            // Resolve once, fallibly, before backend-dependent dispatch. Unlike
+            // the SDK's ambient convenience fallback, the CLI must not run a
+            // sandbox operation locally after an invalid explicit cloud selection.
+            let backend = microsandbox::resolve_default_backend()?;
+            let backend_info = backend.info();
+            microsandbox::set_default_backend(backend);
 
-        if shows_backend_notice(&command) {
-            microsandbox_cli::ui::notice("Backend", &context::notice_text(&backend_info));
+            if shows_backend_notice(&command) {
+                microsandbox_cli::ui::notice("Backend", &context::notice_text(&backend_info));
+            }
         }
 
         match command {
@@ -689,6 +691,24 @@ fn run_async_command_anyhow(
     })
 }
 
+/// Return whether a command manages the CLI installation rather than a backend.
+///
+/// These commands are deliberately available even when backend configuration is
+/// invalid so users can diagnose, repair, downgrade, or uninstall that setup.
+fn is_backend_independent_maintenance_command(command: &Commands) -> bool {
+    match command {
+        Commands::SchemaBaseline(_)
+        | Commands::Doctor(_)
+        | Commands::Update(_)
+        | Commands::Downgrade(_)
+        | Commands::Self_(_)
+        | Commands::Completion(_) => true,
+        #[cfg(windows)]
+        Commands::WindowsSelfDowngradeSwap(_) => true,
+        _ => false,
+    }
+}
+
 /// Return whether a command benefits from an explicit execution-context notice.
 fn shows_backend_notice(command: &Commands) -> bool {
     matches!(
@@ -716,6 +736,34 @@ fn matches_ssh_command(_command: &Commands) -> bool {
 #[cfg(test)]
 mod command_tests {
     use super::*;
+
+    #[test]
+    fn maintenance_commands_do_not_require_backend_resolution() {
+        let maintenance_commands = [
+            Cli::try_parse_from(["msb", "doctor"]).unwrap().command,
+            Cli::try_parse_from(["msb", "update"]).unwrap().command,
+            Cli::try_parse_from(["msb", "downgrade", "0.6.0"])
+                .unwrap()
+                .command,
+            Cli::try_parse_from(["msb", "self", "doctor"])
+                .unwrap()
+                .command,
+            Cli::try_parse_from(["msb", "completion", "bash"])
+                .unwrap()
+                .command,
+        ];
+
+        for command in &maintenance_commands {
+            assert!(is_backend_independent_maintenance_command(command));
+        }
+
+        let context = Cli::try_parse_from(["msb", "context"]).unwrap();
+        let create = Cli::try_parse_from(["msb", "create", "alpine:3.19"]).unwrap();
+        assert!(!is_backend_independent_maintenance_command(
+            &context.command
+        ));
+        assert!(!is_backend_independent_maintenance_command(&create.command));
+    }
 
     #[test]
     fn backend_notices_cover_requested_commands_only() {
