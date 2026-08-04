@@ -4,6 +4,8 @@
 #![allow(clippy::module_inception)]
 
 mod error;
+#[cfg(test)]
+mod test_support;
 
 //--------------------------------------------------------------------------------------------------
 // Exports

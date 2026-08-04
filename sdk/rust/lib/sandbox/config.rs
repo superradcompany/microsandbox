@@ -1638,8 +1638,8 @@ mod tests {
     #[cfg(feature = "net")]
     #[test]
     fn spawn_resolver_reads_source_from_host_env() {
-        // SAFETY: variable name is unique to this test, so no other test
-        // races on it.
+        let _env_guard = crate::test_support::lock_env();
+        // SAFETY: every environment-mutating SDK unit test holds the shared lock.
         unsafe { std::env::set_var("MSB_TEST_RESOLVE_SOURCE", SECRET_SENTINEL) };
 
         let config = config_with_source_secret(Some("MSB_TEST_RESOLVE_SOURCE"));
@@ -1653,7 +1653,6 @@ mod tests {
         let durable = config.local_network_config().unwrap();
         assert!(durable.secrets.secrets[0].value.is_empty());
 
-        // SAFETY: variable name is unique to this test.
         unsafe { std::env::remove_var("MSB_TEST_RESOLVE_SOURCE") };
     }
 

@@ -420,8 +420,6 @@ fn sdk_config_path() -> PathBuf {
 mod tests {
     use super::*;
 
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn sdk_config_parses_minimal() {
         let json = r#"{
@@ -474,6 +472,8 @@ mod tests {
 
     #[test]
     fn api_key_ref_env_when_set() {
+        let _env_guard = crate::test_support::lock_env();
+        // SAFETY: every environment-mutating SDK unit test holds the shared lock.
         unsafe { std::env::set_var("MSB_TEST_RESOLVE_API_KEY", " msb_test_xyz ") };
         let key = resolve_api_key_ref("p", "env:MSB_TEST_RESOLVE_API_KEY").unwrap();
         assert_eq!(key, "msb_test_xyz");
@@ -482,6 +482,8 @@ mod tests {
 
     #[test]
     fn api_key_ref_env_rejects_empty_value() {
+        let _env_guard = crate::test_support::lock_env();
+        // SAFETY: every environment-mutating SDK unit test holds the shared lock.
         unsafe { std::env::set_var("MSB_TEST_EMPTY_API_KEY", "   ") };
         assert!(resolve_api_key_ref("p", "env:MSB_TEST_EMPTY_API_KEY").is_err());
         unsafe { std::env::remove_var("MSB_TEST_EMPTY_API_KEY") };
@@ -489,6 +491,8 @@ mod tests {
 
     #[test]
     fn api_key_ref_env_missing() {
+        let _env_guard = crate::test_support::lock_env();
+        // SAFETY: every environment-mutating SDK unit test holds the shared lock.
         unsafe { std::env::remove_var("MSB_TEST_DEFINITELY_NOT_SET") };
         assert!(resolve_api_key_ref("p", "env:MSB_TEST_DEFINITELY_NOT_SET").is_err());
     }
@@ -638,7 +642,8 @@ mod tests {
 
     #[test]
     fn resolve_default_backend_honors_explicit_local_over_cloud_env() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _env_guard = crate::test_support::lock_env();
+        // SAFETY: every environment-mutating SDK unit test holds the shared lock.
         unsafe {
             std::env::set_var("MSB_BACKEND", " local ");
             std::env::set_var("MSB_API_URL", "https://msb.example.com");
@@ -659,7 +664,8 @@ mod tests {
 
     #[test]
     fn explicit_cloud_without_credentials_fails_closed() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _env_guard = crate::test_support::lock_env();
+        // SAFETY: every environment-mutating SDK unit test holds the shared lock.
         unsafe {
             std::env::set_var("MSB_BACKEND", "cloud");
             std::env::remove_var("MSB_API_KEY");

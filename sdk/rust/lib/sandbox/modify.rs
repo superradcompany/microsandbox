@@ -3781,7 +3781,8 @@ mod tests {
         // The live control batch carries the value only for socket transport;
         // any Debug-logged form of the request shows [redacted] instead.
         let rotated_value = format!("{SECRET_SENTINEL}-rotated");
-        // SAFETY: unique variable name; no concurrent reader of this var.
+        let _env_guard = crate::test_support::lock_env();
+        // SAFETY: every environment-mutating SDK unit test holds the shared lock.
         unsafe { std::env::set_var("API_KEY_MODIFY_LEAK_TEST", &rotated_value) };
         let mut live_patch = patch.clone();
         live_patch.secrets[0].source = Some(SecretSource::Env {
