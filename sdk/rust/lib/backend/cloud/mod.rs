@@ -456,7 +456,10 @@ mod tests {
                 CertificateDer::from(ca_cert.der().to_vec()),
             ];
             let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der()));
-            let server_config = rustls::ServerConfig::builder()
+            let provider = Arc::new(rustls::crypto::ring::default_provider());
+            let server_config = rustls::ServerConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .expect("server TLS protocol configuration")
                 .with_no_client_auth()
                 .with_single_cert(chain, key)
                 .expect("server TLS config");
