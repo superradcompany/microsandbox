@@ -3,8 +3,8 @@
 use clap::Args;
 use console::style;
 use microsandbox::sandbox::{
-    HostPermissions, MountOptions, Sandbox, SandboxConfig, SandboxStatus, SecurityProfile,
-    StatVirtualization, VolumeMount,
+    DeploymentProfile, HostPermissions, MountOptions, Sandbox, SandboxConfig, SandboxStatus,
+    SecurityProfile, StatVirtualization, VolumeMount,
 };
 use serde::Serialize;
 
@@ -194,6 +194,12 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
             SecurityProfile::Restricted => "restricted",
         };
         ui::detail_kv("Security", security);
+
+        let deployment_profile = match config.spec.deployment_profile {
+            DeploymentProfile::SingleTenant => "single-tenant",
+            DeploymentProfile::MultiTenant => "multi-tenant",
+        };
+        ui::detail_kv("Deployment Profile", deployment_profile);
 
         if let Some(ref workdir) = config.spec.runtime.workdir {
             ui::detail_kv("Workdir", workdir);

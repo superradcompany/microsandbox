@@ -7,8 +7,8 @@ use clap::Args;
 use microsandbox::VolumeKind;
 use microsandbox::backend::{Backend, LocalBackend};
 use microsandbox::sandbox::{
-    DiskImageFormat, MountBuilder, Patch, RootDiskBuilder, Sandbox, SandboxBuilder, SandboxHandle,
-    SecurityProfile,
+    DeploymentProfile, DiskImageFormat, MountBuilder, Patch, RootDiskBuilder, Sandbox,
+    SandboxBuilder, SandboxHandle, SecurityProfile,
 };
 
 use crate::ui;
@@ -131,6 +131,11 @@ pub struct SandboxOpts {
     /// In-guest security profile (default or restricted).
     #[arg(long, value_parser = ["default", "restricted"])]
     pub security: Option<String>,
+
+    /// Host-runtime deployment profile (single-tenant or multi-tenant).
+    /// Managed backends may enforce their own profile.
+    #[arg(long = "deployment-profile", value_parser = ["single-tenant", "multi-tenant"])]
+    pub deployment_profile: Option<String>,
 
     /// Register a shell snippet as a named script (NAME=BODY). The body
     /// supports `\n`, `\t`, `\r`, `\\`, `\"`, `\'` escapes; unknown escapes
@@ -669,6 +674,9 @@ pub fn apply_sandbox_opts(
     }
     if let Some(ref security) = opts.security {
         builder = builder.security(parse_security_profile(security)?);
+    }
+    if let Some(ref profile) = opts.deployment_profile {
+        builder = builder.deployment_profile(parse_deployment_profile(profile)?);
     }
 
     // --- Handoff init ---
@@ -2064,6 +2072,14 @@ fn parse_security_profile(value: &str) -> anyhow::Result<SecurityProfile> {
     }
 }
 
+fn parse_deployment_profile(value: &str) -> anyhow::Result<DeploymentProfile> {
+    match value {
+        "single-tenant" | "single_tenant" => Ok(DeploymentProfile::SingleTenant),
+        "multi-tenant" | "multi_tenant" => Ok(DeploymentProfile::MultiTenant),
+        other => anyhow::bail!("invalid deployment profile {other:?}"),
+    }
+}
+
 /// Resolve `--script` / `--script-raw` / `--script-path` specs into a
 /// deduped list of `(name, content)` pairs preserving argv order:
 /// inline shell snippets first, then raw inline, then path-backed.
@@ -2675,6 +2691,24 @@ mod tests {
             .unwrap();
 
         assert_eq!(config.spec.security_profile, SecurityProfile::Restricted);
+    }
+
+    #[tokio::test]
+    async fn apply_sandbox_opts_sets_deployment_profile() {
+        let opts = SandboxOpts {
+            deployment_profile: Some("multi-tenant".to_string()),
+            ..Default::default()
+        };
+        let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            config.spec.deployment_profile,
+            DeploymentProfile::MultiTenant
+        );
     }
 
     #[tokio::test]

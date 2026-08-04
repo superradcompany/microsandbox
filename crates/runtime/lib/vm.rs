@@ -328,6 +328,10 @@ pub struct VmConfig {
     #[cfg(feature = "net")]
     pub network: microsandbox_network::config::NetworkConfig,
 
+    /// Host-runtime isolation profile enforced by the network backend.
+    #[cfg(feature = "net")]
+    pub deployment_profile: microsandbox_types::DeploymentProfile,
+
     /// Sandbox slot for deterministic network address derivation.
     #[cfg(feature = "net")]
     pub sandbox_slot: u64,
@@ -1315,9 +1319,12 @@ fn build_vm(
             .validate()
             .map_err(|err| RuntimeError::Custom(format!("invalid network secrets: {err}")))?;
 
-        let mut network =
-            microsandbox_network::network::SmoltcpNetwork::new(vm.network.clone(), vm.sandbox_slot)
-                .map_err(|err| RuntimeError::Custom(format!("initialize network: {err}")))?;
+        let mut network = microsandbox_network::network::SmoltcpNetwork::new_with_profile(
+            vm.network.clone(),
+            vm.sandbox_slot,
+            vm.deployment_profile,
+        )
+        .map_err(|err| RuntimeError::Custom(format!("initialize network: {err}")))?;
         network_termination_handle = Some(network.termination_handle());
         network_metrics_handle = Some(network.metrics_handle());
         // Only sandboxes that booted with secrets can be live-reconfigured:

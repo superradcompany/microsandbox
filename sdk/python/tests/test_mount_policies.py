@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 
 from microsandbox import (
+    DeploymentProfile,
     DiskImageFormat,
     HostPermissions,
     MountConfig,
@@ -140,3 +141,8 @@ def test_host_permissions_str_values() -> None:
 def test_security_profile_str_values() -> None:
     assert SecurityProfile.DEFAULT.value == "default"
     assert SecurityProfile.RESTRICTED.value == "restricted"
+
+
+def test_deployment_profile_str_values() -> None:
+    assert DeploymentProfile.SINGLE_TENANT.value == "single-tenant"
+    assert DeploymentProfile.MULTI_TENANT.value == "multi-tenant"

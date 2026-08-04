@@ -16,6 +16,7 @@ from microsandbox import (
     Action,
     BackendKind,
     ChangeKind,
+    DeploymentProfile,
     DiskImageFormat,
     ExecEventType,
     ImageArchiveFormat,
@@ -73,6 +74,7 @@ def test_native_enum_outputs_are_enum_members() -> None:
         ("pull_policy", "always"),
         ("log_level", "debug"),
         ("security", "restricted"),
+        ("deployment_profile", "single-tenant"),
     ],
 )
 def test_sandbox_create_rejects_raw_enum_strings(field: str, value: str) -> None:
@@ -107,6 +109,7 @@ def test_python_config_types_reject_raw_enum_strings(operation: Callable[[], obj
 
 
 def test_new_enum_domains_have_canonical_values() -> None:
+    assert DeploymentProfile.SINGLE_TENANT.value == "single-tenant"
     assert ImageArchiveFormat.DOCKER.value == "docker"
     assert DiskImageFormat.RAW.value == "raw"
     assert SecurityProfile.RESTRICTED.value == "restricted"
@@ -196,6 +199,7 @@ def test_native_config_boundaries_accept_concrete_types() -> None:
         Sandbox.create(
             "enum-boundary-concrete",
             image="alpine",
+            deployment_profile=DeploymentProfile.SINGLE_TENANT,
             init=MappingProxyType({"cmd": "auto"}),
             volumes={"/data": Volume.bind("/tmp")},
             patches=[Patch.file("/tmp/x", b"\x00\xff")],

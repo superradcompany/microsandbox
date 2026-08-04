@@ -174,6 +174,7 @@ export interface NapiSandboxBuilderSetters {
   workdir(path: string): this;
   shell(shell: string): this;
   security(profile: "default" | "restricted"): this;
+  deploymentProfile(profile: "single-tenant" | "multi-tenant"): this;
   /** @deprecated Use setRuntimeLibkrunfwPath(path) before creating local sandboxes. */
   libkrunfwPath(path: string): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

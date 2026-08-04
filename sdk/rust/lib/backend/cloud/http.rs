@@ -242,7 +242,7 @@ impl CloudBackend {
         opts: &LogStreamOptions,
     ) -> MicrosandboxResult<LogStream> {
         let mut query = Vec::new();
-        let cloud_sources = cloud_log_sources(&opts.sources)?;
+        let cloud_sources = cloud_log_sources(&opts.sources);
         if !cloud_sources.is_empty() {
             query.push(format!("sources={}", cloud_sources.join(",")));
         }
@@ -556,21 +556,17 @@ fn cloud_log_event_to_entry(
     }))
 }
 
-fn cloud_log_sources(requested: &[LogSource]) -> MicrosandboxResult<Vec<String>> {
-    if requested.is_empty() {
-        return Ok(Vec::new());
-    }
-
+fn cloud_log_sources(requested: &[LogSource]) -> Vec<String> {
     LogSource::effective(requested)
         .into_iter()
-        .map(|source| match source {
-            LogSource::Stdout => Ok("stdout".to_string()),
-            LogSource::Stderr => Ok("stderr".to_string()),
-            LogSource::System => Ok("system".to_string()),
-            LogSource::Output => Err(MicrosandboxError::unsupported(
-                Operation::SandboxLogStream,
-                UnsupportedReason::ConfigField("LogSource::Output"),
-            )),
+        .map(|source| {
+            match source {
+                LogSource::Stdout => "stdout",
+                LogSource::Stderr => "stderr",
+                LogSource::System => "system",
+                LogSource::Output => "output",
+            }
+            .to_string()
         })
         .collect()
 }
@@ -689,9 +685,29 @@ mod tests {
     }
 
     #[test]
-    fn cloud_log_sources_rejects_output_until_cloud_supports_it() {
-        let err = cloud_log_sources(&[LogSource::Output]).unwrap_err();
+    fn cloud_log_sources_include_pty_output() {
+        let sources = cloud_log_sources(&[LogSource::Output]);
 
-        assert!(matches!(err, MicrosandboxError::Unsupported { .. }));
+        assert_eq!(sources, ["output"]);
+    }
+
+    #[test]
+    fn cloud_log_sources_use_the_cross_backend_default() {
+        let sources = cloud_log_sources(&[]);
+
+        assert_eq!(sources, ["stdout", "stderr", "output"]);
+    }
+
+    #[test]
+    fn cloud_log_sse_event_maps_pty_output_to_log_entry() {
+        let block = b"event: log\ndata: {\"source\":\"output\",\"ts\":\"2026-05-31T10:00:00Z\",\"text\":\"pty\"}";
+
+        let item = parse_cloud_sse_item(block, &LogStreamOptions::default()).unwrap();
+
+        let CloudSseItem::Entry(entry) = item else {
+            panic!("expected log entry");
+        };
+        assert_eq!(entry.source, LogSource::Output);
+        assert_eq!(entry.data, Bytes::from_static(b"pty"));
     }
 }
