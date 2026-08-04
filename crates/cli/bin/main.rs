@@ -704,7 +704,7 @@ fn is_backend_independent_maintenance_command(command: &Commands) -> bool {
         | Commands::Self_(_)
         | Commands::Completion(_) => true,
         #[cfg(windows)]
-        Commands::WindowsSelfDowngradeSwap(_) => true,
+        Commands::WindowsSelfSwap(_) => true,
         _ => false,
     }
 }
