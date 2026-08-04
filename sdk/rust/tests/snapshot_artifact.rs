@@ -345,8 +345,12 @@ async fn seed_image_cache(cache: &microsandbox_image::GlobalCache) -> SeededImag
         .unwrap();
 
     let image_digest: microsandbox_image::Digest = manifest_digest.parse().unwrap();
-    std::fs::write(cache.layer_erofs_path(&diff_id), vec![0u8; 4096]).unwrap();
-    std::fs::write(cache.fsmeta_erofs_path(&image_digest), vec![0u8; 4096]).unwrap();
+    // Cache validation parses the EROFS superblock and root inode, so these
+    // fixtures must be real filesystem images rather than aligned zero files.
+    let empty_tree = microsandbox_image::tree::FileTree::new();
+    microsandbox_image::erofs::write_erofs(&empty_tree, &cache.layer_erofs_path(&diff_id)).unwrap();
+    microsandbox_image::erofs::write_erofs(&empty_tree, &cache.fsmeta_erofs_path(&image_digest))
+        .unwrap();
     std::fs::write(cache.vmdk_path(&image_digest), b"# vmdk").unwrap();
 
     SeededImageCache {
