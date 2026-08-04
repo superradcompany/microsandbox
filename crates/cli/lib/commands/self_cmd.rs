@@ -119,10 +119,10 @@ pub struct SchemaBaselineArgs {
     pub json: bool,
 }
 
-/// Arguments for the deferred Windows self-downgrade binary swap helper.
+/// Arguments for the deferred Windows self-update or self-downgrade swap helper.
 #[cfg(windows)]
 #[derive(Debug, Args)]
-pub struct WindowsSelfDowngradeSwapArgs {
+pub struct WindowsSelfSwapArgs {
     /// Durable arguments used by Task Scheduler to resume the swap.
     #[arg(long)]
     pub resume_path: PathBuf,
@@ -220,22 +220,36 @@ struct DowngradeOperation {
     journal: DowngradeOperationJournal,
 }
 
-/// Durable Windows-only handoff from the downgrade parent to its retryable
-/// activation helper. Task Scheduler keeps invoking the helper with this file
-/// until target verification and journal cleanup both succeed.
+/// Durable Windows-only handoff from a self-management command to its retryable
+/// activation helper. Task Scheduler keeps invoking the helper until target
+/// verification and command-specific cleanup both succeed.
 #[cfg(windows)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct WindowsDowngradeResume {
+struct WindowsSelfSwapResume {
     format_version: u32,
     task_name: String,
     parent_pid: i32,
     base_dir: PathBuf,
     staged_dir: PathBuf,
-    operation_dir: PathBuf,
     target_version: String,
-    lease_holder_pid: Option<i32>,
-    lease_expires_at: Option<String>,
     log_path: PathBuf,
+    completion: WindowsSelfSwapCompletion,
+}
+
+/// Cleanup required after a deferred Windows release swap succeeds.
+#[cfg(windows)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum WindowsSelfSwapCompletion {
+    /// A self-update only needs artifact verification and helper cleanup.
+    Update,
+
+    /// A self-downgrade must also finish its journal and release its lease.
+    Downgrade {
+        operation_dir: PathBuf,
+        lease_holder_pid: Option<i32>,
+        lease_expires_at: Option<String>,
+    },
 }
 
 #[derive(Debug)]
@@ -259,6 +273,16 @@ struct DowngradeRunContext<'a> {
     operation: &'a mut DowngradeOperation,
     install_lease: Option<&'a mut microsandbox_runtime::maintenance::InstallExclusiveLease>,
     args: &'a SelfDowngradeArgs,
+}
+
+#[cfg(windows)]
+impl WindowsSelfSwapCompletion {
+    fn operation_name(&self) -> &'static str {
+        match self {
+            Self::Update => "update",
+            Self::Downgrade { .. } => "downgrade",
+        }
+    }
 }
 
 impl UninstallCategory {
@@ -755,13 +779,23 @@ pub async fn run_update(args: SelfUpdateArgs) -> anyhow::Result<()> {
     }
 
     let base_dir = resolve_base_dir()?;
+    install_update_release(&base_dir, latest_clean, &latest).await?;
+
+    Ok(())
+}
+
+#[cfg(not(windows))]
+async fn install_update_release(
+    base_dir: &Path,
+    target_version: &str,
+    display_version: &str,
+) -> anyhow::Result<()> {
     let bin_dir = base_dir.join(microsandbox_utils::BIN_SUBDIR);
     let lib_dir = base_dir.join(microsandbox_utils::LIB_SUBDIR);
-
-    let spinner = ui::Spinner::start("Updating", &format!("to {latest}"));
+    let spinner = ui::Spinner::start("Updating", &format!("to {display_version}"));
     let result = microsandbox::setup::Setup::builder()
-        .base_dir(base_dir.clone())
-        .version(latest_clean.to_string())
+        .base_dir(base_dir.to_path_buf())
+        .version(target_version.to_string())
         .force(true)
         .build()
         .install()
@@ -772,14 +806,48 @@ pub async fn run_update(args: SelfUpdateArgs) -> anyhow::Result<()> {
             spinner.finish_clear();
             done(&format!("Updated msb in {}", bin_dir.display()));
             done(&format!("Updated libkrunfw in {}/", lib_dir.display()));
-            link_public_commands(&base_dir)?;
+            link_public_commands(base_dir)?;
+            Ok(())
         }
-        Err(e) => {
+        Err(error) => {
             spinner.finish_clear();
-            anyhow::bail!("update failed: {e}");
+            anyhow::bail!("update failed: {error}");
         }
     }
+}
 
+#[cfg(windows)]
+async fn install_update_release(
+    base_dir: &Path,
+    target_version: &str,
+    display_version: &str,
+) -> anyhow::Result<()> {
+    let target_version = Version::parse(target_version)?;
+    let spinner = ui::Spinner::start("Staging", &format!("verified release {display_version}"));
+    let resume = match prepare_windows_update_recovery(base_dir, target_version).await {
+        Ok(resume) => {
+            spinner.finish_success("Staged");
+            resume
+        }
+        Err(error) => {
+            spinner.finish_clear();
+            anyhow::bail!("update failed: {error}");
+        }
+    };
+
+    start_windows_self_swap_task(&resume.task_name)?;
+    ui::success(
+        "Scheduled",
+        &format!(
+            "Windows update after msb processes release the installed files; log: {}",
+            resume.log_path.display()
+        ),
+    );
+    done(&format!(
+        "Update to v{} will complete in the background",
+        target_version
+    ));
+    link_public_commands(base_dir)?;
     Ok(())
 }
 
@@ -1136,8 +1204,8 @@ async fn install_target_release(
     stage_windows_target_release(ctx).await?;
     refresh_windows_downgrade_recovery(ctx)?;
     let resume =
-        load_windows_downgrade_resume(&windows_downgrade_resume_path(ctx.base_dir, ctx.operation))?;
-    start_windows_downgrade_recovery_task(&resume.task_name)?;
+        load_windows_self_swap_resume(&windows_downgrade_resume_path(ctx.base_dir, ctx.operation))?;
+    start_windows_self_swap_task(&resume.task_name)?;
 
     ui::success(
         "Scheduled",
@@ -1169,23 +1237,8 @@ fn prepare_windows_downgrade_recovery(
     install_lease: Option<&microsandbox_runtime::maintenance::InstallExclusiveLease>,
 ) -> anyhow::Result<()> {
     let recovery_dir = windows_downgrade_recovery_dir(base_dir, operation);
-    fs::create_dir_all(&recovery_dir)?;
-
-    let helper_path = recovery_dir.join("msb-downgrade-helper.exe");
-    if !helper_path.exists() {
-        fs::copy(std::env::current_exe()?, &helper_path)?;
-    }
-
-    let log_dir = base_dir.join(microsandbox_utils::LOGS_SUBDIR);
-    fs::create_dir_all(&log_dir)?;
-    let resume = WindowsDowngradeResume {
-        format_version: 1,
-        task_name: windows_downgrade_task_name(operation),
-        parent_pid: std::process::id() as i32,
-        base_dir: base_dir.to_path_buf(),
-        staged_dir: operation.target_dir().to_path_buf(),
+    let completion = WindowsSelfSwapCompletion::Downgrade {
         operation_dir: operation.directory.clone(),
-        target_version: target_version.to_string(),
         lease_holder_pid: install_lease.map(|lease| lease.holder_pid),
         lease_expires_at: install_lease.map(|lease| {
             lease
@@ -1193,22 +1246,110 @@ fn prepare_windows_downgrade_recovery(
                 .and_utc()
                 .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
         }),
-        log_path: log_dir.join(format!(
+    };
+    prepare_windows_self_swap_recovery(
+        base_dir,
+        operation.target_dir(),
+        &recovery_dir,
+        target_version,
+        windows_downgrade_task_name(operation),
+        format!(
             "self-downgrade-{CURRENT_VERSION}-to-{target_version}-{}.log",
             std::process::id()
-        )),
-    };
-    let resume_path = windows_downgrade_resume_path(base_dir, operation);
-    persist_windows_downgrade_resume(&resume_path, &resume)?;
+        ),
+        completion,
+    )?;
+    Ok(())
+}
 
-    if let Err(error) =
-        register_windows_downgrade_recovery_task(&resume.task_name, &helper_path, &resume_path)
-    {
-        let _ = unregister_windows_downgrade_recovery_task(&resume.task_name);
+#[cfg(windows)]
+async fn prepare_windows_update_recovery(
+    base_dir: &Path,
+    target_version: Version,
+) -> anyhow::Result<WindowsSelfSwapResume> {
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let operation_id = format!("{timestamp}-{}", std::process::id());
+    let recovery_dir = base_dir
+        .join(microsandbox_utils::DB_SUBDIR)
+        .join("self-update-windows")
+        .join(&operation_id);
+    let staged_dir = recovery_dir.join("target");
+    fs::create_dir_all(&recovery_dir)?;
+
+    let result = async {
+        let bundle_digest = fetch_release_bundle_digest(target_version).await?;
+        microsandbox::setup::Setup::builder()
+            .base_dir(staged_dir.clone())
+            .version(target_version.to_string())
+            .allow_ci_local_bundle(false)
+            .expected_bundle_sha256(bundle_digest)
+            .force(true)
+            .build()
+            .install()
+            .await?;
+        verify_installed_msb_version(&staged_dir, target_version).await?;
+
+        prepare_windows_self_swap_recovery(
+            base_dir,
+            &staged_dir,
+            &recovery_dir,
+            target_version,
+            format!("Microsandbox-Self-Update-{operation_id}"),
+            format!(
+                "self-update-{CURRENT_VERSION}-to-{target_version}-{}.log",
+                std::process::id()
+            ),
+            WindowsSelfSwapCompletion::Update,
+        )
+    }
+    .await;
+
+    if result.is_err() {
         let _ = fs::remove_dir_all(&recovery_dir);
+    }
+    result
+}
+
+#[cfg(windows)]
+fn prepare_windows_self_swap_recovery(
+    base_dir: &Path,
+    staged_dir: &Path,
+    recovery_dir: &Path,
+    target_version: Version,
+    task_name: String,
+    log_name: String,
+    completion: WindowsSelfSwapCompletion,
+) -> anyhow::Result<WindowsSelfSwapResume> {
+    fs::create_dir_all(recovery_dir)?;
+
+    // The helper must run outside the install bin directory so Windows can
+    // release and replace whichever public CLI name launched the parent.
+    let helper_path = recovery_dir.join("msb-self-swap-helper.exe");
+    if !helper_path.exists() {
+        fs::copy(std::env::current_exe()?, &helper_path)?;
+    }
+
+    let log_dir = base_dir.join(microsandbox_utils::LOGS_SUBDIR);
+    fs::create_dir_all(&log_dir)?;
+    let resume = WindowsSelfSwapResume {
+        format_version: 1,
+        task_name,
+        parent_pid: std::process::id() as i32,
+        base_dir: base_dir.to_path_buf(),
+        staged_dir: staged_dir.to_path_buf(),
+        target_version: target_version.to_string(),
+        log_path: log_dir.join(log_name),
+        completion,
+    };
+    let resume_path = recovery_dir.join("resume.json");
+    persist_windows_self_swap_resume(&resume_path, &resume)?;
+
+    if let Err(error) = register_windows_self_swap_task(&resume, &helper_path, &resume_path) {
+        let _ = unregister_windows_self_swap_task(&resume.task_name);
+        let _ = fs::remove_dir_all(recovery_dir);
         return Err(error);
     }
-    Ok(())
+    Ok(resume)
 }
 
 #[cfg(windows)]
@@ -1233,13 +1374,13 @@ fn windows_downgrade_task_name(operation: &DowngradeOperation) -> String {
 }
 
 #[cfg(windows)]
-fn persist_windows_downgrade_resume(
+fn persist_windows_self_swap_resume(
     path: &Path,
-    resume: &WindowsDowngradeResume,
+    resume: &WindowsSelfSwapResume,
 ) -> anyhow::Result<()> {
     let parent = path
         .parent()
-        .ok_or_else(|| anyhow::anyhow!("Windows downgrade resume path has no parent"))?;
+        .ok_or_else(|| anyhow::anyhow!("Windows self-swap resume path has no parent"))?;
     fs::create_dir_all(parent)?;
     let temp = parent.join(format!(".resume.json.{}.tmp", std::process::id()));
     let _ = fs::remove_file(&temp);
@@ -1256,11 +1397,11 @@ fn persist_windows_downgrade_resume(
 }
 
 #[cfg(windows)]
-fn load_windows_downgrade_resume(path: &Path) -> anyhow::Result<WindowsDowngradeResume> {
-    let resume: WindowsDowngradeResume = serde_json::from_slice(&fs::read(path)?)?;
+fn load_windows_self_swap_resume(path: &Path) -> anyhow::Result<WindowsSelfSwapResume> {
+    let resume: WindowsSelfSwapResume = serde_json::from_slice(&fs::read(path)?)?;
     if resume.format_version != 1 {
         anyhow::bail!(
-            "unsupported Windows downgrade resume format {}; expected 1",
+            "unsupported Windows self-swap resume format {}; expected 1",
             resume.format_version
         );
     }
@@ -1270,16 +1411,24 @@ fn load_windows_downgrade_resume(path: &Path) -> anyhow::Result<WindowsDowngrade
 #[cfg(windows)]
 fn refresh_windows_downgrade_recovery(ctx: &DowngradeRunContext<'_>) -> anyhow::Result<()> {
     let resume_path = windows_downgrade_resume_path(ctx.base_dir, ctx.operation);
-    let mut resume = load_windows_downgrade_resume(&resume_path)?;
+    let mut resume = load_windows_self_swap_resume(&resume_path)?;
     resume.parent_pid = std::process::id() as i32;
-    resume.lease_holder_pid = ctx.install_lease.as_ref().map(|lease| lease.holder_pid);
-    resume.lease_expires_at = ctx.install_lease.as_ref().map(|lease| {
+    let WindowsSelfSwapCompletion::Downgrade {
+        lease_holder_pid,
+        lease_expires_at,
+        ..
+    } = &mut resume.completion
+    else {
+        anyhow::bail!("Windows downgrade recovery contains an update completion");
+    };
+    *lease_holder_pid = ctx.install_lease.as_ref().map(|lease| lease.holder_pid);
+    *lease_expires_at = ctx.install_lease.as_ref().map(|lease| {
         lease
             .lease_expires_at
             .and_utc()
             .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
     });
-    persist_windows_downgrade_resume(&resume_path, &resume)
+    persist_windows_self_swap_resume(&resume_path, &resume)
 }
 
 #[cfg(not(windows))]
@@ -1288,16 +1437,20 @@ fn refresh_windows_downgrade_recovery(_ctx: &DowngradeRunContext<'_>) -> anyhow:
 }
 
 #[cfg(windows)]
-fn register_windows_downgrade_recovery_task(
-    task_name: &str,
+fn register_windows_self_swap_task(
+    resume: &WindowsSelfSwapResume,
     helper_path: &Path,
     resume_path: &Path,
 ) -> anyhow::Result<()> {
-    let task_name = powershell_single_quote(task_name);
+    let task_name = powershell_single_quote(&resume.task_name);
     let helper_path = powershell_single_quote(&helper_path.display().to_string());
     let resume_path = resume_path.display().to_string().replace('"', "");
     let arguments = powershell_single_quote(&format!(
-        "__windows-self-downgrade-swap --resume-path \"{resume_path}\""
+        "__windows-self-swap --resume-path \"{resume_path}\""
+    ));
+    let description = powershell_single_quote(&format!(
+        "Resume an interrupted Microsandbox self-{}",
+        resume.completion.operation_name()
     ));
     let script = format!(
         r#"
@@ -1316,7 +1469,7 @@ $retryTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(5) -Rep
 $triggers = @($logonTrigger, $retryTrigger)
 $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Hours 2) -MultipleInstances IgnoreNew
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $triggers -Principal $principal -Settings $settings -Description 'Resume an interrupted Microsandbox self-downgrade' -Force | Out-Null
+Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $triggers -Principal $principal -Settings $settings -Description {description} -Force | Out-Null
 # An elevated caller's default task ACL only grants its limited scheduled
 # action read access. Explicitly grant this same user full control over this
 # task so the unelevated helper can unregister itself after durable cleanup.
@@ -1329,11 +1482,11 @@ $registeredTask.SetSecurityDescriptor($dacl + "(A;;GA;;;$sid)", 0)
 Start-ScheduledTask -TaskName $taskName
 "#
     );
-    run_windows_powershell(&script, "register Windows downgrade recovery task")
+    run_windows_powershell(&script, "register Windows self-swap recovery task")
 }
 
 #[cfg(windows)]
-fn start_windows_downgrade_recovery_task(task_name: &str) -> anyhow::Result<()> {
+fn start_windows_self_swap_task(task_name: &str) -> anyhow::Result<()> {
     let task_name = powershell_single_quote(task_name);
     let script = format!(
         r#"
@@ -1345,11 +1498,11 @@ if ($task.State -ne 'Running') {{
 }}
 "#
     );
-    run_windows_powershell(&script, "start Windows downgrade recovery task")
+    run_windows_powershell(&script, "start Windows self-swap recovery task")
 }
 
 #[cfg(windows)]
-fn unregister_windows_downgrade_recovery_task(task_name: &str) -> anyhow::Result<()> {
+fn unregister_windows_self_swap_task(task_name: &str) -> anyhow::Result<()> {
     let task_name = powershell_single_quote(task_name);
     let script = format!(
         r#"
@@ -1361,7 +1514,7 @@ if ($null -ne $task) {{
 }}
 "#
     );
-    run_windows_powershell(&script, "unregister Windows downgrade recovery task")
+    run_windows_powershell(&script, "unregister Windows self-swap recovery task")
 }
 
 #[cfg(windows)]
@@ -1414,12 +1567,10 @@ if ($null -ne $task) {{
     )
 }
 
-/// Complete a deferred Windows self-downgrade after the original msb exits.
+/// Complete a deferred Windows self-update or self-downgrade after the parent exits.
 #[cfg(windows)]
-pub async fn run_windows_self_downgrade_swap(
-    args: WindowsSelfDowngradeSwapArgs,
-) -> anyhow::Result<()> {
-    let resume = load_windows_downgrade_resume(&args.resume_path)?;
+pub async fn run_windows_self_swap(args: WindowsSelfSwapArgs) -> anyhow::Result<()> {
+    let resume = load_windows_self_swap_resume(&args.resume_path)?;
     if let Some(parent) = resume.log_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -1430,10 +1581,11 @@ pub async fn run_windows_self_downgrade_swap(
 
     writeln!(
         log,
-        "starting deferred downgrade swap to v{}",
+        "starting deferred {} swap to v{}",
+        resume.completion.operation_name(),
         resume.target_version
     )?;
-    let result = complete_windows_downgrade_swap(&resume, &mut log).await;
+    let result = complete_windows_self_swap(&resume, &mut log).await;
     if let Err(error) = &result {
         let _ = writeln!(
             log,
@@ -1444,53 +1596,90 @@ pub async fn run_windows_self_downgrade_swap(
 }
 
 #[cfg(windows)]
-async fn complete_windows_downgrade_swap(
-    resume: &WindowsDowngradeResume,
+async fn complete_windows_self_swap(
+    resume: &WindowsSelfSwapResume,
     log: &mut File,
 ) -> anyhow::Result<()> {
     wait_for_parent_process_exit(resume.parent_pid, log)?;
 
-    if resume.operation_dir.exists() {
-        let journal_path = resume.operation_dir.join("journal.json");
-        let journal: DowngradeOperationJournal = serde_json::from_slice(&fs::read(&journal_path)?)?;
-        if journal.phase < DowngradePhase::DatabaseReverted {
-            anyhow::bail!(
-                "downgrade operation {} is at {:?}; target activation requires DatabaseReverted",
-                journal.operation_id,
-                journal.phase
-            );
+    match &resume.completion {
+        WindowsSelfSwapCompletion::Update => {
+            perform_windows_self_swap(resume, log).await?;
         }
-        perform_windows_downgrade_swap(resume, log).await?;
-        mark_windows_downgrade_target_installed(&resume.operation_dir, log)?;
-        clear_windows_downgrade_lease(resume, log).await?;
-        complete_windows_downgrade_operation(&resume.operation_dir, log)?;
-    } else {
-        let target_version = Version::parse(&resume.target_version)?;
-        verify_installed_msb_version(&resume.base_dir, target_version).await?;
-        clear_windows_downgrade_lease(resume, log).await?;
-        writeln!(log, "verified previously completed downgrade operation")?;
+        WindowsSelfSwapCompletion::Downgrade {
+            operation_dir,
+            lease_holder_pid,
+            lease_expires_at,
+        } => {
+            if operation_dir.exists() {
+                let journal_path = operation_dir.join("journal.json");
+                let journal: DowngradeOperationJournal =
+                    serde_json::from_slice(&fs::read(&journal_path)?)?;
+                if journal.phase < DowngradePhase::DatabaseReverted {
+                    anyhow::bail!(
+                        "downgrade operation {} is at {:?}; target activation requires DatabaseReverted",
+                        journal.operation_id,
+                        journal.phase
+                    );
+                }
+                perform_windows_self_swap(resume, log).await?;
+                mark_windows_downgrade_target_installed(operation_dir, log)?;
+                clear_windows_downgrade_lease(
+                    &resume.base_dir,
+                    *lease_holder_pid,
+                    lease_expires_at.as_deref(),
+                    log,
+                )
+                .await?;
+                complete_windows_downgrade_operation(operation_dir, log)?;
+            } else {
+                verify_windows_self_swap(&resume.base_dir, &resume.target_version).await?;
+                clear_windows_downgrade_lease(
+                    &resume.base_dir,
+                    *lease_holder_pid,
+                    lease_expires_at.as_deref(),
+                    log,
+                )
+                .await?;
+                writeln!(log, "verified previously completed downgrade operation")?;
+            }
+        }
     }
-    unregister_windows_downgrade_recovery_task(&resume.task_name)?;
+
+    unregister_windows_self_swap_task(&resume.task_name)?;
     if let Err(error) = schedule_windows_helper_cleanup(log) {
         let _ = writeln!(log, "warning: failed to schedule helper cleanup: {error:#}");
     }
-    writeln!(log, "deferred downgrade swap completed")?;
+    writeln!(
+        log,
+        "deferred {} swap completed",
+        resume.completion.operation_name()
+    )?;
     Ok(())
 }
 
 #[cfg(windows)]
-async fn perform_windows_downgrade_swap(
-    resume: &WindowsDowngradeResume,
+async fn perform_windows_self_swap(
+    resume: &WindowsSelfSwapResume,
     log: &mut File,
 ) -> anyhow::Result<()> {
-    let target_version = Version::parse(&resume.target_version)?;
+    copy_windows_release_artifacts(&resume.staged_dir, &resume.base_dir, log)?;
+    verify_windows_self_swap(&resume.base_dir, &resume.target_version).await?;
+    Ok(())
+}
 
+#[cfg(windows)]
+fn copy_windows_release_artifacts(
+    staged_dir: &Path,
+    base_dir: &Path,
+    log: &mut File,
+) -> anyhow::Result<()> {
     let msb_name = microsandbox_utils::msb_binary_filename("windows");
     let libkrunfw_name = microsandbox_utils::libkrunfw_filename("windows");
-    let staged_bin = resume.staged_dir.join(microsandbox_utils::BIN_SUBDIR);
-    let staged_lib = resume.staged_dir.join(microsandbox_utils::LIB_SUBDIR);
-    let target_bin = resume.base_dir.join(microsandbox_utils::BIN_SUBDIR);
-    let target_lib = resume.base_dir.join(microsandbox_utils::LIB_SUBDIR);
+    let staged_bin = staged_dir.join(microsandbox_utils::BIN_SUBDIR);
+    let staged_lib = staged_dir.join(microsandbox_utils::LIB_SUBDIR);
+    let target_bin = base_dir.join(microsandbox_utils::BIN_SUBDIR);
+    let target_lib = base_dir.join(microsandbox_utils::LIB_SUBDIR);
 
     // Copy the executable before the DLL. If the swap fails halfway, a target
     // CLI with the newer current DLL is safer than a newer CLI against the
@@ -1502,24 +1691,41 @@ async fn perform_windows_downgrade_swap(
         log,
     )?;
     copy_windows_swap_file_with_retries(
+        &staged_bin.join(&msb_name),
+        &target_bin.join("microsandbox.exe"),
+        "microsandbox.exe",
+        log,
+    )?;
+    copy_windows_swap_file_with_retries(
         &staged_lib.join(&libkrunfw_name),
         &target_lib.join(&libkrunfw_name),
         "libkrunfw.dll",
         log,
     )?;
-
-    verify_installed_msb_version(&resume.base_dir, target_version).await?;
     Ok(())
 }
 
 #[cfg(windows)]
+async fn verify_windows_self_swap(base_dir: &Path, target_version: &str) -> anyhow::Result<()> {
+    let target_version = Version::parse(target_version)?;
+    let bin_dir = base_dir.join(microsandbox_utils::BIN_SUBDIR);
+    verify_msb_version_at_path(&bin_dir.join("msb.exe"), target_version, "msb.exe").await?;
+    verify_msb_version_at_path(
+        &bin_dir.join("microsandbox.exe"),
+        target_version,
+        "microsandbox.exe",
+    )
+    .await
+}
+
+#[cfg(windows)]
 async fn clear_windows_downgrade_lease(
-    resume: &WindowsDowngradeResume,
+    base_dir: &Path,
+    lease_holder_pid: Option<i32>,
+    lease_expires_at: Option<&str>,
     log: &mut File,
 ) -> anyhow::Result<()> {
-    let (Some(holder_pid), Some(expires_at)) =
-        (resume.lease_holder_pid, resume.lease_expires_at.as_deref())
-    else {
+    let (Some(holder_pid), Some(expires_at)) = (lease_holder_pid, lease_expires_at) else {
         writeln!(log, "no install-exclusive lease was passed to helper")?;
         return Ok(());
     };
@@ -1529,8 +1735,7 @@ async fn clear_windows_downgrade_lease(
         holder_pid,
         lease_expires_at,
     };
-    let db_path = resume
-        .base_dir
+    let db_path = base_dir
         .join(microsandbox_utils::DB_SUBDIR)
         .join(microsandbox_utils::DB_FILENAME);
     let db = open_downgrade_db(&db_path).await?;
@@ -2671,14 +2876,22 @@ where
 async fn verify_installed_msb_version(base_dir: &Path, target: Version) -> anyhow::Result<()> {
     let msb_name = microsandbox_utils::msb_binary_filename(std::env::consts::OS);
     let msb_path = base_dir.join(microsandbox_utils::BIN_SUBDIR).join(msb_name);
-    let output = TokioCommand::new(&msb_path)
+    verify_msb_version_at_path(&msb_path, target, "msb").await
+}
+
+async fn verify_msb_version_at_path(
+    msb_path: &Path,
+    target: Version,
+    label: &str,
+) -> anyhow::Result<()> {
+    let output = TokioCommand::new(msb_path)
         .arg("--version")
         .output()
         .await?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!(
-            "installed msb version check failed with status {}: {}",
+            "installed {label} version check failed with status {}: {}",
             output.status,
             stderr.trim()
         );
@@ -2688,9 +2901,9 @@ async fn verify_installed_msb_version(base_dir: &Path, target: Version) -> anyho
     let installed = stdout
         .trim()
         .strip_prefix("msb ")
-        .ok_or_else(|| anyhow::anyhow!("unexpected msb --version output: {}", stdout.trim()))?;
+        .ok_or_else(|| anyhow::anyhow!("unexpected {label} --version output: {}", stdout.trim()))?;
     if installed != target.to_string() {
-        anyhow::bail!("installed msb version is {installed}, expected {target}");
+        anyhow::bail!("installed {label} version is {installed}, expected {target}");
     }
 
     Ok(())
@@ -3323,5 +3536,64 @@ mod tests {
 
         let err = build_rollback_plan(&baseline, &applied).unwrap_err();
         assert!(err.to_string().contains("not compatible"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_self_swap_resume_preserves_update_completion() {
+        let resume = WindowsSelfSwapResume {
+            format_version: 1,
+            task_name: "Microsandbox-Self-Update-test".to_string(),
+            parent_pid: 42,
+            base_dir: PathBuf::from(r"C:\Users\Test\.microsandbox"),
+            staged_dir: PathBuf::from(r"C:\Users\Test\.microsandbox\db\stage"),
+            target_version: "0.6.9".to_string(),
+            log_path: PathBuf::from(r"C:\Users\Test\.microsandbox\logs\update.log"),
+            completion: WindowsSelfSwapCompletion::Update,
+        };
+
+        let encoded = serde_json::to_vec(&resume).unwrap();
+        let decoded: WindowsSelfSwapResume = serde_json::from_slice(&encoded).unwrap();
+
+        assert_eq!(decoded.task_name, resume.task_name);
+        assert_eq!(decoded.target_version, "0.6.9");
+        assert!(matches!(
+            decoded.completion,
+            WindowsSelfSwapCompletion::Update
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_release_swap_refreshes_both_cli_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged_dir = dir.path().join("staged");
+        let base_dir = dir.path().join("installed");
+        let staged_bin = staged_dir.join(microsandbox_utils::BIN_SUBDIR);
+        let staged_lib = staged_dir.join(microsandbox_utils::LIB_SUBDIR);
+        fs::create_dir_all(&staged_bin).unwrap();
+        fs::create_dir_all(&staged_lib).unwrap();
+        fs::write(staged_bin.join("msb.exe"), b"new-cli").unwrap();
+        fs::write(staged_lib.join("libkrunfw.dll"), b"new-firmware").unwrap();
+
+        let log_path = dir.path().join("swap.log");
+        let mut log = File::create(&log_path).unwrap();
+        copy_windows_release_artifacts(&staged_dir, &base_dir, &mut log).unwrap();
+
+        let installed_bin = base_dir.join(microsandbox_utils::BIN_SUBDIR);
+        assert_eq!(fs::read(installed_bin.join("msb.exe")).unwrap(), b"new-cli");
+        assert_eq!(
+            fs::read(installed_bin.join("microsandbox.exe")).unwrap(),
+            b"new-cli"
+        );
+        assert_eq!(
+            fs::read(
+                base_dir
+                    .join(microsandbox_utils::LIB_SUBDIR)
+                    .join("libkrunfw.dll")
+            )
+            .unwrap(),
+            b"new-firmware"
+        );
     }
 }

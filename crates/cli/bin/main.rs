@@ -83,10 +83,10 @@ enum Commands {
     #[command(name = "__schema-baseline", hide = true)]
     SchemaBaseline(self_cmd::SchemaBaselineArgs),
 
-    /// Complete a deferred Windows self-downgrade binary swap (internal).
+    /// Complete a deferred Windows self-update or self-downgrade swap (internal).
     #[cfg(windows)]
-    #[command(name = "__windows-self-downgrade-swap", hide = true)]
-    WindowsSelfDowngradeSwap(self_cmd::WindowsSelfDowngradeSwapArgs),
+    #[command(name = "__windows-self-swap", hide = true)]
+    WindowsSelfSwap(self_cmd::WindowsSelfSwapArgs),
 
     /// Create a sandbox from an image and run a command in it.
     Run(run::RunArgs),
@@ -626,9 +626,7 @@ fn run_async_command_anyhow(
             Commands::Sandbox(_) => unreachable!("handled before Tokio starts"),
             Commands::SchemaBaseline(args) => self_cmd::run_schema_baseline(args),
             #[cfg(windows)]
-            Commands::WindowsSelfDowngradeSwap(args) => {
-                self_cmd::run_windows_self_downgrade_swap(args).await
-            }
+            Commands::WindowsSelfSwap(args) => self_cmd::run_windows_self_swap(args).await,
 
             Commands::Run(args) => run::run(args, log_level).await,
             Commands::Create(args) => create::run(args, log_level).await,

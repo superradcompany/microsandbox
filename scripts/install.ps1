@@ -173,6 +173,27 @@ function Test-Checksum {
     Write-Success "Checksum verified."
 }
 
+function Assert-ExecutableNotRunning {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return
+    }
+
+    $target = [System.IO.Path]::GetFullPath($Path).TrimEnd("\", "/")
+    $name = [System.IO.Path]::GetFileName($Path)
+    $processes = Get-CimInstance Win32_Process -Filter "name = '$name'" -ErrorAction SilentlyContinue |
+        Where-Object {
+            -not [string]::IsNullOrWhiteSpace($_.ExecutablePath) -and
+                [System.IO.Path]::GetFullPath($_.ExecutablePath).TrimEnd("\", "/") -ieq $target
+        }
+
+    if ($processes) {
+        $ids = ($processes | ForEach-Object { $_.ProcessId }) -join ", "
+        throw "cannot replace $Path because it is still running (pid: $ids). Stop active sandboxes or msb processes, then rerun the installer."
+    }
+}
+
 function Copy-InstalledFile {
     param(
         [Parameter(Mandatory = $true)][string]$Source,
@@ -182,9 +203,23 @@ function Copy-InstalledFile {
     $destinationDir = Split-Path -Parent $Destination
     New-Item -ItemType Directory -Force -Path $destinationDir | Out-Null
 
-    $tempDestination = "$Destination.tmp"
-    Copy-Item -LiteralPath $Source -Destination $tempDestination -Force
-    Move-Item -LiteralPath $tempDestination -Destination $Destination -Force
+    # File.Replace can atomically overwrite an existing Windows file, unlike
+    # Move-Item -Force, which still fails when the destination already exists.
+    $tempDestination = "$Destination.$([Guid]::NewGuid().ToString('N')).tmp"
+    $backupDestination = "$Destination.$([Guid]::NewGuid().ToString('N')).bak"
+    try {
+        Copy-Item -LiteralPath $Source -Destination $tempDestination -Force
+        if (Test-Path -LiteralPath $Destination -PathType Leaf) {
+            # Windows PowerShell's .NET Framework rejects a null backup path,
+            # so use a unique same-directory backup and remove it immediately.
+            [System.IO.File]::Replace($tempDestination, $Destination, $backupDestination)
+        } else {
+            [System.IO.File]::Move($tempDestination, $Destination)
+        }
+    } finally {
+        Remove-Item -LiteralPath $tempDestination -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $backupDestination -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Install-Bundle {
@@ -207,6 +242,11 @@ function Install-Bundle {
     $msbDestination = Join-Path $BinDir "msb.exe"
     $microsandboxDestination = Join-Path $BinDir "microsandbox.exe"
     $libkrunfwDestination = Join-Path $LibDir "libkrunfw.dll"
+
+    # Check every public executable before changing any installed artifact so
+    # an active sandbox cannot leave the installation partially updated.
+    Assert-ExecutableNotRunning -Path $msbDestination
+    Assert-ExecutableNotRunning -Path $microsandboxDestination
 
     Copy-InstalledFile -Source $msbSource -Destination $msbDestination
     Copy-InstalledFile -Source $msbSource -Destination $microsandboxDestination
