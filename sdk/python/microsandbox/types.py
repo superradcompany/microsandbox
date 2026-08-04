@@ -53,6 +53,13 @@ class SecurityProfile(StrEnum):
     RESTRICTED = "restricted"
 
 
+class DeploymentProfile(StrEnum):
+    """Host-runtime isolation profile requested for local deployments."""
+
+    SINGLE_TENANT = "single-tenant"
+    MULTI_TENANT = "multi-tenant"
+
+
 class SandboxStatus(StrEnum):
     RUNNING = "running"
     STOPPED = "stopped"

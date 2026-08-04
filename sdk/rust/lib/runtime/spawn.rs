@@ -2243,6 +2243,8 @@ fn sandbox_cli_args(
             max_duration_secs: config.spec.lifecycle.max_duration_secs,
             idle_timeout_secs: config.spec.lifecycle.idle_timeout_secs,
         },
+        #[cfg(feature = "net")]
+        deployment_profile: config.spec.deployment_profile,
         workdir: config.spec.runtime.workdir.as_ref().map(PathBuf::from),
         ..Default::default()
     };

@@ -105,6 +105,7 @@ from microsandbox.events import (
 )
 from microsandbox.types import (
     Action,
+    DeploymentProfile,
     DestGroup,
     Destination,
     Direction,
@@ -263,6 +264,7 @@ __all__ = [
     "PullPolicy",
     "RegistryAuth",
     "LogLevel",
+    "DeploymentProfile",
     "SecurityProfile",
     "LogSource",
     "LogReadSource",

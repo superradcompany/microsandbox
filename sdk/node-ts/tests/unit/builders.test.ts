@@ -374,6 +374,14 @@ describe("SandboxBuilder.build", () => {
     expect(cfg.securityProfile).toBe("restricted");
   });
 
+  it("sets the host-runtime deployment profile", async () => {
+    const cfg = await Sandbox.builder("x")
+      .image("alpine")
+      .deploymentProfile("multi-tenant")
+      .build();
+    expect(cfg.deploymentProfile).toBe("multi_tenant");
+  });
+
   it("sets lifecycle ephemeral policy", async () => {
     const cfg = await Sandbox.builder("x")
       .image("alpine")

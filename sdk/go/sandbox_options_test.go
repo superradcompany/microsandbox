@@ -575,6 +575,16 @@ func TestFFIWireShape_SecurityProfile(t *testing.T) {
 	}
 }
 
+func TestFFIWireShape_DeploymentProfile(t *testing.T) {
+	got := marshalCreateOptions(t,
+		WithImage("alpine"),
+		WithDeploymentProfile(DeploymentProfileMultiTenant),
+	)
+	if got["deployment_profile"] != "multi-tenant" {
+		t.Fatalf("deployment_profile = %v", got["deployment_profile"])
+	}
+}
+
 func TestFFIWireShape_Secrets(t *testing.T) {
 	got := marshalCreateOptions(t,
 		WithImage("alpine"),

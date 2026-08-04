@@ -91,6 +91,7 @@ impl LocalBackend {
             "create_local: starting"
         );
 
+        self.apply_deployment_profile(&mut config);
         config.apply_rootfs_defaults(self.config().sandbox_defaults.oci.upper_size_mib);
 
         let mut pinned_manifest_digest: Option<String> = None;

@@ -133,9 +133,9 @@ pub use ssh::{
     SshServerOptionsBuilder, SshStdioStream,
 };
 pub use types::{
-    DiskImageFormat, HostPermissions, ImageBuilder, ImageSource, IntoImage, MountBuilder,
-    MountOptions, NamedVolumeMode, OciRootfsSource, Patch, PatchBuilder, RootDisk, RootDiskBuilder,
-    RootfsSource, SecurityProfile, StatVirtualization, VolumeMount,
+    DeploymentProfile, DiskImageFormat, HostPermissions, ImageBuilder, ImageSource, IntoImage,
+    MountBuilder, MountOptions, NamedVolumeMode, OciRootfsSource, Patch, PatchBuilder, RootDisk,
+    RootDiskBuilder, RootfsSource, SecurityProfile, StatVirtualization, VolumeMount,
 };
 
 //--------------------------------------------------------------------------------------------------

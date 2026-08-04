@@ -10,6 +10,7 @@
 
 use std::path::PathBuf;
 
+use microsandbox_types::DeploymentProfile;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "net")]
@@ -81,6 +82,11 @@ pub struct LaunchConfig {
     /// Network configuration. Present only when the `net` feature is on.
     #[cfg(feature = "net")]
     pub network: Option<NetworkConfig>,
+
+    /// Host-runtime isolation profile enforced by backend implementations.
+    #[cfg(feature = "net")]
+    #[serde(default)]
+    pub deployment_profile: DeploymentProfile,
 
     /// Sandbox slot for deterministic network address derivation.
     #[cfg(feature = "net")]

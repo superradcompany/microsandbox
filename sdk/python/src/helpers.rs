@@ -1,4 +1,6 @@
-use microsandbox::sandbox::{NetworkPolicy, Patch, PullPolicy, SandboxBuilder, SecurityProfile};
+use microsandbox::sandbox::{
+    DeploymentProfile, NetworkPolicy, Patch, PullPolicy, SandboxBuilder, SecurityProfile,
+};
 use microsandbox::{LogLevel, RegistryAuth};
 use microsandbox_network::dns::Nameserver;
 use pyo3::prelude::*;
@@ -20,6 +22,7 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
     "workdir",
     "shell",
     "security",
+    "deployment_profile",
     "hostname",
     "user",
     "entrypoint",
@@ -237,6 +240,18 @@ pub fn sandbox_builder_from_args(
             }
         };
         builder = builder.security(profile);
+    }
+    if let Some(deployment_profile) = extract_opt::<String>(kwargs, "deployment_profile")? {
+        let profile = match deployment_profile.as_str() {
+            "single-tenant" | "single_tenant" => DeploymentProfile::SingleTenant,
+            "multi-tenant" | "multi_tenant" => DeploymentProfile::MultiTenant,
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "invalid deployment profile: {deployment_profile}. Expected: single-tenant, multi-tenant"
+                )));
+            }
+        };
+        builder = builder.deployment_profile(profile);
     }
     if let Some(hostname) = extract_opt::<String>(kwargs, "hostname")? {
         builder = builder.hostname(hostname);

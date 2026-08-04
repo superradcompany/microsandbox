@@ -18,8 +18,8 @@ use super::{
     exec::{Rlimit, RlimitResource},
     init::{HandoffInit, InitOptionsBuilder},
     types::{
-        ImageBuilder, IntoImage, MountBuilder, Patch, PatchBuilder, RootDiskBuilder, RootfsSource,
-        SecurityProfile, VolumeMount,
+        DeploymentProfile, ImageBuilder, IntoImage, MountBuilder, Patch, PatchBuilder,
+        RootDiskBuilder, RootfsSource, SecurityProfile, VolumeMount,
     },
 };
 use crate::{
@@ -839,6 +839,15 @@ impl SandboxBuilder {
         self
     }
 
+    /// Set the host-runtime deployment profile.
+    ///
+    /// Managed backends may replace this request with a platform-owned profile
+    /// before launch. The cloud create wire does not transmit this value.
+    pub fn deployment_profile(mut self, profile: DeploymentProfile) -> Self {
+        self.config.spec.deployment_profile = profile;
+        self
+    }
+
     /// Add a volume mount using a closure-based builder.
     ///
     /// ```ignore
@@ -1332,9 +1341,20 @@ mod tests {
     use microsandbox_network::secrets::config::{HostPattern, SecretEntry, SecretInjection};
     #[cfg(feature = "net")]
     use microsandbox_types::PortProtocol;
-    use microsandbox_types::SandboxLogLevel;
+    use microsandbox_types::{DeploymentProfile, SandboxLogLevel};
     #[cfg(feature = "net")]
     use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn deployment_profile_sets_sandbox_spec() {
+        let builder =
+            SandboxBuilder::new("profile-test").deployment_profile(DeploymentProfile::MultiTenant);
+
+        assert_eq!(
+            builder.config.spec.deployment_profile,
+            DeploymentProfile::MultiTenant
+        );
+    }
 
     #[tokio::test]
     async fn test_builder_sets_runtime_log_level() {

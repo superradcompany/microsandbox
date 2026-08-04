@@ -1949,7 +1949,7 @@ mod tests {
 //--------------------------------------------------------------------------------------------------
 
 pub use microsandbox_types::{
-    DiskImageFormat, HostPermissions, MountOptions, NamedVolumeCreate, NamedVolumeMode,
-    OciRootfsSource, Patch, RootDisk, RootfsSource, SecurityProfile, StatVirtualization,
-    VolumeKind, VolumeMount,
+    DeploymentProfile, DiskImageFormat, HostPermissions, MountOptions, NamedVolumeCreate,
+    NamedVolumeMode, OciRootfsSource, Patch, RootDisk, RootfsSource, SecurityProfile,
+    StatVirtualization, VolumeKind, VolumeMount,
 };

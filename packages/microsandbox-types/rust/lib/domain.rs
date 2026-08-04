@@ -198,6 +198,24 @@ pub enum SecurityProfile {
     Restricted,
 }
 
+/// Host-runtime isolation profile applied when a sandbox is deployed.
+///
+/// Unlike [`SecurityProfile`], which changes behavior inside the guest, this
+/// profile controls defenses enforced by host-side runtime backends. A hosting
+/// platform can override the requested value before launch.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum DeploymentProfile {
+    /// The sandbox runs for one trusted tenant with the requested host-runtime configuration.
+    #[default]
+    SingleTenant,
+
+    /// The sandbox runs on shared infrastructure with platform-owned isolation floors.
+    MultiTenant,
+}
+
 /// Guest mount behavior shared by every volume mount kind.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -689,6 +707,13 @@ pub struct SandboxSpec {
 
     /// In-guest security profile.
     pub security_profile: SecurityProfile,
+
+    /// Host-runtime deployment profile.
+    ///
+    /// Local callers may request a profile, while a managed backend can
+    /// override it before launch. The cloud create wire intentionally omits
+    /// this field so tenant requests cannot select the platform profile.
+    pub deployment_profile: DeploymentProfile,
 
     /// Sandbox lifecycle policy.
     pub lifecycle: SandboxPolicy,
@@ -2429,6 +2454,19 @@ mod tests {
         assert_eq!(
             spec.runtime.metrics_sample_interval_ms,
             Some(DEFAULT_METRICS_SAMPLE_INTERVAL_MS)
+        );
+        assert_eq!(spec.deployment_profile, DeploymentProfile::SingleTenant);
+    }
+
+    #[test]
+    fn deployment_profile_uses_stable_snake_case_wire_values() {
+        assert_eq!(
+            serde_json::to_string(&DeploymentProfile::MultiTenant).unwrap(),
+            r#""multi_tenant""#
+        );
+        assert_eq!(
+            serde_json::from_str::<DeploymentProfile>(r#""single_tenant""#).unwrap(),
+            DeploymentProfile::SingleTenant
         );
     }
 
