@@ -952,6 +952,11 @@ async fn upsert_config_record<C: ConnectionTrait>(
         .as_ref()
         .map(serde_json::to_string)
         .transpose()?;
+    let labels_json = if config.labels.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&config.labels)?)
+    };
 
     let now = chrono::Utc::now().naive_utc();
 
@@ -969,7 +974,7 @@ async fn upsert_config_record<C: ConnectionTrait>(
         entrypoint: Set(entrypoint_json),
         working_dir: Set(config.working_dir.clone()),
         user: Set(config.user.clone()),
-        labels: Set(None),
+        labels: Set(labels_json),
         stop_signal: Set(None),
         created_at: Set(Some(now)),
         ..Default::default()
@@ -1094,6 +1099,12 @@ async fn try_persist_fast_path(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use microsandbox_image::{CachedImageMetadata, ImageConfig};
+
+    use super::*;
+
     #[test]
     fn test_default_backend_image_api_methods_stay_available() {
         // Compile-time tripwire for the pre-backend-routing Rust API shape.
@@ -1106,5 +1117,39 @@ mod tests {
         let _ = super::Image::prune;
         let _ = super::Image::load;
         let _ = super::Image::save;
+    }
+
+    #[tokio::test]
+    async fn persist_preserves_oci_labels_for_inspection() {
+        let temp = tempfile::tempdir().unwrap();
+        let local = LocalBackend::builder()
+            .home(temp.path())
+            .build()
+            .await
+            .unwrap();
+        let reference = "registry.example.com/acme/labeled-image:latest";
+        let metadata = CachedImageMetadata {
+            manifest_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            config_digest:
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            raw_manifest_json: r#"{"schemaVersion":2,"layers":[]}"#.into(),
+            raw_config_json: r#"{"config":{"Labels":{"org.example.feature":"enabled"}}}"#.into(),
+            config: ImageConfig {
+                labels: HashMap::from([("org.example.feature".into(), "enabled".into())]),
+                ..Default::default()
+            },
+            layers: Vec::new(),
+        };
+
+        Image::persist(&local, reference, metadata).await.unwrap();
+
+        let detail = Image::inspect_local(&local, reference).await.unwrap();
+        assert_eq!(
+            detail.config.unwrap().labels,
+            Some(serde_json::json!({
+                "org.example.feature": "enabled"
+            }))
+        );
     }
 }
