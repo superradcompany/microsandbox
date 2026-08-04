@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { defaultBackendInfo, defaultBackendKind } from "../../src/index.js";
+import { defaultBackendInfo, defaultBackendKind } from "../../dist/index.js";
 
 describe("backend introspection", () => {
   it("returns structured, secret-safe default backend information", () => {
