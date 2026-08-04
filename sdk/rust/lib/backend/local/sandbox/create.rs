@@ -251,7 +251,8 @@ impl LocalBackend {
                 None
             };
 
-            // Create upper.ext4 for the writable overlay upper layer.
+            // Ensure sandbox storage exists before provisioning either a private flat rootfs or
+            // the writable overlay upper image.
             tokio::fs::create_dir_all(&sandbox_dir).await?;
             let upper_path = sandbox_dir.join("upper.ext4");
             if let Some((base, target_mib, clone)) = flat_spec {

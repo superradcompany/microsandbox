@@ -383,7 +383,8 @@ impl Registry {
 
         // Step 1: Early cache check using persisted image metadata.
         if let Some(cached) =
-            resolve_cached_pull_result_async(&self.cache, reference, options).await?
+            resolve_cached_pull_result_async(&self.cache, reference, options, &self.platform)
+                .await?
         {
             tracing::debug!(
                 reference = %reference,
@@ -1542,6 +1543,15 @@ fn resolve_cached_pull_result(
     reference: &oci_client::Reference,
     options: &PullOptions,
 ) -> ImageResult<Option<CachedPullInfo>> {
+    resolve_cached_pull_result_for_platform(cache, reference, options, &Platform::host_linux())
+}
+
+fn resolve_cached_pull_result_for_platform(
+    cache: &GlobalCache,
+    reference: &oci_client::Reference,
+    options: &PullOptions,
+    platform: &Platform,
+) -> ImageResult<Option<CachedPullInfo>> {
     if options.force || options.pull_policy == PullPolicy::Always {
         return Ok(None);
     }
@@ -1574,7 +1584,10 @@ fn resolve_cached_pull_result(
     {
         return Ok(None);
     }
-    if options.materialization.includes_flat() && cache.read_flat_ref(&manifest_digest)?.is_none() {
+    if options.materialization.includes_flat()
+        && crate::flat::read_current_flat_ref(cache, &manifest_digest, &cached_diff_ids, platform)?
+            .is_none()
+    {
         return Ok(None);
     }
 
@@ -1622,6 +1635,7 @@ async fn resolve_cached_pull_result_async(
     cache: &GlobalCache,
     reference: &oci_client::Reference,
     options: &PullOptions,
+    platform: &Platform,
 ) -> ImageResult<Option<CachedPullInfo>> {
     if options.force || options.pull_policy == PullPolicy::Always {
         return Ok(None);
@@ -1631,7 +1645,8 @@ async fn resolve_cached_pull_result_async(
         return Ok(None);
     };
 
-    resolve_cached_metadata_pull_result_async(cache, metadata, options.materialization).await
+    resolve_cached_metadata_pull_result_async(cache, metadata, options.materialization, platform)
+        .await
 }
 
 async fn resolve_cached_pull_result_by_manifest_digest_async(
@@ -1639,6 +1654,7 @@ async fn resolve_cached_pull_result_by_manifest_digest_async(
     manifest_digest: &Digest,
 ) -> ImageResult<Option<CachedPullInfo>> {
     let expected = manifest_digest.to_string();
+    let platform = Platform::host_linux();
     let mut entries = tokio::fs::read_dir(cache.manifests_dir())
         .await
         .map_err(|e| ImageError::Cache {
@@ -1671,6 +1687,7 @@ async fn resolve_cached_pull_result_by_manifest_digest_async(
             cache,
             metadata,
             RootfsMaterialization::Layered,
+            &platform,
         )
         .await?
         {
@@ -1685,6 +1702,7 @@ async fn resolve_cached_metadata_pull_result_async(
     cache: &GlobalCache,
     metadata: CachedImageMetadata,
     materialization: RootfsMaterialization,
+    platform: &Platform,
 ) -> ImageResult<Option<CachedPullInfo>> {
     let cached_diff_ids = match metadata
         .layers
@@ -1709,7 +1727,10 @@ async fn resolve_cached_metadata_pull_result_async(
     {
         return Ok(None);
     }
-    if materialization.includes_flat() && cache.read_flat_ref(&manifest_digest)?.is_none() {
+    if materialization.includes_flat()
+        && crate::flat::read_current_flat_ref(cache, &manifest_digest, &cached_diff_ids, platform)?
+            .is_none()
+    {
         return Ok(None);
     }
 
@@ -1766,7 +1787,8 @@ mod tests {
 
     use super::{
         LayerDescriptor, MaterializeLayersRequest, Platform, layer_work_path,
-        read_erofs_layer_metadata, resolve_cached_pull_result, resolve_platform_digest,
+        read_erofs_layer_metadata, resolve_cached_metadata_pull_result_async,
+        resolve_cached_pull_result, resolve_platform_digest,
     };
     use crate::{
         cache::{CachedImageMetadata, CachedLayerMetadata, GlobalCache},
@@ -1774,6 +1796,7 @@ mod tests {
         digest::Digest,
         erofs,
         error::ImageError,
+        ext4::EXT4_ROOTFS_MATERIALIZER_ABI,
         pull::{PullOptions, PullPolicy, RootfsMaterialization},
         tree::{
             FileData, FileTree, InodeMetadata, RegularFileId, RegularFileNode, TreeNode, Xattr,
@@ -2215,6 +2238,74 @@ mod tests {
         assert!(flat.is_some(), "flat should not depend on fsmeta or VMDK");
         assert!(layered.is_none(), "layered still requires fsmeta and VMDK");
         assert!(all.is_none(), "all requires both representations");
+    }
+
+    #[tokio::test]
+    async fn test_flat_cache_hit_rejects_stale_materializer_inputs() {
+        let temp = tempdir().unwrap();
+        let cache = GlobalCache::new(temp.path()).unwrap();
+        let reference: oci_client::Reference =
+            "docker.io/library/shared-base:stale-flat".parse().unwrap();
+        let metadata = write_cached_image_fixture(&cache, &reference, &[true]);
+        let diff_id = parse_digest(&metadata.layers[0].diff_id);
+        write_valid_erofs_layer(&cache, &diff_id, b"shared flat contents");
+        let manifest_digest = parse_digest(&metadata.manifest_digest);
+        let platform = Platform::default();
+        let registry = super::Registry::new(platform.clone(), cache.clone()).unwrap();
+        let current = registry
+            .materialize_flat_rootfs(&manifest_digest, std::slice::from_ref(&diff_id), false)
+            .await
+            .unwrap();
+        let options = PullOptions {
+            materialization: RootfsMaterialization::Flat,
+            ..Default::default()
+        };
+
+        let mut stale_abi = current.clone();
+        stale_abi.materializer_abi = EXT4_ROOTFS_MATERIALIZER_ABI.saturating_sub(1);
+        cache.write_flat_ref(&manifest_digest, &stale_abi).unwrap();
+        assert!(
+            resolve_cached_pull_result(&cache, &reference, &options)
+                .unwrap()
+                .is_none(),
+            "the synchronous cache path must reject an older materializer ABI"
+        );
+        assert!(
+            resolve_cached_metadata_pull_result_async(
+                &cache,
+                metadata.clone(),
+                RootfsMaterialization::Flat,
+                &platform,
+            )
+            .await
+            .unwrap()
+            .is_none(),
+            "the asynchronous cache path must reject an older materializer ABI"
+        );
+
+        let mut stale_derivation = current;
+        stale_derivation.derivation_digest = format!("sha256:{}", "f".repeat(64));
+        cache
+            .write_flat_ref(&manifest_digest, &stale_derivation)
+            .unwrap();
+        assert!(
+            resolve_cached_pull_result(&cache, &reference, &options)
+                .unwrap()
+                .is_none(),
+            "the synchronous cache path must reject a different derivation"
+        );
+        assert!(
+            resolve_cached_metadata_pull_result_async(
+                &cache,
+                metadata,
+                RootfsMaterialization::Flat,
+                &platform,
+            )
+            .await
+            .unwrap()
+            .is_none(),
+            "the asynchronous cache path must reject a different derivation"
+        );
     }
 
     #[tokio::test]

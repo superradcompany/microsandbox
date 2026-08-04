@@ -874,7 +874,10 @@ fn parse_flat_root_disk_options(options: &str) -> anyhow::Result<RootDiskSpec> {
         if token.is_empty() {
             anyhow::bail!("--root-disk: empty flat root option");
         }
-        match token.split_once('=') {
+        let option = token
+            .split_once('=')
+            .map(|(key, value)| (key.trim(), value.trim()));
+        match option {
             Some(("fstype", value)) if !value.is_empty() => {
                 if fstype.replace(value.to_string()).is_some() {
                     anyhow::bail!("--root-disk: duplicate fstype option");
@@ -2691,6 +2694,14 @@ mod tests {
         );
         assert_eq!(
             build("flat:fstype=ext4,clone=copy"),
+            RootDisk::Flat {
+                size_mib: None,
+                fstype: Some("ext4".into()),
+                clone: FlatClone::Copy,
+            }
+        );
+        assert_eq!(
+            build("flat: fstype = ext4 , clone = copy"),
             RootDisk::Flat {
                 size_mib: None,
                 fstype: Some("ext4".into()),

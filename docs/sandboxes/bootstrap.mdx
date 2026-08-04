@@ -32,13 +32,13 @@ await using sb = await Sandbox.builder("worker")
 ```
 
 ```python Python
-from microsandbox import Image, RootDisk, Sandbox
+from microsandbox import FlatClone, Image, RootDisk, Sandbox
 
 sb = await Sandbox.create(
     "worker",
     image=Image.oci(
         "python:3.12",
-        root_disk=RootDisk.flat(8192, clone="auto"),
+        root_disk=RootDisk.flat(8192, clone=FlatClone.AUTO),
     ),
 )
 ```

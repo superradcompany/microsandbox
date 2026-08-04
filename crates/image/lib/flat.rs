@@ -36,8 +36,7 @@ pub(crate) fn materialize_flat_rootfs(
     let (derivation_digest, derivation_bytes) =
         flat_derivation_digest(manifest_digest, layer_diff_ids, platform);
     if !force
-        && let Some(reference) = cache.read_flat_ref(manifest_digest)?
-        && reference.derivation_digest == derivation_digest.to_string()
+        && let Some(reference) = read_matching_flat_ref(cache, manifest_digest, &derivation_digest)?
     {
         return Ok(reference);
     }
@@ -48,8 +47,7 @@ pub(crate) fn materialize_flat_rootfs(
         let _ = flock_unlock(&file);
     });
     if !force
-        && let Some(reference) = cache.read_flat_ref(manifest_digest)?
-        && reference.derivation_digest == derivation_digest.to_string()
+        && let Some(reference) = read_matching_flat_ref(cache, manifest_digest, &derivation_digest)?
     {
         return Ok(reference);
     }
@@ -110,6 +108,31 @@ pub(crate) fn materialize_flat_rootfs(
     };
     cache.write_flat_ref(manifest_digest, &reference)?;
     Ok(reference)
+}
+
+/// Read the flat reference only when it matches the current materializer inputs.
+pub(crate) fn read_current_flat_ref(
+    cache: &GlobalCache,
+    manifest_digest: &Digest,
+    layer_diff_ids: &[Digest],
+    platform: &Platform,
+) -> ImageResult<Option<FlatRootfsRef>> {
+    let (derivation_digest, _) = flat_derivation_digest(manifest_digest, layer_diff_ids, platform);
+    read_matching_flat_ref(cache, manifest_digest, &derivation_digest)
+}
+
+/// Validate both the complete derivation and the ABI explicitly. The ABI is
+/// part of the digest, but checking the persisted field also rejects malformed
+/// or hand-edited references before they are exposed as cache hits.
+fn read_matching_flat_ref(
+    cache: &GlobalCache,
+    manifest_digest: &Digest,
+    derivation_digest: &Digest,
+) -> ImageResult<Option<FlatRootfsRef>> {
+    Ok(cache.read_flat_ref(manifest_digest)?.filter(|reference| {
+        reference.materializer_abi == EXT4_ROOTFS_MATERIALIZER_ABI
+            && reference.derivation_digest == derivation_digest.to_string()
+    }))
 }
 
 fn flat_derivation_digest(

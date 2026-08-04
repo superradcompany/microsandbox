@@ -300,9 +300,7 @@ impl TryFrom<SandboxConfig> for CloudCreateBody {
                 if matches!(
                     oci.root_disk,
                     Some(
-                        RootDisk::Tmpfs { .. }
-                            | RootDisk::DiskImage { .. }
-                            | RootDisk::Flat { .. }
+                        RootDisk::Tmpfs { .. } | RootDisk::DiskImage { .. } | RootDisk::Flat { .. }
                     )
                 ) {
                     return Err(MicrosandboxError::unsupported(

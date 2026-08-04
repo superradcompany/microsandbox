@@ -462,9 +462,12 @@ fn copy_extent(src_fd: RawFd, dst_fd: RawFd, off: u64, len: u64) -> io::Result<(
     read_write_extent(src_fd, dst_fd, off, len)
 }
 
-/// Copy `len` bytes from `src_fd` at `off` to `dst_fd` at `off` using
-/// `pread`/`pwrite`. Universal fallback for `copy_extent` on platforms
-/// or filesystems where `copy_file_range` doesn't apply.
+/// Copy `len` bytes from `src_fd` at `off` to `dst_fd` at `off` with
+/// `pread`/`pwrite`.
+///
+/// This is the explicit-copy backend for `copy_extent`; avoiding clone and
+/// `copy_file_range` operations prevents the destination from sharing COW
+/// extents with the source.
 #[cfg(unix)]
 fn read_write_extent(src_fd: RawFd, dst_fd: RawFd, off: u64, len: u64) -> io::Result<()> {
     const BUF_SIZE: usize = 1024 * 1024;

@@ -655,7 +655,7 @@ export declare class RegistryConfigBuilder {
 export type JsRegistryConfigBuilder = RegistryConfigBuilder
 
 /**
- * Fluent builder for the writable rootfs layer (root disk) of an OCI image.
+ * Fluent builder for the root disk of an OCI image.
  *
  * Used inside `ImageBuilder.rootDisk((d) => ...)`:
  *
