@@ -24,7 +24,7 @@ Start with `msb doctor`, keep the workload and benchmark procedure unchanged, an
 | `sandbox_defaults.cpu_placement` | `inherit` | Coordinates and pins vCPU threads to host logical processors | Linux and Windows hosts |
 | `sandbox_defaults.thp` | `madvise` | Sets the guest Linux transparent-huge-page boot policy | Every newly booted sandbox |
 | `snapshot_defaults.compaction` | `off` | Reclaims proven-free ext4 ranges before publishing a flat snapshot | Flat stopped-sandbox snapshots |
-| `runtime.block_writeback_limit` | `auto` | Bounds buffered host dirty data per writable raw disk | Linux, writable raw disks using writeback caching |
+| `runtime.block_writeback_limit` and `runtime.block_writeback_pool_mib` | `off` and unset | Opt-in bound for buffered host dirty data per writable raw disk and admission across active VMs | Linux, writable raw disks using writeback caching |
 | x2APIC, CRC32C, PREEMPT_NONE | Selected by the compatible runtime and firmware | Reduces interrupt, checksum, and scheduler overhead | Applicable shipping guest builds |
 | AMD AVIC or Intel APICv | Host KVM policy | Accelerates virtual interrupt delivery used by the x86 guest | Linux x86 hosts with capable hardware |
 
@@ -36,9 +36,9 @@ Explicit CLI or SDK settings override `config.json`, which overrides built-in de
 | CPU placement | `sandbox_defaults.cpu_placement` | `--cpu-placement inherit|auto|spread|compact` |
 | Guest THP | `sandbox_defaults.thp` | `--thp always|madvise|never` |
 | Snapshot compaction | `snapshot_defaults.compaction` | `msb snapshot create ... --compaction off|auto|on` |
-| Buffered block writeback limit | `runtime.block_writeback_limit` | Global runtime policy only |
+| Buffered block writeback limit and admission pool | `runtime.block_writeback_limit`, `runtime.block_writeback_pool_mib` | Global runtime policy only |
 
-The Rust, TypeScript, Python, and Go SDK builders expose the same per-sandbox or per-snapshot choices. The block writeback limit is global because it controls host VMM storage policy rather than one guest-visible sandbox specification.
+The Rust, TypeScript, Python, and Go SDK builders expose the same per-sandbox or per-snapshot choices. The block writeback limit and pool are global because they control host VMM storage policy rather than one guest-visible sandbox specification.
 
 ## A measured starting profile
 
@@ -61,12 +61,12 @@ There is no universal fastest profile. The following is a reasonable starting po
     "compaction": "auto"
   },
   "runtime": {
-    "block_writeback_limit": "auto"
+    "block_writeback_limit": "off"
   }
 }
 ```
 
-`cpu_placement: auto` is intentionally not a portable macOS default: managed placement is unsupported on macOS because the operating system does not expose an equivalent public hard-affinity API. Use `inherit` on macOS. Keep `thp: madvise` unless a representative workload and density test justify another policy. The current 512 MiB block-writeback `auto` preset is safety-first experimental policy, not a recommended universal performance default; see its measured sequential-write trade-off below.
+`cpu_placement: auto` is intentionally not a portable macOS default: managed placement is unsupported on macOS because the operating system does not expose an equivalent public hard-affinity API. Use `inherit` on macOS. Keep `thp: madvise` unless a representative workload and density test justify another policy. Buffered-writeback containment remains `off` by default because the finite per-disk window is a workload-and-density policy. The density-first `auto` window is 512 MiB; the unchanged OVH customer disk suite needed a fixed 1.5 GiB window to keep its repeatedly overwritten 1 GiB file at containment-off throughput. Size a fixed window and the aggregate pool from representative hot-set and concurrency measurements rather than assuming either profile is universal.
 
 ## Storage layout: layered or flat
 
@@ -173,13 +173,41 @@ Enabling AVIC or APICv changes interrupt-delivery performance, not the sandbox i
 
 ## Buffered block writeback limit
 
-On Linux, `auto` gives each writable raw disk a 512 MiB hard budget for buffered host dirty data. Libkrun reserves exact page-aligned extents before each mutation, starts background writeback in 128 MiB batches, and applies backpressure before the per-disk budget can be exceeded. Rewritten pages remain charged until the newest generation completes, so repeatedly overwriting one region cannot release another region's credit.
+The default `off` policy leaves the controller and admission path unused. On Linux, explicit `auto` prefers a 512 MiB hard budget for each writable raw disk. Libkrun reserves exact page-aligned extents before each mutation and lets that finite cache window absorb hot rewrites. It starts bounded background retirement only when a new unique page would exceed the hard budget or the exact extent ledger reaches its fragmentation ceiling. Rewriting an already charged page consumes no new credit; a truly growing working set receives backpressure before it can cross the limit.
 
-The background worker kicks queued ranges before waiting for their page-cache writeback to complete, and it releases exact range credit only after that completion. It does not turn each internal batch into a durability barrier. Guest `FLUSH` still performs the existing full Imago flush and sync after all earlier block work, including the host-filesystem metadata required to retrieve the data; the controller does not acknowledge guest durability early. Controller, storage, worker, range-completion, or full-sync failures remain latched and fail future mutations and reactivations closed.
+When pressure does require retirement, the background worker kicks queued ranges before waiting for their page-cache writeback to complete, and it releases exact range credit only after that completion. It does not turn each internal batch into a durability barrier. Guest `FLUSH` still performs the existing full Imago flush and sync after all earlier block work, including the host-filesystem metadata required to retrieve the data; the controller does not acknowledge guest durability early. Controller, storage, worker, range-completion, or full-sync failures remain latched and fail future mutations and reactivations closed.
 
-`off` disables this VMM-owned bound for newly spawned sandboxes. It may improve peak sequential throughput, but it permits a long-running guest to accumulate more host dirty data and may worsen the final flush tail. The policy does not depend on cgroups or guest cooperation. It has no effect on read-only disks, direct-I/O disks, non-raw formats, cache modes without writeback, or non-Linux VMM paths.
+Every active policy also enables spawn-time admission against one aggregate dirty-credit pool. The default pool is the lower of 10% of physical memory and a conservative estimate of the host's dirty-background threshold. An explicit `vm.dirty_background_bytes` is used directly; ratio mode applies `vm.dirty_background_ratio` to current `MemAvailable`, not `MemTotal`, because Linux explicitly excludes unavailable memory from its ratio denominator. On a small or memory-pressured host, the automatic per-disk limit shrinks to fit the pool; if the result would be below the VMM's 128 MiB minimum, creation fails with guidance instead of silently dropping containment. A fixed `{"mib": N}` preserves that requested per-disk limit and fails if the derived pool cannot admit even one disk. Set `block_writeback_pool_mib` only when an operator needs to override the derived aggregate capacity.
 
-On the fixed OVH customer disk suite, both the old internal-barrier controller and the repaired range-completion controller scored 1,668 MB/s sequential write at 512 MiB; the otherwise identical `off` profile scored 9,752 MB/s while host-global Dirty reached approximately 1 GiB. The range-completion repair is the correct containment-versus-durability contract, but it cannot reproduce cache-speed throughput when the hard budget is below the workload's active dirty set. Do not promote this fixed `auto` value as a product default until a budget staircase and aggregate multi-sandbox host-admission policy are measured.
+For example, this admits at most eight one-disk VMs, four two-disk VMs, or another combination whose reservations fit 4 GiB:
+
+```json
+{
+  "runtime": {
+    "block_writeback_limit": { "mib": 512 },
+    "block_writeback_pool_mib": 4096
+  }
+}
+```
+
+Each VM reserves `per-disk limit × eligible writable raw disks` in one retryable SQLite transaction before libkrun is built. Concurrent creators cannot both claim the last credit, and a live reservation admitted under a smaller pool keeps that more restrictive capacity until it drains. The reservation is held by an owner-only process lock. Normal release synchronizes retained descriptors for the exact verified backing files before recycling credit, so containment does not depend on a cooperative guest issuing `FLUSH`. After a process crash in the same boot, those process-held descriptors are gone; the next creator acquires the stale lease and performs `syncfs` on each identity-verified recorded backing filesystem before removing the reservation. After a host reboot, the old page cache is already gone. The reservation is deliberately independent of the transient run row, while missing, malformed, or unverifiable recovery state stays charged. This transaction and recovery path are not on the block-I/O path: libkrun enforces the admitted per-disk budgets locally after boot.
+
+```mermaid
+flowchart LR
+    A["Create VM"] --> B["Count eligible<br/>writable raw disks"]
+    B --> C["Reserve dirty credit<br/>SQLite transaction + process lease"]
+    C -->|"fits"| D["Build libkrun<br/>per-disk hard limits"]
+    C -->|"pool full"| E["Fail before boot<br/>with requested and occupied bytes"]
+    D --> F["Virtio-blk writeback<br/>local VMM enforcement"]
+    F --> G["VM exits<br/>release reservation"]
+    G -. "crash: next creator locks lease, syncs backing filesystems, then recycles credit" .-> C
+```
+
+The allocation catalog and leases are shared by processes using the same `MSB_HOME`. Production processes contributing to one node budget therefore need the same runtime home and service identity; separate homes are separate administrative domains. This mechanism bounds aggregate Microsandbox dirty credit in that domain. It is not a substitute for sizing guest memory, storage capacity, or unrelated host workloads.
+
+`off` disables both the VMM-owned bound and admission for newly spawned sandboxes. It permits a long-running guest to accumulate more host dirty data and may worsen the final flush tail. It is not inherently faster than a correctly sized pressure-triggered window: the focused OVH customer disk suite reached parity with `off` at a fixed 1.5 GiB limit, while the density-first 512 MiB `auto` window correctly backpressures that suite's 1 GiB hot set. Neither the per-disk controller nor admission depends on cgroups or guest cooperation. The policy has no effect on read-only disks, direct-I/O disks, non-raw formats, cache modes without writeback, or non-Linux VMM paths.
+
+The first OVH staircase exposed why simply raising the hard ceiling did not help: every profile still retired hot data in eager 128–256 MiB generations and delivered approximately 1,668 MB/s sequential write against 8,783 MB/s with the controller off. The pressure-triggered design instead keeps a repeatedly overwritten 1 GiB fio file resident inside a 1.5 GiB finite window and retires data only when unique dirty coverage would cross the bound. In the unchanged exact-candidate follow-up, sequential write recovered to 8,933.5 MB/s versus 8,895 MB/s off, and all eight emitted metrics were at parity or above. The dated planning report records the original staircase, corrected customer-suite measurements, exact final candidate, host dirty telemetry and crash-safe multi-VM admission validation.
 
 ## Snapshot compaction
 

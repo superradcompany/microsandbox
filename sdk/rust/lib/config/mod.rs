@@ -260,16 +260,23 @@ pub struct RuntimeConfig {
     /// Hard buffered block writeback policy.
     #[serde(alias = "block_writeback_preflush")]
     pub block_writeback_limit: BlockWritebackLimit,
+
+    /// Optional host-global dirty-credit pool override in MiB.
+    ///
+    /// `None` derives a conservative pool from physical host memory whenever the per-disk policy
+    /// is active. An explicit value overrides that derived aggregate capacity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block_writeback_pool_mib: Option<NonZero<u64>>,
 }
 
 /// Controls the per-disk hard limit for buffered host dirty data.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum BlockWritebackLimit {
-    /// Use the runtime's platform-aware policy.
-    #[default]
+    /// Use the runtime's platform-aware bounded-writeback and admission policy.
     Auto,
 
     /// Disable bounded writeback without changing guest-visible durability semantics.
+    #[default]
     Off,
 
     /// Use an explicit per-disk limit in MiB.
@@ -1274,7 +1281,8 @@ mod tests {
         assert_eq!(cfg.database.max_connections, 5);
         assert_eq!(cfg.database.connect_timeout_secs, 30);
         assert_eq!(cfg.database.busy_timeout_secs, 5);
-        assert_eq!(cfg.runtime.block_writeback_limit, BlockWritebackLimit::Auto);
+        assert_eq!(cfg.runtime.block_writeback_limit, BlockWritebackLimit::Off);
+        assert_eq!(cfg.runtime.block_writeback_pool_mib, None);
     }
 
     #[test]
@@ -1325,7 +1333,12 @@ mod tests {
 
     #[test]
     fn test_block_writeback_limit_fixed_mib_round_trip() {
-        let json = r#"{"runtime":{"block_writeback_limit":{"mib":1280}}}"#;
+        let json = r#"{
+            "runtime": {
+                "block_writeback_limit": {"mib":1280},
+                "block_writeback_pool_mib": 5120
+            }
+        }"#;
         let cfg: LocalConfig = serde_json::from_str(json).unwrap();
 
         assert_eq!(
@@ -1334,6 +1347,7 @@ mod tests {
                 mib: NonZero::new(1280).unwrap(),
             }
         );
+        assert_eq!(cfg.runtime.block_writeback_pool_mib, NonZero::new(5120));
 
         let serialized = serde_json::to_value(&cfg.runtime.block_writeback_limit).unwrap();
         assert_eq!(serialized, serde_json::json!({ "mib": 1280 }));

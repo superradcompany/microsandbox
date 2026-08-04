@@ -19,6 +19,7 @@ mod m20260710_000001_migrate_root_disk;
 mod m20260714_000001_add_snapshot_scope;
 mod m20260719_000001_create_cpu_allocations;
 mod m20260723_000001_snapshot_artifact_transition;
+mod m20260803_000001_create_writeback_allocations;
 pub mod schema_metadata;
 
 use sea_orm_migration::prelude::*;
@@ -63,6 +64,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260714_000001_add_snapshot_scope::Migration),
             Box::new(m20260723_000001_snapshot_artifact_transition::Migration),
             Box::new(m20260719_000001_create_cpu_allocations::Migration),
+            Box::new(m20260803_000001_create_writeback_allocations::Migration),
         ]
     }
 }
