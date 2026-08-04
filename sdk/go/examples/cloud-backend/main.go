@@ -22,9 +22,12 @@ import (
 )
 
 func main() {
-	cloudSelected := strings.EqualFold(strings.TrimSpace(os.Getenv("MSB_BACKEND")), "cloud")
+	backendSelected := strings.TrimSpace(os.Getenv("MSB_BACKEND"))
 	profileSelected := strings.TrimSpace(os.Getenv("MSB_PROFILE")) != ""
-	if !cloudSelected && !profileSelected {
+	if strings.EqualFold(backendSelected, "local") {
+		log.Fatal("this example requires a cloud backend; MSB_BACKEND=local selects Local even when MSB_PROFILE is set")
+	}
+	if backendSelected == "" && !profileSelected {
 		log.Fatal("set MSB_BACKEND=cloud with MSB_API_KEY, or select a cloud profile")
 	}
 
