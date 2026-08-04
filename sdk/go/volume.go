@@ -217,12 +217,12 @@ var ErrPathEscape = errors.New("microsandbox: path escapes volume root")
 func (fs *VolumeFs) Root() string { return fs.root }
 
 // Read reads the contents of a file relative to the volume root.
-func (fs *VolumeFs) Read(relPath string) ([]byte, error) {
+func (fs *VolumeFs) Read(ctx context.Context, relPath string) ([]byte, error) {
 	if fs.root == "" {
 		var result struct {
 			Data string `json:"data_b64"`
 		}
-		err := ffi.VolumeFsOp(context.Background(), fs.target, "read", map[string]any{"path": relPath}, &result)
+		err := ffi.VolumeFsOp(ctx, fs.target, "read", map[string]any{"path": relPath}, &result)
 		if err != nil {
 			return nil, wrapFFI(err)
 		}
@@ -236,12 +236,15 @@ func (fs *VolumeFs) Read(relPath string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return os.ReadFile(abs)
 }
 
 // ReadString reads a file and returns its contents as a string.
-func (fs *VolumeFs) ReadString(relPath string) (string, error) {
-	data, err := fs.Read(relPath)
+func (fs *VolumeFs) ReadString(ctx context.Context, relPath string) (string, error) {
+	data, err := fs.Read(ctx, relPath)
 	if err != nil {
 		return "", err
 	}
@@ -249,75 +252,90 @@ func (fs *VolumeFs) ReadString(relPath string) (string, error) {
 }
 
 // Write writes data to a file, creating or truncating it.
-func (fs *VolumeFs) Write(relPath string, data []byte) error {
+func (fs *VolumeFs) Write(ctx context.Context, relPath string, data []byte) error {
 	if fs.root == "" {
 		args := map[string]any{
 			"path":     relPath,
 			"data_b64": base64.StdEncoding.EncodeToString(data),
 		}
-		return wrapFFI(ffi.VolumeFsOp(context.Background(), fs.target, "write", args, nil))
+		return wrapFFI(ffi.VolumeFsOp(ctx, fs.target, "write", args, nil))
 	}
 	abs, err := fs.abs(relPath)
 	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	return os.WriteFile(abs, data, 0o644)
 }
 
 // WriteString writes a string to a file.
-func (fs *VolumeFs) WriteString(relPath, content string) error {
-	return fs.Write(relPath, []byte(content))
+func (fs *VolumeFs) WriteString(ctx context.Context, relPath, content string) error {
+	return fs.Write(ctx, relPath, []byte(content))
 }
 
 // Mkdir creates a directory and all missing parents.
-func (fs *VolumeFs) Mkdir(relPath string) error {
+func (fs *VolumeFs) Mkdir(ctx context.Context, relPath string) error {
 	if fs.root == "" {
-		return wrapFFI(ffi.VolumeFsOp(context.Background(), fs.target, "mkdir", map[string]any{"path": relPath}, nil))
+		return wrapFFI(ffi.VolumeFsOp(ctx, fs.target, "mkdir", map[string]any{"path": relPath}, nil))
 	}
 	abs, err := fs.abs(relPath)
 	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	return os.MkdirAll(abs, 0o755)
 }
 
 // Remove deletes a file or empty directory.
-func (fs *VolumeFs) Remove(relPath string) error {
+func (fs *VolumeFs) Remove(ctx context.Context, relPath string) error {
 	if fs.root == "" {
 		args := map[string]any{"path": relPath, "recursive": false}
-		return wrapFFI(ffi.VolumeFsOp(context.Background(), fs.target, "remove", args, nil))
+		return wrapFFI(ffi.VolumeFsOp(ctx, fs.target, "remove", args, nil))
 	}
 	abs, err := fs.abs(relPath)
 	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	return os.Remove(abs)
 }
 
 // RemoveAll deletes a path and any children it contains.
-func (fs *VolumeFs) RemoveAll(relPath string) error {
+func (fs *VolumeFs) RemoveAll(ctx context.Context, relPath string) error {
 	if fs.root == "" {
 		args := map[string]any{"path": relPath, "recursive": true}
-		return wrapFFI(ffi.VolumeFsOp(context.Background(), fs.target, "remove", args, nil))
+		return wrapFFI(ffi.VolumeFsOp(ctx, fs.target, "remove", args, nil))
 	}
 	abs, err := fs.abs(relPath)
 	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	return os.RemoveAll(abs)
 }
 
 // Exists reports whether a file or directory exists at the given path.
-func (fs *VolumeFs) Exists(relPath string) (bool, error) {
+func (fs *VolumeFs) Exists(ctx context.Context, relPath string) (bool, error) {
 	if fs.root == "" {
 		var result struct {
 			Exists bool `json:"exists"`
 		}
-		err := ffi.VolumeFsOp(context.Background(), fs.target, "exists", map[string]any{"path": relPath}, &result)
+		err := ffi.VolumeFsOp(ctx, fs.target, "exists", map[string]any{"path": relPath}, &result)
 		return result.Exists, wrapFFI(err)
 	}
 	abs, err := fs.abs(relPath)
 	if err != nil {
+		return false, err
+	}
+	if err := ctx.Err(); err != nil {
 		return false, err
 	}
 	if _, err := os.Stat(abs); err == nil {

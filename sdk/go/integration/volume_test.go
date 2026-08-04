@@ -119,37 +119,36 @@ func TestVolumeFsHostSideOps(t *testing.T) {
 	t.Cleanup(func() { _ = microsandbox.RemoveVolume(context.Background(), name) })
 
 	fs := vol.FS()
-	if err := fs.Mkdir("nested/deep"); err != nil {
+	if err := fs.Mkdir(ctx, "nested/deep"); err != nil {
 		t.Fatalf("Mkdir: %v", err)
 	}
-	if err := fs.WriteString("nested/deep/file.txt", "vol-data"); err != nil {
+	if err := fs.WriteString(ctx, "nested/deep/file.txt", "vol-data"); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	got, err := fs.ReadString("nested/deep/file.txt")
+	got, err := fs.ReadString(ctx, "nested/deep/file.txt")
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
 	if got != "vol-data" {
 		t.Errorf("Read: got %q want %q", got, "vol-data")
 	}
-	ok, err := fs.Exists("nested/deep/file.txt")
+	ok, err := fs.Exists(ctx, "nested/deep/file.txt")
 	if err != nil || !ok {
 		t.Fatalf("Exists: got ok=%v err=%v", ok, err)
 	}
-	missing, err := fs.Exists("not-there")
+	missing, err := fs.Exists(ctx, "not-there")
 	if err != nil {
 		t.Fatalf("Exists missing: %v", err)
 	}
 	if missing {
 		t.Error("Exists on missing path: got true")
 	}
-	if err := fs.Remove("nested/deep/file.txt"); err != nil {
+	if err := fs.Remove(ctx, "nested/deep/file.txt"); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
-	if err := fs.RemoveAll("nested"); err != nil {
+	if err := fs.RemoveAll(ctx, "nested"); err != nil {
 		t.Fatalf("RemoveAll: %v", err)
 	}
-	_ = ctx // keep parameter usage consistent across tests
 }
 
 // TestVolumeFsRejectsPathEscape complements the unit test by exercising the
@@ -166,7 +165,7 @@ func TestVolumeFsRejectsPathEscape(t *testing.T) {
 
 	fs := vol.FS()
 	for _, bad := range []string{"../../etc/passwd", "/etc/hosts", "a/../../escape"} {
-		if _, err := fs.Read(bad); !errors.Is(err, microsandbox.ErrPathEscape) {
+		if _, err := fs.Read(ctx, bad); !errors.Is(err, microsandbox.ErrPathEscape) {
 			t.Errorf("Read(%q): want ErrPathEscape, got %v", bad, err)
 		}
 	}
@@ -185,7 +184,7 @@ func TestNamedVolumeMountIntoSandbox(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = microsandbox.RemoveVolume(context.Background(), name) })
 
-	if err := vol.FS().WriteString("greeting.txt", "hello-from-host\n"); err != nil {
+	if err := vol.FS().WriteString(ctx, "greeting.txt", "hello-from-host\n"); err != nil {
 		t.Fatalf("Volume Write: %v", err)
 	}
 

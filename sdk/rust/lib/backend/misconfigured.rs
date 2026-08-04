@@ -220,6 +220,13 @@ impl VolumeBackend for ConfigurationErrorBackend {
         self.fail()
     }
 
+    fn get_default(
+        &self,
+        _backend: Arc<dyn Backend>,
+    ) -> BoxFuture<'_, MicrosandboxResult<VolumeHandle>> {
+        self.fail()
+    }
+
     fn list<'a>(
         &'a self,
         _backend: Arc<dyn Backend>,
@@ -359,9 +366,19 @@ mod tests {
             Err(error) => error,
         };
         let volume_error = backend.volumes().list(backend.clone()).await.unwrap_err();
+        let default_volume_error = backend
+            .volumes()
+            .get_default(backend.clone())
+            .await
+            .unwrap_err();
 
         assert!(sandbox_error.to_string().contains("MSB_BACKEND=cloud"));
         assert!(volume_error.to_string().contains("MSB_BACKEND=cloud"));
+        assert!(
+            default_volume_error
+                .to_string()
+                .contains("MSB_BACKEND=cloud")
+        );
         assert!(backend.as_local().is_none());
     }
 }

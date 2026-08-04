@@ -446,10 +446,10 @@ impl PyVolumeFs {
         })
     }
 
-    fn copy<'py>(&self, py: Python<'py>, from: String, to: String) -> PyResult<Bound<'py, PyAny>> {
+    fn copy<'py>(&self, py: Python<'py>, from_: String, to: String) -> PyResult<Bound<'py, PyAny>> {
         let handle = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            handle.fs().copy(&from, &to).await.map_err(to_py_err)?;
+            handle.fs().copy(&from_, &to).await.map_err(to_py_err)?;
             Ok(())
         })
     }
@@ -457,12 +457,12 @@ impl PyVolumeFs {
     fn rename<'py>(
         &self,
         py: Python<'py>,
-        from: String,
+        from_: String,
         to: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         let handle = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            handle.fs().rename(&from, &to).await.map_err(to_py_err)?;
+            handle.fs().rename(&from_, &to).await.map_err(to_py_err)?;
             Ok(())
         })
     }
