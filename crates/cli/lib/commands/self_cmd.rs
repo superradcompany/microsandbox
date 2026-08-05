@@ -3465,13 +3465,25 @@ mod tests {
         .unwrap();
         Migrator::up(db.inner(), None).await.unwrap();
 
-        // CPU allocation state is the latest migration; one step must drop its
-        // coordination tables while everything older stays intact.
+        // Writeback admission is the latest migration; one step must drop its
+        // allocation table while every older coordination table stays intact.
         rollback_schema(db.inner(), 1).await.unwrap();
+
+        let rows = db
+            .query_all_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'writeback_allocation'",
+            ))
+            .await
+            .unwrap();
+        assert!(
+            rows.is_empty(),
+            "writeback allocation should be rolled back"
+        );
 
         for table in ["cpu_allocation", "cpu_allocation_cpu"] {
             let rows = db
-                .query_all(Statement::from_string(
+                .query_all_raw(Statement::from_string(
                     DatabaseBackend::Sqlite,
                     format!(
                         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '{table}'"
@@ -3479,7 +3491,7 @@ mod tests {
                 ))
                 .await
                 .unwrap();
-            assert!(rows.is_empty(), "{table} should be rolled back");
+            assert!(!rows.is_empty(), "{table} should remain after one rollback");
         }
 
         let columns = db
