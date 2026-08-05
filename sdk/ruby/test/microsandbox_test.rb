@@ -39,4 +39,35 @@ class MicrosandboxTest < Test::Unit::TestCase
   def test_with_is_available
     assert_respond_to Microsandbox::Sandbox, :with
   end
+
+  def test_entrypoint_rejects_non_string_elements
+    builder = Microsandbox::Sandbox.builder("ruby-test")
+    assert_raise(TypeError) { builder.entrypoint(["sh", 1]) }
+  end
+
+  def test_with_preserves_block_error_when_stop_also_fails
+    fake = Object.new
+    fake.define_singleton_method(:stop) { raise "stop failed" }
+    sandbox_class = Class.new(Microsandbox::Sandbox)
+    sandbox_class.define_singleton_method(:create) { |*, **| fake }
+
+    error = assert_raise(ArgumentError) do
+      sandbox_class.with("ruby-test") { raise ArgumentError, "block failed" }
+    end
+
+    assert_equal "block failed", error.message
+  end
+
+  def test_with_raises_stop_error_after_successful_block
+    fake = Object.new
+    fake.define_singleton_method(:stop) { raise "stop failed" }
+    sandbox_class = Class.new(Microsandbox::Sandbox)
+    sandbox_class.define_singleton_method(:create) { |*, **| fake }
+
+    error = assert_raise(RuntimeError) do
+      sandbox_class.with("ruby-test") { :ok }
+    end
+
+    assert_equal "stop failed", error.message
+  end
 end

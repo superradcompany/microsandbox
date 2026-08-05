@@ -284,6 +284,53 @@ The SDK lets you create and control sandboxes directly from your application. `S
 
 <br />
 
+### Ruby SDK
+
+The Ruby gem supports Ruby 3.1 and newer. Its native extension releases Ruby's
+GVL while waiting for sandbox operations, so other Ruby threads continue to
+run during image pulls, VM startup, command execution, and lifecycle calls.
+
+The supported surface includes:
+
+- sandbox create, start, connect, list, stop, kill, remove, ping, and touch;
+- collected `exec`, `shell`, SSH exec, logs, and metrics;
+- guest filesystem reads, writes, metadata, copies, renames, and host transfer;
+- local image, volume, and snapshot management; and
+- local, explicit cloud, and named cloud-profile backend selection.
+
+Streaming exec/log/metrics/filesystem handles, interactive SSH/SFTP, live
+modification plans, and the complete advanced Rust network/mount builders are
+not currently exposed. Use the Rust SDK when those APIs are required.
+
+The source gem intentionally compiles against the published
+`microsandbox` Rust crate at the exact same version as the gem. The Rake test
+task rejects version drift between the gem, extension crate, and Rust SDK
+dependency.
+
+#### Ruby lifecycle and native requirements
+
+- Installing the source gem requires a Rust 1.85+ toolchain, a C compiler,
+  Ruby development headers, and `rb_sys`.
+- Running local sandboxes requires Apple Silicon virtualization on macOS, KVM
+  on Linux, or WHP on Windows, plus the microsandbox runtime and firmware.
+- A lifecycle-owning `Sandbox` stops when Ruby garbage-collects it. Call
+  `sandbox.detach` first when the VM must outlive the Ruby object, then manage
+  it through `Sandbox.get`.
+- `Sandbox.with` always attempts cleanup. If both the block and cleanup fail,
+  the block's original exception is preserved.
+
+#### Ruby security notes
+
+`network: :none` disables sandbox networking. A hash with `allowed_hosts` and
+`allowed_ports` creates a default-deny egress policy. Secret entries require
+`env`, `value`, and `allowed_host`; the guest receives a placeholder and the
+host proxy substitutes the real value only for the allowed TLS hostname.
+
+The `secret_env` configuration path stores the supplied secret in sandbox
+configuration on the host. Do not pass credentials that may not be persisted
+there. Secret values should come from a process-level secret manager, must not
+be logged, and should be rotated after suspected host compromise.
+
 ## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/terminal/ffffff" alt="cli-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/terminal/000000" alt="cli"></a>&nbsp;&nbsp;CLI
 
 The `msb` CLI provides a complete interface for managing sandboxes, images, and volumes.

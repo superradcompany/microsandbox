@@ -31,6 +31,25 @@ module Microsandbox
     end
   end
 
+  class Filesystem
+    def initialize(sandbox)
+      @sandbox = sandbox
+    end
+
+    def read(path) = @sandbox.fs_read(path)
+    def write(path, data) = @sandbox.fs_write(path, data)
+    def mkdir(path) = @sandbox.fs_mkdir(path)
+    def list(path) = @sandbox.fs_list(path)
+    def stat(path) = @sandbox.fs_stat(path)
+    def exists?(path) = @sandbox.fs_exists?(path)
+    def copy(from, to) = @sandbox.fs_copy(from, to)
+    def rename(from, to) = @sandbox.fs_rename(from, to)
+    def remove(path) = @sandbox.fs_remove(path)
+    def remove_dir(path) = @sandbox.fs_remove_dir(path)
+    def copy_from_host(host_path, guest_path) = @sandbox.fs_copy_from_host(host_path, guest_path)
+    def copy_to_host(guest_path, host_path) = @sandbox.fs_copy_to_host(guest_path, host_path)
+  end
+
   class Sandbox
     def self.with(name, **options)
       sandbox = create(name, **options)
@@ -39,8 +58,17 @@ module Microsandbox
       begin
         yield sandbox
       ensure
-        sandbox.stop
+        primary_error = $!
+        begin
+          sandbox.stop
+        rescue StandardError
+          raise if primary_error.nil?
+        end
       end
+    end
+
+    def fs
+      @fs ||= Filesystem.new(self)
     end
   end
 end
