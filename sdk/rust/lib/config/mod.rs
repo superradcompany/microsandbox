@@ -265,7 +265,7 @@ pub struct RuntimeConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "lowercase", deny_unknown_fields)]
 pub enum BlockWritebackConfig {
-    /// Use the measured per-disk limit and derive the aggregate pool unless overridden.
+    /// Use up to the measured per-disk limit, bounded by the aggregate pool.
     Auto {
         /// Optional host-global dirty-credit pool override in MiB.
         #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -190,15 +190,15 @@ When the root-disk default is flat, plain `msb pull IMAGE` also prepares the reu
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `block_writeback` | `{ "mode": "auto" }` | Buffered host writeback containment and admission. `auto` uses the measured 1536 MiB per-disk window and a derived aggregate pool on Linux. On macOS and Windows, default `auto` is a no-op because this host-page-cache controller is Linux-specific. |
+| `block_writeback` | `{ "mode": "auto" }` | Buffered host writeback containment and admission. `auto` uses up to the measured 1536 MiB per-disk window, bounded by the aggregate pool, on Linux. On macOS and Windows, default `auto` is a no-op because this host-page-cache controller is Linux-specific. |
 
 ### `runtime.block_writeback`
 
 | Field | Modes | Default | Description |
 |-------|-------|---------|-------------|
-| `mode` | all | `"auto"` | `auto` uses the measured 1536 MiB per-disk window, `fixed` requires `per_disk_mib`, and `off` disables both the VMM hard bound and host-global admission. |
+| `mode` | all | `"auto"` | `auto` uses the smaller of the measured 1536 MiB per-disk ceiling and the available aggregate pool, `fixed` requires an exact `per_disk_mib`, and `off` disables both the VMM hard bound and host-global admission. |
 | `per_disk_mib` | `fixed` | required | Explicit hard budget for each eligible writable raw disk. The minimum is 128 MiB. This field is rejected in `auto` and `off` modes. |
-| `pool_mib` | `auto`, `fixed` | `null` | Optional aggregate dirty-credit admission-pool override. `null` derives the pool as the lower of 10% of physical RAM and a conservative estimate of Linux's dirty-background threshold, using the exact byte threshold when configured or the ratio applied to current `MemAvailable`. The pool must fit at least one complete per-disk budget; `auto` never silently shrinks its 1536 MiB window. This field is rejected in `off` mode. |
+| `pool_mib` | `auto`, `fixed` | `null` | Optional aggregate dirty-credit admission-pool override. `null` derives the pool as the lower of 10% of physical RAM and a conservative estimate of Linux's dirty-background threshold, using the exact byte threshold when configured or the ratio applied to current `MemAvailable`. In `auto`, the pool reduces the per-disk window when necessary but must fit libkrun's 128 MiB minimum. In `fixed`, it must fit at least one complete configured per-disk budget. This field is rejected in `off` mode. |
 
 Use a fixed policy only when representative measurements justify a different per-disk window:
 

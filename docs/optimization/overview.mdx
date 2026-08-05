@@ -23,7 +23,7 @@ Start with `msb doctor`, keep the workload and benchmark procedure unchanged, an
 | Flat `clone` strategy | `auto` | Controls whether private flat roots use a metadata-only copy-on-write clone or a sparse copy | Local storage provisioning |
 | `sandbox_defaults.cpu_placement` | `inherit` | Coordinates and pins vCPU threads to host logical processors | Linux and Windows hosts |
 | `sandbox_defaults.thp` | `madvise` | Sets the guest Linux transparent-huge-page boot policy | Every newly booted sandbox |
-| `runtime.block_writeback` | `auto` with a 1536 MiB per-disk window | Bounds buffered host dirty data per writable raw disk and admits active VMs against one derived pool | Linux, writable raw disks using writeback caching |
+| `runtime.block_writeback` | `auto` with up to a 1536 MiB per-disk window | Bounds buffered host dirty data per writable raw disk and admits active VMs against one derived pool | Linux, writable raw disks using writeback caching |
 | x2APIC, CRC32C, PREEMPT_NONE | Selected by the compatible runtime and firmware | Reduces interrupt, checksum, and scheduler overhead | Applicable shipping guest builds |
 | AMD AVIC or Intel APICv | Host KVM policy | Accelerates virtual interrupt delivery used by the x86 guest | Linux x86 hosts with capable hardware |
 
@@ -63,7 +63,7 @@ There is no universal fastest profile. The following is a reasonable starting po
 }
 ```
 
-`cpu_placement: auto` is intentionally not a portable macOS default: managed placement is unsupported on macOS because the operating system does not expose an equivalent public hard-affinity API. Use `inherit` on macOS. Keep `thp: madvise` unless a representative workload and density test justify another policy. Buffered-writeback containment defaults to `auto`: on Linux it uses the measured 1.5 GiB window that kept the unchanged OVH customer disk suite at containment-off throughput, while on macOS and Windows it is a no-op because this controller governs Linux host page-cache writeback. The aggregate Linux pool remains derived from host capacity, so node density is bounded rather than hidden.
+`cpu_placement: auto` is intentionally not a portable macOS default: managed placement is unsupported on macOS because the operating system does not expose an equivalent public hard-affinity API. Use `inherit` on macOS. Keep `thp: madvise` unless a representative workload and density test justify another policy. Buffered-writeback containment defaults to `auto`: on Linux it uses up to the measured 1.5 GiB window that kept the unchanged OVH customer disk suite at containment-off throughput, reducing the hard per-disk limit when the bounded host pool is smaller. On macOS and Windows it is a no-op because this controller governs Linux host page-cache writeback. The aggregate Linux pool remains derived from host capacity, so node density is bounded rather than hidden. Use `fixed` when the exact measured window is a deployment requirement.
 
 ## Storage layout: layered or flat
 
