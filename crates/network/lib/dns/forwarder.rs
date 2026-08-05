@@ -43,7 +43,7 @@ use super::common::config::NormalizedDnsConfig;
 use super::common::filter::{is_private_ipv4, is_private_ipv6};
 use super::common::transport::Transport;
 use super::nameserver::{read_host_dns_servers, resolve_nameservers};
-use crate::policy::{Action, DomainName, NetworkPolicy};
+use crate::policy::{Action, DomainName, NetworkPolicy, PolicyDenial};
 use crate::shared::{ResolvedHostnameFamily, SharedState};
 use crate::stack::GatewayIps;
 
@@ -190,6 +190,16 @@ impl DnsForwarder {
         // the DNS protocol/port.
         if decide_dns_action(&self.network_policy, &domain, transport).is_deny() {
             tracing::debug!(domain = %domain, "DNS query denied by network policy");
+            // Reported here rather than inside the policy evaluator: the
+            // DNS evaluators take no `SharedState`, and widening their
+            // public signatures would break consumers of this crate.
+            self.shared.report_policy_denial(|| {
+                PolicyDenial::to_domain(
+                    transport.policy_protocol(),
+                    domain.clone(),
+                    Some(transport.upstream_port()),
+                )
+            });
             // NXDOMAIN, not REFUSED: stub resolvers (e.g. glibc) don't
             // fail-fast on REFUSED, so a denied lookup hangs the guest in a
             // deny-by-default sandbox. NXDOMAIN is a synthetic negative that
