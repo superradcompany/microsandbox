@@ -2,7 +2,12 @@ use std::{
     ffi::c_void,
     fmt::Display,
     future::Future,
-    sync::{Arc, OnceLock},
+    mem::ManuallyDrop,
+    panic::{AssertUnwindSafe, catch_unwind},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicPtr, AtomicU32, Ordering},
+    },
     time::Duration,
 };
 
@@ -12,7 +17,9 @@ use magnus::{
 };
 use microsandbox_core::{
     BackendKind, MicrosandboxResult,
-    backend::{CloudBackend, LocalBackend, default_backend, set_default_backend},
+    backend::{
+        CloudBackend, LocalBackend, default_backend, resolve_default_backend, set_default_backend,
+    },
     image::{Image, ImageHandle},
     logs::{LogEntry, LogOptions, LogSource},
     sandbox::{
@@ -42,13 +49,25 @@ unsafe extern "C" {
 /// `rb_thread_call_without_gvl`.
 struct BlockingRecv<T> {
     rx: Option<tokio::sync::oneshot::Receiver<T>>,
-    result: Option<T>,
+    result: Option<std::thread::Result<Option<T>>>,
+}
+
+fn catch_callback<F, T>(callback: F) -> std::thread::Result<T>
+where
+    F: FnOnce() -> T,
+{
+    catch_unwind(AssertUnwindSafe(callback))
 }
 
 unsafe extern "C" fn do_blocking_recv<T>(data: *mut c_void) -> *mut c_void {
     let carrier = unsafe { &mut *(data as *mut BlockingRecv<T>) };
-    let rx = carrier.rx.take().expect("receiver already consumed");
-    carrier.result = rx.blocking_recv().ok();
+    let receiver = carrier.rx.take();
+    carrier.result = Some(catch_callback(move || {
+        receiver
+            .expect("GVL callback invoked twice")
+            .blocking_recv()
+            .ok()
+    }));
     std::ptr::null_mut()
 }
 
@@ -56,22 +75,107 @@ unsafe extern "C" fn do_blocking_recv<T>(data: *mut c_void) -> *mut c_void {
 // Runtime
 // -------------------------------------------------------------------------------------------------
 
-static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+// A tokio runtime cannot survive fork(2): only the calling thread exists in
+// the child, while the inherited runtime points at worker and I/O threads that
+// disappeared. Tag each leaked runtime with the process that created it and
+// build a fresh one after fork. The stale parent runtime is intentionally
+// leaked; dropping it in the child can block forever joining vanished threads.
+static RUNTIME_PTR: AtomicPtr<tokio::runtime::Runtime> = AtomicPtr::new(std::ptr::null_mut());
+static RUNTIME_PID: AtomicU32 = AtomicU32::new(0);
+static RUNTIME_SLOT: Mutex<RuntimeSlot> = Mutex::new(RuntimeSlot { runtime: None });
+
+struct RuntimeSlot {
+    runtime: Option<ManuallyDrop<tokio::runtime::Runtime>>,
+}
 
 fn current_ruby() -> Ruby {
     Ruby::get().expect("Ruby VM is not available")
 }
 
-fn runtime() -> Result<&'static tokio::runtime::Runtime, Error> {
-    if let Some(rt) = RUNTIME.get() {
-        return Ok(rt);
+#[derive(Clone)]
+enum BackendSelection {
+    Ambient,
+    Local,
+    Cloud {
+        api_key: String,
+        url: Option<String>,
+    },
+    CloudProfile(String),
+}
+
+static BACKEND_SELECTION: Mutex<BackendSelection> = Mutex::new(BackendSelection::Ambient);
+
+fn reset_backend_after_fork(ruby: &Ruby) -> Result<(), Error> {
+    let selection = BACKEND_SELECTION
+        .lock()
+        .map_err(|_| {
+            Error::new(
+                ruby.exception_runtime_error(),
+                "backend selection lock is poisoned",
+            )
+        })?
+        .clone();
+    match selection {
+        BackendSelection::Ambient => {
+            let backend = resolve_default_backend().map_err(|error| native_error(ruby, error))?;
+            set_default_backend(backend);
+        }
+        BackendSelection::Local => set_default_backend(LocalBackend::lazy()),
+        BackendSelection::Cloud { api_key, url } => {
+            let backend = match url {
+                Some(url) => CloudBackend::new(url, api_key),
+                None => CloudBackend::with_api_key(api_key),
+            }
+            .map_err(|error| native_error(ruby, error))?;
+            set_default_backend(backend);
+        }
+        BackendSelection::CloudProfile(name) => {
+            let backend =
+                CloudBackend::from_profile(&name).map_err(|error| native_error(ruby, error))?;
+            set_default_backend(backend);
+        }
     }
-    let rt = tokio::runtime::Builder::new_multi_thread()
+    Ok(())
+}
+
+fn runtime() -> Result<&'static tokio::runtime::Runtime, Error> {
+    let process_id = std::process::id();
+    let runtime_ptr = RUNTIME_PTR.load(Ordering::Acquire);
+    if !runtime_ptr.is_null() && RUNTIME_PID.load(Ordering::Acquire) == process_id {
+        return Ok(unsafe { &*runtime_ptr });
+    }
+
+    let mut slot = RUNTIME_SLOT.lock().map_err(|_| {
+        Error::new(
+            current_ruby().exception_runtime_error(),
+            "Tokio runtime lock is poisoned",
+        )
+    })?;
+    let runtime_ptr = RUNTIME_PTR.load(Ordering::Acquire);
+    if !runtime_ptr.is_null() && RUNTIME_PID.load(Ordering::Acquire) == process_id {
+        return Ok(unsafe { &*runtime_ptr });
+    }
+
+    if RUNTIME_PID.load(Ordering::Acquire) != 0 {
+        reset_backend_after_fork(&current_ruby())?;
+    }
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
+        .thread_name("microsandbox-ruby")
         .build()
-        .map_err(|e| Error::new(current_ruby().exception_runtime_error(), e.to_string()))?;
-    let _ = RUNTIME.set(rt);
-    Ok(RUNTIME.get().expect("tokio runtime disappeared after init"))
+        .map_err(|error| Error::new(current_ruby().exception_runtime_error(), error.to_string()))?;
+    // Assignment deliberately does not drop an inherited runtime. Its worker
+    // threads vanished at fork and Tokio may hang trying to join them.
+    slot.runtime = Some(ManuallyDrop::new(runtime));
+    let runtime_ptr = slot
+        .runtime
+        .as_ref()
+        .map(|runtime| &**runtime as *const _ as *mut _)
+        .expect("runtime slot was just initialized");
+    RUNTIME_PTR.store(runtime_ptr, Ordering::Release);
+    RUNTIME_PID.store(process_id, Ordering::Release);
+    Ok(unsafe { &*runtime_ptr })
 }
 
 fn native_error(ruby: &Ruby, error: impl Display) -> Error {
@@ -107,12 +211,15 @@ where
             std::ptr::null_mut(),
         );
     }
-    carrier.result.ok_or_else(|| {
-        Error::new(
+    match carrier.result.take() {
+        Some(Ok(Some(value))) => Ok(value),
+        Some(Ok(None)) => Err(Error::new(
             ruby.exception_runtime_error(),
             "sandbox operation was canceled",
-        )
-    })
+        )),
+        Some(Err(panic)) => std::panic::resume_unwind(panic),
+        None => unreachable!("GVL callback did not run"),
+    }
 }
 
 /// Run an SDK future to completion (GVL released) and convert errors.
@@ -1356,28 +1463,39 @@ fn default_backend_kind_str() -> String {
     .to_owned()
 }
 
-fn set_default_backend_local() -> Result<(), Error> {
-    set_default_backend(LocalBackend::lazy());
+fn remember_backend_selection(ruby: &Ruby, selection: BackendSelection) -> Result<(), Error> {
+    *BACKEND_SELECTION.lock().map_err(|_| {
+        Error::new(
+            ruby.exception_runtime_error(),
+            "backend selection lock is poisoned",
+        )
+    })? = selection;
     Ok(())
+}
+
+fn set_default_backend_local(ruby: &Ruby) -> Result<(), Error> {
+    set_default_backend(LocalBackend::lazy());
+    remember_backend_selection(ruby, BackendSelection::Local)
 }
 
 fn set_default_backend_cloud(ruby: &Ruby, args: &[Value]) -> Result<(), Error> {
     let parsed = scan_args::<(String,), (), (), (), RHash, ()>(args)?;
     reject_unknown_keywords(ruby, parsed.keywords, &["url"])?;
     let api_key = parsed.required.0;
-    let backend = match keyword::<String>(parsed.keywords, "url")? {
-        Some(url) => CloudBackend::new(url, api_key),
-        None => CloudBackend::with_api_key(api_key),
+    let url = keyword::<String>(parsed.keywords, "url")?;
+    let backend = match &url {
+        Some(url) => CloudBackend::new(url, &api_key),
+        None => CloudBackend::with_api_key(&api_key),
     }
     .map_err(|error| native_error(ruby, error))?;
     set_default_backend(backend);
-    Ok(())
+    remember_backend_selection(ruby, BackendSelection::Cloud { api_key, url })
 }
 
 fn set_default_backend_profile(ruby: &Ruby, name: String) -> Result<(), Error> {
     let backend = CloudBackend::from_profile(&name).map_err(|error| native_error(ruby, error))?;
     set_default_backend(backend);
-    Ok(())
+    remember_backend_selection(ruby, BackendSelection::CloudProfile(name))
 }
 // -- Sandbox statics ---------------------------------------------------------
 
@@ -2025,4 +2143,15 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     snap_handle.define_method("remove", method!(RubySnapshotHandle::remove, 1))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    use super::catch_callback;
+
+    #[test]
+    fn no_gvl_callback_panics_are_captured() {
+        let result = catch_callback(|| panic!("callback panic"));
+        assert!(result.is_err());
+    }
 }

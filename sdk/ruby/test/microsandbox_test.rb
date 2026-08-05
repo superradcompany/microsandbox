@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "test/unit"
+require "timeout"
 require_relative "../lib/microsandbox"
 
 class MicrosandboxTest < Test::Unit::TestCase
@@ -69,5 +70,41 @@ class MicrosandboxTest < Test::Unit::TestCase
     end
 
     assert_equal "stop failed", error.message
+  end
+
+  def test_native_runtime_rebuilds_after_fork
+    omit("fork is unavailable") unless Process.respond_to?(:fork)
+
+    Microsandbox::Sandbox.list(limit: 1)
+    reader, writer = IO.pipe
+    child = fork do
+      reader.close
+      begin
+        Microsandbox::Sandbox.list(limit: 1)
+        writer.write("ok")
+      rescue StandardError => error
+        writer.write("#{error.class}: #{error.message}")
+      ensure
+        writer.close
+        exit! 0
+      end
+    end
+    writer.close
+
+    result = Timeout.timeout(10) { reader.read }
+    Process.wait(child)
+
+    assert_equal "ok", result
+  ensure
+    reader&.close
+    writer&.close
+    if child
+      begin
+        Process.kill("KILL", child)
+        Process.wait(child)
+      rescue Errno::ESRCH, Errno::ECHILD
+        nil
+      end
+    end
   end
 end

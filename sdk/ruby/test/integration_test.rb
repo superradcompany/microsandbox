@@ -52,13 +52,13 @@ class MicrosandboxIntegrationTest < Test::Unit::TestCase
     secret = "ruby-secret-#{SecureRandom.hex(8)}"
     sandbox = create_sandbox(
       "secret",
-      network: { allowed_hosts: ["httpbin.org"], allowed_ports: [443] },
-      secrets: [{ env: "API_KEY", value: secret, allowed_host: "httpbin.org" }]
+      network: { allowed_hosts: ["httpbingo.org"], allowed_ports: [443] },
+      secrets: [{ env: "API_KEY", value: secret, allowed_host: "httpbingo.org" }]
     )
 
     guest_env = sandbox.shell('printf "%s" "$API_KEY"')
     response = sandbox.shell(
-      'wget -qO- --timeout=15 --header="Authorization: Bearer $API_KEY" https://httpbin.org/headers'
+      'for attempt in 1 2 3; do wget -qO- --timeout=15 --header="Authorization: Bearer $API_KEY" https://httpbingo.org/headers && break; sleep 1; done'
     )
 
     assert_not_include guest_env.stdout, secret

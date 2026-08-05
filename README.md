@@ -289,6 +289,8 @@ The SDK lets you create and control sandboxes directly from your application. `S
 The Ruby gem supports Ruby 3.1 and newer. Its native extension releases Ruby's
 GVL while waiting for sandbox operations, so other Ruby threads continue to
 run during image pulls, VM startup, command execution, and lifecycle calls.
+The native runtime and selected backend are rebuilt after `fork(2)`, supporting
+clustered Puma workers, Resque, and other prefork process models.
 
 The supported surface includes:
 
