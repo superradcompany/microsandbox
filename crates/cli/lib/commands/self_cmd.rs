@@ -2453,7 +2453,7 @@ async fn applied_migrations(db: &DatabaseConnection) -> anyhow::Result<Vec<Strin
     let rows = match db
         .query_all_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
-            "SELECT version FROM seaql_migrations ORDER BY applied_at ASC, version ASC",
+            "SELECT version FROM seaql_migrations",
         ))
         .await
     {
@@ -2462,9 +2462,23 @@ async fn applied_migrations(db: &DatabaseConnection) -> anyhow::Result<Vec<Strin
         Err(err) => return Err(err.into()),
     };
 
-    rows.iter()
+    let applied = rows
+        .iter()
         .map(|row| row.try_get_by_index::<String>(0).map_err(Into::into))
-        .collect()
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let Some(prefix) =
+        schema_metadata::canonical_applied_prefix(applied.iter().map(String::as_str))
+    else {
+        anyhow::bail!(
+            "local database was updated by a newer msb or does not contain a valid migration prefix"
+        );
+    };
+
+    Ok(prefix
+        .iter()
+        .map(|metadata| metadata.id.to_string())
+        .collect())
 }
 
 async fn user_data_warnings(db: &DatabaseConnection) -> anyhow::Result<Vec<String>> {

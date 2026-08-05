@@ -18,7 +18,7 @@
 mod sandbox;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     num::NonZero,
     path::{Path, PathBuf},
     sync::Arc,
@@ -745,7 +745,7 @@ async fn refuse_schema_ahead(conn: &DatabaseConnection) -> MicrosandboxResult<()
     let rows = match conn
         .query_all_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
-            "SELECT version FROM seaql_migrations ORDER BY applied_at ASC, version ASC",
+            "SELECT version FROM seaql_migrations",
         ))
         .await
     {
@@ -758,14 +758,19 @@ async fn refuse_schema_ahead(conn: &DatabaseConnection) -> MicrosandboxResult<()
         .iter()
         .map(|row| row.try_get_by_index::<String>(0))
         .collect::<Result<_, _>>()?;
-    let known: Vec<&str> = schema_metadata::migration_ids().collect();
-
-    for (index, version) in applied.iter().enumerate() {
-        if known.get(index).copied() != Some(version.as_str()) {
-            return Err(MicrosandboxError::Runtime(format!(
-                "database schema is newer than this msb binary; applied migration {version:?} is not in this binary's migration prefix"
-            )));
-        }
+    if schema_metadata::canonical_applied_prefix(applied.iter().map(String::as_str)).is_none() {
+        let expected_prefix: HashSet<_> = schema_metadata::migration_ids()
+            .take(applied.len())
+            .collect();
+        let version = applied
+            .iter()
+            .find(|version| !expected_prefix.contains(version.as_str()))
+            .or_else(|| applied.first())
+            .map(String::as_str)
+            .unwrap_or("<missing migration>");
+        return Err(MicrosandboxError::Runtime(format!(
+            "database schema is newer than this msb binary; applied migration {version:?} is not in this binary's migration prefix"
+        )));
     }
 
     Ok(())
@@ -1005,6 +1010,33 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("database schema is newer"));
+    }
+
+    #[tokio::test]
+    async fn test_connect_and_migrate_accepts_equal_migration_timestamps() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_dir = tmp.path().join("db");
+        let database = DatabaseConfig::default();
+
+        let pools = connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
+            .await
+            .unwrap();
+        pools
+            .write()
+            .inner()
+            .execute_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "UPDATE seaql_migrations SET applied_at = 1",
+            ))
+            .await
+            .unwrap();
+        drop(pools);
+
+        // Reopening must use the canonical metadata order rather than sorting equal timestamps by
+        // their backdated migration names.
+        connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
+            .await
+            .unwrap();
     }
 
     #[test]
