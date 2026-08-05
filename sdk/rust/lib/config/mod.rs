@@ -257,52 +257,33 @@ pub struct OciSandboxDefaults {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RuntimeConfig {
-    /// Hard buffered block writeback policy.
-    #[serde(alias = "block_writeback_preflush")]
-    pub block_writeback_limit: BlockWritebackLimit,
-
-    /// Optional host-global dirty-credit pool override in MiB.
-    ///
-    /// `None` derives a conservative pool from physical host memory whenever the per-disk policy
-    /// is active. An explicit value overrides that derived aggregate capacity.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub block_writeback_pool_mib: Option<NonZero<u64>>,
+    /// Buffered host writeback containment and admission policy.
+    pub block_writeback: BlockWritebackConfig,
 }
 
-/// Controls the per-disk hard limit for buffered host dirty data.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub enum BlockWritebackLimit {
-    /// Use the runtime's platform-aware bounded-writeback and admission policy.
-    Auto,
+/// Controls buffered host dirty data for writable raw disks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "lowercase", deny_unknown_fields)]
+pub enum BlockWritebackConfig {
+    /// Use the measured per-disk limit and derive the aggregate pool unless overridden.
+    Auto {
+        /// Optional host-global dirty-credit pool override in MiB.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pool_mib: Option<NonZero<u64>>,
+    },
+
+    /// Use an explicit per-disk limit and derive the aggregate pool unless overridden.
+    Fixed {
+        /// Maximum page-aligned dirty data charged to one writable raw disk, in MiB.
+        per_disk_mib: NonZero<u64>,
+
+        /// Optional host-global dirty-credit pool override in MiB.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pool_mib: Option<NonZero<u64>>,
+    },
 
     /// Disable bounded writeback without changing guest-visible durability semantics.
-    #[default]
-    Off,
-
-    /// Use an explicit per-disk limit in MiB.
-    Fixed {
-        /// Maximum page-aligned dirty data charged to one writable raw disk.
-        mib: NonZero<u64>,
-    },
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum BlockWritebackLimitKeyword {
-    Auto,
-    Off,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-struct FixedBlockWritebackLimit {
-    mib: NonZero<u64>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(untagged)]
-enum BlockWritebackLimitWire {
-    Keyword(BlockWritebackLimitKeyword),
-    Fixed(FixedBlockWritebackLimit),
+    Off {},
 }
 
 /// Registry configuration.
@@ -683,30 +664,9 @@ impl Default for SandboxDefaults {
     }
 }
 
-impl Serialize for BlockWritebackLimit {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let wire = match *self {
-            Self::Auto => BlockWritebackLimitWire::Keyword(BlockWritebackLimitKeyword::Auto),
-            Self::Off => BlockWritebackLimitWire::Keyword(BlockWritebackLimitKeyword::Off),
-            Self::Fixed { mib } => BlockWritebackLimitWire::Fixed(FixedBlockWritebackLimit { mib }),
-        };
-        wire.serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for BlockWritebackLimit {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        Ok(match BlockWritebackLimitWire::deserialize(deserializer)? {
-            BlockWritebackLimitWire::Keyword(BlockWritebackLimitKeyword::Auto) => Self::Auto,
-            BlockWritebackLimitWire::Keyword(BlockWritebackLimitKeyword::Off) => Self::Off,
-            BlockWritebackLimitWire::Fixed(FixedBlockWritebackLimit { mib }) => Self::Fixed { mib },
-        })
+impl Default for BlockWritebackConfig {
+    fn default() -> Self {
+        Self::Auto { pool_mib: None }
     }
 }
 
@@ -1281,8 +1241,14 @@ mod tests {
         assert_eq!(cfg.database.max_connections, 5);
         assert_eq!(cfg.database.connect_timeout_secs, 30);
         assert_eq!(cfg.database.busy_timeout_secs, 5);
-        assert_eq!(cfg.runtime.block_writeback_limit, BlockWritebackLimit::Off);
-        assert_eq!(cfg.runtime.block_writeback_pool_mib, None);
+        assert_eq!(
+            cfg.runtime.block_writeback,
+            BlockWritebackConfig::Auto { pool_mib: None }
+        );
+        assert_eq!(
+            serde_json::to_value(cfg.runtime.block_writeback).unwrap(),
+            serde_json::json!({ "mode": "auto" })
+        );
     }
 
     #[test]
@@ -1314,7 +1280,7 @@ mod tests {
                     }
                 }
             },
-            "runtime": { "block_writeback_limit": "off" }
+            "runtime": { "block_writeback": { "mode": "off" } }
         }"#;
 
         let cfg: LocalConfig = serde_json::from_str(json).unwrap();
@@ -1328,37 +1294,62 @@ mod tests {
                 clone: microsandbox_types::FlatClone::Copy,
             })
         );
-        assert_eq!(cfg.runtime.block_writeback_limit, BlockWritebackLimit::Off);
+        assert_eq!(cfg.runtime.block_writeback, BlockWritebackConfig::Off {});
     }
 
     #[test]
-    fn test_block_writeback_limit_fixed_mib_round_trip() {
+    fn test_block_writeback_fixed_round_trip() {
         let json = r#"{
             "runtime": {
-                "block_writeback_limit": {"mib":1280},
-                "block_writeback_pool_mib": 5120
+                "block_writeback": {
+                    "mode": "fixed",
+                    "per_disk_mib": 1280,
+                    "pool_mib": 5120
+                }
             }
         }"#;
         let cfg: LocalConfig = serde_json::from_str(json).unwrap();
 
         assert_eq!(
-            cfg.runtime.block_writeback_limit,
-            BlockWritebackLimit::Fixed {
-                mib: NonZero::new(1280).unwrap(),
+            cfg.runtime.block_writeback,
+            BlockWritebackConfig::Fixed {
+                per_disk_mib: NonZero::new(1280).unwrap(),
+                pool_mib: NonZero::new(5120),
             }
         );
-        assert_eq!(cfg.runtime.block_writeback_pool_mib, NonZero::new(5120));
 
-        let serialized = serde_json::to_value(&cfg.runtime.block_writeback_limit).unwrap();
-        assert_eq!(serialized, serde_json::json!({ "mib": 1280 }));
+        let serialized = serde_json::to_value(&cfg.runtime.block_writeback).unwrap();
+        assert_eq!(
+            serialized,
+            serde_json::json!({
+                "mode": "fixed",
+                "per_disk_mib": 1280,
+                "pool_mib": 5120
+            })
+        );
     }
 
     #[test]
-    fn test_deserialize_legacy_block_writeback_preflush_key() {
-        let json = r#"{"runtime": {"block_writeback_preflush": "off"}}"#;
+    fn test_block_writeback_modes_reject_incompatible_fields() {
+        let auto_with_fixed_limit = r#"{
+            "runtime": {
+                "block_writeback": {
+                    "mode": "auto",
+                    "per_disk_mib": 1536
+                }
+            }
+        }"#;
+        let off_with_pool = r#"{
+            "runtime": {
+                "block_writeback": {
+                    "mode": "off",
+                    "pool_mib": 4096
+                }
+            }
+        }"#;
 
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(cfg.runtime.block_writeback_limit, BlockWritebackLimit::Off);
+        assert!(serde_json::from_str::<LocalConfig>(auto_with_fixed_limit).is_err());
+        assert!(serde_json::from_str::<LocalConfig>(off_with_pool).is_err());
     }
 
     #[test]

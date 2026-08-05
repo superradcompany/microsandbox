@@ -876,6 +876,7 @@ mod tests {
             "snapshot_index",
             "volume",
             "volume_attach",
+            "writeback_allocation",
         ];
 
         assert_eq!(table_names, expected);
