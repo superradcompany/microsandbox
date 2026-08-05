@@ -1,0 +1,17 @@
+# frozen_string_literal: true
+
+require "rake/extensiontask"
+require "rake/testtask"
+
+Rake::ExtensionTask.new("microsandbox") do |extension|
+  extension.lib_dir = "lib/microsandbox"
+end
+
+Rake::TestTask.new do |test|
+  test.libs << "lib"
+  test.pattern = "test/**/*_test.rb"
+  test.verbose = true
+  test.deps << :compile
+end
+
+task default: :test
