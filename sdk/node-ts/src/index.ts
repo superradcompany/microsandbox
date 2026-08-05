@@ -12,11 +12,12 @@ export {
   type RawFrame,
 } from "./agent.js";
 export {
+  defaultBackendInfo,
   defaultBackendKind,
   setDefaultBackend,
   withDefaultBackend,
 } from "./runtime.js";
-export type { DefaultBackend } from "./runtime.js";
+export type { BackendInfo, DefaultBackend } from "./runtime.js";
 export type { DeploymentProfile } from "./deployment-profile.js";
 
 // Sandbox lifecycle and execution

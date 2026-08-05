@@ -260,6 +260,7 @@ pub struct ExecEvent {
 #[napi(object)]
 pub struct VolumeInfo {
     pub name: String,
+    pub is_default: bool,
     pub kind: String,
     pub quota_mib: Option<u32>,
     pub used_bytes: f64,

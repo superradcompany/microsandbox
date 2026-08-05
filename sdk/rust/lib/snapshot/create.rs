@@ -261,6 +261,9 @@ fn ensure_snapshottable_root_disk(
         Some(RootDisk::DiskImage { .. }) => Err(MicrosandboxError::InvalidConfig(format!(
             "sandbox '{source_sandbox}' uses a user-owned disk-image root disk, which microsandbox does not snapshot"
         ))),
+        Some(RootDisk::Flat { .. }) => Err(MicrosandboxError::InvalidConfig(format!(
+            "sandbox '{source_sandbox}' uses a flat root disk, which is not yet supported by snapshots"
+        ))),
         Some(RootDisk::Managed { .. }) | None => Ok(()),
     }
 }
@@ -349,5 +352,21 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("disk-image"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn flat_root_disk_is_rejected_with_a_purposeful_error() {
+        let err = ensure_snapshottable_root_disk(
+            Some(&RootDisk::Flat {
+                size_mib: Some(8192),
+                fstype: None,
+                clone: microsandbox_types::FlatClone::Auto,
+            }),
+            "sb",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("flat"), "unexpected error: {err}");
+        assert!(err.contains("not yet supported"), "unexpected error: {err}");
     }
 }

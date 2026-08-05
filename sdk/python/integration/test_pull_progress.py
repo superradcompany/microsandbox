@@ -7,7 +7,7 @@ from contextlib import suppress
 import pytest
 
 from integration.helpers import IMAGE, remove_sandbox
-from microsandbox import MicrosandboxError, Sandbox
+from microsandbox import MicrosandboxError, PullEventType, PullPolicy, Sandbox
 
 
 @pytest.mark.asyncio
@@ -21,7 +21,7 @@ async def test_create_with_progress_emits_events_and_returns_sandbox(sandbox_nam
         cpus=1,
         memory=512,
         replace=True,
-        pull_policy="always",
+        pull_policy=PullPolicy.ALWAYS,
     )
 
     sandbox = None
@@ -33,11 +33,12 @@ async def test_create_with_progress_emits_events_and_returns_sandbox(sandbox_nam
             sandbox = await session.result()
 
         event_types = [event.event_type for event in events]
-        assert event_types[0] == "resolving"
-        assert "resolved" in event_types
-        assert event_types[-1] == "complete"
+        assert all(isinstance(event_type, PullEventType) for event_type in event_types)
+        assert event_types[0] is PullEventType.RESOLVING
+        assert PullEventType.RESOLVED in event_types
+        assert event_types[-1] is PullEventType.COMPLETE
 
-        resolved = next(event for event in events if event.event_type == "resolved")
+        resolved = next(event for event in events if event.event_type is PullEventType.RESOLVED)
         assert resolved.reference
         assert resolved.manifest_digest
         assert resolved.layer_count > 0
@@ -106,9 +107,10 @@ async def test_create_with_progress_detached_returns_detached_sandbox(sandbox_na
                 event_types.append(event.event_type)
             sandbox = await session.result()
 
-        assert event_types[0] == "resolving"
-        assert "resolved" in event_types
-        assert event_types[-1] == "complete"
+        assert all(isinstance(event_type, PullEventType) for event_type in event_types)
+        assert event_types[0] is PullEventType.RESOLVING
+        assert PullEventType.RESOLVED in event_types
+        assert event_types[-1] is PullEventType.COMPLETE
         assert await sandbox.name == name
         assert await sandbox.owns_lifecycle is False
 
@@ -147,7 +149,7 @@ async def test_create_with_progress_failure_surfaces_from_result(sandbox_name):
         cpus=1,
         memory=512,
         replace=True,
-        pull_policy="never",
+        pull_policy=PullPolicy.NEVER,
     )
 
     async with session:

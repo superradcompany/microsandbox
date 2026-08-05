@@ -27,6 +27,19 @@ struct PyBackendScope {
     previous: Option<Arc<dyn microsandbox::Backend>>,
 }
 
+/// Secret-safe information about an SDK backend.
+#[pyclass(name = "BackendInfo", frozen)]
+struct PyBackendInfo {
+    #[pyo3(get)]
+    kind: String,
+    #[pyo3(get)]
+    api_url: Option<String>,
+    #[pyo3(get)]
+    source: String,
+    #[pyo3(get)]
+    profile: Option<String>,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -42,6 +55,7 @@ fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(set_default_backend, m)?)?;
     m.add_function(wrap_pyfunction!(backend_scope, m)?)?;
     m.add_function(wrap_pyfunction!(default_backend_kind, m)?)?;
+    m.add_function(wrap_pyfunction!(default_backend_info, m)?)?;
     m.add_function(wrap_pyfunction!(resolved_msb_path, m)?)?;
     m.add_function(wrap_pyfunction!(metrics::all_sandbox_metrics, m)?)?;
     m.add_class::<sandbox::PySandbox>()?;
@@ -73,6 +87,7 @@ fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<logs::PyLogEntry>()?;
     m.add_class::<logs::PyLogStream>()?;
     m.add_class::<sandbox::PyPullSession>()?;
+    m.add_class::<sandbox::PyPullEvent>()?;
     m.add_class::<ssh::PySandboxSshOps>()?;
     m.add_class::<ssh::PySshOutput>()?;
     m.add_class::<ssh::PySshClient>()?;
@@ -82,6 +97,7 @@ fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<fs::PyFsEntry>()?;
     m.add_class::<fs::PyFsMetadata>()?;
     m.add_class::<PyBackendScope>()?;
+    m.add_class::<PyBackendInfo>()?;
     Ok(())
 }
 
@@ -109,16 +125,18 @@ fn set_runtime_libkrunfw_path(path: String) {
 
 /// Set the process-wide default backend.
 ///
-/// `kind="local"` selects the local libkrun backend. `kind="cloud"` requires
-/// either `api_key` (with an optional `url` override), or `profile`.
+/// `BackendKind.LOCAL` selects the local libkrun backend. `BackendKind.CLOUD`
+/// requires either `api_key` (with an optional `url` override), or `profile`.
 #[pyfunction]
 #[pyo3(signature = (kind, *, url=None, api_key=None, profile=None))]
 fn set_default_backend(
-    kind: String,
+    py: Python<'_>,
+    kind: Py<PyAny>,
     url: Option<String>,
     api_key: Option<String>,
     profile: Option<String>,
 ) -> PyResult<()> {
+    let kind = crate::helpers::extract_str_enum(kind.bind(py), "BackendKind")?;
     microsandbox::set_default_backend(build_backend(kind, url, api_key, profile)?);
     Ok(())
 }
@@ -128,7 +146,7 @@ fn set_default_backend(
 /// Use as a regular context manager, including inside async functions:
 ///
 /// ```python
-/// with backend_scope("cloud", profile="dev"):
+/// with backend_scope(BackendKind.CLOUD, profile="dev"):
 ///     sandbox = await Sandbox.create("x", image="alpine:3.19")
 /// ```
 ///
@@ -137,23 +155,38 @@ fn set_default_backend(
 #[pyfunction]
 #[pyo3(signature = (kind, *, url=None, api_key=None, profile=None))]
 fn backend_scope(
-    kind: String,
+    py: Python<'_>,
+    kind: Py<PyAny>,
     url: Option<String>,
     api_key: Option<String>,
     profile: Option<String>,
 ) -> PyResult<PyBackendScope> {
+    let kind = crate::helpers::extract_str_enum(kind.bind(py), "BackendKind")?;
     let previous = microsandbox::swap_default_backend(build_backend(kind, url, api_key, profile)?);
     Ok(PyBackendScope {
         previous: Some(previous),
     })
 }
 
-/// Return the active default backend kind (`"local"` or `"cloud"`).
+/// Return the active default backend kind.
 #[pyfunction]
-fn default_backend_kind() -> &'static str {
-    match microsandbox::default_backend().kind() {
+fn default_backend_kind(py: Python<'_>) -> PyResult<PyObject> {
+    let kind = match microsandbox::default_backend().kind() {
         microsandbox::BackendKind::Local => "local",
         microsandbox::BackendKind::Cloud => "cloud",
+    };
+    crate::helpers::str_enum_member(py, "BackendKind", kind)
+}
+
+/// Return secret-safe information about the active default backend.
+#[pyfunction]
+fn default_backend_info() -> PyBackendInfo {
+    let info = microsandbox::default_backend_info();
+    PyBackendInfo {
+        kind: info.kind.as_str().to_string(),
+        api_url: info.api_url,
+        source: info.source.as_str().to_string(),
+        profile: info.profile,
     }
 }
 

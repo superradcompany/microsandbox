@@ -1309,6 +1309,31 @@ impl SandboxBuilder {
                 }
                 Ok(())
             }
+            Some(RootDisk::Flat {
+                size_mib, fstype, ..
+            }) => {
+                if *size_mib == Some(0) {
+                    return Err(crate::MicrosandboxError::InvalidConfig(
+                        "flat root disk size must be greater than 0".into(),
+                    ));
+                }
+                if fstype.as_deref().unwrap_or("ext4") != "ext4" {
+                    return Err(crate::MicrosandboxError::InvalidConfig(
+                        "flat root disks currently support only fstype=ext4".into(),
+                    ));
+                }
+                if !self.config.spec.patches.is_empty() {
+                    return Err(crate::MicrosandboxError::InvalidConfig(
+                        "patches are not yet compatible with flat OCI rootfs".into(),
+                    ));
+                }
+                if self.config.snapshot_upper_source.is_some() {
+                    return Err(crate::MicrosandboxError::InvalidConfig(
+                        "from_snapshot is not yet compatible with flat OCI rootfs".into(),
+                    ));
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -1603,6 +1628,42 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("require a managed root disk"));
+    }
+
+    #[tokio::test]
+    async fn test_builder_accepts_flat_root_disk() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .root_disk_with(|disk| {
+                disk.flat()
+                    .size(8192u32)
+                    .clone_strategy(crate::sandbox::FlatClone::Copy)
+            })
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            config.spec.image.oci_root_disk(),
+            Some(&crate::sandbox::RootDisk::Flat {
+                size_mib: Some(8192),
+                fstype: None,
+                clone: crate::sandbox::FlatClone::Copy,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn test_builder_flat_root_disk_rejects_patches() {
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .root_disk_with(|disk| disk.flat())
+            .patch(|patch| patch.text("/etc/motd", "hello", None, true))
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("not yet compatible with flat"));
     }
 
     #[tokio::test]

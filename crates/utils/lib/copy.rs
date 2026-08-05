@@ -28,10 +28,54 @@ use std::io;
 use std::io::{Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::io::{AsRawFd, RawFd};
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
 use std::path::Path;
+#[cfg(windows)]
+use std::ptr;
 
 #[cfg(windows)]
 use crate::extent::mark_sparse;
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::HANDLE;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::GetVolumeInformationByHandleW;
+#[cfg(windows)]
+use windows_sys::Win32::System::IO::DeviceIoControl;
+#[cfg(windows)]
+use windows_sys::Win32::System::Ioctl::{
+    DUPLICATE_EXTENTS_DATA, FSCTL_DUPLICATE_EXTENTS_TO_FILE, FSCTL_GET_INTEGRITY_INFORMATION,
+    FSCTL_GET_INTEGRITY_INFORMATION_BUFFER, FSCTL_SET_INTEGRITY_INFORMATION,
+    FSCTL_SET_INTEGRITY_INFORMATION_BUFFER,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::SystemServices::FILE_SUPPORTS_BLOCK_REFCOUNTING;
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// ReFS supports 4 KiB and 64 KiB clusters. Aligning to the larger unit is valid on both.
+#[cfg(windows)]
+const WINDOWS_CLONE_ALIGNMENT: u64 = 64 * 1024;
+
+/// Windows requires each duplicate-extents request to be strictly smaller than 4 GiB.
+#[cfg(windows)]
+const WINDOWS_MAX_CLONE_CHUNK: u64 =
+    (u32::MAX as u64 / WINDOWS_CLONE_ALIGNMENT) * WINDOWS_CLONE_ALIGNMENT;
+
+//--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+/// Strategy that successfully created a destination in [`fast_copy_with_strategy`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FastCopyStrategy {
+    /// The destination shares source extents through filesystem copy-on-write.
+    Reflink,
+    /// The destination is an independent sparse-aware copy.
+    SparseCopy,
+}
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -47,6 +91,11 @@ use crate::extent::mark_sparse;
 /// **Blocking.** Callers in async contexts should wrap in
 /// `tokio::task::spawn_blocking`.
 pub fn fast_copy(src: &Path, dst: &Path) -> io::Result<u64> {
+    fast_copy_with_strategy(src, dst).map(|(len, _)| len)
+}
+
+/// Copy using the fastest safe strategy and report which strategy resolved.
+pub fn fast_copy_with_strategy(src: &Path, dst: &Path) -> io::Result<(u64, FastCopyStrategy)> {
     // Stat the source up front. This makes the missing-source error
     // kind platform-consistent (`NotFound` everywhere); without it,
     // reflink-copy on Linux surfaces `InvalidInput` with no errno
@@ -57,15 +106,22 @@ pub fn fast_copy(src: &Path, dst: &Path) -> io::Result<u64> {
     // Tier 1: reflink. Errors on unsupported FSes; we fall through to
     // Tier 2. We do NOT use `reflink_or_copy`, which densifies on
     // fallback via `std::fs::copy`.
-    match reflink_copy::reflink(src, dst) {
-        Ok(()) => return Ok(src_len),
+    match reflink_impl(src, dst) {
+        Ok(()) => return Ok((src_len, FastCopyStrategy::Reflink)),
         Err(e) if is_reflink_unsupported(&e) => {
             // fall through to sparse copy
         }
         Err(e) => return Err(e),
     }
 
-    sparse_copy(src, dst)
+    sparse_copy(src, dst).map(|len| (len, FastCopyStrategy::SparseCopy))
+}
+
+/// Require a filesystem copy-on-write clone with no fallback.
+pub fn reflink(src: &Path, dst: &Path) -> io::Result<u64> {
+    let src_len = std::fs::metadata(src)?.len();
+    reflink_impl(src, dst)?;
+    Ok(src_len)
 }
 
 /// Sparse-aware copy via `SEEK_DATA`/`SEEK_HOLE` and per-extent copy.
@@ -126,6 +182,39 @@ fn sparse_copy_impl(src: &Path, dst: &Path) -> io::Result<u64> {
     Ok(len)
 }
 
+/// Use the platform's native copy-on-write file-clone primitive.
+#[cfg(unix)]
+fn reflink_impl(src: &Path, dst: &Path) -> io::Result<()> {
+    reflink_copy::reflink(src, dst)
+}
+
+/// Clone a file on a Windows volume that explicitly supports block refcounting.
+#[cfg(windows)]
+fn reflink_impl(src: &Path, dst: &Path) -> io::Result<()> {
+    let mut src_file = File::open(src)?;
+    let mut dst_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(dst)?;
+
+    let result = reflink_windows_files(&mut src_file, &mut dst_file);
+    drop(dst_file);
+    drop(src_file);
+    if result.is_err() {
+        let _ = std::fs::remove_file(dst);
+    }
+    result
+}
+
+#[cfg(not(any(unix, windows)))]
+fn reflink_impl(_src: &Path, _dst: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "filesystem reflinks are unsupported on this platform",
+    ))
+}
+
 #[cfg(windows)]
 fn sparse_copy_impl(src: &Path, dst: &Path) -> io::Result<u64> {
     const BUF_SIZE: usize = 1024 * 1024;
@@ -162,6 +251,172 @@ fn sparse_copy_impl(src: &Path, dst: &Path) -> io::Result<u64> {
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
+#[cfg(windows)]
+fn reflink_windows_files(src: &mut File, dst: &mut File) -> io::Result<()> {
+    let src_volume = windows_volume_identity(src)?;
+    let dst_volume = windows_volume_identity(dst)?;
+    if src_volume.0 != dst_volume.0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Windows block cloning requires source and destination on the same volume",
+        ));
+    }
+    if src_volume.1 & FILE_SUPPORTS_BLOCK_REFCOUNTING == 0
+        || dst_volume.1 & FILE_SUPPORTS_BLOCK_REFCOUNTING == 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "destination volume does not advertise block-refcounting support",
+        ));
+    }
+
+    mark_sparse(dst)?;
+    match_windows_integrity(src, dst)?;
+
+    let len = src.metadata()?.len();
+    dst.set_len(len)?;
+    let clone_len = len / WINDOWS_CLONE_ALIGNMENT * WINDOWS_CLONE_ALIGNMENT;
+    let mut offset = 0u64;
+    while offset < clone_len {
+        let chunk = (clone_len - offset).min(WINDOWS_MAX_CLONE_CHUNK);
+        duplicate_windows_extents(src, dst, offset, chunk)?;
+        offset += chunk;
+    }
+    if clone_len < len {
+        copy_windows_tail(src, dst, clone_len, len - clone_len)?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_volume_identity(file: &File) -> io::Result<(u32, u32)> {
+    let mut serial = 0u32;
+    let mut flags = 0u32;
+    let ok = unsafe {
+        GetVolumeInformationByHandleW(
+            file.as_raw_handle() as HANDLE,
+            ptr::null_mut(),
+            0,
+            &mut serial,
+            ptr::null_mut(),
+            &mut flags,
+            ptr::null_mut(),
+            0,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((serial, flags))
+}
+
+#[cfg(windows)]
+fn match_windows_integrity(src: &File, dst: &File) -> io::Result<()> {
+    let Some(src_info) = get_windows_integrity(src)? else {
+        return Ok(());
+    };
+    let Some(dst_info) = get_windows_integrity(dst)? else {
+        return Ok(());
+    };
+    if src_info.ChecksumAlgorithm == dst_info.ChecksumAlgorithm && src_info.Flags == dst_info.Flags
+    {
+        return Ok(());
+    }
+
+    let info = FSCTL_SET_INTEGRITY_INFORMATION_BUFFER {
+        ChecksumAlgorithm: src_info.ChecksumAlgorithm,
+        Reserved: 0,
+        Flags: src_info.Flags,
+    };
+    let mut returned = 0u32;
+    let ok = unsafe {
+        DeviceIoControl(
+            dst.as_raw_handle() as HANDLE,
+            FSCTL_SET_INTEGRITY_INFORMATION,
+            &info as *const _ as *const _,
+            size_of::<FSCTL_SET_INTEGRITY_INFORMATION_BUFFER>() as u32,
+            ptr::null_mut(),
+            0,
+            &mut returned,
+            ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn get_windows_integrity(
+    file: &File,
+) -> io::Result<Option<FSCTL_GET_INTEGRITY_INFORMATION_BUFFER>> {
+    let mut info = FSCTL_GET_INTEGRITY_INFORMATION_BUFFER::default();
+    let mut returned = 0u32;
+    let ok = unsafe {
+        DeviceIoControl(
+            file.as_raw_handle() as HANDLE,
+            FSCTL_GET_INTEGRITY_INFORMATION,
+            ptr::null(),
+            0,
+            &mut info as *mut _ as *mut _,
+            size_of::<FSCTL_GET_INTEGRITY_INFORMATION_BUFFER>() as u32,
+            &mut returned,
+            ptr::null_mut(),
+        )
+    };
+    if ok != 0 {
+        return Ok(Some(info));
+    }
+    let error = io::Error::last_os_error();
+    if is_reflink_unsupported(&error) {
+        Ok(None)
+    } else {
+        Err(error)
+    }
+}
+
+#[cfg(windows)]
+fn duplicate_windows_extents(src: &File, dst: &File, offset: u64, len: u64) -> io::Result<()> {
+    let request = DUPLICATE_EXTENTS_DATA {
+        FileHandle: src.as_raw_handle() as HANDLE,
+        SourceFileOffset: offset as i64,
+        TargetFileOffset: offset as i64,
+        ByteCount: len as i64,
+    };
+    let mut returned = 0u32;
+    let ok = unsafe {
+        DeviceIoControl(
+            dst.as_raw_handle() as HANDLE,
+            FSCTL_DUPLICATE_EXTENTS_TO_FILE,
+            &request as *const _ as *const _,
+            size_of::<DUPLICATE_EXTENTS_DATA>() as u32,
+            ptr::null_mut(),
+            0,
+            &mut returned,
+            ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn copy_windows_tail(src: &mut File, dst: &mut File, offset: u64, len: u64) -> io::Result<()> {
+    src.seek(SeekFrom::Start(offset))?;
+    dst.seek(SeekFrom::Start(offset))?;
+    let copied = io::copy(&mut src.take(len), dst)?;
+    if copied != len {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            format!("Windows reflink tail copied {copied} of {len} bytes"),
+        ));
+    }
+    Ok(())
+}
+
 /// Reflink can fail with several different errnos depending on the
 /// filesystem and platform. Treat them all as "fall through to Tier 2"
 /// rather than propagating to the caller.
@@ -183,10 +438,12 @@ fn is_reflink_unsupported(e: &io::Error) -> bool {
     let aliases: &[i32] = &[libc::ENOTSUP, libc::EOPNOTSUPP, libc::EXDEV, libc::EINVAL];
     #[cfg(windows)]
     let aliases: &[i32] = &[
-        1,  // ERROR_INVALID_FUNCTION
-        17, // ERROR_NOT_SAME_DEVICE
-        50, // ERROR_NOT_SUPPORTED
-        87, // ERROR_INVALID_PARAMETER
+        1,   // ERROR_INVALID_FUNCTION
+        17,  // ERROR_NOT_SAME_DEVICE
+        50,  // ERROR_NOT_SUPPORTED
+        87,  // ERROR_INVALID_PARAMETER
+        124, // ERROR_INVALID_LEVEL
+        775, // ERROR_NOT_CAPABLE
     ];
 
     #[cfg(windows)]
@@ -199,55 +456,22 @@ fn is_reflink_unsupported(e: &io::Error) -> bool {
     aliases.contains(&code)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn copy_extent(src_fd: RawFd, dst_fd: RawFd, off: u64, len: u64) -> io::Result<()> {
-    let mut src_off = off as i64;
-    let mut dst_off = off as i64;
-    let mut remaining = len;
-
-    while remaining > 0 {
-        let chunk = remaining.min(usize::MAX as u64 / 2) as usize;
-        let n =
-            unsafe { libc::copy_file_range(src_fd, &mut src_off, dst_fd, &mut dst_off, chunk, 0) };
-        if n < 0 {
-            let err = io::Error::last_os_error();
-            // copy_file_range may not be supported on every kernel/FS
-            // combination (notably across-FS prior to 5.3, or older
-            // kernels). Fall back to pread/pwrite for the remainder of
-            // this extent.
-            if matches!(
-                err.raw_os_error(),
-                Some(libc::ENOSYS)
-                    | Some(libc::EXDEV)
-                    | Some(libc::EINVAL)
-                    | Some(libc::EOPNOTSUPP)
-            ) {
-                let consumed = len - remaining;
-                return read_write_extent(src_fd, dst_fd, off + consumed, remaining);
-            }
-            return Err(err);
-        }
-        if n == 0 {
-            // EOF — should not happen for a valid extent, but guard.
-            break;
-        }
-        remaining -= n as u64;
-    }
-    Ok(())
-}
-
-#[cfg(all(unix, not(target_os = "linux")))]
-fn copy_extent(src_fd: RawFd, dst_fd: RawFd, off: u64, len: u64) -> io::Result<()> {
+    // Explicit copy must never ask the filesystem to satisfy the transfer with shared COW extents.
     read_write_extent(src_fd, dst_fd, off, len)
 }
 
-/// Copy `len` bytes from `src_fd` at `off` to `dst_fd` at `off` using
-/// `pread`/`pwrite`. Universal fallback for `copy_extent` on platforms
-/// or filesystems where `copy_file_range` doesn't apply.
+/// Copy `len` bytes from `src_fd` at `off` to `dst_fd` at `off` with
+/// `pread`/`pwrite`.
+///
+/// This is the explicit-copy backend for `copy_extent`; avoiding clone and
+/// `copy_file_range` operations prevents the destination from sharing COW
+/// extents with the source.
 #[cfg(unix)]
 fn read_write_extent(src_fd: RawFd, dst_fd: RawFd, off: u64, len: u64) -> io::Result<()> {
-    const BUF_SIZE: usize = 64 * 1024;
-    let mut buf = [0u8; BUF_SIZE];
+    const BUF_SIZE: usize = 1024 * 1024;
+    let mut buf = vec![0u8; BUF_SIZE];
     let mut copied: u64 = 0;
 
     while copied < len {

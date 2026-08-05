@@ -6,7 +6,13 @@ import asyncio
 
 import pytest
 
-from microsandbox import MicrosandboxError, Sandbox, all_sandbox_metrics
+from microsandbox import (
+    LogReadSource,
+    LogSource,
+    MicrosandboxError,
+    Sandbox,
+    all_sandbox_metrics,
+)
 
 
 async def wait_for_metrics(sandbox):
@@ -60,15 +66,17 @@ async def test_logs_snapshot_filters_and_stream_resume(sandbox_factory):
     second = await sandbox.shell("echo recent-log-line; echo err-log-line >&2")
     assert second.success is True
 
-    stdout_entries = await sandbox.logs(tail=20, sources=["stdout"])
+    stdout_entries = await sandbox.logs(tail=20, sources=[LogReadSource.STDOUT])
     stdout_text = "".join(entry.text() for entry in stdout_entries)
     assert "old-log-line" in stdout_text
     assert "recent-log-line" in stdout_text
+    assert all(entry.source is LogSource.STDOUT for entry in stdout_entries)
 
-    stderr_entries = await sandbox.logs(tail=20, sources=["stderr"])
+    stderr_entries = await sandbox.logs(tail=20, sources=[LogReadSource.STDERR])
     assert "err-log-line" in "".join(entry.text() for entry in stderr_entries)
+    assert all(entry.source is LogSource.STDERR for entry in stderr_entries)
 
-    stream = await sandbox.log_stream(sources=["stdout"], follow=False)
+    stream = await sandbox.log_stream(sources=[LogReadSource.STDOUT], follow=False)
     streamed = []
     async for entry in stream:
         streamed.append(entry)
@@ -76,9 +84,10 @@ async def test_logs_snapshot_filters_and_stream_resume(sandbox_factory):
     streamed_text = "".join(entry.text() for entry in streamed)
     assert "recent-log-line" in streamed_text
     assert all(entry.cursor for entry in streamed)
+    assert all(entry.source is LogSource.STDOUT for entry in streamed)
 
     resumed = await sandbox.log_stream(
-        sources=["stdout"],
+        sources=[LogReadSource.STDOUT],
         from_cursor=streamed[-1].cursor,
         follow=False,
     )
@@ -87,5 +96,5 @@ async def test_logs_snapshot_filters_and_stream_resume(sandbox_factory):
     name = await sandbox.name
     await sandbox.stop()
     handle = await Sandbox.get(name)
-    stopped_entries = await handle.logs(tail=20, sources=["stdout"])
+    stopped_entries = await handle.logs(tail=20, sources=[LogReadSource.STDOUT])
     assert "recent-log-line" in "".join(entry.text() for entry in stopped_entries)

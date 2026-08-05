@@ -36,7 +36,9 @@ use microsandbox_types::DeploymentProfile;
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, DbErr, Statement};
 use tokio::sync::OnceCell;
 
-use super::{Backend, BackendKind, SandboxBackend, VolumeBackend};
+use super::{
+    Backend, BackendInfo, BackendKind, BackendSelectionSource, SandboxBackend, VolumeBackend,
+};
 use crate::{MicrosandboxError, MicrosandboxResult};
 use crate::{
     SandboxConfig,
@@ -57,6 +59,8 @@ pub struct LocalBackend {
     config: Arc<LocalConfig>,
     db: OnceCell<DbPools>,
     deployment_profile: Option<DeploymentProfile>,
+    selection_source: BackendSelectionSource,
+    profile: Option<String>,
 }
 
 /// Fluent builder for [`LocalBackend`]. Construct via [`LocalBackend::builder`].
@@ -116,11 +120,21 @@ impl LocalBackend {
     /// `LocalBackend` instance, so callers never end up with two backends
     /// racing on the same SQLite file.
     pub fn lazy() -> Self {
+        Self::lazy_with_selection(BackendSelectionSource::Programmatic, None)
+    }
+
+    /// Construct a lazy local backend with resolver provenance attached.
+    pub(crate) fn lazy_with_selection(
+        selection_source: BackendSelectionSource,
+        profile: Option<String>,
+    ) -> Self {
         let config = Arc::new(load_persisted_config_or_default().unwrap_or_default());
         Self {
             config,
             db: OnceCell::new(),
             deployment_profile: None,
+            selection_source,
+            profile,
         }
     }
 
@@ -402,6 +416,8 @@ impl LocalBackendBuilder {
             config: Arc::new(config),
             db: OnceCell::new(),
             deployment_profile,
+            selection_source: BackendSelectionSource::Programmatic,
+            profile: None,
         }
     }
 
@@ -534,6 +550,15 @@ impl MigrationLock {
 impl Backend for LocalBackend {
     fn kind(&self) -> BackendKind {
         BackendKind::Local
+    }
+
+    fn info(&self) -> BackendInfo {
+        BackendInfo {
+            kind: BackendKind::Local,
+            api_url: None,
+            source: self.selection_source,
+            profile: self.profile.clone(),
+        }
     }
 
     fn sandboxes(&self) -> &dyn SandboxBackend {
@@ -771,6 +796,8 @@ mod tests {
             config: Arc::new(LocalConfig::default()),
             db: OnceCell::new(),
             deployment_profile: Some(DeploymentProfile::MultiTenant),
+            selection_source: BackendSelectionSource::Programmatic,
+            profile: None,
         };
         let mut config = SandboxConfig::default();
         config.spec.name = "profile-test".into();
@@ -790,6 +817,8 @@ mod tests {
             config: Arc::new(LocalConfig::default()),
             db: OnceCell::new(),
             deployment_profile: None,
+            selection_source: BackendSelectionSource::Programmatic,
+            profile: None,
         };
         let mut config = SandboxConfig::default();
         config.spec.deployment_profile = DeploymentProfile::MultiTenant;

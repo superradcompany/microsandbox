@@ -9,12 +9,12 @@ import pytest
 from microsandbox import Image
 
 
-async def test_save_rejects_unknown_format(tmp_path: pathlib.Path) -> None:
-    with pytest.raises(ValueError, match="invalid archive format"):
+async def test_save_rejects_raw_format_strings(tmp_path: pathlib.Path) -> None:
+    with pytest.raises(TypeError, match="expected ImageArchiveFormat"):
         await Image.save(
             "python:3.12",
             output_path=str(tmp_path / "image.tar"),
-            format="zip",
+            format="docker",
         )
 
 

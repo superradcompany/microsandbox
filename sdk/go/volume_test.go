@@ -1,10 +1,13 @@
 package microsandbox
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
 
 func TestVolumeName(t *testing.T) {
@@ -18,6 +21,7 @@ func TestVolumeName(t *testing.T) {
 // This is the test that catches the "fs.root + / + rel" footgun where a
 // caller-supplied "../../etc/passwd" would happily escape the volume.
 func TestVolumeFsPathEscape(t *testing.T) {
+	ctx := context.Background()
 	root := t.TempDir()
 	fs := &VolumeFs{root: root}
 	volumeRoot := filepath.VolumeName(root) + string(filepath.Separator)
@@ -33,16 +37,16 @@ func TestVolumeFsPathEscape(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if _, err := fs.Read(c.rel); !errors.Is(err, ErrPathEscape) {
+			if _, err := fs.Read(ctx, c.rel); !errors.Is(err, ErrPathEscape) {
 				t.Errorf("Read(%q): want ErrPathEscape, got %v", c.rel, err)
 			}
-			if err := fs.Write(c.rel, []byte("x")); !errors.Is(err, ErrPathEscape) {
+			if err := fs.Write(ctx, c.rel, []byte("x")); !errors.Is(err, ErrPathEscape) {
 				t.Errorf("Write(%q): want ErrPathEscape, got %v", c.rel, err)
 			}
-			if _, err := fs.Exists(c.rel); !errors.Is(err, ErrPathEscape) {
+			if _, err := fs.Exists(ctx, c.rel); !errors.Is(err, ErrPathEscape) {
 				t.Errorf("Exists(%q): want ErrPathEscape, got %v", c.rel, err)
 			}
-			if err := fs.Remove(c.rel); !errors.Is(err, ErrPathEscape) {
+			if err := fs.Remove(ctx, c.rel); !errors.Is(err, ErrPathEscape) {
 				t.Errorf("Remove(%q): want ErrPathEscape, got %v", c.rel, err)
 			}
 		})
@@ -51,16 +55,17 @@ func TestVolumeFsPathEscape(t *testing.T) {
 
 // Sanity: legitimate paths still work end-to-end.
 func TestVolumeFsHappyPath(t *testing.T) {
+	ctx := context.Background()
 	root := t.TempDir()
 	fs := &VolumeFs{root: root}
 
-	if err := fs.Mkdir("sub/dir"); err != nil {
+	if err := fs.Mkdir(ctx, "sub/dir"); err != nil {
 		t.Fatalf("Mkdir: %v", err)
 	}
-	if err := fs.WriteString("sub/dir/file.txt", "hi"); err != nil {
+	if err := fs.WriteString(ctx, "sub/dir/file.txt", "hi"); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	got, err := fs.ReadString("sub/dir/file.txt")
+	got, err := fs.ReadString(ctx, "sub/dir/file.txt")
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
@@ -68,7 +73,7 @@ func TestVolumeFsHappyPath(t *testing.T) {
 		t.Errorf("Read: got %q want %q", got, "hi")
 	}
 
-	ok, err := fs.Exists("sub/dir/file.txt")
+	ok, err := fs.Exists(ctx, "sub/dir/file.txt")
 	if err != nil || !ok {
 		t.Fatalf("Exists: got %v, %v", ok, err)
 	}
@@ -82,7 +87,34 @@ func TestVolumeFsHappyPath(t *testing.T) {
 
 func TestVolumeFsEmptyRoot(t *testing.T) {
 	fs := &VolumeFs{root: ""}
-	if _, err := fs.Read("anything"); err == nil {
+	if _, err := fs.Read(context.Background(), "anything"); err == nil {
 		t.Error("expected error on empty root")
+	}
+}
+
+func TestVolumeFsHonorsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	fs := &VolumeFs{root: t.TempDir()}
+	if _, err := fs.Read(ctx, "anything"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Read() = %v, want context.Canceled", err)
+	}
+}
+
+func TestCloudVolumeFsTargetUsesImmutableID(t *testing.T) {
+	id := "11111111-1111-1111-1111-111111111111"
+	info := &ffi.VolumeHandleInfo{ID: &id, Name: "reusable-name"}
+
+	if got := volumeFsTarget(info); got != "cloud-id:"+id {
+		t.Fatalf("volumeFsTarget() = %q, want immutable cloud ID", got)
+	}
+}
+
+func TestDefaultVolumeCannotBeRemoved(t *testing.T) {
+	handle := &VolumeHandle{isDefault: true}
+	err := handle.Remove(context.Background())
+	if !IsKind(err, ErrUnsupportedOperation) {
+		t.Fatalf("Remove() = %v, want ErrUnsupportedOperation", err)
 	}
 }

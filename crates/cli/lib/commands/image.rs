@@ -168,6 +168,7 @@ pub async fn run(args: ImageArgs) -> anyhow::Result<()> {
                 args.insecure,
                 args.ca_certs,
                 microsandbox_image::PullPolicy::IfMissing,
+                args.materialize,
             )
             .await
         }
@@ -189,6 +190,7 @@ pub async fn run_pull(args: pull::PullArgs) -> anyhow::Result<()> {
         args.insecure,
         args.ca_certs,
         microsandbox_image::PullPolicy::IfMissing,
+        args.materialize,
     )
     .await
 }
@@ -201,6 +203,7 @@ async fn run_pull_inner(
     insecure: bool,
     cli_ca_certs: Option<String>,
     pull_policy: microsandbox_image::PullPolicy,
+    materialization: pull::PullMaterialization,
 ) -> anyhow::Result<()> {
     let start = Instant::now();
 
@@ -213,7 +216,11 @@ async fn run_pull_inner(
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid image reference: {e}"))?;
 
-    let options = microsandbox_image::PullOptions { pull_policy, force };
+    let options = microsandbox_image::PullOptions {
+        pull_policy,
+        force,
+        materialization: materialization.image_materialization(),
+    };
 
     if let Some((result, metadata)) =
         microsandbox_image::Registry::pull_cached(&cache, &image_ref, &options)?
@@ -355,7 +362,11 @@ async fn run_pull_inner(
 /// printed, because the caller already has its own UI (e.g. the Starting
 /// spinner in `resolve_and_start`). Only falls through to the full pull UI
 /// when there's actual work to do.
-pub(crate) async fn pull_if_missing(reference: &str, quiet: bool) -> anyhow::Result<()> {
+pub(crate) async fn pull_if_missing(
+    reference: &str,
+    quiet: bool,
+    materialization: pull::PullMaterialization,
+) -> anyhow::Result<()> {
     // Local paths (directories, disk images) are not pullable.
     if reference.starts_with('.') || reference.starts_with('/') {
         return Ok(());
@@ -370,6 +381,7 @@ pub(crate) async fn pull_if_missing(reference: &str, quiet: bool) -> anyhow::Res
     let options = microsandbox_image::PullOptions {
         pull_policy: microsandbox_image::PullPolicy::IfMissing,
         force: false,
+        materialization: materialization.image_materialization(),
     };
 
     if let Some((_, metadata)) =
@@ -388,6 +400,7 @@ pub(crate) async fn pull_if_missing(reference: &str, quiet: bool) -> anyhow::Res
         false,
         None,
         microsandbox_image::PullPolicy::IfMissing,
+        materialization,
     )
     .await
 }

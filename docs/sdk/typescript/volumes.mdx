@@ -23,6 +23,20 @@ await Volume.remove("my-data");                 // 4. delete
 
 ## Static methods
 
+#### <span className="msb-recv">Volume.</span><span className="msb-hn">getDefault()</span>
+
+```typescript
+static getDefault(): Promise<VolumeHandle>
+```
+
+Get the Cloud account's always-present default volume. It has no user-assigned name, cannot be removed, and supports direct filesystem operations through `.fs()`. The local backend returns a typed `Unsupported` error; it never substitutes a directory from the caller's machine.
+
+```typescript
+const volume = await Volume.getDefault();
+await volume.fs().write("customers/acme.json", JSON.stringify({ active: true }));
+console.log(await volume.fs().readToString("customers/acme.json"));
+```
+
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">builder()</span>
 
 ```typescript
@@ -198,7 +212,7 @@ console.log(await vfs.readToString("seed.txt"));
 
 </Accordion>
 
-Get a host-side filesystem handle for this volume's directory. Reads and writes happen directly on the host, with no sandbox running. See [`VolumeFs`](#volumefs-methods) for the full API.
+Get a filesystem handle for this volume. Local reads and writes use the managed host directory; Cloud reads and writes use the authenticated volume API. No sandbox needs to be running. See [`VolumeFs`](#volumefs-methods) for the full API.
 
 <p className="msb-label">Returns</p>
 

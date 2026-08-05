@@ -299,7 +299,9 @@ impl TryFrom<SandboxConfig> for CloudCreateBody {
             RootfsSource::Oci(oci) => {
                 if matches!(
                     oci.root_disk,
-                    Some(RootDisk::Tmpfs { .. } | RootDisk::DiskImage { .. })
+                    Some(
+                        RootDisk::Tmpfs { .. } | RootDisk::DiskImage { .. } | RootDisk::Flat { .. }
+                    )
                 ) {
                     return Err(MicrosandboxError::unsupported(
                         Operation::SandboxCreate,
@@ -612,6 +614,21 @@ mod tests {
             },
             ..Default::default()
         };
+
+        let err = CloudCreateBody::try_from(config).unwrap_err();
+        assert!(matches!(err, MicrosandboxError::Unsupported { .. }));
+    }
+
+    #[test]
+    fn cloud_create_request_rejects_flat_root_disk() {
+        let mut config = base_cloud_config();
+        if let RootfsSource::Oci(oci) = &mut config.spec.image {
+            oci.root_disk = Some(RootDisk::Flat {
+                size_mib: Some(8192),
+                fstype: None,
+                clone: microsandbox_types::FlatClone::Auto,
+            });
+        }
 
         let err = CloudCreateBody::try_from(config).unwrap_err();
         assert!(matches!(err, MicrosandboxError::Unsupported { .. }));

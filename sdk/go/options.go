@@ -17,7 +17,7 @@ type SandboxConfig struct {
 	Image       string
 	ImageFstype string
 	ImageBind   string
-	// RootDisk configures the writable rootfs layer for an OCI image.
+	// RootDisk configures root storage for an OCI image.
 	// Construct via the RootDisk factory and set with WithRootDisk.
 	RootDisk *RootDiskConfig
 	// OCIUpperSizeMiB is honored as a managed root disk of this size when
@@ -349,6 +349,7 @@ type persistedRootDisk struct {
 	Path    string  `json:"path"`
 	Format  string  `json:"format"`
 	Fstype  string  `json:"fstype"`
+	Clone   string  `json:"clone"`
 }
 
 func (p persistedRootDisk) toConfig() (*RootDiskConfig, error) {
@@ -363,6 +364,10 @@ func (p persistedRootDisk) toConfig() (*RootDiskConfig, error) {
 		cfg.Path = p.Path
 		cfg.Format = strings.ToLower(p.Format)
 		cfg.Fstype = p.Fstype
+	case "flat":
+		cfg.kind = RootDiskKindFlat
+		cfg.Fstype = p.Fstype
+		cfg.Clone = FlatClone(p.Clone)
 	default:
 		return nil, fmt.Errorf("unknown root disk kind: %q", p.Kind)
 	}
@@ -398,15 +403,15 @@ func WithImage(image string) SandboxOption {
 	return func(o *SandboxConfig) { o.Image = image }
 }
 
-// RootDiskConfig describes the writable rootfs layer (root disk) of an OCI
-// image. Construct via the RootDisk factory:
+// RootDiskConfig describes root storage for an OCI image. Construct via the
+// RootDisk factory:
 //
 //	microsandbox.RootDisk.Managed(8192)
 //	microsandbox.RootDisk.Tmpfs(microsandbox.RootDiskTmpfsOptions{SizeMiB: 512})
 //	microsandbox.RootDisk.Disk("./scratch.img", microsandbox.RootDiskImageOptions{Fstype: "ext4"})
 //
 // Use the factory rather than constructing the struct directly: it enforces
-// the mutually-exclusive kinds (managed / tmpfs / disk-image).
+// the mutually-exclusive kinds (managed / tmpfs / disk-image / flat).
 type RootDiskConfig struct {
 	// kind is the discriminator. Exposed via Kind() for callers that need
 	// to introspect; setting fields below directly is discouraged.
@@ -424,9 +429,11 @@ type RootDiskConfig struct {
 	// Fstype is the inner filesystem type of a disk-image root disk
 	// (e.g. "ext4"). Empty means ext4.
 	Fstype string
+	// Clone controls private flat-root provisioning. Empty resolves to auto.
+	Clone FlatClone
 }
 
-// RootDiskKind discriminates between the three root disk flavours.
+// RootDiskKind discriminates between root disk flavours.
 type RootDiskKind uint8
 
 const (
@@ -439,6 +446,17 @@ const (
 	// RootDiskKindDiskImage is a user-supplied disk image attached
 	// writable as the upper. User-owned lifecycle.
 	RootDiskKindDiskImage
+	// RootDiskKindFlat is one complete OCI filesystem without guest OverlayFS.
+	RootDiskKindFlat
+)
+
+// FlatClone controls how a private sandbox disk is created from a cached flat base.
+type FlatClone string
+
+const (
+	FlatCloneAuto    FlatClone = "auto"
+	FlatCloneCopy    FlatClone = "copy"
+	FlatCloneReflink FlatClone = "reflink"
 )
 
 // Kind reports which flavour of root disk this is.
@@ -458,6 +476,16 @@ type RootDiskImageOptions struct {
 	Format string
 	// Fstype hint ("ext4", "xfs"). Optional; ext4 when empty.
 	Fstype string
+}
+
+// RootDiskFlatOptions tunes the RootDisk.Flat factory.
+type RootDiskFlatOptions struct {
+	// SizeMiB is the final guest capacity. Zero selects the runtime default.
+	SizeMiB uint32
+	// Fstype is reserved for generated filesystem selection; currently ext4.
+	Fstype string
+	// Clone selects auto, copy, or strict reflink provisioning.
+	Clone FlatClone
 }
 
 // rootDiskFactory is the factory namespace for constructing RootDiskConfig
@@ -500,7 +528,18 @@ func (rootDiskFactory) Disk(path string, opts RootDiskImageOptions) RootDiskConf
 	}
 }
 
-// WithRootDisk configures the writable rootfs layer for an OCI image.
+// Flat returns a complete microsandbox-owned OCI rootfs mounted without guest OverlayFS.
+func (rootDiskFactory) Flat(opts RootDiskFlatOptions) RootDiskConfig {
+	return RootDiskConfig{
+		kind:    RootDiskKindFlat,
+		SizeMiB: opts.SizeMiB,
+		sizeSet: opts.SizeMiB != 0,
+		Fstype:  opts.Fstype,
+		Clone:   opts.Clone,
+	}
+}
+
+// WithRootDisk configures root storage for an OCI image.
 // It is valid only with WithImage when the image resolves to an OCI reference.
 func WithRootDisk(disk RootDiskConfig) SandboxOption {
 	return func(o *SandboxConfig) { o.RootDisk = &disk }

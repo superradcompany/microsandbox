@@ -52,6 +52,12 @@ where.exe msb
 
 If an error mentions `libkrunfw.so` or `libkrunfw.dylib`, clear any old Unix/macOS override in `MSB_LIBKRUNFW_PATH` or `config.json`, or point it at `libkrunfw.dll`.
 
+## Updates and reinstalls
+
+`msb self update` stages and verifies the new Windows release before scheduling the installed files for replacement. The command can exit while another `msb` or `microsandbox` process still has an executable locked; the background task keeps retrying and writes its progress to the log path printed by the command.
+
+The PowerShell installer checks both public executable names before changing the installation. If it reports that an executable is still running, stop the listed process or its active sandbox, then rerun the installer.
+
 ## Firewall and terminals
 
 Published ports open a listening socket on the Windows host. Windows Defender Firewall can prompt the first time `msb.exe` opens that listener. For local development, keep published ports bound to `127.0.0.1`; only allow private or public network access when you intentionally bind beyond loopback.

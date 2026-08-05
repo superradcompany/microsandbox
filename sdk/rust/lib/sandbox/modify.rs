@@ -382,7 +382,7 @@ impl SandboxModificationBuilder {
         if let Some(target_mib) = root_disk_grow_target(&plan, &self.patch, &config)
             && (stopped_status(status) || restart_required)
         {
-            grow_upper_now(&self.backend, &self.name, target_mib).await?;
+            grow_root_disk_now(&self.backend, &self.name, &config, target_mib).await?;
         }
         if !plan.changes.is_empty() {
             apply_patch_to_config(&mut config, &self.patch);
@@ -563,12 +563,11 @@ fn root_disk_grow_target(
     }
 }
 
-/// Grow the sandbox's canonical `upper.ext4` to `target_mib`. Callers only
-/// invoke this while the sandbox is stopped; the caller persists the new
-/// desired size after this succeeds.
-async fn grow_upper_now(
+/// Grow the sandbox-owned layered upper or flat root disk while it is stopped.
+async fn grow_root_disk_now(
     backend: &Arc<dyn Backend>,
     name: &str,
+    config: &SandboxConfig,
     target_mib: u32,
 ) -> MicrosandboxResult<()> {
     let local_backend = backend.as_local().ok_or_else(|| {
@@ -577,8 +576,18 @@ async fn grow_upper_now(
             UnsupportedReason::LocalOnly,
         )
     })?;
-    let upper_path = local_backend.sandboxes_dir().join(name).join("upper.ext4");
-    super::upper::grow_upper_to_mib(upper_path, target_mib).await
+    let sandbox_dir = local_backend.sandboxes_dir().join(name);
+    if matches!(
+        &config.spec.image,
+        RootfsSource::Oci(oci) if matches!(&oci.root_disk, Some(RootDisk::Flat { .. }))
+    ) {
+        return super::flat_rootfs::grow_private_flat_rootfs(
+            sandbox_dir.join(super::flat_rootfs::FLAT_ROOTFS_FILENAME),
+            target_mib,
+        )
+        .await;
+    }
+    super::upper::grow_upper_to_mib(sandbox_dir.join("upper.ext4"), target_mib).await
 }
 
 /// Path of the sandbox's host-side runtime control socket.
@@ -828,7 +837,9 @@ fn apply_patch_to_config(config: &mut SandboxConfig, patch: &SandboxModification
         && let RootfsSource::Oci(oci) = &mut config.spec.image
     {
         match &mut oci.root_disk {
-            Some(RootDisk::Managed { size_mib: s }) | Some(RootDisk::Tmpfs { size_mib: s }) => {
+            Some(RootDisk::Managed { size_mib: s })
+            | Some(RootDisk::Tmpfs { size_mib: s })
+            | Some(RootDisk::Flat { size_mib: s, .. }) => {
                 *s = Some(size_mib);
             }
             // The planner surfaces disk-image sizing as a conflict; never
@@ -1430,6 +1441,9 @@ fn root_disk_size_state(config: &SandboxConfig) -> Option<RootDiskSizeState> {
             current_mib: super::config::DEFAULT_OCI_UPPER_SIZE_MIB,
         },
         Some(RootDisk::Managed { size_mib }) => RootDiskSizeState::Managed {
+            current_mib: size_mib.unwrap_or(super::config::DEFAULT_OCI_UPPER_SIZE_MIB),
+        },
+        Some(RootDisk::Flat { size_mib, .. }) => RootDiskSizeState::Managed {
             current_mib: size_mib.unwrap_or(super::config::DEFAULT_OCI_UPPER_SIZE_MIB),
         },
         Some(RootDisk::Tmpfs { size_mib }) => RootDiskSizeState::Tmpfs {
@@ -3767,7 +3781,8 @@ mod tests {
         // The live control batch carries the value only for socket transport;
         // any Debug-logged form of the request shows [redacted] instead.
         let rotated_value = format!("{SECRET_SENTINEL}-rotated");
-        // SAFETY: unique variable name; no concurrent reader of this var.
+        let _env_guard = crate::test_support::lock_env();
+        // SAFETY: every environment-mutating SDK unit test holds the shared lock.
         unsafe { std::env::set_var("API_KEY_MODIFY_LEAK_TEST", &rotated_value) };
         let mut live_patch = patch.clone();
         live_patch.secrets[0].source = Some(SecretSource::Env {

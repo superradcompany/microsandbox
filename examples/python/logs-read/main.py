@@ -2,7 +2,7 @@
 
 import asyncio
 
-from microsandbox import Sandbox
+from microsandbox import LogReadSource, Sandbox
 
 
 async def main():
@@ -31,7 +31,12 @@ async def main():
 
     # Adding `system` mixes in lifecycle markers and runtime/kernel diagnostics.
     with_system = await handle.logs(
-        sources=["stdout", "stderr", "output", "system"]
+        sources=[
+            LogReadSource.STDOUT,
+            LogReadSource.STDERR,
+            LogReadSource.OUTPUT,
+            LogReadSource.SYSTEM,
+        ]
     )
     print(
         f"\n== including system (runtime/kernel + lifecycle markers): "

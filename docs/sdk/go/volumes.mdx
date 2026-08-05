@@ -16,7 +16,7 @@ vol, err := m.CreateVolume(ctx, "my-data",         // 1. create a named volume
 )
 
 vfs := vol.FS()                                    // 2. seed it from the host
-err = vfs.WriteString("seed.txt", "hello")
+err = vfs.WriteString(ctx, "seed.txt", "hello")
 
 sb, err := m.CreateSandbox(ctx, "worker",          // 3. attach it to a sandbox
     m.WithImage("alpine"),
@@ -29,6 +29,20 @@ sb, err := m.CreateSandbox(ctx, "worker",          // 3. attach it to a sandbox
 Named volumes are managed by microsandbox and stored by default under `~/.microsandbox/volumes/<name>/`. They persist independently of any sandbox. There is no Rust-side resource to release: `Remove` deletes the on-disk state and the DB record.
 
 ## Functions
+
+#### <span className="msb-recv"></span><span className="msb-hn">GetDefaultVolume()</span>
+
+```go
+func GetDefaultVolume(ctx context.Context) (*VolumeHandle, error)
+```
+
+Get the Cloud account's always-present default volume. It has no user-assigned name, cannot be removed, and supports direct filesystem operations through `FS()`. The local backend returns `ErrUnsupportedOperation`; it never substitutes a directory from the caller's machine.
+
+```go
+volume, err := m.GetDefaultVolume(ctx)
+err = volume.FS().WriteString(ctx, "customers/acme.json", `{"active":true}`)
+contents, err := volume.FS().ReadString(ctx, "customers/acme.json")
+```
 
 #### <span className="msb-recv"></span><span className="msb-hn">CreateVolume()</span>
 
@@ -210,19 +224,19 @@ func (v *Volume) FS() *VolumeFs
 
 ```go
 vfs := vol.FS()
-err := vfs.WriteString("seed.txt", "hello")
+err := vfs.WriteString(ctx, "seed.txt", "hello")
 ```
 
 </Accordion>
 
-Return a [`*VolumeFs`](#volumefs) for direct host-side file operations on this volume.
+Return a [`*VolumeFs`](#volumefs) for direct file operations. Local calls use the managed host directory; Cloud calls use the authenticated volume API.
 
 <p className="msb-label">Returns</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><a className="msb-type" href="#volumefs">*VolumeFs</a></div>
-    <div className="msb-param-desc">Host-side filesystem accessor rooted at the volume directory.</div>
+    <div className="msb-param-desc">Filesystem accessor rooted at the volume directory.</div>
   </div>
 </div>
 
@@ -348,7 +362,7 @@ Return a [`*VolumeFs`](#volumefs) for direct host-side file operations on this v
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><a className="msb-type" href="#volumefs">*VolumeFs</a></div>
-    <div className="msb-param-desc">Host-side filesystem accessor rooted at the volume directory.</div>
+    <div className="msb-param-desc">Filesystem accessor rooted at the volume directory.</div>
   </div>
 </div>
 
@@ -362,17 +376,19 @@ Delete this volume. All sandboxes using it must be stopped. Equivalent to [`Remo
 
 ## VolumeFs methods
 
-Host-side filesystem operations on a named volume's data directory. Obtain via [`Volume.FS()`](#v-fs) or [`VolumeHandle.FS()`](#h-fs). These operations run directly on the host filesystem: no running sandbox is required and no agent protocol is involved.
+Filesystem operations on a volume's data directory. Obtain via [`Volume.FS()`](#v-fs) or [`VolumeHandle.FS()`](#h-fs). Local operations run directly on the host filesystem, while Cloud operations use the authenticated Cloud API. No running sandbox or agent protocol is required.
 
 All path arguments are relative to the volume root. Paths that would escape the root via `..`, absolute components, or stray symlink chains are rejected with [`ErrPathEscape`](#errpathescape).
+
+Every operation except `Root` accepts a `context.Context`. Cloud operations use it to cancel or time out the underlying network request; local operations check it before accessing the host filesystem.
 
 ```go
 vfs := vol.FS()
 
-if err := vfs.WriteString("seed.txt", "hello"); err != nil {
+if err := vfs.WriteString(ctx, "seed.txt", "hello"); err != nil {
     return err
 }
-content, err := vfs.ReadString("seed.txt")
+content, err := vfs.ReadString(ctx, "seed.txt")
 ```
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">Root()</span>
@@ -386,7 +402,7 @@ Return the absolute host path of the volume's data directory.
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">Read()</span>
 
 ```go
-func (fs *VolumeFs) Read(relPath string) ([]byte, error)
+func (fs *VolumeFs) Read(ctx context.Context, relPath string) ([]byte, error)
 ```
 
 Read the contents of a file relative to the volume root.
@@ -412,7 +428,7 @@ Read the contents of a file relative to the volume root.
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">ReadString()</span>
 
 ```go
-func (fs *VolumeFs) ReadString(relPath string) (string, error)
+func (fs *VolumeFs) ReadString(ctx context.Context, relPath string) (string, error)
 ```
 
 Read a file and return its contents as a UTF-8 string.
@@ -420,7 +436,7 @@ Read a file and return its contents as a UTF-8 string.
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">Write()</span>
 
 ```go
-func (fs *VolumeFs) Write(relPath string, data []byte) error
+func (fs *VolumeFs) Write(ctx context.Context, relPath string, data []byte) error
 ```
 
 Write data to a file, creating or truncating it. Created files use mode `0o644`.
@@ -441,7 +457,7 @@ Write data to a file, creating or truncating it. Created files use mode `0o644`.
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">WriteString()</span>
 
 ```go
-func (fs *VolumeFs) WriteString(relPath, content string) error
+func (fs *VolumeFs) WriteString(ctx context.Context, relPath, content string) error
 ```
 
 Write a string to a file. Created files use mode `0o644`.
@@ -449,7 +465,7 @@ Write a string to a file. Created files use mode `0o644`.
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">Mkdir()</span>
 
 ```go
-func (fs *VolumeFs) Mkdir(relPath string) error
+func (fs *VolumeFs) Mkdir(ctx context.Context, relPath string) error
 ```
 
 Create a directory and all missing parents (mode `0o755`).
@@ -457,7 +473,7 @@ Create a directory and all missing parents (mode `0o755`).
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">Remove()</span>
 
 ```go
-func (fs *VolumeFs) Remove(relPath string) error
+func (fs *VolumeFs) Remove(ctx context.Context, relPath string) error
 ```
 
 Delete a single file or empty directory.
@@ -465,7 +481,7 @@ Delete a single file or empty directory.
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">RemoveAll()</span>
 
 ```go
-func (fs *VolumeFs) RemoveAll(relPath string) error
+func (fs *VolumeFs) RemoveAll(ctx context.Context, relPath string) error
 ```
 
 Delete a path and any children it contains (recursive).
@@ -473,7 +489,7 @@ Delete a path and any children it contains (recursive).
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">Exists()</span>
 
 ```go
-func (fs *VolumeFs) Exists(relPath string) (bool, error)
+func (fs *VolumeFs) Exists(ctx context.Context, relPath string) (bool, error)
 ```
 
 Report whether a file or directory exists at the given path.
@@ -735,7 +751,7 @@ A named persistent volume carrying its host-side path. Returned by [`CreateVolum
 |--------|---------|-------------|
 | [`Name()`](#v-name) | `string` | Volume name |
 | [`Path()`](#v-path) | `string` | Host filesystem path of the data directory |
-| [`FS()`](#v-fs) | [`*VolumeFs`](#volumefs) | Host-side filesystem accessor |
+| [`FS()`](#v-fs) | [`*VolumeFs`](#volumefs) | Filesystem accessor |
 | [`Remove(ctx)`](#v-remove) | `error` | Delete this volume (all sandboxes using it must be stopped) |
 
 ### VolumeHandle
@@ -756,26 +772,26 @@ Metadata reference for a named volume. Obtain via [`GetVolume`](#getvolume) or [
 | [`DiskFstype()`](#h-diskfstype) | `*string` | Disk filesystem type, or `nil` |
 | [`Labels()`](#h-labels) | `map[string]string` | Metadata labels |
 | [`CreatedAt()`](#h-createdat) | `time.Time` | Creation timestamp, zero value if unknown |
-| [`FS()`](#h-fs) | [`*VolumeFs`](#volumefs) | Host-side filesystem accessor |
+| [`FS()`](#h-fs) | [`*VolumeFs`](#volumefs) | Filesystem accessor |
 | [`Remove(ctx)`](#h-remove) | `error` | Delete this volume |
 
 ### VolumeFs
 
-Host-side filesystem operations on a volume's data directory. Obtain via [`Volume.FS()`](#v-fs) or [`VolumeHandle.FS()`](#h-fs). All path arguments are relative to the volume root; escaping paths are rejected with [`ErrPathEscape`](#errpathescape).
+Filesystem operations on a volume's data directory. Obtain via [`Volume.FS()`](#v-fs) or [`VolumeHandle.FS()`](#h-fs). All path arguments are relative to the volume root; escaping paths are rejected with [`ErrPathEscape`](#errpathescape).
 
 <p className="msb-backref">Returned by <a href="#v-fs">Volume.FS()</a> · <a href="#h-fs">VolumeHandle.FS()</a></p>
 
 | Method | Returns | Description |
 |--------|---------|-------------|
 | [`Root()`](#vfs-root) | `string` | Absolute host path of the data directory |
-| [`Read(relPath)`](#vfs-read) | `([]byte, error)` | Read file bytes |
-| [`ReadString(relPath)`](#vfs-readstring) | `(string, error)` | Read file as a UTF-8 string |
-| [`Write(relPath, data)`](#vfs-write) | `error` | Write bytes, creating or truncating |
-| [`WriteString(relPath, content)`](#vfs-writestring) | `error` | Write a string |
-| [`Mkdir(relPath)`](#vfs-mkdir) | `error` | Create a directory tree |
-| [`Remove(relPath)`](#vfs-remove) | `error` | Delete a file or empty directory |
-| [`RemoveAll(relPath)`](#vfs-removeall) | `error` | Recursive delete |
-| [`Exists(relPath)`](#vfs-exists) | `(bool, error)` | Check for existence |
+| [`Read(ctx, relPath)`](#vfs-read) | `([]byte, error)` | Read file bytes |
+| [`ReadString(ctx, relPath)`](#vfs-readstring) | `(string, error)` | Read file as a UTF-8 string |
+| [`Write(ctx, relPath, data)`](#vfs-write) | `error` | Write bytes, creating or truncating |
+| [`WriteString(ctx, relPath, content)`](#vfs-writestring) | `error` | Write a string |
+| [`Mkdir(ctx, relPath)`](#vfs-mkdir) | `error` | Create a directory tree |
+| [`Remove(ctx, relPath)`](#vfs-remove) | `error` | Delete a file or empty directory |
+| [`RemoveAll(ctx, relPath)`](#vfs-removeall) | `error` | Recursive delete |
+| [`Exists(ctx, relPath)`](#vfs-exists) | `(bool, error)` | Check for existence |
 
 ### ErrPathEscape
 
@@ -788,7 +804,7 @@ Returned by every [`VolumeFs`](#volumefs) method when `relPath` is absolute, con
 <p className="msb-backref">Returned by <a href="#volumefs">VolumeFs</a> methods</p>
 
 ```go
-if _, err := vfs.Read("../etc/passwd"); errors.Is(err, m.ErrPathEscape) {
+if _, err := vfs.Read(ctx, "../etc/passwd"); errors.Is(err, m.ErrPathEscape) {
     log.Println("nice try")
 }
 ```

@@ -73,7 +73,9 @@ async fn main() -> anyhow::Result<()> {
 fn configure_cloud_backend() -> anyhow::Result<()> {
     let kind = microsandbox::default_backend().kind();
     if kind != BackendKind::Cloud {
-        anyhow::bail!("set MSB_API_KEY or select a cloud profile; got {kind:?}");
+        anyhow::bail!(
+            "set MSB_BACKEND=cloud with MSB_API_KEY, or select a cloud profile; got {kind:?}"
+        );
     }
     Ok(())
 }

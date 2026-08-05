@@ -92,6 +92,7 @@ enum MountKind {
 /// .root_disk_with(|d| d.size(8.gib()))                       // managed ext4 (default kind)
 /// .root_disk_with(|d| d.tmpfs().size(2.gib()))               // RAM-backed, ephemeral
 /// .root_disk_with(|d| d.disk_image("./scratch.img"))         // user-supplied image
+/// .root_disk_with(|d| d.flat().size(8.gib()))                 // complete flat rootfs
 /// ```
 #[derive(Default)]
 pub struct RootDiskBuilder {
@@ -99,6 +100,7 @@ pub struct RootDiskBuilder {
     size_mib: Option<u32>,
     format: Option<DiskImageFormat>,
     fstype: Option<String>,
+    clone_strategy: Option<FlatClone>,
     error: Option<crate::MicrosandboxError>,
 }
 
@@ -109,6 +111,7 @@ enum RootDiskKind {
     Unset,
     Tmpfs,
     DiskImage(PathBuf),
+    Flat,
 }
 
 /// Sub-builder for [`MountBuilder::named_with`].
@@ -725,7 +728,7 @@ impl ImageSource {
 //--------------------------------------------------------------------------------------------------
 
 impl RootDiskBuilder {
-    /// Set the size in MiB. Valid for the managed (default) and tmpfs kinds;
+    /// Set the size in MiB. Valid for the managed (default), tmpfs and flat kinds;
     /// a user-supplied disk image takes its size from the image file.
     pub fn size(mut self, size: impl Into<Mebibytes>) -> Self {
         if matches!(self.kind, RootDiskKind::DiskImage(_)) {
@@ -747,6 +750,22 @@ impl RootDiskBuilder {
             RootDiskKind::DiskImage(_) => {
                 self.set_error("tmpfs() cannot be combined with disk_image()");
             }
+            RootDiskKind::Flat => {
+                self.set_error("tmpfs() cannot be combined with flat()");
+            }
+        }
+        self
+    }
+
+    /// Materialize the OCI image into one complete, microsandbox-owned root disk.
+    pub fn flat(mut self) -> Self {
+        match self.kind {
+            RootDiskKind::Unset => self.kind = RootDiskKind::Flat,
+            RootDiskKind::Flat => {}
+            RootDiskKind::Tmpfs => self.set_error("flat() cannot be combined with tmpfs()"),
+            RootDiskKind::DiskImage(_) => {
+                self.set_error("flat() cannot be combined with disk_image()");
+            }
         }
         self
     }
@@ -756,9 +775,16 @@ impl RootDiskBuilder {
     /// The format is derived from the file extension (`.img`/`.raw` → raw,
     /// `.qcow2` → qcow2) unless set explicitly with [`format`](Self::format).
     pub fn disk_image(mut self, path: impl Into<PathBuf>) -> Self {
-        if matches!(self.kind, RootDiskKind::Tmpfs) {
-            self.set_error("disk_image() cannot be combined with tmpfs()");
-            return self;
+        match self.kind {
+            RootDiskKind::Tmpfs => {
+                self.set_error("disk_image() cannot be combined with tmpfs()");
+                return self;
+            }
+            RootDiskKind::Flat => {
+                self.set_error("disk_image() cannot be combined with flat()");
+                return self;
+            }
+            RootDiskKind::Unset | RootDiskKind::DiskImage(_) => {}
         }
         if self.size_mib.is_some() {
             self.set_error(
@@ -785,11 +811,11 @@ impl RootDiskBuilder {
         self
     }
 
-    /// Set the inner filesystem type of the disk image. Defaults to ext4.
-    /// Valid only after [`disk_image`](Self::disk_image).
+    /// Set the generated or supplied filesystem type. Defaults to ext4.
+    /// Valid only after [`flat`](Self::flat) or [`disk_image`](Self::disk_image).
     pub fn fstype(mut self, fstype: impl Into<String>) -> Self {
-        if !matches!(self.kind, RootDiskKind::DiskImage(_)) {
-            self.set_error("fstype() requires disk_image() to be called first");
+        if !matches!(self.kind, RootDiskKind::DiskImage(_) | RootDiskKind::Flat) {
+            self.set_error("fstype() requires flat() or disk_image() to be called first");
             return self;
         }
         let fstype = fstype.into();
@@ -803,6 +829,16 @@ impl RootDiskBuilder {
             return self;
         }
         self.fstype = Some(fstype);
+        self
+    }
+
+    /// Select how a private disk is created from the cached flat rootfs artifact.
+    pub fn clone_strategy(mut self, strategy: FlatClone) -> Self {
+        if !matches!(self.kind, RootDiskKind::Flat) {
+            self.set_error("clone_strategy() requires flat() to be called first");
+            return self;
+        }
+        self.clone_strategy = Some(strategy);
         self
     }
 
@@ -840,6 +876,11 @@ impl RootDiskBuilder {
                     fstype: self.fstype,
                 })
             }
+            RootDiskKind::Flat => Ok(RootDisk::Flat {
+                size_mib: self.size_mib,
+                fstype: self.fstype,
+                clone: self.clone_strategy.unwrap_or_default(),
+            }),
         }
     }
 
@@ -1785,6 +1826,46 @@ mod tests {
     }
 
     #[test]
+    fn test_root_disk_builder_flat() {
+        let root_disk = RootDiskBuilder::default()
+            .flat()
+            .size(8192u32)
+            .fstype("ext4")
+            .clone_strategy(FlatClone::Reflink)
+            .build()
+            .unwrap();
+        assert_eq!(
+            root_disk,
+            RootDisk::Flat {
+                size_mib: Some(8192),
+                fstype: Some("ext4".into()),
+                clone: FlatClone::Reflink,
+            }
+        );
+    }
+
+    #[test]
+    fn test_root_disk_builder_flat_rejects_incompatible_kinds() {
+        assert!(
+            RootDiskBuilder::default()
+                .flat()
+                .tmpfs()
+                .build()
+                .unwrap_err()
+                .to_string()
+                .contains("cannot be combined")
+        );
+        assert!(
+            RootDiskBuilder::default()
+                .clone_strategy(FlatClone::Copy)
+                .build()
+                .unwrap_err()
+                .to_string()
+                .contains("requires flat()")
+        );
+    }
+
+    #[test]
     fn test_root_disk_builder_disk_image_infers_format() {
         let root_disk = RootDiskBuilder::default()
             .disk_image("./scratch.img")
@@ -1949,7 +2030,7 @@ mod tests {
 //--------------------------------------------------------------------------------------------------
 
 pub use microsandbox_types::{
-    DeploymentProfile, DiskImageFormat, HostPermissions, MountOptions, NamedVolumeCreate,
-    NamedVolumeMode, OciRootfsSource, Patch, RootDisk, RootfsSource, SecurityProfile,
-    StatVirtualization, VolumeKind, VolumeMount,
+    DeploymentProfile, DiskImageFormat, FlatClone, HostPermissions, MountOptions,
+    NamedVolumeCreate, NamedVolumeMode, OciRootfsSource, Patch, RootDisk, RootfsSource,
+    SecurityProfile, StatVirtualization, VolumeKind, VolumeMount,
 };

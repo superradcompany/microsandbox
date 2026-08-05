@@ -59,6 +59,7 @@ notify.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
+rustls-platform-verifier.workspace = true
 russh = { workspace = true, optional = true }
 russh-sftp = { workspace = true, optional = true }
 scopeguard.workspace = true
@@ -75,7 +76,6 @@ tracing.workspace = true
 typed-builder.workspace = true
 typed-path.workspace = true
 which.workspace = true
-webpki-roots.workspace = true
 zeroize.workspace = true
 
 [build-dependencies]

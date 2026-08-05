@@ -265,6 +265,21 @@ func TestFFIWireShape_WithRootDiskImage(t *testing.T) {
 	}
 }
 
+func TestFFIWireShape_WithRootDiskFlat(t *testing.T) {
+	got := marshalCreateOptions(t,
+		WithImage("python:3.12"),
+		WithRootDisk(RootDisk.Flat(RootDiskFlatOptions{
+			SizeMiB: 8192,
+			Fstype:  "ext4",
+			Clone:   FlatCloneReflink,
+		})),
+	)
+	rd := mustField(t, got, "root_disk").(map[string]any)
+	if rd["kind"] != "flat" || rd["size_mib"] != float64(8192) || rd["fstype"] != "ext4" || rd["clone"] != "reflink" {
+		t.Fatalf("root_disk = %v, want flat ext4 reflink fields", rd)
+	}
+}
+
 func TestFFIWireShape_WithOCIUpperSize(t *testing.T) {
 	got := marshalCreateOptions(t, WithImage("python:3.12"), WithOCIUpperSize(8192))
 	rd := mustField(t, got, "root_disk").(map[string]any)

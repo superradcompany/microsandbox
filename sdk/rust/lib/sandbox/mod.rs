@@ -9,6 +9,7 @@ pub(crate) mod attach;
 mod builder;
 pub(crate) mod config;
 pub mod exec;
+pub(crate) mod flat_rootfs;
 pub mod fs;
 mod handle;
 pub mod init;
@@ -133,9 +134,9 @@ pub use ssh::{
     SshServerOptionsBuilder, SshStdioStream,
 };
 pub use types::{
-    DeploymentProfile, DiskImageFormat, HostPermissions, ImageBuilder, ImageSource, IntoImage,
-    MountBuilder, MountOptions, NamedVolumeMode, OciRootfsSource, Patch, PatchBuilder, RootDisk,
-    RootDiskBuilder, RootfsSource, SecurityProfile, StatVirtualization, VolumeMount,
+    DeploymentProfile, DiskImageFormat, FlatClone, HostPermissions, ImageBuilder, ImageSource,
+    IntoImage, MountBuilder, MountOptions, NamedVolumeMode, OciRootfsSource, Patch, PatchBuilder,
+    RootDisk, RootDiskBuilder, RootfsSource, SecurityProfile, StatVirtualization, VolumeMount,
 };
 
 //--------------------------------------------------------------------------------------------------

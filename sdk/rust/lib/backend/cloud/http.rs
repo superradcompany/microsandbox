@@ -304,6 +304,18 @@ impl CloudBackend {
         decode_json(resp, "GET /v1/volumes").await
     }
 
+    /// `GET /v1/volumes/default`.
+    pub(in crate::backend) async fn get_default_volume(&self) -> MicrosandboxResult<CloudVolume> {
+        let url = format!("{}/v1/volumes/default", self.url);
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| cloud_io_error("GET /v1/volumes/default", e))?;
+        decode_json(resp, "GET /v1/volumes/default").await
+    }
+
     /// `POST /v1/volumes`.
     pub(in crate::backend) async fn create_volume(
         &self,
@@ -357,6 +369,39 @@ impl CloudBackend {
             .find(|volume| volume.name.as_deref() == Some(name))
             .ok_or_else(|| MicrosandboxError::VolumeNotFound(name.to_string()))
     }
+
+    /// Send a volume filesystem request and preserve the streaming response.
+    pub(in crate::backend) async fn volume_file_request(
+        &self,
+        method: reqwest::Method,
+        id: &str,
+        suffix: &str,
+        headers: &[(&str, String)],
+        json: Option<serde_json::Value>,
+        body: Option<reqwest::Body>,
+    ) -> MicrosandboxResult<Response> {
+        let url = format!(
+            "{}/v1/volumes/{}/files{}",
+            self.url,
+            urlencoding(id),
+            suffix
+        );
+        let mut request = self.http.request(method, &url);
+        for (name, value) in headers {
+            request = request.header(*name, value);
+        }
+        if let Some(json) = json {
+            request = request.json(&json);
+        }
+        if let Some(body) = body {
+            request = request.body(body);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|e| cloud_io_error("volume filesystem request", e))?;
+        ensure_success(response, "volume filesystem request").await
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -387,6 +432,21 @@ async fn decode_json<T: serde::de::DeserializeOwned>(
     ))
 }
 
+async fn ensure_success(resp: Response, op: &str) -> MicrosandboxResult<Response> {
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(resp);
+    }
+    let body_text = resp.text().await.unwrap_or_default();
+    let typed: Option<CloudErrorBody> = serde_json::from_str(&body_text).ok();
+    Err(cloud_http_error(
+        status.as_u16(),
+        typed.as_ref(),
+        &body_text,
+        op,
+    ))
+}
+
 fn cloud_io_error(op: &str, e: reqwest::Error) -> MicrosandboxError {
     tracing::debug!(operation = op, error = %e, "cloud backend transport error");
     MicrosandboxError::Http(e)
@@ -406,8 +466,10 @@ fn cloud_http_error(
 
     match code.as_deref() {
         Some("sandbox_not_found") => return MicrosandboxError::SandboxNotFound(message),
+        Some("volume_not_found") => return MicrosandboxError::VolumeNotFound(message),
+        Some("volume_file_not_found") => return MicrosandboxError::SandboxFsOps(message),
         Some("name_already_exists") => return MicrosandboxError::SandboxAlreadyExists(message),
-        Some("invalid_request") | Some("invalid_sandbox_config") => {
+        Some("invalid_request") | Some("invalid_sandbox_config") | Some("invalid_volume_path") => {
             return MicrosandboxError::InvalidConfig(message);
         }
         Some("orchestrator_unreachable") | Some("nomad_job_failed") => {
@@ -647,6 +709,27 @@ mod tests {
         assert!(
             matches!(err, MicrosandboxError::SandboxAlreadyExists(msg) if msg.contains("name taken"))
         );
+    }
+
+    #[test]
+    fn cloud_http_error_distinguishes_volume_and_file_not_found() {
+        let volume: CloudErrorBody = serde_json::from_str(
+            r#"{"error":{"code":"volume_not_found","message":"volume missing"}}"#,
+        )
+        .unwrap();
+        let file: CloudErrorBody = serde_json::from_str(
+            r#"{"error":{"code":"volume_file_not_found","message":"path missing"}}"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            cloud_http_error(404, Some(&volume), "", "volume filesystem request"),
+            MicrosandboxError::VolumeNotFound(_)
+        ));
+        assert!(matches!(
+            cloud_http_error(404, Some(&file), "", "volume filesystem request"),
+            MicrosandboxError::SandboxFsOps(_)
+        ));
     }
 
     #[test]

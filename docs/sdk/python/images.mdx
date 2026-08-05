@@ -34,21 +34,28 @@ These static methods return an [`ImageSource`](#imagesource) you can pass as the
 
 ```python
 @staticmethod
-def oci(reference: str, *, upper_size_mib: int | None = None) -> ImageSource
+def oci(
+    reference: str,
+    *,
+    root_disk: RootDiskConfig | int | None = None,
+    upper_size_mib: int | None = None,
+) -> ImageSource
 ```
 
 <Accordion title="Example">
 
 ```python
+from microsandbox import Image, RootDisk, Sandbox
+
 sb = await Sandbox.create(
     "api",
-    image=Image.oci("python:3.12", upper_size_mib=8192),
+    image=Image.oci("python:3.12", root_disk=RootDisk.managed(8192)),
 )
 ```
 
 </Accordion>
 
-Create an OCI image rootfs source. Use `upper_size_mib` to size the writable overlay upper layer; otherwise the default applies.
+Create an OCI image rootfs source. Use `root_disk` to configure its writable layer with a [`RootDisk`](#rootdisk) factory result. An integer is shorthand for a managed disk of that size in MiB.
 
 <p className="msb-label">Parameters</p>
 
@@ -58,8 +65,12 @@ Create an OCI image rootfs source. Use `upper_size_mib` to size the writable ove
     <div className="msb-param-desc">OCI image reference, e.g. <code>"python:3.12"</code>.</div>
   </div>
   <div className="msb-param">
+    <div className="msb-param-key"><code>root_disk</code><span className="msb-type">RootDiskConfig | int | None</span></div>
+    <div className="msb-param-desc">Writable root disk configuration or managed-disk size in MiB.</div>
+  </div>
+  <div className="msb-param">
     <div className="msb-param-key"><code>upper_size_mib</code><span className="msb-type">int | None</span></div>
-    <div className="msb-param-desc">Writable overlay upper size in MiB. <code>None</code> keeps the default.</div>
+    <div className="msb-param-desc">Deprecated managed-disk size alias. Use <code>root_disk=RootDisk.managed(...)</code>.</div>
   </div>
 </div>
 
@@ -375,10 +386,15 @@ images = await Image.load(input_path="-")
 
 ```python
 @staticmethod
-async def save(reference: str | Sequence[str], *, output_path: str, format: str = "docker") -> None
+async def save(
+    reference: str | Sequence[str],
+    *,
+    output_path: str,
+    format: ImageArchiveFormat = ImageArchiveFormat.DOCKER,
+) -> None
 ```
 
-Export one or more cached images to an archive file. Raises [`ImageNotFoundError`](#errors) when any reference is not in the local cache, and `ValueError` for an unknown `format` or an empty reference list.
+Export one or more cached images to an archive file. Raises [`ImageNotFoundError`](#errors) when any reference is not in the local cache, and `ValueError` for an empty reference list.
 
 <p className="msb-label">Parameters</p>
 
@@ -392,16 +408,22 @@ Export one or more cached images to an archive file. Raises [`ImageNotFoundError
     <div className="msb-param-desc">File path to write the archive to.</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>format</code><span className="msb-type">str</span></div>
-    <div className="msb-param-desc">Archive layout: <code>"docker"</code> (default, loadable with <code>docker load</code>) or <code>"oci"</code> (OCI Image Layout).</div>
+    <div className="msb-param-key"><code>format</code><a className="msb-type" href="#imagearchiveformat">ImageArchiveFormat</a></div>
+    <div className="msb-param-desc">Archive layout. Defaults to <code>DOCKER</code>.</div>
   </div>
 </div>
 
 <Accordion title="Example">
 
 ```python
+from microsandbox import ImageArchiveFormat
+
 await Image.save("python:3.12", output_path="python.tar")
-await Image.save("python:3.12", output_path="python-oci.tar", format="oci")
+await Image.save(
+    "python:3.12",
+    output_path="python-oci.tar",
+    format=ImageArchiveFormat.OCI,
+)
 await Image.save(["python:3.12", "app:local"], output_path="bundle.tar")
 ```
 
@@ -417,12 +439,46 @@ Explicit rootfs image source. Build one with [`Image.oci()`](#image-oci), [`Imag
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `_type` | `str` | Source kind: `"oci"`, `"bind"`, or `"disk"` |
+| `_type` | [`ImageSourceKind`](#imagesourcekind) | Source kind |
 | `_path` | `str \| None` | Host path for `bind` / `disk` sources |
 | `_reference` | `str \| None` | OCI reference for `oci` sources |
 | `_upper_size_mib` | `int \| None` | Writable overlay upper size in MiB (OCI only) |
 | `_fstype` | `str \| None` | Filesystem type for `disk` sources |
 | `_format` | [`DiskImageFormat`](#diskimageformat)` \| None` | Disk image format (inferred from extension) |
+
+### RootDisk
+
+Factory for writable OCI root disk configurations.
+
+```python
+from microsandbox import DiskImageFormat, RootDisk
+
+managed = RootDisk.managed(8192)
+temporary = RootDisk.tmpfs(512)
+existing = RootDisk.disk(
+    "/data/upper.raw",
+    format=DiskImageFormat.RAW,
+    fstype="ext4",
+)
+```
+
+| Factory | Returns | Description |
+|---------|---------|-------------|
+| `managed(size_mib=None)` | [`RootDiskConfig`](#rootdiskconfig) | Microsandbox-managed sparse ext4 disk |
+| `tmpfs(size_mib=None)` | [`RootDiskConfig`](#rootdiskconfig) | Ephemeral RAM-backed upper layer |
+| `disk(path, *, format=None, fstype=None)` | [`RootDiskConfig`](#rootdiskconfig) | User-supplied writable disk image |
+
+### RootDiskConfig
+
+Frozen root disk configuration produced by [`RootDisk`](#rootdisk).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `kind` | [`RootDiskKind`](#rootdiskkind) | Root disk implementation |
+| `size_mib` | `int \| None` | Managed disk or tmpfs size |
+| `path` | `str \| None` | User-supplied disk image path |
+| `format` | [`DiskImageFormat`](#diskimageformat)` \| None` | Disk image format |
+| `fstype` | `str \| None` | Inner filesystem type |
 
 ### ImageHandle
 
@@ -508,13 +564,48 @@ Summary of cached image data removed by [`Image.prune()`](#image-prune).
 
 <p className="msb-backref">Used by <a href="#imagesource">ImageSource._format</a></p>
 
-Disk image container format. A `StrEnum`, so the string values are accepted directly.
+Disk image container format.
 
-| Value | Description |
-|-------|-------------|
-| `"qcow2"` | QEMU copy-on-write v2 |
-| `"raw"` | Raw block image |
-| `"vmdk"` | VMware disk image |
+| Member | Value | Description |
+|--------|-------|-------------|
+| `DiskImageFormat.QCOW2` | `"qcow2"` | QEMU copy-on-write v2 |
+| `DiskImageFormat.RAW` | `"raw"` | Raw block image |
+| `DiskImageFormat.VMDK` | `"vmdk"` | VMware disk image |
+
+### ImageArchiveFormat
+
+<p className="msb-backref">Used by <a href="#image-save">Image.save(format=...)</a></p>
+
+Archive layout used when exporting cached images.
+
+| Member | Value | Description |
+|--------|-------|-------------|
+| `ImageArchiveFormat.DOCKER` | `"docker"` | Docker archive compatible with `docker load` |
+| `ImageArchiveFormat.OCI` | `"oci"` | OCI Image Layout archive |
+
+### ImageSourceKind
+
+<p className="msb-backref">Returned in <a href="#imagesource">ImageSource._type</a></p>
+
+Root filesystem source kind.
+
+| Member | Value | Description |
+|--------|-------|-------------|
+| `ImageSourceKind.OCI` | `"oci"` | OCI image reference |
+| `ImageSourceKind.BIND` | `"bind"` | Host directory bind source |
+| `ImageSourceKind.DISK` | `"disk"` | Host disk-image source |
+
+### RootDiskKind
+
+<p className="msb-backref">Returned in <a href="#rootdiskconfig">RootDiskConfig.kind</a></p>
+
+Writable OCI root disk implementation.
+
+| Member | Value | Description |
+|--------|-------|-------------|
+| `RootDiskKind.MANAGED` | `"managed"` | Microsandbox-managed sparse ext4 disk |
+| `RootDiskKind.TMPFS` | `"tmpfs"` | Ephemeral RAM-backed upper layer |
+| `RootDiskKind.DISK_IMAGE` | `"disk-image"` | User-supplied writable disk image |
 
 ### Errors
 

@@ -10,7 +10,7 @@ Run commands inside a running sandbox: collect output in one shot, stream events
 ```python
 import sys
 
-from microsandbox import Sandbox
+from microsandbox import ExecEventType, Sandbox
 
 sandbox = await Sandbox.create("api", image="python")
 
@@ -21,9 +21,9 @@ print(out.stdout_text)  # "2\n"
 # 2. stream
 handle = await sandbox.exec_stream("tail", ["-f", "/var/log/app.log"])
 async for event in handle:
-    if event.event_type == "stdout":
+    if event.event_type is ExecEventType.STDOUT:
         sys.stdout.buffer.write(event.data)
-    elif event.event_type == "exited":
+    elif event.event_type is ExecEventType.EXITED:
         break
 
 await sandbox.stop()
@@ -36,13 +36,13 @@ await sandbox.stop()
 ```python
 async def exec(
     cmd: str,
-    args: list[str] | Mapping[str, Any] | None = None,
+    args: list[str] | ExecOptions | None = None,
     *,
     cwd: str | None = None,
     user: str | None = None,
     env: Mapping[str, str] | None = None,
     timeout: float | None = None,
-    stdin: Stdin | bytes | str | None = None,
+    stdin: Stdin | bytes | None = None,
     tty: bool = False,
     rlimits: list[Rlimit] | None = None,
 ) -> ExecOutput
@@ -74,8 +74,8 @@ Run a command inside the sandbox and wait for it to complete, buffering all stdo
     <div className="msb-param-desc">Command to execute (e.g. <code>"python3"</code>, <code>"/usr/bin/node"</code>).</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>args</code><span className="msb-type">list[str] | Mapping[str, Any] | None</span></div>
-    <div className="msb-param-desc">Command arguments. A mapping is accepted as a shorthand for the keyword-only options below.</div>
+    <div className="msb-param-key"><code>args</code><span className="msb-type">list[str] | ExecOptions | None</span></div>
+    <div className="msb-param-desc">Command arguments, or a typed options mapping that may include its own <code>args</code> list.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>cwd</code><span className="msb-type">str | None</span></div>
@@ -94,8 +94,8 @@ Run a command inside the sandbox and wait for it to complete, buffering all stdo
     <div className="msb-param-desc">Seconds before the process is killed.</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>stdin</code><a className="msb-type" href="#stdin">Stdin | bytes | str | None</a></div>
-    <div className="msb-param-desc">Stdin mode. Raw <code>bytes</code> / <code>str</code> are sent inline; default is <code>/dev/null</code>.</div>
+    <div className="msb-param-key"><code>stdin</code><a className="msb-type" href="#stdin">Stdin | bytes | None</a></div>
+    <div className="msb-param-desc">Stdin configuration. Raw <code>bytes</code> are sent inline; default is <code>/dev/null</code>.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>tty</code><span className="msb-type">bool</span></div>
@@ -126,7 +126,7 @@ async def shell(
     user: str | None = None,
     env: Mapping[str, str] | None = None,
     timeout: float | None = None,
-    stdin: Stdin | bytes | str | None = None,
+    stdin: Stdin | bytes | None = None,
     tty: bool = False,
     rlimits: list[Rlimit] | None = None,
 ) -> ExecOutput
@@ -172,13 +172,13 @@ Run a command through the sandbox's configured shell (defaults to `/bin/sh`). Sh
 ```python
 async def exec_stream(
     cmd: str,
-    args: list[str] | Mapping[str, Any] | None = None,
+    args: list[str] | ExecOptions | None = None,
     *,
     cwd: str | None = None,
     user: str | None = None,
     env: Mapping[str, str] | None = None,
     timeout: float | None = None,
-    stdin: Stdin | bytes | str | None = None,
+    stdin: Stdin | bytes | None = None,
     tty: bool = False,
     rlimits: list[Rlimit] | None = None,
 ) -> ExecHandle
@@ -189,11 +189,13 @@ async def exec_stream(
 ```python
 import sys
 
+from microsandbox import ExecEventType
+
 handle = await sandbox.exec_stream("tail", ["-f", "/var/log/app.log"])
 async for event in handle:
-    if event.event_type == "stdout":
+    if event.event_type is ExecEventType.STDOUT:
         sys.stdout.buffer.write(event.data)
-    elif event.event_type == "exited":
+    elif event.event_type is ExecEventType.EXITED:
         break
 ```
 
@@ -209,8 +211,8 @@ Run a command with streaming output. Returns an [`ExecHandle`](#exechandle) that
     <div className="msb-param-desc">Command to execute.</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>args</code><span className="msb-type">list[str] | Mapping[str, Any] | None</span></div>
-    <div className="msb-param-desc">Command arguments.</div>
+    <div className="msb-param-key"><code>args</code><span className="msb-type">list[str] | ExecOptions | None</span></div>
+    <div className="msb-param-desc">Command arguments, or a typed options mapping.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>cwd, user, env, timeout, stdin, tty, rlimits</code></div>
@@ -237,7 +239,7 @@ async def shell_stream(
     user: str | None = None,
     env: Mapping[str, str] | None = None,
     timeout: float | None = None,
-    stdin: Stdin | bytes | str | None = None,
+    stdin: Stdin | bytes | None = None,
     tty: bool = False,
     rlimits: list[Rlimit] | None = None,
 ) -> ExecHandle
@@ -248,9 +250,11 @@ async def shell_stream(
 ```python
 import sys
 
+from microsandbox import ExecEventType
+
 handle = await sandbox.shell_stream("for i in 1 2 3; do echo $i; sleep 1; done")
 async for event in handle:
-    if event.event_type == "stdout":
+    if event.event_type is ExecEventType.STDOUT:
         sys.stdout.buffer.write(event.data)
 ```
 
@@ -371,6 +375,24 @@ Bridge your terminal to the sandbox's default shell in a fully interactive PTY s
 
 ## Types
 
+### ExecOptions
+
+<p className="msb-backref">Accepted by <a href="#sandbox-exec">exec()</a> · <a href="#sandbox-exec_stream">exec_stream()</a></p>
+
+Typed dictionary for passing arguments and per-call options together as the second positional argument. Use a [`Stdin`](#stdin) object to select a mode or raw `bytes` for inline data.
+
+| Key | Type | Description |
+|-----|------|-------------|
+| args | `list[str]` | Command arguments |
+| cwd | `str` | Working directory |
+| user | `str` | Guest user |
+| env | `Mapping[str, str]` | Per-command environment variables |
+| timeout | `float` | Timeout in seconds |
+| stdin | [`Stdin`](#stdin) `\| bytes` | Stdin configuration or inline bytes |
+| stdin_data | `bytes` | Inline stdin bytes when `stdin` is omitted |
+| tty | `bool` | Whether to allocate a pseudo-terminal |
+| rlimits | `list[`[`Rlimit`](#rlimit)`]` | POSIX resource limits |
+
 ### ExecOutput
 
 <p className="msb-backref">Returned by <a href="#sandbox-exec">exec()</a> · <a href="#sandbox-shell">shell()</a> · <a href="#exechandle">ExecHandle.collect()</a></p>
@@ -422,10 +444,25 @@ Native event object emitted by [`recv()`](#exechandle) and by iterating an [`Exe
 
 | Property | Type | Description |
 |----------|------|-------------|
-| event_type | `str` | `"started"`, `"stdout"`, `"stderr"`, `"exited"`, `"failed"`, or `"stdin_error"` |
-| pid | `int \| None` | Guest PID, set on `"started"` |
-| data | `bytes \| None` | Output bytes on `"stdout"` / `"stderr"`, or a UTF-8 failure message on `"failed"` / `"stdin_error"` |
-| code | `int \| None` | Exit code on `"exited"`, or errno when available on `"failed"` / `"stdin_error"` |
+| event_type | [`ExecEventType`](#execeventtype) | Exact event discriminator |
+| pid | `int \| None` | Guest PID, set on `ExecEventType.STARTED` |
+| data | `bytes \| None` | Output bytes on `STDOUT` / `STDERR`, or a UTF-8 failure message on `FAILED` / `STDIN_ERROR` |
+| code | `int \| None` | Exit code on `EXITED`, or errno when available on `FAILED` / `STDIN_ERROR` |
+
+### ExecEventType
+
+<p className="msb-backref">Returned by <a href="#execevent">ExecEvent.event_type</a></p>
+
+String enum (`enum.StrEnum`) identifying a streaming execution event.
+
+| Member | Value | Description |
+|--------|-------|-------------|
+| `ExecEventType.STARTED` | `"started"` | Process started; `pid` is populated |
+| `ExecEventType.STDOUT` | `"stdout"` | Standard-output bytes are available in `data` |
+| `ExecEventType.STDERR` | `"stderr"` | Standard-error bytes are available in `data` |
+| `ExecEventType.EXITED` | `"exited"` | Process exited; `code` is populated |
+| `ExecEventType.FAILED` | `"failed"` | Process startup failed |
+| `ExecEventType.STDIN_ERROR` | `"stdin_error"` | Writing process stdin failed |
 
 ### ExitStatus
 
@@ -442,13 +479,27 @@ Frozen dataclass describing a process exit result. [`ExecHandle.wait()`](#execha
 
 <p className="msb-backref">Used by <a href="#sandbox-exec">exec()</a> · <a href="#sandbox-shell">shell()</a> · <a href="#sandbox-exec_stream">exec_stream()</a> · <a href="#sandbox-shell_stream">shell_stream()</a></p>
 
-Frozen dataclass with factory methods for configuring process stdin. Pass the result as the `stdin` argument to an exec or shell method. Raw `bytes` and `str` are also accepted directly and are sent inline.
+Frozen dataclass with factory methods for configuring process stdin. Pass the result as the `stdin` argument to an exec or shell method. Raw `bytes` are also accepted directly and are sent inline.
 
 | Factory | Parameters | Description |
 |---------|-----------|-------------|
 | Stdin.null() | - | Connect stdin to `/dev/null` (default) |
 | Stdin.pipe() | - | Open a writable pipe. Write via [`take_stdin()`](#exechandle) on the handle |
 | Stdin.bytes(data) | `data: bytes` | Inline data sent before the process starts, then EOF |
+
+The factories set the corresponding [`StdinMode`](#stdinmode) member.
+
+### StdinMode
+
+<p className="msb-backref">Used internally by <a href="#stdin">Stdin</a></p>
+
+String enum (`enum.StrEnum`) identifying how command stdin is connected.
+
+| Member | Value | Description |
+|--------|-------|-------------|
+| `StdinMode.NULL` | `"null"` | Connect stdin to `/dev/null` |
+| `StdinMode.PIPE` | `"pipe"` | Expose a writable [`ExecSink`](#execsink) |
+| `StdinMode.BYTES` | `"bytes"` | Send inline bytes, then EOF |
 
 ### Rlimit
 
@@ -480,21 +531,21 @@ Frozen dataclass describing a POSIX resource limit. Construct one directly or vi
 
 String enum (`enum.StrEnum`) naming a limitable POSIX resource.
 
-| Value | Description |
-|-------|-------------|
-| `CPU` | CPU time |
-| `FSIZE` | File size |
-| `DATA` | Data segment size |
-| `STACK` | Stack size |
-| `CORE` | Core file size |
-| `RSS` | Resident set size |
-| `NPROC` | Number of processes |
-| `NOFILE` | Open file descriptors |
-| `MEMLOCK` | Locked memory |
-| `AS` | Virtual memory |
-| `LOCKS` | File locks |
-| `SIGPENDING` | Pending signals |
-| `MSGQUEUE` | Message queue size |
-| `NICE` | Nice priority ceiling |
-| `RTPRIO` | Real-time priority ceiling |
-| `RTTIME` | Real-time CPU time |
+| Member | Value | Description |
+|--------|-------|-------------|
+| `RlimitResource.CPU` | `"cpu"` | CPU time |
+| `RlimitResource.FSIZE` | `"fsize"` | File size |
+| `RlimitResource.DATA` | `"data"` | Data segment size |
+| `RlimitResource.STACK` | `"stack"` | Stack size |
+| `RlimitResource.CORE` | `"core"` | Core file size |
+| `RlimitResource.RSS` | `"rss"` | Resident set size |
+| `RlimitResource.NPROC` | `"nproc"` | Number of processes |
+| `RlimitResource.NOFILE` | `"nofile"` | Open file descriptors |
+| `RlimitResource.MEMLOCK` | `"memlock"` | Locked memory |
+| `RlimitResource.AS` | `"as"` | Virtual memory |
+| `RlimitResource.LOCKS` | `"locks"` | File locks |
+| `RlimitResource.SIGPENDING` | `"sigpending"` | Pending signals |
+| `RlimitResource.MSGQUEUE` | `"msgqueue"` | Message queue size |
+| `RlimitResource.NICE` | `"nice"` | Nice priority ceiling |
+| `RlimitResource.RTPRIO` | `"rtprio"` | Real-time priority ceiling |
+| `RlimitResource.RTTIME` | `"rttime"` | Real-time CPU time |

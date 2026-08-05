@@ -617,11 +617,31 @@ char *msb_sandbox_remove_persisted(uint64_t cancel_id,
 char *msb_volume_get(uint64_t cancel_id, const char *name, unsigned char *buf, uintptr_t buf_len);
 
 /**
+ * Return the cloud account's always-present default volume metadata.
+ */
+char *msb_volume_get_default(uint64_t cancel_id, unsigned char *buf, uintptr_t buf_len);
+
+/**
+ * Dispatch a buffered volume filesystem operation for the Go binding.
+ */
+char *msb_volume_fs_op(uint64_t cancel_id,
+                       const char *target,
+                       const char *op,
+                       const char *args_json,
+                       unsigned char *buf,
+                       uintptr_t buf_len);
+
+/**
  * Returns the upstream `microsandbox` crate version this FFI was built against.
  * Synchronous; no Rust-side state is touched. The Go SDK exposes this so callers
  * can verify the loaded library matches the expected runtime.
  */
 char *msb_version(unsigned char *buf, uintptr_t buf_len);
+
+/**
+ * Return secret-safe information about the active default backend.
+ */
+char *msb_default_backend_info(unsigned char *buf, uintptr_t buf_len);
 
 char *msb_image_get(uint64_t cancel_id,
                     const char *reference,

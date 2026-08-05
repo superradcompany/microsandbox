@@ -5,7 +5,9 @@ import {
 
 function configureCloudBackend() {
   if (defaultBackendKind() !== "cloud") {
-    throw new Error("set MSB_API_KEY or select a cloud profile");
+    throw new Error(
+      "set MSB_BACKEND=cloud with MSB_API_KEY, or select a cloud profile",
+    );
   }
 }
 

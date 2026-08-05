@@ -267,15 +267,62 @@ Cloud profiles require `api_key_ref`. The `url` field is optional and defaults t
 Backend resolution uses this order:
 
 1. Programmatic backend set by the SDK
-2. `MSB_BACKEND=local`, or a non-empty `MSB_API_KEY`
+2. `MSB_BACKEND=local|cloud`
 3. `MSB_PROFILE=<name>`
 4. `active_profile`
 5. Local runtime
 
-For hosted cloud usage, the API key is sufficient:
+Cloud is opt-in. For hosted cloud usage, select it explicitly and provide the credential separately:
 
 ```bash
+export MSB_BACKEND=cloud
 export MSB_API_KEY=msb_...
 ```
 
-`MSB_API_URL` only overrides the cloud endpoint; it never selects the cloud backend without an API key.
+`MSB_API_URL` is optional and defaults to `https://api.microsandbox.dev`. It only overrides the endpoint. Neither `MSB_API_KEY` nor `MSB_API_URL` selects Cloud on its own, so leaving cloud credentials in a shell does not unexpectedly reroute local workloads.
+
+Selecting a cloud profile with `MSB_PROFILE` or `active_profile` is also explicit Cloud intent when that profile has `"backend": "cloud"`. `MSB_BACKEND=cloud` without a usable API key or cloud profile returns a configuration error; it never falls back to Local.
+
+### Inspect the active backend
+
+Use `msb context` before running CLI commands when you want to confirm where sandboxes will execute. The human-readable output uses the regular CLI table style; JSON is available for scripts:
+
+```bash
+msb context
+msb context --format json
+```
+
+`msb ctx` is a shorter alias for `msb context`.
+
+The SDKs expose the same secret-safe information. It includes the backend kind, cloud API URL, selection source, and profile when applicable, but never the API key:
+
+<CodeGroup>
+```typescript TypeScript
+import { defaultBackendInfo } from "microsandbox";
+
+console.log(defaultBackendInfo());
+console.log(sandbox.backendKind);
+```
+
+```python Python
+from microsandbox import default_backend_info
+
+print(default_backend_info())
+print(sandbox.backend_kind)
+```
+
+```rust Rust
+let info = microsandbox::default_backend_info();
+println!("{}", info.kind.as_str());
+println!("{}", sandbox.backend_kind().as_str());
+```
+
+```go Go
+info, err := microsandbox.DefaultBackendInfo()
+if err != nil {
+    return err
+}
+fmt.Println(info.Kind)
+fmt.Println(sandbox.BackendKind())
+```
+</CodeGroup>

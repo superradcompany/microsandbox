@@ -501,7 +501,7 @@ Metadata for a single directory entry, returned by [`list()`](#fs-list).
 | Property | Type | Description |
 |----------|------|-------------|
 | path | `str` | Full path of the entry |
-| kind | `str` | Entry type: `"file"`, `"directory"`, `"symlink"`, or `"other"` (see [`FsEntryKind`](#fsentrykind)) |
+| kind | [`FsEntryKind`](#fsentrykind) | Entry type |
 | size | `int` | File size in bytes |
 | mode | `int` | Unix permission bits |
 | modified | `float \| None` | Last-modified time, milliseconds since the Unix epoch |
@@ -510,14 +510,20 @@ Metadata for a single directory entry, returned by [`list()`](#fs-list).
 
 <p className="msb-backref">Describes <a href="#fsentry">FsEntry.kind</a> · <a href="#fsmetadata">FsMetadata.kind</a></p>
 
-String enum ([`StrEnum`](https://docs.python.org/3/library/enum.html#enum.StrEnum)) of filesystem entry types. The `kind` fields on [`FsEntry`](#fsentry) and [`FsMetadata`](#fsmetadata) carry these string values.
+Filesystem entry type returned by [`FsEntry.kind`](#fsentry) and [`FsMetadata.kind`](#fsmetadata).
 
-| Value | Description |
-|-------|-------------|
-| `"file"` | Regular file |
-| `"directory"` | Directory |
-| `"symlink"` | Symbolic link |
-| `"other"` | Other entry type |
+| Member | Value | Description |
+|--------|-------|-------------|
+| `FsEntryKind.FILE` | `"file"` | Regular file |
+| `FsEntryKind.DIRECTORY` | `"directory"` | Directory |
+| `FsEntryKind.SYMLINK` | `"symlink"` | Symbolic link |
+| `FsEntryKind.OTHER` | `"other"` | Other entry type |
+
+```python
+from microsandbox import FsEntryKind
+
+files = [entry for entry in await sb.fs.list("/app") if entry.kind is FsEntryKind.FILE]
+```
 
 ### FsMetadata
 
@@ -527,7 +533,7 @@ Detailed file metadata, returned by [`stat()`](#fs-stat).
 
 | Property | Type | Description |
 |----------|------|-------------|
-| kind | `str` | Entry type: `"file"`, `"directory"`, `"symlink"`, or `"other"` (see [`FsEntryKind`](#fsentrykind)) |
+| kind | [`FsEntryKind`](#fsentrykind) | Entry type |
 | size | `int` | File size in bytes |
 | mode | `int` | Unix permission bits |
 | readonly | `bool` | Whether the file is read-only |

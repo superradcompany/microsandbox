@@ -42,6 +42,12 @@ impl JsSandboxHandle {
         format!("{:?}", self.inner.status_snapshot()).to_lowercase()
     }
 
+    /// Backend retained by this handle (`"local"` or `"cloud"`).
+    #[napi(getter)]
+    pub fn backend_kind(&self) -> &'static str {
+        self.inner.backend_kind().as_str()
+    }
+
     /// Raw config JSON string from the database.
     #[napi(getter)]
     pub fn config_json(&self) -> String {

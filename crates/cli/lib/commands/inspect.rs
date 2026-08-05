@@ -158,6 +158,21 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
                     ),
                 );
             }
+            Some(microsandbox::sandbox::RootDisk::Flat {
+                size_mib,
+                fstype,
+                clone,
+            }) => {
+                let size = size_mib.map_or("default".to_string(), |mib| format!("{mib} MiB"));
+                ui::detail_kv(
+                    "Root Disk",
+                    &format!(
+                        "{size} (flat, {}, clone={})",
+                        fstype.as_deref().unwrap_or("ext4"),
+                        clone.as_str()
+                    ),
+                );
+            }
             None => {}
         }
 

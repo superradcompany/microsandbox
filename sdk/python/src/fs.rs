@@ -4,6 +4,7 @@ use pyo3::prelude::*;
 use tokio::sync::Mutex;
 
 use crate::error::to_py_err;
+use crate::helpers::str_enum_member;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -338,7 +339,6 @@ impl PyFsWriteSink {
 pub struct PyFsEntry {
     #[pyo3(get)]
     path: String,
-    #[pyo3(get)]
     kind: String,
     #[pyo3(get)]
     size: u64,
@@ -350,7 +350,6 @@ pub struct PyFsEntry {
 
 #[pyclass(name = "FsMetadata")]
 pub struct PyFsMetadata {
-    #[pyo3(get)]
     kind: String,
     #[pyo3(get)]
     size: u64,
@@ -362,6 +361,26 @@ pub struct PyFsMetadata {
     modified: Option<f64>,
     #[pyo3(get)]
     created: Option<f64>,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods: Python-exposed structs
+//--------------------------------------------------------------------------------------------------
+
+#[pymethods]
+impl PyFsEntry {
+    #[getter]
+    fn kind(&self, py: Python<'_>) -> PyResult<PyObject> {
+        str_enum_member(py, "FsEntryKind", &self.kind)
+    }
+}
+
+#[pymethods]
+impl PyFsMetadata {
+    #[getter]
+    fn kind(&self, py: Python<'_>) -> PyResult<PyObject> {
+        str_enum_member(py, "FsEntryKind", &self.kind)
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -387,7 +406,7 @@ pub(crate) fn convert_fs_entry(entry: microsandbox::sandbox::FsEntry) -> PyFsEnt
     }
 }
 
-fn convert_fs_metadata(meta: &microsandbox::sandbox::FsMetadata) -> PyFsMetadata {
+pub(crate) fn convert_fs_metadata(meta: &microsandbox::sandbox::FsMetadata) -> PyFsMetadata {
     PyFsMetadata {
         kind: kind_str(meta.kind).to_string(),
         size: meta.size,
