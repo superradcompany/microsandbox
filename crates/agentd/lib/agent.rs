@@ -1,6 +1,6 @@
 //! Main agent loop: serial I/O, session management, heartbeat.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd;
@@ -10,6 +10,7 @@ use std::time::Instant;
 
 use chrono::Utc;
 use tokio::io::unix::AsyncFd;
+use tokio::signal::unix::{self, SignalKind};
 use tokio::sync::{mpsc, watch};
 use tokio::time::{self, Duration};
 
@@ -155,6 +156,11 @@ pub async fn run(
     let mut serial_out_buf = Vec::new();
 
     let mut state = AgentState::default();
+
+    // Session tasks own their direct children's exit statuses. PID 1 can also
+    // adopt descendants after an exec leader exits, so handle SIGCHLD here to
+    // reap only adopted zombies without racing those session tasks.
+    let mut child_signal = unix::signal(SignalKind::child())?;
 
     // Channel for session output events.
     let (session_tx, mut session_rx) = mpsc::unbounded_channel::<(u32, SessionOutput)>();
@@ -346,6 +352,10 @@ pub async fn run(
                 if !serial_out_buf.is_empty() {
                     flush_write_buf(&async_port, &mut serial_out_buf).await?;
                 }
+            }
+
+            _ = child_signal.recv() => {
+                reap_adopted_zombies(state.sessions.values().map(|session| session.pid() as i32));
             }
         }
     }
@@ -771,6 +781,44 @@ fn spawn_heartbeat_thread(
             }
         })
         .expect("failed to spawn agentd heartbeat thread")
+}
+
+/// Reap exited children adopted by this PID 1 without consuming active exec
+/// session leaders, whose reader tasks own their exit statuses.
+fn reap_adopted_zombies(active_session_pids: impl Iterator<Item = i32>) {
+    let active_session_pids: HashSet<_> = active_session_pids.collect();
+    let parent_pid = std::process::id() as i32;
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        if active_session_pids.contains(&pid) {
+            continue;
+        }
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        let Some((_, fields)) = stat.rsplit_once(')') else {
+            continue;
+        };
+        let fields: Vec<_> = fields.split_whitespace().collect();
+        if fields.first() != Some(&"Z")
+            || fields.get(1).and_then(|ppid| ppid.parse::<i32>().ok()) != Some(parent_pid)
+        {
+            continue;
+        }
+        unsafe {
+            libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG);
+        }
+    }
 }
 
 fn heartbeat_snapshot(state: &AgentState, activity: &ActivityTracker) -> HeartbeatSnapshot {
