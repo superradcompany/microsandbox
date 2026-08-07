@@ -49,6 +49,9 @@ jobs:
           workspaces: sdk/ruby/ext/microsandbox
           cache-bin: false
 
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+
       - name: Install Ruby build dependencies
         run: gem install rake rake-compiler test-unit rb_sys --no-document
 
