@@ -42,7 +42,7 @@ export type ResourceConvergenceState =
 /**
  * Options for `Sandbox.modify()` / `SandboxHandle.modify()`.
  *
- * `memory` / `maxMemory` are in MiB. Omitted fields are left unchanged.
+ * `memory` / `maxMemory` / `rootDiskSize` are in MiB. Omitted fields are left unchanged.
  */
 export interface ModifyOptions {
   /** Desired effective vCPU count. */
@@ -53,6 +53,8 @@ export interface ModifyOptions {
   memory?: number;
   /** Desired boot-time maximum hotpluggable memory in MiB. */
   maxMemory?: number;
+  /** Desired root disk size in MiB. Managed and flat disks are grow-only. */
+  rootDiskSize?: number;
   /** Environment variables to set for future execs. */
   env?: Record<string, string>;
   /** Environment variable keys to remove. */
@@ -170,6 +172,7 @@ export function modifyOptionsToNapi(
     maxCpus: opts.maxCpus,
     memoryMib: opts.memory,
     maxMemoryMib: opts.maxMemory,
+    rootDiskSizeMib: opts.rootDiskSize,
     env: opts.env,
     envRemove: opts.envRemove,
     labels: opts.labels,

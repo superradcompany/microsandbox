@@ -898,6 +898,7 @@ pub(crate) fn configure_modify(
         max_cpus: options.max_cpus.map(cpu_count_u8).transpose()?,
         memory_mib: options.memory_mib,
         max_memory_mib: options.max_memory_mib,
+        root_disk_size_mib: options.root_disk_size_mib,
         env: env_pairs
             .into_iter()
             .map(|(key, value)| EnvVar::new(key, value))
