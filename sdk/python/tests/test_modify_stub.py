@@ -13,6 +13,7 @@ EXPECTED_KWARGS = [
     "max_cpus",
     "memory",
     "max_memory",
+    "root_disk_size",
     "env",
     "env_rm",
     "labels",

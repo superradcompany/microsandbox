@@ -898,6 +898,7 @@ pub(crate) fn configure_modify(
         max_cpus: options.max_cpus.map(cpu_count_u8).transpose()?,
         memory_mib: options.memory_mib,
         max_memory_mib: options.max_memory_mib,
+        root_disk_size_mib: options.root_disk_size_mib,
         env: env_pairs
             .into_iter()
             .map(|(key, value)| EnvVar::new(key, value))
@@ -908,8 +909,6 @@ pub(crate) fn configure_modify(
         workdir: options.workdir.clone(),
         secrets,
         secrets_remove: options.secrets_remove.clone().unwrap_or_default(),
-        // Patch fields without an option surface here stay unset.
-        ..Default::default()
     };
 
     let builder = builder.with_patch(patch);

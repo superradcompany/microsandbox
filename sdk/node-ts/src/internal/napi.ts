@@ -323,6 +323,7 @@ export interface NapiSandboxModifyOptions {
   maxCpus?: number;
   memoryMib?: number;
   maxMemoryMib?: number;
+  rootDiskSizeMib?: number;
   env?: Record<string, string>;
   envRemove?: string[];
   labels?: Record<string, string>;

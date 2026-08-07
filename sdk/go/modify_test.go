@@ -39,17 +39,18 @@ func TestModifyRequestJSONEmptyOptions(t *testing.T) {
 
 func TestModifyRequestJSONFullOptions(t *testing.T) {
 	out := marshalModifyRequest(t, ModifyOptions{
-		CPUs:         2,
-		MaxCPUs:      8,
-		MemoryMiB:    1024,
-		MaxMemoryMiB: 4096,
-		Env:          map[string]string{"B": "2", "A": "1"},
-		EnvRemove:    []string{"OLD"},
-		Labels:       map[string]string{"tier": "gold", "app": "api"},
-		LabelsRemove: []string{"stale"},
-		Workdir:      "/srv",
-		Policy:       ModificationPolicyRestart,
-		DryRun:       true,
+		CPUs:            2,
+		MaxCPUs:         8,
+		MemoryMiB:       1024,
+		MaxMemoryMiB:    4096,
+		RootDiskSizeMiB: 8192,
+		Env:             map[string]string{"B": "2", "A": "1"},
+		EnvRemove:       []string{"OLD"},
+		Labels:          map[string]string{"tier": "gold", "app": "api"},
+		LabelsRemove:    []string{"stale"},
+		Workdir:         "/srv",
+		Policy:          ModificationPolicyRestart,
+		DryRun:          true,
 	})
 
 	if out["policy"] != "restart" {
@@ -65,6 +66,9 @@ func TestModifyRequestJSONFullOptions(t *testing.T) {
 	}
 	if patch["memory_mib"] != float64(1024) || patch["max_memory_mib"] != float64(4096) {
 		t.Fatalf("memory fields = %v / %v", patch["memory_mib"], patch["max_memory_mib"])
+	}
+	if patch["root_disk_size_mib"] != float64(8192) {
+		t.Fatalf("root_disk_size_mib = %v", patch["root_disk_size_mib"])
 	}
 	if patch["workdir"] != "/srv" {
 		t.Fatalf("workdir = %v", patch["workdir"])
