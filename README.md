@@ -209,6 +209,9 @@ The SDK lets you create and control sandboxes directly from your application. `S
 > sandbox.stop
 > ```
 >
+> See the [Ruby SDK guide](./sdk/ruby/README.md) for installation, lifecycle,
+> networking, and backend details.
+>
 > </details>
 >
 > <details>
@@ -283,55 +286,6 @@ The SDK lets you create and control sandboxes directly from your application. `S
 <a href="https://docs.microsandbox.dev/sdk/overview"><img src="https://img.shields.io/badge/SDK_Docs-%E2%86%92-A770EF?style=flat-square&labelColor=2b2b2b" alt="SDK Docs"></a>
 
 <br />
-
-### Ruby SDK
-
-The Ruby gem supports Ruby 3.1 and newer. Its native extension releases Ruby's
-GVL while waiting for sandbox operations, so other Ruby threads continue to
-run during image pulls, VM startup, command execution, and lifecycle calls.
-The native runtime and selected backend are rebuilt after `fork(2)`, supporting
-clustered Puma workers, Resque, and other prefork process models.
-
-The supported surface includes:
-
-- `Sandbox` create/start/connect/list/stop/kill/remove/ping/touch operations;
-- collected `exec`, `shell`, `ssh_exec`, `logs`, and `metrics`;
-- guest filesystem operations through `sandbox.fs`;
-- local `Image`, `Volume`, and `Snapshot` management; and
-- `use_local_backend!`, `use_cloud_backend!`, and `use_cloud_profile!`.
-
-Streaming exec/log/metrics/filesystem handles, interactive SSH/SFTP, live
-modification plans, and the complete advanced Rust network/mount builders are
-not currently exposed. Use the Rust SDK when those APIs are required.
-
-The source gem intentionally compiles against the published
-`microsandbox` Rust crate at the exact same version as the gem. The Rake test
-task rejects version drift between the gem, extension crate, and Rust SDK
-dependency.
-
-#### Ruby lifecycle and native requirements
-
-- Installing the source gem requires a Rust 1.85+ toolchain, a C compiler,
-  Ruby development headers, and `rb_sys`.
-- Running local sandboxes requires Apple Silicon virtualization on macOS, KVM
-  on Linux, or WHP on Windows, plus the microsandbox runtime and firmware.
-- A lifecycle-owning `Sandbox` stops when Ruby garbage-collects it. Call
-  `sandbox.detach` first when the VM must outlive the Ruby object, then manage
-  it through `Sandbox.get`.
-- `Sandbox.with` always attempts cleanup. If both the block and cleanup fail,
-  the block's original exception is preserved.
-
-#### Ruby security notes
-
-`network: :none` disables sandbox networking. A hash with `allowed_hosts` and
-`allowed_ports` creates a default-deny egress policy. Secret entries require
-`env`, `value`, and `allowed_host`; the guest receives a placeholder and the
-host proxy substitutes the real value only for the allowed TLS hostname.
-
-The `secret_env` configuration path stores the supplied secret in sandbox
-configuration on the host. Do not pass credentials that may not be persisted
-there. Secret values should come from a process-level secret manager, must not
-be logged, and should be rotated after suspected host compromise.
 
 ## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/terminal/ffffff" alt="cli-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/terminal/000000" alt="cli"></a>&nbsp;&nbsp;CLI
 

@@ -20,7 +20,7 @@ Gem::Specification.new do |spec|
   }
 
   spec.files = Dir.chdir(__dir__) do
-    Dir["lib/**/*.rb", "ext/**/*", "Rakefile", "microsandbox.gemspec", "LICENSE"]
+    Dir["lib/**/*.rb", "ext/**/*", "Rakefile", "microsandbox.gemspec", "README.md", "LICENSE"]
       .reject { |path| path == "ext/microsandbox/target" || path.start_with?("ext/microsandbox/target/") }
   end
   spec.require_paths = ["lib"]
