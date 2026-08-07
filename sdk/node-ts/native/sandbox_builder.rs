@@ -6,7 +6,8 @@ use napi_derive::napi;
 
 use microsandbox::sandbox::LogLevel as RustLogLevel;
 use microsandbox::sandbox::{
-    PullPolicy as RustPullPolicy, Sandbox as RustSandbox, SandboxBuilder as RustSandboxBuilder,
+    DeploymentProfile as RustDeploymentProfile, PullPolicy as RustPullPolicy,
+    Sandbox as RustSandbox, SandboxBuilder as RustSandboxBuilder,
     SecurityProfile as RustSecurityProfile,
 };
 use microsandbox::size::Mebibytes;
@@ -91,11 +92,12 @@ impl JsSandboxBuilder {
     /// Sugar over `imageWith((i) => i.oci(...).rootDisk(...))` — the root
     /// disk lives on the OCI rootfs source, so an OCI image must be set
     /// first. Pass a number of MiB for a managed root disk, or a callback
-    /// for the tmpfs and disk-image kinds:
+    /// for the tmpfs, flat, and disk-image kinds:
     ///
     /// ```ts
     /// .image("python").rootDisk(8192)
     /// .image("python").rootDisk((d) => d.tmpfs().size(512))
+    /// .image("python").rootDisk((d) => d.flat().size(8192).cloneStrategy("auto"))
     /// .image("python").rootDisk((d) => d.disk("./scratch.img"))
     /// ```
     #[napi(
@@ -270,6 +272,24 @@ impl JsSandboxBuilder {
         };
         let prev = self.take_inner();
         self.inner = Some(prev.security(profile));
+        Ok(self)
+    }
+
+    /// Host-runtime deployment profile (`"single-tenant"` or `"multi-tenant"`).
+    /// Managed backends may enforce their own profile.
+    #[napi(js_name = "deploymentProfile")]
+    pub fn deployment_profile(&mut self, profile: String) -> Result<&Self> {
+        let profile = match profile.as_str() {
+            "single-tenant" | "single_tenant" => RustDeploymentProfile::SingleTenant,
+            "multi-tenant" | "multi_tenant" => RustDeploymentProfile::MultiTenant,
+            other => {
+                return Err(napi::Error::from_reason(format!(
+                    "invalid deployment profile `{other}` (expected single-tenant | multi-tenant)"
+                )));
+            }
+        };
+        let prev = self.take_inner();
+        self.inner = Some(prev.deployment_profile(profile));
         Ok(self)
     }
 

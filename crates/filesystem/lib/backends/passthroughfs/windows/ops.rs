@@ -276,6 +276,14 @@ impl DynFileSystem for PassthroughFs {
         }
 
         let handle = self.handle(inode, handle)?;
+        // A read-only handle has no buffered writes to persist. On Windows, flush
+        // maps to FlushFileBuffers, which requires the handle to hold GENERIC_WRITE
+        // and returns ERROR_ACCESS_DENIED on a read-only handle. That surfaces as a
+        // spurious EACCES on the guest close() of any read. Skip flush for read-only
+        // handles: there is nothing to sync.
+        if !open_flags_write(handle.flags) {
+            return Ok(());
+        }
         handle.file.lock().unwrap().sync_data().map_err(host_error)
     }
 

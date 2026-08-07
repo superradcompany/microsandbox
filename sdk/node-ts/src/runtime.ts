@@ -13,6 +13,21 @@ export type DefaultBackend =
       profile: string;
     };
 
+/** Secret-safe information about the active default backend. */
+export interface BackendInfo {
+  kind: "local" | "cloud";
+  apiUrl?: string;
+  source:
+    | "programmatic"
+    | "MSB_BACKEND"
+    | "MSB_API_KEY"
+    | "MSB_PROFILE"
+    | "profile"
+    | "active_profile"
+    | "default";
+  profile?: string;
+}
+
 /** Set the process-wide default backend used by SDK entry points. */
 export function setDefaultBackend(backend: DefaultBackend): void {
   const setNative = napi.setDefaultBackend;
@@ -63,6 +78,15 @@ export function defaultBackendKind(): "local" | "cloud" {
   const getNative = napi.defaultBackendKind;
   if (!getNative) {
     throw new Error("native defaultBackendKind binding is unavailable");
+  }
+  return getNative();
+}
+
+/** Return secret-safe information about the active default backend. */
+export function defaultBackendInfo(): BackendInfo {
+  const getNative = napi.defaultBackendInfo;
+  if (!getNative) {
+    throw new Error("native defaultBackendInfo binding is unavailable");
   }
   return getNative();
 }

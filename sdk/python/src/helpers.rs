@@ -1,8 +1,10 @@
-use microsandbox::sandbox::{NetworkPolicy, Patch, PullPolicy, SandboxBuilder, SecurityProfile};
+use microsandbox::sandbox::{
+    DeploymentProfile, NetworkPolicy, Patch, PullPolicy, SandboxBuilder, SecurityProfile,
+};
 use microsandbox::{LogLevel, RegistryAuth};
 use microsandbox_network::dns::Nameserver;
 use pyo3::prelude::*;
-use pyo3::types::{PyByteArray, PyBytes, PyDict, PyList};
+use pyo3::types::{PyByteArray, PyBytes, PyDict, PyList, PyModule};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -20,6 +22,7 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
     "workdir",
     "shell",
     "security",
+    "deployment_profile",
     "hostname",
     "user",
     "entrypoint",
@@ -47,6 +50,97 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
 ];
 
 //--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+/// Tuple returned by [`parse_init_kwarg`]: `(cmd, args, env)`.
+type ParsedInit = (String, Vec<String>, Vec<(String, String)>);
+
+/// `(args, env)` pair extracted from a Python init-options mapping.
+type ArgsEnv = (Vec<String>, Vec<(String, String)>);
+
+/// Root disk configuration extracted from an ImageSource's `_root_disk`
+/// attribute (an integer shorthand or concrete `RootDiskConfig`).
+struct RootDiskSpec {
+    kind: String,
+    size_mib: Option<u32>,
+    path: Option<String>,
+    format: Option<microsandbox::sandbox::DiskImageFormat>,
+    fstype: Option<String>,
+    clone: Option<microsandbox::sandbox::FlatClone>,
+}
+
+/// Identifies whether port entries came directly from the public kwarg or
+/// from the already-validated, serialized contents of a `Network` config.
+#[derive(Clone, Copy)]
+enum PortBindingSource {
+    PublicConfig,
+    SerializedNetwork,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl RootDiskSpec {
+    /// Apply this spec to an OCI image builder.
+    fn apply(
+        self,
+        image: microsandbox::sandbox::ImageBuilder,
+    ) -> microsandbox::sandbox::ImageBuilder {
+        image.root_disk_with(|mut d| {
+            match self.kind.as_str() {
+                "managed" => {}
+                "tmpfs" => d = d.tmpfs(),
+                // Path presence is validated in `extract_root_disk`.
+                "disk-image" => d = d.disk_image(self.path.as_deref().unwrap_or_default()),
+                "flat" => d = d.flat(),
+                _ => unreachable!("validated root disk kind"),
+            }
+            if let Some(size_mib) = self.size_mib {
+                d = d.size(size_mib);
+            }
+            if let Some(format) = self.format {
+                d = d.format(format);
+            }
+            if let Some(fstype) = self.fstype {
+                d = d.fstype(fstype);
+            }
+            if let Some(clone) = self.clone {
+                d = d.clone_strategy(clone);
+            }
+            d
+        })
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Python Enums
+//--------------------------------------------------------------------------------------------------
+
+/// Extract the wire value from one exact public Python `StrEnum` class.
+///
+/// Checking the class before reading `.value` is intentional: `StrEnum`
+/// members are also strings, so ordinary string extraction would silently
+/// preserve the legacy raw-string API.
+pub(crate) fn extract_str_enum(value: &Bound<'_, PyAny>, enum_name: &str) -> PyResult<String> {
+    let enum_class = PyModule::import(value.py(), "microsandbox.types")?.getattr(enum_name)?;
+    if !value.is_instance(&enum_class)? {
+        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "expected {enum_name}, got {}",
+            value.get_type().name()?
+        )));
+    }
+    value.getattr("value")?.extract()
+}
+
+/// Construct a public Python `StrEnum` member from a trusted wire value.
+pub(crate) fn str_enum_member(py: Python<'_>, enum_name: &str, value: &str) -> PyResult<PyObject> {
+    let enum_class = PyModule::import(py, "microsandbox.types")?.getattr(enum_name)?;
+    Ok(enum_class.call1((value,))?.unbind())
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions: Config Conversion
 //--------------------------------------------------------------------------------------------------
 
@@ -71,8 +165,12 @@ pub fn sandbox_builder_from_args(
 
     reject_unknown_kwargs(kwargs)?;
 
-    let image_present = kwargs.get_item("image")?.is_some();
-    let snapshot_present = kwargs.get_item("from_snapshot")?.is_some();
+    let image_present = kwargs
+        .get_item("image")?
+        .is_some_and(|value| !value.is_none());
+    let snapshot_present = kwargs
+        .get_item("from_snapshot")?
+        .is_some_and(|value| !value.is_none());
     if image_present && snapshot_present {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "pass either image= or from_snapshot=, not both",
@@ -154,11 +252,14 @@ pub fn sandbox_builder_from_args(
         builder = builder.snapshot_resolved(manifest.image.manifest_digest.clone(), upper_path);
     } else {
         let image_obj = kwargs.get_item("image")?.unwrap();
-        // Accept str, PathLike, or ImageSource (with _to_image_str method).
+        // Accept an open image reference/path or the concrete ImageSource
+        // configuration type. Arbitrary objects with similarly named
+        // methods must not bypass ImageSource's enum validation.
+        let is_image_source = is_exact_sdk_type(&image_obj, "ImageSource")?;
         let image_str: String = if let Ok(s) = image_obj.extract::<String>() {
             s
-        } else if let Ok(method) = image_obj.getattr("_to_image_str") {
-            method.call0()?.extract()?
+        } else if is_image_source {
+            image_obj.call_method0("_to_image_str")?.extract()?
         } else if let Ok(fspath) = image_obj.call_method0("__fspath__") {
             fspath.extract()?
         } else {
@@ -167,7 +268,7 @@ pub fn sandbox_builder_from_args(
             ));
         };
 
-        let fstype = if let Ok(fstype_attr) = image_obj.getattr("_fstype") {
+        let fstype = if is_image_source && let Ok(fstype_attr) = image_obj.getattr("_fstype") {
             if fstype_attr.is_none() {
                 None
             } else {
@@ -176,7 +277,11 @@ pub fn sandbox_builder_from_args(
         } else {
             None
         };
-        let root_disk = extract_root_disk(&image_obj)?;
+        let root_disk = if is_image_source {
+            extract_root_disk(&image_obj)?
+        } else {
+            None
+        };
 
         if root_disk.is_some() {
             let image_type = image_obj
@@ -226,7 +331,8 @@ pub fn sandbox_builder_from_args(
     if let Some(shell) = extract_opt::<String>(kwargs, "shell")? {
         builder = builder.shell(shell);
     }
-    if let Some(security) = extract_opt::<String>(kwargs, "security")? {
+    if let Some(security_obj) = kwargs.get_item("security")?.filter(|v| !v.is_none()) {
+        let security = extract_str_enum(&security_obj, "SecurityProfile")?;
         let profile = match security.as_str() {
             "default" => SecurityProfile::Default,
             "restricted" => SecurityProfile::Restricted,
@@ -237,6 +343,22 @@ pub fn sandbox_builder_from_args(
             }
         };
         builder = builder.security(profile);
+    }
+    if let Some(deployment_profile_obj) = kwargs
+        .get_item("deployment_profile")?
+        .filter(|value| !value.is_none())
+    {
+        let deployment_profile = extract_str_enum(&deployment_profile_obj, "DeploymentProfile")?;
+        let profile = match deployment_profile.as_str() {
+            "single-tenant" => DeploymentProfile::SingleTenant,
+            "multi-tenant" => DeploymentProfile::MultiTenant,
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "invalid deployment profile: {deployment_profile}. Expected: single-tenant, multi-tenant"
+                )));
+            }
+        };
+        builder = builder.deployment_profile(profile);
     }
     if let Some(hostname) = extract_opt::<String>(kwargs, "hostname")? {
         builder = builder.hostname(hostname);
@@ -290,8 +412,8 @@ pub fn sandbox_builder_from_args(
     }
 
     // Environment variables.
-    if let Some(env) = kwargs.get_item("env")? {
-        let env_dict: &Bound<'_, PyDict> = env.downcast()?;
+    if let Some(env) = kwargs.get_item("env")?.filter(|v| !v.is_none()) {
+        let env_dict = require_mapping_dict(&env, "env")?;
         for (k, v) in env_dict.iter() {
             let key: String = k.extract()?;
             let val: String = v.extract()?;
@@ -300,8 +422,8 @@ pub fn sandbox_builder_from_args(
     }
 
     // Labels.
-    if let Some(labels) = kwargs.get_item("labels")? {
-        let labels_dict: &Bound<'_, PyDict> = labels.downcast()?;
+    if let Some(labels) = kwargs.get_item("labels")?.filter(|v| !v.is_none()) {
+        let labels_dict = require_mapping_dict(&labels, "labels")?;
         for (k, v) in labels_dict.iter() {
             let key: String = k.extract()?;
             let val: String = v.extract()?;
@@ -310,8 +432,8 @@ pub fn sandbox_builder_from_args(
     }
 
     // Scripts.
-    if let Some(scripts) = kwargs.get_item("scripts")? {
-        let scripts_dict: &Bound<'_, PyDict> = scripts.downcast()?;
+    if let Some(scripts) = kwargs.get_item("scripts")?.filter(|v| !v.is_none()) {
+        let scripts_dict = require_mapping_dict(&scripts, "scripts")?;
         for (k, v) in scripts_dict.iter() {
             let key: String = k.extract()?;
             let val: String = v.extract()?;
@@ -320,10 +442,11 @@ pub fn sandbox_builder_from_args(
     }
 
     // Pull policy.
-    if let Some(pp) = extract_opt::<String>(kwargs, "pull_policy")? {
+    if let Some(pp_obj) = kwargs.get_item("pull_policy")?.filter(|v| !v.is_none()) {
+        let pp = extract_str_enum(&pp_obj, "PullPolicy")?;
         let policy = match pp.as_str() {
             "always" => PullPolicy::Always,
-            "if-missing" | "if_missing" | "IF_MISSING" => PullPolicy::IfMissing,
+            "if-missing" => PullPolicy::IfMissing,
             "never" => PullPolicy::Never,
             _ => {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -335,13 +458,14 @@ pub fn sandbox_builder_from_args(
     }
 
     // Log level.
-    if let Some(ll) = extract_opt::<String>(kwargs, "log_level")? {
+    if let Some(ll_obj) = kwargs.get_item("log_level")?.filter(|v| !v.is_none()) {
+        let ll = extract_str_enum(&ll_obj, "LogLevel")?;
         let level = match ll.as_str() {
-            "trace" | "TRACE" => LogLevel::Trace,
-            "debug" | "DEBUG" => LogLevel::Debug,
-            "info" | "INFO" => LogLevel::Info,
-            "warn" | "WARN" => LogLevel::Warn,
-            "error" | "ERROR" => LogLevel::Error,
+            "trace" => LogLevel::Trace,
+            "debug" => LogLevel::Debug,
+            "info" => LogLevel::Info,
+            "warn" => LogLevel::Warn,
+            "error" => LogLevel::Error,
             _ => {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
                     "invalid log_level: {ll}"
@@ -381,40 +505,50 @@ pub fn sandbox_builder_from_args(
     }
 
     // Volumes.
-    if let Some(volumes) = kwargs.get_item("volumes")? {
-        let vol_dict: &Bound<'_, PyDict> = volumes.downcast()?;
+    if let Some(volumes) = kwargs.get_item("volumes")?.filter(|v| !v.is_none()) {
+        let vol_dict = require_mapping_dict(&volumes, "volumes")?;
         for (guest_path_obj, mount_obj) in vol_dict.iter() {
             let guest_path: String = guest_path_obj.extract()?;
-            let mount_dict = as_dict(&mount_obj)?;
+            let mount_dict = config_dict(&mount_obj, "MountConfig")?;
             builder = apply_mount(builder, guest_path, &mount_dict)?;
         }
     }
 
     // Patches.
-    if let Some(patches) = kwargs.get_item("patches")? {
-        let patches_list: &Bound<'_, PyList> = patches.downcast()?;
-        for patch_obj in patches_list.iter() {
-            let patch_dict = as_dict(&patch_obj)?;
+    if let Some(patches) = kwargs.get_item("patches")?.filter(|v| !v.is_none()) {
+        let patches_iter = patches.try_iter().map_err(|_| {
+            pyo3::exceptions::PyTypeError::new_err(
+                "patches must be a sequence of PatchConfig values",
+            )
+        })?;
+        for patch_obj in patches_iter {
+            let patch_obj = patch_obj?;
+            let patch_dict = config_dict(&patch_obj, "PatchConfig")?;
             builder = apply_patch(builder, &patch_dict)?;
         }
     }
 
     // Ports.
-    if let Some(ports) = kwargs.get_item("ports")? {
-        builder = apply_ports(builder, &ports)?;
+    if let Some(ports) = kwargs.get_item("ports")?.filter(|v| !v.is_none()) {
+        builder = apply_ports(builder, &ports, PortBindingSource::PublicConfig)?;
     }
 
     // Network.
-    if let Some(network) = kwargs.get_item("network")? {
-        let net_dict = as_dict(&network)?;
+    if let Some(network) = kwargs.get_item("network")?.filter(|v| !v.is_none()) {
+        let net_dict = config_dict(&network, "Network")?;
         builder = apply_network(builder, &net_dict)?;
     }
 
     // Secrets.
-    if let Some(secrets) = kwargs.get_item("secrets")? {
-        let secrets_list: &Bound<'_, PyList> = secrets.downcast()?;
-        for secret_obj in secrets_list.iter() {
-            let secret_dict = as_dict(&secret_obj)?;
+    if let Some(secrets) = kwargs.get_item("secrets")?.filter(|v| !v.is_none()) {
+        let secrets_iter = secrets.try_iter().map_err(|_| {
+            pyo3::exceptions::PyTypeError::new_err(
+                "secrets must be a sequence of SecretEntry values",
+            )
+        })?;
+        for secret_obj in secrets_iter {
+            let secret_obj = secret_obj?;
+            let secret_dict = config_dict(&secret_obj, "SecretEntry")?;
             builder = apply_secret(builder, &secret_dict)?;
         }
     }
@@ -439,9 +573,6 @@ pub fn sandbox_builder_from_args(
 // Functions: Init
 //--------------------------------------------------------------------------------------------------
 
-/// Tuple returned by [`parse_init_kwarg`]: `(cmd, args, env)`.
-type ParsedInit = (String, Vec<String>, Vec<(String, String)>);
-
 /// Parse the `init=` kwarg into `(cmd, args, env)`.
 ///
 /// Accepted forms (consistent with how other `Sandbox.create` kwargs
@@ -457,21 +588,23 @@ fn parse_init_kwarg(obj: &Bound<'_, PyAny>) -> PyResult<ParsedInit> {
         return Ok((s, Vec::new(), Vec::new()));
     }
 
-    // Dict form, or any object exposing `_to_dict()` (e.g. InitConfig).
-    let dict_owned = if let Ok(d) = obj.downcast::<PyDict>() {
-        Some(d.clone())
-    } else if let Ok(method) = obj.getattr("_to_dict") {
-        let returned = method.call0()?;
+    // Rich form: either the concrete SDK config or the explicitly documented
+    // Mapping protocol. Arbitrary objects with a coincidental `_to_dict`
+    // method are not configuration values.
+    let dict_owned = if is_exact_sdk_type(obj, "InitConfig")? {
+        let returned = obj.call_method0("_to_dict")?;
         Some(
             returned
                 .downcast::<PyDict>()
                 .map_err(|_| {
-                    pyo3::exceptions::PyTypeError::new_err("init._to_dict() must return a dict")
+                    pyo3::exceptions::PyTypeError::new_err(
+                        "InitConfig._to_dict() must return a dict",
+                    )
                 })?
                 .clone(),
         )
     } else {
-        None
+        mapping_to_dict(obj)?
     };
     if let Some(dict) = dict_owned {
         let cmd: String = dict
@@ -483,14 +616,11 @@ fn parse_init_kwarg(obj: &Bound<'_, PyAny>) -> PyResult<ParsedInit> {
     }
 
     Err(pyo3::exceptions::PyTypeError::new_err(
-        "init must be str, dict with 'cmd', or InitConfig",
+        "init must be str, Mapping with 'cmd', or InitConfig",
     ))
 }
 
-/// `(args, env)` pair extracted from a Python init-options dict.
-type ArgsEnv = (Vec<String>, Vec<(String, String)>);
-
-/// Pull `args: list[str]` and `env: dict[str, str]` from an init dict.
+/// Pull `args: list[str]` and `env: Mapping[str, str]` from an init dict.
 /// Both keys are optional.
 fn parse_args_env(dict: &Bound<'_, PyDict>) -> PyResult<ArgsEnv> {
     let args = dict
@@ -501,7 +631,7 @@ fn parse_args_env(dict: &Bound<'_, PyDict>) -> PyResult<ArgsEnv> {
         .unwrap_or_default();
     let env = match dict.get_item("env")? {
         Some(env_obj) if !env_obj.is_none() => {
-            let env_dict: &Bound<'_, PyDict> = env_obj.downcast()?;
+            let env_dict = require_mapping_dict(&env_obj, "init.env")?;
             env_dict
                 .iter()
                 .map(|(k, v)| Ok::<_, PyErr>((k.extract::<String>()?, v.extract::<String>()?)))
@@ -515,44 +645,6 @@ fn parse_args_env(dict: &Bound<'_, PyDict>) -> PyResult<ArgsEnv> {
 //--------------------------------------------------------------------------------------------------
 // Functions: Root Disk
 //--------------------------------------------------------------------------------------------------
-
-/// Root disk configuration extracted from an ImageSource's `_root_disk`
-/// attribute (int, dict, or `RootDisk.*()` config object).
-struct RootDiskSpec {
-    kind: String,
-    size_mib: Option<u32>,
-    path: Option<String>,
-    format: Option<microsandbox::sandbox::DiskImageFormat>,
-    fstype: Option<String>,
-}
-
-impl RootDiskSpec {
-    /// Apply this spec to an OCI image builder.
-    fn apply(
-        self,
-        image: microsandbox::sandbox::ImageBuilder,
-    ) -> microsandbox::sandbox::ImageBuilder {
-        image.root_disk_with(|mut d| {
-            match self.kind.as_str() {
-                "managed" => {}
-                "tmpfs" => d = d.tmpfs(),
-                // Path presence is validated in `extract_root_disk`.
-                "disk-image" => d = d.disk_image(self.path.as_deref().unwrap_or_default()),
-                _ => unreachable!("validated root disk kind"),
-            }
-            if let Some(size_mib) = self.size_mib {
-                d = d.size(size_mib);
-            }
-            if let Some(format) = self.format {
-                d = d.format(format);
-            }
-            if let Some(fstype) = self.fstype {
-                d = d.fstype(fstype);
-            }
-            d
-        })
-    }
-}
 
 /// Read the `_root_disk` attribute of an ImageSource, falling back to the
 /// deprecated `_upper_size_mib` (managed sugar) when absent.
@@ -573,23 +665,29 @@ fn extract_root_disk(image_obj: &Bound<'_, PyAny>) -> PyResult<Option<RootDiskSp
                 path: None,
                 format: None,
                 fstype: None,
+                clone: None,
             }));
         }
         return Ok(None);
     };
 
-    // Bare int: managed root disk of that size.
-    if let Ok(size_mib) = attr.extract::<u32>() {
+    // Bare exact int: managed root disk of that size. `bool` and integer
+    // subclasses do not satisfy this shorthand even though Python normally
+    // treats bool as an integer.
+    let int_class = PyModule::import(attr.py(), "builtins")?.getattr("int")?;
+    if attr.get_type().as_any().is(&int_class) {
+        let size_mib = attr.extract::<u32>()?;
         return Ok(Some(RootDiskSpec {
             kind: "managed".to_string(),
             size_mib: Some(size_mib),
             path: None,
             format: None,
             fstype: None,
+            clone: None,
         }));
     }
 
-    let dict = as_dict(&attr)?;
+    let dict = config_dict(&attr, "RootDiskConfig")?;
     let kind = extract_opt::<String>(&dict, "kind")?.unwrap_or_else(|| "managed".to_string());
     let size_mib = extract_opt::<u32>(&dict, "size_mib")?;
     let path = extract_opt::<String>(&dict, "path")?;
@@ -600,12 +698,22 @@ fn extract_root_disk(image_obj: &Bound<'_, PyAny>) -> PyResult<Option<RootDiskSp
         })
         .transpose()?;
     let fstype = extract_opt::<String>(&dict, "fstype")?;
+    let clone = extract_opt::<String>(&dict, "clone")?
+        .map(|value| match value.as_str() {
+            "auto" => Ok(microsandbox::sandbox::FlatClone::Auto),
+            "copy" => Ok(microsandbox::sandbox::FlatClone::Copy),
+            "reflink" => Ok(microsandbox::sandbox::FlatClone::Reflink),
+            other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "unknown flat clone strategy: {other} (expected auto, copy, reflink)"
+            ))),
+        })
+        .transpose()?;
 
     match kind.as_str() {
         "managed" | "tmpfs" => {
-            if path.is_some() || format.is_some() || fstype.is_some() {
+            if path.is_some() || format.is_some() || fstype.is_some() || clone.is_some() {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "path/format/fstype are only valid for a disk-image root disk (got kind={kind})"
+                    "path/format/fstype/clone are not valid for a {kind} root disk"
                 )));
             }
         }
@@ -615,15 +723,27 @@ fn extract_root_disk(image_obj: &Bound<'_, PyAny>) -> PyResult<Option<RootDiskSp
                     "disk-image root disk requires path",
                 ));
             }
+            if clone.is_some() {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "clone is only valid for a flat root disk",
+                ));
+            }
             if size_mib.is_some() {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "size_mib is not valid for a disk-image root disk; resize the image file itself",
                 ));
             }
         }
+        "flat" => {
+            if path.is_some() || format.is_some() {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "path/format are not valid for a flat root disk",
+                ));
+            }
+        }
         other => {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "unknown root disk kind: {other} (expected managed, tmpfs, disk-image)"
+                "unknown root disk kind: {other} (expected managed, tmpfs, disk-image, flat)"
             )));
         }
     }
@@ -634,6 +754,7 @@ fn extract_root_disk(image_obj: &Bound<'_, PyAny>) -> PyResult<Option<RootDiskSp
         path,
         format,
         fstype,
+        clone,
     }))
 }
 
@@ -850,6 +971,16 @@ fn apply_patch(
                 replace,
             }))
         }
+        "file" => {
+            let path: String = extract_required(patch, "path")?;
+            let content: Vec<u8> = extract_required(patch, "content")?;
+            Ok(builder.add_patch(Patch::File {
+                path,
+                content,
+                mode,
+                replace,
+            }))
+        }
         "append" => {
             let path: String = extract_required(patch, "path")?;
             let content: String = extract_required(patch, "content")?;
@@ -943,7 +1074,7 @@ fn apply_network(
     if let Some(custom) = net.get_item("custom_policy")?
         && !custom.is_none()
     {
-        let cp_dict = as_dict(&custom)?;
+        let cp_dict: Bound<'_, PyDict> = custom.downcast::<PyDict>()?.clone();
         let parse_action_field = |field: &str,
                                   default: microsandbox_network::policy::Action|
          -> PyResult<microsandbox_network::policy::Action> {
@@ -975,7 +1106,7 @@ fn apply_network(
         {
             let rules_list: &Bound<'_, PyList> = rules_obj.downcast()?;
             for rule_obj in rules_list.iter() {
-                let rd = as_dict(&rule_obj)?;
+                let rd: Bound<'_, PyDict> = rule_obj.downcast::<PyDict>()?.clone();
                 let action_str: String = extract_required(&rd, "action")?;
                 let action = match action_str.as_str() {
                     "allow" => microsandbox_network::policy::Action::Allow,
@@ -1066,7 +1197,7 @@ fn apply_network(
     if let Some(dns) = net.get_item("dns")?
         && !dns.is_none()
     {
-        let dns = as_dict(&dns)?;
+        let dns: Bound<'_, PyDict> = dns.downcast::<PyDict>()?.clone();
 
         let rebind = extract_opt::<bool>(&dns, "rebind_protection")?;
         let nameservers_raw = extract_opt::<Vec<String>>(&dns, "nameservers")?;
@@ -1123,7 +1254,7 @@ fn apply_network(
     if let Some(violation_obj) = net.get_item("on_secret_violation")?
         && !violation_obj.is_none()
     {
-        let action = parse_violation_action_obj(&violation_obj)?;
+        let action = parse_serialized_violation_action(&violation_obj)?;
         builder = builder.network(|n| {
             n.on_secret_violation(|_| {
                 microsandbox_network::builder::ViolationActionBuilder::from_action(action)
@@ -1135,7 +1266,7 @@ fn apply_network(
     if let Some(tls) = net.get_item("tls")?
         && !tls.is_none()
     {
-        let tls_dict = as_dict(&tls)?;
+        let tls_dict: Bound<'_, PyDict> = tls.downcast::<PyDict>()?.clone();
         let bypass: Vec<String> = extract_opt(&tls_dict, "bypass")?.unwrap_or_default();
         let verify_upstream: Option<bool> = extract_opt(&tls_dict, "verify_upstream")?;
         let intercepted_ports: Option<Vec<u16>> = extract_opt(&tls_dict, "intercepted_ports")?;
@@ -1187,7 +1318,7 @@ fn apply_network(
     if let Some(ports) = net.get_item("ports")?
         && !ports.is_none()
     {
-        builder = apply_ports(builder, &ports)?;
+        builder = apply_ports(builder, &ports, PortBindingSource::SerializedNetwork)?;
     }
 
     Ok(builder)
@@ -1196,8 +1327,9 @@ fn apply_network(
 fn apply_ports(
     mut builder: microsandbox::sandbox::SandboxBuilder,
     ports: &Bound<'_, PyAny>,
+    source: PortBindingSource,
 ) -> PyResult<microsandbox::sandbox::SandboxBuilder> {
-    if let Ok(ports_dict) = ports.downcast::<PyDict>() {
+    if let Some(ports_dict) = mapping_to_dict(ports)? {
         for (host_obj, guest_obj) in ports_dict.iter() {
             let host_port: u16 = host_obj.extract()?;
             let guest_port: u16 = guest_obj.extract()?;
@@ -1214,7 +1346,16 @@ fn apply_ports(
 
     for item in iter {
         let item = item?;
-        let port = as_dict(&item)?;
+        let port = match source {
+            PortBindingSource::PublicConfig => config_dict(&item, "PortBinding")?,
+            PortBindingSource::SerializedNetwork => {
+                item.downcast::<PyDict>().cloned().map_err(|_| {
+                    pyo3::exceptions::PyTypeError::new_err(
+                        "Network._to_dict() ports must contain dictionaries",
+                    )
+                })?
+            }
+        };
         let host_port: u16 = extract_required(&port, "host_port")?;
         let guest_port: u16 = extract_required(&port, "guest_port")?;
         let bind: String = extract_opt(&port, "bind")?.unwrap_or_else(|| "127.0.0.1".to_string());
@@ -1257,7 +1398,7 @@ fn apply_secret(
     let on_violation = if let Some(violation_obj) = secret.get_item("on_violation")?
         && !violation_obj.is_none()
     {
-        Some(parse_violation_action_obj(&violation_obj)?)
+        Some(parse_serialized_violation_action(&violation_obj)?)
     } else {
         None
     };
@@ -1267,7 +1408,7 @@ fn apply_secret(
 
     let (inject_headers, inject_basic_auth, inject_query_params, inject_body) =
         if let Some(injection_obj) = secret.get_item("injection")? {
-            let injection = as_dict(&injection_obj)?;
+            let injection: Bound<'_, PyDict> = injection_obj.downcast::<PyDict>()?.clone();
             (
                 extract_opt::<bool>(&injection, "headers")?,
                 extract_opt::<bool>(&injection, "basic_auth")?,
@@ -1348,34 +1489,60 @@ fn reject_unknown_kwargs(kwargs: &Bound<'_, PyDict>) -> PyResult<()> {
     )))
 }
 
-/// Convert an object to a PyDict — either it's already a dict, or call _to_dict().
-fn as_dict<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
-    if let Ok(dict) = obj.downcast::<PyDict>() {
-        return Ok(dict.clone());
+/// Return whether `obj` has exactly the named public SDK type.
+pub(crate) fn is_exact_sdk_type(obj: &Bound<'_, PyAny>, type_name: &str) -> PyResult<bool> {
+    let class = PyModule::import(obj.py(), "microsandbox.types")?.getattr(type_name)?;
+    Ok(obj.get_type().as_any().is(&class))
+}
+
+/// Copy a documented Python Mapping into a concrete dictionary.
+fn mapping_to_dict<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyDict>>> {
+    let mapping_class = PyModule::import(obj.py(), "collections.abc")?.getattr("Mapping")?;
+    if !obj.is_instance(&mapping_class)? {
+        return Ok(None);
     }
-    // Try calling _to_dict() on the object (for our frozen dataclasses).
-    if let Ok(method) = obj.getattr("_to_dict") {
-        let result = method.call0()?;
-        return Ok(result.downcast::<PyDict>()?.clone());
+    let dict_class = PyModule::import(obj.py(), "builtins")?.getattr("dict")?;
+    let converted = dict_class.call1((obj,))?;
+    Ok(Some(converted.downcast::<PyDict>()?.clone()))
+}
+
+/// Copy a required documented Mapping into a concrete dictionary.
+fn require_mapping_dict<'py>(
+    obj: &Bound<'py, PyAny>,
+    argument: &str,
+) -> PyResult<Bound<'py, PyDict>> {
+    mapping_to_dict(obj)?.ok_or_else(|| {
+        pyo3::exceptions::PyTypeError::new_err(format!("{argument} must be a Mapping"))
+    })
+}
+
+/// Serialize one concrete public SDK configuration object.
+///
+/// Requiring the declared class before calling `_to_dict` is the boundary
+/// that keeps raw dictionaries, duck-typed objects, and unrelated enum
+/// classes from bypassing the Python SDK's validation.
+fn config_dict<'py>(obj: &Bound<'py, PyAny>, type_name: &str) -> PyResult<Bound<'py, PyDict>> {
+    if !is_exact_sdk_type(obj, type_name)? {
+        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "expected {type_name}, got {}",
+            obj.get_type().name()?
+        )));
     }
-    // Try __dict__ as last resort.
-    if let Ok(d) = obj.getattr("__dict__")
-        && let Ok(dict) = d.downcast::<PyDict>()
-    {
-        return Ok(dict.clone());
-    }
-    Err(pyo3::exceptions::PyTypeError::new_err(format!(
-        "expected dict or object with _to_dict(), got {}",
-        obj.get_type().name()?
-    )))
+    let result = obj.call_method0("_to_dict")?;
+    result.downcast::<PyDict>().cloned().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err(format!("{type_name}._to_dict() must return a dict"))
+    })
 }
 
 /// Parse the `registry_auth` kwarg into a `RegistryAuth`.
 fn parse_registry_auth(kwargs: &Bound<'_, PyDict>) -> PyResult<Option<RegistryAuth>> {
-    let Some(auth) = kwargs.get_item("registry_auth")? else {
+    let Some(auth) = kwargs
+        .get_item("registry_auth")?
+        .filter(|value| !value.is_none())
+    else {
         return Ok(None);
     };
-    let auth_dict = as_dict(&auth)?;
+    let auth_dict = config_dict(&auth, "RegistryAuth")?;
     let auth_dict = &auth_dict;
     let username: String = auth_dict
         .get_item("username")?
@@ -1440,7 +1607,7 @@ fn parse_scoped_upstream_ca_certs(
     let entries: &Bound<'_, PyList> = obj.downcast()?;
     let mut scoped = Vec::with_capacity(entries.len());
     for entry in entries.iter() {
-        let entry_dict = as_dict(&entry)?;
+        let entry_dict: Bound<'_, PyDict> = entry.downcast::<PyDict>()?.clone();
         scoped.push((
             extract_required(&entry_dict, "pattern")?,
             extract_required(&entry_dict, "path")?,
@@ -1463,7 +1630,7 @@ fn parse_scoped_verify_upstream(
     let entries: &Bound<'_, PyList> = obj.downcast()?;
     let mut scoped = Vec::with_capacity(entries.len());
     for entry in entries.iter() {
-        let entry_dict = as_dict(&entry)?;
+        let entry_dict: Bound<'_, PyDict> = entry.downcast::<PyDict>()?.clone();
         scoped.push((
             extract_required(&entry_dict, "pattern")?,
             extract_required(&entry_dict, "verify")?,
@@ -1596,8 +1763,8 @@ fn parse_violation_action(
     use microsandbox_network::secrets::config::{HostPattern, ViolationAction};
     match s {
         "block" => Ok(ViolationAction::Block),
-        "block-and-log" | "block_and_log" => Ok(ViolationAction::BlockAndLog),
-        "block-and-terminate" | "block_and_terminate" => Ok(ViolationAction::BlockAndTerminate),
+        "block-and-log" => Ok(ViolationAction::BlockAndLog),
+        "block-and-terminate" => Ok(ViolationAction::BlockAndTerminate),
         "passthrough" => Ok(ViolationAction::Passthrough(vec![HostPattern::Any])),
         _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
             "unknown violation action: {s}"
@@ -1608,43 +1775,43 @@ fn parse_violation_action(
 fn parse_violation_action_obj(
     obj: &Bound<'_, PyAny>,
 ) -> PyResult<microsandbox_network::secrets::config::ViolationAction> {
-    if let Ok(s) = obj.extract::<String>() {
+    if let Ok(s) = extract_str_enum(obj, "ViolationAction") {
+        return parse_violation_action(&s);
+    }
+    if !is_exact_sdk_type(obj, "ViolationPolicy")? {
+        return Err(pyo3::exceptions::PyTypeError::new_err(
+            "expected ViolationAction or ViolationPolicy",
+        ));
+    }
+
+    // Convert the concrete policy exactly once. Fallback policies flatten to
+    // a ViolationAction member; passthrough policies become a trusted dict.
+    let converted = obj.call_method0("_to_dict")?;
+    parse_serialized_violation_action(&converted)
+}
+
+/// Parse a violation policy after a concrete SDK config has serialized it.
+fn parse_serialized_violation_action(
+    obj: &Bound<'_, PyAny>,
+) -> PyResult<microsandbox_network::secrets::config::ViolationAction> {
+    if let Ok(s) = extract_str_enum(obj, "ViolationAction") {
         return parse_violation_action(&s);
     }
 
-    // Convert policy objects exactly once: fallback policies flatten to a
-    // string, while passthrough policies serialize to a dictionary.
-    let converted = if let Ok(method) = obj.getattr("_to_dict") {
-        Some(method.call0()?)
-    } else {
-        None
-    };
-    if let Some(result) = &converted
-        && let Ok(s) = result.extract::<String>()
-    {
-        return parse_violation_action(&s);
-    }
-
-    let dict = if let Some(result) = converted {
-        result
-            .downcast::<PyDict>()
-            .map_err(|_| {
-                pyo3::exceptions::PyTypeError::new_err(
-                    "violation policy _to_dict() must return a string or dict",
-                )
-            })?
-            .clone()
-    } else {
-        as_dict(obj)?
-    };
+    let dict = obj.downcast::<PyDict>().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err(
+            "serialized violation policy must be ViolationAction or dict",
+        )
+    })?;
     if let Some(passthrough_obj) = dict.get_item("passthrough")?
         && !passthrough_obj.is_none()
     {
-        return parse_passthrough_policy(&as_dict(&passthrough_obj)?);
+        let passthrough: &Bound<'_, PyDict> = passthrough_obj.downcast()?;
+        return parse_passthrough_policy(passthrough);
     }
 
     Err(pyo3::exceptions::PyValueError::new_err(
-        "expected violation action string or {'passthrough': {...}}",
+        "expected ViolationAction or ViolationPolicy",
     ))
 }
 

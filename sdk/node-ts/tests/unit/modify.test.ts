@@ -9,13 +9,14 @@ describe("modifyOptionsToNapi", () => {
     expect(modifyOptionsToNapi(undefined)).toBeUndefined();
   });
 
-  it("maps memory/maxMemory onto the MiB native fields", () => {
+  it("maps memory and disk sizes onto the MiB native fields", () => {
     expect(
       modifyOptionsToNapi({
         cpus: 2,
         maxCpus: 8,
         memory: 1024,
         maxMemory: 4096,
+        rootDiskSize: 8192,
         env: { API_URL: "https://api" },
         envRemove: ["OLD"],
         labels: { tier: "gold" },
@@ -29,6 +30,7 @@ describe("modifyOptionsToNapi", () => {
       maxCpus: 8,
       memoryMib: 1024,
       maxMemoryMib: 4096,
+      rootDiskSizeMib: 8192,
       env: { API_URL: "https://api" },
       envRemove: ["OLD"],
       labels: { tier: "gold" },

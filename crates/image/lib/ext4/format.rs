@@ -14,6 +14,7 @@ pub const EXT4_BLOCKS_PER_GROUP: u32 = 32768;
 pub const EXT4_INODES_PER_GROUP: u32 = 8192;
 pub const EXT4_INODE_SIZE: u16 = 256;
 pub const EXT4_FIRST_INO: u32 = 11;
+pub const EXT4_RESIZE_INO: u32 = 7;
 pub const EXT4_JOURNAL_INO: u32 = 8;
 pub const EXT4_ROOT_INO: u32 = 2;
 pub const EXT4_DESC_SIZE: u16 = 64;
@@ -22,7 +23,12 @@ pub const EXT4_MIN_EXTRA_ISIZE: u16 = 32;
 // Feature compat flags
 pub const EXT4_FEATURE_COMPAT_HAS_JOURNAL: u32 = 0x04;
 pub const EXT4_FEATURE_COMPAT_EXT_ATTR: u32 = 0x08;
+pub const EXT4_FEATURE_COMPAT_RESIZE_INODE: u32 = 0x10;
 pub const EXT4_FEATURE_COMPAT_DIR_INDEX: u32 = 0x20;
+
+// Superblock field offsets
+pub const EXT4_SB_ERROR_COUNT_OFFSET: usize = 0x194;
+pub const EXT4_SB_OVERHEAD_BLOCKS_OFFSET: usize = 0x248;
 
 // Feature incompat flags
 pub const EXT4_FEATURE_INCOMPAT_FILETYPE: u32 = 0x02;
@@ -50,6 +56,9 @@ pub const S_IFREG: u16 = 0o100000;
 pub const S_IFDIR: u16 = 0o040000;
 pub const S_IFLNK: u16 = 0o120000;
 pub const S_IFCHR: u16 = 0o020000;
+pub const S_IFBLK: u16 = 0o060000;
+pub const S_IFIFO: u16 = 0o010000;
+pub const S_IFSOCK: u16 = 0o140000;
 
 // Inode flags
 pub const EXT4_EXTENTS_FL: u32 = 0x00080000;

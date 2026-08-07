@@ -42,6 +42,23 @@ pub enum DiskImageFormat {
     Vmdk,
 }
 
+/// Strategy used to create a sandbox-owned instance of a cached flat rootfs.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "kebab-case")]
+pub enum FlatClone {
+    /// Use a native copy-on-write clone when supported, otherwise make a sparse copy.
+    #[default]
+    Auto,
+
+    /// Always create an independent sparse-aware copy.
+    Copy,
+
+    /// Require a native copy-on-write clone and fail when it is unavailable.
+    Reflink,
+}
+
 /// Root filesystem source for a sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -128,6 +145,23 @@ pub enum RootDisk {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fstype: Option<String>,
     },
+
+    /// A complete OCI root filesystem materialized into one private writable filesystem.
+    ///
+    /// This is microsandbox-owned like [`RootDisk::Managed`], but it replaces the layered
+    /// EROFS-plus-OverlayFS topology rather than supplying only its writable upper.
+    Flat {
+        /// Final guest filesystem capacity in MiB. `None` resolves to the greater of 4096 MiB
+        /// and the materialized image's minimum size.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size_mib: Option<u32>,
+        /// Generated filesystem type. `None` resolves to ext4.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fstype: Option<String>,
+        /// Requested private-instance strategy.
+        #[serde(default, skip_serializing_if = "FlatClone::is_auto")]
+        clone: FlatClone,
+    },
 }
 
 /// Controls when an OCI registry is contacted for manifest freshness.
@@ -196,6 +230,24 @@ pub enum SecurityProfile {
     ///
     /// Agentd sets `no_new_privs`, drops `CAP_SYS_ADMIN`, and forces `nosuid,nodev` on user mounts. Workloads that need privilege elevation or guest mount administration, such as `sudo` and Docker-in-Docker, are intentionally incompatible with this profile.
     Restricted,
+}
+
+/// Host-runtime isolation profile applied when a sandbox is deployed.
+///
+/// Unlike [`SecurityProfile`], which changes behavior inside the guest, this
+/// profile controls defenses enforced by host-side runtime backends. A hosting
+/// platform can override the requested value before launch.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum DeploymentProfile {
+    /// The sandbox runs for one trusted tenant with the requested host-runtime configuration.
+    #[default]
+    SingleTenant,
+
+    /// The sandbox runs on shared infrastructure with platform-owned isolation floors.
+    MultiTenant,
 }
 
 /// Guest mount behavior shared by every volume mount kind.
@@ -690,6 +742,13 @@ pub struct SandboxSpec {
     /// In-guest security profile.
     pub security_profile: SecurityProfile,
 
+    /// Host-runtime deployment profile.
+    ///
+    /// Local callers may request a profile, while a managed backend can
+    /// override it before launch. The cloud create wire intentionally omits
+    /// this field so tenant requests cannot select the platform profile.
+    pub deployment_profile: DeploymentProfile,
+
     /// Sandbox lifecycle policy.
     pub lifecycle: SandboxPolicy,
 }
@@ -916,10 +975,21 @@ impl RootDisk {
         }
     }
 
+    /// Create a flat root disk with the given final capacity in MiB.
+    pub fn flat(size_mib: u32) -> Self {
+        Self::Flat {
+            size_mib: Some(size_mib),
+            fstype: None,
+            clone: FlatClone::Auto,
+        }
+    }
+
     /// Return the configured size in MiB, if this kind carries one.
     pub fn size_mib(&self) -> Option<u32> {
         match self {
-            Self::Managed { size_mib } | Self::Tmpfs { size_mib } => *size_mib,
+            Self::Managed { size_mib } | Self::Tmpfs { size_mib } | Self::Flat { size_mib, .. } => {
+                *size_mib
+            }
             Self::DiskImage { .. } => None,
         }
     }
@@ -930,12 +1000,29 @@ impl RootDisk {
             Self::Managed { .. } => "managed",
             Self::Tmpfs { .. } => "tmpfs",
             Self::DiskImage { .. } => "disk-image",
+            Self::Flat { .. } => "flat",
         }
     }
 
     /// Whether this is the managed (default) kind.
     pub fn is_managed(&self) -> bool {
         matches!(self, Self::Managed { .. })
+    }
+}
+
+impl FlatClone {
+    /// Return the stable lowercase value used by CLI, SDK and persisted metadata surfaces.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Copy => "copy",
+            Self::Reflink => "reflink",
+        }
+    }
+
+    /// Whether this is the default auto strategy.
+    pub const fn is_auto(&self) -> bool {
+        matches!(self, Self::Auto)
     }
 }
 
@@ -2429,6 +2516,19 @@ mod tests {
         assert_eq!(
             spec.runtime.metrics_sample_interval_ms,
             Some(DEFAULT_METRICS_SAMPLE_INTERVAL_MS)
+        );
+        assert_eq!(spec.deployment_profile, DeploymentProfile::SingleTenant);
+    }
+
+    #[test]
+    fn deployment_profile_uses_stable_snake_case_wire_values() {
+        assert_eq!(
+            serde_json::to_string(&DeploymentProfile::MultiTenant).unwrap(),
+            r#""multi_tenant""#
+        );
+        assert_eq!(
+            serde_json::from_str::<DeploymentProfile>(r#""single_tenant""#).unwrap(),
+            DeploymentProfile::SingleTenant
         );
     }
 

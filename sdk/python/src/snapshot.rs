@@ -12,6 +12,7 @@ use microsandbox::{
 };
 
 use crate::error::to_py_err;
+use crate::helpers::str_enum_member;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -258,18 +259,20 @@ impl PySnapshot {
 
     /// Closed descriptor state kind (`"file"` or `"checkpoint"`).
     #[getter]
-    fn state_kind(&self) -> &'static str {
-        self.inner.manifest().state.kind()
+    fn state_kind(&self, py: Python<'_>) -> PyResult<PyObject> {
+        str_enum_member(py, "SnapshotStateKind", self.inner.manifest().state.kind())
     }
 
     /// On-disk format for file state.
     #[getter]
-    fn format(&self) -> Option<&'static str> {
+    fn format(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
         self.inner
             .manifest()
             .state
             .as_file()
             .map(|state| format_str(state.format))
+            .map(|format| str_enum_member(py, "SnapshotFormat", format))
+            .transpose()
     }
 
     /// Filesystem type inside the upper (e.g. `"ext4"`).
@@ -308,10 +311,14 @@ impl PySnapshot {
         self.inner.manifest().parent.as_deref()
     }
 
-    /// Snapshot payload scope (`"disk"` today).
+    /// Snapshot payload scope as a `SnapshotScope` member (`DISK` today).
     #[getter]
-    fn scope(&self) -> &'static str {
-        format_scope(self.inner.manifest().scope)
+    fn scope(&self, py: Python<'_>) -> PyResult<PyObject> {
+        str_enum_member(
+            py,
+            "SnapshotScope",
+            format_scope(self.inner.manifest().scope),
+        )
     }
 
     /// RFC 3339 timestamp when the snapshot was created.
@@ -392,8 +399,8 @@ impl PySnapshotHandle {
     }
 
     #[getter]
-    fn scope(&self) -> &'static str {
-        format_scope(self.inner.scope())
+    fn scope(&self, py: Python<'_>) -> PyResult<PyObject> {
+        str_enum_member(py, "SnapshotScope", format_scope(self.inner.scope()))
     }
 
     #[getter]
@@ -402,13 +409,17 @@ impl PySnapshotHandle {
     }
 
     #[getter]
-    fn state_kind(&self) -> &str {
-        self.inner.state_kind()
+    fn state_kind(&self, py: Python<'_>) -> PyResult<PyObject> {
+        str_enum_member(py, "SnapshotStateKind", self.inner.state_kind())
     }
 
     #[getter]
-    fn format(&self) -> Option<&'static str> {
-        self.inner.format().map(format_str)
+    fn format(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+        self.inner
+            .format()
+            .map(format_str)
+            .map(|format| str_enum_member(py, "SnapshotFormat", format))
+            .transpose()
     }
 
     #[getter]

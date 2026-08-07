@@ -31,6 +31,7 @@ use microsandbox_protocol::tcp::{TcpClose, TcpConnect, TcpData, TcpEof, TcpFaile
 use crate::config::AgentdConfig;
 use crate::error::{AgentdError, AgentdResult};
 use crate::fs::{FsReadSession, FsState, FsStreamSession, FsWriteSession};
+use crate::process::ProcessManager;
 use crate::serial::AGENT_PORT_NAME;
 use crate::session::{
     ExecSession, RawActivity, RawSessionCompletion, SessionOutput, resolve_default_user,
@@ -141,6 +142,9 @@ pub async fn run(
     config: &AgentdConfig,
     port_file: File,
 ) -> AgentdResult<()> {
+    let process_manager = ProcessManager::get()?;
+    let mut process_manager_failure = process_manager.subscribe_failure()?;
+
     // Set non-blocking for async I/O. Early boot handshakes use the same fd
     // in blocking mode before it is moved into the async loop.
     let port_fd = port_file.as_raw_fd();
@@ -191,6 +195,17 @@ pub async fn run(
     // Main loop.
     'agent: loop {
         tokio::select! {
+            failure = process_manager_failure.changed() => {
+                let error = match failure {
+                    Ok(()) => process_manager_failure
+                        .borrow()
+                        .clone()
+                        .unwrap_or_else(|| "process manager stopped without an error".to_string()),
+                    Err(error) => format!("process manager failure channel closed: {error}"),
+                };
+                return Err(AgentdError::ExecSession(error));
+            }
+
             // Read from serial port.
             result = async_port.readable() => {
                 let Ok(mut guard) = result else {

@@ -7,6 +7,7 @@ use pyo3::types::PyBytes;
 use tokio::sync::Mutex;
 
 use crate::error::to_py_err;
+use crate::helpers::{extract_str_enum, str_enum_member};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -19,11 +20,10 @@ pub struct PyLogEntry {
     #[pyo3(get)]
     pub timestamp_ms: f64,
 
-    /// `"stdout"`, `"stderr"`, `"output"` (pty merged), or `"system"`.
-    #[pyo3(get)]
+    /// Log source as a `LogSource` member.
     pub source: String,
 
-    /// Relay-monotonic session id. `None` for `system` lifecycle
+    /// Relay-monotonic session id. `None` for system lifecycle
     /// markers (which aren't tied to a specific session).
     #[pyo3(get)]
     pub session_id: Option<u64>,
@@ -39,6 +39,11 @@ pub struct PyLogEntry {
 
 #[pymethods]
 impl PyLogEntry {
+    #[getter]
+    fn source(&self, py: Python<'_>) -> PyResult<PyObject> {
+        str_enum_member(py, "LogSource", &self.source)
+    }
+
     #[getter]
     fn data<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
         PyBytes::new(py, &self.data)
@@ -132,10 +137,11 @@ pub fn convert_entry(entry: microsandbox::logs::LogEntry) -> PyLogEntry {
 /// Build a [`microsandbox::logs::LogOptions`] from the keyword args the
 /// Python snapshot-log methods accept.
 pub fn parse_log_options(
+    py: Python<'_>,
     tail: Option<usize>,
     since_ms: Option<f64>,
     until_ms: Option<f64>,
-    sources: Option<Vec<String>>,
+    sources: Option<Vec<Py<PyAny>>>,
 ) -> PyResult<microsandbox::logs::LogOptions> {
     use microsandbox::logs::{LogOptions, LogSource};
 
@@ -146,7 +152,8 @@ pub fn parse_log_options(
         sources: Vec::new(),
     };
     if let Some(src) = sources {
-        for s in src {
+        for source in src {
+            let s = extract_str_enum(source.bind(py), "LogReadSource")?;
             match s.as_str() {
                 "stdout" => opts.sources.push(LogSource::Stdout),
                 "stderr" => opts.sources.push(LogSource::Stderr),
@@ -176,7 +183,8 @@ pub fn parse_log_options(
 /// args the Python method accepts. `since_ms` and `from_cursor` are
 /// mutually exclusive.
 pub fn parse_log_stream_options(
-    sources: Option<Vec<String>>,
+    py: Python<'_>,
+    sources: Option<Vec<Py<PyAny>>>,
     since_ms: Option<f64>,
     from_cursor: Option<String>,
     until_ms: Option<f64>,
@@ -204,7 +212,8 @@ pub fn parse_log_stream_options(
     };
     let mut engine_sources = Vec::new();
     if let Some(src) = sources {
-        for s in src {
+        for source in src {
+            let s = extract_str_enum(source.bind(py), "LogReadSource")?;
             match s.as_str() {
                 "stdout" => engine_sources.push(LogSource::Stdout),
                 "stderr" => engine_sources.push(LogSource::Stderr),

@@ -102,6 +102,7 @@ typedef void     (*msb_set_sdk_msb_path_fn)(const char *path);
 typedef uint64_t (*msb_cancel_alloc_fn)(void);
 typedef void     (*msb_cancel_trigger_fn)(uint64_t id);
 typedef void     (*msb_cancel_unregister_fn)(uint64_t id);
+typedef char *(*msb_default_backend_info_fn)(uint8_t *buf, size_t buf_len);
 
 typedef char *(*msb_sandbox_create_fn)(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_lookup_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
@@ -197,6 +198,8 @@ typedef char *(*msb_volume_create_fn)(uint64_t cancel_id, const char *name, cons
 typedef char *(*msb_volume_remove_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_volume_list_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_volume_get_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_volume_get_default_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_volume_fs_op_fn)(uint64_t cancel_id, const char *name, const char *op, const char *args_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_version_fn)(uint8_t *buf, size_t buf_len);
 typedef char *(*msb_agent_socket_path_fn)(const char *name, uint8_t *buf, size_t buf_len);
 
@@ -248,6 +251,7 @@ static msb_cancel_trigger_fn     ptr_msb_cancel_trigger     = NULL;
 static msb_cancel_unregister_fn  ptr_msb_cancel_unregister  = NULL;
 static msb_sandbox_create_fn     ptr_msb_sandbox_create     = NULL;
 static msb_sandbox_lookup_fn     ptr_msb_sandbox_lookup     = NULL;
+static msb_default_backend_info_fn ptr_msb_default_backend_info = NULL;
 static msb_sandbox_connect_fn    ptr_msb_sandbox_connect    = NULL;
 static msb_sandbox_start_fn      ptr_msb_sandbox_start      = NULL;
 static msb_sandbox_handle_stop_fn ptr_msb_sandbox_handle_stop = NULL;
@@ -333,6 +337,8 @@ static msb_volume_create_fn       ptr_msb_volume_create       = NULL;
 static msb_volume_remove_fn       ptr_msb_volume_remove       = NULL;
 static msb_volume_list_fn         ptr_msb_volume_list         = NULL;
 static msb_volume_get_fn          ptr_msb_volume_get          = NULL;
+static msb_volume_get_default_fn  ptr_msb_volume_get_default  = NULL;
+static msb_volume_fs_op_fn        ptr_msb_volume_fs_op        = NULL;
 static msb_fs_read_stream_fn       ptr_msb_fs_read_stream       = NULL;
 static msb_fs_read_stream_recv_fn  ptr_msb_fs_read_stream_recv  = NULL;
 static msb_fs_read_stream_close_fn ptr_msb_fs_read_stream_close = NULL;
@@ -389,6 +395,14 @@ static char load_error[1024] = {0};
 		} \
 	} while (0)
 
+// Optional symbols let a newly-built Go package load an older embedded FFI
+// bundle. Calls using the new capability detect the missing function and
+// return an explicit unavailable result without breaking unrelated methods.
+#define RESOLVE_OPTIONAL(name) \
+	do { \
+		ptr_##name = (name##_fn)dlsym(lib_handle, #name); \
+	} while (0)
+
 // load_microsandbox opens the shared library at path and resolves every
 // msb_* symbol. Returns NULL on success or a static error string on failure.
 // Idempotent: returns NULL immediately if already loaded.
@@ -407,6 +421,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_cancel_alloc);
 	RESOLVE(msb_cancel_trigger);
 	RESOLVE(msb_cancel_unregister);
+	RESOLVE_OPTIONAL(msb_default_backend_info);
 	RESOLVE(msb_sandbox_create);
 	RESOLVE(msb_sandbox_lookup);
 	RESOLVE(msb_sandbox_connect);
@@ -494,6 +509,8 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_volume_remove);
 	RESOLVE(msb_volume_list);
 	RESOLVE(msb_volume_get);
+	RESOLVE(msb_volume_get_default);
+	RESOLVE(msb_volume_fs_op);
 	RESOLVE(msb_fs_read_stream);
 	RESOLVE(msb_fs_read_stream_recv);
 	RESOLVE(msb_fs_read_stream_close);
@@ -563,6 +580,10 @@ char *call_msb_sandbox_create(uint64_t cancel_id, const char *name, const char *
 }
 char *call_msb_sandbox_lookup(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_lookup ? ptr_msb_sandbox_lookup(cancel_id, name, buf, buf_len) : NULL;
+}
+
+char *call_msb_default_backend_info(uint8_t *buf, size_t buf_len) {
+	return ptr_msb_default_backend_info ? ptr_msb_default_backend_info(buf, buf_len) : NULL;
 }
 char *call_msb_sandbox_connect(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_connect ? ptr_msb_sandbox_connect(cancel_id, name, buf, buf_len) : NULL;
@@ -818,6 +839,12 @@ char *call_msb_volume_list(uint64_t cancel_id, uint8_t *buf, size_t buf_len) {
 }
 char *call_msb_volume_get(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_volume_get ? ptr_msb_volume_get(cancel_id, name, buf, buf_len) : NULL;
+}
+char *call_msb_volume_get_default(uint64_t cancel_id, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_volume_get_default ? ptr_msb_volume_get_default(cancel_id, buf, buf_len) : NULL;
+}
+char *call_msb_volume_fs_op(uint64_t cancel_id, const char *name, const char *op, const char *args_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_volume_fs_op ? ptr_msb_volume_fs_op(cancel_id, name, op, args_json, buf, buf_len) : NULL;
 }
 char *call_msb_fs_read_stream(uint64_t cancel_id, uint64_t handle, const char *path, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_fs_read_stream ? ptr_msb_fs_read_stream(cancel_id, handle, path, buf, buf_len) : NULL;
@@ -1088,8 +1115,9 @@ const (
 // Safe for concurrent use from multiple goroutines; Close uses an atomic
 // swap so concurrent Close calls produce exactly one Rust-side release.
 type Sandbox struct {
-	handle atomic.Uint64
-	name   string
+	handle      atomic.Uint64
+	name        string
+	backendKind string
 }
 
 // SandboxPingResult is the FFI shape returned by ping operations.
@@ -1133,6 +1161,14 @@ func (s *Sandbox) h() C.uint64_t { return C.uint64_t(s.handle.Load()) }
 
 // Name returns the sandbox name supplied at creation time.
 func (s *Sandbox) Name() string { return s.name }
+
+// BackendKind returns the backend retained by this sandbox.
+func (s *Sandbox) BackendKind() string {
+	if s.backendKind == "" {
+		return "unknown"
+	}
+	return s.backendKind
+}
 
 // call invokes fn with a fresh 1 MiB buffer and a Rust-side cancellation
 // token. It runs fn on a goroutine and selects on ctx.Done; if the context
@@ -1496,6 +1532,7 @@ type CreateOptions struct {
 	Workdir              string               `json:"workdir,omitempty"`
 	Shell                string               `json:"shell,omitempty"`
 	SecurityProfile      string               `json:"security_profile,omitempty"`
+	DeploymentProfile    string               `json:"deployment_profile,omitempty"`
 	Hostname             string               `json:"hostname,omitempty"`
 	User                 string               `json:"user,omitempty"`
 	Replace              bool                 `json:"replace,omitempty"`
@@ -1540,8 +1577,8 @@ type RegistryAuthOptions struct {
 	Password string `json:"password"`
 }
 
-// RootDiskSpec describes the writable rootfs layer (root disk) of an OCI
-// image. Kind is "managed", "tmpfs", or "disk-image"; SizeMiB is a pointer
+// RootDiskSpec describes root storage for an OCI image. Kind is "managed",
+// "tmpfs", "disk-image", or "flat"; SizeMiB is a pointer
 // so an explicit zero reaches the wire for validation.
 type RootDiskSpec struct {
 	Kind    string  `json:"kind"`
@@ -1549,6 +1586,7 @@ type RootDiskSpec struct {
 	Path    string  `json:"path,omitempty"`
 	Format  string  `json:"format,omitempty"`
 	Fstype  string  `json:"fstype,omitempty"`
+	Clone   string  `json:"clone,omitempty"`
 }
 
 // MountSpec describes a volume mount for a sandbox.
@@ -1697,7 +1735,8 @@ func CreateSandbox(ctx context.Context, name string, opts CreateOptions) (*Sandb
 		return nil, err
 	}
 	var resp struct {
-		Handle uint64 `json:"handle"`
+		Handle      uint64 `json:"handle"`
+		BackendKind string `json:"backend_kind"`
 	}
 	if err := json.Unmarshal([]byte(out), &resp); err != nil {
 		// Rust has allocated a handle we can no longer trust. Best-effort
@@ -1708,7 +1747,7 @@ func CreateSandbox(ctx context.Context, name string, opts CreateOptions) (*Sandb
 		}
 		return nil, fmt.Errorf("parse create response: %w", err)
 	}
-	s := &Sandbox{name: name}
+	s := &Sandbox{name: name, backendKind: resp.BackendKind}
 	s.handle.Store(resp.Handle)
 	return s, nil
 }
@@ -1730,7 +1769,8 @@ func ConnectSandbox(ctx context.Context, name string) (*Sandbox, error) {
 		return nil, err
 	}
 	var resp struct {
-		Handle uint64 `json:"handle"`
+		Handle      uint64 `json:"handle"`
+		BackendKind string `json:"backend_kind"`
 	}
 	if err := json.Unmarshal([]byte(out), &resp); err != nil {
 		if h := salvageHandle(out); h != 0 {
@@ -1738,7 +1778,7 @@ func ConnectSandbox(ctx context.Context, name string) (*Sandbox, error) {
 		}
 		return nil, fmt.Errorf("parse connect response: %w", err)
 	}
-	s := &Sandbox{name: name}
+	s := &Sandbox{name: name, backendKind: resp.BackendKind}
 	s.handle.Store(resp.Handle)
 	return s, nil
 }
@@ -1750,6 +1790,15 @@ type SandboxHandleInfo struct {
 	ConfigJSON    string `json:"config_json"`
 	CreatedAtUnix *int64 `json:"created_at_unix"`
 	UpdatedAtUnix *int64 `json:"updated_at_unix"`
+	BackendKind   string `json:"backend_kind"`
+}
+
+// BackendInfo is the secret-safe backend diagnostic shape returned by Rust.
+type BackendInfo struct {
+	Kind    string  `json:"kind"`
+	APIURL  *string `json:"api_url"`
+	Source  string  `json:"source"`
+	Profile *string `json:"profile"`
 }
 
 // SandboxStopResult is the JSON payload returned after observing a stopped sandbox.
@@ -1891,7 +1940,8 @@ func StartSandbox(ctx context.Context, name string, detached bool) (*Sandbox, er
 		return nil, err
 	}
 	var resp struct {
-		Handle uint64 `json:"handle"`
+		Handle      uint64 `json:"handle"`
+		BackendKind string `json:"backend_kind"`
 	}
 	if err := json.Unmarshal([]byte(out), &resp); err != nil {
 		if h := salvageHandle(out); h != 0 {
@@ -1899,7 +1949,7 @@ func StartSandbox(ctx context.Context, name string, detached bool) (*Sandbox, er
 		}
 		return nil, fmt.Errorf("parse start response: %w", err)
 	}
-	s := &Sandbox{name: name}
+	s := &Sandbox{name: name, backendKind: resp.BackendKind}
 	s.handle.Store(resp.Handle)
 	return s, nil
 }
@@ -3907,7 +3957,9 @@ func CreateVolume(ctx context.Context, name string, opts VolumeCreateOptions) (*
 // Rust side into a VolumeHandleInfo.
 func parseVolumeHandle(s string) (*VolumeHandleInfo, error) {
 	var raw struct {
+		ID            *string           `json:"id"`
 		Name          string            `json:"name"`
+		IsDefault     bool              `json:"is_default"`
 		Path          string            `json:"path"`
 		Kind          string            `json:"kind"`
 		QuotaMiB      *uint32           `json:"quota_mib"`
@@ -3922,7 +3974,9 @@ func parseVolumeHandle(s string) (*VolumeHandleInfo, error) {
 		return nil, fmt.Errorf("parse volume handle: %w", err)
 	}
 	return &VolumeHandleInfo{
+		ID:            raw.ID,
 		Name:          raw.Name,
+		IsDefault:     raw.IsDefault,
 		Path:          raw.Path,
 		Kind:          raw.Kind,
 		QuotaMiB:      raw.QuotaMiB,
@@ -3996,6 +4050,38 @@ func Version() (string, error) {
 	return resp.Version, nil
 }
 
+// DefaultBackendInfo returns secret-safe information about the backend cached
+// by the native SDK resolver. A nil result means the loaded compatibility
+// bundle predates backend introspection.
+func DefaultBackendInfo() (*BackendInfo, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	buf := make([]byte, defaultBufSize)
+	errPtr := C.call_msb_default_backend_info((*C.uint8_t)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)))
+	if errPtr != nil {
+		msg := C.GoString(errPtr)
+		C.call_msb_free_string(errPtr)
+		var e Error
+		if jerr := json.Unmarshal([]byte(msg), &e); jerr != nil {
+			e = Error{Kind: KindInternal, Message: msg}
+		}
+		return nil, &e
+	}
+	end := 0
+	for end < len(buf) && buf[end] != 0 {
+		end++
+	}
+	if end == 0 {
+		return nil, nil
+	}
+	var info BackendInfo
+	if err := json.Unmarshal(buf[:end], &info); err != nil {
+		return nil, fmt.Errorf("parse backend info: %w", err)
+	}
+	return &info, nil
+}
+
 // AgentSocketPath resolves the host-side path of a sandbox's agentd relay
 // socket by name, without connecting.
 func AgentSocketPath(name string) (string, error) {
@@ -4030,7 +4116,9 @@ func AgentSocketPath(name string) (string, error) {
 
 // VolumeHandleInfo carries metadata for a volume returned by GetVolume.
 type VolumeHandleInfo struct {
+	ID            *string           `json:"id"`
 	Name          string            `json:"name"`
+	IsDefault     bool              `json:"is_default"`
 	Path          string            `json:"path"`
 	Kind          string            `json:"kind"`
 	QuotaMiB      *uint32           `json:"quota_mib"`
@@ -4056,7 +4144,9 @@ func GetVolume(ctx context.Context, name string) (*VolumeHandleInfo, error) {
 		return nil, err
 	}
 	var raw struct {
+		ID            *string           `json:"id"`
 		Name          string            `json:"name"`
+		IsDefault     bool              `json:"is_default"`
 		Path          string            `json:"path"`
 		Kind          string            `json:"kind"`
 		QuotaMiB      *uint32           `json:"quota_mib"`
@@ -4071,7 +4161,9 @@ func GetVolume(ctx context.Context, name string) (*VolumeHandleInfo, error) {
 		return nil, fmt.Errorf("parse volume_get: %w", err)
 	}
 	return &VolumeHandleInfo{
+		ID:            raw.ID,
 		Name:          raw.Name,
+		IsDefault:     raw.IsDefault,
 		Path:          raw.Path,
 		Kind:          raw.Kind,
 		QuotaMiB:      raw.QuotaMiB,
@@ -4082,6 +4174,54 @@ func GetVolume(ctx context.Context, name string) (*VolumeHandleInfo, error) {
 		Labels:        raw.Labels,
 		CreatedAtUnix: raw.CreatedAtUnix,
 	}, nil
+}
+
+// GetDefaultVolume returns the cloud account's always-present default volume.
+func GetDefaultVolume(ctx context.Context) (*VolumeHandleInfo, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_volume_get_default(cancelID, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var info VolumeHandleInfo
+	if err := json.Unmarshal([]byte(out), &info); err != nil {
+		return nil, fmt.Errorf("parse volume_get_default: %w", err)
+	}
+	return &info, nil
+}
+
+// VolumeFsOp dispatches a buffered filesystem operation through the active backend.
+func VolumeFsOp(ctx context.Context, name, op string, args any, result any) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(args)
+	if err != nil {
+		return fmt.Errorf("marshal volume fs args: %w", err)
+	}
+	cName := C.CString(name)
+	cOp := C.CString(op)
+	cArgs := C.CString(string(encoded))
+	defer C.free(unsafe.Pointer(cName))
+	defer C.free(unsafe.Pointer(cOp))
+	defer C.free(unsafe.Pointer(cArgs))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_volume_fs_op(cancelID, cName, cOp, cArgs, buf, bufLen)
+	})
+	if err != nil {
+		return err
+	}
+	if result == nil {
+		return nil
+	}
+	if err := json.Unmarshal([]byte(out), result); err != nil {
+		return fmt.Errorf("parse volume fs response: %w", err)
+	}
+	return nil
 }
 
 // =============================================================================

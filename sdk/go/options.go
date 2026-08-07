@@ -17,26 +17,27 @@ type SandboxConfig struct {
 	Image       string
 	ImageFstype string
 	ImageBind   string
-	// RootDisk configures the writable rootfs layer for an OCI image.
+	// RootDisk configures root storage for an OCI image.
 	// Construct via the RootDisk factory and set with WithRootDisk.
 	RootDisk *RootDiskConfig
 	// OCIUpperSizeMiB is honored as a managed root disk of this size when
 	// RootDisk is nil.
 	//
 	// Deprecated: set RootDisk (via WithRootDisk / RootDisk.Managed) instead.
-	OCIUpperSizeMiB uint32
-	ociUpperSizeSet bool
-	Snapshot        string
-	MemoryMiB       uint32
-	CPUs            uint8
-	MaxMemoryMiB    uint32
-	MaxCPUs         uint8
-	Workdir         string
-	Shell           string
-	SecurityProfile SecurityProfile
-	Hostname        string
-	User            string
-	Replace         bool
+	OCIUpperSizeMiB   uint32
+	ociUpperSizeSet   bool
+	Snapshot          string
+	MemoryMiB         uint32
+	CPUs              uint8
+	MaxMemoryMiB      uint32
+	MaxCPUs           uint8
+	Workdir           string
+	Shell             string
+	SecurityProfile   SecurityProfile
+	DeploymentProfile DeploymentProfile
+	Hostname          string
+	User              string
+	Replace           bool
 	// ReplaceWithTimeout, if non-nil, sets a specific timeout between
 	// SIGTERM and SIGKILL when replacing an existing sandbox. nil means
 	// "use the runtime default" (10s when Replace is set). Setting this
@@ -77,30 +78,31 @@ type SandboxConfig struct {
 type SandboxOption func(*SandboxConfig)
 
 type persistedSandboxConfig struct {
-	Name            string               `json:"name"`
-	Image           json.RawMessage      `json:"image"`
-	ImageFstype     string               `json:"image_fstype"`
-	OCIUpperSizeMiB uint32               `json:"oci_upper_size_mib"`
-	MemoryMiB       uint32               `json:"memory_mib"`
-	CPUs            uint8                `json:"cpus"`
-	MaxMemoryMiB    uint32               `json:"max_memory_mib"`
-	MaxCPUs         uint8                `json:"max_cpus"`
-	Resources       *persistedResources  `json:"resources"`
-	Workdir         string               `json:"workdir"`
-	Shell           string               `json:"shell"`
-	SecurityProfile SecurityProfile      `json:"security_profile"`
-	Hostname        string               `json:"hostname"`
-	User            string               `json:"user"`
-	Replace         bool                 `json:"replace"`
-	Labels          map[string]string    `json:"labels"`
-	Detached        bool                 `json:"detached"`
-	Lifecycle       *persistedLifecycle  `json:"lifecycle"`
-	Entrypoint      []string             `json:"entrypoint"`
-	Init            *persistedInitConfig `json:"init"`
-	LogLevel        LogLevel             `json:"log_level"`
-	QuietLogs       bool                 `json:"quiet_logs"`
-	Scripts         map[string]string    `json:"scripts"`
-	PullPolicy      PullPolicy           `json:"pull_policy"`
+	Name              string               `json:"name"`
+	Image             json.RawMessage      `json:"image"`
+	ImageFstype       string               `json:"image_fstype"`
+	OCIUpperSizeMiB   uint32               `json:"oci_upper_size_mib"`
+	MemoryMiB         uint32               `json:"memory_mib"`
+	CPUs              uint8                `json:"cpus"`
+	MaxMemoryMiB      uint32               `json:"max_memory_mib"`
+	MaxCPUs           uint8                `json:"max_cpus"`
+	Resources         *persistedResources  `json:"resources"`
+	Workdir           string               `json:"workdir"`
+	Shell             string               `json:"shell"`
+	SecurityProfile   SecurityProfile      `json:"security_profile"`
+	DeploymentProfile DeploymentProfile    `json:"deployment_profile"`
+	Hostname          string               `json:"hostname"`
+	User              string               `json:"user"`
+	Replace           bool                 `json:"replace"`
+	Labels            map[string]string    `json:"labels"`
+	Detached          bool                 `json:"detached"`
+	Lifecycle         *persistedLifecycle  `json:"lifecycle"`
+	Entrypoint        []string             `json:"entrypoint"`
+	Init              *persistedInitConfig `json:"init"`
+	LogLevel          LogLevel             `json:"log_level"`
+	QuietLogs         bool                 `json:"quiet_logs"`
+	Scripts           map[string]string    `json:"scripts"`
+	PullPolicy        PullPolicy           `json:"pull_policy"`
 }
 
 type persistedInitConfig struct {
@@ -153,33 +155,34 @@ func (c *SandboxConfig) UnmarshalJSON(data []byte) error {
 	}
 
 	*c = SandboxConfig{
-		Name:            raw.Name,
-		Image:           image,
-		ImageFstype:     imageFstype,
-		RootDisk:        rootDisk,
-		OCIUpperSizeMiB: upperSizeMiB,
-		ociUpperSizeSet: upperSizeSet,
-		MemoryMiB:       raw.memoryMiB(),
-		CPUs:            raw.cpus(),
-		MaxMemoryMiB:    raw.maxMemoryMiB(),
-		MaxCPUs:         raw.maxCPUs(),
-		Workdir:         raw.Workdir,
-		Shell:           raw.Shell,
-		SecurityProfile: raw.SecurityProfile,
-		Hostname:        raw.Hostname,
-		User:            raw.User,
-		Replace:         raw.Replace,
-		Labels:          raw.Labels,
-		Detached:        raw.Detached,
-		Ephemeral:       raw.lifecycleEphemeral(),
-		Entrypoint:      raw.Entrypoint,
-		Init:            decodePersistedInit(raw.Init),
-		LogLevel:        raw.LogLevel,
-		QuietLogs:       raw.QuietLogs,
-		Scripts:         raw.Scripts,
-		PullPolicy:      raw.PullPolicy,
-		MaxDuration:     time.Duration(raw.lifecycleMaxDurationSecs()) * time.Second,
-		IdleTimeout:     time.Duration(raw.lifecycleIdleTimeoutSecs()) * time.Second,
+		Name:              raw.Name,
+		Image:             image,
+		ImageFstype:       imageFstype,
+		RootDisk:          rootDisk,
+		OCIUpperSizeMiB:   upperSizeMiB,
+		ociUpperSizeSet:   upperSizeSet,
+		MemoryMiB:         raw.memoryMiB(),
+		CPUs:              raw.cpus(),
+		MaxMemoryMiB:      raw.maxMemoryMiB(),
+		MaxCPUs:           raw.maxCPUs(),
+		Workdir:           raw.Workdir,
+		Shell:             raw.Shell,
+		SecurityProfile:   raw.SecurityProfile,
+		DeploymentProfile: normalizeDeploymentProfile(raw.DeploymentProfile),
+		Hostname:          raw.Hostname,
+		User:              raw.User,
+		Replace:           raw.Replace,
+		Labels:            raw.Labels,
+		Detached:          raw.Detached,
+		Ephemeral:         raw.lifecycleEphemeral(),
+		Entrypoint:        raw.Entrypoint,
+		Init:              decodePersistedInit(raw.Init),
+		LogLevel:          raw.LogLevel,
+		QuietLogs:         raw.QuietLogs,
+		Scripts:           raw.Scripts,
+		PullPolicy:        raw.PullPolicy,
+		MaxDuration:       time.Duration(raw.lifecycleMaxDurationSecs()) * time.Second,
+		IdleTimeout:       time.Duration(raw.lifecycleIdleTimeoutSecs()) * time.Second,
 	}
 	return nil
 }
@@ -240,6 +243,19 @@ func (c persistedSandboxConfig) lifecycleIdleTimeoutSecs() uint64 {
 		return 0
 	}
 	return c.Lifecycle.IdleTimeoutSecs
+}
+
+// normalizeDeploymentProfile translates the Rust spec's snake_case wire value
+// back to the idiomatic public Go spelling used by the functional option.
+func normalizeDeploymentProfile(profile DeploymentProfile) DeploymentProfile {
+	switch profile {
+	case "single_tenant":
+		return DeploymentProfileSingleTenant
+	case "multi_tenant":
+		return DeploymentProfileMultiTenant
+	default:
+		return profile
+	}
 }
 
 func decodePersistedInit(raw *persistedInitConfig) *InitConfig {
@@ -333,6 +349,7 @@ type persistedRootDisk struct {
 	Path    string  `json:"path"`
 	Format  string  `json:"format"`
 	Fstype  string  `json:"fstype"`
+	Clone   string  `json:"clone"`
 }
 
 func (p persistedRootDisk) toConfig() (*RootDiskConfig, error) {
@@ -347,6 +364,10 @@ func (p persistedRootDisk) toConfig() (*RootDiskConfig, error) {
 		cfg.Path = p.Path
 		cfg.Format = strings.ToLower(p.Format)
 		cfg.Fstype = p.Fstype
+	case "flat":
+		cfg.kind = RootDiskKindFlat
+		cfg.Fstype = p.Fstype
+		cfg.Clone = FlatClone(p.Clone)
 	default:
 		return nil, fmt.Errorf("unknown root disk kind: %q", p.Kind)
 	}
@@ -367,20 +388,30 @@ const (
 	SecurityProfileRestricted SecurityProfile = "restricted"
 )
 
+// DeploymentProfile selects the host-runtime isolation profile for local deployments.
+type DeploymentProfile string
+
+const (
+	// DeploymentProfileSingleTenant preserves the requested host-runtime configuration.
+	DeploymentProfileSingleTenant DeploymentProfile = "single-tenant"
+	// DeploymentProfileMultiTenant enables platform-owned isolation floors.
+	DeploymentProfileMultiTenant DeploymentProfile = "multi-tenant"
+)
+
 // WithImage sets the container image to use (e.g. "python:3.12").
 func WithImage(image string) SandboxOption {
 	return func(o *SandboxConfig) { o.Image = image }
 }
 
-// RootDiskConfig describes the writable rootfs layer (root disk) of an OCI
-// image. Construct via the RootDisk factory:
+// RootDiskConfig describes root storage for an OCI image. Construct via the
+// RootDisk factory:
 //
 //	microsandbox.RootDisk.Managed(8192)
 //	microsandbox.RootDisk.Tmpfs(microsandbox.RootDiskTmpfsOptions{SizeMiB: 512})
 //	microsandbox.RootDisk.Disk("./scratch.img", microsandbox.RootDiskImageOptions{Fstype: "ext4"})
 //
 // Use the factory rather than constructing the struct directly: it enforces
-// the mutually-exclusive kinds (managed / tmpfs / disk-image).
+// the mutually-exclusive kinds (managed / tmpfs / disk-image / flat).
 type RootDiskConfig struct {
 	// kind is the discriminator. Exposed via Kind() for callers that need
 	// to introspect; setting fields below directly is discouraged.
@@ -398,9 +429,11 @@ type RootDiskConfig struct {
 	// Fstype is the inner filesystem type of a disk-image root disk
 	// (e.g. "ext4"). Empty means ext4.
 	Fstype string
+	// Clone controls private flat-root provisioning. Empty resolves to auto.
+	Clone FlatClone
 }
 
-// RootDiskKind discriminates between the three root disk flavours.
+// RootDiskKind discriminates between root disk flavours.
 type RootDiskKind uint8
 
 const (
@@ -413,6 +446,17 @@ const (
 	// RootDiskKindDiskImage is a user-supplied disk image attached
 	// writable as the upper. User-owned lifecycle.
 	RootDiskKindDiskImage
+	// RootDiskKindFlat is one complete OCI filesystem without guest OverlayFS.
+	RootDiskKindFlat
+)
+
+// FlatClone controls how a private sandbox disk is created from a cached flat base.
+type FlatClone string
+
+const (
+	FlatCloneAuto    FlatClone = "auto"
+	FlatCloneCopy    FlatClone = "copy"
+	FlatCloneReflink FlatClone = "reflink"
 )
 
 // Kind reports which flavour of root disk this is.
@@ -432,6 +476,16 @@ type RootDiskImageOptions struct {
 	Format string
 	// Fstype hint ("ext4", "xfs"). Optional; ext4 when empty.
 	Fstype string
+}
+
+// RootDiskFlatOptions tunes the RootDisk.Flat factory.
+type RootDiskFlatOptions struct {
+	// SizeMiB is the final guest capacity. Zero selects the runtime default.
+	SizeMiB uint32
+	// Fstype is reserved for generated filesystem selection; currently ext4.
+	Fstype string
+	// Clone selects auto, copy, or strict reflink provisioning.
+	Clone FlatClone
 }
 
 // rootDiskFactory is the factory namespace for constructing RootDiskConfig
@@ -474,7 +528,18 @@ func (rootDiskFactory) Disk(path string, opts RootDiskImageOptions) RootDiskConf
 	}
 }
 
-// WithRootDisk configures the writable rootfs layer for an OCI image.
+// Flat returns a complete microsandbox-owned OCI rootfs mounted without guest OverlayFS.
+func (rootDiskFactory) Flat(opts RootDiskFlatOptions) RootDiskConfig {
+	return RootDiskConfig{
+		kind:    RootDiskKindFlat,
+		SizeMiB: opts.SizeMiB,
+		sizeSet: opts.SizeMiB != 0,
+		Fstype:  opts.Fstype,
+		Clone:   opts.Clone,
+	}
+}
+
+// WithRootDisk configures root storage for an OCI image.
 // It is valid only with WithImage when the image resolves to an OCI reference.
 func WithRootDisk(disk RootDiskConfig) SandboxOption {
 	return func(o *SandboxConfig) { o.RootDisk = &disk }
@@ -545,6 +610,12 @@ func WithShell(shell string) SandboxOption {
 // WithSecurityProfile selects the in-guest security profile.
 func WithSecurityProfile(profile SecurityProfile) SandboxOption {
 	return func(o *SandboxConfig) { o.SecurityProfile = profile }
+}
+
+// WithDeploymentProfile selects the host-runtime isolation profile.
+// Managed backends may enforce their own profile.
+func WithDeploymentProfile(profile DeploymentProfile) SandboxOption {
+	return func(o *SandboxConfig) { o.DeploymentProfile = profile }
 }
 
 // WithEnv adds environment variables to the sandbox. Called repeatedly,

@@ -29,6 +29,34 @@ CLI mount flags use `SOURCE:DEST[:OPTIONS]`. The `:` before `OPTIONS` starts the
 | `--mount-disk` | Host disk image | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `format=raw\|qcow2\|vmdk`, `fstype=<type>` |
 | `--tmpfs` | Guest path | `ro`, `rw`, `noexec`, `nosuid`, `nodev`; size may be passed as `PATH:SIZE[:OPTIONS]` |
 
+## Cloud default volume
+
+Every Cloud organization has an always-present default volume. You can read and write it directly without starting a sandbox:
+
+<CodeGroup>
+```rust Rust
+let volume = Volume::get_default().await?;
+volume.fs().write("state.json", br#"{"ready":true}"#).await?;
+```
+
+```typescript TypeScript
+const volume = await Volume.getDefault();
+await volume.fs().write("state.json", JSON.stringify({ ready: true }));
+```
+
+```python Python
+volume = await Volume.get_default()
+await volume.fs().write("state.json", b'{"ready": true}')
+```
+
+```go Go
+volume, err := m.GetDefaultVolume(ctx)
+err = volume.FS().WriteString("state.json", `{"ready":true}`)
+```
+</CodeGroup>
+
+The default volume is isolated to the authenticated Cloud organization and cannot be removed. Default-volume lookup is deliberately unsupported on the local backend: forgetting an API key cannot expose or modify files from your machine. Named local volumes continue to live under `~/.microsandbox/volumes/` and retain their existing direct filesystem API.
+
 ## Bind mounts
 
 Mount a directory from the host directly into the sandbox. Changes inside the sandbox are reflected on the host, and vice versa.
@@ -149,7 +177,13 @@ const dockerData = await Volume.builder("docker-data")
 ```
 
 ```python Python
-docker_data = await Volume.create("docker-data", kind="disk", size_mib=20 * 1024)
+from microsandbox import VolumeKind
+
+docker_data = await Volume.create(
+    "docker-data",
+    kind=VolumeKind.DISK,
+    size_mib=20 * 1024,
+)
 ```
 
 ```go Go

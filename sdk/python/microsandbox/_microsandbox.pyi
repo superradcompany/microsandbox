@@ -4,30 +4,45 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator, Awaitable, Mapping, Sequence
-from typing import Any, TypedDict
+from typing import Any
 
 from microsandbox.types import (
+    BackendKind,
+    DiskImageFormat,
+    ExecEventType,
+    ExecOptions,
+    FsEntryKind,
+    ImageArchiveFormat,
     ImageSource,
+    InitConfig,
+    InitOptions,
+    LogLevel,
     LogReadSource,
     LogSource,
+    ModificationPolicy,
     MountConfig,
+    NamedVolumeMode,
+    Network,
+    PatchConfig,
+    PortBinding,
+    PullEventType,
+    PullPolicy,
+    RegistryAuth,
     Rlimit,
     RootDiskConfig,
+    SandboxModificationPlan,
+    SandboxStatus,
+    SecretEntry,
+    SecretModifySpec,
+    SecurityProfile,
+    SnapshotFormat,
+    SnapshotScope,
+    SnapshotStateKind,
     Stdin,
+    ViolationAction,
+    ViolationPolicy,
+    VolumeKind,
 )
-
-class SecretModifySpec(TypedDict, total=False):
-    """Desired state for one secret in `modify(secrets=...)`.
-
-    `env`, `value`, and `store` are mutually exclusive ways to provide the
-    secret material; setting more than one raises ValueError.
-    """
-
-    env: str
-    value: str
-    store: str
-    placeholder: str
-    allowed_hosts: list[str]
 
 class PyAgentClient:
     """Raw agent client.
@@ -70,7 +85,43 @@ class Sandbox:
     """
 
     @staticmethod
-    async def create(name: str, **kwargs: Any) -> Sandbox: ...
+    async def create(
+        name: str,
+        *,
+        image: str | os.PathLike[str] | ImageSource | None = None,
+        from_snapshot: str | os.PathLike[str] | None = None,
+        memory: int | None = None,
+        cpus: int | None = None,
+        max_memory: int | None = None,
+        max_cpus: int | None = None,
+        workdir: str | None = None,
+        shell: str | None = None,
+        security: SecurityProfile | None = None,
+        hostname: str | None = None,
+        user: str | None = None,
+        entrypoint: Sequence[str] | None = None,
+        init: str | InitConfig | InitOptions | None = None,
+        replace: bool = False,
+        replace_with_timeout: float | None = None,
+        max_duration: float | None = None,
+        idle_timeout: float | None = None,
+        ephemeral: bool = False,
+        env: Mapping[str, str] | None = None,
+        labels: Mapping[str, str] | None = None,
+        scripts: Mapping[str, str] | None = None,
+        pull_policy: PullPolicy | None = None,
+        log_level: LogLevel | None = None,
+        registry_auth: RegistryAuth | None = None,
+        registry_insecure: bool = False,
+        registry_ca_certs: list[bytes | bytearray | str | os.PathLike[str]] | None = None,
+        volumes: Mapping[str, MountConfig] | None = None,
+        patches: Sequence[PatchConfig] | None = None,
+        ports: Mapping[int, int] | Sequence[PortBinding] | None = None,
+        network: Network | None = None,
+        secrets: Sequence[SecretEntry] | None = None,
+        on_secret_violation: ViolationAction | ViolationPolicy | None = None,
+        detached: bool = False,
+    ) -> Sandbox: ...
     @staticmethod
     async def start(name: str, *, detached: bool = False) -> Sandbox: ...
     @staticmethod
@@ -88,38 +139,70 @@ class Sandbox:
     async def remove(name: str) -> None: ...
     @staticmethod
     def create_with_progress(
-        name: str, **kwargs: Any
+        name: str,
+        *,
+        image: str | os.PathLike[str] | ImageSource | None = None,
+        from_snapshot: str | os.PathLike[str] | None = None,
+        memory: int | None = None,
+        cpus: int | None = None,
+        max_memory: int | None = None,
+        max_cpus: int | None = None,
+        workdir: str | None = None,
+        shell: str | None = None,
+        security: SecurityProfile | None = None,
+        hostname: str | None = None,
+        user: str | None = None,
+        entrypoint: Sequence[str] | None = None,
+        init: str | InitConfig | InitOptions | None = None,
+        replace: bool = False,
+        replace_with_timeout: float | None = None,
+        max_duration: float | None = None,
+        idle_timeout: float | None = None,
+        ephemeral: bool = False,
+        env: Mapping[str, str] | None = None,
+        labels: Mapping[str, str] | None = None,
+        scripts: Mapping[str, str] | None = None,
+        pull_policy: PullPolicy | None = None,
+        log_level: LogLevel | None = None,
+        registry_auth: RegistryAuth | None = None,
+        registry_insecure: bool = False,
+        registry_ca_certs: list[bytes | bytearray | str | os.PathLike[str]] | None = None,
+        volumes: Mapping[str, MountConfig] | None = None,
+        patches: Sequence[PatchConfig] | None = None,
+        ports: Mapping[int, int] | Sequence[PortBinding] | None = None,
+        network: Network | None = None,
+        secrets: Sequence[SecretEntry] | None = None,
+        on_secret_violation: ViolationAction | ViolationPolicy | None = None,
+        detached: bool = False,
     ) -> PullSession: ...
-
     async def name(self) -> str: ...
     @property
     def owns_lifecycle(self) -> Awaitable[bool]: ...
     @property
     def fs(self) -> SandboxFsOps: ...
-
     async def exec(
         self,
         cmd: str,
-        args: list[str] | Mapping[str, Any] | None = None,
+        args: list[str] | ExecOptions | None = None,
         *,
         cwd: str | None = None,
         user: str | None = None,
         env: Mapping[str, str] | None = None,
         timeout: float | None = None,
-        stdin: Stdin | bytes | str | None = None,
+        stdin: Stdin | bytes | None = None,
         tty: bool = False,
         rlimits: list[Rlimit] | None = None,
     ) -> ExecOutput: ...
     async def exec_stream(
         self,
         cmd: str,
-        args: list[str] | Mapping[str, Any] | None = None,
+        args: list[str] | ExecOptions | None = None,
         *,
         cwd: str | None = None,
         user: str | None = None,
         env: Mapping[str, str] | None = None,
         timeout: float | None = None,
-        stdin: Stdin | bytes | str | None = None,
+        stdin: Stdin | bytes | None = None,
         tty: bool = False,
         rlimits: list[Rlimit] | None = None,
     ) -> ExecHandle: ...
@@ -131,7 +214,7 @@ class Sandbox:
         user: str | None = None,
         env: Mapping[str, str] | None = None,
         timeout: float | None = None,
-        stdin: Stdin | bytes | str | None = None,
+        stdin: Stdin | bytes | None = None,
         tty: bool = False,
         rlimits: list[Rlimit] | None = None,
     ) -> ExecOutput: ...
@@ -143,7 +226,7 @@ class Sandbox:
         user: str | None = None,
         env: Mapping[str, str] | None = None,
         timeout: float | None = None,
-        stdin: Stdin | bytes | str | None = None,
+        stdin: Stdin | bytes | None = None,
         tty: bool = False,
         rlimits: list[Rlimit] | None = None,
     ) -> ExecHandle: ...
@@ -169,6 +252,7 @@ class Sandbox:
         max_cpus: int | None = None,
         memory: int | None = None,
         max_memory: int | None = None,
+        root_disk_size: int | None = None,
         env: Mapping[str, str] | None = None,
         env_rm: list[str] | None = None,
         labels: Mapping[str, str] | None = None,
@@ -176,9 +260,9 @@ class Sandbox:
         workdir: str | None = None,
         secrets: Mapping[str, SecretModifySpec] | None = None,
         secrets_rm: list[str] | None = None,
-        policy: str | None = None,
+        policy: ModificationPolicy | None = None,
         dry_run: bool = False,
-    ) -> dict[str, Any]: ...
+    ) -> SandboxModificationPlan: ...
     async def metrics_stream(self, interval: float = 1.0) -> MetricsStream: ...
     async def logs(
         self,
@@ -211,7 +295,7 @@ class SandboxStopResult:
     @property
     def name(self) -> str: ...
     @property
-    def status(self) -> str: ...
+    def status(self) -> SandboxStatus: ...
     @property
     def exit_code(self) -> int | None: ...
     @property
@@ -242,7 +326,7 @@ class SandboxHandle:
     @property
     def name(self) -> str: ...
     @property
-    def status(self) -> str: ...
+    def status(self) -> SandboxStatus: ...
     @property
     def config_json(self) -> str: ...
     @property
@@ -259,6 +343,7 @@ class SandboxHandle:
         max_cpus: int | None = None,
         memory: int | None = None,
         max_memory: int | None = None,
+        root_disk_size: int | None = None,
         env: Mapping[str, str] | None = None,
         env_rm: list[str] | None = None,
         labels: Mapping[str, str] | None = None,
@@ -266,9 +351,9 @@ class SandboxHandle:
         workdir: str | None = None,
         secrets: Mapping[str, SecretModifySpec] | None = None,
         secrets_rm: list[str] | None = None,
-        policy: str | None = None,
+        policy: ModificationPolicy | None = None,
         dry_run: bool = False,
-    ) -> dict[str, Any]: ...
+    ) -> SandboxModificationPlan: ...
     async def logs(
         self,
         tail: int | None = None,
@@ -329,7 +414,7 @@ class ExecSink:
     async def close(self) -> None: ...
 
 class ExecEvent:
-    event_type: str
+    event_type: ExecEventType
     pid: int | None
     data: bytes | None
     code: int | None
@@ -424,13 +509,13 @@ class FsWriteSink:
 
 class FsEntry:
     path: str
-    kind: str
+    kind: FsEntryKind
     size: int
     mode: int
     modified: float | None
 
 class FsMetadata:
-    kind: str
+    kind: FsEntryKind
     size: int
     mode: int
     readonly: bool
@@ -476,13 +561,15 @@ class Volume:
     async def create(
         name: str,
         *,
-        kind: str = "dir",
+        kind: VolumeKind = VolumeKind.DIRECTORY,
         size_mib: int | None = None,
         quota_mib: int | None = None,
         labels: dict[str, str] | None = None,
     ) -> Volume: ...
     @staticmethod
     async def get(name: str) -> VolumeHandle: ...
+    @staticmethod
+    async def get_default() -> VolumeHandle: ...
     @staticmethod
     async def list() -> list[VolumeHandle]: ...
     @staticmethod
@@ -500,6 +587,10 @@ class Volume:
     def named(
         name: str,
         *,
+        mode: NamedVolumeMode | None = None,
+        kind: VolumeKind | None = None,
+        size_mib: int | None = None,
+        quota_mib: int | None = None,
         readonly: bool = False,
         noexec: bool = False,
         nosuid: bool = False,
@@ -518,7 +609,7 @@ class Volume:
     def disk(
         path: str,
         *,
-        format: str | None = None,
+        format: DiskImageFormat | None = None,
         fstype: str | None = None,
         readonly: bool = False,
         noexec: bool = False,
@@ -534,7 +625,9 @@ class VolumeHandle:
     @property
     def name(self) -> str: ...
     @property
-    def kind(self) -> str: ...
+    def is_default(self) -> bool: ...
+    @property
+    def kind(self) -> VolumeKind: ...
     @property
     def quota_mib(self) -> int | None: ...
     @property
@@ -542,7 +635,7 @@ class VolumeHandle:
     @property
     def capacity_bytes(self) -> int | None: ...
     @property
-    def disk_format(self) -> str | None: ...
+    def disk_format(self) -> DiskImageFormat | None: ...
     @property
     def disk_fstype(self) -> str | None: ...
     @property
@@ -560,6 +653,10 @@ class VolumeFs:
     async def list(self, path: str) -> list[FsEntry]: ...
     async def mkdir(self, path: str) -> None: ...
     async def remove_file(self, path: str) -> None: ...
+    async def remove_dir(self, path: str) -> None: ...
+    async def copy(self, from_: str, to: str) -> None: ...
+    async def rename(self, from_: str, to: str) -> None: ...
+    async def stat(self, path: str) -> FsMetadata: ...
     async def exists(self, path: str) -> bool: ...
 
 class Image:
@@ -567,7 +664,7 @@ class Image:
     def oci(
         reference: str,
         *,
-        root_disk: RootDiskConfig | dict | int | None = None,
+        root_disk: RootDiskConfig | int | None = None,
         upper_size_mib: int | None = None,
     ) -> ImageSource: ...
     @staticmethod
@@ -588,7 +685,10 @@ class Image:
     async def load(input_path: str, *, tag: str | None = None) -> list[ImageHandle]: ...
     @staticmethod
     async def save(
-        reference: str | Sequence[str], *, output_path: str, format: str = "docker"
+        reference: str | Sequence[str],
+        *,
+        output_path: str,
+        format: ImageArchiveFormat = ImageArchiveFormat.DOCKER,
     ) -> None: ...
 
 class ImageHandle:
@@ -715,9 +815,9 @@ class Snapshot:
     @property
     def image_manifest_digest(self) -> str: ...
     @property
-    def state_kind(self) -> str: ...
+    def state_kind(self) -> SnapshotStateKind: ...
     @property
-    def format(self) -> str | None: ...
+    def format(self) -> SnapshotFormat | None: ...
     @property
     def fstype(self) -> str | None: ...
     @property
@@ -727,7 +827,7 @@ class Snapshot:
     @property
     def parent(self) -> str | None: ...
     @property
-    def scope(self) -> str: ...
+    def scope(self) -> SnapshotScope: ...
     @property
     def created_at(self) -> str: ...
     @property
@@ -744,13 +844,13 @@ class SnapshotHandle:
     @property
     def parent_digest(self) -> str | None: ...
     @property
-    def scope(self) -> str: ...
+    def scope(self) -> SnapshotScope: ...
     @property
     def image_ref(self) -> str: ...
     @property
-    def state_kind(self) -> str: ...
+    def state_kind(self) -> SnapshotStateKind: ...
     @property
-    def format(self) -> str | None: ...
+    def format(self) -> SnapshotFormat | None: ...
     @property
     def fstype(self) -> str | None: ...
     @property
@@ -786,7 +886,7 @@ class PullProgressIter:
     async def __anext__(self) -> PullEvent: ...
 
 class PullEvent:
-    event_type: str
+    event_type: PullEventType
     reference: str | None
     manifest_digest: str | None
     layer_count: int | None
@@ -801,6 +901,21 @@ class PullEvent:
 async def all_sandbox_metrics() -> dict[str, SandboxMetrics]: ...
 def install() -> None: ...
 def is_installed() -> bool: ...
+def set_default_backend(
+    kind: BackendKind,
+    *,
+    url: str | None = None,
+    api_key: str | None = None,
+    profile: str | None = None,
+) -> None: ...
+def backend_scope(
+    kind: BackendKind,
+    *,
+    url: str | None = None,
+    api_key: str | None = None,
+    profile: str | None = None,
+) -> Any: ...
+def default_backend_kind() -> BackendKind: ...
 def resolved_msb_path() -> str: ...
 def set_runtime_msb_path(path: str) -> None: ...
 def version() -> str: ...

@@ -14,9 +14,9 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::domain::{
-    DiskImageFormat, EnvVar, HandoffInit, HostPattern, HostPermissions, MountOptions,
-    NetworkPolicy, NetworkSpec, OciRootfsSource, Patch, PullPolicy, Rlimit, RlimitResource,
-    RootDisk, RootfsSource, SandboxLogLevel, SandboxPolicy, SandboxResources,
+    DeploymentProfile, DiskImageFormat, EnvVar, HandoffInit, HostPattern, HostPermissions,
+    MountOptions, NetworkPolicy, NetworkSpec, OciRootfsSource, Patch, PullPolicy, Rlimit,
+    RlimitResource, RootDisk, RootfsSource, SandboxLogLevel, SandboxPolicy, SandboxResources,
     SandboxRuntimeOptions, SandboxSpec, SecretEntry, SecretInjection, SecretsConfig,
     SecurityProfile, StatVirtualization, ViolationAction, VolumeMount, default_private,
     default_strict,
@@ -1022,6 +1022,7 @@ impl TryFrom<CloudSandboxSpec> for SandboxSpec {
             init: spec.init,
             pull_policy: spec.pull_policy.into(),
             security_profile: spec.security_profile,
+            deployment_profile: DeploymentProfile::default(),
             lifecycle: spec.lifecycle,
         })
     }
@@ -1388,6 +1389,7 @@ mod tests {
         // Spec fields are flattened onto the top level (SDK parity).
         assert_eq!(json["name"], "agent-1");
         assert!(json.get("image").is_some());
+        assert!(json.get("deployment_profile").is_none());
 
         let back: CloudCreateSandboxRequest = serde_json::from_value(json).unwrap();
         assert_eq!(back.spec.name, "agent-1");
@@ -1513,10 +1515,20 @@ mod tests {
                 reference: "python:3.12".into(),
                 root_disk: Some(RootDisk::managed(8192)),
             }),
+            deployment_profile: DeploymentProfile::MultiTenant,
             ..Default::default()
         };
 
         let req = CloudCreateSandboxRequest::from(domain);
+
+        // The hosting platform, not a tenant create request, selects the
+        // effective deployment profile.
+        assert!(
+            serde_json::to_value(&req)
+                .unwrap()
+                .get("deployment_profile")
+                .is_none()
+        );
 
         assert_eq!(req.spec.resources.disk_size_mib, Some(8192));
         match req.spec.image {

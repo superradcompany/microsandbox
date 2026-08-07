@@ -32,10 +32,13 @@ use std::{
 
 use microsandbox_db::pool::DbPools;
 use microsandbox_migration::{Migrator, MigratorTrait, schema_metadata};
+use microsandbox_types::DeploymentProfile;
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, DbErr, Statement};
 use tokio::sync::OnceCell;
 
-use super::{Backend, BackendKind, SandboxBackend, VolumeBackend};
+use super::{
+    Backend, BackendInfo, BackendKind, BackendSelectionSource, SandboxBackend, VolumeBackend,
+};
 use crate::{MicrosandboxError, MicrosandboxResult};
 use crate::{
     SandboxConfig,
@@ -55,6 +58,9 @@ use crate::{
 pub struct LocalBackend {
     config: Arc<LocalConfig>,
     db: OnceCell<DbPools>,
+    deployment_profile: Option<DeploymentProfile>,
+    selection_source: BackendSelectionSource,
+    profile: Option<String>,
 }
 
 /// Fluent builder for [`LocalBackend`]. Construct via [`LocalBackend::builder`].
@@ -88,6 +94,7 @@ pub struct LocalBackendBuilder {
     ca_certs: Option<Option<PathBuf>>,
     registry_hosts: Option<HashMap<String, RegistryEntry>>,
     log_level: Option<microsandbox_runtime::logging::LogLevel>,
+    deployment_profile: Option<DeploymentProfile>,
 }
 
 struct MigrationLock {
@@ -113,10 +120,21 @@ impl LocalBackend {
     /// `LocalBackend` instance, so callers never end up with two backends
     /// racing on the same SQLite file.
     pub fn lazy() -> Self {
+        Self::lazy_with_selection(BackendSelectionSource::Programmatic, None)
+    }
+
+    /// Construct a lazy local backend with resolver provenance attached.
+    pub(crate) fn lazy_with_selection(
+        selection_source: BackendSelectionSource,
+        profile: Option<String>,
+    ) -> Self {
         let config = Arc::new(load_persisted_config_or_default().unwrap_or_default());
         Self {
             config,
             db: OnceCell::new(),
+            deployment_profile: None,
+            selection_source,
+            profile,
         }
     }
 
@@ -204,6 +222,42 @@ impl LocalBackend {
                 "SandboxBuilder::slug is only honored by cloud backends; ignoring"
             );
         }
+    }
+
+    /// Apply the operator-selected deployment profile before persistence and launch.
+    ///
+    /// The optional backend value is authoritative. Keeping this decision on
+    /// the backend means an embedding host can enforce its isolation model even
+    /// when the incoming sandbox specification requests a weaker profile.
+    pub(crate) fn apply_deployment_profile(&self, config: &mut SandboxConfig) {
+        let Some(profile) = self.deployment_profile else {
+            return;
+        };
+
+        if config.spec.deployment_profile != profile {
+            let requested = config.spec.deployment_profile;
+            if requested == DeploymentProfile::MultiTenant
+                && profile == DeploymentProfile::SingleTenant
+            {
+                tracing::warn!(
+                    sandbox = %config.spec.name,
+                    ?requested,
+                    enforced = ?profile,
+                    "host policy is weakening the requested deployment profile"
+                );
+            } else {
+                // Hosted create requests intentionally omit this field and
+                // therefore decode to SingleTenant. Enforcing MultiTenant is
+                // the normal managed path, not a tenant override attempt.
+                tracing::debug!(
+                    sandbox = %config.spec.name,
+                    ?requested,
+                    enforced = ?profile,
+                    "host policy strengthened the deployment profile"
+                );
+            }
+        }
+        config.spec.deployment_profile = profile;
     }
 }
 
@@ -327,6 +381,15 @@ impl LocalBackendBuilder {
         self
     }
 
+    /// Force the host-runtime deployment profile for every sandbox launched by this backend.
+    ///
+    /// This operator setting takes precedence over the profile requested on a
+    /// sandbox builder and is applied on both create and restart.
+    pub fn deployment_profile(mut self, profile: DeploymentProfile) -> Self {
+        self.deployment_profile = Some(profile);
+        self
+    }
+
     /// Build the `LocalBackend`. Opens the DB pool and applies migrations.
     ///
     /// Reads `~/.microsandbox/config.json` (or `MSB_CONFIG_PATH`) and
@@ -334,14 +397,28 @@ impl LocalBackendBuilder {
     /// anything the builder didn't set falls through to the persisted
     /// config (or the hard-coded defaults if no config file exists).
     pub async fn build(self) -> MicrosandboxResult<LocalBackend> {
-        let persisted = load_persisted_config_or_default().unwrap_or_default();
-        let config = self.merge_into(persisted);
-        let backend = LocalBackend {
-            config: Arc::new(config),
-            db: OnceCell::new(),
-        };
+        let backend = self.build_lazy();
         let _ = backend.db().await?;
         Ok(backend)
+    }
+
+    /// Build a `LocalBackend` whose database initializes on first use.
+    ///
+    /// This retains the programmatic overrides from the builder while avoiding
+    /// filesystem or migration work during construction. It is useful for
+    /// embedding runtimes that must finish a protocol handshake before touching
+    /// sandbox state.
+    pub fn build_lazy(self) -> LocalBackend {
+        let persisted = load_persisted_config_or_default().unwrap_or_default();
+        let deployment_profile = self.deployment_profile;
+        let config = self.merge_into(persisted);
+        LocalBackend {
+            config: Arc::new(config),
+            db: OnceCell::new(),
+            deployment_profile,
+            selection_source: BackendSelectionSource::Programmatic,
+            profile: None,
+        }
     }
 
     /// Overlay the builder's overrides on top of `base`. Builder values win;
@@ -367,6 +444,7 @@ impl LocalBackendBuilder {
             ca_certs,
             registry_hosts,
             log_level,
+            deployment_profile: _,
         } = self;
 
         if let Some(home) = home {
@@ -472,6 +550,15 @@ impl MigrationLock {
 impl Backend for LocalBackend {
     fn kind(&self) -> BackendKind {
         BackendKind::Local
+    }
+
+    fn info(&self) -> BackendInfo {
+        BackendInfo {
+            kind: BackendKind::Local,
+            api_url: None,
+            source: self.selection_source,
+            profile: self.profile.clone(),
+        }
     }
 
     fn sandboxes(&self) -> &dyn SandboxBackend {
@@ -702,6 +789,47 @@ mod tests {
     use super::*;
     use crate::backend::with_backend;
     use crate::volume::VolumeConfig;
+
+    #[test]
+    fn operator_deployment_profile_overrides_sandbox_request() {
+        let backend = LocalBackend {
+            config: Arc::new(LocalConfig::default()),
+            db: OnceCell::new(),
+            deployment_profile: Some(DeploymentProfile::MultiTenant),
+            selection_source: BackendSelectionSource::Programmatic,
+            profile: None,
+        };
+        let mut config = SandboxConfig::default();
+        config.spec.name = "profile-test".into();
+        config.spec.deployment_profile = DeploymentProfile::SingleTenant;
+
+        backend.apply_deployment_profile(&mut config);
+
+        assert_eq!(
+            config.spec.deployment_profile,
+            DeploymentProfile::MultiTenant
+        );
+    }
+
+    #[test]
+    fn sandbox_deployment_profile_is_preserved_without_operator_override() {
+        let backend = LocalBackend {
+            config: Arc::new(LocalConfig::default()),
+            db: OnceCell::new(),
+            deployment_profile: None,
+            selection_source: BackendSelectionSource::Programmatic,
+            profile: None,
+        };
+        let mut config = SandboxConfig::default();
+        config.spec.deployment_profile = DeploymentProfile::MultiTenant;
+
+        backend.apply_deployment_profile(&mut config);
+
+        assert_eq!(
+            config.spec.deployment_profile,
+            DeploymentProfile::MultiTenant
+        );
+    }
 
     #[tokio::test]
     async fn test_connect_and_migrate_creates_db_and_tables() {

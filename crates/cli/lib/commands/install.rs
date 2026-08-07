@@ -135,7 +135,8 @@ pub async fn run(args: InstallArgs) -> anyhow::Result<()> {
 
     // Pre-pull the image so the alias is ready to use immediately.
     if !no_pull {
-        super::image::pull_if_missing(image, false).await?;
+        super::image::pull_if_missing(image, false, super::pull::PullMaterialization::Layered)
+            .await?;
     }
 
     // Ensure bin dir exists.

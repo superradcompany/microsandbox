@@ -2,32 +2,15 @@
 
 from __future__ import annotations
 
+import pytest
+
 from microsandbox import Network, Sandbox, Secret, ViolationAction, ViolationPolicy
 
 
-class _OneShotViolationPolicy:
-    """Policy-shaped object that fails if the native parser converts it twice."""
-
-    def __init__(self) -> None:
-        self.calls = 0
+class _ViolationPolicyLike:
+    """Duck-typed policy that must not cross the public config boundary."""
 
     def _to_dict(self) -> dict[str, object]:
-        self.calls += 1
-        if self.calls > 1:
-            raise AssertionError("violation policy converted more than once")
-        return {"passthrough": {"all_hosts": True}}
-
-
-class _FailingViolationPolicy:
-    """Policy-shaped object whose first conversion error must be preserved."""
-
-    def __init__(self) -> None:
-        self.calls = 0
-
-    def _to_dict(self) -> dict[str, object]:
-        self.calls += 1
-        if self.calls == 1:
-            raise RuntimeError("sentinel conversion failure")
         return {"passthrough": {"all_hosts": True}}
 
 
@@ -89,7 +72,7 @@ def _native_create_error(**kwargs: object) -> Exception:
 
 
 def test_native_create_accepts_violation_policy_fallback_objects() -> None:
-    baseline = _native_create_error(on_secret_violation="block")
+    baseline = _native_create_error(on_secret_violation=ViolationAction.BLOCK)
     for policy in (
         ViolationPolicy.block(),
         ViolationPolicy.block_and_log(),
@@ -101,7 +84,7 @@ def test_native_create_accepts_violation_policy_fallback_objects() -> None:
 
 
 def test_native_create_accepts_violation_policy_passthrough_objects() -> None:
-    baseline = _native_create_error(on_secret_violation="block")
+    baseline = _native_create_error(on_secret_violation=ViolationAction.BLOCK)
     exc = _native_create_error(
         on_secret_violation=ViolationPolicy.passthrough(hosts=("api.example.com",)),
     )
@@ -109,7 +92,7 @@ def test_native_create_accepts_violation_policy_passthrough_objects() -> None:
 
 
 def test_native_create_accepts_network_violation_policy_fallback_objects() -> None:
-    baseline = _native_create_error(on_secret_violation="block")
+    baseline = _native_create_error(on_secret_violation=ViolationAction.BLOCK)
     for policy in (
         ViolationPolicy.block(),
         ViolationPolicy.block_and_log(),
@@ -120,7 +103,7 @@ def test_native_create_accepts_network_violation_policy_fallback_objects() -> No
 
 
 def test_native_create_accepts_secret_violation_policy_fallback_objects() -> None:
-    baseline = _native_create_error(on_secret_violation="block")
+    baseline = _native_create_error(on_secret_violation=ViolationAction.BLOCK)
     secret = Secret.env(
         "API_KEY",
         value="sk-abc",
@@ -131,41 +114,38 @@ def test_native_create_accepts_secret_violation_policy_fallback_objects() -> Non
     assert type(exc) is type(baseline), f"per-secret policy rejected by parser: {exc!r}"
 
 
-def test_native_create_converts_violation_policy_objects_once() -> None:
-    baseline = _native_create_error(on_secret_violation="block")
-    for location in ("top-level", "network", "secret"):
-        policy = _OneShotViolationPolicy()
-        if location == "top-level":
-            kwargs = {"on_secret_violation": policy}
-        elif location == "network":
-            kwargs = {"network": {"on_secret_violation": policy}}
-        else:
-            kwargs = {
-                "secrets": [
-                    {
-                        "env_var": "API_KEY",
-                        "value": "sk-abc",
-                        "allow_hosts": ["api.example.com"],
-                        "on_violation": policy,
-                    }
-                ]
-            }
+def test_native_create_rejects_duck_typed_violation_policy() -> None:
+    exc = _native_create_error(on_secret_violation=_ViolationPolicyLike())
 
-        exc = _native_create_error(**kwargs)
-        assert type(exc) is type(baseline), f"{location} policy rejected: {exc!r}"
-        assert policy.calls == 1
+    assert isinstance(exc, TypeError)
+    assert "ViolationAction or ViolationPolicy" in str(exc)
 
 
-def test_native_create_preserves_violation_policy_conversion_errors() -> None:
-    policy = _FailingViolationPolicy()
-    exc = _native_create_error(on_secret_violation=policy)
+def test_nested_configs_reject_duck_typed_violation_policy() -> None:
+    with pytest.raises(TypeError, match="on_violation"):
+        Network(on_secret_violation=_ViolationPolicyLike())._to_dict()
 
-    assert isinstance(exc, RuntimeError)
-    assert str(exc) == "sentinel conversion failure"
-    assert policy.calls == 1
+    secret = Secret.env(
+        "API_KEY",
+        value="sk-abc",
+        allow_hosts=("api.example.com",),
+        on_violation=_ViolationPolicyLike(),
+    )
+    with pytest.raises(TypeError, match="on_violation"):
+        secret._to_dict()
 
 
-def test_native_create_rejects_unknown_violation_action() -> None:
-    exc = _native_create_error(on_secret_violation="never-heard-of-it")
-    assert isinstance(exc, ValueError)
-    assert "unknown violation action" in str(exc)
+def test_passthrough_policy_validates_ignored_fallback() -> None:
+    policy = ViolationPolicy(
+        fallback="block",  # type: ignore[arg-type]
+        passthrough_hosts=("api.example.com",),
+    )
+
+    with pytest.raises(TypeError, match=r"ViolationPolicy\.fallback"):
+        policy._to_dict()
+
+
+def test_native_create_rejects_raw_violation_action_strings() -> None:
+    exc = _native_create_error(on_secret_violation="block")
+    assert isinstance(exc, TypeError)
+    assert "expected ViolationAction or ViolationPolicy" in str(exc)

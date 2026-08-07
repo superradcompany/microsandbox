@@ -23,6 +23,9 @@ type Sandbox struct {
 	inner *ffi.Sandbox
 }
 
+// BackendKind returns the backend retained by this sandbox.
+func (s *Sandbox) BackendKind() BackendKind { return BackendKind(s.inner.BackendKind()) }
+
 // CreateSandbox creates and boots a new sandbox. The returned Sandbox owns the
 // VM process — call Close (or Stop + Close) when done.
 //
@@ -67,35 +70,36 @@ func resolveRegistryCACertPaths(o *SandboxConfig) error {
 // Extracted so tests can assert the JSON envelope without booting the runtime.
 func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 	ffiOpts := ffi.CreateOptions{
-		Image:            o.Image,
-		ImageFstype:      o.ImageFstype,
-		ImageBind:        o.ImageBind,
-		Snapshot:         o.Snapshot,
-		MemoryMiB:        o.MemoryMiB,
-		CPUs:             o.CPUs,
-		MaxMemoryMiB:     o.MaxMemoryMiB,
-		MaxCPUs:          o.MaxCPUs,
-		Workdir:          o.Workdir,
-		Shell:            o.Shell,
-		SecurityProfile:  string(o.SecurityProfile),
-		Hostname:         o.Hostname,
-		User:             o.User,
-		Replace:          o.Replace,
-		Env:              o.Env,
-		Labels:           o.Labels,
-		Detached:         o.Detached,
-		Ephemeral:        o.Ephemeral,
-		Entrypoint:       o.Entrypoint,
-		LogLevel:         string(o.LogLevel),
-		QuietLogs:        o.QuietLogs,
-		Scripts:          o.Scripts,
-		PullPolicy:       string(o.PullPolicy),
-		MaxDurationSecs:  durationSecsCeil(o.MaxDuration),
-		IdleTimeoutSecs:  durationSecsCeil(o.IdleTimeout),
-		Ports:            o.Ports,
-		PortsUDP:         o.PortsUDP,
-		PortBindings:     buildFFIPortBindings(o.PortBindings),
-		RegistryInsecure: o.RegistryInsecure,
+		Image:             o.Image,
+		ImageFstype:       o.ImageFstype,
+		ImageBind:         o.ImageBind,
+		Snapshot:          o.Snapshot,
+		MemoryMiB:         o.MemoryMiB,
+		CPUs:              o.CPUs,
+		MaxMemoryMiB:      o.MaxMemoryMiB,
+		MaxCPUs:           o.MaxCPUs,
+		Workdir:           o.Workdir,
+		Shell:             o.Shell,
+		SecurityProfile:   string(o.SecurityProfile),
+		DeploymentProfile: string(o.DeploymentProfile),
+		Hostname:          o.Hostname,
+		User:              o.User,
+		Replace:           o.Replace,
+		Env:               o.Env,
+		Labels:            o.Labels,
+		Detached:          o.Detached,
+		Ephemeral:         o.Ephemeral,
+		Entrypoint:        o.Entrypoint,
+		LogLevel:          string(o.LogLevel),
+		QuietLogs:         o.QuietLogs,
+		Scripts:           o.Scripts,
+		PullPolicy:        string(o.PullPolicy),
+		MaxDurationSecs:   durationSecsCeil(o.MaxDuration),
+		IdleTimeoutSecs:   durationSecsCeil(o.IdleTimeout),
+		Ports:             o.Ports,
+		PortsUDP:          o.PortsUDP,
+		PortBindings:      buildFFIPortBindings(o.PortBindings),
+		RegistryInsecure:  o.RegistryInsecure,
 	}
 	if o.RootDisk != nil {
 		ffiOpts.RootDisk = buildFFIRootDisk(*o.RootDisk)
@@ -202,6 +206,10 @@ func buildFFIRootDisk(rd RootDiskConfig) *ffi.RootDiskSpec {
 		spec.Path = rd.Path
 		spec.Format = rd.Format
 		spec.Fstype = rd.Fstype
+	case RootDiskKindFlat:
+		spec.Kind = "flat"
+		spec.Fstype = rd.Fstype
+		spec.Clone = string(rd.Clone)
 	default:
 		// Managed, including zero-valued configs built without the factory.
 		spec.Kind = "managed"
@@ -558,15 +566,21 @@ type SandboxHandle struct {
 	configJSON    string
 	createdAtUnix *int64
 	updatedAtUnix *int64
+	backendKind   BackendKind
 }
 
 func newSandboxHandle(info *ffi.SandboxHandleInfo) *SandboxHandle {
+	backendKind := BackendKind(info.BackendKind)
+	if backendKind == "" {
+		backendKind = BackendUnknown
+	}
 	return &SandboxHandle{
 		name:          info.Name,
 		status:        SandboxStatus(info.Status),
 		configJSON:    info.ConfigJSON,
 		createdAtUnix: info.CreatedAtUnix,
 		updatedAtUnix: info.UpdatedAtUnix,
+		backendKind:   backendKind,
 	}
 }
 
@@ -575,6 +589,9 @@ func (h *SandboxHandle) Name() string { return h.name }
 
 // Status returns the sandbox's last-known lifecycle status.
 func (h *SandboxHandle) Status() SandboxStatus { return h.status }
+
+// BackendKind returns the backend retained by this handle.
+func (h *SandboxHandle) BackendKind() BackendKind { return h.backendKind }
 
 // ConfigJSON returns the raw JSON configuration stored for this sandbox.
 func (h *SandboxHandle) ConfigJSON() string { return h.configJSON }

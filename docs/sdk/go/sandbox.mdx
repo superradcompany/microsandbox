@@ -650,15 +650,19 @@ _, err = sb.Modify(ctx, m.ModifyOptions{
     Env:    map[string]string{"MODE": "prod"},
     Policy: m.ModificationPolicyRestart,
 })
+
+// Grow the managed OCI root disk offline and restart
+_, err = sb.Modify(ctx, m.ModifyOptions{
+    RootDiskSizeMiB: 8192,
+    Policy:          m.ModificationPolicyRestart,
+})
 ```
 
 </Accordion>
 
 Plan or apply a configuration change. The returned plan labels each change `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`, and apply is all-or-nothing.
 
-`CPUs` and `MemoryMiB` resize live within the [`WithMaxCPUs`](#withmaxcpus) / [`WithMaxMemory`](#withmaxmemory) ceilings; raising a ceiling requires a restart. Env and workdir changes affect future execs only. On a stopped sandbox, changes are saved for the next boot.
-
-Secret changes are Rust-SDK and CLI only for now. The CLI equivalent is [`msb modify`](/cli/sandbox-commands#msb-modify).
+`CPUs` and `MemoryMiB` resize live within the [`WithMaxCPUs`](#withmaxcpus) / [`WithMaxMemory`](#withmaxmemory) ceilings; raising a ceiling requires a restart. `RootDiskSizeMiB` changes are offline: managed and flat OCI root disks grow only, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected. Env and workdir changes affect future execs only. On a stopped sandbox, changes are saved for the next boot.
 
 A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and the returned plan's `ResizeStatus` reports when the sandbox has finished adjusting. See [`SandboxModificationPlan`](#sandboxmodificationplan).
 
@@ -2034,7 +2038,7 @@ Explicit idle-refresh result.
 
 <p className="msb-backref">Used by <a href="#sb-modify">Modify()</a></p>
 
-A requested sandbox modification. Zero-valued fields are left unchanged (`0` is not a valid CPU or memory size). Secret changes are Rust-SDK and CLI only for now.
+A requested sandbox modification. Zero-valued fields are left unchanged (`0` is not a valid CPU, memory, or disk size).
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -2042,6 +2046,7 @@ A requested sandbox modification. Zero-valued fields are left unchanged (`0` is 
 | MaxCPUs | `uint8` | Boot-time maximum possible vCPUs (restart-backed) |
 | MemoryMiB | `uint32` | Desired effective guest memory in MiB. Live when within the booted `MaxMemoryMiB` |
 | MaxMemoryMiB | `uint32` | Boot-time maximum hotpluggable memory in MiB (restart-backed) |
+| RootDiskSizeMiB | `uint32` | Desired root disk size in MiB. Managed and flat OCI disks are grow-only; applies on restart or next start |
 | Env | `map[string]string` | Environment variables to set for future execs |
 | EnvRemove | `[]string` | Environment variable keys to remove |
 | Labels | `map[string]string` | Labels to set |

@@ -547,15 +547,16 @@ for (const c of preview.changes) {
 
 // Make an env change active now by restarting
 await sandbox.modify({ env: { MODE: "prod" }, policy: "restart" });
+
+// Grow the managed OCI root disk offline and restart
+await sandbox.modify({ rootDiskSize: 8192, policy: "restart" });
 ```
 
 </Accordion>
 
 Plan or apply a configuration change. The returned plan labels each change `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`, and apply is all-or-nothing.
 
-`cpus` and `memory` resize live within the [`maxCpus`](#maxcpus) / [`maxMemory`](#maxmemory) ceilings; raising a ceiling requires a restart. Env and workdir changes affect future execs only. On a stopped sandbox, changes are saved for the next boot.
-
-Secret changes are Rust-SDK and CLI only for now. The CLI equivalent is [`msb modify`](/cli/sandbox-commands#msb-modify).
+`cpus` and `memory` resize live within the [`maxCpus`](#maxcpus) / [`maxMemory`](#maxmemory) ceilings; raising a ceiling requires a restart. `rootDiskSize` changes are offline: managed and flat OCI root disks grow only, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected. Env and workdir changes affect future execs only. On a stopped sandbox, changes are saved for the next boot.
 
 A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and the returned plan's `resizeStatus` reports when the sandbox has finished adjusting. See [`SandboxModificationPlan`](#sandboxmodificationplan).
 
@@ -2049,7 +2050,7 @@ Async stream for receiving periodic metrics snapshots. Implements `AsyncDisposab
 
 <p className="msb-backref">Used by <a href="#sandbox-modify">modify()</a></p>
 
-A requested sandbox modification. Omitted fields are left unchanged. Secret changes are Rust-SDK and CLI only for now.
+A requested sandbox modification. Omitted fields are left unchanged.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -2057,6 +2058,7 @@ A requested sandbox modification. Omitted fields are left unchanged. Secret chan
 | maxCpus | `number` | Boot-time maximum possible vCPUs (restart-backed) |
 | memory | `number` | Desired effective guest memory in MiB. Live when within the booted `maxMemory` |
 | maxMemory | `number` | Boot-time maximum hotpluggable memory in MiB (restart-backed) |
+| rootDiskSize | `number` | Desired root disk size in MiB. Managed and flat OCI disks are grow-only; applies on restart or next start |
 | env | `Record<string, string>` | Environment variables to set for future execs |
 | envRemove | `string[]` | Environment variable keys to remove |
 | labels | `Record<string, string>` | Labels to set |

@@ -4,6 +4,8 @@
 #![allow(clippy::module_inception)]
 
 mod error;
+#[cfg(test)]
+mod test_support;
 
 //--------------------------------------------------------------------------------------------------
 // Exports
@@ -27,15 +29,16 @@ pub use agent::{
     RawFrame, StreamHandle,
 };
 pub use backend::{
-    Backend, BackendKind, CloudBackend, CloudBackendBuilder, CloudCreateSandboxRequest,
-    CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails, CloudMessageResponse,
-    CloudPaginated, CloudSandboxStatus, CloudSandboxStatusReason, CloudVolumeKind,
-    CloudVolumeStatus, DEFAULT_CLOUD_API_URL, LocalBackend, LocalBackendBuilder, Profile,
-    ProfileBackend, SandboxBackend, SandboxCloudState, SandboxHandleCloudState, SandboxHandleInner,
-    SandboxHandleLocalState, SandboxInner, SandboxLocalState, SdkConfig, VolumeBackend,
-    VolumeCloudState, VolumeHandleCloudState, VolumeHandleInner, VolumeHandleLocalState,
-    VolumeInner, VolumeLocalState, default_backend, load_sdk_config, resolve_default_backend,
-    set_default_backend, swap_default_backend, with_backend,
+    Backend, BackendInfo, BackendKind, BackendSelectionSource, CloudBackend, CloudBackendBuilder,
+    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
+    CloudMessageResponse, CloudPaginated, CloudSandboxStatus, CloudSandboxStatusReason,
+    CloudVolumeKind, CloudVolumeStatus, DEFAULT_CLOUD_API_URL, LocalBackend, LocalBackendBuilder,
+    Profile, ProfileBackend, SandboxBackend, SandboxCloudState, SandboxHandleCloudState,
+    SandboxHandleInner, SandboxHandleLocalState, SandboxInner, SandboxLocalState, SdkConfig,
+    VolumeBackend, VolumeCloudState, VolumeHandleCloudState, VolumeHandleInner,
+    VolumeHandleLocalState, VolumeInner, VolumeLocalState, default_backend, default_backend_info,
+    load_sdk_config, resolve_default_backend, set_default_backend, swap_default_backend,
+    with_backend,
 };
 pub use config::set_sdk_libkrunfw_path as set_libkrunfw_path;
 pub use error::*;

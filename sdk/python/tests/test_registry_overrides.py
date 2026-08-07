@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from microsandbox import InvalidConfigError, Sandbox
+from microsandbox import InvalidConfigError, RegistryAuth, Sandbox
 
 PEM = b"-----BEGIN CERTIFICATE-----\nQUJD\n-----END CERTIFICATE-----\n"
 
@@ -47,7 +47,7 @@ def test_accepts_auth_alongside_insecure_and_ca_certs(tmp_path: Path) -> None:
     # them must not drop any of the three.
     assert_kwargs_accepted(
         "registry-overrides-with-auth",
-        registry_auth={"username": "user", "password": "pass"},
+        registry_auth=RegistryAuth.basic("user", "pass"),
         registry_insecure=True,
         registry_ca_certs=[cert_file],
     )
@@ -72,6 +72,15 @@ async def test_overrides_survive_config_materialization() -> None:
 def test_rejects_non_bool_insecure() -> None:
     with pytest.raises(TypeError, match="registry_insecure must be a bool"):
         Sandbox.create("bad-insecure", image=MISSING_IMAGE, registry_insecure="yes")
+
+
+def test_rejects_raw_registry_auth_mapping() -> None:
+    with pytest.raises(TypeError, match="RegistryAuth"):
+        Sandbox.create(
+            "bad-registry-auth",
+            image=MISSING_IMAGE,
+            registry_auth={"username": "user", "password": "pass"},
+        )
 
 
 def test_rejects_non_list_ca_certs() -> None:

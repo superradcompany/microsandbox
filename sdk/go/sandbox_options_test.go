@@ -265,6 +265,21 @@ func TestFFIWireShape_WithRootDiskImage(t *testing.T) {
 	}
 }
 
+func TestFFIWireShape_WithRootDiskFlat(t *testing.T) {
+	got := marshalCreateOptions(t,
+		WithImage("python:3.12"),
+		WithRootDisk(RootDisk.Flat(RootDiskFlatOptions{
+			SizeMiB: 8192,
+			Fstype:  "ext4",
+			Clone:   FlatCloneReflink,
+		})),
+	)
+	rd := mustField(t, got, "root_disk").(map[string]any)
+	if rd["kind"] != "flat" || rd["size_mib"] != float64(8192) || rd["fstype"] != "ext4" || rd["clone"] != "reflink" {
+		t.Fatalf("root_disk = %v, want flat ext4 reflink fields", rd)
+	}
+}
+
 func TestFFIWireShape_WithOCIUpperSize(t *testing.T) {
 	got := marshalCreateOptions(t, WithImage("python:3.12"), WithOCIUpperSize(8192))
 	rd := mustField(t, got, "root_disk").(map[string]any)
@@ -572,6 +587,16 @@ func TestFFIWireShape_SecurityProfile(t *testing.T) {
 	)
 	if got["security_profile"] != "restricted" {
 		t.Fatalf("security_profile = %v", got["security_profile"])
+	}
+}
+
+func TestFFIWireShape_DeploymentProfile(t *testing.T) {
+	got := marshalCreateOptions(t,
+		WithImage("alpine"),
+		WithDeploymentProfile(DeploymentProfileMultiTenant),
+	)
+	if got["deployment_profile"] != "multi-tenant" {
+		t.Fatalf("deployment_profile = %v", got["deployment_profile"])
 	}
 }
 

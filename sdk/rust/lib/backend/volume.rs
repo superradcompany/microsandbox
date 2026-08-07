@@ -7,9 +7,8 @@
 //! inside each backend's trait impl and wrapped with the `Arc<dyn Backend>`
 //! the caller passes in.
 //!
-//! Cloud volumes support create / get / list / remove. Volume filesystem ops
-//! stay `Unsupported` on cloud — volume contents are reached by mounting the
-//! volume into a sandbox.
+//! Cloud volumes support create / get / list / remove plus direct filesystem
+//! operations. Default-volume lookup is Cloud-only by design.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -151,17 +150,15 @@ pub struct VolumeHandleCloudState {
     pub updated_at: DateTime<Utc>,
 }
 
-/// Resource-specific backend for volume lifecycle + host-side filesystem ops.
+/// Resource-specific backend for volume lifecycle and filesystem operations.
 ///
 /// Trait methods take the [`Arc<dyn Backend>`] that they should wrap any
 /// returned [`Volume`] / [`VolumeHandle`] with. Callers (e.g. `Volume::create`)
 /// resolve the backend via [`default_backend`](super::default_backend) and
 /// forward it through.
 ///
-/// Cloud-side `fs_*` ops ultimately route through msb-cloud HTTP per the plan's
-/// D9, but in this commit cloud returns
-/// [`MicrosandboxError::Unsupported`](crate::MicrosandboxError::Unsupported) for
-/// every method — cloud volumes ship in Phase 6.
+/// Cloud-side `fs_*` operations route through msb-cloud HTTP while local
+/// operations remain scoped to the configured local volume root.
 pub trait VolumeBackend: Send + Sync {
     /// Create a volume. The returned outer [`Volume`] carries the supplied
     /// `backend` Arc and the variant-specific state inside [`VolumeInner`].
@@ -177,6 +174,12 @@ pub trait VolumeBackend: Send + Sync {
         backend: Arc<dyn Backend>,
         name: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<VolumeHandle>>;
+
+    /// Get the backend-provided default volume.
+    fn get_default(
+        &self,
+        backend: Arc<dyn Backend>,
+    ) -> BoxFuture<'_, MicrosandboxResult<VolumeHandle>>;
 
     /// List all volumes.
     fn list<'a>(
@@ -305,6 +308,18 @@ impl VolumeBackend for LocalBackend {
         Box::pin(async move { crate::volume::get_local(backend, name).await })
     }
 
+    fn get_default(
+        &self,
+        _backend: Arc<dyn Backend>,
+    ) -> BoxFuture<'_, MicrosandboxResult<VolumeHandle>> {
+        Box::pin(async move {
+            Err(crate::MicrosandboxError::unsupported(
+                crate::error::Operation::VolumeGetDefault,
+                crate::error::UnsupportedReason::CloudOnly,
+            ))
+        })
+    }
+
     fn list<'a>(
         &'a self,
         backend: Arc<dyn Backend>,
@@ -431,6 +446,31 @@ mod tests {
     use crate::MicrosandboxError;
     use crate::backend::{LocalBackend, set_default_backend};
     use crate::volume::VolumeConfig;
+
+    #[tokio::test]
+    async fn local_default_volume_lookup_fails_closed() {
+        let home = tempfile::tempdir().unwrap();
+        let backend: Arc<dyn Backend> = Arc::new(
+            LocalBackend::builder()
+                .home(home.path())
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        let error = backend
+            .volumes()
+            .get_default(backend.clone())
+            .await
+            .expect_err("Local must never expose a default host volume");
+        assert!(matches!(
+            error,
+            MicrosandboxError::Unsupported {
+                op: crate::error::Operation::VolumeGetDefault,
+                reason: crate::error::UnsupportedReason::CloudOnly,
+            }
+        ));
+    }
 
     /// Regression test for the asymmetric-signature P1: `LocalBackend::remove`
     /// must operate on the passed-in `backend` Arc, not on the process-wide

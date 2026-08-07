@@ -374,6 +374,14 @@ describe("SandboxBuilder.build", () => {
     expect(cfg.securityProfile).toBe("restricted");
   });
 
+  it("sets the host-runtime deployment profile", async () => {
+    const cfg = await Sandbox.builder("x")
+      .image("alpine")
+      .deploymentProfile("multi-tenant")
+      .build();
+    expect(cfg.deploymentProfile).toBe("multi_tenant");
+  });
+
   it("sets lifecycle ephemeral policy", async () => {
     const cfg = await Sandbox.builder("x")
       .image("alpine")
@@ -588,6 +596,11 @@ describe("ImageBuilder root disk", () => {
   it("accepts a disk-image root disk via the builder callback", () => {
     const i = new ImageBuilder().oci("python:3.12");
     expect(i.rootDisk((d) => d.disk("./scratch.img").format("raw").fstype("ext4"))).toBe(i);
+  });
+
+  it("accepts a flat root disk via the builder callback", () => {
+    const i = new ImageBuilder().oci("python:3.12");
+    expect(i.rootDisk((d) => d.flat().size(8192).cloneStrategy("reflink"))).toBe(i);
   });
 
   it("rejects an unknown disk-image format eagerly", () => {

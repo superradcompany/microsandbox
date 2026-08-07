@@ -213,6 +213,7 @@ pub fn create_interface(device: &mut SmoltcpDevice, config: &PollLoopConfig) -> 
 /// * `config` - Resolved per-sandbox parameters (gateway / guest MAC + IPv4 + IPv6, MTU).
 /// * `network_policy` - User-provided egress policy. Evaluated against the sandbox's
 ///   gateway IPs (stored on [`SharedState`]) so `DestinationGroup::Host` rules match.
+/// * `platform_policy` - Optional host-owned policy floor. Traffic must pass both policies.
 /// * `dns_config` - DNS interception settings (block lists, upstreams, timeout).
 /// * `tls_state` - Optional TLS MITM state; drives interception of intercepted ports and DoT
 ///   when present.
@@ -227,6 +228,7 @@ pub fn smoltcp_poll_loop(
     shared: Arc<SharedState>,
     config: PollLoopConfig,
     network_policy: NetworkPolicy,
+    platform_policy: Option<NetworkPolicy>,
     dns_config: DnsConfig,
     tls_state: Option<Arc<TlsState>>,
     published_ports: Vec<PublishedPort>,
@@ -257,6 +259,7 @@ pub fn smoltcp_poll_loop(
     // so `DestinationGroup::Host` rules can resolve to the right address.
     shared.set_gateway_ips(config.gateway.ipv4, config.gateway.ipv6);
     let network_policy = Arc::new(network_policy);
+    let platform_policy = platform_policy.map(Arc::new);
 
     let (mut dns_interceptor, dns_forwarder_handle) = DnsInterceptor::new(
         &mut sockets,
@@ -265,6 +268,7 @@ pub fn smoltcp_poll_loop(
         &tokio_handle,
         gateway_ips,
         network_policy.clone(),
+        platform_policy.clone(),
         config.gateway,
         config.gateway_mac,
         config.guest_mac,
@@ -328,12 +332,23 @@ pub fn smoltcp_poll_loop(
 
         // ── Phase 1: Drain all guest frames with pre-inspection ──────────
         while let Some(frame) = device.stage_next_frame() {
-            if handle_gateway_icmp_echo(frame, &config, &shared, &network_policy) {
+            if handle_gateway_icmp_echo(
+                frame,
+                &config,
+                &shared,
+                &network_policy,
+                platform_policy.as_deref(),
+            ) {
                 device.drop_staged_frame();
                 continue;
             }
 
-            if icmp_relay.relay_outbound_if_echo(frame, &config, &network_policy) {
+            if icmp_relay.relay_outbound_if_echo(
+                frame,
+                &config,
+                &network_policy,
+                platform_policy.as_deref(),
+            ) {
                 device.drop_staged_frame();
                 continue;
             }
@@ -372,15 +387,23 @@ pub fn smoltcp_poll_loop(
                         }
                         // Other: regular outbound — defer Domain rules to first-flight;
                         // accept unless an IP-layer rule denies.
-                        DnsPortType::Other => match network_policy.evaluate_egress_with_source(
-                            dst,
-                            Protocol::Tcp,
-                            &shared,
-                            HostnameSource::Deferred,
-                        ) {
-                            EgressEvaluation::Allow | EgressEvaluation::DeferUntilHostname => true,
-                            EgressEvaluation::Deny => false,
-                        },
+                        DnsPortType::Other => {
+                            let platform_allows = platform_policy.as_deref().is_none_or(|policy| {
+                                policy
+                                    .evaluate_egress(dst, Protocol::Tcp, &shared)
+                                    .is_allow()
+                            });
+                            platform_allows
+                                && matches!(
+                                    network_policy.evaluate_egress_with_source(
+                                        dst,
+                                        Protocol::Tcp,
+                                        &shared,
+                                        HostnameSource::Deferred,
+                                    ),
+                                    EgressEvaluation::Allow | EgressEvaluation::DeferUntilHostname
+                                )
+                        }
                     };
                     if allow && !conn_tracker.has_socket_for(&src, &dst) {
                         conn_tracker.create_tcp_socket(src, dst, &mut sockets);
@@ -397,6 +420,7 @@ pub fn smoltcp_poll_loop(
                         dst,
                         &config,
                         &network_policy,
+                        platform_policy.as_deref(),
                         &shared,
                         &mut port_publisher,
                         tls_state.as_deref(),
@@ -415,6 +439,7 @@ pub fn smoltcp_poll_loop(
                             &mut sockets,
                             &config,
                             &network_policy,
+                            platform_policy.as_deref(),
                             &shared,
                             &mut port_publisher,
                             tls_state.as_deref(),
@@ -435,6 +460,7 @@ pub fn smoltcp_poll_loop(
                             &mut sockets,
                             &config,
                             &network_policy,
+                            platform_policy.as_deref(),
                             &shared,
                             &mut port_publisher,
                             tls_state.as_deref(),
@@ -686,6 +712,7 @@ fn relay_udp_frame(
     dst: SocketAddr,
     config: &PollLoopConfig,
     network_policy: &NetworkPolicy,
+    platform_policy: Option<&NetworkPolicy>,
     shared: &Arc<SharedState>,
     port_publisher: &mut PortPublisher,
     tls_state: Option<&TlsState>,
@@ -717,9 +744,11 @@ fn relay_udp_frame(
     }
 
     // Policy is applied after reassembly, when the UDP destination port is known.
-    if network_policy
-        .evaluate_egress(dst, Protocol::Udp, shared)
-        .is_deny()
+    if platform_policy
+        .is_some_and(|policy| policy.evaluate_egress(dst, Protocol::Udp, shared).is_deny())
+        || network_policy
+            .evaluate_egress(dst, Protocol::Udp, shared)
+            .is_deny()
     {
         return;
     }
@@ -740,6 +769,7 @@ fn handle_reassembled_udp_datagram(
     sockets: &mut SocketSet<'_>,
     config: &PollLoopConfig,
     network_policy: &NetworkPolicy,
+    platform_policy: Option<&NetworkPolicy>,
     shared: &Arc<SharedState>,
     port_publisher: &mut PortPublisher,
     tls_state: Option<&TlsState>,
@@ -757,6 +787,7 @@ fn handle_reassembled_udp_datagram(
         datagram.dst,
         config,
         network_policy,
+        platform_policy,
         shared,
         port_publisher,
         tls_state,
@@ -809,6 +840,7 @@ fn handle_gateway_icmp_echo(
     config: &PollLoopConfig,
     shared: &SharedState,
     network_policy: &NetworkPolicy,
+    platform_policy: Option<&NetworkPolicy>,
 ) -> bool {
     let Ok(eth) = EthernetFrame::new_checked(frame) else {
         return false;
@@ -823,11 +855,23 @@ fn handle_gateway_icmp_echo(
         return false;
     };
 
-    if network_policy
+    // This path bypasses the normal proxy evaluators, so it must independently
+    // satisfy both the tenant policy and the optional host-owned policy floor.
+    let tenant_denied = network_policy
         .evaluate_egress_ip(reply.dst, reply.protocol, shared)
-        .is_deny()
-    {
-        tracing::debug!(dst = %reply.dst, "gateway ICMP echo denied by policy");
+        .is_deny();
+    let platform_denied = platform_policy.is_some_and(|policy| {
+        policy
+            .evaluate_egress_ip(reply.dst, reply.protocol, shared)
+            .is_deny()
+    });
+    if tenant_denied || platform_denied {
+        tracing::debug!(
+            dst = %reply.dst,
+            tenant_denied,
+            platform_denied,
+            "gateway ICMP echo denied by policy",
+        );
         return true;
     }
 
@@ -1316,7 +1360,13 @@ mod tests {
             now: Instant,
         ) {
             let frame = device.stage_next_frame().expect("expected staged frame");
-            if handle_gateway_icmp_echo(frame, poll_config, shared, &NetworkPolicy::allow_all()) {
+            if handle_gateway_icmp_echo(
+                frame,
+                poll_config,
+                shared,
+                &NetworkPolicy::allow_all(),
+                None,
+            ) {
                 device.drop_staged_frame();
                 return;
             }
@@ -1438,12 +1488,51 @@ mod tests {
             &frame,
             &poll_config,
             &shared,
-            &policy
+            &policy,
+            None,
         ));
         assert!(
             shared.rx_ring.pop().is_none(),
             "denied gateway ICMP should not queue a reply"
         );
+    }
+
+    #[test]
+    fn platform_public_floor_consumes_gateway_echo_without_replying() {
+        let shared = SharedState::new(4);
+        let gateway = Ipv4Addr::new(100, 96, 0, 1);
+        let guest = Ipv4Addr::new(100, 96, 0, 2);
+        shared.set_gateway_ips(Some(gateway), None);
+        let config = PollLoopConfig {
+            gateway_mac: [0x02, 0, 0, 0, 0, 1],
+            guest_mac: [0x02, 0, 0, 0, 0, 2],
+            gateway: GatewayIps {
+                ipv4: Some(gateway),
+                ipv6: None,
+            },
+            guest_ipv4: Some(guest),
+            guest_ipv6: None,
+            mtu: 1500,
+        };
+        let frame = build_icmpv4_echo_frame(
+            config.guest_mac,
+            config.gateway_mac,
+            guest.octets(),
+            gateway.octets(),
+            1,
+            1,
+            b"ping",
+        );
+        let platform = NetworkPolicy::from_profiles([crate::policy::NetworkProfile::Public]);
+
+        assert!(handle_gateway_icmp_echo(
+            &frame,
+            &config,
+            &shared,
+            &NetworkPolicy::allow_all(),
+            Some(&platform),
+        ));
+        assert!(shared.rx_ring.pop().is_none());
     }
 
     fn test_gateway() -> GatewayIps {
@@ -1502,7 +1591,13 @@ mod tests {
             now: Instant,
         ) {
             let frame = device.stage_next_frame().expect("expected staged frame");
-            if handle_gateway_icmp_echo(frame, poll_config, shared, &NetworkPolicy::allow_all()) {
+            if handle_gateway_icmp_echo(
+                frame,
+                poll_config,
+                shared,
+                &NetworkPolicy::allow_all(),
+                None,
+            ) {
                 device.drop_staged_frame();
                 return;
             }

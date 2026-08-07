@@ -1,5 +1,6 @@
 //! Global on-disk image and layer cache.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use oci_client::Reference;
@@ -9,6 +10,7 @@ use sha2::{Digest as Sha2Digest, Sha256};
 use crate::{
     config::ImageConfig,
     digest::Digest,
+    erofs::ErofsReader,
     error::{ImageError, ImageResult},
 };
 
@@ -24,6 +26,12 @@ const FSMETA_DIR: &str = "fsmeta";
 
 /// Subdirectory for VMDK descriptors (keyed by manifest digest).
 const VMDK_DIR: &str = "vmdk";
+
+/// Root directory for reusable flat ext4 artifacts.
+const FLAT_DIR: &str = "flat";
+const FLAT_REFS_DIR: &str = "refs";
+const FLAT_BLOBS_DIR: &str = "blobs";
+const FLAT_LOCKS_DIR: &str = "locks";
 
 /// Subdirectory for cached manifest + config metadata.
 const MANIFESTS_DIR: &str = "manifests";
@@ -53,6 +61,7 @@ const EROFS_ALIGNMENT_BYTES: u64 = 4096;
 /// ~/.microsandbox/cache/vmdk/<manifest_safe>.vmdk            # VMDK descriptor
 /// ~/.microsandbox/cache/vmdk/<manifest_safe>.vmdk.lock       # materialization flock
 /// ```
+#[derive(Clone)]
 pub struct GlobalCache {
     /// Root of the layer EROFS cache (`~/.microsandbox/cache/layers/`).
     layers_dir: PathBuf,
@@ -62,6 +71,15 @@ pub struct GlobalCache {
 
     /// Root of the VMDK descriptor cache (`~/.microsandbox/cache/vmdk/`).
     vmdk_dir: PathBuf,
+
+    /// Manifest-keyed references to immutable flat artifacts.
+    flat_refs_dir: PathBuf,
+
+    /// Content-addressed immutable raw ext4 artifacts.
+    flat_blobs_dir: PathBuf,
+
+    /// Per-derivation materialization locks.
+    flat_locks_dir: PathBuf,
 
     /// Root of the manifest metadata cache (`~/.microsandbox/cache/manifests/`).
     manifests_dir: PathBuf,
@@ -100,6 +118,29 @@ pub struct CachedLayerMetadata {
     pub diff_id: String,
 }
 
+/// Manifest-keyed reference to one validated immutable flat rootfs artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlatRootfsRef {
+    /// Reference schema version.
+    pub schema: u32,
+    /// Resolved OCI manifest digest used as the requested input.
+    pub manifest_digest: String,
+    /// Complete derivation digest including platform and materializer profile.
+    pub derivation_digest: String,
+    /// SHA-256 digest of the validated raw ext4 bytes.
+    pub artifact_digest: String,
+    /// Pure-Rust materializer ABI.
+    pub materializer_abi: u32,
+    /// Deterministic ext4 UUID as lowercase hexadecimal.
+    pub uuid: String,
+    /// Logical sparse image size.
+    pub virtual_size_bytes: u64,
+    /// Unique inode count in the materialized rootfs.
+    pub inode_count: u64,
+    /// Unique regular-file content bytes.
+    pub content_bytes: u64,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -112,6 +153,10 @@ impl GlobalCache {
         let layers_dir = cache_dir.join(LAYERS_DIR);
         let fsmeta_dir = cache_dir.join(FSMETA_DIR);
         let vmdk_dir = cache_dir.join(VMDK_DIR);
+        let flat_dir = cache_dir.join(FLAT_DIR);
+        let flat_refs_dir = flat_dir.join(FLAT_REFS_DIR);
+        let flat_blobs_dir = flat_dir.join(FLAT_BLOBS_DIR);
+        let flat_locks_dir = flat_dir.join(FLAT_LOCKS_DIR);
         let manifests_dir = cache_dir.join(MANIFESTS_DIR);
         let tmp_dir = cache_dir.join(TMP_DIR);
 
@@ -119,6 +164,9 @@ impl GlobalCache {
             &layers_dir,
             &fsmeta_dir,
             &vmdk_dir,
+            &flat_refs_dir,
+            &flat_blobs_dir,
+            &flat_locks_dir,
             &manifests_dir,
             &tmp_dir,
         ] {
@@ -132,6 +180,9 @@ impl GlobalCache {
             layers_dir,
             fsmeta_dir,
             vmdk_dir,
+            flat_refs_dir,
+            flat_blobs_dir,
+            flat_locks_dir,
             manifests_dir,
             tmp_dir,
         })
@@ -142,6 +193,10 @@ impl GlobalCache {
         let layers_dir = cache_dir.join(LAYERS_DIR);
         let fsmeta_dir = cache_dir.join(FSMETA_DIR);
         let vmdk_dir = cache_dir.join(VMDK_DIR);
+        let flat_dir = cache_dir.join(FLAT_DIR);
+        let flat_refs_dir = flat_dir.join(FLAT_REFS_DIR);
+        let flat_blobs_dir = flat_dir.join(FLAT_BLOBS_DIR);
+        let flat_locks_dir = flat_dir.join(FLAT_LOCKS_DIR);
         let manifests_dir = cache_dir.join(MANIFESTS_DIR);
         let tmp_dir = cache_dir.join(TMP_DIR);
 
@@ -149,6 +204,9 @@ impl GlobalCache {
             &layers_dir,
             &fsmeta_dir,
             &vmdk_dir,
+            &flat_refs_dir,
+            &flat_blobs_dir,
+            &flat_locks_dir,
             &manifests_dir,
             &tmp_dir,
         ] {
@@ -164,6 +222,9 @@ impl GlobalCache {
             layers_dir,
             fsmeta_dir,
             vmdk_dir,
+            flat_refs_dir,
+            flat_blobs_dir,
+            flat_locks_dir,
             manifests_dir,
             tmp_dir,
         })
@@ -244,6 +305,137 @@ impl GlobalCache {
     /// Check if a VMDK descriptor exists for a given manifest digest.
     pub fn is_vmdk_materialized(&self, manifest_digest: &Digest) -> bool {
         self.vmdk_path(manifest_digest).exists()
+    }
+
+    // ── Flat ext4 artifact paths (manifest ref → content blob) ───────
+
+    /// Path to the manifest-keyed flat rootfs reference.
+    pub fn flat_ref_path(&self, manifest_digest: &Digest) -> PathBuf {
+        self.flat_refs_dir
+            .join(format!("{}.json", manifest_digest.to_path_safe()))
+    }
+
+    /// Path to the immutable content-addressed raw ext4 artifact.
+    pub fn flat_blob_path(&self, artifact_digest: &Digest) -> PathBuf {
+        self.flat_blobs_dir
+            .join(format!("{}.raw", artifact_digest.to_path_safe()))
+    }
+
+    /// Path to the per-derivation flat materialization lock.
+    pub fn flat_lock_path(&self, derivation_digest: &Digest) -> PathBuf {
+        self.flat_locks_dir
+            .join(format!("{}.lock", derivation_digest.to_path_safe()))
+    }
+
+    /// Same-filesystem work directory for one flat-rootfs derivation.
+    pub fn flat_work_dir(&self, derivation_digest: &Digest) -> PathBuf {
+        self.tmp_dir
+            .join(format!("{}.flat.work", derivation_digest.to_path_safe()))
+    }
+
+    /// Publish a synchronized candidate as an immutable content-addressed blob.
+    pub fn publish_flat_blob(
+        &self,
+        candidate: &Path,
+        artifact_digest: &Digest,
+        expected_size: u64,
+    ) -> ImageResult<PathBuf> {
+        let destination = self.flat_blob_path(artifact_digest);
+        if let Ok(metadata) = std::fs::metadata(&destination) {
+            if metadata.len() != expected_size {
+                return Err(ImageError::Cache {
+                    path: destination,
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "content-addressed flat blob has an unexpected size",
+                    ),
+                });
+            }
+            if flat_blob_matches_digest(&destination, artifact_digest)? {
+                let _ = std::fs::remove_file(candidate);
+                return Ok(destination);
+            }
+
+            // A content-addressed name must never retain different bytes. The
+            // candidate has already been synchronized and validated, while a
+            // missing destination makes every existing ref safely miss after
+            // a crash between removal and rename.
+            std::fs::remove_file(&destination).map_err(|source| ImageError::Cache {
+                path: destination.clone(),
+                source,
+            })?;
+        }
+        std::fs::rename(candidate, &destination).map_err(|source| ImageError::Cache {
+            path: destination.clone(),
+            source,
+        })?;
+        sync_directory(&self.flat_blobs_dir)?;
+        Ok(destination)
+    }
+
+    /// Read and validate the manifest-keyed flat rootfs reference.
+    pub fn read_flat_ref(&self, manifest_digest: &Digest) -> ImageResult<Option<FlatRootfsRef>> {
+        let path = self.flat_ref_path(manifest_digest);
+        let data = match std::fs::read_to_string(&path) {
+            Ok(data) => data,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(ImageError::Cache { path, source }),
+        };
+        let reference = match serde_json::from_str::<FlatRootfsRef>(&data) {
+            Ok(reference)
+                if reference.schema == 1
+                    && reference.manifest_digest == manifest_digest.to_string() =>
+            {
+                reference
+            }
+            Ok(_) => return Ok(None),
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "corrupt flat rootfs ref, ignoring");
+                return Ok(None);
+            }
+        };
+        let artifact_digest = match reference.artifact_digest.parse::<Digest>() {
+            Ok(digest) => digest,
+            Err(_) => return Ok(None),
+        };
+        let blob_path = self.flat_blob_path(&artifact_digest);
+        match std::fs::metadata(&blob_path) {
+            Ok(metadata) if metadata.len() == reference.virtual_size_bytes => Ok(Some(reference)),
+            Ok(_) | Err(_) => Ok(None),
+        }
+    }
+
+    /// Atomically replace a flat rootfs reference after its immutable blob is durable.
+    pub fn write_flat_ref(
+        &self,
+        manifest_digest: &Digest,
+        reference: &FlatRootfsRef,
+    ) -> ImageResult<()> {
+        let path = self.flat_ref_path(manifest_digest);
+        let temp_path = path.with_extension("json.part");
+        let payload = serde_json::to_vec_pretty(reference).map_err(|error| {
+            ImageError::ConfigParse(format!("failed to serialize flat rootfs ref: {error}"))
+        })?;
+        let mut temp = std::fs::File::create(&temp_path).map_err(|source| ImageError::Cache {
+            path: temp_path.clone(),
+            source,
+        })?;
+        use std::io::Write;
+        temp.write_all(&payload)
+            .map_err(|source| ImageError::Cache {
+                path: temp_path.clone(),
+                source,
+            })?;
+        temp.sync_all().map_err(|source| ImageError::Cache {
+            path: temp_path.clone(),
+            source,
+        })?;
+        std::fs::rename(&temp_path, &path).map_err(|source| ImageError::Cache {
+            path: path.clone(),
+            source,
+        })?;
+        sync_directory(&self.flat_refs_dir)?;
+        Ok(())
     }
 
     // ── Staging/tmp paths (downloads, work dirs) ─────────────────────
@@ -407,6 +599,23 @@ fn image_cache_key(reference: &Reference) -> String {
     hex::encode(hasher.finalize())
 }
 
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> ImageResult<()> {
+    let directory = std::fs::File::open(path).map_err(|source| ImageError::Cache {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    directory.sync_all().map_err(|source| ImageError::Cache {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> ImageResult<()> {
+    Ok(())
+}
+
 pub(crate) fn parse_cached_image_metadata(
     path: &Path,
     data: &str,
@@ -425,21 +634,155 @@ pub(crate) fn parse_cached_image_metadata(
 }
 
 pub(crate) fn is_valid_erofs_artifact(path: &Path) -> bool {
-    match std::fs::metadata(path) {
-        Ok(meta) => {
-            let len = meta.len();
-            len > 0 && len % EROFS_ALIGNMENT_BYTES == 0
-        }
-        Err(_) => false,
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    let len = meta.len();
+    if !meta.is_file() || len == 0 || len % EROFS_ALIGNMENT_BYTES != 0 {
+        return false;
     }
+
+    // Length alone accepts any aligned garbage as a cache hit. Parse the
+    // superblock and root inode so corrupt cached layers are re-materialized
+    // instead of failing later while composing a flat rootfs or booting a VM.
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let Ok(mut reader) = ErofsReader::new(file) else {
+        return false;
+    };
+    reader.root_directory_metadata().is_ok()
 }
 
 pub(crate) async fn is_valid_erofs_artifact_async(path: &Path) -> bool {
-    match tokio::fs::metadata(path).await {
-        Ok(meta) => {
-            let len = meta.len();
-            len > 0 && len % EROFS_ALIGNMENT_BYTES == 0
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || is_valid_erofs_artifact(&path))
+        .await
+        .unwrap_or(false)
+}
+
+fn flat_blob_matches_digest(path: &Path, expected: &Digest) -> ImageResult<bool> {
+    let mut file = std::fs::File::open(path).map_err(|source| ImageError::Cache {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 1024 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|source| ImageError::Cache {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if read == 0 {
+            break;
         }
-        Err(_) => false,
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("sha256:{}", hex::encode(hasher.finalize())) == expected.to_string())
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn digest(byte: char) -> Digest {
+        format!("sha256:{}", byte.to_string().repeat(64))
+            .parse()
+            .unwrap()
+    }
+
+    #[test]
+    fn flat_cache_separates_manifest_refs_from_content_blobs() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = GlobalCache::new(directory.path()).unwrap();
+        let manifest = digest('a');
+        let derivation = digest('b');
+        let artifact = digest('c');
+
+        assert!(cache.flat_ref_path(&manifest).ends_with(
+            "flat/refs/sha256_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"
+        ));
+        assert!(cache.flat_blob_path(&artifact).ends_with(
+            "flat/blobs/sha256_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.raw"
+        ));
+        assert!(cache.flat_lock_path(&derivation).ends_with(
+            "flat/locks/sha256_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.lock"
+        ));
+
+        let blob_path = cache.flat_blob_path(&artifact);
+        let blob = std::fs::File::create(&blob_path).unwrap();
+        blob.set_len(4096).unwrap();
+        let reference = FlatRootfsRef {
+            schema: 1,
+            manifest_digest: manifest.to_string(),
+            derivation_digest: derivation.to_string(),
+            artifact_digest: artifact.to_string(),
+            materializer_abi: 1,
+            uuid: "00".repeat(16),
+            virtual_size_bytes: 4096,
+            inode_count: 2,
+            content_bytes: 7,
+        };
+        cache.write_flat_ref(&manifest, &reference).unwrap();
+
+        assert_eq!(cache.read_flat_ref(&manifest).unwrap(), Some(reference));
+    }
+
+    #[test]
+    fn aligned_garbage_is_not_a_valid_erofs_cache_artifact() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("corrupt.erofs");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(EROFS_ALIGNMENT_BYTES).unwrap();
+
+        assert!(!is_valid_erofs_artifact(&path));
+    }
+
+    #[test]
+    fn flat_ref_must_name_the_manifest_that_indexes_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = GlobalCache::new(directory.path()).unwrap();
+        let indexed_manifest = digest('a');
+        let wrong_manifest = digest('b');
+        let artifact = digest('c');
+        std::fs::write(cache.flat_blob_path(&artifact), [0u8; 8]).unwrap();
+        let reference = FlatRootfsRef {
+            schema: 1,
+            manifest_digest: wrong_manifest.to_string(),
+            derivation_digest: digest('d').to_string(),
+            artifact_digest: artifact.to_string(),
+            materializer_abi: 1,
+            uuid: "00".repeat(16),
+            virtual_size_bytes: 8,
+            inode_count: 2,
+            content_bytes: 0,
+        };
+        cache.write_flat_ref(&indexed_manifest, &reference).unwrap();
+
+        assert_eq!(cache.read_flat_ref(&indexed_manifest).unwrap(), None);
+    }
+
+    #[test]
+    fn publishing_replaces_same_size_blob_with_wrong_content() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = GlobalCache::new(directory.path()).unwrap();
+        let candidate = directory.path().join("candidate.raw");
+        let expected_bytes = b"good";
+        std::fs::write(&candidate, expected_bytes).unwrap();
+        let expected: Digest = format!("sha256:{}", hex::encode(Sha256::digest(expected_bytes)))
+            .parse()
+            .unwrap();
+        let destination = cache.flat_blob_path(&expected);
+        std::fs::write(&destination, b"evil").unwrap();
+
+        cache
+            .publish_flat_blob(&candidate, &expected, expected_bytes.len() as u64)
+            .unwrap();
+
+        assert_eq!(std::fs::read(destination).unwrap(), expected_bytes);
     }
 }

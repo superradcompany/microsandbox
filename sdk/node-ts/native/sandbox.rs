@@ -27,6 +27,7 @@ use crate::types::*;
 #[napi]
 pub struct Sandbox {
     inner: Arc<Mutex<Option<microsandbox::sandbox::Sandbox>>>,
+    backend_kind: &'static str,
 }
 
 /// One page returned by `Sandbox.list` / `Sandbox.listWith`.
@@ -70,8 +71,10 @@ pub struct JsLogStream {
 
 impl Sandbox {
     pub fn from_rust(inner: microsandbox::sandbox::Sandbox) -> Self {
+        let backend_kind = inner.backend_kind().as_str();
         Sandbox {
             inner: Arc::new(Mutex::new(Some(inner))),
+            backend_kind,
         }
     }
 }
@@ -90,9 +93,7 @@ impl Sandbox {
         let inner = microsandbox::sandbox::Sandbox::start(&name)
             .await
             .map_err(to_napi_error)?;
-        Ok(Sandbox {
-            inner: Arc::new(Mutex::new(Some(inner))),
-        })
+        Ok(Sandbox::from_rust(inner))
     }
 
     /// Start an existing stopped sandbox (detached mode).
@@ -103,9 +104,7 @@ impl Sandbox {
         let inner = microsandbox::sandbox::Sandbox::start_detached(&name)
             .await
             .map_err(to_napi_error)?;
-        Ok(Sandbox {
-            inner: Arc::new(Mutex::new(Some(inner))),
-        })
+        Ok(Sandbox::from_rust(inner))
     }
 
     //----------------------------------------------------------------------------------------------
@@ -166,6 +165,12 @@ impl Sandbox {
     //----------------------------------------------------------------------------------------------
     // Properties
     //----------------------------------------------------------------------------------------------
+
+    /// Backend retained by this sandbox (`"local"` or `"cloud"`).
+    #[napi(getter)]
+    pub fn backend_kind(&self) -> &'static str {
+        self.backend_kind
+    }
 
     /// Sandbox name. Names are limited to 128 UTF-8 bytes.
     #[napi(getter)]
@@ -893,6 +898,7 @@ pub(crate) fn configure_modify(
         max_cpus: options.max_cpus.map(cpu_count_u8).transpose()?,
         memory_mib: options.memory_mib,
         max_memory_mib: options.max_memory_mib,
+        root_disk_size_mib: options.root_disk_size_mib,
         env: env_pairs
             .into_iter()
             .map(|(key, value)| EnvVar::new(key, value))
@@ -903,8 +909,6 @@ pub(crate) fn configure_modify(
         workdir: options.workdir.clone(),
         secrets,
         secrets_remove: options.secrets_remove.clone().unwrap_or_default(),
-        // Patch fields without an option surface here stay unset.
-        ..Default::default()
     };
 
     let builder = builder.with_patch(patch);

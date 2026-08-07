@@ -18,8 +18,8 @@ use super::{
     exec::{Rlimit, RlimitResource},
     init::{HandoffInit, InitOptionsBuilder},
     types::{
-        ImageBuilder, IntoImage, MountBuilder, Patch, PatchBuilder, RootDiskBuilder, RootfsSource,
-        SecurityProfile, VolumeMount,
+        DeploymentProfile, ImageBuilder, IntoImage, MountBuilder, Patch, PatchBuilder,
+        RootDiskBuilder, RootfsSource, SecurityProfile, VolumeMount,
     },
 };
 use crate::{
@@ -839,6 +839,15 @@ impl SandboxBuilder {
         self
     }
 
+    /// Set the host-runtime deployment profile.
+    ///
+    /// Managed backends may replace this request with a platform-owned profile
+    /// before launch. The cloud create wire does not transmit this value.
+    pub fn deployment_profile(mut self, profile: DeploymentProfile) -> Self {
+        self.config.spec.deployment_profile = profile;
+        self
+    }
+
     /// Add a volume mount using a closure-based builder.
     ///
     /// ```ignore
@@ -1300,6 +1309,31 @@ impl SandboxBuilder {
                 }
                 Ok(())
             }
+            Some(RootDisk::Flat {
+                size_mib, fstype, ..
+            }) => {
+                if *size_mib == Some(0) {
+                    return Err(crate::MicrosandboxError::InvalidConfig(
+                        "flat root disk size must be greater than 0".into(),
+                    ));
+                }
+                if fstype.as_deref().unwrap_or("ext4") != "ext4" {
+                    return Err(crate::MicrosandboxError::InvalidConfig(
+                        "flat root disks currently support only fstype=ext4".into(),
+                    ));
+                }
+                if !self.config.spec.patches.is_empty() {
+                    return Err(crate::MicrosandboxError::InvalidConfig(
+                        "patches are not yet compatible with flat OCI rootfs".into(),
+                    ));
+                }
+                if self.config.snapshot_upper_source.is_some() {
+                    return Err(crate::MicrosandboxError::InvalidConfig(
+                        "from_snapshot is not yet compatible with flat OCI rootfs".into(),
+                    ));
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -1332,9 +1366,20 @@ mod tests {
     use microsandbox_network::secrets::config::{HostPattern, SecretEntry, SecretInjection};
     #[cfg(feature = "net")]
     use microsandbox_types::PortProtocol;
-    use microsandbox_types::SandboxLogLevel;
+    use microsandbox_types::{DeploymentProfile, SandboxLogLevel};
     #[cfg(feature = "net")]
     use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn deployment_profile_sets_sandbox_spec() {
+        let builder =
+            SandboxBuilder::new("profile-test").deployment_profile(DeploymentProfile::MultiTenant);
+
+        assert_eq!(
+            builder.config.spec.deployment_profile,
+            DeploymentProfile::MultiTenant
+        );
+    }
 
     #[tokio::test]
     async fn test_builder_sets_runtime_log_level() {
@@ -1583,6 +1628,42 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("require a managed root disk"));
+    }
+
+    #[tokio::test]
+    async fn test_builder_accepts_flat_root_disk() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .root_disk_with(|disk| {
+                disk.flat()
+                    .size(8192u32)
+                    .clone_strategy(crate::sandbox::FlatClone::Copy)
+            })
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            config.spec.image.oci_root_disk(),
+            Some(&crate::sandbox::RootDisk::Flat {
+                size_mib: Some(8192),
+                fstype: None,
+                clone: crate::sandbox::FlatClone::Copy,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn test_builder_flat_root_disk_rejects_patches() {
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .root_disk_with(|disk| disk.flat())
+            .patch(|patch| patch.text("/etc/motd", "hello", None, true))
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("not yet compatible with flat"));
     }
 
     #[tokio::test]

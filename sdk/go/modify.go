@@ -34,7 +34,7 @@ const (
 )
 
 // ModifyOptions describes a requested sandbox modification. Zero-valued
-// fields are left unchanged (0 is not a valid CPU or memory size).
+// fields are left unchanged (0 is not a valid CPU, memory, or disk size).
 type ModifyOptions struct {
 	// CPUs sets the desired effective vCPU count.
 	CPUs uint8
@@ -47,6 +47,10 @@ type ModifyOptions struct {
 
 	// MaxMemoryMiB sets the desired boot-time maximum hotpluggable memory in MiB.
 	MaxMemoryMiB uint32
+
+	// RootDiskSizeMiB sets the desired root disk size in MiB. Managed and flat
+	// disks are grow-only.
+	RootDiskSizeMiB uint32
 
 	// Env sets environment variables for future execs.
 	Env map[string]string
@@ -202,17 +206,18 @@ type modifyEnvVar struct {
 
 // modifyPatch mirrors the core SandboxModificationPatch serde shape.
 type modifyPatch struct {
-	CPUs          *uint8         `json:"cpus,omitempty"`
-	MaxCPUs       *uint8         `json:"max_cpus,omitempty"`
-	MemoryMiB     *uint32        `json:"memory_mib,omitempty"`
-	MaxMemoryMiB  *uint32        `json:"max_memory_mib,omitempty"`
-	Env           []modifyEnvVar `json:"env,omitempty"`
-	EnvRemove     []string       `json:"env_remove,omitempty"`
-	Labels        [][2]string    `json:"labels,omitempty"`
-	LabelsRemove  []string       `json:"labels_remove,omitempty"`
-	Workdir       *string        `json:"workdir,omitempty"`
-	Secrets       []modifySecret `json:"secrets,omitempty"`
-	SecretsRemove []string       `json:"secrets_remove,omitempty"`
+	CPUs            *uint8         `json:"cpus,omitempty"`
+	MaxCPUs         *uint8         `json:"max_cpus,omitempty"`
+	MemoryMiB       *uint32        `json:"memory_mib,omitempty"`
+	MaxMemoryMiB    *uint32        `json:"max_memory_mib,omitempty"`
+	RootDiskSizeMiB *uint32        `json:"root_disk_size_mib,omitempty"`
+	Env             []modifyEnvVar `json:"env,omitempty"`
+	EnvRemove       []string       `json:"env_remove,omitempty"`
+	Labels          [][2]string    `json:"labels,omitempty"`
+	LabelsRemove    []string       `json:"labels_remove,omitempty"`
+	Workdir         *string        `json:"workdir,omitempty"`
+	Secrets         []modifySecret `json:"secrets,omitempty"`
+	SecretsRemove   []string       `json:"secrets_remove,omitempty"`
 }
 
 // modifySecret mirrors the core SecretModificationPatch serde shape. Value is
@@ -260,6 +265,9 @@ func buildModifyRequestJSON(opts ModifyOptions) (string, error) {
 	}
 	if opts.MaxMemoryMiB > 0 {
 		patch.MaxMemoryMiB = &opts.MaxMemoryMiB
+	}
+	if opts.RootDiskSizeMiB > 0 {
+		patch.RootDiskSizeMiB = &opts.RootDiskSizeMiB
 	}
 	for _, key := range sortedKeys(opts.Env) {
 		patch.Env = append(patch.Env, modifyEnvVar{Key: key, Value: opts.Env[key]})

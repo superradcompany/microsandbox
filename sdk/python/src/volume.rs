@@ -4,6 +4,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 
 use crate::error::to_py_err;
+use crate::helpers::{extract_str_enum, str_enum_member};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -35,14 +36,18 @@ impl PyVolume {
     fn create<'py>(
         py: Python<'py>,
         name: String,
-        kind: Option<String>,
+        kind: Option<Py<PyAny>>,
         size_mib: Option<u32>,
         quota_mib: Option<u32>,
         labels: Option<HashMap<String, String>>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let kind = kind
+            .as_ref()
+            .map(|value| extract_str_enum(value.bind(py), "VolumeKind"))
+            .transpose()?
+            .unwrap_or_else(|| "dir".to_string());
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut builder = microsandbox::Volume::builder(&name);
-            let kind = kind.unwrap_or_else(|| "dir".to_string());
             match kind.as_str() {
                 "dir" => {
                     builder = builder.directory();
@@ -95,6 +100,17 @@ impl PyVolume {
     fn get<'py>(py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let handle = microsandbox::Volume::get(&name).await.map_err(to_py_err)?;
+            Ok(PyVolumeHandle { inner: handle })
+        })
+    }
+
+    /// Get the cloud account's always-present default volume.
+    #[staticmethod]
+    fn get_default<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let handle = microsandbox::Volume::get_default()
+                .await
+                .map_err(to_py_err)?;
             Ok(PyVolumeHandle { inner: handle })
         })
     }
@@ -169,8 +185,8 @@ impl PyVolume {
     fn named(
         py: Python<'_>,
         name: String,
-        mode: Option<String>,
-        kind: Option<String>,
+        mode: Option<Py<PyAny>>,
+        kind: Option<Py<PyAny>>,
         size_mib: Option<u32>,
         quota_mib: Option<u32>,
         readonly: bool,
@@ -182,9 +198,11 @@ impl PyVolume {
         kwargs.set_item("kind", mount_kind(py, "NAMED")?)?;
         kwargs.set_item("named", name)?;
         if let Some(mode) = mode {
+            extract_str_enum(mode.bind(py), "NamedVolumeMode")?;
             kwargs.set_item("named_mode", mode)?;
         }
         if let Some(kind) = kind {
+            extract_str_enum(kind.bind(py), "VolumeKind")?;
             kwargs.set_item("named_kind", kind)?;
         }
         if let Some(size_mib) = size_mib {
@@ -225,8 +243,8 @@ impl PyVolume {
 
     /// Create a disk-image volume mount config.
     ///
-    /// `format` is the disk image format (`"qcow2"` / `"raw"` / `"vmdk"`).
-    /// When omitted it is inferred from the file extension. `fstype`
+    /// `format` is a `DiskImageFormat` member. When omitted it is inferred
+    /// from the file extension. `fstype`
     /// (e.g. `"ext4"`) is the inner filesystem agentd will mount; if
     /// omitted, agentd probes `/proc/filesystems` to find a type that
     /// mounts cleanly.
@@ -234,7 +252,7 @@ impl PyVolume {
     #[pyo3(signature = (path, *, format = None, fstype = None, readonly = false, noexec = false, nosuid = false, nodev = false))]
     fn disk(
         path: String,
-        format: Option<String>,
+        format: Option<Py<PyAny>>,
         fstype: Option<String>,
         readonly: bool,
         noexec: bool,
@@ -246,6 +264,7 @@ impl PyVolume {
             kwargs.set_item("kind", mount_kind(py, "DISK")?)?;
             kwargs.set_item("disk", path)?;
             if let Some(format) = format {
+                extract_str_enum(format.bind(py), "DiskImageFormat")?;
                 kwargs.set_item("format", format)?;
             }
             if let Some(fstype) = fstype {
@@ -272,13 +291,18 @@ impl PyVolumeHandle {
     }
 
     #[getter]
+    fn is_default(&self) -> bool {
+        self.inner.is_default()
+    }
+
+    #[getter]
     fn quota_mib(&self) -> Option<u32> {
         self.inner.quota_mib()
     }
 
     #[getter]
-    fn kind(&self) -> &str {
-        self.inner.kind().as_str()
+    fn kind(&self, py: Python<'_>) -> PyResult<PyObject> {
+        str_enum_member(py, "VolumeKind", self.inner.kind().as_str())
     }
 
     #[getter]
@@ -292,8 +316,11 @@ impl PyVolumeHandle {
     }
 
     #[getter]
-    fn disk_format(&self) -> Option<&str> {
-        self.inner.disk_format()
+    fn disk_format(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+        self.inner
+            .disk_format()
+            .map(|format| str_enum_member(py, "DiskImageFormat", format))
+            .transpose()
     }
 
     #[getter]
@@ -408,6 +435,43 @@ impl PyVolumeFs {
             let fs = handle.fs();
             fs.remove(&path).await.map_err(to_py_err)?;
             Ok(())
+        })
+    }
+
+    fn remove_dir<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
+        let handle = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            handle.fs().remove_dir(&path).await.map_err(to_py_err)?;
+            Ok(())
+        })
+    }
+
+    fn copy<'py>(&self, py: Python<'py>, from_: String, to: String) -> PyResult<Bound<'py, PyAny>> {
+        let handle = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            handle.fs().copy(&from_, &to).await.map_err(to_py_err)?;
+            Ok(())
+        })
+    }
+
+    fn rename<'py>(
+        &self,
+        py: Python<'py>,
+        from_: String,
+        to: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let handle = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            handle.fs().rename(&from_, &to).await.map_err(to_py_err)?;
+            Ok(())
+        })
+    }
+
+    fn stat<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
+        let handle = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let metadata = handle.fs().stat(&path).await.map_err(to_py_err)?;
+            Ok(crate::fs::convert_fs_metadata(&metadata))
         })
     }
 

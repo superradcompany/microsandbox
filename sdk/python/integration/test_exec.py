@@ -7,12 +7,16 @@ import signal
 
 import pytest
 
-from microsandbox import ExecTimeoutError, MicrosandboxError, Stdin
+from microsandbox import ExecEventType, ExecTimeoutError, MicrosandboxError, Stdin
 
 
 @pytest.mark.asyncio
 async def test_exec_kwargs_and_options_dict(sandbox_factory):
     sandbox = await sandbox_factory("py-sdk-exec")
+
+    class FakeExecOptions:
+        def _to_dict(self):
+            return {"args": []}
 
     output = await sandbox.exec("echo", ["hello"])
     assert output.success is True
@@ -51,6 +55,9 @@ async def test_exec_kwargs_and_options_dict(sandbox_factory):
     with pytest.raises(TypeError, match="unknown exec option"):
         await sandbox.exec("true", {"args": [], "typo": True})
 
+    with pytest.raises(TypeError, match="args must be a list of strings"):
+        await sandbox.exec("true", FakeExecOptions())
+
 
 @pytest.mark.asyncio
 async def test_shell_timeout_and_user_env_overrides(sandbox_factory):
@@ -78,12 +85,17 @@ async def test_exec_stream_iteration_collect_wait_and_signal(sandbox_factory):
     async for event in handle:
         events.append(event)
 
-    assert any(event.event_type == "started" and event.pid for event in events)
-    stdout = b"".join(event.data or b"" for event in events if event.event_type == "stdout")
-    stderr = b"".join(event.data or b"" for event in events if event.event_type == "stderr")
+    assert all(isinstance(event.event_type, ExecEventType) for event in events)
+    assert any(event.event_type is ExecEventType.STARTED and event.pid for event in events)
+    stdout = b"".join(
+        event.data or b"" for event in events if event.event_type is ExecEventType.STDOUT
+    )
+    stderr = b"".join(
+        event.data or b"" for event in events if event.event_type is ExecEventType.STDERR
+    )
     assert stdout == b"stream\n"
     assert stderr == b"err\n"
-    assert [event.code for event in events if event.event_type == "exited"] == [7]
+    assert [event.code for event in events if event.event_type is ExecEventType.EXITED] == [7]
 
     collect_handle = await sandbox.exec_stream(
         "sh",
@@ -107,7 +119,7 @@ async def test_exec_stream_iteration_collect_wait_and_signal(sandbox_factory):
     sleep_handle = await sandbox.shell_stream("sleep 60")
     first = await sleep_handle.recv()
     assert first is not None
-    assert first.event_type == "started"
+    assert first.event_type is ExecEventType.STARTED
     await sleep_handle.signal(signal.SIGTERM)
     code, success = await sleep_handle.wait()
     assert success is False
@@ -129,7 +141,7 @@ async def test_exec_stream_tty_resize_while_receiving(sandbox_factory):
     while True:
         event = await handle.recv()
         assert event is not None
-        if event.event_type == "stdout" and b"ready" in (event.data or b""):
+        if event.event_type is ExecEventType.STDOUT and b"ready" in (event.data or b""):
             break
 
     pending_event = asyncio.ensure_future(handle.recv())
@@ -139,7 +151,7 @@ async def test_exec_stream_tty_resize_while_receiving(sandbox_factory):
     events = [await pending_event]
     events.extend([event async for event in handle])
     output = b"".join(
-        event.data or b"" for event in events if event and event.event_type == "stdout"
+        event.data or b"" for event in events if event and event.event_type is ExecEventType.STDOUT
     )
     assert b"40 100" in output
 
@@ -154,8 +166,8 @@ async def test_exec_stream_missing_binary_surfaces_failure(sandbox_factory):
         return
 
     events = [event async for event in handle]
-    saw_started = any(event.event_type == "started" for event in events)
-    saw_failed = any(event.event_type == "failed" for event in events)
+    saw_started = any(event.event_type is ExecEventType.STARTED for event in events)
+    saw_failed = any(event.event_type is ExecEventType.FAILED for event in events)
     assert saw_failed or not saw_started
 
 
@@ -180,3 +192,17 @@ async def test_stdin_modes_and_take_stdin_contract(sandbox_factory):
     piped_output = await piped.collect()
     assert piped_output.success is True
     assert piped_output.stdout_text == "stdin-pipe\n"
+
+    with pytest.raises(TypeError, match="stdin must be Stdin"):
+        await sandbox.exec("true", stdin="null")
+
+
+@pytest.mark.asyncio
+async def test_rlimits_reject_raw_dicts(sandbox_factory):
+    sandbox = await sandbox_factory("py-sdk-rlimit-types")
+
+    with pytest.raises(TypeError, match="rlimit must be Rlimit"):
+        await sandbox.exec(
+            "true",
+            rlimits=[{"resource": "cpu", "soft": 1, "hard": 1}],
+        )
