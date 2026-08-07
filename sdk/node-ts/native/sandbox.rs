@@ -909,8 +909,6 @@ pub(crate) fn configure_modify(
         workdir: options.workdir.clone(),
         secrets,
         secrets_remove: options.secrets_remove.clone().unwrap_or_default(),
-        // Patch fields without an option surface here stay unset.
-        ..Default::default()
     };
 
     let builder = builder.with_patch(patch);

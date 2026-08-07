@@ -1037,8 +1037,6 @@ pub(crate) fn build_modify_patch(
         workdir,
         secrets,
         secrets_remove: secrets_rm.unwrap_or_default(),
-        // Patch fields without a kwarg surface here stay unset.
-        ..Default::default()
     }
 }
 
