@@ -15,5 +15,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 magnus = "0.8.2"
-microsandbox_core = { package = "microsandbox", version = "0.6.8", default-features = false, features = ["net", "prebuilt", "ssh"] }
+microsandbox_core = { package = "microsandbox", version = "=0.6.8", default-features = false, features = ["net", "prebuilt", "ssh"] }
 tokio = { version = "1.52", features = ["rt-multi-thread", "time"] }

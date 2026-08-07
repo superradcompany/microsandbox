@@ -111,6 +111,17 @@ class MicrosandboxIntegrationTest < Test::Unit::TestCase
     sandbox&.stop
   end
 
+  def test_assert_eventually_enforces_timeout
+    started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+
+    assert_raise(Test::Unit::AssertionFailedError) do
+      assert_eventually("condition that remains false", timeout: 0.02) { false }
+    end
+
+    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
+    assert_operator elapsed, :<, 1
+  end
+
   private
 
   def create_sandbox(label, **options)
@@ -133,12 +144,16 @@ class MicrosandboxIntegrationTest < Test::Unit::TestCase
   def assert_eventually(message, timeout: 10)
     deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
     loop do
-      value = yield
-      return assert_true(value) if value
+      begin
+        value = yield
+        return assert_true(value) if value
+      rescue Microsandbox::Error
+        return assert_true(true)
+      end
+
+      break if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
 
       sleep 0.1
-    rescue Microsandbox::Error
-      return assert_true(true)
     end
 
     flunk("timed out waiting for #{message}")

@@ -59,6 +59,16 @@ where
     catch_unwind(AssertUnwindSafe(callback))
 }
 
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
+    if let Some(message) = panic.downcast_ref::<&str>() {
+        message
+    } else if let Some(message) = panic.downcast_ref::<String>() {
+        message.as_str()
+    } else {
+        "unknown panic payload"
+    }
+}
+
 unsafe extern "C" fn do_blocking_recv<T>(data: *mut c_void) -> *mut c_void {
     let carrier = unsafe { &mut *(data as *mut BlockingRecv<T>) };
     let receiver = carrier.rx.take();
@@ -217,7 +227,13 @@ where
             ruby.exception_runtime_error(),
             "sandbox operation was canceled",
         )),
-        Some(Err(panic)) => std::panic::resume_unwind(panic),
+        Some(Err(panic)) => Err(Error::new(
+            ruby.exception_runtime_error(),
+            format!(
+                "native operation panicked while the Ruby GVL was released: {}",
+                panic_message(panic.as_ref())
+            ),
+        )),
         None => unreachable!("GVL callback did not run"),
     }
 }
@@ -2147,11 +2163,12 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
 
 #[cfg(test)]
 mod runtime_tests {
-    use super::catch_callback;
+    use super::{catch_callback, panic_message};
 
     #[test]
     fn no_gvl_callback_panics_are_captured() {
         let result = catch_callback(|| panic!("callback panic"));
-        assert!(result.is_err());
+        let panic = result.expect_err("callback panic should be captured");
+        assert_eq!(panic_message(panic.as_ref()), "callback panic");
     }
 }

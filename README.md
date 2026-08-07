@@ -294,11 +294,11 @@ clustered Puma workers, Resque, and other prefork process models.
 
 The supported surface includes:
 
-- sandbox create, start, connect, list, stop, kill, remove, ping, and touch;
-- collected `exec`, `shell`, SSH exec, logs, and metrics;
-- guest filesystem reads, writes, metadata, copies, renames, and host transfer;
-- local image, volume, and snapshot management; and
-- local, explicit cloud, and named cloud-profile backend selection.
+- `Sandbox` create/start/connect/list/stop/kill/remove/ping/touch operations;
+- collected `exec`, `shell`, `ssh_exec`, `logs`, and `metrics`;
+- guest filesystem operations through `sandbox.fs`;
+- local `Image`, `Volume`, and `Snapshot` management; and
+- `use_local_backend!`, `use_cloud_backend!`, and `use_cloud_profile!`.
 
 Streaming exec/log/metrics/filesystem handles, interactive SSH/SFTP, live
 modification plans, and the complete advanced Rust network/mount builders are
