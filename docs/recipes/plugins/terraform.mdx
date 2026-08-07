@@ -1,0 +1,311 @@
+---
+title: Vet a Terraform provider offline
+sidebarTitle: Terraform
+description: Inspect a pinned provider as native code inside a networkless microVM
+icon: "cubes"
+---
+
+Terraform providers are native executables that Terraform Core starts as subprocesses and talks to over RPC. A microVM keeps that code off the host, but it cannot contain changes made through a cloud API. This recipe therefore gives the provider no credentials or network access, never runs `apply`, and exports only bounded validation and plan metadata.
+
+The `random` provider needs no remote API, so it can demonstrate schema loading and a credential-free plan while the worker remains offline. Run the blocks below in one shell so the unique resource names remain available.
+
+## Create a review configuration
+
+Use a private temporary directory instead of writing over a project file:
+
+```sh
+terraform_run_id="terraform-vet-$(date +%Y%m%d%H%M%S)-$$"
+terraform_base="${terraform_run_id}-base"
+terraform_snapshot="${terraform_run_id}-runtime"
+terraform_worker="${terraform_run_id}-worker"
+
+terraform_host_dir=$(mktemp -d "${TMPDIR:-/tmp}/msb-terraform-vet.XXXXXX")
+chmod 700 "$terraform_host_dir"
+terraform_config="$terraform_host_dir/main.tf"
+terraform_lock="$terraform_host_dir/.terraform.lock.hcl"
+terraform_report="$terraform_host_dir/report.json"
+
+cat > "$terraform_config" <<'EOF'
+terraform {
+  required_version = "= 1.13.5"
+
+  required_providers {
+    random = {
+      source  = "hashicorp/random"
+      version = "3.7.2"
+    }
+  }
+}
+
+resource "random_pet" "review" {
+  length = 2
+  prefix = "microsandbox"
+}
+EOF
+```
+
+This configuration declares a resource but does not create it. The plan below reports only the proposed action count.
+
+## Build a pinned toolchain
+
+The build sandbox downloads Terraform 1.13.5 for the guest architecture and checks the archive against the reviewed SHA-256 published with that release. It then initializes exactly `hashicorp/random` 3.7.2, preserving the Terraform CLI configuration, plugin cache, initialized working directory, and dependency lock file for the snapshot.
+
+```sh
+msb run --name "$terraform_base" \
+  --cpus 1 --memory 768M --root-disk 2G \
+  --max-duration 5m \
+  --copy-file "$terraform_config:/work/main.tf" \
+  --workdir /work \
+  python:3.13.7-slim-bookworm -- sh -lc '
+    set -eu
+
+    terraform_version=1.13.5
+    case "$(uname -m)" in
+      x86_64)
+        terraform_arch=amd64
+        terraform_sha256=0dbe3fcc268eb670801af6a6456799d1ae26e72e73797f6c6167e18aafd1fd9a
+        ;;
+      aarch64|arm64)
+        terraform_arch=arm64
+        terraform_sha256=fc1ddcb403fb57e25bdbdceb1ef2b1a102650c01b4d65dd3410082d2ef8b4417
+        ;;
+      *)
+        echo "unsupported architecture: $(uname -m)" >&2
+        exit 1
+        ;;
+    esac
+
+    terraform_archive="/tmp/terraform_${terraform_version}_linux_${terraform_arch}.zip"
+    terraform_url="https://releases.hashicorp.com/terraform/${terraform_version}/$(basename "$terraform_archive")"
+
+    python - "$terraform_url" "$terraform_archive" <<"PY"
+import shutil
+import sys
+import urllib.request
+
+request = urllib.request.Request(sys.argv[1], headers={"User-Agent": "microsandbox-recipe"})
+with urllib.request.urlopen(request, timeout=30) as response:
+    with open(sys.argv[2], "wb") as output:
+        shutil.copyfileobj(response, output)
+PY
+
+    printf "%s  %s\n" "$terraform_sha256" "$terraform_archive" | sha256sum -c -
+
+    python - "$terraform_archive" <<"PY"
+import shutil
+import sys
+import zipfile
+
+with zipfile.ZipFile(sys.argv[1]) as bundle:
+    with bundle.open("terraform") as source:
+        with open("/usr/local/bin/terraform", "wb") as output:
+            shutil.copyfileobj(source, output)
+PY
+
+    chmod 0755 /usr/local/bin/terraform
+    terraform version | grep -F "Terraform v1.13.5"
+
+    mkdir -p /opt/terraform/plugin-cache /out
+    cat > /opt/terraform/terraform.rc <<"EOF"
+plugin_cache_dir   = "/opt/terraform/plugin-cache"
+disable_checkpoint = true
+EOF
+
+    export TF_CLI_CONFIG_FILE=/opt/terraform/terraform.rc
+    terraform init -backend=false -input=false
+    terraform providers
+
+    test -s .terraform.lock.hcl
+    test "$(find /opt/terraform/plugin-cache -type f -name "terraform-provider-random*" | wc -l)" -eq 1
+
+    chown -R 65534:65534 /work /out
+  '
+```
+
+The checksum values above come from the release's signed checksum manifest; re-check that manifest before changing the Terraform version. `terraform init` should also report `Installed hashicorp/random v3.7.2 (signed by HashiCorp)`. The build sandbox needs public network access, so do not give it project credentials.
+
+Export and inspect the generated provider lock before preserving the prepared filesystem:
+
+```sh
+msb cp "$terraform_base:/work/.terraform.lock.hcl" "$terraform_lock"
+test ! -L "$terraform_lock"
+test -f "$terraform_lock"
+test -s "$terraform_lock"
+test "$(wc -c < "$terraform_lock")" -le 65536
+grep -Fq 'provider "registry.terraform.io/hashicorp/random"' "$terraform_lock"
+grep -Fq 'version     = "3.7.2"' "$terraform_lock"
+
+msb snapshot create "$terraform_snapshot" \
+  --from "$terraform_base" \
+  --integrity
+msb snapshot verify "$terraform_snapshot"
+```
+
+For a real project, review and commit `.terraform.lock.hcl` before building the snapshot. Snapshot integrity detects later changes to this local artifact; it does not prove who built the snapshot or whether its inputs were trustworthy.
+
+## Inspect and plan offline
+
+The fresh worker overlays the reviewed configuration and lock file as read-only inputs. It runs as an unprivileged user with no network access, checks formatting, loads the provider schema, validates the configuration, and creates a saved plan with refresh disabled. The saved plan, schema, and full diagnostics remain inside the disposable guest.
+
+```sh
+msb run --name "$terraform_worker" \
+  --from-snapshot "$terraform_snapshot" \
+  --cpus 1 --memory 512M \
+  --no-net --security restricted \
+  --rlimit nproc=64 --rlimit nofile=128 --rlimit fsize=1048576 \
+  --max-duration 1m \
+  --user 65534:65534 \
+  --env HOME=/tmp \
+  --env TF_CLI_CONFIG_FILE=/opt/terraform/terraform.rc \
+  --mount-file "$terraform_config:/work/main.tf:ro" \
+  --mount-file "$terraform_lock:/work/.terraform.lock.hcl:ro" \
+  --workdir /work \
+  --script vet-offline='set -eu
+
+    test "$(id -u)" -ne 0
+
+    for input in main.tf .terraform.lock.hcl; do
+      if (printf x >> "$input") 2>/dev/null; then
+        echo "$input unexpectedly writable" >&2
+        exit 1
+      fi
+    done
+    echo "configuration and lock file read-only"
+
+    if python - 2>/dev/null <<"PY"
+import socket
+
+connection = socket.create_connection(("1.1.1.1", 443), timeout=2)
+connection.close()
+PY
+    then
+      echo "network unexpectedly reachable" >&2
+      exit 1
+    fi
+    echo "network blocked"
+
+    terraform fmt -check -diff main.tf > /tmp/fmt.txt
+    terraform providers schema -json > /tmp/provider-schema.json 2> /tmp/schema.err
+    terraform validate -json > /tmp/validate.json
+    terraform plan \
+      -refresh=false \
+      -input=false \
+      -lock=false \
+      -no-color \
+      -out=/tmp/plan.bin > /tmp/plan.txt
+    terraform show -json /tmp/plan.bin > /tmp/plan.json
+
+    python - <<"PY"
+import hashlib
+import json
+from pathlib import Path
+
+provider_address = "registry.terraform.io/hashicorp/random"
+schema_bytes = Path("/tmp/provider-schema.json").read_bytes()
+schema = json.loads(schema_bytes)
+provider_schema = schema["provider_schemas"][provider_address]
+resource_schemas = provider_schema["resource_schemas"]
+if "random_pet" not in resource_schemas:
+    raise SystemExit("random_pet schema missing")
+
+validation = json.loads(Path("/tmp/validate.json").read_text())
+if not validation["valid"]:
+    raise SystemExit("terraform validate failed")
+
+plan = json.loads(Path("/tmp/plan.json").read_text())
+changes = plan.get("resource_changes", [])
+action_counts = {}
+for change in changes:
+    action = "/".join(change["change"]["actions"])
+    action_counts[action] = action_counts.get(action, 0) + 1
+
+diagnostics = []
+for diagnostic in validation.get("diagnostics", [])[:20]:
+    diagnostics.append({
+        "severity": str(diagnostic.get("severity", ""))[:32],
+        "summary": str(diagnostic.get("summary", ""))[:256],
+    })
+
+report = {
+    "terraform_version": plan.get("terraform_version"),
+    "format": {"clean": True},
+    "provider": {
+        "address": provider_address,
+        "resource_type_count": len(resource_schemas),
+        "schema_sha256": hashlib.sha256(schema_bytes).hexdigest(),
+    },
+    "validation": {
+        "valid": validation["valid"],
+        "error_count": validation["error_count"],
+        "warning_count": validation["warning_count"],
+        "diagnostics": diagnostics,
+    },
+    "plan": {
+        "refresh": False,
+        "resource_change_count": len(changes),
+        "action_counts": action_counts,
+    },
+}
+
+encoded = json.dumps(report, indent=2, sort_keys=True).encode() + bytes([10])
+if len(encoded) > 65536:
+    raise SystemExit("report exceeds 64 KiB")
+Path("/out/report.json").write_bytes(encoded)
+
+print("provider schema: random_pet")
+print("validation: {} error(s), {} warning(s)".format(
+    validation["error_count"],
+    validation["warning_count"],
+))
+print("plan actions: {}".format(action_counts))
+PY
+  ' \
+  --entrypoint vet-offline
+```
+
+The fixture should print:
+
+```text
+configuration and lock file read-only
+network blocked
+provider schema: random_pet
+validation: 0 error(s), 0 warning(s)
+plan actions: {'create': 1}
+```
+
+Stop the worker before copying its provider-influenced report. Accept only a regular file within the in-guest 64 KiB bound, then inspect the small metadata object as data:
+
+```sh
+msb stop "$terraform_worker"
+msb cp "$terraform_worker:/out/report.json" "$terraform_report"
+test ! -L "$terraform_report"
+test -f "$terraform_report"
+test -s "$terraform_report"
+test "$(wc -c < "$terraform_report")" -le 65536
+sed -n '1,120p' "$terraform_report"
+```
+
+The exported report includes formatting status, bounded validation summaries, the schema hash and resource-type count, and aggregate plan actions. It deliberately excludes provider-schema contents, plan values, state, and logs.
+
+<Warning>
+  `-refresh=false` suppresses managed-resource refresh, but it is not a general network-safety switch: providers, data sources, or custom validation can still attempt remote calls. `--no-net` is the actual boundary in this recipe, and providers that require an API will fail inside it. If you instead give a worker cloud credentials and egress, provider actions can persist outside the microVM; use separate cloud-side controls and disposable accounts for that different workflow.
+</Warning>
+
+## Cleanup
+
+Remove only the resources named by this shell and the private temporary files it created:
+
+```sh
+msb remove -f "$terraform_worker"
+msb remove -f "$terraform_base"
+msb snapshot remove "$terraform_snapshot"
+rm -f "$terraform_report" "$terraform_lock" "$terraform_config"
+rmdir "$terraform_host_dir"
+```
+
+## Reference
+
+- [Terraform 1.13.5 release checksums](https://releases.hashicorp.com/terraform/1.13.5/terraform_1.13.5_SHA256SUMS)
+- [How Terraform works with plugins](https://developer.hashicorp.com/terraform/plugin/how-terraform-works)
+- [Provider dependency lock file](https://developer.hashicorp.com/terraform/language/files/dependency-lock)
+- [Random provider v3.7.2](https://github.com/hashicorp/terraform-provider-random/releases/tag/v3.7.2)

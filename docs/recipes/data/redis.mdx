@@ -1,0 +1,57 @@
+---
+title: Redis
+description: Run an authenticated Redis service with persistent data
+icon: "database"
+---
+
+This recipe starts Redis 7 with password authentication, a persistent named volume, and a localhost-only forwarded port.
+
+## Start Redis
+
+```sh
+export REDIS_PASSWORD="$(openssl rand -hex 24)"
+
+msb run -d --name redis-demo --replace \
+  --cpus 1 --memory 512M --root-disk 1G \
+  -p 127.0.0.1:56379:6379 \
+  --mount-named redis-data:/data \
+  redis:7-alpine -- redis-server \
+    --bind 0.0.0.0 \
+    --protected-mode yes \
+    --appendonly yes \
+    --requirepass "$REDIS_PASSWORD"
+```
+
+## Verify reads and writes
+
+```sh
+msb exec redis-demo -- \
+  redis-cli -a "$REDIS_PASSWORD" --no-auth-warning SET recipe ready
+
+msb exec redis-demo -- \
+  redis-cli -a "$REDIS_PASSWORD" --no-auth-warning GET recipe
+
+msb exec redis-demo -- \
+  redis-cli -a "$REDIS_PASSWORD" --no-auth-warning PING
+```
+
+The three commands should return `OK`, `ready`, and `PONG`. Host applications connect to `127.0.0.1:56379`.
+
+<Warning>
+  `--requirepass` places the demo password in the guest process arguments. For production, use an ACL file delivered through the [secrets workflow](/sandboxes/secrets) and do not expose the forwarded port beyond loopback.
+</Warning>
+
+## Persistence and cleanup
+
+Remove the sandbox while retaining the append-only database:
+
+```sh
+msb rm -f redis-demo
+```
+
+Delete all persisted Redis data:
+
+```sh
+msb volume rm redis-data
+unset REDIS_PASSWORD
+```

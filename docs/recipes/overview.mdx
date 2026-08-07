@@ -1,0 +1,46 @@
+---
+title: Recipes
+sidebarTitle: Overview
+description: Practical, tested microsandbox workflows for agents, CI, automation, tooling, browsers, data, and files
+icon: "beaker"
+---
+
+These recipes are complete workflows rather than isolated command fragments. Each one shows the boundary around the workload, how results cross back to the host, and how to clean up safely.
+
+## Start with these
+
+<CardGroup cols={2}>
+  <Card title="AI coding agent" icon="robot" href="/recipes/use-cases/ai-coding-agent">
+    Give an agent a copied repository and an isolated workspace.
+  </Card>
+  <Card title="Run untrusted code" icon="shield-halved" href="/recipes/use-cases/run-untrusted-code">
+    Bound CPU, memory, time, and network access around user-supplied code.
+  </Card>
+  <Card title="GitHub Actions runner" icon="github" href="/recipes/ci-cd/github-actions-runner">
+    Run one self-hosted job in a fresh microVM, then discard its workspace.
+  </Card>
+  <Card title="Compose tests" icon="boxes-stacked" href="/recipes/ci-cd/compose-tests">
+    Run a multi-container stack without exposing the host Docker socket.
+  </Card>
+  <Card title="Warm workers" icon="bolt" href="/recipes/sandboxing/warm-workers">
+    Snapshot a toolchain once, then launch clean, prepared workers.
+  </Card>
+  <Card title="Parallel batch jobs" icon="layer-group" href="/recipes/automation/parallel-batch-jobs">
+    Fan out bounded jobs and collect checked artifacts independently.
+  </Card>
+  <Card title="Scrapy crawler" icon="spider" href="/recipes/web-automation/scrapy">
+    Crawl into bounded JSON with robots.txt and network controls.
+  </Card>
+  <Card title="Media processing" icon="film" href="/recipes/file-processing/ffmpeg">
+    Convert untrusted media without mounting the host directory writable.
+  </Card>
+</CardGroup>
+
+## Browse by workflow
+
+- **Agents**: OpenCode, OpenClaw, Goose, Gemini CLI, Hermes Agent, Pi, and a tool-agnostic coding-agent pattern.
+- **CI/CD**: Ephemeral GitHub Actions runners, hermetic PR checks, Docker Compose integration tests, and time-limited preview deploys.
+- **Automation**: Scheduled dependency audits and parallel batch dispatch.
+- **Tool isolation**: Vet native Terraform providers and third-party ESLint plugins in constrained workers.
+- **Web Automation**: Playwright browser jobs and bounded Scrapy crawls.
+- **Systems and data**: Docker, systemd, VNC, PostgreSQL, Redis, migrations, metrics backends, and file processing.

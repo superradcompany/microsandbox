@@ -1,0 +1,63 @@
+---
+title: code-server
+description: Open a disposable VS Code environment in the browser
+icon: "code"
+---
+
+code-server provides VS Code in a browser. This recipe starts the official ARM64/AMD64 image, forwards it only to host loopback, and copies a project into the isolated guest filesystem.
+
+## Start code-server
+
+```sh
+msb run -d --name code-server-demo --replace \
+  --cpus 2 --memory 2G --root-disk 4G \
+  -p 127.0.0.1:8080:8080 \
+  --entrypoint /usr/bin/code-server \
+  codercom/code-server:4.130.0 -- \
+    --bind-addr 0.0.0.0:8080 \
+    --auth none \
+    /home/coder/project
+```
+
+Copy a project into the running sandbox and give the image's `coder` user ownership:
+
+```sh
+msb cp ./my-project/. code-server-demo:/home/coder/project
+msb exec -u root code-server-demo -- chown -R coder:coder /home/coder/project
+```
+
+Open [http://127.0.0.1:8080](http://127.0.0.1:8080). The editor, integrated terminal, extension host, and project processes all run inside the microVM.
+
+## Verify the service
+
+```sh
+curl -I http://127.0.0.1:8080/
+msb logs --tail 20 code-server-demo
+```
+
+The root endpoint redirects to the project workspace, and the logs show the HTTP server listening on `0.0.0.0:8080` inside the guest.
+
+<Warning>
+  `--auth none` is acceptable here only because the host port is bound to `127.0.0.1`. Never expose an unauthenticated code-server instance to a LAN or the internet; its integrated terminal gives users command execution inside the VM.
+</Warning>
+
+## Export changes
+
+Review the project and export a patch:
+
+```sh
+msb exec code-server-demo -- sh -lc 'cd /home/coder/project && git add -N . && git diff --binary > /tmp/code-server.patch'
+msb cp code-server-demo:/tmp/code-server.patch ./code-server.patch
+git apply --check ./code-server.patch
+```
+
+## Cleanup
+
+```sh
+msb rm -f code-server-demo
+```
+
+## Reference
+
+- [code-server installation](https://github.com/coder/code-server/blob/main/docs/install.md)
+- [Safely exposing code-server](https://github.com/coder/code-server/blob/main/docs/guide.md)

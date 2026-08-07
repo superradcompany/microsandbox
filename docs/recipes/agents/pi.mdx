@@ -1,0 +1,53 @@
+---
+title: Pi coding agent
+sidebarTitle: Pi
+description: Run the Pi terminal coding agent in an isolated project copy
+icon: "/images/recipes/agents/pi.svg"
+---
+
+Pi is a terminal coding agent distributed as a Node.js package. This recipe pins the tested package version and gives it a copied workspace inside the microVM.
+
+## Start Pi
+
+```sh
+msb run -t --name pi-demo --replace \
+  --cpus 2 --memory 2G --root-disk 4G \
+  --copy-dir ./my-project:/workspace \
+  --workdir /workspace \
+  node:24-bookworm-slim -- sh -lc '
+    apt-get update &&
+    apt-get install -y --no-install-recommends ca-certificates git &&
+    npm install -g @mariozechner/pi-coding-agent@0.73.1 &&
+    exec pi
+  '
+```
+
+The tested install downloads 188 packages and takes about a minute on a warm Node image cache. Configure a provider from the TUI when prompted.
+
+## Verify the installation
+
+Exit Pi and run:
+
+```sh
+msb exec pi-demo -- pi --version
+```
+
+The pinned recipe prints `0.73.1`.
+
+## Export changes
+
+```sh
+msb exec pi-demo -- sh -lc 'cd /workspace && git add -N . && git diff --binary > /tmp/pi.patch'
+msb cp pi-demo:/tmp/pi.patch ./pi.patch
+git apply --check ./pi.patch
+```
+
+## Cleanup
+
+```sh
+msb rm -f pi-demo
+```
+
+## Reference
+
+- [Pi repository](https://github.com/badlogic/pi-mono)

@@ -1,0 +1,114 @@
+---
+title: Start warm workers from a snapshot
+sidebarTitle: Warm workers
+description: Install a toolchain once and launch clean workers from the captured disk state
+icon: "code-branch"
+---
+
+Package installation often costs more than sandbox boot. This recipe installs OpenCode once, records the stopped sandbox as an integrity-checked snapshot, and launches fresh workers from that prepared filesystem.
+
+## Prepare the baseline
+
+```sh
+msb run --name agent-base --replace \
+  --cpus 2 --memory 2G --root-disk 4G \
+  node:24-bookworm-slim -- sh -lc '
+    apt-get update &&
+    apt-get install -y --no-install-recommends ca-certificates git &&
+    rm -rf /var/lib/apt/lists/* &&
+    npm install -g opencode-ai@1.18.4 &&
+    mkdir -p /workspace/project &&
+    chown -R node:node /workspace &&
+    opencode --version
+  '
+```
+
+When the command exits, `agent-base` is stopped and ready to snapshot.
+
+## Create and verify the snapshot
+
+```sh
+msb snapshot create coding-agent-base \
+  --from agent-base \
+  --integrity \
+  --force
+
+msb snapshot verify coding-agent-base
+```
+
+The snapshot captures the writable disk changes and pins the source image. It does not capture memory, running processes, network state, environment variables, or named volumes. Integrity verification detects later changes to those captured bytes; it does not attest who built the snapshot or whether its packages are trustworthy.
+
+<Warning>
+  Snapshots preserve every file written to the guest disk, including shell history, tool configuration, and cached credentials. Build the baseline in a trusted workflow, and never authenticate OpenCode or place registry tokens, source code, or API keys in `agent-base`.
+</Warning>
+
+## Launch a clean worker
+
+```sh
+msb run -d --name coding-worker-1 --replace \
+  --from-snapshot coding-agent-base \
+  --cpus 2 --memory 2G \
+  --user node --security restricted \
+  --max-duration 1h \
+  --workdir /workspace/project \
+  -- sh -lc 'exec sleep 1h'
+
+git -C ./my-project archive --format=tar HEAD | \
+  msb exec --stream --user node \
+    --rlimit nproc=256 --rlimit nofile=1024 --rlimit fsize=268435456 \
+    coding-worker-1 -- tar -x -C /workspace/project
+
+msb exec --user node --workdir /workspace/project \
+  --rlimit nproc=256 --rlimit nofile=1024 --rlimit fsize=268435456 \
+  coding-worker-1 -- sh -lc '
+  set -eu
+  test "$(id -u)" -ne 0
+  git init -q
+  git add .
+  git -c user.name=microsandbox \
+    -c user.email=worker@microsandbox.local \
+    commit -qm "sandbox baseline"
+  test -z "$(git remote)"
+  opencode --version
+'
+
+msb exec -t --user node --workdir /workspace/project \
+  --rlimit nproc=256 --rlimit nofile=1024 --rlimit fsize=268435456 \
+  coding-worker-1 -- opencode
+```
+
+Rootfs patches such as `--copy-dir` cannot be combined with `--from-snapshot`, so the worker boots first and receives the committed tree through a stream. `git archive` excludes `.git`, checkout credentials, and untracked files such as a local `.env`; review the committed tree for secrets before sending it. Initializing a new repository inside the worker preserves useful diff workflows without copying host remotes or credentials. Each streamed or interactive workload sets its own process, file-descriptor, and per-file limits.
+
+Each launch receives its own writable layer. Changes made by one worker do not modify the snapshot, the host project, or another worker.
+
+<Note>
+  This worker uses microsandbox's default public-internet profile so OpenCode can reach a configured provider. For sensitive projects, replace it with a deny-by-default allowlist for the provider and source hosts you need, and use [host-held secrets](/sandboxes/secrets) instead of copying credentials into the worker.
+</Note>
+
+Create more workers by changing the sandbox name:
+
+```sh
+msb run --name coding-worker-2 --replace \
+  --from-snapshot coding-agent-base \
+  --user node --security restricted \
+  --rlimit nproc=256 --rlimit nofile=1024 --rlimit fsize=268435456 \
+  --max-duration 1m \
+  -- opencode --version
+```
+
+## Refresh the baseline
+
+Snapshots are immutable. To update packages, recreate `agent-base`, then overwrite the named snapshot intentionally:
+
+```sh
+msb snapshot create coding-agent-base --from agent-base --integrity --force
+```
+
+## Cleanup
+
+```sh
+msb rm -f agent-base coding-worker-1 coding-worker-2
+msb snapshot rm coding-agent-base
+```
+
+See [Snapshots](/sandboxes/snapshots) for archive, integrity, and portability details.

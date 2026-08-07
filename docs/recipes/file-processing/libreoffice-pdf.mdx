@@ -1,0 +1,112 @@
+---
+title: Convert documents and render PDFs
+sidebarTitle: Documents to PDF
+description: Prepare LibreOffice once, then convert untrusted documents without network access
+icon: "file-pdf"
+---
+
+Document parsers process complex, attacker-controlled file formats. This recipe installs LibreOffice and Poppler once, snapshots the toolchain, and performs each conversion in a fresh worker with networking disabled.
+
+## Prepare the converter
+
+```sh
+msb run --name office-base --replace \
+  --cpus 2 --memory 2G --root-disk 5G \
+  debian:bookworm-slim -- sh -lc '
+    apt-get update &&
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      libreoffice-writer poppler-utils &&
+    rm -rf /var/lib/apt/lists/* &&
+    useradd --system --create-home --shell /usr/sbin/nologin converter &&
+    mkdir -p /input /out &&
+    chown converter:converter /out &&
+    chmod 0555 /input &&
+    chmod 0700 /out &&
+    libreoffice --version &&
+    pdftoppm -v
+  '
+
+msb snapshot create office-tools --from office-base --integrity --force
+msb snapshot verify office-tools
+```
+
+Bookworm currently downloads roughly 130 MB and adds about 440 MB to the guest for this toolchain; package updates can change those numbers. The snapshot lets later workers skip that installation.
+
+## Convert a document offline
+
+The example accepts a Word document named `input.docx`:
+
+```sh
+msb run -d --name document-worker --replace \
+  --from-snapshot office-tools \
+  --cpus 2 --memory 2G \
+  --user converter --security restricted \
+  --no-net --max-duration 2m \
+  -- sh -lc 'exec sleep 2m'
+
+msb cp ./input.docx document-worker:/input/input.docx
+msb exec --user root document-worker -- chmod 0444 /input/input.docx
+
+msb exec --user converter --timeout 90s \
+  --rlimit nproc=128 --rlimit nofile=512 --rlimit fsize=536870912 \
+  document-worker -- sh -lc '
+    test "$(id -u)" -ne 0
+
+    if (printf x >> /input/input.docx) 2>/dev/null; then
+      echo "input unexpectedly writable" >&2
+      exit 1
+    fi
+
+    if getent ahosts example.com >/dev/null 2>&1; then
+      echo "network unexpectedly reachable" >&2
+      exit 1
+    fi
+
+    echo "input read-only; network blocked"
+    libreoffice --headless --convert-to pdf --outdir /out /input/input.docx &&
+    pdftoppm -png -singlefile -r 96 /out/input.pdf /out/preview &&
+    test -s /out/input.pdf &&
+    test -s /out/preview.png &&
+    stat -c "%n: %s bytes" /out/input.pdf /out/preview.png
+  '
+```
+
+The worker boots before the document is copied because rootfs patches cannot be combined with `--from-snapshot`. The root-owned input directory prevents the unprivileged converter from replacing the document, while its home directory and `/out` hold the only workload-writable state. The untrusted conversion command sets its own process, file-descriptor, and per-file limits.
+
+Copy out only the generated artifacts:
+
+```sh
+export OFFICE_ARTIFACT_DIR="${OFFICE_ARTIFACT_DIR:-$PWD/.office-artifacts}"
+
+if [ -e "$OFFICE_ARTIFACT_DIR" ] || [ -L "$OFFICE_ARTIFACT_DIR" ]; then
+  echo "artifact path already exists: $OFFICE_ARTIFACT_DIR" >&2
+  exit 1
+fi
+
+mkdir -m 700 "$OFFICE_ARTIFACT_DIR"
+msb stop document-worker
+msb cp document-worker:/out/input.pdf "$OFFICE_ARTIFACT_DIR/output.pdf"
+msb cp document-worker:/out/preview.png "$OFFICE_ARTIFACT_DIR/preview.png"
+
+for artifact in output.pdf preview.png; do
+  test ! -L "$OFFICE_ARTIFACT_DIR/$artifact" &&
+    test -f "$OFFICE_ARTIFACT_DIR/$artifact" &&
+    test -s "$OFFICE_ARTIFACT_DIR/$artifact" &&
+    test "$(wc -c < "$OFFICE_ARTIFACT_DIR/$artifact")" -le 536870912
+done
+```
+
+Stopping the worker prevents artifact races. The fresh private directory and checks require two nonempty regular files no larger than the conversion command's 512 MiB per-file limit.
+
+<Warning>
+  A VM boundary reduces host exposure but does not make every document safe to publish or trust. Enforce input and output size limits before boot, cap concurrent conversions, reject unexpected file types, and scan retained artifacts according to your threat model.
+</Warning>
+
+## Cleanup
+
+```sh
+msb rm -f office-base document-worker
+msb snapshot rm office-tools
+```
+
+The checked `output.pdf` and `preview.png` remain under `${OFFICE_ARTIFACT_DIR:-$PWD/.office-artifacts}` on the host.

@@ -1,0 +1,278 @@
+---
+title: Run Docker Compose integration tests
+sidebarTitle: Compose tests
+description: Health-check and test a multi-container stack without exposing the host Docker daemon
+icon: "boxes-stacked"
+---
+
+Run an entire Docker Compose stack inside a disposable microVM. The inner Docker daemon can build networks, start services, and report the test container's exit code without receiving `/var/run/docker.sock` from the host.
+
+This fixture starts a small JSON service, waits until it is healthy, and tests it from a second container.
+
+## Create the fixture
+
+Create a clean directory for the Compose project:
+
+```sh
+mkdir -p compose-ci/app
+cd compose-ci
+```
+
+Add the service:
+
+```python app/app.py
+import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        request = urlparse(self.path)
+
+        if request.path == "/healthz":
+            body = b"ready"
+            status = 200
+            content_type = "text/plain"
+        elif request.path == "/add":
+            query = parse_qs(request.query)
+            result = int(query["a"][0]) + int(query["b"][0])
+            body = json.dumps({"result": result}, separators=(",", ":")).encode()
+            status = 200
+            content_type = "application/json"
+        else:
+            body = b"not found"
+            status = 404
+            content_type = "text/plain"
+
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        return
+
+
+ThreadingHTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
+```
+
+Add the Compose stack. Its `test` service waits for the application health check before making assertions:
+
+```yaml compose.yaml
+services:
+  app:
+    image: python:3.13.14-alpine3.24
+    working_dir: /app
+    volumes:
+      - ./app:/app:ro
+    command: ["python", "app.py"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8000/healthz"]
+      interval: 1s
+      timeout: 1s
+      retries: 15
+
+  test:
+    image: alpine:3.22.5
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      EXPECTED_RESULT: "${EXPECTED_RESULT:-42}"
+    command:
+      - sh
+      - -euxc
+      - |
+        test "$$(wget -qO- http://app:8000/healthz)" = ready
+        response="$$(wget -qO- 'http://app:8000/add?a=20&b=22')"
+        test "$$response" = "{\"result\":$$EXPECTED_RESULT}"
+        printf 'integration test passed: %s\n' "$$response"
+```
+
+## Run the tests
+
+Save the runner next to `compose.yaml`:
+
+```bash run-compose-tests.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+project_dir="${1:-$PWD}"
+project_dir="$(cd "$project_dir" && pwd -P)"
+
+if [[ "$project_dir" == / || "$project_dir" == *:* ]]; then
+  echo "project directory is too broad or contains the reserved ':' separator" >&2
+  exit 2
+fi
+
+compose_path="$project_dir/compose.yaml"
+app_dir="$project_dir/app"
+if [[ -L "$compose_path" || ! -f "$compose_path" ]]; then
+  echo "compose.yaml must be a regular, non-symlink file" >&2
+  exit 2
+fi
+if [[ -L "$app_dir" || ! -d "$app_dir" ]]; then
+  echo "app must be a real directory" >&2
+  exit 2
+fi
+
+app_dir="$(cd "$app_dir" && pwd -P)"
+case "$app_dir/" in
+  "$project_dir"/*/) ;;
+  *) echo "app resolves outside the project directory" >&2; exit 2 ;;
+esac
+
+if [[ -n "$(find "$app_dir" -type l -print -quit)" ]]; then
+  echo "app must not contain symlinks" >&2
+  exit 2
+fi
+
+run_key="${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-$$-${GITHUB_JOB:-compose}"
+run_key="$(printf '%s' "$run_key" | tr -cs 'A-Za-z0-9._-' '-')"
+sandbox_name="compose-ci-${run_key:0:96}"
+
+if [[ -n "${COMPOSE_CACHE_NAME:-}" ]]; then
+  cache_name="$COMPOSE_CACHE_NAME"
+  keep_cache=true
+else
+  cache_name="${sandbox_name}-cache"
+  keep_cache=false
+fi
+
+case "$cache_name" in
+  *[!A-Za-z0-9._-]*|'')
+    echo "COMPOSE_CACHE_NAME contains unsupported characters" >&2
+    exit 2
+    ;;
+esac
+
+cleanup_host() {
+  msb rm -f "$sandbox_name" >/dev/null 2>&1 || true
+  if [[ "$keep_cache" == false ]]; then
+    msb volume remove "$cache_name" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup_host EXIT
+
+msb run --name "$sandbox_name" \
+  --cpus 2 --memory 2G --root-disk 4G --max-duration 5m \
+  --env "EXPECTED_RESULT=${EXPECTED_RESULT:-42}" \
+  --mount-named "$cache_name:/var/lib/docker:kind=disk,size=6G" \
+  --mkdir /workspace \
+  --copy-file "$compose_path:/workspace/compose.yaml" \
+  --copy-dir "$app_dir:/workspace/app" \
+  --workdir /workspace \
+  --script ci='set -eu
+if [ -S /var/run/docker.sock ]; then
+  echo "refusing unexpected Docker socket" >&2
+  exit 1
+fi
+printf "host Docker socket: absent\n"
+
+if [ -e /workspace/.git ] || [ -e /workspace/.env ]; then
+  echo "refusing unexpected checkout metadata" >&2
+  exit 1
+fi
+
+dockerd >/tmp/dockerd.log 2>&1 &
+dockerd_pid=$!
+
+cleanup() {
+  status=$?
+  trap - EXIT INT TERM
+  docker compose down --volumes --remove-orphans >/tmp/compose-down.log 2>&1 || true
+  kill "$dockerd_pid" 2>/dev/null || true
+  wait "$dockerd_pid" 2>/dev/null || true
+  exit "$status"
+}
+trap cleanup EXIT INT TERM
+
+timeout 60 sh -c "until docker info >/dev/null 2>&1; do kill -0 $dockerd_pid || exit 1; sleep 1; done" || {
+  cat /tmp/dockerd.log >&2
+  exit 1
+}
+
+docker version --format "Docker server: {{.Server.Version}}"
+docker compose version
+
+set +e
+docker compose up --abort-on-container-exit --exit-code-from test
+status=$?
+set -e
+
+if [ "$status" -ne 0 ]; then
+  docker compose logs >&2
+fi
+
+exit "$status"' \
+  --entrypoint ci \
+  docker:27.5.1-dind
+```
+
+Run it:
+
+```sh
+chmod +x ./run-compose-tests.sh
+./run-compose-tests.sh
+```
+
+By default, every invocation gets unique sandbox and cache names, then removes both. Concurrent CI jobs cannot replace one another or inherit writable Docker state from another job. The Compose containers, network, and anonymous volumes are also removed inside the worker after every run.
+
+Look for these lines in a successful run:
+
+```text
+host Docker socket: absent
+Docker server: 27.5.1
+Docker Compose version v2.33.0
+integration test passed: {"result":42}
+test-1 exited with code 0
+```
+
+For one reviewed project on a serialized runner, opt into a repository-specific cache and run the script twice to exercise the warm-cache path:
+
+```sh
+COMPOSE_CACHE_NAME=acme-widget-compose-cache ./run-compose-tests.sh
+COMPOSE_CACHE_NAME=acme-widget-compose-cache ./run-compose-tests.sh
+```
+
+The version-tagged service images remain in that named disk between runs. Do not reuse the cache across repositories, trust domains, or concurrent jobs: it is writable state, not a security boundary.
+
+Only `compose.yaml` and `app/` are copied into the microVM. This excludes `.git`, `.env`, credentials, and unrelated checkout artifacts. The bind mount in `compose.yaml` therefore exposes a guest path to the nested application container, not the host checkout.
+
+<Warning>
+  Do not mount the host's `/var/run/docker.sock` into this sandbox. The runner deliberately aborts if a socket already exists, then starts a new Docker daemon whose authority ends at the microVM boundary.
+</Warning>
+
+<Warning>
+  In an untrusted pull-request workflow, install this runner outside the checkout and pass the checkout directory as its argument. Never execute a PR-controlled copy of `run-compose-tests.sh` on the host. Keep the default per-job cache, or remove a uniquely named cache after the job; a shared Docker disk lets one workload persist data for the next.
+</Warning>
+
+<Note>
+  Keep the guest's default security profile for this recipe. Docker-in-Docker needs guest capabilities that the restricted profile removes; its daemon is privileged inside the microVM, not on the host.
+</Note>
+
+## Verify failure propagation
+
+Deliberately ask the test container to expect the wrong result:
+
+```sh
+set +e
+EXPECTED_RESULT=41 ./run-compose-tests.sh
+compose_status=$?
+set -e
+
+test "$compose_status" -eq 1
+printf 'Compose failure reached the host: exit %s\n' "$compose_status"
+```
+
+The assertion fails inside `test`, `docker compose up --exit-code-from test` returns its status, and `msb run` returns the same status to the host. The cleanup trap still removes the nested stack.
+
+## Cleanup
+
+The runner removes its unique sandbox and default cache automatically. Remove an opt-in trusted cache when you no longer need it:
+
+```sh
+msb volume remove acme-widget-compose-cache
+```

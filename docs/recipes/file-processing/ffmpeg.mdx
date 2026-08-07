@@ -1,0 +1,112 @@
+---
+title: Transcode media with FFmpeg
+sidebarTitle: FFmpeg
+description: Prepare FFmpeg once and process untrusted media in an offline worker
+icon: "film"
+---
+
+Media parsers are a natural fit for disposable microVMs. This recipe snapshots a prepared FFmpeg toolchain, copies one input file into a networkless worker, and exports only the transcoded result.
+
+## Prepare FFmpeg
+
+```sh
+msb run --name ffmpeg-base --replace \
+  --cpus 2 --memory 2G --root-disk 4G \
+  debian:bookworm-slim -- sh -lc '
+    apt-get update &&
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ffmpeg &&
+    rm -rf /var/lib/apt/lists/* &&
+    useradd --system --create-home --shell /usr/sbin/nologin media &&
+    mkdir -p /input /out &&
+    chown media:media /out &&
+    chmod 0555 /input &&
+    chmod 0700 /out &&
+    ffmpeg -version | head -1
+  '
+
+msb snapshot create ffmpeg-tools --from ffmpeg-base --integrity --force
+msb snapshot verify ffmpeg-tools
+```
+
+## Transcode offline
+
+```sh
+msb run -d --name ffmpeg-worker --replace \
+  --from-snapshot ffmpeg-tools \
+  --cpus 2 --memory 2G \
+  --user media --security restricted \
+  --no-net --max-duration 10m \
+  -- sh -lc 'exec sleep 10m'
+
+msb cp ./input.mov ffmpeg-worker:/input/input.mov
+msb exec --user root ffmpeg-worker -- chmod 0444 /input/input.mov
+
+msb exec --user media --timeout 9m \
+  --rlimit nproc=64 --rlimit nofile=256 --rlimit fsize=1073741824 \
+  ffmpeg-worker -- sh -lc '
+    test "$(id -u)" -ne 0
+
+    if (printf x >> /input/input.mov) 2>/dev/null; then
+      echo "input unexpectedly writable" >&2
+      exit 1
+    fi
+
+    if getent ahosts example.com >/dev/null 2>&1; then
+      echo "network unexpectedly reachable" >&2
+      exit 1
+    fi
+
+    echo "input read-only; network blocked"
+    ffmpeg -nostdin -hide_banner -y \
+      -i /input/input.mov \
+      -c:v libx264 -preset medium -crf 23 \
+      -c:a aac -b:a 128k \
+      /out/output.mp4 &&
+    ffprobe -v error \
+      -show_entries format=duration,size \
+      -of default=noprint_wrappers=1 \
+      /out/output.mp4
+  '
+```
+
+The worker boots before the input is copied because rootfs patches cannot be combined with `--from-snapshot`. The root-owned input directory prevents the unprivileged media process from replacing the copied file, while `/out` is the only workload-owned data directory. The untrusted transcode command sets its own process, file-descriptor, and per-file limits.
+
+Copy the result to the host:
+
+```sh
+export FFMPEG_ARTIFACT_DIR="${FFMPEG_ARTIFACT_DIR:-$PWD/.ffmpeg-artifacts}"
+
+if [ -e "$FFMPEG_ARTIFACT_DIR" ] || [ -L "$FFMPEG_ARTIFACT_DIR" ]; then
+  echo "artifact path already exists: $FFMPEG_ARTIFACT_DIR" >&2
+  exit 1
+fi
+
+mkdir -m 700 "$FFMPEG_ARTIFACT_DIR"
+msb stop ffmpeg-worker
+msb cp ffmpeg-worker:/out/output.mp4 "$FFMPEG_ARTIFACT_DIR/output.mp4"
+test ! -L "$FFMPEG_ARTIFACT_DIR/output.mp4" &&
+  test -f "$FFMPEG_ARTIFACT_DIR/output.mp4" &&
+  test -s "$FFMPEG_ARTIFACT_DIR/output.mp4" &&
+  test "$(wc -c < "$FFMPEG_ARTIFACT_DIR/output.mp4")" -le 1073741824
+```
+
+Stopping the worker before export removes any process that could race the artifact path. The fresh private directory, regular-file check, and 1 GiB host-side size check keep the exported file within the transcode command's per-file limit.
+
+The laboratory smoke test generated a two-second H.264 video and `ffprobe` verified its duration and size.
+
+## Bound the workload
+
+- Validate the input size before creating the sandbox.
+- Set `--max-duration` according to the longest media you accept.
+- Limit concurrent workers at the application layer so users cannot exhaust host CPU.
+- Keep `--no-net` unless the worker must retrieve remote media; copy or stream validated input through a controlled host service instead.
+- Export only checked regular files from a stopped worker rather than the worker's entire filesystem.
+
+## Cleanup
+
+```sh
+msb rm -f ffmpeg-base ffmpeg-worker
+msb snapshot rm ffmpeg-tools
+```
+
+The checked output remains under `${FFMPEG_ARTIFACT_DIR:-$PWD/.ffmpeg-artifacts}` until you remove it.

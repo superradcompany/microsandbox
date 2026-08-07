@@ -1,0 +1,77 @@
+---
+title: Hermes Agent
+description: Set up Hermes Agent from its official image and persist its state
+icon: "/images/recipes/agents/hermes-agent.svg"
+---
+
+Hermes Agent's source installer brings in a large Python, Node.js, browser, and media toolchain. Use the official image instead: it contains the complete application and stores mutable state under `/opt/data`.
+
+<Note>
+  The official image uses s6-overlay. `--init auto` is required so its `/init` entrypoint becomes guest PID 1 rather than running as an ordinary child process. The image is approximately 900 MB compressed and can require several gigabytes of temporary free space during its first pull.
+</Note>
+
+## Run setup
+
+```sh
+msb run -t --name hermes-setup --replace \
+  --cpus 2 --memory 4G --root-disk 2G \
+  --mount-named hermes-data:/opt/data \
+  --init auto \
+  nousresearch/hermes-agent:v2026.7.20 -- setup
+```
+
+Follow the setup wizard to configure a model provider and any messaging integrations. Everything written to `/opt/data` survives sandbox replacement in the `hermes-data` volume.
+
+## Verify the installation
+
+After setup exits, inspect the pinned image directly:
+
+```sh
+msb run --name hermes-version --replace \
+  --entrypoint /opt/hermes/.venv/bin/hermes \
+  nousresearch/hermes-agent:v2026.7.20 -- --version
+```
+
+The tested image reports Hermes Agent `v0.19.0 (2026.7.20)`.
+
+## Run the gateway API
+
+Generate an API key, then recreate Hermes as a detached, supervised gateway:
+
+```sh
+export HERMES_API_KEY="$(openssl rand -hex 32)"
+
+msb run -d --name hermes-gateway --replace \
+  --cpus 2 --memory 4G --root-disk 2G \
+  -p 127.0.0.1:8642:8642 \
+  -e API_SERVER_ENABLED=true \
+  -e API_SERVER_HOST=0.0.0.0 \
+  -e API_SERVER_KEY="$HERMES_API_KEY" \
+  --mount-named hermes-data:/opt/data \
+  --init auto \
+  nousresearch/hermes-agent:v2026.7.20 -- gateway run
+```
+
+Port 8642 is published only on host loopback. Watch the supervised gateway start with:
+
+```sh
+msb logs -f hermes-gateway
+```
+
+<Warning>
+  Do not expose the API or dashboard on a public interface without a supported authentication provider and TLS. Hermes refuses several unsafe configurations, but host-level port exposure is still your responsibility.
+</Warning>
+
+## Cleanup
+
+```sh
+msb rm -f hermes-setup hermes-version hermes-gateway
+msb volume rm hermes-data
+unset HERMES_API_KEY
+```
+
+Keep `hermes-data` to preserve configuration, sessions, memories, skills, and credentials.
+
+## Reference
+
+- [Hermes Agent Docker image guide](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/docker.md)

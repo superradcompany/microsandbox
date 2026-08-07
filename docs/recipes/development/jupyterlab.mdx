@@ -1,0 +1,60 @@
+---
+title: JupyterLab
+description: Run token-authenticated notebooks in an isolated Python environment
+icon: "flask"
+---
+
+This recipe installs JupyterLab into a Python microVM, stores notebooks in a named volume, and exposes the server only on host loopback.
+
+## Start JupyterLab
+
+Set a temporary token in the host shell:
+
+```sh
+export JUPYTER_TOKEN="$(openssl rand -hex 24)"
+```
+
+Start the server:
+
+```sh
+msb run -d --name jupyter-demo --replace \
+  --cpus 2 --memory 2G --root-disk 4G \
+  -p 127.0.0.1:8888:8888 \
+  -e JUPYTER_TOKEN="$JUPYTER_TOKEN" \
+  --mount-named jupyter-notebooks:/workspace \
+  --workdir /workspace \
+  python:3.13-slim -- sh -lc '
+    pip install --no-cache-dir jupyterlab==4.6.2 &&
+    exec jupyter lab \
+      --ip=0.0.0.0 \
+      --port=8888 \
+      --no-browser \
+      --allow-root \
+      --IdentityProvider.token="$JUPYTER_TOKEN"
+  '
+```
+
+Open `http://127.0.0.1:8888/lab?token=$JUPYTER_TOKEN` in your browser, substituting the shell variable's value if the browser does not expand it.
+
+## Verify the service
+
+```sh
+curl -sS "http://127.0.0.1:8888/api?token=$JUPYTER_TOKEN" | head
+msb logs --tail 20 jupyter-demo
+```
+
+The logs show Jupyter Server listening on guest port 8888. Notebooks saved under `/workspace` remain in `jupyter-notebooks` after the sandbox is removed.
+
+<Warning>
+  The token is visible to the guest and to processes that can inspect the host command environment. Use the [secrets workflow](/sandboxes/secrets) for production credentials, retain the loopback bind, and place a TLS-terminating authenticated proxy in front of any remote deployment.
+</Warning>
+
+## Cleanup
+
+```sh
+msb rm -f jupyter-demo
+msb volume rm jupyter-notebooks
+unset JUPYTER_TOKEN
+```
+
+Keep `jupyter-notebooks` if you want to retain the notebooks.

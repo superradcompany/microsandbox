@@ -1,0 +1,107 @@
+---
+title: Create an ephemeral preview deploy
+sidebarTitle: Preview deploys
+description: Serve a built site in a time-limited microVM with loopback-only access and no egress
+icon: "window-maximize"
+---
+
+Give every pull request a disposable preview without letting the preview process reach the internet or modify the build output on the host. This recipe copies a static `dist` artifact into a microVM, publishes it on host loopback, and stops it automatically after 30 minutes.
+
+## Start the preview
+
+Produce `dist` in a separate build sandbox or download it as a reviewed CI artifact; do not execute an untrusted pull request's build toolchain on the host. Then run:
+
+```bash
+preview_name="preview-${PR_NUMBER:-local}"
+preview_port="${PREVIEW_PORT:-4173}"
+project_dir="$(pwd -P)"
+site_candidate="${PREVIEW_DIR:-$project_dir/dist}"
+
+if [[ "$site_candidate" != /* ]]; then
+  site_candidate="$project_dir/$site_candidate"
+fi
+if [[ -L "$site_candidate" || ! -d "$site_candidate" ]]; then
+  echo "preview artifact must be a real directory" >&2
+  exit 2
+fi
+if [[ ! "$preview_port" =~ ^[0-9]+$ ]] || (( preview_port < 1 || preview_port > 65535 )); then
+  echo "PREVIEW_PORT must be an integer between 1 and 65535" >&2
+  exit 2
+fi
+
+site_dir="$(cd "$site_candidate" && pwd -P)"
+case "$site_dir/" in
+  "$project_dir"/*/) ;;
+  *) echo "preview artifact resolves outside the project directory" >&2; exit 2 ;;
+esac
+
+if [[ -n "$(find "$site_dir" -type l -print -quit)" ]]; then
+  echo "preview artifact must not contain symlinks" >&2
+  exit 2
+fi
+
+msb run -d --name "$preview_name" --replace \
+  --cpus 1 --memory 256M \
+  --copy-dir "$site_dir:/site" \
+  -p "127.0.0.1:${preview_port}:8080" \
+  --net-default-egress deny \
+  --net-default-ingress allow \
+  --security restricted --user 65534:65534 \
+  --max-duration 30m \
+  --label recipe=preview \
+  --env PYTHONDONTWRITEBYTECODE=1 \
+  python:3.13.14-alpine3.23 -- \
+    python -m http.server 8080 \
+      --bind 0.0.0.0 \
+      --directory /site
+```
+
+`--copy-dir` gives the preview its own copy of the build. Replacing the sandbox cannot change `./dist` on the host.
+
+## Wait until it is ready
+
+Detached runs return before the server is listening, so use a bounded readiness loop:
+
+```sh
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  curl -fsS "http://127.0.0.1:${preview_port}/" >/dev/null 2>&1 && break
+  sleep 1
+done
+
+curl -fsS "http://127.0.0.1:${preview_port}/"
+printf 'Preview: http://127.0.0.1:%s\n' "$preview_port"
+```
+
+Open the URL printed by the readiness block to inspect the build. With the default port, it is [http://127.0.0.1:4173](http://127.0.0.1:4173).
+
+Verify that inbound preview traffic still works while guest egress is denied:
+
+```sh
+if msb exec "$preview_name" -- python -c '
+import urllib.request
+urllib.request.urlopen("https://example.com", timeout=2)
+' >/dev/null 2>&1; then
+  echo "network unexpectedly reachable" >&2
+  exit 1
+else
+  echo "preview reachable; guest egress blocked"
+fi
+```
+
+<Warning>
+  Loopback is a reachability choice, not an authentication boundary: other processes on a shared host may reach the preview. Put an authenticated reverse proxy or tunnel in front of it if reviewers need remote access, allocate a unique `PREVIEW_PORT` per concurrent preview, and do not expose untrusted content directly to the internet.
+</Warning>
+
+<Warning>
+  Guest egress rules constrain the Python server, not JavaScript running in a reviewer's browser. Treat preview HTML as untrusted, use a disposable browser profile without sensitive sessions or local-service access, and review the build artifact's provenance before opening it.
+</Warning>
+
+## Use it in CI
+
+Set `PR_NUMBER` to a stable pull-request identifier, choose a non-conflicting `PREVIEW_PORT`, and run the commands above on a virtualization-capable runner. A later run with the same name and `--replace` stops and replaces the previous preview; this causes a brief service gap, and a failed replacement can leave no preview. `--max-duration` still bounds abandoned previews when cleanup does not run.
+
+## Cleanup
+
+```sh
+msb rm -f "preview-${PR_NUMBER:-local}"
+```

@@ -1,0 +1,76 @@
+---
+title: OpenClaw
+description: Onboard OpenClaw and run its persistent gateway inside a microVM
+icon: "/images/recipes/agents/openclaw.svg"
+---
+
+OpenClaw combines an interactive agent with a long-running gateway. This recipe persists its state in a named volume and maps the gateway only to host loopback.
+
+## Run onboarding
+
+```sh
+msb run -t --name openclaw-setup --replace \
+  --cpus 2 --memory 2G --root-disk 4G \
+  --mount-named openclaw-data:/root/.openclaw \
+  node:24-bookworm-slim -- sh -lc '
+    apt-get update &&
+    apt-get install -y --no-install-recommends ca-certificates git &&
+    npm install -g openclaw@2026.7.1-2 &&
+    exec openclaw onboard --mode local
+  '
+```
+
+Complete the provider and channel prompts. The `openclaw-data` volume retains the workspace, configuration, credentials, sessions, and gateway state after the setup sandbox is removed.
+
+Verify the installed version before removing the setup sandbox:
+
+```sh
+msb exec openclaw-setup -- openclaw --version
+```
+
+The pinned package reports `OpenClaw 2026.7.1-2`.
+
+## Run the gateway
+
+Generate a token in the host shell and start a fresh gateway sandbox using the persisted state:
+
+```sh
+export OPENCLAW_GATEWAY_TOKEN="$(openssl rand -hex 32)"
+
+msb run -d --name openclaw-gateway --replace \
+  --cpus 2 --memory 2G --root-disk 4G \
+  -p 127.0.0.1:18789:18789 \
+  -e OPENCLAW_GATEWAY_TOKEN="$OPENCLAW_GATEWAY_TOKEN" \
+  --mount-named openclaw-data:/root/.openclaw \
+  node:24-bookworm-slim -- sh -lc '
+    apt-get update &&
+    apt-get install -y --no-install-recommends ca-certificates git &&
+    npm install -g openclaw@2026.7.1-2 &&
+    exec openclaw gateway run --bind lan --port 18789 --auth token
+  '
+```
+
+The gateway listens inside the guest on port 18789, while microsandbox exposes it only at `127.0.0.1:18789` on the host. Follow its output with:
+
+```sh
+msb logs -f openclaw-gateway
+```
+
+<Warning>
+  `OPENCLAW_GATEWAY_TOKEN` is visible to the guest and to processes that can inspect the host command environment. Use the microsandbox [secrets workflow](/sandboxes/secrets) for production credentials. Do not change the host bind address to `0.0.0.0` without adding transport security and understanding the exposure.
+</Warning>
+
+## Cleanup
+
+```sh
+msb rm -f openclaw-setup openclaw-gateway
+msb volume rm openclaw-data
+unset OPENCLAW_GATEWAY_TOKEN
+```
+
+Keep `openclaw-data` if you want the configured agent to survive sandbox replacement.
+
+## Reference
+
+- [OpenClaw getting started](https://docs.openclaw.ai/getting-started)
+- [OpenClaw gateway CLI](https://docs.openclaw.ai/cli/gateway)

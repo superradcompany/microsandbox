@@ -197,6 +197,30 @@
         "tab": "Recipes",
         "groups": [
           {
+            "group": "Agents",
+            "icon": "robot",
+            "pages": [
+              "recipes/overview",
+              "recipes/use-cases/ai-coding-agent",
+              "recipes/agents/opencode",
+              "recipes/agents/openclaw",
+              "recipes/agents/goose",
+              "recipes/agents/gemini-cli",
+              "recipes/agents/hermes-agent",
+              "recipes/agents/pi"
+            ]
+          },
+          {
+            "group": "CI/CD",
+            "icon": "code-pull-request",
+            "pages": [
+              "recipes/ci-cd/github-actions-runner",
+              "recipes/ci-cd/pr-checks",
+              "recipes/ci-cd/compose-tests",
+              "recipes/ci-cd/preview-deploys"
+            ]
+          },
+          {
             "group": "Docker",
             "icon": "docker",
             "pages": [
@@ -206,14 +230,72 @@
             ]
           },
           {
-            "group": "Guest",
-            "icon": "server",
+            "group": "Guest Systems",
+            "icon": "desktop",
             "pages": [
+              "recipes/development/vnc-desktop",
               "recipes/guest/systemd-services"
             ]
           },
           {
-            "group": "Metrics backends",
+            "group": "Sandboxing",
+            "icon": "shield-halved",
+            "pages": [
+              "recipes/use-cases/run-untrusted-code",
+              "recipes/sandboxing/warm-workers"
+            ]
+          },
+          {
+            "group": "Automation",
+            "icon": "gears",
+            "pages": [
+              "recipes/automation/dependency-audits",
+              "recipes/automation/parallel-batch-jobs"
+            ]
+          },
+          {
+            "group": "Development",
+            "icon": "code",
+            "pages": [
+              "recipes/development/code-server",
+              "recipes/development/jupyterlab"
+            ]
+          },
+          {
+            "group": "Tooling",
+            "icon": "puzzle-piece",
+            "pages": [
+              "recipes/plugins/terraform",
+              "recipes/plugins/eslint"
+            ]
+          },
+          {
+            "group": "Web Automation",
+            "icon": "globe",
+            "pages": [
+              "recipes/browser-automation/playwright",
+              "recipes/web-automation/scrapy"
+            ]
+          },
+          {
+            "group": "Data",
+            "icon": "database",
+            "pages": [
+              "recipes/data/postgresql",
+              "recipes/data/migration-rehearsal",
+              "recipes/data/redis"
+            ]
+          },
+          {
+            "group": "Files",
+            "icon": "file",
+            "pages": [
+              "recipes/file-processing/libreoffice-pdf",
+              "recipes/file-processing/ffmpeg"
+            ]
+          },
+          {
+            "group": "Metrics",
             "icon": "paper-plane",
             "pages": [
               "recipes/metrics-backends/grafana-cloud",

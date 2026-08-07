@@ -1,0 +1,143 @@
+---
+title: Schedule dependency audits
+sidebarTitle: Dependency audits
+description: Run npm audits as bounded jobs with registry-only network access and durable JSON reports
+icon: "clock-rotate-left"
+---
+
+Keep the scheduler on the host and make every audit workload a fresh, bounded microVM. This pattern works with cron, a systemd timer, launchd, or a CI schedule without placing npm or its dependency parser in a long-running automation service.
+
+The worker can resolve and reach the npm registry, but unrelated domains remain blocked. It copies the JSON report out even when `npm audit` correctly returns a failing status.
+
+## Create the job
+
+Save this as `run-dependency-audit.sh` next to `package.json` and `package-lock.json`:
+
+```bash run-dependency-audit.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+for manifest in package.json package-lock.json; do
+  if [[ -L "$manifest" || ! -f "$manifest" ]]; then
+    echo "refusing a non-regular manifest: $manifest" >&2
+    exit 2
+  fi
+done
+
+audit_name="dependency-audit-$(date +%Y%m%d-%H%M%S)-$$"
+artifact_root="${AUDIT_ARTIFACT_ROOT:-${RUNNER_TEMP:-$PWD/.artifacts}}"
+mkdir -p "$artifact_root"
+umask 077
+artifact_dir="$(mktemp -d "${artifact_root%/}/npm-audit.XXXXXX")"
+
+cleanup() {
+  msb rm -f "$audit_name" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+audit_exit=0
+msb run --name "$audit_name" \
+  --cpus 1 --memory 512M --root-disk 2G \
+  --net-default deny \
+  --net-rule 'allow@registry.npmjs.org:tcp:443' \
+  --max-connections 16 \
+  --copy-file ./package.json:/workspace/package.json \
+  --copy-file ./package-lock.json:/workspace/package-lock.json \
+  --workdir /workspace --user node \
+  --security restricted \
+  --rlimit nproc=64 --rlimit nofile=256 --rlimit fsize=8388608 \
+  --timeout 90s --max-duration 2m \
+  --label recipe=dependency-audit \
+  node:24.18.1-alpine3.23 -- sh -lc '
+    mkdir -p /home/node/audit
+    set +e
+    npm audit --json > /home/node/audit/npm-audit.json
+    audit_exit=$?
+    set -e
+
+    if wget -q -T 2 -O /dev/null https://example.com >/dev/null 2>&1; then
+      echo "unrelated network access unexpectedly succeeded" >&2
+      exit 1
+    fi
+
+    echo "unrelated egress blocked"
+    exit "$audit_exit"
+  ' || audit_exit=$?
+
+msb stop --timeout 5 "$audit_name" >/dev/null 2>&1 || true
+msb cp "$audit_name:/home/node/audit/npm-audit.json" "$artifact_dir/npm-audit.json"
+
+report_path="$artifact_dir/npm-audit.json"
+if [[ -L "$report_path" || ! -f "$report_path" ]]; then
+  echo "refusing a non-regular audit artifact" >&2
+  exit 1
+fi
+
+report_size="$(wc -c < "$report_path")"
+if (( report_size == 0 || report_size > 8388608 )); then
+  echo "audit artifact has an invalid size: $report_size bytes" >&2
+  exit 1
+fi
+
+node -e '
+  const report = require(process.argv[1]);
+  if (!report.auditReportVersion || !report.metadata?.vulnerabilities) process.exit(1);
+  console.log(report.metadata.vulnerabilities);
+' "$report_path"
+
+printf 'Report: %s\n' "$report_path"
+if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+  printf 'artifact_dir=%s\n' "$artifact_dir" >> "$GITHUB_OUTPUT"
+fi
+
+exit "$audit_exit"
+```
+
+Make it executable and run it once before scheduling it:
+
+```sh
+chmod +x ./run-dependency-audit.sh
+./run-dependency-audit.sh
+```
+
+A nonzero exit means the audit found vulnerabilities or the job failed. The script still exports the parsed report into a new private directory, prints that path, rejects symlinks and non-regular files, and bounds the report to 8 MiB in both the guest and host.
+
+## Schedule it
+
+Point your existing scheduler at the script. For example, a CI scheduler can run it nightly on a self-hosted runner that exposes virtualization:
+
+```yaml
+on:
+  schedule:
+    - cron: "17 3 * * *"
+
+concurrency:
+  group: dependency-audit-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  dependency-audit:
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: audit
+        run: ./run-dependency-audit.sh
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.audit.outputs.artifact_dir != ''
+        with:
+          name: npm-audit
+          path: ${{ steps.audit.outputs.artifact_dir }}/npm-audit.json
+          retention-days: 7
+```
+
+Use the scheduler's concurrency control or an external lock to prevent overlapping invocations. A fixed sandbox name is not a lock: `--replace` would terminate the older job.
+
+## Why the scheduler stays outside
+
+A one-shot worker is easier to bound and recover than a permanent cron VM. `--timeout` limits the audit command, `--max-duration` limits the whole sandbox, the unique name allows concurrent repositories, and the exit trap removes the stopped record. If you need services that remain inside a guest, see [systemd services](/recipes/guest/systemd-services).
+
+<Note>
+  `npm audit` sends dependency metadata to the configured registry, and its JSON report contains package names, versions, and vulnerability details. For private projects, use the intended private registry, scope any registry credential with the [secrets workflow](/sandboxes/secrets), restrict artifact access, and choose an appropriate retention period. Schedule the checked-in wrapper only from a protected default branch.
+</Note>

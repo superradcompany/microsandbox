@@ -1,0 +1,654 @@
+---
+title: Run an ephemeral GitHub Actions runner
+sidebarTitle: GitHub runner
+description: Run one repository job in a fresh microVM, retain bounded host logs, and destroy it
+icon: "github"
+---
+
+Create a repository-scoped, just-in-time (JIT) GitHub Actions runner inside a fresh microsandbox worker. GitHub assigns at most one job to the runner and deregisters it after that job; the controller independently deletes any remaining registration, retains bounded host-side output, and destroys the worker.
+
+The baseline in this recipe supports shell steps and JavaScript actions such as `actions/checkout` and `actions/upload-artifact`. It intentionally has no Docker daemon.
+
+## Prepare the host
+
+For an always-on controller, use a Linux bare-metal host with KVM or a cloud VM type that explicitly exposes nested virtualization. Merely seeing virtualization in a cloud product name is not enough; `/dev/kvm` must be available to the account that runs `msb`. The same scripts also work on an Apple Silicon Mac for local validation. Install `msb` and the GitHub CLI, then check the host before creating a runner:
+
+```sh
+case "$(uname -s)" in
+  Linux) test -r /dev/kvm -a -w /dev/kvm ;;
+  Darwin) test "$(uname -m)" = arm64 ;;
+  *) exit 1 ;;
+esac
+msb doctor
+gh auth status --hostname github.com
+```
+
+The controller needs repository **Administration: write** access for GitHub's JIT configuration and runner deletion endpoints. For a one-off run, authenticate `gh` with a fine-grained token that remains valid beyond the controller's two-hour lifetime. For a hosted service, set `MSB_GITHUB_TOKEN_COMMAND` to an administrator-owned executable that accepts `OWNER/REPO` and prints a fresh GitHub App installation token; the controller invokes it separately for every API operation, so cleanup never depends on an expired one-hour token. Keep either credential on the host. It is not the workflow's `GITHUB_TOKEN` and must never enter the guest.
+
+## Build the runner snapshot
+
+Install this trusted preparation script outside every repository checkout and run it on each native architecture you operate. It selects GitHub's `x64` or `arm64` archive from the host architecture, verifies the release archive before extraction, and records the native architecture in the snapshot name.
+
+```bash /usr/local/sbin/build-msb-github-runner
+#!/usr/bin/env bash
+set -euo pipefail
+
+runner_version=2.336.0
+
+case "$(uname -m)" in
+  x86_64)
+    runner_arch=x64
+    runner_sha256=04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d
+    ;;
+  aarch64 | arm64)
+    runner_arch=arm64
+    runner_sha256=58b758e420b87093fbd4bfddd368074960053e2f1388f01848c82624b90f27d1
+    ;;
+  *)
+    echo "unsupported host architecture: $(uname -m)" >&2
+    exit 2
+    ;;
+esac
+
+snapshot_name="github-actions-runner-${runner_version}-${runner_arch}"
+build_key="$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM}"
+builder_name="ghr-build-${runner_arch}-${build_key}"
+
+cleanup() {
+  msb rm -f "$builder_name" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+msb doctor
+
+msb run --name "$builder_name" \
+  --cpus 2 --memory 4G --root-disk 16G \
+  --max-duration 20m \
+  --net public \
+  --security default \
+  --env "RUNNER_VERSION=$runner_version" \
+  --env "RUNNER_ARCH=$runner_arch" \
+  --env "RUNNER_SHA256=$runner_sha256" \
+  ubuntu:24.04 -- bash -lc '
+    set -euo pipefail
+    export DEBIAN_FRONTEND=noninteractive
+
+    apt-get update
+    apt-get install -y --no-install-recommends \
+      ca-certificates curl git git-lfs jq sudo
+
+    archive=/tmp/actions-runner.tar.gz
+    curl --fail --location --silent --show-error \
+      --retry 5 --retry-delay 2 --retry-all-errors \
+      --output "$archive" \
+      "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-${RUNNER_ARCH}-${RUNNER_VERSION}.tar.gz"
+    printf "%s  %s\n" "$RUNNER_SHA256" "$archive" | sha256sum --check --strict -
+
+    install -d -m 0755 /opt/actions-runner
+    tar -xzf "$archive" -C /opt/actions-runner
+    /opt/actions-runner/bin/installdependencies.sh
+
+    useradd --create-home --shell /bin/bash runner
+    printf "runner ALL=(ALL:ALL) NOPASSWD: ALL\n" > /etc/sudoers.d/runner
+    chmod 0440 /etc/sudoers.d/runner
+    visudo --check --file=/etc/sudoers.d/runner
+    chown -R runner:runner /opt/actions-runner
+
+    su - runner -c "test -x /opt/actions-runner/run.sh && sudo -n true"
+    test "$(su - runner -c "/opt/actions-runner/bin/Runner.Listener --version")" = "$RUNNER_VERSION"
+
+    rm -f "$archive"
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
+  '
+
+msb snapshot create "$snapshot_name" \
+  --from "$builder_name" \
+  --integrity \
+  --force
+
+msb snapshot verify "$snapshot_name"
+printf 'Prepared %s\n' "$snapshot_name"
+```
+
+The runner process and every workflow step start as the unprivileged `runner` user. Passwordless `sudo` is available only inside the guest, so jobs that expect the usual Ubuntu runner privilege model still work. The worker uses the default in-guest security profile because `--security restricted` deliberately blocks `sudo`; the microVM remains the host boundary.
+
+Rebuild the snapshot when changing the base image, runner version, packages, or architecture. The integrity record detects later snapshot-disk changes, but it does not prove who built the snapshot. Build it only from reviewed inputs, and never put repository credentials, workflow secrets, or source checkouts in it.
+
+## Add a narrowly scoped workflow
+
+Choose a custom label that is unique to this repository and deployment, then use the exact same label when starting the controller. This example also proves that the job is non-root, no host Docker socket appeared, passwordless guest `sudo` works, checkout produced `README.md`, and a JavaScript artifact action can run:
+
+```yaml .github/workflows/microsandbox-jit.yml
+name: Microsandbox JIT runner
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: msb-jit-acme-widget-7d6e
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Verify isolation and runner tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(id -u)" -ne 0
+          test ! -S /var/run/docker.sock
+          sudo -n true
+          test -f README.md
+          printf 'runner=%s\nsha=%s\n' "$RUNNER_NAME" "$GITHUB_SHA" > runner-proof.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runner-proof
+          path: runner-proof.txt
+          retention-days: 1
+```
+
+Specifying any `permissions` entries sets all omitted `GITHUB_TOKEN` permissions to `none`. `persist-credentials: false` prevents checkout from leaving that token in the guest Git configuration, although workflow code can still access the job token while the job is running. Pin third-party actions to reviewed commit SHAs if your policy requires immutable action code.
+
+## Install the JIT controller
+
+Install the controller below as `/usr/local/sbin/msb-github-jit`, owned by the host administrator and outside all repository checkouts. It accepts exactly one `OWNER/REPO` and one custom label, derives collision-resistant runner and sandbox names, verifies the matching native snapshot, and creates no host mounts.
+
+```bash /usr/local/sbin/msb-github-jit
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  echo "usage: msb-github-jit OWNER/REPO RUNNER_LABEL" >&2
+  exit 2
+}
+
+repo="${1:-}"
+runner_label="${2:-}"
+[[ $# -eq 2 ]] || usage
+
+if [[ ! "$repo" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$ ]]; then
+  echo "repository must be OWNER/REPO using GitHub-safe characters" >&2
+  exit 2
+fi
+
+owner="${repo%%/*}"
+repository="${repo#*/}"
+if [[ "$owner" == *- || "$repository" == "." || "$repository" == ".." ]]; then
+  echo "repository owner or name is invalid" >&2
+  exit 2
+fi
+
+if (( ${#runner_label} > 64 )) || [[ ! "$runner_label" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+  echo "runner label must be 1-64 letters, numbers, dots, underscores, or hyphens" >&2
+  exit 2
+fi
+
+normalized_label="$(printf '%s' "$runner_label" | tr '[:upper:]' '[:lower:]')"
+case "$normalized_label" in
+  self-hosted | linux | windows | macos | x64 | arm64 | arm)
+    echo "runner label must be a unique custom label, not $runner_label" >&2
+    exit 2
+    ;;
+esac
+
+for required_command in gh msb; do
+  if ! command -v "$required_command" >/dev/null 2>&1; then
+    echo "required command not found: $required_command" >&2
+    exit 2
+  fi
+done
+
+case "$(uname -s)" in
+  Linux)
+    if [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
+      echo "/dev/kvm must be readable and writable" >&2
+      exit 2
+    fi
+    ;;
+  Darwin)
+    if [[ "$(uname -m)" != arm64 ]]; then
+      echo "local macOS validation requires Apple Silicon" >&2
+      exit 2
+    fi
+    ;;
+  *)
+    echo "unsupported host: $(uname -s)" >&2
+    exit 2
+    ;;
+esac
+
+case "$(uname -m)" in
+  x86_64) runner_arch=x64 ;;
+  aarch64 | arm64) runner_arch=arm64 ;;
+  *) echo "unsupported host architecture: $(uname -m)" >&2; exit 2 ;;
+esac
+
+runner_version=2.336.0
+snapshot_name="github-actions-runner-${runner_version}-${runner_arch}"
+api_version=2026-03-10
+github_token_command="${MSB_GITHUB_TOKEN_COMMAND:-}"
+
+if [[ -n "$github_token_command" && ( "$github_token_command" != /* || ! -f "$github_token_command" || ! -x "$github_token_command" ) ]]; then
+  echo "MSB_GITHUB_TOKEN_COMMAND must be an absolute path to an executable" >&2
+  exit 2
+fi
+
+artifact_root="${MSB_GITHUB_STATE_DIR:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}}"
+if [[ ! -d "$artifact_root" || ! -w "$artifact_root" ]]; then
+  echo "artifact root must be an existing writable directory: $artifact_root" >&2
+  exit 2
+fi
+
+umask 077
+artifact_dir="$(mktemp -d "${artifact_root%/}/msb-github-jit.XXXXXXXX")"
+chmod 0700 "$artifact_dir"
+runner_id_file="$artifact_dir/runner-id"
+
+nonce="${artifact_dir##*.}"
+started_at="$(date -u +%Y%m%dT%H%M%SZ)"
+runner_name="msb-${owner:0:12}-${repository:0:12}-${started_at}-${nonce}"
+sandbox_name="ghr-${started_at}-${nonce}"
+sandbox_may_exist=0
+jit_runner_may_exist=0
+
+printf '%s\n' "$repo" > "$artifact_dir/repository"
+printf '%s\n' "$runner_name" > "$artifact_dir/runner-name"
+printf '%s\n' "$sandbox_name" > "$artifact_dir/sandbox-name"
+
+github_api() {
+  local api_token
+  local api_status=0
+
+  if [[ -n "$github_token_command" ]]; then
+    if ! api_token="$("$github_token_command" "$repo")"; then
+      echo "failed to mint a GitHub App installation token" >&2
+      return 1
+    fi
+    if [[ -z "$api_token" || "$api_token" =~ [[:space:]] ]]; then
+      echo "MSB_GITHUB_TOKEN_COMMAND returned an invalid token" >&2
+      return 1
+    fi
+
+    GH_TOKEN="$api_token" env -u GH_DEBUG -u DEBUG -u GH_FORCE_TTY \
+      gh api --hostname github.com "$@" || api_status=$?
+    unset api_token
+    return "$api_status"
+  else
+    env -u GH_DEBUG -u DEBUG -u GH_FORCE_TTY \
+      gh api --hostname github.com "$@"
+  fi
+}
+
+capture_bounded_stdout() {
+  local head_pipe="$artifact_dir/.runner-stdout.head.pipe"
+  local tail_pipe="$artifact_dir/.runner-stdout.tail.pipe"
+  local head_log="$artifact_dir/runner-stdout.head.log"
+  local tail_log="$artifact_dir/runner-stdout.tail.log"
+  local half_limit=33554432
+  local head_pid
+  local tail_pid
+  local tee_status
+  local head_status
+  local tail_status
+
+  rm -f -- "$head_pipe" "$tail_pipe"
+  if ! mkfifo -m 0600 "$head_pipe" "$tail_pipe"; then
+    echo "failed to create private stdout pipes" >&2
+    return 1
+  fi
+
+  # Keep this FIFO open after the retained prefix so tee can drain arbitrarily noisy output.
+  {
+    head_capture_status=0
+    head -c "$half_limit" > "$head_log" || head_capture_status=$?
+    cat >/dev/null
+    exit "$head_capture_status"
+  } < "$head_pipe" &
+  head_pid=$!
+  tail -c "$half_limit" < "$tail_pipe" > "$tail_log" &
+  tail_pid=$!
+
+  set +e
+  # Drain the untrusted stream without rendering terminal-control bytes or creating an unbounded log.
+  tee "$head_pipe" "$tail_pipe" >/dev/null
+  tee_status=$?
+  wait "$head_pid"
+  head_status=$?
+  wait "$tail_pid"
+  tail_status=$?
+  rm -f -- "$head_pipe" "$tail_pipe"
+
+  if (( tee_status != 0 || head_status != 0 || tail_status != 0 )); then
+    echo "failed to capture bounded runner stdout" >&2
+    return 1
+  fi
+}
+
+delete_runner_id() {
+  local runner_id="$1"
+  local delete_error_file="$artifact_dir/runner-delete-${runner_id}.error.log"
+  local delete_response
+  local api_exit
+  local http_status
+  local attempt
+  local retry_after
+  local rate_limit_remaining
+  local rate_limit_reset
+  local retry_delay
+  local now
+
+  for attempt in 1 2 3; do
+    delete_response="$(github_api \
+      --method DELETE \
+      --include \
+      --silent \
+      --header "X-GitHub-Api-Version: $api_version" \
+      "repos/$repo/actions/runners/$runner_id" \
+      2>"$delete_error_file")"
+    api_exit=$?
+    http_status="$(printf '%s\n' "$delete_response" | awk '$1 ~ /^HTTP\/[0-9.]+$/ && $2 ~ /^[0-9][0-9][0-9]$/ { code = $2 } END { print code }')"
+
+    case "$http_status" in
+      204)
+        rm -f -- "$delete_error_file"
+        return 0
+        ;;
+      404)
+        # GitHub can conceal an inaccessible repository as 404, so verify access before accepting absence.
+        if github_api \
+          --silent \
+          --header "X-GitHub-Api-Version: $api_version" \
+          "repos/$repo/actions/runners?per_page=1" \
+          >/dev/null 2>"$delete_error_file"; then
+          rm -f -- "$delete_error_file"
+          return 0
+        fi
+        if (( attempt < 3 )); then
+          sleep $((attempt * 2))
+          continue
+        fi
+        ;;
+      403 | 429)
+        retry_after="$(printf '%s\n' "$delete_response" | awk 'tolower($1) == "retry-after:" { gsub(/\r/, "", $2); value = $2 } END { print value }')"
+        rate_limit_remaining="$(printf '%s\n' "$delete_response" | awk 'tolower($1) == "x-ratelimit-remaining:" { gsub(/\r/, "", $2); value = $2 } END { print value }')"
+        rate_limit_reset="$(printf '%s\n' "$delete_response" | awk 'tolower($1) == "x-ratelimit-reset:" { gsub(/\r/, "", $2); value = $2 } END { print value }')"
+
+        if [[ "$http_status" == 429 || "$retry_after" =~ ^[0-9]+$ || "$rate_limit_remaining" == 0 ]]; then
+          retry_delay=$((attempt * 2))
+          if [[ "$retry_after" =~ ^[0-9]+$ ]]; then
+            retry_delay="$retry_after"
+          elif [[ "$rate_limit_reset" =~ ^[0-9]+$ ]]; then
+            now="$(date +%s)"
+            retry_delay=$((rate_limit_reset - now))
+            (( retry_delay > 0 )) || retry_delay=1
+          fi
+
+          if (( retry_delay > 60 )); then
+            printf 'GitHub rate limit defers runner %s cleanup for %ss; reconciliation is required\n' \
+              "$runner_id" "$retry_delay" >&2
+            return 1
+          fi
+          if (( attempt < 3 )); then
+            sleep "$retry_delay"
+            continue
+          fi
+        fi
+        ;;
+      408 | 500 | 502 | 503 | 504 | "")
+        if (( attempt < 3 )); then
+          sleep $((attempt * 2))
+          continue
+        fi
+        ;;
+    esac
+
+    printf 'failed to delete GitHub runner %s (HTTP %s, gh exit %s)\n' \
+      "$runner_id" "${http_status:-unknown}" "$api_exit" >&2
+    if [[ -s "$delete_error_file" ]]; then
+      sed -n '1,3p' "$delete_error_file" >&2
+    fi
+    return 1
+  done
+}
+
+find_runner_ids_by_name() {
+  local reconcile_error_file="$artifact_dir/runner-reconcile.error.log"
+  local runner_ids
+  local attempt
+
+  for attempt in 1 2 3; do
+    if runner_ids="$(github_api \
+      --paginate \
+      --header "X-GitHub-Api-Version: $api_version" \
+      --jq ".runners[] | select(.name == \"$runner_name\") | .id" \
+      "repos/$repo/actions/runners?per_page=100" \
+      2>"$reconcile_error_file")"; then
+      rm -f -- "$reconcile_error_file"
+      if [[ -n "$runner_ids" ]]; then
+        printf '%s' "$runner_ids"
+        return 0
+      fi
+      if (( attempt == 3 )); then
+        echo "runner creation remains unresolved: no matching registration is visible yet" >&2
+        return 1
+      fi
+    elif (( attempt == 3 )); then
+      echo "failed to reconcile the GitHub runner by name" >&2
+      if [[ -s "$reconcile_error_file" ]]; then
+        sed -n '1,3p' "$reconcile_error_file" >&2
+      fi
+      return 1
+    fi
+
+    sleep $((attempt * 2))
+  done
+}
+
+delete_runner_registration() {
+  local runner_ids=""
+  local runner_id
+  local delete_failed=0
+
+  if [[ ! -L "$runner_id_file" && -f "$runner_id_file" ]]; then
+    IFS= read -r runner_id < "$runner_id_file"
+    if [[ "$runner_id" =~ ^[0-9]+$ ]]; then
+      runner_ids="$runner_id"
+    fi
+  fi
+
+  # Reconcile an ambiguous POST or local write failure by the collision-resistant runner name.
+  if [[ -z "$runner_ids" ]]; then
+    runner_ids="$(find_runner_ids_by_name)" || return 1
+  fi
+
+  while IFS= read -r runner_id; do
+    [[ -z "$runner_id" ]] && continue
+    if [[ ! "$runner_id" =~ ^[0-9]+$ ]]; then
+      echo "GitHub returned an invalid runner ID during cleanup" >&2
+      delete_failed=1
+      continue
+    fi
+    delete_runner_id "$runner_id" || delete_failed=1
+  done <<< "$runner_ids"
+
+  return "$delete_failed"
+}
+
+cleanup() {
+  local status=$?
+  local cleanup_failed=0
+
+  trap - EXIT INT TERM
+  set +e
+
+  if (( sandbox_may_exist != 0 )); then
+    if ! msb rm -f "$sandbox_name" >/dev/null 2>&1; then
+      echo "failed to remove sandbox: $sandbox_name" >&2
+      cleanup_failed=1
+    fi
+  fi
+  if (( jit_runner_may_exist != 0 )); then
+    delete_runner_registration || cleanup_failed=1
+  fi
+  rm -f -- "$artifact_dir/.runner-stdout.head.pipe" "$artifact_dir/.runner-stdout.tail.pipe"
+  if [[ -n "${jit_api_error_file:-}" && ! -s "$jit_api_error_file" ]]; then
+    rm -f -- "$jit_api_error_file"
+  fi
+
+  printf 'Runner artifacts: %s\n' "$artifact_dir" >&2
+
+  if (( cleanup_failed != 0 )); then
+    printf 'remote or local cleanup requires reconciliation\n' > "$artifact_dir/cleanup-pending"
+    echo "cleanup was incomplete; inspect the private artifact directory" >&2
+    if (( status == 0 )); then
+      status=1
+    fi
+  else
+    rm -f -- "$artifact_dir/cleanup-pending"
+  fi
+  exit "$status"
+}
+
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+msb doctor
+msb snapshot verify "$snapshot_name"
+github_api --silent \
+  --header "X-GitHub-Api-Version: $api_version" \
+  "repos/$repo/actions/runners?per_page=1" >/dev/null
+
+sandbox_may_exist=1
+msb run --detach --name "$sandbox_name" \
+  --from-snapshot "$snapshot_name" \
+  --cpus 4 --memory 8G \
+  --max-duration 2h \
+  --net public \
+  --security default \
+  --label recipe=github-actions-jit \
+  --env HOME=/home/runner \
+  --user runner \
+  --workdir /opt/actions-runner \
+  -- bash -lc 'exec sleep 7200'
+
+set +e
+jit_api_error_file="$artifact_dir/jit-api.error.log"
+jit_runner_may_exist=1
+github_api \
+  --method POST \
+  --header "X-GitHub-Api-Version: $api_version" \
+  --field "name=$runner_name" \
+  --field runner_group_id=1 \
+  --field "labels[]=self-hosted" \
+  --field "labels[]=linux" \
+  --field "labels[]=$runner_arch" \
+  --field "labels[]=$runner_label" \
+  --field work_folder=_work \
+  --jq '(.runner.id | tostring), .encoded_jit_config' \
+  "repos/$repo/actions/runners/generate-jitconfig" \
+  2>"$jit_api_error_file" |
+  {
+    IFS= read -r generated_runner_id
+    if [[ ! "$generated_runner_id" =~ ^[0-9]+$ ]]; then
+      echo "GitHub returned an invalid runner ID" >&2
+      exit 1
+    fi
+    if ! printf '%s\n' "$generated_runner_id" > "$runner_id_file"; then
+      echo "failed to save the generated runner ID" >&2
+      exit 1
+    fi
+    cat
+  } |
+  msb exec --stream \
+    --user runner \
+    --workdir /opt/actions-runner \
+    --env RUNNER_MANUALLY_TRAP_SIG=1 \
+    --env ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=1 \
+    --timeout 115m \
+    --rlimit nproc=512 \
+    --rlimit nofile=4096 \
+    "$sandbox_name" -- bash -c '
+      set -euo pipefail
+      IFS= read -r encoded_jit_config
+      if [[ -z "$encoded_jit_config" || "$encoded_jit_config" == null ]]; then
+        echo "missing encoded JIT configuration" >&2
+        exit 1
+      fi
+      exec ./run.sh --jitconfig "$encoded_jit_config"
+    ' 2>&1 |
+  capture_bounded_stdout
+pipeline_status=("${PIPESTATUS[@]}")
+set -e
+
+if (( pipeline_status[0] == 0 )); then
+  rm -f -- "$jit_api_error_file"
+else
+  echo "GitHub JIT configuration request failed; details are in $jit_api_error_file" >&2
+fi
+
+runner_status=0
+for stage_status in "${pipeline_status[@]}"; do
+  if (( stage_status != 0 )); then
+    runner_status=$stage_status
+    break
+  fi
+done
+
+exit "$runner_status"
+```
+
+The two-line API projection sends the numeric runner ID to a mode-`0600` host file and pipes only `encoded_jit_config` into `msb exec --stream`. The host-side controller neither intentionally logs nor persists that blob, and `github_api` disables GitHub CLI debug output because `GH_DEBUG=api` would log the raw response before `--jq`. Inside the VM, however, `Runner.Listener` receives the encoded value in its process arguments, decodes it, and writes active configuration and credential files. Workflow code runs as the same user and has `sudo`, so it can read those credentials. Treat the JIT configuration as job-accessible and the entire VM as credential-bearing until deletion. The narrower guarantee is that the host administration token never enters the VM. Do not add shell tracing, capture the API response in a variable, redirect it to a file, pass the host token with `--env`, or use microsandbox `--secret`. Avoiding `--secret` keeps both the host token and secret-injection TLS interception out of this runner.
+
+The stdout capture fully drains `msb exec` without rendering attacker-controlled terminal sequences. It retains only the first 32 MiB and last 32 MiB as private host logs, so a noisy job cannot create an unbounded controller artifact; follow live progress in the GitHub Actions UI instead. The retained files still contain untrusted bytes, so inspect them with tooling that escapes control characters rather than sending them directly to an administrator's terminal. The controller copies `PIPESTATUS` immediately and returns the first failure from the API request, ID extraction, runner, or capture stage. The exit trap deletes the VM without reading any post-job guest path, retries transient deletion failures, treats only HTTP `404` as already absent, and reconciles an ambiguous create response by the unique runner name. The private artifact directory is intentionally retained for incident review.
+
+The controller deliberately does not copy `_diag` after the job. Passwordless guest `sudo` means untrusted workflow code can replace diagnostic files, guest archive tools, and archive paths, while a host size check after `msb cp` cannot prevent an oversized transfer. The bounded stream is enforced outside the guest and is therefore the safer audit artifact.
+
+<Warning>
+  Do not add the `fsize` limits used by simpler recipes to this runner exec. In testing, the .NET runner crashed under explicit `RLIMIT_FSIZE` values of both 1 GiB and 4 GiB. This controller instead limits process count and open file descriptors, while the snapshot disk size, bounded host capture, job timeout, and sandbox lifetime bound the other relevant resources.
+</Warning>
+
+Queue the workflow, then run the controller with the workflow's exact custom label:
+
+```sh
+/usr/local/sbin/msb-github-jit acme/widget msb-jit-acme-widget-7d6e
+```
+
+If the job is not already queued, the runner waits until one job with that unique `runs-on` label arrives or the controller's timeout ends. Use one controller invocation per desired worker. The JIT registration and random names prevent one invocation from replacing another.
+
+## Understand the security boundary
+
+`--net public` is intentionally broad: the job can reach any public internet destination needed by GitHub, actions, package registries, or test dependencies. microsandbox still blocks the host, private networks, link-local addresses, and cloud metadata under the `public` profile, but it cannot stop a malicious job from exfiltrating data to a public endpoint.
+
+The fresh snapshot, lack of host mounts, absent host Docker socket, microVM boundary, and unconditional deletion protect host state and prevent one completed job from persisting into the next worker. They do not make credentials safe from code running inside the job. A malicious workflow can use or leak its `GITHUB_TOKEN`, OIDC token, cloud credentials, repository secrets, environment secrets, checked-out private source, and any other data intentionally provided to it.
+
+For untrusted pull requests, provide no secrets or cloud credentials, do not grant `id-token: write`, keep the `GITHUB_TOKEN` at the minimum permissions, require approval where appropriate, and follow GitHub's [secure use guidance for self-hosted runners](https://docs.github.com/en/actions/reference/security/secure-use#hardening-for-self-hosted-runners). Repository scope limits this JIT runner to one repository; organization and enterprise deployments should additionally use [runner groups restricted to selected repositories and workflows](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/manage-access).
+
+Passwordless `sudo` means hostile code can become root inside the guest and change in-guest limits. CPU, memory, disk, maximum duration, the hypervisor boundary, and network policy remain host-enforced, but guest root should still be treated as fully compromised until deletion. Review the bounded host logs as sensitive operational data and set a retention policy for their directory.
+
+## Operate it as a hosted service
+
+For an always-on service, keep the controller on a long-lived, virtualization-capable Linux host and enqueue one fresh VM for each validated `workflow_job` event whose action is `queued`. Validate the webhook signature, deduplicate both delivery IDs and workflow job IDs, authorize the repository and requested labels again, persist the installation ID and request—not an installation token—to a queue, and return `2xx` promptly; worker creation must be idempotent. Configure `MSB_GITHUB_TOKEN_COMMAND` as trusted service configuration, never webhook input, and use it to mint a fresh installation token from host-protected GitHub App credentials for every create, reconcile, and delete request.
+
+Set `MSB_GITHUB_STATE_DIR` or `RUNNER_TEMP` to an administrator-owned mode-`0700` directory on persistent storage. The controller records the repository, runner name, sandbox name, and then the GitHub runner ID there before the listener starts. A host crash cannot run an `EXIT` trap, so a hosted service must reconcile retained records and runners with this name prefix on startup, retry remote deletion until confirmed, and apply an explicit retention policy to the bounded logs. Do not rely only on GitHub's eventual cleanup of unused JIT registrations.
+
+GitHub documents the [`workflow_job` webhook payload](https://docs.github.com/en/webhooks/webhook-events-and-payloads#workflow_job), [webhook signature validation](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries), and [installation-token generation](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-an-installation-access-token-for-a-github-app). At larger scale, use GitHub's [runner scale-set client or Actions Runner Controller](https://docs.github.com/en/actions/reference/runners/self-hosted-runners#autoscaling) instead of inventing queue and retry semantics.
+
+## Add container actions separately
+
+GitHub container actions, job containers, and service containers require Docker on a Linux self-hosted runner. This snapshot deliberately supports only shell and JavaScript actions. Build a separate reviewed Docker-in-VM snapshot for those workflows, start the daemon inside that microVM, and keep its writable Docker state disposable or repository-specific.
+
+Never mount the host's `/var/run/docker.sock` into a runner. Possession of that socket is normally equivalent to control of the host Docker daemon and defeats the VM boundary. See [Docker inside a sandbox](/recipes/docker/docker-in-sandbox) and GitHub's [self-hosted runner requirements](https://docs.github.com/en/actions/reference/runners/self-hosted-runners#requirements-for-self-hosted-runner-machines).
+
+## Verified flow and references
+
+The exact snapshot builder and controller above were exercised on an ARM64 Ubuntu 24.04 microsandbox in attempt 5 of [GitHub Actions run 30624020450](https://github.com/superradcompany/microsandbox/actions/runs/30624020450), with GitHub CLI API debugging deliberately enabled in the parent environment to verify that the controller suppressed it. A uniquely labeled JIT runner registered, ran checkout and the non-root, Docker-socket, `sudo`, and `README.md` assertions, uploaded an artifact, exited after one job, deregistered, retained bounded mode-`0600` host logs, and removed its sandbox. Separate startup-failure and interrupt probes also removed both the local VM and remote runner registration.
+
+The authoritative GitHub references are the [repository JIT configuration REST endpoint](https://docs.github.com/en/rest/actions/self-hosted-runners#create-configuration-for-a-just-in-time-runner-for-a-repository), [self-hosted runner reference](https://docs.github.com/en/actions/reference/runners/self-hosted-runners), [secure use reference](https://docs.github.com/en/actions/reference/security/secure-use), [workflow permissions reference](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#permissions), and [Actions Runner v2.336.0 release](https://github.com/actions/runner/releases/tag/v2.336.0).

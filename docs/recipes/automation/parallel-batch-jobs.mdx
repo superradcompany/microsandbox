@@ -1,0 +1,560 @@
+---
+title: Fan out isolated batch jobs
+sidebarTitle: Parallel jobs
+description: Process JSON jobs concurrently in bounded microVMs and collect verified results
+icon: "layer-group"
+---
+
+Use this pattern for imports, report generation, scoring, document transforms, or any queue where jobs are independent. A trusted host dispatcher starts one fresh microVM per JSON input, keeps at most a configured number running, and retains deterministic results from successful jobs even when a sibling fails.
+
+This example totals order lines, but the isolation and collection lifecycle is the useful part: every worker receives one explicitly copied input, has no host mount or network access, and disappears after its result is exported.
+
+## Create the jobs
+
+Create a `jobs` directory and add a few independent inputs:
+
+```json jobs/ap-south.json
+{
+  "id": "ap-south",
+  "lines": [
+    {"sku": "seat", "quantity": 2, "unit_price_cents": 2500},
+    {"sku": "storage", "quantity": 10, "unit_price_cents": 900}
+  ]
+}
+```
+
+```json jobs/eu-west.json
+{
+  "id": "eu-west",
+  "lines": [
+    {"sku": "seat", "quantity": 3, "unit_price_cents": 2500},
+    {"sku": "storage", "quantity": 2, "unit_price_cents": 900}
+  ]
+}
+```
+
+```json jobs/north-america.json
+{
+  "id": "north-america",
+  "lines": [
+    {"sku": "seat", "quantity": 5, "unit_price_cents": 2500},
+    {"sku": "support", "quantity": 1, "unit_price_cents": 6000}
+  ]
+}
+```
+
+## Create the worker
+
+Save this trusted worker as `batch-worker.py` beside `jobs`:
+
+```python batch-worker.py
+#!/usr/bin/env python3
+
+import hashlib
+import json
+import os
+import resource
+import stat
+from pathlib import Path
+
+
+MAX_INPUT_BYTES = 65_536
+MAX_OUTPUT_BYTES = 65_536
+INPUT_PATH = Path("/job/input.json")
+OUTPUT_DIR = Path("/var/tmp/job-artifacts")
+OUTPUT_PATH = OUTPUT_DIR / "result.json"
+EXPECTED_LIMITS = {
+    "fsize": (resource.RLIMIT_FSIZE, 65_536),
+    "nofile": (resource.RLIMIT_NOFILE, 32),
+    "nproc": (resource.RLIMIT_NPROC, 16),
+}
+
+
+def require_integer(value: object, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{field} must be a non-negative integer")
+    return value
+
+
+def main() -> None:
+    if os.geteuid() == 0:
+        raise RuntimeError("worker must not run as root")
+
+    limits: dict[str, int] = {}
+    for name, (kind, expected) in EXPECTED_LIMITS.items():
+        soft, _ = resource.getrlimit(kind)
+        if soft != expected:
+            raise RuntimeError(f"unexpected {name} limit: {soft}")
+        limits[name] = soft
+
+    raw = INPUT_PATH.read_bytes()
+    if not raw or len(raw) > MAX_INPUT_BYTES:
+        raise ValueError("input must be between 1 and 65536 bytes")
+
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise ValueError("input must be a JSON object")
+
+    job_id = payload.get("id")
+    if not isinstance(job_id, str) or not job_id or len(job_id) > 128:
+        raise ValueError("id must be a non-empty string of at most 128 characters")
+    if payload.get("fail") is True:
+        raise RuntimeError("requested failure")
+
+    lines = payload.get("lines")
+    if not isinstance(lines, list) or not lines:
+        raise ValueError("lines must be a non-empty array")
+
+    total_cents = 0
+    units = 0
+    for index, line in enumerate(lines):
+        if not isinstance(line, dict):
+            raise ValueError(f"lines[{index}] must be an object")
+        quantity = require_integer(line.get("quantity"), f"lines[{index}].quantity")
+        unit_price = require_integer(
+            line.get("unit_price_cents"), f"lines[{index}].unit_price_cents"
+        )
+        sku = line.get("sku")
+        if not isinstance(sku, str) or not sku:
+            raise ValueError(f"lines[{index}].sku must be a non-empty string")
+        units += quantity
+        total_cents += quantity * unit_price
+
+    result = {
+        "input_sha256": hashlib.sha256(raw).hexdigest(),
+        "job_id": job_id,
+        "limits": limits,
+        "line_count": len(lines),
+        "total_cents": total_cents,
+        "units": units,
+    }
+    encoded = (json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    if len(encoded) > MAX_OUTPUT_BYTES:
+        raise RuntimeError("result exceeds the output limit")
+
+    # /var/tmp is part of the writable layer, so the result remains available
+    # after the sandbox stops. /tmp is a tmpfs and does not.
+    OUTPUT_DIR.mkdir(mode=0o700)
+    directory_stat = OUTPUT_DIR.lstat()
+    if not stat.S_ISDIR(directory_stat.st_mode) or stat.S_IMODE(directory_stat.st_mode) != 0o700:
+        raise RuntimeError("artifact directory is not a private directory")
+    if directory_stat.st_uid != os.geteuid():
+        raise RuntimeError("artifact directory has the wrong owner")
+
+    # Refuse replacement and symlink traversal even though the per-job directory is fresh and private.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(OUTPUT_PATH, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(encoded)
+            output.flush()
+            os.fsync(output.fileno())
+    except BaseException:
+        OUTPUT_PATH.unlink(missing_ok=True)
+        raise
+
+    output_stat = OUTPUT_PATH.lstat()
+    if not stat.S_ISREG(output_stat.st_mode) or output_stat.st_size > MAX_OUTPUT_BYTES:
+        raise RuntimeError("result is not a bounded regular file")
+    print(json.dumps({"completed": job_id, "total_cents": total_cents}, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()
+```
+
+The result includes a SHA-256 digest of the exact input bytes, so a downstream consumer can tie each artifact to the job that produced it. It contains no clock, VM name, or random value, which also makes reruns byte-for-byte deterministic. The artifact deliberately lives under `/var/tmp`: `/tmp` is a tmpfs and is unavailable after the sandbox stops.
+
+## Create the dispatcher
+
+Save this as `run-batch.sh`:
+
+```bash run-batch.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+export LC_ALL=C
+umask 077
+
+readonly max_input_bytes=65536
+readonly max_output_bytes=65536
+readonly max_worker_bytes=262144
+max_parallel="${MAX_PARALLEL:-2}"
+
+if [[ ! "$max_parallel" =~ ^[1-9][0-9]*$ ]] || (( max_parallel > 16 )); then
+  echo "MAX_PARALLEL must be an integer between 1 and 16" >&2
+  exit 2
+fi
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "python3 is required for safe input staging" >&2
+  exit 2
+fi
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+input_dir="${BATCH_INPUT_DIR:-$script_dir/jobs}"
+worker_path="$script_dir/batch-worker.py"
+artifact_parent="${BATCH_ARTIFACT_DIR:-$script_dir/.batch-artifacts}"
+
+if [[ -L "$input_dir" || ! -d "$input_dir" ]]; then
+  echo "input directory must be a real directory: $input_dir" >&2
+  exit 2
+fi
+if [[ -L "$worker_path" || ! -f "$worker_path" ]]; then
+  echo "worker must be a regular, non-symlink file: $worker_path" >&2
+  exit 2
+fi
+if [[ -L "$artifact_parent" ]]; then
+  echo "artifact parent must not be a symlink: $artifact_parent" >&2
+  exit 2
+fi
+if [[ "$artifact_parent" == *:* ]]; then
+  echo "artifact path contains the reserved ':' separator: $artifact_parent" >&2
+  exit 2
+fi
+
+input_dir="$(cd -- "$input_dir" && pwd -P)"
+
+shopt -s nullglob
+inputs=("$input_dir"/*.json)
+if (( ${#inputs[@]} == 0 )); then
+  echo "no JSON jobs found in $input_dir" >&2
+  exit 2
+fi
+
+file_size() {
+  local size
+  size="$(wc -c < "$1")"
+  size="${size//[[:space:]]/}"
+  printf '%s\n' "$size"
+}
+
+stage_regular_file() {
+  python3 - "$1" "$2" "$3" <<'PY'
+import os
+import stat
+import sys
+
+
+source, destination, raw_limit = sys.argv[1:]
+limit = int(raw_limit)
+if not hasattr(os, "O_NOFOLLOW"):
+    raise RuntimeError("safe staging requires O_NOFOLLOW")
+
+
+def read_bounded(descriptor):
+    chunks = []
+    total = 0
+    while total <= limit:
+        chunk = os.read(descriptor, min(65_536, limit + 1 - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks)
+
+
+def source_identity(metadata):
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+source_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | os.O_NOFOLLOW
+source_descriptor = os.open(source, source_flags)
+try:
+    before = os.fstat(source_descriptor)
+    if not stat.S_ISREG(before.st_mode):
+        raise ValueError("source is not a regular file")
+    if before.st_size < 1 or before.st_size > limit:
+        raise ValueError(f"source must be between 1 and {limit} bytes")
+
+    first_read = read_bounded(source_descriptor)
+    os.lseek(source_descriptor, 0, os.SEEK_SET)
+    second_read = read_bounded(source_descriptor)
+    after = os.fstat(source_descriptor)
+    path_after = os.stat(source, follow_symlinks=False)
+
+    identity = source_identity(before)
+    if identity != source_identity(after) or identity != source_identity(path_after):
+        raise RuntimeError("source changed while it was staged")
+    if len(first_read) != before.st_size or first_read != second_read:
+        raise RuntimeError("source bytes changed while they were staged")
+finally:
+    os.close(source_descriptor)
+
+destination_flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW
+destination_descriptor = None
+try:
+    destination_descriptor = os.open(destination, destination_flags, 0o600)
+    os.fchmod(destination_descriptor, 0o444)
+    view = memoryview(first_read)
+    while view:
+        written = os.write(destination_descriptor, view)
+        view = view[written:]
+    os.fsync(destination_descriptor)
+
+    staged_metadata = os.fstat(destination_descriptor)
+    os.lseek(destination_descriptor, 0, os.SEEK_SET)
+    staged_bytes = read_bounded(destination_descriptor)
+    if not stat.S_ISREG(staged_metadata.st_mode):
+        raise RuntimeError("staged path is not a regular file")
+    if stat.S_IMODE(staged_metadata.st_mode) != 0o444:
+        raise RuntimeError("staged file has an unexpected mode")
+    if staged_metadata.st_size != len(first_read) or staged_bytes != first_read:
+        raise RuntimeError("staged bytes do not match the opened source")
+except BaseException:
+    if destination_descriptor is not None:
+        os.close(destination_descriptor)
+        destination_descriptor = None
+        os.unlink(destination)
+    raise
+finally:
+    if destination_descriptor is not None:
+        os.close(destination_descriptor)
+PY
+}
+
+mkdir -p -- "$artifact_parent"
+if [[ -L "$artifact_parent" || ! -d "$artifact_parent" ]]; then
+  echo "artifact parent is not a real directory: $artifact_parent" >&2
+  exit 2
+fi
+artifact_parent="$(cd -- "$artifact_parent" && pwd -P)"
+if [[ "$artifact_parent" == *:* ]]; then
+  echo "artifact path contains the reserved ':' separator: $artifact_parent" >&2
+  exit 2
+fi
+
+batch_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+artifact_root="$artifact_parent/$batch_id"
+mkdir -- "$artifact_root"
+chmod 700 "$artifact_root"
+
+pids=()
+batch_status=0
+staged_inputs=()
+input_names=()
+staged_worker="$artifact_root/.worker.py"
+
+cleanup_batch() {
+  local staged_input
+  rm -f "$staged_worker" >/dev/null 2>&1 || true
+  if (( ${#staged_inputs[@]} > 0 )); then
+    for staged_input in "${staged_inputs[@]}"; do
+      rm -f "$staged_input" >/dev/null 2>&1 || true
+    done
+  fi
+  msb rm -q -f \
+    --label recipe=parallel-batch \
+    --label "batch=$batch_id" >/dev/null 2>&1 || true
+}
+trap cleanup_batch EXIT
+
+handle_interrupt() {
+  trap - INT TERM
+  local pid
+  cleanup_batch
+  if (( ${#pids[@]} > 0 )); then
+    for pid in "${pids[@]}"; do
+      wait "$pid" >/dev/null 2>&1 || true
+    done
+  fi
+  exit 130
+}
+trap handle_interrupt INT TERM
+
+if ! stage_regular_file "$worker_path" "$staged_worker" "$max_worker_bytes"; then
+  echo "failed to stage trusted worker: $worker_path" >&2
+  exit 2
+fi
+
+stage_index=0
+for input_path in "${inputs[@]}"; do
+  stage_index=$((stage_index + 1))
+  printf -v stage_job_index '%04d' "$stage_index"
+  stage_job_dir="$artifact_root/job-$stage_job_index"
+  staged_input="$stage_job_dir/input.json"
+  staged_inputs+=("$staged_input")
+  input_names+=("$(basename -- "$input_path")")
+
+  mkdir -- "$stage_job_dir"
+  chmod 700 "$stage_job_dir"
+  if ! stage_regular_file "$input_path" "$staged_input" "$max_input_bytes"; then
+    echo "failed to stage input: $input_path" >&2
+    exit 2
+  fi
+done
+
+is_stopped() {
+  local expected="$1"
+  local current
+  while IFS= read -r current; do
+    if [[ "$current" == "$expected" ]]; then
+      return 0
+    fi
+  done < <(msb list --stopped --quiet)
+  return 1
+}
+
+run_one() (
+  set -euo pipefail
+
+  local staged_input="$1"
+  local input_name="$2"
+  local index="$3"
+  local sandbox_name="batch-${batch_id}-${index}"
+  local job_dir="$artifact_root/job-$index"
+  local partial_result="$job_dir/.result.json.part"
+  local result_path="$job_dir/result.json"
+  local run_status=0
+
+  cleanup_worker() {
+    rm -f "$staged_input" "$partial_result" >/dev/null 2>&1 || true
+    msb rm -q -f "$sandbox_name" >/dev/null 2>&1 || true
+  }
+  trap cleanup_worker EXIT
+
+  if msb run --name "$sandbox_name" \
+    --cpus 1 --memory 256M --root-disk 1G \
+    --no-net --security restricted --user 65534:65534 \
+    --rlimit nproc=16 --rlimit nofile=32 --rlimit fsize=65536 \
+    --timeout 30s --max-duration 45s \
+    --workdir /job \
+    --label recipe=parallel-batch \
+    --label "batch=$batch_id" \
+    --label "job=$index" \
+    --copy-file "$staged_worker:/opt/batch/worker.py" \
+    --copy-file "$staged_input:/job/input.json" \
+    python:3.13.14-alpine3.23 -- python3 /opt/batch/worker.py \
+    >"$job_dir/msb.log" 2>&1; then
+    :
+  else
+    run_status=$?
+    echo "job $index failed; see $job_dir/msb.log" >&2
+    tail -n 20 -- "$job_dir/msb.log" >&2 || true
+    exit "$run_status"
+  fi
+
+  if ! is_stopped "$sandbox_name"; then
+    echo "refusing to export from a sandbox that is not stopped: $sandbox_name" >&2
+    exit 1
+  fi
+
+  msb cp "$sandbox_name:/var/tmp/job-artifacts/result.json" "$partial_result"
+  if [[ -L "$partial_result" || ! -f "$partial_result" ]]; then
+    echo "exported result is not a regular, non-symlink file: $partial_result" >&2
+    exit 1
+  fi
+  result_size="$(file_size "$partial_result")"
+  if (( result_size == 0 || result_size > max_output_bytes )); then
+    echo "exported result must be between 1 and $max_output_bytes bytes" >&2
+    exit 1
+  fi
+
+  mv -- "$partial_result" "$result_path"
+  printf 'completed %s -> %s\n' "$input_name" "$result_path"
+)
+
+wait_for_oldest() {
+  local pid="${pids[0]}"
+  if ! wait "$pid"; then
+    batch_status=1
+  fi
+  pids=("${pids[@]:1}")
+}
+
+dispatch_index=0
+while (( dispatch_index < ${#staged_inputs[@]} )); do
+  printf -v job_index '%04d' "$((dispatch_index + 1))"
+  run_one "${staged_inputs[$dispatch_index]}" "${input_names[$dispatch_index]}" "$job_index" &
+  pids+=("$!")
+  if (( ${#pids[@]} == max_parallel )); then
+    wait_for_oldest
+  fi
+  dispatch_index=$((dispatch_index + 1))
+done
+while (( ${#pids[@]} > 0 )); do
+  wait_for_oldest
+done
+
+if (( batch_status != 0 )); then
+  echo "one or more jobs failed; completed artifacts remain in $artifact_root" >&2
+else
+  echo "all ${#inputs[@]} jobs completed; artifacts: $artifact_root"
+fi
+exit "$batch_status"
+```
+
+The dispatcher uses Bash arrays rather than parsing `ls` or interpolating paths into shell source. Quoted absolute paths handle spaces safely; only the artifact path rejects `:` because it becomes the source side of microsandbox's `SRC:DST` copy syntax. Its small host-side Python helper opens each source with `O_NOFOLLOW`, performs two bounded reads through that descriptor, verifies the file identity and metadata stayed stable, then writes and rereads an exclusive private staging file. Every input is staged before the first VM starts, so dispatch never returns to an uploader-controlled path.
+
+Each host job directory is mode `0700`. Staged files are read-only mode `0444` because `--copy-file` preserves source modes and the guest worker is deliberately non-root; the private containing directory keeps those short-lived files confidential, and the exit trap deletes them without changing the original input.
+
+## Run the batch
+
+The host needs `msb`, Bash, and Python 3. Python is used only for race-resistant staging; the workload still runs inside the guest.
+
+```sh
+chmod +x ./run-batch.sh
+MAX_PARALLEL=2 ./run-batch.sh
+```
+
+The run creates a unique directory under `.batch-artifacts`. Each successful `job-NNNN` directory contains `result.json` and `msb.log`; for example, the three inputs above produce totals of `14000`, `9300`, and `18500` cents. Running the command again creates a new artifact directory and produces byte-identical result files.
+
+Set `BATCH_INPUT_DIR` or `BATCH_ARTIFACT_DIR` to quoted paths when the inputs or outputs live elsewhere. `MAX_PARALLEL` is capped at 16 by the script; choose a lower ceiling when the host cannot sustain that many concurrent microVMs.
+
+## Test failure propagation
+
+Add one job that deliberately exercises the error path:
+
+```json jobs/reject.json
+{
+  "id": "deliberate-failure",
+  "fail": true,
+  "lines": [
+    {"sku": "seat", "quantity": 1, "unit_price_cents": 2500}
+  ]
+}
+```
+
+Run the dispatcher again. It waits for every admitted worker, preserves results from successful siblings, prints the failed worker's log, and exits nonzero. No `result.json` is exported for `reject.json`.
+
+```sh
+if ./run-batch.sh; then
+  echo "expected the batch to fail" >&2
+  exit 1
+else
+  echo "worker failure reached the host"
+fi
+
+rm ./jobs/reject.json
+```
+
+Remove the `fail` branch from the worker when adapting the example; it exists only to make the failure contract easy to verify.
+
+## What is bounded
+
+- The rolling PID window admits no more than `MAX_PARALLEL` workers from this dispatcher at once.
+- Unique timestamp, process, and sequence identifiers prevent one run from replacing another run's sandboxes.
+- `--no-net`, `--security restricted`, and UID/GID `65534:65534` constrain every worker. Running as non-root also makes the `nproc=16` limit effective.
+- CPU, memory, wall-clock duration, process count, open descriptors, and output file size are bounded independently.
+- Before any worker starts, staging accepts only stable regular inputs of at most 64 KiB, never follows a source symlink, and verifies the private staged bytes against the opened source. Only that immutable staged file is copied to the guest.
+- The worker creates a mode-`0700` guest artifact directory and a mode-`0600` result with exclusive, no-follow creation.
+- An attached `msb run` leaves the named sandbox stopped. The dispatcher verifies that state before copying anything out, then accepts only a regular, non-symlink result of at most 64 KiB and atomically renames the checked partial file.
+- Per-worker traps remove exact sandbox names, while the batch trap removes only sandboxes carrying both labels for this unique run. On interruption, it first requests scoped cleanup, drains the already-admitted and time-bounded workers so a late creation cannot race cleanup, then applies the scoped cleanup again. Host artifacts are intentionally retained.
+
+<Warning>
+  `MAX_PARALLEL` limits one dispatcher process, not every process on a shared host. Put a host-wide queue, service-level semaphore, or scheduler concurrency limit in front of this script when multiple batches can start independently, and enforce a retention policy for `.batch-artifacts`.
+</Warning>
+
+<Warning>
+  Keep `run-batch.sh` and `batch-worker.py` under the scheduler's control. The input directory may contain untrusted entries: staging rejects symlinks, type or size changes, pathname swaps, and unstable byte reads before VM admission. Producers should still publish complete inputs with an atomic rename instead of modifying an accepted inode in place, and the host must enforce authentication and queue quotas.
+</Warning>
+
+<Note>
+  The example pins a complete Python image tag. For a high-assurance pipeline, pin the reviewed image by immutable digest as well and update that digest through your normal dependency-review process.
+</Note>

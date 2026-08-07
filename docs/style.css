@@ -3,6 +3,44 @@ body {
 }
 
 /* ----------------------------------------------------------------------------
+ * Agent recipe sidebar icons: Mintlify renders custom page icons as images,
+ * which bypasses the gray idle / violet selected colors used by built-in icon
+ * masks. Reuse each official brand mark as a mask so it follows the same
+ * interaction states as the rest of the sidebar.
+ * -------------------------------------------------------------------------- */
+nav[aria-label="Pages"] a > div:has(> img[src*="/images/recipes/agents/"]) {
+  width: 1rem;
+  background-color: #9ca3af;
+  -webkit-mask-image: var(--msb-agent-icon);
+  -webkit-mask-position: center;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-size: 1rem 1rem;
+  mask-image: var(--msb-agent-icon);
+  mask-position: center;
+  mask-repeat: no-repeat;
+  mask-size: 1rem 1rem;
+}
+
+.dark nav[aria-label="Pages"] a > div:has(> img[src*="/images/recipes/agents/"]) {
+  background-color: #6b7280;
+}
+
+nav[aria-label="Pages"] a[aria-current="page"] > div:has(> img[src*="/images/recipes/agents/"]) {
+  background-color: #bf84fe;
+}
+
+nav[aria-label="Pages"] img[src*="/images/recipes/agents/"] {
+  display: none;
+}
+
+nav[aria-label="Pages"] a > div:has(> img[src*="/opencode.svg"]) { --msb-agent-icon: url("/images/recipes/agents/opencode.svg"); }
+nav[aria-label="Pages"] a > div:has(> img[src*="/openclaw.svg"]) { --msb-agent-icon: url("/images/recipes/agents/openclaw.svg"); }
+nav[aria-label="Pages"] a > div:has(> img[src*="/goose.svg"]) { --msb-agent-icon: url("/images/recipes/agents/goose.svg"); }
+nav[aria-label="Pages"] a > div:has(> img[src*="/gemini-cli.svg"]) { --msb-agent-icon: url("/images/recipes/agents/gemini-cli.svg"); }
+nav[aria-label="Pages"] a > div:has(> img[src*="/hermes-agent.svg"]) { --msb-agent-icon: url("/images/recipes/agents/hermes-agent.svg"); }
+nav[aria-label="Pages"] a > div:has(> img[src*="/pi.svg"]) { --msb-agent-icon: url("/images/recipes/agents/pi.svg"); }
+
+/* ----------------------------------------------------------------------------
  * Content width: Mintlify caps #content-area at max-w-xl (36rem) and sets its
  * width to `calc(100% - 28rem)`, centered with mx-auto, so on wide screens the
  * content is a narrow column with large dead zones. The TOC column to its right

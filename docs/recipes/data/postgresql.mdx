@@ -1,0 +1,73 @@
+---
+title: PostgreSQL
+description: Run a persistent PostgreSQL service with a localhost-only forwarded port
+icon: "database"
+---
+
+This recipe runs PostgreSQL 17 in a microVM, stores the database on a disk-backed named volume, and publishes the service only to host loopback.
+
+<Note>
+  The current `postgres:17-alpine` image contains tab characters in `DOCKER_PG_LLVM_DEPS`. Passing `-e DOCKER_PG_LLVM_DEPS=` is a temporary compatibility workaround for microsandbox's guest environment validation.
+</Note>
+
+## Start PostgreSQL
+
+Set a demo password in the host shell:
+
+```sh
+export POSTGRES_PASSWORD="$(openssl rand -hex 24)"
+```
+
+Start the database:
+
+```sh
+msb run -d --name postgres-demo --replace \
+  --cpus 1 --memory 1G --root-disk 2G \
+  -p 127.0.0.1:55432:5432 \
+  -e POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
+  -e POSTGRES_DB=recipes \
+  -e DOCKER_PG_LLVM_DEPS= \
+  --mount-named postgres-data:/var/lib/postgresql/data:kind=disk,size=5G \
+  postgres:17-alpine
+```
+
+With no command after the image, microsandbox runs the image's declared `docker-entrypoint.sh postgres` command in the background.
+
+## Wait for readiness
+
+```sh
+msb exec postgres-demo -- sh -lc '
+  until pg_isready -h 127.0.0.1 -d recipes -U postgres; do sleep 1; done
+'
+```
+
+## Run a query
+
+```sh
+msb exec -e PGPASSWORD="$POSTGRES_PASSWORD" postgres-demo -- \
+  psql -h 127.0.0.1 -U postgres -d recipes \
+  -c "select current_database(), current_setting('server_version');"
+```
+
+The tested image returned database `recipes` and PostgreSQL `17.10`.
+
+Applications on the host can connect to `127.0.0.1:55432` with the same database, user, and password.
+
+<Warning>
+  Environment variables and command arguments are appropriate for this local demo, not for production secrets. Use [secret injection](/sandboxes/secrets), retain the loopback bind, and configure PostgreSQL access controls before allowing remote clients.
+</Warning>
+
+## Persistence and cleanup
+
+Remove the VM while keeping its database:
+
+```sh
+msb rm -f postgres-demo
+```
+
+Remove the database volume only when you no longer need its contents:
+
+```sh
+msb volume rm postgres-data
+unset POSTGRES_PASSWORD
+```

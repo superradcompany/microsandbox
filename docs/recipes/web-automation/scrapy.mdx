@@ -1,0 +1,364 @@
+---
+title: Crawl a site with Scrapy
+sidebarTitle: Scrapy
+description: Crawl a site into bounded JSON with robots.txt and network controls
+icon: "spider"
+---
+
+Use [Scrapy](https://scrapy.org/) to turn a catalog into structured JSON inside a disposable microVM. This recipe prepares the crawler once, proves it against a deterministic local site with no network access, and then runs the same crawler with a single-domain production allowlist.
+
+This example is for server-rendered HTML. Use [Playwright](/recipes/browser-automation/playwright) when the content only appears after JavaScript runs.
+
+## Create the crawler
+
+Save this as `catalog_spider.py`:
+
+```python catalog_spider.py
+import os
+from urllib.parse import urlsplit
+
+import scrapy
+
+
+class CatalogSpider(scrapy.Spider):
+    name = "catalog"
+    start_urls = [os.environ["START_URL"]]
+    allowed_domains = [urlsplit(start_urls[0]).hostname]
+
+    custom_settings = {
+        "ROBOTSTXT_OBEY": True,
+        "USER_AGENT": "microsandbox-scrapy-recipe/1.0",
+        "DOWNLOAD_TIMEOUT": 10,
+        "DOWNLOAD_MAXSIZE": 5_000_000,
+        "DOWNLOAD_DELAY": 0.25,
+        "CONCURRENT_REQUESTS_PER_DOMAIN": 2,
+        "CLOSESPIDER_PAGECOUNT": 20,
+        "DEPTH_LIMIT": 5,
+        "FEEDS": {
+            "/out/items.json": {
+                "format": "json",
+                "encoding": "utf8",
+                "indent": 2,
+                "overwrite": True,
+            }
+        },
+    }
+
+    def parse(self, response):
+        for product in response.css("article.product_pod"):
+            href = product.css("h3 a::attr(href)").get()
+            yield {
+                "name": product.css("h3 a::attr(title)").get(),
+                "price": product.css(".price_color::text").get(),
+                "url": response.urljoin(href),
+            }
+
+        next_page = response.css("li.next a::attr(href)").get()
+        if next_page:
+            yield response.follow(next_page, callback=self.parse)
+
+        yield from response.follow_all(
+            css="a[data-crawl]::attr(href)",
+            callback=self.parse,
+        )
+```
+
+`allowed_domains` keeps Scrapy on the start URL's hostname. The microsandbox network policy used later enforces the same boundary outside the crawler process.
+
+## Create a deterministic test site
+
+Save this as `fixture.py` beside the spider:
+
+```python fixture.py
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+
+REQUEST_LOG = Path("/tmp/fixture-requests.log")
+PAGES = {
+    "/": """<!doctype html><title>Catalog</title>
+<article class="product_pod">
+  <h3><a href="/products/alpha" title="Alpha">Alpha</a></h3>
+  <p class="price_color">$19.95</p>
+</article>
+<li class="next"><a href="/page-2">Next</a></li>
+<a data-crawl href="/private/secret">Private</a>
+""",
+    "/page-2": """<!doctype html><title>Catalog page 2</title>
+<article class="product_pod">
+  <h3><a href="/products/beta" title="Beta">Beta</a></h3>
+  <p class="price_color">$24.50</p>
+</article>
+""",
+    "/private/secret": """<!doctype html><title>Private</title>
+<article class="product_pod">
+  <h3><a href="/products/private" title="Must not crawl">Private</a></h3>
+  <p class="price_color">$0.00</p>
+</article>
+""",
+    "/robots.txt": "User-agent: *\nDisallow: /private/\n",
+}
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        with REQUEST_LOG.open("a") as log:
+            print(self.path, file=log)
+
+        body = PAGES.get(self.path)
+        if body is None:
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        encoded = body.encode()
+        self.send_response(200)
+        self.send_header(
+            "Content-Type",
+            "text/plain" if self.path == "/robots.txt" else "text/html",
+        )
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def log_message(self, *_args):
+        pass
+
+
+ThreadingHTTPServer(("127.0.0.1", 8080), Handler).serve_forever()
+```
+
+The index deliberately links to `/private/secret`. The smoke test verifies that Scrapy requests `robots.txt` and never requests that disallowed page.
+
+## Prepare and snapshot Scrapy
+
+Install the pinned Scrapy release, bake both files into the baseline, and verify the resulting snapshot:
+
+```sh
+msb run --name scrapy-base --replace \
+  --cpus 2 --memory 1G --root-disk 3G \
+  --max-duration 10m \
+  --mkdir /work --mkdir /out \
+  --copy-file ./fixture.py:/work/fixture.py \
+  --copy-file ./catalog_spider.py:/work/catalog_spider.py \
+  --script prepare='set -eu
+addgroup -S crawler
+adduser -S -D -G crawler crawler
+python -m pip install --no-cache-dir scrapy==2.17.0
+mkdir -p /home/crawler
+chown crawler:crawler /home/crawler /out
+chmod 0700 /home/crawler /out
+scrapy version' \
+  --entrypoint prepare \
+  python:3.13.14-alpine3.23
+
+msb snapshot create scrapy-tools \
+  --from scrapy-base \
+  --integrity \
+  --force
+
+msb snapshot verify scrapy-tools
+```
+
+The preparation command should print `Scrapy 2.17.0`, and snapshot verification should report `verified`.
+
+<Note>
+  The crawler files are copied before the snapshot intentionally. Root-filesystem patch flags such as `--copy-file` cannot be combined with `--from-snapshot`; recreate the baseline and replace the snapshot when the crawler changes.
+</Note>
+
+## Crawl the fixture offline
+
+Launch a clean worker with all external networking disabled. The fixture and crawler communicate only over the guest's loopback interface:
+
+```sh
+msb run --name scrapy-fixture --replace \
+  --from-snapshot scrapy-tools \
+  --cpus 2 --memory 1G \
+  --user crawler --security restricted \
+  --rlimit nproc=64 --rlimit nofile=256 --rlimit fsize=16777216 \
+  --no-net --max-duration 2m \
+  -- sh -lc '
+    set -eu
+    rm -f /tmp/fixture-requests.log /out/items.json
+
+    if (printf x >> /work/catalog_spider.py) 2>/dev/null; then
+      echo "crawler source unexpectedly writable" >&2
+      exit 1
+    fi
+    echo "crawler source read-only"
+
+    python /work/fixture.py &
+    fixture_pid=$!
+    trap "kill $fixture_pid 2>/dev/null || true" EXIT
+
+    ready=false
+    for attempt in 1 2 3 4 5; do
+      if wget -q -O /dev/null http://127.0.0.1:8080/ 2>/dev/null; then
+        ready=true
+        break
+      fi
+      sleep 1
+    done
+    $ready
+
+    START_URL=http://127.0.0.1:8080/ \
+      scrapy runspider /work/catalog_spider.py --loglevel WARNING
+
+    python - <<"PY"
+import json
+import resource
+import socket
+from pathlib import Path
+
+assert resource.getrlimit(resource.RLIMIT_NPROC) == (64, 64)
+assert resource.getrlimit(resource.RLIMIT_NOFILE) == (256, 256)
+assert resource.getrlimit(resource.RLIMIT_FSIZE) == (16777216, 16777216)
+
+items_path = Path("/out/items.json")
+items = json.loads(items_path.read_text())
+items.sort(key=lambda item: (item["name"], item["url"]))
+assert [(item["name"], item["price"]) for item in items] == [
+    ("Alpha", "$19.95"),
+    ("Beta", "$24.50"),
+], items
+
+requests = Path("/tmp/fixture-requests.log").read_text().splitlines()
+assert "/robots.txt" in requests, requests
+assert "/private/secret" not in requests, requests
+
+try:
+    socket.create_connection(("example.com", 443), timeout=2)
+except OSError:
+    print("offsite network denied")
+else:
+    raise AssertionError("offsite network unexpectedly reachable")
+
+items_path.write_text(json.dumps(items, indent=2) + "\n")
+print("verified 2 products; robots.txt blocked /private/secret")
+PY
+  '
+```
+
+Look for these three lines:
+
+```text
+crawler source read-only
+offsite network denied
+verified 2 products; robots.txt blocked /private/secret
+```
+
+Export the canonical JSON artifact:
+
+```sh
+export SCRAPY_ARTIFACT_DIR="${SCRAPY_ARTIFACT_DIR:-$PWD/.scrapy-artifacts}"
+
+if [ -e "$SCRAPY_ARTIFACT_DIR" ] || [ -L "$SCRAPY_ARTIFACT_DIR" ]; then
+  echo "artifact path already exists: $SCRAPY_ARTIFACT_DIR" >&2
+  exit 1
+fi
+
+mkdir -m 700 "$SCRAPY_ARTIFACT_DIR"
+msb cp scrapy-fixture:/out/items.json "$SCRAPY_ARTIFACT_DIR/items.json"
+test ! -L "$SCRAPY_ARTIFACT_DIR/items.json" &&
+  test -f "$SCRAPY_ARTIFACT_DIR/items.json" &&
+  test -s "$SCRAPY_ARTIFACT_DIR/items.json" &&
+  test "$(wc -c < "$SCRAPY_ARTIFACT_DIR/items.json")" -le 16777216
+```
+
+The fresh private directory prevents a crawler-controlled symlink from redirecting a later host-side reader to a sibling artifact. The host size check mirrors the worker's 16 MiB per-file limit.
+
+Run the same `msb run` block again, copy the second artifact, and compare it with the first. `--replace` gives the rerun a fresh writable layer from the same snapshot.
+
+```sh
+msb cp scrapy-fixture:/out/items.json "$SCRAPY_ARTIFACT_DIR/items-rerun.json"
+test ! -L "$SCRAPY_ARTIFACT_DIR/items-rerun.json" &&
+  test -f "$SCRAPY_ARTIFACT_DIR/items-rerun.json" &&
+  test -s "$SCRAPY_ARTIFACT_DIR/items-rerun.json" &&
+  test "$(wc -c < "$SCRAPY_ARTIFACT_DIR/items-rerun.json")" -le 16777216 &&
+  cmp "$SCRAPY_ARTIFACT_DIR/items.json" "$SCRAPY_ARTIFACT_DIR/items-rerun.json"
+```
+
+`cmp` prints nothing and exits successfully when both canonical results match.
+
+## Crawl an allowlisted site
+
+[Books to Scrape](https://books.toscrape.com/) is a public practice site whose markup matches the example spider. This variant permits DNS and HTTPS traffic for that hostname while denying every other destination:
+
+```sh
+msb run --name scrapy-books --replace \
+  --from-snapshot scrapy-tools \
+  --cpus 2 --memory 1G \
+  --user crawler --security restricted \
+  --rlimit nproc=64 --rlimit nofile=256 --rlimit fsize=16777216 \
+  --max-duration 5m --max-connections 8 \
+  --net-default deny \
+  --net-rule "allow@books.toscrape.com:tcp:443" \
+  -e START_URL=https://books.toscrape.com/ \
+  -- sh -lc '
+    set -eu
+    rm -f /out/items.json
+
+    python - <<"PY"
+import socket
+
+try:
+    socket.create_connection(("www.iana.org", 443), timeout=2)
+except OSError:
+    print("offsite network denied")
+else:
+    raise AssertionError("offsite network unexpectedly reachable")
+PY
+
+    scrapy runspider /work/catalog_spider.py --loglevel WARNING
+
+    python - <<"PY"
+import json
+import resource
+from pathlib import Path
+
+assert resource.getrlimit(resource.RLIMIT_NPROC) == (64, 64)
+assert resource.getrlimit(resource.RLIMIT_NOFILE) == (256, 256)
+assert resource.getrlimit(resource.RLIMIT_FSIZE) == (16777216, 16777216)
+
+items_path = Path("/out/items.json")
+items = json.loads(items_path.read_text())
+assert items, "crawler returned no products"
+items.sort(key=lambda item: (item["name"], item["url"]))
+items_path.write_text(json.dumps(items, indent=2, ensure_ascii=False) + "\n")
+print(f"exported {len(items)} products")
+PY
+  '
+
+msb cp scrapy-books:/out/items.json "$SCRAPY_ARTIFACT_DIR/books.json"
+test ! -L "$SCRAPY_ARTIFACT_DIR/books.json" &&
+  test -f "$SCRAPY_ARTIFACT_DIR/books.json" &&
+  test -s "$SCRAPY_ARTIFACT_DIR/books.json" &&
+  test "$(wc -c < "$SCRAPY_ARTIFACT_DIR/books.json")" -le 16777216
+```
+
+Change the start URL, allowlisted hostname, selectors, user agent, and crawl limits together when adapting this pattern. Review the site's terms and robots policy before crawling it; network permission is not permission from the site owner.
+
+<Warning>
+  Treat every exported field as untrusted input. Escape values for their destination, reject spreadsheet formulas before CSV export, and do not render scraped HTML without sanitizing it.
+</Warning>
+
+## Cleanup
+
+```sh
+msb rm -f scrapy-base scrapy-fixture scrapy-books
+msb snapshot rm scrapy-tools
+
+scrapy_artifact_dir="${SCRAPY_ARTIFACT_DIR:-$PWD/.scrapy-artifacts}"
+rm -f "$scrapy_artifact_dir/items.json" \
+  "$scrapy_artifact_dir/items-rerun.json" \
+  "$scrapy_artifact_dir/books.json"
+rmdir "$scrapy_artifact_dir"
+```
+
+The source files remain in the current directory so the crawler can be reviewed or rebuilt.
+
+## Reference
+
+- [Scrapy spiders](https://docs.scrapy.org/en/latest/topics/spiders.html)
+- [Feed exports](https://docs.scrapy.org/en/latest/topics/feed-exports.html)
+- [Downloader settings](https://docs.scrapy.org/en/latest/topics/settings.html#downloader)

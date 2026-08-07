@@ -1,0 +1,263 @@
+---
+title: Run hermetic PR checks
+sidebarTitle: PR checks
+description: Reuse reviewed dependencies, test an untrusted checkout offline, and export bounded JUnit results
+icon: "check-double"
+---
+
+Build reviewed dependencies once, snapshot them, then give every pull request a clean microVM with no network access. A trusted runner script streams committed files into the worker as data, so no PR-controlled shell code runs on the host and tests cannot modify the host checkout.
+
+This example uses Node's built-in test runner. Keep `package.json`, `package-lock.json`, and the test command aligned with your project.
+
+## Prepare trusted dependencies
+
+Choose a repository-specific identifier, derive the snapshot name from both package manifests, and build it from a reviewed revision on a trusted machine:
+
+```sh
+export PR_CHECK_PROJECT_ID=acme-widget
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d ' ' -f 1
+  else
+    shasum -a 256 "$1" | cut -d ' ' -f 1
+  fi
+}
+
+sha256_stream() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | cut -d ' ' -f 1
+  else
+    shasum -a 256 | cut -d ' ' -f 1
+  fi
+}
+
+package_digest="$(sha256_file package.json)"
+lock_digest="$(sha256_file package-lock.json)"
+inputs_digest="$(printf '%s\n%s\n' "$package_digest" "$lock_digest" | sha256_stream)"
+snapshot_name="${PR_CHECK_PROJECT_ID}-node-ci-${inputs_digest%${inputs_digest#????????????????}}"
+base_name="${snapshot_name}-build"
+
+msb run --name "$base_name" --replace \
+  --cpus 2 --memory 1G --root-disk 2G \
+  --mkdir /workspace --mkdir /artifacts \
+  --copy-file ./package.json:/workspace/package.json \
+  --copy-file ./package-lock.json:/workspace/package-lock.json \
+  --workdir /workspace \
+  node:24.18.1-bookworm-slim -- sh -lc '
+    set -eu
+    npm ci --ignore-scripts
+    sha256sum package.json package-lock.json > /opt/node-ci-inputs.sha256
+    chown -R node:node /workspace /artifacts
+  '
+
+msb snapshot create "$snapshot_name" \
+  --from "$base_name" \
+  --integrity \
+  --force
+
+msb snapshot verify "$snapshot_name"
+msb rm -f "$base_name"
+printf 'Prepared %s\n' "$snapshot_name"
+```
+
+The baseline contains the reviewed package manifests, installed dependencies, and empty work and artifact directories. `--ignore-scripts` prevents dependency lifecycle hooks from running during preparation. The worker later verifies both manifest hashes, so a changed `package.json` or `package-lock.json` fails instead of silently using stale dependencies.
+
+Build and overwrite this snapshot only from a protected workflow or trusted revision. The repository prefix prevents cross-project name collisions, while `snapshot verify` detects disk changes against its recorded hash; integrity verification does not establish who built the snapshot. Do not put registry credentials, source code, or CI secrets in it because snapshots preserve guest-disk contents.
+
+## Install the trusted runner
+
+Install the following script as `/usr/local/bin/msb-pr-check`, owned by the runner administrator and outside every checkout. Never save or invoke this host-side wrapper from an untrusted pull request.
+
+```bash /usr/local/bin/msb-pr-check
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_dir="${1:?usage: msb-pr-check CHECKOUT_DIR}"
+repo_dir="$(cd "$repo_dir" && pwd -P)"
+project_id="${PR_CHECK_PROJECT_ID:?set a repository-specific PR_CHECK_PROJECT_ID}"
+
+case "$project_id" in
+  *[!A-Za-z0-9._-]*|'')
+    echo "PR_CHECK_PROJECT_ID may contain only letters, numbers, dots, underscores, and hyphens" >&2
+    exit 2
+    ;;
+esac
+
+for manifest in package.json package-lock.json; do
+  manifest_path="$repo_dir/$manifest"
+  if [[ -L "$manifest_path" || ! -f "$manifest_path" ]]; then
+    echo "refusing a non-regular manifest: $manifest_path" >&2
+    exit 2
+  fi
+done
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d ' ' -f 1
+  else
+    shasum -a 256 "$1" | cut -d ' ' -f 1
+  fi
+}
+
+sha256_stream() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | cut -d ' ' -f 1
+  else
+    shasum -a 256 | cut -d ' ' -f 1
+  fi
+}
+
+package_digest="$(sha256_file "$repo_dir/package.json")"
+lock_digest="$(sha256_file "$repo_dir/package-lock.json")"
+inputs_digest="$(printf '%s\n%s\n' "$package_digest" "$lock_digest" | sha256_stream)"
+snapshot_name="${project_id}-node-ci-${inputs_digest%${inputs_digest#????????????????}}"
+job_key="${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-$$-${GITHUB_JOB:-check}"
+job_key="$(printf '%s' "$job_key" | tr -cs 'A-Za-z0-9._-' '-')"
+job_name="pr-${job_key:0:100}"
+
+artifact_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+mkdir -p "$artifact_root"
+umask 077
+artifact_dir="$(mktemp -d "${artifact_root%/}/msb-pr-check.XXXXXX")"
+
+cleanup() {
+  msb rm -f "$job_name" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+msb snapshot verify "$snapshot_name"
+
+# Rootfs patches cannot be layered onto a snapshot, so boot the worker first.
+msb run -d --name "$job_name" \
+  --from-snapshot "$snapshot_name" \
+  --cpus 2 --memory 1G \
+  --no-net --security restricted \
+  --max-duration 10m \
+  --label recipe=pr-check \
+  --workdir /workspace \
+  --user node \
+  -- sh -lc 'exec sleep 600'
+
+# Stream only committed files into the guest. This excludes .git and checkout credentials.
+git -C "$repo_dir" archive HEAD | \
+  msb exec --stream --user node "$job_name" -- tar -x -C /workspace
+
+test_exit=0
+msb exec --timeout 8m \
+  --user node \
+  --rlimit nproc=256 \
+  --rlimit nofile=1024 \
+  --rlimit fsize=16777216 \
+  --workdir /workspace \
+  "$job_name" -- sh -lc '
+    set -u
+    sha256sum -c /opt/node-ci-inputs.sha256 || {
+      echo "dependency snapshot does not match this checkout" >&2
+      exit 1
+    }
+
+    test_exit=0
+    node --test \
+      --test-reporter=junit \
+      --test-reporter-destination=/artifacts/junit.xml || test_exit=$?
+
+    if node -e '\''fetch("https://example.com", { signal: AbortSignal.timeout(2000) }).then(() => process.exit(0), () => process.exit(1))'\''; then
+      echo "network unexpectedly reachable" >&2
+      exit 1
+    fi
+
+    echo "network blocked"
+    exit "$test_exit"
+  ' || test_exit=$?
+
+# Freeze guest state before crossing the host boundary.
+msb stop --timeout 5 "$job_name" >/dev/null
+msb cp "$job_name:/artifacts/junit.xml" "$artifact_dir/junit.xml"
+
+junit_path="$artifact_dir/junit.xml"
+if [[ -L "$junit_path" || ! -f "$junit_path" ]]; then
+  echo "refusing a non-regular JUnit artifact" >&2
+  exit 1
+fi
+
+junit_size="$(wc -c < "$junit_path")"
+if (( junit_size == 0 || junit_size > 16777216 )); then
+  echo "JUnit artifact has an invalid size: $junit_size bytes" >&2
+  exit 1
+fi
+
+grep -q '<testsuite' "$junit_path"
+printf 'JUnit: %s\n' "$junit_path"
+
+if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+  printf 'artifact_dir=%s\n' "$artifact_dir" >> "$GITHUB_OUTPUT"
+fi
+
+exit "$test_exit"
+```
+
+The wrapper creates a private artifact directory, stops the worker before export, rejects symlinks and non-regular files, enforces a 16 MiB guest and host size limit, preserves the test exit code, and removes the worker on every exit path. Run it again to get a fresh writable layer from the same verified dependency snapshot.
+
+For local use, point the trusted installed script at a clean commit:
+
+```sh
+PR_CHECK_PROJECT_ID=acme-widget /usr/local/bin/msb-pr-check "$PWD"
+```
+
+<Note>
+  microsandbox needs KVM on Linux or Apple Silicon virtualization on macOS. In hosted CI, select a runner that exposes nested virtualization; do not assume every managed runner does. See [Linux troubleshooting](/troubleshooting/linux#containers-and-vms).
+</Note>
+
+## GitHub Actions
+
+For untrusted pull requests, keep the workflow definition on the protected base branch. `pull_request_target` provides that trusted definition, but it is safe here only because the token is read-only and the checked-out PR is never executed on the host:
+
+```yaml
+name: Isolated PR checks
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: isolated-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: [self-hosted, linux, microsandbox]
+    env:
+      PR_CHECK_PROJECT_ID: acme-widget
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - id: sandbox
+        name: Run checks in microsandbox
+        run: /usr/local/bin/msb-pr-check "$GITHUB_WORKSPACE"
+
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.sandbox.outputs.artifact_dir != ''
+        with:
+          name: junit
+          path: ${{ steps.sandbox.outputs.artifact_dir }}/junit.xml
+          retention-days: 7
+```
+
+<Warning>
+  Treat this workflow as security-sensitive. Do not run a script, local action, package manager, build tool, or generated command from the PR checkout on the host; do not add secrets or write permissions; and do not let a pull request replace `/usr/local/bin/msb-pr-check` or create the shared dependency snapshot. Pin external actions to reviewed commit SHAs if your runner policy requires immutable action code.
+</Warning>
+
+## Cleanup
+
+The trusted wrapper removes each worker automatically. Remove a repository's reusable baseline only when it is obsolete:
+
+```sh
+msb snapshot rm "${PR_CHECK_PROJECT_ID}-node-ci-<manifest-digest-prefix>"
+```
