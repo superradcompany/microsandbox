@@ -7,6 +7,7 @@ mod command;
 mod domain;
 mod error;
 pub mod modify;
+pub mod snapshot;
 mod validation;
 
 #[cfg(feature = "ts")]
@@ -45,7 +46,7 @@ pub use domain::{
     VolumeKind, VolumeMount, VolumeSpec, VsockRouteSpec, VsockSocketType, VsockSpec,
     VsockSpecPatch, canonicalize_volume_mounts,
 };
-pub use error::{TypesError, TypesResult};
+pub use error::{SnapshotManifestError, SnapshotManifestResult, TypesError, TypesResult};
 pub use modify::{
     ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,
     ModificationPolicy, ModificationWarning, PlannedChange, ResourceConvergenceState, ResourceKind,
