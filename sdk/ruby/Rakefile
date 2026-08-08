@@ -86,7 +86,7 @@ namespace :cargo do
       cp ".cargo/config.toml", ".cargo/config.toml.orig"
     end
     base = File.exist?(".cargo/config.toml.orig") ? File.read(".cargo/config.toml.orig") : ""
-    if base.match?(/^\s*\[patch\.crates-io\]/)
+    if base.match?(/^\s*\[patch\.(?:crates-io|"crates-io"|'crates-io')\]/)
       # Appending would produce a duplicate table, which cargo rejects; merging
       # into a hand-maintained table is too much magic for a rake task.
       abort ".cargo/config.toml already carries a [patch.crates-io] table; " \
@@ -144,7 +144,13 @@ namespace :gem do
     # cannot load (e.g. the README's arm64-darwin example copied onto Linux).
     host = Gem::Platform.local
     requested = Gem::Platform.new(platform)
-    unless host.os == requested.os && host.cpu == requested.cpu
+    # The version component carries the libc/runtime flavor (gnu vs musl,
+    # ucrt); a musl host must not package a -gnu labeled gem. Compared only
+    # when both sides report one: a versionless label (arm64-darwin) accepts
+    # any darwin host, and a host that reports no flavor stays permissive.
+    mismatch = host.os != requested.os || host.cpu != requested.cpu ||
+               (requested.version && host.version && host.version != requested.version)
+    if mismatch
       abort "GEM_PLATFORM #{platform} does not match this host (#{host}); " \
             "platform gems must be packaged on their native platform"
     end
