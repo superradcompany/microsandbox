@@ -67,6 +67,11 @@ jobs:
         with:
           workspaces: sdk/ruby/ext/microsandbox
           cache-bin: false
+          # rust-cache does not key on matrix values or the runner image, so
+          # without this the platforms poison each other's caches — cached
+          # build-script executables from a newer-glibc image fail to run on
+          # ubuntu-22.04 (GLIBC_x.y not found).
+          key: ${{ matrix.platform }}
 
       - name: Install system dependencies
         if: contains(matrix.platform, 'linux')
