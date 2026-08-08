@@ -580,7 +580,7 @@ mod tests {
         let spec = &req.envelope.spec;
         assert_eq!(spec.name, "agent-1");
         assert!(
-            matches!(spec.image, microsandbox_types::CloudRootfsSource::Oci { ref reference } if reference == "python:3.12")
+            matches!(spec.image, Some(microsandbox_types::CloudRootfsSource::Oci { ref reference }) if reference == "python:3.12")
         );
         assert_eq!(spec.resources.vcpus, 2);
         assert_eq!(spec.resources.memory_mib, 1024);

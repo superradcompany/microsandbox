@@ -22,6 +22,7 @@ use crate::domain::{
     VolumeMount, VsockSpec, default_private, default_strict,
 };
 use crate::modify::SecretSource;
+use crate::snapshot::Manifest as SnapshotManifest;
 use crate::{TypesError, TypesResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -50,9 +51,16 @@ pub struct CloudSandboxSpec {
     /// Unique sandbox name.
     pub name: String,
 
-    /// Root filesystem source.
-    #[cfg_attr(feature = "utoipa", schema(value_type = Object))]
-    pub image: CloudRootfsSource,
+    /// Root filesystem source. Exactly one of `image` and `from_snapshot`
+    /// must be set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<Object>))]
+    pub image: Option<CloudRootfsSource>,
+
+    /// Snapshot to restore the sandbox from. Exactly one of `image` and
+    /// `from_snapshot` must be set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_snapshot: Option<CloudSnapshotReference>,
 
     /// CPU, memory, and user-facing disk resources.
     pub resources: CloudSandboxResources,
@@ -926,8 +934,169 @@ pub struct CloudErrorDetails {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Types: Snapshots
+//--------------------------------------------------------------------------------------------------
+
+/// Wire shape of a cloud snapshot create request body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct CloudCreateSnapshotRequest {
+    /// Name of the sandbox to capture.
+    pub source_sandbox: String,
+    /// Snapshot name.
+    pub name: String,
+    /// Directory on a mounted host volume to write the artifact into. `None`
+    /// stores the snapshot in managed snapshot storage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(type = "string | null"))]
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
+    pub dest_dir: Option<PathBuf>,
+    /// User-defined labels stored on the snapshot.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    /// Replace an existing snapshot with the same name.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub force: bool,
+    /// Record payload integrity metadata during capture.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub record_integrity: bool,
+    /// Capture memory and device state so the snapshot can resume execution.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resumable: bool,
+}
+
+/// Reference to an existing cloud snapshot, as carried on a sandbox create
+/// request that restores from one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CloudSnapshotReference {
+    /// Reference a snapshot in managed snapshot storage by name.
+    Managed {
+        /// Snapshot name.
+        name: String,
+    },
+    /// Reference a snapshot artifact directory on a mounted host volume.
+    HostVolume {
+        /// Artifact directory path on the host volume.
+        path: String,
+    },
+}
+
+/// Wire shape of the cloud snapshot returned by snapshot endpoints.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct CloudSnapshot {
+    /// Snapshot name.
+    pub name: String,
+    /// Where the snapshot artifact resides.
+    pub location: CloudSnapshotLocation,
+    /// Identifier of the sandbox the snapshot was captured from, when known.
+    #[serde(default)]
+    pub source_sandbox_id: Option<String>,
+    /// Snapshot identity: the `sha256:` digest of the canonical descriptor.
+    pub digest: String,
+    /// Apparent artifact payload size in bytes.
+    pub size_bytes: u64,
+    /// Canonical snapshot descriptor.
+    pub manifest: SnapshotManifest,
+    /// User-defined labels stored on the snapshot.
+    pub labels: BTreeMap<String, String>,
+    /// Creation timestamp.
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
+    pub created_at: DateTime<Utc>,
+}
+
+/// Where a cloud snapshot's artifact resides.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CloudSnapshotLocation {
+    /// Held in managed snapshot storage.
+    Managed {
+        /// Identifier of the stored artifact.
+        id: String,
+    },
+    /// Stored in a directory on a mounted host volume.
+    HostVolume {
+        /// Artifact directory path on the host volume.
+        path: String,
+    },
+}
+
+/// Wire shape of the asynchronous snapshot operation returned by snapshot
+/// capture endpoints.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct CloudSnapshotOperation {
+    /// Server-side operation identifier.
+    pub id: String,
+    /// Current operation status.
+    pub status: CloudSnapshotOperationStatus,
+    /// The resulting snapshot, present once the operation succeeds.
+    #[serde(default)]
+    pub result: Option<CloudSnapshot>,
+    /// Error details for a failed operation.
+    #[serde(default)]
+    pub error: Option<CloudErrorDetails>,
+    /// Creation timestamp.
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
+    pub created_at: DateTime<Utc>,
+    /// Timestamp of the most recent status change.
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
+    pub updated_at: DateTime<Utc>,
+    /// Timestamp of the terminal status, when the operation has finished.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(type = "string | null"))]
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// Status of an asynchronous cloud snapshot operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum CloudSnapshotOperationStatus {
+    /// Accepted but not yet started.
+    Queued,
+    /// The operation is running.
+    InProgress,
+    /// The snapshot is complete and available.
+    Succeeded,
+    /// The operation failed.
+    Failed,
+}
+
+//--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
+
+impl CloudSandboxSpec {
+    /// Validate cross-field invariants: exactly one of `image` and
+    /// `from_snapshot` must be set, and `resources.disk_size_mib` is only
+    /// valid together with `image`.
+    pub fn validate(&self) -> TypesResult<()> {
+        match (&self.image, &self.from_snapshot) {
+            (Some(_), Some(_)) => Err(TypesError::invalid_config(
+                "exactly one of image and from_snapshot must be set, not both",
+            )),
+            (None, None) => Err(TypesError::invalid_config(
+                "exactly one of image and from_snapshot must be set",
+            )),
+            (None, Some(_)) if self.resources.disk_size_mib.is_some() => {
+                Err(TypesError::invalid_config(
+                    "resources.disk_size_mib is not valid with from_snapshot",
+                ))
+            }
+            _ => Ok(()),
+        }
+    }
+}
 
 impl TryFrom<CloudCreateSandboxRequest> for SandboxSpec {
     type Error = TypesError;
@@ -941,8 +1110,19 @@ impl TryFrom<CloudSandboxSpec> for SandboxSpec {
     type Error = TypesError;
 
     fn try_from(spec: CloudSandboxSpec) -> TypesResult<Self> {
+        spec.validate()?;
+        let Some(image) = spec.image else {
+            // `validate` guarantees `from_snapshot` is set here. The domain
+            // spec has no notion of a snapshot reference, so dropping it
+            // silently would build a sandbox from the wrong rootfs.
+            return Err(TypesError::invalid_config(
+                "from_snapshot is not supported here: resolve the snapshot reference \
+                 to a concrete image before converting to a sandbox spec",
+            ));
+        };
+
         let disk_size_mib = spec.resources.disk_size_mib;
-        let image = match spec.image {
+        let image = match image {
             // The cloud wire expresses only the managed kind (a size); tmpfs and
             // disk-image root disks are local-only until the wire grows a kind field.
             CloudRootfsSource::Oci { reference } => RootfsSource::Oci(OciRootfsSource {
@@ -1073,7 +1253,8 @@ impl From<SandboxSpec> for CloudSandboxSpec {
 
         Self {
             name: spec.name,
-            image,
+            image: Some(image),
+            from_snapshot: None,
             resources: CloudSandboxResources {
                 vcpus: spec.resources.cpus,
                 memory_mib: spec.resources.memory_mib,
@@ -1381,9 +1562,9 @@ mod tests {
     fn spec(name: &str) -> CloudSandboxSpec {
         CloudSandboxSpec {
             name: name.into(),
-            image: CloudRootfsSource::Oci {
+            image: Some(CloudRootfsSource::Oci {
                 reference: "python:3.12".into(),
-            },
+            }),
             ..Default::default()
         }
     }
@@ -1542,9 +1723,9 @@ mod tests {
         let mut req = CloudCreateSandboxRequest {
             spec: spec("agent-1"),
         };
-        req.spec.image = CloudRootfsSource::Bind {
+        req.spec.image = Some(CloudRootfsSource::Bind {
             path: "/tmp/rootfs".into(),
-        };
+        });
         req.spec.resources.disk_size_mib = Some(8192);
 
         let err = SandboxSpec::try_from(req).unwrap_err();
@@ -1576,8 +1757,9 @@ mod tests {
         );
 
         assert_eq!(req.spec.resources.disk_size_mib, Some(8192));
+        assert!(req.spec.from_snapshot.is_none());
         match req.spec.image {
-            CloudRootfsSource::Oci { reference } => {
+            Some(CloudRootfsSource::Oci { reference }) => {
                 assert_eq!(reference, "python:3.12");
             }
             other => panic!("expected OCI rootfs, got {other:?}"),
@@ -1644,5 +1826,370 @@ mod tests {
 
         assert!(response.spec.is_none());
         assert_eq!(response.status, CloudSandboxStatus::Running);
+    }
+
+    #[test]
+    fn snapshot_reference_and_location_use_internal_tagging() {
+        assert_eq!(
+            serde_json::to_value(CloudSnapshotReference::Managed {
+                name: "post-setup".into(),
+            })
+            .unwrap(),
+            serde_json::json!({"type": "managed", "name": "post-setup"})
+        );
+        assert_eq!(
+            serde_json::to_value(CloudSnapshotReference::HostVolume {
+                path: "/mnt/snapshots/post-setup".into(),
+            })
+            .unwrap(),
+            serde_json::json!({"type": "host_volume", "path": "/mnt/snapshots/post-setup"})
+        );
+        assert_eq!(
+            serde_json::to_value(CloudSnapshotLocation::Managed {
+                id: "snap-00000000-0000-0000-0000-000000000003".into(),
+            })
+            .unwrap(),
+            serde_json::json!({
+                "type": "managed",
+                "id": "snap-00000000-0000-0000-0000-000000000003",
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(CloudSnapshotLocation::HostVolume {
+                path: "/mnt/snapshots/post-setup".into(),
+            })
+            .unwrap(),
+            serde_json::json!({"type": "host_volume", "path": "/mnt/snapshots/post-setup"})
+        );
+    }
+
+    #[test]
+    fn create_request_requires_exactly_one_rootfs_origin() {
+        let mut neither = spec("agent-1");
+        neither.image = None;
+        let err = SandboxSpec::try_from(neither).unwrap_err();
+        assert!(err.to_string().contains("exactly one"));
+
+        let mut both = spec("agent-1");
+        both.from_snapshot = Some(CloudSnapshotReference::Managed {
+            name: "post-setup".into(),
+        });
+        let err = SandboxSpec::try_from(both).unwrap_err();
+        assert!(err.to_string().contains("exactly one"));
+    }
+
+    #[test]
+    fn create_request_deserializes_managed_snapshot_restore() {
+        let req: CloudCreateSandboxRequest = serde_json::from_value(serde_json::json!({
+            "name": "agent-1",
+            "from_snapshot": {"type": "managed", "name": "post-setup"},
+        }))
+        .unwrap();
+
+        assert!(req.spec.image.is_none());
+        assert_eq!(
+            req.spec.from_snapshot,
+            Some(CloudSnapshotReference::Managed {
+                name: "post-setup".into(),
+            })
+        );
+        req.spec.validate().unwrap();
+    }
+
+    #[test]
+    fn create_request_wire_body_with_image_and_snapshot_fails_validation() {
+        let req: CloudCreateSandboxRequest = serde_json::from_value(serde_json::json!({
+            "name": "agent-1",
+            "image": {"type": "oci", "reference": "python:3.12"},
+            "from_snapshot": {"type": "managed", "name": "post-setup"},
+        }))
+        .unwrap();
+
+        let err = req.spec.validate().unwrap_err();
+        assert!(err.to_string().contains("exactly one"));
+    }
+
+    #[test]
+    fn create_request_rejects_disk_size_for_snapshot_restore() {
+        let mut restore = spec("agent-1");
+        restore.image = None;
+        restore.from_snapshot = Some(CloudSnapshotReference::Managed {
+            name: "post-setup".into(),
+        });
+        restore.resources.disk_size_mib = Some(8192);
+
+        let err = SandboxSpec::try_from(restore).unwrap_err();
+
+        assert!(err.to_string().contains("disk_size_mib"));
+    }
+
+    #[test]
+    fn unresolved_snapshot_reference_conversion_errors() {
+        let mut restore = spec("agent-1");
+        restore.image = None;
+        restore.from_snapshot = Some(CloudSnapshotReference::HostVolume {
+            path: "/mnt/snapshots/post-setup".into(),
+        });
+
+        let err = SandboxSpec::try_from(restore).unwrap_err();
+
+        assert!(err.to_string().contains("from_snapshot"));
+    }
+
+    #[test]
+    fn domain_spec_converts_to_image_without_snapshot() {
+        let cloud = CloudSandboxSpec::from(SandboxSpec {
+            name: "agent-1".into(),
+            ..Default::default()
+        });
+
+        assert!(cloud.image.is_some());
+        assert!(cloud.from_snapshot.is_none());
+        // Unset origins stay off the wire entirely.
+        let json = serde_json::to_value(&cloud).unwrap();
+        assert!(json.get("from_snapshot").is_none());
+    }
+
+    fn sample_snapshot_manifest() -> SnapshotManifest {
+        use crate::snapshot::{
+            FileSnapshotState, ImageRef, SCHEMA_VERSION, SNAPSHOT_ARTIFACT_KIND, SPARSE_SHA256_V1,
+            SnapshotFormat, SnapshotScope, SnapshotState, UpperIntegrity, UpperLayer,
+        };
+
+        SnapshotManifest {
+            schema: SCHEMA_VERSION,
+            artifact: SNAPSHOT_ARTIFACT_KIND.into(),
+            scope: SnapshotScope::Disk,
+            created_at: "2026-05-01T12:00:00Z".into(),
+            parent: None,
+            image: ImageRef {
+                reference: "docker.io/library/python:3.12".into(),
+                manifest_digest:
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .into(),
+            },
+            source_sandbox: Some("agent-1".into()),
+            state: SnapshotState::File(FileSnapshotState {
+                format: SnapshotFormat::Raw,
+                fstype: "ext4".into(),
+                upper: UpperLayer {
+                    file: "upper.ext4".into(),
+                    size_bytes: 4_294_967_296,
+                    integrity: UpperIntegrity {
+                        algorithm: SPARSE_SHA256_V1.into(),
+                        digest:
+                            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                                .into(),
+                    },
+                },
+            }),
+            labels: BTreeMap::new(),
+            extensions: BTreeMap::new(),
+            requires: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn cloud_snapshot_serializes_approved_shape_and_round_trips() {
+        let manifest = sample_snapshot_manifest();
+        let digest = manifest.digest().unwrap();
+        let snapshot = CloudSnapshot {
+            name: "post-setup".into(),
+            location: CloudSnapshotLocation::Managed {
+                id: "snap-00000000-0000-0000-0000-000000000003".into(),
+            },
+            source_sandbox_id: Some("00000000-0000-0000-0000-000000000002".into()),
+            digest: digest.clone(),
+            size_bytes: 4_294_967_296,
+            manifest,
+            labels: BTreeMap::from([("owner".into(), "alice".into())]),
+            created_at: "2026-05-17T12:00:00Z".parse().unwrap(),
+        };
+
+        let json = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "name": "post-setup",
+                "location": {
+                    "type": "managed",
+                    "id": "snap-00000000-0000-0000-0000-000000000003",
+                },
+                "source_sandbox_id": "00000000-0000-0000-0000-000000000002",
+                "digest": digest,
+                "size_bytes": 4_294_967_296_u64,
+                "manifest": {
+                    "schema": 1,
+                    "artifact": "snapshot",
+                    "scope": "disk",
+                    "created_at": "2026-05-01T12:00:00Z",
+                    "parent": null,
+                    "image": {
+                        "ref": "docker.io/library/python:3.12",
+                        "manifest_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    },
+                    "source_sandbox": "agent-1",
+                    "state": {
+                        "kind": "file",
+                        "format": "raw",
+                        "fstype": "ext4",
+                        "upper": {
+                            "file": "upper.ext4",
+                            "size_bytes": 4_294_967_296_u64,
+                            "integrity": {
+                                "algorithm": "msb-sparse-sha256-v1",
+                                "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                            },
+                        },
+                    },
+                    "labels": {},
+                    "extensions": {},
+                    "requires": [],
+                },
+                "labels": {"owner": "alice"},
+                "created_at": "2026-05-17T12:00:00Z",
+            })
+        );
+
+        let back: CloudSnapshot = serde_json::from_value(json).unwrap();
+        assert_eq!(back.digest, snapshot.digest);
+        assert_eq!(back.manifest, snapshot.manifest);
+        assert_eq!(back.location, snapshot.location);
+    }
+
+    #[test]
+    fn snapshot_operation_serializes_approved_shape() {
+        let operation = CloudSnapshotOperation {
+            id: "op-00000000-0000-0000-0000-000000000004".into(),
+            status: CloudSnapshotOperationStatus::Failed,
+            result: None,
+            error: Some(CloudErrorDetails {
+                code: Some("snapshot_failed".into()),
+                message: Some("sandbox stopped during capture".into()),
+            }),
+            created_at: "2026-05-17T12:00:00Z".parse().unwrap(),
+            updated_at: "2026-05-17T12:00:05Z".parse().unwrap(),
+            completed_at: Some("2026-05-17T12:00:05Z".parse().unwrap()),
+        };
+
+        let json = serde_json::to_value(&operation).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "id": "op-00000000-0000-0000-0000-000000000004",
+                "status": "failed",
+                "result": null,
+                "error": {
+                    "code": "snapshot_failed",
+                    "message": "sandbox stopped during capture",
+                },
+                "created_at": "2026-05-17T12:00:00Z",
+                "updated_at": "2026-05-17T12:00:05Z",
+                "completed_at": "2026-05-17T12:00:05Z",
+            })
+        );
+
+        let back: CloudSnapshotOperation = serde_json::from_value(json).unwrap();
+        assert_eq!(back.status, CloudSnapshotOperationStatus::Failed);
+        assert!(back.result.is_none());
+        assert_eq!(back.error.unwrap().code.as_deref(), Some("snapshot_failed"));
+        assert!(back.completed_at.is_some());
+    }
+
+    #[test]
+    fn snapshot_operation_status_serializes_snake_case() {
+        use CloudSnapshotOperationStatus::*;
+
+        for (status, expected) in [
+            (Queued, "queued"),
+            (InProgress, "in_progress"),
+            (Succeeded, "succeeded"),
+            (Failed, "failed"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(status).unwrap(),
+                serde_json::json!(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn in_flight_snapshot_operation_defaults_result_fields() {
+        let operation: CloudSnapshotOperation = serde_json::from_value(serde_json::json!({
+            "id": "op-00000000-0000-0000-0000-000000000004",
+            "status": "in_progress",
+            "created_at": "2026-05-17T12:00:00Z",
+            "updated_at": "2026-05-17T12:00:01Z",
+        }))
+        .unwrap();
+
+        assert_eq!(operation.status, CloudSnapshotOperationStatus::InProgress);
+        assert!(operation.result.is_none());
+        assert!(operation.error.is_none());
+        assert!(operation.completed_at.is_none());
+    }
+
+    #[test]
+    fn create_snapshot_request_serializes_approved_shape() {
+        let request = CloudCreateSnapshotRequest {
+            source_sandbox: "agent-1".into(),
+            name: "post-setup".into(),
+            dest_dir: Some("/mnt/snapshots".into()),
+            labels: BTreeMap::from([("owner".into(), "alice".into())]),
+            force: true,
+            record_integrity: true,
+            resumable: true,
+        };
+
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            serde_json::json!({
+                "source_sandbox": "agent-1",
+                "name": "post-setup",
+                "dest_dir": "/mnt/snapshots",
+                "labels": {"owner": "alice"},
+                "force": true,
+                "record_integrity": true,
+                "resumable": true,
+            })
+        );
+    }
+
+    #[test]
+    fn create_snapshot_request_requires_source_and_name_and_defaults_the_rest() {
+        let request: CloudCreateSnapshotRequest = serde_json::from_value(serde_json::json!({
+            "source_sandbox": "agent-1",
+            "name": "post-setup",
+        }))
+        .unwrap();
+
+        assert_eq!(request.source_sandbox, "agent-1");
+        assert_eq!(request.name, "post-setup");
+        assert!(request.dest_dir.is_none());
+        assert!(request.labels.is_empty());
+        assert!(!request.force);
+        assert!(!request.record_integrity);
+        assert!(!request.resumable);
+
+        // Defaulted fields stay off the wire entirely.
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            serde_json::json!({
+                "source_sandbox": "agent-1",
+                "name": "post-setup",
+            })
+        );
+
+        let missing_source =
+            serde_json::from_value::<CloudCreateSnapshotRequest>(serde_json::json!({
+                "name": "post-setup",
+            }));
+        assert!(missing_source.is_err());
+
+        let missing_name =
+            serde_json::from_value::<CloudCreateSnapshotRequest>(serde_json::json!({
+                "source_sandbox": "agent-1",
+            }));
+        assert!(missing_name.is_err());
     }
 }

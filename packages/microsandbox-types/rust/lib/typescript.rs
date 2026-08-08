@@ -1,22 +1,29 @@
 //! TypeScript binding generation helpers.
 //!
-//! Two files are emitted. `domain.ts` carries only the domain types the cloud
-//! contract transitively references; `cloud.ts` carries the cloud wire twins and
-//! imports its domain dependencies from `./domain`. Domain types the cloud never
-//! touches (the modification plan set, snapshots, volume specs, the domain twins
-//! the cloud replaces, …) are intentionally not generated.
+//! Three files are emitted. `domain.ts` carries only the domain types the cloud
+//! contract transitively references; `snapshot.ts` carries the shared snapshot
+//! descriptor schema; `cloud.ts` carries the cloud wire twins and imports its
+//! dependencies from `./domain` and `./snapshot`. Domain types the cloud never
+//! touches (the modification plan set, volume specs, the domain twins the cloud
+//! replaces, …) are intentionally not generated.
 
 use ts_rs::TS;
 
+use crate::snapshot::{
+    CheckpointSnapshotState, FileSnapshotState, ImageRef, SnapshotFormat, SnapshotScope,
+    SnapshotState, UpperIntegrity, UpperLayer,
+};
 use crate::{
-    Action, CloudCreateSandboxResponse, CloudDiskImageFormat, CloudErrorBody, CloudErrorDetails,
-    CloudHostPattern, CloudMessageResponse, CloudNetworkSpec, CloudPaginated, CloudPatch,
-    CloudPullPolicy, CloudRlimit, CloudRlimitResource, CloudRootfsSource, CloudSandboxResources,
-    CloudSandboxRuntimeOptions, CloudSandboxSpec, CloudSandboxStatus, CloudSandboxStatusReason,
-    CloudSecretEntry, CloudSecretSource, CloudSecretsConfig, CloudViolationAction,
-    CloudVolumeMount, Destination, DestinationGroup, Direction, EnvVar, HandoffInit,
-    HostPermissions, MountOptions, NetworkPolicy, PortRange, Protocol, Rule, SandboxLogLevel,
-    SandboxPolicy, SecretInjection, SecurityProfile, StatVirtualization,
+    Action, CloudCreateSandboxResponse, CloudCreateSnapshotRequest, CloudDiskImageFormat,
+    CloudErrorBody, CloudErrorDetails, CloudHostPattern, CloudMessageResponse, CloudNetworkSpec,
+    CloudPaginated, CloudPatch, CloudPullPolicy, CloudRlimit, CloudRlimitResource,
+    CloudRootfsSource, CloudSandboxResources, CloudSandboxRuntimeOptions, CloudSandboxSpec,
+    CloudSandboxStatus, CloudSandboxStatusReason, CloudSecretEntry, CloudSecretSource,
+    CloudSecretsConfig, CloudSnapshot, CloudSnapshotLocation, CloudSnapshotOperation,
+    CloudSnapshotOperationStatus, CloudSnapshotReference, CloudViolationAction, CloudVolumeMount,
+    Destination, DestinationGroup, Direction, EnvVar, HandoffInit, HostPermissions, MountOptions,
+    NetworkPolicy, PortRange, Protocol, Rule, SandboxLogLevel, SandboxPolicy, SecretInjection,
+    SecurityProfile, SnapshotManifest, StatVirtualization,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -48,6 +55,20 @@ const DOMAIN_TYPE_NAMES: &[&str] = &[
     "StatVirtualization",
 ];
 
+/// Snapshot schema type names the cloud twins may reference. Filtered into the
+/// `cloud.ts` import list the same way as [`DOMAIN_TYPE_NAMES`].
+const SNAPSHOT_TYPE_NAMES: &[&str] = &[
+    "SnapshotManifest",
+    "SnapshotScope",
+    "SnapshotFormat",
+    "SnapshotState",
+    "ImageRef",
+    "UpperLayer",
+    "UpperIntegrity",
+    "FileSnapshotState",
+    "CheckpointSnapshotState",
+];
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -57,25 +78,37 @@ pub fn render_domain() -> String {
     format_ts(&format!("{HEADER}{}", body(&domain_declarations())))
 }
 
-/// Render `cloud.ts` — the cloud wire twins. Imports the domain types they use
-/// from `./domain` and re-exports the domain surface so consumers of the package
-/// entry see the whole cloud contract.
+/// Render `snapshot.ts` — the shared snapshot descriptor schema.
+pub fn render_snapshot() -> String {
+    format_ts(&format!("{HEADER}{}", body(&snapshot_declarations())))
+}
+
+/// Render `cloud.ts` — the cloud wire twins. Imports the domain and snapshot
+/// types they use from `./domain` and `./snapshot` and re-exports both surfaces
+/// so consumers of the package entry see the whole cloud contract.
 pub fn render_cloud() -> String {
     let decls = cloud_declarations();
-    let imports: Vec<&str> = DOMAIN_TYPE_NAMES
+
+    let mut output = String::from(HEADER);
+    output.push_str(&import_block(DOMAIN_TYPE_NAMES, &decls, "./domain.js"));
+    output.push_str(&import_block(SNAPSHOT_TYPE_NAMES, &decls, "./snapshot.js"));
+    output.push('\n');
+    output.push_str(&body(&decls));
+    format_ts(&output)
+}
+
+/// Import the referenced subset of `names` from `module` and re-export the
+/// module's whole surface.
+fn import_block(names: &[&str], decls: &[String], module: &str) -> String {
+    let imports: Vec<&str> = names
         .iter()
         .copied()
         .filter(|name| decls.iter().any(|decl| mentions(decl, name)))
         .collect();
-
-    let mut output = String::from(HEADER);
-    output.push_str(&format!(
-        "import type {{ {} }} from \"./domain.js\";\n",
+    format!(
+        "import type {{ {} }} from \"{module}\";\nexport type * from \"{module}\";\n",
         imports.join(", ")
-    ));
-    output.push_str("export type * from \"./domain.js\";\n\n");
-    output.push_str(&body(&decls));
-    format_ts(&output)
+    )
 }
 
 /// Format generated TypeScript with dprint's Deno style — the same formatter
@@ -127,6 +160,24 @@ pub fn domain_declarations() -> Vec<String> {
     ]
 }
 
+/// Raw `ts-rs` declarations for the shared snapshot descriptor schema,
+/// transitively closed from `SnapshotManifest`.
+pub fn snapshot_declarations() -> Vec<String> {
+    let cfg = ts_rs::Config::new().with_large_int("number");
+
+    vec![
+        SnapshotManifest::decl(&cfg),
+        SnapshotScope::decl(&cfg),
+        ImageRef::decl(&cfg),
+        SnapshotState::decl(&cfg),
+        FileSnapshotState::decl(&cfg),
+        CheckpointSnapshotState::decl(&cfg),
+        SnapshotFormat::decl(&cfg),
+        UpperLayer::decl(&cfg),
+        UpperIntegrity::decl(&cfg),
+    ]
+}
+
 /// Raw `ts-rs` declarations for the cloud wire twins.
 pub fn cloud_declarations() -> Vec<String> {
     let cfg = ts_rs::Config::new().with_large_int("number");
@@ -134,6 +185,7 @@ pub fn cloud_declarations() -> Vec<String> {
     vec![
         CloudSandboxSpec::decl(&cfg),
         CloudRootfsSource::decl(&cfg),
+        CloudSnapshotReference::decl(&cfg),
         CloudVolumeMount::decl(&cfg),
         CloudSandboxResources::decl(&cfg),
         CloudSandboxRuntimeOptions::decl(&cfg),
@@ -151,6 +203,11 @@ pub fn cloud_declarations() -> Vec<String> {
         CloudCreateSandboxResponse::decl(&cfg),
         CloudSandboxStatus::decl(&cfg),
         CloudSandboxStatusReason::decl(&cfg),
+        CloudCreateSnapshotRequest::decl(&cfg),
+        CloudSnapshot::decl(&cfg),
+        CloudSnapshotLocation::decl(&cfg),
+        CloudSnapshotOperation::decl(&cfg),
+        CloudSnapshotOperationStatus::decl(&cfg),
         CloudPaginated::<CloudCreateSandboxResponse>::decl(&cfg),
         CloudMessageResponse::decl(&cfg),
         CloudErrorBody::decl(&cfg),
@@ -222,7 +279,11 @@ mod tests {
 
     #[test]
     fn checked_in_bindings_match_generated_output() {
-        for (file, generated) in [("domain.ts", render_domain()), ("cloud.ts", render_cloud())] {
+        for (file, generated) in [
+            ("domain.ts", render_domain()),
+            ("snapshot.ts", render_snapshot()),
+            ("cloud.ts", render_cloud()),
+        ] {
             let path = src_dir().join(file);
             let current = fs::read_to_string(&path)
                 .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
@@ -233,7 +294,8 @@ mod tests {
     #[test]
     fn cloud_bindings_import_domain_and_stay_scoped() {
         assert_eq!(domain_declarations().len(), 17);
-        assert_eq!(cloud_declarations().len(), 23);
+        assert_eq!(snapshot_declarations().len(), 9);
+        assert_eq!(cloud_declarations().len(), 29);
 
         let cloud = render_cloud();
         // Cloud twins live here and their domain deps are imported/re-exported.
@@ -241,6 +303,10 @@ mod tests {
         assert!(cloud.contains("import type {"));
         assert!(cloud.contains("EnvVar"));
         assert!(cloud.contains("export type * from \"./domain.js\""));
+        // The snapshot schema is imported/re-exported the same way.
+        assert!(cloud.contains("export type CloudSnapshot"));
+        assert!(cloud.contains("import type { SnapshotManifest } from \"./snapshot.js\""));
+        assert!(cloud.contains("export type * from \"./snapshot.js\""));
 
         let domain = render_domain();
         // Transitive domain deps are present...
@@ -249,5 +315,11 @@ mod tests {
         // ...but domain-only types the cloud never reaches are not generated.
         assert!(!domain.contains("SandboxModificationPlan"));
         assert!(!domain.contains("export type SandboxSpec ="));
+
+        let snapshot = render_snapshot();
+        // The canonical descriptor generates under its exposed name.
+        assert!(snapshot.contains("export type SnapshotManifest"));
+        assert!(snapshot.contains("export type SnapshotState"));
+        assert!(!snapshot.contains("export type Manifest"));
     }
 }
