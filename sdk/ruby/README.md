@@ -31,7 +31,10 @@ later). The platform name carries no glibc version, so on an older glibc host
 the platform gem still installs but fails to load — force the source gem there
 (see below).
 
-<!-- pending first CI run: whether ruby:slim needs libcap-ng0 -->
+The Linux gems need `libcap-ng0` at runtime. Debian and Ubuntu ship it in the
+base system — the stock `ruby:slim` images load the gem with no extra
+packages, which CI verifies — so this only matters on stripped-down
+environments such as distroless images.
 
 Installing a platform gem requires RubyGems 3.3.11 or newer; earlier releases
 mismatch `-linux` gems against glibc hosts. Run `gem update --system` first if
