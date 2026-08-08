@@ -121,14 +121,18 @@ namespace :cargo do
 
   desc "Undo cargo:patch_workspace: drop the patch config, restore the lockfile"
   task :unpatch_workspace do
-    # Without this, a leftover gitignored .cargo/config.toml keeps every later
-    # local build silently resolving against the in-tree SDK instead of the
-    # published pin the source gem actually ships with. Removal only happens
-    # when the state file proves the current config.toml is our generated one;
-    # with neither state nor backup, there is nothing of ours to undo.
+    # Leaving the patch applied would keep every later local build silently
+    # resolving against the in-tree SDK instead of the published pin the
+    # source gem actually ships with. The state sentinel gates the whole
+    # undo: without it nothing here is ours, so touching .orig files or the
+    # config would destroy contributor work, not clean up after this task.
+    unless File.exist?(PATCH_STATE)
+      puts "cargo:unpatch_workspace: nothing to undo (cargo:patch_workspace has not been applied)"
+      next
+    end
     if File.exist?(".cargo/config.toml.orig")
       mv ".cargo/config.toml.orig", ".cargo/config.toml"
-    elsif File.exist?(PATCH_STATE)
+    else
       rm_f ".cargo/config.toml"
     end
     if File.exist?("ext/microsandbox/Cargo.lock.orig")
