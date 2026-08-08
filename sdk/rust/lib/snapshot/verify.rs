@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason};
-use microsandbox_image::snapshot::{FILE_MERKLE_BLAKE3_LEAF_SIZE, SnapshotState, UpperIntegrity};
+use microsandbox_types::snapshot::{
+    FILE_MERKLE_BLAKE3_LEAF_SIZE, SnapshotState, UpperIntegrity,
+};
 use microsandbox_utils::extent::ExtentMap;
 use rayon::prelude::*;
 use sha2::{Digest as _, Sha256};

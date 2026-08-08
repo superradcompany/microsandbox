@@ -19,7 +19,9 @@ use microsandbox_image::snapshot::migration::{
     V066_BACKUP_FILENAME, V066_DESCRIPTOR_FILENAME, V066PayloadIdentity, V066SourceInfo,
     inspect_v066_source, translate_v066_forward,
 };
-use microsandbox_image::snapshot::{DESCRIPTOR_FILENAME, Manifest, SnapshotState};
+use microsandbox_types::snapshot::{
+    DESCRIPTOR_FILENAME, Manifest, SnapshotFormat, SnapshotState,
+};
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement, TransactionTrait};
 
 use crate::{MicrosandboxError, MicrosandboxResult};
@@ -922,8 +924,8 @@ where
         unreachable!("v0.6.6 translation always produces file state")
     };
     let format = match file.format {
-        microsandbox_image::snapshot::SnapshotFormat::Raw => "raw",
-        microsandbox_image::snapshot::SnapshotFormat::Qcow2 => "qcow2",
+        SnapshotFormat::Raw => "raw",
+        SnapshotFormat::Qcow2 => "qcow2",
     };
     let name = candidate
         .inspected

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use microsandbox_image::snapshot::migration::V066_DESCRIPTOR_FILENAME;
-use microsandbox_image::snapshot::{DESCRIPTOR_FILENAME, Manifest, SnapshotState};
+use microsandbox_types::snapshot::{DESCRIPTOR_FILENAME, Manifest, SnapshotState};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter,
     QueryOrder,
@@ -159,8 +159,8 @@ pub(super) async fn index_upsert(
     {
         SnapshotState::File(state) => {
             let format = match state.format {
-                microsandbox_image::snapshot::SnapshotFormat::Raw => "raw",
-                microsandbox_image::snapshot::SnapshotFormat::Qcow2 => "qcow2",
+                SnapshotFormat::Raw => "raw",
+                SnapshotFormat::Qcow2 => "qcow2",
             };
             (
                 "file",

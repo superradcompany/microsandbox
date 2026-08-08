@@ -814,7 +814,7 @@ fn is_missing_migrations_table(err: &DbErr) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use microsandbox_image::snapshot::Manifest;
+    use microsandbox_types::snapshot::Manifest;
     use microsandbox_types::{
         CpuPlacement, MemoryPlacement, NumaPlacement, PlacementProfile, SandboxResourcesPatch,
     };
