@@ -65,7 +65,9 @@ async def test_create_get_list_connect_stop_start_and_remove(sandbox_name):
         handle_touch = await handle.touch()
         assert handle_touch.name == name
 
-        plan = await sandbox.modify(cpus=2, labels={"tier": "gold"}, dry_run=True)
+        plan = await sandbox.modify(
+            cpus=2, root_disk_size=8192, labels={"tier": "gold"}, dry_run=True
+        )
         assert plan["sandbox"] == name
         assert plan["applied"] is False
         assert plan["status"] is SandboxStatus.RUNNING
@@ -75,7 +77,11 @@ async def test_create_get_list_connect_stop_start_and_remove(sandbox_name):
         assert all(
             isinstance(change["disposition"], ModificationDisposition) for change in plan["changes"]
         )
-        assert {change["field"] for change in plan["changes"]} >= {"cpus", "label"}
+        assert {change["field"] for change in plan["changes"]} >= {
+            "cpus",
+            "root_disk_size",
+            "label",
+        }
 
         handle_plan = await handle.modify(env={"MODIFIED": "1"}, dry_run=True)
         assert handle_plan["sandbox"] == name

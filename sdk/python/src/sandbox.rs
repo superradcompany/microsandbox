@@ -675,7 +675,7 @@ impl PySandbox {
 
     /// Plan or apply a sandbox modification. Returns the plan as a dict.
     ///
-    /// `memory` / `max_memory` are in MiB. `policy` is a
+    /// `memory` / `max_memory` / `root_disk_size` are in MiB. `policy` is a
     /// `ModificationPolicy`; with `dry_run=True` the plan is computed without
     /// applying anything.
     ///
@@ -688,6 +688,7 @@ impl PySandbox {
         max_cpus = None,
         memory = None,
         max_memory = None,
+        root_disk_size = None,
         env = None,
         env_rm = None,
         labels = None,
@@ -706,6 +707,7 @@ impl PySandbox {
         max_cpus: Option<u8>,
         memory: Option<u32>,
         max_memory: Option<u32>,
+        root_disk_size: Option<u32>,
         env: Option<HashMap<String, String>>,
         env_rm: Option<Vec<String>>,
         labels: Option<HashMap<String, String>>,
@@ -719,7 +721,17 @@ impl PySandbox {
         let inner = self.inner.clone();
         let secrets = build_secret_patches(py, secrets)?;
         let patch = build_modify_patch(
-            cpus, max_cpus, memory, max_memory, env, env_rm, labels, labels_rm, workdir, secrets,
+            cpus,
+            max_cpus,
+            memory,
+            max_memory,
+            root_disk_size,
+            env,
+            env_rm,
+            labels,
+            labels_rm,
+            workdir,
+            secrets,
             secrets_rm,
         );
         let policy = policy
@@ -995,6 +1007,7 @@ pub(crate) fn build_modify_patch(
     max_cpus: Option<u8>,
     memory: Option<u32>,
     max_memory: Option<u32>,
+    root_disk_size: Option<u32>,
     env: Option<HashMap<String, String>>,
     env_rm: Option<Vec<String>>,
     labels: Option<HashMap<String, String>>,
@@ -1013,6 +1026,7 @@ pub(crate) fn build_modify_patch(
         max_cpus,
         memory_mib: memory,
         max_memory_mib: max_memory,
+        root_disk_size_mib: root_disk_size,
         env: env_pairs
             .into_iter()
             .map(|(key, value)| microsandbox::sandbox::EnvVar::new(key, value))
@@ -1023,8 +1037,6 @@ pub(crate) fn build_modify_patch(
         workdir,
         secrets,
         secrets_remove: secrets_rm.unwrap_or_default(),
-        // Patch fields without a kwarg surface here stay unset.
-        ..Default::default()
     }
 }
 
@@ -2035,6 +2047,7 @@ mod tests {
             None,
             None,
             None,
+            Some(8192),
             None,
             None,
             None,
@@ -2063,6 +2076,7 @@ mod tests {
         );
 
         let json = serde_json::to_value(&patch).expect("serialize patch");
+        assert_eq!(json["root_disk_size_mib"], 8192);
         let secrets = json["secrets"].as_array().expect("secrets array");
         assert_eq!(secrets.len(), 3);
 

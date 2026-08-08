@@ -151,6 +151,7 @@ describe.skipIf(!msbPath())("end-to-end smoke", () => {
   it("plans a dry-run modification without applying it", async () => {
     const plan = await sb.modify({
       cpus: 2,
+      rootDiskSize: 8192,
       labels: { tier: "gold" },
       dryRun: true,
     });
@@ -159,6 +160,7 @@ describe.skipIf(!msbPath())("end-to-end smoke", () => {
     expect(plan.policy).toBe("no_restart");
     const fields = plan.changes.map((change) => change.field);
     expect(fields).toContain("cpus");
+    expect(fields).toContain("root_disk_size");
     expect(fields).toContain("label");
 
     const handle = await Sandbox.get(SANDBOX_NAME);

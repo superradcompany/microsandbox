@@ -114,7 +114,8 @@ The plan labels each change as `live`, `next start`, `requires restart`, or `uns
 | `labels` | Live | Host-side metadata; no guest process changes |
 | `env`, `workdir` | Future execs | Running processes keep what they already have |
 | `secrets` | Live for rotation | Placeholder changes need a restart |
-| Storage | Create or mount time | Size rootfs, volumes, tmpfs, and disk images outside `modify` |
+| Root disk size | Restart or next start | Managed and flat OCI disks grow only; tmpfs changes on next boot |
+| Other storage | Create or mount time | Named volumes, mount tmpfs, and user disk images are sized outside `modify` |
 
 ## Dry runs
 
@@ -214,13 +215,57 @@ msb modify worker --secret GITHUB_TOKEN@api.github.com
 msb modify worker --secret-rm OLD_TOKEN
 ```
 
-Secret changes through modify are Rust-SDK and CLI only for now. For the credential model and host allow lists, see [Secrets](/sandboxes/secrets).
+For the credential model and host allow lists, see [Secrets](/sandboxes/secrets).
 
 ## Storage
 
-Storage capacity is not part of `modify` today. Choose it where the storage is defined:
+The local backend can resize an OCI sandbox's root disk through `modify`:
 
-- OCI writable layer size on the image source
+<CodeGroup>
+```rust Rust
+sb.modify()
+    .root_disk_size_mib(8192)
+    .restart()
+    .apply()
+    .await?;
+```
+
+```typescript TypeScript
+await sandbox.modify({ rootDiskSize: 8192, policy: "restart" });
+```
+
+```python Python
+await sb.modify(
+    root_disk_size=8192,
+    policy=ModificationPolicy.RESTART,
+)
+```
+
+```go Go
+_, err := sb.Modify(ctx, m.ModifyOptions{
+    RootDiskSizeMiB: 8192,
+    Policy:          m.ModificationPolicyRestart,
+})
+```
+
+```bash CLI
+msb modify worker --root-disk 8G --restart
+```
+</CodeGroup>
+
+Root disk changes are offline, not live. For a running sandbox, use the restart policy to make the new size active immediately, or the next-start policy to save it without touching the running VM. A stopped sandbox grows before the new size is persisted.
+
+The backing determines which changes are valid:
+
+- Managed and flat OCI root disks are grow-only. Shrinking is rejected because it risks filesystem data loss.
+- A tmpfs OCI root disk can grow or shrink on the next boot, but its size cannot exceed sandbox memory.
+- User-supplied root disk images are not resized or deleted by microsandbox; resize the image file yourself while it is detached.
+- Existing disk-backed named volumes do not have a resize operation. Their capacity is fixed when the volume is created.
+
+The ext4 grower uses the image's reserved metadata headroom. If an older image cannot grow to the requested size in place, recreate the sandbox with a larger root disk.
+
+Other storage capacity is still chosen where the storage is defined:
+
 - named volume size or quota on the volume
 - tmpfs size on the mount
 - disk image size in the disk image itself

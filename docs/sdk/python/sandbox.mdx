@@ -515,6 +515,7 @@ async def modify(
     max_cpus: int | None = None,
     memory: int | None = None,
     max_memory: int | None = None,
+    root_disk_size: int | None = None,
     env: Mapping[str, str] | None = None,
     env_rm: list[str] | None = None,
     labels: Mapping[str, str] | None = None,
@@ -550,13 +551,16 @@ for change in plan["changes"]:
 
 # Make an env change active now by restarting
 await sb.modify(env={"MODE": "prod"}, policy=ModificationPolicy.RESTART)
+
+# Grow the managed OCI root disk offline and restart
+await sb.modify(root_disk_size=8192, policy=ModificationPolicy.RESTART)
 ```
 
 </Accordion>
 
 Plan or apply a configuration change. The returned plan uses [`ModificationDisposition`](#modificationdisposition) to classify when each change takes effect, and apply is all-or-nothing.
 
-`cpus` and `memory` resize live within the `max_cpus` / `max_memory` ceilings; raising a ceiling requires a restart. Env and workdir changes affect future execs only. On a stopped sandbox, changes are saved for the next boot.
+`cpus` and `memory` resize live within the `max_cpus` / `max_memory` ceilings; raising a ceiling requires a restart. `root_disk_size` changes are offline: managed and flat OCI root disks grow only, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected. Env and workdir changes affect future execs only. On a stopped sandbox, changes are saved for the next boot.
 
 Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source—`env`, `value`, or `store`—and may also set `placeholder` and `allowed_hosts`; omitting a source updates only the other supplied fields. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `secrets_rm`.
 
@@ -593,6 +597,10 @@ A live CPU or memory resize can take a moment to settle. The new limits are enfo
   <div className="msb-param">
     <div className="msb-param-key"><code>max_memory</code><span className="msb-type">int | None</span></div>
     <div className="msb-param-desc">Boot-time maximum hotpluggable memory in MiB (restart-backed).</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>root_disk_size</code><span className="msb-type">int | None</span></div>
+    <div className="msb-param-desc">Desired root disk size in MiB. Managed and flat OCI disks are grow-only; applies on restart or next start.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>env</code><span className="msb-type">Mapping[str, str] | None</span></div>

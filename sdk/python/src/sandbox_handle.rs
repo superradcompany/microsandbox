@@ -172,6 +172,7 @@ impl PySandboxHandle {
         max_cpus = None,
         memory = None,
         max_memory = None,
+        root_disk_size = None,
         env = None,
         env_rm = None,
         labels = None,
@@ -190,6 +191,7 @@ impl PySandboxHandle {
         max_cpus: Option<u8>,
         memory: Option<u32>,
         max_memory: Option<u32>,
+        root_disk_size: Option<u32>,
         env: Option<std::collections::HashMap<String, String>>,
         env_rm: Option<Vec<String>>,
         labels: Option<std::collections::HashMap<String, String>>,
@@ -205,7 +207,17 @@ impl PySandboxHandle {
         let inner = self.inner.clone();
         let secrets = crate::sandbox::build_secret_patches(py, secrets)?;
         let patch = crate::sandbox::build_modify_patch(
-            cpus, max_cpus, memory, max_memory, env, env_rm, labels, labels_rm, workdir, secrets,
+            cpus,
+            max_cpus,
+            memory,
+            max_memory,
+            root_disk_size,
+            env,
+            env_rm,
+            labels,
+            labels_rm,
+            workdir,
+            secrets,
             secrets_rm,
         );
         let policy = policy

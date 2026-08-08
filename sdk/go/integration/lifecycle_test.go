@@ -143,9 +143,10 @@ func TestSandboxModifyDryRun(t *testing.T) {
 	})
 
 	plan, err := sb.Modify(ctx, microsandbox.ModifyOptions{
-		CPUs:   2,
-		Labels: map[string]string{"tier": "gold"},
-		DryRun: true,
+		CPUs:            2,
+		RootDiskSizeMiB: 8192,
+		Labels:          map[string]string{"tier": "gold"},
+		DryRun:          true,
 	})
 	if err != nil {
 		t.Fatalf("Sandbox.Modify: %v", err)
@@ -160,7 +161,7 @@ func TestSandboxModifyDryRun(t *testing.T) {
 	for _, change := range plan.Changes {
 		fields[change.Field] = true
 	}
-	if !fields["cpus"] || !fields["label"] {
+	if !fields["cpus"] || !fields["root_disk_size"] || !fields["label"] {
 		t.Fatalf("Sandbox.Modify changes = %+v", plan.Changes)
 	}
 

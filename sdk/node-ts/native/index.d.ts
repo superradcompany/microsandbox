@@ -2116,7 +2116,7 @@ export interface SandboxMetrics {
 /**
  * Options accepted by `Sandbox.modify()` / `SandboxHandle.modify()`.
  *
- * `memoryMib` / `maxMemoryMib` are in MiB. `policy` is `"no_restart"`
+ * `memoryMib` / `maxMemoryMib` / `rootDiskSizeMib` are in MiB. `policy` is `"no_restart"`
  * (default), `"next_start"`, or `"restart"`. With `dryRun: true` the plan
  * is computed without applying anything.
  */
@@ -2125,6 +2125,7 @@ export interface SandboxModifyOptions {
   maxCpus?: number
   memoryMib?: number
   maxMemoryMib?: number
+  rootDiskSizeMib?: number
   env?: Record<string, string>
   envRemove?: Array<string>
   labels?: Record<string, string>
