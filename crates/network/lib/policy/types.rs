@@ -109,7 +109,8 @@ pub struct Rule {
     pub protocols: Vec<Protocol>,
 
     /// Port-range set (empty = any port). Always the guest-side port:
-    /// destination port for egress, listening port for ingress.
+    /// destination port for egress, listening port for ingress. A
+    /// non-empty set also excludes ICMP, which carries no ports.
     #[serde(default)]
     pub ports: Vec<PortRange>,
 
@@ -676,42 +677,115 @@ impl Default for NetworkPolicy {
 }
 
 impl Rule {
-    /// Convenience: allow rule for egress, any protocol, any port.
+    /// Convenience: allow rule for egress, any protocol, **every port**.
+    /// See [`Self::allow_egress_ports`] to scope it to specific ports.
     pub fn allow_egress(destination: Destination) -> Self {
         Self::new(Direction::Egress, destination, Action::Allow)
     }
 
-    /// Convenience: deny rule for egress, any protocol, any port.
+    /// Convenience: deny rule for egress, any protocol, **every port**.
+    /// See [`Self::deny_egress_ports`] to scope it to specific ports.
     pub fn deny_egress(destination: Destination) -> Self {
         Self::new(Direction::Egress, destination, Action::Deny)
     }
 
-    /// Convenience: allow rule for ingress, any protocol, any port.
+    /// Convenience: allow rule for ingress, any protocol, **every port**.
+    /// See [`Self::allow_ingress_ports`] to scope it to specific ports.
     pub fn allow_ingress(destination: Destination) -> Self {
         Self::new(Direction::Ingress, destination, Action::Allow)
     }
 
-    /// Convenience: deny rule for ingress, any protocol, any port.
+    /// Convenience: deny rule for ingress, any protocol, **every port**.
+    /// See [`Self::deny_ingress_ports`] to scope it to specific ports.
     pub fn deny_ingress(destination: Destination) -> Self {
         Self::new(Direction::Ingress, destination, Action::Deny)
     }
 
-    /// Convenience: allow rule for either direction, any protocol, any port.
+    /// Convenience: allow rule for either direction, any protocol,
+    /// **every port**. See [`Self::allow_any_ports`] to scope it to specific ports.
     pub fn allow_any(destination: Destination) -> Self {
         Self::new(Direction::Any, destination, Action::Allow)
     }
 
-    /// Convenience: deny rule for either direction, any protocol, any port.
+    /// Convenience: deny rule for either direction, any protocol,
+    /// **every port**. See [`Self::deny_any_ports`] to scope it to specific ports.
     pub fn deny_any(destination: Destination) -> Self {
         Self::new(Direction::Any, destination, Action::Deny)
     }
 
+    /// Allow rule for egress, any protocol, restricted to `ports`.
+    /// Empty `ports` matches every port, as in [`Self::allow_egress`].
+    pub fn allow_egress_ports<I>(destination: Destination, ports: I) -> Self
+    where
+        I: IntoIterator<Item = PortRange>,
+    {
+        Self::with_ports(Direction::Egress, destination, Action::Allow, ports)
+    }
+
+    /// Deny rule for egress, any protocol, restricted to `ports`.
+    /// Empty `ports` matches every port, as in [`Self::deny_egress`].
+    pub fn deny_egress_ports<I>(destination: Destination, ports: I) -> Self
+    where
+        I: IntoIterator<Item = PortRange>,
+    {
+        Self::with_ports(Direction::Egress, destination, Action::Deny, ports)
+    }
+
+    /// Allow rule for ingress, any protocol, restricted to `ports` — the
+    /// guest-side listening ports, never the peer's source port. Empty
+    /// `ports` matches every port, as in [`Self::allow_ingress`].
+    pub fn allow_ingress_ports<I>(destination: Destination, ports: I) -> Self
+    where
+        I: IntoIterator<Item = PortRange>,
+    {
+        Self::with_ports(Direction::Ingress, destination, Action::Allow, ports)
+    }
+
+    /// Deny rule for ingress, any protocol, restricted to `ports`.
+    /// Empty `ports` matches every port, as in [`Self::deny_ingress`].
+    pub fn deny_ingress_ports<I>(destination: Destination, ports: I) -> Self
+    where
+        I: IntoIterator<Item = PortRange>,
+    {
+        Self::with_ports(Direction::Ingress, destination, Action::Deny, ports)
+    }
+
+    /// Allow rule for either direction, any protocol, restricted to
+    /// `ports`. Empty `ports` matches every port, as in [`Self::allow_any`].
+    pub fn allow_any_ports<I>(destination: Destination, ports: I) -> Self
+    where
+        I: IntoIterator<Item = PortRange>,
+    {
+        Self::with_ports(Direction::Any, destination, Action::Allow, ports)
+    }
+
+    /// Deny rule for either direction, any protocol, restricted to
+    /// `ports`. Empty `ports` matches every port, as in [`Self::deny_any`].
+    pub fn deny_any_ports<I>(destination: Destination, ports: I) -> Self
+    where
+        I: IntoIterator<Item = PortRange>,
+    {
+        Self::with_ports(Direction::Any, destination, Action::Deny, ports)
+    }
+
     fn new(direction: Direction, destination: Destination, action: Action) -> Self {
+        Self::with_ports(direction, destination, action, std::iter::empty())
+    }
+
+    fn with_ports<I>(
+        direction: Direction,
+        destination: Destination,
+        action: Action,
+        ports: I,
+    ) -> Self
+    where
+        I: IntoIterator<Item = PortRange>,
+    {
         Self {
             direction,
             destination,
             protocols: Vec::new(),
-            ports: Vec::new(),
+            ports: ports.into_iter().collect(),
             action,
         }
     }
@@ -1056,6 +1130,126 @@ mod tests {
             deny.destination,
             Destination::Group(DestinationGroup::Host)
         ));
+    }
+
+    #[test]
+    fn port_scoped_constructors_set_direction_action_and_ports() {
+        let dest = || Destination::Group(DestinationGroup::Host);
+        let ports = [PortRange::single(8080), PortRange::range(9000, 9100)];
+
+        let cases: [(Rule, Direction, Action); 6] = [
+            (
+                Rule::allow_egress_ports(dest(), ports),
+                Direction::Egress,
+                Action::Allow,
+            ),
+            (
+                Rule::deny_egress_ports(dest(), ports),
+                Direction::Egress,
+                Action::Deny,
+            ),
+            (
+                Rule::allow_ingress_ports(dest(), ports),
+                Direction::Ingress,
+                Action::Allow,
+            ),
+            (
+                Rule::deny_ingress_ports(dest(), ports),
+                Direction::Ingress,
+                Action::Deny,
+            ),
+            (
+                Rule::allow_any_ports(dest(), ports),
+                Direction::Any,
+                Action::Allow,
+            ),
+            (
+                Rule::deny_any_ports(dest(), ports),
+                Direction::Any,
+                Action::Deny,
+            ),
+        ];
+
+        for (rule, direction, action) in cases {
+            assert_eq!(rule.direction, direction);
+            assert_eq!(rule.action, action);
+            assert_eq!(rule.ports, ports);
+            assert!(rule.protocols.is_empty());
+            assert!(matches!(
+                rule.destination,
+                Destination::Group(DestinationGroup::Host)
+            ));
+        }
+    }
+
+    #[test]
+    fn port_scoped_constructors_with_no_ports_match_the_all_ports_constructors() {
+        let dest = || Destination::Group(DestinationGroup::Public);
+        let pairs = [
+            (
+                Rule::allow_egress_ports(dest(), []),
+                Rule::allow_egress(dest()),
+            ),
+            (
+                Rule::deny_egress_ports(dest(), []),
+                Rule::deny_egress(dest()),
+            ),
+            (
+                Rule::allow_ingress_ports(dest(), []),
+                Rule::allow_ingress(dest()),
+            ),
+            (
+                Rule::deny_ingress_ports(dest(), []),
+                Rule::deny_ingress(dest()),
+            ),
+            (Rule::allow_any_ports(dest(), []), Rule::allow_any(dest())),
+            (Rule::deny_any_ports(dest(), []), Rule::deny_any(dest())),
+        ];
+
+        for (scoped, unscoped) in pairs {
+            assert_eq!(scoped.direction, unscoped.direction);
+            assert_eq!(scoped.action, unscoped.action);
+            assert_eq!(scoped.protocols, unscoped.protocols);
+            assert_eq!(scoped.ports, unscoped.ports);
+            assert!(scoped.ports.is_empty());
+        }
+    }
+
+    #[test]
+    fn port_scoped_host_rule_grants_only_the_named_service() {
+        let (shared, gw4, _) = shared_with_gateway();
+        let host = || Destination::Group(DestinationGroup::Host);
+        let forward_server = SocketAddr::new(IpAddr::V4(gw4), 8080);
+        let ssh = SocketAddr::new(IpAddr::V4(gw4), 22);
+
+        let all_ports = NetworkPolicy {
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![Rule::allow_egress(host())],
+        };
+        assert!(
+            all_ports
+                .evaluate_egress(ssh, Protocol::Tcp, &shared)
+                .is_allow(),
+            "the all-ports constructor reaches every host port"
+        );
+
+        let scoped = NetworkPolicy {
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![Rule::allow_egress_ports(host(), [PortRange::single(8080)])],
+        };
+        assert!(
+            scoped
+                .evaluate_egress(forward_server, Protocol::Tcp, &shared)
+                .is_allow()
+        );
+        assert!(
+            scoped
+                .evaluate_egress(ssh, Protocol::Tcp, &shared)
+                .is_deny(),
+            "ports outside the scoped set fall through to default_egress"
+        );
     }
 
     /// Outbound TCP/443 allow rule pinned to a specific hostname,
