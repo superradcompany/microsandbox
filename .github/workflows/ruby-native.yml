@@ -1,0 +1,207 @@
+name: Ruby SDK Platform Gems
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "sdk/ruby/**"
+      - ".github/workflows/ruby-native.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "sdk/ruby/**"
+      - ".github/workflows/ruby-native.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_TIMEOUT: "120"
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: x86_64-linux
+            runner: ubuntu-latest
+          - platform: aarch64-linux
+            runner: ubuntu-24.04-arm
+          - platform: arm64-darwin
+            runner: macos-14
+
+    env:
+      # Absolute, and shared by every Ruby in this job. rb_sys otherwise
+      # defaults this to a per-Ruby relative target directory, which rebuilds
+      # the whole dependency graph once per ABI.
+      RB_SYS_CARGO_TARGET_DIR: ${{ github.workspace }}/sdk/ruby/ext/microsandbox/target
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: sdk/ruby/ext/microsandbox
+          cache-bin: false
+
+      - name: Install system dependencies
+        if: contains(matrix.platform, 'linux')
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        with:
+          ruby-version: "3.1"
+
+      - name: Build for Ruby 3.1
+        working-directory: sdk/ruby
+        run: |
+          gem install rake rake-compiler rb_sys --no-document
+          rake version_check cargo:patch_workspace gem:stage
+
+      - name: Assert the extension builds against the in-tree Rust SDK
+        working-directory: sdk/ruby
+        # Cargo silently ignores a [patch.crates-io] entry it cannot apply, so
+        # the patch failing is indistinguishable from success at build time.
+        # This is the guard. It must run from sdk/ruby: cargo discovers
+        # .cargo/config.toml by walking up from the working directory, not from
+        # the manifest, so the same command from the repo root sees no patch.
+        run: cargo tree --manifest-path ext/microsandbox/Cargo.toml --depth 1 | grep "sdk/rust)"
+
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        with:
+          ruby-version: "3.2"
+
+      # Each setup-ruby switches to a fresh gem environment, so the build
+      # dependencies have to be installed again for every ABI.
+      - name: Build for Ruby 3.2
+        working-directory: sdk/ruby
+        run: |
+          gem install rake rake-compiler rb_sys --no-document
+          rake gem:stage
+
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        with:
+          ruby-version: "3.3"
+
+      - name: Build for Ruby 3.3
+        working-directory: sdk/ruby
+        run: |
+          gem install rake rake-compiler rb_sys --no-document
+          rake gem:stage
+
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        with:
+          ruby-version: "3.4"
+
+      - name: Build for Ruby 3.4
+        working-directory: sdk/ruby
+        run: |
+          gem install rake rake-compiler rb_sys --no-document
+          rake gem:stage
+
+      - name: Package the platform gem
+        working-directory: sdk/ruby
+        env:
+          GEM_PLATFORM: ${{ matrix.platform }}
+        run: rake gem:platform
+
+      - name: Assert the packaged gem spec
+        working-directory: sdk/ruby
+        env:
+          GEM_PLATFORM: ${{ matrix.platform }}
+        run: |
+          ruby -e 'require "rubygems/package"
+
+            path = Dir["pkg/*.gem"].first
+            abort "no platform gem in pkg/" unless path
+            spec = Gem::Package.new(path).spec
+
+            abort "platform mismatch: #{spec.platform}" unless spec.platform.to_s == ENV.fetch("GEM_PLATFORM")
+            abort "platform gem must not declare extensions: #{spec.extensions.inspect}" unless spec.extensions.empty?
+            abort "required_ruby_version: #{spec.required_ruby_version}" unless spec.required_ruby_version == Gem::Requirement.new([">= 3.1", "< 3.5.dev"])
+            abort "required_rubygems_version: #{spec.required_rubygems_version}" unless spec.required_rubygems_version == Gem::Requirement.new(">= 3.3.11")
+            abort "rb_sys must not be a runtime dependency" if spec.dependencies.any? { |d| d.name == "rb_sys" && d.type == :runtime }
+
+            %w[3.1 3.2 3.3 3.4].each do |abi|
+              expected = ["lib/microsandbox/#{abi}/microsandbox.so", "lib/microsandbox/#{abi}/microsandbox.bundle"]
+              abort "missing binary for Ruby #{abi}: #{spec.files.inspect}" if (spec.files & expected).empty?
+            end
+
+            puts "platform gem spec OK: #{File.basename(path)}"'
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ruby-sdk-${{ matrix.platform }}
+          path: sdk/ruby/pkg/*.gem
+
+  smoke:
+    name: Smoke ${{ matrix.platform }} / Ruby ${{ matrix.ruby }}
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [x86_64-linux, aarch64-linux, arm64-darwin]
+        ruby: ["3.1", "3.2", "3.3", "3.4"]
+        include:
+          - platform: x86_64-linux
+            runner: ubuntu-latest
+          - platform: aarch64-linux
+            runner: ubuntu-24.04-arm
+          - platform: arm64-darwin
+            runner: macos-14
+
+    # Deliberately no checkout: the gem has to install and load with nothing
+    # from the source tree on disk.
+    steps:
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ruby-sdk-${{ matrix.platform }}
+
+      - name: Install the platform gem
+        run: gem install --local ./microsandbox-*.gem --no-document
+
+      - name: Assert the precompiled binary is what loads
+        run: |
+          ruby -e 'require "microsandbox"
+            loaded = $LOADED_FEATURES.grep(%r{microsandbox/\d+\.\d+/microsandbox\.(so|bundle)$})
+            abort "precompiled ABI binary not used: #{$LOADED_FEATURES.grep(/microsandbox/).inspect}" if loaded.empty?
+            abort "native/ruby version mismatch" unless Microsandbox.version == Microsandbox::VERSION'
+
+  smoke-clean-env:
+    name: Smoke x86_64-linux / clean container
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ruby-sdk-x86_64-linux
+
+      # A stock ruby image with no build toolchain and no system packages we
+      # installed ourselves: this is what a user gets from `gem install`.
+      # If require fails on a missing libcap-ng.so.0, add
+      # `apt-get update && apt-get install -y libcap-ng0` ahead of the install
+      # here and document the runtime requirement in sdk/ruby/README.md.
+      - name: Install and load the gem in a stock ruby image
+        run: |
+          docker run --rm -v "$PWD:/gems" ruby:3.4-slim bash -ec 'gem install --local /gems/microsandbox-*.gem --no-document && ruby -e "require \"microsandbox\"
+          loaded = \$LOADED_FEATURES.grep(%r{microsandbox/\d+\.\d+/microsandbox\.(so|bundle)\$})
+          abort \"precompiled ABI binary not used: #{\$LOADED_FEATURES.grep(/microsandbox/).inspect}\" if loaded.empty?
+          abort \"native/ruby version mismatch\" unless Microsandbox.version == Microsandbox::VERSION"'

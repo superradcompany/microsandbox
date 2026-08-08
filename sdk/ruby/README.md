@@ -11,6 +11,55 @@ Install the gem:
 gem install microsandbox
 ```
 
+Precompiled platform gems carry the native extension, so these combinations
+install without a Rust toolchain:
+
+| Gem platform    | Ruby     | Notes            |
+| --------------- | -------- | ---------------- |
+| `x86_64-linux`  | 3.1–3.4  | glibc            |
+| `aarch64-linux` | 3.1–3.4  | glibc            |
+| `arm64-darwin`  | 3.1–3.4  | Apple Silicon    |
+
+<!-- pending first CI run: whether ruby:slim needs libcap-ng0 -->
+
+Installing a platform gem requires RubyGems 3.3.11 or newer; earlier releases
+mismatch `-linux` gems against glibc hosts. Run `gem update --system` first if
+`gem --version` reports anything older.
+
+musl (Alpine), Windows, and any other platform or Ruby version fall back to the
+source gem automatically. The source gem compiles the extension during install
+and therefore needs a Rust toolchain (1.85 or newer).
+
+To compile from source even where a platform gem exists:
+
+```sh
+gem install microsandbox --platform ruby
+```
+
+With Bundler:
+
+```ruby
+gem "microsandbox", force_ruby_platform: true
+```
+
+To build a platform gem from a checkout, install every target Ruby, then run
+from `sdk/ruby`:
+
+```sh
+rake version_check cargo:patch_workspace
+rake gem:stage # Once per installed Ruby, 3.1 through 3.4
+GEM_PLATFORM=arm64-darwin rake gem:platform
+```
+
+`gem:platform` refuses to package unless all four ABIs are staged. Set
+`RUBY_ABIS` (for example `RUBY_ABIS=3.4`) to relax that when testing against a
+single local Ruby; CI never sets it.
+
+`cargo:patch_workspace` points the build at the in-tree Rust SDK and drops
+`ext/microsandbox/Cargo.lock`, which pins the published crate graph and cannot
+resolve against the patched path. Restore it before committing anything:
+`git checkout -- ext/microsandbox/Cargo.lock`.
+
 To use the local backend, install the microsandbox runtime and firmware once:
 
 ```ruby
