@@ -20,8 +20,8 @@ use std::task::{Context, Poll};
 use async_compression::tokio::bufread::ZstdDecoder;
 use async_compression::tokio::write::ZstdEncoder;
 use microsandbox_image::snapshot::migration::V066_DESCRIPTOR_FILENAME;
-use microsandbox_image::snapshot::{
-    DESCRIPTOR_FILENAME, MAX_JSON_SAFE_INTEGER, SnapshotState, UpperIntegrity,
+use microsandbox_types::snapshot::{
+    DESCRIPTOR_FILENAME, MAX_JSON_SAFE_INTEGER, Manifest, SnapshotState, UpperIntegrity,
 };
 use microsandbox_utils::extent::{self, ExtentMap};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -1888,7 +1888,7 @@ async fn promote_stage(stage: &Path, dest: &Path) -> MicrosandboxResult<()> {
 async fn install_staged_cache(
     cache_stage: &Path,
     cache_dir: &Path,
-    manifest: &microsandbox_image::snapshot::Manifest,
+    manifest: &Manifest,
 ) -> MicrosandboxResult<()> {
     if !contains_files(cache_stage)? {
         return Ok(());
@@ -1930,7 +1930,7 @@ async fn install_staged_cache(
 }
 
 fn validate_cached_metadata(
-    manifest: &microsandbox_image::snapshot::Manifest,
+    manifest: &Manifest,
     metadata: &microsandbox_image::CachedImageMetadata,
 ) -> MicrosandboxResult<()> {
     if metadata.manifest_digest != manifest.image.manifest_digest {

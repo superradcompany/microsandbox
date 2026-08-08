@@ -814,7 +814,7 @@ fn is_missing_migrations_table(err: &DbErr) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use microsandbox_image::snapshot::Manifest;
+    use microsandbox_types::snapshot::Manifest;
     use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement};
     use sha2::{Digest as _, Sha256};
 

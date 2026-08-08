@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use microsandbox::Snapshot;
 use microsandbox::backend::{Backend, LocalBackend};
-use microsandbox_image::snapshot::{
+use microsandbox_types::snapshot::{
     CheckpointSnapshotState, DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, FileSnapshotState, ImageRef,
     Manifest, SCHEMA_VERSION, SNAPSHOT_ARTIFACT_KIND, SnapshotFormat, SnapshotScope, SnapshotState,
     UpperIntegrity, UpperLayer,
