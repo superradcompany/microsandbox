@@ -43,6 +43,11 @@ fn targets() -> Vec<Target> {
             content: microsandbox_types::typescript::render_domain(),
         },
         Target {
+            label: "microsandbox-types snapshot bindings",
+            path: src.join("snapshot.ts"),
+            content: microsandbox_types::typescript::render_snapshot(),
+        },
+        Target {
             label: "microsandbox-types cloud bindings",
             path: src.join("cloud.ts"),
             content: microsandbox_types::typescript::render_cloud(),

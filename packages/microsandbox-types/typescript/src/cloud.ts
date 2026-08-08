@@ -13,6 +13,8 @@ import type {
   StatVirtualization,
 } from "./domain.js";
 export type * from "./domain.js";
+import type { SnapshotManifest } from "./snapshot.js";
+export type * from "./snapshot.js";
 
 export type CloudSandboxSpec = {
   /**
@@ -20,9 +22,15 @@ export type CloudSandboxSpec = {
    */
   name: string;
   /**
-   * Root filesystem source.
+   * Root filesystem source. Exactly one of `image` and `from_snapshot`
+   * must be set.
    */
-  image: CloudRootfsSource;
+  image?: CloudRootfsSource | null;
+  /**
+   * Snapshot to restore the sandbox from. Exactly one of `image` and
+   * `from_snapshot` must be set.
+   */
+  from_snapshot?: CloudSnapshotReference | null;
   /**
    * CPU, memory, and user-facing disk resources.
    */
@@ -99,6 +107,20 @@ export type CloudRootfsSource = {
    * Inner filesystem type (optional; auto-detected if absent).
    */
   fstype: string | null;
+};
+
+export type CloudSnapshotReference = {
+  "type": "managed";
+  /**
+   * Snapshot name.
+   */
+  name: string;
+} | {
+  "type": "host_volume";
+  /**
+   * Artifact directory path on the host volume.
+   */
+  path: string;
 };
 
 export type CloudVolumeMount = {
@@ -548,6 +570,124 @@ export type CloudSandboxStatus =
   | "failed";
 
 export type CloudSandboxStatusReason = "scheduling" | "insufficient_capacity";
+
+export type CloudCreateSnapshotRequest = {
+  /**
+   * Name of the sandbox to capture.
+   */
+  source_sandbox: string;
+  /**
+   * Snapshot name.
+   */
+  name: string;
+  /**
+   * Directory on a mounted host volume to write the artifact into. `None`
+   * stores the snapshot in managed snapshot storage.
+   */
+  dest_dir?: string | null;
+  /**
+   * User-defined labels stored on the snapshot.
+   */
+  labels?: { [key in string]: string };
+  /**
+   * Replace an existing snapshot with the same name.
+   */
+  force?: boolean;
+  /**
+   * Record payload integrity metadata during capture.
+   */
+  record_integrity?: boolean;
+  /**
+   * Capture memory and device state so the snapshot can resume execution.
+   */
+  resumable?: boolean;
+};
+
+export type CloudSnapshot = {
+  /**
+   * Snapshot name.
+   */
+  name: string;
+  /**
+   * Where the snapshot artifact resides.
+   */
+  location: CloudSnapshotLocation;
+  /**
+   * Identifier of the sandbox the snapshot was captured from, when known.
+   */
+  source_sandbox_id: string | null;
+  /**
+   * Snapshot identity: the `sha256:` digest of the canonical descriptor.
+   */
+  digest: string;
+  /**
+   * Apparent artifact payload size in bytes.
+   */
+  size_bytes: number;
+  /**
+   * Canonical snapshot descriptor.
+   */
+  manifest: SnapshotManifest;
+  /**
+   * User-defined labels stored on the snapshot.
+   */
+  labels: { [key in string]: string };
+  /**
+   * Creation timestamp.
+   */
+  created_at: string;
+};
+
+export type CloudSnapshotLocation = {
+  "type": "managed";
+  /**
+   * Identifier of the stored artifact.
+   */
+  id: string;
+} | {
+  "type": "host_volume";
+  /**
+   * Artifact directory path on the host volume.
+   */
+  path: string;
+};
+
+export type CloudSnapshotOperation = {
+  /**
+   * Server-side operation identifier.
+   */
+  id: string;
+  /**
+   * Current operation status.
+   */
+  status: CloudSnapshotOperationStatus;
+  /**
+   * The resulting snapshot, present once the operation succeeds.
+   */
+  result: CloudSnapshot | null;
+  /**
+   * Error details for a failed operation.
+   */
+  error: CloudErrorDetails | null;
+  /**
+   * Creation timestamp.
+   */
+  created_at: string;
+  /**
+   * Timestamp of the most recent status change.
+   */
+  updated_at: string;
+  /**
+   * Timestamp of the terminal status, when the operation has finished.
+   */
+  completed_at: string | null;
+};
+
+export type CloudSnapshotOperationStatus =
+  | "queued"
+  | "in_progress"
+  | "succeeded"
+  | "failed";
 
 export type CloudPaginated<T> = {
   /**
