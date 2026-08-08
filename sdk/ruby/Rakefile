@@ -56,6 +56,20 @@ namespace :cargo do
     # entry whose version does not satisfy the dependency requirement, so a
     # version skew here fails open: `version_check` plus the `cargo tree`
     # assertion in CI are what actually guard the swap.
+    # The committed Cargo.lock resolves the *published* crate graph; the in-tree
+    # SDK routinely drifts ahead of it, and cargo cannot reconcile the patched
+    # path dependency against the stale lock. Move it aside (preserving any
+    # local edits) so the patched build re-resolves from scratch;
+    # `rake cargo:unpatch_workspace` moves it back. This runs before the config
+    # handling below so the manual flow its abort prescribes starts from a
+    # workspace where the lock is already staged for re-resolution.
+    if File.exist?("ext/microsandbox/Cargo.lock.orig")
+      # Patched already; the current lock is generated output, not user work.
+      rm_f "ext/microsandbox/Cargo.lock"
+    elsif File.exist?("ext/microsandbox/Cargo.lock")
+      mv "ext/microsandbox/Cargo.lock", "ext/microsandbox/Cargo.lock.orig"
+    end
+
     mkdir_p ".cargo"
     # A contributor may keep local linker/target settings here; save the
     # original and append the patch stanza to a copy of it, so those settings
@@ -68,25 +82,15 @@ namespace :cargo do
       # Appending would produce a duplicate table, which cargo rejects; merging
       # into a hand-maintained table is too much magic for a rake task.
       abort ".cargo/config.toml already carries a [patch.crates-io] table; " \
-            "add `microsandbox = { path = \"../rust\" }` to it by hand instead"
+            "add `microsandbox = { path = \"../rust\" }` to it by hand. The " \
+            "lockfile is already moved aside; `rake cargo:unpatch_workspace` " \
+            "undoes everything."
     end
     base << "\n" unless base.empty? || base.end_with?("\n")
     File.write(".cargo/config.toml", base + <<~TOML)
       [patch.crates-io]
       microsandbox = { path = "../rust" }
     TOML
-
-    # The committed Cargo.lock resolves the *published* crate graph; the in-tree
-    # SDK routinely drifts ahead of it, and cargo cannot reconcile the patched
-    # path dependency against the stale lock. Move it aside (preserving any
-    # local edits) so the patched build re-resolves from scratch;
-    # `rake cargo:unpatch_workspace` moves it back.
-    if File.exist?("ext/microsandbox/Cargo.lock.orig")
-      # Patched already; the current lock is generated output, not user work.
-      rm_f "ext/microsandbox/Cargo.lock"
-    elsif File.exist?("ext/microsandbox/Cargo.lock")
-      mv "ext/microsandbox/Cargo.lock", "ext/microsandbox/Cargo.lock.orig"
-    end
   end
 
   desc "Undo cargo:patch_workspace: drop the patch config, restore the lockfile"
