@@ -194,6 +194,51 @@ for {
 
 </CodeGroup>
 
+## Combined output
+
+Some programs interleave stdout and stderr, and the relative order of the two matters. Because stdout and stderr normally travel through separate pipes, that order is lost by the time both reach you. Combined output redirects stderr into stdout inside the guest — like `2>&1` in a shell — so both share one pipe and arrive in the exact order the program wrote them.
+
+All output is then reported as stdout: stderr stays empty and streaming execs emit no stderr events. The option has no effect with `tty` (a PTY is already a single combined stream).
+
+<CodeGroup>
+```rust Rust
+let output = sb.exec_with("sh", |e| e
+    .args(["-c", "echo one; echo two >&2; echo three"])
+    .combined_output(true)
+).await?;
+println!("{}", output.stdout()?); // "one\ntwo\nthree\n"
+```
+
+```typescript TypeScript
+const output = await sb.execWith("sh", (e) =>
+    e.args(["-c", "echo one; echo two >&2; echo three"]).combinedOutput(true),
+);
+console.log(output.stdout()); // "one\ntwo\nthree\n"
+```
+
+```python Python
+output = await sb.exec(
+    "sh",
+    ["-c", "echo one; echo two >&2; echo three"],
+    combined_output=True,
+)
+print(output.stdout_text)  # "one\ntwo\nthree\n"
+```
+
+```go Go
+output, err := sb.Exec(ctx, "sh",
+    []string{"-c", "echo one; echo two >&2; echo three"},
+    m.WithExecCombinedOutput(),
+)
+fmt.Print(output.Stdout()) // "one\ntwo\nthree\n"
+```
+
+```bash CLI
+msb exec --combined-output worker -- sh -c "echo one; echo two >&2; echo three"
+```
+
+</CodeGroup>
+
 ## Interactive attach
 
 Bridges your terminal directly to a process inside the sandbox for a fully interactive PTY session. Useful for debugging, running REPLs, or anything that expects a real terminal.

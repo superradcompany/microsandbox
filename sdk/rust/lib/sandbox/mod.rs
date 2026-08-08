@@ -1241,6 +1241,7 @@ pub(crate) fn build_exec_request(
     tty: bool,
     rows: u16,
     cols: u16,
+    combined_output: bool,
 ) -> ExecRequest {
     let merged = config::merge_env_pairs(&config.spec.env, env);
     let mut env: Vec<String> = merged
@@ -1274,6 +1275,7 @@ pub(crate) fn build_exec_request(
         rows,
         cols,
         rlimits,
+        combined_output,
     }
 }
 

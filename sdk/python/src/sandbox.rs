@@ -432,6 +432,7 @@ impl PySandbox {
         timeout = None,
         stdin = None,
         tty = false,
+        combined_output = false,
         rlimits = None,
     ))]
     fn exec<'py>(
@@ -445,10 +446,21 @@ impl PySandbox {
         timeout: Option<f64>,
         stdin: Option<&Bound<'py, PyAny>>,
         tty: bool,
+        combined_output: bool,
         rlimits: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let (args, opts) = parse_exec_call(args, cwd, user, env, timeout, stdin, tty, rlimits)?;
+        let (args, opts) = parse_exec_call(
+            args,
+            cwd,
+            user,
+            env,
+            timeout,
+            stdin,
+            tty,
+            combined_output,
+            rlimits,
+        )?;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
@@ -472,6 +484,7 @@ impl PySandbox {
         timeout = None,
         stdin = None,
         tty = false,
+        combined_output = false,
         rlimits = None,
     ))]
     fn exec_stream<'py>(
@@ -485,10 +498,21 @@ impl PySandbox {
         timeout: Option<f64>,
         stdin: Option<&Bound<'py, PyAny>>,
         tty: bool,
+        combined_output: bool,
         rlimits: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let (args, opts) = parse_exec_call(args, cwd, user, env, timeout, stdin, tty, rlimits)?;
+        let (args, opts) = parse_exec_call(
+            args,
+            cwd,
+            user,
+            env,
+            timeout,
+            stdin,
+            tty,
+            combined_output,
+            rlimits,
+        )?;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
@@ -511,6 +535,7 @@ impl PySandbox {
         timeout = None,
         stdin = None,
         tty = false,
+        combined_output = false,
         rlimits = None,
     ))]
     fn shell<'py>(
@@ -523,10 +548,20 @@ impl PySandbox {
         timeout: Option<f64>,
         stdin: Option<&Bound<'py, PyAny>>,
         tty: bool,
+        combined_output: bool,
         rlimits: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let opts = parse_shell_call(cwd, user, env, timeout, stdin, tty, rlimits)?;
+        let opts = parse_shell_call(
+            cwd,
+            user,
+            env,
+            timeout,
+            stdin,
+            tty,
+            combined_output,
+            rlimits,
+        )?;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
@@ -549,6 +584,7 @@ impl PySandbox {
         timeout = None,
         stdin = None,
         tty = false,
+        combined_output = false,
         rlimits = None,
     ))]
     fn shell_stream<'py>(
@@ -561,10 +597,20 @@ impl PySandbox {
         timeout: Option<f64>,
         stdin: Option<&Bound<'py, PyAny>>,
         tty: bool,
+        combined_output: bool,
         rlimits: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let opts = parse_shell_call(cwd, user, env, timeout, stdin, tty, rlimits)?;
+        let opts = parse_shell_call(
+            cwd,
+            user,
+            env,
+            timeout,
+            stdin,
+            tty,
+            combined_output,
+            rlimits,
+        )?;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
@@ -1310,6 +1356,7 @@ struct ExecOpts {
     env: Vec<(String, String)>,
     timeout_secs: Option<f64>,
     tty: bool,
+    combined_output: bool,
     stdin_mode: Option<String>,
     stdin_data: Option<Vec<u8>>,
     rlimits: Vec<(String, u64, u64)>,
@@ -1332,6 +1379,7 @@ fn parse_exec_call(
     timeout_secs: Option<f64>,
     stdin: Option<&Bound<'_, PyAny>>,
     tty: bool,
+    combined_output: bool,
     rlimits: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<(Vec<String>, ExecOpts)> {
     let (stdin_mode, stdin_data) = parse_stdin(stdin)?;
@@ -1342,6 +1390,7 @@ fn parse_exec_call(
         env: env_to_pairs(env),
         timeout_secs,
         tty,
+        combined_output,
         stdin_mode,
         stdin_data,
         rlimits: parse_rlimits(rlimits)?,
@@ -1367,8 +1416,8 @@ fn validate_exec_options_keys(dict: &Bound<'_, PyDict>) -> PyResult<()> {
             pyo3::exceptions::PyTypeError::new_err("exec option keys must be strings")
         })?;
         match key.as_str() {
-            "args" | "cwd" | "user" | "env" | "timeout" | "tty" | "stdin" | "stdin_data"
-            | "rlimits" => {}
+            "args" | "cwd" | "user" | "env" | "timeout" | "tty" | "combined_output" | "stdin"
+            | "stdin_data" | "rlimits" => {}
             other => {
                 return Err(pyo3::exceptions::PyTypeError::new_err(format!(
                     "unknown exec option: {other}",
@@ -1401,6 +1450,9 @@ fn apply_exec_options_dict(opts: &mut ExecOpts, dict: &Bound<'_, PyDict>) -> PyR
     }
     if let Some(tty) = extract_optional_dict_value::<bool>(dict, "tty")? {
         opts.tty = tty;
+    }
+    if let Some(combined) = extract_optional_dict_value::<bool>(dict, "combined_output")? {
+        opts.combined_output = combined;
     }
     if let Some(stdin) = dict.get_item("stdin")?
         && !stdin.is_none()
@@ -1440,6 +1492,7 @@ fn parse_shell_call(
     timeout_secs: Option<f64>,
     stdin: Option<&Bound<'_, PyAny>>,
     tty: bool,
+    combined_output: bool,
     rlimits: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<ExecOpts> {
     let (stdin_mode, stdin_data) = parse_stdin(stdin)?;
@@ -1450,6 +1503,7 @@ fn parse_shell_call(
         env: env_to_pairs(env),
         timeout_secs,
         tty,
+        combined_output,
         stdin_mode,
         stdin_data,
         rlimits: parse_rlimits(rlimits)?,
@@ -1654,6 +1708,9 @@ fn apply_exec_options(
     }
     if opts.tty {
         builder = builder.tty(true);
+    }
+    if opts.combined_output {
+        builder = builder.combined_output(true);
     }
     // Stdin mode.
     match opts.stdin_mode.as_deref() {

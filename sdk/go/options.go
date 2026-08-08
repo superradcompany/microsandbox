@@ -1298,6 +1298,12 @@ type ExecConfig struct {
 	TTY       bool
 	User      string
 	Env       map[string]string
+
+	// CombinedOutput redirects stderr into stdout (like `2>&1`), preserving
+	// the interleaved order of writes. All output is then reported as stdout
+	// and Stderr stays empty. It has no effect with TTY (a PTY is already a
+	// single combined stream).
+	CombinedOutput bool
 }
 
 // ExecOption is a functional option for Exec.
@@ -1325,6 +1331,15 @@ func WithExecStdinPipe() ExecOption {
 // Enable it for interactive programs such as shells, editors, and top.
 func WithExecTTY(enabled bool) ExecOption {
 	return func(o *ExecConfig) { o.TTY = enabled }
+}
+
+// WithExecCombinedOutput redirects the command's stderr into its stdout
+// stream (like `2>&1` in a shell), preserving the interleaved order of
+// writes. All output is then reported as stdout — Stderr stays empty and no
+// stderr events are emitted. It has no effect with TTY (a PTY is already a
+// single combined stream).
+func WithExecCombinedOutput() ExecOption {
+	return func(o *ExecConfig) { o.CombinedOutput = true }
 }
 
 // WithExecUser sets the user to run the command as (UID or name).

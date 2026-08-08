@@ -191,6 +191,7 @@ class Sandbox:
         timeout: float | None = None,
         stdin: Stdin | bytes | None = None,
         tty: bool = False,
+        combined_output: bool = False,
         rlimits: list[Rlimit] | None = None,
     ) -> ExecOutput: ...
     async def exec_stream(
@@ -204,6 +205,7 @@ class Sandbox:
         timeout: float | None = None,
         stdin: Stdin | bytes | None = None,
         tty: bool = False,
+        combined_output: bool = False,
         rlimits: list[Rlimit] | None = None,
     ) -> ExecHandle: ...
     async def shell(
@@ -216,6 +218,7 @@ class Sandbox:
         timeout: float | None = None,
         stdin: Stdin | bytes | None = None,
         tty: bool = False,
+        combined_output: bool = False,
         rlimits: list[Rlimit] | None = None,
     ) -> ExecOutput: ...
     async def shell_stream(
@@ -228,6 +231,7 @@ class Sandbox:
         timeout: float | None = None,
         stdin: Stdin | bytes | None = None,
         tty: bool = False,
+        combined_output: bool = False,
         rlimits: list[Rlimit] | None = None,
     ) -> ExecHandle: ...
     def ssh(self) -> SandboxSshOps: ...

@@ -1012,6 +1012,7 @@ impl SshSession {
             timeout: None,
             stdin: StdinMode::Pipe,
             tty: pty.is_some(),
+            combined_output: false,
             rlimits: Vec::new(),
         };
         let rows = pty.as_ref().map(|p| p.rows).unwrap_or(24);

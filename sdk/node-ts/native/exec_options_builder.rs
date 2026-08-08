@@ -42,6 +42,7 @@ pub struct JsExecOptions {
     pub timeout_ms: Option<u32>,
     pub stdin: JsStdinMode,
     pub tty: bool,
+    pub combined_output: bool,
     pub rlimits: Vec<JsRlimit>,
 }
 
@@ -56,6 +57,7 @@ pub struct JsExecOptionsBuilder {
     timeout_ms: Option<u32>,
     stdin: JsStdinMode,
     tty: bool,
+    combined_output: bool,
     rlimits: Vec<JsRlimit>,
 }
 
@@ -79,6 +81,7 @@ impl JsExecOptionsBuilder {
                 data: None,
             },
             tty: false,
+            combined_output: false,
             rlimits: Vec::new(),
         }
     }
@@ -190,6 +193,18 @@ impl JsExecOptionsBuilder {
         self
     }
 
+    /// Redirect stderr into stdout (like `2>&1` in a shell), preserving the
+    /// interleaved order of writes. All output is then reported as stdout —
+    /// stderr stays empty and no stderr events are emitted. Has no effect
+    /// with `tty` (a PTY is already a single combined stream).
+    #[napi(js_name = "combinedOutput")]
+    pub fn combined_output(&mut self, enabled: bool) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.combined_output(enabled));
+        self.combined_output = enabled;
+        self
+    }
+
     #[napi]
     pub fn rlimit(&mut self, resource: String, limit: u32) -> Result<&Self> {
         let res = parse_rlimit_resource(&resource)?;
@@ -227,6 +242,7 @@ impl JsExecOptionsBuilder {
             timeout_ms: self.timeout_ms,
             stdin: self.stdin.clone(),
             tty: self.tty,
+            combined_output: self.combined_output,
             rlimits: self.rlimits.clone(),
         }
     }

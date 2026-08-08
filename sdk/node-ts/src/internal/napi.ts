@@ -814,6 +814,7 @@ export interface NapiExecOptionsBuilder {
   stdinPipe(): this;
   stdinBytes(data: Buffer): this;
   tty(enabled: boolean): this;
+  combinedOutput(enabled: boolean): this;
   rlimit(resource: string, limit: number): this;
   rlimitRange(resource: string, soft: number, hard: number): this;
 }

@@ -60,6 +60,38 @@ async def test_exec_kwargs_and_options_dict(sandbox_factory):
 
 
 @pytest.mark.asyncio
+async def test_exec_combined_output_preserves_interleaved_order(sandbox_factory):
+    sandbox = await sandbox_factory("py-sdk-exec-combined")
+
+    script = 'i=0; while [ $i -lt 16 ]; do echo "out$i"; echo "err$i" >&2; i=$((i+1)); done'
+    output = await sandbox.exec("sh", ["-c", script], combined_output=True)
+    assert output.success is True
+    expected = "".join(f"out{i}\nerr{i}\n" for i in range(16))
+    assert output.stdout_text == expected
+    assert output.stderr_text == ""
+
+    via_dict = await sandbox.exec(
+        "sh",
+        {"args": ["-c", "echo a; echo b >&2"], "combined_output": True},
+    )
+    assert via_dict.success is True
+    assert via_dict.stdout_text == "a\nb\n"
+    assert via_dict.stderr_text == ""
+
+    handle = await sandbox.exec_stream(
+        "sh", ["-c", "echo s; echo e >&2"], combined_output=True
+    )
+    kinds = []
+    stdout = b""
+    async for event in handle:
+        kinds.append(event.event_type)
+        if event.event_type == "stdout":
+            stdout += event.data or b""
+    assert "stderr" not in kinds
+    assert stdout == b"s\ne\n"
+
+
+@pytest.mark.asyncio
 async def test_shell_timeout_and_user_env_overrides(sandbox_factory):
     sandbox = await sandbox_factory("py-sdk-exec-opts", env={"BASE_VAR": "base"})
 

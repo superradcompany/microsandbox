@@ -2338,13 +2338,15 @@ func RemoveSandbox(ctx context.Context, name string) error {
 
 // ExecOptions configures a single Exec call.
 type ExecOptions struct {
-	Args        []string          `json:"args,omitempty"`
-	Cwd         string            `json:"cwd,omitempty"`
-	TimeoutSecs uint64            `json:"timeout_secs,omitempty"`
-	StdinPipe   bool              `json:"stdin_pipe,omitempty"`
-	TTY         bool              `json:"tty,omitempty"`
-	User        string            `json:"user,omitempty"`
-	Env         map[string]string `json:"env,omitempty"`
+	Args        []string `json:"args,omitempty"`
+	Cwd         string   `json:"cwd,omitempty"`
+	TimeoutSecs uint64   `json:"timeout_secs,omitempty"`
+	StdinPipe   bool     `json:"stdin_pipe,omitempty"`
+	TTY         bool     `json:"tty,omitempty"`
+	// CombinedOutput redirects stderr into the stdout stream (`2>&1`).
+	CombinedOutput bool              `json:"combined_output,omitempty"`
+	User           string            `json:"user,omitempty"`
+	Env            map[string]string `json:"env,omitempty"`
 }
 
 // ExecResult is the collected output of a completed command.

@@ -148,6 +148,13 @@ export declare class ExecOptionsBuilder {
   stdinPipe(): this
   stdinBytes(data: Buffer): this
   tty(enabled: boolean): this
+  /**
+   * Redirect stderr into stdout (like `2>&1` in a shell), preserving the
+   * interleaved order of writes. All output is then reported as stdout —
+   * stderr stays empty and no stderr events are emitted. Has no effect
+   * with `tty` (a PTY is already a single combined stream).
+   */
+  combinedOutput(enabled: boolean): this
   rlimit(resource: string, limit: number): this
   rlimitRange(resource: string, soft: number, hard: number): this
   /** Snapshot the accumulated configuration. */
@@ -1709,6 +1716,7 @@ export interface ExecOptions {
   timeoutMs?: number
   stdin: StdinMode
   tty: boolean
+  combinedOutput: boolean
   rlimits: Array<Rlimit>
 }
 
