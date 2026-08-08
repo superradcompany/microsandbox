@@ -186,9 +186,11 @@ pub enum SnapshotState {
 /// Final schema-1 snapshot descriptor.
 ///
 /// Field order is identity-bearing. Do not reorder these fields.
+///
+/// Generated bindings and API schemas expose this type as `SnapshotManifest`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema), schema(as = SnapshotManifest))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "SnapshotManifest"))]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     /// Schema version. Exactly [`SCHEMA_VERSION`].
@@ -213,6 +215,7 @@ pub struct Manifest {
     pub labels: BTreeMap<String, String>,
     /// Namespaced additive extension values.
     #[cfg_attr(feature = "utoipa", schema(value_type = Object))]
+    #[cfg_attr(feature = "ts", ts(type = "{ [key in string]: unknown }"))]
     pub extensions: BTreeMap<String, serde_json::Value>,
     /// Sorted unique must-understand extension keys.
     pub requires: Vec<String>,

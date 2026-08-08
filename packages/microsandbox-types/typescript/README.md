@@ -8,10 +8,11 @@ It contains no runtime code. Every export is a type; importing it adds nothing t
 
 ## Generated, Not Hand-Written
 
-Two files are generated from the Rust crate with [`ts-rs`](https://github.com/Aleph-Alpha/ts-rs), each carrying a `// @generated` header. Do not edit them:
+Three files are generated from the Rust crate with [`ts-rs`](https://github.com/Aleph-Alpha/ts-rs), each carrying a `// @generated` header. Do not edit them:
 
-- `src/cloud.ts` — the package entry: the cloud wire twins (`CloudSandboxSpec`, `CloudVolumeMount`, `CloudSecretsConfig`, …), which import and re-export their domain deps from `./domain`.
+- `src/cloud.ts` — the package entry: the cloud wire types, which import and re-export their domain and snapshot dependencies.
 - `src/domain.ts` — only the domain types the cloud twins transitively reference (`EnvVar`, `Rlimit`, `NetworkPolicy`, …).
+- `src/snapshot.ts` — the canonical snapshot manifest schema embedded by cloud snapshot resources.
 
 To change a shape, edit the Rust type and regenerate from the repo root:
 
@@ -46,7 +47,7 @@ The bindings follow `ts-rs` conventions, which mirror the Rust serde representat
 - Cloud enums are internally tagged with a `type` field: `CloudRootfsSource` is `{ type: "bind"; … } | { type: "oci"; reference: string } | { type: "disk_image"; … }`, and `CloudVolumeMount` / `CloudHostPattern` / `CloudViolationAction` follow the same shape.
 - Lowercase domain enums like `StatVirtualization` are string-literal unions (`"strict" | "relaxed" | "off"`).
 - Optional Rust fields are `T | null`; fields skipped when absent are `?:` optional.
-- The domain types the cloud references (`EnvVar`, `Rlimit`, `NetworkPolicy`, …) live in `domain.ts` and are re-exported from the package entry, so a single import from `@microsandbox/types` sees the whole cloud contract.
+- Referenced domain and snapshot types live in `domain.ts` and `snapshot.ts` and are re-exported from the package entry, so a single import from `@microsandbox/types` sees the whole cloud contract.
 
 ## Build And Typecheck
 
