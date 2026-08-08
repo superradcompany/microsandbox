@@ -351,6 +351,54 @@ pub struct SandboxOpts {
     #[arg(long = "net-default-ingress", value_name = "ACTION")]
     pub net_default_ingress: Option<String>,
 
+    /// Limit guest upload (egress) bandwidth, e.g. 1M/1s. SIZE accepts
+    /// raw bytes plus K, M, and G suffixes; the interval defaults to one
+    /// second when omitted. Applies on the next sandbox start.
+    #[cfg(feature = "net")]
+    #[arg(long = "net-tx-bandwidth", value_name = "SIZE[/DURATION]")]
+    pub net_tx_bandwidth: Option<String>,
+
+    /// One-time startup burst for the egress bandwidth limit, e.g. 512K.
+    /// Requires --net-tx-bandwidth.
+    #[cfg(feature = "net")]
+    #[arg(long = "net-tx-bandwidth-burst", value_name = "SIZE")]
+    pub net_tx_bandwidth_burst: Option<String>,
+
+    /// Limit guest upload (egress) packet rate, e.g. 1000/1s. The
+    /// interval defaults to one second when omitted.
+    #[cfg(feature = "net")]
+    #[arg(long = "net-tx-ops", value_name = "COUNT[/DURATION]")]
+    pub net_tx_ops: Option<String>,
+
+    /// One-time startup burst for the egress packet-rate limit.
+    /// Requires --net-tx-ops.
+    #[cfg(feature = "net")]
+    #[arg(long = "net-tx-ops-burst", value_name = "COUNT")]
+    pub net_tx_ops_burst: Option<u64>,
+
+    /// Limit guest download (ingress) bandwidth, e.g. 1M/1s. Same syntax
+    /// as --net-tx-bandwidth.
+    #[cfg(feature = "net")]
+    #[arg(long = "net-rx-bandwidth", value_name = "SIZE[/DURATION]")]
+    pub net_rx_bandwidth: Option<String>,
+
+    /// One-time startup burst for the ingress bandwidth limit.
+    /// Requires --net-rx-bandwidth.
+    #[cfg(feature = "net")]
+    #[arg(long = "net-rx-bandwidth-burst", value_name = "SIZE")]
+    pub net_rx_bandwidth_burst: Option<String>,
+
+    /// Limit guest download (ingress) packet rate, e.g. 1000/1s.
+    #[cfg(feature = "net")]
+    #[arg(long = "net-rx-ops", value_name = "COUNT[/DURATION]")]
+    pub net_rx_ops: Option<String>,
+
+    /// One-time startup burst for the ingress packet-rate limit.
+    /// Requires --net-rx-ops.
+    #[cfg(feature = "net")]
+    #[arg(long = "net-rx-ops-burst", value_name = "COUNT")]
+    pub net_rx_ops_burst: Option<u64>,
+
     /// Limit the number of concurrent network connections.
     #[cfg(feature = "net")]
     #[arg(long)]
@@ -531,6 +579,14 @@ impl SandboxOpts {
             || self.net_default.is_some()
             || self.net_default_egress.is_some()
             || self.net_default_ingress.is_some()
+            || self.net_tx_bandwidth.is_some()
+            || self.net_tx_bandwidth_burst.is_some()
+            || self.net_tx_ops.is_some()
+            || self.net_tx_ops_burst.is_some()
+            || self.net_rx_bandwidth.is_some()
+            || self.net_rx_bandwidth_burst.is_some()
+            || self.net_rx_ops.is_some()
+            || self.net_rx_ops_burst.is_some()
             || self.max_connections.is_some()
             || self.trust_host_cas
             || self.tls_intercept
@@ -1633,6 +1689,14 @@ fn apply_network_opts(
         || opts.net_default_ingress.is_some()
         || opts.net_ipv4_pool.is_some()
         || opts.net_ipv6_pool.is_some()
+        || opts.net_tx_bandwidth.is_some()
+        || opts.net_tx_bandwidth_burst.is_some()
+        || opts.net_tx_ops.is_some()
+        || opts.net_tx_ops_burst.is_some()
+        || opts.net_rx_bandwidth.is_some()
+        || opts.net_rx_bandwidth_burst.is_some()
+        || opts.net_rx_ops.is_some()
+        || opts.net_rx_ops_burst.is_some()
         || opts.max_connections.is_some()
         || opts.trust_host_cas
         || opts.tls_intercept
@@ -1694,6 +1758,20 @@ fn apply_network_opts(
             .collect::<anyhow::Result<Vec<_>>>()?;
         let no_verify_upstream_for = opts.tls_no_verify_upstream_for.clone();
         let violation_action = parse_violation_action(&opts.on_secret_violation)?;
+        let tx_rate_limiter = parse_rate_limiter_flags(
+            "tx",
+            opts.net_tx_bandwidth.as_deref(),
+            opts.net_tx_bandwidth_burst.as_deref(),
+            opts.net_tx_ops.as_deref(),
+            opts.net_tx_ops_burst,
+        )?;
+        let rx_rate_limiter = parse_rate_limiter_flags(
+            "rx",
+            opts.net_rx_bandwidth.as_deref(),
+            opts.net_rx_bandwidth_burst.as_deref(),
+            opts.net_rx_ops.as_deref(),
+            opts.net_rx_ops_burst,
+        )?;
 
         builder = builder.network(move |mut n| {
             n = n.dns(move |mut d| {
@@ -1722,6 +1800,12 @@ fn apply_network_opts(
             }
             if trust_host_cas {
                 n = n.trust_host_cas(true);
+            }
+            if let Some(limiter) = tx_rate_limiter {
+                n = n.tx_rate_limiter(|r| limiter.apply(r));
+            }
+            if let Some(limiter) = rx_rate_limiter {
+                n = n.rx_rate_limiter(|r| limiter.apply(r));
             }
             if let Some(action) = violation_action {
                 n = n.on_secret_violation(|_| {
@@ -1820,6 +1904,101 @@ pub fn parse_duration(s: &str) -> anyhow::Result<std::time::Duration> {
     } else {
         Ok(std::time::Duration::from_secs(s.parse::<u64>()?))
     }
+}
+
+/// Parsed values of one direction's `--net-{tx,rx}-*` rate limit flags.
+#[cfg(feature = "net")]
+struct CliRateLimiter {
+    bandwidth: Option<(u64, std::time::Duration)>,
+    bandwidth_burst: Option<u64>,
+    ops: Option<(u64, std::time::Duration)>,
+    ops_burst: Option<u64>,
+}
+
+#[cfg(feature = "net")]
+impl CliRateLimiter {
+    /// Apply the parsed flags to the SDK builder, which validates the
+    /// combination (bucket sizes, bursts without buckets) at build time.
+    fn apply(
+        &self,
+        mut r: microsandbox_network::builder::RateLimiterBuilder,
+    ) -> microsandbox_network::builder::RateLimiterBuilder {
+        if let Some((size, per)) = self.bandwidth {
+            r = r.bandwidth(size, per);
+        }
+        if let Some(burst) = self.bandwidth_burst {
+            r = r.bandwidth_burst(burst);
+        }
+        if let Some((count, per)) = self.ops {
+            r = r.ops(count, per);
+        }
+        if let Some(burst) = self.ops_burst {
+            r = r.ops_burst(burst);
+        }
+        r
+    }
+}
+
+/// Parse one direction's rate limit flags. Returns `None` when none of
+/// the four flags is set.
+#[cfg(feature = "net")]
+fn parse_rate_limiter_flags(
+    direction: &str,
+    bandwidth: Option<&str>,
+    bandwidth_burst: Option<&str>,
+    ops: Option<&str>,
+    ops_burst: Option<u64>,
+) -> anyhow::Result<Option<CliRateLimiter>> {
+    if bandwidth.is_none() && bandwidth_burst.is_none() && ops.is_none() && ops_burst.is_none() {
+        return Ok(None);
+    }
+
+    let bandwidth = bandwidth
+        .map(|spec| {
+            parse_rate(&format!("--net-{direction}-bandwidth"), spec, |s| {
+                ui::parse_size_bytes(s).map_err(anyhow::Error::msg)
+            })
+        })
+        .transpose()?;
+    let bandwidth_burst = bandwidth_burst
+        .map(|s| {
+            ui::parse_size_bytes(s)
+                .map_err(|e| anyhow::anyhow!("--net-{direction}-bandwidth-burst: {e}"))
+        })
+        .transpose()?;
+    let ops = ops
+        .map(|spec| {
+            parse_rate(&format!("--net-{direction}-ops"), spec, |s| {
+                s.parse::<u64>().map_err(anyhow::Error::from)
+            })
+        })
+        .transpose()?;
+
+    Ok(Some(CliRateLimiter {
+        bandwidth,
+        bandwidth_burst,
+        ops,
+        ops_burst,
+    }))
+}
+
+/// Parse a `VALUE/DURATION` rate spec like `1M/1s` or `1000/1s`. A bare
+/// value means per second.
+#[cfg(feature = "net")]
+fn parse_rate(
+    flag: &str,
+    spec: &str,
+    parse_value: impl Fn(&str) -> anyhow::Result<u64>,
+) -> anyhow::Result<(u64, std::time::Duration)> {
+    let (value, duration) = match spec.split_once('/') {
+        Some((value, duration)) => (
+            value,
+            parse_duration(duration).map_err(|e| anyhow::anyhow!("{flag}: {e}"))?,
+        ),
+        None => (spec, std::time::Duration::from_secs(1)),
+    };
+    let value = parse_value(value.trim()).map_err(|e| anyhow::anyhow!("{flag}: {e}"))?;
+    Ok((value, duration))
 }
 
 /// Assemble a [`NetworkPolicy`] from `--net`, `--net-rule`,
@@ -2541,6 +2720,63 @@ mod tests {
     };
 
     use super::*;
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn parse_rate_splits_value_and_duration() {
+        let bytes = |s: &str| ui::parse_size_bytes(s).map_err(anyhow::Error::msg);
+
+        let (size, per) = parse_rate("--net-tx-bandwidth", "1M/1s", bytes).unwrap();
+        assert_eq!(size, 1024 * 1024);
+        assert_eq!(per, std::time::Duration::from_secs(1));
+
+        // A bare value means per second.
+        let (count, per) = parse_rate("--net-tx-ops", "1000", |s| {
+            s.parse::<u64>().map_err(anyhow::Error::from)
+        })
+        .unwrap();
+        assert_eq!(count, 1000);
+        assert_eq!(per, std::time::Duration::from_secs(1));
+
+        let (size, per) = parse_rate("--net-rx-bandwidth", "512K/500ms", bytes).unwrap();
+        assert_eq!(size, 512 * 1024);
+        assert_eq!(per, std::time::Duration::from_millis(500));
+
+        let err = parse_rate("--net-tx-ops", "abc/1s", |s| {
+            s.parse::<u64>().map_err(anyhow::Error::from)
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("--net-tx-ops"), "unexpected error: {err}");
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn parse_rate_limiter_flags_maps_all_four_flags() {
+        let limiter = parse_rate_limiter_flags(
+            "tx",
+            Some("1M/1s"),
+            Some("512K"),
+            Some("1000/1s"),
+            Some(500),
+        )
+        .unwrap()
+        .expect("limiter should be present");
+
+        assert_eq!(
+            limiter.bandwidth,
+            Some((1024 * 1024, std::time::Duration::from_secs(1)))
+        );
+        assert_eq!(limiter.bandwidth_burst, Some(512 * 1024));
+        assert_eq!(limiter.ops, Some((1000, std::time::Duration::from_secs(1))));
+        assert_eq!(limiter.ops_burst, Some(500));
+
+        assert!(
+            parse_rate_limiter_flags("rx", None, None, None, None)
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[test]
     fn parse_secret_returns_env_and_host_reference() {

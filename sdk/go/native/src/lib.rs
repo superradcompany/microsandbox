@@ -858,6 +858,24 @@ struct DnsOpts {
     query_timeout_ms: Option<u64>,
 }
 
+/// Rate limiter for one traffic direction. A missing bucket leaves that
+/// dimension unlimited.
+#[derive(Clone, serde::Deserialize)]
+struct RateLimiterOpts {
+    bandwidth: Option<TokenBucketOpts>,
+    ops: Option<TokenBucketOpts>,
+}
+
+/// Token bucket: `size` tokens (bytes or frames) refilled every
+/// `refill_time_ms`, plus an optional startup-only burst.
+#[derive(Clone, serde::Deserialize)]
+struct TokenBucketOpts {
+    size: u64,
+    refill_time_ms: u64,
+    #[serde(default)]
+    one_time_burst: u64,
+}
+
 #[derive(serde::Deserialize, Default)]
 struct NetworkOpts {
     /// Removed preset field retained only to return migration guidance instead
@@ -888,6 +906,10 @@ struct NetworkOpts {
     /// IPv6 pool used to derive per-sandbox /64 guest prefixes.
     ipv6_pool: Option<String>,
     max_connections: Option<usize>,
+    /// Guest-to-runtime (egress) rate limiter.
+    tx_rate_limiter: Option<RateLimiterOpts>,
+    /// Runtime-to-guest (ingress) rate limiter.
+    rx_rate_limiter: Option<RateLimiterOpts>,
     /// Sandbox-wide secret violation action: "block", "block-and-log",
     /// "block-and-terminate".
     on_secret_violation: Option<String>,
@@ -1336,6 +1358,19 @@ fn apply_network(
         builder = builder.network(move |n| n.max_connections(max));
     }
 
+    // Rate limiters. Validation (empty limiter, zero size/refill, burst
+    // without a bucket) happens in the network builder's build step.
+    if let Some(ref limiter) = net.tx_rate_limiter {
+        let limiter = limiter.clone();
+        builder =
+            builder.network(move |n| n.tx_rate_limiter(move |r| apply_rate_limiter(r, &limiter)));
+    }
+    if let Some(ref limiter) = net.rx_rate_limiter {
+        let limiter = limiter.clone();
+        builder =
+            builder.network(move |n| n.rx_rate_limiter(move |r| apply_rate_limiter(r, &limiter)));
+    }
+
     // Trust host CA bundles inside the guest.
     if let Some(trust) = net.trust_host_cas {
         builder = builder.network(move |n| n.trust_host_cas(trust));
@@ -1381,6 +1416,27 @@ fn apply_port_binding(
             ));
         }
     })
+}
+
+/// Copy deserialized bucket values onto a rate limiter builder. Bursts are
+/// only forwarded when non-zero so an absent JSON field stays "no burst".
+fn apply_rate_limiter(
+    mut r: microsandbox_network::builder::RateLimiterBuilder,
+    opts: &RateLimiterOpts,
+) -> microsandbox_network::builder::RateLimiterBuilder {
+    if let Some(ref b) = opts.bandwidth {
+        r = r.bandwidth(b.size, Duration::from_millis(b.refill_time_ms));
+        if b.one_time_burst > 0 {
+            r = r.bandwidth_burst(b.one_time_burst);
+        }
+    }
+    if let Some(ref b) = opts.ops {
+        r = r.ops(b.size, Duration::from_millis(b.refill_time_ms));
+        if b.one_time_burst > 0 {
+            r = r.ops_burst(b.one_time_burst);
+        }
+    }
+    r
 }
 
 /// Resolve a JSON destination string into the typed enum. Supports the

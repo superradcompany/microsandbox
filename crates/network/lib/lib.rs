@@ -25,6 +25,7 @@ pub mod network;
 pub mod policy;
 pub mod proxy;
 pub mod publisher;
+pub mod rate_limit;
 pub mod secrets;
 pub mod shared;
 pub mod stack;

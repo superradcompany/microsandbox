@@ -559,6 +559,14 @@ pub struct NetworkSpec {
     /// Max concurrent guest connections.
     pub max_connections: Option<usize>,
 
+    /// Guest-to-runtime (egress) rate limiter. Missing means unlimited.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_rate_limiter: Option<RateLimiterConfig>,
+
+    /// Runtime-to-guest (ingress) rate limiter. Missing means unlimited.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rx_rate_limiter: Option<RateLimiterConfig>,
+
     /// Whether to copy trusted host CAs into the guest at boot.
     pub trust_host_cas: bool,
 }
@@ -1312,6 +1320,8 @@ impl Default for NetworkSpec {
             tls: None,
             secrets: None,
             max_connections: None,
+            tx_rate_limiter: None,
+            rx_rate_limiter: None,
             trust_host_cas: false,
         }
     }
@@ -2394,6 +2404,101 @@ pub struct InterfaceOverrides {
 
 fn empty_secret_value() -> Zeroizing<String> {
     Zeroizing::new(String::new())
+}
+
+//--------------------------------------------------------------------------------------------------
+// Types: Networking — rate limits
+//--------------------------------------------------------------------------------------------------
+
+/// Token-bucket rate limiter for one traffic direction. Carried in
+/// [`NetworkSpec::tx_rate_limiter`] and [`NetworkSpec::rx_rate_limiter`].
+///
+/// A limiter caps bandwidth (bytes) and packet rate (operations)
+/// independently; a missing bucket leaves that dimension unlimited.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(default)]
+pub struct RateLimiterConfig {
+    /// Bandwidth bucket. One token is one byte of frame data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bandwidth: Option<TokenBucketConfig>,
+
+    /// Operations bucket. One token is one network frame.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ops: Option<TokenBucketConfig>,
+}
+
+/// One token bucket of a [`RateLimiterConfig`].
+///
+/// The bucket starts full and refills continuously at `size` tokens per
+/// `refill_time_ms`. `one_time_burst` grants extra startup tokens that are
+/// spent before the regular budget and never refill.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct TokenBucketConfig {
+    /// Bucket capacity in tokens. Must be greater than zero.
+    pub size: u64,
+
+    /// Time to refill `size` tokens, in milliseconds. Must be greater than
+    /// zero.
+    pub refill_time_ms: u64,
+
+    /// Extra tokens granted once at startup. Default: 0.
+    #[serde(default)]
+    pub one_time_burst: u64,
+}
+
+/// Invalid rate limiter configuration.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RateLimitConfigError {
+    /// The limiter has neither a bandwidth nor an ops bucket.
+    #[error("rate limiter must configure at least one of bandwidth or ops")]
+    EmptyLimiter,
+
+    /// A bucket capacity is zero.
+    #[error("{bucket} bucket: size must be greater than zero")]
+    ZeroSize {
+        /// Which bucket is invalid (`bandwidth` or `ops`).
+        bucket: &'static str,
+    },
+
+    /// A bucket refill interval is zero.
+    #[error("{bucket} bucket: refill_time_ms must be greater than zero")]
+    ZeroRefillTime {
+        /// Which bucket is invalid (`bandwidth` or `ops`).
+        bucket: &'static str,
+    },
+}
+
+impl RateLimiterConfig {
+    /// Validate the limiter and each configured bucket.
+    pub fn validate(&self) -> Result<(), RateLimitConfigError> {
+        if self.bandwidth.is_none() && self.ops.is_none() {
+            return Err(RateLimitConfigError::EmptyLimiter);
+        }
+        if let Some(bandwidth) = &self.bandwidth {
+            bandwidth.validate("bandwidth")?;
+        }
+        if let Some(ops) = &self.ops {
+            ops.validate("ops")?;
+        }
+        Ok(())
+    }
+}
+
+impl TokenBucketConfig {
+    /// Validate this bucket. `bucket` names it in error messages.
+    pub fn validate(&self, bucket: &'static str) -> Result<(), RateLimitConfigError> {
+        if self.size == 0 {
+            return Err(RateLimitConfigError::ZeroSize { bucket });
+        }
+        if self.refill_time_ms == 0 {
+            return Err(RateLimitConfigError::ZeroRefillTime { bucket });
+        }
+        Ok(())
+    }
 }
 
 //--------------------------------------------------------------------------------------------------

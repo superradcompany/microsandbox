@@ -1928,6 +1928,58 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[tokio::test]
+    async fn test_builder_network_rate_limiters_land_in_the_spec() {
+        use std::time::Duration;
+
+        use microsandbox_utils::size::SizeExt;
+
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .network(|n| {
+                n.tx_rate_limiter(|r| {
+                    r.bandwidth(1.mib(), Duration::from_secs(1))
+                        .bandwidth_burst(512.kib())
+                        .ops(1_000, Duration::from_secs(1))
+                        .ops_burst(500)
+                })
+            })
+            .build()
+            .await
+            .unwrap();
+
+        let tx = config
+            .spec
+            .network
+            .tx_rate_limiter
+            .as_ref()
+            .expect("tx limiter persisted");
+        let bandwidth = tx.bandwidth.as_ref().unwrap();
+        assert_eq!(bandwidth.size, 1024 * 1024);
+        assert_eq!(bandwidth.refill_time_ms, 1000);
+        assert_eq!(bandwidth.one_time_burst, 512 * 1024);
+        assert_eq!(tx.ops.as_ref().unwrap().one_time_burst, 500);
+        assert!(config.spec.network.rx_rate_limiter.is_none());
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn test_builder_rejects_invalid_rate_limiter() {
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .network(|n| n.rx_rate_limiter(|r| r))
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("rate limiter must configure at least one of bandwidth or ops"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
     async fn test_builder_rejects_invalid_secret_config() {
         let err = SandboxBuilder::new("test")
             .image("alpine")

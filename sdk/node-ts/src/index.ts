@@ -378,10 +378,13 @@ import type {
   NapiInterfaceOverridesBuilder,
   NapiPullProgressEvent,
   NapiPullProgressStream,
+  NapiRateLimiterBuilder,
   NapiVolumeMount,
 } from "./internal/napi.js";
 export const InterfaceOverridesBuilder = napi.InterfaceOverridesBuilder;
 export type InterfaceOverridesBuilder = NapiInterfaceOverridesBuilder;
+export const RateLimiterBuilder = napi.RateLimiterBuilder;
+export type RateLimiterBuilder = NapiRateLimiterBuilder;
 export type PullProgressEvent = NapiPullProgressEvent;
 export type PullProgressStream = NapiPullProgressStream;
 

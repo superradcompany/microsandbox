@@ -695,6 +695,99 @@ func TestFFIWireShape_NetworkCustomRules(t *testing.T) {
 	}
 }
 
+func TestBuildFFINetworkRateLimiters(t *testing.T) {
+	out := buildFFINetwork(&NetworkConfig{
+		TxRateLimiter: &RateLimiterConfig{
+			Bandwidth: &TokenBucketConfig{
+				Size:         1 << 20,
+				RefillTime:   time.Second,
+				OneTimeBurst: 512 << 10,
+			},
+			Ops: &TokenBucketConfig{Size: 1000, RefillTime: 100 * time.Millisecond},
+		},
+		RxRateLimiter: &RateLimiterConfig{
+			Bandwidth: &TokenBucketConfig{Size: 2 << 20, RefillTime: 500 * time.Millisecond},
+		},
+	})
+
+	tx := out.TxRateLimiter
+	if tx == nil || tx.Bandwidth == nil || tx.Ops == nil {
+		t.Fatalf("tx rate limiter = %+v", tx)
+	}
+	if tx.Bandwidth.Size != 1<<20 || tx.Bandwidth.RefillTimeMs != 1000 {
+		t.Fatalf("tx bandwidth = %+v", tx.Bandwidth)
+	}
+	if tx.Bandwidth.OneTimeBurst != 512<<10 {
+		t.Fatalf("tx bandwidth burst = %d", tx.Bandwidth.OneTimeBurst)
+	}
+	if tx.Ops.Size != 1000 || tx.Ops.RefillTimeMs != 100 || tx.Ops.OneTimeBurst != 0 {
+		t.Fatalf("tx ops = %+v", tx.Ops)
+	}
+
+	rx := out.RxRateLimiter
+	if rx == nil || rx.Bandwidth == nil {
+		t.Fatalf("rx rate limiter = %+v", rx)
+	}
+	if rx.Ops != nil {
+		t.Fatalf("rx ops should stay nil, got %+v", rx.Ops)
+	}
+	if rx.Bandwidth.Size != 2<<20 || rx.Bandwidth.RefillTimeMs != 500 {
+		t.Fatalf("rx bandwidth = %+v", rx.Bandwidth)
+	}
+}
+
+func TestBuildFFINetworkRateLimitersNil(t *testing.T) {
+	out := buildFFINetwork(&NetworkConfig{Policy: NetworkPolicyPresetAllowAll})
+	if out.TxRateLimiter != nil || out.RxRateLimiter != nil {
+		t.Fatalf("nil rate limiters should stay nil: %+v", out)
+	}
+}
+
+func TestFFIWireShape_NetworkRateLimiters(t *testing.T) {
+	got := marshalCreateOptions(t,
+		WithImage("alpine"),
+		WithNetwork(&NetworkConfig{
+			Policy: NetworkPolicyPresetAllowAll,
+			TxRateLimiter: &RateLimiterConfig{
+				Bandwidth: &TokenBucketConfig{
+					Size:         1 << 20,
+					RefillTime:   time.Second,
+					OneTimeBurst: 512 << 10,
+				},
+			},
+			RxRateLimiter: &RateLimiterConfig{
+				Ops: &TokenBucketConfig{Size: 1000, RefillTime: 100 * time.Millisecond},
+			},
+		}),
+	)
+	net := mustField(t, got, "network").(map[string]any)
+
+	tx := net["tx_rate_limiter"].(map[string]any)
+	bw := tx["bandwidth"].(map[string]any)
+	if bw["size"] != float64(1<<20) || bw["refill_time_ms"] != float64(1000) {
+		t.Fatalf("tx bandwidth = %v", bw)
+	}
+	if bw["one_time_burst"] != float64(512<<10) {
+		t.Fatalf("tx bandwidth burst = %v", bw["one_time_burst"])
+	}
+	if _, present := tx["ops"]; present {
+		t.Fatalf("nil ops bucket should be omitted: %v", tx)
+	}
+
+	rx := net["rx_rate_limiter"].(map[string]any)
+	ops := rx["ops"].(map[string]any)
+	if ops["size"] != float64(1000) || ops["refill_time_ms"] != float64(100) {
+		t.Fatalf("rx ops = %v", ops)
+	}
+	// A zero burst must not reach the wire; the Rust side defaults it.
+	if _, present := ops["one_time_burst"]; present {
+		t.Fatalf("zero one_time_burst should be omitted: %v", ops)
+	}
+	if _, present := rx["bandwidth"]; present {
+		t.Fatalf("nil bandwidth bucket should be omitted: %v", rx)
+	}
+}
+
 // The Rust side relies on serde(default), so zero-valued Go scalar fields must
 // not reach the wire. Explicit optional values use pointers when zero is valid
 // on the wire for validation.

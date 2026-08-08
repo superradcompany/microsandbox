@@ -33,6 +33,7 @@ use crate::icmp_relay::IcmpRelay;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::proxy;
 use crate::publisher::PortPublisher;
+use crate::rate_limit::RateLimiter;
 use crate::secrets::handle::SecretsHandle;
 use crate::shared::SharedState;
 use crate::tls::{proxy as tls_proxy, state::TlsState};
@@ -221,6 +222,8 @@ pub fn create_interface(device: &mut SmoltcpDevice, config: &PollLoopConfig) -> 
 ///   connections on the host-bind address and forwards into the guest.
 /// * `max_connections` - Optional cap on concurrent guest connections tracked by
 ///   [`ConnectionTracker`]; `None` uses the default.
+/// * `tx_rate_limiter` - Optional guest-to-runtime rate limiter. A throttled
+///   frame stays staged and the poll timeout retries at its refill deadline.
 /// * `tokio_handle` - Runtime handle used for proxy tasks, DNS forwarding, port publishing,
 ///   and ICMP relays.
 #[allow(clippy::too_many_arguments)]
@@ -233,6 +236,7 @@ pub fn smoltcp_poll_loop(
     tls_state: Option<Arc<TlsState>>,
     published_ports: Vec<PublishedPort>,
     max_connections: Option<usize>,
+    mut tx_rate_limiter: Option<RateLimiter>,
     tokio_handle: tokio::runtime::Handle,
     secrets: SecretsHandle,
 ) {
@@ -331,7 +335,19 @@ pub fn smoltcp_poll_loop(
         let now = smoltcp_now();
 
         // ── Phase 1: Drain all guest frames with pre-inspection ──────────
+        let mut tx_resume_at: Option<std::time::Instant> = None;
         while let Some(frame) = device.stage_next_frame() {
+            // Every guest frame crossing the boundary is charged one op and
+            // its Ethernet length. A throttled frame stays staged; the poll
+            // timeout below retries at the refill deadline.
+            if let Some(limiter) = tx_rate_limiter.as_mut()
+                && let Err(resume_at) =
+                    limiter.try_consume_frame(frame.len() as u64, std::time::Instant::now())
+            {
+                tx_resume_at = Some(resume_at);
+                break;
+            }
+
             if handle_gateway_icmp_echo(
                 frame,
                 &config,
@@ -631,10 +647,21 @@ pub fn smoltcp_poll_loop(
             shared.rx_wake.wake();
         }
 
-        let timeout_ms = iface
+        let mut timeout_ms = iface
             .poll_delay(now, &sockets)
             .map(|d| d.total_millis().min(i32::MAX as u64) as i32)
             .unwrap_or(100); // 100ms fallback when no timers pending.
+
+        // Rate-limit deadlines bound the sleep: a due RX deadline re-wakes
+        // the guest for its throttled frame, and pending TX/RX deadlines
+        // shorten the timeout so throttled frames retry on time.
+        let now_std = std::time::Instant::now();
+        if shared.take_due_rx_resume(now_std) {
+            shared.rx_wake.wake();
+        }
+        for deadline in tx_resume_at.into_iter().chain(shared.rx_resume_at()) {
+            timeout_ms = timeout_ms.min(deadline_timeout_ms(deadline, now_std));
+        }
 
         #[cfg(unix)]
         sleep_until_stack_wake(&shared, timeout_ms, &mut poll_fds);
@@ -646,6 +673,17 @@ pub fn smoltcp_poll_loop(
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+/// Poll timeout that lands at or just after a rate-limit refill deadline.
+/// Rounded up a millisecond so an early wake never busy-loops on a
+/// not-quite-due deadline.
+fn deadline_timeout_ms(deadline: std::time::Instant, now: std::time::Instant) -> i32 {
+    let wait = deadline.saturating_duration_since(now);
+    if wait.is_zero() {
+        return 0;
+    }
+    wait.as_millis().saturating_add(1).min(i32::MAX as u128) as i32
+}
 
 #[cfg(unix)]
 fn sleep_until_stack_wake(shared: &SharedState, timeout_ms: i32, poll_fds: &mut [libc::pollfd; 2]) {

@@ -41,6 +41,19 @@ export interface TlsConfig {
   readonly interceptCaKeyPath: string | null;
 }
 
+/** One token bucket of a rate limiter: starts full, refills continuously. */
+export interface TokenBucketConfig {
+  readonly size: number;
+  readonly refillTimeMs: number;
+  readonly oneTimeBurst: number;
+}
+
+/** Rate limiter for one direction. A missing bucket means unlimited. */
+export interface RateLimiterConfig {
+  readonly bandwidth?: TokenBucketConfig;
+  readonly ops?: TokenBucketConfig;
+}
+
 /** Where in the HTTP request the secret value can be substituted. */
 export interface SecretInjection {
   readonly headers?: boolean;
@@ -71,6 +84,8 @@ export interface NetworkConfig {
   readonly secrets: readonly SecretEntry[];
   readonly secretViolation: ViolationAction | null;
   readonly maxConnections: number | null;
+  readonly txRateLimiter: RateLimiterConfig | null;
+  readonly rxRateLimiter: RateLimiterConfig | null;
   readonly interface?: {
     readonly ipv4Pool?: string | null;
     readonly ipv6Pool?: string | null;

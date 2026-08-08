@@ -32,6 +32,7 @@
 use std::str::FromStr;
 
 use ipnetwork::IpNetwork;
+use microsandbox_types::RateLimitConfigError;
 
 use crate::secrets::config::SecretConfigError;
 
@@ -126,6 +127,34 @@ pub enum BuildError {
         /// Underlying secret validation error.
         #[from]
         source: SecretConfigError,
+    },
+
+    /// A rate limiter failed validation.
+    #[error("{direction} rate limiter: {source}")]
+    InvalidRateLimitConfig {
+        /// Which limiter is invalid: `tx` or `rx`.
+        direction: &'static str,
+        /// Underlying rate limit validation error.
+        #[source]
+        source: RateLimitConfigError,
+    },
+
+    /// A one-time burst was set without its corresponding bucket.
+    #[error("{direction} rate limiter: {bucket}_burst requires the {bucket} bucket")]
+    RateLimitBurstWithoutBucket {
+        /// Which limiter is invalid: `tx` or `rx`.
+        direction: &'static str,
+        /// The bucket the burst belongs to: `bandwidth` or `ops`.
+        bucket: &'static str,
+    },
+
+    /// A rate limiter refill interval does not fit in u64 milliseconds.
+    #[error("{direction} rate limiter: {bucket} refill interval overflows u64 milliseconds")]
+    RateLimitRefillTooLong {
+        /// Which limiter is invalid: `tx` or `rx`.
+        direction: &'static str,
+        /// The bucket with the overflowing interval: `bandwidth` or `ops`.
+        bucket: &'static str,
     },
 }
 

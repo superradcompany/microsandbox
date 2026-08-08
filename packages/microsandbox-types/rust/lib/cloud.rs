@@ -993,6 +993,8 @@ impl TryFrom<CloudSandboxSpec> for SandboxSpec {
             tls: None,
             secrets: spec.network.secrets.map(Into::into),
             max_connections: spec.network.max_connections,
+            tx_rate_limiter: None,
+            rx_rate_limiter: None,
             trust_host_cas: false,
         };
         let runtime = SandboxRuntimeOptions {

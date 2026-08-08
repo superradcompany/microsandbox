@@ -3,7 +3,7 @@ title: Networking
 description: Go SDK - Network API reference
 ---
 
-Configure a sandbox's network stack: a first-match-wins egress/ingress policy, published ports, DNS interception, TLS interception, and secret-violation handling. See [Networking](/networking/overview) for the conceptual overview and [TLS Interception](/networking/tls) for proxy details.
+Configure a sandbox's network stack: a first-match-wins egress/ingress policy, published ports, DNS interception, TLS interception, rate limits, and secret-violation handling. See [Networking](/networking/overview) for the conceptual overview and [TLS Interception](/networking/tls) for proxy details.
 
 The Go SDK exposes networking as a single [`NetworkConfig`](#networkconfig) struct passed to [`WithNetwork`](#m-withnetwork). Common shapes come from the [`NetworkPolicy`](#networkpolicy) factory; custom firewalls are built by populating `NetworkConfig.Rules` directly.
 
@@ -362,6 +362,8 @@ The full network stack configuration passed via [`WithNetwork`](#m-withnetwork).
 | IPv4Pool | `string` | Pool used to derive per-sandbox `/30` guest subnets. Defaults to `172.16.0.0/12` |
 | IPv6Pool | `string` | Pool used to derive per-sandbox `/64` guest prefixes. Defaults to `fd42:6d73:62::/48` |
 | MaxConnections | `*uint` | Cap on concurrent network connections from the sandbox |
+| TxRateLimiter | [`*RateLimiterConfig`](#ratelimiterconfig) | Guest upload (egress) rate limiter. `nil` means unlimited. Takes effect on the next sandbox start |
+| RxRateLimiter | [`*RateLimiterConfig`](#ratelimiterconfig) | Guest download (ingress) rate limiter. `nil` means unlimited. Takes effect on the next sandbox start |
 | OnSecretViolation | [`ViolationAction`](/sdk/go/secrets#violationaction) | Sandbox-wide action when a secret is sent to a disallowed host. Per-secret overrides via `SecretEntry.OnViolation` |
 | TrustHostCAs | `*bool` | Ship the host's extra CA bundles into the guest. Opt-in for corporate MITM proxies whose gateway CA is unknown to the guest's stock bundle |
 
@@ -444,6 +446,45 @@ Host-scoped upstream certificate verification override.
 |-------|------|-------------|
 | Pattern | `string` | Exact host or `*.suffix` wildcard |
 | Verify | `bool` | Whether to verify certificates for matching upstream hosts |
+
+### RateLimiterConfig
+
+<p className="msb-backref">Used by <a href="#networkconfig">NetworkConfig.TxRateLimiter / RxRateLimiter</a></p>
+
+Rate limiter for one traffic direction. Caps bandwidth (bytes) and packet rate (frames) independently; a `nil` bucket leaves that dimension unlimited. Cloud sandboxes reject rate limiters as unsupported for now.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Bandwidth | [`*TokenBucketConfig`](#tokenbucketconfig) | Byte budget; one token per byte of frame data |
+| Ops | [`*TokenBucketConfig`](#tokenbucketconfig) | Packet budget; one token per network frame |
+
+<Accordion title="Example">
+
+```go
+sb, err := m.CreateSandbox(ctx, "throttled",
+    m.WithImage("python"),
+    m.WithNetwork(&m.NetworkConfig{
+        TxRateLimiter: &m.RateLimiterConfig{
+            Bandwidth: &m.TokenBucketConfig{Size: 1 << 20, RefillTime: time.Second, OneTimeBurst: 512 << 10},
+            Ops:       &m.TokenBucketConfig{Size: 1000, RefillTime: time.Second},
+        },
+    }),
+)
+```
+
+</Accordion>
+
+### TokenBucketConfig
+
+<p className="msb-backref">Used by <a href="#ratelimiterconfig">RateLimiterConfig</a></p>
+
+One token bucket of a rate limiter. The bucket starts full and refills continuously: `Size` tokens every `RefillTime`. The one-time burst is spent before the regular budget and never refills.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Size | `uint64` | Bucket capacity in tokens: bytes for bandwidth buckets, frames for ops buckets. Must be greater than zero |
+| RefillTime | `time.Duration` | Time to refill `Size` tokens. Must be at least one millisecond |
+| OneTimeBurst | `uint64` | Extra startup-only tokens. Optional |
 
 ### PortBinding
 

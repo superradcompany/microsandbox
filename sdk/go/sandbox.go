@@ -298,6 +298,8 @@ func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 		IPv4Pool:            n.IPv4Pool,
 		IPv6Pool:            n.IPv6Pool,
 		MaxConnections:      n.MaxConnections,
+		TxRateLimiter:       buildFFIRateLimiter(n.TxRateLimiter),
+		RxRateLimiter:       buildFFIRateLimiter(n.RxRateLimiter),
 		OnSecretViolation:   string(n.OnSecretViolation),
 		TrustHostCAs:        n.TrustHostCAs,
 	}
@@ -361,6 +363,27 @@ func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 	}
 
 	return out
+}
+
+func buildFFIRateLimiter(l *RateLimiterConfig) *ffi.RateLimiterOptions {
+	if l == nil {
+		return nil
+	}
+	return &ffi.RateLimiterOptions{
+		Bandwidth: buildFFITokenBucket(l.Bandwidth),
+		Ops:       buildFFITokenBucket(l.Ops),
+	}
+}
+
+func buildFFITokenBucket(b *TokenBucketConfig) *ffi.TokenBucketOptions {
+	if b == nil {
+		return nil
+	}
+	return &ffi.TokenBucketOptions{
+		Size:         b.Size,
+		RefillTimeMs: uint64(b.RefillTime.Milliseconds()),
+		OneTimeBurst: b.OneTimeBurst,
+	}
 }
 
 func buildFFIPortBindings(bindings []PortBinding) []ffi.PortBindingOptions {

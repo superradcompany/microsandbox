@@ -1496,6 +1496,49 @@ class PortBinding:
 
 
 @dataclass(frozen=True, slots=True)
+class TokenBucket:
+    """One token bucket of a rate limiter.
+
+    The bucket starts full and refills continuously at ``size`` tokens per
+    ``refill_time_ms``. ``one_time_burst`` grants extra startup tokens that
+    are spent before the regular budget and never refill.
+    """
+    size: int
+    """Bucket capacity in tokens: bytes for bandwidth, frames for ops."""
+    refill_time_ms: int
+    """Time to refill ``size`` tokens, in milliseconds."""
+    one_time_burst: int = 0
+    """Extra tokens granted once at startup. Default: 0."""
+
+    def _to_dict(self) -> dict:
+        d: dict = {"size": self.size, "refill_time_ms": self.refill_time_ms}
+        if self.one_time_burst:
+            d["one_time_burst"] = self.one_time_burst
+        return d
+
+
+@dataclass(frozen=True, slots=True)
+class RateLimiter:
+    """Rate limiter for one traffic direction.
+
+    Caps bandwidth (bytes) and packet rate (frames) independently; a
+    missing bucket leaves that dimension unlimited.
+    """
+    bandwidth: TokenBucket | None = None
+    """Bandwidth bucket. One token is one byte of frame data."""
+    ops: TokenBucket | None = None
+    """Operations bucket. One token is one network frame."""
+
+    def _to_dict(self) -> dict:
+        d: dict = {}
+        if self.bandwidth is not None:
+            d["bandwidth"] = self.bandwidth._to_dict()
+        if self.ops is not None:
+            d["ops"] = self.ops._to_dict()
+        return d
+
+
+@dataclass(frozen=True, slots=True)
 class Network:
     """Network configuration for a sandbox."""
 
@@ -1519,6 +1562,12 @@ class Network:
     """IPv6 pool used to derive per-sandbox /64 guest prefixes. Defaults
     to ``fd42:6d73:62::/48``."""
     max_connections: int | None = None
+    tx_rate_limiter: RateLimiter | None = None
+    """Guest-to-runtime (egress) rate limiter. ``None`` means unlimited.
+    Applies on the next sandbox start."""
+    rx_rate_limiter: RateLimiter | None = None
+    """Runtime-to-guest (ingress) rate limiter. ``None`` means unlimited.
+    Applies on the next sandbox start."""
     on_secret_violation: ViolationAction | ViolationPolicy = ViolationAction.BLOCK_AND_LOG
 
     @classmethod
@@ -1572,6 +1621,10 @@ class Network:
             d["ipv6_pool"] = self.ipv6_pool
         if self.max_connections is not None:
             d["max_connections"] = self.max_connections
+        if self.tx_rate_limiter is not None:
+            d["tx_rate_limiter"] = self.tx_rate_limiter._to_dict()
+        if self.rx_rate_limiter is not None:
+            d["rx_rate_limiter"] = self.rx_rate_limiter._to_dict()
         violation = violation_policy_to_dict(self.on_secret_violation)
         if violation != str(ViolationAction.BLOCK_AND_LOG):
             d["on_secret_violation"] = violation

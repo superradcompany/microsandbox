@@ -10,6 +10,7 @@ use microsandbox_network::policy::NetworkPolicy as RustNetworkPolicy;
 use crate::dns_builder::JsDnsBuilder;
 use crate::interface_overrides_builder::JsInterfaceOverridesBuilder;
 use crate::network_policy_builder::JsNetworkPolicyBuilder;
+use crate::rate_limiter_builder::JsRateLimiterBuilder;
 use crate::secret_builder::JsSecretBuilder;
 use crate::tls_builder::JsTlsBuilder;
 use crate::violation_action_builder::JsViolationActionBuilder;
@@ -275,6 +276,48 @@ impl JsNetworkBuilder {
         self
     }
 
+    /// Limit guest-to-runtime (egress) traffic via a callback. Applies on
+    /// the next sandbox start.
+    ///
+    /// ```js
+    /// .txRateLimiter((r) => r
+    ///   .bandwidth(1_048_576, 1_000)
+    ///   .ops(1_000, 1_000))
+    /// ```
+    #[napi(js_name = "txRateLimiter")]
+    pub fn tx_rate_limiter(
+        &mut self,
+        env: &Env,
+        configure: Function<
+            ClassInstance<JsRateLimiterBuilder>,
+            ClassInstance<JsRateLimiterBuilder>,
+        >,
+    ) -> Result<&Self> {
+        let initial = JsRateLimiterBuilder::new().into_instance(env)?;
+        let returned = configure.call(initial)?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.tx_rate_limiter(|r| apply_rate_limiter(r, &returned)));
+        Ok(self)
+    }
+
+    /// Limit runtime-to-guest (ingress) traffic via a callback. Applies on
+    /// the next sandbox start.
+    #[napi(js_name = "rxRateLimiter")]
+    pub fn rx_rate_limiter(
+        &mut self,
+        env: &Env,
+        configure: Function<
+            ClassInstance<JsRateLimiterBuilder>,
+            ClassInstance<JsRateLimiterBuilder>,
+        >,
+    ) -> Result<&Self> {
+        let initial = JsRateLimiterBuilder::new().into_instance(env)?;
+        let returned = configure.call(initial)?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.rx_rate_limiter(|r| apply_rate_limiter(r, &returned)));
+        Ok(self)
+    }
+
     /// Snapshot the accumulated configuration as a JSON string. The TS
     /// layer parses + key-remaps to camelCase before returning to the
     /// caller.
@@ -296,6 +339,27 @@ impl JsNetworkBuilder {
 fn parse_bind_addr(bind: &str) -> Result<IpAddr> {
     bind.parse::<IpAddr>()
         .map_err(|_| napi::Error::from_reason(format!("invalid bind address: {bind}")))
+}
+
+/// Apply the values a JS callback accumulated on a `RateLimiterBuilder`
+/// to the Rust builder. Validation happens in `NetworkBuilder.build()`.
+fn apply_rate_limiter(
+    mut r: microsandbox_network::builder::RateLimiterBuilder,
+    js: &JsRateLimiterBuilder,
+) -> microsandbox_network::builder::RateLimiterBuilder {
+    if let Some((size_bytes, refill_time_ms)) = js.bandwidth {
+        r = r.bandwidth(size_bytes, std::time::Duration::from_millis(refill_time_ms));
+    }
+    if let Some(burst) = js.bandwidth_burst {
+        r = r.bandwidth_burst(burst);
+    }
+    if let Some((count, refill_time_ms)) = js.ops {
+        r = r.ops(count, std::time::Duration::from_millis(refill_time_ms));
+    }
+    if let Some(burst) = js.ops_burst {
+        r = r.ops_burst(burst);
+    }
+    r
 }
 
 impl JsNetworkBuilder {

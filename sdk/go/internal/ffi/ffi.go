@@ -1622,8 +1622,24 @@ type NetworkOptions struct {
 	IPv4Pool            string               `json:"ipv4_pool,omitempty"`
 	IPv6Pool            string               `json:"ipv6_pool,omitempty"`
 	MaxConnections      *uint                `json:"max_connections,omitempty"`
+	TxRateLimiter       *RateLimiterOptions  `json:"tx_rate_limiter,omitempty"`
+	RxRateLimiter       *RateLimiterOptions  `json:"rx_rate_limiter,omitempty"`
 	OnSecretViolation   string               `json:"on_secret_violation,omitempty"`
 	TrustHostCAs        *bool                `json:"trust_host_cas,omitempty"`
+}
+
+// RateLimiterOptions limits one traffic direction; a nil bucket leaves that
+// dimension unlimited.
+type RateLimiterOptions struct {
+	Bandwidth *TokenBucketOptions `json:"bandwidth,omitempty"`
+	Ops       *TokenBucketOptions `json:"ops,omitempty"`
+}
+
+// TokenBucketOptions is the JSON representation of a token bucket.
+type TokenBucketOptions struct {
+	Size         uint64 `json:"size"`
+	RefillTimeMs uint64 `json:"refill_time_ms"`
+	OneTimeBurst uint64 `json:"one_time_burst,omitempty"`
 }
 
 // PortBindingOptions publishes a host port on a specific host bind address.

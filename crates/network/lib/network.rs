@@ -8,6 +8,7 @@
 use std::net::{Ipv4Addr, Ipv6Addr, UdpSocket};
 use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use ipnetwork::{Ipv4Network, Ipv6Network};
 use microsandbox_protocol::{ENV_HOST_ALIAS, ENV_NET, ENV_NET_IPV4, ENV_NET_IPV6};
@@ -17,6 +18,7 @@ use msb_krun::backends::net::NetBackend;
 use crate::backend::SmoltcpBackend;
 use crate::config::{MAX_NETWORK_CONNECTIONS, NetworkConfig};
 use crate::policy::{NetworkPolicy, NetworkProfile};
+use crate::rate_limit::RateLimiter;
 use crate::secrets::handle::SecretsHandle;
 use crate::shared::{DEFAULT_QUEUE_CAPACITY, SharedState};
 use crate::stack::{self, GatewayIps, PollLoopConfig};
@@ -227,7 +229,13 @@ impl SmoltcpNetwork {
             .unwrap_or(DEFAULT_QUEUE_CAPACITY)
             .max(DEFAULT_QUEUE_CAPACITY);
         let shared = Arc::new(SharedState::new(queue_capacity));
-        let backend = SmoltcpBackend::new(shared.clone());
+        // Every path that writes a rate limiter into the config validates it
+        // first (`NetworkBuilder::build`), so an invalid one here is a bug.
+        let rx_rate_limiter = config.rx_rate_limiter.as_ref().map(|limiter| {
+            RateLimiter::new(limiter, Instant::now())
+                .expect("rx rate limiter config should be validated before reaching the engine")
+        });
+        let backend = SmoltcpBackend::new(shared.clone(), rx_rate_limiter);
 
         let secrets = SecretsHandle::new(config.secrets.clone());
         let tls_state = if config.tls.enabled {
@@ -290,6 +298,10 @@ impl SmoltcpNetwork {
         let tls_state = self.tls_state.clone();
         let published_ports = self.config.ports.clone();
         let max_connections = self.config.max_connections;
+        let tx_rate_limiter = self.config.tx_rate_limiter.as_ref().map(|limiter| {
+            RateLimiter::new(limiter, Instant::now())
+                .expect("tx rate limiter config should be validated before reaching the engine")
+        });
         let secrets = self.secrets.clone();
 
         self.poll_handle = Some(
@@ -305,6 +317,7 @@ impl SmoltcpNetwork {
                         tls_state,
                         published_ports,
                         max_connections,
+                        tx_rate_limiter,
                         tokio_handle,
                         secrets,
                     );
@@ -809,5 +822,177 @@ mod tests {
                 limit: MAX_NETWORK_CONNECTIONS
             } if configured == MAX_NETWORK_CONNECTIONS + 1
         ));
+    }
+}
+
+/// End-to-end rate limit checks: guest ICMP echo requests cross the TX
+/// boundary into the gateway echo responder, and the replies cross the RX
+/// boundary back to the guest, so one ping exercises both directions.
+#[cfg(all(test, unix))]
+mod rate_limit_tests {
+    use std::time::{Duration, Instant};
+
+    use microsandbox_types::{RateLimiterConfig, TokenBucketConfig};
+    use smoltcp::phy::ChecksumCapabilities;
+    use smoltcp::wire::{
+        EthernetAddress, EthernetFrame, EthernetProtocol, EthernetRepr, Icmpv4Packet, Icmpv4Repr,
+        IpProtocol, Ipv4Packet, Ipv4Repr,
+    };
+
+    use super::*;
+
+    const VIRTIO_NET_HDR_LEN: usize = 12;
+
+    fn ops_limiter(size: u64, refill_time_ms: u64) -> RateLimiterConfig {
+        RateLimiterConfig {
+            bandwidth: None,
+            ops: Some(TokenBucketConfig {
+                size,
+                refill_time_ms,
+                one_time_burst: 0,
+            }),
+        }
+    }
+
+    fn bandwidth_limiter(size: u64, refill_time_ms: u64) -> RateLimiterConfig {
+        RateLimiterConfig {
+            bandwidth: Some(TokenBucketConfig {
+                size,
+                refill_time_ms,
+                one_time_burst: 0,
+            }),
+            ops: None,
+        }
+    }
+
+    /// Build a guest -> gateway ICMP echo request frame.
+    fn echo_request_frame(net: &SmoltcpNetwork, seq_no: u16, data: &[u8]) -> Vec<u8> {
+        let guest_ipv4 = net.guest_ipv4.expect("guest ipv4 active");
+        let gateway_ipv4 = net.gateway_ipv4.expect("gateway ipv4 active");
+
+        let ipv4_repr = Ipv4Repr {
+            src_addr: guest_ipv4,
+            dst_addr: gateway_ipv4,
+            next_header: IpProtocol::Icmp,
+            payload_len: 8 + data.len(),
+            hop_limit: 64,
+        };
+        let icmp_repr = Icmpv4Repr::EchoRequest {
+            ident: 0x42,
+            seq_no,
+            data,
+        };
+        let mut frame = vec![0u8; 14 + ipv4_repr.buffer_len() + icmp_repr.buffer_len()];
+
+        let mut eth = EthernetFrame::new_unchecked(&mut frame);
+        EthernetRepr {
+            src_addr: EthernetAddress(net.guest_mac),
+            dst_addr: EthernetAddress(net.gateway_mac),
+            ethertype: EthernetProtocol::Ipv4,
+        }
+        .emit(&mut eth);
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut frame[14..34]),
+            &ChecksumCapabilities::default(),
+        );
+        icmp_repr.emit(
+            &mut Icmpv4Packet::new_unchecked(&mut frame[34..]),
+            &ChecksumCapabilities::default(),
+        );
+
+        frame
+    }
+
+    /// Wait (bounded) for the backend's wake fd, mirroring the NetWorker.
+    fn wait_readable(fd: std::os::fd::RawFd, timeout_ms: i32) {
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: `pfd` points to a valid pollfd for a live file descriptor.
+        unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+    }
+
+    /// Send `count` gateway pings with `payload_len`-byte payloads through
+    /// a started network and return the time until every reply arrived.
+    fn ping_round_trip_time(
+        mut config: NetworkConfig,
+        count: usize,
+        payload_len: usize,
+    ) -> Duration {
+        // Gateway echo replies are policy-gated; these tests measure rate
+        // limiting, not policy.
+        config.policy = crate::policy::NetworkPolicy::allow_all();
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let mut net =
+            SmoltcpNetwork::new_with_routes(config, 0, true, false).expect("network init");
+        let mut backend = net.take_backend();
+        net.start(runtime.handle().clone());
+
+        let payload = vec![0xab_u8; payload_len];
+        let started = Instant::now();
+        for seq_no in 0..count {
+            let frame = echo_request_frame(&net, seq_no as u16, &payload);
+            let mut buf = vec![0u8; VIRTIO_NET_HDR_LEN + frame.len()];
+            buf[VIRTIO_NET_HDR_LEN..].copy_from_slice(&frame);
+            backend
+                .write_frame(VIRTIO_NET_HDR_LEN, &mut buf)
+                .expect("guest frame accepted");
+        }
+
+        let deadline = started + Duration::from_secs(10);
+        let mut received = 0;
+        let mut buf = [0u8; 2048];
+        while received < count {
+            assert!(
+                Instant::now() < deadline,
+                "timed out after {received}/{count} echo replies"
+            );
+            if backend.read_frame(&mut buf).is_ok() {
+                received += 1;
+                continue;
+            }
+            wait_readable(backend.raw_socket_fd(), 100);
+        }
+        started.elapsed()
+    }
+
+    #[test]
+    fn tx_ops_limiter_paces_guest_frames() {
+        // 2 frames up front, then one per 50ms: the 6th crosses at +200ms.
+        let config = NetworkConfig {
+            tx_rate_limiter: Some(ops_limiter(2, 100)),
+            ..NetworkConfig::default()
+        };
+
+        let elapsed = ping_round_trip_time(config, 6, 8);
+        assert!(
+            elapsed >= Duration::from_millis(190),
+            "tx throttling too fast: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn rx_bandwidth_limiter_paces_frames_to_the_guest() {
+        // Echo replies are 14 (eth) + 20 (ipv4) + 8 (icmp) + 58 = 100 bytes:
+        // the first reply drains the bucket, each next waits a full refill,
+        // so the 4th arrives at +300ms.
+        let config = NetworkConfig {
+            rx_rate_limiter: Some(bandwidth_limiter(100, 100)),
+            ..NetworkConfig::default()
+        };
+
+        let elapsed = ping_round_trip_time(config, 4, 58);
+        assert!(
+            elapsed >= Duration::from_millis(290),
+            "rx throttling too fast: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn unlimited_config_is_not_throttled() {
+        let elapsed = ping_round_trip_time(NetworkConfig::default(), 6, 8);
+        assert!(elapsed < Duration::from_secs(5), "unexpected {elapsed:?}");
     }
 }

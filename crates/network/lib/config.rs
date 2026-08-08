@@ -12,7 +12,7 @@ use crate::dns::Nameserver;
 
 use crate::policy::NetworkPolicy;
 use crate::secrets::config::SecretsConfig;
-use microsandbox_types::TlsConfig;
+use microsandbox_types::{RateLimiterConfig, TlsConfig};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -68,6 +68,14 @@ pub struct NetworkConfig {
     /// Max concurrent guest connections. Default: 256, maximum: 4096.
     #[serde(default)]
     pub max_connections: Option<usize>,
+
+    /// Guest-to-runtime (egress) rate limiter. `None` means unlimited.
+    #[serde(default)]
+    pub tx_rate_limiter: Option<RateLimiterConfig>,
+
+    /// Runtime-to-guest (ingress) rate limiter. `None` means unlimited.
+    #[serde(default)]
+    pub rx_rate_limiter: Option<RateLimiterConfig>,
 
     /// Ship the host's trusted root CAs into the guest at boot so outbound
     /// TLS works behind corporate MITM proxies (Cloudflare Warp Zero
@@ -176,6 +184,8 @@ impl Default for NetworkConfig {
             tls: TlsConfig::default(),
             secrets: SecretsConfig::default(),
             max_connections: None,
+            tx_rate_limiter: None,
+            rx_rate_limiter: None,
             trust_host_cas: false,
         }
     }
@@ -286,6 +296,50 @@ mod tests {
             legacy_group,
             microsandbox_types::DestinationGroup::LinkLocal
         );
+    }
+
+    /// A config persisted before rate limiters existed must keep
+    /// deserializing, defaulting both directions to unlimited.
+    #[test]
+    fn config_without_rate_limiter_fields_stays_unlimited() {
+        let config: NetworkConfig = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(config.tx_rate_limiter.is_none());
+        assert!(config.rx_rate_limiter.is_none());
+    }
+
+    #[test]
+    fn rate_limiters_survive_the_wire_spec_round_trip() {
+        use microsandbox_types::{RateLimiterConfig, TokenBucketConfig};
+
+        let config = NetworkConfig {
+            tx_rate_limiter: Some(RateLimiterConfig {
+                bandwidth: Some(TokenBucketConfig {
+                    size: 1024 * 1024,
+                    refill_time_ms: 1000,
+                    one_time_burst: 512 * 1024,
+                }),
+                ops: None,
+            }),
+            rx_rate_limiter: Some(RateLimiterConfig {
+                bandwidth: None,
+                ops: Some(TokenBucketConfig {
+                    size: 1000,
+                    refill_time_ms: 1000,
+                    one_time_burst: 0,
+                }),
+            }),
+            ..NetworkConfig::default()
+        };
+
+        let spec: microsandbox_types::NetworkSpec =
+            serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+        assert_eq!(spec.tx_rate_limiter, config.tx_rate_limiter);
+        assert_eq!(spec.rx_rate_limiter, config.rx_rate_limiter);
+
+        let back: NetworkConfig =
+            serde_json::from_value(serde_json::to_value(&spec).unwrap()).unwrap();
+        assert_eq!(back.tx_rate_limiter, config.tx_rate_limiter);
+        assert_eq!(back.rx_rate_limiter, config.rx_rate_limiter);
     }
 
     #[test]

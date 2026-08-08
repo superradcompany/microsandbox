@@ -508,6 +508,22 @@ export declare class NetworkBuilder {
   /** Trust the host's root CAs inside the guest. Default: false. */
   trustHostCAs(enabled: boolean): this
   /**
+   * Limit guest-to-runtime (egress) traffic via a callback. Applies on
+   * the next sandbox start.
+   *
+   * ```js
+   * .txRateLimiter((r) => r
+   *   .bandwidth(1_048_576, 1_000)
+   *   .ops(1_000, 1_000))
+   * ```
+   */
+  txRateLimiter(configure: (arg: JsRateLimiterBuilder) => JsRateLimiterBuilder): this
+  /**
+   * Limit runtime-to-guest (ingress) traffic via a callback. Applies on
+   * the next sandbox start.
+   */
+  rxRateLimiter(configure: (arg: JsRateLimiterBuilder) => JsRateLimiterBuilder): this
+  /**
    * Snapshot the accumulated configuration as a JSON string. The TS
    * layer parses + key-remaps to camelCase before returning to the
    * caller.
@@ -629,6 +645,31 @@ export declare class PullProgressStream {
   [Symbol.asyncIterator](): AsyncGenerator<PullProgressEvent, void, undefined>
 }
 export type JsPullProgressStream = PullProgressStream
+
+/**
+ * Fluent builder for one direction's network rate limiter. Chainable
+ * setters accumulate bucket values; the parent
+ * `NetworkBuilder.txRateLimiter()` / `.rxRateLimiter()` applies them to
+ * the Rust builder, where validation happens at `build()` time.
+ */
+export declare class RateLimiterBuilder {
+  constructor()
+  /** Cap bandwidth at `sizeBytes` bytes per `refillTimeMs` milliseconds. */
+  bandwidth(sizeBytes: number, refillTimeMs: number): this
+  /**
+   * Grant a one-time startup burst of `sizeBytes` bytes on top of the
+   * bandwidth bucket. Requires `bandwidth()`.
+   */
+  bandwidthBurst(sizeBytes: number): this
+  /** Cap packet rate at `count` frames per `refillTimeMs` milliseconds. */
+  ops(count: number, refillTimeMs: number): this
+  /**
+   * Grant a one-time startup burst of `count` frames on top of the ops
+   * bucket. Requires `ops()`.
+   */
+  opsBurst(count: number): this
+}
+export type JsRateLimiterBuilder = RateLimiterBuilder
 
 /** Fluent builder for OCI registry connection settings. */
 export declare class RegistryConfigBuilder {

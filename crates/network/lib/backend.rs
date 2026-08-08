@@ -12,11 +12,13 @@
 #[cfg(unix)]
 use std::os::fd::RawFd;
 use std::sync::Arc;
+use std::time::Instant;
 
 use msb_krun::backends::net::{NetBackend, ReadError, WriteError};
 #[cfg(windows)]
 use msb_krun_utils::event::{EventSource, EventToken};
 
+use crate::rate_limit::RateLimiter;
 use crate::shared::SharedState;
 
 //--------------------------------------------------------------------------------------------------
@@ -45,6 +47,11 @@ const VIRTIO_NET_HDR_LEN: usize = 12;
 ///   event handle on Windows so the NetWorker can detect new frames.
 pub struct SmoltcpBackend {
     shared: Arc<SharedState>,
+    /// RX rate limiter. `None` means unlimited.
+    rx_rate_limiter: Option<RateLimiter>,
+    /// A frame popped from `rx_ring` but throttled by the RX limiter.
+    /// Delivered before any queued frame so ordering is preserved.
+    pending_rx: Option<Vec<u8>>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -53,8 +60,12 @@ pub struct SmoltcpBackend {
 
 impl SmoltcpBackend {
     /// Create a new backend connected to the given shared state.
-    pub fn new(shared: Arc<SharedState>) -> Self {
-        Self { shared }
+    pub fn new(shared: Arc<SharedState>, rx_rate_limiter: Option<RateLimiter>) -> Self {
+        Self {
+            shared,
+            rx_rate_limiter,
+            pending_rx: None,
+        }
     }
 }
 
@@ -89,7 +100,20 @@ impl NetBackend for SmoltcpBackend {
     fn read_frame(&mut self, buf: &mut [u8]) -> Result<usize, ReadError> {
         self.shared.rx_wake.drain();
 
-        let frame = self.shared.rx_ring.pop().ok_or(ReadError::NothingRead)?;
+        let frame = match self.pending_rx.take() {
+            Some(frame) => frame,
+            None => self.shared.rx_ring.pop().ok_or(ReadError::NothingRead)?,
+        };
+
+        if let Some(limiter) = &mut self.rx_rate_limiter
+            && let Err(resume_at) = limiter.try_consume_frame(frame.len() as u64, Instant::now())
+        {
+            // Keep the frame in the pending slot; the poll loop wakes
+            // `rx_wake` when the refill deadline arrives.
+            self.pending_rx = Some(frame);
+            self.shared.set_rx_resume_at(resume_at);
+            return Err(ReadError::NothingRead);
+        }
 
         let total_len = VIRTIO_NET_HDR_LEN + frame.len();
         if total_len > buf.len() {
@@ -147,7 +171,7 @@ mod tests {
     #[test]
     fn read_frame_drains_rx_wake_pipe() {
         let shared = Arc::new(SharedState::new(4));
-        let mut backend = SmoltcpBackend::new(shared.clone());
+        let mut backend = SmoltcpBackend::new(shared.clone(), None);
         let mut buf = [0u8; 64];
 
         assert!(shared.push_rx_frame_and_wake(vec![0xaa, 0xbb]));
@@ -165,7 +189,7 @@ mod tests {
     #[test]
     fn write_frame_enqueues_guest_frame_and_wakes_poll_loop() {
         let shared = Arc::new(SharedState::new(1));
-        let mut backend = SmoltcpBackend::new(shared.clone());
+        let mut backend = SmoltcpBackend::new(shared.clone(), None);
         let mut buf = vec![0u8; VIRTIO_NET_HDR_LEN + 3];
         buf[VIRTIO_NET_HDR_LEN..].copy_from_slice(&[0xaa, 0xbb, 0xcc]);
 
@@ -182,7 +206,7 @@ mod tests {
     fn write_frame_drops_guest_frame_when_tx_ring_is_full() {
         let shared = Arc::new(SharedState::new(1));
         shared.tx_ring.push(vec![0x11]).unwrap();
-        let mut backend = SmoltcpBackend::new(shared.clone());
+        let mut backend = SmoltcpBackend::new(shared.clone(), None);
         let mut buf = vec![0u8; VIRTIO_NET_HDR_LEN + 2];
         buf[VIRTIO_NET_HDR_LEN..].copy_from_slice(&[0xaa, 0xbb]);
 
@@ -193,6 +217,54 @@ mod tests {
         assert_eq!(shared.tx_bytes(), 0);
         assert_eq!(shared.tx_ring.pop(), Some(vec![0x11]));
         assert_eq!(shared.tx_ring.pop(), None);
+    }
+
+    #[test]
+    fn read_frame_throttles_via_pending_slot_and_preserves_order() {
+        use microsandbox_types::{RateLimiterConfig, TokenBucketConfig};
+
+        use crate::rate_limit::RateLimiter;
+
+        let shared = Arc::new(SharedState::new(4));
+        // One op per 100ms: the second frame must throttle.
+        let limiter = RateLimiter::new(
+            &RateLimiterConfig {
+                bandwidth: None,
+                ops: Some(TokenBucketConfig {
+                    size: 1,
+                    refill_time_ms: 100,
+                    one_time_burst: 0,
+                }),
+            },
+            Instant::now(),
+        )
+        .unwrap();
+        let mut backend = SmoltcpBackend::new(shared.clone(), Some(limiter));
+        let mut buf = [0u8; 64];
+
+        assert!(shared.push_rx_frame_and_wake(vec![0xaa]));
+        assert!(shared.push_rx_frame_and_wake(vec![0xbb]));
+
+        // First frame passes; the second lands in the pending slot with a
+        // published resume deadline that nudged the poll loop.
+        let n = backend.read_frame(&mut buf).expect("first frame");
+        assert_eq!(&buf[VIRTIO_NET_HDR_LEN..n], &[0xaa]);
+        assert!(matches!(
+            backend.read_frame(&mut buf),
+            Err(ReadError::NothingRead)
+        ));
+        let resume_at = shared.rx_resume_at().expect("resume deadline published");
+        assert!(fd_is_readable(shared.tx_wake.as_raw_fd()));
+
+        // The throttled frame stays first in line: nothing is lost or
+        // reordered while blocked, and it delivers once the deadline passes.
+        assert!(matches!(
+            backend.read_frame(&mut buf),
+            Err(ReadError::NothingRead)
+        ));
+        std::thread::sleep(resume_at.saturating_duration_since(Instant::now()));
+        let n = backend.read_frame(&mut buf).expect("throttled frame");
+        assert_eq!(&buf[VIRTIO_NET_HDR_LEN..n], &[0xbb]);
     }
 
     fn fd_is_readable(fd: RawFd) -> bool {
