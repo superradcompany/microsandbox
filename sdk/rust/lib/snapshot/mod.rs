@@ -413,7 +413,7 @@ impl SnapshotBuilder {
 pub use archive::SaveOpts;
 #[cfg(feature = "fuzzing")]
 pub use archive::fuzz_unpack_archive;
-pub use microsandbox_image::snapshot::{
+pub use microsandbox_types::snapshot::{
     CheckpointSnapshotState, DESCRIPTOR_FILENAME, FileSnapshotState, ImageRef, Manifest,
     SnapshotDescriptor, SnapshotFormat, SnapshotScope, SnapshotState, UpperIntegrity, UpperLayer,
 };
