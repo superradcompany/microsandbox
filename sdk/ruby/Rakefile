@@ -57,7 +57,14 @@ namespace :cargo do
     # version skew here fails open: `version_check` plus the `cargo tree`
     # assertion in CI are what actually guard the swap.
     mkdir_p ".cargo"
-    File.write(".cargo/config.toml", <<~TOML)
+    # A contributor may keep local linker/target settings here; save the
+    # original and append the patch stanza to a copy of it, so those settings
+    # stay active during the patched build and survive the round trip.
+    if File.exist?(".cargo/config.toml") && !File.exist?(".cargo/config.toml.orig")
+      cp ".cargo/config.toml", ".cargo/config.toml.orig"
+    end
+    base = File.exist?(".cargo/config.toml.orig") ? File.read(".cargo/config.toml.orig") : ""
+    File.write(".cargo/config.toml", base + <<~TOML)
       [patch.crates-io]
       microsandbox = { path = "../rust" }
     TOML
@@ -80,7 +87,11 @@ namespace :cargo do
     # Without this, a leftover gitignored .cargo/config.toml keeps every later
     # local build silently resolving against the in-tree SDK instead of the
     # published pin the source gem actually ships with.
-    rm_f ".cargo/config.toml"
+    if File.exist?(".cargo/config.toml.orig")
+      mv ".cargo/config.toml.orig", ".cargo/config.toml"
+    else
+      rm_f ".cargo/config.toml"
+    end
     if File.exist?("ext/microsandbox/Cargo.lock.orig")
       mv "ext/microsandbox/Cargo.lock.orig", "ext/microsandbox/Cargo.lock"
     end
