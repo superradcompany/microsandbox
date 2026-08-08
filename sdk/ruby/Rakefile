@@ -48,6 +48,11 @@ Rake::TestTask.new do |test|
   test.deps << :compile
 end
 
+# Sentinel recording that cargo:patch_workspace owns the current generated
+# config/lock state; its presence is what distinguishes a repeat run (safe to
+# regenerate) from a first run (back up what is there).
+PATCH_STATE = ".cargo/.patch_workspace_applied"
+
 namespace :cargo do
   desc "Point the extension at the in-tree Rust SDK (precompiled platform gems only)"
   task :patch_workspace do
@@ -58,6 +63,22 @@ namespace :cargo do
     # entry whose version does not satisfy the dependency requirement, so a
     # version skew here fails open: `version_check` plus the `cargo tree`
     # assertion in CI are what actually guard the swap.
+    first_run = !File.exist?(PATCH_STATE)
+    if first_run
+      # Backups this task did not create are not ours to adopt or overwrite.
+      %w[ext/microsandbox/Cargo.lock.orig .cargo/config.toml.orig].each do |stray|
+        next unless File.exist?(stray)
+        abort "#{stray} exists but was not created by this task; move it away first"
+      end
+    end
+    if File.exist?(".cargo/config")
+      # Cargo prefers the extensionless legacy file over config.toml, which
+      # would silently override the patch written below. Checked before any
+      # mutation, so this abort leaves the workspace untouched.
+      abort ".cargo/config (legacy, extensionless) exists and would take " \
+            "precedence; rename it to config.toml first"
+    end
+
     # The committed Cargo.lock resolves the *published* crate graph; the in-tree
     # SDK routinely drifts ahead of it, and cargo cannot reconcile the patched
     # path dependency against the stale lock. Move it aside (preserving any
@@ -65,26 +86,23 @@ namespace :cargo do
     # `rake cargo:unpatch_workspace` moves it back. This runs before the config
     # handling below so the manual flow its abort prescribes starts from a
     # workspace where the lock is already staged for re-resolution.
-    if File.exist?("ext/microsandbox/Cargo.lock.orig")
-      # Patched already; the current lock is generated output, not user work.
+    if first_run
+      mv "ext/microsandbox/Cargo.lock", "ext/microsandbox/Cargo.lock.orig" if File.exist?("ext/microsandbox/Cargo.lock")
+    else
+      # Repeat run: the current lock is generated output, not user work.
       rm_f "ext/microsandbox/Cargo.lock"
-    elsif File.exist?("ext/microsandbox/Cargo.lock")
-      mv "ext/microsandbox/Cargo.lock", "ext/microsandbox/Cargo.lock.orig"
     end
 
     mkdir_p ".cargo"
-    if File.exist?(".cargo/config")
-      # Cargo prefers the extensionless legacy file over config.toml, which
-      # would silently override the patch written below.
-      abort ".cargo/config (legacy, extensionless) exists and would take " \
-            "precedence; rename it to config.toml first"
-    end
     # A contributor may keep local linker/target settings here; save the
     # original and append the patch stanza to a copy of it, so those settings
-    # stay active during the patched build and survive the round trip.
-    if File.exist?(".cargo/config.toml") && !File.exist?(".cargo/config.toml.orig")
+    # stay active during the patched build and survive the round trip. On a
+    # repeat run the current config.toml is our own generated file, so only a
+    # first run may back it up.
+    if first_run && File.exist?(".cargo/config.toml")
       cp ".cargo/config.toml", ".cargo/config.toml.orig"
     end
+    File.write(PATCH_STATE, "")
     base = File.exist?(".cargo/config.toml.orig") ? File.read(".cargo/config.toml.orig") : ""
     if base.match?(/^\s*\[patch\.(?:crates-io|"crates-io"|'crates-io')\]/)
       # Appending would produce a duplicate table, which cargo rejects; merging
@@ -105,15 +123,18 @@ namespace :cargo do
   task :unpatch_workspace do
     # Without this, a leftover gitignored .cargo/config.toml keeps every later
     # local build silently resolving against the in-tree SDK instead of the
-    # published pin the source gem actually ships with.
+    # published pin the source gem actually ships with. Removal only happens
+    # when the state file proves the current config.toml is our generated one;
+    # with neither state nor backup, there is nothing of ours to undo.
     if File.exist?(".cargo/config.toml.orig")
       mv ".cargo/config.toml.orig", ".cargo/config.toml"
-    else
+    elsif File.exist?(PATCH_STATE)
       rm_f ".cargo/config.toml"
     end
     if File.exist?("ext/microsandbox/Cargo.lock.orig")
       mv "ext/microsandbox/Cargo.lock.orig", "ext/microsandbox/Cargo.lock"
     end
+    rm_f PATCH_STATE
   end
 end
 
