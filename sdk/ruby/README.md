@@ -14,11 +14,11 @@ gem install microsandbox
 Precompiled platform gems carry the native extension, so these combinations
 install without a Rust toolchain:
 
-| Gem platform    | Ruby     | Notes            |
-| --------------- | -------- | ---------------- |
-| `x86_64-linux`  | 3.1–3.4  | glibc            |
-| `aarch64-linux` | 3.1–3.4  | glibc            |
-| `arm64-darwin`  | 3.1–3.4  | Apple Silicon    |
+| Gem platform        | Ruby     | Notes            |
+| ------------------- | -------- | ---------------- |
+| `x86_64-linux-gnu`  | 3.1–3.4  | glibc            |
+| `aarch64-linux-gnu` | 3.1–3.4  | glibc            |
+| `arm64-darwin`      | 3.1–3.4  | Apple Silicon    |
 
 <!-- pending first CI run: whether ruby:slim needs libcap-ng0 -->
 
@@ -57,8 +57,10 @@ single local Ruby; CI never sets it.
 
 `cargo:patch_workspace` points the build at the in-tree Rust SDK and drops
 `ext/microsandbox/Cargo.lock`, which pins the published crate graph and cannot
-resolve against the patched path. Restore it before committing anything:
-`git checkout -- ext/microsandbox/Cargo.lock`.
+resolve against the patched path. When you are done, run
+`rake cargo:unpatch_workspace` — it removes the gitignored patch config (which
+would otherwise keep later local builds silently resolving against the in-tree
+SDK) and restores the lockfile.
 
 To use the local backend, install the microsandbox runtime and firmware once:
 
