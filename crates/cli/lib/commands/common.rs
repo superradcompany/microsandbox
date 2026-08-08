@@ -7,8 +7,9 @@ use clap::Args;
 use microsandbox::VolumeKind;
 use microsandbox::backend::{Backend, LocalBackend};
 use microsandbox::sandbox::{
-    DeploymentProfile, DiskImageFormat, FlatClone, MountBuilder, Patch, RootDiskBuilder, Sandbox,
-    SandboxBuilder, SandboxHandle, SecurityProfile,
+    CpuPlacement, DeploymentProfile, DiskImageFormat, FlatClone, MountBuilder, Patch,
+    RootDiskBuilder, Sandbox, SandboxBuilder, SandboxHandle, SecurityProfile,
+    TransparentHugePagePolicy,
 };
 
 use crate::ui;
@@ -61,6 +62,10 @@ pub struct SandboxOpts {
     #[arg(long = "max-cpus")]
     pub max_cpus: Option<u8>,
 
+    /// Host CPU placement policy (inherit, auto, spread, compact).
+    #[arg(long = "cpu-placement", value_name = "POLICY")]
+    pub cpu_placement: Option<CpuPlacement>,
+
     /// Amount of memory to allocate (e.g. 512M, 1G).
     #[arg(short, long)]
     pub memory: Option<String>,
@@ -68,6 +73,10 @@ pub struct SandboxOpts {
     /// Boot-time maximum hotpluggable memory (e.g. 1G, 8G).
     #[arg(long = "max-memory", value_name = "SIZE")]
     pub max_memory: Option<String>,
+
+    /// Guest transparent huge-page policy selected at boot.
+    #[arg(long, value_name = "POLICY", value_parser = ["always", "madvise", "never"])]
+    pub thp: Option<String>,
 
     /// Mount a host path or named volume into the sandbox (`SOURCE:DEST[:OPTIONS]`).
     #[arg(short, long)]
@@ -487,8 +496,10 @@ impl SandboxOpts {
     pub fn has_creation_flags(&self) -> bool {
         let base = self.cpus.is_some()
             || self.max_cpus.is_some()
+            || self.cpu_placement.is_some()
             || self.memory.is_some()
             || self.max_memory.is_some()
+            || self.thp.is_some()
             || !self.volume.is_empty()
             || !self.mount_dir.is_empty()
             || !self.mount_file.is_empty()
@@ -568,11 +579,20 @@ pub fn apply_sandbox_opts(
     if let Some(max_cpus) = opts.max_cpus {
         builder = builder.max_cpus(max_cpus);
     }
+    if let Some(cpu_placement) = opts.cpu_placement {
+        builder = builder.cpu_placement(cpu_placement);
+    }
     if let Some(ref mem) = opts.memory {
         builder = builder.memory(ui::parse_size_mib(mem).map_err(anyhow::Error::msg)?);
     }
     if let Some(ref max_memory) = opts.max_memory {
         builder = builder.max_memory(ui::parse_size_mib(max_memory).map_err(anyhow::Error::msg)?);
+    }
+    if let Some(ref thp) = opts.thp {
+        let policy = thp
+            .parse::<TransparentHugePagePolicy>()
+            .map_err(anyhow::Error::msg)?;
+        builder = builder.thp(policy);
     }
     if let Some(ref workdir) = opts.workdir {
         builder = builder.workdir(workdir);
@@ -2779,6 +2799,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn apply_sandbox_opts_sets_transparent_huge_page_policy() {
+        let opts = SandboxOpts {
+            thp: Some("always".to_string()),
+            ..Default::default()
+        };
+        let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(config.spec.resources.thp, TransparentHugePagePolicy::Always);
+    }
+
+    #[tokio::test]
+    async fn apply_sandbox_opts_sets_flat_root_disk() {
+        let opts = SandboxOpts {
+            root_disk: Some("flat:8G,fstype=ext4,clone=reflink".to_string()),
+            ..Default::default()
+        };
+        let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        let RootfsSource::Oci(oci) = config.spec.image else {
+            panic!("expected Oci");
+        };
+        assert_eq!(
+            oci.root_disk,
+            Some(microsandbox::sandbox::RootDisk::Flat {
+                size_mib: Some(8192),
+                fstype: Some("ext4".to_string()),
+                clone: FlatClone::Reflink,
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn apply_sandbox_opts_sets_oci_upper_size() {
         let opts = SandboxOpts {
             oci_upper_size: Some("8G".to_string()),
@@ -2830,6 +2890,21 @@ mod tests {
             config.spec.deployment_profile,
             DeploymentProfile::MultiTenant
         );
+    }
+
+    #[tokio::test]
+    async fn apply_sandbox_opts_sets_cpu_placement() {
+        let opts = SandboxOpts {
+            cpu_placement: Some(CpuPlacement::Spread),
+            ..Default::default()
+        };
+        let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(config.spec.resources.cpu_placement, CpuPlacement::Spread);
     }
 
     #[tokio::test]

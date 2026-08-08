@@ -327,6 +327,7 @@ func TestFFIWireShape_ScalarKnobs(t *testing.T) {
 		WithCPUs(2),
 		WithMaxMemory(4096),
 		WithMaxCPUs(8),
+		WithCPUPlacement(CPUPlacementSpread),
 		WithWorkdir("/app"),
 		WithShell("/bin/bash"),
 		WithHostname("sb"),
@@ -345,6 +346,7 @@ func TestFFIWireShape_ScalarKnobs(t *testing.T) {
 		want any
 	}{
 		{"image", "alpine"},
+		{"cpu_placement", "spread"},
 		{"memory_mib", float64(512)},
 		{"cpus", float64(2)},
 		{"max_memory_mib", float64(4096)},
@@ -703,6 +705,7 @@ func TestFFIWireShape_EmptyConfigOmitsOptionalFields(t *testing.T) {
 
 	for _, key := range []string{
 		"image", "snapshot", "memory_mib", "cpus", "max_memory_mib", "max_cpus", "workdir", "shell",
+		"thp",
 		"hostname", "user", "replace", "detached", "env", "scripts",
 		"ports", "ports_udp", "network", "secrets", "patches", "volumes",
 		"init", "registry_auth", "registry_insecure", "registry_ca_certs", "root_disk",
@@ -711,6 +714,13 @@ func TestFFIWireShape_EmptyConfigOmitsOptionalFields(t *testing.T) {
 			body, _ := json.Marshal(got)
 			t.Errorf("empty config emitted key %q; payload = %s", key, body)
 		}
+	}
+}
+
+func TestFFIWireShape_THPPolicy(t *testing.T) {
+	got := marshalCreateOptions(t, WithImage("python:3.12"), WithTHP(THPAlways))
+	if got["thp"] != "always" {
+		t.Fatalf("thp = %v, want always", got["thp"])
 	}
 }
 

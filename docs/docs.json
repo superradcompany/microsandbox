@@ -38,6 +38,7 @@
             "icon": "box",
             "pages": [
               "sandboxes/overview",
+              "sandboxes/cpu-placement",
               "sandboxes/lifecycle",
               "sandboxes/commands",
               "sandboxes/filesystem",
@@ -189,6 +190,13 @@
             "icon": "gear",
             "pages": [
               "configuration"
+            ]
+          },
+          {
+            "group": "Performance",
+            "icon": "bolt",
+            "pages": [
+              "optimization/overview"
             ]
           }
         ]

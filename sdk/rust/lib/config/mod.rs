@@ -21,6 +21,7 @@ use std::{
 use docker_credential::{CredentialRetrievalError, DockerCredential};
 use microsandbox_image::RegistryAuth;
 use microsandbox_runtime::logging::LogLevel;
+use microsandbox_types::{CpuPlacement, RootDisk, TransparentHugePagePolicy};
 use serde::{Deserialize, Serialize};
 
 use crate::error::Operation;
@@ -117,6 +118,9 @@ pub struct LocalConfig {
     /// Default values for sandbox configuration.
     pub sandbox_defaults: SandboxDefaults,
 
+    /// Host runtime performance policy.
+    pub runtime: RuntimeConfig,
+
     /// Registry authentication configuration.
     pub registries: RegistriesConfig,
 
@@ -206,6 +210,12 @@ pub struct SandboxDefaults {
     /// Default guest memory in MiB.
     pub memory_mib: u32,
 
+    /// Default host CPU placement policy.
+    pub cpu_placement: CpuPlacement,
+
+    /// Default guest transparent huge-page policy.
+    pub thp: TransparentHugePagePolicy,
+
     /// Default OCI rootfs settings.
     pub oci: OciSandboxDefaults,
 
@@ -235,6 +245,45 @@ pub struct OciSandboxDefaults {
     ///
     /// `None` uses microsandbox's built-in formatter default.
     pub upper_size_mib: Option<u32>,
+
+    /// Default writable root disk for OCI sandboxes.
+    ///
+    /// This is mutually exclusive with the deprecated [`Self::upper_size_mib`] field. `None`
+    /// preserves the managed layered root disk default.
+    pub root_disk: Option<RootDisk>,
+}
+
+/// Host runtime performance policy.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RuntimeConfig {
+    /// Buffered host writeback containment and admission policy.
+    pub block_writeback: BlockWritebackConfig,
+}
+
+/// Controls buffered host dirty data for writable raw disks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "lowercase", deny_unknown_fields)]
+pub enum BlockWritebackConfig {
+    /// Use up to the measured per-disk limit, bounded by the aggregate pool.
+    Auto {
+        /// Optional host-global dirty-credit pool override in MiB.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pool_mib: Option<NonZero<u64>>,
+    },
+
+    /// Use an explicit per-disk limit and derive the aggregate pool unless overridden.
+    Fixed {
+        /// Maximum page-aligned dirty data charged to one writable raw disk, in MiB.
+        per_disk_mib: NonZero<u64>,
+
+        /// Optional host-global dirty-credit pool override in MiB.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pool_mib: Option<NonZero<u64>>,
+    },
+
+    /// Disable bounded writeback without changing guest-visible durability semantics.
+    Off {},
 }
 
 /// Registry configuration.
@@ -314,6 +363,24 @@ struct KeyringRegistryCredential {
 //--------------------------------------------------------------------------------------------------
 
 impl LocalConfig {
+    /// Validate defaults that affect sandbox construction.
+    pub(crate) fn validate_sandbox_defaults(&self) -> MicrosandboxResult<()> {
+        let oci = &self.sandbox_defaults.oci;
+        if oci.upper_size_mib.is_some() && oci.root_disk.is_some() {
+            return Err(MicrosandboxError::InvalidConfig(
+                "sandbox_defaults.oci.root_disk and deprecated sandbox_defaults.oci.upper_size_mib are mutually exclusive".into(),
+            ));
+        }
+
+        if matches!(oci.root_disk, Some(RootDisk::DiskImage { .. })) {
+            return Err(MicrosandboxError::InvalidConfig(
+                "sandbox_defaults.oci.root_disk cannot be a shared disk-image; specify user-owned disk images per sandbox".into(),
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Get the resolved home directory.
     pub fn home(&self) -> PathBuf {
         self.home.clone().unwrap_or_else(resolve_default_home)
@@ -586,12 +653,20 @@ impl Default for SandboxDefaults {
         Self {
             cpus: DEFAULT_CPUS,
             memory_mib: DEFAULT_MEMORY_MIB,
+            cpu_placement: CpuPlacement::Inherit,
+            thp: TransparentHugePagePolicy::Madvise,
             oci: OciSandboxDefaults::default(),
             shell: "/bin/sh".into(),
             workdir: None,
             metrics_sample_interval_ms: default_metrics_sample_interval(),
             disable_metrics_sample: false,
         }
+    }
+}
+
+impl Default for BlockWritebackConfig {
+    fn default() -> Self {
+        Self::Auto { pool_mib: None }
     }
 }
 
@@ -1153,7 +1228,10 @@ mod tests {
         let cfg = LocalConfig::default();
         assert_eq!(cfg.sandbox_defaults.cpus, 1);
         assert_eq!(cfg.sandbox_defaults.memory_mib, 512);
+        assert_eq!(cfg.sandbox_defaults.cpu_placement, CpuPlacement::Inherit);
+        assert_eq!(cfg.sandbox_defaults.thp, TransparentHugePagePolicy::Madvise);
         assert_eq!(cfg.sandbox_defaults.oci.upper_size_mib, None);
+        assert_eq!(cfg.sandbox_defaults.oci.root_disk, None);
         assert_eq!(cfg.sandbox_defaults.shell, "/bin/sh");
         assert_eq!(
             cfg.sandbox_defaults.metrics_sample_interval_ms,
@@ -1163,6 +1241,14 @@ mod tests {
         assert_eq!(cfg.database.max_connections, 5);
         assert_eq!(cfg.database.connect_timeout_secs, 30);
         assert_eq!(cfg.database.busy_timeout_secs, 5);
+        assert_eq!(
+            cfg.runtime.block_writeback,
+            BlockWritebackConfig::Auto { pool_mib: None }
+        );
+        assert_eq!(
+            serde_json::to_value(cfg.runtime.block_writeback).unwrap(),
+            serde_json::json!({ "mode": "auto" })
+        );
     }
 
     #[test]
@@ -1178,6 +1264,108 @@ mod tests {
         let cfg: LocalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.sandbox_defaults.cpus, 4);
         assert_eq!(cfg.sandbox_defaults.memory_mib, 512);
+    }
+
+    #[test]
+    fn test_deserialize_performance_defaults() {
+        let json = r#"{
+            "sandbox_defaults": {
+                "cpu_placement": "spread",
+                "thp": "always",
+                "oci": {
+                    "root_disk": {
+                        "kind": "flat",
+                        "size_mib": 8192,
+                        "clone": "copy"
+                    }
+                }
+            },
+            "runtime": { "block_writeback": { "mode": "off" } }
+        }"#;
+
+        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.sandbox_defaults.cpu_placement, CpuPlacement::Spread);
+        assert_eq!(cfg.sandbox_defaults.thp, TransparentHugePagePolicy::Always);
+        assert_eq!(
+            cfg.sandbox_defaults.oci.root_disk,
+            Some(RootDisk::Flat {
+                size_mib: Some(8192),
+                fstype: None,
+                clone: microsandbox_types::FlatClone::Copy,
+            })
+        );
+        assert_eq!(cfg.runtime.block_writeback, BlockWritebackConfig::Off {});
+    }
+
+    #[test]
+    fn test_block_writeback_fixed_round_trip() {
+        let json = r#"{
+            "runtime": {
+                "block_writeback": {
+                    "mode": "fixed",
+                    "per_disk_mib": 1280,
+                    "pool_mib": 5120
+                }
+            }
+        }"#;
+        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(
+            cfg.runtime.block_writeback,
+            BlockWritebackConfig::Fixed {
+                per_disk_mib: NonZero::new(1280).unwrap(),
+                pool_mib: NonZero::new(5120),
+            }
+        );
+
+        let serialized = serde_json::to_value(&cfg.runtime.block_writeback).unwrap();
+        assert_eq!(
+            serialized,
+            serde_json::json!({
+                "mode": "fixed",
+                "per_disk_mib": 1280,
+                "pool_mib": 5120
+            })
+        );
+    }
+
+    #[test]
+    fn test_block_writeback_modes_reject_incompatible_fields() {
+        let auto_with_fixed_limit = r#"{
+            "runtime": {
+                "block_writeback": {
+                    "mode": "auto",
+                    "per_disk_mib": 1536
+                }
+            }
+        }"#;
+        let off_with_pool = r#"{
+            "runtime": {
+                "block_writeback": {
+                    "mode": "off",
+                    "pool_mib": 4096
+                }
+            }
+        }"#;
+
+        assert!(serde_json::from_str::<LocalConfig>(auto_with_fixed_limit).is_err());
+        assert!(serde_json::from_str::<LocalConfig>(off_with_pool).is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_legacy_and_typed_root_disk_defaults() {
+        let json = r#"{
+            "sandbox_defaults": {
+                "oci": {
+                    "upper_size_mib": 4096,
+                    "root_disk": { "kind": "flat" }
+                }
+            }
+        }"#;
+        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+
+        let error = cfg.validate_sandbox_defaults().unwrap_err();
+        assert!(error.to_string().contains("mutually exclusive"));
     }
 
     #[test]

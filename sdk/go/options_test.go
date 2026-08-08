@@ -150,6 +150,22 @@ func TestWithMaxCPUs(t *testing.T) {
 	}
 }
 
+func TestWithCPUPlacement(t *testing.T) {
+	o := SandboxConfig{}
+	WithCPUPlacement(CPUPlacementSpread)(&o)
+	if o.CPUPlacement != CPUPlacementSpread {
+		t.Errorf("got %q, want %q", o.CPUPlacement, CPUPlacementSpread)
+	}
+}
+
+func TestWithTHP(t *testing.T) {
+	o := SandboxConfig{}
+	WithTHP(THPAlways)(&o)
+	if o.THP != THPAlways {
+		t.Errorf("got %q, want %q", o.THP, THPAlways)
+	}
+}
+
 func TestWithWorkdir(t *testing.T) {
 	o := SandboxConfig{}
 	WithWorkdir("/app")(&o)

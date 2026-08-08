@@ -115,10 +115,11 @@ pub use microsandbox_network::config::NetworkConfig;
 #[cfg(feature = "net")]
 pub use microsandbox_network::policy::{NetworkPolicy, NetworkProfile};
 pub use microsandbox_runtime::logging::LogLevel;
-pub use microsandbox_types::PullPolicy;
+pub use microsandbox_types::{CpuPlacement, PullPolicy};
 pub use microsandbox_types::{
     EnvVar, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, NetworkSpec, PortProtocol,
     PublishedPortSpec, SandboxLogLevel, SandboxResources, SandboxRuntimeOptions, SandboxSpec,
+    TransparentHugePagePolicy,
 };
 pub use modify::{
     ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,
@@ -236,7 +237,12 @@ pub struct SandboxTouchResult {
 impl Sandbox {
     /// Start building a new sandbox configuration.
     pub fn builder(name: impl Into<String>) -> SandboxBuilder {
-        SandboxBuilder::new(name)
+        let builder = SandboxBuilder::new(name);
+        let backend = crate::backend::default_backend();
+        match backend.as_local() {
+            Some(local) => builder.with_local_defaults(local.config()),
+            None => builder,
+        }
     }
 
     /// Create a sandbox from a config.

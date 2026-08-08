@@ -5,6 +5,8 @@
 //! can ensure every migration has an explicit reversibility and cache-impact
 //! decision before a new binary ships.
 
+use std::collections::HashSet;
+
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
@@ -27,6 +29,12 @@ pub const SNAPSHOT_SCOPE_MIGRATION_ID: &str = "m20260714_000001_add_snapshot_sco
 /// Migration that projects final snapshot state and journals legacy conversion.
 pub const SNAPSHOT_ARTIFACT_TRANSITION_MIGRATION_ID: &str =
     "m20260723_000001_snapshot_artifact_transition";
+
+/// Migration that introduces cooperative host CPU allocation state.
+pub const CPU_ALLOCATION_MIGRATION_ID: &str = "m20260719_000001_create_cpu_allocations";
+
+/// Migration that introduces host-global writeback dirty-credit reservations.
+pub const WRITEBACK_ALLOCATION_MIGRATION_ID: &str = "m20260803_000001_create_writeback_allocations";
 
 /// Frozen migration baseline for the transitional 0.6.0 release.
 ///
@@ -178,6 +186,20 @@ pub const MIGRATION_METADATA: &[MigrationMetadata] = &[
         affects_user_data: true,
         summary: "reverse final snapshot descriptors before removing migration state",
     },
+    MigrationMetadata {
+        id: CPU_ALLOCATION_MIGRATION_ID,
+        reversible: true,
+        affects_cache: false,
+        affects_user_data: false,
+        summary: "remove cooperative host CPU allocation tables",
+    },
+    MigrationMetadata {
+        id: WRITEBACK_ALLOCATION_MIGRATION_ID,
+        reversible: true,
+        affects_cache: false,
+        affects_user_data: false,
+        summary: "remove host-global writeback allocation state",
+    },
 ];
 
 //--------------------------------------------------------------------------------------------------
@@ -214,6 +236,32 @@ pub fn migration_ids() -> impl Iterator<Item = &'static str> {
     MIGRATION_METADATA.iter().map(|metadata| metadata.id)
 }
 
+/// Resolve an unordered collection of applied migration identifiers to its canonical prefix.
+///
+/// SeaORM records migration timestamps with insufficient precision to recover execution order
+/// when several migrations run together. Treat the migration table as a set and use this binary's
+/// append-only metadata as the only source of ordering instead.
+pub fn canonical_applied_prefix<'a>(
+    applied_ids: impl IntoIterator<Item = &'a str>,
+) -> Option<&'static [MigrationMetadata]> {
+    let mut applied_count = 0;
+    let applied_ids: HashSet<_> = applied_ids
+        .into_iter()
+        .inspect(|_| applied_count += 1)
+        .collect();
+
+    // Duplicate migration rows are invalid even if their distinct identifiers resemble a prefix.
+    if applied_ids.len() != applied_count {
+        return None;
+    }
+
+    let prefix = MIGRATION_METADATA.get(..applied_count)?;
+    prefix
+        .iter()
+        .all(|metadata| applied_ids.contains(metadata.id))
+        .then_some(prefix)
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -233,6 +281,39 @@ mod tests {
         let metadata_ids: Vec<_> = migration_ids().map(str::to_string).collect();
 
         assert_eq!(metadata_ids, migrator_ids);
+    }
+
+    #[test]
+    fn canonical_applied_prefix_uses_metadata_order() {
+        let applied = [
+            WRITEBACK_ALLOCATION_MIGRATION_ID,
+            SNAPSHOT_ARTIFACT_TRANSITION_MIGRATION_ID,
+            CPU_ALLOCATION_MIGRATION_ID,
+        ];
+        let prefix_len = MIGRATION_METADATA.len();
+        let mut all_applied: Vec<_> = MIGRATION_METADATA[..prefix_len - applied.len()]
+            .iter()
+            .map(|metadata| metadata.id)
+            .collect();
+        all_applied.extend(applied);
+
+        let prefix = canonical_applied_prefix(all_applied).expect("valid unordered prefix");
+        assert_eq!(prefix, MIGRATION_METADATA);
+    }
+
+    #[test]
+    fn canonical_applied_prefix_rejects_gaps_and_unknown_migrations() {
+        let without_first = MIGRATION_METADATA
+            .iter()
+            .skip(1)
+            .map(|metadata| metadata.id);
+        assert!(canonical_applied_prefix(without_first).is_none());
+
+        let with_unknown = MIGRATION_METADATA
+            .iter()
+            .map(|metadata| metadata.id)
+            .chain(["m20990101_000001_future"]);
+        assert!(canonical_applied_prefix(with_unknown).is_none());
     }
 
     #[test]

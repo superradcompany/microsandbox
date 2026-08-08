@@ -16,6 +16,7 @@ mod error;
 pub mod boot_error;
 pub mod console;
 pub mod control;
+pub mod cpu;
 pub mod exec_log;
 pub mod heartbeat;
 pub mod launch;
@@ -26,5 +27,6 @@ pub mod policy;
 pub mod relay;
 mod startup;
 pub mod vm;
+pub(crate) mod writeback;
 
 pub use error::*;
