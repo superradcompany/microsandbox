@@ -93,8 +93,19 @@ jobs:
         run: rustup target add x86_64-pc-windows-gnu
 
       - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        if: "!contains(matrix.platform, 'mingw')"
         with:
           ruby-version: "3.1"
+
+      # On RubyInstaller rubies, plain setup-ruby leaves bindgen pointed at
+      # the MSVC libclang, which cannot parse the mingw ruby headers (missing
+      # strings.h). setup-ruby-and-rust wires the MinGW bindgen environment
+      # rb-sys needs.
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@e5f9a49a7812a078584072f6e3f657ad247c8771 # v1.4.4
+        if: contains(matrix.platform, 'mingw')
+        with:
+          ruby-version: "3.1"
+          cargo-cache: false
 
       - name: Build for Ruby 3.1
         working-directory: sdk/ruby
@@ -114,8 +125,15 @@ jobs:
         run: cargo tree --manifest-path ext/microsandbox/Cargo.toml --depth 1 | grep "sdk.rust)"
 
       - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        if: "!contains(matrix.platform, 'mingw')"
         with:
           ruby-version: "3.2"
+
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@e5f9a49a7812a078584072f6e3f657ad247c8771 # v1.4.4
+        if: contains(matrix.platform, 'mingw')
+        with:
+          ruby-version: "3.2"
+          cargo-cache: false
 
       # Each setup-ruby switches to a fresh gem environment, so the build
       # dependencies have to be installed again for every ABI.
@@ -126,8 +144,15 @@ jobs:
           rake gem:stage
 
       - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        if: "!contains(matrix.platform, 'mingw')"
         with:
           ruby-version: "3.3"
+
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@e5f9a49a7812a078584072f6e3f657ad247c8771 # v1.4.4
+        if: contains(matrix.platform, 'mingw')
+        with:
+          ruby-version: "3.3"
+          cargo-cache: false
 
       - name: Build for Ruby 3.3
         working-directory: sdk/ruby
@@ -136,8 +161,15 @@ jobs:
           rake gem:stage
 
       - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        if: "!contains(matrix.platform, 'mingw')"
         with:
           ruby-version: "3.4"
+
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@e5f9a49a7812a078584072f6e3f657ad247c8771 # v1.4.4
+        if: contains(matrix.platform, 'mingw')
+        with:
+          ruby-version: "3.4"
+          cargo-cache: false
 
       - name: Build for Ruby 3.4
         working-directory: sdk/ruby

@@ -73,6 +73,12 @@ namespace :cargo do
     end
 
     mkdir_p ".cargo"
+    if File.exist?(".cargo/config")
+      # Cargo prefers the extensionless legacy file over config.toml, which
+      # would silently override the patch written below.
+      abort ".cargo/config (legacy, extensionless) exists and would take " \
+            "precedence; rename it to config.toml first"
+    end
     # A contributor may keep local linker/target settings here; save the
     # original and append the patch stanza to a copy of it, so those settings
     # stay active during the patched build and survive the round trip.
@@ -133,6 +139,16 @@ namespace :gem do
       abort "GEM_PLATFORM must be one of: #{GEM_PLATFORMS.join(", ")} (got: #{platform.inspect})"
     end
 
+    # The staged binaries are native to the machine that compiled them, so a
+    # label naming another platform would package binaries that install but
+    # cannot load (e.g. the README's arm64-darwin example copied onto Linux).
+    host = Gem::Platform.local
+    requested = Gem::Platform.new(platform)
+    unless host.os == requested.os && host.cpu == requested.cpu
+      abort "GEM_PLATFORM #{platform} does not match this host (#{host}); " \
+            "platform gems must be packaged on their native platform"
+    end
+
     staged = Dir["lib/microsandbox/*/microsandbox.{so,bundle}"]
     staged_abis = staged.map { |path| File.basename(File.dirname(path)) }.sort
     # Dev-only escape hatch for packaging against a single locally installed
@@ -155,7 +171,11 @@ namespace :gem do
     # wrapper shims and never holds binaries.
     spec.files = spec.files.reject { |path| path.start_with?("ext/") } +
                  staged + Dir["libexec/**/*"]
-    spec.required_ruby_version = Gem::Requirement.new([">= 3.1", "< #{RUBY_ABIS.last.next}.dev"])
+    # Derived from the ABIs actually packaged, so a single-ABI dev gem (via the
+    # RUBY_ABIS override) cannot claim Rubies it has no binary for. In CI this
+    # is always the full list.
+    abis = expected_abis.sort_by { |a| Gem::Version.new(a) }
+    spec.required_ruby_version = Gem::Requirement.new([">= #{abis.first}", "< #{abis.last.next}.dev"])
     # RubyGems only matches -gnu suffixed platform gems on glibc hosts from
     # 3.3.11 onwards; older releases would fall back to the source gem anyway,
     # this just makes the boundary explicit.
