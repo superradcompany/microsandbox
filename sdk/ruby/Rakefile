@@ -12,8 +12,10 @@ require "rubygems/package"
 RUBY_ABIS = %w[3.1 3.2 3.3 3.4].freeze
 # The Linux platforms carry an explicit -gnu suffix: a bare x86_64-linux gem
 # platform acts as a libc wildcard and would also match musl hosts, which these
-# glibc-linked binaries cannot serve. musl stays on the source gem.
-GEM_PLATFORMS = %w[x86_64-linux-gnu aarch64-linux-gnu arm64-darwin].freeze
+# glibc-linked binaries cannot serve. musl stays on the source gem. Windows is
+# x64-mingw-ucrt only: RubyInstaller 3.1+ builds are all ucrt, and no arm64
+# RubyInstaller exists for the 3.1-3.4 range these gems cover.
+GEM_PLATFORMS = %w[x86_64-linux-gnu aarch64-linux-gnu arm64-darwin x64-mingw-ucrt].freeze
 
 Rake::ExtensionTask.new("microsandbox") do |extension|
   extension.lib_dir = "lib/microsandbox"

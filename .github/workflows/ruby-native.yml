@@ -37,6 +37,11 @@ jobs:
   build:
     name: Build ${{ matrix.platform }}
     runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        # The run steps are written in bash (&&, globs, quoting); this keeps
+        # the Windows job on Git Bash instead of PowerShell.
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
@@ -51,6 +56,12 @@ jobs:
             runner: ubuntu-22.04-arm
           - platform: arm64-darwin
             runner: macos-14
+          # RubyInstaller rubies are MinGW-ucrt, so the extension builds with
+          # the windows-gnu Rust target (setup-ruby provides the MSYS2
+          # toolchain), not the MSVC target the rest of the repo's Windows CI
+          # exercises. arm64 Windows is out: no RubyInstaller for 3.1-3.4.
+          - platform: x64-mingw-ucrt
+            runner: windows-latest
 
     env:
       # Absolute, and shared by every Ruby in this job. rb_sys otherwise
@@ -77,6 +88,10 @@ jobs:
         if: contains(matrix.platform, 'linux')
         run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
 
+      - name: Add the windows-gnu Rust target
+        if: contains(matrix.platform, 'mingw')
+        run: rustup target add x86_64-pc-windows-gnu
+
       - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
         with:
           ruby-version: "3.1"
@@ -94,7 +109,9 @@ jobs:
         # This is the guard. It must run from sdk/ruby: cargo discovers
         # .cargo/config.toml by walking up from the working directory, not from
         # the manifest, so the same command from the repo root sees no patch.
-        run: cargo tree --manifest-path ext/microsandbox/Cargo.toml --depth 1 | grep "sdk/rust)"
+        # The dot in the pattern matches the path separator: forward slash on
+        # Unix, backslash in cargo's Windows output.
+        run: cargo tree --manifest-path ext/microsandbox/Cargo.toml --depth 1 | grep "sdk.rust)"
 
       - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
         with:
@@ -184,10 +201,13 @@ jobs:
     name: Smoke ${{ matrix.platform }} / Ruby ${{ matrix.ruby }}
     needs: build
     runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
-        platform: [x86_64-linux-gnu, aarch64-linux-gnu, arm64-darwin]
+        platform: [x86_64-linux-gnu, aarch64-linux-gnu, arm64-darwin, x64-mingw-ucrt]
         ruby: ["3.1", "3.2", "3.3", "3.4"]
         include:
           # Same glibc floor as the build: installing and loading on the
@@ -198,6 +218,8 @@ jobs:
             runner: ubuntu-22.04-arm
           - platform: arm64-darwin
             runner: macos-14
+          - platform: x64-mingw-ucrt
+            runner: windows-latest
 
     # Deliberately no checkout: the gem has to install and load with nothing
     # from the source tree on disk.

@@ -20,11 +20,12 @@ gem install microsandbox
 Precompiled platform gems carry the native extension, so these combinations
 install without a Rust toolchain:
 
-| Gem platform        | Ruby     | Notes            |
-| ------------------- | -------- | ---------------- |
-| `x86_64-linux-gnu`  | 3.1–3.4  | glibc 2.35+      |
-| `aarch64-linux-gnu` | 3.1–3.4  | glibc 2.35+      |
-| `arm64-darwin`      | 3.1–3.4  | Apple Silicon    |
+| Gem platform        | Ruby     | Notes              |
+| ------------------- | -------- | ------------------ |
+| `x86_64-linux-gnu`  | 3.1–3.4  | glibc 2.35+        |
+| `aarch64-linux-gnu` | 3.1–3.4  | glibc 2.35+        |
+| `arm64-darwin`      | 3.1–3.4  | Apple Silicon      |
+| `x64-mingw-ucrt`    | 3.1–3.4  | RubyInstaller 3.1+ |
 
 The Linux gems require glibc 2.35 or newer (Ubuntu 22.04, Debian 12, and
 later). The platform name carries no glibc version, so on an older glibc host
@@ -40,9 +41,9 @@ Installing a platform gem requires RubyGems 3.3.11 or newer; earlier releases
 mismatch `-linux` gems against glibc hosts. Run `gem update --system` first if
 `gem --version` reports anything older.
 
-musl (Alpine), Windows, and any other platform or Ruby version fall back to the
-source gem automatically. The source gem compiles the extension during install
-and therefore needs a Rust toolchain (1.85 or newer).
+musl (Alpine), Windows on ARM, and any other platform or Ruby version fall
+back to the source gem automatically. The source gem compiles the extension
+during install and therefore needs a Rust toolchain (1.85 or newer).
 
 To compile from source even where a platform gem exists:
 
