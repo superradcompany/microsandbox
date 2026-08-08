@@ -34,6 +34,7 @@ ts = [
 [dependencies]
 chrono.workspace = true
 dprint-plugin-typescript = { version = "=0.95", optional = true }
+hex.workspace = true
 ipnetwork.workspace = true
 serde.workspace = true
 serde_json.workspace = true

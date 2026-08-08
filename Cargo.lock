@@ -3994,6 +3994,7 @@ dependencies = [
  "futures",
  "hex",
  "libc",
+ "microsandbox-types",
  "microsandbox-utils",
  "oci-client",
  "oci-spec 0.10.0",
@@ -4195,6 +4196,7 @@ version = "0.6.13"
 dependencies = [
  "chrono",
  "dprint-plugin-typescript",
+ "hex",
  "ipnetwork",
  "serde",
  "serde_json",

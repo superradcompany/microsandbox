@@ -533,6 +533,11 @@ impl From<microsandbox_types::CommandResolutionError> for MicrosandboxError {
             microsandbox_types::CommandResolutionError::NoDefaultCommand => Self::NoDefaultCommand,
             error => Self::InvalidConfig(error.to_string()),
         }
+}
+
+impl From<microsandbox_types::SnapshotManifestError> for MicrosandboxError {
+    fn from(value: microsandbox_types::SnapshotManifestError) -> Self {
+        Self::Image(value.into())
     }
 }
 

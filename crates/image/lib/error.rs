@@ -30,6 +30,10 @@ pub enum ImageError {
     #[error("manifest parse error: {0}")]
     ManifestParse(String),
 
+    /// Snapshot descriptor parsing, validation, or serialization failed.
+    #[error(transparent)]
+    SnapshotManifest(#[from] microsandbox_types::SnapshotManifestError),
+
     /// OCI image config parsing failed.
     #[error("config parse error: {0}")]
     ConfigParse(String),
