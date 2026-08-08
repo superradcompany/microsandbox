@@ -41,10 +41,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # The gem platform string carries no glibc version, so the build
+          # host's glibc is the floor these binaries require at runtime. Pin
+          # the Linux runners to the oldest hosted image (glibc 2.35) and keep
+          # the audit step below in sync when bumping them.
           - platform: x86_64-linux-gnu
-            runner: ubuntu-latest
+            runner: ubuntu-22.04
           - platform: aarch64-linux-gnu
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-22.04-arm
           - platform: arm64-darwin
             runner: macos-14
 
@@ -119,6 +123,23 @@ jobs:
           gem install rake rake-compiler rb_sys --no-document
           rake gem:stage
 
+      - name: Audit the glibc symbol floor
+        if: contains(matrix.platform, 'linux')
+        working-directory: sdk/ruby
+        # RubyGems hands a -gnu platform gem to any glibc host regardless of
+        # version, so the binaries must not require symbols newer than the
+        # documented 2.35 floor. Fails when a runner upgrade would silently
+        # raise it.
+        run: |
+          for so in lib/microsandbox/*/microsandbox.so; do
+            max=$(objdump -T "$so" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -uV | tail -n1)
+            echo "$so requires $max"
+            if [ "$(printf '%s\nGLIBC_2.35\n' "$max" | sort -V | tail -n1)" != "GLIBC_2.35" ]; then
+              echo "::error::$so requires $max, above the documented glibc 2.35 floor"
+              exit 1
+            fi
+          done
+
       - name: Package the platform gem
         working-directory: sdk/ruby
         env:
@@ -164,10 +185,12 @@ jobs:
         platform: [x86_64-linux-gnu, aarch64-linux-gnu, arm64-darwin]
         ruby: ["3.1", "3.2", "3.3", "3.4"]
         include:
+          # Same glibc floor as the build: installing and loading on the
+          # oldest hosted image proves the 2.35 floor for real.
           - platform: x86_64-linux-gnu
-            runner: ubuntu-latest
+            runner: ubuntu-22.04
           - platform: aarch64-linux-gnu
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-22.04-arm
           - platform: arm64-darwin
             runner: macos-14
 

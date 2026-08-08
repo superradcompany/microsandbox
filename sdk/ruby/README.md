@@ -16,9 +16,14 @@ install without a Rust toolchain:
 
 | Gem platform        | Ruby     | Notes            |
 | ------------------- | -------- | ---------------- |
-| `x86_64-linux-gnu`  | 3.1–3.4  | glibc            |
-| `aarch64-linux-gnu` | 3.1–3.4  | glibc            |
+| `x86_64-linux-gnu`  | 3.1–3.4  | glibc 2.35+      |
+| `aarch64-linux-gnu` | 3.1–3.4  | glibc 2.35+      |
 | `arm64-darwin`      | 3.1–3.4  | Apple Silicon    |
+
+The Linux gems require glibc 2.35 or newer (Ubuntu 22.04, Debian 12, and
+later). The platform name carries no glibc version, so on an older glibc host
+the platform gem still installs but fails to load — force the source gem there
+(see below).
 
 <!-- pending first CI run: whether ruby:slim needs libcap-ng0 -->
 
