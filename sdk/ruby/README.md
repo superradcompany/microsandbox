@@ -11,6 +11,12 @@ Install the gem:
 gem install microsandbox
 ```
 
+> [!NOTE]
+> Platform gems are currently built and validated in CI but not yet published
+> to RubyGems — every `gem install microsandbox` still compiles the source gem
+> and needs a Rust toolchain. This section describes the state once the release
+> wiring ships them.
+
 Precompiled platform gems carry the native extension, so these combinations
 install without a Rust toolchain:
 

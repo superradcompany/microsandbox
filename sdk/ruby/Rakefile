@@ -64,6 +64,13 @@ namespace :cargo do
       cp ".cargo/config.toml", ".cargo/config.toml.orig"
     end
     base = File.exist?(".cargo/config.toml.orig") ? File.read(".cargo/config.toml.orig") : ""
+    if base.match?(/^\s*\[patch\.crates-io\]/)
+      # Appending would produce a duplicate table, which cargo rejects; merging
+      # into a hand-maintained table is too much magic for a rake task.
+      abort ".cargo/config.toml already carries a [patch.crates-io] table; " \
+            "add `microsandbox = { path = \"../rust\" }` to it by hand instead"
+    end
+    base << "\n" unless base.empty? || base.end_with?("\n")
     File.write(".cargo/config.toml", base + <<~TOML)
       [patch.crates-io]
       microsandbox = { path = "../rust" }
