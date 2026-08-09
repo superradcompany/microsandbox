@@ -952,6 +952,15 @@ impl Sandbox {
     fn is_local_ephemeral(&self) -> bool {
         self.local().is_some() && self.config.spec.lifecycle.ephemeral
     }
+
+    fn resolve_default_command(&self) -> MicrosandboxResult<microsandbox_types::ResolvedCommand> {
+        microsandbox_types::resolve_default_command(
+            self.config.spec.runtime.entrypoint.as_deref(),
+            self.config.spec.runtime.cmd.as_deref(),
+            None,
+        )
+        .map_err(Into::into)
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -959,6 +968,64 @@ impl Sandbox {
 //--------------------------------------------------------------------------------------------------
 
 impl Sandbox {
+    /// Execute the sandbox's effective OCI entrypoint and CMD and return a streaming handle.
+    pub async fn exec_default_stream(&self) -> MicrosandboxResult<ExecHandle> {
+        self.exec_default_stream_with(|options| options).await
+    }
+
+    /// Execute the sandbox's effective OCI entrypoint and CMD with full streaming options.
+    ///
+    /// Arguments configured through the options builder are appended after the resolved default
+    /// argv. They are execution arguments, not an OCI CMD override.
+    pub async fn exec_default_stream_with(
+        &self,
+        f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
+    ) -> MicrosandboxResult<ExecHandle> {
+        let command = self.resolve_default_command()?;
+        let opts = f(ExecOptionsBuilder::default())
+            .prepend_args(command.args)
+            .build()?;
+        self.backend
+            .sandboxes()
+            .exec_stream(
+                self.backend.clone(),
+                &self.name,
+                &self.config,
+                command.program,
+                opts,
+            )
+            .await
+    }
+
+    /// Execute the sandbox's effective OCI entrypoint and CMD and wait for completion.
+    pub async fn exec_default(&self) -> MicrosandboxResult<ExecOutput> {
+        self.exec_default_with(|options| options).await
+    }
+
+    /// Execute the sandbox's effective OCI entrypoint and CMD with full options.
+    ///
+    /// Arguments configured through the options builder are appended after the resolved default
+    /// argv. They are execution arguments, not an OCI CMD override.
+    pub async fn exec_default_with(
+        &self,
+        f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
+    ) -> MicrosandboxResult<ExecOutput> {
+        let command = self.resolve_default_command()?;
+        let opts = f(ExecOptionsBuilder::default())
+            .prepend_args(command.args)
+            .build()?;
+        self.backend
+            .sandboxes()
+            .exec(
+                self.backend.clone(),
+                &self.name,
+                &self.config,
+                command.program,
+                opts,
+            )
+            .await
+    }
+
     /// Execute a command and return a streaming handle.
     ///
     /// ```ignore
@@ -1156,6 +1223,33 @@ impl Sandbox {
 //--------------------------------------------------------------------------------------------------
 
 impl Sandbox {
+    /// Attach to the sandbox's effective OCI entrypoint and CMD.
+    pub async fn attach_default(&self) -> MicrosandboxResult<i32> {
+        self.attach_default_with(|options| options).await
+    }
+
+    /// Attach to the sandbox's effective OCI entrypoint and CMD with full options.
+    ///
+    /// Arguments configured through the options builder are appended after the resolved default
+    /// argv. They are execution arguments, not an OCI CMD override.
+    pub async fn attach_default_with(
+        &self,
+        f: impl FnOnce(AttachOptionsBuilder) -> AttachOptionsBuilder,
+    ) -> MicrosandboxResult<i32> {
+        let command = self.resolve_default_command()?;
+        let builder = f(AttachOptionsBuilder::default()).prepend_args(command.args);
+        self.backend
+            .sandboxes()
+            .attach(
+                self.backend.clone(),
+                &self.name,
+                &self.config,
+                command.program,
+                builder,
+            )
+            .await
+    }
+
     /// Attach to the sandbox with an interactive terminal session.
     ///
     /// ```ignore

@@ -126,7 +126,9 @@ typedef char *(*msb_sandbox_request_kill_fn)(uint64_t cancel_id, uint64_t handle
 typedef char *(*msb_sandbox_list_fn)(uint64_t cancel_id, const char *filter_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_remove_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_exec_fn)(uint64_t cancel_id, uint64_t handle, const char *cmd, const char *exec_opts_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_exec_default_fn)(uint64_t cancel_id, uint64_t handle, const char *exec_opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_exec_stream_fn)(uint64_t cancel_id, uint64_t handle, const char *cmd, const char *exec_opts_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_exec_default_stream_fn)(uint64_t cancel_id, uint64_t handle, const char *exec_opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_metrics_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_ssh_connect_fn)(uint64_t cancel_id, uint64_t handle, const char *opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_ssh_server_fn)(uint64_t cancel_id, uint64_t handle, const char *opts_json, uint8_t *buf, size_t buf_len);
@@ -184,6 +186,7 @@ typedef char *(*msb_sandbox_touch_fn)(uint64_t cancel_id, uint64_t handle, uint8
 typedef char *(*msb_sandbox_modify_fn)(uint64_t cancel_id, uint64_t handle, const char *opts_json, uint8_t *buf, size_t buf_len);
 
 typedef char *(*msb_sandbox_attach_fn)(uint64_t cancel_id, uint64_t handle, const char *cmd, const char *opts_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_attach_default_fn)(uint64_t cancel_id, uint64_t handle, const char *opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_attach_shell_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_all_sandbox_metrics_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_metrics_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
@@ -272,7 +275,9 @@ static msb_sandbox_request_kill_fn ptr_msb_sandbox_request_kill = NULL;
 static msb_sandbox_list_fn       ptr_msb_sandbox_list       = NULL;
 static msb_sandbox_remove_fn     ptr_msb_sandbox_remove     = NULL;
 static msb_sandbox_exec_fn       ptr_msb_sandbox_exec       = NULL;
+static msb_sandbox_exec_default_fn ptr_msb_sandbox_exec_default = NULL;
 static msb_sandbox_exec_stream_fn ptr_msb_sandbox_exec_stream = NULL;
+static msb_sandbox_exec_default_stream_fn ptr_msb_sandbox_exec_default_stream = NULL;
 static msb_sandbox_metrics_fn    ptr_msb_sandbox_metrics    = NULL;
 static msb_sandbox_ssh_connect_fn ptr_msb_sandbox_ssh_connect = NULL;
 static msb_sandbox_ssh_server_fn ptr_msb_sandbox_ssh_server = NULL;
@@ -324,6 +329,7 @@ static msb_exec_wait_fn            ptr_msb_exec_wait            = NULL;
 static msb_exec_kill_fn            ptr_msb_exec_kill            = NULL;
 static msb_exec_id_fn              ptr_msb_exec_id              = NULL;
 static msb_sandbox_attach_fn      ptr_msb_sandbox_attach      = NULL;
+static msb_sandbox_attach_default_fn ptr_msb_sandbox_attach_default = NULL;
 static msb_sandbox_attach_shell_fn ptr_msb_sandbox_attach_shell = NULL;
 static msb_all_sandbox_metrics_fn  ptr_msb_all_sandbox_metrics  = NULL;
 static msb_sandbox_handle_metrics_fn ptr_msb_sandbox_handle_metrics = NULL;
@@ -444,7 +450,9 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_sandbox_list);
 	RESOLVE(msb_sandbox_remove);
 	RESOLVE(msb_sandbox_exec);
+	RESOLVE(msb_sandbox_exec_default);
 	RESOLVE(msb_sandbox_exec_stream);
+	RESOLVE(msb_sandbox_exec_default_stream);
 	RESOLVE(msb_sandbox_metrics);
 	RESOLVE(msb_sandbox_ssh_connect);
 	RESOLVE(msb_sandbox_ssh_server);
@@ -496,6 +504,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_exec_kill);
 	RESOLVE(msb_exec_id);
 	RESOLVE(msb_sandbox_attach);
+	RESOLVE(msb_sandbox_attach_default);
 	RESOLVE(msb_sandbox_attach_shell);
 	RESOLVE(msb_all_sandbox_metrics);
 	RESOLVE(msb_sandbox_handle_metrics);
@@ -645,8 +654,14 @@ char *call_msb_sandbox_remove(uint64_t cancel_id, const char *name, uint8_t *buf
 char *call_msb_sandbox_exec(uint64_t cancel_id, uint64_t handle, const char *cmd, const char *opts, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_exec ? ptr_msb_sandbox_exec(cancel_id, handle, cmd, opts, buf, buf_len) : NULL;
 }
+char *call_msb_sandbox_exec_default(uint64_t cancel_id, uint64_t handle, const char *opts, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_exec_default ? ptr_msb_sandbox_exec_default(cancel_id, handle, opts, buf, buf_len) : NULL;
+}
 char *call_msb_sandbox_exec_stream(uint64_t cancel_id, uint64_t handle, const char *cmd, const char *opts, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_exec_stream ? ptr_msb_sandbox_exec_stream(cancel_id, handle, cmd, opts, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_exec_default_stream(uint64_t cancel_id, uint64_t handle, const char *opts, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_exec_default_stream ? ptr_msb_sandbox_exec_default_stream(cancel_id, handle, opts, buf, buf_len) : NULL;
 }
 char *call_msb_sandbox_metrics(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_metrics ? ptr_msb_sandbox_metrics(cancel_id, handle, buf, buf_len) : NULL;
@@ -800,6 +815,9 @@ char *call_msb_exec_id(uint64_t exec_handle, uint8_t *buf, size_t buf_len) {
 }
 char *call_msb_sandbox_attach(uint64_t cancel_id, uint64_t handle, const char *cmd, const char *opts_json, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_attach ? ptr_msb_sandbox_attach(cancel_id, handle, cmd, opts_json, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_attach_default(uint64_t cancel_id, uint64_t handle, const char *opts_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_attach_default ? ptr_msb_sandbox_attach_default(cancel_id, handle, opts_json, buf, buf_len) : NULL;
 }
 char *call_msb_sandbox_attach_shell(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_attach_shell ? ptr_msb_sandbox_attach_shell(cancel_id, handle, buf, buf_len) : NULL;
@@ -1089,6 +1107,7 @@ const (
 	KindVolumeNotFound         = "volume_not_found"
 	KindVolumeAlreadyExists    = "volume_already_exists"
 	KindExecTimeout            = "exec_timeout"
+	KindNoDefaultCommand       = "no_default_command"
 	KindInvalidConfig          = "invalid_config"
 	KindInvalidArgument        = "invalid_argument"
 	KindInvalidHandle          = "invalid_handle"
@@ -1543,7 +1562,8 @@ type CreateOptions struct {
 	Labels               map[string]string    `json:"labels,omitempty"`
 	Detached             bool                 `json:"detached,omitempty"`
 	Ephemeral            bool                 `json:"ephemeral,omitempty"`
-	Entrypoint           []string             `json:"entrypoint,omitempty"`
+	Entrypoint           *[]string            `json:"entrypoint,omitempty"`
+	Cmd                  *[]string            `json:"cmd,omitempty"`
 	Init                 *InitOptions         `json:"init,omitempty"`
 	LogLevel             string               `json:"log_level,omitempty"`
 	QuietLogs            bool                 `json:"quiet_logs,omitempty"`
@@ -2391,6 +2411,39 @@ func (s *Sandbox) Exec(ctx context.Context, cmd string, opts ExecOptions) (*Exec
 	return &ExecResult{Stdout: raw.Stdout, Stderr: raw.Stderr, ExitCode: code}, nil
 }
 
+// ExecDefault runs the sandbox's effective OCI entrypoint and CMD and collects its output.
+func (s *Sandbox) ExecDefault(ctx context.Context, opts ExecOptions) (*ExecResult, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	optsJSON, err := json.Marshal(opts)
+	if err != nil {
+		return nil, fmt.Errorf("marshal exec opts: %w", err)
+	}
+	cOpts := C.CString(string(optsJSON))
+	defer C.free(unsafe.Pointer(cOpts))
+
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_exec_default(cancelID, s.h(), cOpts, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var raw struct {
+		Stdout   string `json:"stdout"`
+		Stderr   string `json:"stderr"`
+		ExitCode *int   `json:"exit_code"`
+	}
+	if err := json.Unmarshal([]byte(out), &raw); err != nil {
+		return nil, fmt.Errorf("parse exec_default response: %w", err)
+	}
+	code := -1
+	if raw.ExitCode != nil {
+		code = *raw.ExitCode
+	}
+	return &ExecResult{Stdout: raw.Stdout, Stderr: raw.Stderr, ExitCode: code}, nil
+}
+
 // =============================================================================
 // SSH
 // =============================================================================
@@ -2938,6 +2991,33 @@ func (s *Sandbox) ExecStream(ctx context.Context, cmd string, opts ExecOptions) 
 	return &ExecStreamHandle{handle: C.uint64_t(resp.ExecHandle), stdinPiped: opts.StdinPipe}, nil
 }
 
+// ExecDefaultStream starts a streaming exec of the sandbox's effective OCI entrypoint and CMD.
+func (s *Sandbox) ExecDefaultStream(ctx context.Context, opts ExecOptions) (*ExecStreamHandle, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	optsJSON, err := json.Marshal(opts)
+	if err != nil {
+		return nil, fmt.Errorf("marshal exec opts: %w", err)
+	}
+	cOpts := C.CString(string(optsJSON))
+	defer C.free(unsafe.Pointer(cOpts))
+
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_exec_default_stream(cancelID, s.h(), cOpts, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		ExecHandle uint64 `json:"exec_handle"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return nil, fmt.Errorf("parse exec_default_stream response: %w", err)
+	}
+	return &ExecStreamHandle{handle: C.uint64_t(resp.ExecHandle), stdinPiped: opts.StdinPipe}, nil
+}
+
 // TakeStdin returns a sink for writing to the process's stdin. Returns nil
 // when the exec session was not started with StdinPipe==true, and on every
 // call after the first (matching the Node SDK's single-take semantics).
@@ -3440,6 +3520,32 @@ func (s *Sandbox) Attach(ctx context.Context, cmd string, opts AttachOptions) (i
 	}
 	if err := json.Unmarshal([]byte(out), &resp); err != nil {
 		return -1, fmt.Errorf("parse attach response: %w", err)
+	}
+	return resp.ExitCode, nil
+}
+
+// AttachDefault starts an interactive PTY session for the effective OCI entrypoint and CMD.
+func (s *Sandbox) AttachDefault(ctx context.Context, opts AttachOptions) (int, error) {
+	if err := ensureLoaded(); err != nil {
+		return -1, err
+	}
+	optsBytes, err := json.Marshal(opts)
+	if err != nil {
+		return -1, fmt.Errorf("marshal attach opts: %w", err)
+	}
+	cOpts := C.CString(string(optsBytes))
+	defer C.free(unsafe.Pointer(cOpts))
+	out, callErr := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_attach_default(cancelID, s.h(), cOpts, buf, bufLen)
+	})
+	if callErr != nil {
+		return -1, callErr
+	}
+	var resp struct {
+		ExitCode int `json:"exit_code"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return -1, fmt.Errorf("parse attach_default response: %w", err)
 	}
 	return resp.ExitCode, nil
 }

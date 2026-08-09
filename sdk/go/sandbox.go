@@ -91,7 +91,6 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		Labels:            o.Labels,
 		Detached:          o.Detached,
 		Ephemeral:         o.Ephemeral,
-		Entrypoint:        o.Entrypoint,
 		LogLevel:          string(o.LogLevel),
 		QuietLogs:         o.QuietLogs,
 		Scripts:           o.Scripts,
@@ -102,6 +101,14 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		PortsUDP:          o.PortsUDP,
 		PortBindings:      buildFFIPortBindings(o.PortBindings),
 		RegistryInsecure:  o.RegistryInsecure,
+	}
+	if o.Entrypoint != nil {
+		entrypoint := append([]string{}, o.Entrypoint...)
+		ffiOpts.Entrypoint = &entrypoint
+	}
+	if o.Cmd != nil {
+		cmd := append([]string{}, o.Cmd...)
+		ffiOpts.Cmd = &cmd
 	}
 	if o.RootDisk != nil {
 		ffiOpts.RootDisk = buildFFIRootDisk(*o.RootDisk)
@@ -820,6 +827,21 @@ func (s *Sandbox) OwnsLifecycleOrFalse() bool {
 // CLI tools, not library code.
 func (s *Sandbox) Attach(ctx context.Context, cmd string, args ...string) (int, error) {
 	code, err := s.inner.Attach(ctx, cmd, ffi.AttachOptions{Args: args})
+	return code, wrapFFI(err)
+}
+
+// AttachDefault starts an interactive PTY session for the effective OCI entrypoint and CMD.
+func (s *Sandbox) AttachDefault(ctx context.Context, opts ...AttachOption) (int, error) {
+	o := AttachConfig{}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	code, err := s.inner.AttachDefault(ctx, ffi.AttachOptions{
+		Cwd:        o.Cwd,
+		User:       o.User,
+		Env:        o.Env,
+		DetachKeys: o.DetachKeys,
+	})
 	return code, wrapFFI(err)
 }
 

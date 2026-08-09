@@ -951,7 +951,7 @@ Fully disable networking. No network interface is created.
 entrypoint(cmd: string[]): this
 ```
 
-Override the OCI image's stored ENTRYPOINT. Consulted by `msb exec` / `msb run` (CLI command resolution), **not** by [`sandbox.exec`](/sdk/typescript/execution) / [`sandbox.shell`](/sdk/typescript/execution) - those pass `cmd` literally to the guest agent. Use this when configuring a sandbox via the SDK for later CLI attachment.
+Override the image ENTRYPOINT used by default-workload execution. [`sandbox.execDefault`](/sdk/typescript/execution) combines it with the effective CMD. Literal [`sandbox.exec`](/sdk/typescript/execution), [`sandbox.attach`](/sdk/typescript/execution), and [`sandbox.shell`](/sdk/typescript/execution) calls ignore it.
 
 <p className="msb-label">Parameters</p>
 
@@ -1128,6 +1128,21 @@ Configure an explicit rootfs source. Use this for OCI-only settings such as the 
     <div className="msb-param-desc">Configure the rootfs source.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">.</span><span className="msb-hn">cmd()</span>
+
+```typescript
+cmd(cmd: string[]): this
+```
+
+Override the image CMD used by default-workload execution. An empty array explicitly clears the image CMD. This describes durable configuration and does not execute anything during `create()`.
+
+```typescript
+const sandbox = await Sandbox.builder("worker")
+  .image("example/worker:latest")
+  .cmd(["worker.py", "--once"])
+  .create();
+```
 
 #### <span className="msb-recv">.</span><span className="msb-hn">init()</span>
 
@@ -2152,8 +2167,8 @@ Configuration object produced by [`build()`](#build) and returned by [`config()`
 | workdir | `string \| null` | Default working directory |
 | shell | `string \| null` | Shell binary |
 | securityProfile | `"default" \| "restricted"` | In-guest security profile |
-| entrypoint | `string[] \| null` | Override image entrypoint |
-| cmd | `string[] \| null` | Override image cmd |
+| entrypoint | `string[] \| null` | Override the image ENTRYPOINT used by default-workload execution |
+| cmd | `string[] \| null` | Override the image CMD used by default-workload execution; an empty array clears CMD |
 | hostname | `string \| null` | Guest hostname |
 | user | `string \| null` | Default guest user |
 | env | `Array<readonly [string, string]>` | Environment variables |

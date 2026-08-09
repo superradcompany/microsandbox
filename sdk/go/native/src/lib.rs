@@ -451,6 +451,7 @@ mod error_kind {
     pub const VOLUME_NOT_FOUND: &str = "volume_not_found";
     pub const VOLUME_ALREADY_EXISTS: &str = "volume_already_exists";
     pub const EXEC_TIMEOUT: &str = "exec_timeout";
+    pub const NO_DEFAULT_COMMAND: &str = "no_default_command";
     pub const INVALID_CONFIG: &str = "invalid_config";
     pub const INVALID_ARGUMENT: &str = "invalid_argument";
     pub const INVALID_HANDLE: &str = "invalid_handle";
@@ -518,6 +519,7 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::VolumeNotFound(_) => error_kind::VOLUME_NOT_FOUND,
             MicrosandboxError::VolumeAlreadyExists(_) => error_kind::VOLUME_ALREADY_EXISTS,
             MicrosandboxError::ExecTimeout(_) => error_kind::EXEC_TIMEOUT,
+            MicrosandboxError::NoDefaultCommand => error_kind::NO_DEFAULT_COMMAND,
             MicrosandboxError::InvalidConfig(_) => error_kind::INVALID_CONFIG,
             MicrosandboxError::SandboxFsOps(_) => error_kind::FILESYSTEM,
             MicrosandboxError::ImageNotFound(_) => error_kind::IMAGE_NOT_FOUND,
@@ -999,8 +1001,9 @@ struct SandboxCreateOpts {
     labels: HashMap<String, String>,
     /// User-workload entrypoint override (separate from `init`, which is
     /// guest PID 1). Sent across as an array of strings.
-    #[serde(default)]
-    entrypoint: Vec<String>,
+    entrypoint: Option<Vec<String>>,
+    /// User-workload CMD override. `Some([])` explicitly clears image CMD.
+    cmd: Option<Vec<String>>,
     /// PID-1 init handoff. Either a bare cmd string or {cmd, args, env}.
     init: Option<InitOpts>,
     /// Sandbox log level: trace/debug/info/warn/error.
@@ -2133,8 +2136,11 @@ pub unsafe extern "C" fn msb_sandbox_create(
             if opts.ephemeral {
                 builder = builder.ephemeral(true);
             }
-            if !opts.entrypoint.is_empty() {
-                builder = builder.entrypoint(opts.entrypoint);
+            if let Some(entrypoint) = opts.entrypoint {
+                builder = builder.entrypoint(entrypoint);
+            }
+            if let Some(cmd) = opts.cmd {
+                builder = builder.cmd(cmd);
             }
             if let Some(init) = opts.init {
                 let args = init.args;
@@ -3799,6 +3805,56 @@ pub unsafe extern "C" fn msb_sandbox_exec(
     })
 }
 
+/// Execute the sandbox's effective OCI entrypoint and CMD with collected output.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_exec_default(
+    cancel_id: u64,
+    handle: Handle,
+    exec_opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sb = get(handle)?;
+        let opts_raw = unsafe { cstr(exec_opts_json) }?;
+        let opts: ExecOpts = serde_json::from_str(&opts_raw)
+            .map_err(|e| FfiError::invalid_argument(format!("invalid exec opts: {e}")))?;
+        Ok(Box::pin(async move {
+            let output = sb
+                .exec_default_with(|mut b| {
+                    if let Some(args) = opts.args {
+                        b = b.args(args);
+                    }
+                    if let Some(cwd) = opts.cwd {
+                        b = b.cwd(cwd);
+                    }
+                    if let Some(tty) = opts.tty {
+                        b = b.tty(tty);
+                    }
+                    if let Some(secs) = opts.timeout_secs {
+                        b = b.timeout(Duration::from_secs(secs));
+                    }
+                    if let Some(user) = opts.user {
+                        b = b.user(user);
+                    }
+                    for (key, value) in opts.env {
+                        b = b.env(key, value);
+                    }
+                    b
+                })
+                .await
+                .map_err(FfiError::from)?;
+
+            Ok(serde_json::json!({
+                "stdout": output.stdout().unwrap_or_default(),
+                "stderr": output.stderr().unwrap_or_default(),
+                "exit_code": output.status().code,
+            })
+            .to_string())
+        }))
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Sandbox — metrics
 // Output: {cpu_percent,memory_bytes,memory_limit_bytes,disk_*,net_*,uptime_secs}
@@ -4591,6 +4647,62 @@ pub unsafe extern "C" fn msb_sandbox_exec_stream(
             if stdin_pipe
                 && let Ok(eh) = get_exec(exec_h)
                 && let Ok(mut guard) = eh.handle.lock()
+                && let Some(sink) = guard.take_stdin()
+            {
+                let _ = register_stdin(exec_h, sink);
+            }
+            Ok(format!(r#"{{"exec_handle":{exec_h}}}"#))
+        }))
+    })
+}
+
+/// Start a streaming exec of the sandbox's effective OCI entrypoint and CMD.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_exec_default_stream(
+    cancel_id: u64,
+    handle: Handle,
+    exec_opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sb = get(handle)?;
+        let opts_raw = unsafe { cstr(exec_opts_json) }?;
+        let opts: ExecOpts = serde_json::from_str(&opts_raw)
+            .map_err(|e| FfiError::invalid_argument(format!("invalid exec opts: {e}")))?;
+        Ok(Box::pin(async move {
+            let stdin_pipe = opts.stdin_pipe.unwrap_or(false);
+            let exec_handle = sb
+                .exec_default_stream_with(|mut b| {
+                    if let Some(args) = opts.args {
+                        b = b.args(args);
+                    }
+                    if stdin_pipe {
+                        b = b.stdin_pipe();
+                    }
+                    if let Some(tty) = opts.tty {
+                        b = b.tty(tty);
+                    }
+                    if let Some(cwd) = opts.cwd {
+                        b = b.cwd(cwd);
+                    }
+                    if let Some(secs) = opts.timeout_secs {
+                        b = b.timeout(Duration::from_secs(secs));
+                    }
+                    if let Some(user) = opts.user {
+                        b = b.user(user);
+                    }
+                    for (key, value) in opts.env {
+                        b = b.env(key, value);
+                    }
+                    b
+                })
+                .await
+                .map_err(FfiError::from)?;
+            let exec_h = register_exec(exec_handle)?;
+            if stdin_pipe
+                && let Ok(entry) = get_exec(exec_h)
+                && let Ok(mut guard) = entry.handle.lock()
                 && let Some(sink) = guard.take_stdin()
             {
                 let _ = register_stdin(exec_h, sink);
@@ -6392,6 +6504,55 @@ pub unsafe extern "C" fn msb_sandbox_attach(
     match result {
         Ok(()) => std::ptr::null_mut(),
         Err(e) => err_ptr(e),
+    }
+}
+
+/// Attach to the sandbox's effective OCI entrypoint and CMD.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_attach_default(
+    cancel_id: u64,
+    handle: Handle,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    let result: Result<(), FfiError> = (|| -> Result<(), FfiError> {
+        let token = lookup_cancel_token(cancel_id)?;
+        let sb = get(handle)?;
+        let opts: AttachOpts = if opts_json.is_null() {
+            AttachOpts::default()
+        } else {
+            let value = unsafe { cstr(opts_json) }?;
+            serde_json::from_str(&value)
+                .map_err(|e| FfiError::invalid_argument(format!("attach opts: {e}")))?
+        };
+        let exit_code = rt().block_on(async {
+            tokio::select! {
+                result = sb.attach_default_with(|mut builder| {
+                    builder = builder.args(opts.args);
+                    if let Some(cwd) = opts.cwd {
+                        builder = builder.cwd(cwd);
+                    }
+                    if let Some(user) = opts.user {
+                        builder = builder.user(user);
+                    }
+                    for (key, value) in opts.env {
+                        builder = builder.env(key, value);
+                    }
+                    if let Some(keys) = opts.detach_keys {
+                        builder = builder.detach_keys(keys);
+                    }
+                    builder
+                }) => result.map_err(FfiError::from),
+                _ = token.cancelled() => Err(FfiError::new(error_kind::CANCELLED, "cancelled")),
+            }
+        })?;
+        write_output(buf, buf_len, &format!(r#"{{"exit_code":{exit_code}}}"#))
+    })();
+    cancel_unregister(cancel_id);
+    match result {
+        Ok(()) => std::ptr::null_mut(),
+        Err(error) => err_ptr(error),
     }
 }
 

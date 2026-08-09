@@ -266,6 +266,36 @@ export class Sandbox implements AsyncDisposable {
 
   // -- exec ---------------------------------------------------------------
 
+  async execDefault(): Promise<ExecOutput> {
+    const raw = await withMappedErrors(() => this.inner.execDefault());
+    return new ExecOutput(raw);
+  }
+
+  async execDefaultWith(
+    configure: (b: NapiExecOptionsBuilder) => NapiExecOptionsBuilder,
+  ): Promise<ExecOutput> {
+    const builder = configure(new napi.ExecOptionsBuilder());
+    const raw = await withMappedErrors(() =>
+      this.inner.execDefaultWithBuilder(builder),
+    );
+    return new ExecOutput(raw);
+  }
+
+  async execDefaultStream(): Promise<ExecHandle> {
+    const raw = await withMappedErrors(() => this.inner.execDefaultStream());
+    return new ExecHandle(raw);
+  }
+
+  async execDefaultStreamWith(
+    configure: (b: NapiExecOptionsBuilder) => NapiExecOptionsBuilder,
+  ): Promise<ExecHandle> {
+    const builder = configure(new napi.ExecOptionsBuilder());
+    const raw = await withMappedErrors(() =>
+      this.inner.execDefaultStreamWithBuilder(builder),
+    );
+    return new ExecHandle(raw);
+  }
+
   async exec(cmd: string, args?: Iterable<string>): Promise<ExecOutput> {
     const argv = args ? Array.from(args) : undefined;
     const raw = await withMappedErrors(() => this.inner.exec(cmd, argv));
@@ -313,6 +343,19 @@ export class Sandbox implements AsyncDisposable {
   }
 
   // -- attach -------------------------------------------------------------
+
+  async attachDefault(): Promise<number> {
+    return await withMappedErrors(() => this.inner.attachDefault());
+  }
+
+  async attachDefaultWith(
+    configure: (b: NapiAttachOptionsBuilder) => NapiAttachOptionsBuilder,
+  ): Promise<number> {
+    const builder = configure(new napi.AttachOptionsBuilder());
+    return await withMappedErrors(() =>
+      this.inner.attachDefaultWithBuilder(builder),
+    );
+  }
 
   async attach(cmd: string, args?: Iterable<string>): Promise<number> {
     const argv = args ? Array.from(args) : undefined;

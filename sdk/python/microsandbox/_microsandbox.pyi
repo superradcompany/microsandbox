@@ -100,6 +100,7 @@ class Sandbox:
         hostname: str | None = None,
         user: str | None = None,
         entrypoint: Sequence[str] | None = None,
+        cmd: Sequence[str] | None = None,
         init: str | InitConfig | InitOptions | None = None,
         replace: bool = False,
         replace_with_timeout: float | None = None,
@@ -153,6 +154,7 @@ class Sandbox:
         hostname: str | None = None,
         user: str | None = None,
         entrypoint: Sequence[str] | None = None,
+        cmd: Sequence[str] | None = None,
         init: str | InitConfig | InitOptions | None = None,
         replace: bool = False,
         replace_with_timeout: float | None = None,
@@ -180,6 +182,28 @@ class Sandbox:
     def owns_lifecycle(self) -> Awaitable[bool]: ...
     @property
     def fs(self) -> SandboxFsOps: ...
+    async def exec_default(
+        self,
+        *,
+        cwd: str | None = None,
+        user: str | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        stdin: Stdin | bytes | None = None,
+        tty: bool = False,
+        rlimits: list[Rlimit] | None = None,
+    ) -> ExecOutput: ...
+    async def exec_default_stream(
+        self,
+        *,
+        cwd: str | None = None,
+        user: str | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        stdin: Stdin | bytes | None = None,
+        tty: bool = False,
+        rlimits: list[Rlimit] | None = None,
+    ) -> ExecHandle: ...
     async def exec(
         self,
         cmd: str,
@@ -231,6 +255,14 @@ class Sandbox:
         rlimits: list[Rlimit] | None = None,
     ) -> ExecHandle: ...
     def ssh(self) -> SandboxSshOps: ...
+    async def attach_default(
+        self,
+        *,
+        cwd: str | None = None,
+        user: str | None = None,
+        env: Mapping[str, str] | None = None,
+        detach_keys: str | None = None,
+    ) -> int: ...
     async def attach(
         self,
         cmd: str,

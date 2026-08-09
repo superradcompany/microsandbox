@@ -58,6 +58,12 @@ pub(crate) struct DetachKeys {
 //--------------------------------------------------------------------------------------------------
 
 impl AttachOptionsBuilder {
+    /// Prepend arguments resolved by a higher-level execution helper.
+    pub(crate) fn prepend_args(mut self, args: impl IntoIterator<Item = String>) -> Self {
+        self.options.args.splice(0..0, args);
+        self
+    }
+
     /// Append a command-line argument to the attached command.
     pub fn arg(mut self, arg: impl Into<String>) -> Self {
         self.options.args.push(arg.into());

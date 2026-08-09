@@ -65,7 +65,7 @@ use microsandbox_protocol::{
 };
 use microsandbox_runtime::launch::{LaunchConfig, Lifecycle};
 use microsandbox_runtime::vm::{MetricsSlotHandoff, StartupCommand};
-use microsandbox_types::SandboxLogLevel;
+use microsandbox_types::{CommandResolutionError, SandboxLogLevel, resolve_default_command};
 use microsandbox_utils::{DB_FILENAME, DB_SUBDIR};
 
 #[cfg(not(target_os = "linux"))]
@@ -2842,22 +2842,17 @@ fn resolve_startup_command(config: &SandboxConfig) -> Option<(String, Vec<String
         return None;
     }
 
-    match (&config.spec.runtime.entrypoint, &config.spec.runtime.cmd) {
-        (Some(entrypoint), cmd) if !entrypoint.is_empty() => {
-            let bin = entrypoint[0].clone();
-            let args = entrypoint[1..]
-                .iter()
-                .chain(cmd.iter().flatten())
-                .cloned()
-                .collect();
-            Some((bin, args))
+    match resolve_default_command(
+        config.spec.runtime.entrypoint.as_deref(),
+        config.spec.runtime.cmd.as_deref(),
+        None,
+    ) {
+        Ok(command) => Some((command.program, command.args)),
+        Err(CommandResolutionError::NoDefaultCommand) => None,
+        Err(error) => {
+            tracing::error!(%error, "invalid startup command reached runtime launch planning");
+            None
         }
-        (_, Some(cmd)) if !cmd.is_empty() => {
-            let bin = cmd[0].clone();
-            let args = cmd[1..].to_vec();
-            Some((bin, args))
-        }
-        _ => None,
     }
 }
 

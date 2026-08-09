@@ -377,6 +377,14 @@ impl JsSandboxBuilder {
         self
     }
 
+    /// Override the image CMD used by default-workload execution.
+    #[napi]
+    pub fn cmd(&mut self, cmd: Vec<String>) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.cmd(cmd));
+        self
+    }
+
     /// Hand off PID 1 to a guest init binary after agentd's setup.
     ///
     /// `cmd` is either an absolute path inside the guest rootfs or

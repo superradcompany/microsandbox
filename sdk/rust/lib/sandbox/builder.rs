@@ -444,6 +444,15 @@ impl SandboxBuilder {
         self
     }
 
+    /// Override the OCI image command used by default-workload execution.
+    ///
+    /// An empty array clears the image CMD. This describes durable configuration and does not
+    /// execute the command during sandbox creation.
+    pub fn cmd(mut self, cmd: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.config.spec.runtime.cmd = Some(cmd.into_iter().map(Into::into).collect());
+        self
+    }
+
     /// Select the foreground command for attached CLI `run`.
     #[doc(hidden)]
     pub fn foreground_command(
@@ -1258,6 +1267,17 @@ impl SandboxBuilder {
         super::validate_env(&self.config.spec.env)?;
         super::validate_labels(&self.config.spec.labels)?;
 
+        if let Err(error) = microsandbox_types::resolve_default_command(
+            self.config.spec.runtime.entrypoint.as_deref(),
+            self.config.spec.runtime.cmd.as_deref(),
+            None,
+        ) && !matches!(
+            error,
+            microsandbox_types::CommandResolutionError::NoDefaultCommand
+        ) {
+            return Err(error.into());
+        }
+
         if let Some(spec) = &self.config.spec.init {
             super::init::validate(spec)?;
         }
@@ -1482,6 +1502,30 @@ mod tests {
             Some(&"echo hi".into())
         );
         assert_eq!(config.spec.lifecycle.max_duration_secs, Some(60));
+    }
+
+    #[tokio::test]
+    async fn test_builder_preserves_cmd_override_and_explicit_clears() {
+        let configured = SandboxBuilder::new("test")
+            .image("alpine")
+            .cmd(["worker.py", "--once"])
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(
+            configured.spec.runtime.cmd,
+            Some(vec!["worker.py".to_string(), "--once".to_string()])
+        );
+
+        let cleared = SandboxBuilder::new("test")
+            .image("alpine")
+            .entrypoint(Vec::<String>::new())
+            .cmd(Vec::<String>::new())
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(cleared.spec.runtime.entrypoint, Some(Vec::new()));
+        assert_eq!(cleared.spec.runtime.cmd, Some(Vec::new()));
     }
 
     #[tokio::test]

@@ -51,6 +51,7 @@ type SandboxConfig struct {
 	Detached           bool
 	Ephemeral          bool
 	Entrypoint         []string
+	Cmd                []string
 	Init               *InitConfig
 	LogLevel           LogLevel
 	QuietLogs          bool
@@ -100,6 +101,7 @@ type persistedSandboxConfig struct {
 	MaxCPUs           uint8                `json:"max_cpus"`
 	CPUPlacement      CPUPlacement         `json:"cpu_placement"`
 	Resources         *persistedResources  `json:"resources"`
+	Runtime           *persistedRuntime    `json:"runtime"`
 	Workdir           string               `json:"workdir"`
 	Shell             string               `json:"shell"`
 	SecurityProfile   SecurityProfile      `json:"security_profile"`
@@ -111,6 +113,7 @@ type persistedSandboxConfig struct {
 	Detached          bool                 `json:"detached"`
 	Lifecycle         *persistedLifecycle  `json:"lifecycle"`
 	Entrypoint        []string             `json:"entrypoint"`
+	Cmd               []string             `json:"cmd"`
 	Init              *persistedInitConfig `json:"init"`
 	LogLevel          LogLevel             `json:"log_level"`
 	QuietLogs         bool                 `json:"quiet_logs"`
@@ -131,6 +134,17 @@ type persistedResources struct {
 	MaxMemoryMiB uint32       `json:"max_memory_mib"`
 	CPUPlacement CPUPlacement `json:"cpu_placement"`
 	THP          THPPolicy    `json:"thp"`
+}
+
+type persistedRuntime struct {
+	Workdir    string            `json:"workdir"`
+	Shell      string            `json:"shell"`
+	Scripts    map[string]string `json:"scripts"`
+	Entrypoint []string          `json:"entrypoint"`
+	Cmd        []string          `json:"cmd"`
+	Hostname   string            `json:"hostname"`
+	User       string            `json:"user"`
+	LogLevel   LogLevel          `json:"log_level"`
 }
 
 type persistedLifecycle struct {
@@ -169,6 +183,20 @@ func (c *SandboxConfig) UnmarshalJSON(data []byte) error {
 		upperSizeSet = true
 	}
 
+	runtime := persistedRuntime{
+		Workdir:    raw.Workdir,
+		Shell:      raw.Shell,
+		Scripts:    raw.Scripts,
+		Entrypoint: raw.Entrypoint,
+		Cmd:        raw.Cmd,
+		Hostname:   raw.Hostname,
+		User:       raw.User,
+		LogLevel:   raw.LogLevel,
+	}
+	if raw.Runtime != nil {
+		runtime = *raw.Runtime
+	}
+
 	*c = SandboxConfig{
 		Name:              raw.Name,
 		Image:             image,
@@ -182,21 +210,22 @@ func (c *SandboxConfig) UnmarshalJSON(data []byte) error {
 		MaxCPUs:           raw.maxCPUs(),
 		CPUPlacement:      raw.cpuPlacement(),
 		THP:               raw.thp(),
-		Workdir:           raw.Workdir,
-		Shell:             raw.Shell,
+		Workdir:           runtime.Workdir,
+		Shell:             runtime.Shell,
 		SecurityProfile:   raw.SecurityProfile,
 		DeploymentProfile: normalizeDeploymentProfile(raw.DeploymentProfile),
-		Hostname:          raw.Hostname,
-		User:              raw.User,
+		Hostname:          runtime.Hostname,
+		User:              runtime.User,
 		Replace:           raw.Replace,
 		Labels:            raw.Labels,
 		Detached:          raw.Detached,
 		Ephemeral:         raw.lifecycleEphemeral(),
-		Entrypoint:        raw.Entrypoint,
+		Entrypoint:        runtime.Entrypoint,
+		Cmd:               runtime.Cmd,
 		Init:              decodePersistedInit(raw.Init),
-		LogLevel:          raw.LogLevel,
+		LogLevel:          runtime.LogLevel,
 		QuietLogs:         raw.QuietLogs,
-		Scripts:           raw.Scripts,
+		Scripts:           runtime.Scripts,
 		PullPolicy:        raw.PullPolicy,
 		MaxDuration:       time.Duration(raw.lifecycleMaxDurationSecs()) * time.Second,
 		IdleTimeout:       time.Duration(raw.lifecycleIdleTimeoutSecs()) * time.Second,
@@ -753,11 +782,17 @@ func WithEphemeral(ephemeral bool) SandboxOption {
 	return func(o *SandboxConfig) { o.Ephemeral = ephemeral }
 }
 
-// WithEntrypoint overrides the user-workload entrypoint baked into the image.
-// Note this is the user workload (what the agent execs per request), not the
-// guest PID 1 — for that, use WithInit.
+// WithEntrypoint overrides the image ENTRYPOINT used by default-workload execution.
+// Literal Exec, Attach, and Shell calls ignore it. This is the user workload,
+// not guest PID 1 — for that, use WithInit.
 func WithEntrypoint(cmd ...string) SandboxOption {
-	return func(o *SandboxConfig) { o.Entrypoint = append([]string(nil), cmd...) }
+	return func(o *SandboxConfig) { o.Entrypoint = append([]string{}, cmd...) }
+}
+
+// WithCmd overrides the image CMD used by default-workload execution.
+// Calling WithCmd with no arguments explicitly clears the image CMD.
+func WithCmd(cmd ...string) SandboxOption {
+	return func(o *SandboxConfig) { o.Cmd = append([]string{}, cmd...) }
 }
 
 // WithInit hands off PID 1 to a guest init binary.

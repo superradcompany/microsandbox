@@ -397,6 +397,24 @@ func TestFFIWireShape_ReplaceWithTimeoutMs(t *testing.T) {
 	}
 }
 
+func TestFFIWireShape_CommandOverridesPreserveExplicitClear(t *testing.T) {
+	got := marshalCreateOptions(t, WithEntrypoint("python", "-u"), WithCmd("worker.py"))
+	if entrypoint := mustField(t, got, "entrypoint").([]any); len(entrypoint) != 2 {
+		t.Fatalf("entrypoint = %v", entrypoint)
+	}
+	if cmd := mustField(t, got, "cmd").([]any); len(cmd) != 1 || cmd[0] != "worker.py" {
+		t.Fatalf("cmd = %v", cmd)
+	}
+
+	cleared := marshalCreateOptions(t, WithEntrypoint(), WithCmd())
+	if entrypoint := mustField(t, cleared, "entrypoint").([]any); len(entrypoint) != 0 {
+		t.Fatalf("cleared entrypoint = %v", entrypoint)
+	}
+	if cmd := mustField(t, cleared, "cmd").([]any); len(cmd) != 0 {
+		t.Fatalf("cleared cmd = %v", cmd)
+	}
+}
+
 func TestFFIWireShape_EnvAndScripts(t *testing.T) {
 	got := marshalCreateOptions(t,
 		WithImage("alpine"),

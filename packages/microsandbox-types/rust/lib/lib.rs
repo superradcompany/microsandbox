@@ -3,6 +3,7 @@
 #![warn(missing_docs)]
 
 mod cloud;
+mod command;
 mod domain;
 mod error;
 pub mod modify;
@@ -23,6 +24,8 @@ pub use cloud::{
     CloudSandboxStatusReason, CloudSecretEntry, CloudSecretSource, CloudSecretsConfig,
     CloudViolationAction, CloudVolumeMount,
 };
+#[doc(hidden)]
+pub use command::{CommandResolutionError, ResolvedCommand, resolve_default_command};
 pub use domain::{
     Action, CertCacheConfig, CpuPlacement, DEFAULT_METRICS_SAMPLE_INTERVAL_MS,
     DEFAULT_SANDBOX_CPUS, DEFAULT_SANDBOX_MEMORY_MIB, DeploymentProfile, Destination,

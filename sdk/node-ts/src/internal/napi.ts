@@ -199,6 +199,7 @@ export interface NapiSandboxBuilderSetters {
   replace(): this;
   replaceWithTimeout(timeoutMs: number): this;
   entrypoint(cmd: string[]): this;
+  cmd(cmd: string[]): this;
   init(cmd: string, args?: string[]): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   initWith(cmd: string, configure: (b: any) => any): this;
@@ -240,6 +241,10 @@ export interface NapiSandboxBuilder extends NapiSandboxBuilderSetters {
 export interface NapiSandbox {
   readonly backendKind: "local" | "cloud";
   configJson(): Promise<string>;
+  execDefault(): Promise<NapiExecOutput>;
+  execDefaultWithBuilder(builder: NapiExecOptionsBuilder): Promise<NapiExecOutput>;
+  execDefaultStream(): Promise<NapiExecHandle>;
+  execDefaultStreamWithBuilder(builder: NapiExecOptionsBuilder): Promise<NapiExecHandle>;
   exec(cmd: string, args?: string[]): Promise<NapiExecOutput>;
   execWithBuilder(cmd: string, builder: NapiExecOptionsBuilder): Promise<NapiExecOutput>;
   execStream(cmd: string, args?: string[]): Promise<NapiExecHandle>;
@@ -255,6 +260,8 @@ export interface NapiSandbox {
   touch(): Promise<NapiSandboxTouchResult>;
   modify(opts?: NapiSandboxModifyOptions): Promise<string>;
   attach(cmd: string, args?: string[]): Promise<number>;
+  attachDefault(): Promise<number>;
+  attachDefaultWithBuilder(builder: NapiAttachOptionsBuilder): Promise<number>;
   attachWithBuilder(cmd: string, builder: NapiAttachOptionsBuilder): Promise<number>;
   attachShell(): Promise<number>;
   stop(): Promise<void>;
