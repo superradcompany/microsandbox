@@ -4732,7 +4732,7 @@ mod tests {
         #[cfg(target_os = "linux")]
         {
             let automatic = resolve_linux_block_writeback_policy(
-                RuntimeConfig::default().block_writeback,
+                BlockWritebackConfig::Auto { pool_mib: None },
                 64 * 1024 * 1024 * 1024,
                 Some(6 * 1024 * 1024 * 1024),
             )
@@ -4813,7 +4813,8 @@ mod tests {
                 .contains("must not exceed 100")
             );
         }
-        #[cfg(not(target_os = "linux"))]
+        // Default local execution must never reserve aggregate writeback credit or reject a
+        // second sandbox merely because the host's derived pool cannot fit another full window.
         assert_eq!(
             block_writeback_policy(&RuntimeConfig::default()).unwrap(),
             (None, None)

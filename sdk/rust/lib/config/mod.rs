@@ -666,7 +666,9 @@ impl Default for SandboxDefaults {
 
 impl Default for BlockWritebackConfig {
     fn default() -> Self {
-        Self::Auto { pool_mib: None }
+        // Keep ordinary sandbox creation independent of host-global dirty-credit capacity.
+        // Operators can opt into bounded writeback after sizing it for their workload and node.
+        Self::Off {}
     }
 }
 
@@ -1241,13 +1243,10 @@ mod tests {
         assert_eq!(cfg.database.max_connections, 5);
         assert_eq!(cfg.database.connect_timeout_secs, 30);
         assert_eq!(cfg.database.busy_timeout_secs, 5);
-        assert_eq!(
-            cfg.runtime.block_writeback,
-            BlockWritebackConfig::Auto { pool_mib: None }
-        );
+        assert_eq!(cfg.runtime.block_writeback, BlockWritebackConfig::Off {});
         assert_eq!(
             serde_json::to_value(cfg.runtime.block_writeback).unwrap(),
-            serde_json::json!({ "mode": "auto" })
+            serde_json::json!({ "mode": "off" })
         );
     }
 
@@ -1256,6 +1255,7 @@ mod tests {
         let cfg: LocalConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(cfg.sandbox_defaults.cpus, 1);
         assert!(cfg.home.is_none());
+        assert_eq!(cfg.runtime.block_writeback, BlockWritebackConfig::Off {});
     }
 
     #[test]
