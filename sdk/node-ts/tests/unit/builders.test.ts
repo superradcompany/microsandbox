@@ -390,6 +390,25 @@ describe("SandboxBuilder.build", () => {
     expect((cfg.lifecycle as { ephemeral: boolean }).ephemeral).toBe(true);
   });
 
+  it("preserves durable CMD overrides and explicit clears", async () => {
+    const configured = await Sandbox.builder("x")
+      .image("alpine")
+      .cmd(["worker.py", "--once"])
+      .build();
+    expect((configured.runtime as { cmd: string[] }).cmd).toEqual([
+      "worker.py",
+      "--once",
+    ]);
+
+    const cleared = await Sandbox.builder("x")
+      .image("alpine")
+      .entrypoint([])
+      .cmd([])
+      .build();
+    expect((cleared.runtime as { entrypoint: string[] }).entrypoint).toEqual([]);
+    expect((cleared.runtime as { cmd: string[] }).cmd).toEqual([]);
+  });
+
   it("keeps libkrunfwPath as a chainable compatibility alias", async () => {
     const builder = Sandbox.builder("x");
     expect(builder.libkrunfwPath("/tmp/libkrunfw.dylib")).toBe(builder);

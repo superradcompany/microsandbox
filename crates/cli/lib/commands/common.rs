@@ -2352,25 +2352,15 @@ pub fn resolve_command(
     user_command: Vec<String>,
     interactive: bool,
 ) -> anyhow::Result<(Option<String>, Vec<String>)> {
-    // User supplied an explicit command — prepend entrypoint if set.
-    if !user_command.is_empty() {
-        return match &config.spec.runtime.entrypoint {
-            Some(ep) if !ep.is_empty() => {
-                let bin = ep[0].clone();
-                let args = ep[1..].iter().cloned().chain(user_command).collect();
-                Ok((Some(bin), args))
-            }
-            _ => {
-                let mut parts = user_command;
-                let cmd = parts.remove(0);
-                Ok((Some(cmd), parts))
-            }
-        };
-    }
-
-    // No user command — try the image's entrypoint/cmd.
-    if let Some((cmd, cmd_args)) = resolve_image_command(config) {
-        return Ok((Some(cmd), cmd_args));
+    let cmd_override = (!user_command.is_empty()).then_some(user_command.as_slice());
+    match microsandbox_types::resolve_default_command(
+        config.spec.runtime.entrypoint.as_deref(),
+        config.spec.runtime.cmd.as_deref(),
+        cmd_override,
+    ) {
+        Ok(command) => return Ok((Some(command.program), command.args)),
+        Err(microsandbox_types::CommandResolutionError::NoDefaultCommand) => {}
+        Err(error) => return Err(error.into()),
     }
 
     // Fall back to configured shell (or /bin/sh) in interactive mode.
@@ -2402,35 +2392,6 @@ pub fn resolve_exec_command(
     }
 
     resolve_command(config, user_command, interactive)
-}
-
-/// Resolve the default process from OCI image config.
-///
-/// Follows OCI semantics:
-/// - `entrypoint` + `cmd`: entrypoint is the binary, cmd provides default arguments.
-/// - `entrypoint` only: entrypoint is the full command.
-/// - `cmd` only: cmd[0] is the binary, cmd[1..] are arguments.
-/// - Neither set: returns `None`.
-fn resolve_image_command(
-    config: &microsandbox::sandbox::SandboxConfig,
-) -> Option<(String, Vec<String>)> {
-    match (&config.spec.runtime.entrypoint, &config.spec.runtime.cmd) {
-        (Some(ep), cmd) if !ep.is_empty() => {
-            let bin = ep[0].clone();
-            let args = ep[1..]
-                .iter()
-                .chain(cmd.iter().flatten())
-                .cloned()
-                .collect();
-            Some((bin, args))
-        }
-        (_, Some(cmd)) if !cmd.is_empty() => {
-            let bin = cmd[0].clone();
-            let args = cmd[1..].to_vec();
-            Some((bin, args))
-        }
-        _ => None,
-    }
 }
 
 /// Parse an rlimit spec: `RESOURCE=LIMIT` or `RESOURCE=SOFT:HARD`.
@@ -3367,6 +3328,27 @@ mod tests {
 
         assert_eq!(cmd.as_deref(), Some("start"));
         assert_eq!(args, vec!["date".to_string()]);
+    }
+
+    #[test]
+    fn resolve_command_replaces_stored_cmd_with_run_override() {
+        let config = command_config(Some(&["start", "--verbose"]), Some(&["serve", "--http"]));
+        let (cmd, args) = resolve_command(
+            &config,
+            vec!["worker".to_string(), "--once".to_string()],
+            false,
+        )
+        .expect("resolve command");
+
+        assert_eq!(cmd.as_deref(), Some("start"));
+        assert_eq!(
+            args,
+            vec![
+                "--verbose".to_string(),
+                "worker".to_string(),
+                "--once".to_string()
+            ]
+        );
     }
 
     #[test]

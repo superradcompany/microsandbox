@@ -876,7 +876,7 @@ Fully disable networking. No network interface is created.
 fn entrypoint(self, cmd: impl IntoIterator<Item = impl Into<String>>) -> Self
 ```
 
-Override the OCI image's stored ENTRYPOINT. The value is consulted by command-resolution paths that follow OCI semantics, specifically `msb exec` / `msb run` against this sandbox from the terminal. [`Sandbox::exec`](/sdk/rust/execution) and [`Sandbox::shell`](/sdk/rust/execution) do **not** consult it; they pass `cmd` literally to the guest agent. Use this when configuring a sandbox via the SDK for later CLI attachment.
+Override the image ENTRYPOINT used by default-workload execution. [`Sandbox::exec_default`](/sdk/rust/execution) combines it with the effective CMD. Literal [`Sandbox::exec`](/sdk/rust/execution), [`Sandbox::attach`](/sdk/rust/execution), and [`Sandbox::shell`](/sdk/rust/execution) calls ignore it.
 
 <p className="msb-label">Parameters</p>
 
@@ -941,6 +941,22 @@ Auto-drain the sandbox after this many seconds of inactivity (no active exec ses
     <div className="msb-param-desc">Idle timeout in seconds.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">.</span><span className="msb-hn">cmd()</span>
+
+```rust
+fn cmd(self, cmd: impl IntoIterator<Item = impl Into<String>>) -> Self
+```
+
+Override the image CMD used by default-workload execution. An empty array explicitly clears the image CMD. This describes durable configuration and does not execute anything during `create()`.
+
+```rust
+let sb = Sandbox::builder("worker")
+    .image("example/worker:latest")
+    .cmd(["worker.py", "--once"])
+    .create()
+    .await?;
+```
 
 #### <span className="msb-recv">.</span><span className="msb-hn">init()</span>
 

@@ -1,0 +1,17 @@
+---
+title: "Week of August 9, 2026"
+description: "Explicit default-workload execution with one OCI command resolver across the CLI and every SDK."
+icon: "bolt"
+---
+
+## New features
+
+**Explicit image-default execution across every SDK**
+
+Sandbox builders now accept a durable CMD override alongside ENTRYPOINT, and every SDK can explicitly run the resolved OCI default through buffered, streaming, or interactive APIs: Rust `exec_default`, Python `exec_default`, TypeScript `execDefault`, and Go `ExecDefault`, with matching stream and attach variants. Literal `exec` and `attach` remain unchanged and never prepend the image entrypoint.
+
+The CLI, attached execution, detached runtime startup, and SDK helpers now use one argv-based `ENTRYPOINT + CMD` resolver. A command after `msb run IMAGE --` remains a one-shot CMD replacement that preserves the effective entrypoint.
+
+## Behavior changes
+
+`create()` is now strictly boot-only. Previously, `create(init="auto")` could implicitly launch an image workload when a recognized inherited init entrypoint was present. Callers relying on that exception should explicitly call the default-execution method after creation, or use `msb run` when the workload must be routed through an inherited init at boot. Init-owned `msb run` workloads are still routed through PID 1 and are not duplicated through agentd.

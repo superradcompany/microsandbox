@@ -344,6 +344,15 @@ char *msb_sandbox_exec(uint64_t cancel_id,
                        unsigned char *buf,
                        uintptr_t buf_len);
 
+/**
+ * Execute the sandbox's effective OCI entrypoint and CMD with collected output.
+ */
+char *msb_sandbox_exec_default(uint64_t cancel_id,
+                               Handle handle,
+                               const char *exec_opts_json,
+                               unsigned char *buf,
+                               uintptr_t buf_len);
+
 char *msb_sandbox_metrics(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
 
 char *msb_fs_read(uint64_t cancel_id,
@@ -505,6 +514,15 @@ char *msb_sandbox_exec_stream(uint64_t cancel_id,
                               const char *exec_opts_json,
                               unsigned char *buf,
                               uintptr_t buf_len);
+
+/**
+ * Start a streaming exec of the sandbox's effective OCI entrypoint and CMD.
+ */
+char *msb_sandbox_exec_default_stream(uint64_t cancel_id,
+                                      Handle handle,
+                                      const char *exec_opts_json,
+                                      unsigned char *buf,
+                                      uintptr_t buf_len);
 
 /**
  * Receive the next event from a streaming exec session.
@@ -862,6 +880,15 @@ char *msb_sandbox_attach(uint64_t cancel_id,
                          const char *opts_json,
                          unsigned char *buf,
                          uintptr_t buf_len);
+
+/**
+ * Attach to the sandbox's effective OCI entrypoint and CMD.
+ */
+char *msb_sandbox_attach_default(uint64_t cancel_id,
+                                 Handle handle,
+                                 const char *opts_json,
+                                 unsigned char *buf,
+                                 uintptr_t buf_len);
 
 /**
  * Attach to the sandbox's default shell.

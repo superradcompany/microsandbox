@@ -673,6 +673,19 @@ func TestWithEntrypoint(t *testing.T) {
 	}
 }
 
+func TestWithCmd(t *testing.T) {
+	o := SandboxConfig{}
+	WithCmd("worker.py", "--once")(&o)
+	if len(o.Cmd) != 2 || o.Cmd[0] != "worker.py" {
+		t.Errorf("Cmd: got %v", o.Cmd)
+	}
+
+	WithCmd()(&o)
+	if o.Cmd == nil || len(o.Cmd) != 0 {
+		t.Errorf("Cmd clear: got %#v", o.Cmd)
+	}
+}
+
 func TestWithInitFactories(t *testing.T) {
 	o := SandboxConfig{}
 	WithInit(Init.Auto())(&o)
@@ -719,6 +732,32 @@ func TestSandboxConfigUnmarshalJSONIncludesPersistedInit(t *testing.T) {
 	wantEnv := map[string]string{"FOO": "BAR", "PATH": "/usr/bin:/bin"}
 	if !reflect.DeepEqual(cfg.Init.Env, wantEnv) {
 		t.Errorf("Init.Env = %v, want %v", cfg.Init.Env, wantEnv)
+	}
+}
+
+func TestSandboxConfigUnmarshalJSONIncludesRuntimeCommandTemplate(t *testing.T) {
+	var cfg SandboxConfig
+	data := []byte(`{
+		"name": "worker",
+		"image": "alpine",
+		"runtime": {
+			"workdir": "/app",
+			"entrypoint": ["python", "-u"],
+			"cmd": ["worker.py", "--once"]
+		}
+	}`)
+
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("UnmarshalJSON: %v", err)
+	}
+	if cfg.Workdir != "/app" {
+		t.Errorf("Workdir = %q, want /app", cfg.Workdir)
+	}
+	if !reflect.DeepEqual(cfg.Entrypoint, []string{"python", "-u"}) {
+		t.Errorf("Entrypoint = %v", cfg.Entrypoint)
+	}
+	if !reflect.DeepEqual(cfg.Cmd, []string{"worker.py", "--once"}) {
+		t.Errorf("Cmd = %v", cfg.Cmd)
 	}
 }
 

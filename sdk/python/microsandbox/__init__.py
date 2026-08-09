@@ -77,6 +77,7 @@ from microsandbox.errors import (
     MetricsUnavailableError,
     MicrosandboxError,
     NetworkPolicyError,
+    NoDefaultCommandError,
     PathNotFoundError,
     SandboxAlreadyExistsError,
     SandboxNotFoundError,
@@ -320,6 +321,7 @@ __all__ = [
     # Errors
     "MicrosandboxError",
     "InvalidConfigError",
+    "NoDefaultCommandError",
     "CloudHttpError",
     "SandboxNotFoundError",
     "SandboxNotRunningError",

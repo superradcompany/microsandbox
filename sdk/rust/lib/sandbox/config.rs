@@ -172,6 +172,14 @@ pub struct SandboxConfig {
     /// Transient process-launch intent for the current create operation.
     #[serde(skip)]
     pub(crate) launch_intent: LaunchIntent,
+
+    /// Whether image-init routing consumed the requested boot workload.
+    #[serde(skip)]
+    pub(crate) init_owns_workload: bool,
+
+    /// Number of transient workload arguments appended to the init specification.
+    #[serde(skip)]
+    pub(crate) init_workload_arg_count: usize,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -193,12 +201,22 @@ impl SandboxConfig {
 
     /// Return the config shape that should be persisted for future starts.
     ///
-    /// Attached `msb run` commands are one-shot foreground intent. Detached startup intent stays
-    /// in `runtime.cmd` and is either executed by the host runtime after agentd is ready or, for
-    /// image-declared init entrypoints, passed to the init handoff as the container startup argv.
+    /// CLI `run` commands are one-shot launch intent. Their durable CMD template is retained, while
+    /// transient launch markers and any workload argv routed through an inherited init are removed.
     pub(crate) fn clone_for_persistence(&self) -> Self {
         let mut config = self.clone();
         config.launch_intent = LaunchIntent::None;
+        config.init_owns_workload = false;
+        if config.init_workload_arg_count > 0 {
+            if let Some(init) = config.spec.init.as_mut() {
+                let durable_len = init
+                    .args
+                    .len()
+                    .saturating_sub(config.init_workload_arg_count);
+                init.args.truncate(durable_len);
+            }
+            config.init_workload_arg_count = 0;
+        }
         for mount in &mut config.spec.mounts {
             if let VolumeMount::Named { create, .. } = mount {
                 *create = None;
@@ -234,6 +252,12 @@ impl SandboxConfig {
     /// Clear process-launch intent after another mechanism takes ownership of the command.
     pub(crate) fn clear_launch_intent(&mut self) {
         self.launch_intent = LaunchIntent::None;
+    }
+
+    /// Return whether inherited image init routing owns this create operation's boot workload.
+    #[doc(hidden)]
+    pub fn init_owns_boot_workload(&self) -> bool {
+        self.init_owns_workload
     }
 
     /// Apply OCI image config as defaults. User-provided values take precedence.
@@ -278,9 +302,9 @@ impl SandboxConfig {
     /// Resolve `init = "auto"` from a known init path declared as the
     /// image entrypoint.
     ///
-    /// Docker starts containers by appending CMD to the image ENTRYPOINT. If that ENTRYPOINT is an
-    /// init binary, the init handoff must own the resolved argv; launching the same command later
-    /// through agentd skips init-established state such as s6's PATH.
+    /// Docker starts containers by appending CMD to the image ENTRYPOINT. Init selection always
+    /// removes a recognized inherited init token from the durable workload template. Only an
+    /// explicit boot-workload intent may transfer the already-resolved argv to PID 1.
     fn resolve_auto_init_from_image_entrypoint(
         &mut self,
         image_entrypoint: Option<&[String]>,
@@ -314,21 +338,16 @@ impl SandboxConfig {
             return;
         }
 
-        let Some(mut entrypoint) = self.spec.runtime.entrypoint.take() else {
+        let Some(entrypoint) = self.spec.runtime.entrypoint.take() else {
             return;
         };
-        if entrypoint
+        let mut workload_entrypoint = entrypoint.clone();
+        if workload_entrypoint
             .first()
             .is_some_and(|first| first.as_str() == init_path)
         {
-            entrypoint.remove(0);
+            workload_entrypoint.remove(0);
         }
-        let foreground_command = match &self.launch_intent {
-            LaunchIntent::Foreground { command } => command.as_deref(),
-            LaunchIntent::None | LaunchIntent::Background => None,
-        };
-        let runtime_cmd = foreground_command.or(self.spec.runtime.cmd.as_deref());
-        let init_args = resolved_container_argv(&entrypoint, runtime_cmd);
 
         let init = self
             .spec
@@ -336,15 +355,44 @@ impl SandboxConfig {
             .as_mut()
             .expect("init was present at start of auto resolution");
         init.cmd = init_path.to_string();
-        init.args.extend(init_args);
         init.env = merge_init_env(&self.spec.env, &init.env);
 
-        // The startup command is now part of the PID 1 argv. Running it again through agentd would
-        // both duplicate execution and bypass any state the image init establishes before execing.
-        if self.should_launch_background_command() {
-            self.clear_launch_intent();
+        self.spec.runtime.entrypoint =
+            (!workload_entrypoint.is_empty()).then_some(workload_entrypoint.clone());
+
+        let cmd_override = match &self.launch_intent {
+            LaunchIntent::Foreground { command } => command.as_deref(),
+            LaunchIntent::Background => None,
+            LaunchIntent::None => return,
+        };
+        let is_container_init_contract = init_path == "/init" || !workload_entrypoint.is_empty();
+        if !is_container_init_contract {
+            return;
         }
-        self.spec.runtime.entrypoint = (!entrypoint.is_empty()).then_some(entrypoint);
+
+        let Ok(command) = microsandbox_types::resolve_default_command(
+            Some(entrypoint.as_slice()),
+            self.spec.runtime.cmd.as_deref(),
+            cmd_override,
+        ) else {
+            return;
+        };
+        if command.program != init_path {
+            return;
+        }
+
+        self.init_workload_arg_count = command.args.len();
+        self.spec
+            .init
+            .as_mut()
+            .expect("init remains configured")
+            .args
+            .extend(command.args);
+        self.init_owns_workload = true;
+
+        // The startup command is now part of PID 1's argv. Clearing launch intent prevents the
+        // direct runtime from issuing a duplicate agent exec for a detached invocation.
+        self.clear_launch_intent();
     }
 
     /// Materialize rootfs defaults that should be persisted with the sandbox.
@@ -429,14 +477,6 @@ fn merge_init_env(base: &[EnvVar], overrides: &[(String, String)]) -> Vec<(Strin
     merge_env_pairs(base, &overrides)
         .into_iter()
         .map(Into::into)
-        .collect()
-}
-
-fn resolved_container_argv(entrypoint_tail: &[String], cmd: Option<&[String]>) -> Vec<String> {
-    entrypoint_tail
-        .iter()
-        .chain(cmd.into_iter().flatten())
-        .cloned()
         .collect()
 }
 
@@ -645,6 +685,8 @@ impl Default for SandboxConfig {
             manifest_digest: None,
             snapshot_upper_source: None,
             launch_intent: LaunchIntent::None,
+            init_owns_workload: false,
+            init_workload_arg_count: 0,
         }
     }
 }
@@ -771,7 +813,7 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_image_defaults_resolves_auto_init_from_image_entrypoint() {
+    fn test_merge_image_defaults_selects_init_without_launching_default_workload() {
         let image = ImageConfig {
             entrypoint: Some(vec![
                 "/init".to_string(),
@@ -799,18 +841,16 @@ mod tests {
             .as_ref()
             .expect("init should remain configured");
         assert_eq!(init.cmd, "/init");
-        assert_eq!(
-            init.args,
-            vec!["/opt/hermes/docker/main-wrapper.sh".to_string()]
-        );
+        assert!(init.args.is_empty());
         assert_eq!(
             config.spec.runtime.entrypoint,
             Some(vec!["/opt/hermes/docker/main-wrapper.sh".to_string()])
         );
+        assert!(!config.init_owns_boot_workload());
     }
 
     #[test]
-    fn test_merge_image_defaults_keeps_attached_command_out_of_init_entrypoint() {
+    fn test_merge_image_defaults_routes_attached_command_through_init_entrypoint() {
         let image = ImageConfig {
             entrypoint: Some(vec![
                 "/init".to_string(),
@@ -851,6 +891,7 @@ mod tests {
             config.spec.runtime.entrypoint,
             Some(vec!["/opt/hermes/docker/main-wrapper.sh".to_string()])
         );
+        assert!(config.init_owns_boot_workload());
     }
 
     #[test]
@@ -949,6 +990,19 @@ mod tests {
             Some(vec!["gateway".to_string(), "run".to_string()])
         );
         assert!(!config.should_launch_background_command());
+        assert!(config.init_owns_boot_workload());
+
+        let persisted = config.clone_for_persistence();
+        assert!(
+            persisted
+                .spec
+                .init
+                .as_ref()
+                .expect("persisted init")
+                .args
+                .is_empty()
+        );
+        assert!(!persisted.init_owns_boot_workload());
     }
 
     #[test]
@@ -1144,8 +1198,9 @@ mod tests {
             .as_ref()
             .expect("init should remain configured");
         assert_eq!(init.cmd, "/lib/systemd/systemd");
-        assert_eq!(init.args, vec!["bash".to_string()]);
+        assert!(init.args.is_empty());
         assert_eq!(config.spec.runtime.entrypoint, None);
+        assert!(!config.init_owns_boot_workload());
     }
 
     #[test]

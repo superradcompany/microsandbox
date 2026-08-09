@@ -203,6 +203,56 @@ impl Sandbox {
     // Execution
     //----------------------------------------------------------------------------------------------
 
+    /// Execute the sandbox's effective OCI entrypoint and CMD.
+    #[napi]
+    pub async fn exec_default(&self) -> Result<ExecOutput> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let output = sb.exec_default().await.map_err(to_napi_error)?;
+        Ok(ExecOutput::from_rust(output))
+    }
+
+    /// Execute the sandbox's effective OCI entrypoint and CMD using a populated options builder.
+    #[napi(js_name = "execDefaultWithBuilder")]
+    pub async unsafe fn exec_default_with_builder(
+        &self,
+        builder: &mut JsExecOptionsBuilder,
+    ) -> Result<ExecOutput> {
+        let opts_builder = builder.take_inner_builder()?;
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let output = sb
+            .exec_default_with(|_default| opts_builder)
+            .await
+            .map_err(to_napi_error)?;
+        Ok(ExecOutput::from_rust(output))
+    }
+
+    /// Execute the sandbox's effective OCI entrypoint and CMD with streaming I/O.
+    #[napi]
+    pub async fn exec_default_stream(&self) -> Result<JsExecHandle> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let handle = sb.exec_default_stream().await.map_err(to_napi_error)?;
+        Ok(JsExecHandle::from_rust(handle))
+    }
+
+    /// Stream the sandbox's effective OCI entrypoint and CMD using a populated options builder.
+    #[napi(js_name = "execDefaultStreamWithBuilder")]
+    pub async unsafe fn exec_default_stream_with_builder(
+        &self,
+        builder: &mut JsExecOptionsBuilder,
+    ) -> Result<JsExecHandle> {
+        let opts_builder = builder.take_inner_builder()?;
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let handle = sb
+            .exec_default_stream_with(|_default| opts_builder)
+            .await
+            .map_err(to_napi_error)?;
+        Ok(JsExecHandle::from_rust(handle))
+    }
+
     /// Execute a command and wait for completion.
     #[napi]
     pub async fn exec(&self, cmd: String, args: Option<Vec<String>>) -> Result<ExecOutput> {
@@ -399,6 +449,28 @@ impl Sandbox {
     //----------------------------------------------------------------------------------------------
     // Attach
     //----------------------------------------------------------------------------------------------
+
+    /// Attach to the sandbox's effective OCI entrypoint and CMD.
+    #[napi]
+    pub async fn attach_default(&self) -> Result<i32> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        sb.attach_default().await.map_err(to_napi_error)
+    }
+
+    /// Attach to the sandbox's effective OCI entrypoint and CMD using a populated options builder.
+    #[napi(js_name = "attachDefaultWithBuilder")]
+    pub async unsafe fn attach_default_with_builder(
+        &self,
+        builder: &mut JsAttachOptionsBuilder,
+    ) -> Result<i32> {
+        let opts_builder = builder.take_inner_builder()?;
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        sb.attach_default_with(|_default| opts_builder)
+            .await
+            .map_err(to_napi_error)
+    }
 
     /// Attach to an interactive PTY session inside the sandbox.
     ///

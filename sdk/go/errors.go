@@ -151,6 +151,9 @@ const (
 
 	// ErrInternal is every other error from the runtime.
 	ErrInternal
+
+	// ErrNoDefaultCommand indicates that neither the effective entrypoint nor CMD is executable.
+	ErrNoDefaultCommand
 )
 
 func (k ErrorKind) String() string {
@@ -223,6 +226,8 @@ func (k ErrorKind) String() string {
 		return "UnsupportedOperation"
 	case ErrInternal:
 		return "Internal"
+	case ErrNoDefaultCommand:
+		return "NoDefaultCommand"
 	default:
 		return "Unknown"
 	}
@@ -302,6 +307,8 @@ func kindFromFFI(kind string) ErrorKind {
 		return ErrVolumeAlreadyExists
 	case ffi.KindExecTimeout:
 		return ErrExecTimeout
+	case ffi.KindNoDefaultCommand:
+		return ErrNoDefaultCommand
 	case ffi.KindFilesystem:
 		return ErrFilesystem
 	case ffi.KindImageNotFound:

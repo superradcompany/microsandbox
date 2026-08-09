@@ -26,6 +26,7 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
     "hostname",
     "user",
     "entrypoint",
+    "cmd",
     "init",
     "replace",
     "replace_with_timeout",
@@ -371,6 +372,9 @@ pub fn sandbox_builder_from_args(
     }
     if let Some(entrypoint) = extract_opt::<Vec<String>>(kwargs, "entrypoint")? {
         builder = builder.entrypoint(entrypoint);
+    }
+    if let Some(cmd) = extract_opt::<Vec<String>>(kwargs, "cmd")? {
+        builder = builder.cmd(cmd);
     }
     if let Some(init_obj) = kwargs.get_item("init")?
         && !init_obj.is_none()

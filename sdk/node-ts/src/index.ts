@@ -409,6 +409,7 @@ export {
   ImageInUseError,
   ImageNotFoundError,
   InvalidConfigError,
+  NoDefaultCommandError,
   IoError,
   JsonError,
   LibkrunfwNotFoundError,
