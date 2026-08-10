@@ -264,20 +264,11 @@ async fn fetch_bundle_digest(version: &str, bundle_url: &str) -> MicrosandboxRes
 
 /// Extract the digest for `filename` from `sha256sum`-formatted checksums.
 fn bundle_digest_from_checksums(checksums: &str, filename: &str) -> MicrosandboxResult<String> {
-    checksums
-        .lines()
-        .find_map(|line| {
-            let mut fields = line.split_whitespace();
-            let digest = fields.next()?;
-            // sha256sum marks binary-mode entries with a leading `*`.
-            let name = fields.next()?.trim_start_matches('*');
-            (name == filename).then(|| digest.to_owned())
-        })
-        .ok_or_else(|| {
-            MicrosandboxError::Custom(format!(
-                "release checksums do not contain an entry for {filename}"
-            ))
-        })
+    microsandbox_utils::bundle_digest_from_checksums(checksums, filename).ok_or_else(|| {
+        MicrosandboxError::Custom(format!(
+            "release checksums do not contain an entry for {filename}"
+        ))
+    })
 }
 
 fn verify_bundle_digest(data: &[u8], expected: &str) -> MicrosandboxResult<()> {

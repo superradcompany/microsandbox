@@ -80,7 +80,10 @@ fn install_prebuilt(base_dir: PathBuf) {
         "cargo:warning=downloading microsandbox runtime dependencies (v{PREBUILT_VERSION})..."
     );
 
+    let expected_digest =
+        fetch_bundle_digest(&url).expect("failed to fetch microsandbox bundle checksums");
     let data = download(&url).expect("failed to download microsandbox bundle");
+    verify_bundle_digest(&data, &expected_digest);
     extract_bundle(&data, &bin_dir, &lib_dir).expect("failed to extract bundle");
     create_symlinks(&lib_dir, &libkrunfw_name);
 
@@ -187,6 +190,34 @@ fn download(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut buf = Vec::new();
     resp.into_body().into_reader().read_to_end(&mut buf)?;
     Ok(buf)
+}
+
+/// Fetch the published SHA-256 digest for the bundle at `bundle_url` from the
+/// release's `checksums.sha256` asset. Fail-closed: an unreachable checksums
+/// asset or one without an entry for this bundle fails the build.
+#[cfg(all(feature = "prebuilt", not(windows)))]
+fn fetch_bundle_digest(bundle_url: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let checksums_url = microsandbox_utils::checksums_download_url(PREBUILT_VERSION);
+    let checksums = String::from_utf8(download(&checksums_url)?)?;
+    let filename = bundle_url.rsplit('/').next().unwrap_or(bundle_url);
+    microsandbox_utils::bundle_digest_from_checksums(&checksums, filename)
+        .ok_or_else(|| format!("release checksums do not contain an entry for {filename}").into())
+}
+
+#[cfg(all(feature = "prebuilt", not(windows)))]
+fn verify_bundle_digest(data: &[u8], expected: &str) {
+    use sha2::{Digest as _, Sha256};
+
+    let expected = expected.strip_prefix("sha256:").unwrap_or(expected);
+    assert!(
+        expected.len() == 64 && expected.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "microsandbox bundle has an invalid published SHA-256 digest: {expected}"
+    );
+    let actual = hex::encode(Sha256::digest(data));
+    assert!(
+        actual.eq_ignore_ascii_case(expected),
+        "microsandbox bundle SHA-256 mismatch: expected {expected}, got {actual}"
+    );
 }
 
 #[cfg(all(feature = "prebuilt", not(windows)))]
