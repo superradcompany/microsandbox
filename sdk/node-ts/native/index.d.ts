@@ -440,6 +440,11 @@ export declare class MountBuilder {
    */
   hostPermissions(policy: string): this
   /**
+   * Present host files that carry no per-file stat override as this guest
+   * owner. Valid only for bind and directory-backed named volume mounts.
+   */
+  owner(uid: number, gid: number): this
+  /**
    * Materialize the mount spec. Returns a flat `VolumeMount` with a
    * `kind` discriminator and per-variant fields.
    */

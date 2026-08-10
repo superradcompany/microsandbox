@@ -1091,3 +1091,32 @@ fn no_symlink_root_allows_deep_real_path() {
 
     build_no_symlink(deep).expect("deep real path should mount");
 }
+
+#[test]
+fn no_override_falls_back_to_configured_default_owner() {
+    let temp = TempDir::new();
+    std::fs::write(temp.path.join("hostfile.txt"), b"host-created").unwrap();
+
+    // A host-created file has no override stored; with default_owner set it is
+    // presented as that owner instead of the raw 0:0.
+    let fs = PassthroughFs::new(PassthroughConfig {
+        root_dir: temp.path.clone(),
+        inject_init: false,
+        default_owner: Some((1000, 1000)),
+        ..Default::default()
+    })
+    .unwrap();
+    fs.init(FsOptions::empty()).unwrap();
+
+    let entry = fs.lookup(context(), ROOT_INODE, c"hostfile.txt").unwrap();
+    assert_eq!(entry.attr.st_uid, 1000);
+    assert_eq!(entry.attr.st_gid, 1000);
+
+    // Without default_owner the same host file falls back to 0:0.
+    let plain = fs_for(&temp.path);
+    let entry = plain
+        .lookup(context(), ROOT_INODE, c"hostfile.txt")
+        .unwrap();
+    assert_eq!(entry.attr.st_uid, 0);
+    assert_eq!(entry.attr.st_gid, 0);
+}

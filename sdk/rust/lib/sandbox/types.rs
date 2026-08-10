@@ -361,6 +361,19 @@ impl MountBuilder {
         self
     }
 
+    /// Present host files that carry no per-file stat override as this guest
+    /// owner.
+    ///
+    /// Files created outside the guest (directly on the host) have no override,
+    /// so by default they surface with the runtime's fallback owner. Pinning an
+    /// owner here makes them appear as `(uid, gid)` instead. Valid only for bind
+    /// and named-directory/file mounts (requires stat virtualization).
+    pub fn owner(mut self, uid: u32, gid: u32) -> Self {
+        self.options.override_uid = Some(uid);
+        self.options.override_gid = Some(gid);
+        self
+    }
+
     /// Set size limit (for tmpfs).
     ///
     /// Accepts bare `u32` (interpreted as MiB) or a [`SizeExt`](crate::size::SizeExt) helper:

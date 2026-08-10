@@ -266,6 +266,15 @@ impl JsMountBuilder {
         Ok(self)
     }
 
+    /// Present host files that carry no per-file stat override as this guest
+    /// owner. Valid only for bind and directory-backed named volume mounts.
+    #[napi]
+    pub fn owner(&mut self, uid: u32, gid: u32) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.owner(uid, gid));
+        self
+    }
+
     /// Materialize the mount spec. Returns a flat `VolumeMount` with a
     /// `kind` discriminator and per-variant fields.
     #[napi]

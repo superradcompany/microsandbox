@@ -501,4 +501,27 @@ mod tests {
     fn test_unsupported_xattr_is_none_in_non_strict_mode() {
         assert!(handle_unsupported_xattr(false).unwrap().is_none());
     }
+
+    #[test]
+    fn test_bind_identity_map_applies_owner_and_overflow() {
+        use super::BindIdentityMap;
+
+        let map = BindIdentityMap::new(501, 1000, 1000);
+
+        // A file owned by the host owner is presented as the mapped guest owner.
+        let mut st: crate::stat64 = unsafe { std::mem::zeroed() };
+        st.st_uid = 501;
+        st.st_gid = 20;
+        map.apply(&mut st);
+        assert_eq!(st.st_uid, 1000);
+        assert_eq!(st.st_gid, 1000);
+
+        // Any other owner falls through to the overflow identity (65534).
+        let mut other: crate::stat64 = unsafe { std::mem::zeroed() };
+        other.st_uid = 4242;
+        other.st_gid = 4242;
+        map.apply(&mut other);
+        assert_eq!(other.st_uid, 65534);
+        assert_eq!(other.st_gid, 65534);
+    }
 }

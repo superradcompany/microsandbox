@@ -25,6 +25,11 @@ impl PassthroughFs {
             let mut st = host_stat_from_metadata(metadata, data.inode);
             if let Some(override_stat) = store.read(&data.path)? {
                 apply_override_stat(&mut st, override_stat);
+            } else if let Some((uid, gid)) = self.cfg.default_owner {
+                // No per-file override: a host-created file. Present the
+                // configured default owner instead of the raw 0:0.
+                st.st_uid = uid;
+                st.st_gid = gid;
             }
             return Ok(st);
         }
