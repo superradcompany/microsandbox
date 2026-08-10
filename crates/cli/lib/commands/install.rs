@@ -153,8 +153,8 @@ pub async fn run(args: InstallArgs) -> anyhow::Result<()> {
 
     // Validate the same merged builder the generated alias will create, before writing anything.
     let cli_opts = install_sandbox_opts(&args);
-    let builder = image.apply(microsandbox::sandbox::Sandbox::builder("msb-install-check"))?;
-    let builder = resolved.apply(builder, &cli_opts)?;
+    let builder = resolved.apply(microsandbox::sandbox::Sandbox::builder("msb-install-check"))?;
+    let builder = image.apply(builder)?;
     let builder = apply_sandbox_opts_after_config(builder, &cli_opts)?;
     builder.build().await?;
 

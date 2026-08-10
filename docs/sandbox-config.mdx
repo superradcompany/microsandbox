@@ -100,6 +100,33 @@ msb run python --conf base.yaml --resource-conf large.yaml --memory 12G
 
 Relative host paths are resolved against the file that contains them. Paths inside a file listed by `patch_files` are resolved against that patch file.
 
+## Rust SDK patches
+
+The Rust SDK owns the typed sparse representation used after a file has been parsed. `SandboxConfigPatch` composes root and scoped patches with right-hand-side precedence, and `SandboxBuilder::configure` applies the result before later fluent builder calls:
+
+```rust
+use std::collections::BTreeMap;
+
+use microsandbox::{
+    ResourceConfigPatch, RuntimeConfigPatch, Sandbox, SandboxConfigPatch, SandboxImagePatch,
+};
+
+let patch = SandboxConfigPatch::new()
+    .image(SandboxImagePatch::Image("python:3.12".into()))
+    .overlay(ResourceConfigPatch::new().cpus(2).memory_mib(1024))
+    .overlay(RuntimeConfigPatch::new().env(BTreeMap::from([
+        ("MODE".into(), "production".into()),
+    ])));
+
+let sandbox = Sandbox::builder("agent")
+    .configure(patch)
+    .memory(2048) // Explicit builder calls are higher precedence.
+    .create()
+    .await?;
+```
+
+Scoped patch types implement `Into<SandboxConfigPatch>`, so they pass directly to `overlay` without wrapper constructors. The SDK patch types do not read YAML, resolve relative paths, or expand `${ENV}`; those are CLI file-adapter responsibilities. `SandboxConfig` remains the complete durable configuration, while `SandboxConfigPatch` represents only construction-time fields that were supplied.
+
 ## Schema
 
 ### Image and registry

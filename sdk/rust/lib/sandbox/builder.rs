@@ -1,6 +1,6 @@
 //! Fluent builder for [`SandboxConfig`].
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 #[cfg(feature = "net")]
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
@@ -9,6 +9,8 @@ use std::time::Duration;
 use microsandbox_image::{PullProgressHandle, RegistryAuth};
 #[cfg(feature = "net")]
 use microsandbox_network::builder::{NetworkBuilder, SecretBuilder};
+#[cfg(feature = "net")]
+use microsandbox_network::policy::{NetworkPolicy, Rule};
 use microsandbox_types::{CpuPlacement, EnvVar, PullPolicy, VsockRouteSpec, VsockSocketType};
 #[cfg(feature = "net")]
 use microsandbox_types::{PortProtocol, PublishedPortSpec};
@@ -39,9 +41,17 @@ pub struct SandboxBuilder {
     build_error: Option<crate::MicrosandboxError>,
     max_cpus_explicit: bool,
     max_memory_explicit: bool,
+    /// Raw script snippets supplied through construction patches. They are materialized only when
+    /// building so later shell overrides determine their shebang.
+    config_scripts: BTreeMap<String, String>,
+    #[cfg(feature = "net")]
+    configured_network_rules: Vec<Rule>,
     /// Pending snapshot reference (path or bare name) supplied via
     /// [`from_snapshot`]. Resolved during async `create()`.
     pending_snapshot: Option<String>,
+    /// Distinguishes a sparse-patch snapshot, which later builder calls may override, from an
+    /// explicit `from_snapshot` call that retains the established mutual-exclusion validation.
+    pending_snapshot_from_config: bool,
 }
 
 /// Sub-builder for registry connection settings.
@@ -93,7 +103,11 @@ impl SandboxBuilder {
             build_error: None,
             max_cpus_explicit: false,
             max_memory_explicit: false,
+            config_scripts: BTreeMap::new(),
+            #[cfg(feature = "net")]
+            configured_network_rules: Vec::new(),
             pending_snapshot: None,
+            pending_snapshot_from_config: false,
         }
     }
 
@@ -151,6 +165,10 @@ impl SandboxBuilder {
     /// .image("./ubuntu.qcow2")   // disk image (auto-detect fs)
     /// ```
     pub fn image(mut self, image: impl IntoImage) -> Self {
+        if self.pending_snapshot_from_config {
+            self.pending_snapshot = None;
+            self.pending_snapshot_from_config = false;
+        }
         match image.into_rootfs_source() {
             Ok(rootfs) => self.config.spec.image = rootfs,
             Err(e) => {
@@ -169,6 +187,10 @@ impl SandboxBuilder {
     /// .image_with(|i| i.disk("./ubuntu.qcow2").fstype("ext4"))
     /// ```
     pub fn image_with(mut self, f: impl FnOnce(ImageBuilder) -> ImageBuilder) -> Self {
+        if self.pending_snapshot_from_config {
+            self.pending_snapshot = None;
+            self.pending_snapshot_from_config = false;
+        }
         match f(ImageBuilder::new()).build() {
             Ok(rootfs) => self.config.spec.image = rootfs,
             Err(e) => {
@@ -177,6 +199,41 @@ impl SandboxBuilder {
                 }
             }
         }
+        self
+    }
+
+    /// Apply a CLI-selected image after discarding a lower-precedence configured snapshot.
+    #[doc(hidden)]
+    pub fn override_image(mut self, image: impl IntoImage) -> Self {
+        self.pending_snapshot = None;
+        self.pending_snapshot_from_config = false;
+        self.image(image)
+    }
+
+    /// Apply a CLI-selected image builder after discarding a configured snapshot.
+    #[doc(hidden)]
+    pub fn override_image_with(
+        mut self,
+        configure: impl FnOnce(ImageBuilder) -> ImageBuilder,
+    ) -> Self {
+        self.pending_snapshot = None;
+        self.pending_snapshot_from_config = false;
+        self.image_with(configure)
+    }
+
+    /// Apply a CLI-selected snapshot after discarding a lower-precedence configured image.
+    #[doc(hidden)]
+    pub fn override_snapshot(mut self, snapshot: impl Into<String>) -> Self {
+        self.config.spec.image = RootfsSource::oci("");
+        self.pending_snapshot = Some(snapshot.into());
+        self.pending_snapshot_from_config = false;
+        self
+    }
+
+    pub(super) fn config_snapshot(mut self, snapshot: impl Into<String>) -> Self {
+        self.config.spec.image = RootfsSource::oci("");
+        self.pending_snapshot = Some(snapshot.into());
+        self.pending_snapshot_from_config = true;
         self
     }
 
@@ -621,6 +678,49 @@ impl SandboxBuilder {
         self
     }
 
+    /// Prepend explicit rules while preserving a configured policy's defaults and existing rules.
+    #[cfg(feature = "net")]
+    #[doc(hidden)]
+    pub fn prepend_network_policy_rules(mut self, mut rules: Vec<Rule>) -> Self {
+        match self.config.local_network_config() {
+            Ok(mut network) => {
+                rules.append(&mut network.policy.rules);
+                network.policy.rules = rules;
+                if let Err(error) = self.config.set_local_network_config(network)
+                    && self.build_error.is_none()
+                {
+                    self.build_error = Some(error);
+                }
+            }
+            Err(error) if self.build_error.is_none() => self.build_error = Some(error),
+            Err(_) => {}
+        }
+        self
+    }
+
+    /// Replace policy defaults/profile rules while retaining rules supplied by a config patch.
+    #[cfg(feature = "net")]
+    #[doc(hidden)]
+    pub fn replace_network_policy_preserving_config_rules(
+        mut self,
+        mut policy: NetworkPolicy,
+    ) -> Self {
+        policy.rules.extend(self.configured_network_rules.clone());
+        match self.config.local_network_config() {
+            Ok(mut network) => {
+                network.policy = policy;
+                if let Err(error) = self.config.set_local_network_config(network)
+                    && self.build_error.is_none()
+                {
+                    self.build_error = Some(error);
+                }
+            }
+            Err(error) if self.build_error.is_none() => self.build_error = Some(error),
+            Err(_) => {}
+        }
+        self
+    }
+
     /// Publish a TCP port directly on the sandbox builder.
     ///
     /// Repeatable: call multiple times to expose multiple ports.
@@ -877,11 +977,13 @@ impl SandboxBuilder {
     /// the guest. Scripts are added to `PATH` so they can be invoked by name
     /// via [`exec`](super::Sandbox::exec).
     pub fn script(mut self, name: impl Into<String>, content: impl Into<String>) -> Self {
+        let name = name.into();
+        self.config_scripts.remove(&name);
         self.config
             .spec
             .runtime
             .scripts
-            .insert(name.into(), content.into());
+            .insert(name, content.into());
         self
     }
 
@@ -891,11 +993,13 @@ impl SandboxBuilder {
         scripts: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
     ) -> Self {
         for (name, content) in scripts {
+            let name = name.into();
+            self.config_scripts.remove(&name);
             self.config
                 .spec
                 .runtime
                 .scripts
-                .insert(name.into(), content.into());
+                .insert(name, content.into());
         }
         self
     }
@@ -995,6 +1099,13 @@ impl SandboxBuilder {
         self
     }
 
+    /// Add one already-materialized volume mount.
+    #[doc(hidden)]
+    pub fn add_volume_mount(mut self, mount: VolumeMount) -> Self {
+        self.config.spec.mounts.push(mount);
+        self
+    }
+
     /// Boot a fresh sandbox from a snapshot artifact.
     ///
     /// The snapshot already pins the image reference and digest, so
@@ -1007,6 +1118,7 @@ impl SandboxBuilder {
     /// directory).
     pub fn from_snapshot(mut self, path_or_name: impl Into<String>) -> Self {
         self.pending_snapshot = Some(path_or_name.into());
+        self.pending_snapshot_from_config = false;
         self
     }
 
@@ -1035,9 +1147,45 @@ impl SandboxBuilder {
     /// digest, and upper-layer source path are populated onto the config.
     /// Backend-owned defaults were seeded before explicit builder methods were applied.
     pub async fn build(mut self) -> MicrosandboxResult<SandboxConfig> {
+        self.materialize_config_scripts();
         self.resolve_pending().await?;
         self.validate()?;
         Ok(self.config)
+    }
+
+    pub(super) fn config_scripts(mut self, scripts: BTreeMap<String, String>) -> Self {
+        self.config_scripts.extend(scripts);
+        self
+    }
+
+    #[cfg(feature = "net")]
+    pub(super) fn config_network_rules(mut self, rules: Vec<Rule>) -> Self {
+        self.configured_network_rules = rules;
+        self
+    }
+
+    pub(super) fn config_error(mut self, message: impl Into<String>) -> Self {
+        if self.build_error.is_none() {
+            self.build_error = Some(MicrosandboxError::InvalidConfig(message.into()));
+        }
+        self
+    }
+
+    fn materialize_config_scripts(&mut self) {
+        let shell = self.config.spec.runtime.shell.as_deref();
+        for (name, body) in std::mem::take(&mut self.config_scripts) {
+            if let Err(message) = validate_config_script_name(&name) {
+                if self.build_error.is_none() {
+                    self.build_error = Some(MicrosandboxError::InvalidConfig(message));
+                }
+                continue;
+            }
+            self.config
+                .spec
+                .runtime
+                .scripts
+                .insert(name, wrap_config_script(shell, &body));
+        }
     }
 
     /// Open the deferred snapshot artifact and copy its pinned image
@@ -1047,6 +1195,7 @@ impl SandboxBuilder {
         let Some(snapshot_ref) = self.pending_snapshot.take() else {
             return Ok(());
         };
+        self.pending_snapshot_from_config = false;
 
         if self.has_explicit_rootfs_source() {
             return Err(crate::MicrosandboxError::InvalidConfig(
@@ -1518,6 +1667,41 @@ impl SandboxBuilder {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+fn validate_config_script_name(name: &str) -> Result<(), String> {
+    let path = std::path::Path::new(name);
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.as_bytes().contains(&0)
+        || name.contains(['/', '\\'])
+        || path.file_name().and_then(|part| part.to_str()) != Some(name)
+    {
+        return Err(format!(
+            "script name {name:?} must be a single non-empty filename"
+        ));
+    }
+    Ok(())
+}
+
+fn wrap_config_script(shell: Option<&str>, body: &str) -> String {
+    let shell = shell.unwrap_or("/bin/sh");
+    let mut script = if shell.contains('/') {
+        format!("#!{shell}")
+    } else {
+        format!("#!/usr/bin/env {shell}")
+    };
+    script.push('\n');
+    script.push_str(body);
+    if !script.ends_with('\n') {
+        script.push('\n');
+    }
+    script
+}
+
+//--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
@@ -1529,7 +1713,11 @@ impl From<SandboxConfig> for SandboxBuilder {
             build_error: None,
             max_cpus_explicit: true,
             max_memory_explicit: true,
+            config_scripts: BTreeMap::new(),
+            #[cfg(feature = "net")]
+            configured_network_rules: Vec::new(),
             pending_snapshot: None,
+            pending_snapshot_from_config: false,
         }
     }
 }

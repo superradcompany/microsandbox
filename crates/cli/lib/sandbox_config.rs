@@ -6,8 +6,15 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use microsandbox::sandbox::{
-    DiskImageFormat, HostPermissions, Patch, PullPolicy, RlimitResource, SandboxBuilder,
-    SecurityProfile, StatVirtualization,
+    DiskImageFormat, FilesystemConfigPatch, HostPermissions, InitConfigPatch, MountBuilder, Patch,
+    PullPolicy, ResourceConfigPatch, Rlimit, RlimitResource, RuntimeConfigPatch, SandboxBuilder,
+    SandboxConfigPatch, SandboxImagePatch, ScriptConfigPatch, SecurityProfile, StatVirtualization,
+    VolumeMount,
+};
+#[cfg(feature = "net")]
+use microsandbox::sandbox::{
+    DnsConfigPatch, NetworkConfigPatch, NetworkPolicyConfigPatch, SecretConfigPatch,
+    SecretEntryConfigPatch, TlsConfigPatch,
 };
 use microsandbox_image::RegistryAuth;
 use serde::Deserialize;
@@ -16,9 +23,9 @@ use serde_json::Value;
 use serde_saphyr::granit_parser::{Event, Parser};
 use serde_saphyr::{DuplicateKeyPolicy, MergeKeyPolicy, Options};
 
-use crate::commands::common::{
-    SandboxConfigSources, SandboxOpts, parse_duration_secs, validate_shell, wrap_shell_script,
-};
+#[cfg(test)]
+use crate::commands::common::SandboxOpts;
+use crate::commands::common::{SandboxConfigSources, parse_duration_secs, validate_shell};
 use crate::ui;
 
 //--------------------------------------------------------------------------------------------------
@@ -32,10 +39,27 @@ const MAX_CONFIG_BYTES: usize = 16 * 1024 * 1024;
 //--------------------------------------------------------------------------------------------------
 
 /// A merged sparse single-sandbox configuration ready to lower into the SDK builder.
-#[derive(Debug)]
 pub struct ResolvedSandboxConfig {
+    #[cfg(test)]
     patch: SandboxPatch,
+    sdk_patch: SandboxConfigPatch,
+    image: Option<ResolvedImage>,
+    registry_auth: Option<RegistryAuth>,
     loaded: bool,
+}
+
+impl std::fmt::Debug for ResolvedSandboxConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ResolvedSandboxConfig")
+            .field("loaded", &self.loaded)
+            .field("image", &self.image)
+            .field(
+                "registry_auth",
+                &self.registry_auth.as_ref().map(|_| "<redacted>"),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 /// The final rootfs source selected after file and positional precedence is resolved.
@@ -496,10 +520,7 @@ impl ResolvedSandboxConfig {
 
     /// Resolve explicit registry credentials for install-time pre-pulling.
     pub fn registry_auth(&self) -> anyhow::Result<Option<RegistryAuth>> {
-        match self.patch.registry.as_ref() {
-            Some(registry) => resolve_registry_auth(registry),
-            None => Ok(None),
-        }
+        Ok(self.registry_auth.clone())
     }
 
     /// Resolve the final image after positional arguments override file fields.
@@ -515,125 +536,16 @@ impl ResolvedSandboxConfig {
             return Ok(ResolvedImage::Image(image.to_string()));
         }
 
-        let image = self.patch.image.as_ref().ok_or_else(|| {
+        self.image.clone().ok_or_else(|| {
             anyhow::anyhow!(
                 "missing required sandbox field `image`; provide an image argument or set `image` in --conf"
             )
-        })?;
-        resolve_image_input(image)
+        })
     }
 
-    /// Lower the merged sparse file plus CLI network overrides into an SDK builder.
-    pub fn apply(
-        &self,
-        mut builder: SandboxBuilder,
-        opts: &SandboxOpts,
-    ) -> anyhow::Result<SandboxBuilder> {
-        if !self.loaded {
-            return Ok(builder);
-        }
-        let patch = &self.patch;
-
-        if let Some(cpus) = patch.cpus {
-            builder = builder.cpus(cpus);
-        }
-        if let Some(memory) = &patch.memory {
-            builder = builder.memory(parse_size("memory", memory)?);
-        }
-        if let Some(duration) = &patch.max_duration {
-            builder = builder.max_duration(parse_duration_secs(duration)?);
-        }
-        if let Some(duration) = &patch.idle_timeout {
-            builder = builder.idle_timeout(parse_duration_secs(duration)?);
-        }
-        if let Some(rlimits) = &patch.rlimits {
-            for input in rlimits {
-                let resource = RlimitResource::try_from(input.resource.as_str())
-                    .map_err(anyhow::Error::msg)?;
-                builder =
-                    builder.rlimit_range(resource, input.soft, input.hard.unwrap_or(input.soft));
-            }
-        }
-        if let Some(workdir) = &patch.workdir {
-            builder = builder.workdir(workdir);
-        }
-        if let Some(shell) = &patch.shell {
-            validate_shell(shell)?;
-            builder = builder.shell(shell);
-        }
-        if let Some(user) = &patch.user {
-            builder = builder.user(user);
-        }
-        if let Some(hostname) = &patch.hostname {
-            builder = builder.hostname(hostname);
-        }
-        if let Some(security) = patch.security {
-            builder = builder.security(match security {
-                SecurityInput::Default => SecurityProfile::Default,
-                SecurityInput::Restricted => SecurityProfile::Restricted,
-            });
-        }
-        if let Some(entrypoint) = &patch.entrypoint {
-            builder = builder.entrypoint(entrypoint.clone());
-        }
-        if let Some(command) = &patch.cmd {
-            // Store the durable workload default without selecting foreground or background
-            // launch. `msb run` chooses that intent, while `msb create` only persists the command.
-            builder = builder.cmd(command.clone());
-        }
-        if let Some(env) = &patch.env {
-            builder = builder.envs(env.iter().map(|(key, value)| (key.clone(), value.clone())));
-        }
-        if let Some(labels) = &patch.labels {
-            builder = builder.labels(
-                labels
-                    .iter()
-                    .map(|(key, value)| (key.clone(), value.clone())),
-            );
-        }
-        if let Some(init) = &patch.init {
-            builder = apply_init(builder, init)?;
-        }
-        if let Some(mounts) = &patch.mounts {
-            for mount in mounts {
-                builder = apply_mount(builder, mount)?;
-            }
-        }
-        builder = apply_patch_files(builder, patch.patch_files.as_deref())?;
-        if let Some(patches) = &patch.patches {
-            for input in patches {
-                builder = builder.add_patch(materialize_patch(input)?);
-            }
-        }
-        if let Some(policy) = patch.pull_policy {
-            builder = builder.pull_policy(match policy {
-                PullPolicyInput::Missing => PullPolicy::IfMissing,
-                PullPolicyInput::Always => PullPolicy::Always,
-                PullPolicyInput::Never => PullPolicy::Never,
-            });
-        }
-        if let Some(registry) = &patch.registry {
-            builder = apply_registry(builder, registry)?;
-        }
-        if let Some(scripts) = &patch.scripts {
-            let effective_shell = opts.shell.as_deref().or(patch.shell.as_deref());
-            if let Some(shell) = effective_shell {
-                validate_shell(shell)?;
-            }
-            let mut materialized = Vec::with_capacity(scripts.len());
-            for (name, script) in scripts {
-                validate_script_name(name)?;
-                materialized.push((name.clone(), wrap_shell_script(effective_shell, script)));
-            }
-            builder = builder.scripts(materialized);
-        }
-
-        apply_network(
-            builder,
-            patch.network.as_ref(),
-            patch.secrets.as_ref(),
-            opts,
-        )
+    /// Apply the typed sparse patch to an SDK builder.
+    pub fn apply(&self, builder: SandboxBuilder) -> anyhow::Result<SandboxBuilder> {
+        Ok(builder.configure(self.sdk_patch.clone()))
     }
 }
 
@@ -641,26 +553,26 @@ impl ResolvedImage {
     /// Apply this rootfs source to a builder.
     pub fn apply(&self, builder: SandboxBuilder) -> anyhow::Result<SandboxBuilder> {
         Ok(match self {
-            Self::Image(image) => builder.image(image.as_str()),
+            Self::Image(image) => builder.override_image(image.as_str()),
             Self::Oci {
                 reference,
                 upper_size,
             } => match upper_size {
                 Some(value) => {
                     let size = parse_size("image.upper_size", value)?;
-                    builder.image_with(|image| image.oci(reference).root_disk(size))
+                    builder.override_image_with(|image| image.oci(reference).root_disk(size))
                 }
-                None => builder.image_with(|image| image.oci(reference)),
+                None => builder.override_image_with(|image| image.oci(reference)),
             },
-            Self::Disk { path, fstype } => builder.image_with(|mut image| {
+            Self::Disk { path, fstype } => builder.override_image_with(|mut image| {
                 image = image.disk(path);
                 if let Some(fstype) = fstype {
                     image = image.fstype(fstype);
                 }
                 image
             }),
-            Self::Bind(path) => builder.image_with(|image| image.bind(path)),
-            Self::Snapshot(snapshot) => builder.from_snapshot(snapshot),
+            Self::Bind(path) => builder.override_image_with(|image| image.bind(path)),
+            Self::Snapshot(snapshot) => builder.override_snapshot(snapshot),
         })
     }
 
@@ -723,32 +635,56 @@ impl From<HostPermissionsInput> for HostPermissions {
 /// Load and merge the root and scoped sparse configuration inputs.
 pub fn resolve(sources: &SandboxConfigSources) -> anyhow::Result<ResolvedSandboxConfig> {
     let mut patch = SandboxPatch::default();
+    let mut sdk_patch = SandboxConfigPatch::new();
+    let mut image = None;
+    let mut registry_auth = None;
     if let Some(path) = sources.conf.as_deref() {
-        patch.merge(load_root(path)?);
+        let contribution = load_root(path)?;
+        image = contribution
+            .image
+            .as_ref()
+            .map(resolve_image_input)
+            .transpose()?;
+        registry_auth = contribution
+            .registry
+            .as_ref()
+            .map(resolve_registry_auth)
+            .transpose()?
+            .flatten();
+        sdk_patch = sdk_patch.overlay(materialize_sandbox_patch(
+            &contribution,
+            image.as_ref(),
+            registry_auth.clone(),
+        )?);
+        patch.merge(contribution);
     }
 
     if let Some(path) = &sources.net_conf {
         reject_scoped_wrapper(path, "network", "--net-conf")?;
         let network = load_typed::<NetworkPatch>(path, "network config")?;
-        patch.merge(SandboxPatch {
+        let contribution = SandboxPatch {
             network: Some(NetworkInput::Object(network)),
             ..SandboxPatch::default()
-        });
+        };
+        sdk_patch = sdk_patch.overlay(materialize_sandbox_patch(&contribution, None, None)?);
+        patch.merge(contribution);
     }
     if let Some(path) = &sources.resource_conf {
         let scoped = load_typed::<ResourcePatch>(path, "resource config")?;
-        patch.merge(SandboxPatch {
+        let contribution = SandboxPatch {
             cpus: scoped.cpus,
             memory: scoped.memory,
             max_duration: scoped.max_duration,
             idle_timeout: scoped.idle_timeout,
             rlimits: scoped.rlimits,
             ..SandboxPatch::default()
-        });
+        };
+        sdk_patch = sdk_patch.overlay(materialize_sandbox_patch(&contribution, None, None)?);
+        patch.merge(contribution);
     }
     if let Some(path) = &sources.runtime_conf {
         let scoped = load_typed::<RuntimePatch>(path, "runtime config")?;
-        patch.merge(SandboxPatch {
+        let contribution = SandboxPatch {
             workdir: scoped.workdir,
             shell: scoped.shell,
             user: scoped.user,
@@ -760,17 +696,21 @@ pub fn resolve(sources: &SandboxConfigSources) -> anyhow::Result<ResolvedSandbox
             labels: scoped.labels,
             init: scoped.init,
             ..SandboxPatch::default()
-        });
+        };
+        sdk_patch = sdk_patch.overlay(materialize_sandbox_patch(&contribution, None, None)?);
+        patch.merge(contribution);
     }
     if let Some(path) = &sources.fs_conf {
         let mut scoped = load_typed::<FilesystemPatch>(path, "filesystem config")?;
         absolutize_filesystem_patch(&mut scoped, config_base(path)?);
-        patch.merge(SandboxPatch {
+        let contribution = SandboxPatch {
             mounts: scoped.mounts,
             patch_files: scoped.patch_files,
             patches: scoped.patches,
             ..SandboxPatch::default()
-        });
+        };
+        sdk_patch = sdk_patch.overlay(materialize_sandbox_patch(&contribution, None, None)?);
+        patch.merge(contribution);
     }
     if let Some(path) = &sources.secret_conf {
         reject_scoped_wrapper(path, "secrets", "--secret-conf")?;
@@ -779,23 +719,31 @@ pub fn resolve(sources: &SandboxConfigSources) -> anyhow::Result<ResolvedSandbox
             "secret config",
             vec!["secrets".to_string()],
         )?;
-        patch.merge(SandboxPatch {
+        let contribution = SandboxPatch {
             secrets: Some(secrets),
             ..SandboxPatch::default()
-        });
+        };
+        sdk_patch = sdk_patch.overlay(materialize_sandbox_patch(&contribution, None, None)?);
+        patch.merge(contribution);
     }
     if let Some(path) = &sources.script_conf {
         reject_scoped_wrapper(path, "scripts", "--script-conf")?;
         let scripts = load_typed::<BTreeMap<String, String>>(path, "script config")?;
-        patch.merge(SandboxPatch {
+        let contribution = SandboxPatch {
             scripts: Some(scripts),
             ..SandboxPatch::default()
-        });
+        };
+        sdk_patch = sdk_patch.overlay(materialize_sandbox_patch(&contribution, None, None)?);
+        patch.merge(contribution);
     }
 
     patch.normalize();
     Ok(ResolvedSandboxConfig {
+        #[cfg(test)]
         patch,
+        sdk_patch,
+        image,
+        registry_auth,
         loaded: sources.any(),
     })
 }
@@ -1235,6 +1183,178 @@ fn bind_mount_separator(spec: &str) -> Option<usize> {
 // Functions: Image and Runtime
 //--------------------------------------------------------------------------------------------------
 
+fn materialize_sandbox_patch(
+    patch: &SandboxPatch,
+    image: Option<&ResolvedImage>,
+    registry_auth: Option<RegistryAuth>,
+) -> anyhow::Result<SandboxConfigPatch> {
+    let mut result = SandboxConfigPatch::new();
+    if let Some(image) = image {
+        result = result.image(materialize_image_patch(image)?);
+    }
+    if let Some(policy) = patch.pull_policy {
+        result = result.pull_policy(match policy {
+            PullPolicyInput::Missing => PullPolicy::IfMissing,
+            PullPolicyInput::Always => PullPolicy::Always,
+            PullPolicyInput::Never => PullPolicy::Never,
+        });
+    }
+    if let Some(auth) = registry_auth {
+        result = result.registry_auth(auth);
+    }
+
+    let mut resources = ResourceConfigPatch::new();
+    if let Some(cpus) = patch.cpus {
+        resources = resources.cpus(cpus);
+    }
+    if let Some(memory) = &patch.memory {
+        resources = resources.memory_mib(parse_size("memory", memory)?);
+    }
+    if let Some(duration) = &patch.max_duration {
+        resources = resources.max_duration_secs(parse_duration_secs(duration)?);
+    }
+    if let Some(duration) = &patch.idle_timeout {
+        resources = resources.idle_timeout_secs(parse_duration_secs(duration)?);
+    }
+    if let Some(rlimits) = &patch.rlimits {
+        let values = rlimits
+            .iter()
+            .map(|input| {
+                let resource = RlimitResource::try_from(input.resource.as_str())
+                    .map_err(anyhow::Error::msg)?;
+                Ok(Rlimit {
+                    resource,
+                    soft: input.soft,
+                    hard: input.hard.unwrap_or(input.soft),
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        resources = resources.rlimits(values);
+    }
+    result = result.resources(resources);
+
+    let mut runtime = RuntimeConfigPatch::new();
+    if let Some(value) = &patch.workdir {
+        runtime = runtime.workdir(value);
+    }
+    if let Some(value) = &patch.shell {
+        validate_shell(value)?;
+        runtime = runtime.shell(value);
+    }
+    if let Some(value) = &patch.user {
+        runtime = runtime.user(value);
+    }
+    if let Some(value) = &patch.hostname {
+        runtime = runtime.hostname(value);
+    }
+    if let Some(value) = patch.security {
+        runtime = runtime.security(match value {
+            SecurityInput::Default => SecurityProfile::Default,
+            SecurityInput::Restricted => SecurityProfile::Restricted,
+        });
+    }
+    if let Some(value) = &patch.entrypoint {
+        runtime = runtime.entrypoint(value.clone());
+    }
+    if let Some(value) = &patch.cmd {
+        runtime = runtime.cmd(value.clone());
+    }
+    if let Some(value) = &patch.env {
+        runtime = runtime.env(value.clone());
+    }
+    if let Some(value) = &patch.labels {
+        runtime = runtime.labels(value.clone());
+    }
+    if let Some(value) = &patch.init {
+        runtime = runtime.init(materialize_init_patch(value)?);
+    }
+    result = result.runtime(runtime);
+
+    let mut filesystem = FilesystemConfigPatch::new();
+    if let Some(mounts) = &patch.mounts {
+        filesystem = filesystem.mounts(
+            mounts
+                .iter()
+                .map(materialize_mount)
+                .collect::<anyhow::Result<Vec<_>>>()?,
+        );
+    }
+    if let Some(paths) = &patch.patch_files {
+        filesystem = filesystem.patch_file_operations(materialize_patch_files(paths)?);
+    }
+    if let Some(patches) = &patch.patches {
+        filesystem = filesystem.patches(
+            patches
+                .iter()
+                .map(materialize_patch)
+                .collect::<anyhow::Result<Vec<_>>>()?,
+        );
+    }
+    result = result.filesystem(filesystem);
+
+    if let Some(scripts) = &patch.scripts {
+        for name in scripts.keys() {
+            validate_script_name(name)?;
+        }
+        result = result.scripts(ScriptConfigPatch::new().scripts(scripts.clone()));
+    }
+
+    #[cfg(feature = "net")]
+    {
+        if let Some(network) = &patch.network {
+            result = result.network(materialize_network_patch(network)?);
+        }
+        if let Some(secrets) = &patch.secrets {
+            result = result.secrets(materialize_secret_patch(secrets)?);
+        }
+    }
+    #[cfg(not(feature = "net"))]
+    if patch.network.is_some() || patch.secrets.is_some() {
+        anyhow::bail!("network and secret config require an msb build with networking enabled");
+    }
+
+    Ok(result)
+}
+
+fn materialize_image_patch(image: &ResolvedImage) -> anyhow::Result<SandboxImagePatch> {
+    Ok(match image {
+        ResolvedImage::Image(value) => SandboxImagePatch::Image(value.clone()),
+        ResolvedImage::Oci {
+            reference,
+            upper_size,
+        } => SandboxImagePatch::Oci {
+            reference: reference.clone(),
+            root_disk_mib: upper_size
+                .as_deref()
+                .map(|value| parse_size("image.upper_size", value))
+                .transpose()?,
+        },
+        ResolvedImage::Disk { path, fstype } => SandboxImagePatch::Disk {
+            path: path.clone(),
+            fstype: fstype.clone(),
+        },
+        ResolvedImage::Bind(path) => SandboxImagePatch::Bind(path.clone()),
+        ResolvedImage::Snapshot(value) => SandboxImagePatch::Snapshot(value.clone()),
+    })
+}
+
+fn materialize_init_patch(init: &InitInput) -> anyhow::Result<InitConfigPatch> {
+    let mut patch = InitConfigPatch::new();
+    if let Some(cmd) = init.cmd.as_deref() {
+        if cmd != microsandbox_protocol::HANDOFF_INIT_AUTO && !cmd.starts_with('/') {
+            anyhow::bail!("init.cmd must be an absolute guest path or `auto`, got {cmd:?}");
+        }
+        patch = patch.cmd(cmd);
+    }
+    if let Some(args) = &init.args {
+        patch = patch.args(args.clone());
+    }
+    if let Some(env) = &init.env {
+        patch = patch.env(env.clone());
+    }
+    Ok(patch)
+}
+
 fn resolve_image_input(input: &ImageInput) -> anyhow::Result<ResolvedImage> {
     match input {
         ImageInput::String(value) => Ok(ResolvedImage::Image(value.clone())),
@@ -1298,34 +1418,6 @@ fn parse_size(field: &str, value: &str) -> anyhow::Result<u32> {
     ui::parse_size_mib(value).map_err(|err| anyhow::anyhow!("{field}: {err}"))
 }
 
-fn apply_init(mut builder: SandboxBuilder, init: &InitInput) -> anyhow::Result<SandboxBuilder> {
-    let cmd = init
-        .cmd
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("init.cmd is required when `init` is present"))?;
-    if cmd != microsandbox_protocol::HANDOFF_INIT_AUTO && !cmd.starts_with('/') {
-        anyhow::bail!("init.cmd must be an absolute guest path or `auto`, got {cmd:?}");
-    }
-    let args = init.args.clone().unwrap_or_default();
-    let env = init.env.clone().unwrap_or_default();
-    if args.is_empty() && env.is_empty() {
-        builder = builder.init(cmd);
-    } else {
-        builder = builder.init_with(cmd, |value| value.args(args).envs(env));
-    }
-    Ok(builder)
-}
-
-fn apply_registry(
-    builder: SandboxBuilder,
-    registry: &RegistryInput,
-) -> anyhow::Result<SandboxBuilder> {
-    let Some(auth) = resolve_registry_auth(registry)? else {
-        return Ok(builder);
-    };
-    Ok(builder.registry(|value| value.auth(auth)))
-}
-
 fn resolve_registry_auth(registry: &RegistryInput) -> anyhow::Result<Option<RegistryAuth>> {
     match (&registry.username, &registry.password_env) {
         (None, None) => Ok(None),
@@ -1350,14 +1442,14 @@ fn resolve_registry_auth(registry: &RegistryInput) -> anyhow::Result<Option<Regi
 // Functions: Mounts and Patches
 //--------------------------------------------------------------------------------------------------
 
-fn apply_mount(builder: SandboxBuilder, input: &MountInput) -> anyhow::Result<SandboxBuilder> {
+fn materialize_mount(input: &MountInput) -> anyhow::Result<VolumeMount> {
     match input {
-        MountInput::String(spec) => apply_bind_mount_string(builder, spec),
-        MountInput::Object(object) => apply_mount_object(builder, object),
+        MountInput::String(spec) => materialize_bind_mount_string(spec),
+        MountInput::Object(object) => materialize_mount_object(object),
     }
 }
 
-fn apply_bind_mount_string(builder: SandboxBuilder, spec: &str) -> anyhow::Result<SandboxBuilder> {
+fn materialize_bind_mount_string(spec: &str) -> anyhow::Result<VolumeMount> {
     let index = bind_mount_separator(spec)
         .ok_or_else(|| anyhow::anyhow!("bind mount {spec:?} must use SOURCE:TARGET[:ro]"))?;
     let source = &spec[..index];
@@ -1373,19 +1465,14 @@ fn apply_bind_mount_string(builder: SandboxBuilder, spec: &str) -> anyhow::Resul
         anyhow::bail!("bind mount target must be an absolute guest path, got {target:?}");
     }
     let source = PathBuf::from(source);
-    Ok(builder.volume(target, move |mut mount| {
-        mount = mount.bind(source);
-        if readonly {
-            mount = mount.readonly();
-        }
-        mount
-    }))
+    let mut mount = MountBuilder::new(target).bind(source);
+    if readonly {
+        mount = mount.readonly();
+    }
+    mount.build().map_err(Into::into)
 }
 
-fn apply_mount_object(
-    builder: SandboxBuilder,
-    object: &MountObject,
-) -> anyhow::Result<SandboxBuilder> {
+fn materialize_mount_object(object: &MountObject) -> anyhow::Result<VolumeMount> {
     let source_count = usize::from(object.bind.is_some())
         + usize::from(object.named.is_some())
         + usize::from(object.tmpfs.is_some())
@@ -1424,67 +1511,62 @@ fn apply_mount_object(
         .map(|size| parse_size("mount.tmpfs.size", size))
         .transpose()?;
     let object = object.clone();
-    Ok(builder.volume(target, move |mut mount| {
-        if let Some(path) = object.bind {
-            mount = mount.bind(path);
-        } else if let Some(name) = object.named {
-            mount = match object.create.unwrap_or(NamedCreateInput::Existing) {
-                NamedCreateInput::Existing => mount.named(name),
-                NamedCreateInput::Create => mount.named_with(name, |value| value.create()),
-                NamedCreateInput::EnsureExists => {
-                    mount.named_with(name, |value| value.ensure_exists())
-                }
-            };
-        } else if object.tmpfs.is_some() {
-            mount = mount.tmpfs();
-            if let Some(size) = tmpfs_size {
-                mount = mount.size(size);
-            }
-        } else if let Some(path) = object.disk {
-            mount = mount.disk(path);
-            if let Some(format) = object.format {
-                mount = mount.format(format.into());
-            }
-            if let Some(fstype) = object.fstype {
-                mount = mount.fstype(fstype);
-            }
+    let mut mount = MountBuilder::new(target);
+    if let Some(path) = object.bind {
+        mount = mount.bind(path);
+    } else if let Some(name) = object.named {
+        mount = match object.create.unwrap_or(NamedCreateInput::Existing) {
+            NamedCreateInput::Existing => mount.named(name),
+            NamedCreateInput::Create => mount.named_with(name, |value| value.create()),
+            NamedCreateInput::EnsureExists => mount.named_with(name, |value| value.ensure_exists()),
+        };
+    } else if object.tmpfs.is_some() {
+        mount = mount.tmpfs();
+        if let Some(size) = tmpfs_size {
+            mount = mount.size(size);
         }
+    } else if let Some(path) = object.disk {
+        mount = mount.disk(path);
+        if let Some(format) = object.format {
+            mount = mount.format(format.into());
+        }
+        if let Some(fstype) = object.fstype {
+            mount = mount.fstype(fstype);
+        }
+    }
 
-        if object.readonly.unwrap_or(false) {
-            mount = mount.readonly();
-        }
-        if object.noexec.unwrap_or(false) {
-            mount = mount.noexec();
-        }
-        if object.nosuid.unwrap_or(false) {
-            mount = mount.nosuid();
-        }
-        if object.nodev.unwrap_or(false) {
-            mount = mount.nodev();
-        }
-        if let Some(policy) = object.stat_virtualization {
-            mount = mount.stat_virtualization(policy.into());
-        }
-        if let Some(policy) = object.host_permissions {
-            mount = mount.host_permissions(policy.into());
-        }
-        mount
-    }))
+    if object.readonly.unwrap_or(false) {
+        mount = mount.readonly();
+    }
+    if object.noexec.unwrap_or(false) {
+        mount = mount.noexec();
+    }
+    if object.nosuid.unwrap_or(false) {
+        mount = mount.nosuid();
+    }
+    if object.nodev.unwrap_or(false) {
+        mount = mount.nodev();
+    }
+    if let Some(policy) = object.stat_virtualization {
+        mount = mount.stat_virtualization(policy.into());
+    }
+    if let Some(policy) = object.host_permissions {
+        mount = mount.host_permissions(policy.into());
+    }
+    mount.build().map_err(Into::into)
 }
 
-fn apply_patch_files(
-    mut builder: SandboxBuilder,
-    paths: Option<&[PathBuf]>,
-) -> anyhow::Result<SandboxBuilder> {
-    for path in paths.unwrap_or_default() {
+fn materialize_patch_files(paths: &[PathBuf]) -> anyhow::Result<Vec<Patch>> {
+    let mut patches = Vec::new();
+    for path in paths {
         let mut patch_file = load_typed::<PatchFileInput>(path, "rootfs patch file")?;
         let base = config_base(path)?;
         absolutize_patch_inputs(&mut patch_file.patches, &base);
         for input in &patch_file.patches {
-            builder = builder.add_patch(materialize_patch(input)?);
+            patches.push(materialize_patch(input)?);
         }
     }
-    Ok(builder)
+    Ok(patches)
 }
 
 fn materialize_patch(input: &PatchInput) -> anyhow::Result<Patch> {
@@ -1596,347 +1678,158 @@ fn validate_script_name(name: &str) -> anyhow::Result<()> {
 //--------------------------------------------------------------------------------------------------
 
 #[cfg(feature = "net")]
-fn apply_network(
-    mut builder: SandboxBuilder,
-    network: Option<&NetworkInput>,
-    file_secrets: Option<&BTreeMap<String, SecretInput>>,
-    opts: &SandboxOpts,
-) -> anyhow::Result<SandboxBuilder> {
-    use microsandbox::sandbox::SecretSource;
-    use microsandbox_network::builder::ViolationActionBuilder;
+fn materialize_network_patch(input: &NetworkInput) -> anyhow::Result<NetworkConfigPatch> {
+    use microsandbox_network::config::{PortProtocol, PublishedPort};
     use microsandbox_network::dns::Nameserver;
-    use microsandbox_network::policy::{Action, NetworkPolicy, NetworkProfile};
+    use microsandbox_network::policy::{NetworkPolicy, NetworkProfile};
 
-    use crate::commands::common::{
-        build_network_policy, parse_port_mapping, parse_scoped_upstream_ca_cert, parse_secret,
-        parse_violation_action,
-    };
-    use crate::net_rule::{parse_rule_list, parse_rule_token};
+    use crate::commands::common::parse_port_mapping;
+    use crate::net_rule::parse_rule_token;
 
-    let has_cli_network = opts.no_dns_rebind_protection
-        || !opts.dns_nameserver.is_empty()
-        || opts.dns_query_timeout_ms.is_some()
-        || !opts.net_rule.is_empty()
-        || !opts.net.is_empty()
-        || opts.no_net
-        || opts.net_default.is_some()
-        || opts.net_default_egress.is_some()
-        || opts.net_default_ingress.is_some()
-        || opts.net_ipv4_pool.is_some()
-        || opts.net_ipv6_pool.is_some()
-        || opts.max_connections.is_some()
-        || opts.trust_host_cas
-        || opts.tls_intercept
-        || !opts.tls_intercept_port.is_empty()
-        || !opts.tls_bypass.is_empty()
-        || opts.no_block_quic
-        || opts.tls_intercept_ca_cert.is_some()
-        || opts.tls_intercept_ca_key.is_some()
-        || !opts.tls_upstream_ca_cert.is_empty()
-        || !opts.tls_upstream_ca_cert_for.is_empty()
-        || !opts.tls_no_verify_upstream_for.is_empty()
-        || !opts.secret.is_empty()
-        || opts.on_secret_violation.is_some();
-    if network.is_none() && file_secrets.is_none() && !has_cli_network {
-        return Ok(builder);
+    let input = input.clone().into_object();
+    let mut policy = NetworkPolicyConfigPatch::new();
+    if let Some(base) = input.policy {
+        policy = policy.base(match base {
+            NetworkPreset::None => NetworkPolicy::none(),
+            NetworkPreset::Public => NetworkPolicy::from_profiles([NetworkProfile::Public]),
+            NetworkPreset::Open => NetworkPolicy::allow_all(),
+        });
     }
-
-    let network = network
-        .cloned()
-        .map(NetworkInput::into_object)
-        .unwrap_or_default();
-    let base_policy = match network.policy.unwrap_or(NetworkPreset::Public) {
-        NetworkPreset::None => NetworkPolicy::none(),
-        NetworkPreset::Public => NetworkPolicy::from_profiles([NetworkProfile::Public]),
-        NetworkPreset::Open => NetworkPolicy::allow_all(),
-    };
-    let mut file_rules = Vec::new();
-    for destination in network.deny.as_deref().unwrap_or_default() {
-        file_rules
-            .push(parse_rule_token(&format!("deny@{destination}")).map_err(anyhow::Error::from)?);
-    }
-    for destination in network.allow.as_deref().unwrap_or_default() {
-        file_rules
-            .push(parse_rule_token(&format!("allow@{destination}")).map_err(anyhow::Error::from)?);
-    }
-
-    let allowlist = network
-        .allow
-        .as_ref()
-        .is_some_and(|rules| !rules.is_empty());
-    let mut policy = NetworkPolicy {
-        default_egress: if allowlist {
-            Action::Deny
-        } else {
-            base_policy.default_egress
-        },
-        default_ingress: base_policy.default_ingress,
-        rules: file_rules,
-    };
-    let cli_replaces_preset = !opts.net.is_empty()
-        || opts.no_net
-        || opts.net_default.is_some()
-        || opts.net_default_egress.is_some()
-        || opts.net_default_ingress.is_some();
-    if !allowlist && !cli_replaces_preset {
-        policy.rules.extend(base_policy.rules);
-    }
-
-    if opts.net.is_empty() {
-        let mut cli_rules = Vec::new();
-        for value in &opts.net_rule {
-            cli_rules.extend(parse_rule_list(value).map_err(anyhow::Error::from)?);
-        }
-        cli_rules.append(&mut policy.rules);
-        policy.rules = cli_rules;
-    } else {
-        // High-level CLI profiles replace the file's preset while retaining lower-precedence
-        // file rules after the profile and explicit CLI rules.
-        let mut cli_policy = build_network_policy(
-            &opts.net,
-            &opts.net_rule,
-            opts.no_net,
-            opts.net_default.as_deref(),
-            opts.net_default_egress.as_deref(),
-            opts.net_default_ingress.as_deref(),
-        )?
-        .expect("non-empty --net values must produce a network policy");
-        cli_policy.rules.append(&mut policy.rules);
-        policy = cli_policy;
-    }
-
-    let parse_action = |flag: &str, raw: &str| -> anyhow::Result<Action> {
-        match raw {
-            "allow" => Ok(Action::Allow),
-            "deny" => Ok(Action::Deny),
-            other => anyhow::bail!("{flag}: expected `allow` or `deny`, got {other:?}"),
-        }
-    };
-    if opts.no_net {
-        policy.default_egress = Action::Deny;
-        policy.default_ingress = Action::Deny;
-    } else if let Some(raw) = &opts.net_default {
-        let action = parse_action("--net-default", raw)?;
-        policy.default_egress = action;
-        policy.default_ingress = action;
-    }
-    if let Some(raw) = &opts.net_default_egress {
-        policy.default_egress = parse_action("--net-default-egress", raw)?;
-    }
-    if let Some(raw) = &opts.net_default_ingress {
-        policy.default_ingress = parse_action("--net-default-ingress", raw)?;
-    }
-
-    for port in network.ports.as_deref().unwrap_or_default() {
-        let (bind, host, guest, udp) = parse_port_mapping(port)?;
-        builder = if udp {
-            builder.port_udp_bind(bind, host, guest)
-        } else {
-            builder.port_bind(bind, host, guest)
-        };
-    }
-
-    let mut secrets = file_secrets.cloned().unwrap_or_default();
-    for spec in &opts.secret {
-        let (name, hosts) = parse_secret(spec, "run")?;
-        let env = name.clone();
-        secrets.insert(
-            name,
-            SecretInput {
-                value: Some(SecretValueInput::Environment { env }),
-                allow: Some(hosts),
-                inject: None,
-                require_tls_identity: None,
-            },
+    if let Some(deny) = input.deny {
+        policy = policy.deny_rules(
+            deny.into_iter()
+                .map(|destination| {
+                    parse_rule_token(&format!("deny@{destination}")).map_err(anyhow::Error::from)
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?,
         );
     }
-    validate_secrets(&secrets)?;
-
-    let mut rebind_protection = network
-        .dns
-        .as_ref()
-        .and_then(|dns| dns.rebind_protection)
-        .unwrap_or(true);
-    if !secrets.is_empty() {
-        rebind_protection = true;
+    if let Some(allow) = input.allow {
+        policy = policy.allow_rules(
+            allow
+                .into_iter()
+                .map(|destination| {
+                    parse_rule_token(&format!("allow@{destination}")).map_err(anyhow::Error::from)
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?,
+        );
     }
-    if opts.no_dns_rebind_protection {
-        rebind_protection = false;
-    }
-    let nameserver_values = if opts.dns_nameserver.is_empty() {
-        network
-            .dns
-            .as_ref()
-            .and_then(|dns| dns.nameservers.clone())
-            .unwrap_or_default()
-    } else {
-        opts.dns_nameserver.clone()
-    };
-    let nameservers = nameserver_values
-        .iter()
-        .map(|value| value.parse::<Nameserver>().map_err(anyhow::Error::from))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    let query_timeout_ms = match opts.dns_query_timeout_ms {
-        Some(value) => value,
-        None => network
-            .dns
-            .as_ref()
-            .and_then(|dns| dns.query_timeout.as_deref())
-            .map(parse_duration_millis)
-            .transpose()?
-            .unwrap_or(5_000),
-    };
+    let mut patch = NetworkConfigPatch::new().policy(policy);
 
-    let tls = network.tls.unwrap_or_default();
-    let tls_enabled = !secrets.is_empty() || opts.tls_intercept || tls.enabled.unwrap_or(false);
-    let mut tls_bypass = tls.bypass.unwrap_or_default();
-    tls_bypass.extend(opts.tls_bypass.clone());
-    let verify_upstream = tls.verify_upstream.unwrap_or(true);
-    let block_quic = if opts.no_block_quic {
-        false
-    } else {
-        tls.block_quic.unwrap_or(true)
-    };
-    let tls_ports = if opts.tls_intercept_port.is_empty() {
-        vec![443]
-    } else {
-        opts.tls_intercept_port.clone()
-    };
-    let scoped_upstream_ca_cert = opts
-        .tls_upstream_ca_cert_for
-        .iter()
-        .map(|spec| parse_scoped_upstream_ca_cert(spec))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    let violation_action = parse_violation_action(&opts.on_secret_violation)?;
-    let max_connections = opts.max_connections.or(network.max_connections);
-    let trust_host_cas = opts.trust_host_cas || network.trust_host_cas.unwrap_or(false);
-    let ipv4_pool = opts
-        .net_ipv4_pool
-        .as_deref()
-        .map(str::parse::<ipnetwork::Ipv4Network>)
-        .transpose()?;
-    let ipv6_pool = opts
-        .net_ipv6_pool
-        .as_deref()
-        .map(str::parse::<ipnetwork::Ipv6Network>)
-        .transpose()?;
-
-    builder = builder.network(move |mut value| {
-        value = value.policy(policy).dns(move |dns| {
-            let mut dns = dns
-                .rebind_protection(rebind_protection)
-                .query_timeout_ms(query_timeout_ms);
-            if !nameservers.is_empty() {
-                dns = dns.nameservers(nameservers);
-            }
-            dns
-        });
-        if let Some(max) = max_connections {
-            value = value.max_connections(max);
-        }
-        if let Some(pool) = ipv4_pool {
-            value = value.ipv4_pool(pool);
-        }
-        if let Some(pool) = ipv6_pool {
-            value = value.ipv6_pool(pool);
-        }
-        value = value.trust_host_cas(trust_host_cas);
-        if let Some(action) = violation_action {
-            value = value.on_secret_violation(|_| ViolationActionBuilder::from_action(action));
-        }
-
-        if tls_enabled {
-            value = value.tls(move |mut tls| {
-                tls = tls
-                    .intercepted_ports(tls_ports)
-                    .verify_upstream(verify_upstream)
-                    .block_quic(block_quic);
-                for bypass in tls_bypass {
-                    tls = tls.bypass(bypass);
-                }
-                if let Some(cert) = opts.tls_intercept_ca_cert.clone() {
-                    tls = tls.intercept_ca_cert(cert);
-                }
-                if let Some(key) = opts.tls_intercept_ca_key.clone() {
-                    tls = tls.intercept_ca_key(key);
-                }
-                for cert in opts.tls_upstream_ca_cert.clone() {
-                    tls = tls.upstream_ca_cert(cert);
-                }
-                for (pattern, cert) in scoped_upstream_ca_cert {
-                    tls = tls.upstream_ca_cert_for(pattern, cert);
-                }
-                for pattern in opts.tls_no_verify_upstream_for.clone() {
-                    tls = tls.verify_upstream_for(pattern, false);
-                }
-                tls
-            });
-        }
-
-        for (name, secret) in secrets {
-            value = value.secret(move |mut entry| {
-                entry = entry.env(&name);
-                entry = match secret.value {
-                    None => entry.source(SecretSource::Env { var: name.clone() }),
-                    Some(SecretValueInput::Environment { env }) => {
-                        entry.source(SecretSource::Env { var: env })
-                    }
-                    Some(SecretValueInput::Literal(literal)) => entry.value(literal),
-                };
-                for host in secret.allow.unwrap_or_default() {
-                    entry = if host.starts_with("*.") {
-                        entry.allow_host_pattern(host)
+    if let Some(ports) = input.ports {
+        let ports = ports
+            .iter()
+            .map(|value| {
+                let (host_bind, host_port, guest_port, udp) = parse_port_mapping(value)?;
+                Ok(PublishedPort {
+                    host_port,
+                    guest_port,
+                    protocol: if udp {
+                        PortProtocol::Udp
                     } else {
-                        entry.allow_host(host)
-                    };
-                }
-                let injection = secret
-                    .inject
-                    .unwrap_or_else(|| vec![SecretInjectionInput::Headers]);
-                entry
-                    .inject_headers(injection.contains(&SecretInjectionInput::Headers))
-                    .inject_basic_auth(injection.contains(&SecretInjectionInput::BasicAuth))
-                    .inject_query(injection.contains(&SecretInjectionInput::QueryParams))
-                    .require_tls_identity(secret.require_tls_identity.unwrap_or(true))
-            });
-        }
-        value
-    });
-
-    Ok(builder)
-}
-
-#[cfg(not(feature = "net"))]
-fn apply_network(
-    builder: SandboxBuilder,
-    network: Option<&NetworkInput>,
-    secrets: Option<&BTreeMap<String, SecretInput>>,
-    _opts: &SandboxOpts,
-) -> anyhow::Result<SandboxBuilder> {
-    if network.is_some() || secrets.is_some() {
-        anyhow::bail!("network and secret config require an msb build with networking enabled");
+                        PortProtocol::Tcp
+                    },
+                    host_bind,
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        patch = patch.ports(ports);
     }
-    Ok(builder)
+    if let Some(dns) = input.dns {
+        let mut value = DnsConfigPatch::new();
+        if let Some(enabled) = dns.rebind_protection {
+            value = value.rebind_protection(enabled);
+        }
+        if let Some(nameservers) = dns.nameservers {
+            value = value.nameservers(
+                nameservers
+                    .iter()
+                    .map(|item| item.parse::<Nameserver>().map_err(anyhow::Error::from))
+                    .collect::<anyhow::Result<Vec<_>>>()?,
+            );
+        }
+        if let Some(timeout) = dns.query_timeout {
+            value = value.query_timeout_ms(parse_duration_millis(&timeout)?);
+        }
+        patch = patch.dns(value);
+    }
+    if let Some(tls) = input.tls {
+        let mut value = TlsConfigPatch::new();
+        if let Some(enabled) = tls.enabled {
+            value = value.enabled(enabled);
+        }
+        if let Some(bypass) = tls.bypass {
+            value = value.bypass(bypass);
+        }
+        if let Some(verify) = tls.verify_upstream {
+            value = value.verify_upstream(verify);
+        }
+        if let Some(block) = tls.block_quic {
+            value = value.block_quic(block);
+        }
+        patch = patch.tls(value);
+    }
+    if let Some(enabled) = input.trust_host_cas {
+        patch = patch.trust_host_cas(enabled);
+    }
+    if let Some(max) = input.max_connections {
+        patch = patch.max_connections(max);
+    }
+    Ok(patch)
 }
 
 #[cfg(feature = "net")]
-fn validate_secrets(secrets: &BTreeMap<String, SecretInput>) -> anyhow::Result<()> {
-    for (name, secret) in secrets {
-        if name.is_empty() {
-            anyhow::bail!("secret names must not be empty");
+fn materialize_secret_patch(
+    input: &BTreeMap<String, SecretInput>,
+) -> anyhow::Result<SecretConfigPatch> {
+    use microsandbox::sandbox::SecretSource;
+    use microsandbox_types::{HostPattern, SecretInjection};
+
+    let mut patch = SecretConfigPatch::new();
+    for (name, input) in input {
+        let mut entry = SecretEntryConfigPatch::new();
+        match &input.value {
+            Some(SecretValueInput::Literal(value)) => {
+                entry = entry.literal(value);
+            }
+            Some(SecretValueInput::Environment { env }) => {
+                entry = entry.source(SecretSource::Env { var: env.clone() });
+            }
+            None => {
+                entry = entry.source(SecretSource::Env { var: name.clone() });
+            }
         }
-        if secret.allow.as_ref().is_none_or(Vec::is_empty) {
-            anyhow::bail!("secret {name:?} must declare a non-empty `allow` list");
-        }
-        if secret
+        entry = entry.allowed_hosts(
+            input
+                .allow
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|host| {
+                    if host.starts_with("*.") {
+                        HostPattern::Wildcard(host)
+                    } else {
+                        HostPattern::Exact(host)
+                    }
+                })
+                .collect(),
+        );
+        let injection = input
             .inject
-            .as_ref()
-            .is_some_and(|injection| injection.is_empty())
-        {
-            anyhow::bail!("secret {name:?} must enable at least one injection location");
+            .clone()
+            .unwrap_or_else(|| vec![SecretInjectionInput::Headers]);
+        entry = entry.injection(SecretInjection {
+            headers: injection.contains(&SecretInjectionInput::Headers),
+            basic_auth: injection.contains(&SecretInjectionInput::BasicAuth),
+            query_params: injection.contains(&SecretInjectionInput::QueryParams),
+            body: false,
+        });
+        if let Some(required) = input.require_tls_identity {
+            entry = entry.require_tls_identity(required);
         }
+        patch = patch.secret(name, entry);
     }
-    Ok(())
+    Ok(patch)
 }
 
 #[cfg(feature = "net")]
@@ -2017,11 +1910,63 @@ allow: ["scoped.example.com"]
         );
     }
 
+    #[tokio::test]
+    async fn nested_required_fields_can_be_completed_by_a_scoped_patch() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = write_config(
+            dir.path(),
+            "base.yaml",
+            "image: alpine\ninit:\n  args: [--unit=test.target]\n",
+        );
+        let runtime = write_config(dir.path(), "runtime.yaml", "init:\n  cmd: auto\n");
+        let resolved = resolve(&SandboxConfigSources {
+            conf: Some(root),
+            runtime_conf: Some(runtime),
+            ..SandboxConfigSources::default()
+        })
+        .unwrap();
+
+        let config = resolved
+            .apply(SandboxBuilder::new("completed-init"))
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let init = config.spec.init.unwrap();
+        assert_eq!(init.cmd, "auto");
+        assert_eq!(init.args, ["--unit=test.target"]);
+    }
+
+    #[tokio::test]
+    async fn unresolved_nested_required_fields_fail_at_final_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = write_config(
+            dir.path(),
+            "base.yaml",
+            "image: alpine\ninit:\n  args: [--unit=test.target]\n",
+        );
+        let resolved = resolve(&SandboxConfigSources {
+            conf: Some(root),
+            ..SandboxConfigSources::default()
+        })
+        .unwrap();
+
+        let error = resolved
+            .apply(SandboxBuilder::new("missing-init"))
+            .unwrap()
+            .build()
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("init.cmd is required"));
+    }
+
     #[test]
     fn paths_are_relative_to_the_contributing_file() {
         let dir = tempfile::tempdir().unwrap();
         let config_dir = dir.path().join("config");
         fs::create_dir(&config_dir).unwrap();
+        fs::write(config_dir.join("patch.yaml"), "patches: []\n").unwrap();
+        fs::write(config_dir.join("app.toml"), "[app]\n").unwrap();
         let root = write_config(
             &config_dir,
             "agent.yaml",
@@ -2183,14 +2128,8 @@ secrets:
         };
         let resolved = resolve(&sources).unwrap();
         let image = resolved.image(None, None).unwrap();
-        let opts = SandboxOpts::default();
-        let builder = image.apply(SandboxBuilder::new("config-test")).unwrap();
-        let config = resolved
-            .apply(builder, &opts)
-            .unwrap()
-            .build()
-            .await
-            .unwrap();
+        let builder = resolved.apply(SandboxBuilder::new("config-test")).unwrap();
+        let config = image.apply(builder).unwrap().build().await.unwrap();
 
         assert_eq!(config.spec.resources.cpus, 2);
         assert_eq!(config.spec.resources.memory_mib, 1024);
@@ -2311,7 +2250,7 @@ scripts: { start: "python app.py" }
             .unwrap()
             .apply(SandboxBuilder::new("cli-override"))
             .unwrap();
-        let builder = resolved.apply(builder, &opts).unwrap();
+        let builder = resolved.apply(builder).unwrap();
         let config = crate::commands::common::apply_sandbox_opts_after_config(builder, &opts)
             .unwrap()
             .build()
@@ -2349,8 +2288,8 @@ scripts: { start: "python app.py" }
             .unwrap()
             .apply(SandboxBuilder::new("network-override"))
             .unwrap();
-        let config = resolved
-            .apply(builder, &opts)
+        let builder = resolved.apply(builder).unwrap();
+        let config = crate::commands::common::apply_sandbox_opts_after_config(builder, &opts)
             .unwrap()
             .build()
             .await
@@ -2385,8 +2324,8 @@ scripts: { start: "python app.py" }
             .unwrap()
             .apply(SandboxBuilder::new("network-profile-override"))
             .unwrap();
-        let config = resolved
-            .apply(builder, &opts)
+        let builder = resolved.apply(builder).unwrap();
+        let config = crate::commands::common::apply_sandbox_opts_after_config(builder, &opts)
             .unwrap()
             .build()
             .await
@@ -2396,6 +2335,47 @@ scripts: { start: "python app.py" }
         assert_eq!(policy["default_egress"], "deny");
         assert_eq!(policy["default_ingress"], "deny");
         assert_eq!(policy["rules"], serde_json::json!([]));
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn cli_network_rules_prepend_without_discarding_file_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = write_config(
+            dir.path(),
+            "agent.yaml",
+            r#"
+image: "python"
+network:
+  policy: open
+  deny: ["169.254.169.254"]
+  allow: ["api.openai.com"]
+"#,
+        );
+        let sources = SandboxConfigSources {
+            conf: Some(root),
+            ..SandboxConfigSources::default()
+        };
+        let resolved = resolve(&sources).unwrap();
+        let opts = SandboxOpts {
+            net_rule: vec!["deny@192.0.2.1".to_string()],
+            ..SandboxOpts::default()
+        };
+        let builder = resolved
+            .apply(SandboxBuilder::new("network-rule-order"))
+            .unwrap();
+        let builder = resolved.image(None, None).unwrap().apply(builder).unwrap();
+        let config = crate::commands::common::apply_sandbox_opts_after_config(builder, &opts)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        let policy = serde_json::to_value(config.spec.network.policy.as_ref().unwrap()).unwrap();
+        assert_eq!(policy["rules"].as_array().unwrap().len(), 3);
+        assert_eq!(policy["rules"][0]["action"], "deny");
+        assert_eq!(policy["rules"][1]["action"], "deny");
+        assert_eq!(policy["rules"][2]["action"], "allow");
     }
 
     #[test]

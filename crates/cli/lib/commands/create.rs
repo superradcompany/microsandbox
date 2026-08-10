@@ -43,8 +43,8 @@ pub async fn run(
 
     let resolved = sandbox_config::resolve(&args.sandbox.config)?;
     let image = resolved.image(args.image.as_deref(), None)?;
-    let builder = image.apply(Sandbox::builder(&name))?;
-    let builder = resolved.apply(builder, &args.sandbox)?;
+    let builder = resolved.apply(Sandbox::builder(&name))?;
+    let builder = image.apply(builder)?;
     let builder = if resolved.loaded() {
         apply_sandbox_opts_after_config(builder, &args.sandbox)?
     } else {

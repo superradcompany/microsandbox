@@ -173,8 +173,8 @@ async fn run_new(
     let launch_started_at = chrono::Utc::now();
     let resolved = sandbox_config::resolve(&args.sandbox.config)?;
     let image = resolved.image(args.image.as_deref(), args.from_snapshot.as_deref())?;
-    let builder = image.apply(Sandbox::builder(&name))?;
-    let builder = resolved.apply(builder, &args.sandbox)?;
+    let builder = resolved.apply(Sandbox::builder(&name))?;
+    let builder = image.apply(builder)?;
     if args.sandbox.log_level.is_none()
         && let Some(log_level) = log_level
     {

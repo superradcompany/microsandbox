@@ -157,9 +157,23 @@ impl NetworkBuilder {
         self
     }
 
+    /// Configure DNS starting from the current values instead of defaults.
+    #[doc(hidden)]
+    pub fn dns_overlay(mut self, f: impl FnOnce(DnsBuilder) -> DnsBuilder) -> Self {
+        self.config.dns = f(DnsBuilder::from_config(self.config.dns)).build();
+        self
+    }
+
     /// Configure TLS interception via a closure.
     pub fn tls(mut self, f: impl FnOnce(TlsBuilder) -> TlsBuilder) -> Self {
         self.config.tls = f(TlsBuilder::new()).build();
+        self
+    }
+
+    /// Configure TLS interception starting from the current values instead of defaults.
+    #[doc(hidden)]
+    pub fn tls_overlay(mut self, f: impl FnOnce(TlsBuilder) -> TlsBuilder) -> Self {
+        self.config.tls = f(TlsBuilder::from_config(self.config.tls)).build();
         self
     }
 
@@ -305,6 +319,10 @@ impl DnsBuilder {
         }
     }
 
+    fn from_config(config: DnsConfig) -> Self {
+        Self { config }
+    }
+
     /// Enable or disable DNS rebinding protection. Default: true.
     pub fn rebind_protection(mut self, enabled: bool) -> Self {
         self.config.rebind_protection = enabled;
@@ -353,6 +371,16 @@ impl TlsBuilder {
                 ..TlsConfig::default()
             },
         }
+    }
+
+    fn from_config(config: TlsConfig) -> Self {
+        Self { config }
+    }
+
+    /// Enable or disable TLS interception while retaining the remaining TLS settings.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.config.enabled = enabled;
+        self
     }
 
     /// Add a domain to the bypass list (no MITM). Supports `*.suffix` wildcards.
