@@ -14,6 +14,7 @@ pub mod log_args;
 #[cfg(feature = "net")]
 pub mod net_rule;
 pub mod sandbox_cmd;
+pub mod sandbox_config;
 pub mod styles;
 pub mod tree;
 pub mod ui;

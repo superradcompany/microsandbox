@@ -8,8 +8,8 @@ use futures::{FutureExt, StreamExt};
 use microsandbox::logs::{LogSource, LogStreamOptions, LogStreamStart};
 use microsandbox::sandbox::{ExecOutput, RlimitResource, Sandbox};
 
-use super::common::{SandboxOpts, apply_sandbox_opts};
-use crate::ui;
+use super::common::{SandboxOpts, apply_sandbox_opts, apply_sandbox_opts_after_config};
+use crate::{sandbox_config, ui};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -20,11 +20,9 @@ use crate::ui;
 pub struct RunArgs {
     /// Image to use (e.g. alpine, python, ./rootfs, ./disk.qcow2).
     ///
-    /// Mutually exclusive with `--from-snapshot`; one of the two is required.
-    #[arg(
-        required_unless_present = "from_snapshot",
-        conflicts_with = "from_snapshot"
-    )]
+    /// Mutually exclusive with `--from-snapshot`. May be omitted when a config file supplies
+    /// `image`.
+    #[arg(conflicts_with = "from_snapshot")]
     pub image: Option<String>,
 
     /// Boot a fresh sandbox from a snapshot artifact (path or name).
@@ -173,20 +171,20 @@ async fn run_new(
     log_level: Option<microsandbox::LogLevel>,
 ) -> anyhow::Result<()> {
     let launch_started_at = chrono::Utc::now();
-    let mut builder = Sandbox::builder(&name);
-    if let Some(ref snap) = args.from_snapshot {
-        builder = builder.from_snapshot(snap.clone());
-    } else if let Some(ref image) = args.image {
-        builder = builder.image(image.as_str());
-    } else {
-        anyhow::bail!("either an image or --from-snapshot is required");
-    }
+    let resolved = sandbox_config::resolve(&args.sandbox.config)?;
+    let image = resolved.image(args.image.as_deref(), args.from_snapshot.as_deref())?;
+    let builder = image.apply(Sandbox::builder(&name))?;
+    let builder = resolved.apply(builder, &args.sandbox)?;
     if args.sandbox.log_level.is_none()
         && let Some(log_level) = log_level
     {
         args.sandbox.log_level = Some(log_level.to_string());
     }
-    let mut builder = apply_sandbox_opts(builder, &args.sandbox)?;
+    let mut builder = if resolved.loaded() {
+        apply_sandbox_opts_after_config(builder, &args.sandbox)?
+    } else {
+        apply_sandbox_opts(builder, &args.sandbox)?
+    };
     if !is_named {
         // Unnamed `msb run` (including `--detach`) is a one-off: mark it
         // ephemeral so the host runtime removes its persisted state on exit.
@@ -208,11 +206,7 @@ async fn run_new(
         builder.create_with_pull_progress()?
     };
 
-    let display_label = args
-        .from_snapshot
-        .clone()
-        .or_else(|| args.image.clone())
-        .unwrap_or_else(|| name.clone());
+    let display_label = image.display();
     let mut display = if args.sandbox.quiet {
         ui::PullProgressDisplay::quiet(&display_label)
     } else {
@@ -446,6 +440,8 @@ fn warn_detached_command_ignored(name: &str, args: &RunArgs) {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use clap::Parser;
     use clap::error::ErrorKind;
 
@@ -537,6 +533,39 @@ mod tests {
             let err = TestCli::try_parse_from(argv).unwrap_err();
             assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
         }
+    }
+
+    #[test]
+    fn config_can_supply_the_image_before_a_trailing_command() {
+        let args = parse_run_args(&[
+            "--conf",
+            "sandbox.yaml",
+            "--net-conf",
+            "network.yaml",
+            "--",
+            "python",
+            "app.py",
+        ]);
+
+        assert!(args.image.is_none());
+        assert_eq!(
+            args.sandbox.config.conf,
+            Some(PathBuf::from("sandbox.yaml"))
+        );
+        assert_eq!(
+            args.sandbox.config.net_conf,
+            Some(PathBuf::from("network.yaml"))
+        );
+        assert_eq!(args.command, ["python", "app.py"]);
+    }
+
+    #[test]
+    fn duplicate_config_flags_are_argument_errors() {
+        let error =
+            TestCli::try_parse_from(["msb", "python", "--conf", "one.yaml", "--conf", "two.yaml"])
+                .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
     }
 
     #[test]

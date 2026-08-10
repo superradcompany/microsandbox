@@ -190,7 +190,8 @@
             "group": "Configuration",
             "icon": "gear",
             "pages": [
-              "configuration"
+              "configuration",
+              "sandbox-config"
             ]
           },
           {

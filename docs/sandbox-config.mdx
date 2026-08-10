@@ -1,0 +1,290 @@
+---
+title: Sandbox configuration
+description: Configure one sandbox with root or scoped YAML files
+icon: "file-code"
+---
+
+Sandbox configuration is a reusable, sparse definition for one sandbox. Load it with `msb run`, `msb create`, or `msb install`; explicit CLI arguments are applied on top. The file may have any name when passed with `--conf`.
+
+```yaml
+# sandbox.yaml
+image: "python:3.12"
+cpus: 2
+memory: "1G"
+workdir: "/app"
+mounts:
+  - "./src:/app"
+network:
+  allow: ["api.openai.com"]
+  ports: ["8000:8000"]
+secrets:
+  OPENAI_API_KEY:
+    allow: ["api.openai.com"]
+scripts:
+  start: "python app.py"
+```
+
+```bash
+msb run --conf sandbox.yaml -- start
+msb create --conf sandbox.yaml --name agent
+msb install --conf sandbox.yaml --name agent
+```
+
+Sandbox configuration is never auto-discovered. Every root or scoped configuration file must be supplied explicitly with its corresponding flag.
+
+## Sparse configuration
+
+Every config file may provide only the fields it owns. Required fields are checked after root config, scoped config, and command-line inputs are merged, so a positional image can complete a network-only file:
+
+```yaml
+# net-policy.yaml
+network:
+  policy: public
+  allow:
+    - "api.openai.com"
+  deny:
+    - "169.254.169.254"
+```
+
+```bash
+msb run python --conf net-policy.yaml
+```
+
+If neither the files nor the arguments provide an image, the command fails before pulling an image or creating sandbox state.
+
+## Scoped config files
+
+Scoped flags accept the contents of one field or field group without its root wrapper. They are useful for focused policies that should fail on unrelated fields.
+
+| Flag | Accepted fields |
+| --- | --- |
+| `--conf PATH` | Any sandbox configuration field |
+| `--net-conf PATH` | `policy`, `allow`, `deny`, `ports`, `dns`, `tls`, `trust_host_cas`, `max_connections` |
+| `--resource-conf PATH` | `cpus`, `memory`, `max_duration`, `idle_timeout`, `rlimits` |
+| `--runtime-conf PATH` | `workdir`, `shell`, `user`, `hostname`, `security`, `entrypoint`, `cmd`, `env`, `labels`, `init` |
+| `--fs-conf PATH` | `mounts`, `patch_files`, `patches` |
+| `--secret-conf PATH` | A map of secret names to secret definitions |
+| `--script-conf PATH` | A map of script names to shell snippets |
+
+For example, `--net-conf` expects this unwrapped document:
+
+```yaml
+policy: public
+allow:
+  - "api.openai.com"
+deny:
+  - "169.254.169.254"
+```
+
+```bash
+msb run python --net-conf net-policy.yaml
+```
+
+Passing `network: {...}` to `--net-conf` is an error; use `--conf` for a root-shaped document. Each config flag may appear at most once.
+
+## Precedence and merging
+
+Configuration resolves from lower to higher precedence:
+
+1. Built-in and global `config.json` defaults
+2. Explicit `--conf`
+3. Scoped config flags in the fixed order shown above
+4. Explicit CLI flags and positional arguments
+
+Higher-precedence scalars replace lower values. Maps merge by key, including nested `init`, `network.dns`, `network.tls`, and secret definitions. A list supplied by a higher-precedence config file replaces the lower list. Repeatable CLI flags remain additive, and CLI network rules are evaluated before rules loaded from files.
+
+```bash
+# large.yaml can replace memory from base.yaml; the CLI value wins over both.
+msb run python --conf base.yaml --resource-conf large.yaml --memory 12G
+```
+
+Relative host paths are resolved against the file that contains them. Paths inside a file listed by `patch_files` are resolved against that patch file.
+
+## Schema
+
+### Image and registry
+
+The common image form is a string. Local paths beginning with `.`, `..`, or `/` are resolved as bind roots or disk images; other strings are OCI references.
+
+```yaml
+image: "python:3.12"
+pull_policy: missing       # missing | always | never
+registry:
+  username: "deploy"
+  password_env: "REGISTRY_TOKEN"
+```
+
+Use the object form to select a source explicitly:
+
+```yaml
+image: { oci: "python:3.12", upper_size: "8G" }
+image: { snapshot: "prepared-agent" }
+image: { disk: "./ubuntu.qcow2", fstype: ext4 }
+image: { bind: "./rootfs" }
+```
+
+Exactly one source is allowed. Project layer references are not valid in single-sandbox configuration; consume a published layer as an OCI reference instead.
+
+### Resources and lifecycle
+
+```yaml
+cpus: 2
+memory: "1G"
+max_duration: "12h"
+idle_timeout: "10m"
+rlimits:
+  - { resource: nofile, soft: 8192, hard: 16384 }
+  - { resource: nproc, soft: 512 }
+```
+
+When `hard` is omitted it equals `soft`.
+
+### Runtime
+
+```yaml
+workdir: "/app"
+shell: "/bin/bash"
+user: "app"
+hostname: "api"
+security: restricted       # default | restricted
+entrypoint: ["/usr/bin/tini", "--"]
+cmd: ["python", "app.py"]
+env:
+  MODE: "production"
+labels:
+  team: "platform"
+init:
+  cmd: auto                # auto or an absolute guest path
+  args: []
+  env: {}
+```
+
+`cmd` is the default workload for `msb run`. `msb create` stores it without launching it.
+
+### Mounts
+
+A string mount is a bind mount with an optional trailing `:ro`:
+
+```yaml
+mounts:
+  - "./src:/app"
+  - "./certs:/etc/app/certs:ro"
+```
+
+Object mounts require exactly one source and a guest `target`:
+
+```yaml
+mounts:
+  - bind: "./src"
+    target: "/app"
+    stat_virtualization: strict
+    host_permissions: private
+  - named: cache
+    target: "/var/cache/app"
+    create: ensure-exists
+  - tmpfs: { size: "256M" }
+    target: "/run"
+    noexec: true
+  - disk: "./seed.qcow2"
+    target: "/seed"
+    format: qcow2
+    fstype: ext4
+    readonly: true
+```
+
+All mount kinds accept `readonly`, `noexec`, `nosuid`, and `nodev`. `stat_virtualization` and `host_permissions` apply only to bind and named mounts. Duplicate guest targets are rejected.
+
+### Rootfs patches
+
+Patch files run first in listed order, followed by inline patches:
+
+```yaml
+patch_files:
+  - "./patches/common.yaml"
+patches:
+  - copy_file: { src: "./config.toml", dst: "/etc/app/config.toml", mode: "0644", replace: true }
+  - copy_dir: { src: "./certs", dst: "/etc/app/certs" }
+  - text: { path: "/etc/app/build.txt", content: "release", mode: "0644" }
+  - file: { path: "/etc/app/blob.bin", content_base64: "SGVsbG8=", mode: "0600" }
+  - mkdir: { path: "/var/cache/app", mode: "0755" }
+  - symlink: { target: "/etc/app/config.toml", link: "/etc/app/active.toml" }
+  - append: { path: "/etc/hosts", content: "10.0.0.5 db.internal\n" }
+  - remove: { path: "/etc/motd" }
+```
+
+A patch file has one top-level `patches` list using the same operations. File modes must be quoted four-digit octal strings.
+
+### Network
+
+Use a preset string for the common cases:
+
+```yaml
+network: public             # none | public | open
+```
+
+`public`, the default, permits public internet access while blocking private, loopback, link-local, and metadata destinations. `none` denies ingress and egress. `open` is unrestricted.
+
+The object form adds rules and network services:
+
+```yaml
+network:
+  policy: public
+  allow: ["api.openai.com", "*.stripe.com"]
+  deny: ["169.254.169.254"]
+  ports: ["8000:8000", "9100:9100/udp"]
+  dns:
+    rebind_protection: true
+    nameservers: ["1.1.1.1", "8.8.8.8"]
+    query_timeout: "5s"
+  tls:
+    enabled: true
+    bypass: ["*.internal.example"]
+    verify_upstream: true
+    block_quic: true
+  trust_host_cas: false
+  max_connections: 256
+```
+
+A non-empty `allow` list implies deny-by-default egress. Top-level `ports` is shorthand for `network.ports`; when both are present, the lists are combined and duplicate host ports are rejected.
+
+### Secrets
+
+Every secret requires a non-empty destination allowlist. When `value` is omitted, the host environment variable with the same name is used. An exact `${NAME}` value records `NAME` as the host-side source instead of copying its plaintext into durable config.
+
+```yaml
+secrets:
+  OPENAI_API_KEY:
+    allow: ["api.openai.com"]
+  DATABASE_URL:
+    value: "${DB_DSN}"
+    allow: ["db.internal"]
+    inject: [headers]
+    require_tls_identity: true
+```
+
+`inject` accepts `headers`, `basic_auth`, and `query_params`; it defaults to `headers`. Declaring a secret enables TLS interception and DNS-rebind protection.
+
+### Scripts
+
+Scripts are named shell snippets installed as executables in `/.msb/scripts`, which is on `PATH`. The sandbox configuration's `shell` selects their shebang and defaults to `/bin/sh`.
+
+```yaml
+shell: "/bin/bash"
+scripts:
+  start: "python app.py"
+  migrate: "alembic upgrade head"
+```
+
+Run a script like any other guest command:
+
+```bash
+msb run --conf sandbox.yaml -- migrate
+```
+
+## Strict YAML and environment substitution
+
+Sandbox configuration is data, not a templating language. The loader rejects unknown fields, duplicate keys, multiple YAML documents, anchors, aliases, merge keys, and custom tags. Bare YAML 1.1 booleans such as `yes`, `no`, `on`, and `off` are rejected. Quote modes, sizes, durations, ports, domains, image references, and other typed strings.
+
+Only `${NAME}` environment substitution is supported. Substituted variables must exist when the config is loaded; an exact secret `value: "${NAME}"` is the exception because it records a host-side source that is resolved when the sandbox starts. Shell-style operators such as `${NAME:-fallback}`, includes, templates, loops, and expressions are not supported.
+
+Project envelope fields such as `sandboxes`, `volumes`, and `layers`, plus per-project fields such as `depends_on`, are rejected in single-sandbox configuration.

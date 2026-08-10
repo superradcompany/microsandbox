@@ -47,9 +47,45 @@ pub fn local_backend_ref(backend: &Arc<dyn Backend>) -> anyhow::Result<&LocalBac
 // Types
 //--------------------------------------------------------------------------------------------------
 
+/// Sparse configuration files accepted by single-sandbox commands.
+#[derive(Debug, Default, Args)]
+pub struct SandboxConfigSources {
+    /// Load a sparse single-sandbox configuration.
+    #[arg(long, value_name = "PATH")]
+    pub conf: Option<PathBuf>,
+
+    /// Load an unwrapped network configuration.
+    #[arg(long = "net-conf", value_name = "PATH")]
+    pub net_conf: Option<PathBuf>,
+
+    /// Load an unwrapped resource and lifecycle configuration.
+    #[arg(long = "resource-conf", value_name = "PATH")]
+    pub resource_conf: Option<PathBuf>,
+
+    /// Load an unwrapped runtime configuration.
+    #[arg(long = "runtime-conf", value_name = "PATH")]
+    pub runtime_conf: Option<PathBuf>,
+
+    /// Load an unwrapped filesystem configuration.
+    #[arg(long = "fs-conf", value_name = "PATH")]
+    pub fs_conf: Option<PathBuf>,
+
+    /// Load an unwrapped secret-name map.
+    #[arg(long = "secret-conf", value_name = "PATH")]
+    pub secret_conf: Option<PathBuf>,
+
+    /// Load an unwrapped script-name map.
+    #[arg(long = "script-conf", value_name = "PATH")]
+    pub script_conf: Option<PathBuf>,
+}
+
 /// Common sandbox configuration flags shared between `msb run` and `msb create`.
 #[derive(Debug, Default, Args)]
 pub struct SandboxOpts {
+    /// Sparse root and scoped configuration inputs.
+    #[command(flatten)]
+    pub config: SandboxConfigSources,
+
     /// Name for the sandbox. Auto-generated if omitted. Maximum 128 UTF-8 bytes.
     #[arg(short, long)]
     pub name: Option<String>,
@@ -568,7 +604,20 @@ impl SandboxOpts {
         #[cfg(not(feature = "net"))]
         let net = false;
 
-        base || net
+        base || net || self.config.any()
+    }
+}
+
+impl SandboxConfigSources {
+    /// Returns true when at least one explicit config path was supplied.
+    pub fn any(&self) -> bool {
+        self.conf.is_some()
+            || self.net_conf.is_some()
+            || self.resource_conf.is_some()
+            || self.runtime_conf.is_some()
+            || self.fs_conf.is_some()
+            || self.secret_conf.is_some()
+            || self.script_conf.is_some()
     }
 }
 
@@ -578,8 +627,27 @@ impl SandboxOpts {
 
 /// Apply common sandbox options to a builder.
 pub fn apply_sandbox_opts(
+    builder: SandboxBuilder,
+    opts: &SandboxOpts,
+) -> anyhow::Result<SandboxBuilder> {
+    apply_sandbox_opts_inner(builder, opts, true)
+}
+
+/// Apply CLI options after a config file has already materialized the network policy.
+///
+/// Non-policy network flags still apply here. The resolver has already combined CLI rules with
+/// file rules in first-match order, so replacing that policy a second time would discard the file.
+pub fn apply_sandbox_opts_after_config(
+    builder: SandboxBuilder,
+    opts: &SandboxOpts,
+) -> anyhow::Result<SandboxBuilder> {
+    apply_sandbox_opts_inner(builder, opts, false)
+}
+
+fn apply_sandbox_opts_inner(
     mut builder: SandboxBuilder,
     opts: &SandboxOpts,
+    _apply_cli_network_policy: bool,
 ) -> anyhow::Result<SandboxBuilder> {
     // --- Basic resources ---
     if let Some(cpus) = opts.cpus {
@@ -758,7 +826,7 @@ pub fn apply_sandbox_opts(
     // --- Networking ---
     #[cfg(feature = "net")]
     {
-        builder = apply_network_opts(builder, opts)?;
+        builder = apply_network_opts(builder, opts, _apply_cli_network_policy)?;
     }
 
     Ok(builder)
@@ -1651,6 +1719,7 @@ fn ensure_host_kind(context: &str, source: &str, kind: HostPathKind) -> anyhow::
 fn apply_network_opts(
     mut builder: SandboxBuilder,
     opts: &SandboxOpts,
+    apply_cli_network_config: bool,
 ) -> anyhow::Result<SandboxBuilder> {
     use microsandbox_network::dns::Nameserver;
 
@@ -1662,6 +1731,13 @@ fn apply_network_opts(
         } else {
             builder.port_bind(bind, host, guest)
         };
+    }
+
+    // A loaded config is resolved together with CLI network fields before this function runs.
+    // Ports remain additive and are intentionally applied above, while every other network field
+    // is skipped to avoid rebuilding a nested DNS/TLS document from defaults.
+    if !apply_cli_network_config {
+        return Ok(builder);
     }
 
     // Secrets. `create` persists a host-side source reference, not the raw
@@ -1900,7 +1976,7 @@ pub fn parse_duration(s: &str) -> anyhow::Result<std::time::Duration> {
 /// it with the explicit defaults, so the four default-source params are
 /// mutually exclusive on the caller side.
 #[cfg(feature = "net")]
-fn build_network_policy(
+pub(crate) fn build_network_policy(
     profile_args: &[String],
     rule_args: &[String],
     no_net: bool,
@@ -2030,7 +2106,7 @@ fn build_network_policy(
 ///
 /// IPv6 bind addresses must be bracketed, e.g. `[::]:8080:80`.
 #[cfg(feature = "net")]
-fn parse_port_mapping(spec: &str) -> anyhow::Result<(std::net::IpAddr, u16, u16, bool)> {
+pub(crate) fn parse_port_mapping(spec: &str) -> anyhow::Result<(std::net::IpAddr, u16, u16, bool)> {
     use std::net::{IpAddr, Ipv4Addr};
 
     let (port_part, udp) = if let Some(p) = spec.strip_suffix("/udp") {
@@ -2140,7 +2216,7 @@ fn allow_secret_host(
 
 /// Parse a scoped upstream CA spec: `PATTERN=PATH`.
 #[cfg(feature = "net")]
-fn parse_scoped_upstream_ca_cert(spec: &str) -> anyhow::Result<(String, PathBuf)> {
+pub(crate) fn parse_scoped_upstream_ca_cert(spec: &str) -> anyhow::Result<(String, PathBuf)> {
     let (pattern, path) = spec
         .split_once('=')
         .filter(|(pattern, path)| !pattern.is_empty() && !path.is_empty())
@@ -2151,7 +2227,7 @@ fn parse_scoped_upstream_ca_cert(spec: &str) -> anyhow::Result<(String, PathBuf)
 
 /// Parse a violation action string.
 #[cfg(feature = "net")]
-fn parse_violation_action(
+pub(crate) fn parse_violation_action(
     s: &Option<String>,
 ) -> anyhow::Result<Option<microsandbox_network::secrets::config::ViolationAction>> {
     use microsandbox_network::secrets::config::{HostPattern, ViolationAction};
@@ -2294,7 +2370,7 @@ fn parse_script_spec(spec: &str, flag: &str) -> anyhow::Result<(String, String)>
 /// line or fail to exec interactively. Whitespace (including newlines)
 /// and NUL break shebang parsing; an empty string or `/` leave no
 /// interpreter for the kernel to run.
-fn validate_shell(shell: &str) -> anyhow::Result<()> {
+pub(crate) fn validate_shell(shell: &str) -> anyhow::Result<()> {
     if shell.is_empty() {
         anyhow::bail!("--shell must not be empty");
     }
@@ -2352,7 +2428,7 @@ fn decode_script_escapes(input: &str) -> String {
 
 /// Wrap a decoded shell snippet with the generated shebang and ensure
 /// a trailing newline so the file is well-formed.
-fn wrap_shell_script(shell: Option<&str>, body: &str) -> String {
+pub(crate) fn wrap_shell_script(shell: Option<&str>, body: &str) -> String {
     let mut script = script_shebang(shell);
     script.push('\n');
     script.push_str(body);
