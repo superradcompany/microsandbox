@@ -7,8 +7,9 @@ use clap::Args;
 use microsandbox::VolumeKind;
 use microsandbox::backend::{Backend, LocalBackend};
 use microsandbox::sandbox::{
-    DeploymentProfile, DiskImageFormat, FlatClone, MountBuilder, Patch, RootDiskBuilder, Sandbox,
-    SandboxBuilder, SandboxHandle, SecurityProfile,
+    CpuPlacement, DeploymentProfile, DiskImageFormat, FlatClone, MountBuilder, Patch,
+    RootDiskBuilder, Sandbox, SandboxBuilder, SandboxHandle, SecurityProfile,
+    TransparentHugePagePolicy,
 };
 #[cfg(feature = "net")]
 use microsandbox_network::rate_limit::RateLimitDirection;
@@ -63,6 +64,10 @@ pub struct SandboxOpts {
     #[arg(long = "max-cpus")]
     pub max_cpus: Option<u8>,
 
+    /// Host CPU placement policy (inherit, auto, spread, compact).
+    #[arg(long = "cpu-placement", value_name = "POLICY")]
+    pub cpu_placement: Option<CpuPlacement>,
+
     /// Amount of memory to allocate (e.g. 512M, 1G).
     #[arg(short, long)]
     pub memory: Option<String>,
@@ -70,6 +75,10 @@ pub struct SandboxOpts {
     /// Boot-time maximum hotpluggable memory (e.g. 1G, 8G).
     #[arg(long = "max-memory", value_name = "SIZE")]
     pub max_memory: Option<String>,
+
+    /// Guest transparent huge-page policy selected at boot.
+    #[arg(long, value_name = "POLICY", value_parser = ["always", "madvise", "never"])]
+    pub thp: Option<String>,
 
     /// Mount a host path or named volume into the sandbox (`SOURCE:DEST[:OPTIONS]`).
     #[arg(short, long)]
@@ -537,8 +546,10 @@ impl SandboxOpts {
     pub fn has_creation_flags(&self) -> bool {
         let base = self.cpus.is_some()
             || self.max_cpus.is_some()
+            || self.cpu_placement.is_some()
             || self.memory.is_some()
             || self.max_memory.is_some()
+            || self.thp.is_some()
             || !self.volume.is_empty()
             || !self.mount_dir.is_empty()
             || !self.mount_file.is_empty()
@@ -626,11 +637,20 @@ pub fn apply_sandbox_opts(
     if let Some(max_cpus) = opts.max_cpus {
         builder = builder.max_cpus(max_cpus);
     }
+    if let Some(cpu_placement) = opts.cpu_placement {
+        builder = builder.cpu_placement(cpu_placement);
+    }
     if let Some(ref mem) = opts.memory {
         builder = builder.memory(ui::parse_size_mib(mem).map_err(anyhow::Error::msg)?);
     }
     if let Some(ref max_memory) = opts.max_memory {
         builder = builder.max_memory(ui::parse_size_mib(max_memory).map_err(anyhow::Error::msg)?);
+    }
+    if let Some(ref thp) = opts.thp {
+        let policy = thp
+            .parse::<TransparentHugePagePolicy>()
+            .map_err(anyhow::Error::msg)?;
+        builder = builder.thp(policy);
     }
     if let Some(ref workdir) = opts.workdir {
         builder = builder.workdir(workdir);
@@ -2533,25 +2553,15 @@ pub fn resolve_command(
     user_command: Vec<String>,
     interactive: bool,
 ) -> anyhow::Result<(Option<String>, Vec<String>)> {
-    // User supplied an explicit command — prepend entrypoint if set.
-    if !user_command.is_empty() {
-        return match &config.spec.runtime.entrypoint {
-            Some(ep) if !ep.is_empty() => {
-                let bin = ep[0].clone();
-                let args = ep[1..].iter().cloned().chain(user_command).collect();
-                Ok((Some(bin), args))
-            }
-            _ => {
-                let mut parts = user_command;
-                let cmd = parts.remove(0);
-                Ok((Some(cmd), parts))
-            }
-        };
-    }
-
-    // No user command — try the image's entrypoint/cmd.
-    if let Some((cmd, cmd_args)) = resolve_image_command(config) {
-        return Ok((Some(cmd), cmd_args));
+    let cmd_override = (!user_command.is_empty()).then_some(user_command.as_slice());
+    match microsandbox_types::resolve_default_command(
+        config.spec.runtime.entrypoint.as_deref(),
+        config.spec.runtime.cmd.as_deref(),
+        cmd_override,
+    ) {
+        Ok(command) => return Ok((Some(command.program), command.args)),
+        Err(microsandbox_types::CommandResolutionError::NoDefaultCommand) => {}
+        Err(error) => return Err(error.into()),
     }
 
     // Fall back to configured shell (or /bin/sh) in interactive mode.
@@ -2583,35 +2593,6 @@ pub fn resolve_exec_command(
     }
 
     resolve_command(config, user_command, interactive)
-}
-
-/// Resolve the default process from OCI image config.
-///
-/// Follows OCI semantics:
-/// - `entrypoint` + `cmd`: entrypoint is the binary, cmd provides default arguments.
-/// - `entrypoint` only: entrypoint is the full command.
-/// - `cmd` only: cmd[0] is the binary, cmd[1..] are arguments.
-/// - Neither set: returns `None`.
-fn resolve_image_command(
-    config: &microsandbox::sandbox::SandboxConfig,
-) -> Option<(String, Vec<String>)> {
-    match (&config.spec.runtime.entrypoint, &config.spec.runtime.cmd) {
-        (Some(ep), cmd) if !ep.is_empty() => {
-            let bin = ep[0].clone();
-            let args = ep[1..]
-                .iter()
-                .chain(cmd.iter().flatten())
-                .cloned()
-                .collect();
-            Some((bin, args))
-        }
-        (_, Some(cmd)) if !cmd.is_empty() => {
-            let bin = cmd[0].clone();
-            let args = cmd[1..].to_vec();
-            Some((bin, args))
-        }
-        _ => None,
-    }
 }
 
 /// Parse an rlimit spec: `RESOURCE=LIMIT` or `RESOURCE=SOFT:HARD`.
@@ -3017,6 +2998,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn apply_sandbox_opts_sets_transparent_huge_page_policy() {
+        let opts = SandboxOpts {
+            thp: Some("always".to_string()),
+            ..Default::default()
+        };
+        let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(config.spec.resources.thp, TransparentHugePagePolicy::Always);
+    }
+
+    #[tokio::test]
+    async fn apply_sandbox_opts_sets_flat_root_disk() {
+        let opts = SandboxOpts {
+            root_disk: Some("flat:8G,fstype=ext4,clone=reflink".to_string()),
+            ..Default::default()
+        };
+        let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        let RootfsSource::Oci(oci) = config.spec.image else {
+            panic!("expected Oci");
+        };
+        assert_eq!(
+            oci.root_disk,
+            Some(microsandbox::sandbox::RootDisk::Flat {
+                size_mib: Some(8192),
+                fstype: Some("ext4".to_string()),
+                clone: FlatClone::Reflink,
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn apply_sandbox_opts_sets_oci_upper_size() {
         let opts = SandboxOpts {
             oci_upper_size: Some("8G".to_string()),
@@ -3068,6 +3089,21 @@ mod tests {
             config.spec.deployment_profile,
             DeploymentProfile::MultiTenant
         );
+    }
+
+    #[tokio::test]
+    async fn apply_sandbox_opts_sets_cpu_placement() {
+        let opts = SandboxOpts {
+            cpu_placement: Some(CpuPlacement::Spread),
+            ..Default::default()
+        };
+        let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(config.spec.resources.cpu_placement, CpuPlacement::Spread);
     }
 
     #[tokio::test]
@@ -3605,6 +3641,27 @@ mod tests {
 
         assert_eq!(cmd.as_deref(), Some("start"));
         assert_eq!(args, vec!["date".to_string()]);
+    }
+
+    #[test]
+    fn resolve_command_replaces_stored_cmd_with_run_override() {
+        let config = command_config(Some(&["start", "--verbose"]), Some(&["serve", "--http"]));
+        let (cmd, args) = resolve_command(
+            &config,
+            vec!["worker".to_string(), "--once".to_string()],
+            false,
+        )
+        .expect("resolve command");
+
+        assert_eq!(cmd.as_deref(), Some("start"));
+        assert_eq!(
+            args,
+            vec![
+                "--verbose".to_string(),
+                "worker".to_string(),
+                "--once".to_string()
+            ]
+        );
     }
 
     #[test]

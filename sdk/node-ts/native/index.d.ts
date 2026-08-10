@@ -907,6 +907,14 @@ export declare class Sandbox {
    * The TS layer parses + camelCase-remaps this into a plain object.
    */
   configJson(): Promise<string>
+  /** Execute the sandbox's effective OCI entrypoint and CMD. */
+  execDefault(): Promise<ExecOutput>
+  /** Execute the sandbox's effective OCI entrypoint and CMD using a populated options builder. */
+  execDefaultWithBuilder(builder: ExecOptionsBuilder): Promise<ExecOutput>
+  /** Execute the sandbox's effective OCI entrypoint and CMD with streaming I/O. */
+  execDefaultStream(): Promise<ExecHandle>
+  /** Stream the sandbox's effective OCI entrypoint and CMD using a populated options builder. */
+  execDefaultStreamWithBuilder(builder: ExecOptionsBuilder): Promise<ExecHandle>
   /** Execute a command and wait for completion. */
   exec(cmd: string, args?: Array<string> | undefined | null): Promise<ExecOutput>
   /**
@@ -946,6 +954,10 @@ export declare class Sandbox {
   modify(options?: SandboxModifyOptions | undefined | null): Promise<string>
   /** Stream metrics snapshots at the requested interval (in milliseconds). */
   metricsStream(intervalMs: number): Promise<MetricsStream>
+  /** Attach to the sandbox's effective OCI entrypoint and CMD. */
+  attachDefault(): Promise<number>
+  /** Attach to the sandbox's effective OCI entrypoint and CMD using a populated options builder. */
+  attachDefaultWithBuilder(builder: AttachOptionsBuilder): Promise<number>
   /**
    * Attach to an interactive PTY session inside the sandbox.
    *
@@ -1049,10 +1061,14 @@ export declare class SandboxBuilder {
   cpus(count: number): this
   /** Boot-time maximum possible virtual CPUs. */
   maxCpus(count: number): this
+  /** Host CPU placement policy. */
+  cpuPlacement(policy: string): this
   /** Guest memory in MiB. */
   memory(mib: number): this
   /** Boot-time maximum hotpluggable guest memory in MiB. */
   maxMemory(mib: number): this
+  /** Guest transparent huge-page policy selected at boot. */
+  thp(policy: 'always' | 'madvise' | 'never'): this
   /** Override log verbosity: `"trace" | "debug" | "info" | "warn" | "error"`. */
   logLevel(level: string): this
   /** Suppress sandbox logs. */
@@ -1106,6 +1122,8 @@ export declare class SandboxBuilder {
   replaceWithTimeout(timeoutMs: number): this
   /** Override the image entrypoint. */
   entrypoint(cmd: Array<string>): this
+  /** Override the image CMD used by default-workload execution. */
+  cmd(cmd: Array<string>): this
   /**
    * Hand off PID 1 to a guest init binary after agentd's setup.
    *

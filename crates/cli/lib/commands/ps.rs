@@ -166,6 +166,7 @@ fn status_json(handle: &SandboxHandle) -> serde_json::Value {
         "max_cpus": resources.map(|r| r.max_cpus.max(r.cpus)),
         "memory_mib": resources.map(|r| r.memory_mib),
         "max_memory_mib": resources.map(|r| r.max_memory_mib.max(r.memory_mib)),
+        "thp": resources.map(|r| r.thp.as_str()),
         "ports": config.as_ref().map(format_ports_raw).unwrap_or_default(),
     })
 }

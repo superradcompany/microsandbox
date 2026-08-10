@@ -173,6 +173,7 @@ pub fn run(args: SandboxArgs) -> ! {
     };
     let vm_config = VmConfig {
         libkrunfw_path: launch.libkrunfw_path,
+        thp: launch.thp,
         vcpus: args.vcpus,
         memory_mib: args.memory_mib,
         max_cpus: args.max_vcpus.unwrap_or(args.vcpus).max(args.vcpus),
@@ -180,6 +181,8 @@ pub fn run(args: SandboxArgs) -> ! {
             .max_memory_mib
             .unwrap_or(args.memory_mib)
             .max(args.memory_mib),
+        cpu_placement: launch.cpu_placement,
+        block_writeback_limit_bytes: launch.block_writeback_limit_bytes,
         rootfs_path: launch.rootfs.path,
         rootfs_follow_root_symlinks: launch.rootfs.follow_root_symlinks,
         rootfs_vmdk: if is_vmdk {
@@ -222,6 +225,9 @@ pub fn run(args: SandboxArgs) -> ! {
         log_dir: launch.log_dir,
         runtime_dir: launch.runtime_dir,
         sandboxes_dir: launch.sandboxes_dir,
+        cpu_lease_dir: launch.cpu_lease_dir,
+        writeback_lease_dir: launch.writeback_lease_dir,
+        block_writeback_pool_bytes: launch.block_writeback_pool_bytes,
         agent_sock_path: launch.agent_sock,
         startup_command: launch.startup,
         #[cfg(unix)]
@@ -573,6 +579,9 @@ mod tests {
         let launch = LaunchConfig {
             db_path: PathBuf::from("/tmp/x.db"),
             env: vec!["TOKEN=secret".to_string()],
+            block_writeback_limit_bytes: Some(512 * 1024 * 1024),
+            block_writeback_pool_bytes: Some(4 * 1024 * 1024 * 1024),
+            writeback_lease_dir: PathBuf::from("/tmp/writeback-leases"),
             ..Default::default()
         };
         let mut file = tempfile::NamedTempFile::new().unwrap();
@@ -584,6 +593,15 @@ mod tests {
 
         assert_eq!(loaded.db_path, PathBuf::from("/tmp/x.db"));
         assert_eq!(loaded.env, vec!["TOKEN=secret".to_string()]);
+        assert_eq!(loaded.block_writeback_limit_bytes, Some(512 * 1024 * 1024));
+        assert_eq!(
+            loaded.block_writeback_pool_bytes,
+            Some(4 * 1024 * 1024 * 1024)
+        );
+        assert_eq!(
+            loaded.writeback_lease_dir,
+            PathBuf::from("/tmp/writeback-leases")
+        );
     }
 
     #[test]

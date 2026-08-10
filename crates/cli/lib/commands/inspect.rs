@@ -190,6 +190,10 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
             ),
         );
         ui::detail_kv_indent(
+            "CPU Placement",
+            &config.spec.resources.cpu_placement.to_string(),
+        );
+        ui::detail_kv_indent(
             "Memory",
             &resource_value(
                 &format!("{} MiB", config.spec.resources.memory_mib),
@@ -203,6 +207,7 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
                 change_for("max_memory"),
             ),
         );
+        ui::detail_kv_indent("THP", config.spec.resources.thp.as_str());
 
         let security = match config.spec.security_profile {
             SecurityProfile::Default => "default",

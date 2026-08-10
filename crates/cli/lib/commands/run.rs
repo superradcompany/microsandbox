@@ -4,6 +4,8 @@ use std::io::{IsTerminal, Write};
 use std::time::Duration;
 
 use clap::Args;
+use futures::{FutureExt, StreamExt};
+use microsandbox::logs::{LogSource, LogStreamOptions, LogStreamStart};
 use microsandbox::sandbox::{ExecOutput, RlimitResource, Sandbox};
 
 use super::common::{SandboxOpts, apply_sandbox_opts};
@@ -170,6 +172,7 @@ async fn run_new(
     mut args: RunArgs,
     log_level: Option<microsandbox::LogLevel>,
 ) -> anyhow::Result<()> {
+    let launch_started_at = chrono::Utc::now();
     let mut builder = Sandbox::builder(&name);
     if let Some(ref snap) = args.from_snapshot {
         builder = builder.from_snapshot(snap.clone());
@@ -236,6 +239,24 @@ async fn run_new(
     let interactive =
         super::common::use_interactive_tty(std::io::stdin().is_terminal(), args.no_tty);
 
+    if sandbox.config().init_owns_boot_workload() {
+        let observe = observe_init_owned_workload(&sandbox, launch_started_at);
+        let result = match exec_opts.timeout {
+            Some(duration) => match tokio::time::timeout(duration, observe).await {
+                Ok(result) => result,
+                Err(_) => Err(anyhow::anyhow!("command timed out after {duration:?}")),
+            },
+            None => observe.await,
+        };
+
+        if result.is_err()
+            && let Err(error) = sandbox.stop().await
+        {
+            ui::warn(&format!("failed to stop sandbox: {error}"));
+        }
+        return handle_exit(result?);
+    }
+
     let (cmd, cmd_args) =
         super::common::resolve_command(sandbox.config(), args.command, interactive)?;
     let (cmd, cmd_args) = match (cmd, cmd_args) {
@@ -257,6 +278,57 @@ async fn run_new(
     }
 
     handle_exit(result?)
+}
+
+/// Stream the VM console while an inherited image init owns the foreground workload.
+///
+/// Init-owned workloads are part of PID 1's argv, so issuing an agent exec would run them twice.
+/// Their stdio is captured in the system console log and their exit is the VM process exit.
+async fn observe_init_owned_workload(
+    sandbox: &Sandbox,
+    started_at: chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<i32> {
+    let options = LogStreamOptions {
+        sources: vec![LogSource::System],
+        start: LogStreamStart::Since(started_at),
+        until: None,
+        follow: true,
+    };
+    let mut logs = sandbox.log_stream(&options).await?;
+    let wait = sandbox.wait();
+    tokio::pin!(wait);
+
+    loop {
+        tokio::select! {
+            status = &mut wait => {
+                let status = status?;
+                // The runtime can exit while its final console entries are already readable but
+                // still queued behind the wait branch. Poll the stream to current EOF so attached
+                // runs do not lose their last output chunk.
+                loop {
+                    match logs.next().now_or_never() {
+                        Some(Some(Ok(entry))) => {
+                            std::io::stdout().write_all(&entry.data)?;
+                            std::io::stdout().flush()?;
+                        }
+                        Some(Some(Err(error))) => return Err(error.into()),
+                        Some(None) | None => break,
+                    }
+                }
+                return Ok(status.code().unwrap_or(1));
+            }
+            entry = logs.next() => {
+                match entry {
+                    Some(Ok(entry)) => {
+                        std::io::stdout().write_all(&entry.data)?;
+                        std::io::stdout().flush()?;
+                    }
+                    Some(Err(error)) => return Err(error.into()),
+                    None => return Ok(wait.await?.code().unwrap_or(1)),
+                }
+            }
+        }
+    }
 }
 
 /// Execute or attach to a command in a sandbox.

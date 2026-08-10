@@ -20,6 +20,7 @@ EXPECTED_KWARGS = [
     "hostname",
     "user",
     "entrypoint",
+    "cmd",
     "init",
     "replace",
     "replace_with_timeout",
@@ -92,3 +93,39 @@ def test_create_closed_values_are_precisely_typed() -> None:
     assert annotations["volumes"] == "Mapping[str, MountConfig] | None"
     assert annotations["patches"] == "Sequence[PatchConfig] | None"
     assert annotations["network"] == "Network | None"
+
+
+def test_default_workload_methods_have_explicit_keyword_only_contracts() -> None:
+    exec_default = _method("exec_default")
+    exec_default_stream = _method("exec_default_stream")
+    attach_default = _method("attach_default")
+
+    for method in (exec_default, exec_default_stream, attach_default):
+        assert isinstance(method, ast.AsyncFunctionDef)
+        assert method.args.kwarg is None
+        assert method.args.args[0].arg == "self"
+
+    assert [arg.arg for arg in exec_default.args.kwonlyargs] == [
+        "cwd",
+        "user",
+        "env",
+        "timeout",
+        "stdin",
+        "tty",
+        "rlimits",
+    ]
+    assert [arg.arg for arg in exec_default_stream.args.kwonlyargs] == [
+        "cwd",
+        "user",
+        "env",
+        "timeout",
+        "stdin",
+        "tty",
+        "rlimits",
+    ]
+    assert [arg.arg for arg in attach_default.args.kwonlyargs] == [
+        "cwd",
+        "user",
+        "env",
+        "detach_keys",
+    ]

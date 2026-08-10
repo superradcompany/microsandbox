@@ -17,9 +17,20 @@ describe("native Sandbox lifecycle contract", () => {
       "ping",
       "touch",
       "modify",
+      "execDefault",
+      "execDefaultWithBuilder",
+      "execDefaultStream",
+      "execDefaultStreamWithBuilder",
+      "attachDefault",
+      "attachDefaultWithBuilder",
     ]) {
       expect(typeof proto[method], method).toBe("function");
     }
+  });
+
+  it("exports the durable CMD builder setter", () => {
+    const proto = napi.SandboxBuilder.prototype as Record<string, unknown>;
+    expect(typeof proto.cmd).toBe("function");
   });
 
   it("exports the handle health methods used by the TS wrapper", () => {

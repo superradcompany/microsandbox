@@ -47,6 +47,7 @@ Common flags:
 | `--max-cpus` | Boot-time maximum possible virtual CPUs for future resize capacity |
 | `-m`, `--memory` | Memory limit, such as `512M` or `1G` |
 | `--max-memory` | Boot-time maximum hotpluggable memory, such as `2G` or `8G` |
+| `--thp` | Guest transparent huge-page policy: `always`, `madvise` (default), or `never` |
 | `--root-disk` | OCI root storage, such as `8G`, `tmpfs:2G`, `flat:8G,clone=auto`, or `./rootfs.qcow2:format=qcow2,fstype=ext4` |
 | `-v`, `--volume` | Mount a host path or named volume, such as `./src:/app:ro` |
 | `--mount-dir`, `--mount-file`, `--mount-disk`, `--mount-named` | Mount a source with an explicit kind (`SOURCE:DEST[:OPTIONS]` or `NAME:DEST[:OPTIONS]`). `--mount-named` creates missing named volumes idempotently and accepts `kind=dir\|disk`, `size=...`, and `quota=...` |
@@ -78,7 +79,7 @@ msb run --root-disk flat:8G,clone=auto python -- python -c "print('hello')"
 
 The pre-pull is optional: creating the first flat sandbox lazily materializes a missing flat artifact from the normal OCI layer cache. `clone=auto` prefers a native copy-on-write clone and falls back to a sparse copy, `clone=copy` forces an independent portable copy, and `clone=reflink` requires native clone support and fails clearly if the destination filesystem cannot provide it. Native cloning uses `FICLONE` on Linux, `clonefile` on macOS, and block cloning on Windows volumes that advertise block refcounting, including supported ReFS and Dev Drive configurations.
 
-Flat v1 supports local OCI sandboxes with ext4. Rootfs patches, snapshots, and cloud execution are rejected instead of silently changing their semantics. The normal layered root remains the default.
+Flat v1 supports local OCI sandboxes with ext4. Rootfs patches, snapshots, and cloud execution are rejected instead of silently changing their semantics. The normal layered root remains the built-in default, and `sandbox_defaults.oci.root_disk` can select flat for future local sandboxes without repeating the flag.
 
 Published ports bind to `127.0.0.1` by default. Use an explicit bind address only when the sandbox service should be reachable beyond localhost. On Windows, opening a published port can trigger a Windows Defender Firewall prompt for `msb.exe`; keep the bind on `127.0.0.1` for local-only development, and allow private/public network access only when you intentionally bind beyond loopback.
 
@@ -553,7 +554,7 @@ msb self uninstall --yes      # Skip confirmation
 
 | Subcommand | Description |
 |------------|-------------|
-| `doctor` (alias: `check`) | Check runtime files and supported host prerequisites, including Windows Hypervisor Platform on Windows |
+| `doctor` (alias: `check`) | Check runtime files, supported host virtualization prerequisites, and non-blocking host performance capabilities |
 | `update` (alias: `upgrade`) | Update msb and libkrunfw to the latest release and refresh command links |
 | `downgrade <version>` | Downgrade msb and compatible local state to a supported older release at or above 0.6.0, refusing unsafe downgrades before touching files or state |
 | `uninstall` | Remove msb, libkrunfw, and command links |
@@ -571,3 +572,9 @@ Before a downgrade changes local state, `msb` runs several safety checks. It ver
 | `--keep-cache` | `downgrade` | Keep the image cache even when rollback metadata marks it affected |
 | `--no-backup` | `downgrade` | Skip the database backup before rolling back local state |
 | `-y`, `--yes` | `uninstall` | Skip confirmation prompt |
+
+On Linux x86 hosts, `msb doctor` reports the applicable KVM interrupt-acceleration policy: AMD AVIC when the CPU advertises that capability, or Intel APICv when the live `kvm_intel` module exposes its policy parameter. A disabled result is a non-blocking performance warning and does not make the host unhealthy. These module parameters establish host policy rather than proving per-sandbox activation; doctor never reloads `kvm_amd` or `kvm_intel` automatically. Irrelevant platforms and unavailable policy state do not produce an AVIC or APICv row.
+
+Doctor also runs a short-lived clone probe inside `MSB_HOME` and reports whether flat-root `clone=auto` resolves to a native reflink or the portable sparse-copy fallback. The probe files are removed immediately and no host configuration is changed.
+
+See [Performance optimization](/optimization/overview) for interpreting these checks, choosing sandbox-level policies, and preparing the host storage and virtualization environment.

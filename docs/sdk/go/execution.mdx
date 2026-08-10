@@ -22,6 +22,19 @@ if !out.Success() {
 fmt.Print(out.Stdout())
 ```
 
+## Default workload
+
+`CreateSandbox` boots the sandbox without executing its image workload. `ExecDefault` resolves the effective OCI ENTRYPOINT and CMD; `ExecDefaultStream` streams it and `AttachDefault` runs it in an interactive PTY. They return `ErrNoDefaultCommand` when no executable default exists and never fall back to a shell.
+
+```go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("example/worker:latest"),
+    m.WithEntrypoint("python", "-u"),
+    m.WithCmd("worker.py", "--once"),
+)
+out, err := sb.ExecDefault(ctx, m.WithExecEnv(map[string]string{"LOG_LEVEL": "debug"}))
+```
+
 ## Sandbox methods
 
 The exec entry points live on [`*Sandbox`](/sdk/go/sandbox#instance-methods).

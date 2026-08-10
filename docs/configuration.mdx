@@ -30,11 +30,22 @@ microsandbox reads its global configuration from `~/.microsandbox/config.json`. 
   "sandbox_defaults": {
     "cpus": 2,
     "memory_mib": 1024,
+    "cpu_placement": "auto",
+    "thp": "madvise",
     "oci": {
-      "upper_size_mib": 8192
+      "root_disk": {
+        "kind": "flat",
+        "size_mib": 8192,
+        "clone": "auto"
+      }
     },
     "shell": "/bin/bash",
     "workdir": "/app"
+  },
+  "runtime": {
+    "block_writeback": {
+      "mode": "auto"
+    }
   },
   "registries": {
     "ca_certs": "/path/to/corporate-ca.pem",
@@ -85,7 +96,8 @@ microsandbox reads its global configuration from `~/.microsandbox/config.json`. 
 | `log_level` | `null` (silent) | Log level for sandbox processes: `error`, `warn`, `info`, `debug`, `trace` |
 | `database` | [reference](#database) | Database connection settings |
 | `paths` | [reference](#paths) | Path overrides for binaries and directories |
-| `sandbox_defaults` | [reference](#sandbox_defaults) | Defaults applied to every sandbox |
+| `sandbox_defaults` | [reference](#sandbox_defaults) | Defaults applied to local sandboxes |
+| `runtime` | [reference](#runtime) | Host runtime performance policy |
 | `registries` | [reference](#registries) | Container registry authentication |
 | `metrics` | [reference](#metrics) | Live metrics shared-memory registry settings |
 | `active_profile` | `null` | Default backend profile name |
@@ -143,12 +155,18 @@ let msb = cfg.resolve_msb_path()?;
 
 ## `sandbox_defaults`
 
-Defaults applied to every sandbox unless overridden per-sandbox.
+Defaults applied to local sandboxes unless overridden per-sandbox. Cloud backends retain their service-side default policy.
+
+Explicit CLI or SDK options win over `config.json`, and `config.json` wins over built-in defaults. Microsandbox resolves the effective values once when it creates a local sandbox and persists that resolved sandbox configuration; changing the global file affects future creations, not existing sandboxes.
+
+For workload effects, host requirements, filesystem expectations, and verification steps for these settings, see [Performance optimization](/optimization/overview).
 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `cpus` | `1` | Number of vCPUs |
 | `memory_mib` | `512` | Guest memory in MiB |
+| `cpu_placement` | `"inherit"` | Host vCPU placement: `inherit`, `auto`, `spread`, or `compact` |
+| `thp` | `"madvise"` | Guest transparent huge-page policy: `always`, `madvise`, or `never` |
 | `oci` | [reference](#sandbox_defaultsoci) | Defaults for OCI-rooted sandboxes |
 | `shell` | `"/bin/sh"` | Shell for interactive sessions and scripts |
 | `workdir` | `null` | Working directory inside the sandbox |
@@ -161,7 +179,44 @@ Defaults applied only when the sandbox rootfs is an OCI image.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `upper_size_mib` | `4096` | Writable overlay upper size in MiB |
+| `root_disk` | `null` | Default OCI root disk using the same tagged shape as the SDK: `managed`, `tmpfs`, or `flat`. A missing value preserves the managed layered root. User-owned `disk-image` defaults are rejected because they would share one writable image across sandboxes. |
+| `upper_size_mib` | `null` | Deprecated managed-layered size shorthand. When both this field and `root_disk` are absent, the resolved managed size is 4096 MiB. |
+
+`root_disk` and `upper_size_mib` are mutually exclusive. For a portable flat default, use `clone: "auto"`; it attempts a native reflink and safely falls back to a sparse copy. Use `clone: "reflink"` only when failure is preferable to copying on a host filesystem without reflink support.
+
+When the root-disk default is flat, plain `msb pull IMAGE` also prepares the reusable flat artifact. An explicit `msb pull IMAGE --materialize layered|flat|all` always wins.
+
+## `runtime`
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `block_writeback` | `{ "mode": "off" }` | Buffered host writeback containment and admission. The compatibility default cannot reject sandbox creation because of host-global dirty-credit capacity. Operators can opt into `auto` or `fixed` after sizing the policy for their workload and node. |
+
+### `runtime.block_writeback`
+
+| Field | Modes | Default | Description |
+|-------|-------|---------|-------------|
+| `mode` | all | `"off"` | `auto` uses the smaller of the measured 1536 MiB per-disk ceiling and the available aggregate pool, `fixed` requires an exact `per_disk_mib`, and `off` disables both the VMM hard bound and host-global admission. |
+| `per_disk_mib` | `fixed` | required | Explicit hard budget for each eligible writable raw disk. The minimum is 128 MiB. This field is rejected in `auto` and `off` modes. |
+| `pool_mib` | `auto`, `fixed` | `null` | Optional aggregate dirty-credit admission-pool override. `null` derives the pool as the lower of 10% of physical RAM and a conservative estimate of Linux's dirty-background threshold, using the exact byte threshold when configured or the ratio applied to current `MemAvailable`. In `auto`, the pool reduces the per-disk window when necessary but must fit libkrun's 128 MiB minimum. In `fixed`, it must fit at least one complete configured per-disk budget. This field is rejected in `off` mode. |
+
+Use a fixed policy only when representative measurements justify a different per-disk window:
+
+```json
+{
+  "runtime": {
+    "block_writeback": {
+      "mode": "fixed",
+      "per_disk_mib": 2048,
+      "pool_mib": 12288
+    }
+  }
+}
+```
+
+`pool_mib` is admission capacity, not eagerly allocated RAM. Each sandbox reserves `per-disk window × eligible disks` from it before boot, while actual host page-cache use follows guest writes. Linux rejects creation if the pool cannot admit the complete requested reservation. `fixed` and an explicitly pooled `auto` policy are unsupported on other hosts.
+
+Hardware CRC32C, the guest kernel preemption model, x2APIC, APICv/AVIC capability, vCPU affinity mechanics, and the pure-Rust ext4 writer are implementation or capability details rather than user policy, so they intentionally have no global config keys. The [performance guide](/optimization/overview#optimizations-that-are-not-knobs) explains how those automatic layers interact with the configurable policy.
 
 ## `registries`
 

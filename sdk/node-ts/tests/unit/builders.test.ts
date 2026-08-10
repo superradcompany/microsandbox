@@ -339,11 +339,17 @@ describe("SandboxBuilder.build", () => {
       .maxMemory(GiB(8))
       .cpus(2)
       .maxCpus(8)
+      .cpuPlacement("spread")
+      .thp("always")
       .build();
     expect((cfg.resources as { memoryMib: number }).memoryMib).toBe(2048);
     expect((cfg.resources as { maxMemoryMib: number }).maxMemoryMib).toBe(8192);
     expect((cfg.resources as { cpus: number }).cpus).toBe(2);
     expect((cfg.resources as { maxCpus: number }).maxCpus).toBe(8);
+    expect((cfg.resources as { cpuPlacement: string }).cpuPlacement).toBe(
+      "spread",
+    );
+    expect((cfg.resources as { thp: string }).thp).toBe("always");
   });
 
   it("collects volumes through the MountBuilder callback", async () => {
@@ -388,6 +394,25 @@ describe("SandboxBuilder.build", () => {
       .ephemeral(true)
       .build();
     expect((cfg.lifecycle as { ephemeral: boolean }).ephemeral).toBe(true);
+  });
+
+  it("preserves durable CMD overrides and explicit clears", async () => {
+    const configured = await Sandbox.builder("x")
+      .image("alpine")
+      .cmd(["worker.py", "--once"])
+      .build();
+    expect((configured.runtime as { cmd: string[] }).cmd).toEqual([
+      "worker.py",
+      "--once",
+    ]);
+
+    const cleared = await Sandbox.builder("x")
+      .image("alpine")
+      .entrypoint([])
+      .cmd([])
+      .build();
+    expect((cleared.runtime as { entrypoint: string[] }).entrypoint).toEqual([]);
+    expect((cleared.runtime as { cmd: string[] }).cmd).toEqual([]);
   });
 
   it("keeps libkrunfwPath as a chainable compatibility alias", async () => {

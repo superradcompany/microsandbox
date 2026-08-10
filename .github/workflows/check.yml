@@ -734,6 +734,13 @@ jobs:
         run: |
           export PATH="$HOME/.microsandbox/bin:$PATH"
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
+          # Functional VM tests deliberately create multiple writable-root sandboxes. Give this
+          # dedicated runner a stable admission pool so unrelated tests do not depend on its
+          # momentary MemAvailable-derived pool; Auto still exercises the shipping 1536 MiB
+          # per-disk controller and the normal host-global admission path.
+          integration_config="$RUNNER_TEMP/msb-integration-config.json"
+          printf '%s\n' '{"runtime":{"block_writeback":{"mode":"auto","pool_mib":4096}}}' > "$integration_config"
+          export MSB_CONFIG_PATH="$integration_config"
           cargo nextest run -p microsandbox --tests --run-ignored=only --test-threads 1
 
       - name: Disk usage

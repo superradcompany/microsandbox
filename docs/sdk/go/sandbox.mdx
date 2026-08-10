@@ -1129,6 +1129,23 @@ Set the boot-time maximum hotpluggable guest memory in MiB. This reserves the en
   </div>
 </div>
 
+#### <span className="msb-recv"></span><span className="msb-hn">WithTHP()</span>
+
+```go
+func WithTHP(policy THPPolicy) SandboxOption
+```
+
+Select the guest transparent huge-page policy applied through the kernel command line at boot. Default: `THPMadvise`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>policy</code><span className="msb-type">THPPolicy</span></div>
+    <div className="msb-param-desc"><code>THPAlways</code>, <code>THPMadvise</code>, or <code>THPNever</code>.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv"></span><span className="msb-hn">WithCPUs()</span>
 
 ```go
@@ -1359,7 +1376,7 @@ Mark whether the runtime should remove the sandbox's DB row, on-disk state, logs
 func WithEntrypoint(cmd ...string) SandboxOption
 ```
 
-Override the user-workload entrypoint baked into the image: the command the agent execs per request. This is the user workload, **not** the guest PID 1, for that, use [`WithInit`](#withinit) instead.
+Override the image ENTRYPOINT used by default-workload execution. Literal `Exec`, `Attach`, and `Shell` calls ignore it. This is the user workload, **not** the guest PID 1; for that, use [`WithInit`](#withinit) instead.
 
 <p className="msb-label">Parameters</p>
 
@@ -1369,6 +1386,21 @@ Override the user-workload entrypoint baked into the image: the command the agen
     <div className="msb-param-desc">Entrypoint command and arguments.</div>
   </div>
 </div>
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithCmd()</span>
+
+```go
+func WithCmd(cmd ...string) SandboxOption
+```
+
+Override the image CMD used by default-workload execution. Calling `WithCmd()` with no arguments explicitly clears the image CMD. This describes durable configuration and does not execute anything during `CreateSandbox`.
+
+```go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("example/worker:latest"),
+    m.WithCmd("worker.py", "--once"),
+)
+```
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithInit()</span>
 
@@ -2143,7 +2175,8 @@ The full configuration of a sandbox. Most callers build a sandbox via `CreateSan
 | Labels | `map[string]string` | Labels for metrics attribution and filtering |
 | Detached | `bool` | If `true`, sandbox survives after the process exits |
 | Ephemeral | `bool` | If `true`, all state is removed on termination |
-| Entrypoint | `[]string` | Override image entrypoint |
+| Entrypoint | `[]string` | Override the image ENTRYPOINT used by default-workload execution |
+| Cmd | `[]string` | Override the image CMD used by default-workload execution; an empty non-nil slice clears CMD |
 | Init | [`*InitConfig`](#initconfig) | Hand PID 1 off to a guest init binary |
 | LogLevel | [`LogLevel`](#loglevel) | Sandbox log verbosity override |
 | QuietLogs | `bool` | Suppress sandbox-level log output |

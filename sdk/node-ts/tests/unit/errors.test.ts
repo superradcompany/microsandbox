@@ -4,6 +4,7 @@ import {
   ImageNotFoundError,
   MetricsDisabledError,
   MicrosandboxError,
+  NoDefaultCommandError,
   SandboxNotFoundError,
 } from "../../dist/index.js";
 import { mapNapiError } from "../../dist/internal/error-mapping.js";
@@ -57,6 +58,14 @@ describe("mapNapiError", () => {
       "metrics disabled for sandbox: foo",
     );
     expect((mapped as MetricsDisabledError).code).toBe("metricsDisabled");
+    expect((mapped as MicrosandboxError).cause).toBe(raw);
+  });
+
+  it("maps NoDefaultCommand to its typed SDK error", () => {
+    const raw = new Error("[NoDefaultCommand] sandbox has no default command");
+    const mapped = mapNapiError(raw);
+    expect(mapped).toBeInstanceOf(NoDefaultCommandError);
+    expect((mapped as NoDefaultCommandError).code).toBe("noDefaultCommand");
     expect((mapped as MicrosandboxError).cause).toBe(raw);
   });
 });

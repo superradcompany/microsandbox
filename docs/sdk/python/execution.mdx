@@ -29,6 +29,20 @@ async for event in handle:
 await sandbox.stop()
 ```
 
+## Default workload
+
+`Sandbox.create(...)` boots the sandbox without executing its image workload. `exec_default()` resolves the effective OCI ENTRYPOINT and CMD; `exec_default_stream()` streams it and `attach_default()` runs it in an interactive PTY. All three accept the same per-call options as their literal counterparts. They raise `NoDefaultCommandError` when no executable default exists and never fall back to a shell.
+
+```python
+sandbox = await Sandbox.create(
+    "worker",
+    image="example/worker:latest",
+    entrypoint=["python", "-u"],
+    cmd=["worker.py", "--once"],
+)
+out = await sandbox.exec_default(env={"LOG_LEVEL": "debug"})
+```
+
 ## Run and collect
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">exec()</span>

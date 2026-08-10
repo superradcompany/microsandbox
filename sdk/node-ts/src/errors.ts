@@ -5,6 +5,7 @@ export type MicrosandboxErrorCode =
   | "libkrunfwNotFound"
   | "database"
   | "invalidConfig"
+  | "noDefaultCommand"
   | "sandboxNotFound"
   | "sandboxAlreadyExists"
   | "sandboxStillRunning"
@@ -70,6 +71,12 @@ export class DatabaseError extends MicrosandboxError {
 export class InvalidConfigError extends MicrosandboxError {
   constructor(message: string, options?: ErrorOptions) {
     super("invalidConfig", message, options);
+  }
+}
+
+export class NoDefaultCommandError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("noDefaultCommand", message, options);
   }
 }
 

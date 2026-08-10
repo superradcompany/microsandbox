@@ -37,6 +37,7 @@ export const SandboxBuilder = function SandboxBuilder(
 } as unknown as new (name: string) => _SBT;
 export type SandboxBuilder = _SBT;
 export type {
+  CpuPlacement,
   SandboxConfig,
   SandboxPage,
   SandboxPingResult,
@@ -412,6 +413,7 @@ export {
   ImageInUseError,
   ImageNotFoundError,
   InvalidConfigError,
+  NoDefaultCommandError,
   IoError,
   JsonError,
   LibkrunfwNotFoundError,

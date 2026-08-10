@@ -1,5 +1,6 @@
 use microsandbox::sandbox::{
-    DeploymentProfile, NetworkPolicy, Patch, PullPolicy, SandboxBuilder, SecurityProfile,
+    CpuPlacement, DeploymentProfile, NetworkPolicy, Patch, PullPolicy, SandboxBuilder,
+    SecurityProfile, TransparentHugePagePolicy,
 };
 use microsandbox::{LogLevel, RegistryAuth};
 use microsandbox_network::dns::Nameserver;
@@ -19,6 +20,8 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
     "cpus",
     "max_memory",
     "max_cpus",
+    "cpu_placement",
+    "thp",
     "workdir",
     "shell",
     "security",
@@ -26,6 +29,7 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
     "hostname",
     "user",
     "entrypoint",
+    "cmd",
     "init",
     "replace",
     "replace_with_timeout",
@@ -325,6 +329,18 @@ pub fn sandbox_builder_from_args(
     if let Some(max_cpus) = extract_opt::<u8>(kwargs, "max_cpus")? {
         builder = builder.max_cpus(max_cpus);
     }
+    if let Some(cpu_placement) = extract_opt::<String>(kwargs, "cpu_placement")? {
+        let policy = cpu_placement
+            .parse::<CpuPlacement>()
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        builder = builder.cpu_placement(policy);
+    }
+    if let Some(thp) = extract_opt::<String>(kwargs, "thp")? {
+        let policy = thp
+            .parse::<TransparentHugePagePolicy>()
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        builder = builder.thp(policy);
+    }
     if let Some(workdir) = extract_opt::<String>(kwargs, "workdir")? {
         builder = builder.workdir(workdir);
     }
@@ -371,6 +387,9 @@ pub fn sandbox_builder_from_args(
     }
     if let Some(entrypoint) = extract_opt::<Vec<String>>(kwargs, "entrypoint")? {
         builder = builder.entrypoint(entrypoint);
+    }
+    if let Some(cmd) = extract_opt::<Vec<String>>(kwargs, "cmd")? {
+        builder = builder.cmd(cmd);
     }
     if let Some(init_obj) = kwargs.get_item("init")?
         && !init_obj.is_none()

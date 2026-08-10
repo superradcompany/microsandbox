@@ -27,6 +27,21 @@ while let Some(event) = handle.recv().await {
 sb.stop().await?;
 ```
 
+## Default workload
+
+`create()` boots the sandbox without executing its image workload. `exec_default()` resolves the effective OCI ENTRYPOINT and CMD, then runs it through the guest agent. Use `exec_default_with(...)` for per-call options, `exec_default_stream()` / `exec_default_stream_with(...)` for streaming, and `attach_default()` / `attach_default_with(...)` for a PTY. These methods return `MicrosandboxError::NoDefaultCommand` when no executable default exists; they never fall back to a shell.
+
+```rust
+let sb = Sandbox::builder("worker")
+    .image("example/worker:latest")
+    .entrypoint(["python", "-u"])
+    .cmd(["worker.py", "--once"])
+    .create()
+    .await?;
+
+let out = sb.exec_default_with(|e| e.env("LOG_LEVEL", "debug")).await?;
+```
+
 ## Run methods
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">exec()</span>

@@ -26,6 +26,19 @@ for await (const event of handle) {
 await sandbox.stop();
 ```
 
+## Default workload
+
+`create()` boots the sandbox without executing its image workload. `execDefault()` resolves the effective OCI ENTRYPOINT and CMD; `execDefaultStream()` streams it and `attachDefault()` runs it in an interactive PTY. The `*With` variants accept the existing execution-option builders. They throw `NoDefaultCommandError` when no executable default exists and never fall back to a shell.
+
+```typescript
+const sandbox = await Sandbox.builder("worker")
+  .image("example/worker:latest")
+  .entrypoint(["python", "-u"])
+  .cmd(["worker.py", "--once"])
+  .create();
+const out = await sandbox.execDefaultWith((e) => e.env("LOG_LEVEL", "debug"));
+```
+
 ## Run and collect
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">exec()</span>

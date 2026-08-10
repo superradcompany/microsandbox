@@ -6,9 +6,9 @@ use napi_derive::napi;
 
 use microsandbox::sandbox::LogLevel as RustLogLevel;
 use microsandbox::sandbox::{
-    DeploymentProfile as RustDeploymentProfile, PullPolicy as RustPullPolicy,
-    Sandbox as RustSandbox, SandboxBuilder as RustSandboxBuilder,
-    SecurityProfile as RustSecurityProfile,
+    CpuPlacement as RustCpuPlacement, DeploymentProfile as RustDeploymentProfile,
+    PullPolicy as RustPullPolicy, Sandbox as RustSandbox, SandboxBuilder as RustSandboxBuilder,
+    SecurityProfile as RustSecurityProfile, TransparentHugePagePolicy as RustThpPolicy,
 };
 use microsandbox::size::Mebibytes;
 
@@ -58,7 +58,7 @@ impl JsSandboxBuilder {
     #[napi(constructor)]
     pub fn new(name: String) -> Self {
         Self {
-            inner: Some(RustSandboxBuilder::new(name)),
+            inner: Some(microsandbox::Sandbox::builder(name)),
         }
     }
 
@@ -162,6 +162,17 @@ impl JsSandboxBuilder {
         Ok(self)
     }
 
+    /// Host CPU placement policy.
+    #[napi(js_name = "cpuPlacement")]
+    pub fn cpu_placement(&mut self, policy: String) -> Result<&Self> {
+        let policy = policy
+            .parse::<RustCpuPlacement>()
+            .map_err(napi::Error::from_reason)?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.cpu_placement(policy));
+        Ok(self)
+    }
+
     /// Guest memory in MiB.
     #[napi]
     pub fn memory(&mut self, mib: u32) -> &Self {
@@ -176,6 +187,24 @@ impl JsSandboxBuilder {
         let prev = self.take_inner();
         self.inner = Some(prev.max_memory(Mebibytes::from(mib)));
         self
+    }
+
+    /// Guest transparent huge-page policy selected at boot.
+    #[napi(ts_args_type = "policy: 'always' | 'madvise' | 'never'")]
+    pub fn thp(&mut self, policy: String) -> Result<&Self> {
+        let policy = match policy.as_str() {
+            "always" => RustThpPolicy::Always,
+            "madvise" => RustThpPolicy::Madvise,
+            "never" => RustThpPolicy::Never,
+            other => {
+                return Err(napi::Error::from_reason(format!(
+                    "invalid THP policy `{other}`; expected always, madvise, or never"
+                )));
+            }
+        };
+        let prev = self.take_inner();
+        self.inner = Some(prev.thp(policy));
+        Ok(self)
     }
 
     /// Override log verbosity: `"trace" | "debug" | "info" | "warn" | "error"`.
@@ -345,6 +374,14 @@ impl JsSandboxBuilder {
     pub fn entrypoint(&mut self, cmd: Vec<String>) -> &Self {
         let prev = self.take_inner();
         self.inner = Some(prev.entrypoint(cmd));
+        self
+    }
+
+    /// Override the image CMD used by default-workload execution.
+    #[napi]
+    pub fn cmd(&mut self, cmd: Vec<String>) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.cmd(cmd));
         self
     }
 
