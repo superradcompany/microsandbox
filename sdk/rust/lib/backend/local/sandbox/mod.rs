@@ -126,10 +126,10 @@ impl LocalBackend {
             .filter(|pid| Self::pid_is_alive(*pid))
         {
             let start = std::time::Instant::now();
-            while start.elapsed() < Duration::from_secs(5) && !Self::pid_is_dead_or_reaped(pid) {
+            while start.elapsed() < Duration::from_secs(5) && !Self::pid_has_exited(pid) {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            if !Self::pid_is_dead_or_reaped(pid) {
+            if !Self::pid_has_exited(pid) {
                 return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
                     "cannot start sandbox {name:?}: previous runtime pid {pid} is still alive"
                 )));
@@ -237,14 +237,14 @@ impl LocalBackend {
             let start = std::time::Instant::now();
             let poll_interval = Duration::from_millis(50);
             while start.elapsed() < timeout {
-                if pids.iter().all(|pid| Self::pid_is_dead_or_reaped(*pid)) {
+                if pids.iter().all(|pid| Self::pid_has_exited(*pid)) {
                     break;
                 }
                 tokio::time::sleep(poll_interval).await;
             }
         }
 
-        let all_dead = pids.is_empty() || pids.iter().all(|pid| Self::pid_is_dead_or_reaped(*pid));
+        let all_dead = pids.is_empty() || pids.iter().all(|pid| Self::pid_has_exited(*pid));
         if all_dead {
             let db = self.db().await?.write();
             if let Err(e) = Self::update_sandbox_status(db, model.id, SandboxStatus::Stopped).await
@@ -787,21 +787,12 @@ impl LocalBackend {
         microsandbox_utils::process::pid_is_alive(pid)
     }
 
-    /// Whether `pid` has exited (reaping it when we are the parent).
-    #[cfg(unix)]
-    fn pid_is_dead_or_reaped(pid: i32) -> bool {
-        let mut status = 0;
-        let result = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
-        if result == pid {
-            return true;
-        }
-
-        !Self::pid_is_alive(pid)
-    }
-
-    /// Whether `pid` has exited.
-    #[cfg(windows)]
-    fn pid_is_dead_or_reaped(pid: i32) -> bool {
+    /// Whether `pid` has exited without consuming its wait status.
+    ///
+    /// The runtime's owning `Child` or Tokio task must remain the sole reaper;
+    /// probing with `waitpid` here can steal the status and make that waiter
+    /// fail with `ECHILD`.
+    fn pid_has_exited(pid: i32) -> bool {
         !Self::pid_is_alive(pid)
     }
 
@@ -1139,6 +1130,23 @@ mod tests {
             pid += 1;
         }
         pid
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn pid_exit_probe_does_not_reap_child() {
+        let mut child = Command::new("sh").arg("-c").arg("exit 0").spawn().unwrap();
+        let pid = child.id() as i32;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+
+        // Wait until the process is a zombie. The exit probe must observe that
+        // state without consuming the status owned by `child` below.
+        while LocalBackend::pid_is_alive(pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert!(LocalBackend::pid_has_exited(pid));
+        assert!(child.wait().unwrap().success());
     }
 
     #[tokio::test]

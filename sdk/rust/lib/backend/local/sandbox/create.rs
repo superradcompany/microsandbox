@@ -1046,7 +1046,7 @@ impl LocalBackend {
                 }
             }
             Self::wait_for_pids_to_exit(&pids, std::time::Duration::from_secs(5)).await;
-            if pids.iter().any(|pid| !Self::pid_is_dead_or_reaped(*pid)) {
+            if pids.iter().any(|pid| !Self::pid_has_exited(*pid)) {
                 return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
                     "cannot replace sandbox {:?}: runtime did not exit after SIGKILL",
                     sandbox.name
@@ -1108,7 +1108,7 @@ impl LocalBackend {
         let poll_interval = std::time::Duration::from_millis(50);
 
         loop {
-            if pids.iter().all(|pid| Self::pid_is_dead_or_reaped(*pid)) {
+            if pids.iter().all(|pid| Self::pid_has_exited(*pid)) {
                 return;
             }
 
