@@ -227,6 +227,14 @@ pub fn bundle_download_url(version: &str, arch: &str, os: &str) -> String {
     )
 }
 
+/// Returns the GitHub release download URL for the `checksums.sha256` asset
+/// listing the SHA-256 digest of every asset in the release.
+pub fn checksums_download_url(version: &str) -> String {
+    format!(
+        "https://github.com/{GITHUB_ORG}/{MICROSANDBOX_REPO}/releases/download/v{version}/checksums.sha256"
+    )
+}
+
 /// Returns an HTTP client configured for release asset downloads.
 #[cfg(feature = "http-client")]
 pub fn http_client() -> ureq::Agent {

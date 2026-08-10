@@ -44,9 +44,12 @@ pub struct Setup {
 
     /// Expected SHA-256 for the downloaded release bundle.
     ///
-    /// Self-downgrade supplies the digest published by the GitHub release API
-    /// so target staging fails before extraction if the retained bundle bytes
-    /// do not match the release asset.
+    /// When set, this digest is used as-is and the release's published
+    /// `checksums.sha256` asset is not fetched — self-downgrade supplies the
+    /// digest from the GitHub release API this way. When unset, the digest is
+    /// fetched from the release's `checksums.sha256` asset before the bundle
+    /// download. Either way, verification is fail-closed: the bundle is not
+    /// extracted unless its bytes match the expected digest.
     #[builder(default, setter(strip_option, into))]
     expected_bundle_sha256: Option<String>,
 }
@@ -105,15 +108,18 @@ impl Setup {
             std::env::consts::OS,
         );
 
+        let expected_digest = match self.expected_bundle_sha256.clone() {
+            Some(digest) => digest,
+            None => fetch_bundle_digest(version, &url).await?,
+        };
+
         tracing::info!(
             version = version,
             url = %url,
             "downloading microsandbox runtime dependencies"
         );
         let data = download_bytes(&url).await?;
-        if let Some(expected) = self.expected_bundle_sha256.as_deref() {
-            verify_bundle_digest(&data, expected)?;
-        }
+        verify_bundle_digest(&data, &expected_digest)?;
         extract_bundle(&data, bin_dir, lib_dir)?;
         tracing::info!("microsandbox runtime dependencies installed");
 
@@ -149,8 +155,9 @@ impl Setup {
 
 /// Install microsandbox runtime dependencies with default settings.
 ///
-/// This downloads the microsandbox bundle tarball and extracts `msb`
-/// and `libkrunfw` to `~/.microsandbox/{bin,lib}/`.
+/// This downloads the microsandbox bundle tarball, verifies it against the
+/// SHA-256 digest published in the release's `checksums.sha256` asset, and
+/// extracts `msb` and `libkrunfw` to `~/.microsandbox/{bin,lib}/`.
 pub async fn install() -> MicrosandboxResult<()> {
     Setup::builder().build().install().await
 }
@@ -227,6 +234,50 @@ async fn download_bytes(url: &str) -> MicrosandboxResult<Vec<u8>> {
     }
 
     Ok(data)
+}
+
+/// Fetch the published SHA-256 digest for the bundle at `bundle_url` from the
+/// release's `checksums.sha256` asset.
+///
+/// The checksums asset is served from the same release-download endpoint as
+/// the bundle itself, so this adds no GitHub API calls (and no unauthenticated
+/// rate-limit exposure) to the default install path. The fetch is fail-closed:
+/// a release without published checksums, an unreachable checksums asset, or a
+/// checksums file without an entry for this bundle all abort installation.
+/// Callers that cannot rely on published checksums can supply
+/// `expected_bundle_sha256` explicitly instead.
+async fn fetch_bundle_digest(version: &str, bundle_url: &str) -> MicrosandboxResult<String> {
+    let checksums_url = microsandbox_utils::checksums_download_url(version);
+    let checksums = download_bytes(&checksums_url).await.map_err(|error| {
+        MicrosandboxError::Custom(format!(
+            "could not fetch release bundle checksums from {checksums_url}: {error}"
+        ))
+    })?;
+    let checksums = String::from_utf8(checksums).map_err(|_| {
+        MicrosandboxError::Custom(format!(
+            "release checksums at {checksums_url} are not valid UTF-8"
+        ))
+    })?;
+    let filename = bundle_url.rsplit('/').next().unwrap_or(bundle_url);
+    bundle_digest_from_checksums(&checksums, filename)
+}
+
+/// Extract the digest for `filename` from `sha256sum`-formatted checksums.
+fn bundle_digest_from_checksums(checksums: &str, filename: &str) -> MicrosandboxResult<String> {
+    checksums
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split_whitespace();
+            let digest = fields.next()?;
+            // sha256sum marks binary-mode entries with a leading `*`.
+            let name = fields.next()?.trim_start_matches('*');
+            (name == filename).then(|| digest.to_owned())
+        })
+        .ok_or_else(|| {
+            MicrosandboxError::Custom(format!(
+                "release checksums do not contain an entry for {filename}"
+            ))
+        })
 }
 
 fn verify_bundle_digest(data: &[u8], expected: &str) -> MicrosandboxResult<()> {
@@ -341,5 +392,52 @@ mod tests {
 
         let error = verify_bundle_digest(b"changed", &"0".repeat(64)).unwrap_err();
         assert!(error.to_string().contains("SHA-256 mismatch"));
+    }
+
+    #[test]
+    fn bundle_digest_is_selected_from_release_checksums() {
+        let hello = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        let checksums = format!(
+            "{}  agentd-aarch64\n\
+             {hello}  microsandbox-darwin-aarch64.tar.gz\n\
+             {} *microsandbox-linux-x86_64.tar.gz\n",
+            "a".repeat(64),
+            "b".repeat(64),
+        );
+
+        let digest =
+            bundle_digest_from_checksums(&checksums, "microsandbox-darwin-aarch64.tar.gz").unwrap();
+        assert_eq!(digest, hello);
+        verify_bundle_digest(b"hello", &digest).unwrap();
+
+        // Binary-mode `*` markers are stripped before matching.
+        let digest =
+            bundle_digest_from_checksums(&checksums, "microsandbox-linux-x86_64.tar.gz").unwrap();
+        assert_eq!(digest, "b".repeat(64));
+    }
+
+    #[test]
+    fn missing_checksums_entry_fails_closed() {
+        let checksums = format!("{}  agentd-aarch64\n", "a".repeat(64));
+
+        let error = bundle_digest_from_checksums(&checksums, "microsandbox-linux-aarch64.tar.gz")
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("microsandbox-linux-aarch64.tar.gz")
+        );
+    }
+
+    #[test]
+    fn malformed_checksums_digest_fails_closed() {
+        // A matching entry whose digest is not 64 hex chars must still fail
+        // verification rather than being accepted.
+        let checksums = "not-a-digest  microsandbox-linux-aarch64.tar.gz\n";
+
+        let digest =
+            bundle_digest_from_checksums(checksums, "microsandbox-linux-aarch64.tar.gz").unwrap();
+        let error = verify_bundle_digest(b"hello", &digest).unwrap_err();
+        assert!(error.to_string().contains("invalid published SHA-256"));
     }
 }
