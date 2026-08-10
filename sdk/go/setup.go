@@ -2,8 +2,11 @@ package microsandbox
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -109,7 +112,9 @@ var (
 
 // EnsureInstalled ensures the msb + libkrunfw runtime is present at
 // ~/.microsandbox/ and downloads it from the matching GitHub release
-// if not. It is OPTIONAL: the SDK's FFI library is embedded in the
+// if not, verifying the bundle against the SHA-256 digest published in
+// the release's checksums.sha256 asset before extracting anything.
+// It is OPTIONAL: the SDK's FFI library is embedded in the
 // Go binary and loads automatically on first use, so EnsureInstalled
 // only governs the optional msb runtime download.
 //
@@ -212,7 +217,7 @@ func materializeFFI(dir string) (string, error) {
 		return "", fmt.Errorf("create %s: %w", libDir, err)
 	}
 	dest := filepath.Join(libDir, bundle.Filename())
-	if existing, err := os.ReadFile(dest); err == nil && bytesEqual(existing, ffiBytes) {
+	if existing, err := os.ReadFile(dest); err == nil && bytes.Equal(existing, ffiBytes) {
 		return dest, nil
 	}
 	if err := writeFile(dest, ffiBytes, 0o755); err != nil {
@@ -349,8 +354,14 @@ func osStringFor(goos string) (string, error) {
 	}
 }
 
-// bundleURL is the GitHub release asset URL for the current OS/arch.
-func bundleURL() (string, error) {
+// releaseDownloadBase is the GitHub release download URL prefix. A var so
+// tests can point downloads at a local server.
+var releaseDownloadBase = fmt.Sprintf(
+	"https://github.com/%s/%s/releases/download", githubOrg, githubRepo)
+
+// bundleFilename is the release asset name of the msb + libkrunfw bundle
+// for the current OS/arch.
+func bundleFilename() (string, error) {
 	arch, err := archString()
 	if err != nil {
 		return "", err
@@ -359,15 +370,30 @@ func bundleURL() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf(
-		"https://github.com/%s/%s/releases/download/v%s/%s-%s-%s.tar.gz",
-		githubOrg, githubRepo, sdkVersion, githubRepo, osName, arch,
-	), nil
+	return fmt.Sprintf("%s-%s-%s.tar.gz", githubRepo, osName, arch), nil
 }
 
-// downloadMsbAndKrunfw fetches the release bundle and extracts msb +
-// libkrunfw into <installDir>/{bin,lib}/. The FFI library inside the
-// tarball is ignored (the SDK ships it embedded).
+// bundleURL is the GitHub release asset URL for the current OS/arch.
+func bundleURL() (string, error) {
+	name, err := bundleFilename()
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s/v%s/%s", releaseDownloadBase, sdkVersion, name), nil
+}
+
+// checksumsURL is the GitHub release asset URL for the checksums.sha256 file
+// listing the SHA-256 digest of every asset in the release.
+func checksumsURL() string {
+	return fmt.Sprintf("%s/v%s/checksums.sha256", releaseDownloadBase, sdkVersion)
+}
+
+// downloadMsbAndKrunfw fetches the release bundle, verifies it against the
+// SHA-256 digest published in the release's checksums.sha256 asset, and
+// extracts msb + libkrunfw into <installDir>/{bin,lib}/. Verification is
+// fail-closed: if the digest cannot be fetched or does not match, nothing
+// is extracted. The FFI library inside the tarball is ignored (the SDK
+// ships it embedded).
 func downloadMsbAndKrunfw(ctx context.Context, installDir string) error {
 	binDir := filepath.Join(installDir, "bin")
 	libDir := filepath.Join(installDir, "lib")
@@ -378,31 +404,34 @@ func downloadMsbAndKrunfw(ctx context.Context, installDir string) error {
 		return err
 	}
 
+	filename, err := bundleFilename()
+	if err != nil {
+		return err
+	}
 	url, err := bundleURL()
 	if err != nil {
 		return err
 	}
 
-	reqCtx, cancel := context.WithTimeout(ctx, httpTimeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
+	sums, err := httpGet(ctx, checksumsURL())
+	if err != nil {
+		return fmt.Errorf("fetch release checksums: %w", err)
+	}
+	want, err := bundleDigestFromChecksums(string(sums), filename)
 	if err != nil {
 		return err
 	}
 
-	client := &http.Client{Timeout: httpTimeout}
-	resp, err := client.Do(req)
+	data, err := httpGet(ctx, url)
 	if err != nil {
-		return fmt.Errorf("GET %s: %w", url, err)
+		return err
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("GET %s: HTTP %d", url, resp.StatusCode)
+	sum := sha256.Sum256(data)
+	if got := hex.EncodeToString(sum[:]); got != want {
+		return fmt.Errorf("%s SHA-256 mismatch: expected %s, got %s", filename, want, got)
 	}
 
-	if err := extractMsbAndKrunfw(resp.Body, binDir, libDir); err != nil {
+	if err := extractMsbAndKrunfw(bytes.NewReader(data), binDir, libDir); err != nil {
 		return err
 	}
 
@@ -425,6 +454,58 @@ func downloadMsbAndKrunfw(ctx context.Context, installDir string) error {
 		return fmt.Errorf("%s not found after extraction: %w", libkrunfwFilename(), err)
 	}
 	return nil
+}
+
+// httpGet fetches url and returns the full response body.
+func httpGet(ctx context.Context, url string) ([]byte, error) {
+	reqCtx, cancel := context.WithTimeout(ctx, httpTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	client := &http.Client{Timeout: httpTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("GET %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GET %s: HTTP %d", url, resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("GET %s: %w", url, err)
+	}
+	return body, nil
+}
+
+// bundleDigestFromChecksums extracts the digest for filename from the
+// sha256sum-formatted checksums published with each release.
+func bundleDigestFromChecksums(checksums, filename string) (string, error) {
+	for _, line := range strings.Split(checksums, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		// sha256sum marks binary-mode entries with a leading "*".
+		if strings.TrimPrefix(fields[1], "*") != filename {
+			continue
+		}
+		digest := strings.ToLower(fields[0])
+		if len(digest) != 64 {
+			return "", fmt.Errorf("checksums.sha256 publishes an invalid SHA-256 for %s: %s", filename, fields[0])
+		}
+		if _, err := hex.DecodeString(digest); err != nil {
+			return "", fmt.Errorf("checksums.sha256 publishes an invalid SHA-256 for %s: %s", filename, fields[0])
+		}
+		return digest, nil
+	}
+	return "", fmt.Errorf("checksums.sha256 has no entry for %s", filename)
 }
 
 // extractMsbAndKrunfw streams a tar.gz from r and copies msb + libkrunfw*
@@ -509,17 +590,4 @@ func writeFile(dest string, data []byte, mode os.FileMode) error {
 		return fmt.Errorf("rename %s -> %s: %w", tmpName, dest, err)
 	}
 	return nil
-}
-
-// bytesEqual is a tiny byte-slice equality without an `bytes` import.
-func bytesEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
