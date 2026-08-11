@@ -1,0 +1,293 @@
+name: Check Platform
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        description: Platform label used for caches and artifact selection.
+        required: true
+        type: string
+      runner:
+        description: GitHub Actions runner label.
+        required: true
+        type: string
+      os:
+        description: Operating-system family (linux or darwin).
+        required: true
+        type: string
+      agentd_target:
+        description: Rust target for a native Linux agentd build.
+        required: false
+        default: ""
+        type: string
+      libkrunfw_file:
+        description: Runtime library filename staged into SDK bundles.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_TIMEOUT: "120"
+  CARGO_HTTP_MULTIPLEXING: "false"
+  LIBKRUNFW_VERSION: "5.6.1"
+  LIBKRUNFW_ABI: "5"
+
+jobs:
+  check:
+    name: Check (${{ inputs.target }})
+    runs-on: ${{ inputs.runner }}
+    # A green darwin-aarch64 run takes ~35m, and GitHub-hosted macos-14
+    # runner speed varies enough that slow runners blew a 45m budget
+    # mid-build (main and a PR, both on 2026-07-10). 60m restores
+    # headroom while still bounding a genuinely wedged run.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-bin: false
+
+      # -- Linux build deps --
+      - name: Install build deps (Linux)
+        if: inputs.os == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
+
+      # -- agentd (Linux: native musl) --
+      - name: Build agentd (musl)
+        if: inputs.os == 'linux'
+        run: |
+          rustup target add --toolchain stable ${{ inputs.agentd_target }}
+          cargo +stable build --release --manifest-path crates/agentd/Cargo.toml --target ${{ inputs.agentd_target }}
+          mkdir -p build
+          cp target/${{ inputs.agentd_target }}/release/agentd build/agentd
+
+      # -- agentd (macOS: download prebuilt Linux artifact) --
+      - name: Download agentd (macOS)
+        if: inputs.os == 'darwin'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: agentd-aarch64-linux-musl
+          path: build/
+
+      # -- libkrunfw (cached) --
+      - name: Cache libkrunfw
+        id: cache-libkrunfw
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build/libkrunfw*
+          key: libkrunfw-${{ inputs.target }}-${{ hashFiles('vendor/libkrunfw/**') }}
+
+      - name: Build libkrunfw (Linux)
+        if: steps.cache-libkrunfw.outputs.cache-hit != 'true' && inputs.os == 'linux'
+        run: |
+          cd vendor/libkrunfw
+          make -j$(nproc)
+          cd ../..
+          mkdir -p build
+          cp vendor/libkrunfw/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} build/
+          cd build
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} libkrunfw.so
+
+      - name: Download kernel.c (macOS)
+        if: steps.cache-libkrunfw.outputs.cache-hit != 'true' && inputs.os == 'darwin'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: kernel-c-aarch64
+          path: vendor/libkrunfw/
+
+      - name: Build libkrunfw (macOS)
+        if: steps.cache-libkrunfw.outputs.cache-hit != 'true' && inputs.os == 'darwin'
+        run: |
+          cd vendor/libkrunfw
+          cc -fPIC -DABI_VERSION=${{ env.LIBKRUNFW_ABI }} -shared -o libkrunfw.${{ env.LIBKRUNFW_ABI }}.dylib kernel.c
+          cd ../..
+          mkdir -p build
+          cp vendor/libkrunfw/libkrunfw.${{ env.LIBKRUNFW_ABI }}.dylib build/
+          cd build
+          ln -sf libkrunfw.${{ env.LIBKRUNFW_ABI }}.dylib libkrunfw.dylib
+
+      - name: Build msb
+        run: |
+          cargo build --release --no-default-features --features net,ssh -p microsandbox-cli
+          mkdir -p build
+          cp target/release/msb build/msb
+
+      - name: Codesign msb (macOS)
+        if: inputs.os == 'darwin'
+        run: codesign --entitlements msb-entitlements.plist --force -s - build/msb
+
+      # -- Checks (workspace) --
+      - name: Format
+        run: cargo +stable fmt --all -- --check
+
+      - name: Clippy
+        run: cargo +stable clippy --workspace --exclude microsandbox-agentd -- -D warnings
+
+      - name: Docs
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo +stable doc --workspace --exclude microsandbox-agentd --no-deps
+
+      - name: Check generated microsandbox types
+        run: cargo +stable run -p microsandbox-types --features ts --bin microsandbox-types-generate -- --check
+
+      # -- Checks (agentd — Linux-only) --
+      - name: Format agentd
+        if: inputs.os == 'linux'
+        run: cargo +stable fmt --manifest-path crates/agentd/Cargo.toml -- --check
+
+      - name: Clippy agentd
+        if: inputs.os == 'linux'
+        run: cargo +stable clippy --manifest-path crates/agentd/Cargo.toml --target ${{ inputs.agentd_target }} -- -D warnings
+
+      # -- Checks (Node SDK) --
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: Build agent client package
+        working-directory: packages/agent-client/typescript
+        run: npm ci && npm run build && npm run typecheck && npm test
+
+      - name: Build microsandbox types package
+        working-directory: packages/microsandbox-types/typescript
+        run: npm ci && npm run build && npm run typecheck
+
+      - name: Build Node SDK
+        working-directory: sdk/node-ts
+        run: |
+          node scripts/prune-platform-optional-deps.mjs
+          npm install --package-lock=false
+          npm run build
+
+      # -- Checks (Python SDK) --
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "sdk/python/uv.lock"
+
+      - name: Sync Python dev environment
+        working-directory: sdk/python
+        run: uv sync --group dev
+
+      - name: Stage runtime bundle (Python SDK)
+        run: |
+          mkdir -p sdk/python/microsandbox/_bundled/bin
+          mkdir -p sdk/python/microsandbox/_bundled/lib
+          cp build/msb sdk/python/microsandbox/_bundled/bin/
+          cp build/${{ inputs.libkrunfw_file }} sdk/python/microsandbox/_bundled/lib/
+          cd sdk/python/microsandbox/_bundled/lib
+          if [ "${{ inputs.os }}" = "darwin" ]; then
+            ln -sf ${{ inputs.libkrunfw_file }} libkrunfw.dylib
+          else
+            ln -sf ${{ inputs.libkrunfw_file }} libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
+            ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} libkrunfw.so
+          fi
+
+      - name: Build Python SDK (editable)
+        working-directory: sdk/python
+        run: uv run maturin develop --release
+
+      - name: Test Python SDK
+        working-directory: sdk/python
+        run: uv run pytest
+
+      - name: Lint Python SDK (ruff)
+        working-directory: sdk/python
+        run: uv run ruff check .
+
+      - name: Sanity wheel build (Python SDK)
+        working-directory: sdk/python
+        run: uv build --wheel
+
+      # -- Checks (Go SDK) --
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          # No cache-dependency-path: sdk/go has zero external deps,
+          # nothing to cache.
+          cache: false
+
+      - name: Build Go SDK
+        working-directory: sdk/go
+        run: go build ./...
+
+      - name: Vet Go SDK
+        working-directory: sdk/go
+        run: go vet ./...
+
+      - name: Unit-test Go SDK
+        working-directory: sdk/go
+        # Unit tests don't dlopen the FFI lib, so no MICROSANDBOX_FFI_PATH
+        # needed. Integration tests live under ./integration with the
+        # `integration` build tag and run in the go-sdk-test job below.
+        run: go test -count=1 .
+
+      # -- Build Go FFI cdylib (linux-x86_64 only, for the integration job) --
+      - name: Build microsandbox-go cdylib
+        if: inputs.target == 'linux-x86_64'
+        run: |
+          cargo build -p microsandbox-go
+          mkdir -p build
+          cp target/debug/libmicrosandbox_go_ffi.so build/
+
+      # -- Smoke-test the FFI boundary (no KVM needed) --
+      # Released SDK builds embed the FFI library; here we use the
+      # microsandbox_ffi_path build tag to swap the embed for the
+      # freshly-built local .so.
+      - name: Smoke-test Go SDK FFI
+        if: inputs.target == 'linux-x86_64'
+        working-directory: sdk/go
+        env:
+          MICROSANDBOX_FFI_PATH: ${{ github.workspace }}/build/libmicrosandbox_go_ffi.so
+        run: go test -tags "smoke microsandbox_ffi_path" -count=1 -timeout 2m .
+
+      # -- Upload artifacts (linux-x86_64 only, for SDK smoke tests) --
+      - name: Upload build artifacts
+        if: inputs.target == 'linux-x86_64'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: msb-linux-x86_64
+          path: build/
+
+      - name: Upload Node SDK artifacts
+        if: inputs.target == 'linux-x86_64'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: node-sdk-linux-x86_64
+          path: |
+            sdk/node-ts/native/index.cjs
+            sdk/node-ts/native/index.d.ts
+            sdk/node-ts/native/microsandbox.*.node
+            sdk/node-ts/dist/
+            sdk/node-ts/package.json
+            sdk/node-ts/package-lock.json
+            sdk/node-ts/scripts/prune-platform-optional-deps.mjs
+            sdk/node-ts/tests/
+            sdk/node-ts/tsconfig.json
+            sdk/node-ts/vitest.config.ts
+
+      # -- Checks (MCP server) --
+      - name: Build MCP server
+        working-directory: mcp
+        run: |
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.dependencies.microsandbox = 'file:../sdk/node-ts';
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
+          "
+          npm install --no-package-lock --ignore-scripts
+          npm run build
