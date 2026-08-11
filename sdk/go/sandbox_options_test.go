@@ -764,7 +764,12 @@ func TestBuildFFINetworkRateLimitersNil(t *testing.T) {
 }
 
 func TestBuildFFITokenBucketKeepsInvalidRefillTimesInvalid(t *testing.T) {
-	for _, refillTime := range []time.Duration{-time.Second, 0, time.Microsecond} {
+	for _, refillTime := range []time.Duration{
+		-time.Second,
+		0,
+		time.Microsecond,
+		1500 * time.Microsecond,
+	} {
 		out := buildFFITokenBucket(&TokenBucketConfig{Size: 1, RefillTime: refillTime})
 		if out.RefillTimeMs != 0 {
 			t.Fatalf("refill time %s became %dms", refillTime, out.RefillTimeMs)

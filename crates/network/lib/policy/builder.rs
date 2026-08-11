@@ -148,6 +148,26 @@ pub enum BuildError {
         bucket: &'static str,
     },
 
+    /// A rate limiter refill interval is shorter than the wire format supports.
+    #[error("{direction} rate limiter: {bucket} refill interval must be at least one millisecond")]
+    RateLimitRefillTooShort {
+        /// Which limiter is invalid: `egress` or `ingress`.
+        direction: NetworkRateLimitDirection,
+        /// The bucket with the short interval: `bandwidth` or `ops`.
+        bucket: &'static str,
+    },
+
+    /// A rate limiter refill interval cannot be represented exactly in milliseconds.
+    #[error(
+        "{direction} rate limiter: {bucket} refill interval must be a whole number of milliseconds"
+    )]
+    RateLimitRefillPrecision {
+        /// Which limiter is invalid: `egress` or `ingress`.
+        direction: NetworkRateLimitDirection,
+        /// The bucket with the fractional-millisecond interval: `bandwidth` or `ops`.
+        bucket: &'static str,
+    },
+
     /// A rate limiter refill interval does not fit in u64 milliseconds.
     #[error("{direction} rate limiter: {bucket} refill interval overflows u64 milliseconds")]
     RateLimitRefillTooLong {

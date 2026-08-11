@@ -1088,7 +1088,8 @@ type TokenBucketConfig struct {
 	// Size is the bucket capacity in tokens: bytes for bandwidth buckets,
 	// frames for ops buckets.
 	Size uint64
-	// RefillTime is the time it takes to refill Size tokens.
+	// RefillTime is the time it takes to refill Size tokens. It must be at
+	// least one millisecond and a whole number of milliseconds.
 	RefillTime time.Duration
 	// OneTimeBurst grants extra tokens available at startup; the burst
 	// never refills. Optional.

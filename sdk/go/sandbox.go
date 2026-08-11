@@ -392,7 +392,7 @@ func buildFFITokenBucket(b *TokenBucketConfig) *ffi.TokenBucketOptions {
 	// a configuration error. Casting a negative Milliseconds result directly
 	// to uint64 would otherwise turn it into an enormous valid interval.
 	var refillTimeMs uint64
-	if b.RefillTime >= time.Millisecond {
+	if b.RefillTime >= time.Millisecond && b.RefillTime%time.Millisecond == 0 {
 		refillTimeMs = uint64(b.RefillTime / time.Millisecond)
 	}
 	return &ffi.TokenBucketOptions{

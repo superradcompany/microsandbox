@@ -87,8 +87,15 @@ pub struct RateLimiterBuilder {
     ops: Option<TokenBucketConfig>,
     bandwidth_burst: Option<u64>,
     ops_burst: Option<u64>,
-    /// Bucket whose refill interval overflowed u64 milliseconds.
-    refill_overflow: Option<&'static str>,
+    /// First bucket whose refill interval cannot be represented on the wire.
+    refill_error: Option<(&'static str, RefillTimeError)>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RefillTimeError {
+    TooShort,
+    Precision,
+    TooLong,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -663,25 +670,30 @@ impl RateLimiterBuilder {
             ops: None,
             bandwidth_burst: None,
             ops_burst: None,
-            refill_overflow: None,
+            refill_error: None,
         }
     }
 
     /// Cap bandwidth at `size` bytes per `refill_time`.
+    ///
+    /// `refill_time` must be at least one millisecond and exactly representable
+    /// as a whole number of milliseconds.
     ///
     /// ```ignore
     /// .bandwidth(1.mib(), Duration::from_secs(1))
     /// ```
     pub fn bandwidth(mut self, size: impl Into<Bytes>, refill_time: Duration) -> Self {
         match refill_time_ms(refill_time) {
-            Some(refill_time_ms) => {
+            Ok(refill_time_ms) => {
                 self.bandwidth = Some(TokenBucketConfig {
                     size: size.into().as_u64(),
                     refill_time_ms,
                     one_time_burst: 0,
                 });
             }
-            None => self.refill_overflow = Some("bandwidth"),
+            Err(error) => {
+                self.refill_error.get_or_insert(("bandwidth", error));
+            }
         }
         self
     }
@@ -695,19 +707,24 @@ impl RateLimiterBuilder {
 
     /// Cap packet rate at `count` frames per `refill_time`.
     ///
+    /// `refill_time` must be at least one millisecond and exactly representable
+    /// as a whole number of milliseconds.
+    ///
     /// ```ignore
     /// .ops(1_000, Duration::from_secs(1))
     /// ```
     pub fn ops(mut self, count: u64, refill_time: Duration) -> Self {
         match refill_time_ms(refill_time) {
-            Some(refill_time_ms) => {
+            Ok(refill_time_ms) => {
                 self.ops = Some(TokenBucketConfig {
                     size: count,
                     refill_time_ms,
                     one_time_burst: 0,
                 });
             }
-            None => self.refill_overflow = Some("ops"),
+            Err(error) => {
+                self.refill_error.get_or_insert(("ops", error));
+            }
         }
         self
     }
@@ -722,8 +739,18 @@ impl RateLimiterBuilder {
     /// Consume the builder and return the validated configuration.
     pub fn build(self) -> Result<RateLimiterConfig, BuildError> {
         let direction = self.direction;
-        if let Some(bucket) = self.refill_overflow {
-            return Err(BuildError::RateLimitRefillTooLong { direction, bucket });
+        if let Some((bucket, error)) = self.refill_error {
+            return Err(match error {
+                RefillTimeError::TooShort => {
+                    BuildError::RateLimitRefillTooShort { direction, bucket }
+                }
+                RefillTimeError::Precision => {
+                    BuildError::RateLimitRefillPrecision { direction, bucket }
+                }
+                RefillTimeError::TooLong => {
+                    BuildError::RateLimitRefillTooLong { direction, bucket }
+                }
+            });
         }
 
         let mut config = RateLimiterConfig {
@@ -823,10 +850,17 @@ impl ViolationActionBuilder {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Convert a refill interval to whole milliseconds, or `None` when it does
-/// not fit in u64.
-fn refill_time_ms(refill_time: Duration) -> Option<u64> {
-    u64::try_from(refill_time.as_millis()).ok()
+/// Convert a refill interval to its exact whole-millisecond wire value.
+fn refill_time_ms(refill_time: Duration) -> Result<u64, RefillTimeError> {
+    if refill_time < Duration::from_millis(1) {
+        return Err(RefillTimeError::TooShort);
+    }
+    let refill_time_ms =
+        u64::try_from(refill_time.as_millis()).map_err(|_| RefillTimeError::TooLong)?;
+    if !refill_time.subsec_nanos().is_multiple_of(1_000_000) {
+        return Err(RefillTimeError::Precision);
+    }
+    Ok(refill_time_ms)
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1105,7 +1139,7 @@ mod tests {
     }
 
     #[test]
-    fn rate_limiter_builder_rejects_zero_size_and_zero_refill() {
+    fn rate_limiter_builder_rejects_zero_size_and_unrepresentable_refill() {
         let err = NetworkBuilder::new()
             .ingress_rate_limiter(|r| r.bandwidth(0u64, Duration::from_secs(1)))
             .build()
@@ -1121,7 +1155,16 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err.to_string(),
-            "egress rate limiter: ops bucket: refill_time_ms must be greater than zero"
+            "egress rate limiter: ops refill interval must be at least one millisecond"
+        );
+
+        let err = NetworkBuilder::new()
+            .egress_rate_limiter(|r| r.ops(10, Duration::from_micros(1_500)))
+            .build()
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "egress rate limiter: ops refill interval must be a whole number of milliseconds"
         );
     }
 
