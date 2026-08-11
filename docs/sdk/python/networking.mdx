@@ -82,13 +82,17 @@ Deny all traffic in both directions. The network interface remains present; `exe
 def from_profiles(*profiles: NetworkProfile) -> Network
 ```
 
-Build a deny-by-default network configuration from `PUBLIC`, `PRIVATE`, and `HOST` profiles. Duplicate profiles are ignored, generated rules use canonical order, and gateway DNS is added automatically for every non-empty profile set.
+<Accordion title="Example">
 
 ```python
 from microsandbox import Network, NetworkProfile
 
 network = Network.from_profiles(NetworkProfile.PUBLIC, NetworkProfile.PRIVATE)
 ```
+
+</Accordion>
+
+Build a deny-by-default network configuration from `PUBLIC`, `PRIVATE`, and `HOST` profiles. Duplicate profiles are ignored, generated rules use canonical order, and gateway DNS is added automatically for every non-empty profile set.
 
 <p className="msb-label">Returns</p>
 
@@ -121,6 +125,8 @@ Unrestricted network access, including to private addresses and the host machine
 
 A [`NetworkPolicy`](#networkpolicy) is an ordered list of [`Rule`](#rule) values plus two per-direction defaults, evaluated first-match-wins per direction. The class methods below build rules; assemble them into `NetworkPolicy(rules=(...))` and pass it as `Network(policy=...)`.
 
+<Accordion title="Example">
+
 ```python
 from microsandbox import Action, Destination, NetworkPolicy, Protocol, Rule
 
@@ -134,9 +140,13 @@ policy = NetworkPolicy(
 )
 ```
 
+</Accordion>
+
 ### Rule order matters
 
 The first matching rule wins, so a broad rule placed before a narrow one swallows it:
+
+<Accordion title="Example">
 
 ```python
 policy = NetworkPolicy(
@@ -148,6 +158,8 @@ policy = NetworkPolicy(
     ),
 )
 ```
+
+</Accordion>
 
 Put specific rules before general ones.
 
@@ -304,6 +316,8 @@ Deny gateway UDP/53 and TCP/53. Place these rules before profile-generated rules
 
 Factory namespace for typed network policy destinations. Typed destinations avoid string-shorthand ambiguity and match the TypeScript SDK shape. Each method returns a [`NetworkDestination`](#networkdestination).
 
+<Accordion title="Example">
+
 ```python
 from microsandbox import DestGroup, Destination
 
@@ -314,6 +328,8 @@ Destination.domain("api.example.com")
 Destination.domain_suffix(".example.com")
 Destination.group(DestGroup.LINK_LOCAL)
 ```
+
+</Accordion>
 
 Bare IP strings such as `"1.1.1.1"` remain supported on [`Rule`](#rule) destinations and are parsed like `Destination.ip("1.1.1.1")`. Prefer the typed helper when the value is known to be an IP.
 
@@ -420,10 +436,14 @@ Match a well-known [`DestGroup`](#destgroup) address group.
 
 [`PortBinding`](#portbinding) is a frozen dataclass for published ports that need an explicit host bind address or UDP. Prefer the protocol-specific constructors over building one by hand.
 
+<Accordion title="Example">
+
 ```python
 PortBinding.tcp(8001, 8001, bind="0.0.0.0")
 PortBinding.udp(5353, 5353, bind="0.0.0.0")
 ```
+
+</Accordion>
 
 Pass them to `Network(ports=(...))`. A plain `dict[int, int]` is also accepted for the common case, binding TCP to `127.0.0.1`.
 
@@ -503,8 +523,6 @@ Publish a UDP port from the sandbox to the host.
 
 <p className="msb-backref">Used by <a href="/sdk/python/sandbox#sandbox-create">Sandbox.create(network=...)</a></p>
 
-Frozen dataclass for sandbox network configuration. Use the [profile and terminal-policy helpers](#network-factory) for common cases, or construct directly with custom options.
-
 ```python
 Network(
     policy: NetworkPolicy | None = None,
@@ -521,6 +539,8 @@ Network(
     on_secret_violation: ViolationAction | ViolationPolicy = ViolationAction.BLOCK_AND_LOG,
 )
 ```
+
+Frozen dataclass for sandbox network configuration. Use the [profile and terminal-policy helpers](#network-factory) for common cases, or construct directly with custom options.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -547,8 +567,6 @@ Network(
 
 <p className="msb-backref">Used by <a href="#network">Network(policy=...)</a></p>
 
-Frozen dataclass: an ordered list of [`Rule`](#rule) values plus two per-direction defaults, evaluated first-match-wins. The defaults are asymmetric: egress falls through to deny; ingress falls through to allow. Use `NetworkPolicy.from_profiles(...)` to add canonical profile and DNS rules.
-
 ```python
 NetworkPolicy(
     default_egress: Action = Action.DENY,
@@ -556,6 +574,8 @@ NetworkPolicy(
     rules: tuple[Rule, ...] = (),
 )
 ```
+
+Frozen dataclass: an ordered list of [`Rule`](#rule) values plus two per-direction defaults, evaluated first-match-wins. The defaults are asymmetric: egress falls through to deny; ingress falls through to allow. Use `NetworkPolicy.from_profiles(...)` to add canonical profile and DNS rules.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -577,8 +597,6 @@ Class methods `none()` and `allow_all()` construct terminal whole policies. `fro
 
 <p className="msb-backref">Used by <a href="#networkpolicy">NetworkPolicy(rules=...)</a></p>
 
-Frozen dataclass for a single network policy rule. Prefer the [`Rule.allow()`](#rule-allow) / [`Rule.deny()`](#rule-deny) class methods over the positional constructor.
-
 ```python
 Rule(
     action: Action,
@@ -588,6 +606,8 @@ Rule(
     port: int | str | None = None,
 )
 ```
+
+Frozen dataclass for a single network policy rule. Prefer the [`Rule.allow()`](#rule-allow) / [`Rule.deny()`](#rule-deny) class methods over the positional constructor.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -625,14 +645,14 @@ Factory namespace ([static methods](#destination-factory)) producing typed [`Net
 
 <p className="msb-backref">Produced by <a href="#destination">Destination</a> helpers</p>
 
-Frozen dataclass produced by [`Destination`](#destination) helpers.
-
 ```python
 NetworkDestination(
     kind: NetworkDestinationKind,
     value: str | None = None,
 )
 ```
+
+Frozen dataclass produced by [`Destination`](#destination) helpers.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -658,8 +678,6 @@ Network destination variant.
 
 <p className="msb-backref">Used by <a href="#network">Network(ports=...)</a></p>
 
-Frozen dataclass for a published host-to-guest port with an optional host bind address. Prefer the [`PortBinding.tcp()`](#portbinding-tcp) / [`PortBinding.udp()`](#portbinding-udp) class methods.
-
 ```python
 PortBinding(
     host_port: int,
@@ -668,6 +686,8 @@ PortBinding(
     protocol: PortProtocol = PortProtocol.TCP,
 )
 ```
+
+Frozen dataclass for a published host-to-guest port with an optional host bind address. Prefer the [`PortBinding.tcp()`](#portbinding-tcp) / [`PortBinding.udp()`](#portbinding-udp) class methods.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -685,8 +705,6 @@ PortBinding(
 
 <p className="msb-backref">Used by <a href="#network">Network(dns=...)</a></p>
 
-Frozen dataclass for DNS interception settings. The value type of [`Network.dns`](#network); import it from `microsandbox.types`.
-
 ```python
 DnsConfig(
     rebind_protection: bool = True,
@@ -694,6 +712,8 @@ DnsConfig(
     query_timeout_ms: int | None = None,
 )
 ```
+
+Frozen dataclass for DNS interception settings. The value type of [`Network.dns`](#network); import it from `microsandbox.types`.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -704,8 +724,6 @@ DnsConfig(
 ### TlsConfig
 
 <p className="msb-backref">Used by <a href="#network">Network(tls=...)</a></p>
-
-Frozen dataclass for TLS interception settings within [`Network`](#network).
 
 ```python
 TlsConfig(
@@ -721,6 +739,8 @@ TlsConfig(
     ca_cn: str | None = None,
 )
 ```
+
+Frozen dataclass for TLS interception settings within [`Network`](#network).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -741,14 +761,14 @@ TlsConfig(
 
 <p className="msb-backref">Used by <a href="#tlsconfig">TlsConfig(scoped_upstream_ca_certs=...)</a></p>
 
-A CA bundle trusted only for upstream hosts matching a pattern.
-
 ```python
 ScopedUpstreamCACert(
     pattern: str,
     path: str,
 )
 ```
+
+A CA bundle trusted only for upstream hosts matching a pattern.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -761,14 +781,14 @@ ScopedUpstreamCACert(
 
 <p className="msb-backref">Used by <a href="#tlsconfig">TlsConfig(scoped_verify_upstream=...)</a></p>
 
-A per-host override for upstream certificate verification.
-
 ```python
 ScopedVerifyUpstream(
     pattern: str,
     verify: bool,
 )
 ```
+
+A per-host override for upstream certificate verification.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -781,19 +801,12 @@ ScopedVerifyUpstream(
 
 <p className="msb-backref">Used by <a href="#network">Network(egress_rate_limiter=... / ingress_rate_limiter=...)</a></p>
 
-Frozen dataclass limiting one traffic direction. Caps bandwidth (bytes) and packet rate (frames) independently; a `None` bucket leaves that dimension unlimited. Limits apply on the next sandbox start; cloud sandboxes reject rate limiters as unsupported for now. Import it from `microsandbox`.
-
 ```python
 RateLimiter(
     bandwidth: TokenBucket | None = None,
     ops: TokenBucket | None = None,
 )
 ```
-
-| Field | Type | Description |
-|-------|------|-------------|
-| bandwidth | [`TokenBucket`](#tokenbucket)` \| None` | Byte budget; one token per byte of frame data |
-| ops | [`TokenBucket`](#tokenbucket)` \| None` | Packet budget; one token per network frame |
 
 <Accordion title="Example">
 
@@ -814,13 +827,18 @@ sb = await Sandbox.create(
 
 </Accordion>
 
+Frozen dataclass limiting one traffic direction. Caps bandwidth (bytes) and packet rate (frames) independently; a `None` bucket leaves that dimension unlimited. Limits apply on the next sandbox start; cloud sandboxes reject rate limiters as unsupported for now. Import it from `microsandbox`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| bandwidth | [`TokenBucket`](#tokenbucket)` \| None` | Byte budget; one token per byte of frame data |
+| ops | [`TokenBucket`](#tokenbucket)` \| None` | Packet budget; one token per network frame |
+
 ### TokenBucket
 
 <div className="msb-tags"><span className="msb-tag is-type">dataclass</span></div>
 
 <p className="msb-backref">Used by <a href="#ratelimiter">RateLimiter</a></p>
-
-Frozen dataclass for one token bucket of a rate limiter. The bucket starts full and refills continuously at `size` tokens per `refill_time_ms`; the one-time burst is spent before the regular budget and never refills.
 
 ```python
 TokenBucket(
@@ -829,6 +847,8 @@ TokenBucket(
     one_time_burst: int = 0,
 )
 ```
+
+Frozen dataclass for one token bucket of a rate limiter. The bucket starts full and refills continuously at `size` tokens per `refill_time_ms`; the one-time burst is spent before the regular budget and never refills.
 
 | Field | Type | Description |
 |-------|------|-------------|

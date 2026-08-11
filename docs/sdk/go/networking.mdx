@@ -224,7 +224,13 @@ Build a deny-by-default policy from `NetworkProfilePublic`, `NetworkProfilePriva
   </div>
 </div>
 
-When profile names come from JSON, configuration, environment variables, or other runtime input, use the checked variant instead:
+#### <span className="msb-recv">NetworkPolicy.</span><span className="msb-hn">FromProfilesChecked()</span>
+
+```go
+func (networkPolicyFactory) FromProfilesChecked(profiles ...NetworkProfile) (*NetworkConfig, error)
+```
+
+<Accordion title="Example">
 
 ```go
 network, err := m.NetworkPolicy.FromProfilesChecked(profiles...)
@@ -233,11 +239,7 @@ if err != nil {
 }
 ```
 
-#### <span className="msb-recv">NetworkPolicy.</span><span className="msb-hn">FromProfilesChecked()</span>
-
-```go
-func (networkPolicyFactory) FromProfilesChecked(profiles ...NetworkProfile) (*NetworkConfig, error)
-```
+</Accordion>
 
 Builds the same canonical deny-by-default policy as `FromProfiles`, but returns an error instead of panicking when a profile is unknown. Use this method for values derived from runtime input.
 
@@ -308,15 +310,20 @@ Permit all network traffic, including private addresses and the host machine.
 
 The package-level `Rule` factory provides semantic low-level rules. `Rule.AllowDNS()` returns a [`PolicyRule`](#policyrule) allowing gateway UDP/53 and TCP/53; `Rule.DenyDNS()` returns its deny counterpart. Put `Rule.DenyDNS()` before profile-generated rules when you need to override automatic DNS access.
 
+<Accordion title="Example">
+
 ```go
 network := m.NetworkPolicy.FromProfiles(m.NetworkProfilePublic)
 network.Rules = append([]m.PolicyRule{m.Rule.DenyDNS()}, network.Rules...)
 ```
 
+</Accordion>
 
 ## Custom rules
 
 Build a custom firewall by populating [`NetworkConfig.Rules`](#networkconfig). Rules are evaluated **first-match-wins** per direction; `DefaultEgress` and `DefaultIngress` set the fall-through action. A broad rule placed before a narrow one swallows it, so put specific rules first.
+
+<Accordion title="Example">
 
 ```go
 sb, err := m.CreateSandbox(ctx, "ci-runner",
@@ -339,11 +346,35 @@ sb, err := m.CreateSandbox(ctx, "ci-runner",
 )
 ```
 
+</Accordion>
+
 ## Types
 
 ### NetworkConfig
 
 <p className="msb-backref">Used by <a href="#m-withnetwork">WithNetwork()</a> · returned by <a href="#networkpolicy">NetworkPolicy</a></p>
+
+```go
+type NetworkConfig struct {
+    Rules                    []PolicyRule
+    DefaultEgress           PolicyAction
+    DefaultIngress          PolicyAction
+    DenyDomains             []string
+    DenyDomainSuffixes      []string
+    DNS                      *DNSConfig
+    DNSRebindProtection     *bool
+    TLS                      *TLSConfig
+    Ports                    map[uint16]uint16
+    PortBindings             []PortBinding
+    IPv4Pool                 string
+    IPv6Pool                 string
+    MaxConnections           *uint
+    EgressRateLimiter        *RateLimiterConfig
+    IngressRateLimiter       *RateLimiterConfig
+    OnSecretViolation        ViolationAction
+    TrustHostCAs             *bool
+}
+```
 
 The full network stack configuration passed via [`WithNetwork`](#m-withnetwork).
 
@@ -371,6 +402,18 @@ The full network stack configuration passed via [`WithNetwork`](#m-withnetwork).
 
 <p className="msb-backref">Used by <a href="#networkconfig">NetworkConfig.Rules</a></p>
 
+```go
+type PolicyRule struct {
+    Action      PolicyAction
+    Direction   PolicyDirection
+    Destination string
+    Protocol    PolicyProtocol
+    Protocols   []PolicyProtocol
+    Port        string
+    Ports       []string
+}
+```
+
 A single firewall rule. Ingress rules carrying ICMP protocols are rejected at sandbox creation, since the host has no inbound ICMP path; use `PolicyDirectionEgress` for ICMP.
 
 | Field | Type | Description |
@@ -387,6 +430,14 @@ A single firewall rule. Ingress rules carrying ICMP protocols are rejected at sa
 
 <p className="msb-backref">Used by <a href="#networkconfig">NetworkConfig.DNS</a></p>
 
+```go
+type DNSConfig struct {
+    RebindProtection *bool
+    Nameservers      []string
+    QueryTimeoutMs   *uint64
+}
+```
+
 In-VM DNS proxy configuration.
 
 | Field | Type | Description |
@@ -398,6 +449,36 @@ In-VM DNS proxy configuration.
 ### TLSConfig
 
 <p className="msb-backref">Used by <a href="#networkconfig">NetworkConfig.TLS</a></p>
+
+```go
+type TLSConfig struct {
+    Bypass                    []string
+    VerifyUpstream            *bool
+    InterceptedPorts          []uint16
+    BlockQUIC                 *bool
+    CACert                    string
+    CAKey                     string
+    UpstreamCACerts           []string
+    ScopedUpstreamCACerts     []ScopedUpstreamCACert
+    ScopedVerifyUpstream      []ScopedVerifyUpstream
+}
+```
+
+<Accordion title="Example">
+
+```go
+sb, err := m.CreateSandbox(ctx, "inspect",
+    m.WithImage("python:3.12"),
+    m.WithNetwork(&m.NetworkConfig{
+        TLS: &m.TLSConfig{
+            Bypass:           []string{"*.googleapis.com"},
+            InterceptedPorts: []uint16{443},
+        },
+    }),
+)
+```
+
+</Accordion>
 
 Transparent HTTPS inspection proxy configuration.
 
@@ -413,21 +494,16 @@ Transparent HTTPS inspection proxy configuration.
 | ScopedUpstreamCACerts | `[]ScopedUpstreamCACert` | Host-pattern-scoped CA bundles trusted only for matching upstream hosts |
 | ScopedVerifyUpstream | `[]ScopedVerifyUpstream` | Host-pattern-scoped upstream certificate verification overrides |
 
-```go
-sb, err := m.CreateSandbox(ctx, "inspect",
-    m.WithImage("python:3.12"),
-    m.WithNetwork(&m.NetworkConfig{
-        TLS: &m.TLSConfig{
-            Bypass:           []string{"*.googleapis.com"},
-            InterceptedPorts: []uint16{443},
-        },
-    }),
-)
-```
-
 ### ScopedUpstreamCACert
 
 <p className="msb-backref">Used by <a href="#tlsconfig">TLSConfig.ScopedUpstreamCACerts</a></p>
+
+```go
+type ScopedUpstreamCACert struct {
+    Pattern string
+    Path    string
+}
+```
 
 Host-scoped upstream CA bundle configuration.
 
@@ -440,6 +516,13 @@ Host-scoped upstream CA bundle configuration.
 
 <p className="msb-backref">Used by <a href="#tlsconfig">TLSConfig.ScopedVerifyUpstream</a></p>
 
+```go
+type ScopedVerifyUpstream struct {
+    Pattern string
+    Verify  bool
+}
+```
+
 Host-scoped upstream certificate verification override.
 
 | Field | Type | Description |
@@ -451,12 +534,12 @@ Host-scoped upstream certificate verification override.
 
 <p className="msb-backref">Used by <a href="#networkconfig">NetworkConfig.EgressRateLimiter / IngressRateLimiter</a></p>
 
-Rate limiter for one traffic direction. Caps bandwidth (bytes) and packet rate (frames) independently; a `nil` bucket leaves that dimension unlimited. Cloud sandboxes reject rate limiters as unsupported for now.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| Bandwidth | [`*TokenBucketConfig`](#tokenbucketconfig) | Byte budget; one token per byte of frame data |
-| Ops | [`*TokenBucketConfig`](#tokenbucketconfig) | Packet budget; one token per network frame |
+```go
+type RateLimiterConfig struct {
+    Bandwidth *TokenBucketConfig
+    Ops       *TokenBucketConfig
+}
+```
 
 <Accordion title="Example">
 
@@ -474,9 +557,24 @@ sb, err := m.CreateSandbox(ctx, "throttled",
 
 </Accordion>
 
+Rate limiter for one traffic direction. Caps bandwidth (bytes) and packet rate (frames) independently; a `nil` bucket leaves that dimension unlimited. Cloud sandboxes reject rate limiters as unsupported for now.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Bandwidth | [`*TokenBucketConfig`](#tokenbucketconfig) | Byte budget; one token per byte of frame data |
+| Ops | [`*TokenBucketConfig`](#tokenbucketconfig) | Packet budget; one token per network frame |
+
 ### TokenBucketConfig
 
 <p className="msb-backref">Used by <a href="#ratelimiterconfig">RateLimiterConfig</a></p>
+
+```go
+type TokenBucketConfig struct {
+    Size         uint64
+    RefillTime   time.Duration
+    OneTimeBurst uint64
+}
+```
 
 One token bucket of a rate limiter. The bucket starts full and refills continuously: `Size` tokens every `RefillTime`. The one-time burst is spent before the regular budget and never refills.
 
@@ -489,6 +587,15 @@ One token bucket of a rate limiter. The bucket starts full and refills continuou
 ### PortBinding
 
 <p className="msb-backref">Used by <a href="#m-withportbindings">WithPortBindings()</a> · <a href="#networkconfig">NetworkConfig.PortBindings</a></p>
+
+```go
+type PortBinding struct {
+    Bind      string
+    HostPort  uint16
+    GuestPort uint16
+    Protocol  PortProtocol
+}
+```
 
 A host-to-guest port mapping with an explicit host bind address. `Protocol` defaults to TCP when empty. Use `Bind: "0.0.0.0"` to expose the published port on all IPv4 interfaces.
 
@@ -503,6 +610,10 @@ A host-to-guest port mapping with an explicit host bind address. `Protocol` defa
 
 <p className="msb-backref">Used by <a href="#portbinding">PortBinding.Protocol</a></p>
 
+```go
+type PortProtocol string
+```
+
 Identifies the protocol for an exposed sandbox service.
 
 | Constant | Value | Description |
@@ -514,6 +625,10 @@ Identifies the protocol for an exposed sandbox service.
 
 <p className="msb-backref">Used by <a href="#policyrule">PolicyRule.Action</a> · <a href="#networkconfig">NetworkConfig.DefaultEgress</a></p>
 
+```go
+type PolicyAction string
+```
+
 The action half of a [`PolicyRule`](#policyrule).
 
 | Constant | Value | Description |
@@ -524,6 +639,10 @@ The action half of a [`PolicyRule`](#policyrule).
 ### PolicyDirection
 
 <p className="msb-backref">Used by <a href="#policyrule">PolicyRule.Direction</a></p>
+
+```go
+type PolicyDirection string
+```
 
 The direction half of a [`PolicyRule`](#policyrule). The Go SDK follows the Python naming (`egress`/`ingress`); the wire format carries these values.
 
@@ -537,6 +656,10 @@ The direction half of a [`PolicyRule`](#policyrule). The Go SDK follows the Pyth
 
 <p className="msb-backref">Used by <a href="#policyrule">PolicyRule.Protocol</a> · <a href="#policyrule">PolicyRule.Protocols</a></p>
 
+```go
+type PolicyProtocol string
+```
+
 The protocol half of a [`PolicyRule`](#policyrule).
 
 | Constant | Value | Description |
@@ -547,6 +670,10 @@ The protocol half of a [`PolicyRule`](#policyrule).
 | `PolicyProtocolICMPv6` | `"icmpv6"` | ICMPv6 traffic (egress only) |
 
 ### NetworkProfile
+
+```go
+type NetworkProfile string
+```
 
 Composable profile names accepted by [`NetworkPolicy.FromProfiles()`](#networkpolicyfromprofiles).
 
