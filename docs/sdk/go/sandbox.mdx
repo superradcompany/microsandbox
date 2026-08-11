@@ -36,7 +36,7 @@ defer func() {
 
 </Accordion>
 
-Create and boot a new sandbox. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it is ready to accept commands. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes. The returned [`*Sandbox`](#methods) owns the VM process, call `Close` (or `Stop` + `Close`) when done. See [Options](#options) for all configuration knobs.
+Create and boot a new sandbox. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it is ready to accept commands. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes. The returned [`*Sandbox`](#methods) owns the VM process. Call `Close` (or `Stop` + `Close`) when done. See [Options](#options) for all configuration knobs.
 
 <p className="msb-label">Parameters</p>
 
@@ -875,7 +875,7 @@ defer sb.Close()
 
 </Accordion>
 
-Release the Rust-side handle. Safe to call multiple times; the second call returns an error with `Kind == ErrInvalidHandle`. For a sandbox created with [`WithDetached`](#withdetached), `Close` stops the VM, use [`Detach`](#sb-detach) instead to leave it running.
+Release the Rust-side handle. Safe to call multiple times; the second call returns an error with `Kind == ErrInvalidHandle`. For a sandbox created with [`WithDetached`](#withdetached), `Close` stops the VM. Use [`Detach`](#sb-detach) instead to leave it running.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">OwnsLifecycle()</span>
 
@@ -1230,7 +1230,7 @@ Replace any existing sandbox with the same name. Sends SIGTERM, waits up to 10s 
 func WithReplaceWithTimeout(timeout time.Duration) SandboxOption
 ```
 
-Like [`WithReplace`](#withreplace) but with a caller-specified timeout between SIGTERM and SIGKILL. Implies `WithReplace`, calling this alone is enough. A zero duration skips SIGTERM and SIGKILLs immediately.
+Like [`WithReplace`](#withreplace) but with a caller-specified timeout between SIGTERM and SIGKILL. Implies `WithReplace`; calling this alone is enough. A zero duration skips SIGTERM and SIGKILLs immediately.
 
 <p className="msb-label">Parameters</p>
 
@@ -1591,7 +1591,7 @@ Add volume mount configurations keyed by guest path. Build values via the [`Moun
 func WithStopTimeout(timeout time.Duration) StopOption
 ```
 
-Set how long [`Stop`](#sb-stop) waits for graceful shutdown before force-killing. Default: 10 seconds. This is a `StopOption`, not a `SandboxOption`, pass it to [`Stop`](#sb-stop).
+Set how long [`Stop`](#sb-stop) waits for graceful shutdown before force-killing. Default: 10 seconds. This is a `StopOption`, not a `SandboxOption`. Pass it to [`Stop`](#sb-stop).
 
 <p className="msb-label">Parameters</p>
 
@@ -1862,7 +1862,7 @@ Specify the init binary explicitly with optional argv and env. `cmd` must be an 
 
 <p className="msb-backref">Returned by <a href="#m-getsandbox">GetSandbox()</a> · <a href="#m-listsandboxes">ListSandboxes()</a> · <a href="#m-listsandboxeswith">ListSandboxesWith()</a></p>
 
-A lightweight reference to a sandbox's persisted state. Carries metadata (name, status, config JSON, timestamps) and offers lifecycle methods that operate on the sandbox **without** an active guest-agent connection. You cannot `Exec` or `FS` on a handle, call `Connect` or `Start` to upgrade to a full [`*Sandbox`](#methods).
+A lightweight reference to a sandbox's persisted state. Carries metadata (name, status, config JSON, timestamps) and offers lifecycle methods that operate on the sandbox **without** an active guest-agent connection. You cannot `Exec` or `FS` on a handle. Call `Connect` or `Start` to upgrade to a full [`*Sandbox`](#methods).
 
 | Method | Returns | Description |
 |--------|---------|-------------|
