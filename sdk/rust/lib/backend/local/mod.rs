@@ -128,11 +128,12 @@ impl LocalBackend {
         selection_source: BackendSelectionSource,
         profile: Option<String>,
     ) -> Self {
-        let config = Arc::new(load_persisted_config_or_default().unwrap_or_default());
+        let config = load_persisted_config_or_default().unwrap_or_default();
+        let deployment_profile = config.deployment_profile;
         Self {
-            config,
+            config: Arc::new(config),
             db: OnceCell::new(),
-            deployment_profile: None,
+            deployment_profile,
             selection_source,
             profile,
         }
@@ -410,8 +411,8 @@ impl LocalBackendBuilder {
     /// sandbox state.
     pub fn build_lazy(self) -> LocalBackend {
         let persisted = load_persisted_config_or_default().unwrap_or_default();
-        let deployment_profile = self.deployment_profile;
         let config = self.merge_into(persisted);
+        let deployment_profile = config.deployment_profile;
         LocalBackend {
             config: Arc::new(config),
             db: OnceCell::new(),
@@ -444,7 +445,7 @@ impl LocalBackendBuilder {
             ca_certs,
             registry_hosts,
             log_level,
-            deployment_profile: _,
+            deployment_profile,
         } = self;
 
         if let Some(home) = home {
@@ -452,6 +453,9 @@ impl LocalBackendBuilder {
         }
         if let Some(level) = log_level {
             base.log_level = Some(level);
+        }
+        if let Some(profile) = deployment_profile {
+            base.deployment_profile = Some(profile);
         }
 
         if let Some(v) = max_connections {
@@ -1233,6 +1237,7 @@ mod tests {
         // wrote to ~/.microsandbox/config.json.
         let base = LocalConfig {
             log_level: Some(microsandbox_runtime::logging::LogLevel::Debug),
+            deployment_profile: Some(DeploymentProfile::MultiTenant),
             database: DatabaseConfig {
                 url: None,
                 max_connections: 9,
@@ -1276,6 +1281,27 @@ mod tests {
         assert_eq!(
             merged.log_level,
             Some(microsandbox_runtime::logging::LogLevel::Debug)
+        );
+        assert_eq!(
+            merged.deployment_profile,
+            Some(DeploymentProfile::MultiTenant)
+        );
+    }
+
+    #[test]
+    fn builder_deployment_profile_overrides_persisted_policy() {
+        let base = LocalConfig {
+            deployment_profile: Some(DeploymentProfile::SingleTenant),
+            ..Default::default()
+        };
+
+        let merged = LocalBackend::builder()
+            .deployment_profile(DeploymentProfile::MultiTenant)
+            .merge_into(base);
+
+        assert_eq!(
+            merged.deployment_profile,
+            Some(DeploymentProfile::MultiTenant)
         );
     }
 }

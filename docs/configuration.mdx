@@ -11,6 +11,7 @@ microsandbox reads its global configuration from `~/.microsandbox/config.json`. 
 {
   "home": "/custom/path/.microsandbox",
   "log_level": "info",
+  "deployment_profile": "multi-tenant",
   "database": {
     "url": "sqlite:///tmp/msb.db",
     "max_connections": 10,
@@ -94,6 +95,7 @@ microsandbox reads its global configuration from `~/.microsandbox/config.json`. 
 |-------|---------|-------------|
 | `home` | `~/.microsandbox` | Root directory for all microsandbox data |
 | `log_level` | `null` (silent) | Log level for sandbox processes: `error`, `warn`, `info`, `debug`, `trace` |
+| `deployment_profile` | `null` | Authoritative local host-runtime isolation profile: `single-tenant` or `multi-tenant` |
 | `database` | [reference](#database) | Database connection settings |
 | `paths` | [reference](#paths) | Path overrides for binaries and directories |
 | `sandbox_defaults` | [reference](#sandbox_defaults) | Defaults applied to local sandboxes |
@@ -102,6 +104,20 @@ microsandbox reads its global configuration from `~/.microsandbox/config.json`. 
 | `metrics` | [reference](#metrics) | Live metrics shared-memory registry settings |
 | `active_profile` | `null` | Default backend profile name |
 | `profiles` | `{}` | Named backend profiles |
+
+## `deployment_profile`
+
+Set `deployment_profile` when the local host must enforce one deployment policy for every sandbox:
+
+```json
+{
+  "deployment_profile": "multi-tenant"
+}
+```
+
+`single-tenant` preserves the network configuration requested by each sandbox. `multi-tenant` applies the host-runtime isolation floor for shared infrastructure. The configured value is authoritative on create and restart, so a per-sandbox CLI or SDK option cannot weaken or replace it. A programmatic `LocalBackendBuilder::deployment_profile()` override takes precedence over the file. When the field is absent or `null`, each sandbox selects its own profile and defaults to `single-tenant`.
+
+The parser also accepts the internal wire spellings `single_tenant` and `multi_tenant` for compatibility, but the kebab-case values above are canonical in this human-edited file. Managed cloud backends ignore this local setting because the hosting platform chooses their effective deployment profile.
 
 ## `database`
 
