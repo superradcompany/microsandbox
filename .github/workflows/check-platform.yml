@@ -82,7 +82,9 @@ jobs:
       - name: Build libkrunfw (Linux)
         if: steps.cache-libkrunfw.outputs.cache-hit != 'true' && inputs.os == 'linux'
         run: |
-          make -C vendor/libkrunfw -j$(nproc)
+          cd vendor/libkrunfw
+          make -j"$(nproc)"
+          cd ../..
           mkdir -p build
           cp vendor/libkrunfw/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} build/
           cd build
