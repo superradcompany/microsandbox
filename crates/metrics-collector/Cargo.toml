@@ -41,6 +41,8 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 microsandbox-db.workspace = true
 # Query traits (EntityTrait, ColumnTrait, QueryFilter) for the label lookup.
 sea-orm = { workspace = true }
+# Parse the effective sandbox config used for label enrichment.
+serde_json.workspace = true
 # Used by the binary to derive the shm registry name from `$MSB_HOME`.
 microsandbox-utils.workspace = true
 # CLI duration parsing (e.g. "1s", "500ms").

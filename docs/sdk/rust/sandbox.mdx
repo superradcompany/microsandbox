@@ -5,22 +5,6 @@ description: Rust SDK - Sandbox API reference
 
 Create and control a microVM sandbox: boot it from an image, run commands, stream logs and metrics, then shut it down. See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```rust
-use microsandbox::Sandbox;
-
-let sb = Sandbox::builder("api")             // 1. configure
-    .image("python")
-    .memory(1024)
-    .create()                                // 2. boot the microVM
-    .await?;
-
-let out = sb.exec("python", ["-V"]).await?;  // 3. run
-println!("{}", out.stdout()?);
-
-sb.stop().await?;                            // 4. shut down
-```
 
 ## Static methods
 
@@ -733,7 +717,7 @@ Block until the sandbox is observed in a terminal non-running state. Owned local
 
 ## SandboxBuilder
 
-Builder for configuring a sandbox before creation. Obtained via [`Sandbox::builder(name)`](#sandboxbuilder). Every setter returns `Self`, so calls chain. Examples are shown on the methods where usage is non-obvious; simple setters are demonstrated by the [Typical flow](#typical-flow) above.
+Builder for configuring a sandbox before creation. Obtained via [`Sandbox::builder(name)`](#sandboxbuilder). Every setter returns `Self`, so calls chain. Examples are shown on the methods where usage is non-obvious.
 
 #### <span className="msb-recv">.</span><span className="msb-hn">build()</span>
 

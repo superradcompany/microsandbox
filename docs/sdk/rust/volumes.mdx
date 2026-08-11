@@ -5,27 +5,6 @@ description: Rust SDK - Volume API reference
 
 Create and manage named volumes: persistent storage that lives independently of any sandbox. Read and write a volume's files directly from the host, or mount it into a sandbox. See [Volumes](/sandboxes/volumes) for usage examples and patterns.
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```rust
-use microsandbox::{Sandbox, Volume};
-
-// 1. create a persistent named volume
-let vol = Volume::builder("pip-cache").create().await?;
-
-// 2. seed it from the host, no sandbox required
-vol.fs().write("/note.txt", "shared cache").await?;
-
-// 3. mount it into a sandbox
-let sb = Sandbox::builder("api")
-    .image("python")
-    .volume("/root/.cache/pip", |v| v.named("pip-cache"))
-    .create()
-    .await?;
-
-sb.exec("pip", ["install", "requests"]).await?;
-sb.stop().await?;
-```
 
 ## Static methods
 

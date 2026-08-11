@@ -10,21 +10,6 @@ import { Image, ImageHandle } from "microsandbox";
 import type { ImageDetail, ImagePruneReport } from "microsandbox";
 ```
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```typescript
-import { Image } from "microsandbox";
-
-for (const image of await Image.list()) {
-  console.log(image.reference, image.layerCount);
-}
-
-const detail = await Image.inspect("python:3.12");
-console.log(detail.config?.workingDir);
-
-const report = await Image.prune();
-console.log(report.bytesReclaimed);
-```
 
 ## Static methods
 

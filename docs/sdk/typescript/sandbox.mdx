@@ -9,21 +9,6 @@ The TypeScript SDK uses a **builder-only** entry point. Start every new sandbox 
 
 `libkrunfw` selection is process-level, not per sandbox. To use a custom library, call `setRuntimeLibkrunfwPath(path)` before creating local sandboxes, set `MSB_LIBKRUNFW_PATH`, or configure `paths.libkrunfw`.
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```typescript
-import { Sandbox } from "microsandbox";
-
-await using sandbox = await Sandbox.builder("api")  // 1. configure
-  .image("python")
-  .memory(1024)
-  .create();                                        // 2. boot the microVM
-
-const out = await sandbox.exec("python", ["-V"]);   // 3. run
-console.log(out.stdout);
-
-await sandbox.stop();                               // 4. shut down
-```
 
 ## Static methods
 
@@ -550,6 +535,17 @@ await sandbox.modify({ env: { MODE: "prod" }, policy: "restart" });
 
 // Grow the managed OCI root disk offline and restart
 await sandbox.modify({ rootDiskSize: 8192, policy: "restart" });
+
+// Add or rotate a host-environment secret; restart if it is newly added
+await sandbox.modify({
+  secrets: {
+    API_KEY: { env: "API_KEY", allowedHosts: ["api.example.com"] },
+  },
+  policy: "restart",
+});
+
+// Remove an existing secret
+await sandbox.modify({ secretsRemove: ["OLD_API_KEY"] });
 ```
 
 </Accordion>
@@ -557,6 +553,8 @@ await sandbox.modify({ rootDiskSize: 8192, policy: "restart" });
 Plan or apply a configuration change. The returned plan labels each change `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`, and apply is all-or-nothing.
 
 `cpus` and `memory` resize live within the [`maxCpus`](#maxcpus) / [`maxMemory`](#maxmemory) ceilings; raising a ceiling requires a restart. `rootDiskSize` changes are offline: managed and flat OCI root disks grow only, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected. Env and workdir changes affect future execs only. On a stopped sandbox, changes are saved for the next boot.
+
+Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source—`env`, `value`, or `store`—and may also set `placeholder` and `allowedHosts`; omitting a source updates only the other supplied fields. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `secretsRemove`.
 
 A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and the returned plan's `resizeStatus` reports when the sandbox has finished adjusting. See [`SandboxModificationPlan`](#sandboxmodificationplan).
 
@@ -795,7 +793,7 @@ Implements `AsyncDisposable` so the sandbox can be used with `await using`. When
 
 ## SandboxBuilder
 
-Fluent builder for configuring a sandbox before creation. Obtained via [`Sandbox.builder(name)`](#sandbox-builder). Every setter returns the same builder so calls chain. Examples are shown on the methods where usage is non-obvious; simple setters are demonstrated by the [Typical flow](#typical-flow) above.
+Fluent builder for configuring a sandbox before creation. Obtained via [`Sandbox.builder(name)`](#sandbox-builder). Every setter returns the same builder so calls chain. Examples are shown on the methods where usage is non-obvious.
 
 #### <span className="msb-recv">.</span><span className="msb-hn">build()</span>
 
@@ -2096,8 +2094,24 @@ A requested sandbox modification. Omitted fields are left unchanged.
 | labels | `Record<string, string>` | Labels to set |
 | labelsRemove | `string[]` | Label keys to remove |
 | workdir | `string` | Working directory for future execs |
+| secrets | `Record<string, SecretModifySpec>` | Desired secret specs keyed by stable secret name |
+| secretsRemove | `string[]` | Secret names to remove explicitly |
 | policy | `"no_restart" \| "next_start" \| "restart"` | `"no_restart"` (default) applies only changes that can complete without restarting; `"next_start"` persists changes for the next start without mutating a running VM; `"restart"` restarts if needed so restart-required changes become active now |
 | dryRun | `boolean` | Compute the plan without applying anything. Defaults to `false` |
+
+### SecretModifySpec
+
+<p className="msb-backref">Used by <a href="#sandbox-modify">modify()</a></p>
+
+Desired state for one secret. `env`, `value`, and `store` are mutually exclusive sources. Omit all three to update only the placeholder or allowed hosts.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| env | `string` | Host environment variable to resolve when applying the modification |
+| value | `string` | Raw secret value. Stored in the durable sandbox config until replaced by a source reference |
+| store | `string` | Reserved for a host-side secret store reference; currently unsupported |
+| placeholder | `string` | Explicit guest-visible placeholder. New secrets default to `$MSB_<NAME>` |
+| allowedHosts | `string[]` | Desired allowed host patterns. A new secret requires at least one; an empty list leaves existing hosts unchanged |
 
 ### PullPolicy
 

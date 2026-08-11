@@ -5,21 +5,6 @@ description: TypeScript SDK - Volume API reference
 
 Create and manage named volumes: persistent storage that lives independently of any sandbox. Build a volume, look one up, read and write its files from the host, then delete it. See [Volumes](/sandboxes/volumes) for usage examples and patterns.
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```typescript
-import { Volume } from "microsandbox";
-
-const data = await Volume.builder("my-data")    // 1. configure
-  .label("env", "prod")
-  .create();                                    // 2. create on disk
-
-const vfs = data.fs();                          // 3. host-side I/O
-await vfs.write("seed.txt", "hello");
-console.log(await vfs.list(""));
-
-await Volume.remove("my-data");                 // 4. delete
-```
 
 ## Static methods
 

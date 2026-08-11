@@ -5,22 +5,6 @@ description: Rust SDK - Filesystem API reference
 
 Read, write, list, and manipulate files inside a running sandbox. Obtained via [`sb.fs()`](/sdk/rust/sandbox#sb-fs). Every op dispatches through the same host-guest channel as command execution, so there is no SSH and no network involved. Path-style helpers are the usual choice; handle-style helpers are available for callers that need POSIX-like file descriptor reuse. For bulk file movement, prefer a [volume](/sdk/rust/volumes) that gives the guest direct filesystem access. See [Filesystem](/sandboxes/filesystem) for conceptual usage.
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```rust
-use microsandbox::Sandbox;
-
-let sb = Sandbox::builder("api").image("python").create().await?;
-let fs = sb.fs();
-
-fs.write("/tmp/config.json", r#"{"debug": true}"#).await?;
-let text = fs.read_to_string("/tmp/config.json").await?;
-println!("{text}");
-
-for entry in fs.list("/tmp").await? {
-    println!("{} ({} bytes)", entry.path, entry.size);
-}
-```
 
 `sb.fs()` is synchronous and just borrows the sandbox's backend and name; the work happens on the `await`ed methods below, every one of which is `async`.
 

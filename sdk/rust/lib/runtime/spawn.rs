@@ -94,7 +94,7 @@ use crate::{
 // Constants
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 static SIGCHLD_ALT_STACK_INIT: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
 #[cfg(windows)]
@@ -1268,7 +1268,7 @@ fn release_metrics_reservation(config: &SandboxConfig, reservation: Option<&Metr
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 async fn ensure_sigchld_handler_uses_alt_stack_before_spawn() -> MicrosandboxResult<()> {
     SIGCHLD_ALT_STACK_INIT
         .get_or_try_init(|| async {
@@ -1280,19 +1280,19 @@ async fn ensure_sigchld_handler_uses_alt_stack_before_spawn() -> MicrosandboxRes
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 async fn ensure_sigchld_handler_uses_alt_stack_before_spawn() -> MicrosandboxResult<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn install_tokio_sigchld_handler() -> MicrosandboxResult<()> {
     let signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child())?;
     let _ = Box::leak(Box::new(signal));
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn patch_sigchld_handler_uses_alt_stack() {
     unsafe {
         let mut action = std::mem::MaybeUninit::<libc::sigaction>::uninit();
@@ -2998,7 +2998,7 @@ mod tests {
         ));
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_sigchld_handler_uses_alt_stack_after_prepare() {
         super::ensure_sigchld_handler_uses_alt_stack_before_spawn()

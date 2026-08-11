@@ -5,18 +5,6 @@ description: Python SDK - SSH API reference
 
 Reach a running sandbox over SSH: open a native in-process SSH client, run exec requests, attach an interactive shell, transfer files over SFTP, or stand up a reusable server endpoint that serves connections over stdin/stdout. See [SSH](/sandboxes/ssh) for usage flows.
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```python
-from microsandbox import Sandbox
-
-async with await Sandbox.create("api", image="python") as sb:
-    client = await sb.ssh().open_client()       # 1. open an SSH client
-    out = await client.exec("python -V")        # 2. run a command
-    print(out.stdout_text)
-
-    await client.close()                        # 3. close the session
-```
 
 ## Sandbox
 

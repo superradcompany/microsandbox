@@ -5,20 +5,6 @@ description: Python SDK - Filesystem API reference
 
 Read, write, and manage files inside a running sandbox. Operations go through the same host-guest channel as command execution: no SSH, no network. See [Filesystem](/sandboxes/filesystem) for usage examples. For bulk file movement, prefer a [volume](/sandboxes/volumes).
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```python
-from microsandbox import Sandbox
-
-async with await Sandbox.create("api", image="python") as sb:
-    fs = sb.fs                                     # 1. grab the handle
-
-    await fs.mkdir("/app")                         # 2. set up
-    await fs.write("/app/config.json", b'{"ok": true}')
-
-    data = await fs.read_text("/app/config.json")  # 3. read it back
-    print(data)
-```
 
 The handle is reached through the `sb.fs` property on a running [`Sandbox`](/sdk/python/sandbox). All methods are coroutines, so `await` each call.
 
