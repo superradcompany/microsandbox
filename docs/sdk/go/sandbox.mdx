@@ -1345,7 +1345,7 @@ Like [`WithReplace`](#withreplace) but with a caller-specified timeout between S
 func WithDetached() SandboxOption
 ```
 
-Create the sandbox in detached mode. The VM continues running after the Go process exits; reattach via [`GetSandbox`](#m-getsandbox). Note that [`Close`](#sb-close) stops a detached sandbox, use [`Detach`](#sb-detach) to leave it running.
+Create the sandbox in detached mode. The VM continues running after the Go process exits; reattach via [`GetSandbox`](#m-getsandbox). [`Close`](#sb-close) stops a detached sandbox; use [`Detach`](#sb-detach) to leave it running.
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithEphemeral()</span>
 
