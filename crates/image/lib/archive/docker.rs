@@ -36,6 +36,8 @@ const ARCHIVE_LAYER_MAX_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 const ARCHIVE_MAX_ENTRY_COUNT: u64 = 1_000_000;
 const OCI_INDEX_MAX_DEPTH: usize = 32;
 const OCI_INDEX_MAX_COUNT: usize = 1_024;
+const TAR_LINK_NAME_MAX_BYTES: usize = 100;
+const GNU_LONG_LINK_PATH: &str = "././@LongLink";
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 //--------------------------------------------------------------------------------------------------
@@ -1585,10 +1587,8 @@ fn append_erofs_entry<W: Write>(
             if let Some(first_path) = hardlinks.get(&entry.nid) {
                 header.set_entry_type(tar::EntryType::Link);
                 header.set_size(0);
-                header.set_link_name(first_path).map_err(ImageError::Io)?;
-                header.set_cksum();
                 builder
-                    .append_data(&mut header, &entry.path, io::empty())
+                    .append_link(&mut header, &entry.path, first_path)
                     .map_err(ImageError::Io)?;
                 return Ok(());
             }
@@ -1614,13 +1614,7 @@ fn append_erofs_entry<W: Write>(
             header.set_entry_type(tar::EntryType::Symlink);
             header.set_size(0);
             let target = reader.read_link_by_nid(entry.nid).map_err(ImageError::Io)?;
-            header
-                .set_link_name_literal(target)
-                .map_err(ImageError::Io)?;
-            header.set_cksum();
-            builder
-                .append_data(&mut header, &entry.path, io::empty())
-                .map_err(ImageError::Io)?;
+            append_link_literal(builder, &mut header, &entry.path, &target)?;
         }
         ErofsEntryKind::CharDevice | ErofsEntryKind::BlockDevice => {
             header.set_entry_type(if entry.kind == ErofsEntryKind::CharDevice {
@@ -1657,6 +1651,113 @@ fn append_erofs_entry<W: Write>(
     }
 
     Ok(())
+}
+
+fn append_link_literal<W: Write>(
+    builder: &mut tar::Builder<W>,
+    header: &mut tar::Header,
+    path: &Path,
+    target: &[u8],
+) -> ImageResult<()> {
+    let path = normalized_link_path(path_bytes(path))?;
+    validate_link_bytes(target, "link target")?;
+
+    if path.len() > TAR_LINK_NAME_MAX_BYTES {
+        append_gnu_long_value(builder, &path, tar::EntryType::GNULongName)?;
+    }
+    set_gnu_header_field(
+        &mut header
+            .as_gnu_mut()
+            .ok_or_else(|| invalid_link_data("link header is not GNU format"))?
+            .name,
+        &path[..path.len().min(TAR_LINK_NAME_MAX_BYTES)],
+    )?;
+
+    if target.len() > TAR_LINK_NAME_MAX_BYTES {
+        append_gnu_long_value(builder, target, tar::EntryType::GNULongLink)?;
+    }
+    set_gnu_header_field(
+        &mut header
+            .as_gnu_mut()
+            .ok_or_else(|| invalid_link_data("link header is not GNU format"))?
+            .linkname,
+        &target[..target.len().min(TAR_LINK_NAME_MAX_BYTES)],
+    )?;
+
+    header.set_cksum();
+    builder.append(header, io::empty()).map_err(ImageError::Io)
+}
+
+fn append_gnu_long_value<W: Write>(
+    builder: &mut tar::Builder<W>,
+    value: &[u8],
+    entry_type: tar::EntryType,
+) -> ImageResult<()> {
+    let mut header = tar::Header::new_gnu();
+    set_gnu_header_field(
+        &mut header
+            .as_gnu_mut()
+            .ok_or_else(|| invalid_link_data("long-link header is not GNU format"))?
+            .name,
+        GNU_LONG_LINK_PATH.as_bytes(),
+    )?;
+    header.set_entry_type(entry_type);
+    header.set_mode(0o644);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_mtime(0);
+    header.set_size(value.len() as u64 + 1);
+    header.set_cksum();
+
+    let mut data = value.chain(io::repeat(0).take(1));
+    builder.append(&header, &mut data).map_err(ImageError::Io)
+}
+
+fn set_gnu_header_field(field: &mut [u8], value: &[u8]) -> ImageResult<()> {
+    if value.len() > field.len() {
+        return Err(invalid_link_data("GNU header field is too short"));
+    }
+    field.fill(0);
+    field[..value.len()].copy_from_slice(value);
+    Ok(())
+}
+
+fn validate_link_bytes(value: &[u8], field: &str) -> ImageResult<()> {
+    if value.is_empty() {
+        return Err(invalid_link_data(&format!("{field} is empty")));
+    }
+    if value.contains(&0) {
+        return Err(invalid_link_data(&format!("{field} contains a NUL byte")));
+    }
+    Ok(())
+}
+
+fn normalized_link_path(path: &[u8]) -> ImageResult<Vec<u8>> {
+    validate_link_bytes(path, "link path")?;
+    if path.starts_with(b"/") {
+        return Err(invalid_link_data("link path must be relative without `..`"));
+    }
+
+    let mut normalized = Vec::with_capacity(path.len());
+    for component in path.split(|byte| *byte == b'/') {
+        if component.is_empty() || component == b"." {
+            continue;
+        }
+        if component == b".." {
+            return Err(invalid_link_data("link path must be relative without `..`"));
+        }
+        if !normalized.is_empty() {
+            normalized.push(b'/');
+        }
+        normalized.extend_from_slice(component);
+    }
+
+    validate_link_bytes(&normalized, "link path")?;
+    Ok(normalized)
+}
+
+fn invalid_link_data(message: &str) -> ImageError {
+    ImageError::Io(io::Error::new(io::ErrorKind::InvalidInput, message))
 }
 
 fn append_whiteout<W: Write>(
@@ -2231,6 +2332,139 @@ mod tests {
 
         assert_eq!(reloaded.len(), 1);
         assert_eq!(reloaded[0].reference, "complex:latest");
+    }
+
+    #[test]
+    fn docker_archive_save_preserves_long_link_targets() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let temp = tempdir().unwrap();
+        let input = temp.path().join("long-links.tar");
+        let long_target = format!("deep/{}config.txt", "component/".repeat(12));
+        let long_symlink_path = format!("links/{}link", "component/".repeat(12));
+        let relative_symlink_target = "../../etc/passwd";
+        let short_symlink_target = r"..\..\etc\passwd";
+        let long_symlink_target = format!(r"..\{}..\etc\passwd", "component\\".repeat(12));
+        let mut layer_bytes = Vec::new();
+        {
+            let mut layer = tar::Builder::new(&mut layer_bytes);
+            append_test_file(&mut layer, &long_target, b"shared config\n", 0o644, 0, 0, 1);
+            append_test_hardlink(&mut layer, "zz-hardlink", &long_target);
+            append_test_symlink(&mut layer, "zz-relative-symlink", relative_symlink_target);
+            append_test_symlink(&mut layer, "zz-short-symlink", short_symlink_target);
+            append_test_symlink(&mut layer, &long_symlink_path, &long_symlink_target);
+            layer.finish().unwrap();
+        }
+        write_test_docker_archive_from_layer(&input, "long-links:latest", layer_bytes);
+
+        let first_cache = temp.path().join("cache-1");
+        let loaded = runtime
+            .block_on(load_archive(
+                &first_cache,
+                &input,
+                ImageLoadOptions::default(),
+            ))
+            .unwrap();
+
+        let saved = temp.path().join("saved-long-links.tar");
+        let request = save_request_from_loaded(&loaded[0]);
+        let cache = GlobalCache::new(&first_cache).unwrap();
+        save_docker_archive(&cache, &saved, &[request]).unwrap();
+
+        let entries = saved_layer_entries(&saved);
+        assert_eq!(
+            entries.get("zz-hardlink").unwrap().link_name.as_deref(),
+            Some(long_target.as_str())
+        );
+        assert_eq!(
+            entries
+                .get("zz-short-symlink")
+                .unwrap()
+                .link_name
+                .as_deref(),
+            Some(short_symlink_target)
+        );
+        assert_eq!(
+            entries
+                .get("zz-relative-symlink")
+                .unwrap()
+                .link_name
+                .as_deref(),
+            Some(relative_symlink_target)
+        );
+        assert_eq!(
+            entries
+                .get(&long_symlink_path)
+                .unwrap()
+                .link_name
+                .as_deref(),
+            Some(long_symlink_target.as_str())
+        );
+
+        let second_cache = temp.path().join("cache-2");
+        let reloaded = runtime
+            .block_on(load_archive(
+                &second_cache,
+                &saved,
+                ImageLoadOptions::default(),
+            ))
+            .unwrap();
+        assert_eq!(reloaded[0].reference, "long-links:latest");
+    }
+
+    #[test]
+    fn append_link_literal_preserves_non_utf8_target() {
+        let target = vec![0xff; TAR_LINK_NAME_MAX_BYTES + 1];
+        let mut archive_bytes = Vec::new();
+        {
+            let mut archive = tar::Builder::new(&mut archive_bytes);
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_size(0);
+            append_link_literal(&mut archive, &mut header, Path::new("link"), &target).unwrap();
+            archive.finish().unwrap();
+        }
+
+        let mut archive = tar::Archive::new(Cursor::new(archive_bytes));
+        let entry = archive.entries().unwrap().next().unwrap().unwrap();
+        assert_eq!(entry.link_name_bytes().unwrap().as_ref(), target);
+    }
+
+    #[test]
+    fn append_link_literal_rejects_nul_before_writing() {
+        let mut target = vec![b'a'; TAR_LINK_NAME_MAX_BYTES + 1];
+        target[TAR_LINK_NAME_MAX_BYTES / 2] = 0;
+        let mut archive = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+
+        let err =
+            append_link_literal(&mut archive, &mut header, Path::new("link"), &target).unwrap_err();
+
+        assert!(err.to_string().contains("NUL byte"));
+        let archive_bytes = archive.into_inner().unwrap();
+        let mut archive = tar::Archive::new(Cursor::new(archive_bytes));
+        assert!(archive.entries().unwrap().next().is_none());
+    }
+
+    #[test]
+    fn append_link_literal_rejects_invalid_entry_path_before_writing() {
+        let target = vec![b'a'; TAR_LINK_NAME_MAX_BYTES + 1];
+        let mut archive = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+
+        let err = append_link_literal(&mut archive, &mut header, Path::new("../link"), &target)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("must be relative"));
+        let archive_bytes = archive.into_inner().unwrap();
+        let mut archive = tar::Archive::new(Cursor::new(archive_bytes));
+        assert!(archive.entries().unwrap().next().is_none());
     }
 
     #[test]
@@ -3134,20 +3368,16 @@ mod tests {
     fn append_test_hardlink(layer: &mut tar::Builder<&mut Vec<u8>>, path: &str, target: &str) {
         let mut header = tar::Header::new_gnu();
         header.set_entry_type(tar::EntryType::Link);
-        header.set_link_name(target).unwrap();
         header.set_size(0);
-        header.set_cksum();
-        layer.append_data(&mut header, path, io::empty()).unwrap();
+        layer.append_link(&mut header, path, target).unwrap();
     }
 
     fn append_test_symlink(layer: &mut tar::Builder<&mut Vec<u8>>, path: &str, target: &str) {
         let mut header = tar::Header::new_gnu();
         header.set_entry_type(tar::EntryType::Symlink);
-        header.set_link_name(target).unwrap();
         header.set_mode(0o777);
         header.set_size(0);
-        header.set_cksum();
-        layer.append_data(&mut header, path, io::empty()).unwrap();
+        append_link_literal(layer, &mut header, Path::new(path), target.as_bytes()).unwrap();
     }
 
     #[derive(Debug)]
