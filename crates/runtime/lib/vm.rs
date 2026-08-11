@@ -1481,6 +1481,16 @@ fn build_vm(
             .secrets
             .validate()
             .map_err(|err| RuntimeError::Custom(format!("invalid network secrets: {err}")))?;
+        let ingress_rate_limiter = vm
+            .network
+            .ingress_rate_limiter
+            .as_ref()
+            .map(to_krun_rate_limiter);
+        let egress_rate_limiter = vm
+            .network
+            .egress_rate_limiter
+            .as_ref()
+            .map(to_krun_rate_limiter);
 
         let mut network = microsandbox_network::network::SmoltcpNetwork::new_with_profile(
             vm.network.clone(),
@@ -1517,7 +1527,16 @@ fn build_vm(
             exec_env.push(format!("{key}={value}"));
         }
 
-        builder = builder.net(move |n| n.mac(guest_mac).custom(net_backend));
+        builder = builder.net(move |mut n| {
+            n = n.mac(guest_mac);
+            if let Some(config) = ingress_rate_limiter {
+                n = n.rx_rate_limiter(config);
+            }
+            if let Some(config) = egress_rate_limiter {
+                n = n.tx_rate_limiter(config);
+            }
+            n.custom(net_backend)
+        });
     }
 
     // Execution configuration.
@@ -1585,6 +1604,24 @@ fn build_vm(
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+#[cfg(feature = "net")]
+fn to_krun_rate_limiter(
+    config: &microsandbox_types::RateLimiterConfig,
+) -> msb_krun::RateLimiterConfig {
+    fn bucket(config: &microsandbox_types::TokenBucketConfig) -> msb_krun::TokenBucketConfig {
+        msb_krun::TokenBucketConfig {
+            size: config.size,
+            refill_time: Duration::from_millis(config.refill_time_ms),
+            one_time_burst: config.one_time_burst,
+        }
+    }
+
+    msb_krun::RateLimiterConfig {
+        bandwidth: config.bandwidth.as_ref().map(bucket),
+        ops: config.ops.as_ref().map(bucket),
+    }
+}
 
 /// Raise `RLIMIT_NOFILE` to the hard limit, capped at 1M (the reference virtiofsd default). On macOS the soft limit is additionally clamped to
 /// `kern.maxfilesperproc`, which `setrlimit` enforces even when the hard limit is unlimited.
@@ -2295,6 +2332,8 @@ fn thp_kernel_cmdline(policy: microsandbox_types::TransparentHugePagePolicy) -> 
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "net")]
+    use super::to_krun_rate_limiter;
     #[cfg(unix)]
     use super::{
         BindIdentityMapRegistration, PARENT_WATCH_DETACH, ParentWatchdogSignal,
@@ -2322,6 +2361,42 @@ mod tests {
             gid: 0,
             pid: 1,
         }
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn network_rate_limiter_maps_to_libkrun_without_losing_precision() {
+        let config = microsandbox_types::RateLimiterConfig {
+            bandwidth: Some(microsandbox_types::TokenBucketConfig {
+                size: 1_048_576,
+                refill_time_ms: 1_234,
+                one_time_burst: 524_288,
+            }),
+            ops: Some(microsandbox_types::TokenBucketConfig {
+                size: 1_000,
+                refill_time_ms: 7,
+                one_time_burst: 12,
+            }),
+        };
+
+        let mapped = to_krun_rate_limiter(&config);
+
+        assert_eq!(
+            mapped.bandwidth.unwrap(),
+            msb_krun::TokenBucketConfig {
+                size: 1_048_576,
+                refill_time: Duration::from_millis(1_234),
+                one_time_burst: 524_288,
+            }
+        );
+        assert_eq!(
+            mapped.ops.unwrap(),
+            msb_krun::TokenBucketConfig {
+                size: 1_000,
+                refill_time: Duration::from_millis(7),
+                one_time_burst: 12,
+            }
+        );
     }
 
     #[test]

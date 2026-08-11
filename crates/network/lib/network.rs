@@ -8,17 +8,17 @@
 use std::net::{Ipv4Addr, Ipv6Addr, UdpSocket};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::Instant;
 
 use ipnetwork::{Ipv4Network, Ipv6Network};
 use microsandbox_protocol::{ENV_HOST_ALIAS, ENV_NET, ENV_NET_IPV4, ENV_NET_IPV6};
-use microsandbox_types::{DeploymentProfile, RateLimitConfigError};
+use microsandbox_types::{
+    DeploymentProfile, NetworkRateLimitDirection, RateLimitConfigError, RateLimiterConfig,
+};
 use msb_krun::backends::net::NetBackend;
 
 use crate::backend::SmoltcpBackend;
 use crate::config::{MAX_NETWORK_CONNECTIONS, NetworkConfig};
 use crate::policy::{NetworkPolicy, NetworkProfile};
-use crate::rate_limit::{RateLimitDirection, RateLimiter};
 use crate::secrets::handle::SecretsHandle;
 use crate::shared::{DEFAULT_QUEUE_CAPACITY, SharedState};
 use crate::stack::{self, GatewayIps, PollLoopConfig};
@@ -55,9 +55,6 @@ pub struct SmoltcpNetwork {
     deployment_profile: DeploymentProfile,
     shared: Arc<SharedState>,
     backend: Option<SmoltcpBackend>,
-    /// Egress limiter validated and built at construction; moved into the poll
-    /// loop by [`start()`](Self::start).
-    egress_rate_limiter: Option<RateLimiter>,
     poll_handle: Option<JoinHandle<()>>,
 
     // Resolved from config + slot.
@@ -98,7 +95,7 @@ pub enum NetworkInitError {
     #[error("invalid {direction} rate limiter: {source}")]
     InvalidRateLimit {
         /// Which limiter is invalid: `egress` or `ingress`.
-        direction: RateLimitDirection,
+        direction: NetworkRateLimitDirection,
         /// Underlying validation error.
         #[source]
         source: RateLimitConfigError,
@@ -185,48 +182,12 @@ impl SmoltcpNetwork {
         )
     }
 
-    #[cfg(test)]
-    fn new_with_routes_at(
-        config: NetworkConfig,
-        slot: u64,
-        host_has_ipv4: bool,
-        host_has_ipv6: bool,
-        now: Instant,
-    ) -> Result<Self, NetworkInitError> {
-        Self::new_with_profile_and_routes_at(
-            config,
-            slot,
-            DeploymentProfile::SingleTenant,
-            host_has_ipv4,
-            host_has_ipv6,
-            now,
-        )
-    }
-
     fn new_with_profile_and_routes(
         config: NetworkConfig,
         slot: u64,
         deployment_profile: DeploymentProfile,
         host_has_ipv4: bool,
         host_has_ipv6: bool,
-    ) -> Result<Self, NetworkInitError> {
-        Self::new_with_profile_and_routes_at(
-            config,
-            slot,
-            deployment_profile,
-            host_has_ipv4,
-            host_has_ipv6,
-            Instant::now(),
-        )
-    }
-
-    fn new_with_profile_and_routes_at(
-        config: NetworkConfig,
-        slot: u64,
-        deployment_profile: DeploymentProfile,
-        host_has_ipv4: bool,
-        host_has_ipv6: bool,
-        now: Instant,
     ) -> Result<Self, NetworkInitError> {
         assert!(
             slot <= MAX_SLOT,
@@ -281,25 +242,25 @@ impl SmoltcpNetwork {
         // Every write path validates rate limiters (`NetworkBuilder::build`),
         // but a stored config bypasses the builder: fail startup cleanly
         // instead of panicking on a corrupted spec.
-        let ingress_rate_limiter = config
+        config
             .ingress_rate_limiter
             .as_ref()
-            .map(|limiter| RateLimiter::new(limiter, now))
+            .map(RateLimiterConfig::validate)
             .transpose()
             .map_err(|source| NetworkInitError::InvalidRateLimit {
-                direction: RateLimitDirection::Ingress,
+                direction: NetworkRateLimitDirection::Ingress,
                 source,
             })?;
-        let egress_rate_limiter = config
+        config
             .egress_rate_limiter
             .as_ref()
-            .map(|limiter| RateLimiter::new(limiter, now))
+            .map(RateLimiterConfig::validate)
             .transpose()
             .map_err(|source| NetworkInitError::InvalidRateLimit {
-                direction: RateLimitDirection::Egress,
+                direction: NetworkRateLimitDirection::Egress,
                 source,
             })?;
-        let backend = SmoltcpBackend::new(shared.clone(), ingress_rate_limiter);
+        let backend = SmoltcpBackend::new(shared.clone());
 
         let secrets = SecretsHandle::new(config.secrets.clone());
         let tls_state = if config.tls.enabled {
@@ -316,7 +277,6 @@ impl SmoltcpNetwork {
             deployment_profile,
             shared,
             backend: Some(backend),
-            egress_rate_limiter,
             poll_handle: None,
             guest_mac,
             gateway_mac,
@@ -363,7 +323,6 @@ impl SmoltcpNetwork {
         let tls_state = self.tls_state.clone();
         let published_ports = self.config.ports.clone();
         let max_connections = self.config.max_connections;
-        let egress_rate_limiter = self.egress_rate_limiter.take();
         let secrets = self.secrets.clone();
 
         self.poll_handle = Some(
@@ -379,7 +338,6 @@ impl SmoltcpNetwork {
                         tls_state,
                         published_ports,
                         max_connections,
-                        egress_rate_limiter,
                         tokio_handle,
                         secrets,
                     );
@@ -907,89 +865,9 @@ mod tests {
         assert!(matches!(
             err,
             NetworkInitError::InvalidRateLimit {
-                direction: RateLimitDirection::Ingress,
+                direction: NetworkRateLimitDirection::Ingress,
                 source: RateLimitConfigError::EmptyLimiter,
             }
         ));
-    }
-}
-
-/// Deterministic checks that directional limiters attach to the correct
-/// virtio-net boundaries.
-#[cfg(test)]
-mod rate_limit_tests {
-    use std::time::{Duration, Instant};
-
-    use microsandbox_types::{RateLimiterConfig, TokenBucketConfig};
-    use msb_krun::backends::net::ReadError;
-
-    use super::*;
-
-    const VIRTIO_NET_HDR_LEN: usize = 12;
-
-    fn bucket(size: u64, refill_time_ms: u64) -> TokenBucketConfig {
-        TokenBucketConfig {
-            size,
-            refill_time_ms,
-            one_time_burst: 0,
-        }
-    }
-
-    #[test]
-    fn directional_limiters_apply_at_the_correct_boundaries() {
-        let base = Instant::now();
-        let config = NetworkConfig {
-            egress_rate_limiter: Some(RateLimiterConfig {
-                bandwidth: None,
-                ops: Some(bucket(1, 100)),
-            }),
-            ingress_rate_limiter: Some(RateLimiterConfig {
-                bandwidth: Some(bucket(1, 200)),
-                ops: None,
-            }),
-            ..NetworkConfig::default()
-        };
-        let mut net =
-            SmoltcpNetwork::new_with_routes_at(config, 0, true, false, base).expect("network init");
-
-        // The guest-to-runtime boundary uses the egress ops limiter.
-        let mut egress = net.egress_rate_limiter.take().expect("egress limiter");
-        assert!(egress.try_consume_frame(1000, base).is_ok());
-        let egress_deadline = egress.try_consume_frame(1, base).unwrap_err();
-        assert_eq!(egress_deadline, base + Duration::from_millis(100));
-
-        // The runtime-to-guest boundary uses the ingress bandwidth limiter.
-        // Its pending slot preserves the blocked frame and its position.
-        assert!(net.shared.push_rx_frame_and_wake(vec![0xaa]));
-        assert!(net.shared.push_rx_frame_and_wake(vec![0xbb]));
-        let mut backend = net.backend.take().expect("network backend");
-        let mut buf = [0u8; 64];
-
-        let len = backend.read_frame_at(&mut buf, base).expect("first frame");
-        assert_eq!(&buf[VIRTIO_NET_HDR_LEN..len], &[0xaa]);
-        assert!(matches!(
-            backend.read_frame_at(&mut buf, base),
-            Err(ReadError::NothingRead)
-        ));
-        assert_eq!(
-            net.shared.ingress_resume_at(),
-            Some(base + Duration::from_millis(200))
-        );
-
-        let before_deadline = base + Duration::from_millis(199);
-        assert!(matches!(
-            backend.read_frame_at(&mut buf, before_deadline),
-            Err(ReadError::NothingRead)
-        ));
-        assert!(!net.shared.take_due_ingress_resume(before_deadline));
-        assert!(
-            net.shared
-                .take_due_ingress_resume(base + Duration::from_millis(200))
-        );
-        assert_eq!(net.shared.ingress_resume_at(), None);
-        let len = backend
-            .read_frame_at(&mut buf, base + Duration::from_millis(200))
-            .expect("throttled frame at exact deadline");
-        assert_eq!(&buf[VIRTIO_NET_HDR_LEN..len], &[0xbb]);
     }
 }

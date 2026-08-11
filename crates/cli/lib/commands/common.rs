@@ -12,7 +12,7 @@ use microsandbox::sandbox::{
     TransparentHugePagePolicy,
 };
 #[cfg(feature = "net")]
-use microsandbox_network::rate_limit::RateLimitDirection;
+use microsandbox_types::NetworkRateLimitDirection;
 
 use crate::ui;
 
@@ -1781,14 +1781,14 @@ fn apply_network_opts(
         let no_verify_upstream_for = opts.tls_no_verify_upstream_for.clone();
         let violation_action = parse_violation_action(&opts.on_secret_violation)?;
         let egress_rate_limiter = parse_rate_limiter_flags(
-            RateLimitDirection::Egress,
+            NetworkRateLimitDirection::Egress,
             opts.net_egress_bandwidth.as_deref(),
             opts.net_egress_bandwidth_burst.as_deref(),
             opts.net_egress_ops.as_deref(),
             opts.net_egress_ops_burst,
         )?;
         let ingress_rate_limiter = parse_rate_limiter_flags(
-            RateLimitDirection::Ingress,
+            NetworkRateLimitDirection::Ingress,
             opts.net_ingress_bandwidth.as_deref(),
             opts.net_ingress_bandwidth_burst.as_deref(),
             opts.net_ingress_ops.as_deref(),
@@ -1965,7 +1965,7 @@ impl CliRateLimiter {
 /// the four flags is set.
 #[cfg(feature = "net")]
 fn parse_rate_limiter_flags(
-    direction: RateLimitDirection,
+    direction: NetworkRateLimitDirection,
     bandwidth: Option<&str>,
     bandwidth_burst: Option<&str>,
     ops: Option<&str>,
@@ -2737,7 +2737,7 @@ mod tests {
     #[test]
     fn parse_rate_limiter_flags_maps_all_four_flags() {
         let limiter = parse_rate_limiter_flags(
-            RateLimitDirection::Egress,
+            NetworkRateLimitDirection::Egress,
             Some("1M/1s"),
             Some("512K"),
             Some("1000/1s"),
@@ -2755,7 +2755,7 @@ mod tests {
         assert_eq!(limiter.ops_burst, Some(500));
 
         assert!(
-            parse_rate_limiter_flags(RateLimitDirection::Ingress, None, None, None, None)
+            parse_rate_limiter_flags(NetworkRateLimitDirection::Ingress, None, None, None, None,)
                 .unwrap()
                 .is_none()
         );

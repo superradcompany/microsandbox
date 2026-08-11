@@ -147,7 +147,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -158,7 +158,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1898,7 +1898,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2142,7 +2142,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4163,9 +4163,8 @@ dependencies = [
 
 [[package]]
 name = "msb_krun"
-version = "0.1.26"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d8ee04c9ab5ac9849d288f9b38cb143dcde304b97fdf8b9fd027ef945a94a7c"
+version = "0.1.28"
+source = "git+https://github.com/superradcompany/libkrun.git?branch=agent%2Fvirtio-net-rate-limits#3d3525d94ecbaeca912f0777d1ee7a2d5e2fd306"
 dependencies = [
  "crossbeam-channel",
  "kvm-bindings",
@@ -4183,9 +4182,8 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_arch"
-version = "0.1.26"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bfd265469aa37265b2de6d4e6ebcf536e2cc915bffd014a8bb0034fedd74d838"
+version = "0.1.28"
+source = "git+https://github.com/superradcompany/libkrun.git?branch=agent%2Fvirtio-net-rate-limits#3d3525d94ecbaeca912f0777d1ee7a2d5e2fd306"
 dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
@@ -4198,15 +4196,13 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_arch_gen"
-version = "0.1.26"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df8472690b285cf4ead92816b468662b5468fce99a0597f4f6f54696d313254e"
+version = "0.1.28"
+source = "git+https://github.com/superradcompany/libkrun.git?branch=agent%2Fvirtio-net-rate-limits#3d3525d94ecbaeca912f0777d1ee7a2d5e2fd306"
 
 [[package]]
 name = "msb_krun_cpuid"
-version = "0.1.26"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1057ddf1b7a1c9ef8178986066b2c018a8dc54f0ffdc69356ce1b621e1088a9c"
+version = "0.1.28"
+source = "git+https://github.com/superradcompany/libkrun.git?branch=agent%2Fvirtio-net-rate-limits#3d3525d94ecbaeca912f0777d1ee7a2d5e2fd306"
 dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
@@ -4215,9 +4211,8 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_devices"
-version = "0.1.26"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f622af9b0ff353abddcc1c3fca9e1613b67f613be15776df1b4f246b52245b2f"
+version = "0.1.28"
+source = "git+https://github.com/superradcompany/libkrun.git?branch=agent%2Fvirtio-net-rate-limits#3d3525d94ecbaeca912f0777d1ee7a2d5e2fd306"
 dependencies = [
  "bitflags 1.3.2",
  "capng",
@@ -4245,9 +4240,8 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_hvf"
-version = "0.1.26"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca2025a231679bf342281c19e64eef7cfd120882e60ade8ef533c16b9fe246d1"
+version = "0.1.28"
+source = "git+https://github.com/superradcompany/libkrun.git?branch=agent%2Fvirtio-net-rate-limits#3d3525d94ecbaeca912f0777d1ee7a2d5e2fd306"
 dependencies = [
  "crossbeam-channel",
  "libloading 0.8.9",
@@ -4257,9 +4251,8 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_kernel"
-version = "0.1.26"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53c05990d373eb5c26c9179c5d9c87f4025721c4c30187d74e74a8d0d03c6e16"
+version = "0.1.28"
+source = "git+https://github.com/superradcompany/libkrun.git?branch=agent%2Fvirtio-net-rate-limits#3d3525d94ecbaeca912f0777d1ee7a2d5e2fd306"
 dependencies = [
  "msb_krun_utils",
  "vm-memory",
@@ -4267,9 +4260,8 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_polly"
-version = "0.1.26"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02fcc828ea3d4aa1c5da02ed1433bc81ce3f1ede5c65dbb756a4b03271109aae"
+version = "0.1.28"
+source = "git+https://github.com/superradcompany/libkrun.git?branch=agent%2Fvirtio-net-rate-limits#3d3525d94ecbaeca912f0777d1ee7a2d5e2fd306"
 dependencies = [
  "libc",
  "msb_krun_utils",
@@ -4277,18 +4269,16 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_smbios"
-version = "0.1.26"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd6d617b90458c041da4ee3a4cb8f548eb750eed8b50cc87ed8c0d6a9276070c"
+version = "0.1.28"
+source = "git+https://github.com/superradcompany/libkrun.git?branch=agent%2Fvirtio-net-rate-limits#3d3525d94ecbaeca912f0777d1ee7a2d5e2fd306"
 dependencies = [
  "vm-memory",
 ]
 
 [[package]]
 name = "msb_krun_utils"
-version = "0.1.26"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e5f881a3a5ab9d960c829c77dfab765cffac2208e6bea52d456c6d2e7495f2b5"
+version = "0.1.28"
+source = "git+https://github.com/superradcompany/libkrun.git?branch=agent%2Fvirtio-net-rate-limits#3d3525d94ecbaeca912f0777d1ee7a2d5e2fd306"
 dependencies = [
  "bitflags 1.3.2",
  "crossbeam-channel",
@@ -4302,9 +4292,8 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_vmm"
-version = "0.1.26"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "063bf27d7dbd535afd4f25071de0c0fc83023d574d58eea39d682c4c58cc7571"
+version = "0.1.28"
+source = "git+https://github.com/superradcompany/libkrun.git?branch=agent%2Fvirtio-net-rate-limits#3d3525d94ecbaeca912f0777d1ee7a2d5e2fd306"
 dependencies = [
  "bzip2",
  "crossbeam-channel",
@@ -4547,7 +4536,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6068,7 +6057,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6127,7 +6116,7 @@ dependencies = [
  "security-framework 3.7.0",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6148,7 +6137,7 @@ dependencies = [
  "security-framework 3.7.0",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6826,7 +6815,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7116,7 +7105,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7437,7 +7426,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -8008,7 +7997,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -8494,7 +8483,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

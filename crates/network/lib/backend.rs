@@ -12,13 +12,11 @@
 #[cfg(unix)]
 use std::os::fd::RawFd;
 use std::sync::Arc;
-use std::time::Instant;
 
 use msb_krun::backends::net::{NetBackend, ReadError, WriteError};
 #[cfg(windows)]
 use msb_krun_utils::event::{EventSource, EventToken};
 
-use crate::rate_limit::RateLimiter;
 use crate::shared::SharedState;
 
 //--------------------------------------------------------------------------------------------------
@@ -47,11 +45,6 @@ const VIRTIO_NET_HDR_LEN: usize = 12;
 ///   event handle on Windows so the NetWorker can detect new frames.
 pub struct SmoltcpBackend {
     shared: Arc<SharedState>,
-    /// Ingress rate limiter. `None` means unlimited.
-    ingress_rate_limiter: Option<RateLimiter>,
-    /// A frame popped from `rx_ring` but throttled by the ingress limiter.
-    /// Delivered before any queued frame so ordering is preserved.
-    pending_ingress_frame: Option<Vec<u8>>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -60,39 +53,14 @@ pub struct SmoltcpBackend {
 
 impl SmoltcpBackend {
     /// Create a new backend connected to the given shared state.
-    pub fn new(shared: Arc<SharedState>, ingress_rate_limiter: Option<RateLimiter>) -> Self {
-        Self {
-            shared,
-            ingress_rate_limiter,
-            pending_ingress_frame: None,
-        }
+    pub fn new(shared: Arc<SharedState>) -> Self {
+        Self { shared }
     }
 
-    /// Deliver a frame using an explicit rate-limiter clock value.
-    ///
-    /// The production trait implementation supplies [`Instant::now`]; tests
-    /// use this seam to assert exact deadlines without sleeping.
-    pub(crate) fn read_frame_at(
-        &mut self,
-        buf: &mut [u8],
-        now: Instant,
-    ) -> Result<usize, ReadError> {
+    fn read_frame_from_ring(&mut self, buf: &mut [u8]) -> Result<usize, ReadError> {
         self.shared.rx_wake.drain();
 
-        let frame = match self.pending_ingress_frame.take() {
-            Some(frame) => frame,
-            None => self.shared.rx_ring.pop().ok_or(ReadError::NothingRead)?,
-        };
-
-        if let Some(limiter) = &mut self.ingress_rate_limiter
-            && let Err(resume_at) = limiter.try_consume_frame(frame.len() as u64, now)
-        {
-            // Keep the frame in the pending slot; the poll loop wakes
-            // `rx_wake` when the refill deadline arrives.
-            self.pending_ingress_frame = Some(frame);
-            self.shared.set_ingress_resume_at(resume_at);
-            return Err(ReadError::NothingRead);
-        }
+        let frame = self.shared.rx_ring.pop().ok_or(ReadError::NothingRead)?;
 
         let total_len = VIRTIO_NET_HDR_LEN + frame.len();
         if total_len > buf.len() {
@@ -142,7 +110,7 @@ impl NetBackend for SmoltcpBackend {
     /// Deliver a frame from smoltcp to the guest. Prepends a zeroed
     /// virtio-net header.
     fn read_frame(&mut self, buf: &mut [u8]) -> Result<usize, ReadError> {
-        self.read_frame_at(buf, Instant::now())
+        self.read_frame_from_ring(buf)
     }
 
     /// No partial writes — queue push is atomic.
@@ -183,7 +151,7 @@ mod tests {
     #[test]
     fn read_frame_drains_rx_wake_pipe() {
         let shared = Arc::new(SharedState::new(4));
-        let mut backend = SmoltcpBackend::new(shared.clone(), None);
+        let mut backend = SmoltcpBackend::new(shared.clone());
         let mut buf = [0u8; 64];
 
         assert!(shared.push_rx_frame_and_wake(vec![0xaa, 0xbb]));
@@ -201,7 +169,7 @@ mod tests {
     #[test]
     fn write_frame_enqueues_guest_frame_and_wakes_poll_loop() {
         let shared = Arc::new(SharedState::new(1));
-        let mut backend = SmoltcpBackend::new(shared.clone(), None);
+        let mut backend = SmoltcpBackend::new(shared.clone());
         let mut buf = vec![0u8; VIRTIO_NET_HDR_LEN + 3];
         buf[VIRTIO_NET_HDR_LEN..].copy_from_slice(&[0xaa, 0xbb, 0xcc]);
 
@@ -218,7 +186,7 @@ mod tests {
     fn write_frame_drops_guest_frame_when_tx_ring_is_full() {
         let shared = Arc::new(SharedState::new(1));
         shared.tx_ring.push(vec![0x11]).unwrap();
-        let mut backend = SmoltcpBackend::new(shared.clone(), None);
+        let mut backend = SmoltcpBackend::new(shared.clone());
         let mut buf = vec![0u8; VIRTIO_NET_HDR_LEN + 2];
         buf[VIRTIO_NET_HDR_LEN..].copy_from_slice(&[0xaa, 0xbb]);
 

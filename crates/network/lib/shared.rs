@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use crossbeam_queue::ArrayQueue;
 use microsandbox_utils::ttl_reverse_index::TtlReverseIndex;
 pub use microsandbox_utils::wake_pipe::WakePipe;
-use parking_lot::{Mutex as PlMutex, RwLock};
+use parking_lot::RwLock;
 
 use crate::addr::normalize_ip_addr;
 
@@ -79,11 +79,6 @@ pub struct SharedState {
 
     /// Aggregate network byte counters at the guest/runtime boundary.
     metrics: NetworkMetrics,
-
-    /// Deadline when a throttled runtime -> guest frame becomes deliverable.
-    /// Written by the NetWorker thread (`SmoltcpBackend::read_frame`), read
-    /// by the poll loop to bound its sleep and re-wake the guest.
-    ingress_resume_at: PlMutex<Option<Instant>>,
 }
 
 /// Aggregate network byte counters shared with the runtime metrics sampler.
@@ -127,7 +122,6 @@ impl SharedState {
             gateway_ipv4: OnceLock::new(),
             gateway_ipv6: OnceLock::new(),
             metrics: NetworkMetrics::default(),
-            ingress_resume_at: PlMutex::new(None),
         }
     }
 
@@ -244,32 +238,6 @@ impl SharedState {
 
         self.rx_wake.wake();
         true
-    }
-
-    /// Record when the ingress rate limiter can deliver its throttled frame, and
-    /// nudge the poll loop so its next sleep honors the deadline.
-    pub fn set_ingress_resume_at(&self, deadline: Instant) {
-        *self.ingress_resume_at.lock() = Some(deadline);
-        self.tx_wake.wake();
-    }
-
-    /// Deadline for the throttled ingress frame, if one is pending.
-    pub fn ingress_resume_at(&self) -> Option<Instant> {
-        *self.ingress_resume_at.lock()
-    }
-
-    /// Clear and report a due ingress resume deadline. The poll loop uses this to
-    /// wake the guest exactly once when the throttled frame becomes
-    /// deliverable.
-    pub fn take_due_ingress_resume(&self, now: Instant) -> bool {
-        let mut slot = self.ingress_resume_at.lock();
-        match *slot {
-            Some(deadline) if now >= deadline => {
-                *slot = None;
-                true
-            }
-            _ => false,
-        }
     }
 
     /// Total bytes transmitted by the guest into the runtime.

@@ -32,9 +32,8 @@
 use std::str::FromStr;
 
 use ipnetwork::IpNetwork;
-use microsandbox_types::RateLimitConfigError;
+use microsandbox_types::{NetworkRateLimitDirection, RateLimitConfigError};
 
-use crate::rate_limit::RateLimitDirection;
 use crate::secrets::config::SecretConfigError;
 
 use super::{
@@ -134,7 +133,7 @@ pub enum BuildError {
     #[error("{direction} rate limiter: {source}")]
     InvalidRateLimitConfig {
         /// Which limiter is invalid: `egress` or `ingress`.
-        direction: RateLimitDirection,
+        direction: NetworkRateLimitDirection,
         /// Underlying rate limit validation error.
         #[source]
         source: RateLimitConfigError,
@@ -144,7 +143,7 @@ pub enum BuildError {
     #[error("{direction} rate limiter: {bucket}_burst requires the {bucket} bucket")]
     RateLimitBurstWithoutBucket {
         /// Which limiter is invalid: `egress` or `ingress`.
-        direction: RateLimitDirection,
+        direction: NetworkRateLimitDirection,
         /// The bucket the burst belongs to: `bandwidth` or `ops`.
         bucket: &'static str,
     },
@@ -153,7 +152,7 @@ pub enum BuildError {
     #[error("{direction} rate limiter: {bucket} refill interval overflows u64 milliseconds")]
     RateLimitRefillTooLong {
         /// Which limiter is invalid: `egress` or `ingress`.
-        direction: RateLimitDirection,
+        direction: NetworkRateLimitDirection,
         /// The bucket with the overflowing interval: `bandwidth` or `ops`.
         bucket: &'static str,
     },

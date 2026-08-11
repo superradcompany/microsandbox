@@ -2534,6 +2534,15 @@ fn empty_secret_value() -> Zeroizing<String> {
 // Types: Networking — rate limits
 //--------------------------------------------------------------------------------------------------
 
+/// Sandbox-relative direction governed by a network rate limiter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NetworkRateLimitDirection {
+    /// Traffic leaving the sandbox.
+    Egress,
+    /// Traffic entering the sandbox.
+    Ingress,
+}
+
 /// Token-bucket rate limiter for one traffic direction. Carried in
 /// [`NetworkSpec::egress_rate_limiter`] and [`NetworkSpec::ingress_rate_limiter`].
 ///
@@ -2622,6 +2631,15 @@ impl TokenBucketConfig {
             return Err(RateLimitConfigError::ZeroRefillTime { bucket });
         }
         Ok(())
+    }
+}
+
+impl fmt::Display for NetworkRateLimitDirection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Egress => f.write_str("egress"),
+            Self::Ingress => f.write_str("ingress"),
+        }
     }
 }
 

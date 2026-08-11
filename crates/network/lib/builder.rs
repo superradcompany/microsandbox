@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use ipnetwork::{Ipv4Network, Ipv6Network};
 use microsandbox_types::{
-    RateLimiterConfig, ScopedUpstreamCaCert, ScopedVerifyUpstream, TlsConfig, TokenBucketConfig,
+    NetworkRateLimitDirection, RateLimiterConfig, ScopedUpstreamCaCert, ScopedVerifyUpstream,
+    TlsConfig, TokenBucketConfig,
 };
 use microsandbox_utils::size::Bytes;
 use zeroize::Zeroizing;
@@ -19,7 +20,6 @@ use crate::config::{
 };
 use crate::dns::Nameserver;
 use crate::policy::{BuildError, NetworkPolicy};
-use crate::rate_limit::RateLimitDirection;
 use crate::secrets::config::{
     HostPattern, SecretEntry, SecretInjection, SecretSource, ViolationAction,
 };
@@ -82,7 +82,7 @@ pub struct ViolationActionBuilder {
 /// )
 /// ```
 pub struct RateLimiterBuilder {
-    direction: RateLimitDirection,
+    direction: NetworkRateLimitDirection,
     bandwidth: Option<TokenBucketConfig>,
     ops: Option<TokenBucketConfig>,
     bandwidth_burst: Option<u64>,
@@ -306,7 +306,7 @@ impl NetworkBuilder {
         mut self,
         f: impl FnOnce(RateLimiterBuilder) -> RateLimiterBuilder,
     ) -> Self {
-        match f(RateLimiterBuilder::new(RateLimitDirection::Egress)).build() {
+        match f(RateLimiterBuilder::new(NetworkRateLimitDirection::Egress)).build() {
             Ok(limiter) => self.config.egress_rate_limiter = Some(limiter),
             Err(err) => self.errors.push(err),
         }
@@ -319,7 +319,7 @@ impl NetworkBuilder {
         mut self,
         f: impl FnOnce(RateLimiterBuilder) -> RateLimiterBuilder,
     ) -> Self {
-        match f(RateLimiterBuilder::new(RateLimitDirection::Ingress)).build() {
+        match f(RateLimiterBuilder::new(NetworkRateLimitDirection::Ingress)).build() {
             Ok(limiter) => self.config.ingress_rate_limiter = Some(limiter),
             Err(err) => self.errors.push(err),
         }
@@ -656,7 +656,7 @@ impl SecretBuilder {
 }
 
 impl RateLimiterBuilder {
-    fn new(direction: RateLimitDirection) -> Self {
+    fn new(direction: NetworkRateLimitDirection) -> Self {
         Self {
             direction,
             bandwidth: None,

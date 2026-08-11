@@ -32,13 +32,13 @@ pub use domain::{
     DestinationGroup, Direction, DiskImageFormat, DnsConfig, EnvVar, FlatClone, HandoffInit,
     HostPattern, HostPermissions, InterceptCaConfig, InterfaceOverrides, LogSource,
     MAX_SECRET_PLACEHOLDER_BYTES, MountOptions, NamedVolumeCreate, NamedVolumeMode, NetworkPolicy,
-    NetworkSpec, OciRootfsSource, Patch, PortProtocol, PortRange, Protocol, PublishedPortSpec,
-    PullPolicy, RateLimitConfigError, RateLimiterConfig, Rlimit, RlimitResource, RootDisk,
-    RootfsSource, Rule, SandboxLogLevel, SandboxPolicy, SandboxResources, SandboxRuntimeOptions,
-    SandboxSpec, ScopedUpstreamCaCert, ScopedVerifyUpstream, SecretConfigError, SecretEntry,
-    SecretInjection, SecretsConfig, SecurityProfile, SnapshotSpec, StatVirtualization, TlsConfig,
-    TokenBucketConfig, TransparentHugePagePolicy, ViolationAction, VolumeKind, VolumeMount,
-    VolumeSpec,
+    NetworkRateLimitDirection, NetworkSpec, OciRootfsSource, Patch, PortProtocol, PortRange,
+    Protocol, PublishedPortSpec, PullPolicy, RateLimitConfigError, RateLimiterConfig, Rlimit,
+    RlimitResource, RootDisk, RootfsSource, Rule, SandboxLogLevel, SandboxPolicy, SandboxResources,
+    SandboxRuntimeOptions, SandboxSpec, ScopedUpstreamCaCert, ScopedVerifyUpstream,
+    SecretConfigError, SecretEntry, SecretInjection, SecretsConfig, SecurityProfile, SnapshotSpec,
+    StatVirtualization, TlsConfig, TokenBucketConfig, TransparentHugePagePolicy, ViolationAction,
+    VolumeKind, VolumeMount, VolumeSpec,
 };
 pub use error::{TypesError, TypesResult};
 pub use modify::{
