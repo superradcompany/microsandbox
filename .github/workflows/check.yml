@@ -51,8 +51,9 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          submodules: true
+
+      - name: Check out libkrunfw
+        run: git submodule update --init --depth 1 vendor/libkrunfw
 
       - name: Cache kernel.c
         id: cache-kernel
@@ -84,8 +85,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          submodules: true
+
+      - name: Check out libkrunfw
+        run: git submodule update --init --depth 1 vendor/libkrunfw
 
       - name: Cache kernel.c
         id: cache-kernel
@@ -124,8 +126,6 @@ jobs:
       SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          submodules: true
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
@@ -155,12 +155,52 @@ jobs:
           name: agentd-aarch64-linux-musl
           path: build/agentd
 
+  build-agentd-x86_64:
+    name: Build agentd (x86_64-linux-musl)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest' }}
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Set up sccache
+        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-bin: false
+          cache-targets: false
+
+      - name: Install agentd build deps
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build agentd
+        run: |
+          rustup target add --toolchain stable x86_64-unknown-linux-musl
+          cargo +stable build --release --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl
+          mkdir -p build
+          cp target/x86_64-unknown-linux-musl/release/agentd build/agentd
+
+      - name: Upload agentd
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: agentd-x86_64-linux-musl
+          path: build/agentd
+
   # ---------------------------------------------------------------------------
   # Check
   # ---------------------------------------------------------------------------
   build-linux-x86_64:
     name: Build runtime (linux-x86_64)
-    needs: changes
+    needs: [build-agentd-x86_64, changes]
     if: needs.changes.outputs.code == 'true'
     # CI_LINUX_X86_RUNNER can point at an organization larger-runner label.
     # Default to a standard hosted runner so unconfigured repositories do not queue indefinitely.
@@ -193,14 +233,13 @@ jobs:
           cache-targets: false
 
       - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y musl-tools libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
 
-      - name: Build agentd
-        run: |
-          rustup target add --toolchain stable x86_64-unknown-linux-musl
-          cargo +stable build --release --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl
-          mkdir -p build
-          cp target/x86_64-unknown-linux-musl/release/agentd build/agentd
+      - name: Download agentd
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: agentd-x86_64-linux-musl
+          path: build/
 
       - name: Cache libkrunfw
         id: cache-libkrunfw
@@ -212,7 +251,9 @@ jobs:
       - name: Build libkrunfw
         if: steps.cache-libkrunfw.outputs.cache-hit != 'true'
         run: |
-          make -C vendor/libkrunfw -j$(nproc)
+          cd vendor/libkrunfw
+          make -j"$(nproc)"
+          cd ../..
           mkdir -p build
           cp vendor/libkrunfw/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} build/
           cd build
@@ -329,12 +370,15 @@ jobs:
   #
   # These jobs verify the WHP host targets compile on both Windows architectures.
   # VM smoke and integration coverage intentionally stays Linux/KVM-only below.
+  # Quality and linked release builds use separate runners so dev/test compilation
+  # does not serialize the expensive release and Go FFI links.
   # ---------------------------------------------------------------------------
-  windows-check:
-    name: Check Windows (${{ matrix.target }})
-    needs: [build-kernel, build-kernel-x86_64, build-agentd-aarch64, build-linux-x86_64, changes]
-    if: always() && needs.changes.outputs.code == 'true'
+  windows-quality:
+    name: Windows Quality (${{ matrix.target }})
+    needs: [build-kernel, build-kernel-x86_64, build-agentd-aarch64, build-agentd-x86_64, changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     env:
       CARGO_INCREMENTAL: "0"
       RUSTC_WRAPPER: sccache
@@ -346,8 +390,6 @@ jobs:
           - target: windows-aarch64
             runner: windows-11-arm
             rust_target: aarch64-pc-windows-msvc
-            go_arch: arm64
-            go_cc: clang
             kernel_artifact: kernel-c-aarch64
             agentd_artifact: agentd-aarch64-linux-musl
             vs_arch: arm64
@@ -355,21 +397,20 @@ jobs:
           - target: windows-x86_64
             runner: windows-latest
             rust_target: x86_64-pc-windows-msvc
-            go_arch: amd64
-            go_cc: clang -fuse-ld=lld
             kernel_artifact: kernel-c-x86_64
-            agentd_artifact: msb-linux-x86_64
+            agentd_artifact: agentd-x86_64-linux-musl
             vs_arch: amd64
             vs_host_arch: amd64
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          submodules: true
+
+      - name: Check out libkrunfw
+        run: git submodule update --init --depth 1 vendor/libkrunfw
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
-          components: clippy, rustfmt
+          components: clippy
           targets: ${{ matrix.rust_target }}
 
       - name: Set up sccache
@@ -380,7 +421,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-bin: false
-          cache-targets: false
+          # Unlike sccache, this preserves Cargo fingerprints and linked outputs.
+          cache-targets: true
+          shared-key: windows-quality-${{ matrix.target }}
 
       - name: Download kernel.c
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -408,10 +451,6 @@ jobs:
           New-Item -ItemType Directory -Force -Path build | Out-Null
           Copy-Item vendor\libkrunfw\libkrunfw.dll build\libkrunfw.dll -Force
 
-      - name: Format
-        shell: pwsh
-        run: cargo +stable fmt --all -- --check
-
       - name: Check msb
         shell: pwsh
         run: |
@@ -435,6 +474,87 @@ jobs:
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
           cargo +stable test --no-default-features --features net -p microsandbox-runtime --lib --target ${{ matrix.rust_target }} test_bind_rootfs_backend_exposes_host_file_and_init
+
+  windows-build:
+    name: Build Windows (${{ matrix.target }})
+    needs: [build-kernel, build-kernel-x86_64, build-agentd-aarch64, build-agentd-x86_64, changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows-aarch64
+            runner: windows-11-arm
+            rust_target: aarch64-pc-windows-msvc
+            go_arch: arm64
+            go_cc: clang
+            kernel_artifact: kernel-c-aarch64
+            agentd_artifact: agentd-aarch64-linux-musl
+            vs_arch: arm64
+            vs_host_arch: arm64
+          - target: windows-x86_64
+            runner: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+            go_arch: amd64
+            go_cc: clang -fuse-ld=lld
+            kernel_artifact: kernel-c-x86_64
+            agentd_artifact: agentd-x86_64-linux-musl
+            vs_arch: amd64
+            vs_host_arch: amd64
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check out libkrunfw
+        run: git submodule update --init --depth 1 vendor/libkrunfw
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Set up sccache
+        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-bin: false
+          # Release links are not cacheable by sccache; retain exact Cargo outputs.
+          cache-targets: true
+          shared-key: windows-build-${{ matrix.target }}
+
+      - name: Download kernel.c
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ matrix.kernel_artifact }}
+          path: vendor/libkrunfw/
+
+      - name: Download agentd
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ matrix.agentd_artifact }}
+          path: build/
+
+      - name: Build libkrunfw.dll
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & .\vendor\libkrunfw\scripts\build-windows.ps1 `
+            -SkipKernelBundle `
+            -AbiVersion ${{ env.LIBKRUNFW_ABI }} `
+            -Architecture ${{ matrix.vs_arch }} `
+            -HostArchitecture ${{ matrix.vs_host_arch }} `
+            -Output libkrunfw.dll `
+            -ImportLibrary libkrunfw.lib
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          Copy-Item vendor\libkrunfw\libkrunfw.dll build\libkrunfw.dll -Force
 
       - name: Build msb
         shell: pwsh
@@ -1373,10 +1493,12 @@ jobs:
       - build-kernel
       - build-kernel-x86_64
       - build-agentd-aarch64
+      - build-agentd-x86_64
       - build-linux-x86_64
       - go-ffi-build
       - check
-      - windows-check
+      - windows-quality
+      - windows-build
       - rust-quality
       - node-sdk-build
       - python-quality
