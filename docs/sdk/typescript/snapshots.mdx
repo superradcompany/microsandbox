@@ -14,24 +14,6 @@ import type { SaveOpts, SnapshotScope, SnapshotVerifyReport } from "microsandbox
   Snapshots are **disk-only** and require a sandbox that is not running (stopped or crashed).
 </Note>
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```typescript
-import { Sandbox, Snapshot } from "microsandbox";
-
-// 1. capture: stop the sandbox, then snapshot its disk
-const sb = await Sandbox.get("baseline");
-await sb.stop();
-const snap = await Snapshot.builder("after-pip-install")
-  .fromSandbox("baseline")       // sandbox to capture
-  .recordIntegrity()             // hash the upper layer
-  .create();
-
-// 2. boot a fresh sandbox from the snapshot
-const fresh = await Sandbox.builder("worker")
-  .fromSnapshot(snap.path)
-  .create();
-```
 
 ## Capture and boot
 

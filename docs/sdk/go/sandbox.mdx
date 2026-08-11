@@ -7,30 +7,6 @@ Create and control a microVM sandbox: boot it from an image, run commands, strea
 
 For local sandboxes, call [`EnsureInstalled`](#m-ensureinstalled) once at process startup. It installs the `msb` + `libkrunfw` runtime into `~/.microsandbox/` when needed, is idempotent, and surfaces runtime setup failures before the first sandbox operation. Use [`IsInstalled`](#m-isinstalled) when you only need to check whether the runtime is already present.
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```go
-import m "github.com/superradcompany/microsandbox/sdk/go"
-
-if err := m.EnsureInstalled(ctx); err != nil {      // 1. prepare local runtime
-    return err
-}
-
-sb, err := m.CreateSandbox(ctx, "api",              // 2. configure + boot
-    m.WithImage("python"),
-    m.WithMemory(1024),
-)
-if err != nil {
-    return err
-}
-defer sb.Close()                                    // 5. release handle
-
-out, err := sb.Exec(ctx, "python", []string{"-V"})  // 3. run
-if err != nil {
-    return err
-}
-fmt.Println(out.Stdout())                           // 4. read output
-```
 
 ## Functions
 
@@ -656,6 +632,22 @@ _, err = sb.Modify(ctx, m.ModifyOptions{
     RootDiskSizeMiB: 8192,
     Policy:          m.ModificationPolicyRestart,
 })
+
+// Add or rotate a host-environment secret; restart if it is newly added
+_, err = sb.Modify(ctx, m.ModifyOptions{
+    Secrets: map[string]m.SecretModifySpec{
+        "API_KEY": {
+            Env:          "API_KEY",
+            AllowedHosts: []string{"api.example.com"},
+        },
+    },
+    Policy: m.ModificationPolicyRestart,
+})
+
+// Remove an existing secret
+_, err = sb.Modify(ctx, m.ModifyOptions{
+    SecretsRemove: []string{"OLD_API_KEY"},
+})
 ```
 
 </Accordion>
@@ -663,6 +655,8 @@ _, err = sb.Modify(ctx, m.ModifyOptions{
 Plan or apply a configuration change. The returned plan labels each change `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`, and apply is all-or-nothing.
 
 `CPUs` and `MemoryMiB` resize live within the [`WithMaxCPUs`](#withmaxcpus) / [`WithMaxMemory`](#withmaxmemory) ceilings; raising a ceiling requires a restart. `RootDiskSizeMiB` changes are offline: managed and flat OCI root disks grow only, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected. Env and workdir changes affect future execs only. On a stopped sandbox, changes are saved for the next boot.
+
+Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source—`Env`, `Value`, or `Store`—and may also set `Placeholder` and `AllowedHosts`; omitting a source updates only the other supplied fields. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `SecretsRemove`.
 
 A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and the returned plan's `ResizeStatus` reports when the sandbox has finished adjusting. See [`SandboxModificationPlan`](#sandboxmodificationplan).
 
@@ -1018,7 +1012,7 @@ Convenience wrapper around [`OwnsLifecycle`](#sb-ownslifecycle) that swallows th
 
 ## Options
 
-Functional options for [`CreateSandbox`](#m-createsandbox). Map and slice options merge across repeated calls; single-value setters like [`WithImage`](#withimage) replace. Simple setters are demonstrated by the [Typical flow](#typical-flow) above.
+Functional options for [`CreateSandbox`](#m-createsandbox). Map and slice options merge across repeated calls; single-value setters like [`WithImage`](#withimage) replace.
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithImage()</span>
 
@@ -2084,8 +2078,24 @@ A requested sandbox modification. Zero-valued fields are left unchanged (`0` is 
 | Labels | `map[string]string` | Labels to set |
 | LabelsRemove | `[]string` | Label keys to remove |
 | Workdir | `string` | Working directory for future execs |
+| Secrets | `map[string]SecretModifySpec` | Desired secret specs keyed by stable secret name |
+| SecretsRemove | `[]string` | Secret names to remove explicitly |
 | Policy | `ModificationPolicy` | `ModificationPolicyNoRestart` (default) applies only changes that can complete without restarting; `ModificationPolicyNextStart` persists changes for the next start without mutating a running VM; `ModificationPolicyRestart` restarts if needed so restart-required changes become active now |
 | DryRun | `bool` | Compute the plan without applying anything |
+
+### SecretModifySpec
+
+<p className="msb-backref">Used by <a href="#sb-modify">Modify()</a></p>
+
+Desired state for one secret. `Env`, `Value`, and `Store` are mutually exclusive sources. Leave all three empty to update only the placeholder or allowed hosts.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Env | `string` | Host environment variable to resolve when applying the modification |
+| Value | `string` | Raw secret value. Stored in the durable sandbox config until replaced by a source reference |
+| Store | `string` | Reserved for a host-side secret store reference; currently unsupported |
+| Placeholder | `string` | Explicit guest-visible placeholder. New secrets default to `$MSB_<NAME>` |
+| AllowedHosts | `[]string` | Desired allowed host patterns. A new secret requires at least one; an empty slice leaves existing hosts unchanged |
 
 ### SandboxModificationPlan
 

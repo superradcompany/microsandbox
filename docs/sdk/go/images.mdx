@@ -9,25 +9,6 @@ Inspect and prune the local OCI image cache: the images that sandbox creation ha
 import m "github.com/superradcompany/microsandbox/sdk/go"
 ```
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```go
-import m "github.com/superradcompany/microsandbox/sdk/go"
-
-images, err := m.Image.List(ctx)        // 1. enumerate the cache
-if err != nil {
-    return err
-}
-for _, img := range images {
-    fmt.Println(img.Reference(), img.LayerCount())
-}
-
-report, err := m.Image.Prune(ctx)       // 2. reclaim unused data
-if err != nil {
-    return err
-}
-fmt.Println(report.LayersRemoved, "layers removed")
-```
 
 ## Functions
 

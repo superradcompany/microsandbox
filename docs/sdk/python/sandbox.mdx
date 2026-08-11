@@ -5,18 +5,6 @@ description: Python SDK - Sandbox API reference
 
 Create and control a microVM sandbox: boot it from an image, run commands, stream logs and metrics, then shut it down. See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```python
-from microsandbox import Sandbox
-
-# 1. configure + 2. boot the microVM
-async with await Sandbox.create("api", image="python", memory=1024) as sb:
-    # 3. run
-    out = await sb.exec("python", ["-V"])
-    print(out.stdout_text)
-# 4. on exit the sandbox is killed and its state removed
-```
 
 ## Static methods
 
@@ -554,6 +542,20 @@ await sb.modify(env={"MODE": "prod"}, policy=ModificationPolicy.RESTART)
 
 # Grow the managed OCI root disk offline and restart
 await sb.modify(root_disk_size=8192, policy=ModificationPolicy.RESTART)
+
+# Add or rotate a host-environment secret; restart if it is newly added
+await sb.modify(
+    secrets={
+        "API_KEY": {
+            "env": "API_KEY",
+            "allowed_hosts": ["api.example.com"],
+        },
+    },
+    policy=ModificationPolicy.RESTART,
+)
+
+# Remove an existing secret
+await sb.modify(secrets_rm=["OLD_API_KEY"])
 ```
 
 </Accordion>
@@ -1437,6 +1439,20 @@ Controls how sandbox modifications that cannot apply live are handled.
 | `ModificationPolicy.NO_RESTART` | `"no_restart"` | Apply only changes that do not require a restart |
 | `ModificationPolicy.NEXT_START` | `"next_start"` | Persist changes for the next start without restarting a running VM |
 | `ModificationPolicy.RESTART` | `"restart"` | Restart when required so changes become active immediately |
+
+### SecretModifySpec
+
+<p className="msb-backref">Used by <a href="#sb-modify">modify(secrets=...)</a></p>
+
+Desired state for one secret. `env`, `value`, and `store` are mutually exclusive sources. Omit all three to update only the placeholder or allowed hosts.
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `env` | `str` | Host environment variable to resolve when applying the modification |
+| `value` | `str` | Raw secret value. Stored in the durable sandbox config until replaced by a source reference |
+| `store` | `str` | Reserved for a host-side secret store reference; currently unsupported |
+| `placeholder` | `str` | Explicit guest-visible placeholder. New secrets default to `$MSB_<NAME>` |
+| `allowed_hosts` | `list[str]` | Desired allowed host patterns. A new secret requires at least one; an empty list leaves existing hosts unchanged |
 
 ### SandboxModificationPlan
 

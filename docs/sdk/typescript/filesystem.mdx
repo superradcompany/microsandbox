@@ -5,19 +5,6 @@ description: TypeScript SDK - Filesystem API reference
 
 Read and write files inside a running sandbox over the same host-guest channel as command execution: no SSH, no network. Obtain a handle with `sandbox.fs()`. See [Filesystem](/sandboxes/filesystem) for usage examples. For bulk transfers, consider a [bind-mounted volume](/sandboxes/volumes) instead.
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```typescript
-const fs = sandbox.fs();
-
-await fs.write("/tmp/config.json", '{"debug": true}');     // write
-const content = await fs.readToString("/tmp/config.json"); // read back
-console.log(content);
-
-for (const entry of await fs.list("/tmp")) {               // list
-  console.log(entry.path);
-}
-```
 
 ## SandboxFsOps
 

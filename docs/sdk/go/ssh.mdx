@@ -5,29 +5,6 @@ description: Go SDK - SSH API reference
 
 Reach a running sandbox over SSH: open a native in-process SSH client, run exec requests, attach an interactive shell, transfer files over SFTP, or stand up a reusable SSH server endpoint. See [SSH](/sandboxes/ssh) for usage flows.
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```go
-import (
-    "context"
-
-    m "github.com/superradcompany/microsandbox/sdk/go"
-)
-
-ctx := context.Background()
-
-client, err := sb.SSH().OpenClient(ctx)   // 1. open a native client
-if err != nil {
-    return err
-}
-defer client.Close(ctx)
-
-out, err := client.Exec(ctx, "uname -a")  // 2. run a command
-if err != nil {
-    return err
-}
-fmt.Printf("%s (exit %d)\n", out.Stdout, out.Status)
-```
 
 ## Methods
 

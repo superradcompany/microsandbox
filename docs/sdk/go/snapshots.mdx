@@ -9,30 +9,6 @@ Disk-only snapshots of a sandbox that is not running. Create artifacts from a st
   Snapshots are **disk-only** and require a sandbox that is stopped or crashed.
 </Note>
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```go
-import m "github.com/superradcompany/microsandbox/sdk/go"
-
-// 1. stop the sandbox; snapshots are disk-only
-_ = sb.Stop(ctx)
-_ = sb.Close()
-
-// 2. snapshot it under a bare name
-snap, err := m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
-    Name:            "after-pip-install",
-    FromSandbox:     "baseline",
-    RecordIntegrity: true,
-})
-if err != nil {
-    return err
-}
-
-// 3. boot a fresh sandbox from the snapshot
-sb2, err := m.CreateSandbox(ctx, "worker",
-    m.WithFromSnapshot("after-pip-install"),
-)
-```
 
 ## Snapshot functions
 

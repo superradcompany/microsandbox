@@ -5,21 +5,6 @@ description: TypeScript SDK - SSH API reference
 
 Reach a running sandbox over SSH: open an in-process client, run commands or attach an interactive shell, transfer files over SFTP, or expose the sandbox as a server endpoint. See [SSH](/sandboxes/ssh) for usage flows.
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```typescript
-import { Sandbox } from "microsandbox";
-
-await using sandbox = await Sandbox.builder("api")   // 1. boot the sandbox
-  .image("python")
-  .create();
-
-const client = await sandbox.ssh().openClient();     // 2. open an SSH client
-const out = await client.exec("python -V");          // 3. run a command
-console.log(out.stdout.toString());
-
-await client.close();                                // 4. close the client
-```
 
 ## SandboxSshOps
 

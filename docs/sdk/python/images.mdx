@@ -9,22 +9,6 @@ description: Python SDK - Image cache API reference
 from microsandbox import Image
 ```
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```python
-from microsandbox import Image, Sandbox
-
-# Pull happens implicitly on creation
-async with await Sandbox.create("api", image="python:3.12") as sb:
-    await sb.exec("python", ["-V"])
-
-# Later, inspect and prune the local cache
-for image in await Image.list():
-    print(image.reference, image.layer_count)
-
-report = await Image.prune()
-print(f"reclaimed {report.bytes_reclaimed} bytes")
-```
 
 ## Source factory
 

@@ -7,25 +7,6 @@ description: TypeScript SDK - Low-level agentd client reference
 
 All request and response bodies are raw CBOR bytes. The SDK handles framing and correlation ids, but it does not encode or decode the CBOR message body for you: decode it with a library such as `cbor-x`. The raw body is the full CBOR-encoded protocol `Message` body (`v`, `t`, `p`), not just the inner payload.
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```typescript
-import { encode, decode } from "cbor-x";
-import { AgentClient, FLAG_SESSION_START } from "microsandbox";
-
-const client = await AgentClient.connectSandbox("dev");        // 1. connect
-
-const body = encode({                                          // 2. build a CBOR Message
-  v: 1,
-  t: "core.fs.request",
-  p: encode({ op: { Stat: { path: "/etc" } } }),
-});
-
-const frame = await client.request(FLAG_SESSION_START, body);  // 3. request / response
-console.log(decode(frame.body));
-
-await client.close();                                          // 4. close
-```
 
 ## Constants
 

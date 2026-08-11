@@ -5,23 +5,6 @@ description: Python SDK - Snapshot API reference
 
 Capture the disk state of a stopped sandbox as a reusable artifact, then boot fresh sandboxes from it. Snapshots are disk-only and require a sandbox that is not running. See [Snapshots](/sandboxes/snapshots) for concepts and walkthroughs.
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```python
-from microsandbox import Sandbox, Snapshot
-
-# Run setup work, then stop the sandbox (snapshots are stopped-only)
-sb = await Sandbox.create("baseline", image="python:3.12")
-await sb.exec("pip", ["install", "numpy"])
-await sb.stop()
-
-# Capture its disk state under a name
-snap = await Snapshot.create("after-pip-install", from_sandbox="baseline")
-print(snap.digest)
-
-# Boot a fresh sandbox from the artifact
-sb2 = await Sandbox.create("worker", from_snapshot="after-pip-install")
-```
 
 ## Take a snapshot
 

@@ -9,29 +9,6 @@ Capture a stopped sandbox's writable upper layer into a self-describing, content
   Snapshots are **local-only** and **disk-only** today: they capture a sandbox that is stopped or crashed, and every operation runs against the default local backend. Cloud snapshots and qcow2 backing chains are deferred.
 </Note>
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```rust
-use microsandbox::{Sandbox, Snapshot};
-
-// 1. stop the sandbox you want to capture
-let sb = Sandbox::get("api").await?;
-sb.stop().await?;
-
-// 2. capture its writable upper layer
-let snap = Snapshot::builder("after-pip-install")
-    .from_sandbox("api")           // sandbox to capture
-    .record_integrity()            // hash the upper layer
-    .create()
-    .await?;
-println!("{} ({} bytes)", snap.digest(), snap.size_bytes());
-
-// 3. boot a fresh sandbox from it
-let restored = Sandbox::builder("api-restored")
-    .from_snapshot("after-pip-install")
-    .create()
-    .await?;
-```
 
 ## Static methods
 

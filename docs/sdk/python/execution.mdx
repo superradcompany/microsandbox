@@ -5,29 +5,6 @@ description: Python SDK - Command execution API reference
 
 Run commands inside a running sandbox: collect output in one shot, stream events as they arrive, or bridge your terminal to an interactive PTY. These methods live on a running [`Sandbox`](/sdk/python/sandbox). See [Commands](/sandboxes/commands) for usage examples.
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```python
-import sys
-
-from microsandbox import ExecEventType, Sandbox
-
-sandbox = await Sandbox.create("api", image="python")
-
-# 1. one-shot
-out = await sandbox.exec("python3", ["-c", "print(1 + 1)"])
-print(out.stdout_text)  # "2\n"
-
-# 2. stream
-handle = await sandbox.exec_stream("tail", ["-f", "/var/log/app.log"])
-async for event in handle:
-    if event.event_type is ExecEventType.STDOUT:
-        sys.stdout.buffer.write(event.data)
-    elif event.event_type is ExecEventType.EXITED:
-        break
-
-await sandbox.stop()
-```
 
 ## Default workload
 
