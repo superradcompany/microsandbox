@@ -342,8 +342,8 @@ async fn load(archive_path: &Path, dest: Option<&Path>) -> MicrosandboxResult<Sn
 ```rust
 use std::path::Path;
 
-let h = Snapshot::import(Path::new("/tmp/baseline.tar.zst"), None).await?;
-println!("imported {}", h.digest());
+let h = Snapshot::load(Path::new("/tmp/baseline.tar.zst"), None).await?;
+println!("loaded {}", h.digest());
 ```
 
 </Accordion>
