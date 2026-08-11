@@ -801,6 +801,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
+      - name: Isolate sccache server
+        run: |
+          rm -f "${RUNNER_TEMP}/sccache.sock"
+          echo "SCCACHE_SERVER_UDS=${RUNNER_TEMP}/sccache.sock" >> "$GITHUB_ENV"
+          echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1" >> "$GITHUB_ENV"
+
       - name: Set up sccache
         uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
@@ -1057,6 +1063,12 @@ jobs:
         run: scripts/ci/clean-runner-disk.sh
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Isolate sccache server
+        run: |
+          rm -f "${RUNNER_TEMP}/sccache.sock"
+          echo "SCCACHE_SERVER_UDS=${RUNNER_TEMP}/sccache.sock" >> "$GITHUB_ENV"
+          echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1" >> "$GITHUB_ENV"
 
       - name: Set up sccache
         uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
