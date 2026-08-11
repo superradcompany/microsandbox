@@ -68,7 +68,7 @@ pub use sandbox::{
     validate_sandbox_name,
 };
 #[cfg(feature = "net")]
-pub use sandbox::{NetworkPolicy, NetworkProfile};
+pub use sandbox::{NetworkPolicy, NetworkProfile, OutboundProxy};
 pub use snapshot::{
     CheckpointSnapshotState, FileSnapshotState, SaveOpts, Snapshot, SnapshotBuilder,
     SnapshotConfig, SnapshotDescriptor, SnapshotFormat, SnapshotHandle, SnapshotScope,

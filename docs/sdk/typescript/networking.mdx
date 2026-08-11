@@ -1792,6 +1792,7 @@ Built network configuration produced by `NetworkBuilder.build()`. Keys are camel
 | maxConnections | `number \| null` | Maximum concurrent connections |
 | interface | `{ ipv4Pool?, ipv6Pool?, ipv4Address?, ipv6Address?, mac?, mtu? }` | Optional interface overrides |
 | trustHostCAs | `boolean` | Ship host CAs into the guest |
+| outboundProxy | [`OutboundProxy`](/sdk/typescript/proxies#outboundproxy)` \| null` | Canonical outbound proxy configuration stored in the sandbox network spec; `null` when unset |
 
 ### NetworkPolicy
 

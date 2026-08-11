@@ -898,6 +898,14 @@ struct NetworkOpts {
 }
 
 #[derive(serde::Deserialize)]
+struct OutboundProxyOpts {
+    protocol: String,
+    address: String,
+    #[serde(default)]
+    user_id: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
 struct SecretOpts {
     env_var: String,
     value: String,
@@ -1028,6 +1036,8 @@ struct SandboxCreateOpts {
     #[serde(default)]
     registry_ca_certs: Vec<String>,
     network: Option<NetworkOpts>,
+    /// Proxy that all outbound sandbox connections are dialed through.
+    proxy: Option<OutboundProxyOpts>,
     /// Top-level ports shorthand: {host_port: guest_port} (TCP).
     #[serde(default)]
     ports: HashMap<u16, u16>,
@@ -2210,6 +2220,23 @@ pub unsafe extern "C" fn msb_sandbox_create(
             // Network (policy, DNS, TLS, ports-in-network).
             if let Some(ref net) = opts.network {
                 builder = apply_network(builder, net)?;
+            }
+            if let Some(proxy) = opts.proxy {
+                builder = match proxy.protocol.as_str() {
+                    "socks4" => builder.proxy(move |p| {
+                        let proxy_builder = p.socks4(proxy.address);
+                        match proxy.user_id {
+                            Some(user_id) => proxy_builder.user_id(user_id),
+                            None => proxy_builder,
+                        }
+                    }),
+                    "socks5" => builder.proxy(move |p| p.socks5(proxy.address)),
+                    protocol => {
+                        return Err(FfiError::invalid_argument(format!(
+                            "unsupported outbound proxy protocol {protocol:?}"
+                        )));
+                    }
+                };
             }
             // Secrets.
             for s in &opts.secrets {

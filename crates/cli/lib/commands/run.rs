@@ -553,6 +553,20 @@ mod tests {
         assert_eq!(ignored_existing_inputs(&args), Some("--from-snapshot"));
     }
 
+    #[cfg(feature = "net")]
+    #[test]
+    fn existing_reuse_warns_for_proxy_creation_flag() {
+        let args = parse_run_args(&[
+            "--name",
+            "box",
+            "--proxy",
+            "socks5://127.0.0.1:1080",
+            "alpine",
+        ]);
+
+        assert_eq!(ignored_existing_inputs(&args), Some("creation flags"));
+    }
+
     #[test]
     fn from_snap_is_an_alias_for_from_snapshot() {
         let args = parse_run_args(&["--name", "box", "--from-snap", "clean"]);

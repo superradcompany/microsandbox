@@ -559,6 +559,16 @@ export declare class NetworkPolicyBuilder {
 }
 export type JsNetworkPolicyBuilder = NetworkPolicyBuilder
 
+/** Selects the protocol for an outbound proxy. */
+export declare class OutboundProxyBuilder {
+  constructor()
+  /** Select a SOCKS4 proxy at `address`. */
+  socks4(address: string): Socks4ProxyBuilder
+  /** Select a SOCKS5 proxy at `address`. */
+  socks5(address: string): Socks5ProxyBuilder
+}
+export type JsOutboundProxyBuilder = OutboundProxyBuilder
+
 /** Fluent builder for an ordered list of pre-boot rootfs patches. */
 export declare class PatchBuilder {
   constructor()
@@ -1118,6 +1128,8 @@ export declare class SandboxBuilder {
   disableNetwork(): this
   /** Configure networking via a callback. */
   network(configure: (arg: NetworkBuilder) => NetworkBuilder): this
+  /** Configure the single proxy used for outbound sandbox connections. */
+  proxy(configure: (arg: OutboundProxyBuilder) => Socks4ProxyBuilder | Socks5ProxyBuilder): this
   /** Publish a TCP port from host -> guest. */
   port(hostPort: number, guestPort: number): this
   /** Publish a TCP port from host -> guest on a specific host bind address. */
@@ -1512,6 +1524,19 @@ export declare class SnapshotHandle {
 }
 export type JsSnapshotHandle = SnapshotHandle
 
+/** Builds a SOCKS4 outbound proxy. */
+export declare class Socks4ProxyBuilder {
+  /** Set the optional user ID sent during the SOCKS4 handshake. */
+  userId(userId: string): this
+}
+export type JsSocks4ProxyBuilder = Socks4ProxyBuilder
+
+/** Builds a SOCKS5 outbound proxy. */
+export declare class Socks5ProxyBuilder {
+
+}
+export type JsSocks5ProxyBuilder = Socks5ProxyBuilder
+
 /** Native in-process SSH client session. */
 export declare class SshClient {
   /** Run an SSH exec request and collect stdout, stderr, and exit status. */
@@ -1585,7 +1610,7 @@ export declare class Volume {
   static remove(name: string): Promise<void>
   get name(): string
   get path(): string
-  /** Host-side filesystem operations on this volume's directory. */
+  /** Direct filesystem operations through this volume's bound backend. */
   fs(): VolumeFs
 }
 export type JsVolume = Volume
@@ -1664,7 +1689,7 @@ export declare class VolumeHandle {
   get labels(): Record<string, string>
   get createdAt(): number | null
   remove(): Promise<void>
-  /** Host-side filesystem operations on this volume's directory. */
+  /** Direct filesystem operations through this volume's bound backend. */
   fs(): VolumeFs
 }
 export type JsVolumeHandle = VolumeHandle

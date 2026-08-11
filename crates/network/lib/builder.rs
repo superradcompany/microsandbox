@@ -6,6 +6,8 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 
 use ipnetwork::{Ipv4Network, Ipv6Network};
+use microsandbox_types::{ScopedUpstreamCaCert, ScopedVerifyUpstream, TlsConfig};
+use zeroize::Zeroizing;
 
 use crate::config::{
     DnsConfig, InterfaceOverrides, MAX_NETWORK_CONNECTIONS, NetworkConfig, PortProtocol,
@@ -13,12 +15,9 @@ use crate::config::{
 };
 use crate::dns::Nameserver;
 use crate::policy::{BuildError, NetworkPolicy};
-use zeroize::Zeroizing;
-
 use crate::secrets::config::{
     HostPattern, SecretEntry, SecretInjection, SecretSource, ViolationAction,
 };
-use microsandbox_types::{ScopedUpstreamCaCert, ScopedVerifyUpstream, TlsConfig};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -767,6 +766,12 @@ mod tests {
             IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
         );
         assert_eq!(cfg.ports[1].protocol, PortProtocol::Udp);
+    }
+
+    #[test]
+    fn outbound_proxy_defaults_to_none() {
+        let cfg = NetworkBuilder::new().build().unwrap();
+        assert_eq!(cfg.outbound_proxy, None);
     }
 
     #[test]

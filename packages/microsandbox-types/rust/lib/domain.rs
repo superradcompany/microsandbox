@@ -561,6 +561,34 @@ pub struct NetworkSpec {
 
     /// Whether to copy trusted host CAs into the guest at boot.
     pub trust_host_cas: bool,
+
+    /// Proxy that all outbound sandbox connections are dialed through.
+    ///
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outbound_proxy: Option<OutboundProxy>,
+}
+
+/// Proxy configuration for outbound sandbox connections.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(tag = "protocol", rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum OutboundProxy {
+    /// A SOCKS4 proxy at the given `IP:port` address.
+    Socks4 {
+        /// Proxy socket address.
+        address: String,
+        /// Optional user ID sent during the SOCKS4 handshake.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_id: Option<String>,
+    },
+
+    /// A SOCKS5 proxy at the given `IP:port` address.
+    Socks5 {
+        /// Proxy socket address.
+        address: String,
+    },
 }
 
 /// A published port mapping between host and guest.
@@ -1437,6 +1465,7 @@ impl Default for NetworkSpec {
             secrets: None,
             max_connections: None,
             trust_host_cas: false,
+            outbound_proxy: None,
         }
     }
 }

@@ -1,0 +1,82 @@
+---
+title: Proxies
+description: TypeScript SDK - Proxy API reference
+---
+
+Configure one SOCKS4 or SOCKS5 proxy for outbound sandbox connections with [`SandboxBuilder.proxy()`](#proxy). Proxy protocols are mutually exclusive.
+
+See [Outbound proxy](/networking/outbound-proxy) for runtime behavior, security considerations, and current transport limitations.
+
+## Typical flow
+
+```typescript
+import { Sandbox } from "microsandbox";
+
+await using sandbox = await Sandbox.builder("worker")
+  .image("python")
+  .proxy((p) => p.socks5("127.0.0.1:1080"))
+  .create();
+```
+
+## SandboxBuilder
+
+### <span id="proxy">proxy()</span>
+
+```typescript
+proxy(configure: (proxy: OutboundProxyBuilder) => Socks4ProxyBuilder | Socks5ProxyBuilder): this
+```
+
+Select and configure the single outbound proxy for the sandbox. The callback receives an [`OutboundProxyBuilder`](#outboundproxybuilder) and must return one protocol-specific builder. Invalid addresses throw while applying the callback.
+
+## OutboundProxyBuilder
+
+Protocol selector passed to [`SandboxBuilder.proxy()`](#proxy).
+
+### <span id="socks4">socks4()</span>
+
+```typescript
+socks4(address: string): Socks4ProxyBuilder
+```
+
+Select a SOCKS4 proxy at `IP:port`. The returned builder can optionally set a user ID.
+
+### <span id="socks5">socks5()</span>
+
+```typescript
+socks5(address: string): Socks5ProxyBuilder
+```
+
+Select a SOCKS5 proxy at `IP:port`. The parent sandbox builder validates and materializes the returned [`Socks5ProxyBuilder`](#socks5proxybuilder).
+
+## Socks4ProxyBuilder
+
+Protocol-specific builder returned by [`OutboundProxyBuilder.socks4()`](#socks4).
+
+### userId()
+
+```typescript
+userId(userId: string): this
+```
+
+Set the optional SOCKS4 user ID. It must contain 1–255 bytes and no null byte. A user ID identifies the caller; it is not a password.
+
+## Socks5ProxyBuilder
+
+Protocol-specific builder returned by [`OutboundProxyBuilder.socks5()`](#socks5). It carries the proxy address and is finalized when returned from the `.proxy()` callback.
+
+## OutboundProxy
+
+Discriminated outbound proxy value stored in the resolved sandbox network configuration.
+
+```typescript
+type OutboundProxy =
+  | {
+      readonly protocol: "socks4";
+      readonly address: string;
+      readonly userId?: string;
+    }
+  | {
+      readonly protocol: "socks5";
+      readonly address: string;
+    };
+```

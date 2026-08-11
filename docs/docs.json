@@ -59,7 +59,8 @@
             "pages": [
               "networking/overview",
               "networking/dns",
-              "networking/tls"
+              "networking/tls",
+              "networking/outbound-proxy"
             ]
           },
           {
@@ -115,6 +116,7 @@
                   "sdk/rust/filesystem",
                   "sdk/rust/volumes",
                   "sdk/rust/networking",
+                  "sdk/rust/proxies",
                   "sdk/rust/secrets",
                   "sdk/rust/snapshots",
                   "sdk/rust/images",
@@ -132,6 +134,7 @@
                   "sdk/typescript/filesystem",
                   "sdk/typescript/volumes",
                   "sdk/typescript/networking",
+                  "sdk/typescript/proxies",
                   "sdk/typescript/secrets",
                   "sdk/typescript/snapshots",
                   "sdk/typescript/images",
@@ -149,6 +152,7 @@
                   "sdk/python/filesystem",
                   "sdk/python/volumes",
                   "sdk/python/networking",
+                  "sdk/python/proxies",
                   "sdk/python/secrets",
                   "sdk/python/snapshots",
                   "sdk/python/images",
@@ -167,6 +171,7 @@
                   "sdk/go/volumes",
                   "sdk/go/images",
                   "sdk/go/networking",
+                  "sdk/go/proxies",
                   "sdk/go/secrets",
                   "sdk/go/snapshots",
                   "sdk/go/agent-client"
