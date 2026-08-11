@@ -430,9 +430,10 @@ impl SecretPatchBuilder {
         self
     }
 
-    /// Set the guest-visible placeholder. Placeholder changes cannot reach
-    /// already-running processes, so they classify as restart-required on a
-    /// running sandbox.
+    /// Set the guest-visible placeholder. New secrets default to
+    /// `$MSB_<env_var>`, matching create-time secret configuration.
+    /// Placeholder changes cannot reach already-running processes, so they
+    /// classify as restart-required on a running sandbox.
     pub fn placeholder(mut self, placeholder: impl Into<String>) -> Self {
         self.spec.placeholder = Some(placeholder.into());
         self
@@ -1005,7 +1006,7 @@ fn apply_secret_spec(
             placeholder: spec
                 .placeholder
                 .clone()
-                .unwrap_or_else(|| default_secret_ref(&spec.name)),
+                .unwrap_or_else(|| microsandbox_utils::secret::default_placeholder(&spec.name)),
             allowed_hosts: parse_host_patterns(&spec.allowed_hosts),
             injection: SecretInjection::default(),
             on_violation: None,
@@ -1529,7 +1530,7 @@ fn push_secret_changes(
                 spec.placeholder
                     .clone()
                     .or_else(|| existing.as_ref().map(|secret| secret.placeholder.clone()))
-                    .unwrap_or_else(|| default_secret_ref(&spec.name)),
+                    .unwrap_or_else(|| microsandbox_utils::secret::default_placeholder(&spec.name)),
             ),
             disposition,
             allow_hosts: if spec.allowed_hosts.is_empty() {
@@ -1582,7 +1583,7 @@ fn push_secret_changes(
                 existing
                     .as_ref()
                     .map(|secret| secret.placeholder.clone())
-                    .unwrap_or_else(|| default_secret_ref(name)),
+                    .unwrap_or_else(|| microsandbox_utils::secret::default_placeholder(name)),
             ),
             after_ref: None,
             disposition,
@@ -2251,10 +2252,6 @@ fn status_name(status: SandboxStatus) -> &'static str {
         SandboxStatus::Stopped => "stopped",
         SandboxStatus::Crashed => "crashed",
     }
-}
-
-fn default_secret_ref(name: &str) -> String {
-    format!("${name}")
 }
 
 fn format_mib(mib: u32) -> String {
@@ -3300,7 +3297,7 @@ mod tests {
         );
         let json = serde_json::to_string(&plan).unwrap();
 
-        assert!(json.contains("$API_KEY"));
+        assert!(json.contains("$MSB_API_KEY"));
         assert!(json.contains("api.example.com"));
         assert!(!json.contains("real-secret-value"));
 
@@ -3750,7 +3747,7 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[test]
-    fn applying_new_source_spec_records_reference_not_value() {
+    fn applying_new_source_spec_uses_create_placeholder_default() {
         use microsandbox_network::secrets::config::HostPattern;
 
         let mut config = config(2, 1024);
@@ -3768,7 +3765,7 @@ mod tests {
                 var: "API_KEY".into()
             })
         );
-        assert_eq!(entry.placeholder, "$API_KEY");
+        assert_eq!(entry.placeholder, "$MSB_API_KEY");
         assert_eq!(
             entry.allowed_hosts,
             vec![HostPattern::Exact("api.example.com".into())]

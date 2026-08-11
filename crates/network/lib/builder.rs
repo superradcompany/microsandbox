@@ -583,7 +583,7 @@ impl SecretBuilder {
         );
         let placeholder = self
             .placeholder
-            .unwrap_or_else(|| format!("$MSB_{env_var}"));
+            .unwrap_or_else(|| microsandbox_utils::secret::default_placeholder(&env_var));
 
         SecretEntry {
             env_var,
