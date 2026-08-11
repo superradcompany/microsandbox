@@ -118,6 +118,10 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04-arm
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -125,9 +129,15 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
+      - name: Set up sccache
+        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-bin: false
+          cache-targets: false
 
       - name: Install agentd build deps
         run: sudo apt-get update && sudo apt-get install -y musl-tools
@@ -145,11 +155,21 @@ jobs:
           name: agentd-aarch64-linux-musl
           path: build/agentd
 
-  build-agentd-x86_64:
-    name: Build agentd (x86_64-linux-musl)
+  # ---------------------------------------------------------------------------
+  # Check
+  # ---------------------------------------------------------------------------
+  build-linux-x86_64:
+    name: Build runtime (linux-x86_64)
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    # CI_LINUX_X86_RUNNER can point at an organization larger-runner label.
+    # Repositories can override the standard 8-core larger-runner label.
+    runs-on: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest-8-cores' }}
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -157,12 +177,20 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
+      - name: Set up sccache
+        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+
+      # sccache owns compiled objects; rust-cache only needs Cargo's registry
+      # and git sources. Avoid storing the same target objects twice.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-bin: false
+          cache-targets: false
 
-      - name: Install agentd build deps
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y musl-tools libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
 
       - name: Build agentd
         run: |
@@ -171,26 +199,86 @@ jobs:
           mkdir -p build
           cp target/x86_64-unknown-linux-musl/release/agentd build/agentd
 
-      - name: Upload agentd
+      - name: Cache libkrunfw
+        id: cache-libkrunfw
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build/libkrunfw*
+          key: libkrunfw-linux-x86_64-${{ hashFiles('vendor/libkrunfw/**') }}
+
+      - name: Build libkrunfw
+        if: steps.cache-libkrunfw.outputs.cache-hit != 'true'
+        run: |
+          make -C vendor/libkrunfw -j$(nproc)
+          mkdir -p build
+          cp vendor/libkrunfw/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} build/
+          cd build
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} libkrunfw.so
+
+      # mold complements sccache: sccache cannot cache final executable links,
+      # while mold shortens the release/LTO link on Linux host targets.
+      - name: Set up mold
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+
+      - name: Build msb
+        run: |
+          cargo build --release --no-default-features --features net,ssh -p microsandbox-cli
+          cp target/release/msb build/msb
+
+      # Upload immediately. All KVM lanes can begin while independent quality
+      # and cross-platform checks continue in parallel.
+      - name: Upload runtime artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: agentd-x86_64-linux-musl
-          path: build/agentd
+          name: msb-linux-x86_64
+          path: build/
 
-  # ---------------------------------------------------------------------------
-  # Check
-  # ---------------------------------------------------------------------------
-  check-linux-x86_64:
-    name: Check (linux-x86_64)
-    needs: changes
+  go-ffi-build:
+    name: Build Go FFI (linux-x86_64)
+    needs: [build-linux-x86_64, changes]
     if: needs.changes.outputs.code == 'true'
-    uses: ./.github/workflows/check-platform.yml
-    with:
-      target: linux-x86_64
-      runner: ubuntu-latest
-      os: linux
-      agentd_target: x86_64-unknown-linux-musl
-      libkrunfw_file: libkrunfw.so.5.6.1
+    runs-on: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest-8-cores' }}
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Set up sccache
+        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-bin: false
+          cache-targets: false
+
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+
+      - name: Download runtime artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: msb-linux-x86_64
+          path: build/
+
+      - name: Set up mold
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+
+      - name: Build Go FFI
+        run: cargo build -p microsandbox-go
+
+      - name: Upload Go FFI artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: go-ffi-linux-x86_64
+          path: target/debug/libmicrosandbox_go_ffi.so
 
   check:
     name: Check (${{ matrix.target }})
@@ -219,6 +307,21 @@ jobs:
       libkrunfw_file: ${{ matrix.libkrunfw_file }}
 
   # ---------------------------------------------------------------------------
+  # Unit tests reuse the runtime artifacts produced above. Keeping them in the
+  # same workflow removes the second release/LTO build formerly done by Test.
+  # ---------------------------------------------------------------------------
+  test-linux-x86_64:
+    name: Test (linux-x86_64)
+    needs: [build-linux-x86_64, changes]
+    if: needs.changes.outputs.code == 'true'
+    uses: ./.github/workflows/test-platform.yml
+    with:
+      target: linux-x86_64
+      runner: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest-8-cores' }}
+      os: linux
+      agentd_target: x86_64-unknown-linux-musl
+
+  # ---------------------------------------------------------------------------
   # Windows build/check only.
   #
   # These jobs verify the WHP host targets compile on both Windows architectures.
@@ -226,9 +329,13 @@ jobs:
   # ---------------------------------------------------------------------------
   windows-check:
     name: Check Windows (${{ matrix.target }})
-    needs: [build-kernel, build-kernel-x86_64, build-agentd-aarch64, build-agentd-x86_64, changes]
+    needs: [build-kernel, build-kernel-x86_64, build-agentd-aarch64, build-linux-x86_64, changes]
     if: always() && needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.runner }}
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
     strategy:
       fail-fast: false
       matrix:
@@ -248,7 +355,7 @@ jobs:
             go_arch: amd64
             go_cc: clang -fuse-ld=lld
             kernel_artifact: kernel-c-x86_64
-            agentd_artifact: agentd-x86_64-linux-musl
+            agentd_artifact: msb-linux-x86_64
             vs_arch: amd64
             vs_host_arch: amd64
 
@@ -262,9 +369,15 @@ jobs:
           components: clippy, rustfmt
           targets: ${{ matrix.rust_target }}
 
+      - name: Set up sccache
+        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-bin: false
+          cache-targets: false
 
       - name: Download kernel.c
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -361,6 +474,249 @@ jobs:
           go test -count=1 .
 
   # ---------------------------------------------------------------------------
+  # Platform-independent quality lanes. These run once on Linux instead of
+  # serially repeating on Linux arm64 and macOS.
+  # ---------------------------------------------------------------------------
+  rust-quality:
+    name: Rust Quality
+    needs: [build-linux-x86_64, changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest-8-cores' }}
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy, rustfmt
+          targets: x86_64-unknown-linux-musl
+
+      - name: Set up sccache
+        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-bin: false
+          cache-targets: false
+
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y musl-tools libcap-ng-dev
+
+      - name: Download runtime artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: msb-linux-x86_64
+          path: build/
+
+      - name: Format
+        run: cargo +stable fmt --all -- --check
+
+      - name: Check agentd
+        run: |
+          cargo +stable fmt --manifest-path crates/agentd/Cargo.toml -- --check
+          cargo +stable clippy --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl -- -D warnings
+
+      - name: Set up mold
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+
+      - name: Clippy
+        run: cargo +stable clippy --workspace --exclude microsandbox-agentd -- -D warnings
+
+      - name: Docs
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo +stable doc --workspace --exclude microsandbox-agentd --no-deps
+
+      - name: Check generated microsandbox types
+        run: cargo +stable run -p microsandbox-types --features ts --bin microsandbox-types-generate -- --check
+
+  node-sdk-build:
+    name: TypeScript and Node Quality
+    needs: [build-linux-x86_64, changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest-8-cores' }}
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Set up sccache
+        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-bin: false
+          cache-targets: false
+
+      - name: Set up mold
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+
+      - name: Download runtime artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: msb-linux-x86_64
+          path: build/
+
+      - name: Check agent client package
+        working-directory: packages/agent-client/typescript
+        run: npm ci && npm run build && npm run typecheck && npm test
+
+      - name: Check microsandbox types package
+        working-directory: packages/microsandbox-types/typescript
+        run: npm ci && npm run build && npm run typecheck
+
+      - name: Build Node SDK
+        working-directory: sdk/node-ts
+        run: |
+          node scripts/prune-platform-optional-deps.mjs
+          npm install --package-lock=false
+          npm run build
+
+      - name: Build MCP server
+        working-directory: mcp
+        run: |
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.dependencies.microsandbox = 'file:../sdk/node-ts';
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
+          "
+          npm install --no-package-lock --ignore-scripts
+          npm run build
+
+      - name: Upload Node SDK artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: node-sdk-linux-x86_64
+          path: |
+            sdk/node-ts/native/index.cjs
+            sdk/node-ts/native/index.d.ts
+            sdk/node-ts/native/microsandbox.*.node
+            sdk/node-ts/dist/
+            sdk/node-ts/package.json
+            sdk/node-ts/package-lock.json
+            sdk/node-ts/scripts/prune-platform-optional-deps.mjs
+            sdk/node-ts/tests/
+            sdk/node-ts/tsconfig.json
+            sdk/node-ts/vitest.config.ts
+
+  python-quality:
+    name: Python Quality
+    needs: [build-linux-x86_64, changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest-8-cores' }}
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Set up sccache
+        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-bin: false
+          cache-targets: false
+
+      - name: Set up mold
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "sdk/python/uv.lock"
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+
+      - name: Download runtime artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: msb-linux-x86_64
+          path: build/
+
+      - name: Stage runtime bundle
+        run: |
+          mkdir -p sdk/python/microsandbox/_bundled/bin sdk/python/microsandbox/_bundled/lib
+          cp build/msb sdk/python/microsandbox/_bundled/bin/
+          cp build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} sdk/python/microsandbox/_bundled/lib/
+          cd sdk/python/microsandbox/_bundled/lib
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} libkrunfw.so
+
+      - name: Build and check Python SDK
+        working-directory: sdk/python
+        run: |
+          uv sync --group dev
+          uv run maturin develop --release
+          uv run pytest
+          uv run ruff check .
+          uv build --wheel
+
+  go-quality:
+    name: Go Quality
+    needs: [build-linux-x86_64, go-ffi-build, changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Download runtime artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: msb-linux-x86_64
+          path: build/
+
+      - name: Download Go FFI artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: go-ffi-linux-x86_64
+          path: build/
+
+      - name: Build, vet, and test Go SDK
+        working-directory: sdk/go
+        env:
+          MICROSANDBOX_FFI_PATH: ${{ github.workspace }}/build/libmicrosandbox_go_ffi.so
+        run: |
+          go build ./...
+          go vet ./...
+          go test -count=1 .
+          go test -tags "smoke microsandbox_ffi_path" -count=1 -timeout 2m .
+
+  # ---------------------------------------------------------------------------
   # CLI smoke tests (requires KVM)
   #
   # Runs black-box CLI user flows against the freshly-built msb artifact.
@@ -369,18 +725,11 @@ jobs:
   # ---------------------------------------------------------------------------
   cli-smoke-test:
     name: CLI Smoke Tests
-    needs: [check-linux-x86_64, changes]
+    needs: [build-linux-x86_64, changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: self-hosted-ubuntu-2404-x64
     # Bound a wedged run so it can't squat a shared runner for the 6h default.
     timeout-minutes: 45
-    # The self-hosted box has 32 cores shared by several runners. Uncapped cargo
-    # (-j defaults to ncpu) lets concurrent jobs oversubscribe the CPU ~4x and
-    # starve microVM boots past the 180s agent-relay deadline (flaky
-    # "timed out waiting for agent relay"). Cap per-job build parallelism so
-    # several jobs can build at once without crushing VM boot latency.
-    env:
-      CARGO_BUILD_JOBS: "12"
     steps:
       - name: Clean workspace
         run: |
@@ -401,6 +750,8 @@ jobs:
       - name: Run CLI smoke tests
         run: |
           chmod +x build/msb
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} build/libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} build/libkrunfw.so
           scripts/smoke/cli/image-archive.sh
           scripts/smoke/cli/split-irqchip-bind-net.sh
 
@@ -413,18 +764,19 @@ jobs:
   # ---------------------------------------------------------------------------
   integration-test:
     name: Integration Tests
-    needs: [check-linux-x86_64, changes]
+    needs: [build-linux-x86_64, changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: self-hosted-ubuntu-2404-x64
     # Bound a wedged run so it can't squat a shared runner for the 6h default.
     timeout-minutes: 45
-    # The self-hosted box has 32 cores shared by several runners. Uncapped cargo
-    # (-j defaults to ncpu) lets concurrent jobs oversubscribe the CPU ~4x and
-    # starve microVM boots past the 180s agent-relay deadline (flaky
-    # "timed out waiting for agent relay"). Cap per-job build parallelism so
-    # several jobs can build at once without crushing VM boot latency.
+    # Only this and the Python lane compile Rust on the self-hosted box after
+    # the artifact-first split. Twelve jobs per lane bound their worst overlap at
+    # 24 compiler threads on the 32-core host while preserving build speed.
     env:
       CARGO_BUILD_JOBS: "12"
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
       # Full debuginfo for the dozen-plus integration-test binaries is
       # ~14 GiB of target/ and has filled the shared runner disk mid-link,
       # killing rust-lld with SIGBUS (#1162). line-tables-only keeps
@@ -446,9 +798,15 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
+      - name: Set up sccache
+        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-bin: false
+          cache-targets: false
 
       - uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60 # v2
         with:
@@ -471,15 +829,14 @@ jobs:
           ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} ~/.microsandbox/lib/libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
           ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} ~/.microsandbox/lib/libkrunfw.so
 
-      # -- Build deps (mirrors the Linux install in the check job) --
+      # -- Build deps for the host test graph --
       - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y musl-tools libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev mold
 
-      - name: Build agentd
-        run: |
-          rustup target add x86_64-unknown-linux-musl
-          cargo build --release --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl
-          cp target/x86_64-unknown-linux-musl/release/agentd build/agentd
+      - name: Prepare pre-built agentd
+        # upload-artifact normalizes executable bits. The runtime build already
+        # produced agentd; restore its mode instead of compiling it again here.
+        run: chmod +x build/agentd
 
       # -- Run integration tests --
       # MSB_TEST_ISOLATE_HOME=1 turns on per-test ~/.microsandbox isolation
@@ -500,7 +857,7 @@ jobs:
           integration_config="$RUNNER_TEMP/msb-integration-config.json"
           printf '%s\n' '{"runtime":{"block_writeback":{"mode":"auto","pool_mib":4096}}}' > "$integration_config"
           export MSB_CONFIG_PATH="$integration_config"
-          cargo nextest run -p microsandbox --tests --run-ignored=only --test-threads 2
+          mold -run cargo nextest run -p microsandbox --tests --run-ignored=only --test-threads 2
 
       - name: Disk usage
         if: always()
@@ -510,8 +867,8 @@ jobs:
   # Node.js SDK smoke tests (requires KVM)
   #
   # Runs the smoke suite under both Node and Bun as separate matrix cells.
-  # This second wave begins after the heavier Rust and Go suites, bounding
-  # concurrent microVM load on the shared self-hosted runner.
+  # With twelve runner services available these start as soon as the runtime and
+  # native Node artifact are ready; host capacity is the concurrency bound.
   #
   # No `~/.microsandbox` install: the SDK uses its bundled platform-pkg
   # binaries. We patch in the freshly-built msb + libkrunfw so the test
@@ -521,18 +878,11 @@ jobs:
   # ---------------------------------------------------------------------------
   node-sdk-test:
     name: Node.js SDK Tests (${{ matrix.runtime }})
-    needs: [check-linux-x86_64, changes, integration-test, go-sdk-test]
-    if: always() && needs.changes.outputs.code == 'true' && needs.check-linux-x86_64.result == 'success'
+    needs: [build-linux-x86_64, node-sdk-build, changes]
+    if: always() && needs.changes.outputs.code == 'true' && needs.build-linux-x86_64.result == 'success' && needs.node-sdk-build.result == 'success'
     runs-on: self-hosted-ubuntu-2404-x64
     # Bound a wedged run so it can't squat a shared runner for the 6h default.
     timeout-minutes: 45
-    # The self-hosted box has 32 cores shared by several runners. Uncapped cargo
-    # (-j defaults to ncpu) lets concurrent jobs oversubscribe the CPU ~4x and
-    # starve microVM boots past the 180s agent-relay deadline (flaky
-    # "timed out waiting for agent relay"). Cap per-job build parallelism so
-    # several jobs can build at once without crushing VM boot latency.
-    env:
-      CARGO_BUILD_JOBS: "12"
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -616,7 +966,10 @@ jobs:
           chmod +x ${{ github.workspace }}/build/msb
           install -m755 ${{ github.workspace }}/build/msb "$PKG/bin/msb"
           rm -f "$PKG"/lib/libkrunfw*
-          cp -P ${{ github.workspace }}/build/libkrunfw.so* "$PKG/lib/"
+          cp ${{ github.workspace }}/build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} "$PKG/lib/"
+          cd "$PKG/lib"
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} libkrunfw.so
 
       - name: Run SDK tests (Node)
         if: matrix.runtime == 'node'
@@ -671,24 +1024,24 @@ jobs:
   # ---------------------------------------------------------------------------
   # Python SDK integration tests (requires KVM)
   #
-  # Downloads the pre-built msb + libkrunfw from the `check` job, then builds
+  # Downloads the pre-built msb + libkrunfw from the runtime job, then builds
   # the Python extension locally and runs the integration suite against those
   # fresh runtime binaries.
   # ---------------------------------------------------------------------------
   python-sdk-test:
     name: Python SDK Tests
-    needs: [check-linux-x86_64, changes, integration-test, go-sdk-test]
-    if: always() && needs.changes.outputs.code == 'true' && needs.check-linux-x86_64.result == 'success'
+    needs: [build-linux-x86_64, changes]
+    if: always() && needs.changes.outputs.code == 'true' && needs.build-linux-x86_64.result == 'success'
     runs-on: self-hosted-ubuntu-2404-x64
     # Bound a wedged run so it can't squat a shared runner for the 6h default.
     timeout-minutes: 45
-    # The self-hosted box has 32 cores shared by several runners. Uncapped cargo
-    # (-j defaults to ncpu) lets concurrent jobs oversubscribe the CPU ~4x and
-    # starve microVM boots past the 180s agent-relay deadline (flaky
-    # "timed out waiting for agent relay"). Cap per-job build parallelism so
-    # several jobs can build at once without crushing VM boot latency.
+    # Together with Rust integration, this is the only self-hosted Cargo build.
+    # Twelve jobs per lane keep their combined compile ceiling below 32 cores.
     env:
       CARGO_BUILD_JOBS: "12"
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - name: Clean workspace
         run: |
@@ -702,14 +1055,23 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
+      - name: Set up sccache
+        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-bin: false
+          cache-targets: false
 
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: true
           cache-dependency-glob: "sdk/python/uv.lock"
+
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev mold
 
       - name: Download build artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -734,7 +1096,7 @@ jobs:
 
       - name: Build Python SDK (editable)
         working-directory: sdk/python
-        run: uv run maturin develop --release
+        run: mold -run uv run maturin develop --release
 
       - name: Run Python integration tests
         working-directory: sdk/python
@@ -762,18 +1124,31 @@ jobs:
   # ---------------------------------------------------------------------------
   python-sdk-lower-bound:
     name: Python SDK (3.10 lower bound)
-    needs: [check-linux-x86_64, changes]
+    needs: [build-linux-x86_64, changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
+      - name: Set up sccache
+        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-bin: false
+          cache-targets: false
+
+      - name: Set up mold
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
 
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
@@ -823,32 +1198,29 @@ jobs:
   # Go SDK integration tests (requires KVM)
   #
   # Downloads the pre-built msb + libkrunfw + libmicrosandbox_go_ffi.so from
-  # the `check` job, then runs `go test -tags integration ./integration/...`.
+  # the runtime job, then runs `go test -tags integration ./integration/...`.
   # Mirrors the node-sdk-test pattern.
   # ---------------------------------------------------------------------------
   go-sdk-test:
     name: Go SDK Tests (shard ${{ matrix.label }})
-    needs: [check-linux-x86_64, changes]
+    needs: [build-linux-x86_64, go-ffi-build, changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: self-hosted-ubuntu-2404-x64
     # Bound a wedged run so it can't squat a shared runner for the 6h default.
     timeout-minutes: 45
-    # The self-hosted box has 32 cores shared by several runners. Uncapped cargo
-    # (-j defaults to ncpu) lets concurrent jobs oversubscribe the CPU ~4x and
-    # starve microVM boots past the 180s agent-relay deadline (flaky
-    # "timed out waiting for agent relay"). Cap per-job build parallelism so
-    # several jobs can build at once without crushing VM boot latency.
-    env:
-      CARGO_BUILD_JOBS: "12"
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: 4
       matrix:
         include:
           - shard: 0
-            label: 1/2
+            label: 1/4
           - shard: 1
-            label: 2/2
+            label: 2/4
+          - shard: 2
+            label: 3/4
+          - shard: 3
+            label: 4/4
     steps:
       - name: Clean workspace
         run: |
@@ -872,6 +1244,12 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: msb-linux-x86_64
+          path: build/
+
+      - name: Download Go FFI artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: go-ffi-linux-x86_64
           path: build/
 
       # -- Install msb + libkrunfw --
@@ -912,7 +1290,7 @@ jobs:
           )
           selected_tests=()
           for index in "${!all_tests[@]}"; do
-            if (( index % 2 == ${{ matrix.shard }} )); then
+            if (( index % 4 == ${{ matrix.shard }} )); then
               selected_tests+=("${all_tests[$index]}")
             fi
           done
@@ -950,6 +1328,25 @@ jobs:
   # whether the matrix jobs ran. Branch protection requires only this job,
   # so docs-only PRs (where the matrix is skipped) still satisfy the gate.
   # ---------------------------------------------------------------------------
+  test-summary:
+    name: Test Summary
+    if: always()
+    needs:
+      - changes
+      - test-linux-x86_64
+      - check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Aggregate results
+        run: |
+          results='${{ toJson(needs.*.result) }}'
+          echo "needs results: $results"
+          if echo "$results" | grep -qE '"failure"|"cancelled"'; then
+            echo "::error::A required test job failed or was cancelled"
+            exit 1
+          fi
+          echo "All required test jobs passed or were skipped"
+
   summary:
     name: Check Summary
     if: always()
@@ -958,16 +1355,21 @@ jobs:
       - build-kernel
       - build-kernel-x86_64
       - build-agentd-aarch64
-      - build-agentd-x86_64
-      - check-linux-x86_64
+      - build-linux-x86_64
+      - go-ffi-build
       - check
       - windows-check
+      - rust-quality
+      - node-sdk-build
+      - python-quality
+      - go-quality
       - cli-smoke-test
       - integration-test
       - node-sdk-test
       - python-sdk-test
       - python-sdk-lower-bound
       - go-sdk-test
+      - test-summary
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate results
