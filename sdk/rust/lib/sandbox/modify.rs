@@ -3,11 +3,11 @@
 use std::sync::Arc;
 
 use microsandbox_types::{EnvVar, RootDisk, RootfsSource};
-use sea_orm::{ActiveModelTrait, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 
 use crate::MicrosandboxResult;
 use crate::backend::Backend;
-use crate::db::entity::sandbox as sandbox_entity;
+use crate::db::entity::{sandbox as sandbox_entity, sandbox_label as sandbox_label_entity};
 use crate::error::{Operation, UnsupportedReason};
 use crate::size::Mebibytes;
 
@@ -1147,16 +1147,43 @@ async fn persist_config(
         .ok_or_else(|| crate::MicrosandboxError::local_only(Operation::SandboxModify))?;
 
     let config_json = serde_json::to_string(config)?;
-    sandbox_entity::ActiveModel {
-        id: Set(local.db_id),
-        config: Set(config_json),
-        updated_at: Set(Some(chrono::Utc::now().naive_utc())),
-        ..Default::default()
-    }
-    .update(local_backend.db().await?.write())
-    .await?;
+    let labels = config.spec.labels.clone();
+    let write_db = local_backend.db().await?.write();
 
-    Ok(())
+    write_db
+        .transaction(|txn| {
+            let config_json = config_json.clone();
+            let labels = labels.clone();
+            async move {
+                sandbox_entity::ActiveModel {
+                    id: Set(local.db_id),
+                    config: Set(config_json),
+                    updated_at: Set(Some(chrono::Utc::now().naive_utc())),
+                    ..Default::default()
+                }
+                .update(&txn)
+                .await?;
+
+                sandbox_label_entity::Entity::delete_many()
+                    .filter(sandbox_label_entity::Column::SandboxId.eq(local.db_id))
+                    .exec(&txn)
+                    .await?;
+                if !labels.is_empty() {
+                    sandbox_label_entity::Entity::insert_many(labels.into_iter().map(
+                        |(key, value)| sandbox_label_entity::ActiveModel {
+                            sandbox_id: Set(local.db_id),
+                            key: Set(key),
+                            value: Set(value),
+                        },
+                    ))
+                    .exec(&txn)
+                    .await?;
+                }
+
+                Ok((txn, ()))
+            }
+        })
+        .await
 }
 
 async fn persist_active_config(
@@ -2244,7 +2271,10 @@ fn format_mib(mib: u32) -> String {
 
 #[cfg(test)]
 mod tests {
+    use tempfile::tempdir;
+
     use super::*;
+    use crate::backend::LocalBackend;
 
     fn config(cpus: u8, memory_mib: u32) -> SandboxConfig {
         let mut config = SandboxConfig::default();
@@ -2254,6 +2284,101 @@ mod tests {
         config.spec.resources.max_cpus = cpus;
         config.spec.resources.max_memory_mib = memory_mib;
         config
+    }
+
+    #[tokio::test]
+    async fn persist_config_replaces_label_projection() {
+        let temp = tempdir().unwrap();
+        let backend: Arc<dyn Backend> = Arc::new(
+            LocalBackend::builder()
+                .home(temp.path())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let pools = backend.as_local().unwrap().db().await.unwrap();
+        let mut current = config(2, 1024);
+        current.spec.labels.insert("team".into(), "stale".into());
+        current.spec.labels.insert("removed".into(), "ghost".into());
+        let model = sandbox_entity::ActiveModel {
+            name: Set(current.spec.name.clone()),
+            config: Set(serde_json::to_string(&current).unwrap()),
+            active_config: Set(None),
+            status: Set(SandboxStatus::Stopped),
+            ephemeral: Set(false),
+            created_at: Set(None),
+            updated_at: Set(None),
+            ..Default::default()
+        }
+        .insert(pools.write())
+        .await
+        .unwrap();
+        let sandbox_id = model.id;
+        for (key, value) in [("team", "stale"), ("removed", "ghost")] {
+            sandbox_label_entity::ActiveModel {
+                sandbox_id: Set(sandbox_id),
+                key: Set(key.into()),
+                value: Set(value.into()),
+            }
+            .insert(pools.write())
+            .await
+            .unwrap();
+        }
+
+        let mut updated = current;
+        updated.spec.labels.remove("removed");
+        updated.spec.labels.insert("team".into(), "metrics".into());
+        updated.spec.labels.insert("tier".into(), "gold".into());
+        let handle = backend
+            .sandboxes()
+            .get(backend.clone(), &updated.spec.name)
+            .await
+            .unwrap();
+
+        persist_config(&backend, &handle, &updated).await.unwrap();
+
+        let mut rows = sandbox_label_entity::Entity::find()
+            .filter(sandbox_label_entity::Column::SandboxId.eq(sandbox_id))
+            .all(pools.read())
+            .await
+            .unwrap();
+        rows.sort_by(|left, right| left.key.cmp(&right.key));
+        assert_eq!(
+            rows.into_iter()
+                .map(|row| (row.key, row.value))
+                .collect::<Vec<_>>(),
+            vec![
+                ("team".into(), "metrics".into()),
+                ("tier".into(), "gold".into()),
+            ]
+        );
+        let stored = sandbox_entity::Entity::find_by_id(sandbox_id)
+            .one(pools.read())
+            .await
+            .unwrap()
+            .unwrap();
+        let stored: SandboxConfig = serde_json::from_str(&stored.config).unwrap();
+        assert_eq!(stored.spec.labels, updated.spec.labels);
+
+        let mut without_labels = updated;
+        without_labels.spec.labels.clear();
+        persist_config(&backend, &handle, &without_labels)
+            .await
+            .unwrap();
+
+        let rows = sandbox_label_entity::Entity::find()
+            .filter(sandbox_label_entity::Column::SandboxId.eq(sandbox_id))
+            .all(pools.read())
+            .await
+            .unwrap();
+        assert!(rows.is_empty());
+        let stored = sandbox_entity::Entity::find_by_id(sandbox_id)
+            .one(pools.read())
+            .await
+            .unwrap()
+            .unwrap();
+        let stored: SandboxConfig = serde_json::from_str(&stored.config).unwrap();
+        assert!(stored.spec.labels.is_empty());
     }
 
     #[test]

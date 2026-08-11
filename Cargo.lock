@@ -3912,6 +3912,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "sea-orm",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
@@ -3926,6 +3927,7 @@ version = "0.6.8"
 dependencies = [
  "sea-orm-migration",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

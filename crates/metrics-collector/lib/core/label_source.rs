@@ -2,8 +2,9 @@
 //!
 //! [`LabelSource`] abstracts *where* labels come from, so the collect loop and
 //! the builder depend on a trait rather than a database connection. The
-//! production implementation ([`CatalogLabelSource`]) reads the sqlite catalog
-//! and caches per sandbox; tests can inject an in-memory map instead.
+//! production implementation ([`CatalogLabelSource`]) reads each sandbox's
+//! effective config from the sqlite catalog and caches per sandbox; tests can
+//! inject an in-memory map instead.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -11,8 +12,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use microsandbox_db::DbReadConnection;
 use microsandbox_db::pool::DEFAULT_BUSY_TIMEOUT_SECS;
+use microsandbox_db::{DbReadConnection, entity::sandbox};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
@@ -57,8 +59,9 @@ pub trait LabelSource: Send + Sync {
 /// Connects lazily and retries: if the catalog DB is not yet present (e.g.
 /// msb-metrics started before msb initialized `$MSB_HOME`), each tick emits no
 /// labels and tries again, so enrichment switches on automatically once the
-/// catalog appears. Reads go through an internal cache (one sqlite read per
-/// newly-seen sandbox, presence-based eviction).
+/// catalog appears. A bulk read on each tick selects the config that describes
+/// each running VM; unchanged configs reuse their parsed labels from the
+/// internal cache.
 pub struct CatalogLabelSource {
     db_path: PathBuf,
 
@@ -173,7 +176,7 @@ impl LabelSource for CatalogLabelSource {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Sync the cache to the active snapshot, then resolve each sandbox's labels.
+/// Read the active configs, sync the cache, then resolve each sandbox's labels.
 async fn resolve_labels(
     db: &DbReadConnection,
     cache: &mut LabelCache,
@@ -182,11 +185,23 @@ async fn resolve_labels(
 ) -> MetricsCollectorResult<SandboxLabels> {
     cache.sync(sandbox_ids);
 
+    if sandbox_ids.is_empty() {
+        return Ok(SandboxLabels::new());
+    }
+
+    let models = sandbox::Entity::find()
+        .filter(sandbox::Column::Id.is_in(sandbox_ids.iter().copied()))
+        .all(db)
+        .await?;
     let mut labels = SandboxLabels::with_capacity(sandbox_ids.len());
-    for &sandbox_id in sandbox_ids {
-        let set = apply_exclusions(cache.get_or_fetch(sandbox_id, db).await?, exclude_keys);
+    for model in models {
+        // `active_config` is the snapshot used by the running VM. Falling back
+        // to desired config covers older catalogs and the short startup window
+        // before the active snapshot is persisted.
+        let config_json = model.active_config.as_deref().unwrap_or(&model.config);
+        let set = apply_exclusions(cache.get_or_parse(model.id, config_json)?, exclude_keys);
         if !set.is_empty() {
-            labels.insert(sandbox_id, set);
+            labels.insert(model.id, set);
         }
     }
     Ok(labels)
@@ -234,11 +249,12 @@ mod tests {
         .await
         .unwrap();
         Migrator::up(write.inner(), None).await.unwrap();
+        let config = r#"{"name":"s1","labels":{"user.id":"alice"}}"#.to_string();
         sandbox::ActiveModel {
             id: Set(1),
             name: Set("s1".to_string()),
-            config: Set("{}".to_string()),
-            active_config: Set(None),
+            config: Set(config.clone()),
+            active_config: Set(Some(config)),
             status: Set(sandbox::SandboxStatus::Running),
             ephemeral: Set(false),
             created_at: Set(None),
@@ -310,6 +326,17 @@ mod tests {
         .await
         .unwrap();
 
+        let config = r#"{"name":"s1","labels":{"org.opencontainers.image.revision":"abc123","user.id":"alice"}}"#.to_string();
+        sandbox::ActiveModel {
+            id: Set(1),
+            config: Set(config.clone()),
+            active_config: Set(Some(config)),
+            ..Default::default()
+        }
+        .update(write.inner())
+        .await
+        .unwrap();
+
         let source = CatalogLabelSource::new(db_path)
             .with_excluded_keys(["org.opencontainers.image.revision".to_string()]);
 
@@ -339,6 +366,61 @@ mod tests {
         assert_eq!(
             labels.get(&1).map(|l| l.as_slice()),
             Some([("user.id".to_string(), "alice".to_string())].as_slice())
+        );
+    }
+
+    #[tokio::test]
+    async fn same_id_refreshes_only_when_active_config_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db").join("msb.db");
+        seed_catalog(&db_path).await;
+        let source = CatalogLabelSource::new(db_path.clone());
+
+        let labels = source.labels_for(HashSet::from([1])).await.unwrap();
+        assert_eq!(
+            labels.get(&1).map(|l| l.as_slice()),
+            Some([("user.id".to_string(), "alice".to_string())].as_slice())
+        );
+
+        let write = DbWriteConnection::open(
+            &db_path,
+            CONNECT_TIMEOUT,
+            Duration::from_secs(DEFAULT_BUSY_TIMEOUT_SECS),
+        )
+        .await
+        .unwrap();
+        let desired = r#"{"name":"s1","labels":{"user.id":"bob"}}"#.to_string();
+        sandbox::ActiveModel {
+            id: Set(1),
+            config: Set(desired.clone()),
+            ..Default::default()
+        }
+        .update(write.inner())
+        .await
+        .unwrap();
+
+        // A next-start change must not relabel the still-running VM.
+        let labels = source.labels_for(HashSet::from([1])).await.unwrap();
+        assert_eq!(
+            labels.get(&1).map(|l| l.as_slice()),
+            Some([("user.id".to_string(), "alice".to_string())].as_slice())
+        );
+
+        sandbox::ActiveModel {
+            id: Set(1),
+            active_config: Set(Some(desired)),
+            ..Default::default()
+        }
+        .update(write.inner())
+        .await
+        .unwrap();
+
+        // A rapid restart can retain the same id in adjacent snapshots. The
+        // changed active config still invalidates and refreshes the cache.
+        let labels = source.labels_for(HashSet::from([1])).await.unwrap();
+        assert_eq!(
+            labels.get(&1).map(|l| l.as_slice()),
+            Some([("user.id".to_string(), "bob".to_string())].as_slice())
         );
     }
 }

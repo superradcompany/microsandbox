@@ -1237,10 +1237,10 @@ mod tests {
     use microsandbox_db::entity::{run as run_entity, sandbox_rootfs as sandbox_rootfs_entity};
     use microsandbox_db::pool::DbPools;
     use microsandbox_migration::{Migrator, MigratorTrait};
-    use sea_orm::{EntityTrait, Set};
+    use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set};
     use tempfile::tempdir;
 
-    use super::sandbox_entity;
+    use super::{sandbox_entity, sandbox_label_entity};
     use crate::backend::{Backend, LocalBackend};
     use crate::runtime::SpawnMode;
     use crate::sandbox::{
@@ -1551,6 +1551,82 @@ mod tests {
         let decoded: SandboxConfig = serde_json::from_str(&row.config).unwrap();
 
         assert_eq!(decoded.manifest_digest, config.manifest_digest);
+    }
+
+    #[tokio::test]
+    async fn test_insert_sandbox_record_persists_label_projection() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let pools = open_test_pools(&db_path).await;
+        let mut config = test_config("labelled");
+        config.spec.labels.insert("team".into(), "metrics".into());
+        config.spec.labels.insert("tier".into(), "gold".into());
+
+        let sandbox_id = LocalBackend::insert_sandbox_record(pools.write(), &config)
+            .await
+            .unwrap();
+        let mut rows = sandbox_label_entity::Entity::find()
+            .filter(sandbox_label_entity::Column::SandboxId.eq(sandbox_id))
+            .all(pools.read())
+            .await
+            .unwrap();
+        rows.sort_by(|left, right| left.key.cmp(&right.key));
+
+        assert_eq!(
+            rows.into_iter()
+                .map(|row| (row.key, row.value))
+                .collect::<Vec<_>>(),
+            vec![
+                ("team".into(), "metrics".into()),
+                ("tier".into(), "gold".into()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_label_rebuild_migrates_serialized_sandbox_config() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let pools = open_test_pools(&db_path).await;
+        let mut config = test_config("migration-labels");
+        config.spec.labels.insert("team".into(), "metrics".into());
+        config.spec.labels.insert("tier".into(), "gold".into());
+        let sandbox_id = LocalBackend::insert_sandbox_record(pools.write(), &config)
+            .await
+            .unwrap();
+
+        sandbox_label_entity::Entity::delete_many()
+            .filter(sandbox_label_entity::Column::SandboxId.eq(sandbox_id))
+            .exec(pools.write())
+            .await
+            .unwrap();
+        pools
+            .write()
+            .inner()
+            .execute_unprepared(
+                "DELETE FROM seaql_migrations \
+                 WHERE version = 'm20260810_000001_rebuild_sandbox_labels'",
+            )
+            .await
+            .unwrap();
+
+        Migrator::up(pools.write().inner(), None).await.unwrap();
+
+        let mut rows = sandbox_label_entity::Entity::find()
+            .filter(sandbox_label_entity::Column::SandboxId.eq(sandbox_id))
+            .all(pools.read())
+            .await
+            .unwrap();
+        rows.sort_by(|left, right| left.key.cmp(&right.key));
+        assert_eq!(
+            rows.into_iter()
+                .map(|row| (row.key, row.value))
+                .collect::<Vec<_>>(),
+            vec![
+                ("team".into(), "metrics".into()),
+                ("tier".into(), "gold".into()),
+            ]
+        );
     }
 
     #[tokio::test]
