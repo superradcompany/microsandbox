@@ -257,7 +257,7 @@ pub struct OciSandboxDefaults {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RuntimeConfig {
-    /// Buffered host writeback containment and admission policy.
+    /// Buffered host writeback containment and pressure-sharing policy.
     pub block_writeback: BlockWritebackConfig,
 }
 
@@ -265,19 +265,19 @@ pub struct RuntimeConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "lowercase", deny_unknown_fields)]
 pub enum BlockWritebackConfig {
-    /// Use up to the measured per-disk limit, bounded by the aggregate pool.
+    /// Use the measured per-disk maximum and share the aggregate pool under pressure.
     Auto {
-        /// Optional host-global dirty-credit pool override in MiB.
+        /// Optional host-global dirty-credit pressure-pool override in MiB.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pool_mib: Option<NonZero<u64>>,
     },
 
-    /// Use an explicit per-disk limit and derive the aggregate pool unless overridden.
+    /// Use an explicit per-disk maximum and derive the pressure pool unless overridden.
     Fixed {
         /// Maximum page-aligned dirty data charged to one writable raw disk, in MiB.
         per_disk_mib: NonZero<u64>,
 
-        /// Optional host-global dirty-credit pool override in MiB.
+        /// Optional host-global dirty-credit pressure-pool override in MiB.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pool_mib: Option<NonZero<u64>>,
     },
@@ -666,9 +666,9 @@ impl Default for SandboxDefaults {
 
 impl Default for BlockWritebackConfig {
     fn default() -> Self {
-        // Keep ordinary sandbox creation independent of host-global dirty-credit capacity.
-        // Operators can opt into bounded writeback after sizing it for their workload and node.
-        Self::Off {}
+        // Auto is portable: Linux bounds dirty data and shares a derived pool, while other hosts
+        // treat the unconfigured policy as a no-op.
+        Self::Auto { pool_mib: None }
     }
 }
 
@@ -1243,10 +1243,13 @@ mod tests {
         assert_eq!(cfg.database.max_connections, 5);
         assert_eq!(cfg.database.connect_timeout_secs, 30);
         assert_eq!(cfg.database.busy_timeout_secs, 5);
-        assert_eq!(cfg.runtime.block_writeback, BlockWritebackConfig::Off {});
+        assert_eq!(
+            cfg.runtime.block_writeback,
+            BlockWritebackConfig::Auto { pool_mib: None }
+        );
         assert_eq!(
             serde_json::to_value(cfg.runtime.block_writeback).unwrap(),
-            serde_json::json!({ "mode": "off" })
+            serde_json::json!({ "mode": "auto" })
         );
     }
 
@@ -1255,7 +1258,10 @@ mod tests {
         let cfg: LocalConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(cfg.sandbox_defaults.cpus, 1);
         assert!(cfg.home.is_none());
-        assert_eq!(cfg.runtime.block_writeback, BlockWritebackConfig::Off {});
+        assert_eq!(
+            cfg.runtime.block_writeback,
+            BlockWritebackConfig::Auto { pool_mib: None }
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Host-global admission for bounded block writeback.
+//! Host-global pressure coordination for bounded block writeback.
 
 mod admission;
 
@@ -6,4 +6,4 @@ mod admission;
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-pub(crate) use admission::acquire;
+pub(crate) use admission::{WritebackPressureGuard, acquire};

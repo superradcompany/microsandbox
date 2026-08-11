@@ -49,7 +49,7 @@ pub struct LaunchConfig {
     /// Internal directory containing process-held CPU allocation leases.
     pub cpu_lease_dir: PathBuf,
 
-    /// Internal directory containing process-held writeback admission leases.
+    /// Internal directory containing process-held writeback pressure leases.
     pub writeback_lease_dir: PathBuf,
 
     /// Requested host CPU placement policy.
@@ -69,7 +69,7 @@ pub struct LaunchConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_writeback_limit_bytes: Option<u64>,
 
-    /// Host-global dirty-credit pool used for spawn-time admission.
+    /// Host-global dirty-credit pool shared fairly by live writable disks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_writeback_pool_bytes: Option<u64>,
 

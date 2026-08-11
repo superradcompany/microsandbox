@@ -266,7 +266,8 @@ fn parse_dns_rule(
     }
 
     let mut parts = right.splitn(4, ':');
-    debug_assert_eq!(parts.next(), Some("dns"));
+    let target = parts.next();
+    debug_assert_eq!(target, Some("dns"));
     let proto_raw = parts.next();
     let ports_raw = parts.next();
     if parts.next().is_some() {

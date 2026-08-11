@@ -190,15 +190,15 @@ When the root-disk default is flat, plain `msb pull IMAGE` also prepares the reu
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `block_writeback` | `{ "mode": "off" }` | Buffered host writeback containment and admission. The compatibility default cannot reject sandbox creation because of host-global dirty-credit capacity. Operators can opt into `auto` or `fixed` after sizing the policy for their workload and node. |
+| `block_writeback` | `{ "mode": "auto" }` | Buffered host writeback containment and live pressure sharing on Linux. Pool pressure never rejects sandbox creation; unconfigured `auto` is a no-op on other hosts. |
 
 ### `runtime.block_writeback`
 
 | Field | Modes | Default | Description |
 |-------|-------|---------|-------------|
-| `mode` | all | `"off"` | `auto` uses the smaller of the measured 1536 MiB per-disk ceiling and the available aggregate pool, `fixed` requires an exact `per_disk_mib`, and `off` disables both the VMM hard bound and host-global admission. |
-| `per_disk_mib` | `fixed` | required | Explicit hard budget for each eligible writable raw disk. The minimum is 128 MiB. This field is rejected in `auto` and `off` modes. |
-| `pool_mib` | `auto`, `fixed` | `null` | Optional aggregate dirty-credit admission-pool override. `null` derives the pool as the lower of 10% of physical RAM and a conservative estimate of Linux's dirty-background threshold, using the exact byte threshold when configured or the ratio applied to current `MemAvailable`. In `auto`, the pool reduces the per-disk window when necessary but must fit libkrun's 128 MiB minimum. In `fixed`, it must fit at least one complete configured per-disk budget. This field is rejected in `off` mode. |
+| `mode` | all | `"auto"` | `auto` gives each eligible disk a measured 1536 MiB maximum and shares the aggregate pool when the host is busy, `fixed` requires an explicit maximum, and `off` disables both the VMM bound and host-global pressure coordination. |
+| `per_disk_mib` | `fixed` | required | Explicit maximum for each eligible writable raw disk. The boot-time maximum is at least 128 MiB; the live fair share may fall below it under aggregate pressure. This field is rejected in `auto` and `off` modes. |
+| `pool_mib` | `auto`, `fixed` | `null` | Optional aggregate dirty-credit pressure-pool override. `null` derives the pool as the lower of 10% of physical RAM and a conservative estimate of Linux's dirty-background threshold, using the exact byte threshold when configured or the ratio applied to current `MemAvailable`. This field is rejected in `off` mode. |
 
 Use a fixed policy only when representative measurements justify a different per-disk window:
 
@@ -214,7 +214,7 @@ Use a fixed policy only when representative measurements justify a different per
 }
 ```
 
-`pool_mib` is admission capacity, not eagerly allocated RAM. Each sandbox reserves `per-disk window × eligible disks` from it before boot, while actual host page-cache use follows guest writes. Linux rejects creation if the pool cannot admit the complete requested reservation. `fixed` and an explicitly pooled `auto` policy are unsupported on other hosts.
+`pool_mib` is a live pressure budget, not eagerly allocated RAM. Every eligible writable disk in the same `MSB_HOME` receives a weighted max-min fair share: disks with a smaller configured maximum keep that smaller value, and the remaining pool is divided equally across the rest. Creating another sandbox never fails merely because this pool is full. Existing VMMs observe membership changes within 250 ms; if a disk already owns more dirty data than its new share, libkrun retires accounted ranges and pauses later writes until it converges below the target. A guest write already reserved before the target changed is allowed to complete safely. `fixed` and an explicitly pooled `auto` policy are unsupported on other hosts.
 
 Hardware CRC32C, the guest kernel preemption model, x2APIC, APICv/AVIC capability, vCPU affinity mechanics, and the pure-Rust ext4 writer are implementation or capability details rather than user policy, so they intentionally have no global config keys. The [performance guide](/optimization/overview#optimizations-that-are-not-knobs) explains how those automatic layers interact with the configurable policy.
 

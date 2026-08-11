@@ -798,10 +798,8 @@ fn resolve_linux_block_writeback_policy(
     total_memory_bytes: u64,
     derived_pool_bytes: Option<u64>,
 ) -> MicrosandboxResult<(Option<u64>, Option<u64>)> {
-    let (requested_limit_bytes, explicit_pool_mib, is_auto) = match config {
-        BlockWritebackConfig::Auto { pool_mib } => {
-            (AUTO_BLOCK_WRITEBACK_LIMIT_BYTES, pool_mib, true)
-        }
+    let (limit_bytes, explicit_pool_mib) = match config {
+        BlockWritebackConfig::Auto { pool_mib } => (AUTO_BLOCK_WRITEBACK_LIMIT_BYTES, pool_mib),
         BlockWritebackConfig::Off {} => return Ok((None, None)),
         BlockWritebackConfig::Fixed {
             per_disk_mib,
@@ -818,7 +816,7 @@ fn resolve_linux_block_writeback_policy(
                     "runtime.block_writeback.per_disk_mib exceeds the supported byte range".into(),
                 )
             })?;
-            (limit_bytes, pool_mib, false)
+            (limit_bytes, pool_mib)
         }
     };
     let explicit_pool_bytes = explicit_pool_mib
@@ -838,35 +836,6 @@ fn resolve_linux_block_writeback_policy(
     if pool_bytes > total_memory_bytes {
         return Err(MicrosandboxError::InvalidConfig(format!(
             "writeback pool ({pool_bytes} bytes) exceeds physical host memory ({total_memory_bytes} bytes)"
-        )));
-    }
-
-    // Auto is capacity-sensitive by definition: retain the measured ceiling on large hosts while
-    // selecting a smaller hard bound on denser hosts. Fixed remains the opt-in exact-budget mode.
-    let limit_bytes = if is_auto {
-        requested_limit_bytes.min(pool_bytes)
-    } else {
-        requested_limit_bytes
-    };
-    if limit_bytes < MIN_BLOCK_WRITEBACK_LIMIT_BYTES {
-        let source = if explicit_pool_bytes.is_some() {
-            "configured runtime.block_writeback.pool_mib"
-        } else {
-            "derived writeback pool"
-        };
-        return Err(MicrosandboxError::InvalidConfig(format!(
-            "{source} provides {pool_bytes} bytes but auto requires at least the {}-byte minimum per-disk limit",
-            MIN_BLOCK_WRITEBACK_LIMIT_BYTES
-        )));
-    }
-    if pool_bytes < limit_bytes {
-        let source = if explicit_pool_bytes.is_some() {
-            "configured runtime.block_writeback.pool_mib"
-        } else {
-            "derived writeback pool"
-        };
-        return Err(MicrosandboxError::InvalidConfig(format!(
-            "{source} provides {pool_bytes} bytes but must fit the {limit_bytes}-byte fixed per-disk limit; increase the pool or lower the fixed per-disk limit"
         )));
     }
 
@@ -904,7 +873,9 @@ fn auto_block_writeback_pool_bytes(
             })?
             / 100
     };
-    Ok(conservative_cap.min(kernel_background))
+    // A zero background threshold is a valid host tuning. Preserve one byte of cooperative
+    // credit so libkrun can clamp it to one host page and retain forward progress.
+    Ok(conservative_cap.min(kernel_background).max(1))
 }
 
 #[cfg(target_os = "linux")]
@@ -930,7 +901,7 @@ fn linux_auto_block_writeback_pool_bytes(
 fn linux_meminfo_bytes(field: &str) -> MicrosandboxResult<u64> {
     let meminfo = std::fs::read_to_string("/proc/meminfo").map_err(|error| {
         MicrosandboxError::Runtime(format!(
-            "read /proc/meminfo for writeback admission: {error}"
+            "read /proc/meminfo for writeback pressure policy: {error}"
         ))
     })?;
     let value_kib = meminfo
@@ -943,7 +914,7 @@ fn linux_meminfo_bytes(field: &str) -> MicrosandboxResult<u64> {
         })
         .ok_or_else(|| {
             MicrosandboxError::Runtime(format!(
-                "parse {field} from /proc/meminfo for writeback admission"
+                "parse {field} from /proc/meminfo for writeback pressure policy"
             ))
         })?;
     value_kib.checked_mul(1024).ok_or_else(|| {
@@ -4857,18 +4828,23 @@ mod tests {
                     Some(constrained_pool),
                 )
                 .unwrap(),
-                (Some(constrained_pool), Some(constrained_pool))
+                (
+                    Some(AUTO_BLOCK_WRITEBACK_LIMIT_BYTES),
+                    Some(constrained_pool)
+                )
             );
 
-            assert!(
+            assert_eq!(
                 resolve_linux_block_writeback_policy(
                     BlockWritebackConfig::Auto { pool_mib: None },
                     64 * 1024 * 1024 * 1024,
                     Some(MIN_BLOCK_WRITEBACK_LIMIT_BYTES - 1),
                 )
-                .unwrap_err()
-                .to_string()
-                .contains("minimum per-disk limit")
+                .unwrap(),
+                (
+                    Some(AUTO_BLOCK_WRITEBACK_LIMIT_BYTES),
+                    Some(MIN_BLOCK_WRITEBACK_LIMIT_BYTES - 1)
+                )
             );
             assert_eq!(
                 auto_block_writeback_pool_bytes(
@@ -4910,6 +4886,16 @@ mod tests {
                 .unwrap(),
                 8 * 1024 * 1024 * 1024 / 10
             );
+            assert_eq!(
+                auto_block_writeback_pool_bytes(
+                    64 * 1024 * 1024 * 1024,
+                    60 * 1024 * 1024 * 1024,
+                    0,
+                    0,
+                )
+                .unwrap(),
+                1
+            );
             assert!(
                 auto_block_writeback_pool_bytes(
                     64 * 1024 * 1024 * 1024,
@@ -4922,12 +4908,16 @@ mod tests {
                 .contains("must not exceed 100")
             );
         }
-        // Default local execution must never reserve aggregate writeback credit or reject a
-        // second sandbox merely because the host's derived pool cannot fit another full window.
-        assert_eq!(
-            block_writeback_policy(&RuntimeConfig::default()).unwrap(),
-            (None, None)
-        );
+        // The portable default enables live pressure sharing on Linux and remains a no-op on
+        // platforms where this host page-cache controller does not apply.
+        let default_policy = block_writeback_policy(&RuntimeConfig::default()).unwrap();
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(default_policy.0, Some(AUTO_BLOCK_WRITEBACK_LIMIT_BYTES));
+            assert!(default_policy.1.is_some_and(|pool_bytes| pool_bytes > 0));
+        }
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(default_policy, (None, None));
 
         assert_eq!(
             block_writeback_policy(&RuntimeConfig {
@@ -4973,9 +4963,12 @@ mod tests {
                     None,
                 )
                 .unwrap(),
-                (Some(512 * 1024 * 1024), Some(512 * 1024 * 1024))
+                (
+                    Some(AUTO_BLOCK_WRITEBACK_LIMIT_BYTES),
+                    Some(512 * 1024 * 1024)
+                )
             );
-            assert!(
+            assert_eq!(
                 resolve_linux_block_writeback_policy(
                     BlockWritebackConfig::Fixed {
                         per_disk_mib: NonZero::new(1024).unwrap(),
@@ -4984,9 +4977,8 @@ mod tests {
                     64 * 1024 * 1024 * 1024,
                     None,
                 )
-                .unwrap_err()
-                .to_string()
-                .contains("fixed per-disk limit")
+                .unwrap(),
+                (Some(1024 * 1024 * 1024), Some(512 * 1024 * 1024))
             );
         }
     }

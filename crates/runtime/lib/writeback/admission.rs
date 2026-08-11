@@ -1,4 +1,4 @@
-//! Crash-safe dirty-credit reservations acquired once per VM boot.
+//! Crash-safe membership and fair-share coordination for bounded block writeback.
 
 use std::fs::File;
 use std::io;
@@ -16,6 +16,7 @@ use std::os::unix::fs::MetadataExt;
 use microsandbox_db::DbWriteConnection;
 use microsandbox_db::entity::writeback_allocation;
 use microsandbox_utils::process_lock;
+use msb_krun::WritebackLimit;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 
 use crate::{RuntimeError, RuntimeResult};
@@ -24,9 +25,10 @@ use crate::{RuntimeError, RuntimeResult};
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Process-held reservation from the host-global buffered-writeback pool.
-pub(crate) struct WritebackAdmissionGuard {
+/// Process-held membership in the host-global buffered-writeback pool.
+pub(crate) struct WritebackPressureGuard {
     lease: Option<AllocationLease>,
+    limit: Option<WritebackLimit>,
 }
 
 struct AllocationLease {
@@ -61,8 +63,47 @@ struct RecoveryIdentity {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
-impl WritebackAdmissionGuard {
-    /// Removes catalog state and releases the process-held reservation.
+impl WritebackPressureGuard {
+    pub(crate) fn is_managed(&self) -> bool {
+        self.lease.is_some()
+    }
+
+    /// Returns the live limit shared by every eligible disk in this VM.
+    pub(crate) fn limit(&self) -> Option<WritebackLimit> {
+        self.limit.clone()
+    }
+
+    /// Refreshes this VM's per-disk target from the current host-wide fair share.
+    pub(crate) async fn refresh(&self, db: &DbWriteConnection) -> RuntimeResult<()> {
+        let (Some(lease), Some(limit)) = (&self.lease, &self.limit) else {
+            return Ok(());
+        };
+        let allocations = writeback_allocation::Entity::find().all(db).await?;
+        let target_bytes = fair_target_bytes(&lease.allocation_id, &allocations)?;
+        let previous_target_bytes = limit.target_bytes();
+        limit.set_target_bytes(target_bytes).map_err(|error| {
+            RuntimeError::Custom(format!("update live writeback pressure target: {error}"))
+        })?;
+        if target_bytes != previous_target_bytes {
+            // Target transitions are infrequent and useful when diagnosing host-wide pressure.
+            tracing::debug!(
+                allocation_id = %lease.allocation_id,
+                previous_target_bytes,
+                target_bytes,
+                "writeback pressure target changed"
+            );
+        }
+        Ok(())
+    }
+
+    /// Moves this VM to its smallest forward-progress target after coordination fails.
+    pub(crate) fn fail_closed(&self) {
+        if let Some(limit) = &self.limit {
+            let _ = limit.set_target_bytes(1);
+        }
+    }
+
+    /// Removes catalog state and releases the process-held pressure lease.
     pub(crate) async fn release(&self, db: &DbWriteConnection) -> RuntimeResult<()> {
         if let Some(lease) = &self.lease {
             lease.release(db).await?;
@@ -101,7 +142,7 @@ impl AllocationLease {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Reserves aggregate dirty credit for every eligible disk attached to one VM.
+/// Registers every eligible disk and initializes this VM's live fair-share target.
 pub(crate) async fn acquire(
     db: &DbWriteConnection,
     run_id: i32,
@@ -109,27 +150,30 @@ pub(crate) async fn acquire(
     pool_bytes: Option<u64>,
     per_disk_limit_bytes: Option<u64>,
     disk_paths: &[PathBuf],
-) -> RuntimeResult<WritebackAdmissionGuard> {
-    let (Some(pool_bytes), Some(per_disk_limit_bytes)) = (pool_bytes, per_disk_limit_bytes) else {
-        return Ok(WritebackAdmissionGuard { lease: None });
+) -> RuntimeResult<WritebackPressureGuard> {
+    let Some(per_disk_limit_bytes) = per_disk_limit_bytes else {
+        return Ok(WritebackPressureGuard {
+            lease: None,
+            limit: None,
+        });
+    };
+    let limit = WritebackLimit::new(per_disk_limit_bytes);
+    let Some(pool_bytes) = pool_bytes else {
+        return Ok(WritebackPressureGuard {
+            lease: None,
+            limit: Some(limit),
+        });
     };
     if disk_paths.is_empty() {
-        return Ok(WritebackAdmissionGuard { lease: None });
+        return Ok(WritebackPressureGuard {
+            lease: None,
+            limit: None,
+        });
     }
 
     let disk_count = disk_paths.len();
     let recovery_identity = recovery_identity(disk_paths)?;
-    let requested_bytes = reservation_bytes(per_disk_limit_bytes, disk_count)?;
-    if requested_bytes > pool_bytes {
-        return Err(pool_exhausted_error(
-            requested_bytes,
-            0,
-            pool_bytes,
-            per_disk_limit_bytes,
-            disk_count,
-        ));
-    }
-
+    let requested_bytes = requested_max_bytes(per_disk_limit_bytes, disk_count)?;
     prepare_lease_dir(lease_dir)?;
     let allocation_id = format!("{:032x}", rand::random::<u128>());
     let lease_name = format!("{allocation_id}.lock");
@@ -168,31 +212,12 @@ pub(crate) async fn acquire(
                         .await?;
                 }
 
-                // The capacity check and insert share one retryable SQLite transaction. Concurrent
-                // spawns that read the same snapshot cannot both commit: the loser retries and
-                // observes the winner before deciding whether capacity remains.
+                // The insert remains serialized with stale cleanup. Capacity is intentionally not
+                // an admission gate: every live runtime converges to a weighted fair share instead.
                 let active = writeback_allocation::Entity::find()
                     .all(&transaction)
                     .await?;
-                let occupied_bytes = total_reserved_bytes(&active)?;
-                // A host policy change must not let a new runtime enlarge the pool out from under
-                // reservations that were admitted against a smaller live limit. Once those older
-                // reservations drain, their stored policy leaves the minimum and the larger pool
-                // becomes available without any generation switch or supervisor process.
-                let effective_pool_bytes = most_restrictive_pool_bytes(pool_bytes, &active)?;
-                let admitted_bytes =
-                    occupied_bytes.checked_add(requested_bytes).ok_or_else(|| {
-                        RuntimeError::Custom("writeback reservation total overflowed u64".into())
-                    })?;
-                if admitted_bytes > effective_pool_bytes {
-                    return Err(pool_exhausted_error(
-                        requested_bytes,
-                        occupied_bytes,
-                        effective_pool_bytes,
-                        per_disk_limit_bytes,
-                        disk_count,
-                    ));
-                }
+                let existing_requested_bytes = total_requested_bytes(&active)?;
 
                 writeback_allocation::Entity::insert(writeback_allocation::ActiveModel {
                     id: Set(allocation_id.clone()),
@@ -205,7 +230,7 @@ pub(crate) async fn acquire(
                     disk_count: Set(i32::try_from(disk_count).map_err(|_| {
                         RuntimeError::Custom("writeback disk count exceeds i32".into())
                     })?),
-                    reserved_bytes: Set(to_i64(requested_bytes, "writeback reservation")?),
+                    reserved_bytes: Set(to_i64(requested_bytes, "writeback requested maximum")?),
                     pool_bytes: Set(to_i64(pool_bytes, "writeback pool")?),
                     boot_id: Set(recovery_boot_id),
                     backing_devices: Set(recovery_backing_devices),
@@ -214,24 +239,33 @@ pub(crate) async fn acquire(
                 .exec(&transaction)
                 .await?;
 
-                Ok::<_, RuntimeError>((transaction, occupied_bytes))
+                let active = writeback_allocation::Entity::find()
+                    .all(&transaction)
+                    .await?;
+                let target_bytes = fair_target_bytes(&allocation_id, &active)?;
+
+                Ok::<_, RuntimeError>((transaction, (existing_requested_bytes, target_bytes)))
             }
         })
         .await;
 
     match transaction_result {
-        Ok(occupied_bytes) => {
+        Ok((existing_requested_bytes, target_bytes)) => {
             clean_stale_files(stale);
+            limit.set_target_bytes(target_bytes).map_err(|error| {
+                RuntimeError::Custom(format!("set initial writeback pressure target: {error}"))
+            })?;
             tracing::debug!(
                 pool_bytes,
-                occupied_bytes,
+                existing_requested_bytes,
                 requested_bytes,
                 per_disk_limit_bytes,
+                target_bytes,
                 disk_count,
                 elapsed_us = started.elapsed().as_micros(),
-                "writeback dirty credit admitted"
+                "writeback pressure lease acquired"
             );
-            Ok(WritebackAdmissionGuard {
+            Ok(WritebackPressureGuard {
                 lease: Some(AllocationLease {
                     allocation_id,
                     lease_path,
@@ -239,6 +273,7 @@ pub(crate) async fn acquire(
                     backing_files: recovery_identity.files,
                     released: AtomicBool::new(false),
                 }),
+                limit: Some(limit),
             })
         }
         Err(error) => {
@@ -248,25 +283,25 @@ pub(crate) async fn acquire(
     }
 }
 
-fn reservation_bytes(per_disk_limit_bytes: u64, disk_count: usize) -> RuntimeResult<u64> {
+fn requested_max_bytes(per_disk_limit_bytes: u64, disk_count: usize) -> RuntimeResult<u64> {
     let disk_count = u64::try_from(disk_count)
         .map_err(|_| RuntimeError::Custom("writeback disk count exceeds u64".into()))?;
     per_disk_limit_bytes
         .checked_mul(disk_count)
-        .ok_or_else(|| RuntimeError::Custom("writeback reservation overflowed u64".into()))
+        .ok_or_else(|| RuntimeError::Custom("writeback requested maximum overflowed u64".into()))
 }
 
-fn total_reserved_bytes(allocations: &[writeback_allocation::Model]) -> RuntimeResult<u64> {
+fn total_requested_bytes(allocations: &[writeback_allocation::Model]) -> RuntimeResult<u64> {
     allocations.iter().try_fold(0_u64, |total, allocation| {
         let reserved = u64::try_from(allocation.reserved_bytes).map_err(|_| {
             RuntimeError::Custom(format!(
-                "writeback allocation {} contains a negative reservation",
+                "writeback allocation {} contains a negative requested maximum",
                 allocation.id
             ))
         })?;
         total
             .checked_add(reserved)
-            .ok_or_else(|| RuntimeError::Custom("writeback allocation total overflowed u64".into()))
+            .ok_or_else(|| RuntimeError::Custom("writeback requested total overflowed u64".into()))
     })
 }
 
@@ -287,20 +322,93 @@ fn most_restrictive_pool_bytes(
         })
 }
 
-fn to_i64(value: u64, label: &str) -> RuntimeResult<i64> {
-    i64::try_from(value).map_err(|_| RuntimeError::Custom(format!("{label} exceeds i64")))
+/// Computes the weighted max-min fair target for one allocation.
+///
+/// Every disk receives the same waterline unless its configured maximum is lower. An allocation
+/// with multiple writable disks therefore consumes one share per disk rather than one share per
+/// sandbox. Integer division may leave a few bytes unused but never exceeds the active pool.
+fn fair_target_bytes(
+    allocation_id: &str,
+    allocations: &[writeback_allocation::Model],
+) -> RuntimeResult<u64> {
+    let allocation = allocations
+        .iter()
+        .find(|allocation| allocation.id == allocation_id)
+        .ok_or_else(|| {
+            RuntimeError::Custom(format!(
+                "writeback pressure allocation {allocation_id} disappeared"
+            ))
+        })?;
+    let requested_limit = allocation_limit_bytes(allocation)?;
+    let pool_bytes = most_restrictive_pool_bytes(u64::MAX, allocations)?;
+    let mut limits = allocations
+        .iter()
+        .map(|allocation| {
+            Ok((
+                allocation_limit_bytes(allocation)?,
+                allocation_disk_count(allocation)?,
+            ))
+        })
+        .collect::<RuntimeResult<Vec<_>>>()?;
+    limits.sort_unstable_by_key(|(limit, _)| *limit);
+
+    let mut remaining_pool = pool_bytes;
+    let mut remaining_disks = limits.iter().try_fold(0_u64, |total, (_, count)| {
+        total
+            .checked_add(*count)
+            .ok_or_else(|| RuntimeError::Custom("writeback disk total overflowed u64".into()))
+    })?;
+    if remaining_disks == 0 {
+        return Err(RuntimeError::Custom(
+            "writeback pressure allocation has no disks".into(),
+        ));
+    }
+
+    for (configured_limit, disk_count) in limits {
+        let waterline = remaining_pool / remaining_disks;
+        if configured_limit >= waterline {
+            return Ok(requested_limit.min(waterline.max(1)));
+        }
+        let allocation_bytes = configured_limit.checked_mul(disk_count).ok_or_else(|| {
+            RuntimeError::Custom("writeback fair-share total overflowed u64".into())
+        })?;
+        remaining_pool = remaining_pool.saturating_sub(allocation_bytes);
+        remaining_disks -= disk_count;
+        if remaining_disks == 0 {
+            return Ok(requested_limit);
+        }
+    }
+
+    Ok(requested_limit)
 }
 
-fn pool_exhausted_error(
-    requested_bytes: u64,
-    occupied_bytes: u64,
-    pool_bytes: u64,
-    per_disk_limit_bytes: u64,
-    disk_count: usize,
-) -> RuntimeError {
-    RuntimeError::Custom(format!(
-        "host writeback pool exhausted: requested {requested_bytes} bytes for {disk_count} disk(s) at {per_disk_limit_bytes} bytes each, but {occupied_bytes} of {pool_bytes} bytes is already reserved"
-    ))
+fn allocation_limit_bytes(allocation: &writeback_allocation::Model) -> RuntimeResult<u64> {
+    u64::try_from(allocation.per_disk_limit_bytes).map_err(|_| {
+        RuntimeError::Custom(format!(
+            "writeback allocation {} contains a negative per-disk limit",
+            allocation.id
+        ))
+    })
+}
+
+fn allocation_disk_count(allocation: &writeback_allocation::Model) -> RuntimeResult<u64> {
+    let disk_count = u64::try_from(allocation.disk_count).map_err(|_| {
+        RuntimeError::Custom(format!(
+            "writeback allocation {} contains a negative disk count",
+            allocation.id
+        ))
+    })?;
+    if disk_count == 0 {
+        return Err(RuntimeError::Custom(format!(
+            "writeback allocation {} contains no disks",
+            allocation.id
+        )));
+    }
+    Ok(disk_count)
+}
+
+fn to_i64(value: u64, label: &str) -> RuntimeResult<i64> {
+    i64::try_from(value).map_err(|_| RuntimeError::Custom(format!("{label} exceeds i64")))
 }
 
 fn recovery_identity(disk_paths: &[PathBuf]) -> RuntimeResult<RecoveryIdentity> {
@@ -325,7 +433,7 @@ fn recovery_identity(disk_paths: &[PathBuf]) -> RuntimeResult<RecoveryIdentity> 
         devices.dedup();
         if devices.is_empty() {
             return Err(RuntimeError::Custom(
-                "active writeback admission has no backing filesystem identity".into(),
+                "active writeback pressure policy has no backing filesystem identity".into(),
             ));
         }
         let backing_devices = devices
@@ -431,7 +539,7 @@ fn recover_stale_allocation(allocation: &writeback_allocation::Model) -> Runtime
         let recorded_boot_id = normalize_boot_id(&allocation.boot_id)?;
         if recorded_boot_id != current_boot_id {
             // The page cache and all process locks disappeared at reboot, so no abandoned dirty
-            // data from the recorded boot can still consume this boot's admission budget.
+            // data from the recorded boot can still affect this boot's pressure membership.
             return Ok(());
         }
         let devices = parse_backing_devices(&allocation.backing_devices)?;
@@ -685,7 +793,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     use super::{DeviceId, decode_mountinfo_path, normalize_boot_id, parse_backing_devices};
-    use super::{acquire, is_valid_lease_name, reservation_bytes};
+    use super::{acquire, is_valid_lease_name, requested_max_bytes};
 
     fn test_disks(dir: &TempDir, count: usize) -> Vec<PathBuf> {
         (0..count)
@@ -709,7 +817,7 @@ mod tests {
         Migrator::up(db.inner(), None).await.unwrap();
 
         let sandbox_id = sandbox::ActiveModel {
-            name: Set("writeback-admission-test".into()),
+            name: Set("writeback-pressure-test".into()),
             config: Set("{}".into()),
             status: Set(sandbox::SandboxStatus::Running),
             ephemeral: Set(false),
@@ -738,8 +846,8 @@ mod tests {
 
     #[test]
     fn reservation_multiplies_the_per_disk_limit() {
-        assert_eq!(reservation_bytes(1280, 3).unwrap(), 3840);
-        assert!(reservation_bytes(u64::MAX, 2).is_err());
+        assert_eq!(requested_max_bytes(1280, 3).unwrap(), 3840);
+        assert!(requested_max_bytes(u64::MAX, 2).is_err());
     }
 
     #[test]
@@ -780,7 +888,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admission_rejects_overcommit_and_reuses_released_credit() {
+    async fn pressure_admits_overcommit_and_rebalances_live_limits() {
         let (dir, db, run_ids) = test_db().await;
         let lease_dir = dir.path().join("leases");
         let per_disk = 512 * 1024 * 1024;
@@ -807,31 +915,6 @@ mod tests {
         )
         .await
         .unwrap();
-        let error = match acquire(
-            &db,
-            run_ids[2],
-            &lease_dir,
-            Some(pool),
-            Some(per_disk),
-            &disks,
-        )
-        .await
-        {
-            Ok(_) => panic!("third reservation unexpectedly exceeded the global pool"),
-            Err(error) => error,
-        };
-
-        assert!(error.to_string().contains("host writeback pool exhausted"));
-        assert_eq!(
-            writeback_allocation::Entity::find()
-                .all(&db)
-                .await
-                .unwrap()
-                .len(),
-            2
-        );
-
-        first.release(&db).await.unwrap();
         let third = acquire(
             &db,
             run_ids[2],
@@ -842,21 +925,31 @@ mod tests {
         )
         .await
         .unwrap();
+
         assert_eq!(
             writeback_allocation::Entity::find()
                 .all(&db)
                 .await
                 .unwrap()
                 .len(),
-            2
+            3
         );
+        first.refresh(&db).await.unwrap();
+        second.refresh(&db).await.unwrap();
+        assert_eq!(first.limit().unwrap().target_bytes(), pool / 3);
+        assert_eq!(second.limit().unwrap().target_bytes(), pool / 3);
+        assert_eq!(third.limit().unwrap().target_bytes(), pool / 3);
 
-        second.release(&db).await.unwrap();
         third.release(&db).await.unwrap();
+        first.refresh(&db).await.unwrap();
+        assert_eq!(first.limit().unwrap().target_bytes(), per_disk);
+
+        first.release(&db).await.unwrap();
+        second.release(&db).await.unwrap();
     }
 
     #[tokio::test]
-    async fn admission_preserves_the_most_restrictive_live_pool() {
+    async fn pressure_preserves_the_most_restrictive_live_pool() {
         let (dir, db, run_ids) = test_db().await;
         let lease_dir = dir.path().join("leases");
         let limit = 512 * 1024 * 1024;
@@ -872,22 +965,6 @@ mod tests {
         )
         .await
         .unwrap();
-        let error = match acquire(
-            &db,
-            run_ids[1],
-            &lease_dir,
-            Some(2 * limit),
-            Some(limit),
-            &disks,
-        )
-        .await
-        {
-            Ok(_) => panic!("larger caller pool escaped the active smaller policy"),
-            Err(error) => error,
-        };
-        assert!(error.to_string().contains(&limit.to_string()));
-
-        first.release(&db).await.unwrap();
         let second = acquire(
             &db,
             run_ids[1],
@@ -898,11 +975,18 @@ mod tests {
         )
         .await
         .unwrap();
+        first.refresh(&db).await.unwrap();
+        assert_eq!(first.limit().unwrap().target_bytes(), limit / 2);
+        assert_eq!(second.limit().unwrap().target_bytes(), limit / 2);
+
+        first.release(&db).await.unwrap();
+        second.refresh(&db).await.unwrap();
+        assert_eq!(second.limit().unwrap().target_bytes(), limit);
         second.release(&db).await.unwrap();
     }
 
     #[tokio::test]
-    async fn disabled_admission_does_not_create_a_lease_or_catalog_row() {
+    async fn disabled_pressure_pool_does_not_create_a_lease_or_catalog_row() {
         let (dir, db, run_ids) = test_db().await;
         let lease_dir = dir.path().join("leases");
         let disks = test_disks(&dir, 1);
@@ -926,11 +1010,12 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        assert_eq!(guard.limit().unwrap().target_bytes(), 512 * 1024 * 1024);
         guard.release(&db).await.unwrap();
     }
 
     #[tokio::test]
-    async fn admission_recovers_credit_after_owner_crash() {
+    async fn pressure_pool_recovers_membership_after_owner_crash() {
         let (dir, db, run_ids) = test_db().await;
         let lease_dir = dir.path().join("leases");
         let limit = 512 * 1024 * 1024;
@@ -966,7 +1051,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admission_survives_run_cleanup_until_credit_is_safely_released() {
+    async fn pressure_membership_survives_run_cleanup_until_safely_released() {
         let (dir, db, run_ids) = test_db().await;
         let lease_dir = dir.path().join("leases");
         let limit = 512 * 1024 * 1024;
@@ -1002,7 +1087,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_admission_cannot_overcommit_one_credit() {
+    async fn concurrent_pressure_membership_keeps_both_creators() {
         let (dir, first_db, run_ids) = test_db().await;
         let second_db = DbWriteConnection::open(
             &dir.path().join("catalog.db"),
@@ -1034,21 +1119,64 @@ mod tests {
             ),
         );
 
-        assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+        assert!(first.is_ok());
+        assert!(second.is_ok());
         assert_eq!(
             writeback_allocation::Entity::find()
                 .all(&first_db)
                 .await
                 .unwrap()
                 .len(),
-            1
+            2
         );
 
-        if let Ok(guard) = first {
-            guard.release(&first_db).await.unwrap();
-        }
-        if let Ok(guard) = second {
-            guard.release(&second_db).await.unwrap();
-        }
+        let first = first.unwrap();
+        let second = second.unwrap();
+        first.refresh(&first_db).await.unwrap();
+        second.refresh(&second_db).await.unwrap();
+        assert_eq!(first.limit().unwrap().target_bytes(), limit / 2);
+        assert_eq!(second.limit().unwrap().target_bytes(), limit / 2);
+        first.release(&first_db).await.unwrap();
+        second.release(&second_db).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pressure_counts_every_writable_disk_in_the_fair_share() {
+        let (dir, db, run_ids) = test_db().await;
+        let lease_dir = dir.path().join("leases");
+        let limit = 512 * 1024 * 1024;
+        let pool = 3 * 256 * 1024 * 1024;
+        let two_disks = test_disks(&dir, 2);
+        let one_disk = vec![two_disks[0].clone()];
+
+        let first = acquire(
+            &db,
+            run_ids[0],
+            &lease_dir,
+            Some(pool),
+            Some(limit),
+            &two_disks,
+        )
+        .await
+        .unwrap();
+        let second = acquire(
+            &db,
+            run_ids[1],
+            &lease_dir,
+            Some(pool),
+            Some(limit),
+            &one_disk,
+        )
+        .await
+        .unwrap();
+
+        first.refresh(&db).await.unwrap();
+        assert_eq!(first.limit().unwrap().target_bytes(), pool / 3);
+        assert_eq!(second.limit().unwrap().target_bytes(), pool / 3);
+
+        second.release(&db).await.unwrap();
+        first.refresh(&db).await.unwrap();
+        assert_eq!(first.limit().unwrap().target_bytes(), pool / 2);
+        first.release(&db).await.unwrap();
     }
 }
