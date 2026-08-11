@@ -163,8 +163,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     # CI_LINUX_X86_RUNNER can point at an organization larger-runner label.
-    # Repositories can override the standard 8-core larger-runner label.
-    runs-on: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest-8-cores' }}
+    # Default to a standard hosted runner so unconfigured repositories do not queue indefinitely.
+    runs-on: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 45
     env:
       CARGO_INCREMENTAL: "0"
@@ -238,7 +238,7 @@ jobs:
     name: Build Go FFI (linux-x86_64)
     needs: [build-linux-x86_64, changes]
     if: needs.changes.outputs.code == 'true'
-    runs-on: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest-8-cores' }}
+    runs-on: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: "0"
@@ -317,7 +317,7 @@ jobs:
     uses: ./.github/workflows/test-platform.yml
     with:
       target: linux-x86_64
-      runner: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest-8-cores' }}
+      runner: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest' }}
       os: linux
       agentd_target: x86_64-unknown-linux-musl
 
@@ -481,7 +481,7 @@ jobs:
     name: Rust Quality
     needs: [build-linux-x86_64, changes]
     if: needs.changes.outputs.code == 'true'
-    runs-on: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest-8-cores' }}
+    runs-on: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 45
     env:
       CARGO_INCREMENTAL: "0"
@@ -540,7 +540,7 @@ jobs:
     name: TypeScript and Node Quality
     needs: [build-linux-x86_64, changes]
     if: needs.changes.outputs.code == 'true'
-    runs-on: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest-8-cores' }}
+    runs-on: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 45
     env:
       CARGO_INCREMENTAL: "0"
@@ -624,7 +624,7 @@ jobs:
     name: Python Quality
     needs: [build-linux-x86_64, changes]
     if: needs.changes.outputs.code == 'true'
-    runs-on: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest-8-cores' }}
+    runs-on: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 45
     env:
       CARGO_INCREMENTAL: "0"
