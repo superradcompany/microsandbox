@@ -1823,14 +1823,13 @@ fn build_vm(
 fn to_krun_network_rate_limiters(
     config: &microsandbox_network::config::NetworkConfig,
 ) -> KrunNetworkRateLimiters {
+    let rate_limiter = config.rate_limiter.as_ref();
     KrunNetworkRateLimiters {
-        rx: config
-            .ingress_rate_limiter
-            .as_ref()
+        rx: rate_limiter
+            .and_then(|rate_limiter| rate_limiter.ingress.as_ref())
             .map(to_krun_rate_limiter),
-        tx: config
-            .egress_rate_limiter
-            .as_ref()
+        tx: rate_limiter
+            .and_then(|rate_limiter| rate_limiter.egress.as_ref())
             .map(to_krun_rate_limiter),
     }
 }
@@ -2648,8 +2647,10 @@ mod tests {
             ops: None,
         };
         let config = microsandbox_network::config::NetworkConfig {
-            egress_rate_limiter: Some(egress),
-            ingress_rate_limiter: Some(ingress),
+            rate_limiter: Some(microsandbox_types::NetworkRateLimiterConfig {
+                egress: Some(egress),
+                ingress: Some(ingress),
+            }),
             ..Default::default()
         };
 

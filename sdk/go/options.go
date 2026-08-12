@@ -1087,13 +1087,9 @@ type NetworkConfig struct {
 	// MaxConnections caps concurrent network connections from the sandbox.
 	MaxConnections *uint
 
-	// EgressRateLimiter throttles guest-to-runtime (egress) traffic. Nil means
-	// unlimited. Takes effect on the next sandbox start.
-	EgressRateLimiter *RateLimiterConfig
-
-	// IngressRateLimiter throttles runtime-to-guest (ingress) traffic. Nil means
-	// unlimited. Takes effect on the next sandbox start.
-	IngressRateLimiter *RateLimiterConfig
+	// RateLimiter configures local egress and ingress traffic limits. Nil means
+	// unlimited in both directions.
+	RateLimiter *NetworkRateLimiterConfig
 
 	// OnSecretViolation is the sandbox-wide action when a secret is sent to
 	// a disallowed host. Per-secret overrides via SecretEntry.OnViolation.
@@ -1120,6 +1116,14 @@ type RateLimiterConfig struct {
 	Bandwidth *TokenBucketConfig
 	// Ops caps packet rate in frames.
 	Ops *TokenBucketConfig
+}
+
+// NetworkRateLimiterConfig groups local network limits by traffic direction.
+type NetworkRateLimiterConfig struct {
+	// Egress throttles guest-to-runtime traffic. Nil means unlimited.
+	Egress *RateLimiterConfig
+	// Ingress throttles runtime-to-guest traffic. Nil means unlimited.
+	Ingress *RateLimiterConfig
 }
 
 // TokenBucketConfig describes a token bucket. The bucket starts full and

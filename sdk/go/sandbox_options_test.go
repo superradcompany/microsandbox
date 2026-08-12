@@ -741,20 +741,22 @@ func TestFFIWireShape_NetworkCustomRules(t *testing.T) {
 
 func TestBuildFFINetworkRateLimiters(t *testing.T) {
 	out := buildFFINetwork(&NetworkConfig{
-		EgressRateLimiter: &RateLimiterConfig{
-			Bandwidth: &TokenBucketConfig{
-				Size:         1 << 20,
-				RefillTime:   time.Second,
-				OneTimeBurst: 512 << 10,
+		RateLimiter: &NetworkRateLimiterConfig{
+			Egress: &RateLimiterConfig{
+				Bandwidth: &TokenBucketConfig{
+					Size:         1 << 20,
+					RefillTime:   time.Second,
+					OneTimeBurst: 512 << 10,
+				},
+				Ops: &TokenBucketConfig{Size: 1000, RefillTime: 100 * time.Millisecond},
 			},
-			Ops: &TokenBucketConfig{Size: 1000, RefillTime: 100 * time.Millisecond},
-		},
-		IngressRateLimiter: &RateLimiterConfig{
-			Bandwidth: &TokenBucketConfig{Size: 2 << 20, RefillTime: 500 * time.Millisecond},
+			Ingress: &RateLimiterConfig{
+				Bandwidth: &TokenBucketConfig{Size: 2 << 20, RefillTime: 500 * time.Millisecond},
+			},
 		},
 	})
 
-	egress := out.EgressRateLimiter
+	egress := out.RateLimiter.Egress
 	if egress == nil || egress.Bandwidth == nil || egress.Ops == nil {
 		t.Fatalf("egress rate limiter = %+v", egress)
 	}
@@ -768,7 +770,7 @@ func TestBuildFFINetworkRateLimiters(t *testing.T) {
 		t.Fatalf("egress ops = %+v", egress.Ops)
 	}
 
-	ingress := out.IngressRateLimiter
+	ingress := out.RateLimiter.Ingress
 	if ingress == nil || ingress.Bandwidth == nil {
 		t.Fatalf("ingress rate limiter = %+v", ingress)
 	}
@@ -782,7 +784,7 @@ func TestBuildFFINetworkRateLimiters(t *testing.T) {
 
 func TestBuildFFINetworkRateLimitersNil(t *testing.T) {
 	out := buildFFINetwork(&NetworkConfig{})
-	if out.EgressRateLimiter != nil || out.IngressRateLimiter != nil {
+	if out.RateLimiter != nil {
 		t.Fatalf("nil rate limiters should stay nil: %+v", out)
 	}
 }
@@ -810,21 +812,24 @@ func TestFFIWireShape_NetworkRateLimiters(t *testing.T) {
 	got := marshalCreateOptions(t,
 		WithImage("alpine"),
 		WithNetwork(&NetworkConfig{
-			EgressRateLimiter: &RateLimiterConfig{
-				Bandwidth: &TokenBucketConfig{
-					Size:         1 << 20,
-					RefillTime:   time.Second,
-					OneTimeBurst: 512 << 10,
+			RateLimiter: &NetworkRateLimiterConfig{
+				Egress: &RateLimiterConfig{
+					Bandwidth: &TokenBucketConfig{
+						Size:         1 << 20,
+						RefillTime:   time.Second,
+						OneTimeBurst: 512 << 10,
+					},
 				},
-			},
-			IngressRateLimiter: &RateLimiterConfig{
-				Ops: &TokenBucketConfig{Size: 1000, RefillTime: 100 * time.Millisecond},
+				Ingress: &RateLimiterConfig{
+					Ops: &TokenBucketConfig{Size: 1000, RefillTime: 100 * time.Millisecond},
+				},
 			},
 		}),
 	)
 	net := mustField(t, got, "network").(map[string]any)
+	rateLimiter := net["rate_limiter"].(map[string]any)
 
-	egress := net["egress_rate_limiter"].(map[string]any)
+	egress := rateLimiter["egress"].(map[string]any)
 	bw := egress["bandwidth"].(map[string]any)
 	if bw["size"] != float64(1<<20) || bw["refill_time_ms"] != float64(1000) {
 		t.Fatalf("egress bandwidth = %v", bw)
@@ -836,7 +841,7 @@ func TestFFIWireShape_NetworkRateLimiters(t *testing.T) {
 		t.Fatalf("nil ops bucket should be omitted: %v", egress)
 	}
 
-	ingress := net["ingress_rate_limiter"].(map[string]any)
+	ingress := rateLimiter["ingress"].(map[string]any)
 	ops := ingress["ops"].(map[string]any)
 	if ops["size"] != float64(1000) || ops["refill_time_ms"] != float64(100) {
 		t.Fatalf("ingress ops = %v", ops)

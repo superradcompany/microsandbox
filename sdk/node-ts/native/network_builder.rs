@@ -10,7 +10,7 @@ use microsandbox_network::policy::NetworkPolicy as RustNetworkPolicy;
 use crate::dns_builder::JsDnsBuilder;
 use crate::interface_overrides_builder::JsInterfaceOverridesBuilder;
 use crate::network_policy_builder::JsNetworkPolicyBuilder;
-use crate::rate_limiter_builder::JsRateLimiterBuilder;
+use crate::rate_limiter_builder::{JsNetworkRateLimiterBuilder, RateLimiterValues};
 use crate::secret_builder::JsSecretBuilder;
 use crate::tls_builder::JsTlsBuilder;
 use crate::violation_action_builder::JsViolationActionBuilder;
@@ -276,45 +276,36 @@ impl JsNetworkBuilder {
         self
     }
 
-    /// Limit guest-to-runtime (egress) traffic via a callback. Applies on
-    /// the next sandbox start.
+    /// Configure local egress and ingress rate limits. Applies on the next
+    /// sandbox start.
     ///
     /// ```js
-    /// .egressRateLimiter((r) => r
-    ///   .bandwidth(1_048_576, 1_000)
-    ///   .ops(1_000, 1_000))
+    /// .rateLimiter((r) => r
+    ///   .egress((r) => r
+    ///     .bandwidth(1_048_576, 1_000)
+    ///     .ops(1_000, 1_000)))
     /// ```
-    #[napi(js_name = "egressRateLimiter")]
-    pub fn egress_rate_limiter(
+    #[napi(js_name = "rateLimiter")]
+    pub fn rate_limiter(
         &mut self,
         env: &Env,
         configure: Function<
-            ClassInstance<JsRateLimiterBuilder>,
-            ClassInstance<JsRateLimiterBuilder>,
+            ClassInstance<JsNetworkRateLimiterBuilder>,
+            ClassInstance<JsNetworkRateLimiterBuilder>,
         >,
     ) -> Result<&Self> {
-        let initial = JsRateLimiterBuilder::new().into_instance(env)?;
+        let initial = JsNetworkRateLimiterBuilder::new().into_instance(env)?;
         let returned = configure.call(initial)?;
         let prev = self.take_inner();
-        self.inner = Some(prev.egress_rate_limiter(|r| apply_rate_limiter(r, &returned)));
-        Ok(self)
-    }
-
-    /// Limit runtime-to-guest (ingress) traffic via a callback. Applies on
-    /// the next sandbox start.
-    #[napi(js_name = "ingressRateLimiter")]
-    pub fn ingress_rate_limiter(
-        &mut self,
-        env: &Env,
-        configure: Function<
-            ClassInstance<JsRateLimiterBuilder>,
-            ClassInstance<JsRateLimiterBuilder>,
-        >,
-    ) -> Result<&Self> {
-        let initial = JsRateLimiterBuilder::new().into_instance(env)?;
-        let returned = configure.call(initial)?;
-        let prev = self.take_inner();
-        self.inner = Some(prev.ingress_rate_limiter(|r| apply_rate_limiter(r, &returned)));
+        self.inner = Some(prev.rate_limiter(|mut r| {
+            if let Some(ref limiter) = returned.egress {
+                r = r.egress(|direction| apply_rate_limiter(direction, limiter));
+            }
+            if let Some(ref limiter) = returned.ingress {
+                r = r.ingress(|direction| apply_rate_limiter(direction, limiter));
+            }
+            r
+        }));
         Ok(self)
     }
 
@@ -345,7 +336,7 @@ fn parse_bind_addr(bind: &str) -> Result<IpAddr> {
 /// to the Rust builder. Validation happens in `NetworkBuilder.build()`.
 fn apply_rate_limiter(
     mut r: microsandbox_network::builder::RateLimiterBuilder,
-    js: &JsRateLimiterBuilder,
+    js: &RateLimiterValues,
 ) -> microsandbox_network::builder::RateLimiterBuilder {
     if let Some((size_bytes, refill_time_ms)) = js.bandwidth {
         r = r.bandwidth(size_bytes, std::time::Duration::from_millis(refill_time_ms));

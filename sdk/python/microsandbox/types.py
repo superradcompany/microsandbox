@@ -1554,6 +1554,28 @@ class RateLimiter:
 
 
 @dataclass(frozen=True, slots=True)
+class NetworkRateLimiter:
+    """Egress and ingress rate limits for a local sandbox network."""
+
+    egress: RateLimiter | None = None
+    """Guest-to-runtime rate limiter. ``None`` means unlimited."""
+    ingress: RateLimiter | None = None
+    """Runtime-to-guest rate limiter. ``None`` means unlimited."""
+
+    def _to_dict(self) -> dict:
+        d: dict = {}
+        if self.egress is not None:
+            if not isinstance(self.egress, RateLimiter):
+                raise TypeError("NetworkRateLimiter.egress must be RateLimiter or None")
+            d["egress"] = self.egress._to_dict()
+        if self.ingress is not None:
+            if not isinstance(self.ingress, RateLimiter):
+                raise TypeError("NetworkRateLimiter.ingress must be RateLimiter or None")
+            d["ingress"] = self.ingress._to_dict()
+        return d
+
+
+@dataclass(frozen=True, slots=True)
 class VsockRoute:
     """Host Unix socket or Windows named pipe exposed on host CID 2."""
 
@@ -1601,12 +1623,8 @@ class Network:
     """IPv6 pool used to derive per-sandbox /64 guest prefixes. Defaults
     to ``fd42:6d73:62::/48``."""
     max_connections: int | None = None
-    egress_rate_limiter: RateLimiter | None = None
-    """Guest-to-runtime (egress) rate limiter. ``None`` means unlimited.
-    Applies on the next sandbox start."""
-    ingress_rate_limiter: RateLimiter | None = None
-    """Runtime-to-guest (ingress) rate limiter. ``None`` means unlimited.
-    Applies on the next sandbox start."""
+    rate_limiter: NetworkRateLimiter | None = None
+    """Local egress and ingress rate limits. ``None`` means unlimited."""
     on_secret_violation: ViolationAction | ViolationPolicy = ViolationAction.BLOCK_AND_LOG
 
     @classmethod
@@ -1660,10 +1678,10 @@ class Network:
             d["ipv6_pool"] = self.ipv6_pool
         if self.max_connections is not None:
             d["max_connections"] = self.max_connections
-        if self.egress_rate_limiter is not None:
-            d["egress_rate_limiter"] = self.egress_rate_limiter._to_dict()
-        if self.ingress_rate_limiter is not None:
-            d["ingress_rate_limiter"] = self.ingress_rate_limiter._to_dict()
+        if self.rate_limiter is not None:
+            if not isinstance(self.rate_limiter, NetworkRateLimiter):
+                raise TypeError("Network.rate_limiter must be NetworkRateLimiter or None")
+            d["rate_limiter"] = self.rate_limiter._to_dict()
         violation = violation_policy_to_dict(self.on_secret_violation)
         if violation != str(ViolationAction.BLOCK_AND_LOG):
             d["on_secret_violation"] = violation

@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use ipnetwork::{Ipv4Network, Ipv6Network};
 use microsandbox_types::{
-    NetworkRateLimitDirection, RateLimiterConfig, ScopedUpstreamCaCert, ScopedVerifyUpstream,
-    TlsConfig, TokenBucketConfig,
+    NetworkRateLimitDirection, NetworkRateLimiterConfig, RateLimiterConfig, ScopedUpstreamCaCert,
+    ScopedVerifyUpstream, TlsConfig, TokenBucketConfig,
 };
 use microsandbox_utils::size::Bytes;
 use zeroize::Zeroizing;
@@ -71,10 +71,24 @@ pub struct ViolationActionBuilder {
     action: ViolationAction,
 }
 
-/// Fluent builder for a [`RateLimiterConfig`].
+/// Fluent builder for both directions of a [`NetworkRateLimiterConfig`].
 ///
 /// ```ignore
-/// .egress_rate_limiter(|r| r
+/// .rate_limiter(|r| r
+///     .egress(|r| r.bandwidth(1.mib(), Duration::from_secs(1)))
+///     .ingress(|r| r.ops(1_000, Duration::from_secs(1)))
+/// )
+/// ```
+#[derive(Default)]
+pub struct NetworkRateLimiterBuilder {
+    config: NetworkRateLimiterConfig,
+    errors: Vec<BuildError>,
+}
+
+/// Fluent builder for one direction's [`RateLimiterConfig`].
+///
+/// ```ignore
+/// .egress(|r| r
 ///     .bandwidth(1.mib(), Duration::from_secs(1))
 ///     .bandwidth_burst(512.kib())
 ///     .ops(1_000, Duration::from_secs(1))
@@ -314,34 +328,22 @@ impl NetworkBuilder {
         self
     }
 
-    /// Limit guest-to-runtime (egress) traffic via a closure. Applies on
-    /// the next sandbox start.
+    /// Configure egress and ingress traffic rate limits. Applies on the next
+    /// sandbox start.
     ///
     /// ```ignore
-    /// .egress_rate_limiter(|r| r
-    ///     .bandwidth(1.mib(), Duration::from_secs(1))
-    ///     .ops(1_000, Duration::from_secs(1))
+    /// .rate_limiter(|r| r
+    ///     .egress(|r| r
+    ///         .bandwidth(1.mib(), Duration::from_secs(1))
+    ///         .ops(1_000, Duration::from_secs(1)))
     /// )
     /// ```
-    pub fn egress_rate_limiter(
+    pub fn rate_limiter(
         mut self,
-        f: impl FnOnce(RateLimiterBuilder) -> RateLimiterBuilder,
+        f: impl FnOnce(NetworkRateLimiterBuilder) -> NetworkRateLimiterBuilder,
     ) -> Self {
-        match f(RateLimiterBuilder::new(NetworkRateLimitDirection::Egress)).build() {
-            Ok(limiter) => self.config.egress_rate_limiter = Some(limiter),
-            Err(err) => self.errors.push(err),
-        }
-        self
-    }
-
-    /// Limit runtime-to-guest (ingress) traffic via a closure. Applies on
-    /// the next sandbox start.
-    pub fn ingress_rate_limiter(
-        mut self,
-        f: impl FnOnce(RateLimiterBuilder) -> RateLimiterBuilder,
-    ) -> Self {
-        match f(RateLimiterBuilder::new(NetworkRateLimitDirection::Ingress)).build() {
-            Ok(limiter) => self.config.ingress_rate_limiter = Some(limiter),
+        match f(NetworkRateLimiterBuilder::new()).build() {
+            Ok(limiter) => self.config.rate_limiter = Some(limiter),
             Err(err) => self.errors.push(err),
         }
         self
@@ -687,6 +689,41 @@ impl SecretBuilder {
             on_violation: self.on_violation,
             require_tls_identity: self.require_tls_identity,
         }
+    }
+}
+
+impl NetworkRateLimiterBuilder {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Limit guest-to-runtime (egress) traffic.
+    pub fn egress(mut self, f: impl FnOnce(RateLimiterBuilder) -> RateLimiterBuilder) -> Self {
+        match f(RateLimiterBuilder::new(NetworkRateLimitDirection::Egress)).build() {
+            Ok(limiter) => self.config.egress = Some(limiter),
+            Err(err) => self.errors.push(err),
+        }
+        self
+    }
+
+    /// Limit runtime-to-guest (ingress) traffic.
+    pub fn ingress(mut self, f: impl FnOnce(RateLimiterBuilder) -> RateLimiterBuilder) -> Self {
+        match f(RateLimiterBuilder::new(NetworkRateLimitDirection::Ingress)).build() {
+            Ok(limiter) => self.config.ingress = Some(limiter),
+            Err(err) => self.errors.push(err),
+        }
+        self
+    }
+
+    /// Consume the builder and return both configured directions.
+    pub fn build(mut self) -> Result<NetworkRateLimiterConfig, BuildError> {
+        if let Some(error) = self.errors.drain(..).next() {
+            return Err(error);
+        }
+        if self.config.egress.is_none() && self.config.ingress.is_none() {
+            return Err(BuildError::EmptyNetworkRateLimiter);
+        }
+        Ok(self.config)
     }
 }
 
@@ -1122,17 +1159,20 @@ mod tests {
         use microsandbox_utils::size::SizeExt;
 
         let cfg = NetworkBuilder::new()
-            .egress_rate_limiter(|r| {
-                r.bandwidth(1.mib(), Duration::from_secs(1))
-                    .bandwidth_burst(512.kib())
-                    .ops(1_000, Duration::from_secs(1))
-                    .ops_burst(500)
+            .rate_limiter(|r| {
+                r.egress(|r| {
+                    r.bandwidth(1.mib(), Duration::from_secs(1))
+                        .bandwidth_burst(512.kib())
+                        .ops(1_000, Duration::from_secs(1))
+                        .ops_burst(500)
+                })
+                .ingress(|r| r.bandwidth(2.mib(), Duration::from_millis(500)))
             })
-            .ingress_rate_limiter(|r| r.bandwidth(2.mib(), Duration::from_millis(500)))
             .build()
             .unwrap();
 
-        let egress = cfg.egress_rate_limiter.unwrap();
+        let rate_limiter = cfg.rate_limiter.unwrap();
+        let egress = rate_limiter.egress.unwrap();
         let bandwidth = egress.bandwidth.unwrap();
         assert_eq!(bandwidth.size, 1024 * 1024);
         assert_eq!(bandwidth.refill_time_ms, 1000);
@@ -1142,7 +1182,7 @@ mod tests {
         assert_eq!(ops.refill_time_ms, 1000);
         assert_eq!(ops.one_time_burst, 500);
 
-        let ingress = cfg.ingress_rate_limiter.unwrap();
+        let ingress = rate_limiter.ingress.unwrap();
         assert_eq!(ingress.bandwidth.unwrap().refill_time_ms, 500);
         assert!(ingress.ops.is_none());
     }
@@ -1150,14 +1190,13 @@ mod tests {
     #[test]
     fn rate_limiters_default_to_unlimited() {
         let cfg = NetworkBuilder::new().build().unwrap();
-        assert!(cfg.egress_rate_limiter.is_none());
-        assert!(cfg.ingress_rate_limiter.is_none());
+        assert!(cfg.rate_limiter.is_none());
     }
 
     #[test]
     fn rate_limiter_builder_rejects_empty_limiter() {
         let err = NetworkBuilder::new()
-            .egress_rate_limiter(|r| r)
+            .rate_limiter(|r| r.egress(|r| r))
             .build()
             .unwrap_err();
         assert_eq!(
@@ -1167,9 +1206,21 @@ mod tests {
     }
 
     #[test]
+    fn network_rate_limiter_builder_rejects_missing_directions() {
+        let err = NetworkBuilder::new()
+            .rate_limiter(|r| r)
+            .build()
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "rate limiter must configure at least one of egress or ingress"
+        );
+    }
+
+    #[test]
     fn rate_limiter_builder_rejects_zero_size_and_unrepresentable_refill() {
         let err = NetworkBuilder::new()
-            .ingress_rate_limiter(|r| r.bandwidth(0u64, Duration::from_secs(1)))
+            .rate_limiter(|r| r.ingress(|r| r.bandwidth(0u64, Duration::from_secs(1))))
             .build()
             .unwrap_err();
         assert_eq!(
@@ -1178,7 +1229,7 @@ mod tests {
         );
 
         let err = NetworkBuilder::new()
-            .egress_rate_limiter(|r| r.ops(10, Duration::ZERO))
+            .rate_limiter(|r| r.egress(|r| r.ops(10, Duration::ZERO)))
             .build()
             .unwrap_err();
         assert_eq!(
@@ -1187,7 +1238,7 @@ mod tests {
         );
 
         let err = NetworkBuilder::new()
-            .egress_rate_limiter(|r| r.ops(10, Duration::from_micros(1_500)))
+            .rate_limiter(|r| r.egress(|r| r.ops(10, Duration::from_micros(1_500))))
             .build()
             .unwrap_err();
         assert_eq!(
@@ -1201,7 +1252,7 @@ mod tests {
         use microsandbox_utils::size::SizeExt;
 
         let err = NetworkBuilder::new()
-            .egress_rate_limiter(|r| r.bandwidth_burst(512.kib()))
+            .rate_limiter(|r| r.egress(|r| r.bandwidth_burst(512.kib())))
             .build()
             .unwrap_err();
         assert_eq!(
@@ -1210,7 +1261,9 @@ mod tests {
         );
 
         let err = NetworkBuilder::new()
-            .ingress_rate_limiter(|r| r.bandwidth(1.mib(), Duration::from_secs(1)).ops_burst(5))
+            .rate_limiter(|r| {
+                r.ingress(|r| r.bandwidth(1.mib(), Duration::from_secs(1)).ops_burst(5))
+            })
             .build()
             .unwrap_err();
         assert_eq!(
@@ -1222,7 +1275,7 @@ mod tests {
     #[test]
     fn rate_limiter_builder_rejects_refill_interval_overflow() {
         let err = NetworkBuilder::new()
-            .egress_rate_limiter(|r| r.ops(10, Duration::MAX))
+            .rate_limiter(|r| r.egress(|r| r.ops(10, Duration::MAX)))
             .build()
             .unwrap_err();
         assert_eq!(

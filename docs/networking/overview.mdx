@@ -261,10 +261,10 @@ use microsandbox::size::SizeExt;
 
 let sb = Sandbox::builder("throttled")
     .image("python")
-    .network(|n| n.egress_rate_limiter(|r| r
+    .network(|n| n.rate_limiter(|r| r.egress(|r| r
         .bandwidth(1.mib(), Duration::from_secs(1))
         .bandwidth_burst(512.kib())
-        .ops(1_000, Duration::from_secs(1))))
+        .ops(1_000, Duration::from_secs(1)))))
     .create()
     .await?;
 ```
@@ -272,23 +272,25 @@ let sb = Sandbox::builder("throttled")
 ```typescript TypeScript
 await using sb = await Sandbox.builder("throttled")
     .image("python")
-    .network((n) => n.egressRateLimiter((r) => r
+    .network((n) => n.rateLimiter((r) => r.egress((r) => r
         .bandwidth(1_048_576, 1_000)
         .bandwidthBurst(524_288)
-        .ops(1_000, 1_000)))
+        .ops(1_000, 1_000))))
     .create();
 ```
 
 ```python Python
-from microsandbox import Network, RateLimiter, Sandbox, TokenBucket
+from microsandbox import Network, NetworkRateLimiter, RateLimiter, Sandbox, TokenBucket
 
 sb = await Sandbox.create(
     "throttled",
     image="python",
     network=Network(
-        egress_rate_limiter=RateLimiter(
-            bandwidth=TokenBucket(size=1_048_576, refill_time_ms=1_000, one_time_burst=524_288),
-            ops=TokenBucket(size=1_000, refill_time_ms=1_000),
+        rate_limiter=NetworkRateLimiter(
+            egress=RateLimiter(
+                bandwidth=TokenBucket(size=1_048_576, refill_time_ms=1_000, one_time_burst=524_288),
+                ops=TokenBucket(size=1_000, refill_time_ms=1_000),
+            ),
         ),
     ),
 )
@@ -298,9 +300,11 @@ sb = await Sandbox.create(
 sb, err := m.CreateSandbox(ctx, "throttled",
     m.WithImage("python"),
     m.WithNetwork(&m.NetworkConfig{
-        EgressRateLimiter: &m.RateLimiterConfig{
-            Bandwidth: &m.TokenBucketConfig{Size: 1 << 20, RefillTime: time.Second, OneTimeBurst: 512 << 10},
-            Ops:       &m.TokenBucketConfig{Size: 1000, RefillTime: time.Second},
+        RateLimiter: &m.NetworkRateLimiterConfig{
+            Egress: &m.RateLimiterConfig{
+                Bandwidth: &m.TokenBucketConfig{Size: 1 << 20, RefillTime: time.Second, OneTimeBurst: 512 << 10},
+                Ops:       &m.TokenBucketConfig{Size: 1000, RefillTime: time.Second},
+            },
         },
     }),
 )

@@ -559,13 +559,9 @@ pub struct NetworkSpec {
     /// Max concurrent guest connections.
     pub max_connections: Option<usize>,
 
-    /// Guest-to-runtime (egress) rate limiter. Missing means unlimited.
+    /// Local network rate limits. Missing means unlimited in both directions.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub egress_rate_limiter: Option<RateLimiterConfig>,
-
-    /// Runtime-to-guest (ingress) rate limiter. Missing means unlimited.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ingress_rate_limiter: Option<RateLimiterConfig>,
+    pub rate_limiter: Option<NetworkRateLimiterConfig>,
 
     /// Whether to copy trusted host CAs into the guest at boot.
     pub trust_host_cas: bool,
@@ -1546,8 +1542,7 @@ impl Default for NetworkSpec {
             tls: None,
             secrets: None,
             max_connections: None,
-            egress_rate_limiter: None,
-            ingress_rate_limiter: None,
+            rate_limiter: None,
             trust_host_cas: false,
         }
     }
@@ -2645,8 +2640,23 @@ pub enum NetworkRateLimitDirection {
     Ingress,
 }
 
+/// Egress and ingress rate limits for a local sandbox network.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(default)]
+pub struct NetworkRateLimiterConfig {
+    /// Guest-to-runtime (egress) rate limiter. Missing means unlimited.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub egress: Option<RateLimiterConfig>,
+
+    /// Runtime-to-guest (ingress) rate limiter. Missing means unlimited.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ingress: Option<RateLimiterConfig>,
+}
+
 /// Token-bucket rate limiter for one traffic direction. Carried in
-/// [`NetworkSpec::egress_rate_limiter`] and [`NetworkSpec::ingress_rate_limiter`].
+/// [`NetworkRateLimiterConfig::egress`] and [`NetworkRateLimiterConfig::ingress`].
 ///
 /// A limiter caps bandwidth (bytes) and packet rate (operations)
 /// independently; a missing bucket leaves that dimension unlimited.

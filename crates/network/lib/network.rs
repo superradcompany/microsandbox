@@ -100,6 +100,10 @@ pub enum NetworkInitError {
         #[source]
         source: RateLimitConfigError,
     },
+
+    /// A stored network rate limiter has neither direction configured.
+    #[error("invalid network rate limiter: at least one of egress or ingress is required")]
+    EmptyNetworkRateLimiter,
 }
 
 /// Handle for installing host-side termination behavior into the network stack.
@@ -242,9 +246,15 @@ impl SmoltcpNetwork {
         // Every write path validates rate limiters (`NetworkBuilder::build`),
         // but a stored config bypasses the builder: fail startup cleanly
         // instead of panicking on a corrupted spec.
+        if config.rate_limiter.as_ref().is_some_and(|rate_limiter| {
+            rate_limiter.egress.is_none() && rate_limiter.ingress.is_none()
+        }) {
+            return Err(NetworkInitError::EmptyNetworkRateLimiter);
+        }
         config
-            .ingress_rate_limiter
+            .rate_limiter
             .as_ref()
+            .and_then(|rate_limiter| rate_limiter.ingress.as_ref())
             .map(RateLimiterConfig::validate)
             .transpose()
             .map_err(|source| NetworkInitError::InvalidRateLimit {
@@ -252,8 +262,9 @@ impl SmoltcpNetwork {
                 source,
             })?;
         config
-            .egress_rate_limiter
+            .rate_limiter
             .as_ref()
+            .and_then(|rate_limiter| rate_limiter.egress.as_ref())
             .map(RateLimiterConfig::validate)
             .transpose()
             .map_err(|source| NetworkInitError::InvalidRateLimit {
@@ -849,9 +860,12 @@ mod tests {
     #[test]
     fn new_with_routes_rejects_invalid_rate_limiter() {
         let mut config = NetworkConfig {
-            ingress_rate_limiter: Some(microsandbox_types::RateLimiterConfig {
-                bandwidth: None,
-                ops: None,
+            rate_limiter: Some(microsandbox_types::NetworkRateLimiterConfig {
+                egress: None,
+                ingress: Some(microsandbox_types::RateLimiterConfig {
+                    bandwidth: None,
+                    ops: None,
+                }),
             }),
             ..NetworkConfig::default()
         };

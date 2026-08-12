@@ -1261,13 +1261,23 @@ fn apply_network(
     }
 
     // Rate limiters (egress = guest -> runtime, ingress = runtime -> guest).
-    if let Some(limiter) = parse_rate_limiter(net, "egress_rate_limiter")? {
-        builder =
-            builder.network(move |n| n.egress_rate_limiter(|r| apply_rate_limiter(r, &limiter)));
-    }
-    if let Some(limiter) = parse_rate_limiter(net, "ingress_rate_limiter")? {
-        builder =
-            builder.network(move |n| n.ingress_rate_limiter(|r| apply_rate_limiter(r, &limiter)));
+    if let Some(rate_limiter) = net.get_item("rate_limiter")?
+        && !rate_limiter.is_none()
+    {
+        let rate_limiter: Bound<'_, PyDict> = rate_limiter.downcast::<PyDict>()?.clone();
+        let egress = parse_rate_limiter(&rate_limiter, "egress")?;
+        let ingress = parse_rate_limiter(&rate_limiter, "ingress")?;
+        builder = builder.network(move |n| {
+            n.rate_limiter(|mut r| {
+                if let Some(limiter) = &egress {
+                    r = r.egress(|direction| apply_rate_limiter(direction, limiter));
+                }
+                if let Some(limiter) = &ingress {
+                    r = r.ingress(|direction| apply_rate_limiter(direction, limiter));
+                }
+                r
+            })
+        });
     }
 
     // Guest IPv4 pool.

@@ -508,21 +508,17 @@ export declare class NetworkBuilder {
   /** Trust the host's root CAs inside the guest. Default: false. */
   trustHostCAs(enabled: boolean): this
   /**
-   * Limit guest-to-runtime (egress) traffic via a callback. Applies on
-   * the next sandbox start.
+   * Configure local egress and ingress rate limits. Applies on the next
+   * sandbox start.
    *
    * ```js
-   * .egressRateLimiter((r) => r
-   *   .bandwidth(1_048_576, 1_000)
-   *   .ops(1_000, 1_000))
+   * .rateLimiter((r) => r
+   *   .egress((r) => r
+   *     .bandwidth(1_048_576, 1_000)
+   *     .ops(1_000, 1_000)))
    * ```
    */
-  egressRateLimiter(configure: (arg: JsRateLimiterBuilder) => JsRateLimiterBuilder): this
-  /**
-   * Limit runtime-to-guest (ingress) traffic via a callback. Applies on
-   * the next sandbox start.
-   */
-  ingressRateLimiter(configure: (arg: JsRateLimiterBuilder) => JsRateLimiterBuilder): this
+  rateLimiter(configure: (arg: JsNetworkRateLimiterBuilder) => JsNetworkRateLimiterBuilder): this
   /**
    * Snapshot the accumulated configuration as a JSON string. The TS
    * layer parses + key-remaps to camelCase before returning to the
@@ -574,6 +570,16 @@ export declare class NetworkPolicyBuilder {
   build(): NetworkPolicy
 }
 export type JsNetworkPolicyBuilder = NetworkPolicyBuilder
+
+/** Fluent builder grouping egress and ingress rate limits. */
+export declare class NetworkRateLimiterBuilder {
+  constructor()
+  /** Configure guest-to-runtime traffic limits. */
+  egress(configure: (arg: RateLimiterBuilder) => RateLimiterBuilder): this
+  /** Configure runtime-to-guest traffic limits. */
+  ingress(configure: (arg: RateLimiterBuilder) => RateLimiterBuilder): this
+}
+export type JsNetworkRateLimiterBuilder = NetworkRateLimiterBuilder
 
 /** Fluent builder for an ordered list of pre-boot rootfs patches. */
 export declare class PatchBuilder {
@@ -648,9 +654,7 @@ export type JsPullProgressStream = PullProgressStream
 
 /**
  * Fluent builder for one direction's network rate limiter. Chainable
- * setters accumulate bucket values; the parent
- * `NetworkBuilder.egressRateLimiter()` / `.ingressRateLimiter()` applies them to
- * the Rust builder, where validation happens at `build()` time.
+ * setters accumulate bucket values for `NetworkRateLimiterBuilder`.
  */
 export declare class RateLimiterBuilder {
   constructor()

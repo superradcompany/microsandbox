@@ -54,6 +54,12 @@ export interface RateLimiterConfig {
   readonly ops?: TokenBucketConfig;
 }
 
+/** Local network rate limits grouped by traffic direction. */
+export interface NetworkRateLimiterConfig {
+  readonly egress?: RateLimiterConfig;
+  readonly ingress?: RateLimiterConfig;
+}
+
 /** Where in the HTTP request the secret value can be substituted. */
 export interface SecretInjection {
   readonly headers?: boolean;
@@ -84,8 +90,7 @@ export interface NetworkConfig {
   readonly secrets: readonly SecretEntry[];
   readonly secretViolation: ViolationAction | null;
   readonly maxConnections: number | null;
-  readonly egressRateLimiter: RateLimiterConfig | null;
-  readonly ingressRateLimiter: RateLimiterConfig | null;
+  readonly rateLimiter: NetworkRateLimiterConfig | null;
   readonly interface?: {
     readonly ipv4Pool?: string | null;
     readonly ipv6Pool?: string | null;

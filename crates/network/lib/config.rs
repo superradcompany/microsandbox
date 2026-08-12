@@ -12,7 +12,7 @@ use crate::dns::Nameserver;
 
 use crate::policy::NetworkPolicy;
 use crate::secrets::config::SecretsConfig;
-use microsandbox_types::{RateLimiterConfig, TlsConfig};
+use microsandbox_types::{NetworkRateLimiterConfig, TlsConfig};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -69,13 +69,9 @@ pub struct NetworkConfig {
     #[serde(default)]
     pub max_connections: Option<usize>,
 
-    /// Guest-to-runtime (egress) rate limiter. `None` means unlimited.
+    /// Egress and ingress rate limits. `None` means unlimited in both directions.
     #[serde(default)]
-    pub egress_rate_limiter: Option<RateLimiterConfig>,
-
-    /// Runtime-to-guest (ingress) rate limiter. `None` means unlimited.
-    #[serde(default)]
-    pub ingress_rate_limiter: Option<RateLimiterConfig>,
+    pub rate_limiter: Option<NetworkRateLimiterConfig>,
 
     /// Ship the host's trusted root CAs into the guest at boot so outbound
     /// TLS works behind corporate MITM proxies (Cloudflare Warp Zero
@@ -184,8 +180,7 @@ impl Default for NetworkConfig {
             tls: TlsConfig::default(),
             secrets: SecretsConfig::default(),
             max_connections: None,
-            egress_rate_limiter: None,
-            ingress_rate_limiter: None,
+            rate_limiter: None,
             trust_host_cas: false,
         }
     }
@@ -303,29 +298,30 @@ mod tests {
     #[test]
     fn config_without_rate_limiter_fields_stays_unlimited() {
         let config: NetworkConfig = serde_json::from_value(serde_json::json!({})).unwrap();
-        assert!(config.egress_rate_limiter.is_none());
-        assert!(config.ingress_rate_limiter.is_none());
+        assert!(config.rate_limiter.is_none());
     }
 
     #[test]
     fn rate_limiters_survive_the_wire_spec_round_trip() {
-        use microsandbox_types::{RateLimiterConfig, TokenBucketConfig};
+        use microsandbox_types::{NetworkRateLimiterConfig, RateLimiterConfig, TokenBucketConfig};
 
         let config = NetworkConfig {
-            egress_rate_limiter: Some(RateLimiterConfig {
-                bandwidth: Some(TokenBucketConfig {
-                    size: 1024 * 1024,
-                    refill_time_ms: 1000,
-                    one_time_burst: 512 * 1024,
+            rate_limiter: Some(NetworkRateLimiterConfig {
+                egress: Some(RateLimiterConfig {
+                    bandwidth: Some(TokenBucketConfig {
+                        size: 1024 * 1024,
+                        refill_time_ms: 1000,
+                        one_time_burst: 512 * 1024,
+                    }),
+                    ops: None,
                 }),
-                ops: None,
-            }),
-            ingress_rate_limiter: Some(RateLimiterConfig {
-                bandwidth: None,
-                ops: Some(TokenBucketConfig {
-                    size: 1000,
-                    refill_time_ms: 1000,
-                    one_time_burst: 0,
+                ingress: Some(RateLimiterConfig {
+                    bandwidth: None,
+                    ops: Some(TokenBucketConfig {
+                        size: 1000,
+                        refill_time_ms: 1000,
+                        one_time_burst: 0,
+                    }),
                 }),
             }),
             ..NetworkConfig::default()
@@ -333,13 +329,11 @@ mod tests {
 
         let spec: microsandbox_types::NetworkSpec =
             serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
-        assert_eq!(spec.egress_rate_limiter, config.egress_rate_limiter);
-        assert_eq!(spec.ingress_rate_limiter, config.ingress_rate_limiter);
+        assert_eq!(spec.rate_limiter, config.rate_limiter);
 
         let back: NetworkConfig =
             serde_json::from_value(serde_json::to_value(&spec).unwrap()).unwrap();
-        assert_eq!(back.egress_rate_limiter, config.egress_rate_limiter);
-        assert_eq!(back.ingress_rate_limiter, config.ingress_rate_limiter);
+        assert_eq!(back.rate_limiter, config.rate_limiter);
     }
 
     #[test]

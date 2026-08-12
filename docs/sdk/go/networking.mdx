@@ -340,8 +340,7 @@ type NetworkConfig struct {
     IPv4Pool                 string
     IPv6Pool                 string
     MaxConnections           *uint
-    EgressRateLimiter        *RateLimiterConfig
-    IngressRateLimiter       *RateLimiterConfig
+    RateLimiter              *NetworkRateLimiterConfig
     OnSecretViolation        ViolationAction
     TrustHostCAs             *bool
 }
@@ -364,8 +363,7 @@ The full network stack configuration passed via [`WithNetwork`](#m-withnetwork).
 | IPv4Pool | `string` | Pool used to derive per-sandbox `/30` guest subnets. Defaults to `172.16.0.0/12` |
 | IPv6Pool | `string` | Pool used to derive per-sandbox `/64` guest prefixes. Defaults to `fd42:6d73:62::/48` |
 | MaxConnections | `*uint` | Cap on concurrent network connections from the sandbox |
-| EgressRateLimiter | [`*RateLimiterConfig`](#ratelimiterconfig) | Outbound (egress) rate limiter. `nil` means unlimited. Takes effect on the next sandbox start |
-| IngressRateLimiter | [`*RateLimiterConfig`](#ratelimiterconfig) | Inbound (ingress) rate limiter. `nil` means unlimited. Takes effect on the next sandbox start |
+| RateLimiter | [`*NetworkRateLimiterConfig`](#networkratelimiterconfig) | Local rate limits grouped by direction. `nil` means unlimited. Cloud network configuration does not expose this field |
 | OnSecretViolation | [`ViolationAction`](/sdk/go/secrets#violationaction) | Sandbox-wide action when a secret is sent to a disallowed host. Per-secret overrides via `SecretEntry.OnViolation` |
 | TrustHostCAs | `*bool` | Ship the host's extra CA bundles into the guest. Opt-in for corporate MITM proxies whose gateway CA is unknown to the guest's stock bundle |
 
@@ -501,14 +499,14 @@ Host-scoped upstream certificate verification override.
 | Pattern | `string` | Exact host or `*.suffix` wildcard |
 | Verify | `bool` | Whether to verify certificates for matching upstream hosts |
 
-### RateLimiterConfig
+### NetworkRateLimiterConfig
 
-<p className="msb-backref">Used by <a href="#networkconfig">NetworkConfig.EgressRateLimiter / IngressRateLimiter</a></p>
+<p className="msb-backref">Used by <a href="#networkconfig">NetworkConfig.RateLimiter</a></p>
 
 ```go
-type RateLimiterConfig struct {
-    Bandwidth *TokenBucketConfig
-    Ops       *TokenBucketConfig
+type NetworkRateLimiterConfig struct {
+    Egress  *RateLimiterConfig
+    Ingress *RateLimiterConfig
 }
 ```
 
@@ -518,9 +516,11 @@ type RateLimiterConfig struct {
 sb, err := m.CreateSandbox(ctx, "throttled",
     m.WithImage("python"),
     m.WithNetwork(&m.NetworkConfig{
-        EgressRateLimiter: &m.RateLimiterConfig{
-            Bandwidth: &m.TokenBucketConfig{Size: 1 << 20, RefillTime: time.Second, OneTimeBurst: 512 << 10},
-            Ops:       &m.TokenBucketConfig{Size: 1000, RefillTime: time.Second},
+        RateLimiter: &m.NetworkRateLimiterConfig{
+            Egress: &m.RateLimiterConfig{
+                Bandwidth: &m.TokenBucketConfig{Size: 1 << 20, RefillTime: time.Second, OneTimeBurst: 512 << 10},
+                Ops:       &m.TokenBucketConfig{Size: 1000, RefillTime: time.Second},
+            },
         },
     }),
 )
@@ -528,7 +528,25 @@ sb, err := m.CreateSandbox(ctx, "throttled",
 
 </Accordion>
 
-Rate limiter for one traffic direction. Caps bandwidth (bytes) and packet rate (frames) independently; a `nil` bucket leaves that dimension unlimited. Cloud sandboxes reject rate limiters as unsupported for now.
+Local network rate limits grouped by direction. An omitted direction is unlimited. Cloud network configuration does not expose rate limits.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Egress | [`*RateLimiterConfig`](#ratelimiterconfig) | Guest-to-runtime rate limiter |
+| Ingress | [`*RateLimiterConfig`](#ratelimiterconfig) | Runtime-to-guest rate limiter |
+
+### RateLimiterConfig
+
+<p className="msb-backref">Held by <a href="#networkratelimiterconfig">NetworkRateLimiterConfig</a></p>
+
+```go
+type RateLimiterConfig struct {
+    Bandwidth *TokenBucketConfig
+    Ops       *TokenBucketConfig
+}
+```
+
+Rate limiter for one traffic direction. Caps bandwidth (bytes) and packet rate (frames) independently; a `nil` bucket leaves that dimension unlimited.
 
 | Field | Type | Description |
 |-------|------|-------------|

@@ -872,6 +872,13 @@ struct RateLimiterOpts {
     ops: Option<TokenBucketOpts>,
 }
 
+/// Egress and ingress rate limiters for the local network.
+#[derive(Clone, serde::Deserialize)]
+struct NetworkRateLimiterOpts {
+    egress: Option<RateLimiterOpts>,
+    ingress: Option<RateLimiterOpts>,
+}
+
 /// Token bucket: `size` tokens (bytes or frames) refilled every
 /// `refill_time_ms`, plus an optional startup-only burst.
 #[derive(Clone, serde::Deserialize)]
@@ -912,10 +919,8 @@ struct NetworkOpts {
     /// IPv6 pool used to derive per-sandbox /64 guest prefixes.
     ipv6_pool: Option<String>,
     max_connections: Option<usize>,
-    /// Guest-to-runtime (egress) rate limiter.
-    egress_rate_limiter: Option<RateLimiterOpts>,
-    /// Runtime-to-guest (ingress) rate limiter.
-    ingress_rate_limiter: Option<RateLimiterOpts>,
+    /// Local egress and ingress rate limiters.
+    rate_limiter: Option<NetworkRateLimiterOpts>,
     /// Sandbox-wide secret violation action: "block", "block-and-log",
     /// "block-and-terminate".
     on_secret_violation: Option<String>,
@@ -1381,15 +1386,19 @@ fn apply_network(
 
     // Rate limiters. Validation (empty limiter, zero size/refill, burst
     // without a bucket) happens in the network builder's build step.
-    if let Some(ref limiter) = net.egress_rate_limiter {
-        let limiter = limiter.clone();
-        builder = builder
-            .network(move |n| n.egress_rate_limiter(move |r| apply_rate_limiter(r, &limiter)));
-    }
-    if let Some(ref limiter) = net.ingress_rate_limiter {
-        let limiter = limiter.clone();
-        builder = builder
-            .network(move |n| n.ingress_rate_limiter(move |r| apply_rate_limiter(r, &limiter)));
+    if let Some(ref rate_limiter) = net.rate_limiter {
+        let rate_limiter = rate_limiter.clone();
+        builder = builder.network(move |n| {
+            n.rate_limiter(move |mut r| {
+                if let Some(ref limiter) = rate_limiter.egress {
+                    r = r.egress(|direction| apply_rate_limiter(direction, limiter));
+                }
+                if let Some(ref limiter) = rate_limiter.ingress {
+                    r = r.ingress(|direction| apply_rate_limiter(direction, limiter));
+                }
+                r
+            })
+        });
     }
 
     // Trust host CA bundles inside the guest.

@@ -741,9 +741,9 @@ impl From<VolumeMount> for CloudVolumeMount {
 }
 
 /// Cloud network specification: a subset of the domain [`NetworkSpec`].
-/// Interface overrides, host port mapping, DNS, TLS interception, and host-CA
-/// trust are not part of this type. `deny_unknown_fields` — posting an omitted
-/// field is an error, not a silent drop.
+/// Interface overrides, host port mapping, DNS, TLS interception, rate limits,
+/// and host-CA trust are not part of this type. `deny_unknown_fields` — posting
+/// an omitted field is an error, not a silent drop.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -1008,8 +1008,7 @@ impl TryFrom<CloudSandboxSpec> for SandboxSpec {
             tls: None,
             secrets: spec.network.secrets.map(Into::into),
             max_connections: spec.network.max_connections,
-            egress_rate_limiter: None,
-            ingress_rate_limiter: None,
+            rate_limiter: None,
             trust_host_cas: false,
         };
         let runtime = SandboxRuntimeOptions {
@@ -1417,6 +1416,20 @@ mod tests {
 
         let back: CloudCreateSandboxRequest = serde_json::from_value(json).unwrap();
         assert_eq!(back.spec.name, "agent-1");
+    }
+
+    #[test]
+    fn cloud_network_rejects_rate_limit_configuration() {
+        let error = serde_json::from_value::<CloudNetworkSpec>(serde_json::json!({
+            "rate_limiter": {
+                "egress": {
+                    "bandwidth": {"size": 1024, "refill_time_ms": 1000}
+                }
+            }
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unknown field `rate_limiter`"));
     }
 
     #[test]

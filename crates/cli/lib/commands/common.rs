@@ -2107,11 +2107,16 @@ fn apply_network_opts(
             if trust_host_cas {
                 n = n.trust_host_cas(true);
             }
-            if let Some(limiter) = egress_rate_limiter {
-                n = n.egress_rate_limiter(|r| limiter.apply(r));
-            }
-            if let Some(limiter) = ingress_rate_limiter {
-                n = n.ingress_rate_limiter(|r| limiter.apply(r));
+            if egress_rate_limiter.is_some() || ingress_rate_limiter.is_some() {
+                n = n.rate_limiter(|mut r| {
+                    if let Some(limiter) = &egress_rate_limiter {
+                        r = r.egress(|direction| limiter.apply(direction));
+                    }
+                    if let Some(limiter) = &ingress_rate_limiter {
+                        r = r.ingress(|direction| limiter.apply(direction));
+                    }
+                    r
+                });
             }
             if let Some(action) = violation_action {
                 n = n.on_secret_violation(|_| {

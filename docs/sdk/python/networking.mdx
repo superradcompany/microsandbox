@@ -497,8 +497,7 @@ Network(
     ipv4_pool: str | None = None,
     ipv6_pool: str | None = None,
     max_connections: int | None = None,
-    egress_rate_limiter: RateLimiter | None = None,
-    ingress_rate_limiter: RateLimiter | None = None,
+    rate_limiter: NetworkRateLimiter | None = None,
     on_secret_violation: ViolationAction | ViolationPolicy = ViolationAction.BLOCK_AND_LOG,
 )
 ```
@@ -516,8 +515,7 @@ Frozen dataclass for sandbox network configuration. Use the [profile and termina
 | ipv4_pool | `str \| None` | `None` | IPv4 pool used for per-sandbox `/30` guest subnets. Defaults to `172.16.0.0/12` |
 | ipv6_pool | `str \| None` | `None` | IPv6 pool used for per-sandbox `/64` guest prefixes. Defaults to `fd42:6d73:62::/48` |
 | max_connections | `int \| None` | `None` | Maximum concurrent connections |
-| egress_rate_limiter | [`RateLimiter`](#ratelimiter)` \| None` | `None` | Outbound (egress) rate limiter. `None` means unlimited |
-| ingress_rate_limiter | [`RateLimiter`](#ratelimiter)` \| None` | `None` | Inbound (ingress) rate limiter. `None` means unlimited |
+| rate_limiter | [`NetworkRateLimiter`](#networkratelimiter)` \| None` | `None` | Local rate limits grouped by direction. Cloud network configuration does not expose this field |
 | on_secret_violation | [`ViolationAction`](/sdk/python/secrets#violationaction)` \| `[`ViolationPolicy`](/sdk/python/secrets#violationpolicy) | `BLOCK_AND_LOG` | Sandbox-wide action when a secret placeholder reaches a disallowed host |
 
 | Class method | Returns | Description |
@@ -758,11 +756,52 @@ A per-host override for upstream certificate verification.
 | pattern | `str` | Exact host or `*.suffix` wildcard |
 | verify | `bool` | Whether to verify certificates for matching upstream hosts |
 
+### NetworkRateLimiter
+
+<div className="msb-tags"><span className="msb-tag is-type">dataclass</span></div>
+
+<p className="msb-backref">Used by <a href="#network">Network(rate_limiter=...)</a></p>
+
+```python
+NetworkRateLimiter(
+    egress: RateLimiter | None = None,
+    ingress: RateLimiter | None = None,
+)
+```
+
+<Accordion title="Example">
+
+```python
+from microsandbox import Network, NetworkRateLimiter, RateLimiter, Sandbox, TokenBucket
+
+sb = await Sandbox.create(
+    "throttled",
+    image="python",
+    network=Network(
+        rate_limiter=NetworkRateLimiter(
+            egress=RateLimiter(
+                bandwidth=TokenBucket(size=1_048_576, refill_time_ms=1_000, one_time_burst=524_288),
+                ops=TokenBucket(size=1_000, refill_time_ms=1_000),
+            ),
+        ),
+    ),
+)
+```
+
+</Accordion>
+
+Frozen dataclass grouping local network limits by traffic direction. An omitted direction is unlimited. Cloud network configuration does not expose rate limits. Import it from `microsandbox`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| egress | [`RateLimiter`](#ratelimiter)` \| None` | Guest-to-runtime rate limiter |
+| ingress | [`RateLimiter`](#ratelimiter)` \| None` | Runtime-to-guest rate limiter |
+
 ### RateLimiter
 
 <div className="msb-tags"><span className="msb-tag is-type">dataclass</span></div>
 
-<p className="msb-backref">Used by <a href="#network">Network(egress_rate_limiter=... / ingress_rate_limiter=...)</a></p>
+<p className="msb-backref">Held by <a href="#networkratelimiter">NetworkRateLimiter</a></p>
 
 ```python
 RateLimiter(
@@ -771,26 +810,7 @@ RateLimiter(
 )
 ```
 
-<Accordion title="Example">
-
-```python
-from microsandbox import Network, RateLimiter, Sandbox, TokenBucket
-
-sb = await Sandbox.create(
-    "throttled",
-    image="python",
-    network=Network(
-        egress_rate_limiter=RateLimiter(
-            bandwidth=TokenBucket(size=1_048_576, refill_time_ms=1_000, one_time_burst=524_288),
-            ops=TokenBucket(size=1_000, refill_time_ms=1_000),
-        ),
-    ),
-)
-```
-
-</Accordion>
-
-Frozen dataclass limiting one traffic direction. Caps bandwidth (bytes) and packet rate (frames) independently; a `None` bucket leaves that dimension unlimited. Limits apply on the next sandbox start; cloud sandboxes reject rate limiters as unsupported for now. Import it from `microsandbox`.
+Frozen dataclass limiting one traffic direction. Caps bandwidth (bytes) and packet rate (frames) independently; a `None` bucket leaves that dimension unlimited. Import it from `microsandbox`.
 
 | Field | Type | Description |
 |-------|------|-------------|

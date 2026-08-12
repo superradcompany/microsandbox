@@ -630,37 +630,42 @@ describe("NetworkBuilder ports", () => {
 describe("NetworkBuilder rate limiters", () => {
   it("maps bucket values through build()", () => {
     const cfg = new NetworkBuilder()
-      .egressRateLimiter((r) =>
+      .rateLimiter((r) =>
         r
-          .bandwidth(1_048_576, 1_000)
-          .bandwidthBurst(524_288)
-          .ops(1_000, 1_000)
-          .opsBurst(500)
+          .egress((r) =>
+            r
+              .bandwidth(1_048_576, 1_000)
+              .bandwidthBurst(524_288)
+              .ops(1_000, 1_000)
+              .opsBurst(500),
+          )
+          .ingress((r) => r.ops(100, 500)),
       )
-      .ingressRateLimiter((r) => r.ops(100, 500))
       .build() as {
-        egressRateLimiter: {
-          bandwidth: { size: number; refillTimeMs: number; oneTimeBurst: number };
-          ops: { size: number; refillTimeMs: number; oneTimeBurst: number };
-        };
-        ingressRateLimiter: {
-          bandwidth?: unknown;
-          ops: { size: number; refillTimeMs: number; oneTimeBurst: number };
+        rateLimiter: {
+          egress: {
+            bandwidth: { size: number; refillTimeMs: number; oneTimeBurst: number };
+            ops: { size: number; refillTimeMs: number; oneTimeBurst: number };
+          };
+          ingress: {
+            bandwidth?: unknown;
+            ops: { size: number; refillTimeMs: number; oneTimeBurst: number };
+          };
         };
       };
 
-    expect(cfg.egressRateLimiter.bandwidth).toMatchObject({
+    expect(cfg.rateLimiter.egress.bandwidth).toMatchObject({
       size: 1_048_576,
       refillTimeMs: 1_000,
       oneTimeBurst: 524_288,
     });
-    expect(cfg.egressRateLimiter.ops).toMatchObject({
+    expect(cfg.rateLimiter.egress.ops).toMatchObject({
       size: 1_000,
       refillTimeMs: 1_000,
       oneTimeBurst: 500,
     });
-    expect(cfg.ingressRateLimiter.bandwidth).toBeUndefined();
-    expect(cfg.ingressRateLimiter.ops).toMatchObject({
+    expect(cfg.rateLimiter.ingress.bandwidth).toBeUndefined();
+    expect(cfg.rateLimiter.ingress.ops).toMatchObject({
       size: 100,
       refillTimeMs: 500,
       oneTimeBurst: 0,
@@ -669,27 +674,25 @@ describe("NetworkBuilder rate limiters", () => {
 
   it("defaults to unlimited when not configured", () => {
     const cfg = new NetworkBuilder().build() as {
-      egressRateLimiter: unknown;
-      ingressRateLimiter: unknown;
+      rateLimiter: unknown;
     };
 
-    expect(cfg.egressRateLimiter).toBeNull();
-    expect(cfg.ingressRateLimiter).toBeNull();
+    expect(cfg.rateLimiter).toBeNull();
   });
 
   it("rejects a burst without its bucket at build()", () => {
     expect(() =>
-      new NetworkBuilder().egressRateLimiter((r) => r.bandwidthBurst(1_024)).build()
+      new NetworkBuilder().rateLimiter((r) => r.egress((r) => r.bandwidthBurst(1_024))).build()
     ).toThrow(/bandwidth_burst requires the bandwidth bucket/);
   });
 
   it("rejects fractional and negative bucket values", () => {
-    expect(() => new NetworkBuilder().egressRateLimiter((r) => r.bandwidth(1.5, 1_000))).toThrow(
-      /non-negative integer/,
-    );
-    expect(() => new NetworkBuilder().ingressRateLimiter((r) => r.ops(-1, 1_000))).toThrow(
-      /non-negative integer/,
-    );
+    expect(() =>
+      new NetworkBuilder().rateLimiter((r) => r.egress((r) => r.bandwidth(1.5, 1_000))),
+    ).toThrow(/non-negative integer/);
+    expect(() =>
+      new NetworkBuilder().rateLimiter((r) => r.ingress((r) => r.ops(-1, 1_000))),
+    ).toThrow(/non-negative integer/);
   });
 });
 

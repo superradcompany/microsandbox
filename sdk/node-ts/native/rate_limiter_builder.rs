@@ -6,10 +6,23 @@ use napi::bindgen_prelude::*;
 // Types
 //--------------------------------------------------------------------------------------------------
 
+/// Fluent builder grouping egress and ingress rate limits.
+#[napi(js_name = "NetworkRateLimiterBuilder")]
+pub struct JsNetworkRateLimiterBuilder {
+    pub(crate) egress: Option<RateLimiterValues>,
+    pub(crate) ingress: Option<RateLimiterValues>,
+}
+
+#[derive(Clone)]
+pub(crate) struct RateLimiterValues {
+    pub(crate) bandwidth: Option<(u64, u64)>,
+    pub(crate) bandwidth_burst: Option<u64>,
+    pub(crate) ops: Option<(u64, u64)>,
+    pub(crate) ops_burst: Option<u64>,
+}
+
 /// Fluent builder for one direction's network rate limiter. Chainable
-/// setters accumulate bucket values; the parent
-/// `NetworkBuilder.egressRateLimiter()` / `.ingressRateLimiter()` applies them to
-/// the Rust builder, where validation happens at `build()` time.
+/// setters accumulate bucket values for `NetworkRateLimiterBuilder`.
 #[napi(js_name = "RateLimiterBuilder")]
 pub struct JsRateLimiterBuilder {
     pub(crate) bandwidth: Option<(u64, u64)>,
@@ -68,6 +81,60 @@ impl JsRateLimiterBuilder {
     pub fn ops_burst(&mut self, count: f64) -> Result<&Self> {
         self.ops_burst = Some(whole_u64("count", count)?);
         Ok(self)
+    }
+}
+
+#[napi]
+impl JsNetworkRateLimiterBuilder {
+    #[napi(constructor)]
+    pub fn new() -> Self {
+        Self {
+            egress: None,
+            ingress: None,
+        }
+    }
+
+    /// Configure guest-to-runtime traffic limits.
+    #[napi]
+    pub fn egress(
+        &mut self,
+        env: &Env,
+        configure: Function<
+            ClassInstance<JsRateLimiterBuilder>,
+            ClassInstance<JsRateLimiterBuilder>,
+        >,
+    ) -> Result<&Self> {
+        let initial = JsRateLimiterBuilder::new().into_instance(env)?;
+        let returned = configure.call(initial)?;
+        self.egress = Some(returned.values());
+        Ok(self)
+    }
+
+    /// Configure runtime-to-guest traffic limits.
+    #[napi]
+    pub fn ingress(
+        &mut self,
+        env: &Env,
+        configure: Function<
+            ClassInstance<JsRateLimiterBuilder>,
+            ClassInstance<JsRateLimiterBuilder>,
+        >,
+    ) -> Result<&Self> {
+        let initial = JsRateLimiterBuilder::new().into_instance(env)?;
+        let returned = configure.call(initial)?;
+        self.ingress = Some(returned.values());
+        Ok(self)
+    }
+}
+
+impl JsRateLimiterBuilder {
+    fn values(&self) -> RateLimiterValues {
+        RateLimiterValues {
+            bandwidth: self.bandwidth,
+            bandwidth_burst: self.bandwidth_burst,
+            ops: self.ops,
+            ops_burst: self.ops_burst,
+        }
     }
 }
 

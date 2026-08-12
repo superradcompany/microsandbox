@@ -139,6 +139,10 @@ pub enum BuildError {
         source: RateLimitConfigError,
     },
 
+    /// A network rate limiter was configured without either direction.
+    #[error("rate limiter must configure at least one of egress or ingress")]
+    EmptyNetworkRateLimiter,
+
     /// A one-time burst was set without its corresponding bucket.
     #[error("{direction} rate limiter: {bucket}_burst requires the {bucket} bucket")]
     RateLimitBurstWithoutBucket {

@@ -309,8 +309,7 @@ func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 		IPv4Pool:            n.IPv4Pool,
 		IPv6Pool:            n.IPv6Pool,
 		MaxConnections:      n.MaxConnections,
-		EgressRateLimiter:   buildFFIRateLimiter(n.EgressRateLimiter),
-		IngressRateLimiter:  buildFFIRateLimiter(n.IngressRateLimiter),
+		RateLimiter:         buildFFINetworkRateLimiter(n.RateLimiter),
 		OnSecretViolation:   string(n.OnSecretViolation),
 		TrustHostCAs:        n.TrustHostCAs,
 	}
@@ -374,6 +373,16 @@ func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 	}
 
 	return out
+}
+
+func buildFFINetworkRateLimiter(l *NetworkRateLimiterConfig) *ffi.NetworkRateLimiterOptions {
+	if l == nil {
+		return nil
+	}
+	return &ffi.NetworkRateLimiterOptions{
+		Egress:  buildFFIRateLimiter(l.Egress),
+		Ingress: buildFFIRateLimiter(l.Ingress),
+	}
 }
 
 func buildFFIRateLimiter(l *RateLimiterConfig) *ffi.RateLimiterOptions {

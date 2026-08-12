@@ -32,14 +32,14 @@ pub use domain::{
     DestinationGroup, Direction, DiskImageFormat, DnsConfig, EnvVar, FlatClone, HandoffInit,
     HostPattern, HostPermissions, InterceptCaConfig, InterfaceOverrides, LogSource,
     MAX_SECRET_PLACEHOLDER_BYTES, MemoryPlacement, MountOptions, NamedVolumeCreate,
-    NamedVolumeMode, NetworkPolicy, NetworkRateLimitDirection, NetworkSpec, NumaPlacement,
-    OciRootfsSource, Patch, PlacementProfile, PortProtocol, PortRange, Protocol, PublishedPortSpec,
-    PullPolicy, RateLimitConfigError, RateLimiterConfig, Rlimit, RlimitResource, RootDisk,
-    RootfsSource, Rule, SandboxLogLevel, SandboxPolicy, SandboxResources, SandboxRuntimeOptions,
-    SandboxSpec, ScopedUpstreamCaCert, ScopedVerifyUpstream, SecretConfigError, SecretEntry,
-    SecretInjection, SecretsConfig, SecurityProfile, SnapshotSpec, StatVirtualization, TlsConfig,
-    TokenBucketConfig, TransparentHugePagePolicy, ViolationAction, VolumeKind, VolumeMount,
-    VolumeSpec, VsockRouteSpec, VsockSocketType, VsockSpec,
+    NamedVolumeMode, NetworkPolicy, NetworkRateLimitDirection, NetworkRateLimiterConfig,
+    NetworkSpec, NumaPlacement, OciRootfsSource, Patch, PlacementProfile, PortProtocol, PortRange,
+    Protocol, PublishedPortSpec, PullPolicy, RateLimitConfigError, RateLimiterConfig, Rlimit,
+    RlimitResource, RootDisk, RootfsSource, Rule, SandboxLogLevel, SandboxPolicy, SandboxResources,
+    SandboxRuntimeOptions, SandboxSpec, ScopedUpstreamCaCert, ScopedVerifyUpstream,
+    SecretConfigError, SecretEntry, SecretInjection, SecretsConfig, SecurityProfile, SnapshotSpec,
+    StatVirtualization, TlsConfig, TokenBucketConfig, TransparentHugePagePolicy, ViolationAction,
+    VolumeKind, VolumeMount, VolumeSpec, VsockRouteSpec, VsockSocketType, VsockSpec,
 };
 pub use error::{TypesError, TypesResult};
 pub use modify::{
