@@ -21,7 +21,9 @@ use std::{
 use docker_credential::{CredentialRetrievalError, DockerCredential};
 use microsandbox_image::RegistryAuth;
 use microsandbox_runtime::logging::LogLevel;
-use microsandbox_types::{CpuPlacement, PlacementProfile, RootDisk, TransparentHugePagePolicy};
+use microsandbox_types::{
+    CpuPlacement, DeploymentProfile, PlacementProfile, RootDisk, TransparentHugePagePolicy,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::error::Operation;
@@ -62,6 +64,40 @@ pub(crate) mod metrics_interval_serde {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<NonZero<u64>>, D::Error> {
         Ok(NonZero::new(u64::deserialize(d)?))
+    }
+}
+
+/// Serde adapter for the human-facing deployment profile names used in `config.json`.
+///
+/// Sandbox wire data uses snake_case, while the CLI and SDKs expose kebab-case
+/// names. Accepting both forms keeps existing serialized values readable and
+/// gives the hand-edited global config one canonical spelling.
+mod deployment_profile_serde {
+    use microsandbox_types::DeploymentProfile;
+    use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
+
+    pub fn serialize<S: Serializer>(
+        profile: &Option<DeploymentProfile>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match profile {
+            Some(DeploymentProfile::SingleTenant) => serializer.serialize_some("single-tenant"),
+            Some(DeploymentProfile::MultiTenant) => serializer.serialize_some("multi-tenant"),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<DeploymentProfile>, D::Error> {
+        match Option::<String>::deserialize(deserializer)?.as_deref() {
+            Some("single-tenant" | "single_tenant") => Ok(Some(DeploymentProfile::SingleTenant)),
+            Some("multi-tenant" | "multi_tenant") => Ok(Some(DeploymentProfile::MultiTenant)),
+            Some(other) => Err(D::Error::custom(format!(
+                "unknown deployment profile {other:?}; expected `single-tenant` or `multi-tenant`"
+            ))),
+            None => Ok(None),
+        }
     }
 }
 
@@ -108,6 +144,18 @@ pub struct LocalConfig {
     /// `None` means sandbox runtime processes are silent unless overridden
     /// per-sandbox.
     pub log_level: Option<LogLevel>,
+
+    /// Authoritative host-runtime isolation profile for local sandboxes.
+    ///
+    /// When set, this operator policy overrides the profile requested by an
+    /// individual sandbox on create and restart. `None` preserves per-sandbox
+    /// selection and its built-in `single-tenant` default.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "deployment_profile_serde"
+    )]
+    pub deployment_profile: Option<DeploymentProfile>,
 
     /// Database configuration.
     pub database: DatabaseConfig,
@@ -1270,6 +1318,7 @@ mod tests {
             NonZero::new(DEFAULT_METRICS_SAMPLE_INTERVAL_MS)
         );
         assert_eq!(cfg.log_level, None);
+        assert_eq!(cfg.deployment_profile, None);
         assert_eq!(cfg.database.max_connections, 5);
         assert_eq!(cfg.database.connect_timeout_secs, 30);
         assert_eq!(cfg.database.busy_timeout_secs, 5);
@@ -1301,6 +1350,33 @@ mod tests {
         let cfg: LocalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.sandbox_defaults.cpus, 4);
         assert_eq!(cfg.sandbox_defaults.memory_mib, 512);
+    }
+
+    #[test]
+    fn test_deployment_profile_uses_human_facing_config_values() {
+        let cfg: LocalConfig =
+            serde_json::from_str(r#"{"deployment_profile":"multi-tenant"}"#).unwrap();
+        assert_eq!(cfg.deployment_profile, Some(DeploymentProfile::MultiTenant));
+
+        let json = serde_json::to_value(cfg).unwrap();
+        assert_eq!(json["deployment_profile"], "multi-tenant");
+    }
+
+    #[test]
+    fn test_deployment_profile_accepts_snake_case_wire_values() {
+        let cfg: LocalConfig =
+            serde_json::from_str(r#"{"deployment_profile":"single_tenant"}"#).unwrap();
+        assert_eq!(
+            cfg.deployment_profile,
+            Some(DeploymentProfile::SingleTenant)
+        );
+    }
+
+    #[test]
+    fn test_deployment_profile_rejects_unknown_values() {
+        let error =
+            serde_json::from_str::<LocalConfig>(r#"{"deployment_profile":"shared"}"#).unwrap_err();
+        assert!(error.to_string().contains("unknown deployment profile"));
     }
 
     #[test]

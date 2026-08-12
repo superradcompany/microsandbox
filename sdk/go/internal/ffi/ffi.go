@@ -1581,6 +1581,7 @@ type CreateOptions struct {
 	Ports           map[uint16]uint16    `json:"ports,omitempty"`
 	PortsUDP        map[uint16]uint16    `json:"ports_udp,omitempty"`
 	PortBindings    []PortBindingOptions `json:"port_bindings,omitempty"`
+	Vsock           []VsockRouteOptions  `json:"vsock,omitempty"`
 	Network         *NetworkOptions      `json:"network,omitempty"`
 	Secrets         []SecretOptions      `json:"secrets,omitempty"`
 	Patches         []PatchOptions       `json:"patches,omitempty"`
@@ -1655,6 +1656,13 @@ type PortBindingOptions struct {
 	HostPort  uint16 `json:"host_port"`
 	GuestPort uint16 `json:"guest_port"`
 	Protocol  string `json:"protocol,omitempty"`
+}
+
+// VsockRouteOptions exposes one host Unix socket on a host-CID vsock port.
+type VsockRouteOptions struct {
+	HostSocket string `json:"host_socket"`
+	Port       uint32 `json:"port"`
+	SocketType string `json:"socket_type,omitempty"`
 }
 
 // DNSOptions configures the in-VM DNS proxy.

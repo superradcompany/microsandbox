@@ -1,14 +1,15 @@
 //! Fluent builder for [`SandboxConfig`].
 
+use std::collections::HashSet;
 #[cfg(feature = "net")]
 use std::net::{IpAddr, Ipv4Addr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use microsandbox_image::{PullProgressHandle, RegistryAuth};
 #[cfg(feature = "net")]
 use microsandbox_network::builder::{NetworkBuilder, SecretBuilder};
-use microsandbox_types::{CpuPlacement, EnvVar, PullPolicy};
+use microsandbox_types::{CpuPlacement, EnvVar, PullPolicy, VsockRouteSpec, VsockSocketType};
 #[cfg(feature = "net")]
 use microsandbox_types::{PortProtocol, PublishedPortSpec};
 
@@ -699,6 +700,39 @@ impl SandboxBuilder {
         self
     }
 
+    /// Expose a host Unix stream socket or local Windows named pipe on a guest-to-host vsock port.
+    ///
+    /// Guest applications connect directly to host CID 2 and `port`. No
+    /// in-guest proxy or agentd integration is required.
+    pub fn vsock(mut self, host_path: impl AsRef<Path>, port: u32) -> Self {
+        self.config.spec.vsock.routes.push(VsockRouteSpec {
+            host_socket: host_path.as_ref().to_path_buf(),
+            port,
+            socket_type: VsockSocketType::Stream,
+        });
+        self
+    }
+
+    /// Expose a host Unix datagram socket on a guest-to-host vsock port.
+    ///
+    /// Datagram boundaries are preserved end to end. Delivery remains
+    /// best-effort, matching Unix and vsock datagram semantics. Windows does
+    /// not support datagram routes.
+    pub fn vsock_dgram(mut self, host_path: impl AsRef<Path>, port: u32) -> Self {
+        self.config.spec.vsock.routes.push(VsockRouteSpec {
+            host_socket: host_path.as_ref().to_path_buf(),
+            port,
+            socket_type: VsockSocketType::Dgram,
+        });
+        self
+    }
+
+    /// Add a fully specified guest-to-host vsock route.
+    pub fn vsock_route(mut self, route: VsockRouteSpec) -> Self {
+        self.config.spec.vsock.routes.push(route);
+        self
+    }
+
     /// Add a secret with placeholder-based protection via a closure.
     ///
     /// The sandbox receives a placeholder; the real value is substituted
@@ -1273,6 +1307,7 @@ impl SandboxBuilder {
         super::types::validate_volume_mounts(&self.config.spec.mounts)?;
         super::validate_env(&self.config.spec.env)?;
         super::validate_labels(&self.config.spec.labels)?;
+        self.validate_vsock_routes()?;
 
         if let Err(error) = microsandbox_types::resolve_default_command(
             self.config.spec.runtime.entrypoint.as_deref(),
@@ -1322,6 +1357,77 @@ impl SandboxBuilder {
                     )));
                 }
                 seen.push(canonical);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validate the stable route key and the host resources it references.
+    fn validate_vsock_routes(&self) -> MicrosandboxResult<()> {
+        if self.config.spec.deployment_profile == DeploymentProfile::MultiTenant
+            && !self.config.spec.vsock.is_empty()
+        {
+            return Err(MicrosandboxError::InvalidConfig(
+                "host vsock routes are disabled for multi-tenant deployments".into(),
+            ));
+        }
+
+        let mut routes = HashSet::new();
+
+        for route in &self.config.spec.vsock.routes {
+            #[cfg(unix)]
+            if !route.host_socket.is_absolute() {
+                return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    "vsock host path must be absolute: {}",
+                    route.host_socket.display()
+                )));
+            }
+            #[cfg(windows)]
+            {
+                let path = route.host_socket.as_os_str().to_string_lossy();
+                let prefix = r"\\.\pipe\";
+                let local = path
+                    .get(..prefix.len())
+                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix));
+                let name = path.get(prefix.len()..).unwrap_or_default();
+                if !local
+                    || name.is_empty()
+                    || name
+                        .split(['\\', '/'])
+                        .any(|part| part.is_empty() || part == "." || part == "..")
+                {
+                    return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                        "vsock host path must be a local Windows named pipe such as \\\\.\\pipe\\api: {}",
+                        route.host_socket.display()
+                    )));
+                }
+                if route.socket_type == VsockSocketType::Dgram {
+                    return Err(MicrosandboxError::unsupported(
+                        Operation::SandboxCreate,
+                        UnsupportedReason::RequiresUnixHost,
+                    ));
+                }
+            }
+            if route.port == 0 || route.port == u32::MAX {
+                return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    "vsock port {} must be between 1 and {}",
+                    route.port,
+                    u32::MAX - 1
+                )));
+            }
+            // libkrun uses datagram port 123 for host-to-guest clock updates
+            // on macOS. Reserving it everywhere keeps configurations portable.
+            if route.socket_type == VsockSocketType::Dgram && route.port == 123 {
+                return Err(crate::MicrosandboxError::InvalidConfig(
+                    "vsock datagram port 123 is reserved for guest clock synchronization".into(),
+                ));
+            }
+            if !routes.insert((route.socket_type, route.port)) {
+                return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    "duplicate vsock {:?} route for port {}",
+                    route.socket_type, route.port
+                )));
             }
         }
 
@@ -1450,6 +1556,7 @@ mod tests {
     use microsandbox_types::PortProtocol;
     use microsandbox_types::{
         CpuPlacement, DeploymentProfile, SandboxLogLevel, TransparentHugePagePolicy,
+        VsockSocketType,
     };
     #[cfg(feature = "net")]
     use std::net::{IpAddr, Ipv4Addr};
@@ -2027,6 +2134,106 @@ mod tests {
         assert_eq!(config.spec.network.ports[4].host_port, 5354);
         assert_eq!(config.spec.network.ports[4].guest_port, 54);
         assert_eq!(config.spec.network.ports[4].protocol, PortProtocol::Udp);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_builder_vsock_routes_preserve_socket_type() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .vsock("/run/host-api.sock", 5000)
+            // Stream and datagram namespaces are independent.
+            .vsock_dgram("/run/events.sock", 5000)
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(config.spec.vsock.routes.len(), 2);
+        assert_eq!(
+            config.spec.vsock.routes[0].socket_type,
+            VsockSocketType::Stream
+        );
+        assert_eq!(
+            config.spec.vsock.routes[1].socket_type,
+            VsockSocketType::Dgram
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_builder_rejects_duplicate_vsock_route_key() {
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .vsock("/run/one.sock", 5000)
+            .vsock("/run/two.sock", 5000)
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("duplicate vsock Stream route"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_builder_rejects_reserved_timesync_datagram_port() {
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .vsock_dgram("/run/events.sock", 123)
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("reserved for guest clock"));
+    }
+
+    #[tokio::test]
+    async fn test_builder_rejects_vsock_for_multi_tenant_deployments() {
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .deployment_profile(DeploymentProfile::MultiTenant)
+            .vsock("/run/host-api.sock", 5000)
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("multi-tenant"));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn test_builder_accepts_local_named_pipe_stream_route() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .vsock(r"\\.\pipe\host-api", 5000)
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(config.spec.vsock.routes.len(), 1);
+        assert_eq!(
+            config.spec.vsock.routes[0].socket_type,
+            VsockSocketType::Stream
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn test_builder_rejects_remote_named_pipe_and_datagram() {
+        let remote = SandboxBuilder::new("test")
+            .image("alpine")
+            .vsock(r"\\server\pipe\host-api", 5000)
+            .build()
+            .await
+            .unwrap_err();
+        assert!(remote.to_string().contains("local Windows named pipe"));
+
+        let datagram = SandboxBuilder::new("test")
+            .image("alpine")
+            .vsock_dgram(r"\\.\pipe\events", 5001)
+            .build()
+            .await
+            .unwrap_err();
+        assert!(datagram.to_string().contains("Unix host"));
     }
 
     #[cfg(feature = "net")]

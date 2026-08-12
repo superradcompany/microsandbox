@@ -812,6 +812,12 @@ impl RubySandboxBuilder {
     fn init(this: typed_data::Obj<Self>, v: String) -> Result<(), Error> {
         put_builder(&this, |b| b.init(v))
     }
+    fn vsock(this: typed_data::Obj<Self>, host_path: String, port: u32) -> Result<(), Error> {
+        put_builder(&this, |b| b.vsock(host_path, port))
+    }
+    fn vsock_dgram(this: typed_data::Obj<Self>, host_path: String, port: u32) -> Result<(), Error> {
+        put_builder(&this, |b| b.vsock_dgram(host_path, port))
+    }
     fn create(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<RubySandbox, Error> {
         let b = take_builder(&this)?;
         let sb = run(ruby, b.create())?;
@@ -2073,6 +2079,8 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     builder.define_method("quiet_logs!", method!(RubySandboxBuilder::quiet_logs, 0))?;
     builder.define_method("entrypoint!", method!(RubySandboxBuilder::entrypoint, 1))?;
     builder.define_method("init!", method!(RubySandboxBuilder::init, 1))?;
+    builder.define_method("vsock!", method!(RubySandboxBuilder::vsock, 2))?;
+    builder.define_method("vsock_dgram!", method!(RubySandboxBuilder::vsock_dgram, 2))?;
     builder.define_method("create", method!(RubySandboxBuilder::create, 0))?;
 
     // -- ExecOutput ----------------------------------------------------------

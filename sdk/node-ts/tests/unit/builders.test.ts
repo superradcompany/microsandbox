@@ -419,6 +419,22 @@ describe("SandboxBuilder.build", () => {
     expect((cleared.runtime as { cmd: string[] }).cmd).toEqual([]);
   });
 
+  it("collects stream and datagram vsock routes", async () => {
+    const cfg = await Sandbox.builder("x")
+      .image("alpine")
+      .vsock("/run/host-api.sock", 5000)
+      .vsockDgram("/run/events.sock", 5001)
+      .build();
+    const routes = (cfg.vsock as {
+      routes: Array<{ hostSocket: string; port: number; socketType: string }>;
+    }).routes;
+
+    expect(routes).toEqual([
+      { hostSocket: "/run/host-api.sock", port: 5000, socketType: "stream" },
+      { hostSocket: "/run/events.sock", port: 5001, socketType: "dgram" },
+    ]);
+  });
+
   it("keeps libkrunfwPath as a chainable compatibility alias", async () => {
     const builder = Sandbox.builder("x");
     expect(builder.libkrunfwPath("/tmp/libkrunfw.dylib")).toBe(builder);

@@ -558,6 +558,22 @@ impl JsSandboxBuilder {
         Ok(self)
     }
 
+    /// Expose a host Unix stream socket or local Windows named pipe on a guest-to-host vsock port.
+    #[napi]
+    pub fn vsock(&mut self, host_path: String, port: u32) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.vsock(host_path, port));
+        self
+    }
+
+    /// Expose a host Unix datagram socket on a guest-to-host vsock port.
+    #[napi(js_name = "vsockDgram")]
+    pub fn vsock_dgram(&mut self, host_path: String, port: u32) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.vsock_dgram(host_path, port));
+        self
+    }
+
     /// Add a secret via a callback.
     #[napi]
     pub fn secret(

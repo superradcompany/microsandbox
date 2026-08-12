@@ -468,6 +468,28 @@ func TestFFIWireShape_Ports(t *testing.T) {
 	}
 }
 
+func TestFFIWireShape_Vsock(t *testing.T) {
+	got := marshalCreateOptions(t,
+		WithImage("alpine"),
+		WithVsock(
+			VsockRoute{HostSocket: "/run/host-api.sock", Port: 5000},
+			VsockRoute{HostSocket: "/run/events.sock", Port: 5001, SocketType: VsockSocketTypeDgram},
+		),
+	)
+	routes := mustField(t, got, "vsock").([]any)
+	stream := routes[0].(map[string]any)
+	dgram := routes[1].(map[string]any)
+	if stream["host_socket"] != "/run/host-api.sock" || stream["port"] != float64(5000) {
+		t.Fatalf("stream vsock route = %v", stream)
+	}
+	if _, present := stream["socket_type"]; present {
+		t.Fatalf("default stream type should be omitted: %v", stream)
+	}
+	if dgram["socket_type"] != "dgram" || dgram["port"] != float64(5001) {
+		t.Fatalf("datagram vsock route = %v", dgram)
+	}
+}
+
 func TestFFIWireShape_RegistryAuth(t *testing.T) {
 	got := marshalCreateOptions(t,
 		WithImage("private.example.com/img"),
@@ -727,7 +749,7 @@ func TestFFIWireShape_EmptyConfigOmitsOptionalFields(t *testing.T) {
 		"image", "snapshot", "memory_mib", "cpus", "max_memory_mib", "max_cpus", "workdir", "shell",
 		"thp",
 		"hostname", "user", "replace", "detached", "env", "scripts",
-		"ports", "ports_udp", "network", "secrets", "patches", "volumes",
+		"ports", "ports_udp", "vsock", "network", "secrets", "patches", "volumes",
 		"init", "registry_auth", "registry_insecure", "registry_ca_certs", "root_disk",
 	} {
 		if _, present := got[key]; present {

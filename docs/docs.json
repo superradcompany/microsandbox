@@ -58,6 +58,7 @@
             "icon": "network-wired",
             "pages": [
               "networking/overview",
+              "networking/vsock",
               "networking/dns",
               "networking/tls"
             ]

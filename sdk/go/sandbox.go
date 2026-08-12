@@ -101,6 +101,7 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		Ports:             o.Ports,
 		PortsUDP:          o.PortsUDP,
 		PortBindings:      buildFFIPortBindings(o.PortBindings),
+		Vsock:             buildFFIVsockRoutes(o.Vsock),
 		RegistryInsecure:  o.RegistryInsecure,
 	}
 	if o.Entrypoint != nil {
@@ -381,6 +382,18 @@ func buildFFIPortBindings(bindings []PortBinding) []ffi.PortBindingOptions {
 			HostPort:  b.HostPort,
 			GuestPort: b.GuestPort,
 			Protocol:  string(b.Protocol),
+		})
+	}
+	return out
+}
+
+func buildFFIVsockRoutes(routes []VsockRoute) []ffi.VsockRouteOptions {
+	out := make([]ffi.VsockRouteOptions, 0, len(routes))
+	for _, route := range routes {
+		out = append(out, ffi.VsockRouteOptions{
+			HostSocket: route.HostSocket,
+			Port:       route.Port,
+			SocketType: string(route.SocketType),
 		})
 	}
 	return out

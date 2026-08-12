@@ -19,7 +19,7 @@ use crate::domain::{
     Rlimit, RlimitResource, RootDisk, RootfsSource, SandboxLogLevel, SandboxPolicy,
     SandboxResources, SandboxRuntimeOptions, SandboxSpec, SecretEntry, SecretInjection,
     SecretsConfig, SecurityProfile, StatVirtualization, TransparentHugePagePolicy, ViolationAction,
-    VolumeMount, default_private, default_strict,
+    VolumeMount, VsockSpec, default_private, default_strict,
 };
 use crate::modify::SecretSource;
 use crate::{TypesError, TypesResult};
@@ -1034,6 +1034,7 @@ impl TryFrom<CloudSandboxSpec> for SandboxSpec {
             mounts: spec.mounts.into_iter().map(Into::into).collect(),
             patches: spec.patches.into_iter().map(Into::into).collect(),
             network,
+            vsock: VsockSpec::default(),
             init: spec.init,
             pull_policy: spec.pull_policy.into(),
             security_profile: spec.security_profile,

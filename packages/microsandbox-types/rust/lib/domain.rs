@@ -598,6 +598,58 @@ pub enum PortProtocol {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Types: Vsock
+//--------------------------------------------------------------------------------------------------
+
+/// Host services exposed to a sandbox through virtio-vsock.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(default)]
+pub struct VsockSpec {
+    /// Guest-to-host routes registered before the VM starts.
+    pub routes: Vec<VsockRouteSpec>,
+}
+
+impl VsockSpec {
+    /// Return whether no host services are exposed through vsock.
+    pub fn is_empty(&self) -> bool {
+        self.routes.is_empty()
+    }
+}
+
+/// One host local-IPC endpoint exposed on a host-CID vsock port.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct VsockRouteSpec {
+    /// Existing Unix socket path or local Windows named-pipe path.
+    #[cfg_attr(feature = "utoipa", schema(value_type = String))]
+    pub host_socket: PathBuf,
+
+    /// Port guests address on `VMADDR_CID_HOST` (CID 2).
+    pub port: u32,
+
+    /// Message semantics used by the guest and host endpoints.
+    #[serde(default)]
+    pub socket_type: VsockSocketType,
+}
+
+/// Socket semantics for a host-CID vsock route.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum VsockSocketType {
+    /// Reliable, ordered byte stream.
+    #[default]
+    Stream,
+
+    /// Best-effort message transport preserving datagram boundaries.
+    Dgram,
+}
+
+//--------------------------------------------------------------------------------------------------
 // Types: Init
 //--------------------------------------------------------------------------------------------------
 
@@ -732,6 +784,10 @@ pub struct SandboxSpec {
 
     /// Network specification.
     pub network: NetworkSpec,
+
+    /// Local host services exposed through virtio-vsock.
+    #[serde(default, skip_serializing_if = "VsockSpec::is_empty")]
+    pub vsock: VsockSpec,
 
     /// Hand off PID 1 to a guest init binary after agentd setup.
     pub init: Option<HandoffInit>,

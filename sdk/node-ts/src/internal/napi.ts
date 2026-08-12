@@ -214,6 +214,8 @@ export interface NapiSandboxBuilderSetters {
   portBind(bind: string, host: number, guest: number): this;
   portUdp(host: number, guest: number): this;
   portUdpBind(bind: string, host: number, guest: number): this;
+  vsock(hostPath: string, port: number): this;
+  vsockDgram(hostPath: string, port: number): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   secret(configure: (b: any) => any): this;
   secretEnv(envVar: string, value: string, allowedHost: string): this;

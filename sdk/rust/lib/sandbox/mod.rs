@@ -32,14 +32,15 @@ use microsandbox_protocol::{
     message::MessageType,
 };
 use microsandbox_types::hostname_from_sandbox_name as derive_hostname;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 
 use microsandbox_image::progress_channel;
 
 use crate::{
     MicrosandboxResult,
     agent::AgentClient,
-    db::entity::sandbox as sandbox_entity,
+    backend::LocalBackend,
+    db::entity::{run as run_entity, sandbox as sandbox_entity},
     error::{Operation, UnsupportedReason},
     runtime::SpawnMode,
 };
@@ -119,7 +120,7 @@ pub use microsandbox_types::{CpuPlacement, PullPolicy};
 pub use microsandbox_types::{
     EnvVar, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, NetworkSpec, PortProtocol,
     PublishedPortSpec, SandboxLogLevel, SandboxResources, SandboxRuntimeOptions, SandboxSpec,
-    TransparentHugePagePolicy,
+    TransparentHugePagePolicy, VsockRouteSpec, VsockSocketType, VsockSpec,
 };
 pub use modify::{
     ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,
@@ -567,14 +568,7 @@ impl Sandbox {
                 UnsupportedReason::UseInstead(Operation::SandboxRemove),
             )
         })?;
-        let pools = local_backend.db().await?;
-
-        remove_dir_if_exists(&local_backend.sandboxes_dir().join(&self.name))?;
-        sandbox_entity::Entity::delete_by_id(local.db_id)
-            .exec(pools.write())
-            .await?;
-
-        Ok(())
+        remove_local_persisted_sandbox(local_backend, &self.name, local.db_id).await
     }
 
     /// Unique name identifying this sandbox.
@@ -1524,6 +1518,66 @@ pub(super) fn remove_dir_if_exists(path: &Path) -> MicrosandboxResult<()> {
     }
 }
 
+/// Remove one exact local sandbox identity after proving no runtime owns it.
+pub(super) async fn remove_local_persisted_sandbox(
+    local_backend: &LocalBackend,
+    name: &str,
+    expected_id: i32,
+) -> MicrosandboxResult<()> {
+    let _guard = crate::runtime::acquire_sandbox_lifecycle_guard(
+        &local_backend.config().run_dir(),
+        name,
+        std::time::Duration::from_secs(5),
+    )
+    .await?;
+
+    // Re-read only after acquiring ownership. A stale `Sandbox` object must
+    // never delete a newer sandbox that reused the same deterministic name.
+    let pools = local_backend.db().await?;
+    let current = sandbox_entity::Entity::find()
+        .filter(sandbox_entity::Column::Name.eq(name))
+        .one(pools.read())
+        .await?
+        .ok_or_else(|| crate::MicrosandboxError::SandboxNotFound(name.to_string()))?;
+    if current.id != expected_id {
+        return Err(crate::MicrosandboxError::Runtime(format!(
+            "sandbox {name:?} identity changed from database id {expected_id} to {}; refusing stale removal",
+            current.id
+        )));
+    }
+    if !matches!(
+        current.status,
+        SandboxStatus::Stopped | SandboxStatus::Crashed
+    ) {
+        return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
+            "cannot remove sandbox {name:?}: status is {:?}",
+            current.status
+        )));
+    }
+
+    let latest_run = run_entity::Entity::find()
+        .filter(run_entity::Column::SandboxId.eq(expected_id))
+        .order_by_desc(run_entity::Column::Id)
+        .one(pools.read())
+        .await?;
+    if latest_run
+        .and_then(|run| run.pid)
+        .is_some_and(microsandbox_utils::process::pid_is_alive)
+    {
+        return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
+            "cannot remove sandbox {name:?}: its recorded runtime process is still alive"
+        )));
+    }
+
+    crate::runtime::remove_sandbox_socket_artifacts_for(local_backend, name)?;
+    remove_dir_if_exists(&local_backend.sandboxes_dir().join(name))?;
+    sandbox_entity::Entity::delete_by_id(expected_id)
+        .exec(pools.write())
+        .await?;
+
+    Ok(())
+}
+
 /// Load a sandbox row by name.
 pub(super) async fn load_sandbox_record(
     db: &DbReadConnection,
@@ -1546,13 +1600,15 @@ mod tests {
     #[cfg(unix)]
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
+    use sea_orm::{ActiveModelTrait, Set};
     use tempfile::tempdir;
 
     use super::{
         MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, SandboxStatus, ephemeral_cleanup_stop_result,
-        hostname_from_sandbox_name, remove_dir_if_exists, sandbox_not_found_for_name,
-        validate_hostname,
+        hostname_from_sandbox_name, remove_dir_if_exists, remove_local_persisted_sandbox,
+        sandbox_not_found_for_name, validate_hostname,
     };
+    use crate::backend::LocalBackend;
 
     #[test]
     fn test_sandbox_not_found_for_name_requires_exact_match() {
@@ -1769,5 +1825,36 @@ mod tests {
         remove_dir_if_exists(&sandbox_dir).unwrap();
 
         assert!(!sandbox_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn persisted_removal_rejects_a_stale_sandbox_identity() {
+        let temp = tempdir().unwrap();
+        let backend = LocalBackend::builder()
+            .home(temp.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        let pools = backend.db().await.unwrap();
+        let current = super::sandbox_entity::ActiveModel {
+            name: Set("recreated".to_string()),
+            config: Set("{}".to_string()),
+            status: Set(SandboxStatus::Stopped),
+            ephemeral: Set(false),
+            ..Default::default()
+        }
+        .insert(pools.write())
+        .await
+        .unwrap();
+        let sandbox_dir = backend.sandboxes_dir().join("recreated");
+        std::fs::create_dir_all(&sandbox_dir).unwrap();
+        std::fs::write(sandbox_dir.join("marker"), b"successor").unwrap();
+
+        let error = remove_local_persisted_sandbox(&backend, "recreated", current.id + 1)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("identity changed"));
+        assert!(sandbox_dir.join("marker").exists());
     }
 }

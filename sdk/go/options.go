@@ -72,6 +72,7 @@ type SandboxConfig struct {
 	Ports               map[uint16]uint16 // host port → guest port (TCP)
 	PortsUDP            map[uint16]uint16 // host port → guest port (UDP)
 	PortBindings        []PortBinding     // explicit bind address host→guest ports
+	Vsock               []VsockRoute      // host local IPC → guest host-CID port
 	Network             *NetworkConfig
 	Secrets             []SecretEntry
 	Patches             []PatchConfig
@@ -947,6 +948,29 @@ const (
 func WithPortBindings(bindings ...PortBinding) SandboxOption {
 	return func(o *SandboxConfig) {
 		o.PortBindings = append(o.PortBindings, bindings...)
+	}
+}
+
+// VsockRoute exposes a host Unix socket or local Windows named pipe through
+// virtio-vsock host CID 2. SocketType defaults to stream when empty.
+type VsockRoute struct {
+	HostSocket string
+	Port       uint32
+	SocketType VsockSocketType
+}
+
+// VsockSocketType identifies the message semantics of a vsock route.
+type VsockSocketType string
+
+const (
+	VsockSocketTypeStream VsockSocketType = "stream"
+	VsockSocketTypeDgram  VsockSocketType = "dgram"
+)
+
+// WithVsock appends guest-to-host vsock routes backed by local host IPC.
+func WithVsock(routes ...VsockRoute) SandboxOption {
+	return func(o *SandboxConfig) {
+		o.Vsock = append(o.Vsock, routes...)
 	}
 }
 

@@ -9,7 +9,7 @@ use microsandbox::backend::{Backend, LocalBackend};
 use microsandbox::sandbox::{
     CpuPlacement, DeploymentProfile, DiskImageFormat, FlatClone, MountBuilder, Patch,
     RootDiskBuilder, Sandbox, SandboxBuilder, SandboxHandle, SecurityProfile,
-    TransparentHugePagePolicy,
+    TransparentHugePagePolicy, VsockSocketType,
 };
 
 use crate::ui;
@@ -258,6 +258,14 @@ pub struct SandboxOpts {
     /// Stop the sandbox after this period of inactivity (e.g. 30s, 5m, 1h).
     #[arg(long)]
     pub idle_timeout: Option<String>,
+
+    // --- Host communication ---
+    /// Expose a host local-IPC endpoint on a guest-to-host vsock port.
+    ///
+    /// Syntax: HOST_PATH:PORT, optionally followed by /stream or /dgram.
+    /// Stream is the default. Repeat the flag to expose multiple services.
+    #[arg(long, value_name = "HOST_PATH:PORT[/stream|/dgram]")]
+    pub vsock: Vec<String>,
 
     // --- Networking (requires "net" feature) ---
     /// Forward a host port to the sandbox (HOST:GUEST, BIND_ADDR:HOST:GUEST, and /udp variants).
@@ -534,7 +542,8 @@ impl SandboxOpts {
             || self.log_level.is_some()
             || self.max_duration.is_some()
             || self.idle_timeout.is_some()
-            || self.security.is_some();
+            || self.security.is_some()
+            || !self.vsock.is_empty();
 
         #[cfg(feature = "net")]
         let net = !self.port.is_empty()
@@ -745,6 +754,15 @@ pub fn apply_sandbox_opts(
         builder = builder.idle_timeout(parse_duration_secs(dur)?);
     }
 
+    // --- Host communication ---
+    for route in &opts.vsock {
+        let (host_socket, port, socket_type) = parse_vsock_route(route)?;
+        builder = match socket_type {
+            VsockSocketType::Stream => builder.vsock(host_socket, port),
+            VsockSocketType::Dgram => builder.vsock_dgram(host_socket, port),
+        };
+    }
+
     // --- Networking ---
     #[cfg(feature = "net")]
     {
@@ -752,6 +770,38 @@ pub fn apply_sandbox_opts(
     }
 
     Ok(builder)
+}
+
+/// Parse `HOST_PATH:PORT[/stream|/dgram]` without treating colons in the
+/// host path as separators. Stream is intentionally the compact default.
+fn parse_vsock_route(spec: &str) -> anyhow::Result<(PathBuf, u32, VsockSocketType)> {
+    let (host_socket, endpoint) = spec.rsplit_once(':').ok_or_else(|| {
+        anyhow::anyhow!("--vsock must use HOST_PATH:PORT[/stream|/dgram], got {spec:?}")
+    })?;
+    if host_socket.is_empty() {
+        anyhow::bail!("--vsock host path cannot be empty");
+    }
+
+    let (port, socket_type) = match endpoint.rsplit_once('/') {
+        None => (endpoint, VsockSocketType::Stream),
+        Some((port, "stream")) => (port, VsockSocketType::Stream),
+        Some((port, "dgram")) => (port, VsockSocketType::Dgram),
+        Some((_, kind)) => {
+            anyhow::bail!("--vsock socket type must be stream or dgram, got {kind:?}")
+        }
+    };
+    let port = port.parse::<u32>().map_err(|_| {
+        anyhow::anyhow!("--vsock port must be an unsigned 32-bit integer, got {port:?}")
+    })?;
+    let host_socket = PathBuf::from(host_socket);
+    if !host_socket.is_absolute() {
+        anyhow::bail!(
+            "--vsock host path must be absolute, got {}",
+            host_socket.display()
+        );
+    }
+
+    Ok((host_socket, port, socket_type))
 }
 
 /// Parsed `--root-disk` value, classified before it touches the builder.
@@ -2530,6 +2580,51 @@ mod tests {
     };
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_vsock_route_defaults_to_stream() {
+        let route = parse_vsock_route("/run/host-api.sock:5000").unwrap();
+        assert_eq!(route.0, PathBuf::from("/run/host-api.sock"));
+        assert_eq!(route.1, 5000);
+        assert_eq!(route.2, VsockSocketType::Stream);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_vsock_route_accepts_explicit_socket_types() {
+        let stream = parse_vsock_route("/run/host-api.sock:5000/stream").unwrap();
+        let dgram = parse_vsock_route("/run/events.sock:5001/dgram").unwrap();
+
+        assert_eq!(stream.2, VsockSocketType::Stream);
+        assert_eq!(dgram.2, VsockSocketType::Dgram);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_vsock_route_rejects_relative_paths_and_unknown_types() {
+        assert!(
+            parse_vsock_route("run/host-api.sock:5000")
+                .unwrap_err()
+                .to_string()
+                .contains("absolute")
+        );
+        assert!(
+            parse_vsock_route("/run/host-api.sock:5000/seqpacket")
+                .unwrap_err()
+                .to_string()
+                .contains("stream or dgram")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn parse_vsock_route_accepts_named_pipe_with_default_stream() {
+        let route = parse_vsock_route(r"\\.\pipe\host-api:5000").unwrap();
+        assert_eq!(route.0, PathBuf::from(r"\\.\pipe\host-api"));
+        assert_eq!(route.1, 5000);
+        assert_eq!(route.2, VsockSocketType::Stream);
+    }
 
     #[test]
     fn parse_secret_returns_env_and_host_reference() {

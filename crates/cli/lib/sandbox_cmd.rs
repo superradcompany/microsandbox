@@ -55,6 +55,11 @@ pub struct SandboxArgs {
     #[arg(long = "startup-fd", hide = true)]
     pub startup_fd: Option<i32>,
 
+    /// Inherited descriptor owning this sandbox's lifecycle lock.
+    #[cfg(unix)]
+    #[arg(long = "lifecycle-lock-fd", hide = true)]
+    pub lifecycle_lock_fd: Option<i32>,
+
     /// Windows named pipe used to write startup JSON.
     #[cfg(windows)]
     #[arg(long = "startup-pipe", hide = true)]
@@ -137,6 +142,33 @@ pub fn run(args: SandboxArgs) -> ! {
             std::process::exit(2);
         }
     };
+    let run_dir = launch_run_dir(&launch);
+    #[cfg(unix)]
+    let lifecycle_guard = match args.lifecycle_lock_fd {
+        Some(fd) => match lifecycle_guard_from_fd(fd) {
+            Ok(guard) => guard,
+            Err(err) => {
+                eprintln!("{err}");
+                std::process::exit(2);
+            }
+        },
+        None => {
+            match microsandbox_runtime::ipc::acquire_lifecycle_guard(&run_dir, &args.sandbox_name) {
+                Ok(guard) => guard,
+                Err(err) => {
+                    eprintln!("failed to acquire sandbox lifecycle ownership: {err}");
+                    std::process::exit(2);
+                }
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let lifecycle_guard =
+        microsandbox_runtime::ipc::acquire_lifecycle_guard(&run_dir, &args.sandbox_name)
+            .unwrap_or_else(|err| {
+                eprintln!("failed to acquire sandbox lifecycle ownership: {err}");
+                std::process::exit(2);
+            });
     let is_vmdk = launch.rootfs.disk_format.as_deref() == Some("vmdk");
     let disks = match parse_disk_args(&launch.disks) {
         Ok(disks) => disks,
@@ -211,6 +243,7 @@ pub fn run(args: SandboxArgs) -> ! {
         rootfs_disk_readonly: launch.rootfs.disk_readonly,
         mounts: launch.mounts,
         disks,
+        vsock: launch.vsock,
         #[cfg(unix)]
         backends: vec![],
         init_path: launch.init_path,
@@ -235,6 +268,8 @@ pub fn run(args: SandboxArgs) -> ! {
         log_dir: launch.log_dir,
         runtime_dir: launch.runtime_dir,
         sandboxes_dir: launch.sandboxes_dir,
+        run_dir,
+        lifecycle_guard,
         cpu_lease_dir: launch.cpu_lease_dir,
         writeback_lease_dir: launch.writeback_lease_dir,
         block_writeback_pool_bytes: launch.block_writeback_pool_bytes,
@@ -259,6 +294,31 @@ pub fn run(args: SandboxArgs) -> ! {
     };
 
     microsandbox_runtime::vm::enter(config)
+}
+
+/// Resolve the runtime artifact root across launch-config generations.
+fn launch_run_dir(launch: &LaunchConfig) -> PathBuf {
+    if !launch.run_dir.as_os_str().is_empty() {
+        return launch.run_dir.clone();
+    }
+
+    // Older launchers bind `<run>/agent/<hash>.sock` and do not serialize a
+    // run root. Recover it from that stable legacy endpoint when possible.
+    if let Some(agent_dir) = launch.agent_sock.parent()
+        && agent_dir.file_name().is_some_and(|name| name == "agent")
+        && let Some(run_dir) = agent_dir.parent()
+    {
+        return run_dir.to_path_buf();
+    }
+
+    // The pre-hash deep-path fallback lives below the sandbox root, so it
+    // carries no run-root information. Existing homes colocate `run` beside
+    // `sandboxes`; this inference is only used for old launch payloads.
+    launch
+        .sandboxes_dir
+        .parent()
+        .map(|home| home.join(microsandbox_utils::RUN_SUBDIR))
+        .unwrap_or_default()
 }
 
 /// Load the JSON [`LaunchConfig`] for this sandbox from the inherited config
@@ -320,7 +380,40 @@ fn startup_from_fd(fd: i32) -> Result<OwnedFd, String> {
 }
 
 #[cfg(unix)]
+fn lifecycle_guard_from_fd(
+    fd: i32,
+) -> Result<microsandbox_runtime::ipc::SandboxLifecycleGuard, String> {
+    validate_open_fd(
+        fd,
+        microsandbox_runtime::vm::LIFECYCLE_LOCK_FD,
+        "lifecycle-lock-fd",
+    )?;
+    let file = unsafe { File::from_raw_fd(fd) };
+    Ok(microsandbox_runtime::ipc::SandboxLifecycleGuard::from_inherited_file(file))
+}
+
+#[cfg(unix)]
 fn validate_pipe_fd(fd: i32, expected_fd: i32, arg_name: &str) -> Result<(), String> {
+    validate_open_fd(fd, expected_fd, arg_name)?;
+
+    let mut stat = MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
+        return Err(format!(
+            "invalid --{arg_name} {fd}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let stat = unsafe { stat.assume_init() };
+    let file_type = stat.st_mode & libc::S_IFMT as libc::mode_t;
+    if file_type != libc::S_IFIFO as libc::mode_t {
+        return Err(format!("invalid --{arg_name} {fd}: fd is not a pipe"));
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_open_fd(fd: i32, expected_fd: i32, arg_name: &str) -> Result<(), String> {
     if fd < 0 {
         return Err(format!(
             "invalid --{arg_name}: fd must be non-negative, got {fd}"
@@ -338,19 +431,6 @@ fn validate_pipe_fd(fd: i32, expected_fd: i32, arg_name: &str) -> Result<(), Str
             "invalid --{arg_name} {fd}: {}",
             std::io::Error::last_os_error()
         ));
-    }
-
-    let mut stat = MaybeUninit::<libc::stat>::uninit();
-    if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
-        return Err(format!(
-            "invalid --{arg_name} {fd}: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    let stat = unsafe { stat.assume_init() };
-    let file_type = stat.st_mode & libc::S_IFMT as libc::mode_t;
-    if file_type != libc::S_IFIFO as libc::mode_t {
-        return Err(format!("invalid --{arg_name} {fd}: fd is not a pipe"));
     }
 
     Ok(())
@@ -569,6 +649,8 @@ mod tests {
             parent_watch_fd: None,
             #[cfg(unix)]
             startup_fd: None,
+            #[cfg(unix)]
+            lifecycle_lock_fd: None,
             #[cfg(windows)]
             startup_pipe: None,
             forward_output: false,
@@ -612,6 +694,39 @@ mod tests {
             loaded.writeback_lease_dir,
             PathBuf::from("/tmp/writeback-leases")
         );
+    }
+
+    #[test]
+    fn test_old_launch_config_without_run_dir_remains_readable() {
+        use std::io::Write;
+
+        let launch = LaunchConfig {
+            sandboxes_dir: PathBuf::from("/tmp/msb/sandboxes"),
+            agent_sock: PathBuf::from("/tmp/msb/run/agent/legacy.sock"),
+            ..Default::default()
+        };
+        let mut value = serde_json::to_value(&launch).unwrap();
+        value.as_object_mut().unwrap().remove("run_dir");
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&serde_json::to_vec(&value).unwrap())
+            .unwrap();
+
+        let args = args_with(None, Some(file.path().to_path_buf()));
+        let loaded = load_launch_config(&args).unwrap();
+
+        assert!(loaded.run_dir.as_os_str().is_empty());
+        assert_eq!(launch_run_dir(&loaded), PathBuf::from("/tmp/msb/run"));
+    }
+
+    #[test]
+    fn test_old_fallback_launch_config_infers_run_dir_from_sandbox_root() {
+        let launch = LaunchConfig {
+            sandboxes_dir: PathBuf::from("/tmp/msb/sandboxes"),
+            agent_sock: PathBuf::from("/tmp/msb/sandboxes/demo/runtime/agent.sock"),
+            ..Default::default()
+        };
+
+        assert_eq!(launch_run_dir(&launch), PathBuf::from("/tmp/msb/run"));
     }
 
     #[test]

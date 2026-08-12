@@ -4041,6 +4041,7 @@ dependencies = [
  "microsandbox-protocol",
  "microsandbox-types",
  "microsandbox-utils",
+ "microsandbox-vsock",
  "msb_krun",
  "nix 0.31.3",
  "rand 0.10.2",
@@ -4048,6 +4049,7 @@ dependencies = [
  "sea-orm",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
@@ -4082,6 +4084,18 @@ dependencies = [
  "scopeguard",
  "tempfile",
  "ureq",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "microsandbox-vsock"
+version = "0.6.8"
+dependencies = [
+ "libc",
+ "msb_krun",
+ "nix 0.31.3",
+ "tempfile",
+ "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -4509,6 +4523,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+ "memoffset",
 ]
 
 [[package]]

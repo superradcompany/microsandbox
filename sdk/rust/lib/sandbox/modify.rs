@@ -592,16 +592,38 @@ async fn grow_root_disk_now(
 }
 
 /// Path of the sandbox's host-side runtime control socket.
+#[cfg(windows)]
 fn control_socket_path(name: &str) -> MicrosandboxResult<std::path::PathBuf> {
     Ok(microsandbox_runtime::control::control_socket_path_for(
         &crate::runtime::agent_socket_path(name)?,
     ))
 }
 
+#[cfg(unix)]
+fn control_socket_path_candidates(name: &str) -> Vec<std::path::PathBuf> {
+    control_socket_paths(crate::runtime::sandbox_agent_socket_path_candidates(name))
+}
+
+#[cfg(unix)]
+fn control_socket_paths(
+    agent_candidates: impl IntoIterator<Item = std::path::PathBuf>,
+) -> Vec<std::path::PathBuf> {
+    agent_candidates
+        .into_iter()
+        .map(|path| microsandbox_runtime::control::control_socket_path_for(&path))
+        .collect()
+}
+
 /// Whether the running sandbox exposes the runtime control socket. Its absence
 /// means the runtime predates live control or the VM booted without any
 /// live-mutable capacity, so everything classifies as restart-required.
 fn control_socket_exists(name: &str) -> bool {
+    #[cfg(unix)]
+    return control_socket_path_candidates(name)
+        .into_iter()
+        .any(|path| path.exists());
+
+    #[cfg(not(unix))]
     control_socket_path(name).is_ok_and(|path| path.exists())
 }
 
@@ -668,18 +690,59 @@ async fn control_request(
     name: &str,
     request: String,
 ) -> MicrosandboxResult<microsandbox_runtime::control::ControlResponse> {
+    #[cfg(unix)]
+    {
+        let stream = connect_control_socket(control_socket_path_candidates(name))
+            .await
+            .map_err(|error| {
+                crate::MicrosandboxError::Runtime(format!(
+                    "failed to reach a runtime control socket for sandbox {name:?}: {error}"
+                ))
+            })?;
+        return control_request_over_stream(stream, &request).await;
+    }
+
+    #[cfg(windows)]
+    {
+        let path = control_socket_path(name)?;
+        let stream = connect_control_pipe(&path).await?;
+        control_request_over_stream(stream, &request).await
+    }
+}
+
+#[cfg(unix)]
+async fn connect_control_socket(
+    candidates: impl IntoIterator<Item = std::path::PathBuf>,
+) -> std::io::Result<tokio::net::UnixStream> {
+    let mut last_error = None;
+    for path in candidates {
+        if !path.exists() {
+            continue;
+        }
+        match tokio::net::UnixStream::connect(&path).await {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no runtime control endpoint exists",
+        )
+    }))
+}
+
+/// Send and receive one control exchange over an already-connected transport.
+async fn control_request_over_stream<S>(
+    mut stream: S,
+    request: &str,
+) -> MicrosandboxResult<microsandbox_runtime::control::ControlResponse>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    let path = control_socket_path(name)?;
-    #[cfg(unix)]
-    let mut stream = tokio::net::UnixStream::connect(&path).await.map_err(|e| {
-        crate::MicrosandboxError::Runtime(format!(
-            "failed to reach the runtime control socket at {}: {e}",
-            path.display()
-        ))
-    })?;
-    #[cfg(windows)]
-    let mut stream = connect_control_pipe(&path).await?;
     stream
         .write_all(request.as_bytes())
         .await
@@ -2272,6 +2335,49 @@ mod tests {
 
     use super::*;
     use crate::backend::LocalBackend;
+
+    #[test]
+    #[cfg(unix)]
+    fn new_control_client_selects_old_runtime_socket() {
+        let temp = tempfile::Builder::new()
+            .prefix("msb-control")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let run_dir = temp.path().join("run");
+        let paths = microsandbox_runtime::ipc::sandbox_socket_paths(&run_dir, "old-runtime");
+        std::fs::create_dir_all(paths.legacy_control.parent().unwrap()).unwrap();
+        let _listener = std::os::unix::net::UnixListener::bind(&paths.legacy_control).unwrap();
+
+        let selected = control_socket_paths(vec![paths.agent.clone(), paths.legacy_agent.clone()])
+            .into_iter()
+            .find(|path| path.exists())
+            .unwrap();
+
+        assert_eq!(selected, paths.legacy_control);
+        std::os::unix::net::UnixStream::connect(selected).unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn new_control_client_skips_stale_canonical_socket() {
+        let temp = tempfile::Builder::new()
+            .prefix("msb-control-fallback")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let run_dir = temp.path().join("run");
+        let paths = microsandbox_runtime::ipc::sandbox_socket_paths(&run_dir, "old-runtime");
+        std::fs::create_dir_all(&paths.canonical_dir).unwrap();
+        let stale = std::os::unix::net::UnixListener::bind(&paths.control).unwrap();
+        drop(stale);
+        std::fs::create_dir_all(paths.legacy_control.parent().unwrap()).unwrap();
+        let _live = tokio::net::UnixListener::bind(&paths.legacy_control).unwrap();
+
+        let stream = connect_control_socket(vec![paths.control, paths.legacy_control])
+            .await
+            .unwrap();
+
+        assert!(stream.peer_addr().is_ok());
+    }
 
     fn config(cpus: u8, memory_mib: u32) -> SandboxConfig {
         let mut config = SandboxConfig::default();
