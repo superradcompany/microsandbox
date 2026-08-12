@@ -197,11 +197,11 @@ namespace :gem do
     # platform gem (and the lockfile there is mutated by the patched build), so
     # ship only the Ruby surface plus the staged binaries. The source gemspec
     # globs only lib/**/*.rb, so a flat compiled artifact can never leak into a
-    # gem; binaries ship solely through this explicit list. libexec/ is the seam
-    # for a bundled msb runtime and is empty for now; exe/ stays reserved for
-    # wrapper shims and never holds binaries.
+    # gem; binaries ship solely through this explicit list. The msb runtime is
+    # never bundled here — it ships in a separate per-platform binaries gem
+    # (#1305); exe/ stays reserved for wrapper shims and never holds binaries.
     spec.files = spec.files.reject { |path| path.start_with?("ext/") } +
-                 staged + Dir["libexec/**/*"]
+                 staged
     # Derived from the ABIs actually packaged, so a single-ABI dev gem (via the
     # RUBY_ABIS override) cannot claim Rubies it has no binary for. In CI this
     # is always the full list.
