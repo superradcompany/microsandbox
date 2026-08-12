@@ -21,6 +21,7 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
     "max_memory",
     "max_cpus",
     "cpu_placement",
+    "placement_profile",
     "thp",
     "workdir",
     "shell",
@@ -334,6 +335,9 @@ pub fn sandbox_builder_from_args(
             .parse::<CpuPlacement>()
             .map_err(pyo3::exceptions::PyValueError::new_err)?;
         builder = builder.cpu_placement(policy);
+    }
+    if let Some(placement_profile) = extract_opt::<String>(kwargs, "placement_profile")? {
+        builder = builder.placement_profile(placement_profile);
     }
     if let Some(thp) = extract_opt::<String>(kwargs, "thp")? {
         let policy = thp

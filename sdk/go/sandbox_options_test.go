@@ -328,6 +328,7 @@ func TestFFIWireShape_ScalarKnobs(t *testing.T) {
 		WithMaxMemory(4096),
 		WithMaxCPUs(8),
 		WithCPUPlacement(CPUPlacementSpread),
+		WithPlacementProfile("latency"),
 		WithWorkdir("/app"),
 		WithShell("/bin/bash"),
 		WithHostname("sb"),
@@ -347,6 +348,7 @@ func TestFFIWireShape_ScalarKnobs(t *testing.T) {
 	}{
 		{"image", "alpine"},
 		{"cpu_placement", "spread"},
+		{"placement_profile", "latency"},
 		{"memory_mib", float64(512)},
 		{"cpus", float64(2)},
 		{"max_memory_mib", float64(4096)},

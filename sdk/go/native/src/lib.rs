@@ -979,6 +979,7 @@ struct SandboxCreateOpts {
     max_memory_mib: Option<u32>,
     max_cpus: Option<u8>,
     cpu_placement: Option<String>,
+    placement_profile: Option<String>,
     thp: Option<String>,
     workdir: Option<String>,
     shell: Option<String>,
@@ -2102,6 +2103,9 @@ pub unsafe extern "C" fn msb_sandbox_create(
                     .parse::<microsandbox::sandbox::CpuPlacement>()
                     .map_err(FfiError::invalid_argument)?;
                 builder = builder.cpu_placement(policy);
+            }
+            if let Some(placement_profile) = opts.placement_profile {
+                builder = builder.placement_profile(placement_profile);
             }
             if let Some(thp) = opts.thp {
                 let policy = thp

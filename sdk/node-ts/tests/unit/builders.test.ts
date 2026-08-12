@@ -340,6 +340,7 @@ describe("SandboxBuilder.build", () => {
       .cpus(2)
       .maxCpus(8)
       .cpuPlacement("spread")
+      .placementProfile("latency")
       .thp("always")
       .build();
     expect((cfg.resources as { memoryMib: number }).memoryMib).toBe(2048);
@@ -349,6 +350,9 @@ describe("SandboxBuilder.build", () => {
     expect((cfg.resources as { cpuPlacement: string }).cpuPlacement).toBe(
       "spread",
     );
+    expect(
+      (cfg.resources as { placementProfile: string }).placementProfile,
+    ).toBe("latency");
     expect((cfg.resources as { thp: string }).thp).toBe("always");
   });
 

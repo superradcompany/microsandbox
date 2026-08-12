@@ -203,6 +203,10 @@ export type CloudSandboxResources = {
    */
   cpu_placement?: CpuPlacement;
   /**
+   * Host-approved placement profile name.
+   */
+  placement_profile?: string | null;
+  /**
    * Guest transparent huge-page policy selected at boot.
    */
   thp?: TransparentHugePagePolicy;

@@ -173,6 +173,14 @@ impl JsSandboxBuilder {
         Ok(self)
     }
 
+    /// Host-defined placement profile name.
+    #[napi(js_name = "placementProfile")]
+    pub fn placement_profile(&mut self, profile: String) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.placement_profile(profile));
+        self
+    }
+
     /// Guest memory in MiB.
     #[napi]
     pub fn memory(&mut self, mib: u32) -> &Self {

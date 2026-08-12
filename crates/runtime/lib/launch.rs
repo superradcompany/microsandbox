@@ -10,7 +10,7 @@
 
 use std::path::PathBuf;
 
-use microsandbox_types::{CpuPlacement, DeploymentProfile};
+use microsandbox_types::{CpuPlacement, DeploymentProfile, PlacementProfile};
 use serde::{Deserialize, Serialize};
 
 use microsandbox_types::TransparentHugePagePolicy;
@@ -50,6 +50,14 @@ pub struct LaunchConfig {
 
     /// Requested host CPU placement policy.
     pub cpu_placement: CpuPlacement,
+
+    /// Host-defined profile name retained for diagnostics and missing-profile validation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_profile_name: Option<String>,
+
+    /// Host-resolved profile definition; sandbox clients submit only the name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_profile: Option<PlacementProfile>,
 
     /// Path to the Unix domain socket for the agent relay.
     pub agent_sock: PathBuf,

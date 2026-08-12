@@ -1022,6 +1022,8 @@ export declare class SandboxBuilder {
   maxCpus(count: number): this
   /** Host CPU placement policy. */
   cpuPlacement(policy: string): this
+  /** Host-defined placement profile name. */
+  placementProfile(profile: string): this
   /** Guest memory in MiB. */
   memory(mib: number): this
   /** Boot-time maximum hotpluggable guest memory in MiB. */

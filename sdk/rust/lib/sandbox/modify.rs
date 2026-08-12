@@ -1229,7 +1229,7 @@ fn push_resource_changes(
     changes: &mut Vec<PlannedChange>,
     warnings: &mut Vec<ModificationWarning>,
 ) {
-    let resources = config.spec.resources;
+    let resources = &config.spec.resources;
     let desired = desired_resources(config, patch);
 
     if let Some(cpus) = patch.cpus
@@ -1893,7 +1893,7 @@ fn push_resource_conflicts(
 }
 
 fn desired_resources(config: &SandboxConfig, patch: &SandboxModificationPatch) -> DesiredResources {
-    let resources = config.spec.resources;
+    let resources = &config.spec.resources;
     let cpus = patch.cpus.unwrap_or(resources.cpus);
     let memory_mib = patch.memory_mib.unwrap_or(resources.memory_mib);
     let max_cpus = patch.max_cpus.unwrap_or(resources.max_cpus).max(cpus);

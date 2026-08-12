@@ -66,6 +66,10 @@ pub struct SandboxOpts {
     #[arg(long = "cpu-placement", value_name = "POLICY")]
     pub cpu_placement: Option<CpuPlacement>,
 
+    /// Host-defined placement profile name.
+    #[arg(long = "placement-profile", value_name = "NAME")]
+    pub placement_profile: Option<String>,
+
     /// Amount of memory to allocate (e.g. 512M, 1G).
     #[arg(short, long)]
     pub memory: Option<String>,
@@ -497,6 +501,7 @@ impl SandboxOpts {
         let base = self.cpus.is_some()
             || self.max_cpus.is_some()
             || self.cpu_placement.is_some()
+            || self.placement_profile.is_some()
             || self.memory.is_some()
             || self.max_memory.is_some()
             || self.thp.is_some()
@@ -581,6 +586,9 @@ pub fn apply_sandbox_opts(
     }
     if let Some(cpu_placement) = opts.cpu_placement {
         builder = builder.cpu_placement(cpu_placement);
+    }
+    if let Some(ref placement_profile) = opts.placement_profile {
+        builder = builder.placement_profile(placement_profile);
     }
     if let Some(ref mem) = opts.memory {
         builder = builder.memory(ui::parse_size_mib(mem).map_err(anyhow::Error::msg)?);
@@ -2866,6 +2874,24 @@ mod tests {
             .unwrap();
 
         assert_eq!(config.spec.resources.cpu_placement, CpuPlacement::Spread);
+    }
+
+    #[tokio::test]
+    async fn apply_sandbox_opts_sets_placement_profile() {
+        let opts = SandboxOpts {
+            placement_profile: Some("latency".to_string()),
+            ..Default::default()
+        };
+        let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            config.spec.resources.placement_profile.as_deref(),
+            Some("latency")
+        );
     }
 
     #[tokio::test]

@@ -115,7 +115,7 @@ Reflink optimizes provisioning rather than promising faster steady-state writes.
 | `spread` | Throughput benefits from distinct physical cores and avoiding SMT siblings | Consumes more physical cores and can reduce packing density |
 | `compact` | Cache locality and host packing matter more than avoiding SMT siblings | Sibling contention can hurt compute-heavy workloads |
 
-Managed placement reserves for `max_cpus`, including vCPUs that are offline at boot. It does not pin VMM device workers, isolate unrelated host processes, allocate NUMA-local guest memory, or promise dedicated physical cores. All cooperating processes must use the same machine-wide `MSB_HOME` if the allocation catalog is expected to coordinate the whole host. See [CPU placement](/sandboxes/cpu-placement) for the complete guarantees and platform behavior.
+Managed placement reserves for `max_cpus`, including vCPUs that are offline at boot. It does not pin VMM device workers, isolate unrelated host processes, or promise dedicated physical cores. Named placement profiles can additionally request NUMA-local guest memory. All cooperating processes must use the same machine-wide `MSB_HOME` if the allocation catalog is expected to coordinate the whole host. See [CPU placement](/sandboxes/cpu-placement) for the complete guarantees and platform behavior.
 
 ## Guest transparent huge pages
 

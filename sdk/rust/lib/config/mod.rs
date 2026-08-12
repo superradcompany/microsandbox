@@ -12,7 +12,7 @@
 //! one resolved `msb` binary).
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     num::NonZero,
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
@@ -21,7 +21,7 @@ use std::{
 use docker_credential::{CredentialRetrievalError, DockerCredential};
 use microsandbox_image::RegistryAuth;
 use microsandbox_runtime::logging::LogLevel;
-use microsandbox_types::{CpuPlacement, RootDisk, TransparentHugePagePolicy};
+use microsandbox_types::{CpuPlacement, PlacementProfile, RootDisk, TransparentHugePagePolicy};
 use serde::{Deserialize, Serialize};
 
 use crate::error::Operation;
@@ -213,6 +213,9 @@ pub struct SandboxDefaults {
     /// Default host CPU placement policy.
     pub cpu_placement: CpuPlacement,
 
+    /// Default host-defined placement profile name.
+    pub placement_profile: Option<String>,
+
     /// Default guest transparent huge-page policy.
     pub thp: TransparentHugePagePolicy,
 
@@ -259,6 +262,9 @@ pub struct OciSandboxDefaults {
 pub struct RuntimeConfig {
     /// Buffered host writeback containment and pressure-sharing policy.
     pub block_writeback: BlockWritebackConfig,
+
+    /// Host-owned placement profiles selectable by sandbox name.
+    pub placement_profiles: BTreeMap<String, PlacementProfile>,
 }
 
 /// Controls buffered host dirty data for writable raw disks.
@@ -378,7 +384,29 @@ impl LocalConfig {
             ));
         }
 
+        if let Some(profile_name) = &self.sandbox_defaults.placement_profile {
+            self.resolve_placement_profile(profile_name)?;
+        }
+
         Ok(())
+    }
+
+    /// Resolve and structurally validate a host-owned placement profile.
+    pub(crate) fn resolve_placement_profile(
+        &self,
+        name: &str,
+    ) -> MicrosandboxResult<PlacementProfile> {
+        let profile = self
+            .runtime
+            .placement_profiles
+            .get(name)
+            .copied()
+            .ok_or_else(|| {
+                MicrosandboxError::InvalidConfig(format!(
+                    "placement profile `{name}` is not defined in runtime.placement_profiles"
+                ))
+            })?;
+        Ok(profile)
     }
 
     /// Get the resolved home directory.
@@ -654,6 +682,7 @@ impl Default for SandboxDefaults {
             cpus: DEFAULT_CPUS,
             memory_mib: DEFAULT_MEMORY_MIB,
             cpu_placement: CpuPlacement::Inherit,
+            placement_profile: None,
             thp: TransparentHugePagePolicy::Madvise,
             oci: OciSandboxDefaults::default(),
             shell: "/bin/sh".into(),
@@ -1231,6 +1260,7 @@ mod tests {
         assert_eq!(cfg.sandbox_defaults.cpus, 1);
         assert_eq!(cfg.sandbox_defaults.memory_mib, 512);
         assert_eq!(cfg.sandbox_defaults.cpu_placement, CpuPlacement::Inherit);
+        assert_eq!(cfg.sandbox_defaults.placement_profile, None);
         assert_eq!(cfg.sandbox_defaults.thp, TransparentHugePagePolicy::Madvise);
         assert_eq!(cfg.sandbox_defaults.oci.upper_size_mib, None);
         assert_eq!(cfg.sandbox_defaults.oci.root_disk, None);
@@ -1247,6 +1277,7 @@ mod tests {
             cfg.runtime.block_writeback,
             BlockWritebackConfig::Auto { pool_mib: None }
         );
+        assert!(cfg.runtime.placement_profiles.is_empty());
         assert_eq!(
             serde_json::to_value(cfg.runtime.block_writeback).unwrap(),
             serde_json::json!({ "mode": "auto" })
@@ -1301,6 +1332,61 @@ mod tests {
             })
         );
         assert_eq!(cfg.runtime.block_writeback, BlockWritebackConfig::Off {});
+    }
+
+    #[test]
+    fn test_placement_profile_round_trip_and_default_resolution() {
+        let json = r#"{
+            "sandbox_defaults": {
+                "cpu_placement": "auto",
+                "placement_profile": "latency"
+            },
+            "runtime": {
+                "placement_profiles": {
+                    "latency": {
+                        "numa": { "mode": "prefer_single" },
+                        "memory": { "mode": "follow_cpu" }
+                    }
+                }
+            }
+        }"#;
+        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+
+        cfg.validate_sandbox_defaults().unwrap();
+        assert_eq!(
+            cfg.sandbox_defaults.placement_profile.as_deref(),
+            Some("latency")
+        );
+        let profile = cfg.resolve_placement_profile("latency").unwrap();
+        assert_eq!(
+            profile.numa,
+            microsandbox_types::NumaPlacement::PreferSingle
+        );
+        assert_eq!(
+            profile.memory,
+            microsandbox_types::MemoryPlacement::FollowCpu
+        );
+
+        let round: LocalConfig =
+            serde_json::from_value(serde_json::to_value(cfg).unwrap()).unwrap();
+        assert_eq!(
+            round.sandbox_defaults.placement_profile.as_deref(),
+            Some("latency")
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_unknown_default_placement_profile() {
+        let cfg: LocalConfig =
+            serde_json::from_str(r#"{"sandbox_defaults":{"placement_profile":"missing"}}"#)
+                .unwrap();
+
+        let error = cfg.validate_sandbox_defaults().unwrap_err();
+        assert!(
+            error.to_string().contains(
+                "placement profile `missing` is not defined in runtime.placement_profiles"
+            )
+        );
     }
 
     #[test]

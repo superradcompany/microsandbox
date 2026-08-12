@@ -179,6 +179,7 @@ export interface NapiSandboxBuilderSetters {
   cpus(n: number): this;
   maxCpus(n: number): this;
   cpuPlacement(policy: "inherit" | "auto" | "spread" | "compact"): this;
+  placementProfile(profile: string): this;
   memory(mib: number): this;
   maxMemory(mib: number): this;
   thp(policy: "always" | "madvise" | "never"): this;

@@ -63,9 +63,74 @@ sb, err := m.CreateSandbox(ctx, "worker",
 ```
 </CodeGroup>
 
+## Keep CPU and memory together
+
+On a NUMA host, a named placement profile can keep a sandbox's maximum CPU and memory capacity on one host node. The host operator defines the profile in `config.json`:
+
+```json
+{
+  "runtime": {
+    "placement_profiles": {
+      "latency": {
+        "numa": { "mode": "prefer_single" },
+        "memory": { "mode": "follow_cpu" }
+      }
+    }
+  }
+}
+```
+
+The sandbox selects only the host-approved name. Its CPU policy still controls how logical processors are chosen inside that node.
+
+<CodeGroup>
+```bash CLI
+msb create python:3.12 --name worker --cpus 2 --cpu-placement auto --placement-profile latency
+```
+
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .image("python:3.12")
+    .cpus(2)
+    .cpu_placement(CpuPlacement::Auto)
+    .placement_profile("latency")
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+await using sb = await Sandbox.builder("worker")
+  .image("python:3.12")
+  .cpus(2)
+  .cpuPlacement("auto")
+  .placementProfile("latency")
+  .create();
+```
+
+```python Python
+sb = await Sandbox.create(
+    "worker",
+    image="python:3.12",
+    cpus=2,
+    cpu_placement="auto",
+    placement_profile="latency",
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python:3.12"),
+    m.WithCPUs(2),
+    m.WithCPUPlacement(m.CPUPlacementAuto),
+    m.WithPlacementProfile("latency"),
+)
+```
+</CodeGroup>
+
+Planning uses `max_cpus` and `max_memory_mib`, not just the boot values. On Linux, this keeps later live growth inside the reserved node. In this release, multi-node guest placement is intentionally disabled: `prefer_single` and `strict_single` both return a capacity error rather than silently splitting a sandbox. Linux binds guest RAM to the chosen node. Windows uses the actual processor-to-NUMA-node mapping and requests preferred-node allocation; it checks current boot-time availability, but the operating system does not expose equivalent per-node total capacity for a hard future-growth promise. `inherit` leaves host memory policy unchanged.
+
 ## Scope and guarantees
 
-Managed placement applies hard affinity to libkrun's vCPU threads before they enter guest execution: Linux uses the process affinity mask and `sched_setaffinity`, while Windows uses the calling runtime thread's processor-group affinity and `SetThreadGroupAffinity`. On heterogeneous Windows processors, the planner prefers the higher-performance core class reported by Windows. Placement does not isolate unrelated host processes, pin VMM or device-worker threads, bind guest RAM to a NUMA node, or promise dedicated cores.
+Managed placement applies hard affinity to libkrun's vCPU threads before they enter guest execution: Linux uses the process affinity mask and `sched_setaffinity`, while Windows uses the calling runtime thread's processor-group affinity and `SetThreadGroupAffinity`. On heterogeneous Windows processors, the planner prefers the higher-performance core class reported by Windows. Placement does not isolate unrelated host processes, pin VMM or device-worker threads, or promise dedicated cores. Guest RAM remains under the normal host policy unless a selected placement profile uses `memory.mode: follow_cpu`.
 
 Windows planning currently stays within the runtime thread's inherited primary processor group. Processor-group coordinates are preserved in the allocation catalog and libkrun affinity map, but one runtime process does not spread a sandbox across multiple Windows processor groups. This is immaterial on hosts with at most 64 logical processors and avoids expanding an affinity boundary inherited from the caller.
 

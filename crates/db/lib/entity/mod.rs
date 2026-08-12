@@ -8,6 +8,7 @@ pub mod layer;
 pub mod maintenance_lease;
 pub mod manifest;
 pub mod manifest_layer;
+pub mod memory_allocation_node;
 pub mod run;
 pub mod sandbox;
 pub mod sandbox_label;

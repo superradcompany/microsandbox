@@ -280,6 +280,12 @@ pub struct VmConfig {
     /// Requested host CPU placement policy.
     pub cpu_placement: CpuPlacement,
 
+    /// Selected host profile name, retained for diagnostics.
+    pub placement_profile_name: Option<String>,
+
+    /// Host-resolved placement behavior.
+    pub placement_profile: Option<microsandbox_types::PlacementProfile>,
+
     /// Per-writable-raw-disk hard budget for buffered host dirty data.
     pub block_writeback_limit_bytes: Option<u64>,
 
@@ -428,6 +434,7 @@ impl std::fmt::Debug for VmConfig {
             .field("memory_mib", &self.memory_mib)
             .field("max_cpus", &self.max_cpus)
             .field("max_memory_mib", &self.max_memory_mib)
+            .field("placement_profile_name", &self.placement_profile_name)
             .field(
                 "block_writeback_limit_bytes",
                 &self.block_writeback_limit_bytes,
@@ -551,8 +558,13 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         &db,
         run_db_id,
         &config.cpu_lease_dir,
-        config.vm.cpu_placement,
-        config.vm.max_cpus.max(config.vm.vcpus),
+        crate::cpu::PlacementRequest {
+            policy: config.vm.cpu_placement,
+            max_vcpus: config.vm.max_cpus.max(config.vm.vcpus),
+            boot_memory_mib: config.vm.memory_mib,
+            max_memory_mib: config.vm.max_memory_mib.max(config.vm.memory_mib),
+            profile: config.vm.placement_profile,
+        },
     )) {
         Ok(guard) => Arc::new(guard),
         Err(error) => {
@@ -646,6 +658,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     let exit_metrics_writer = metrics_writer.clone();
     let exit_cpu_guard = Arc::clone(&cpu_guard);
     let exit_writeback_guard = Arc::clone(&writeback_guard);
+    let resolved_numa_topology = cpu_guard.numa_topology();
     #[cfg(windows)]
     let _agent_console_pipe_bridge = AgentConsolePipeBridge::spawn(
         agent_console_pipe_name(config.sandbox_id),
@@ -760,6 +773,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         },
         tokio_rt.handle().clone(),
         cpu_guard.vcpu_targets(),
+        resolved_numa_topology,
         writeback_limit.as_ref(),
     );
     let (
@@ -1247,6 +1261,7 @@ fn build_vm(
     on_exit: impl Fn(i32) + Send + 'static,
     tokio_handle: tokio::runtime::Handle,
     vcpu_targets: Option<&[crate::cpu::LogicalCpuId]>,
+    numa_topology: Option<msb_krun::NumaTopology>,
     writeback_limit: Option<&msb_krun::WritebackLimit>,
 ) -> RuntimeResult<VmBuildOutput> {
     let mut exec_env = config.vm.env.clone();
@@ -1275,6 +1290,9 @@ fn build_vm(
                         .map(|cpu| msb_krun::HostCpuId::in_group(cpu.group, cpu.index))
                         .collect(),
                 );
+            }
+            if let Some(topology) = numa_topology {
+                m = m.numa_topology(topology);
             }
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             {

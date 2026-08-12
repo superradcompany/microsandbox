@@ -113,6 +113,7 @@ impl SandboxBuilder {
         self.config.spec.resources.memory_mib = defaults.memory_mib;
         self.config.spec.resources.max_memory_mib = defaults.memory_mib;
         self.config.spec.resources.cpu_placement = defaults.cpu_placement;
+        self.config.spec.resources.placement_profile = defaults.placement_profile.clone();
         self.config.spec.resources.thp = defaults.thp;
         self.config.spec.runtime.shell = Some(defaults.shell.clone());
         self.config.spec.runtime.workdir = defaults.workdir.clone();
@@ -263,6 +264,12 @@ impl SandboxBuilder {
     /// Select how vCPU threads are placed on host processors.
     pub fn cpu_placement(mut self, policy: CpuPlacement) -> Self {
         self.config.spec.resources.cpu_placement = policy;
+        self
+    }
+
+    /// Select a host-defined placement profile by name.
+    pub fn placement_profile(mut self, profile: impl Into<String>) -> Self {
+        self.config.spec.resources.placement_profile = Some(profile.into());
         self
     }
 

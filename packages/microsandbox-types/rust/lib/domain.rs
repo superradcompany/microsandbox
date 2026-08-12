@@ -754,7 +754,7 @@ pub struct SandboxSpec {
 }
 
 /// CPU and memory resources for a sandbox.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SandboxResources {
@@ -773,6 +773,10 @@ pub struct SandboxResources {
     /// Host CPU placement requested for this sandbox.
     #[serde(default, skip_serializing_if = "CpuPlacement::is_inherit")]
     pub cpu_placement: CpuPlacement,
+
+    /// Host-defined placement profile selected for this sandbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_profile: Option<String>,
 
     /// Guest transparent huge-page policy selected at boot.
     #[serde(default, skip_serializing_if = "TransparentHugePagePolicy::is_madvise")]
@@ -797,6 +801,44 @@ pub enum CpuPlacement {
 
     /// Prefer SMT siblings and minimize the number of physical cores used.
     Compact,
+}
+
+/// Concrete host NUMA scope selected by a named placement profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NumaPlacement {
+    /// Prefer one host NUMA node. Multi-node expansion is not enabled yet.
+    PreferSingle,
+    /// Require maximum CPU and memory capacity to fit one host NUMA node.
+    StrictSingle,
+    /// Preserve the operating system's ordinary NUMA behavior.
+    Inherit,
+}
+
+/// Host backing policy for guest memory selected by a named placement profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MemoryPlacement {
+    /// Back guest RAM from the host nodes selected for its vCPUs.
+    FollowCpu,
+    /// Preserve the operating system's ordinary memory policy.
+    Inherit,
+}
+
+/// Host-owned named placement profile resolved before a local VM starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct PlacementProfile {
+    /// NUMA scope used while selecting host CPU capacity.
+    pub numa: NumaPlacement,
+    /// Host-memory behavior used for the resolved CPU nodes.
+    pub memory: MemoryPlacement,
 }
 
 /// Guest transparent huge-page policy applied through the kernel command line.
@@ -1335,6 +1377,7 @@ impl Default for SandboxResources {
             max_cpus: DEFAULT_SANDBOX_CPUS,
             max_memory_mib: DEFAULT_SANDBOX_MEMORY_MIB,
             cpu_placement: CpuPlacement::Inherit,
+            placement_profile: None,
             thp: TransparentHugePagePolicy::Madvise,
         }
     }
@@ -1356,6 +1399,8 @@ impl<'de> Deserialize<'de> for SandboxResources {
             #[serde(default)]
             cpu_placement: CpuPlacement,
             #[serde(default)]
+            placement_profile: Option<String>,
+            #[serde(default)]
             thp: TransparentHugePagePolicy,
         }
 
@@ -1369,6 +1414,7 @@ impl<'de> Deserialize<'de> for SandboxResources {
             max_cpus: raw.max_cpus.unwrap_or(raw.cpus),
             max_memory_mib: raw.max_memory_mib.unwrap_or(raw.memory_mib),
             cpu_placement: raw.cpu_placement,
+            placement_profile: raw.placement_profile,
             thp: raw.thp,
         })
     }
