@@ -53,6 +53,12 @@ pub(crate) struct DetachKeys {
     sequence: Vec<u8>,
 }
 
+#[cfg(any(windows, test))]
+#[derive(Default)]
+struct WindowsUtf8Decoder {
+    pending: Vec<u8>,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -218,6 +224,50 @@ impl DetachKeys {
     }
 }
 
+#[cfg(any(windows, test))]
+impl WindowsUtf8Decoder {
+    fn decode(&mut self, data: &[u8]) -> Vec<u16> {
+        self.pending.extend_from_slice(data);
+
+        let mut decoded = Vec::new();
+        let mut offset = 0usize;
+        while offset < self.pending.len() {
+            match std::str::from_utf8(&self.pending[offset..]) {
+                Ok(valid) => {
+                    decoded.extend(valid.encode_utf16());
+                    offset = self.pending.len();
+                }
+                Err(error) => {
+                    let valid_end = offset + error.valid_up_to();
+                    decoded.extend(
+                        std::str::from_utf8(&self.pending[offset..valid_end])
+                            .expect("UTF-8 validation identified a valid prefix")
+                            .encode_utf16(),
+                    );
+                    offset = valid_end;
+
+                    let Some(error_len) = error.error_len() else {
+                        break;
+                    };
+                    decoded.push(char::REPLACEMENT_CHARACTER as u16);
+                    offset += error_len;
+                }
+            }
+        }
+
+        self.pending.drain(..offset);
+        decoded
+    }
+
+    fn finish(&mut self) -> Vec<u16> {
+        let decoded = String::from_utf8_lossy(&self.pending)
+            .encode_utf16()
+            .collect();
+        self.pending.clear();
+        decoded
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -246,6 +296,24 @@ pub(crate) fn input_contains_detach_sequence(
     }
 
     false
+}
+
+#[cfg(any(windows, test))]
+fn console_input_to_utf8(data: &[u16], pending_high_surrogate: &mut Option<u16>) -> Vec<u8> {
+    let mut input = Vec::with_capacity(data.len() + usize::from(pending_high_surrogate.is_some()));
+    if let Some(high_surrogate) = pending_high_surrogate.take() {
+        input.push(high_surrogate);
+    }
+    input.extend_from_slice(data);
+
+    if input
+        .last()
+        .is_some_and(|unit| (0xd800..=0xdbff).contains(unit))
+    {
+        *pending_high_surrogate = input.pop();
+    }
+
+    String::from_utf16_lossy(&input).into_bytes()
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -459,16 +527,14 @@ pub(crate) mod agent {
             CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
             WAIT_TIMEOUT,
         },
-        Storage::FileSystem::{
-            CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, ReadFile, WriteFile,
-        },
+        Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING},
         System::{
             Console::{
                 CONSOLE_SCREEN_BUFFER_INFO, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT,
                 ENABLE_MOUSE_INPUT, ENABLE_PROCESSED_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT,
                 ENABLE_VIRTUAL_TERMINAL_PROCESSING, ENABLE_WINDOW_INPUT, GetConsoleMode,
-                GetConsoleScreenBufferInfo, GetStdHandle, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
-                SetConsoleMode,
+                GetConsoleScreenBufferInfo, GetStdHandle, ReadConsoleW, STD_INPUT_HANDLE,
+                STD_OUTPUT_HANDLE, SetConsoleMode, WriteConsoleW,
             },
             IO::CancelSynchronousIo,
             Threading::{CreateEventW, SetEvent, WaitForMultipleObjects},
@@ -481,7 +547,9 @@ pub(crate) mod agent {
         sandbox::{AttachOptionsBuilder, SandboxConfig, build_exec_request},
     };
 
-    use super::{DetachKeys, input_contains_detach_sequence};
+    use super::{
+        DetachKeys, WindowsUtf8Decoder, console_input_to_utf8, input_contains_detach_sequence,
+    };
 
     const TERMINAL_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
     const TERMINAL_INPUT_BUFFER_SIZE: usize = 4096;
@@ -502,6 +570,7 @@ pub(crate) mod agent {
         output: ConsoleHandle,
         input_mode: u32,
         output_mode: u32,
+        output_decoder: WindowsUtf8Decoder,
     }
 
     pub(crate) struct WindowsTerminalEventPump {
@@ -548,7 +617,7 @@ pub(crate) mod agent {
         );
         let (id, mut rx) = client.stream(MessageType::ExecRequest, &req).await?;
 
-        let terminal_guard = WindowsTerminalGuard::enter()?;
+        let mut terminal_guard = WindowsTerminalGuard::enter()?;
         let mut terminal_events = WindowsTerminalEventPump::spawn_for_guard(&terminal_guard)?;
         let mut exit_code: i32 = -1;
         let mut spawn_failure: Option<microsandbox_protocol::exec::ExecFailed> = None;
@@ -583,7 +652,7 @@ pub(crate) mod agent {
                     match msg.t {
                         MessageType::ExecStdout => {
                             if let Ok(out) = msg.payload::<ExecStdout>() {
-                                let _ = terminal_guard.write_output(&out.data);
+                                terminal_guard.write_output(&out.data)?;
                             }
                         }
                         MessageType::ExecExited => {
@@ -608,7 +677,7 @@ pub(crate) mod agent {
                             match next.t {
                                 MessageType::ExecStdout => {
                                     if let Ok(out) = next.payload::<ExecStdout>() {
-                                        let _ = terminal_guard.write_output(&out.data);
+                                        terminal_guard.write_output(&out.data)?;
                                     }
                                 }
                                 MessageType::ExecExited => {
@@ -639,6 +708,7 @@ pub(crate) mod agent {
             }
         }
 
+        terminal_guard.finish_output()?;
         if let Some(failure) = spawn_failure {
             return Err(MicrosandboxError::ExecFailed(failure));
         }
@@ -655,6 +725,7 @@ pub(crate) mod agent {
                 output,
                 input_mode,
                 output_mode,
+                output_decoder: WindowsUtf8Decoder::default(),
             };
 
             if let Err(error) = guard.enable_virtual_terminal_modes() {
@@ -688,19 +759,29 @@ pub(crate) mod agent {
             let _ = unsafe { SetConsoleMode(self.output.raw, self.output_mode) };
         }
 
-        pub(crate) fn write_output(&self, data: &[u8]) -> MicrosandboxResult<()> {
+        pub(crate) fn write_output(&mut self, data: &[u8]) -> MicrosandboxResult<()> {
+            let decoded = self.output_decoder.decode(data);
+            self.write_console(&decoded)
+        }
+
+        pub(crate) fn finish_output(&mut self) -> MicrosandboxResult<()> {
+            let decoded = self.output_decoder.finish();
+            self.write_console(&decoded)
+        }
+
+        fn write_console(&self, data: &[u16]) -> MicrosandboxResult<()> {
             let mut offset = 0usize;
             while offset < data.len() {
                 let remaining = data.len() - offset;
                 let chunk_len = remaining.min(u32::MAX as usize);
                 let mut written = 0u32;
                 let result = unsafe {
-                    WriteFile(
+                    WriteConsoleW(
                         self.output.raw,
-                        data[offset..].as_ptr().cast(),
+                        data[offset..].as_ptr(),
                         chunk_len as u32,
                         &mut written,
-                        ptr::null_mut(),
+                        ptr::null(),
                     )
                 };
                 if result == 0 {
@@ -710,7 +791,9 @@ pub(crate) mod agent {
                     )));
                 }
                 if written == 0 {
-                    break;
+                    return Err(MicrosandboxError::Terminal(
+                        "terminal output: console wrote zero characters".to_string(),
+                    ));
                 }
                 offset += written as usize;
             }
@@ -741,6 +824,7 @@ pub(crate) mod agent {
                 let output = output_handle as HANDLE;
                 let stop_handle = stop_handle as HANDLE;
                 let mut last_size = terminal_size_from_output(output);
+                let mut pending_high_surrogate = None;
                 let wait_handles = [input, stop_handle];
                 let timeout_ms = TERMINAL_EVENT_POLL_INTERVAL.as_millis() as u32;
 
@@ -759,15 +843,15 @@ pub(crate) mod agent {
                     }
 
                     if wait_result == WAIT_OBJECT_0 {
-                        let mut input_buf = [0u8; TERMINAL_INPUT_BUFFER_SIZE];
-                        let mut bytes_read = 0u32;
+                        let mut input_buf = [0u16; TERMINAL_INPUT_BUFFER_SIZE];
+                        let mut chars_read = 0u32;
                         let result = unsafe {
-                            ReadFile(
+                            ReadConsoleW(
                                 input,
                                 input_buf.as_mut_ptr().cast(),
                                 input_buf.len() as u32,
-                                &mut bytes_read,
-                                ptr::null_mut(),
+                                &mut chars_read,
+                                ptr::null(),
                             )
                         };
 
@@ -779,11 +863,14 @@ pub(crate) mod agent {
                             break;
                         }
 
-                        if bytes_read == 0 {
+                        if chars_read == 0 {
                             break;
                         }
 
-                        let data = input_buf[..bytes_read as usize].to_vec();
+                        let data = console_input_to_utf8(
+                            &input_buf[..chars_read as usize],
+                            &mut pending_high_surrogate,
+                        );
                         if tx.send(WindowsTerminalEvent::Input(data)).is_err() {
                             break;
                         }
@@ -826,7 +913,7 @@ pub(crate) mod agent {
             let _ = unsafe { SetEvent(self.stop.0) };
             if let Some(handle) = self.handle.take() {
                 // The pump thread may already be blocked in a synchronous
-                // console ReadFile. The stop event only prevents the next
+                // console ReadConsoleW. The stop event only prevents the next
                 // wait from entering another read, so cancel the in-flight
                 // read before joining or finite guest commands appear to
                 // hang until the user presses another key.
@@ -1058,5 +1145,67 @@ mod tests {
             &mut match_pos
         ));
         assert_eq!(match_pos, 1);
+    }
+
+    #[test]
+    fn test_windows_utf8_decoder_preserves_ansi_and_unicode() {
+        let mut decoder = WindowsUtf8Decoder::default();
+        let decoded = decoder.decode("\x1b[32municode: — ✓ ⠋\x1b[0m\n".as_bytes());
+
+        assert_eq!(
+            String::from_utf16(&decoded).unwrap(),
+            "\x1b[32municode: — ✓ ⠋\x1b[0m\n"
+        );
+        assert!(decoder.finish().is_empty());
+    }
+
+    #[test]
+    fn test_windows_utf8_decoder_preserves_split_sequences() {
+        let expected = "unicode: — ✓ ⠋ 😀\n";
+
+        for split in 0..=expected.len() {
+            let mut decoder = WindowsUtf8Decoder::default();
+            let mut decoded = decoder.decode(&expected.as_bytes()[..split]);
+            decoded.extend(decoder.decode(&expected.as_bytes()[split..]));
+            decoded.extend(decoder.finish());
+
+            assert_eq!(String::from_utf16(&decoded).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn test_windows_utf8_decoder_replaces_invalid_and_incomplete_sequences() {
+        let mut decoder = WindowsUtf8Decoder::default();
+        let mut decoded = decoder.decode(b"valid\xfftail\xe2\x80");
+
+        assert_eq!(String::from_utf16(&decoded).unwrap(), "valid�tail");
+
+        decoded = decoder.finish();
+        assert_eq!(String::from_utf16(&decoded).unwrap(), "�");
+    }
+
+    #[test]
+    fn test_console_input_encodes_utf16_as_utf8() {
+        let mut pending = None;
+        let input = "\x1b[A café".encode_utf16().collect::<Vec<_>>();
+
+        assert_eq!(
+            console_input_to_utf8(&input, &mut pending),
+            "\x1b[A café".as_bytes()
+        );
+        assert_eq!(pending, None);
+    }
+
+    #[test]
+    fn test_console_input_preserves_split_surrogate_pair() {
+        let mut pending = None;
+
+        assert!(console_input_to_utf8(&[0xd83d], &mut pending).is_empty());
+        assert_eq!(pending, Some(0xd83d));
+        assert_eq!(
+            console_input_to_utf8(&[0xde00], &mut pending),
+            "😀".as_bytes()
+        );
+        assert_eq!(pending, None);
     }
 }
