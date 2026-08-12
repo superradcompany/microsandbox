@@ -9,22 +9,6 @@ Reach a running sandbox over SSH: open a native in-process SSH client, run exec 
 microsandbox = { version = "0.5.8", features = ["ssh"] }
 ```
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```rust
-use microsandbox::Sandbox;
-
-let sb = Sandbox::builder("api")
-    .image("python")
-    .create()
-    .await?;
-
-let client = sb.ssh().connect().await?;      // 1. open an SSH client
-let out = client.exec("python -V").await?;   // 2. run a command
-println!("{}", String::from_utf8_lossy(&out.stdout));
-
-client.close().await?;                       // 3. close the session
-```
 
 ## Sandbox
 

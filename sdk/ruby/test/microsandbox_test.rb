@@ -21,6 +21,8 @@ class MicrosandboxTest < Test::Unit::TestCase
       .env("GREETING", "hello")
       .label("suite", "ruby")
       .workdir("/tmp")
+      .vsock("/run/host-api.sock", 5000)
+      .vsock_dgram("/run/events.sock", 5001)
 
     assert_instance_of Microsandbox::SandboxBuilder, builder
   end

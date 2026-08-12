@@ -42,6 +42,7 @@ from microsandbox.types import (
     ViolationAction,
     ViolationPolicy,
     VolumeKind,
+    VsockRoute,
 )
 
 class PyAgentClient:
@@ -118,6 +119,7 @@ class Sandbox:
         volumes: Mapping[str, MountConfig] | None = None,
         patches: Sequence[PatchConfig] | None = None,
         ports: Mapping[int, int] | Sequence[PortBinding] | None = None,
+        vsock: Mapping[str, int] | Sequence[VsockRoute] | None = None,
         network: Network | None = None,
         secrets: Sequence[SecretEntry] | None = None,
         on_secret_violation: ViolationAction | ViolationPolicy | None = None,
@@ -172,6 +174,7 @@ class Sandbox:
         volumes: Mapping[str, MountConfig] | None = None,
         patches: Sequence[PatchConfig] | None = None,
         ports: Mapping[int, int] | Sequence[PortBinding] | None = None,
+        vsock: Mapping[str, int] | Sequence[VsockRoute] | None = None,
         network: Network | None = None,
         secrets: Sequence[SecretEntry] | None = None,
         on_secret_violation: ViolationAction | ViolationPolicy | None = None,

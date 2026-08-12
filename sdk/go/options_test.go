@@ -158,6 +158,14 @@ func TestWithCPUPlacement(t *testing.T) {
 	}
 }
 
+func TestWithPlacementProfile(t *testing.T) {
+	o := SandboxConfig{}
+	WithPlacementProfile("latency")(&o)
+	if o.PlacementProfile != "latency" {
+		t.Errorf("got %q, want %q", o.PlacementProfile, "latency")
+	}
+}
+
 func TestWithTHP(t *testing.T) {
 	o := SandboxConfig{}
 	WithTHP(THPAlways)(&o)

@@ -7,20 +7,6 @@ Run commands inside a running sandbox, collect their output, stream events live,
 
 The exec API mirrors `os/exec` conventions: a **non-zero exit code is not a Go error**. Transport, timeout, and spawn-failure paths return an `error`; a program that ran and exited non-zero is a normal [`*ExecOutput`](#execoutput) result, inspect [`Success()`](#out-success) or [`ExitCode()`](#out-exitcode).
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```go
-import m "github.com/superradcompany/microsandbox/sdk/go"
-
-out, err := sb.Exec(ctx, "python3", []string{"-c", "print(1 + 1)"})
-if err != nil {
-    return err // transport / timeout / spawn failure
-}
-if !out.Success() {
-    log.Printf("exited %d: %s", out.ExitCode(), out.Stderr())
-}
-fmt.Print(out.Stdout())
-```
 
 ## Default workload
 

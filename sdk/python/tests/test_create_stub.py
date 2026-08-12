@@ -38,6 +38,7 @@ EXPECTED_KWARGS = [
     "volumes",
     "patches",
     "ports",
+    "vsock",
     "network",
     "secrets",
     "on_secret_violation",

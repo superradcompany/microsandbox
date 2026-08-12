@@ -12,7 +12,7 @@
 //! one resolved `msb` binary).
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     num::NonZero,
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
@@ -21,7 +21,9 @@ use std::{
 use docker_credential::{CredentialRetrievalError, DockerCredential};
 use microsandbox_image::RegistryAuth;
 use microsandbox_runtime::logging::LogLevel;
-use microsandbox_types::{CpuPlacement, RootDisk, TransparentHugePagePolicy};
+use microsandbox_types::{
+    CpuPlacement, DeploymentProfile, PlacementProfile, RootDisk, TransparentHugePagePolicy,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::error::Operation;
@@ -62,6 +64,40 @@ pub(crate) mod metrics_interval_serde {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<NonZero<u64>>, D::Error> {
         Ok(NonZero::new(u64::deserialize(d)?))
+    }
+}
+
+/// Serde adapter for the human-facing deployment profile names used in `config.json`.
+///
+/// Sandbox wire data uses snake_case, while the CLI and SDKs expose kebab-case
+/// names. Accepting both forms keeps existing serialized values readable and
+/// gives the hand-edited global config one canonical spelling.
+mod deployment_profile_serde {
+    use microsandbox_types::DeploymentProfile;
+    use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
+
+    pub fn serialize<S: Serializer>(
+        profile: &Option<DeploymentProfile>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match profile {
+            Some(DeploymentProfile::SingleTenant) => serializer.serialize_some("single-tenant"),
+            Some(DeploymentProfile::MultiTenant) => serializer.serialize_some("multi-tenant"),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<DeploymentProfile>, D::Error> {
+        match Option::<String>::deserialize(deserializer)?.as_deref() {
+            Some("single-tenant" | "single_tenant") => Ok(Some(DeploymentProfile::SingleTenant)),
+            Some("multi-tenant" | "multi_tenant") => Ok(Some(DeploymentProfile::MultiTenant)),
+            Some(other) => Err(D::Error::custom(format!(
+                "unknown deployment profile {other:?}; expected `single-tenant` or `multi-tenant`"
+            ))),
+            None => Ok(None),
+        }
     }
 }
 
@@ -108,6 +144,18 @@ pub struct LocalConfig {
     /// `None` means sandbox runtime processes are silent unless overridden
     /// per-sandbox.
     pub log_level: Option<LogLevel>,
+
+    /// Authoritative host-runtime isolation profile for local sandboxes.
+    ///
+    /// When set, this operator policy overrides the profile requested by an
+    /// individual sandbox on create and restart. `None` preserves per-sandbox
+    /// selection and its built-in `single-tenant` default.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "deployment_profile_serde"
+    )]
+    pub deployment_profile: Option<DeploymentProfile>,
 
     /// Database configuration.
     pub database: DatabaseConfig,
@@ -213,6 +261,9 @@ pub struct SandboxDefaults {
     /// Default host CPU placement policy.
     pub cpu_placement: CpuPlacement,
 
+    /// Default host-defined placement profile name.
+    pub placement_profile: Option<String>,
+
     /// Default guest transparent huge-page policy.
     pub thp: TransparentHugePagePolicy,
 
@@ -257,27 +308,30 @@ pub struct OciSandboxDefaults {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RuntimeConfig {
-    /// Buffered host writeback containment and admission policy.
+    /// Buffered host writeback containment and pressure-sharing policy.
     pub block_writeback: BlockWritebackConfig,
+
+    /// Host-owned placement profiles selectable by sandbox name.
+    pub placement_profiles: BTreeMap<String, PlacementProfile>,
 }
 
 /// Controls buffered host dirty data for writable raw disks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "lowercase", deny_unknown_fields)]
 pub enum BlockWritebackConfig {
-    /// Use up to the measured per-disk limit, bounded by the aggregate pool.
+    /// Use the measured per-disk maximum and share the aggregate pool under pressure.
     Auto {
-        /// Optional host-global dirty-credit pool override in MiB.
+        /// Optional host-global dirty-credit pressure-pool override in MiB.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pool_mib: Option<NonZero<u64>>,
     },
 
-    /// Use an explicit per-disk limit and derive the aggregate pool unless overridden.
+    /// Use an explicit per-disk maximum and derive the pressure pool unless overridden.
     Fixed {
         /// Maximum page-aligned dirty data charged to one writable raw disk, in MiB.
         per_disk_mib: NonZero<u64>,
 
-        /// Optional host-global dirty-credit pool override in MiB.
+        /// Optional host-global dirty-credit pressure-pool override in MiB.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pool_mib: Option<NonZero<u64>>,
     },
@@ -378,7 +432,29 @@ impl LocalConfig {
             ));
         }
 
+        if let Some(profile_name) = &self.sandbox_defaults.placement_profile {
+            self.resolve_placement_profile(profile_name)?;
+        }
+
         Ok(())
+    }
+
+    /// Resolve and structurally validate a host-owned placement profile.
+    pub(crate) fn resolve_placement_profile(
+        &self,
+        name: &str,
+    ) -> MicrosandboxResult<PlacementProfile> {
+        let profile = self
+            .runtime
+            .placement_profiles
+            .get(name)
+            .copied()
+            .ok_or_else(|| {
+                MicrosandboxError::InvalidConfig(format!(
+                    "placement profile `{name}` is not defined in runtime.placement_profiles"
+                ))
+            })?;
+        Ok(profile)
     }
 
     /// Get the resolved home directory.
@@ -654,6 +730,7 @@ impl Default for SandboxDefaults {
             cpus: DEFAULT_CPUS,
             memory_mib: DEFAULT_MEMORY_MIB,
             cpu_placement: CpuPlacement::Inherit,
+            placement_profile: None,
             thp: TransparentHugePagePolicy::Madvise,
             oci: OciSandboxDefaults::default(),
             shell: "/bin/sh".into(),
@@ -666,9 +743,9 @@ impl Default for SandboxDefaults {
 
 impl Default for BlockWritebackConfig {
     fn default() -> Self {
-        // Keep ordinary sandbox creation independent of host-global dirty-credit capacity.
-        // Operators can opt into bounded writeback after sizing it for their workload and node.
-        Self::Off {}
+        // Auto is portable: Linux bounds dirty data and shares a derived pool, while other hosts
+        // treat the unconfigured policy as a no-op.
+        Self::Auto { pool_mib: None }
     }
 }
 
@@ -1231,6 +1308,7 @@ mod tests {
         assert_eq!(cfg.sandbox_defaults.cpus, 1);
         assert_eq!(cfg.sandbox_defaults.memory_mib, 512);
         assert_eq!(cfg.sandbox_defaults.cpu_placement, CpuPlacement::Inherit);
+        assert_eq!(cfg.sandbox_defaults.placement_profile, None);
         assert_eq!(cfg.sandbox_defaults.thp, TransparentHugePagePolicy::Madvise);
         assert_eq!(cfg.sandbox_defaults.oci.upper_size_mib, None);
         assert_eq!(cfg.sandbox_defaults.oci.root_disk, None);
@@ -1240,13 +1318,18 @@ mod tests {
             NonZero::new(DEFAULT_METRICS_SAMPLE_INTERVAL_MS)
         );
         assert_eq!(cfg.log_level, None);
+        assert_eq!(cfg.deployment_profile, None);
         assert_eq!(cfg.database.max_connections, 5);
         assert_eq!(cfg.database.connect_timeout_secs, 30);
         assert_eq!(cfg.database.busy_timeout_secs, 5);
-        assert_eq!(cfg.runtime.block_writeback, BlockWritebackConfig::Off {});
+        assert_eq!(
+            cfg.runtime.block_writeback,
+            BlockWritebackConfig::Auto { pool_mib: None }
+        );
+        assert!(cfg.runtime.placement_profiles.is_empty());
         assert_eq!(
             serde_json::to_value(cfg.runtime.block_writeback).unwrap(),
-            serde_json::json!({ "mode": "off" })
+            serde_json::json!({ "mode": "auto" })
         );
     }
 
@@ -1255,7 +1338,10 @@ mod tests {
         let cfg: LocalConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(cfg.sandbox_defaults.cpus, 1);
         assert!(cfg.home.is_none());
-        assert_eq!(cfg.runtime.block_writeback, BlockWritebackConfig::Off {});
+        assert_eq!(
+            cfg.runtime.block_writeback,
+            BlockWritebackConfig::Auto { pool_mib: None }
+        );
     }
 
     #[test]
@@ -1264,6 +1350,33 @@ mod tests {
         let cfg: LocalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.sandbox_defaults.cpus, 4);
         assert_eq!(cfg.sandbox_defaults.memory_mib, 512);
+    }
+
+    #[test]
+    fn test_deployment_profile_uses_human_facing_config_values() {
+        let cfg: LocalConfig =
+            serde_json::from_str(r#"{"deployment_profile":"multi-tenant"}"#).unwrap();
+        assert_eq!(cfg.deployment_profile, Some(DeploymentProfile::MultiTenant));
+
+        let json = serde_json::to_value(cfg).unwrap();
+        assert_eq!(json["deployment_profile"], "multi-tenant");
+    }
+
+    #[test]
+    fn test_deployment_profile_accepts_snake_case_wire_values() {
+        let cfg: LocalConfig =
+            serde_json::from_str(r#"{"deployment_profile":"single_tenant"}"#).unwrap();
+        assert_eq!(
+            cfg.deployment_profile,
+            Some(DeploymentProfile::SingleTenant)
+        );
+    }
+
+    #[test]
+    fn test_deployment_profile_rejects_unknown_values() {
+        let error =
+            serde_json::from_str::<LocalConfig>(r#"{"deployment_profile":"shared"}"#).unwrap_err();
+        assert!(error.to_string().contains("unknown deployment profile"));
     }
 
     #[test]
@@ -1295,6 +1408,61 @@ mod tests {
             })
         );
         assert_eq!(cfg.runtime.block_writeback, BlockWritebackConfig::Off {});
+    }
+
+    #[test]
+    fn test_placement_profile_round_trip_and_default_resolution() {
+        let json = r#"{
+            "sandbox_defaults": {
+                "cpu_placement": "auto",
+                "placement_profile": "latency"
+            },
+            "runtime": {
+                "placement_profiles": {
+                    "latency": {
+                        "numa": { "mode": "prefer_single" },
+                        "memory": { "mode": "follow_cpu" }
+                    }
+                }
+            }
+        }"#;
+        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+
+        cfg.validate_sandbox_defaults().unwrap();
+        assert_eq!(
+            cfg.sandbox_defaults.placement_profile.as_deref(),
+            Some("latency")
+        );
+        let profile = cfg.resolve_placement_profile("latency").unwrap();
+        assert_eq!(
+            profile.numa,
+            microsandbox_types::NumaPlacement::PreferSingle
+        );
+        assert_eq!(
+            profile.memory,
+            microsandbox_types::MemoryPlacement::FollowCpu
+        );
+
+        let round: LocalConfig =
+            serde_json::from_value(serde_json::to_value(cfg).unwrap()).unwrap();
+        assert_eq!(
+            round.sandbox_defaults.placement_profile.as_deref(),
+            Some("latency")
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_unknown_default_placement_profile() {
+        let cfg: LocalConfig =
+            serde_json::from_str(r#"{"sandbox_defaults":{"placement_profile":"missing"}}"#)
+                .unwrap();
+
+        let error = cfg.validate_sandbox_defaults().unwrap_err();
+        assert!(
+            error.to_string().contains(
+                "placement profile `missing` is not defined in runtime.placement_profiles"
+            )
+        );
     }
 
     #[test]

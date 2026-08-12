@@ -92,7 +92,7 @@ msb create python --name shared-worker --deployment-profile multi-tenant
 ```
 </CodeGroup>
 
-An embedding host can set an authoritative profile on `LocalBackend`; that operator choice overrides the sandbox request on create and restart. Managed cloud create requests intentionally do not carry a deployment profile—the hosting driver selects it.
+An operator can set an authoritative profile with the top-level `deployment_profile` field in `~/.microsandbox/config.json` or programmatically on `LocalBackend`. That operator choice overrides the sandbox request on create and restart. Managed cloud create requests intentionally do not carry a deployment profile—the hosting driver selects it.
 
 ## High-level profiles
 

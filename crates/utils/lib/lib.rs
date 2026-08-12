@@ -6,6 +6,7 @@ pub mod format;
 pub mod log_text;
 pub mod process;
 pub mod process_lock;
+pub mod secret;
 pub mod size;
 pub mod ttl_reverse_index;
 pub mod wake_pipe;

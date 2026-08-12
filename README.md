@@ -59,10 +59,6 @@
 > ```sh
 > go get github.com/superradcompany/microsandbox/sdk/go    # 🐹 Go
 > ```
->
-> ```sh
-> gem install microsandbox                                 # 💎 Ruby
-> ```
 #### <img height="14" src="https://octicons-col.vercel.app/download/A770EF">&nbsp;&nbsp;Install the CLI
 
 > Boot a microVM in a single command:
@@ -323,6 +319,31 @@ The `msb` CLI provides a complete interface for managing sandboxes, images, and 
 > msb pull python           # Pull an image
 > msb image ls              # List cached images
 > msb image rm python       # Remove an image
+> ```
+
+#### <img height="14" src="https://octicons-col.vercel.app/file-code/A770EF">&nbsp;&nbsp;Configuration File
+
+> ```sh
+> msb run --conf sandbox.yaml -- octocat
+> ```
+>
+> ```yaml
+> image: python:3.12
+> network:
+>   allow:
+>     - api.github.com
+> scripts:
+>   octocat: |
+>     python - <<'PY'
+>     import urllib.request
+>
+>     request = urllib.request.Request(
+>         "https://api.github.com/octocat",
+>         headers={"User-Agent": "microsandbox-example"},
+>     )
+>     with urllib.request.urlopen(request) as response:
+>         print(response.read().decode())
+>     PY
 > ```
 
 #### <img height="14" src="https://octicons-col.vercel.app/download/A770EF">&nbsp;&nbsp;Install & Uninstall Sandboxes

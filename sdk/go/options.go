@@ -32,6 +32,7 @@ type SandboxConfig struct {
 	MaxMemoryMiB      uint32
 	MaxCPUs           uint8
 	CPUPlacement      CPUPlacement
+	PlacementProfile  string
 	THP               THPPolicy
 	Workdir           string
 	Shell             string
@@ -71,6 +72,7 @@ type SandboxConfig struct {
 	Ports               map[uint16]uint16 // host port → guest port (TCP)
 	PortsUDP            map[uint16]uint16 // host port → guest port (UDP)
 	PortBindings        []PortBinding     // explicit bind address host→guest ports
+	Vsock               []VsockRoute      // host local IPC → guest host-CID port
 	Network             *NetworkConfig
 	Secrets             []SecretEntry
 	Patches             []PatchConfig
@@ -100,6 +102,7 @@ type persistedSandboxConfig struct {
 	MaxMemoryMiB      uint32               `json:"max_memory_mib"`
 	MaxCPUs           uint8                `json:"max_cpus"`
 	CPUPlacement      CPUPlacement         `json:"cpu_placement"`
+	PlacementProfile  string               `json:"placement_profile"`
 	Resources         *persistedResources  `json:"resources"`
 	Runtime           *persistedRuntime    `json:"runtime"`
 	Workdir           string               `json:"workdir"`
@@ -128,12 +131,13 @@ type persistedInitConfig struct {
 }
 
 type persistedResources struct {
-	CPUs         uint8        `json:"cpus"`
-	MemoryMiB    uint32       `json:"memory_mib"`
-	MaxCPUs      uint8        `json:"max_cpus"`
-	MaxMemoryMiB uint32       `json:"max_memory_mib"`
-	CPUPlacement CPUPlacement `json:"cpu_placement"`
-	THP          THPPolicy    `json:"thp"`
+	CPUs             uint8        `json:"cpus"`
+	MemoryMiB        uint32       `json:"memory_mib"`
+	MaxCPUs          uint8        `json:"max_cpus"`
+	MaxMemoryMiB     uint32       `json:"max_memory_mib"`
+	CPUPlacement     CPUPlacement `json:"cpu_placement"`
+	PlacementProfile string       `json:"placement_profile"`
+	THP              THPPolicy    `json:"thp"`
 }
 
 type persistedRuntime struct {
@@ -209,6 +213,7 @@ func (c *SandboxConfig) UnmarshalJSON(data []byte) error {
 		MaxMemoryMiB:      raw.maxMemoryMiB(),
 		MaxCPUs:           raw.maxCPUs(),
 		CPUPlacement:      raw.cpuPlacement(),
+		PlacementProfile:  raw.placementProfile(),
 		THP:               raw.thp(),
 		Workdir:           runtime.Workdir,
 		Shell:             runtime.Shell,
@@ -281,6 +286,13 @@ func (c persistedSandboxConfig) cpuPlacement() CPUPlacement {
 		return c.CPUPlacement
 	}
 	return CPUPlacementInherit
+}
+
+func (c persistedSandboxConfig) placementProfile() string {
+	if c.Resources != nil && c.Resources.PlacementProfile != "" {
+		return c.Resources.PlacementProfile
+	}
+	return c.PlacementProfile
 }
 
 func (c persistedSandboxConfig) thp() THPPolicy {
@@ -676,6 +688,11 @@ func WithCPUPlacement(policy CPUPlacement) SandboxOption {
 	return func(o *SandboxConfig) { o.CPUPlacement = policy }
 }
 
+// WithPlacementProfile selects a host-defined placement profile by name.
+func WithPlacementProfile(profile string) SandboxOption {
+	return func(o *SandboxConfig) { o.PlacementProfile = profile }
+}
+
 // WithTHP selects the guest transparent huge-page policy applied at boot.
 func WithTHP(policy THPPolicy) SandboxOption {
 	return func(o *SandboxConfig) { o.THP = policy }
@@ -931,6 +948,29 @@ const (
 func WithPortBindings(bindings ...PortBinding) SandboxOption {
 	return func(o *SandboxConfig) {
 		o.PortBindings = append(o.PortBindings, bindings...)
+	}
+}
+
+// VsockRoute exposes a host Unix socket or local Windows named pipe through
+// virtio-vsock host CID 2. SocketType defaults to stream when empty.
+type VsockRoute struct {
+	HostSocket string
+	Port       uint32
+	SocketType VsockSocketType
+}
+
+// VsockSocketType identifies the message semantics of a vsock route.
+type VsockSocketType string
+
+const (
+	VsockSocketTypeStream VsockSocketType = "stream"
+	VsockSocketTypeDgram  VsockSocketType = "dgram"
+)
+
+// WithVsock appends guest-to-host vsock routes backed by local host IPC.
+func WithVsock(routes ...VsockRoute) SandboxOption {
+	return func(o *SandboxConfig) {
+		o.Vsock = append(o.Vsock, routes...)
 	}
 }
 

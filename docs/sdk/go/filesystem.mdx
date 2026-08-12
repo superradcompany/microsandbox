@@ -5,24 +5,6 @@ description: Go SDK - Filesystem API reference
 
 Read and write files inside a running sandbox over the same host-guest channel as command execution: no SSH, no network. See [Filesystem](/sandboxes/filesystem) for usage examples. For bulk file transfer, prefer a [volume](/sdk/go/volumes).
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```go
-import m "github.com/superradcompany/microsandbox/sdk/go"
-
-fs := sb.FS()                                                     // 1. get the accessor
-
-err := fs.WriteString(ctx, "/tmp/config.json", `{"debug":true}`)  // 2. write
-if err != nil {
-    return err
-}
-
-content, err := fs.ReadString(ctx, "/tmp/config.json")            // 3. read back
-if err != nil {
-    return err
-}
-fmt.Println(content)
-```
 
 ## Methods
 

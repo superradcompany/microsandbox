@@ -19,7 +19,7 @@ use crate::domain::{
     Rlimit, RlimitResource, RootDisk, RootfsSource, SandboxLogLevel, SandboxPolicy,
     SandboxResources, SandboxRuntimeOptions, SandboxSpec, SecretEntry, SecretInjection,
     SecretsConfig, SecurityProfile, StatVirtualization, TransparentHugePagePolicy, ViolationAction,
-    VolumeMount, default_private, default_strict,
+    VolumeMount, VsockSpec, default_private, default_strict,
 };
 use crate::modify::SecretSource;
 use crate::{TypesError, TypesResult};
@@ -92,7 +92,7 @@ pub struct CloudSandboxSpec {
 }
 
 /// Cloud resource request.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(default)]
@@ -106,6 +106,10 @@ pub struct CloudSandboxResources {
     /// Host CPU placement requested for the sandbox.
     #[serde(default, skip_serializing_if = "CpuPlacement::is_inherit")]
     pub cpu_placement: CpuPlacement,
+
+    /// Host-approved placement profile name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_profile: Option<String>,
 
     /// Guest transparent huge-page policy selected at boot.
     #[serde(default, skip_serializing_if = "TransparentHugePagePolicy::is_madvise")]
@@ -988,6 +992,7 @@ impl TryFrom<CloudSandboxSpec> for SandboxSpec {
             max_cpus: spec.resources.vcpus,
             max_memory_mib: spec.resources.memory_mib,
             cpu_placement: spec.resources.cpu_placement,
+            placement_profile: spec.resources.placement_profile,
             thp: spec.resources.thp,
         };
 
@@ -1031,6 +1036,7 @@ impl TryFrom<CloudSandboxSpec> for SandboxSpec {
             mounts: spec.mounts.into_iter().map(Into::into).collect(),
             patches: spec.patches.into_iter().map(Into::into).collect(),
             network,
+            vsock: VsockSpec::default(),
             init: spec.init,
             pull_policy: spec.pull_policy.into(),
             security_profile: spec.security_profile,
@@ -1082,6 +1088,7 @@ impl From<SandboxSpec> for CloudSandboxSpec {
                 vcpus: spec.resources.cpus,
                 memory_mib: spec.resources.memory_mib,
                 cpu_placement: spec.resources.cpu_placement,
+                placement_profile: spec.resources.placement_profile,
                 thp: spec.resources.thp,
                 disk_size_mib,
             },
@@ -1120,6 +1127,7 @@ impl Default for CloudSandboxResources {
             vcpus: resources.cpus,
             memory_mib: resources.memory_mib,
             cpu_placement: resources.cpu_placement,
+            placement_profile: resources.placement_profile,
             thp: resources.thp,
             disk_size_mib: None,
         }

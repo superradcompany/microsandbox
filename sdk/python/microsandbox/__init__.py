@@ -173,6 +173,8 @@ from microsandbox.types import (
     ViolationAction,
     ViolationPolicy,
     VolumeKind,
+    VsockRoute,
+    VsockSocketType,
 )
 
 # Pass the bundled msb path to Rust explicitly. `MSB_PATH` remains a user
@@ -275,6 +277,8 @@ __all__ = [
     "Protocol",
     "PortBinding",
     "PortProtocol",
+    "VsockRoute",
+    "VsockSocketType",
     "DestGroup",
     "RateLimiter",
     "TokenBucket",

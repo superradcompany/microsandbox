@@ -1,6 +1,6 @@
 //! SQLite-backed cooperative CPU allocation and process-held leases.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -8,11 +8,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use microsandbox_db::DbWriteConnection;
-use microsandbox_db::entity::{cpu_allocation, cpu_allocation_cpu};
-use microsandbox_types::CpuPlacement;
+use microsandbox_db::entity::{cpu_allocation, cpu_allocation_cpu, memory_allocation_node};
 use microsandbox_utils::process_lock;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 
+use super::PlacementRequest;
 use super::planner::{self, ResolvedPlacement};
 use super::topology::{CpuTopology, LogicalCpuId};
 use crate::{RuntimeError, RuntimeResult};
@@ -22,6 +22,7 @@ use crate::{RuntimeError, RuntimeResult};
 //--------------------------------------------------------------------------------------------------
 
 const MAX_ALLOCATION_ATTEMPTS: usize = 5;
+const PLANNER_LOCK_NAME: &str = "allocator.lock";
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -33,6 +34,14 @@ pub(crate) struct AllocationLease {
     file: File,
     released: AtomicBool,
 }
+
+/// Short-lived cross-process lock covering the allocation snapshot, plan, and catalog commit.
+///
+/// CPU uniqueness constraints catch colliding CPU plans, but NUMA memory capacity is an aggregate
+/// promise and cannot be expressed as a row-level uniqueness constraint. Holding this lock makes
+/// both resources share one atomic admission boundary. The operating system releases it if the
+/// planner process exits unexpectedly.
+struct AllocationPlannerLock(File);
 
 struct StaleAllocation {
     id: String,
@@ -67,6 +76,18 @@ impl AllocationLease {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl Drop for AllocationPlannerLock {
+    fn drop(&mut self) {
+        if let Err(error) = process_lock::unlock(&self.0) {
+            tracing::warn!(%error, "release allocation planner lock");
+        }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
@@ -75,10 +96,12 @@ pub(crate) async fn acquire(
     run_id: i32,
     lease_dir: &Path,
     topology: &CpuTopology,
-    requested: CpuPlacement,
-    max_vcpus: u8,
+    request: PlacementRequest,
 ) -> RuntimeResult<(AllocationLease, ResolvedPlacement, usize)> {
     prepare_lease_dir(lease_dir)?;
+    let planner_lock = process_lock::open_lock_file(&lease_dir.join(PLANNER_LOCK_NAME))?;
+    process_lock::lock_exclusive(&planner_lock)?;
+    let _planner_lock = AllocationPlannerLock(planner_lock);
     let allocation_id = format!("{:032x}", rand::random::<u128>());
     let lease_name = format!("{allocation_id}.lock");
     let lease_path = lease_dir.join(&lease_name);
@@ -96,6 +119,13 @@ pub(crate) async fn acquire(
         };
         let cpu_rows = match cpu_allocation_cpu::Entity::find().all(db).await {
             Ok(cpu_rows) => cpu_rows,
+            Err(error) => {
+                clean_unpublished_lease(&file, &lease_path);
+                return Err(error.into());
+            }
+        };
+        let memory_rows = match memory_allocation_node::Entity::find().all(db).await {
+            Ok(memory_rows) => memory_rows,
             Err(error) => {
                 clean_unpublished_lease(&file, &lease_path);
                 return Err(error.into());
@@ -122,7 +152,26 @@ pub(crate) async fn acquire(
                 return Err(error);
             }
         };
-        let resolved = match planner::plan(topology, &occupied, requested, max_vcpus) {
+        let mut reserved_memory_mib = BTreeMap::<u32, u64>::new();
+        for row in memory_rows
+            .iter()
+            .filter(|row| !stale_ids.contains(row.allocation_id.as_str()))
+        {
+            let host_node = u32::try_from(row.host_numa_node).map_err(|_| {
+                RuntimeError::Custom(format!(
+                    "memory allocation {} contains invalid host NUMA node {}",
+                    row.allocation_id, row.host_numa_node
+                ))
+            })?;
+            let max_mib = u64::try_from(row.max_mib).map_err(|_| {
+                RuntimeError::Custom(format!(
+                    "memory allocation {} contains invalid maximum memory {}",
+                    row.allocation_id, row.max_mib
+                ))
+            })?;
+            *reserved_memory_mib.entry(host_node).or_default() += max_mib;
+        }
+        let resolved = match planner::plan(topology, &occupied, request, &reserved_memory_mib) {
             Ok(resolved) => resolved,
             Err(error) => {
                 clean_unpublished_lease(&file, &lease_path);
@@ -141,6 +190,11 @@ pub(crate) async fn acquire(
                 let lease_name = lease_name.clone();
                 let topology_fingerprint = topology.fingerprint.clone();
                 let reservations = resolved.reservations.clone();
+                let memory_nodes = resolved
+                    .numa
+                    .as_ref()
+                    .map(|numa| numa.nodes.clone())
+                    .unwrap_or_default();
                 async move {
                     for (id, expected_lease_name) in stale {
                         cpu_allocation::Entity::delete_many()
@@ -153,7 +207,7 @@ pub(crate) async fn acquire(
                     cpu_allocation::Entity::insert(cpu_allocation::ActiveModel {
                         id: Set(allocation_id.clone()),
                         run_id: Set(run_id),
-                        requested_policy: Set(requested.to_string()),
+                        requested_policy: Set(request.policy.to_string()),
                         resolved_policy: Set(resolved.resolved.to_string()),
                         enforcement: Set("thread-affinity".into()),
                         topology_fingerprint: Set(topology_fingerprint),
@@ -171,6 +225,26 @@ pub(crate) async fn acquire(
                             vcpu_index: Set(reservation.vcpu_index.map(i32::from)),
                             role: Set(reservation.role.into()),
                         })
+                        .exec(&transaction)
+                        .await?;
+                    }
+                    for node in memory_nodes {
+                        memory_allocation_node::Entity::insert(
+                            memory_allocation_node::ActiveModel {
+                                allocation_id: Set(allocation_id.clone()),
+                                guest_numa_node: Set(i32::from(node.guest_node_id)),
+                                host_numa_node: Set(i32::try_from(node.host_node_id).map_err(
+                                    |_| {
+                                        RuntimeError::Custom(format!(
+                                            "host NUMA node {} exceeds the catalog range",
+                                            node.host_node_id
+                                        ))
+                                    },
+                                )?),
+                                boot_mib: Set(i64::from(node.boot_memory_mib)),
+                                max_mib: Set(i64::from(node.max_memory_mib)),
+                            },
+                        )
                         .exec(&transaction)
                         .await?;
                     }

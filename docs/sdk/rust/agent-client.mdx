@@ -12,34 +12,6 @@ The client has two tiers that share one socket and one background reader task:
 
 The raw body is the full CBOR-encoded protocol `Message` body (`v`, `t`, and `p`), not just the inner payload. The typed and raw methods reach the connection through `Deref` to the underlying client; everything below is callable directly on the value `connect_sandbox` returns.
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```rust
-use microsandbox::{
-    agent,
-    protocol::{
-        fs::{FsOp, FsRequest, FsResponse},
-        message::MessageType,
-    },
-};
-
-let client = agent::connect_sandbox("dev").await?;   // 1. resolve name + connect
-
-let response = client                                // 2. one-shot typed RPC
-    .request(
-        MessageType::FsRequest,
-        &FsRequest {
-            op: FsOp::Stat {
-                path: "/etc/os-release".to_string(),
-                follow_symlink: true,
-            },
-        },
-    )
-    .await?;
-
-let fs_response: FsResponse = response.payload()?;   // 3. decode the payload
-client.close().await;                                // 4. close
-```
 
 ## Module functions
 

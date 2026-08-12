@@ -5,25 +5,6 @@ description: Python SDK - Volume API reference
 
 Create and manage named persistent volumes, and build the mount configs that attach storage to a sandbox. See [Volumes](/sandboxes/volumes) for usage examples and patterns.
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```python
-from microsandbox import Sandbox, Volume
-
-# 1. create a persistent named volume
-await Volume.create("pip-cache", quota_mib=2048)
-
-# 2. mount it into a sandbox via a mount factory
-sb = await Sandbox.create(
-    "worker",
-    image="python",
-    volumes={"/root/.cache/pip": Volume.named("pip-cache")},
-)
-
-# 3. inspect or edit the volume from the host, no sandbox required
-handle = await Volume.get("pip-cache")
-print(handle.used_bytes)
-```
 
 ## Static methods
 

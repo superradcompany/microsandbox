@@ -606,6 +606,58 @@ pub enum PortProtocol {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Types: Vsock
+//--------------------------------------------------------------------------------------------------
+
+/// Host services exposed to a sandbox through virtio-vsock.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(default)]
+pub struct VsockSpec {
+    /// Guest-to-host routes registered before the VM starts.
+    pub routes: Vec<VsockRouteSpec>,
+}
+
+impl VsockSpec {
+    /// Return whether no host services are exposed through vsock.
+    pub fn is_empty(&self) -> bool {
+        self.routes.is_empty()
+    }
+}
+
+/// One host local-IPC endpoint exposed on a host-CID vsock port.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct VsockRouteSpec {
+    /// Existing Unix socket path or local Windows named-pipe path.
+    #[cfg_attr(feature = "utoipa", schema(value_type = String))]
+    pub host_socket: PathBuf,
+
+    /// Port guests address on `VMADDR_CID_HOST` (CID 2).
+    pub port: u32,
+
+    /// Message semantics used by the guest and host endpoints.
+    #[serde(default)]
+    pub socket_type: VsockSocketType,
+}
+
+/// Socket semantics for a host-CID vsock route.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum VsockSocketType {
+    /// Reliable, ordered byte stream.
+    #[default]
+    Stream,
+
+    /// Best-effort message transport preserving datagram boundaries.
+    Dgram,
+}
+
+//--------------------------------------------------------------------------------------------------
 // Types: Init
 //--------------------------------------------------------------------------------------------------
 
@@ -741,6 +793,10 @@ pub struct SandboxSpec {
     /// Network specification.
     pub network: NetworkSpec,
 
+    /// Local host services exposed through virtio-vsock.
+    #[serde(default, skip_serializing_if = "VsockSpec::is_empty")]
+    pub vsock: VsockSpec,
+
     /// Hand off PID 1 to a guest init binary after agentd setup.
     pub init: Option<HandoffInit>,
 
@@ -762,7 +818,7 @@ pub struct SandboxSpec {
 }
 
 /// CPU and memory resources for a sandbox.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SandboxResources {
@@ -781,6 +837,10 @@ pub struct SandboxResources {
     /// Host CPU placement requested for this sandbox.
     #[serde(default, skip_serializing_if = "CpuPlacement::is_inherit")]
     pub cpu_placement: CpuPlacement,
+
+    /// Host-defined placement profile selected for this sandbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_profile: Option<String>,
 
     /// Guest transparent huge-page policy selected at boot.
     #[serde(default, skip_serializing_if = "TransparentHugePagePolicy::is_madvise")]
@@ -805,6 +865,44 @@ pub enum CpuPlacement {
 
     /// Prefer SMT siblings and minimize the number of physical cores used.
     Compact,
+}
+
+/// Concrete host NUMA scope selected by a named placement profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NumaPlacement {
+    /// Prefer one host NUMA node. Multi-node expansion is not enabled yet.
+    PreferSingle,
+    /// Require maximum CPU and memory capacity to fit one host NUMA node.
+    StrictSingle,
+    /// Preserve the operating system's ordinary NUMA behavior.
+    Inherit,
+}
+
+/// Host backing policy for guest memory selected by a named placement profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MemoryPlacement {
+    /// Back guest RAM from the host nodes selected for its vCPUs.
+    FollowCpu,
+    /// Preserve the operating system's ordinary memory policy.
+    Inherit,
+}
+
+/// Host-owned named placement profile resolved before a local VM starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct PlacementProfile {
+    /// NUMA scope used while selecting host CPU capacity.
+    pub numa: NumaPlacement,
+    /// Host-memory behavior used for the resolved CPU nodes.
+    pub memory: MemoryPlacement,
 }
 
 /// Guest transparent huge-page policy applied through the kernel command line.
@@ -1343,6 +1441,7 @@ impl Default for SandboxResources {
             max_cpus: DEFAULT_SANDBOX_CPUS,
             max_memory_mib: DEFAULT_SANDBOX_MEMORY_MIB,
             cpu_placement: CpuPlacement::Inherit,
+            placement_profile: None,
             thp: TransparentHugePagePolicy::Madvise,
         }
     }
@@ -1364,6 +1463,8 @@ impl<'de> Deserialize<'de> for SandboxResources {
             #[serde(default)]
             cpu_placement: CpuPlacement,
             #[serde(default)]
+            placement_profile: Option<String>,
+            #[serde(default)]
             thp: TransparentHugePagePolicy,
         }
 
@@ -1377,6 +1478,7 @@ impl<'de> Deserialize<'de> for SandboxResources {
             max_cpus: raw.max_cpus.unwrap_or(raw.cpus),
             max_memory_mib: raw.max_memory_mib.unwrap_or(raw.memory_mib),
             cpu_placement: raw.cpu_placement,
+            placement_profile: raw.placement_profile,
             thp: raw.thp,
         })
     }

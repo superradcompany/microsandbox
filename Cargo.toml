@@ -19,6 +19,7 @@ members = [
     "crates/test-macros",
     "crates/test-utils",
     "crates/utils",
+    "crates/vsock",
     "examples/rust/cloud-backend",
     "examples/rust/fs-read-stream",
     "examples/rust/init-handoff",
@@ -77,6 +78,7 @@ microsandbox-network = { version = "=0.6.8", path = "crates/network" }
 microsandbox-protocol = { version = "=0.6.8", path = "crates/protocol" }
 microsandbox-runtime = { version = "=0.6.8", path = "crates/runtime", default-features = false }
 microsandbox-utils = { version = "=0.6.8", path = "crates/utils" }
+microsandbox-vsock = { version = "=0.6.8", path = "crates/vsock" }
 msb_krun = "=0.1.30"
 msb_krun_utils = "=0.1.30"
 test-macros = { path = "crates/test-macros" }
@@ -119,6 +121,7 @@ scopeguard = "1.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_bytes = "0.11"
 serde_json = "1.0"
+serde-saphyr = { version = "1.0.1", default-features = false, features = ["deserialize"] }
 sha2 = "0.11.0"
 smoltcp = { version = "0.13", default-features = false }
 socket2 = "0.6"

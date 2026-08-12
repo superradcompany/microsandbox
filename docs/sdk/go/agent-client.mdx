@@ -7,39 +7,6 @@ description: Go SDK - Low-level agentd client reference
 
 All request and response bodies are raw CBOR bytes. The SDK handles framing and correlation ids, but it does not encode or decode the CBOR message body for you: decode it with a library such as `fxamacker/cbor`. The raw body is the full CBOR-encoded protocol `Message` body (`v`, `t`, `p`), not just the inner payload.
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```go
-import (
-    "context"
-
-    "github.com/fxamacker/cbor/v2"
-    m "github.com/superradcompany/microsandbox/sdk/go"
-)
-
-ctx := context.Background()
-
-client, err := m.ConnectAgentSandbox(ctx, "dev")             // 1. connect
-if err != nil {
-    return err
-}
-defer client.Close()
-
-body, err := cbor.Marshal(map[string]any{                    // 2. build a CBOR Message
-    "v": 1,
-    "t": "core.fs.request",
-    "p": fsRequestBytes,
-})
-if err != nil {
-    return err
-}
-
-frame, err := client.Request(ctx, m.FlagSessionStart, body)  // 3. request / response
-if err != nil {
-    return err
-}
-_ = frame.Body
-```
 
 ## Constants
 

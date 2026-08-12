@@ -3467,7 +3467,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rollback_schema_rolls_back_latest_migration() {
+    async fn rollback_schema_steps_through_latest_migrations() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("msb.db");
         let db = microsandbox_db::connection::DbWriteConnection::open(
@@ -3479,8 +3479,61 @@ mod tests {
         .unwrap();
         Migrator::up(db.inner(), None).await.unwrap();
 
-        // Writeback admission is the latest migration; one step must drop its
-        // allocation table while every older coordination table stays intact.
+        // The label rebuild is compatible with older releases, so its down
+        // migration only removes the migration record. NUMA memory and
+        // writeback state must remain until their own rollback steps.
+        rollback_schema(db.inner(), 1).await.unwrap();
+
+        let rows = db
+            .query_all_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                "SELECT version FROM seaql_migrations WHERE version = ?",
+                [schema_metadata::SANDBOX_LABEL_REBUILD_MIGRATION_ID.into()],
+            ))
+            .await
+            .unwrap();
+        assert!(rows.is_empty(), "label rebuild should be rolled back");
+
+        let rows = db
+            .query_all_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'writeback_allocation'",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "writeback allocation should remain after one rollback"
+        );
+
+        rollback_schema(db.inner(), 1).await.unwrap();
+
+        let rows = db
+            .query_all_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'memory_allocation_node'",
+            ))
+            .await
+            .unwrap();
+        assert!(
+            rows.is_empty(),
+            "NUMA memory allocation should be rolled back"
+        );
+
+        let rows = db
+            .query_all_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'writeback_allocation'",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "writeback allocation should remain after NUMA rollback"
+        );
+
         rollback_schema(db.inner(), 1).await.unwrap();
 
         let rows = db
