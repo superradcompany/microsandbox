@@ -80,22 +80,26 @@ deny:
 msb run python --net-conf net-policy.yaml
 ```
 
-Passing `network: {...}` to `--net-conf` is an error; use `--conf` for a root-shaped document. Each config flag may appear at most once.
+Passing `network: {...}` to `--net-conf` is an error; use `--conf` for a root-shaped document. Every root and scoped config flag is repeatable, and different config flag kinds may be interleaved freely.
 
 ## Precedence and merging
 
 Configuration resolves from lower to higher precedence:
 
 1. Built-in and global `config.json` defaults
-2. Explicit `--conf`
-3. Scoped config flags in the fixed order shown above
-4. Explicit CLI flags and positional arguments
+2. Every `--conf` and scoped config occurrence, from left to right on the command line
+3. Explicit non-config CLI flags and positional arguments
 
-Higher-precedence scalars replace lower values. Maps merge by key, including nested `init`, `network.dns`, `network.tls`, and secret definitions. A list supplied by a higher-precedence config file replaces the lower list. Repeatable CLI flags remain additive, and CLI network rules are evaluated before rules loaded from files.
+Higher-precedence scalars replace lower values. Maps merge by key, including nested `init`, `network.dns`, `network.tls`, and secret definitions. A list supplied by a higher-precedence config file replaces the lower list. Repeating the same config flag works exactly like interleaving different config flags: each file overlays everything to its left. Repeatable non-config CLI flags remain additive, and CLI network rules are evaluated before rules loaded from files.
 
 ```bash
-# large.yaml can replace memory from base.yaml; the CLI value wins over both.
-msb run python --conf base.yaml --resource-conf large.yaml --memory 12G
+# Files overlay left to right; the explicit CLI value wins over every file.
+msb run python \
+  --conf base.yaml \
+  --resource-conf standard.yaml \
+  --conf project.yaml \
+  --resource-conf large.yaml \
+  --memory 12G
 ```
 
 Relative host paths are resolved against the file that contains them. Paths inside a file listed by `patch_files` are resolved against that patch file.

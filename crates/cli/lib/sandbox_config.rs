@@ -25,7 +25,9 @@ use serde_saphyr::{DuplicateKeyPolicy, MergeKeyPolicy, Options};
 
 #[cfg(test)]
 use crate::commands::common::SandboxOpts;
-use crate::commands::common::{SandboxConfigSources, parse_duration_secs, validate_shell};
+use crate::commands::common::{
+    SandboxConfigKind, SandboxConfigSources, parse_duration_secs, validate_shell,
+};
 use crate::ui;
 
 //--------------------------------------------------------------------------------------------------
@@ -638,102 +640,108 @@ pub fn resolve(sources: &SandboxConfigSources) -> anyhow::Result<ResolvedSandbox
     let mut sdk_patch = SandboxConfigPatch::new();
     let mut image = None;
     let mut registry_auth = None;
-    if let Some(path) = sources.conf.as_deref() {
-        let contribution = load_root(path)?;
-        image = contribution
-            .image
-            .as_ref()
-            .map(resolve_image_input)
-            .transpose()?;
-        registry_auth = contribution
-            .registry
-            .as_ref()
-            .map(resolve_registry_auth)
-            .transpose()?
-            .flatten();
-        sdk_patch = sdk_patch.overlay(materialize_sandbox_patch(
-            &contribution,
-            image.as_ref(),
-            registry_auth.clone(),
-        )?);
-        patch.merge(contribution);
-    }
+    for source in sources.iter() {
+        let contribution = match source.kind {
+            SandboxConfigKind::Root => {
+                let contribution = load_root(&source.path)?;
+                let contribution_image = contribution
+                    .image
+                    .as_ref()
+                    .map(resolve_image_input)
+                    .transpose()?;
+                let contribution_registry_auth = contribution
+                    .registry
+                    .as_ref()
+                    .map(resolve_registry_auth)
+                    .transpose()?
+                    .flatten();
 
-    if let Some(path) = &sources.net_conf {
-        reject_scoped_wrapper(path, "network", "--net-conf")?;
-        let network = load_typed::<NetworkPatch>(path, "network config")?;
-        let contribution = SandboxPatch {
-            network: Some(NetworkInput::Object(network)),
-            ..SandboxPatch::default()
+                if contribution_image.is_some() {
+                    image = contribution_image.clone();
+                }
+                if contribution_registry_auth.is_some() {
+                    registry_auth = contribution_registry_auth.clone();
+                }
+                sdk_patch = sdk_patch.overlay(materialize_sandbox_patch(
+                    &contribution,
+                    contribution_image.as_ref(),
+                    contribution_registry_auth,
+                )?);
+                contribution
+            }
+            SandboxConfigKind::Network => {
+                reject_scoped_wrapper(&source.path, "network", "--net-conf")?;
+                let network = load_typed::<NetworkPatch>(&source.path, "network config")?;
+                SandboxPatch {
+                    network: Some(NetworkInput::Object(network)),
+                    ..SandboxPatch::default()
+                }
+            }
+            SandboxConfigKind::Resources => {
+                let scoped = load_typed::<ResourcePatch>(&source.path, "resource config")?;
+                SandboxPatch {
+                    cpus: scoped.cpus,
+                    memory: scoped.memory,
+                    max_duration: scoped.max_duration,
+                    idle_timeout: scoped.idle_timeout,
+                    rlimits: scoped.rlimits,
+                    ..SandboxPatch::default()
+                }
+            }
+            SandboxConfigKind::Runtime => {
+                let scoped = load_typed::<RuntimePatch>(&source.path, "runtime config")?;
+                SandboxPatch {
+                    workdir: scoped.workdir,
+                    shell: scoped.shell,
+                    user: scoped.user,
+                    hostname: scoped.hostname,
+                    security: scoped.security,
+                    entrypoint: scoped.entrypoint,
+                    cmd: scoped.cmd,
+                    env: scoped.env,
+                    labels: scoped.labels,
+                    init: scoped.init,
+                    ..SandboxPatch::default()
+                }
+            }
+            SandboxConfigKind::Filesystem => {
+                let mut scoped = load_typed::<FilesystemPatch>(&source.path, "filesystem config")?;
+                absolutize_filesystem_patch(&mut scoped, config_base(&source.path)?);
+                SandboxPatch {
+                    mounts: scoped.mounts,
+                    patch_files: scoped.patch_files,
+                    patches: scoped.patches,
+                    ..SandboxPatch::default()
+                }
+            }
+            SandboxConfigKind::Secrets => {
+                reject_scoped_wrapper(&source.path, "secrets", "--secret-conf")?;
+                let secrets = load_typed_at::<BTreeMap<String, SecretInput>>(
+                    &source.path,
+                    "secret config",
+                    vec!["secrets".to_string()],
+                )?;
+                SandboxPatch {
+                    secrets: Some(secrets),
+                    ..SandboxPatch::default()
+                }
+            }
+            SandboxConfigKind::Scripts => {
+                reject_scoped_wrapper(&source.path, "scripts", "--script-conf")?;
+                let scripts =
+                    load_typed::<BTreeMap<String, String>>(&source.path, "script config")?;
+                SandboxPatch {
+                    scripts: Some(scripts),
+                    ..SandboxPatch::default()
+                }
+            }
         };
-        sdk_patch = sdk_patch.overlay(materialize_sandbox_patch(&contribution, None, None)?);
-        patch.merge(contribution);
-    }
-    if let Some(path) = &sources.resource_conf {
-        let scoped = load_typed::<ResourcePatch>(path, "resource config")?;
-        let contribution = SandboxPatch {
-            cpus: scoped.cpus,
-            memory: scoped.memory,
-            max_duration: scoped.max_duration,
-            idle_timeout: scoped.idle_timeout,
-            rlimits: scoped.rlimits,
-            ..SandboxPatch::default()
-        };
-        sdk_patch = sdk_patch.overlay(materialize_sandbox_patch(&contribution, None, None)?);
-        patch.merge(contribution);
-    }
-    if let Some(path) = &sources.runtime_conf {
-        let scoped = load_typed::<RuntimePatch>(path, "runtime config")?;
-        let contribution = SandboxPatch {
-            workdir: scoped.workdir,
-            shell: scoped.shell,
-            user: scoped.user,
-            hostname: scoped.hostname,
-            security: scoped.security,
-            entrypoint: scoped.entrypoint,
-            cmd: scoped.cmd,
-            env: scoped.env,
-            labels: scoped.labels,
-            init: scoped.init,
-            ..SandboxPatch::default()
-        };
-        sdk_patch = sdk_patch.overlay(materialize_sandbox_patch(&contribution, None, None)?);
-        patch.merge(contribution);
-    }
-    if let Some(path) = &sources.fs_conf {
-        let mut scoped = load_typed::<FilesystemPatch>(path, "filesystem config")?;
-        absolutize_filesystem_patch(&mut scoped, config_base(path)?);
-        let contribution = SandboxPatch {
-            mounts: scoped.mounts,
-            patch_files: scoped.patch_files,
-            patches: scoped.patches,
-            ..SandboxPatch::default()
-        };
-        sdk_patch = sdk_patch.overlay(materialize_sandbox_patch(&contribution, None, None)?);
-        patch.merge(contribution);
-    }
-    if let Some(path) = &sources.secret_conf {
-        reject_scoped_wrapper(path, "secrets", "--secret-conf")?;
-        let secrets = load_typed_at::<BTreeMap<String, SecretInput>>(
-            path,
-            "secret config",
-            vec!["secrets".to_string()],
-        )?;
-        let contribution = SandboxPatch {
-            secrets: Some(secrets),
-            ..SandboxPatch::default()
-        };
-        sdk_patch = sdk_patch.overlay(materialize_sandbox_patch(&contribution, None, None)?);
-        patch.merge(contribution);
-    }
-    if let Some(path) = &sources.script_conf {
-        reject_scoped_wrapper(path, "scripts", "--script-conf")?;
-        let scripts = load_typed::<BTreeMap<String, String>>(path, "script config")?;
-        let contribution = SandboxPatch {
-            scripts: Some(scripts),
-            ..SandboxPatch::default()
-        };
-        sdk_patch = sdk_patch.overlay(materialize_sandbox_patch(&contribution, None, None)?);
+
+        // Root sources are materialized above so their resolved image and registry credentials are
+        // captured with the contribution that declared them. Scoped sources need no such context.
+        if source.kind != SandboxConfigKind::Root {
+            sdk_patch = sdk_patch.overlay(materialize_sandbox_patch(&contribution, None, None)?);
+        }
         patch.merge(contribution);
     }
 
@@ -1886,12 +1894,10 @@ env:
 allow: ["scoped.example.com"]
 "#,
         );
-        let sources = SandboxConfigSources {
-            conf: Some(root),
-            runtime_conf: Some(runtime),
-            net_conf: Some(network),
-            ..SandboxConfigSources::default()
-        };
+        let sources = SandboxConfigSources::default()
+            .source(SandboxConfigKind::Root, root)
+            .source(SandboxConfigKind::Runtime, runtime)
+            .source(SandboxConfigKind::Network, network);
 
         let resolved = resolve(&sources).unwrap();
         let env = resolved.patch.env.unwrap();
@@ -1910,6 +1916,39 @@ allow: ["scoped.example.com"]
         );
     }
 
+    #[test]
+    fn repeated_root_and_scoped_sources_overlay_in_supplied_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = write_config(dir.path(), "base.yaml", "image: alpine\nmemory: 1G\n");
+        let standard = write_config(dir.path(), "standard.yaml", "memory: 2G\n");
+        let project = write_config(dir.path(), "project.yaml", "memory: 3G\n");
+        let large = write_config(dir.path(), "large.yaml", "memory: 4G\n");
+
+        let resolved = resolve(
+            &SandboxConfigSources::default()
+                .source(SandboxConfigKind::Root, base.clone())
+                .source(SandboxConfigKind::Resources, standard.clone())
+                .source(SandboxConfigKind::Root, project.clone())
+                .source(SandboxConfigKind::Resources, large.clone()),
+        )
+        .unwrap();
+        assert_eq!(resolved.patch.memory.as_deref(), Some("4G"));
+        assert!(matches!(
+            resolved.image(None, None).unwrap(),
+            ResolvedImage::Image(ref value) if value == "alpine"
+        ));
+
+        let reordered = resolve(
+            &SandboxConfigSources::default()
+                .source(SandboxConfigKind::Root, base)
+                .source(SandboxConfigKind::Resources, standard)
+                .source(SandboxConfigKind::Resources, large)
+                .source(SandboxConfigKind::Root, project),
+        )
+        .unwrap();
+        assert_eq!(reordered.patch.memory.as_deref(), Some("3G"));
+    }
+
     #[tokio::test]
     async fn nested_required_fields_can_be_completed_by_a_scoped_patch() {
         let dir = tempfile::tempdir().unwrap();
@@ -1919,11 +1958,11 @@ allow: ["scoped.example.com"]
             "image: alpine\ninit:\n  args: [--unit=test.target]\n",
         );
         let runtime = write_config(dir.path(), "runtime.yaml", "init:\n  cmd: auto\n");
-        let resolved = resolve(&SandboxConfigSources {
-            conf: Some(root),
-            runtime_conf: Some(runtime),
-            ..SandboxConfigSources::default()
-        })
+        let resolved = resolve(
+            &SandboxConfigSources::default()
+                .source(SandboxConfigKind::Root, root)
+                .source(SandboxConfigKind::Runtime, runtime),
+        )
         .unwrap();
 
         let config = resolved
@@ -1945,11 +1984,9 @@ allow: ["scoped.example.com"]
             "base.yaml",
             "image: alpine\ninit:\n  args: [--unit=test.target]\n",
         );
-        let resolved = resolve(&SandboxConfigSources {
-            conf: Some(root),
-            ..SandboxConfigSources::default()
-        })
-        .unwrap();
+        let resolved =
+            resolve(&SandboxConfigSources::default().source(SandboxConfigKind::Root, root))
+                .unwrap();
 
         let error = resolved
             .apply(SandboxBuilder::new("missing-init"))
@@ -1980,10 +2017,7 @@ patches:
 "#,
         );
         let config_base = config_base(&root).unwrap();
-        let sources = SandboxConfigSources {
-            conf: Some(root),
-            ..SandboxConfigSources::default()
-        };
+        let sources = SandboxConfigSources::default().source(SandboxConfigKind::Root, root);
 
         let resolved = resolve(&sources).unwrap();
         let ImageInput::Object(image) = resolved.patch.image.unwrap() else {
@@ -2062,10 +2096,7 @@ patches:
     fn missing_image_is_reported_after_sparse_resolution() {
         let dir = tempfile::tempdir().unwrap();
         let root = write_config(dir.path(), "policy.yaml", "memory: \"1G\"\n");
-        let sources = SandboxConfigSources {
-            conf: Some(root),
-            ..SandboxConfigSources::default()
-        };
+        let sources = SandboxConfigSources::default().source(SandboxConfigKind::Root, root);
         let resolved = resolve(&sources).unwrap();
 
         let error = resolved.image(None, None).unwrap_err().to_string();
@@ -2122,10 +2153,7 @@ secrets:
     allow: ["api.openai.com"]
 "#,
         );
-        let sources = SandboxConfigSources {
-            conf: Some(root),
-            ..SandboxConfigSources::default()
-        };
+        let sources = SandboxConfigSources::default().source(SandboxConfigKind::Root, root);
         let resolved = resolve(&sources).unwrap();
         let image = resolved.image(None, None).unwrap();
         let builder = resolved.apply(SandboxBuilder::new("config-test")).unwrap();
@@ -2169,11 +2197,9 @@ TOKEN:
   inject: [headers, basic_auth]
 "#,
         );
-        let sources = SandboxConfigSources {
-            conf: Some(root),
-            secret_conf: Some(scoped),
-            ..SandboxConfigSources::default()
-        };
+        let sources = SandboxConfigSources::default()
+            .source(SandboxConfigKind::Root, root)
+            .source(SandboxConfigKind::Secrets, scoped);
 
         let resolved = resolve(&sources).unwrap();
         let secret = &resolved.patch.secrets.unwrap()["TOKEN"];
@@ -2212,10 +2238,7 @@ TOKEN:
     fn scoped_network_rejects_the_root_wrapper() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_config(dir.path(), "network.yaml", "network: { policy: public }\n");
-        let sources = SandboxConfigSources {
-            net_conf: Some(path),
-            ..SandboxConfigSources::default()
-        };
+        let sources = SandboxConfigSources::default().source(SandboxConfigKind::Network, path);
 
         let error = resolve(&sources).unwrap_err().to_string();
         assert!(error.contains("without a `network:` wrapper"));
@@ -2235,10 +2258,7 @@ shell: "/bin/sh"
 scripts: { start: "python app.py" }
 "#,
         );
-        let sources = SandboxConfigSources {
-            conf: Some(root),
-            ..SandboxConfigSources::default()
-        };
+        let sources = SandboxConfigSources::default().source(SandboxConfigKind::Root, root);
         let resolved = resolve(&sources).unwrap();
         let opts = SandboxOpts {
             memory: Some("2G".to_string()),
@@ -2274,10 +2294,7 @@ scripts: { start: "python app.py" }
             "agent.yaml",
             "image: \"python\"\nnetwork: public\n",
         );
-        let sources = SandboxConfigSources {
-            conf: Some(root),
-            ..SandboxConfigSources::default()
-        };
+        let sources = SandboxConfigSources::default().source(SandboxConfigKind::Root, root);
         let resolved = resolve(&sources).unwrap();
         let opts = SandboxOpts {
             no_net: true,
@@ -2310,10 +2327,7 @@ scripts: { start: "python app.py" }
             "agent.yaml",
             "image: \"python\"\nnetwork: open\n",
         );
-        let sources = SandboxConfigSources {
-            conf: Some(root),
-            ..SandboxConfigSources::default()
-        };
+        let sources = SandboxConfigSources::default().source(SandboxConfigKind::Root, root);
         let resolved = resolve(&sources).unwrap();
         let opts = SandboxOpts {
             net: vec!["none".to_string()],
@@ -2352,10 +2366,7 @@ network:
   allow: ["api.openai.com"]
 "#,
         );
-        let sources = SandboxConfigSources {
-            conf: Some(root),
-            ..SandboxConfigSources::default()
-        };
+        let sources = SandboxConfigSources::default().source(SandboxConfigKind::Root, root);
         let resolved = resolve(&sources).unwrap();
         let opts = SandboxOpts {
             net_rule: vec!["deny@192.0.2.1".to_string()],

@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use clap::Args;
+use clap::{Arg, ArgAction, ArgMatches, Args, Command, FromArgMatches};
 use microsandbox::VolumeKind;
 use microsandbox::backend::{Backend, LocalBackend};
 use microsandbox::sandbox::{
@@ -48,35 +48,38 @@ pub fn local_backend_ref(backend: &Arc<dyn Backend>) -> anyhow::Result<&LocalBac
 //--------------------------------------------------------------------------------------------------
 
 /// Sparse configuration files accepted by single-sandbox commands.
-#[derive(Debug, Default, Args)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SandboxConfigKind {
+    /// A sparse root sandbox configuration.
+    Root,
+    /// An unwrapped network configuration.
+    Network,
+    /// An unwrapped resource and lifecycle configuration.
+    Resources,
+    /// An unwrapped runtime configuration.
+    Runtime,
+    /// An unwrapped filesystem configuration.
+    Filesystem,
+    /// An unwrapped secret-name map.
+    Secrets,
+    /// An unwrapped script-name map.
+    Scripts,
+}
+
+/// One configuration source in its original command-line position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SandboxConfigSource {
+    /// The schema expected for this source.
+    pub(crate) kind: SandboxConfigKind,
+    /// The file to load.
+    pub(crate) path: PathBuf,
+}
+
+/// Sparse configuration files accepted by single-sandbox commands.
+#[derive(Debug, Default)]
 pub struct SandboxConfigSources {
-    /// Load a sparse single-sandbox configuration.
-    #[arg(long, value_name = "PATH")]
-    pub conf: Option<PathBuf>,
-
-    /// Load an unwrapped network configuration.
-    #[arg(long = "net-conf", value_name = "PATH")]
-    pub net_conf: Option<PathBuf>,
-
-    /// Load an unwrapped resource and lifecycle configuration.
-    #[arg(long = "resource-conf", value_name = "PATH")]
-    pub resource_conf: Option<PathBuf>,
-
-    /// Load an unwrapped runtime configuration.
-    #[arg(long = "runtime-conf", value_name = "PATH")]
-    pub runtime_conf: Option<PathBuf>,
-
-    /// Load an unwrapped filesystem configuration.
-    #[arg(long = "fs-conf", value_name = "PATH")]
-    pub fs_conf: Option<PathBuf>,
-
-    /// Load an unwrapped secret-name map.
-    #[arg(long = "secret-conf", value_name = "PATH")]
-    pub secret_conf: Option<PathBuf>,
-
-    /// Load an unwrapped script-name map.
-    #[arg(long = "script-conf", value_name = "PATH")]
-    pub script_conf: Option<PathBuf>,
+    /// Sources sorted by their occurrence on the command line.
+    sources: Vec<SandboxConfigSource>,
 }
 
 /// Common sandbox configuration flags shared between `msb run` and `msb create`.
@@ -611,13 +614,145 @@ impl SandboxOpts {
 impl SandboxConfigSources {
     /// Returns true when at least one explicit config path was supplied.
     pub fn any(&self) -> bool {
-        self.conf.is_some()
-            || self.net_conf.is_some()
-            || self.resource_conf.is_some()
-            || self.runtime_conf.is_some()
-            || self.fs_conf.is_some()
-            || self.secret_conf.is_some()
-            || self.script_conf.is_some()
+        !self.sources.is_empty()
+    }
+
+    /// Iterate over configuration sources in command-line order.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &SandboxConfigSource> {
+        self.sources.iter()
+    }
+
+    #[cfg(test)]
+    /// Append a source while constructing resolver fixtures.
+    pub(crate) fn source(mut self, kind: SandboxConfigKind, path: impl Into<PathBuf>) -> Self {
+        self.sources.push(SandboxConfigSource {
+            kind,
+            path: path.into(),
+        });
+        self
+    }
+}
+
+impl SandboxConfigKind {
+    /// Every supported source kind, in declaration order for help output.
+    const ALL: [Self; 7] = [
+        Self::Root,
+        Self::Network,
+        Self::Resources,
+        Self::Runtime,
+        Self::Filesystem,
+        Self::Secrets,
+        Self::Scripts,
+    ];
+
+    /// The clap argument identifier used by cross-argument constraints.
+    const fn id(self) -> &'static str {
+        match self {
+            Self::Root => "conf",
+            Self::Network => "net_conf",
+            Self::Resources => "resource_conf",
+            Self::Runtime => "runtime_conf",
+            Self::Filesystem => "fs_conf",
+            Self::Secrets => "secret_conf",
+            Self::Scripts => "script_conf",
+        }
+    }
+
+    /// The long option spelling, without its leading dashes.
+    const fn long(self) -> &'static str {
+        match self {
+            Self::Root => "conf",
+            Self::Network => "net-conf",
+            Self::Resources => "resource-conf",
+            Self::Runtime => "runtime-conf",
+            Self::Filesystem => "fs-conf",
+            Self::Secrets => "secret-conf",
+            Self::Scripts => "script-conf",
+        }
+    }
+
+    /// The long option spelling used when persisting an installed alias.
+    pub(crate) fn flag(self) -> String {
+        format!("--{}", self.long())
+    }
+
+    /// User-facing help for this configuration source.
+    const fn help(self) -> &'static str {
+        match self {
+            Self::Root => "Load a sparse single-sandbox configuration",
+            Self::Network => "Load an unwrapped network configuration",
+            Self::Resources => "Load an unwrapped resource and lifecycle configuration",
+            Self::Runtime => "Load an unwrapped runtime configuration",
+            Self::Filesystem => "Load an unwrapped filesystem configuration",
+            Self::Secrets => "Load an unwrapped secret-name map",
+            Self::Scripts => "Load an unwrapped script-name map",
+        }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl Args for SandboxConfigSources {
+    fn augment_args(command: Command) -> Command {
+        SandboxConfigKind::ALL
+            .into_iter()
+            .fold(command, |command, kind| {
+                command.arg(
+                    Arg::new(kind.id())
+                        .long(kind.long())
+                        .value_name("PATH")
+                        .help(kind.help())
+                        .action(ArgAction::Append)
+                        .value_parser(clap::value_parser!(PathBuf)),
+                )
+            })
+    }
+
+    fn augment_args_for_update(command: Command) -> Command {
+        Self::augment_args(command)
+    }
+}
+
+impl FromArgMatches for SandboxConfigSources {
+    fn from_arg_matches(matches: &ArgMatches) -> Result<Self, clap::Error> {
+        let mut indexed_sources = Vec::new();
+
+        for kind in SandboxConfigKind::ALL {
+            let Some(indices) = matches.indices_of(kind.id()) else {
+                continue;
+            };
+            let Some(paths) = matches.get_many::<PathBuf>(kind.id()) else {
+                continue;
+            };
+
+            indexed_sources.extend(indices.zip(paths).map(|(index, path)| {
+                (
+                    index,
+                    SandboxConfigSource {
+                        kind,
+                        path: path.clone(),
+                    },
+                )
+            }));
+        }
+
+        // Clap retains an index for each value. Sorting those indices recovers interleaving across
+        // independently named flags, which separate Vec fields cannot represent.
+        indexed_sources.sort_by_key(|(index, _)| *index);
+
+        Ok(Self {
+            sources: indexed_sources
+                .into_iter()
+                .map(|(_, source)| source)
+                .collect(),
+        })
+    }
+
+    fn update_from_arg_matches(&mut self, matches: &ArgMatches) -> Result<(), clap::Error> {
+        *self = Self::from_arg_matches(matches)?;
+        Ok(())
     }
 }
 

@@ -445,23 +445,14 @@ fn append_config_options(
     sources: &SandboxConfigSources,
     quote: fn(&str) -> String,
 ) -> anyhow::Result<()> {
-    let inputs = [
-        ("--conf", sources.conf.as_deref()),
-        ("--net-conf", sources.net_conf.as_deref()),
-        ("--resource-conf", sources.resource_conf.as_deref()),
-        ("--runtime-conf", sources.runtime_conf.as_deref()),
-        ("--fs-conf", sources.fs_conf.as_deref()),
-        ("--secret-conf", sources.secret_conf.as_deref()),
-        ("--script-conf", sources.script_conf.as_deref()),
-    ];
-    for (flag, path) in inputs {
-        let Some(path) = path else {
-            continue;
-        };
-        let absolute = fs::canonicalize(path).map_err(|err| {
-            anyhow::anyhow!("failed to resolve config path {}: {err}", path.display())
+    for source in sources.iter() {
+        let absolute = fs::canonicalize(&source.path).map_err(|err| {
+            anyhow::anyhow!(
+                "failed to resolve config path {}: {err}",
+                source.path.display()
+            )
         })?;
-        parts.push(flag.to_string());
+        parts.push(source.kind.flag());
         parts.push(quote(&absolute.to_string_lossy()));
     }
     Ok(())
@@ -658,6 +649,7 @@ mod tests {
     use clap::error::ErrorKind;
 
     use super::*;
+    use crate::commands::common::SandboxConfigKind;
 
     #[derive(Debug, Parser)]
     struct TestCli {
@@ -706,7 +698,43 @@ mod tests {
         let parsed = TestCli::parse_from(["msb", "--conf", "agent.yaml"]);
 
         assert!(parsed.args.image.is_none());
-        assert_eq!(parsed.args.config.conf, Some(PathBuf::from("agent.yaml")));
+        assert_eq!(
+            parsed
+                .args
+                .config
+                .iter()
+                .map(|source| (source.kind, source.path.clone()))
+                .collect::<Vec<_>>(),
+            [(SandboxConfigKind::Root, PathBuf::from("agent.yaml"))]
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn installed_alias_preserves_repeated_config_source_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.yaml");
+        let base = dir.path().join("base.yaml");
+        let second = dir.path().join("second.yaml");
+        fs::write(&first, "memory: 1G\n").unwrap();
+        fs::write(&base, "image: alpine\n").unwrap();
+        fs::write(&second, "memory: 2G\n").unwrap();
+        let sources = SandboxConfigSources::default()
+            .source(SandboxConfigKind::Resources, first)
+            .source(SandboxConfigKind::Root, base)
+            .source(SandboxConfigKind::Resources, second);
+        let mut parts = Vec::new();
+
+        append_config_options(&mut parts, &sources, shell_quote).unwrap();
+
+        assert_eq!(
+            parts
+                .iter()
+                .step_by(2)
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["--resource-conf", "--conf", "--resource-conf"]
+        );
     }
 
     #[test]

@@ -446,6 +446,7 @@ mod tests {
     use clap::error::ErrorKind;
 
     use super::*;
+    use crate::commands::common::SandboxConfigKind;
 
     #[derive(Debug, Parser)]
     struct TestCli {
@@ -549,23 +550,46 @@ mod tests {
 
         assert!(args.image.is_none());
         assert_eq!(
-            args.sandbox.config.conf,
-            Some(PathBuf::from("sandbox.yaml"))
-        );
-        assert_eq!(
-            args.sandbox.config.net_conf,
-            Some(PathBuf::from("network.yaml"))
+            args.sandbox
+                .config
+                .iter()
+                .map(|source| (source.kind, source.path.clone()))
+                .collect::<Vec<_>>(),
+            [
+                (SandboxConfigKind::Root, PathBuf::from("sandbox.yaml")),
+                (SandboxConfigKind::Network, PathBuf::from("network.yaml")),
+            ]
         );
         assert_eq!(args.command, ["python", "app.py"]);
     }
 
     #[test]
-    fn duplicate_config_flags_are_argument_errors() {
-        let error =
-            TestCli::try_parse_from(["msb", "python", "--conf", "one.yaml", "--conf", "two.yaml"])
-                .unwrap_err();
+    fn repeated_config_flags_preserve_cross_flag_command_line_order() {
+        let args = parse_run_args(&[
+            "python",
+            "--resource-conf",
+            "first.yaml",
+            "--conf",
+            "base.yaml",
+            "--resource-conf",
+            "second.yaml",
+            "--net-conf",
+            "network.yaml",
+        ]);
 
-        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+        assert_eq!(
+            args.sandbox
+                .config
+                .iter()
+                .map(|source| (source.kind, source.path.clone()))
+                .collect::<Vec<_>>(),
+            [
+                (SandboxConfigKind::Resources, PathBuf::from("first.yaml")),
+                (SandboxConfigKind::Root, PathBuf::from("base.yaml")),
+                (SandboxConfigKind::Resources, PathBuf::from("second.yaml")),
+                (SandboxConfigKind::Network, PathBuf::from("network.yaml")),
+            ]
+        );
     }
 
     #[test]
