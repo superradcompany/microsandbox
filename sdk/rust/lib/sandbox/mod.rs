@@ -21,6 +21,8 @@ mod patch;
 mod reap;
 #[cfg(feature = "ssh")]
 pub mod ssh;
+#[cfg(any(windows, test))]
+pub(crate) mod terminal;
 mod types;
 pub(crate) mod upper;
 

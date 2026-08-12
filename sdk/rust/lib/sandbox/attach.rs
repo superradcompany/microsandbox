@@ -53,12 +53,6 @@ pub(crate) struct DetachKeys {
     sequence: Vec<u8>,
 }
 
-#[cfg(any(windows, test))]
-#[derive(Default)]
-struct WindowsUtf8Decoder {
-    pending: Vec<u8>,
-}
-
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -224,50 +218,6 @@ impl DetachKeys {
     }
 }
 
-#[cfg(any(windows, test))]
-impl WindowsUtf8Decoder {
-    fn decode(&mut self, data: &[u8]) -> Vec<u16> {
-        self.pending.extend_from_slice(data);
-
-        let mut decoded = Vec::new();
-        let mut offset = 0usize;
-        while offset < self.pending.len() {
-            match std::str::from_utf8(&self.pending[offset..]) {
-                Ok(valid) => {
-                    decoded.extend(valid.encode_utf16());
-                    offset = self.pending.len();
-                }
-                Err(error) => {
-                    let valid_end = offset + error.valid_up_to();
-                    decoded.extend(
-                        std::str::from_utf8(&self.pending[offset..valid_end])
-                            .expect("UTF-8 validation identified a valid prefix")
-                            .encode_utf16(),
-                    );
-                    offset = valid_end;
-
-                    let Some(error_len) = error.error_len() else {
-                        break;
-                    };
-                    decoded.push(char::REPLACEMENT_CHARACTER as u16);
-                    offset += error_len;
-                }
-            }
-        }
-
-        self.pending.drain(..offset);
-        decoded
-    }
-
-    fn finish(&mut self) -> Vec<u16> {
-        let decoded = String::from_utf8_lossy(&self.pending)
-            .encode_utf16()
-            .collect();
-        self.pending.clear();
-        decoded
-    }
-}
-
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -296,24 +246,6 @@ pub(crate) fn input_contains_detach_sequence(
     }
 
     false
-}
-
-#[cfg(any(windows, test))]
-fn console_input_to_utf8(data: &[u16], pending_high_surrogate: &mut Option<u16>) -> Vec<u8> {
-    let mut input = Vec::with_capacity(data.len() + usize::from(pending_high_surrogate.is_some()));
-    if let Some(high_surrogate) = pending_high_surrogate.take() {
-        input.push(high_surrogate);
-    }
-    input.extend_from_slice(data);
-
-    if input
-        .last()
-        .is_some_and(|unit| (0xd800..=0xdbff).contains(unit))
-    {
-        *pending_high_surrogate = input.pop();
-    }
-
-    String::from_utf16_lossy(&input).into_bytes()
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -514,76 +446,26 @@ pub(crate) mod agent {
 
 #[cfg(windows)]
 pub(crate) mod agent {
-    use std::os::windows::io::AsRawHandle;
-    use std::{ptr, sync::Arc, thread, time::Duration};
+    use std::sync::Arc;
 
     use microsandbox_protocol::{
         exec::{ExecExited, ExecResize, ExecStdin, ExecStdout},
         message::MessageType,
     };
-    use tokio::sync::mpsc;
-    use windows_sys::Win32::{
-        Foundation::{
-            CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
-            WAIT_TIMEOUT,
-        },
-        Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING},
-        System::{
-            Console::{
-                CONSOLE_SCREEN_BUFFER_INFO, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT,
-                ENABLE_MOUSE_INPUT, ENABLE_PROCESSED_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT,
-                ENABLE_VIRTUAL_TERMINAL_PROCESSING, ENABLE_WINDOW_INPUT, GetConsoleMode,
-                GetConsoleScreenBufferInfo, GetStdHandle, ReadConsoleW, STD_INPUT_HANDLE,
-                STD_OUTPUT_HANDLE, SetConsoleMode, WriteConsoleW,
-            },
-            IO::CancelSynchronousIo,
-            Threading::{CreateEventW, SetEvent, WaitForMultipleObjects},
-        },
-    };
 
     use crate::backend::Backend;
     use crate::{
         MicrosandboxError, MicrosandboxResult,
-        sandbox::{AttachOptionsBuilder, SandboxConfig, build_exec_request},
+        sandbox::{
+            AttachOptionsBuilder, SandboxConfig, build_exec_request,
+            terminal::{
+                WindowsTerminalEvent, WindowsTerminalEventPump, WindowsTerminalGuard,
+                current_terminal_size,
+            },
+        },
     };
 
-    use super::{
-        DetachKeys, WindowsUtf8Decoder, console_input_to_utf8, input_contains_detach_sequence,
-    };
-
-    const TERMINAL_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
-    const TERMINAL_INPUT_BUFFER_SIZE: usize = 4096;
-
-    struct ConsoleHandle {
-        raw: HANDLE,
-        owned: bool,
-    }
-
-    unsafe impl Send for ConsoleHandle {}
-
-    struct OwnedWindowsHandle(HANDLE);
-
-    unsafe impl Send for OwnedWindowsHandle {}
-
-    pub(crate) struct WindowsTerminalGuard {
-        input: ConsoleHandle,
-        output: ConsoleHandle,
-        input_mode: u32,
-        output_mode: u32,
-        output_decoder: WindowsUtf8Decoder,
-    }
-
-    pub(crate) struct WindowsTerminalEventPump {
-        stop: OwnedWindowsHandle,
-        handle: Option<thread::JoinHandle<()>>,
-        rx: mpsc::UnboundedReceiver<WindowsTerminalEvent>,
-    }
-
-    pub(crate) enum WindowsTerminalEvent {
-        Input(Vec<u8>),
-        Resize { cols: u16, rows: u16 },
-        Error(String),
-    }
+    use super::{DetachKeys, input_contains_detach_sequence};
 
     pub(crate) async fn attach(
         backend: &dyn Backend,
@@ -714,357 +596,6 @@ pub(crate) mod agent {
         }
         Ok(exit_code)
     }
-
-    impl WindowsTerminalGuard {
-        pub(crate) fn enter() -> MicrosandboxResult<Self> {
-            let (input, input_mode) = get_console_handle(STD_INPUT_HANDLE, "stdin")?;
-            let (output, output_mode) = get_console_handle(STD_OUTPUT_HANDLE, "stdout")?;
-
-            let mut guard = Self {
-                input,
-                output,
-                input_mode,
-                output_mode,
-                output_decoder: WindowsUtf8Decoder::default(),
-            };
-
-            if let Err(error) = guard.enable_virtual_terminal_modes() {
-                guard.restore();
-                return Err(error);
-            }
-
-            Ok(guard)
-        }
-
-        fn enable_virtual_terminal_modes(&mut self) -> MicrosandboxResult<()> {
-            let raw_input_mode = console_mode(&self.input, "stdin")?;
-            let raw_output_mode = console_mode(&self.output, "stdout")?;
-
-            let input_mode = (raw_input_mode | ENABLE_VIRTUAL_TERMINAL_INPUT)
-                & !(ENABLE_LINE_INPUT
-                    | ENABLE_ECHO_INPUT
-                    | ENABLE_PROCESSED_INPUT
-                    | ENABLE_WINDOW_INPUT
-                    | ENABLE_MOUSE_INPUT);
-            set_console_mode(&self.input, input_mode, "configure stdin")?;
-
-            let output_mode = raw_output_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
-            set_console_mode(&self.output, output_mode, "configure stdout")?;
-
-            Ok(())
-        }
-
-        fn restore(&mut self) {
-            let _ = unsafe { SetConsoleMode(self.input.raw, self.input_mode) };
-            let _ = unsafe { SetConsoleMode(self.output.raw, self.output_mode) };
-        }
-
-        pub(crate) fn write_output(&mut self, data: &[u8]) -> MicrosandboxResult<()> {
-            let decoded = self.output_decoder.decode(data);
-            self.write_console(&decoded)
-        }
-
-        pub(crate) fn finish_output(&mut self) -> MicrosandboxResult<()> {
-            let decoded = self.output_decoder.finish();
-            self.write_console(&decoded)
-        }
-
-        fn write_console(&self, data: &[u16]) -> MicrosandboxResult<()> {
-            let mut offset = 0usize;
-            while offset < data.len() {
-                let remaining = data.len() - offset;
-                let chunk_len = remaining.min(u32::MAX as usize);
-                let mut written = 0u32;
-                let result = unsafe {
-                    WriteConsoleW(
-                        self.output.raw,
-                        data[offset..].as_ptr(),
-                        chunk_len as u32,
-                        &mut written,
-                        ptr::null(),
-                    )
-                };
-                if result == 0 {
-                    return Err(MicrosandboxError::Terminal(format!(
-                        "terminal output: {}",
-                        std::io::Error::last_os_error()
-                    )));
-                }
-                if written == 0 {
-                    return Err(MicrosandboxError::Terminal(
-                        "terminal output: console wrote zero characters".to_string(),
-                    ));
-                }
-                offset += written as usize;
-            }
-
-            Ok(())
-        }
-    }
-
-    impl Drop for WindowsTerminalGuard {
-        fn drop(&mut self) {
-            self.restore();
-        }
-    }
-
-    impl WindowsTerminalEventPump {
-        pub(crate) fn spawn_for_guard(guard: &WindowsTerminalGuard) -> MicrosandboxResult<Self> {
-            Self::spawn(guard.input.raw, guard.output.raw)
-        }
-
-        fn spawn(input: HANDLE, output: HANDLE) -> MicrosandboxResult<Self> {
-            let (tx, rx) = mpsc::unbounded_channel();
-            let stop = create_event("terminal stop")?;
-            let input_handle = input as isize;
-            let output_handle = output as isize;
-            let stop_handle = stop.0 as isize;
-            let handle = thread::spawn(move || {
-                let input = input_handle as HANDLE;
-                let output = output_handle as HANDLE;
-                let stop_handle = stop_handle as HANDLE;
-                let mut last_size = terminal_size_from_output(output);
-                let mut pending_high_surrogate = None;
-                let wait_handles = [input, stop_handle];
-                let timeout_ms = TERMINAL_EVENT_POLL_INTERVAL.as_millis() as u32;
-
-                loop {
-                    let wait_result = unsafe {
-                        WaitForMultipleObjects(
-                            wait_handles.len() as u32,
-                            wait_handles.as_ptr(),
-                            0,
-                            timeout_ms,
-                        )
-                    };
-
-                    if wait_result == WAIT_OBJECT_0 + 1 {
-                        break;
-                    }
-
-                    if wait_result == WAIT_OBJECT_0 {
-                        let mut input_buf = [0u16; TERMINAL_INPUT_BUFFER_SIZE];
-                        let mut chars_read = 0u32;
-                        let result = unsafe {
-                            ReadConsoleW(
-                                input,
-                                input_buf.as_mut_ptr().cast(),
-                                input_buf.len() as u32,
-                                &mut chars_read,
-                                ptr::null(),
-                            )
-                        };
-
-                        if result == 0 {
-                            let _ = tx.send(WindowsTerminalEvent::Error(format!(
-                                "terminal input: {}",
-                                std::io::Error::last_os_error()
-                            )));
-                            break;
-                        }
-
-                        if chars_read == 0 {
-                            break;
-                        }
-
-                        let data = console_input_to_utf8(
-                            &input_buf[..chars_read as usize],
-                            &mut pending_high_surrogate,
-                        );
-                        if tx.send(WindowsTerminalEvent::Input(data)).is_err() {
-                            break;
-                        }
-                    } else if wait_result != WAIT_TIMEOUT {
-                        let _ = tx.send(WindowsTerminalEvent::Error(format!(
-                            "terminal wait: {}",
-                            std::io::Error::last_os_error()
-                        )));
-                        break;
-                    }
-
-                    let size = terminal_size_from_output(output);
-                    if size != last_size {
-                        last_size = size;
-                        if let Some((cols, rows)) = size
-                            && tx
-                                .send(WindowsTerminalEvent::Resize { cols, rows })
-                                .is_err()
-                        {
-                            break;
-                        }
-                    }
-                }
-            });
-
-            Ok(Self {
-                stop,
-                handle: Some(handle),
-                rx,
-            })
-        }
-
-        pub(crate) async fn recv(&mut self) -> Option<WindowsTerminalEvent> {
-            self.rx.recv().await
-        }
-    }
-
-    impl Drop for WindowsTerminalEventPump {
-        fn drop(&mut self) {
-            let _ = unsafe { SetEvent(self.stop.0) };
-            if let Some(handle) = self.handle.take() {
-                // The pump thread may already be blocked in a synchronous
-                // console ReadConsoleW. The stop event only prevents the next
-                // wait from entering another read, so cancel the in-flight
-                // read before joining or finite guest commands appear to
-                // hang until the user presses another key.
-                let _ = unsafe { CancelSynchronousIo(handle.as_raw_handle() as HANDLE) };
-                let _ = handle.join();
-            }
-        }
-    }
-
-    impl ConsoleHandle {
-        fn borrowed(raw: HANDLE) -> Self {
-            Self { raw, owned: false }
-        }
-
-        fn owned(raw: HANDLE) -> Self {
-            Self { raw, owned: true }
-        }
-    }
-
-    impl Drop for ConsoleHandle {
-        fn drop(&mut self) {
-            if self.owned {
-                let _ = unsafe { CloseHandle(self.raw) };
-            }
-        }
-    }
-
-    fn get_console_handle(kind: u32, name: &str) -> MicrosandboxResult<(ConsoleHandle, u32)> {
-        let handle = unsafe { GetStdHandle(kind) };
-        if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
-            let handle = ConsoleHandle::borrowed(handle);
-            if let Ok(mode) = console_mode(&handle, name) {
-                return Ok((handle, mode));
-            }
-        }
-
-        let handle = open_console_device(kind, name)?;
-        let mode = console_mode(&handle, name)?;
-        Ok((handle, mode))
-    }
-
-    fn open_console_device(kind: u32, name: &str) -> MicrosandboxResult<ConsoleHandle> {
-        let device = match kind {
-            STD_INPUT_HANDLE => "CONIN$",
-            STD_OUTPUT_HANDLE => "CONOUT$",
-            _ => {
-                return Err(MicrosandboxError::Terminal(format!(
-                    "{name} console handle is unavailable"
-                )));
-            }
-        };
-        let wide = device
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect::<Vec<u16>>();
-        let raw = unsafe {
-            CreateFileW(
-                wide.as_ptr(),
-                GENERIC_READ | GENERIC_WRITE,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                ptr::null(),
-                OPEN_EXISTING,
-                0,
-                ptr::null_mut(),
-            )
-        };
-        if raw == INVALID_HANDLE_VALUE {
-            return Err(MicrosandboxError::Terminal(format!(
-                "{name} console handle is unavailable: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-
-        Ok(ConsoleHandle::owned(raw))
-    }
-
-    fn console_mode(handle: &ConsoleHandle, name: &str) -> MicrosandboxResult<u32> {
-        let mut mode = 0u32;
-        let result = unsafe { GetConsoleMode(handle.raw, &mut mode) };
-        if result == 0 {
-            return Err(MicrosandboxError::Terminal(format!(
-                "{name} is not an interactive Windows console: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-        Ok(mode)
-    }
-
-    fn set_console_mode(
-        handle: &ConsoleHandle,
-        mode: u32,
-        context: &str,
-    ) -> MicrosandboxResult<()> {
-        let result = unsafe { SetConsoleMode(handle.raw, mode) };
-        if result == 0 {
-            return Err(MicrosandboxError::Terminal(format!(
-                "{context}: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-        Ok(())
-    }
-
-    fn create_event(context: &str) -> MicrosandboxResult<OwnedWindowsHandle> {
-        let handle = unsafe { CreateEventW(ptr::null(), 1, 0, ptr::null()) };
-        if handle.is_null() {
-            return Err(MicrosandboxError::Terminal(format!(
-                "{context}: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-
-        Ok(OwnedWindowsHandle(handle))
-    }
-
-    pub(crate) fn current_terminal_size() -> Option<(u16, u16)> {
-        let (output, _) = get_console_handle(STD_OUTPUT_HANDLE, "stdout").ok()?;
-        terminal_size_from_output(output.raw)
-    }
-
-    fn terminal_size_from_output(output: HANDLE) -> Option<(u16, u16)> {
-        let mut info = CONSOLE_SCREEN_BUFFER_INFO {
-            dwSize: Default::default(),
-            dwCursorPosition: Default::default(),
-            wAttributes: 0,
-            srWindow: Default::default(),
-            dwMaximumWindowSize: Default::default(),
-        };
-
-        let result = unsafe { GetConsoleScreenBufferInfo(output, &mut info) };
-        if result == 0 {
-            return None;
-        }
-
-        let cols = i32::from(info.srWindow.Right) - i32::from(info.srWindow.Left) + 1;
-        let rows = i32::from(info.srWindow.Bottom) - i32::from(info.srWindow.Top) + 1;
-        if cols <= 0 || rows <= 0 {
-            return None;
-        }
-
-        Some((
-            cols.min(i32::from(u16::MAX)) as u16,
-            rows.min(i32::from(u16::MAX)) as u16,
-        ))
-    }
-
-    impl Drop for OwnedWindowsHandle {
-        fn drop(&mut self) {
-            let _ = unsafe { CloseHandle(self.0) };
-        }
-    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1145,67 +676,5 @@ mod tests {
             &mut match_pos
         ));
         assert_eq!(match_pos, 1);
-    }
-
-    #[test]
-    fn test_windows_utf8_decoder_preserves_ansi_and_unicode() {
-        let mut decoder = WindowsUtf8Decoder::default();
-        let decoded = decoder.decode("\x1b[32municode: — ✓ ⠋\x1b[0m\n".as_bytes());
-
-        assert_eq!(
-            String::from_utf16(&decoded).unwrap(),
-            "\x1b[32municode: — ✓ ⠋\x1b[0m\n"
-        );
-        assert!(decoder.finish().is_empty());
-    }
-
-    #[test]
-    fn test_windows_utf8_decoder_preserves_split_sequences() {
-        let expected = "unicode: — ✓ ⠋ 😀\n";
-
-        for split in 0..=expected.len() {
-            let mut decoder = WindowsUtf8Decoder::default();
-            let mut decoded = decoder.decode(&expected.as_bytes()[..split]);
-            decoded.extend(decoder.decode(&expected.as_bytes()[split..]));
-            decoded.extend(decoder.finish());
-
-            assert_eq!(String::from_utf16(&decoded).unwrap(), expected);
-        }
-    }
-
-    #[test]
-    fn test_windows_utf8_decoder_replaces_invalid_and_incomplete_sequences() {
-        let mut decoder = WindowsUtf8Decoder::default();
-        let mut decoded = decoder.decode(b"valid\xfftail\xe2\x80");
-
-        assert_eq!(String::from_utf16(&decoded).unwrap(), "valid�tail");
-
-        decoded = decoder.finish();
-        assert_eq!(String::from_utf16(&decoded).unwrap(), "�");
-    }
-
-    #[test]
-    fn test_console_input_encodes_utf16_as_utf8() {
-        let mut pending = None;
-        let input = "\x1b[A café".encode_utf16().collect::<Vec<_>>();
-
-        assert_eq!(
-            console_input_to_utf8(&input, &mut pending),
-            "\x1b[A café".as_bytes()
-        );
-        assert_eq!(pending, None);
-    }
-
-    #[test]
-    fn test_console_input_preserves_split_surrogate_pair() {
-        let mut pending = None;
-
-        assert!(console_input_to_utf8(&[0xd83d], &mut pending).is_empty());
-        assert_eq!(pending, Some(0xd83d));
-        assert_eq!(
-            console_input_to_utf8(&[0xde00], &mut pending),
-            "😀".as_bytes()
-        );
-        assert_eq!(pending, None);
     }
 }
