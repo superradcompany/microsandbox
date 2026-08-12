@@ -38,6 +38,7 @@
             "icon": "box",
             "pages": [
               "sandboxes/overview",
+              "sandbox-config",
               "sandboxes/cpu-placement",
               "sandboxes/lifecycle",
               "sandboxes/commands",
@@ -190,8 +191,7 @@
             "group": "Configuration",
             "icon": "gear",
             "pages": [
-              "configuration",
-              "sandbox-config"
+              "configuration"
             ]
           },
           {
