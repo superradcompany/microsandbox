@@ -1440,7 +1440,7 @@ jobs:
           test_pattern=$(IFS='|'; echo "${selected_tests[*]}")
           echo "running ${#selected_tests[@]} Go integration tests in shard ${{ matrix.label }}"
           status=0
-          go test -tags "integration microsandbox_ffi_path" -count=1 -timeout 45m \
+          go test -v -tags "integration microsandbox_ffi_path" -count=1 -timeout 45m \
             -run "^(${test_pattern})$" ./integration || status=$?
 
           if [ "$status" -ne 0 ]; then
