@@ -4227,9 +4227,9 @@ dependencies = [
 
 [[package]]
 name = "msb_krun"
-version = "0.1.30"
+version = "0.1.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b57b2304dc1cef25b7cdd93be44c6515a97c90e00308b7d35eabc4fe27b02af5"
+checksum = "40e6b83f6cf90f676779409ac026f4429adfd7a11886085a59773ddd3aa8207f"
 dependencies = [
  "crossbeam-channel",
  "kvm-bindings",
@@ -4247,9 +4247,9 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_arch"
-version = "0.1.30"
+version = "0.1.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c0dad7a64ad8861a35d7a2cd93ded468a20e137fcdb40bb31b3038d80b76d61"
+checksum = "929f9765edd9e12cc45e5876998456bf2dfb0d2244d4fe6ddf2fdb5c3dd7e99c"
 dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
@@ -4262,15 +4262,15 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_arch_gen"
-version = "0.1.30"
+version = "0.1.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46f9c70b94c97e1bcef28bdf1178a7a4bcc2a5d881429f9a9ced7811060d0935"
+checksum = "df83bf780774e4e131547a4e17d0ca389e5bbb04cdebcb626880b090cae20f2c"
 
 [[package]]
 name = "msb_krun_cpuid"
-version = "0.1.30"
+version = "0.1.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a503273f4c4e2456c71162b0792754d689968f3a264b447bf46f7bd854982818"
+checksum = "7c569d5d7285ed8f8f80e58454fb3ee213fd2c06ec647cc108a16a2e095558bb"
 dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
@@ -4279,9 +4279,9 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_devices"
-version = "0.1.30"
+version = "0.1.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfefdc7146bf598714637f24cdf41550addc131cc85761b553526df1c571805d"
+checksum = "422da6e72923c2debae8eaeddd2990b924df9042079b51a323b4f3de37ebbdaf"
 dependencies = [
  "bitflags 1.3.2",
  "capng",
@@ -4309,9 +4309,9 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_hvf"
-version = "0.1.30"
+version = "0.1.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "decfbb680a30799333464ac15f1b13532432799249e4af0570cf8c8f68a4ba22"
+checksum = "e5034e7b5ebd4f2f8caefb199f5f18483f8ed0c5cc6afb944b6ed0d127d59aa9"
 dependencies = [
  "crossbeam-channel",
  "libloading 0.8.9",
@@ -4321,9 +4321,9 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_kernel"
-version = "0.1.30"
+version = "0.1.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3313be0d646614d9902e0a35c442adf3a5fc748f693821cf7e3ba42e00f64a3d"
+checksum = "04163d07028500bf08e6247c40c64dd5bae462bbb1997cf6a9613d019976a055"
 dependencies = [
  "msb-vm-memory",
  "msb_krun_utils",
@@ -4331,9 +4331,9 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_polly"
-version = "0.1.30"
+version = "0.1.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aabd0f75484ae953a5f3cf48991c3a4e4dfdfa5f440c2cdb3bc76d6044513acf"
+checksum = "9812193639b368ab800b5f87e18509ad30fd85a2e6a77a05265ffadfed2553d1"
 dependencies = [
  "libc",
  "msb_krun_utils",
@@ -4341,18 +4341,18 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_smbios"
-version = "0.1.30"
+version = "0.1.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20739701381783171489500e10eeb2fb825006711d69000b44def11a0300b758"
+checksum = "8cfd3f05f6447f0ad85f04f688b106eb9f04bb64525fee1183757cf9705070a0"
 dependencies = [
  "msb-vm-memory",
 ]
 
 [[package]]
 name = "msb_krun_utils"
-version = "0.1.30"
+version = "0.1.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f4f682dec7289463f89adfd1df7605a425c069d238265496a99dbff921075a9"
+checksum = "b5ce62484f07792ab43a5ac64baa84435556f56a7633805e15030e990c3b98a3"
 dependencies = [
  "bitflags 1.3.2",
  "crossbeam-channel",
@@ -4366,9 +4366,9 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_vmm"
-version = "0.1.30"
+version = "0.1.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d83ca07ca40186a246ca5fa3464d68b52f939ca85c9434baa36d05aba1389be"
+checksum = "67546eb70fa306e3c7e97f525dac2db44b9cc1642b6684aec4369e3b7f9b3af3"
 dependencies = [
  "bzip2",
  "crossbeam-channel",
