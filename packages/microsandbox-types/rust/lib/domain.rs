@@ -849,13 +849,13 @@ pub enum CpuPlacement {
     #[default]
     Inherit,
 
-    /// Select a managed placement policy from the available host topology.
+    /// Spread across cores, then use SMT siblings, then share logical processors under pressure.
     Auto,
 
-    /// Prefer distinct physical cores before assigning SMT siblings.
+    /// Preserve the widest practical distribution, sharing logical processors when necessary.
     Spread,
 
-    /// Prefer SMT siblings and minimize the number of physical cores used.
+    /// Prefer SMT siblings and fewer physical cores, then share balanced logical processors.
     Compact,
 }
 
@@ -865,7 +865,7 @@ pub enum CpuPlacement {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NumaPlacement {
-    /// Prefer one host NUMA node. Multi-node expansion is not enabled yet.
+    /// Prefer one host NUMA node, falling back to inherited host placement when it cannot fit.
     PreferSingle,
     /// Require maximum CPU and memory capacity to fit one host NUMA node.
     StrictSingle,
@@ -879,7 +879,7 @@ pub enum NumaPlacement {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MemoryPlacement {
-    /// Back guest RAM from the host nodes selected for its vCPUs.
+    /// Back guest RAM from the selected CPU node when enforceable, otherwise inherit host policy.
     FollowCpu,
     /// Preserve the operating system's ordinary memory policy.
     Inherit,

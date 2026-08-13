@@ -11,11 +11,11 @@ Microsandbox normally inherits the CPU scheduling and affinity constraints of th
 | Policy | Behavior |
 | --- | --- |
 | `inherit` | Default. Performs no topology discovery, allocation work, lease creation, or affinity calls. |
-| `auto` | Uses `spread` when the requested maximum vCPU count fits on distinct physical cores while leaving one core outside the allocation; otherwise uses `compact`. |
-| `spread` | Assigns each vCPU to a different physical core before using SMT siblings. SMT siblings of selected cores are reserved from other cooperating `spread` sandboxes. |
-| `compact` | Assigns SMT siblings first to minimize the number of physical cores used. |
+| `auto` | Uses untouched physical cores first, then unused SMT siblings, then fairly shares logical CPUs under pressure. |
+| `spread` | Preserves the widest practical distribution across physical cores, then SMT siblings, then shared logical CPUs. |
+| `compact` | Fills SMT siblings and minimizes the physical cores used while exclusive capacity remains, then shares logical CPUs without creating a single unbounded hotspot. |
 
-Managed placement reserves enough host targets for `max_cpus`, including guest CPUs that are offline at boot. Explicit managed policies fail when the host cannot enforce them or has insufficient cooperative capacity; they never silently fall back to `inherit`.
+Managed placement accounts for `max_cpus`, including guest CPUs that are offline at boot. Ordinary policies do not reject creation when cooperative CPU capacity is exhausted: multiple vCPU threads may be pinned to the same logical CPU and the host scheduler time-slices them. Runtime logs distinguish exclusive from shared placement. If topology discovery or cooperative coordination is unavailable, ordinary policies visibly fall back to `inherit`; `strict_single` remains fail-closed.
 
 <CodeGroup>
 ```bash CLI
@@ -126,16 +126,16 @@ sb, err := m.CreateSandbox(ctx, "worker",
 ```
 </CodeGroup>
 
-Planning uses `max_cpus` and `max_memory_mib`, not just the boot values. On Linux, this keeps later live growth inside the reserved node. In this release, multi-node guest placement is intentionally disabled: `prefer_single` and `strict_single` both return a capacity error rather than silently splitting a sandbox. Linux binds guest RAM to the chosen node. Windows uses the actual processor-to-NUMA-node mapping and requests preferred-node allocation; it checks current boot-time availability, but the operating system does not expose equivalent per-node total capacity for a hard future-growth promise. `inherit` leaves host memory policy unchanged.
+Planning uses `max_cpus` and `max_memory_mib`, not just the boot values. A sandbox fits one node only when that node has enough currently unassigned logical CPUs for every possible vCPU, enough current memory for boot, and enough cooperative total memory for its configured maximum. CPU time-sharing never counts as strict single-node capacity. Multi-node guest placement is not enabled in this release: `prefer_single` keeps the best ordinary CPU plan but falls back to inherited host NUMA and memory behavior when one node cannot fit, while `strict_single` returns a capacity error. `follow_cpu` similarly falls back to inherited memory placement if selected CPUs span nodes or the node lacks the requested memory capacity, unless it is paired with `strict_single`. Ordinary Linux placement uses a soft multi-node preference so memory can spill under pressure; `strict_single` uses a required binding. Windows uses the actual processor-to-NUMA-node mapping, but keeps ordinary memory inherited because preferred-node allocation cannot be undone after a later partial CPU fallback. A Windows `strict_single` profile can use required preferred-node allocation. `inherit` leaves host memory policy unchanged.
 
 ## Scope and guarantees
 
-Managed placement applies hard affinity to libkrun's vCPU threads before they enter guest execution: Linux uses the process affinity mask and `sched_setaffinity`, while Windows uses the calling runtime thread's processor-group affinity and `SetThreadGroupAffinity`. On heterogeneous Windows processors, the planner prefers the higher-performance core class reported by Windows. Placement does not isolate unrelated host processes, pin VMM or device-worker threads, or promise dedicated cores. Guest RAM remains under the normal host policy unless a selected placement profile uses `memory.mode: follow_cpu`.
+Managed placement asks libkrun to apply affinity to its vCPU threads before they enter guest execution: Linux uses the process affinity mask and `sched_setaffinity`, while Windows uses the calling runtime thread's processor-group affinity and `SetThreadGroupAffinity`. Every vCPU waits behind a startup barrier while libkrun reports what the operating system actually applied. For ordinary policies, successful pins remain in force and only rejected vCPUs inherit scheduler placement; Microsandbox removes their tentative catalog reservations before the guest runs. Any partial CPU result also returns ordinary `follow_cpu` memory to inherited policy. A `strict_single` profile keeps required enforcement and fails before guest execution instead. On heterogeneous Windows processors, the planner prefers the higher-performance core class reported by Windows. Placement does not isolate unrelated host processes, pin VMM or device-worker threads, or promise dedicated cores.
 
 Windows planning currently stays within the runtime thread's inherited primary processor group. Processor-group coordinates are preserved in the allocation catalog and libkrun affinity map, but one runtime process does not spread a sandbox across multiple Windows processor groups. This is immaterial on hosts with at most 64 logical processors and avoids expanding an affinity boundary inherited from the caller.
 
 Coordination is local to one Microsandbox catalog and lease directory. Sandboxes using different `MSB_HOME` values do not share reservations. Provider deployments that need machine-wide cooperative placement should configure one machine-wide allocation domain.
 
-On macOS, `inherit` remains available. `auto`, `spread`, and `compact` return an unsupported-platform error because Apple does not expose an equivalent public hard-affinity API; Microsandbox does not claim enforcement that was not applied.
+On macOS, `auto`, `spread`, and `compact` visibly resolve to inherited scheduling because Apple does not expose an equivalent public hard-affinity API. A profile using `strict_single` still fails because its locality guarantee cannot be enforced.
 
 See [Performance optimization](/optimization/overview#cpu-placement) for workload selection guidance and the interaction with host topology, THP, and interrupt acceleration.

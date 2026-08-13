@@ -43,6 +43,9 @@ pub const MEMORY_ALLOCATION_NODES_MIGRATION_ID: &str =
 /// Migration that rebuilds the sandbox label index from persisted configs.
 pub const SANDBOX_LABEL_REBUILD_MIGRATION_ID: &str = "m20260810_000001_rebuild_sandbox_labels";
 
+/// Migration that permits several managed vCPUs to share one host logical processor.
+pub const SHARED_CPU_ALLOCATION_MIGRATION_ID: &str = "m20260813_000001_share_cpu_allocations";
+
 /// Frozen migration baseline for the transitional 0.6.0 release.
 ///
 /// The released 0.6.0 binary predates `msb __schema-baseline --json`, so
@@ -221,6 +224,13 @@ pub const MIGRATION_METADATA: &[MigrationMetadata] = &[
         affects_user_data: false,
         summary: "retain the rebuilt sandbox label index",
     },
+    MigrationMetadata {
+        id: SHARED_CPU_ALLOCATION_MIGRATION_ID,
+        reversible: true,
+        affects_cache: false,
+        affects_user_data: false,
+        summary: "restore exclusive logical CPU allocation rows",
+    },
 ];
 
 //--------------------------------------------------------------------------------------------------
@@ -307,6 +317,7 @@ mod tests {
     #[test]
     fn canonical_applied_prefix_uses_metadata_order() {
         let applied = [
+            SHARED_CPU_ALLOCATION_MIGRATION_ID,
             SANDBOX_LABEL_REBUILD_MIGRATION_ID,
             MEMORY_ALLOCATION_NODES_MIGRATION_ID,
             WRITEBACK_ALLOCATION_MIGRATION_ID,

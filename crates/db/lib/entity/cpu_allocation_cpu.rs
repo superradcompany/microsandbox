@@ -6,18 +6,19 @@ use sea_orm::entity::prelude::*;
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// One host logical processor reserved by a cooperative allocation.
+/// One guest vCPU assignment coordinated by a host allocation.
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "cpu_allocation_cpu")]
 pub struct Model {
-    /// Host logical processor identifier and global conflict key.
-    #[sea_orm(primary_key, auto_increment = false)]
-    pub logical_cpu: i64,
     /// Owning allocation identifier.
+    #[sea_orm(primary_key, auto_increment = false)]
     pub allocation_id: String,
-    /// Possible guest vCPU index, or `None` for policy-only sibling reservations.
-    pub vcpu_index: Option<i32>,
-    /// Reservation role (`assigned` or `smt-reserved`).
+    /// Guest vCPU index within the allocation.
+    #[sea_orm(primary_key, auto_increment = false)]
+    pub vcpu_index: i32,
+    /// Host logical processor selected for this vCPU. Multiple allocations may share it.
+    pub logical_cpu: i64,
+    /// Assignment role: `planned` before the OS acknowledgement, then `assigned` when confirmed.
     pub role: String,
 }
 

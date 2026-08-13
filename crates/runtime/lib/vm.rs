@@ -704,7 +704,11 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     let exit_metrics_writer = metrics_writer.clone();
     let exit_cpu_guard = Arc::clone(&cpu_guard);
     let exit_writeback_guard = Arc::clone(&writeback_guard);
+    let placement_rt_handle = tokio_rt.handle().clone();
+    let placement_db = db.clone();
+    let placement_cpu_guard = Arc::clone(&cpu_guard);
     let resolved_numa_topology = cpu_guard.numa_topology();
+    let placement_required = cpu_guard.placement_required();
     #[cfg(windows)]
     let _agent_console_pipe_bridge = AgentConsolePipeBridge::spawn(
         agent_console_pipe_name(config.sandbox_id),
@@ -712,6 +716,11 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         tokio_rt.handle(),
     )
     .map_err(|e| RuntimeError::Custom(format!("agent console pipe bridge: {e}")))?;
+    let host_placement = HostPlacement {
+        vcpu_targets: cpu_guard.vcpu_targets(),
+        required: placement_required,
+        numa_topology: resolved_numa_topology,
+    };
     let build_result = build_vm(
         &config,
         console_backend,
@@ -830,9 +839,29 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                 tracing::debug!(error = %err, slot = writer.slot(), "metrics slot release at exit");
             }
         },
+        move |report: &msb_krun::PlacementReport| {
+            let pinned = report
+                .vcpus
+                .iter()
+                .filter(|result| matches!(result, msb_krun::VcpuPlacementResult::Pinned { .. }))
+                .count();
+            if let Err(error) =
+                placement_rt_handle.block_on(placement_cpu_guard.reconcile(&placement_db, report))
+            {
+                // Placement is already effective at the OS boundary. A catalog failure must not
+                // turn an ordinary best-effort policy into a sandbox-creation failure; the
+                // process-held lease remains conservative until exit or stale-lease recovery.
+                tracing::warn!(%error, "record effective host placement");
+            }
+            tracing::info!(
+                pinned_vcpus = pinned,
+                inherited_vcpus = report.vcpus.len().saturating_sub(pinned),
+                memory = ?report.memory,
+                "host placement acknowledged before guest execution"
+            );
+        },
         tokio_rt.handle().clone(),
-        cpu_guard.vcpu_targets(),
-        resolved_numa_topology,
+        host_placement,
         writeback_limit.as_ref(),
     );
     let (
@@ -1349,13 +1378,19 @@ fn is_writeback_limited_disk(format: msb_krun::DiskImageFormat, read_only: bool)
 }
 
 /// Build the `Vm` from config with an exit observer for cleanup.
+struct HostPlacement<'a> {
+    vcpu_targets: Option<&'a [crate::cpu::LogicalCpuId]>,
+    required: bool,
+    numa_topology: Option<msb_krun::NumaTopology>,
+}
+
 fn build_vm(
     config: &Config,
     console_backend: AgentConsoleBackend,
     on_exit: impl Fn(i32) + Send + 'static,
+    on_placement: impl FnOnce(&msb_krun::PlacementReport) + Send + 'static,
     tokio_handle: tokio::runtime::Handle,
-    vcpu_targets: Option<&[crate::cpu::LogicalCpuId]>,
-    numa_topology: Option<msb_krun::NumaTopology>,
+    host_placement: HostPlacement<'_>,
     writeback_limit: Option<&msb_krun::WritebackLimit>,
 ) -> RuntimeResult<VmBuildOutput> {
     let mut exec_env = config.vm.env.clone();
@@ -1376,16 +1411,19 @@ fn build_vm(
                 .max_vcpus(vm.max_cpus.max(vm.vcpus))
                 .max_memory_mib((vm.max_memory_mib.max(vm.memory_mib)) as usize)
                 .balloon_stats_interval(balloon_stats_interval);
-            if let Some(targets) = vcpu_targets {
-                m = m.vcpu_affinity(
-                    targets
-                        .iter()
-                        .copied()
-                        .map(|cpu| msb_krun::HostCpuId::in_group(cpu.group, cpu.index))
-                        .collect(),
-                );
+            if let Some(targets) = host_placement.vcpu_targets {
+                let affinity = targets
+                    .iter()
+                    .copied()
+                    .map(|cpu| msb_krun::HostCpuId::in_group(cpu.group, cpu.index))
+                    .collect();
+                m = if host_placement.required {
+                    m.vcpu_affinity(affinity)
+                } else {
+                    m.try_vcpu_affinity(affinity)
+                };
             }
-            if let Some(topology) = numa_topology {
+            if let Some(topology) = host_placement.numa_topology {
                 m = m.numa_topology(topology);
             }
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -1784,7 +1822,7 @@ fn build_vm(
     }
 
     // Exit observer — runs synchronously before _exit() for DB cleanup.
-    builder = builder.on_exit(on_exit);
+    builder = builder.on_placement(on_placement).on_exit(on_exit);
 
     let vm = builder
         .build()

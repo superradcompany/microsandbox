@@ -63,7 +63,7 @@ There is no universal fastest profile. The following is a reasonable starting po
 }
 ```
 
-`cpu_placement: auto` is intentionally not a portable macOS default: managed placement is unsupported on macOS because the operating system does not expose an equivalent public hard-affinity API. Use `inherit` on macOS. Keep `thp: madvise` unless a representative workload and density test justify another policy. On Linux, the default writeback `auto` policy gives an idle disk the measured 1.5 GiB window that kept the unchanged OVH customer disk suite at containment-off throughput. When more writable disks join than the pool can support at that maximum, all live VMMs reduce their targets to a fair share and apply write pressure instead of rejecting the new sandbox. On macOS and Windows, unconfigured `auto` is a no-op because this controller governs Linux host page-cache writeback. Use `fixed` when a different per-disk maximum is justified by measurement.
+`cpu_placement: auto` is intentionally not a portable macOS performance default: macOS inherits ordinary scheduling because the operating system does not expose an equivalent public hard-affinity API. Keep `thp: madvise` unless a representative workload and density test justify another policy. On Linux, the default writeback `auto` policy gives an idle disk the measured 1.5 GiB window that kept the unchanged OVH customer disk suite at containment-off throughput. When more writable disks join than the pool can support at that maximum, all live VMMs reduce their targets to a fair share and apply write pressure instead of rejecting the new sandbox. On macOS and Windows, unconfigured writeback `auto` is a no-op because this controller governs Linux host page-cache writeback. Use `fixed` when a different per-disk maximum is justified by measurement.
 
 ## Storage layout: layered or flat
 
@@ -106,16 +106,16 @@ Reflink optimizes provisioning rather than promising faster steady-state writes.
 
 ## CPU placement
 
-`inherit` performs no topology discovery, central allocation, lease creation, or affinity call. It is the lowest-complexity choice when an external orchestrator already constrains the Microsandbox process. Managed `auto`, `spread`, and `compact` policies coordinate through the allocation catalog associated with one `MSB_HOME` and apply hard affinity to libkrun vCPU threads.
+`inherit` performs no topology discovery, central allocation, lease creation, or affinity call. It is the lowest-complexity choice when an external orchestrator already constrains the Microsandbox process. Managed `auto`, `spread`, and `compact` policies coordinate through the allocation catalog associated with one `MSB_HOME` and ask libkrun to pin its vCPU threads. Ordinary placement is best effort at the host boundary: if the operating system rejects an affinity or NUMA-memory call after planning, the VM starts under inherited scheduling or memory placement. An explicit `strict_single` profile keeps required enforcement and fails instead.
 
 | Policy | Use when | Tradeoff |
 | --- | --- | --- |
 | `inherit` | The host scheduler or an external orchestrator owns placement | No cooperative isolation from other Microsandbox vCPUs |
-| `auto` | A general dedicated host should choose between spread and compact | Result depends on topology and requested `max_cpus` |
-| `spread` | Throughput benefits from distinct physical cores and avoiding SMT siblings | Consumes more physical cores and can reduce packing density |
-| `compact` | Cache locality and host packing matter more than avoiding SMT siblings | Sibling contention can hurt compute-heavy workloads |
+| `auto` | General dedicated hosts | Spreads first, uses SMT siblings next, then shares the least-loaded logical CPUs |
+| `spread` | Throughput benefits from the widest physical-core distribution | Preserves that distribution under pressure, then shares balanced logical CPUs |
+| `compact` | Cache locality and host packing matter more than avoiding SMT siblings | Packs exclusive work first, then balances sharing depth to avoid one unbounded hotspot |
 
-Managed placement reserves for `max_cpus`, including vCPUs that are offline at boot. It does not pin VMM device workers, isolate unrelated host processes, or promise dedicated physical cores. Named placement profiles can additionally request NUMA-local guest memory. All cooperating processes must use the same machine-wide `MSB_HOME` if the allocation catalog is expected to coordinate the whole host. See [CPU placement](/sandboxes/cpu-placement) for the complete guarantees and platform behavior.
+Managed placement accounts for `max_cpus`, including vCPUs that are offline at boot. When exclusive logical processors run out, ordinary policies continue by pinning several vCPU threads to the same logical processor and letting the host scheduler time-slice them. It does not pin VMM device workers, isolate unrelated host processes, or promise dedicated physical cores. Named placement profiles can additionally request NUMA-local guest memory. All cooperating processes must use the same machine-wide `MSB_HOME` if the allocation catalog is expected to coordinate the whole host. See [CPU placement](/sandboxes/cpu-placement) for the complete guarantees and platform behavior.
 
 ## Guest transparent huge pages
 

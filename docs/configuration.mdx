@@ -219,9 +219,9 @@ When the root-disk default is flat, plain `msb pull IMAGE` also prepares the reu
 
 ### `runtime.placement_profiles`
 
-Placement profiles let an operator define safe host topology policy once while callers select it by name. `numa.mode` is `prefer_single`, `strict_single`, or `inherit`; `memory.mode` is `follow_cpu` or `inherit`. In this release, both single-node modes fail clearly when `max_cpus` or `max_memory_mib` cannot fit one allowed host NUMA node because multi-node guest placement is not enabled yet.
+Placement profiles let an operator define safe host topology policy once while callers select it by name. `numa.mode` is `prefer_single`, `strict_single`, or `inherit`; `memory.mode` is `follow_cpu` or `inherit`. Multi-node guest placement is not enabled in this release: `prefer_single` falls back to inherited host NUMA behavior when one node cannot fit, while `strict_single` fails clearly because it is an explicit guarantee.
 
-`follow_cpu` requires managed CPU placement (`auto`, `spread`, or `compact`). Linux binds guest RAM to the selected node and admits the configured maximum against host-node capacity. Windows requests preferred-node allocation and checks current boot-time availability, but Windows does not expose equivalent per-node total capacity for a hard future-growth promise. macOS accepts only an inherited no-op profile because it has no equivalent hard-affinity API.
+`follow_cpu` requires managed CPU placement (`auto`, `spread`, or `compact`). Linux prefers the selected node for ordinary profiles and allows memory to spill elsewhere under pressure; `strict_single` uses a required binding instead. If CPUs span nodes, capacity is already insufficient, or the kernel rejects a best-effort affinity or memory-policy syscall, an ordinary profile starts with inherited memory placement. Windows keeps ordinary memory inherited because its preferred-node allocation cannot be undone if a later vCPU affinity attempt falls back; `strict_single` can still request required preferred-node allocation. Windows checks current boot-time availability, but does not expose equivalent per-node total capacity for a hard future-growth promise. macOS inherits ordinary CPU and memory scheduling for non-strict profiles because it has no equivalent hard-affinity API.
 
 ### `runtime.block_writeback`
 

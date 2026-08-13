@@ -26,6 +26,15 @@ pub(crate) struct ResolvedPlacement {
     pub(crate) vcpu_targets: Vec<LogicalCpuId>,
     pub(crate) reservations: Vec<CpuReservation>,
     pub(crate) numa: Option<ResolvedNumaPlacement>,
+    pub(crate) shared: bool,
+    pub(crate) fallback: Option<PlacementFallback>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PlacementFallback {
+    PreferSingleCapacity,
+    FollowCpuCrossNode,
+    FollowCpuMemoryCapacity,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,6 +42,7 @@ pub(crate) struct ResolvedNumaPlacement {
     pub(crate) nodes: Vec<ResolvedNumaNode>,
     pub(crate) distances: Vec<(u16, u16, u8)>,
     pub(crate) memory: MemoryPlacement,
+    pub(crate) required: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,7 +60,7 @@ pub(crate) struct ResolvedNumaNode {
 
 pub(crate) fn plan(
     topology: &CpuTopology,
-    occupied: &HashSet<LogicalCpuId>,
+    loads: &BTreeMap<LogicalCpuId, usize>,
     request: PlacementRequest,
     reserved_memory_mib: &BTreeMap<u32, u64>,
 ) -> RuntimeResult<ResolvedPlacement> {
@@ -62,7 +72,7 @@ pub(crate) fn plan(
     }
 
     let Some(profile) = request.profile else {
-        return plan_cpu(topology, occupied, request.policy, requested_count);
+        return plan_cpu(topology, loads, request.policy, requested_count);
     };
     if matches!(profile.memory, MemoryPlacement::FollowCpu)
         && matches!(request.policy, CpuPlacement::Inherit)
@@ -98,9 +108,8 @@ pub(crate) fn plan(
             });
             for node in candidates {
                 let reserved = reserved_memory_mib.get(&node.id).copied().unwrap_or(0);
-                if node.available_memory_mib < u64::from(request.boot_memory_mib)
-                    || node.total_memory_mib.saturating_sub(reserved)
-                        < u64::from(request.max_memory_mib)
+                if !node_can_fit_memory(node, reserved, request)
+                    || !node_can_fit_unshared_cpus(topology, loads, node.id, requested_count)
                 {
                     continue;
                 }
@@ -114,7 +123,7 @@ pub(crate) fn plan(
                     numa_nodes: vec![node.clone()],
                     fingerprint: topology.fingerprint.clone(),
                 };
-                let Ok(mut resolved) = plan_cpu(&scoped, occupied, request.policy, requested_count)
+                let Ok(mut resolved) = plan_cpu(&scoped, loads, request.policy, requested_count)
                 else {
                     continue;
                 };
@@ -124,22 +133,24 @@ pub(crate) fn plan(
                     request.boot_memory_mib,
                     request.max_memory_mib,
                     profile.memory,
+                    matches!(profile.numa, NumaPlacement::StrictSingle),
                 ));
                 return Ok(resolved);
             }
 
-            let mode = match profile.numa {
-                NumaPlacement::StrictSingle => "strict_single",
-                NumaPlacement::PreferSingle => "prefer_single",
-                NumaPlacement::Inherit => unreachable!(),
-            };
-            Err(RuntimeError::Custom(format!(
-                "NUMA placement {mode} cannot fit max_cpus={} and max_memory_mib={} on one allowed host node; multi-node guest placement is not enabled yet",
-                request.max_vcpus, request.max_memory_mib
-            )))
+            if matches!(profile.numa, NumaPlacement::StrictSingle) {
+                return Err(RuntimeError::Custom(format!(
+                    "NUMA placement strict_single cannot fit max_cpus={} and max_memory_mib={} on one allowed host node",
+                    request.max_vcpus, request.max_memory_mib
+                )));
+            }
+
+            let mut resolved = plan_cpu(topology, loads, request.policy, requested_count)?;
+            resolved.fallback = Some(PlacementFallback::PreferSingleCapacity);
+            Ok(resolved)
         }
         NumaPlacement::Inherit => {
-            let mut resolved = plan_cpu(topology, occupied, request.policy, requested_count)?;
+            let mut resolved = plan_cpu(topology, loads, request.policy, requested_count)?;
             if matches!(profile.memory, MemoryPlacement::FollowCpu) {
                 let host_nodes = resolved
                     .vcpu_targets
@@ -153,20 +164,34 @@ pub(crate) fn plan(
                     })
                     .collect::<HashSet<_>>();
                 if host_nodes.len() != 1 {
-                    return Err(RuntimeError::Custom(
-                        "follow_cpu memory needs guest NUMA tables when selected CPUs span host nodes; multi-node placement is not enabled yet".into(),
-                    ));
+                    resolved.fallback = Some(PlacementFallback::FollowCpuCrossNode);
+                    return Ok(resolved);
                 }
                 let host_node = *host_nodes.iter().next().ok_or_else(|| {
                     RuntimeError::Custom("resolved CPU placement has no host NUMA node".into())
                 })?;
-                resolved.numa = Some(single_node_numa(
-                    host_node,
-                    request.max_vcpus,
-                    request.boot_memory_mib,
-                    request.max_memory_mib,
-                    profile.memory,
-                ));
+                let node = topology
+                    .numa_nodes
+                    .iter()
+                    .find(|node| node.id == host_node)
+                    .ok_or_else(|| {
+                        RuntimeError::Custom(format!(
+                            "resolved CPU placement references missing host NUMA node {host_node}"
+                        ))
+                    })?;
+                let reserved = reserved_memory_mib.get(&host_node).copied().unwrap_or(0);
+                if node_can_fit_memory(node, reserved, request) {
+                    resolved.numa = Some(single_node_numa(
+                        host_node,
+                        request.max_vcpus,
+                        request.boot_memory_mib,
+                        request.max_memory_mib,
+                        profile.memory,
+                        false,
+                    ));
+                } else {
+                    resolved.fallback = Some(PlacementFallback::FollowCpuMemoryCapacity);
+                }
             }
             Ok(resolved)
         }
@@ -175,11 +200,11 @@ pub(crate) fn plan(
 
 fn plan_cpu(
     topology: &CpuTopology,
-    occupied: &HashSet<LogicalCpuId>,
+    loads: &BTreeMap<LogicalCpuId, usize>,
     requested: CpuPlacement,
     requested_count: usize,
 ) -> RuntimeResult<ResolvedPlacement> {
-    let cores = available_cores(topology, occupied);
+    let cores = core_loads(topology, loads);
     match requested {
         CpuPlacement::Auto => plan_auto(cores, requested_count),
         CpuPlacement::Spread => plan_spread(cores, requested, requested_count),
@@ -196,6 +221,7 @@ fn single_node_numa(
     boot_memory_mib: u32,
     max_memory_mib: u32,
     memory: MemoryPlacement,
+    required: bool,
 ) -> ResolvedNumaPlacement {
     ResolvedNumaPlacement {
         nodes: vec![ResolvedNumaNode {
@@ -207,21 +233,23 @@ fn single_node_numa(
         }],
         distances: vec![(0, 0, 10)],
         memory,
+        required,
     }
 }
 
 #[derive(Debug)]
-struct AvailableCore<'a> {
-    logical: Vec<&'a LogicalCpu>,
-    free: Vec<&'a LogicalCpu>,
-    all_free: bool,
+struct CoreLoad {
+    logical: Vec<LogicalLoad>,
     performance_class: u8,
 }
 
-fn available_cores<'a>(
-    topology: &'a CpuTopology,
-    occupied: &HashSet<LogicalCpuId>,
-) -> Vec<AvailableCore<'a>> {
+#[derive(Debug)]
+struct LogicalLoad {
+    id: LogicalCpuId,
+    assignments: usize,
+}
+
+fn core_loads(topology: &CpuTopology, loads: &BTreeMap<LogicalCpuId, usize>) -> Vec<CoreLoad> {
     let mut grouped: BTreeMap<(i32, i32, i32), Vec<&LogicalCpu>> = BTreeMap::new();
     for cpu in &topology.logical_cpus {
         grouped
@@ -234,17 +262,15 @@ fn available_cores<'a>(
         .into_values()
         .map(|mut logical| {
             logical.sort_by_key(|cpu| cpu.id);
-            let free = logical
-                .iter()
-                .copied()
-                .filter(|cpu| !occupied.contains(&cpu.id))
-                .collect::<Vec<_>>();
-            let all_free = free.len() == logical.len();
-            AvailableCore {
+            CoreLoad {
                 performance_class: logical[0].performance_class,
-                logical,
-                free,
-                all_free,
+                logical: logical
+                    .into_iter()
+                    .map(|cpu| LogicalLoad {
+                        id: cpu.id,
+                        assignments: loads.get(&cpu.id).copied().unwrap_or(0),
+                    })
+                    .collect(),
             }
         })
         .collect::<Vec<_>>();
@@ -253,156 +279,279 @@ fn available_cores<'a>(
 }
 
 /// Plan Auto as one stable spread-then-share strategy.
-///
-/// Pass one uses an untouched physical core. A free sibling beside an existing Auto assignment is
-/// a soft hold only in this pass; pass two may consume it when distinct cores are exhausted.
-fn plan_auto(
-    cores: Vec<AvailableCore<'_>>,
-    requested_count: usize,
-) -> RuntimeResult<ResolvedPlacement> {
+fn plan_auto(mut cores: Vec<CoreLoad>, requested_count: usize) -> RuntimeResult<ResolvedPlacement> {
     let mut selected = Vec::with_capacity(requested_count);
+    let mut shared = false;
 
-    // Prefer one thread from every entirely free physical core. This is the low-contention phase.
-    for core in &cores {
-        if core.all_free {
-            selected.push(core.free[0].id);
+    // Low-contention phase: take one thread from every untouched physical core.
+    for core_index in 0..cores.len() {
+        if core_total(&cores[core_index]) == 0 {
+            select_cpu(&mut cores, core_index, 0, &mut selected, &mut shared);
             if selected.len() == requested_count {
                 break;
             }
         }
     }
 
-    // Density phase: use any remaining free hardware thread, including a derived soft hold beside
-    // an older Auto allocation. Keep core order stable so identical snapshots produce identical
-    // plans and the existing uniqueness constraint can resolve concurrent races predictably.
-    if selected.len() < requested_count {
-        for core in &cores {
-            for cpu in &core.free {
-                if selected.contains(&cpu.id) {
-                    continue;
-                }
-                selected.push(cpu.id);
-                if selected.len() == requested_count {
-                    break;
-                }
-            }
-            if selected.len() == requested_count {
-                break;
-            }
-        }
-    }
-    if selected.len() != requested_count {
-        return insufficient_capacity(CpuPlacement::Auto, requested_count);
+    // Density phase: consume unused SMT siblings, including soft holds beside older Auto work.
+    while selected.len() < requested_count {
+        let candidate = cores.iter().enumerate().find_map(|(core_index, core)| {
+            core.logical
+                .iter()
+                .position(|cpu| cpu.assignments == 0)
+                .map(|logical_index| (core_index, logical_index))
+        });
+        let Some((core_index, logical_index)) = candidate else {
+            break;
+        };
+        select_cpu(
+            &mut cores,
+            core_index,
+            logical_index,
+            &mut selected,
+            &mut shared,
+        );
     }
 
-    let reservations = selected
-        .iter()
-        .enumerate()
-        .map(|(vcpu_index, logical_cpu)| CpuReservation {
-            logical_cpu: *logical_cpu,
-            vcpu_index: Some(vcpu_index as u8),
-            role: "assigned",
-        })
-        .collect();
-    Ok(ResolvedPlacement {
-        requested: CpuPlacement::Auto,
-        resolved: CpuPlacement::Auto,
-        vcpu_targets: selected,
-        reservations,
-        numa: None,
-    })
+    // Pressure phase: share the least-loaded logical CPUs instead of rejecting creation.
+    while selected.len() < requested_count {
+        let (core_index, logical_index) = least_loaded_logical(&cores)?;
+        select_cpu(
+            &mut cores,
+            core_index,
+            logical_index,
+            &mut selected,
+            &mut shared,
+        );
+    }
+
+    Ok(finish_plan(CpuPlacement::Auto, selected, shared))
 }
 
 fn plan_spread(
-    cores: Vec<AvailableCore<'_>>,
+    mut cores: Vec<CoreLoad>,
     requested: CpuPlacement,
     requested_count: usize,
 ) -> RuntimeResult<ResolvedPlacement> {
-    let selected: Vec<_> = cores
-        .into_iter()
-        .filter(|core| core.all_free)
-        .take(requested_count)
-        .collect();
-    if selected.len() != requested_count {
-        return insufficient_capacity(CpuPlacement::Spread, requested_count);
+    let mut selected = Vec::with_capacity(requested_count);
+    let mut shared = false;
+
+    while selected.len() < requested_count {
+        let candidate = cores
+            .iter()
+            .enumerate()
+            .filter(|(_, core)| core.logical.iter().any(|cpu| cpu.assignments == 0))
+            .min_by_key(|(core_index, core)| (core_total(core), *core_index))
+            .map(|(core_index, core)| {
+                let logical_index = core
+                    .logical
+                    .iter()
+                    .position(|cpu| cpu.assignments == 0)
+                    .expect("candidate core has an unused logical CPU");
+                (core_index, logical_index)
+            })
+            .or_else(|| least_loaded_core_logical(&cores));
+        let Some((core_index, logical_index)) = candidate else {
+            return no_host_processors(requested);
+        };
+        select_cpu(
+            &mut cores,
+            core_index,
+            logical_index,
+            &mut selected,
+            &mut shared,
+        );
     }
 
-    let mut vcpu_targets = Vec::with_capacity(requested_count);
-    let mut reservations = Vec::new();
-    for (vcpu_index, core) in selected.into_iter().enumerate() {
-        let assigned = core.logical[0].id;
-        vcpu_targets.push(assigned);
-        for cpu in core.logical {
-            reservations.push(CpuReservation {
-                logical_cpu: cpu.id,
-                vcpu_index: (cpu.id == assigned).then_some(vcpu_index as u8),
-                role: if cpu.id == assigned {
-                    "assigned"
-                } else {
-                    "smt-reserved"
-                },
-            });
-        }
-    }
-
-    Ok(ResolvedPlacement {
-        requested,
-        resolved: CpuPlacement::Spread,
-        vcpu_targets,
-        reservations,
-        numa: None,
-    })
+    Ok(finish_plan(requested, selected, shared))
 }
 
 fn plan_compact(
-    cores: Vec<AvailableCore<'_>>,
+    mut cores: Vec<CoreLoad>,
     requested: CpuPlacement,
     requested_count: usize,
 ) -> RuntimeResult<ResolvedPlacement> {
-    let mut candidates: Vec<_> = cores
-        .into_iter()
-        .map(|core| core.free)
-        .filter(|logical| !logical.is_empty())
-        .collect();
-    candidates.sort_by_key(|logical| std::cmp::Reverse(logical.len()));
-
     let mut selected = Vec::with_capacity(requested_count);
-    for core in candidates {
-        for cpu in core {
-            selected.push(cpu.id);
-            if selected.len() == requested_count {
-                break;
-            }
-        }
-        if selected.len() == requested_count {
+    let mut shared = false;
+
+    // Fill unused siblings on already active cores before opening another physical core.
+    while selected.len() < requested_count {
+        let candidate = cores
+            .iter()
+            .enumerate()
+            .filter(|(_, core)| core.logical.iter().any(|cpu| cpu.assignments == 0))
+            .min_by_key(|(core_index, core)| {
+                (
+                    usize::from(core_total(core) == 0),
+                    std::cmp::Reverse(core_total(core)),
+                    *core_index,
+                )
+            })
+            .map(|(core_index, core)| {
+                let logical_index = core
+                    .logical
+                    .iter()
+                    .position(|cpu| cpu.assignments == 0)
+                    .expect("candidate core has an unused logical CPU");
+                (core_index, logical_index)
+            });
+        let Some((core_index, logical_index)) = candidate else {
             break;
-        }
-    }
-    if selected.len() != requested_count {
-        return insufficient_capacity(CpuPlacement::Compact, requested_count);
+        };
+        select_cpu(
+            &mut cores,
+            core_index,
+            logical_index,
+            &mut selected,
+            &mut shared,
+        );
     }
 
+    // Balance the sharing depth first; compactness is only a tie-breaker under pressure.
+    while selected.len() < requested_count {
+        let candidate = cores
+            .iter()
+            .enumerate()
+            .flat_map(|(core_index, core)| {
+                core.logical
+                    .iter()
+                    .enumerate()
+                    .map(move |(logical_index, cpu)| (core_index, logical_index, cpu))
+            })
+            .min_by_key(|(core_index, logical_index, cpu)| {
+                (
+                    cpu.assignments,
+                    std::cmp::Reverse(core_total(&cores[*core_index])),
+                    *core_index,
+                    *logical_index,
+                )
+            })
+            .map(|(core_index, logical_index, _)| (core_index, logical_index));
+        let Some((core_index, logical_index)) = candidate else {
+            return no_host_processors(requested);
+        };
+        select_cpu(
+            &mut cores,
+            core_index,
+            logical_index,
+            &mut selected,
+            &mut shared,
+        );
+    }
+
+    Ok(finish_plan(requested, selected, shared))
+}
+
+fn finish_plan(
+    requested: CpuPlacement,
+    selected: Vec<LogicalCpuId>,
+    shared: bool,
+) -> ResolvedPlacement {
     let reservations = selected
         .iter()
         .enumerate()
         .map(|(vcpu_index, logical_cpu)| CpuReservation {
             logical_cpu: *logical_cpu,
             vcpu_index: Some(vcpu_index as u8),
-            role: "assigned",
+            role: "planned",
         })
         .collect();
-    Ok(ResolvedPlacement {
+    ResolvedPlacement {
         requested,
-        resolved: CpuPlacement::Compact,
+        resolved: requested,
         vcpu_targets: selected,
         reservations,
         numa: None,
-    })
+        shared,
+        fallback: None,
+    }
 }
 
-fn insufficient_capacity<T>(policy: CpuPlacement, requested_count: usize) -> RuntimeResult<T> {
+fn select_cpu(
+    cores: &mut [CoreLoad],
+    core_index: usize,
+    logical_index: usize,
+    selected: &mut Vec<LogicalCpuId>,
+    shared: &mut bool,
+) {
+    let cpu = &mut cores[core_index].logical[logical_index];
+    *shared |= cpu.assignments > 0;
+    selected.push(cpu.id);
+    cpu.assignments += 1;
+}
+
+fn core_total(core: &CoreLoad) -> usize {
+    core.logical.iter().map(|cpu| cpu.assignments).sum()
+}
+
+fn least_loaded_logical(cores: &[CoreLoad]) -> RuntimeResult<(usize, usize)> {
+    cores
+        .iter()
+        .enumerate()
+        .flat_map(|(core_index, core)| {
+            core.logical
+                .iter()
+                .enumerate()
+                .map(move |(logical_index, cpu)| (core_index, logical_index, cpu))
+        })
+        .min_by_key(|(core_index, logical_index, cpu)| {
+            (
+                cpu.assignments,
+                core_total(&cores[*core_index]),
+                *core_index,
+                *logical_index,
+            )
+        })
+        .map(|(core_index, logical_index, _)| (core_index, logical_index))
+        .ok_or_else(|| {
+            RuntimeError::Custom("managed CPU placement found no host processors".into())
+        })
+}
+
+fn least_loaded_core_logical(cores: &[CoreLoad]) -> Option<(usize, usize)> {
+    let core_index = cores
+        .iter()
+        .enumerate()
+        .min_by_key(|(core_index, core)| (core_total(core), *core_index))?
+        .0;
+    let logical_index = cores[core_index]
+        .logical
+        .iter()
+        .enumerate()
+        .min_by_key(|(logical_index, cpu)| (cpu.assignments, *logical_index))?
+        .0;
+    Some((core_index, logical_index))
+}
+
+fn node_can_fit_memory(
+    node: &super::topology::HostNumaNode,
+    reserved_memory_mib: u64,
+    request: PlacementRequest,
+) -> bool {
+    node.available_memory_mib >= u64::from(request.boot_memory_mib)
+        && node.total_memory_mib.saturating_sub(reserved_memory_mib)
+            >= u64::from(request.max_memory_mib)
+}
+
+fn node_can_fit_unshared_cpus(
+    topology: &CpuTopology,
+    loads: &BTreeMap<LogicalCpuId, usize>,
+    host_node_id: u32,
+    requested_count: usize,
+) -> bool {
+    topology
+        .logical_cpus
+        .iter()
+        .filter(|cpu| cpu.numa_node == host_node_id)
+        .filter(|cpu| loads.get(&cpu.id).copied().unwrap_or(0) == 0)
+        .take(requested_count)
+        .count()
+        == requested_count
+}
+
+fn no_host_processors<T>(policy: CpuPlacement) -> RuntimeResult<T> {
     Err(RuntimeError::Custom(format!(
-        "CPU placement {policy} cannot reserve {requested_count} vCPUs from the allowed host topology"
+        "CPU placement {policy} found no allowed host processors"
     )))
 }
 
@@ -418,13 +567,13 @@ mod tests {
 
     fn plan(
         topology: &CpuTopology,
-        occupied: &HashSet<LogicalCpuId>,
+        loads: &BTreeMap<LogicalCpuId, usize>,
         requested: CpuPlacement,
         max_vcpus: u8,
     ) -> RuntimeResult<ResolvedPlacement> {
         super::plan(
             topology,
-            occupied,
+            loads,
             PlacementRequest {
                 policy: requested,
                 max_vcpus,
@@ -477,8 +626,8 @@ mod tests {
     }
 
     #[test]
-    fn spread_uses_distinct_cores_and_reserves_siblings() {
-        let plan = plan(&topology(), &HashSet::new(), CpuPlacement::Spread, 2).unwrap();
+    fn spread_uses_distinct_cores_without_hard_sibling_holds() {
+        let plan = plan(&topology(), &BTreeMap::new(), CpuPlacement::Spread, 2).unwrap();
 
         assert_eq!(plan.vcpu_targets, vec![id(0), id(1)]);
         assert_eq!(
@@ -486,13 +635,14 @@ mod tests {
                 .iter()
                 .map(|reservation| reservation.logical_cpu)
                 .collect::<Vec<_>>(),
-            vec![id(0), id(6), id(1), id(7)]
+            vec![id(0), id(1)]
         );
+        assert!(!plan.shared);
     }
 
     #[test]
     fn compact_consumes_smt_siblings_first() {
-        let plan = plan(&topology(), &HashSet::new(), CpuPlacement::Compact, 2).unwrap();
+        let plan = plan(&topology(), &BTreeMap::new(), CpuPlacement::Compact, 2).unwrap();
 
         assert_eq!(plan.vcpu_targets, vec![id(0), id(6)]);
         assert_eq!(plan.reservations.len(), 2);
@@ -500,39 +650,70 @@ mod tests {
 
     #[test]
     fn auto_uses_distinct_cores_before_smt_siblings() {
-        let plan = plan(&topology(), &HashSet::new(), CpuPlacement::Auto, 3).unwrap();
+        let plan = plan(&topology(), &BTreeMap::new(), CpuPlacement::Auto, 3).unwrap();
 
         assert_eq!(plan.resolved, CpuPlacement::Auto);
         assert_eq!(plan.vcpu_targets, vec![id(0), id(1), id(2)]);
-        assert!(plan.reservations.iter().all(|row| row.role == "assigned"));
+        assert!(plan.reservations.iter().all(|row| row.role == "planned"));
     }
 
     #[test]
     fn auto_consumes_derived_soft_holds_when_untouched_cores_are_exhausted() {
-        // A previously took CPU 0 and CPU 1 with Auto. Their free siblings are not occupied rows.
-        let occupied = HashSet::from([id(0), id(1)]);
-        let plan = plan(&topology(), &occupied, CpuPlacement::Auto, 2).unwrap();
+        // A previously took CPU 0 and CPU 1 with Auto. Their free siblings remain soft holds.
+        let loads = BTreeMap::from([(id(0), 1), (id(1), 1)]);
+        let plan = plan(&topology(), &loads, CpuPlacement::Auto, 2).unwrap();
 
         assert_eq!(plan.vcpu_targets, vec![id(2), id(6)]);
     }
 
     #[test]
     fn auto_soft_holds_reappear_without_catalog_mutation() {
-        let occupied = HashSet::from([id(0), id(1)]);
+        let loads = BTreeMap::from([(id(0), 1), (id(1), 1)]);
 
-        let first = plan(&topology(), &occupied, CpuPlacement::Auto, 1).unwrap();
-        let after_sibling_user_exits = plan(&topology(), &occupied, CpuPlacement::Auto, 1).unwrap();
+        let first = plan(&topology(), &loads, CpuPlacement::Auto, 1).unwrap();
+        let after_sibling_user_exits = plan(&topology(), &loads, CpuPlacement::Auto, 1).unwrap();
 
         assert_eq!(first.vcpu_targets, vec![id(2)]);
         assert_eq!(after_sibling_user_exits.vcpu_targets, first.vcpu_targets);
     }
 
     #[test]
-    fn spread_does_not_share_a_partially_occupied_core() {
-        let occupied = HashSet::from([id(6)]);
-        let plan = plan(&topology(), &occupied, CpuPlacement::Spread, 2).unwrap();
+    fn spread_preserves_the_widest_available_distribution() {
+        let loads = BTreeMap::from([(id(6), 1)]);
+        let plan = plan(&topology(), &loads, CpuPlacement::Spread, 2).unwrap();
 
         assert_eq!(plan.vcpu_targets, vec![id(1), id(2)]);
+    }
+
+    #[test]
+    fn ordinary_policies_share_after_every_logical_cpu_is_used() {
+        for policy in [
+            CpuPlacement::Auto,
+            CpuPlacement::Spread,
+            CpuPlacement::Compact,
+        ] {
+            let resolved = plan(&topology(), &BTreeMap::new(), policy, 8).unwrap();
+
+            assert_eq!(resolved.vcpu_targets.len(), 8);
+            assert!(resolved.shared, "{policy} should report pressure sharing");
+            assert_eq!(resolved.reservations.len(), 8);
+        }
+    }
+
+    #[test]
+    fn sharing_prefers_the_least_loaded_logical_cpus() {
+        let loads = BTreeMap::from([
+            (id(0), 2),
+            (id(6), 2),
+            (id(1), 1),
+            (id(7), 1),
+            (id(2), 1),
+            (id(8), 1),
+        ]);
+        let resolved = plan(&topology(), &loads, CpuPlacement::Auto, 2).unwrap();
+
+        assert_eq!(resolved.vcpu_targets, vec![id(1), id(2)]);
+        assert!(resolved.shared);
     }
 
     #[test]
@@ -549,7 +730,7 @@ mod tests {
             fingerprint: "heterogeneous".into(),
         };
 
-        let plan = plan(&topology, &HashSet::new(), CpuPlacement::Compact, 1).unwrap();
+        let plan = plan(&topology, &BTreeMap::new(), CpuPlacement::Compact, 1).unwrap();
 
         assert_eq!(plan.vcpu_targets, vec![id(1)]);
     }
@@ -582,7 +763,7 @@ mod tests {
         };
         let resolved = super::plan(
             &topology,
-            &HashSet::new(),
+            &BTreeMap::new(),
             PlacementRequest {
                 policy: CpuPlacement::Auto,
                 max_vcpus: 2,
@@ -600,7 +781,74 @@ mod tests {
                 .iter()
                 .all(|cpu| [id(2), id(8)].contains(cpu))
         );
-        assert_eq!(resolved.numa.unwrap().nodes[0].host_node_id, 1);
+        let numa = resolved.numa.unwrap();
+        assert_eq!(numa.nodes[0].host_node_id, 1);
+        assert!(!numa.required);
+    }
+
+    #[test]
+    fn prefer_single_falls_back_to_inherited_numa_under_memory_pressure() {
+        let profile = PlacementProfile {
+            numa: NumaPlacement::PreferSingle,
+            memory: MemoryPlacement::FollowCpu,
+        };
+        let resolved = super::plan(
+            &topology(),
+            &BTreeMap::new(),
+            PlacementRequest {
+                policy: CpuPlacement::Auto,
+                max_vcpus: 2,
+                boot_memory_mib: 1024,
+                max_memory_mib: 4096,
+                profile: Some(profile),
+            },
+            &BTreeMap::from([(0, 15_000)]),
+        )
+        .unwrap();
+
+        assert!(resolved.numa.is_none());
+        assert_eq!(
+            resolved.fallback,
+            Some(PlacementFallback::PreferSingleCapacity)
+        );
+    }
+
+    #[test]
+    fn follow_cpu_falls_back_when_selected_cpus_span_host_nodes() {
+        let mut topology = topology();
+        topology.numa_nodes.push(HostNumaNode {
+            id: 1,
+            package: 0,
+            total_memory_mib: 16_384,
+            available_memory_mib: 16_384,
+            distances: BTreeMap::from([(0, 12), (1, 10)]),
+        });
+        topology.numa_nodes[0].distances.insert(1, 12);
+        for cpu in &mut topology.logical_cpus {
+            cpu.numa_node = u32::from(cpu.core > 0);
+        }
+        let resolved = super::plan(
+            &topology,
+            &BTreeMap::new(),
+            PlacementRequest {
+                policy: CpuPlacement::Auto,
+                max_vcpus: 2,
+                boot_memory_mib: 1024,
+                max_memory_mib: 4096,
+                profile: Some(PlacementProfile {
+                    numa: NumaPlacement::Inherit,
+                    memory: MemoryPlacement::FollowCpu,
+                }),
+            },
+            &BTreeMap::new(),
+        )
+        .unwrap();
+
+        assert!(resolved.numa.is_none());
+        assert_eq!(
+            resolved.fallback,
+            Some(PlacementFallback::FollowCpuCrossNode)
+        );
     }
 
     #[test]
@@ -611,7 +859,7 @@ mod tests {
         };
         let error = super::plan(
             &topology(),
-            &HashSet::new(),
+            &BTreeMap::new(),
             PlacementRequest {
                 policy: CpuPlacement::Auto,
                 max_vcpus: 2,
@@ -624,5 +872,77 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("strict_single"));
+    }
+
+    #[test]
+    fn strict_single_marks_successful_placement_as_required() {
+        let resolved = super::plan(
+            &topology(),
+            &BTreeMap::new(),
+            PlacementRequest {
+                policy: CpuPlacement::Auto,
+                max_vcpus: 2,
+                boot_memory_mib: 1024,
+                max_memory_mib: 4096,
+                profile: Some(PlacementProfile {
+                    numa: NumaPlacement::StrictSingle,
+                    memory: MemoryPlacement::FollowCpu,
+                }),
+            },
+            &BTreeMap::new(),
+        )
+        .unwrap();
+
+        assert!(resolved.numa.unwrap().required);
+    }
+
+    #[test]
+    fn strict_single_does_not_count_cpu_sharing_as_single_node_capacity() {
+        let error = super::plan(
+            &topology(),
+            &BTreeMap::new(),
+            PlacementRequest {
+                policy: CpuPlacement::Auto,
+                max_vcpus: 8,
+                boot_memory_mib: 512,
+                max_memory_mib: 512,
+                profile: Some(PlacementProfile {
+                    numa: NumaPlacement::StrictSingle,
+                    memory: MemoryPlacement::FollowCpu,
+                }),
+            },
+            &BTreeMap::new(),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("strict_single"));
+    }
+
+    #[test]
+    fn prefer_single_keeps_cpu_plan_but_inherits_numa_when_unshared_capacity_is_short() {
+        let resolved = super::plan(
+            &topology(),
+            &BTreeMap::new(),
+            PlacementRequest {
+                policy: CpuPlacement::Auto,
+                max_vcpus: 8,
+                boot_memory_mib: 512,
+                max_memory_mib: 512,
+                profile: Some(PlacementProfile {
+                    numa: NumaPlacement::PreferSingle,
+                    memory: MemoryPlacement::FollowCpu,
+                }),
+            },
+            &BTreeMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(resolved.vcpu_targets.len(), 8);
+        assert!(resolved.shared);
+        assert!(resolved.numa.is_none());
+        assert_eq!(
+            resolved.fallback,
+            Some(PlacementFallback::PreferSingleCapacity)
+        );
     }
 }
