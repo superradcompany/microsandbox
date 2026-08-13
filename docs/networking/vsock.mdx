@@ -59,6 +59,7 @@ sequenceDiagram
 
 The compact API means stream in every SDK and accepts either platform's local path syntax. Use the explicit datagram variant on macOS or Linux when message boundaries matter.
 
+<CodeGroup>
 ```rust Rust
 let sandbox = Sandbox::builder("worker")
     .image("alpine")
@@ -107,6 +108,7 @@ sandbox = Microsandbox::Sandbox.builder("worker")
   .vsock_dgram("/run/events.sock", 5001)
   .create
 ```
+</CodeGroup>
 
 ## Security model and limits
 
