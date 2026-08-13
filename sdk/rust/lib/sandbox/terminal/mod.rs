@@ -1,5 +1,6 @@
 //! Host terminal integration shared by interactive sandbox sessions.
 
+mod encoding;
 #[cfg(windows)]
 mod windows;
 

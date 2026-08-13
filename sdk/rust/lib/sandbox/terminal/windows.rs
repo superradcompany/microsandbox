@@ -13,7 +13,7 @@ use windows_sys::Win32::{
         WAIT_TIMEOUT,
     },
     Storage::FileSystem::{
-        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, ReadFile, WriteFile,
+        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, ReadFile,
     },
     System::{
         Console::{
@@ -21,7 +21,7 @@ use windows_sys::Win32::{
             ENABLE_PROCESSED_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT,
             ENABLE_VIRTUAL_TERMINAL_PROCESSING, ENABLE_WINDOW_INPUT, GetConsoleMode,
             GetConsoleScreenBufferInfo, GetStdHandle, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
-            SetConsoleMode,
+            SetConsoleMode, WriteConsoleW,
         },
         IO::CancelSynchronousIo,
         Threading::{CreateEventW, SetEvent, WaitForMultipleObjects},
@@ -29,6 +29,8 @@ use windows_sys::Win32::{
 };
 
 use crate::{MicrosandboxError, MicrosandboxResult};
+
+use super::encoding::{MAX_CONSOLE_WRITE_UNITS, Utf8ToUtf16Decoder, surrogate_safe_split};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -57,6 +59,9 @@ pub(crate) struct WindowsTerminalGuard {
     output: ConsoleHandle,
     input_mode: u32,
     output_mode: u32,
+
+    /// Carries an incomplete UTF-8 sequence between guest output frames.
+    output_decoder: Utf8ToUtf16Decoder,
 }
 
 pub(crate) struct WindowsTerminalEventPump {
@@ -85,6 +90,7 @@ impl WindowsTerminalGuard {
             output,
             input_mode,
             output_mode,
+            output_decoder: Utf8ToUtf16Decoder::default(),
         };
 
         if let Err(error) = guard.enable_virtual_terminal_modes() {
@@ -118,19 +124,38 @@ impl WindowsTerminalGuard {
         let _ = unsafe { SetConsoleMode(self.output.raw, self.output_mode) };
     }
 
-    pub(crate) fn write_output(&self, data: &[u8]) -> MicrosandboxResult<()> {
+    /// Forward guest output to the console.
+    ///
+    /// Guest bytes are UTF-8, so they are decoded to UTF-16 and written with
+    /// `WriteConsoleW`. The byte-oriented alternative (`WriteFile`, which the
+    /// console treats as `WriteConsoleA`) would reinterpret them in the
+    /// console's current code page and corrupt anything non-ASCII.
+    ///
+    /// A frame may end partway through a character, so the decoder keeps the
+    /// incomplete tail and completes it from the next frame.
+    pub(crate) fn write_output(&mut self, data: &[u8]) -> MicrosandboxResult<()> {
+        let units = self.output_decoder.decode(data);
+        self.write_console(&units)
+    }
+
+    /// Flush a trailing incomplete sequence when the session ends.
+    pub(crate) fn finish_output(&mut self) -> MicrosandboxResult<()> {
+        let units = self.output_decoder.finish();
+        self.write_console(&units)
+    }
+
+    fn write_console(&self, units: &[u16]) -> MicrosandboxResult<()> {
         let mut offset = 0usize;
-        while offset < data.len() {
-            let remaining = data.len() - offset;
-            let chunk_len = remaining.min(u32::MAX as usize);
+        while offset < units.len() {
+            let chunk_len = surrogate_safe_split(&units[offset..], MAX_CONSOLE_WRITE_UNITS);
             let mut written = 0u32;
             let result = unsafe {
-                WriteFile(
+                WriteConsoleW(
                     self.output.raw,
-                    data[offset..].as_ptr().cast(),
+                    units[offset..].as_ptr(),
                     chunk_len as u32,
                     &mut written,
-                    ptr::null_mut(),
+                    ptr::null(),
                 )
             };
             if result == 0 {
@@ -140,7 +165,11 @@ impl WindowsTerminalGuard {
                 )));
             }
             if written == 0 {
-                break;
+                // No progress would mean silently dropping the rest of the
+                // guest's output; fail loudly instead.
+                return Err(MicrosandboxError::Terminal(
+                    "terminal output: console accepted no characters".to_string(),
+                ));
             }
             offset += written as usize;
         }

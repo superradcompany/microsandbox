@@ -20,7 +20,9 @@ mod patch;
 mod reap;
 #[cfg(feature = "ssh")]
 pub mod ssh;
-#[cfg(windows)]
+// Windows-only in shipping builds, but kept compiled under `test` so the
+// platform-independent encoding logic is covered on every host.
+#[cfg(any(windows, test))]
 pub(crate) mod terminal;
 mod types;
 pub(crate) mod upper;

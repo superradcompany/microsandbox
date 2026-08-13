@@ -499,7 +499,7 @@ pub(crate) mod agent {
         );
         let (id, mut rx) = client.stream(MessageType::ExecRequest, &req).await?;
 
-        let terminal_guard = WindowsTerminalGuard::enter()?;
+        let mut terminal_guard = WindowsTerminalGuard::enter()?;
         let mut terminal_events = WindowsTerminalEventPump::spawn_for_guard(&terminal_guard)?;
         let mut exit_code: i32 = -1;
         let mut spawn_failure: Option<microsandbox_protocol::exec::ExecFailed> = None;
@@ -534,7 +534,7 @@ pub(crate) mod agent {
                     match msg.t {
                         MessageType::ExecStdout => {
                             if let Ok(out) = msg.payload::<ExecStdout>() {
-                                let _ = terminal_guard.write_output(&out.data);
+                                terminal_guard.write_output(&out.data)?;
                             }
                         }
                         MessageType::ExecExited => {
@@ -559,7 +559,7 @@ pub(crate) mod agent {
                             match next.t {
                                 MessageType::ExecStdout => {
                                     if let Ok(out) = next.payload::<ExecStdout>() {
-                                        let _ = terminal_guard.write_output(&out.data);
+                                        terminal_guard.write_output(&out.data)?;
                                     }
                                 }
                                 MessageType::ExecExited => {
@@ -593,6 +593,9 @@ pub(crate) mod agent {
         if let Some(failure) = spawn_failure {
             return Err(MicrosandboxError::ExecFailed(failure));
         }
+
+        terminal_guard.finish_output()?;
+
         Ok(exit_code)
     }
 }

@@ -611,7 +611,7 @@ impl SshClient {
                 .map_err(|e| ssh_error("request shell", e))?;
             wait_channel_success(&mut channel, "request shell").await?;
 
-            let terminal_guard = WindowsTerminalGuard::enter()?;
+            let mut terminal_guard = WindowsTerminalGuard::enter()?;
             let mut terminal_events = WindowsTerminalEventPump::spawn_for_guard(&terminal_guard)?;
             let detach_seq = detach_keys.sequence();
             let mut match_pos = 0usize;
@@ -666,6 +666,8 @@ impl SshClient {
                     }
                 }
             }
+
+            terminal_guard.finish_output()?;
 
             Ok(exit_code)
         }
