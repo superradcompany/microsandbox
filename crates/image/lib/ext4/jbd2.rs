@@ -153,6 +153,31 @@ pub(super) fn locate_journal(
     })
 }
 
+/// Replace the UUID of a clean internal journal, preserving all other journal state.
+pub(super) fn rewrite_clean_journal_uuid(
+    file: &mut File,
+    loc: &JournalLocation,
+    uuid: &[u8; 16],
+) -> Result<(), Ext4Error> {
+    let offset = loc.start_block * EXT4_BLOCK_SIZE as u64;
+    let mut raw = vec![0u8; JBD2_SB_SIZE];
+    file.seek(SeekFrom::Start(offset))?;
+    file.read_exact(&mut raw)?;
+    if get_be32(&raw, 0x00) != JBD2_MAGIC
+        || get_be32(&raw, 0x04) != JBD2_SUPERBLOCK_V2
+        || get_be32(&raw, 0x1C) != 0
+    {
+        return Err(unsupported("journal is not a clean formatter journal"));
+    }
+    raw[0x30..0x40].copy_from_slice(uuid);
+    raw[0xFC..0x100].fill(0);
+    let checksum = crc32c::crc32c_raw(0xFFFF_FFFF, &raw);
+    put_be32(&mut raw, 0xFC, checksum);
+    file.seek(SeekFrom::Start(offset))?;
+    file.write_all(&raw)?;
+    Ok(())
+}
+
 /// Replay the pending jbd2 log onto the filesystem and reset the journal to empty.
 ///
 /// SCAN validates the whole log (checksums, sequence chaining, wraparound, target bounds) before REPLAY performs the first write, so an inconsistent journal returns

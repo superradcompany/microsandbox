@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::io::{self, BufWriter, SeekFrom, Write};
+use std::fs::File;
+use std::io::{self, BufWriter, Seek, SeekFrom, Write};
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
 use std::path::Path;
@@ -9,14 +10,14 @@ use std::ptr;
 use super::format::{
     EXT4_BLOCK_SIZE, EXT4_BLOCKS_PER_GROUP, EXT4_DESC_SIZE, EXT4_EH_MAGIC, EXT4_EXTENTS_FL,
     EXT4_FEATURE_COMPAT_DIR_INDEX, EXT4_FEATURE_COMPAT_EXT_ATTR, EXT4_FEATURE_COMPAT_HAS_JOURNAL,
-    EXT4_FEATURE_COMPAT_RESIZE_INODE, EXT4_FEATURE_INCOMPAT_64BIT, EXT4_FEATURE_INCOMPAT_EXTENTS,
-    EXT4_FEATURE_INCOMPAT_FILETYPE, EXT4_FEATURE_RO_COMPAT_DIR_NLINK,
-    EXT4_FEATURE_RO_COMPAT_EXTRA_ISIZE, EXT4_FEATURE_RO_COMPAT_HUGE_FILE,
-    EXT4_FEATURE_RO_COMPAT_LARGE_FILE, EXT4_FEATURE_RO_COMPAT_METADATA_CSUM,
-    EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER, EXT4_FIRST_INO, EXT4_INODE_SIZE, EXT4_INODES_PER_GROUP,
-    EXT4_JOURNAL_INO, EXT4_LOG_BLOCK_SIZE, EXT4_MIN_EXTRA_ISIZE, EXT4_ROOT_INO,
-    EXT4_SB_OVERHEAD_BLOCKS_OFFSET, EXT4_SUPER_MAGIC, JBD2_MAGIC, JBD2_SUPERBLOCK_V2, S_IFBLK,
-    S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFREG, S_IFSOCK,
+    EXT4_FEATURE_COMPAT_RESIZE_INODE, EXT4_FEATURE_INCOMPAT_64BIT, EXT4_FEATURE_INCOMPAT_CSUM_SEED,
+    EXT4_FEATURE_INCOMPAT_EXTENTS, EXT4_FEATURE_INCOMPAT_FILETYPE,
+    EXT4_FEATURE_RO_COMPAT_DIR_NLINK, EXT4_FEATURE_RO_COMPAT_EXTRA_ISIZE,
+    EXT4_FEATURE_RO_COMPAT_HUGE_FILE, EXT4_FEATURE_RO_COMPAT_LARGE_FILE,
+    EXT4_FEATURE_RO_COMPAT_METADATA_CSUM, EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER, EXT4_FIRST_INO,
+    EXT4_INODE_SIZE, EXT4_INODES_PER_GROUP, EXT4_JOURNAL_INO, EXT4_LOG_BLOCK_SIZE,
+    EXT4_MIN_EXTRA_ISIZE, EXT4_ROOT_INO, EXT4_SB_OVERHEAD_BLOCKS_OFFSET, EXT4_SUPER_MAGIC,
+    JBD2_MAGIC, JBD2_SUPERBLOCK_V2, S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFREG, S_IFSOCK,
 };
 use super::layout::{
     GroupDescStats, GroupGeometry, MAX_BLOCKS, RESERVED_GDT_BLOCKS, bitmap_checksum,
@@ -398,7 +399,8 @@ impl Layout {
 
         let feature_incompat = EXT4_FEATURE_INCOMPAT_FILETYPE
             | EXT4_FEATURE_INCOMPAT_EXTENTS
-            | EXT4_FEATURE_INCOMPAT_64BIT;
+            | EXT4_FEATURE_INCOMPAT_64BIT
+            | EXT4_FEATURE_INCOMPAT_CSUM_SEED;
 
         let feature_ro_compat = EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER
             | EXT4_FEATURE_RO_COMPAT_LARGE_FILE
@@ -609,6 +611,29 @@ pub fn format_ext4(path: &Path, options: &Ext4FormatOptions) -> Result<(), Ext4E
     format_ext4_with_tree(path, options, tree)
 }
 
+/// Format an already-open file as a sparse ext4 filesystem with an explicit UUID.
+///
+/// The caller retains ownership of `file`. Its existing contents are replaced without reopening
+/// its path, and all filesystem bytes are durably flushed before this function returns.
+pub fn format_ext4_file_with_uuid(
+    file: &mut File,
+    options: &Ext4FormatOptions,
+    uuid: [u8; 16],
+) -> Result<(), Ext4Error> {
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    format_ext4_file_with_tree_and_reserved_uuid(
+        file,
+        options,
+        FileTree::new(),
+        RESERVED_GDT_BLOCKS,
+        Some(uuid),
+        TreeEncodingMode::Upper,
+    )?;
+    file.sync_all()?;
+    Ok(())
+}
+
 pub fn format_ext4_with_tree(
     path: &Path,
     options: &Ext4FormatOptions,
@@ -662,6 +687,25 @@ pub(super) fn format_ext4_rootfs_with_tree_and_uuid(
 
 fn format_ext4_with_tree_and_reserved_uuid(
     path: &Path,
+    options: &Ext4FormatOptions,
+    tree: FileTree,
+    reserved_gdt_blocks: u32,
+    uuid: Option<[u8; 16]>,
+    encoding_mode: TreeEncodingMode,
+) -> Result<(), Ext4Error> {
+    let mut raw_file = File::create(path)?;
+    format_ext4_file_with_tree_and_reserved_uuid(
+        &mut raw_file,
+        options,
+        tree,
+        reserved_gdt_blocks,
+        uuid,
+        encoding_mode,
+    )
+}
+
+fn format_ext4_file_with_tree_and_reserved_uuid(
+    raw_file: &mut File,
     options: &Ext4FormatOptions,
     tree: FileTree,
     reserved_gdt_blocks: u32,
@@ -739,8 +783,7 @@ fn format_ext4_with_tree_and_reserved_uuid(
     let bitmap_plan = BitmapPlan::new(&layout, &all_plans);
     let stats = compute_fs_stats(&layout, &bitmap_plan);
 
-    let raw_file = std::fs::File::create(path)?;
-    mark_sparse(&raw_file)?;
+    mark_sparse(raw_file)?;
     raw_file.set_len(options.size_bytes)?;
     let mut file = BufWriter::new(raw_file);
 
@@ -2475,11 +2518,9 @@ fn build_superblock(
         layout.total_overhead_blocks() as u32,
     );
 
-    // s_checksum_seed (0x270, u32) -- crc32c::crc32c_raw(~0, uuid)
-    // Only used if INCOMPAT_CSUM_SEED is set. For METADATA_CSUM without
-    // CSUM_SEED, the kernel computes from the UUID. We don't set
-    // INCOMPAT_CSUM_SEED so leave this zero.
-    put_le32(sb, 0x270, 0);
+    // s_checksum_seed (0x270, u32) -- keep metadata checksums independent of the UUID so a cloned
+    // image can receive a distinct filesystem identity without rewriting every metadata block.
+    put_le32(sb, 0x270, layout.csum_seed);
 
     // s_encoding (0x27C, u16) -- 0 (no casefold)
     put_le16(sb, 0x27C, 0);
@@ -2612,6 +2653,45 @@ mod tests {
 
         let meta = std::fs::metadata(&path).unwrap();
         assert_eq!(meta.len(), size);
+    }
+
+    #[test]
+    fn test_format_open_file_with_explicit_uuid() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("inherited.ext4");
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(b"stale-prefix").unwrap();
+        let inode_before = file.metadata().unwrap();
+        let uuid = [0x5a; 16];
+        let options = Ext4FormatOptions {
+            size_bytes: 256 * 1024 * 1024,
+            journal_blocks: 4096,
+        };
+
+        format_ext4_file_with_uuid(&mut file, &options, uuid).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(inode_before.ino(), file.metadata().unwrap().ino());
+        }
+        let mut superblock = vec![0; 1024];
+        file.seek(SeekFrom::Start(1024)).unwrap();
+        std::io::Read::read_exact(&mut file, &mut superblock).unwrap();
+        assert_eq!(&superblock[0x68..0x78], &uuid);
+        assert_eq!(
+            le_u32(&superblock, 0x60) & EXT4_FEATURE_INCOMPAT_CSUM_SEED,
+            EXT4_FEATURE_INCOMPAT_CSUM_SEED
+        );
+        assert_eq!(
+            le_u32(&superblock, 0x270),
+            crc32c::crc32c_raw(0xFFFF_FFFF, &uuid)
+        );
     }
 
     #[test]

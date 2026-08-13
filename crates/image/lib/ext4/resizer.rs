@@ -16,13 +16,13 @@ use super::format::{
     EXT4_BG_INODE_ZEROED, EXT4_BLOCK_SIZE, EXT4_BLOCKS_PER_GROUP, EXT4_DESC_SIZE, EXT4_EH_MAGIC,
     EXT4_EXTENTS_FL, EXT4_FEATURE_COMPAT_DIR_INDEX, EXT4_FEATURE_COMPAT_EXT_ATTR,
     EXT4_FEATURE_COMPAT_HAS_JOURNAL, EXT4_FEATURE_COMPAT_RESIZE_INODE, EXT4_FEATURE_INCOMPAT_64BIT,
-    EXT4_FEATURE_INCOMPAT_EXTENTS, EXT4_FEATURE_INCOMPAT_FILETYPE, EXT4_FEATURE_INCOMPAT_RECOVER,
-    EXT4_FEATURE_RO_COMPAT_DIR_NLINK, EXT4_FEATURE_RO_COMPAT_EXTRA_ISIZE,
-    EXT4_FEATURE_RO_COMPAT_HUGE_FILE, EXT4_FEATURE_RO_COMPAT_LARGE_FILE,
-    EXT4_FEATURE_RO_COMPAT_METADATA_CSUM, EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER, EXT4_FIRST_INO,
-    EXT4_INODE_SIZE, EXT4_INODES_PER_GROUP, EXT4_JOURNAL_INO, EXT4_LOG_BLOCK_SIZE, EXT4_ROOT_INO,
-    EXT4_SB_ERROR_COUNT_OFFSET, EXT4_SB_OVERHEAD_BLOCKS_OFFSET, EXT4_SUPER_MAGIC,
-    sparse_super_group,
+    EXT4_FEATURE_INCOMPAT_CSUM_SEED, EXT4_FEATURE_INCOMPAT_EXTENTS, EXT4_FEATURE_INCOMPAT_FILETYPE,
+    EXT4_FEATURE_INCOMPAT_RECOVER, EXT4_FEATURE_RO_COMPAT_DIR_NLINK,
+    EXT4_FEATURE_RO_COMPAT_EXTRA_ISIZE, EXT4_FEATURE_RO_COMPAT_HUGE_FILE,
+    EXT4_FEATURE_RO_COMPAT_LARGE_FILE, EXT4_FEATURE_RO_COMPAT_METADATA_CSUM,
+    EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER, EXT4_FIRST_INO, EXT4_INODE_SIZE, EXT4_INODES_PER_GROUP,
+    EXT4_JOURNAL_INO, EXT4_LOG_BLOCK_SIZE, EXT4_ROOT_INO, EXT4_SB_ERROR_COUNT_OFFSET,
+    EXT4_SB_OVERHEAD_BLOCKS_OFFSET, EXT4_SUPER_MAGIC, sparse_super_group,
 };
 use super::formatter::{Ext4Error, mark_sparse};
 use super::jbd2;
@@ -357,10 +357,64 @@ pub fn grow_image(path: &Path, new_size_bytes: u64) -> Result<GrowOutcome, Ext4E
     })
 }
 
+/// Replace the filesystem UUID of a clean formatter-produced image.
+///
+/// The image must use the formatter's explicit checksum-seed feature, so metadata checksums remain
+/// valid when the UUID changes. The primary and backup superblocks plus the empty internal journal
+/// are rewritten and durably flushed before this function returns.
+pub fn rewrite_uuid(file: &mut File, uuid: [u8; 16]) -> Result<(), Ext4Error> {
+    let img = parse_and_validate(file)?;
+    if img.needs_recovery {
+        return Err(unsupported(
+            "cannot rewrite UUID while journal recovery is required",
+        ));
+    }
+    if get_le32(&img.sb, 0x60) & EXT4_FEATURE_INCOMPAT_CSUM_SEED == 0 {
+        return Err(unsupported(
+            "cannot rewrite UUID without an explicit metadata checksum seed",
+        ));
+    }
+    validate_rootfs_file(file, &img)?;
+
+    let geometry = img.geometry();
+    let journal = jbd2::locate_journal(file, geometry.group_inode_table_block(0), img.csum_seed)?;
+    jbd2::rewrite_clean_journal_uuid(file, &journal, &uuid)?;
+
+    let rewrite_superblock = |sb: &mut [u8], group: u32| {
+        sb[0x68..0x78].copy_from_slice(&uuid);
+        sb[0xEC..0xFC].copy_from_slice(&uuid);
+        put_le16(sb, 0x5A, group as u16);
+        put_le32(sb, 0x3FC, 0);
+        let checksum = superblock_checksum(sb);
+        put_le32(sb, 0x3FC, checksum);
+    };
+
+    for group in (1..img.num_groups).filter(|group| sparse_super_group(*group)) {
+        let offset = geometry.group_start_block(group) * EXT4_BLOCK_SIZE as u64;
+        let mut backup = read_superblock_at(file, offset, &format!("group {group} backup"))?;
+        rewrite_superblock(&mut backup, group);
+        file.seek(SeekFrom::Start(offset))?;
+        file.write_all(&backup)?;
+    }
+
+    let mut primary = img.sb;
+    rewrite_superblock(&mut primary, 0);
+    file.seek(SeekFrom::Start(SB_OFFSET))?;
+    file.write_all(&primary)?;
+    file.sync_all()?;
+
+    let reparsed = parse_and_validate(file)?;
+    validate_rootfs_file(file, &reparsed)
+}
+
 /// Validate a newly materialized rootfs without mounting it or trusting host filesystem tools.
 pub(super) fn validate_rootfs_image(path: &Path) -> Result<(), Ext4Error> {
     let mut file = File::open(path)?;
     let img = parse_and_validate(&mut file)?;
+    validate_rootfs_file(&mut file, &img)
+}
+
+fn validate_rootfs_file(file: &mut File, img: &ParsedImage) -> Result<(), Ext4Error> {
     if img.needs_recovery {
         return Err(unsupported(
             "new rootfs unexpectedly requires journal recovery",
@@ -373,9 +427,9 @@ pub(super) fn validate_rootfs_image(path: &Path) -> Result<(), Ext4Error> {
     for group in 0..img.num_groups {
         let descriptor =
             &img.gdt[group as usize * EXT4_DESC_SIZE as usize..][..EXT4_DESC_SIZE as usize];
-        let block_bitmap = read_block_at(&mut file, geometry.group_block_bitmap_block(group))?;
-        let inode_bitmap = read_block_at(&mut file, geometry.group_inode_bitmap_block(group))?;
-        validate_group_bitmaps(&img, group, descriptor, &block_bitmap, &inode_bitmap)?;
+        let block_bitmap = read_block_at(file, geometry.group_block_bitmap_block(group))?;
+        let inode_bitmap = read_block_at(file, geometry.group_inode_bitmap_block(group))?;
+        validate_group_bitmaps(img, group, descriptor, &block_bitmap, &inode_bitmap)?;
 
         let used_blocks = count_used_bits(&block_bitmap, geometry.blocks_in_group(group) as usize);
         total_free_blocks += u64::from(geometry.blocks_in_group(group)) - used_blocks as u64;
@@ -393,14 +447,7 @@ pub(super) fn validate_rootfs_image(path: &Path) -> Result<(), Ext4Error> {
             {
                 continue;
             }
-            validate_allocated_inode(
-                &mut file,
-                &img,
-                group,
-                local_inode,
-                inode_number,
-                &block_bitmap,
-            )?;
+            validate_allocated_inode(file, img, group, local_inode, inode_number, &block_bitmap)?;
         }
     }
 
@@ -410,14 +457,14 @@ pub(super) fn validate_rootfs_image(path: &Path) -> Result<(), Ext4Error> {
         ));
     }
     validate_resize_inode(
-        &mut file,
+        file,
         &geometry,
         geometry.group_inode_table_block(0),
         img.csum_seed,
         img.num_groups,
         img.num_blocks,
     )?;
-    validate_backup_metadata(&mut file, &img)?;
+    validate_backup_metadata(file, img)?;
     Ok(())
 }
 
@@ -460,7 +507,8 @@ fn parse_and_validate(file: &mut File) -> Result<ParsedImage, Ext4Error> {
     // guest does not unmount on stop). RECOVER images get their journal replayed by grow_image before the deep validation below ever runs on them.
     let needs_recovery = incompat & EXT4_FEATURE_INCOMPAT_RECOVER != 0;
     if compat != expected_compat
-        || incompat & !EXT4_FEATURE_INCOMPAT_RECOVER != expected_incompat
+        || incompat & !(EXT4_FEATURE_INCOMPAT_RECOVER | EXT4_FEATURE_INCOMPAT_CSUM_SEED)
+            != expected_incompat
         || ro_compat != expected_ro_compat
     {
         return Err(unsupported(format!(
@@ -546,9 +594,18 @@ fn parse_and_validate(file: &mut File) -> Result<ParsedImage, Ext4Error> {
     let inode_table_blocks =
         (EXT4_INODES_PER_GROUP as u64 * EXT4_INODE_SIZE as u64 / EXT4_BLOCK_SIZE as u64) as u32;
 
-    let mut uuid = [0u8; 16];
-    uuid.copy_from_slice(&sb[0x68..0x78]);
-    let csum_seed = crc32c::crc32c_raw(0xFFFF_FFFF, &uuid);
+    let csum_seed = if incompat & EXT4_FEATURE_INCOMPAT_CSUM_SEED != 0 {
+        get_le32(&sb, 0x270)
+    } else {
+        if get_le32(&sb, 0x270) != 0 {
+            return Err(unsupported(
+                "legacy superblock has an unexpected metadata checksum seed",
+            ));
+        }
+        let mut uuid = [0u8; 16];
+        uuid.copy_from_slice(&sb[0x68..0x78]);
+        crc32c::crc32c_raw(0xFFFF_FFFF, &uuid)
+    };
 
     let img = ParsedImage {
         num_blocks,
@@ -1186,6 +1243,37 @@ mod tests {
         file.write_all(&sb).unwrap();
     }
 
+    fn downgrade_to_uuid_derived_checksum_seed(path: &Path) {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        let img = parse_and_validate(&mut file).unwrap();
+        let geometry = img.geometry();
+
+        for group in 0..img.num_groups {
+            if group != 0 && !sparse_super_group(group) {
+                continue;
+            }
+            let offset = if group == 0 {
+                SB_OFFSET
+            } else {
+                geometry.group_start_block(group) * u64::from(EXT4_BLOCK_SIZE)
+            };
+            let mut sb = read_superblock_at(&mut file, offset, "legacy fixture").unwrap();
+            let incompat = get_le32(&sb, 0x60) & !EXT4_FEATURE_INCOMPAT_CSUM_SEED;
+            put_le32(&mut sb, 0x60, incompat);
+            put_le32(&mut sb, 0x270, 0);
+            put_le32(&mut sb, 0x3FC, 0);
+            let checksum = superblock_checksum(&sb);
+            put_le32(&mut sb, 0x3FC, checksum);
+            file.seek(SeekFrom::Start(offset)).unwrap();
+            file.write_all(&sb).unwrap();
+        }
+        file.sync_all().unwrap();
+    }
+
     fn write_dirty_journal(path: &Path, start_seq: u32, transactions: &[TestTransaction]) {
         let (location, uuid) = journal_location(path);
         let mut file = OpenOptions::new()
@@ -1274,6 +1362,98 @@ mod tests {
                 .sum::<u32>()
         );
         assert_image_invariants(&path);
+    }
+
+    #[test]
+    fn test_rewrite_uuid_preserves_metadata_checksums() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clone.ext4");
+        format_image(&path, 256 * MIB);
+        let before = parse(&path);
+        let before_seed = before.csum_seed;
+        let before_gdt = before.gdt.clone();
+        let uuid = [0x6b; 16];
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+
+        rewrite_uuid(&mut file, uuid).unwrap();
+
+        let after = parse(&path);
+        assert_eq!(&after.sb[0x68..0x78], &uuid);
+        assert_eq!(after.csum_seed, before_seed);
+        assert_eq!(after.gdt, before_gdt);
+        assert_image_invariants(&path);
+
+        let journal = jbd2::locate_journal(
+            &mut file,
+            after.geometry().group_inode_table_block(0),
+            after.csum_seed,
+        )
+        .unwrap();
+        let mut jsb = vec![0; 1024];
+        file.seek(SeekFrom::Start(
+            journal.start_block * u64::from(EXT4_BLOCK_SIZE),
+        ))
+        .unwrap();
+        file.read_exact(&mut jsb).unwrap();
+        assert_eq!(&jsb[0x30..0x40], &uuid);
+    }
+
+    #[test]
+    fn test_rewrite_uuid_rejects_pending_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dirty.ext4");
+        format_image(&path, 256 * MIB);
+        set_recover_flag(&path);
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+
+        let result = rewrite_uuid(&mut file, [0x7c; 16]);
+
+        assert!(
+            matches!(result, Err(Ext4Error::Unsupported(message)) if message.contains("recovery"))
+        );
+    }
+
+    #[test]
+    fn test_grow_accepts_legacy_uuid_derived_checksum_seed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.ext4");
+        format_image(&path, 256 * MIB);
+        downgrade_to_uuid_derived_checksum_seed(&path);
+
+        let legacy = parse(&path);
+        assert_eq!(
+            get_le32(&legacy.sb, 0x60) & EXT4_FEATURE_INCOMPAT_CSUM_SEED,
+            0
+        );
+        grow_image(&path, 512 * MIB).unwrap();
+        assert_image_invariants(&path);
+    }
+
+    #[test]
+    fn test_rewrite_uuid_rejects_legacy_checksum_seed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-clone.ext4");
+        format_image(&path, 256 * MIB);
+        downgrade_to_uuid_derived_checksum_seed(&path);
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+
+        let result = rewrite_uuid(&mut file, [0x7d; 16]);
+
+        assert!(
+            matches!(result, Err(Ext4Error::Unsupported(message)) if message.contains("checksum seed"))
+        );
     }
 
     #[test]
@@ -1858,6 +2038,24 @@ mod tests {
         assert_e2fsck_clean(&path, "grow to 512 MiB");
         grow_image(&path, 1024 * MIB).unwrap();
         assert_e2fsck_clean(&path, "grow to 1 GiB");
+    }
+
+    /// Validate that changing a clone's UUID preserves every ext4 metadata checksum.
+    #[test]
+    #[ignore]
+    fn test_e2fsck_validates_rewritten_uuid() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fsck-rewritten.ext4");
+        format_image(&path, 256 * MIB);
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        rewrite_uuid(&mut file, [0x8d; 16]).unwrap();
+        drop(file);
+
+        assert_e2fsck_clean(&path, "UUID rewrite");
     }
 
     /// Cross a 64-group descriptor boundary so one reserved-GDT block becomes a live GDT block,
