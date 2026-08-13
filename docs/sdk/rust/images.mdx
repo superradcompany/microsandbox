@@ -9,21 +9,6 @@ Inspect, remove, prune, and import/export the local OCI image cache: the images 
 use microsandbox::{Image, ImagePruneReport};
 ```
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```rust
-use microsandbox::Image;
-
-for image in Image::list().await? {
-    println!("{} ({} layers)", image.reference(), image.layer_count());
-}
-
-let detail = Image::inspect("python:3.12").await?;
-println!("{:?}", detail.config.as_ref().and_then(|c| c.working_dir.as_deref()));
-
-let report = Image::prune().await?;
-println!("removed {} refs", report.image_refs_removed);
-```
 
 ## Ambient cache methods
 

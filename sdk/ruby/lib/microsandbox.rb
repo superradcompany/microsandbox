@@ -7,7 +7,7 @@ module Microsandbox
     %i[
       image cpus max_cpus memory max_memory workdir shell hostname user
       detached ephemeral max_duration idle_timeout replace root_disk
-      disable_network quiet_logs entrypoint init
+      disable_network quiet_logs entrypoint init vsock vsock_dgram
     ].each do |name|
       define_method(name) do |*args|
         public_send(:"#{name}!", *args)

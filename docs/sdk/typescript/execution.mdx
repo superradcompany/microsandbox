@@ -5,26 +5,6 @@ description: TypeScript SDK - Command execution API reference
 
 Run commands inside a running sandbox: collect output in one shot, stream it as it arrives, attach an interactive PTY, or pipe data to stdin. These methods live on a running [`Sandbox`](/sdk/typescript/sandbox). See [Commands](/sandboxes/commands) for usage examples.
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```typescript
-import { Sandbox } from "microsandbox";
-
-const sandbox = await Sandbox.create("api", { image: "python" });
-
-// 1. one-shot
-const out = await sandbox.exec("python3", ["-c", "print(1 + 1)"]);
-console.log(out.stdout()); // "2\n"
-
-// 2. stream
-const handle = await sandbox.execStream("tail", ["-f", "/var/log/app.log"]);
-for await (const event of handle) {
-  if (event.kind === "stdout") process.stdout.write(event.data);
-  if (event.kind === "exited") break;
-}
-
-await sandbox.stop();
-```
 
 ## Default workload
 

@@ -36,6 +36,10 @@ pub const CPU_ALLOCATION_MIGRATION_ID: &str = "m20260719_000001_create_cpu_alloc
 /// Migration that introduces host-global writeback dirty-credit reservations.
 pub const WRITEBACK_ALLOCATION_MIGRATION_ID: &str = "m20260803_000001_create_writeback_allocations";
 
+/// Migration that records per-NUMA-node guest memory promises for CPU allocations.
+pub const MEMORY_ALLOCATION_NODES_MIGRATION_ID: &str =
+    "m20260808_000001_create_memory_allocation_nodes";
+
 /// Migration that rebuilds the sandbox label index from persisted configs.
 pub const SANDBOX_LABEL_REBUILD_MIGRATION_ID: &str = "m20260810_000001_rebuild_sandbox_labels";
 
@@ -204,6 +208,13 @@ pub const MIGRATION_METADATA: &[MigrationMetadata] = &[
         summary: "remove host-global writeback allocation state",
     },
     MigrationMetadata {
+        id: MEMORY_ALLOCATION_NODES_MIGRATION_ID,
+        reversible: true,
+        affects_cache: false,
+        affects_user_data: false,
+        summary: "remove cooperative NUMA memory allocation state",
+    },
+    MigrationMetadata {
         id: SANDBOX_LABEL_REBUILD_MIGRATION_ID,
         reversible: true,
         affects_cache: false,
@@ -297,6 +308,7 @@ mod tests {
     fn canonical_applied_prefix_uses_metadata_order() {
         let applied = [
             SANDBOX_LABEL_REBUILD_MIGRATION_ID,
+            MEMORY_ALLOCATION_NODES_MIGRATION_ID,
             WRITEBACK_ALLOCATION_MIGRATION_ID,
             SNAPSHOT_ARTIFACT_TRANSITION_MIGRATION_ID,
             CPU_ALLOCATION_MIGRATION_ID,

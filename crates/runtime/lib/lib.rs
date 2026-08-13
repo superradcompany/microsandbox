@@ -19,6 +19,7 @@ pub mod control;
 pub mod cpu;
 pub mod exec_log;
 pub mod heartbeat;
+pub mod ipc;
 pub mod launch;
 pub mod logging;
 pub mod maintenance;

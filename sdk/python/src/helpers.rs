@@ -21,6 +21,7 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
     "max_memory",
     "max_cpus",
     "cpu_placement",
+    "placement_profile",
     "thp",
     "workdir",
     "shell",
@@ -47,6 +48,7 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
     "volumes",
     "patches",
     "ports",
+    "vsock",
     "network",
     "secrets",
     "on_secret_violation",
@@ -335,6 +337,9 @@ pub fn sandbox_builder_from_args(
             .map_err(pyo3::exceptions::PyValueError::new_err)?;
         builder = builder.cpu_placement(policy);
     }
+    if let Some(placement_profile) = extract_opt::<String>(kwargs, "placement_profile")? {
+        builder = builder.placement_profile(placement_profile);
+    }
     if let Some(thp) = extract_opt::<String>(kwargs, "thp")? {
         let policy = thp
             .parse::<TransparentHugePagePolicy>()
@@ -550,6 +555,11 @@ pub fn sandbox_builder_from_args(
     // Ports.
     if let Some(ports) = kwargs.get_item("ports")?.filter(|v| !v.is_none()) {
         builder = apply_ports(builder, &ports, PortBindingSource::PublicConfig)?;
+    }
+
+    // Guest-to-host vsock routes are independent of IP networking.
+    if let Some(vsock) = kwargs.get_item("vsock")?.filter(|v| !v.is_none()) {
+        builder = apply_vsock_routes(builder, &vsock)?;
     }
 
     // Network.
@@ -1388,6 +1398,44 @@ fn apply_ports(
             other => {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
                     "invalid port protocol: {other}"
+                )));
+            }
+        };
+    }
+
+    Ok(builder)
+}
+
+/// Apply the compact `{host_socket: port}` stream shorthand or a sequence of
+/// typed `VsockRoute` values for stream/datagram routes.
+fn apply_vsock_routes(
+    mut builder: microsandbox::sandbox::SandboxBuilder,
+    routes: &Bound<'_, PyAny>,
+) -> PyResult<microsandbox::sandbox::SandboxBuilder> {
+    if let Some(routes_dict) = mapping_to_dict(routes)? {
+        for (host_socket, port) in routes_dict.iter() {
+            builder = builder.vsock(host_socket.extract::<String>()?, port.extract::<u32>()?);
+        }
+        return Ok(builder);
+    }
+
+    let iter = routes.try_iter().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err(
+            "vsock must be a mapping of host_socket to port or a sequence of VsockRoute values",
+        )
+    })?;
+    for route in iter {
+        let route = config_dict(&route?, "VsockRoute")?;
+        let host_socket: String = extract_required(&route, "host_socket")?;
+        let port: u32 = extract_required(&route, "port")?;
+        let socket_type: String =
+            extract_opt(&route, "socket_type")?.unwrap_or_else(|| "stream".to_string());
+        builder = match socket_type.as_str() {
+            "stream" => builder.vsock(host_socket, port),
+            "dgram" => builder.vsock_dgram(host_socket, port),
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "invalid vsock socket type: {other}"
                 )));
             }
         };

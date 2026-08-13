@@ -28,6 +28,10 @@ use microsandbox_protocol::{
     message::{Message, MessageType},
 };
 use microsandbox_types::CpuPlacement;
+#[cfg(windows)]
+use microsandbox_vsock::WindowsNamedPipePortBackend;
+#[cfg(unix)]
+use microsandbox_vsock::{UnixDatagramPortBackend, UnixStreamPortBackend};
 use msb_krun::VmBuilder;
 use sea_orm::{ColumnTrait, EntityTrait, Set};
 use serde::{Deserialize, Serialize};
@@ -74,6 +78,10 @@ pub const PARENT_WATCH_FD: i32 = 97;
 /// Fixed fd used to pass startup JSON from `msb sandbox` to its launcher.
 pub const STARTUP_FD: i32 = 98;
 
+/// Fixed fd holding the inherited per-sandbox lifecycle ownership lock.
+#[cfg(unix)]
+pub const LIFECYCLE_LOCK_FD: i32 = 99;
+
 /// Control byte sent by the owner to stop parent-watch monitoring without stopping the sandbox.
 pub const PARENT_WATCH_DETACH: u8 = 1;
 
@@ -113,6 +121,12 @@ pub struct Config {
     /// lifecycle maintenance can remove ephemeral sandbox directories without
     /// inferring the path from `log_dir`.
     pub sandboxes_dir: PathBuf,
+
+    /// Root directory holding ephemeral host-runtime artifacts.
+    pub run_dir: PathBuf,
+
+    /// Process-lifetime ownership of this sandbox's runtime artifacts.
+    pub lifecycle_guard: crate::ipc::SandboxLifecycleGuard,
 
     /// Internal directory containing process-held CPU allocation leases.
     pub cpu_lease_dir: PathBuf,
@@ -280,6 +294,12 @@ pub struct VmConfig {
     /// Requested host CPU placement policy.
     pub cpu_placement: CpuPlacement,
 
+    /// Selected host profile name, retained for diagnostics.
+    pub placement_profile_name: Option<String>,
+
+    /// Host-resolved placement behavior.
+    pub placement_profile: Option<microsandbox_types::PlacementProfile>,
+
     /// Per-writable-raw-disk hard budget for buffered host dirty data.
     pub block_writeback_limit_bytes: Option<u64>,
 
@@ -326,6 +346,9 @@ pub struct VmConfig {
 
     /// Disk-image volume mounts attached as extra virtio-blk devices.
     pub disks: Vec<DiskMountSpec>,
+
+    /// Host Unix sockets exposed through virtio-vsock.
+    pub vsock: Vec<microsandbox_types::VsockRouteSpec>,
 
     /// Pre-built filesystem backends as `(tag, backend)` pairs.
     #[cfg(unix)]
@@ -428,6 +451,7 @@ impl std::fmt::Debug for VmConfig {
             .field("memory_mib", &self.memory_mib)
             .field("max_cpus", &self.max_cpus)
             .field("max_memory_mib", &self.max_memory_mib)
+            .field("placement_profile_name", &self.placement_profile_name)
             .field(
                 "block_writeback_limit_bytes",
                 &self.block_writeback_limit_bytes,
@@ -527,6 +551,13 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     // Heartbeats are per boot, while the runtime directory persists across starts.
     heartbeat::clear_stale(&config.runtime_dir)?;
 
+    #[cfg(unix)]
+    crate::ipc::prepare_canonical_socket_dir(
+        &config.run_dir,
+        &config.sandbox_name,
+        &config.agent_sock_path,
+    )?;
+
     // Create the relay and persist the run record with a single runtime hop.
     let (mut relay, db, run_db_id) = tokio_rt.block_on(async {
         let relay = AgentRelay::new(&config.agent_sock_path, Arc::clone(&shared));
@@ -551,8 +582,13 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         &db,
         run_db_id,
         &config.cpu_lease_dir,
-        config.vm.cpu_placement,
-        config.vm.max_cpus.max(config.vm.vcpus),
+        crate::cpu::PlacementRequest {
+            policy: config.vm.cpu_placement,
+            max_vcpus: config.vm.max_cpus.max(config.vm.vcpus),
+            boot_memory_mib: config.vm.memory_mib,
+            max_memory_mib: config.vm.max_memory_mib.max(config.vm.memory_mib),
+            profile: config.vm.placement_profile,
+        },
     )) {
         Ok(guard) => Arc::new(guard),
         Err(error) => {
@@ -586,6 +622,26 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         tokio_rt.spawn(async move {
             monitor_writeback_pressure(pressure_guard, pressure_db).await;
         });
+    }
+
+    #[cfg(unix)]
+    if let Err(error) = crate::ipc::publish_legacy_agent_link(
+        &config.run_dir,
+        &config.sandbox_name,
+        &config.agent_sock_path,
+    ) {
+        if let Err(release_error) = tokio_rt.block_on(writeback_guard.release(&db)) {
+            tracing::warn!(%release_error, "release writeback admission after legacy endpoint publication failure");
+        }
+        if let Err(release_error) = tokio_rt.block_on(cpu_guard.release(&db)) {
+            tracing::warn!(%release_error, "release CPU placement after legacy endpoint publication failure");
+        }
+        let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+        // Publication is no-replace. If it collided with another legacy
+        // endpoint, clean only this runtime's canonical namespace.
+        let _ =
+            crate::ipc::remove_canonical_socket_artifacts(&config.run_dir, &config.sandbox_name);
+        return Err(error.into());
     }
 
     // Attach the exec.log writer so the ring reader can capture the
@@ -638,6 +694,8 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     let exit_run_id = run_db_id;
     let exit_reason_for_observer = Arc::clone(&exit_reason);
     let exit_sock_path = config.agent_sock_path.clone();
+    let exit_run_dir = config.run_dir.clone();
+    let exit_sandbox_name = config.sandbox_name.clone();
     let exit_sandboxes_dir = config.sandboxes_dir.clone();
     let exit_log_writer = exec_log_writer.clone();
     // Capture the activated writer so the exit observer can release the slot
@@ -646,6 +704,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     let exit_metrics_writer = metrics_writer.clone();
     let exit_cpu_guard = Arc::clone(&cpu_guard);
     let exit_writeback_guard = Arc::clone(&writeback_guard);
+    let resolved_numa_topology = cpu_guard.numa_topology();
     #[cfg(windows)]
     let _agent_console_pipe_bridge = AgentConsolePipeBridge::spawn(
         agent_console_pipe_name(config.sandbox_id),
@@ -685,6 +744,22 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                     tracing::warn!(%error, "release CPU placement at VM exit");
                 }
 
+                // Runtime ownership remains live until this observer returns.
+                // Remove its deterministic endpoints before publishing a
+                // restartable terminal state; on failure, leave the active row
+                // for dead-PID maintenance to retry after the process exits.
+                let bound_result = crate::ipc::remove_socket_pair(&exit_sock_path);
+                let owned_result =
+                    crate::ipc::remove_sandbox_socket_artifacts(&exit_run_dir, &exit_sandbox_name);
+                if let Err(error) = bound_result.and(owned_result) {
+                    tracing::warn!(
+                        sandbox = %exit_sandbox_name,
+                        error = %error,
+                        "runtime exit socket cleanup failed; leaving lifecycle active for reaping"
+                    );
+                    return;
+                }
+
                 // Mark run as terminated with exit code and reason.
                 let _ = run_entity::Entity::update_many()
                     .col_expr(
@@ -719,9 +794,10 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                 // discrete flags, not the full policy) and no-ops for
                 // persistent sandboxes. Best-effort; recovery sweeps from
                 // other runtimes cover any failure here.
-                match crate::maintenance::cleanup_terminal_ephemeral_sandbox(
+                match crate::maintenance::cleanup_terminal_ephemeral_sandbox_owned(
                     &exit_db,
                     &exit_sandboxes_dir,
+                    &exit_run_dir,
                     exit_sandbox_id,
                 )
                 .await
@@ -753,13 +829,10 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
             {
                 tracing::debug!(error = %err, slot = writer.slot(), "metrics slot release at exit");
             }
-
-            // Clean up agent.sock — the relay's async cleanup won't run because
-            // _exit() is called immediately after this observer returns.
-            let _ = std::fs::remove_file(&exit_sock_path);
         },
         tokio_rt.handle().clone(),
         cpu_guard.vcpu_targets(),
+        resolved_numa_topology,
         writeback_limit.as_ref(),
     );
     let (
@@ -787,6 +860,9 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
             } else {
                 release_reserved_metrics_slot(config.metrics_slot.as_ref());
             }
+            let _ = crate::ipc::remove_socket_pair(&config.agent_sock_path);
+            let _ =
+                crate::ipc::remove_sandbox_socket_artifacts(&config.run_dir, &config.sandbox_name);
             return Err(e);
         }
     };
@@ -822,13 +898,37 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                 #[cfg(feature = "net")]
                 secrets,
             };
-            if let Err(e) =
-                crate::control::spawn_control_listener(control_sock_path.clone(), context)
-            {
-                tracing::warn!(
-                    "failed to start runtime control listener at {}: {e}",
-                    control_sock_path.display()
-                );
+            match crate::control::spawn_control_listener(control_sock_path.clone(), context) {
+                Ok(()) => {
+                    #[cfg(unix)]
+                    if let Err(error) = crate::ipc::publish_legacy_control_link(
+                        &config.run_dir,
+                        &config.sandbox_name,
+                        &control_sock_path,
+                    ) {
+                        if error.kind() == std::io::ErrorKind::InvalidInput {
+                            tracing::warn!(
+                                "legacy runtime control endpoint is unavailable for {}: {error}",
+                                config.sandbox_name
+                            );
+                        } else {
+                            let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+                            // Preserve the colliding compatibility entry. It
+                            // may belong to a still-live older runtime.
+                            let _ = crate::ipc::remove_canonical_socket_artifacts(
+                                &config.run_dir,
+                                &config.sandbox_name,
+                            );
+                            return Err(error.into());
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "failed to start runtime control listener at {}: {e}",
+                        control_sock_path.display()
+                    );
+                }
             }
         }
     }
@@ -851,7 +951,9 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
             } else {
                 release_reserved_metrics_slot(config.metrics_slot.as_ref());
             }
-            let _ = std::fs::remove_file(&config.agent_sock_path);
+            let _ = crate::ipc::remove_socket_pair(&config.agent_sock_path);
+            let _ =
+                crate::ipc::remove_sandbox_socket_artifacts(&config.run_dir, &config.sandbox_name);
             return Err(e);
         }
     }
@@ -916,8 +1018,14 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     {
         let maintenance_db = db.clone();
         let maintenance_dir = config.sandboxes_dir.clone();
+        let maintenance_run_dir = config.run_dir.clone();
         tokio_rt.spawn(async move {
-            crate::maintenance::run_startup_maintenance(&maintenance_db, &maintenance_dir).await;
+            crate::maintenance::run_startup_maintenance(
+                &maintenance_db,
+                &maintenance_dir,
+                &maintenance_run_dir,
+            )
+            .await;
         });
     }
 
@@ -1247,6 +1355,7 @@ fn build_vm(
     on_exit: impl Fn(i32) + Send + 'static,
     tokio_handle: tokio::runtime::Handle,
     vcpu_targets: Option<&[crate::cpu::LogicalCpuId]>,
+    numa_topology: Option<msb_krun::NumaTopology>,
     writeback_limit: Option<&msb_krun::WritebackLimit>,
 ) -> RuntimeResult<VmBuildOutput> {
     let mut exec_env = config.vm.env.clone();
@@ -1275,6 +1384,9 @@ fn build_vm(
                         .map(|cpu| msb_krun::HostCpuId::in_group(cpu.group, cpu.index))
                         .collect(),
                 );
+            }
+            if let Some(topology) = numa_topology {
+                m = m.numa_topology(topology);
             }
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             {
@@ -1486,6 +1598,97 @@ fn build_vm(
     let mut network_termination_handle = None;
     let mut network_metrics_handle = None;
     let mut network_secrets_handle = None;
+
+    // Vsock routes are independent of virtio-net. Microsandbox owns the host
+    // local IPC endpoints while libkrun retains framing, queues and credits.
+    #[cfg(unix)]
+    if !vm.vsock.is_empty() {
+        #[cfg(feature = "net")]
+        if vm.deployment_profile == microsandbox_types::DeploymentProfile::MultiTenant {
+            return Err(RuntimeError::Custom(
+                "host vsock routes are disabled for multi-tenant deployments".to_string(),
+            ));
+        }
+
+        let mut streams: Vec<(u32, Arc<dyn msb_krun::backends::vsock::VsockPortBackend>)> =
+            Vec::new();
+        let mut datagrams: Vec<(
+            u32,
+            Arc<dyn msb_krun::backends::vsock::VsockDatagramPortBackend>,
+        )> = Vec::new();
+
+        for route in &vm.vsock {
+            match route.socket_type {
+                microsandbox_types::VsockSocketType::Stream => {
+                    let backend =
+                        UnixStreamPortBackend::new(&route.host_socket).map_err(|err| {
+                            RuntimeError::Custom(format!(
+                                "initialize stream vsock route {}:{}: {err}",
+                                route.host_socket.display(),
+                                route.port
+                            ))
+                        })?;
+                    streams.push((route.port, Arc::new(backend)));
+                }
+                microsandbox_types::VsockSocketType::Dgram => {
+                    let backend =
+                        UnixDatagramPortBackend::new(&route.host_socket).map_err(|err| {
+                            RuntimeError::Custom(format!(
+                                "initialize datagram vsock route {}:{}: {err}",
+                                route.host_socket.display(),
+                                route.port
+                            ))
+                        })?;
+                    datagrams.push((route.port, Arc::new(backend)));
+                }
+            }
+        }
+
+        builder = builder.vsock(move |mut vsock| {
+            for (port, backend) in streams {
+                vsock = vsock.custom(port, backend);
+            }
+            for (port, backend) in datagrams {
+                vsock = vsock.custom_dgram(port, backend);
+            }
+            vsock
+        });
+    }
+
+    #[cfg(windows)]
+    if !vm.vsock.is_empty() {
+        #[cfg(feature = "net")]
+        if vm.deployment_profile == microsandbox_types::DeploymentProfile::MultiTenant {
+            return Err(RuntimeError::Custom(
+                "host vsock routes are disabled for multi-tenant deployments".to_string(),
+            ));
+        }
+
+        let mut streams: Vec<(u32, Arc<dyn msb_krun::backends::vsock::VsockPortBackend>)> =
+            Vec::new();
+        for route in &vm.vsock {
+            if route.socket_type == microsandbox_types::VsockSocketType::Dgram {
+                return Err(RuntimeError::Custom(
+                    "vsock datagram routes are not supported on Windows".to_string(),
+                ));
+            }
+            let backend = WindowsNamedPipePortBackend::new(&route.host_socket).map_err(|err| {
+                RuntimeError::Custom(format!(
+                    "initialize stream vsock route {}:{}: {err}",
+                    route.host_socket.display(),
+                    route.port
+                ))
+            })?;
+            streams.push((route.port, Arc::new(backend)));
+        }
+
+        builder = builder.vsock(move |mut vsock| {
+            for (port, backend) in streams {
+                vsock = vsock.custom(port, backend);
+            }
+            vsock
+        });
+    }
 
     // Network.
     #[cfg(feature = "net")]

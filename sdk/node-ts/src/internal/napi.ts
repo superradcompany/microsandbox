@@ -179,6 +179,7 @@ export interface NapiSandboxBuilderSetters {
   cpus(n: number): this;
   maxCpus(n: number): this;
   cpuPlacement(policy: "inherit" | "auto" | "spread" | "compact"): this;
+  placementProfile(profile: string): this;
   memory(mib: number): this;
   maxMemory(mib: number): this;
   thp(policy: "always" | "madvise" | "never"): this;
@@ -213,6 +214,8 @@ export interface NapiSandboxBuilderSetters {
   portBind(bind: string, host: number, guest: number): this;
   portUdp(host: number, guest: number): this;
   portUdpBind(bind: string, host: number, guest: number): this;
+  vsock(hostPath: string, port: number): this;
+  vsockDgram(hostPath: string, port: number): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   secret(configure: (b: any) => any): this;
   secretEnv(envVar: string, value: string, allowedHost: string): this;

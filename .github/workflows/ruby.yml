@@ -44,7 +44,22 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # The Ruby extension is its own Cargo project and must keep an exact crates.io
+      # dependency for source-gem releases. Until the matching core crate is published,
+      # patch CI to the checkout so new Ruby bindings can be tested in the same PR.
+      - name: Use checkout Rust SDK
+        shell: bash
+        run: |
+          ruby_cargo_home="$RUNNER_TEMP/microsandbox-ruby-cargo"
+          standalone_lock="$RUNNER_TEMP/microsandbox-ruby-standalone.lock"
+          mkdir -p "$ruby_cargo_home"
+          printf '[patch.crates-io]\nmicrosandbox = { path = "%s/sdk/rust" }\n' "$GITHUB_WORKSPACE" > "$ruby_cargo_home/config.toml"
+          mv "$GITHUB_WORKSPACE/sdk/ruby/ext/microsandbox/Cargo.lock" "$standalone_lock"
+          cp "$GITHUB_WORKSPACE/Cargo.lock" "$GITHUB_WORKSPACE/sdk/ruby/ext/microsandbox/Cargo.lock"
+          echo "CARGO_HOME=$ruby_cargo_home" >> "$GITHUB_ENV"
+          echo "MICROSANDBOX_RUBY_STANDALONE_LOCK=$standalone_lock" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
         with:
           workspaces: sdk/ruby/ext/microsandbox
           cache-bin: false
@@ -66,9 +81,16 @@ jobs:
         working-directory: sdk/ruby
         run: rake clean compile test
 
-      - name: Build and install source gem
+      # The temporary Cargo patch is outside the gem, so the artifact keeps its
+      # exact crates.io pin while this source-tree check uses the matching local API.
+      - name: Build and install source gem against checkout
         working-directory: sdk/ruby
         run: |
           gem build microsandbox.gemspec
           gem install --local microsandbox-*.gem --no-document
           ruby --disable-gems -e 'require "rubygems"; require "microsandbox"; abort unless Microsandbox.version == "0.6.8"'
+
+      - name: Restore standalone Ruby lockfile
+        if: always()
+        shell: bash
+        run: mv "$MICROSANDBOX_RUBY_STANDALONE_LOCK" "$GITHUB_WORKSPACE/sdk/ruby/ext/microsandbox/Cargo.lock"

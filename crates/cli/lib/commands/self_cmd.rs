@@ -3480,8 +3480,8 @@ mod tests {
         Migrator::up(db.inner(), None).await.unwrap();
 
         // The label rebuild is compatible with older releases, so its down
-        // migration only removes the migration record. Writeback state must
-        // remain until the next rollback step.
+        // migration only removes the migration record. NUMA memory and
+        // writeback state must remain until their own rollback steps.
         rollback_schema(db.inner(), 1).await.unwrap();
 
         let rows = db
@@ -3505,6 +3505,33 @@ mod tests {
             rows.len(),
             1,
             "writeback allocation should remain after one rollback"
+        );
+
+        rollback_schema(db.inner(), 1).await.unwrap();
+
+        let rows = db
+            .query_all_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'memory_allocation_node'",
+            ))
+            .await
+            .unwrap();
+        assert!(
+            rows.is_empty(),
+            "NUMA memory allocation should be rolled back"
+        );
+
+        let rows = db
+            .query_all_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'writeback_allocation'",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "writeback allocation should remain after NUMA rollback"
         );
 
         rollback_schema(db.inner(), 1).await.unwrap();

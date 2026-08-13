@@ -72,7 +72,7 @@ impl LocalBackend {
         tracing::debug!(sandbox = name, ?mode, "start_local: loading record");
         let pools = self.db().await?;
         let write_db = pools.write();
-        let model = Self::load_sandbox_record_reconciled(pools, name).await?;
+        let model = self.load_sandbox_record_reconciled(pools, name).await?;
         tracing::debug!(sandbox = name, status = ?model.status, "start_local: current status");
 
         if model.status == SandboxStatus::Running || model.status == SandboxStatus::Draining {
@@ -88,11 +88,59 @@ impl LocalBackend {
             )));
         }
 
+        let lifecycle_guard = crate::runtime::acquire_sandbox_lifecycle_guard(
+            &self.config().run_dir(),
+            name,
+            Duration::from_secs(5),
+        )
+        .await?;
+
+        // Removal or another start may have won while the initial reconciled
+        // snapshot was being loaded. Re-read under ownership and require the
+        // same persisted identity before changing state or touching sockets.
+        let current = load_sandbox_record(pools.read(), name).await?;
+        if current.id != model.id {
+            return Err(crate::MicrosandboxError::Runtime(format!(
+                "sandbox {name:?} identity changed from database id {} to {}; refusing stale start",
+                model.id, current.id
+            )));
+        }
+        if !matches!(
+            current.status,
+            SandboxStatus::Stopped | SandboxStatus::Crashed
+        ) {
+            return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
+                "cannot start sandbox {name:?}: status changed to {:?}",
+                current.status
+            )));
+        }
+        let model = current;
+
+        // Older runtimes did not hold the lifecycle lock and published their
+        // terminal DB state just before process exit. Preserve upgrade safety
+        // by waiting for that recorded owner before the new runtime acquires
+        // and cleans the deterministic socket namespace.
+        if let Some(pid) = Self::load_latest_run(pools.read(), model.id)
+            .await?
+            .and_then(|run| run.pid)
+            .filter(|pid| Self::pid_is_alive(*pid))
+        {
+            let start = std::time::Instant::now();
+            while start.elapsed() < Duration::from_secs(5) && !Self::pid_has_exited(pid) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            if !Self::pid_has_exited(pid) {
+                return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
+                    "cannot start sandbox {name:?}: previous runtime pid {pid} is still alive"
+                )));
+            }
+        }
+
         let mut config: SandboxConfig = serde_json::from_str(&model.config)?;
         self.apply_deployment_profile(&mut config);
         config.apply_runtime_defaults();
-        self.validate_sandbox_name_for_runtime(&config.spec.name)?;
         validate_hostname(config.spec.runtime.hostname.as_deref())?;
+        self.validate_sandbox_name_for_runtime(&config.spec.name)?;
         Self::validate_rootfs_source(&config.spec.image)?;
         validate_env(&config.spec.env)?;
         validate_labels(&config.spec.labels)?;
@@ -100,7 +148,10 @@ impl LocalBackend {
         self.validate_start_state(&config, &self.sandboxes_dir().join(name))?;
         Self::update_sandbox_status(write_db, model.id, SandboxStatus::Running).await?;
 
-        match self.create_sandbox_inner(config, model.id, mode).await {
+        match self
+            .create_sandbox_inner(config, model.id, mode, Some(lifecycle_guard))
+            .await
+        {
             Ok((local_state, returned_config)) => {
                 let sandbox = Sandbox::from_local(backend.clone(), local_state, returned_config);
                 if let Err(err) = Self::update_sandbox_active_config(
@@ -186,14 +237,14 @@ impl LocalBackend {
             let start = std::time::Instant::now();
             let poll_interval = Duration::from_millis(50);
             while start.elapsed() < timeout {
-                if pids.iter().all(|pid| Self::pid_is_dead_or_reaped(*pid)) {
+                if pids.iter().all(|pid| Self::pid_has_exited(*pid)) {
                     break;
                 }
                 tokio::time::sleep(poll_interval).await;
             }
         }
 
-        let all_dead = pids.is_empty() || pids.iter().all(|pid| Self::pid_is_dead_or_reaped(*pid));
+        let all_dead = pids.is_empty() || pids.iter().all(|pid| Self::pid_has_exited(*pid));
         if all_dead {
             let db = self.db().await?.write();
             if let Err(e) = Self::update_sandbox_status(db, model.id, SandboxStatus::Stopped).await
@@ -268,7 +319,7 @@ impl LocalBackend {
             .one(pools.read())
             .await?
             .ok_or_else(|| crate::MicrosandboxError::SandboxNotFound(name.into()))?;
-        let model = Self::reconcile_sandbox_runtime_state(pools, model).await?;
+        let model = self.reconcile_sandbox_runtime_state(pools, model).await?;
         let run = Self::load_active_run(pools.read(), model.id).await?;
         let pid = Self::pid_from_run(run.as_ref());
         Ok((model, pid))
@@ -314,7 +365,7 @@ impl LocalBackend {
 
         let mut reconciled = Vec::with_capacity(sandboxes.len());
         for sandbox in sandboxes {
-            let model = Self::reconcile_sandbox_runtime_state(pools, sandbox).await?;
+            let model = self.reconcile_sandbox_runtime_state(pools, sandbox).await?;
             reconciled.push(model);
         }
 
@@ -390,18 +441,36 @@ impl LocalBackend {
 impl LocalBackend {
     /// Load a sandbox row by name and reconcile its runtime state.
     async fn load_sandbox_record_reconciled(
+        &self,
         pools: &DbPools,
         name: &str,
     ) -> MicrosandboxResult<sandbox_entity::Model> {
         let sandbox = load_sandbox_record(pools.read(), name).await?;
-        Self::reconcile_sandbox_runtime_state(pools, sandbox).await
+        self.reconcile_sandbox_runtime_state(pools, sandbox).await
     }
 
     /// Reconcile a Running/Draining row against the owning process's
     /// liveness, marking it terminal when the runtime is gone.
     async fn reconcile_sandbox_runtime_state(
+        &self,
         pools: &DbPools,
         sandbox: sandbox_entity::Model,
+    ) -> MicrosandboxResult<sandbox_entity::Model> {
+        let run_dir = self.config().run_dir();
+        let sandboxes_dir = self.config().sandboxes_dir();
+        Self::reconcile_sandbox_runtime_state_with_paths(
+            pools,
+            sandbox,
+            Some((&run_dir, &sandboxes_dir)),
+        )
+        .await
+    }
+
+    /// Reconcile runtime state with optional exact socket roots.
+    async fn reconcile_sandbox_runtime_state_with_paths(
+        pools: &DbPools,
+        sandbox: sandbox_entity::Model,
+        socket_roots: Option<(&Path, &Path)>,
     ) -> MicrosandboxResult<sandbox_entity::Model> {
         if !matches!(
             sandbox.status,
@@ -411,6 +480,40 @@ impl LocalBackend {
         }
 
         let run = Self::load_active_run(pools.read(), sandbox.id).await?;
+        if run
+            .as_ref()
+            .and_then(|run| run.pid)
+            .is_some_and(Self::pid_is_alive)
+        {
+            return Ok(sandbox);
+        }
+
+        // A dead-PID snapshot is not sufficient: another process may already
+        // have reconciled and restarted this name. Serialize on the runtime
+        // ownership lock, then re-read the exact row/run before unlinking.
+        let _guard = if let Some((run_dir, _)) = socket_roots {
+            let Some(guard) =
+                microsandbox_runtime::ipc::try_acquire_lifecycle_guard(run_dir, &sandbox.name)?
+            else {
+                return Ok(sandbox);
+            };
+            Some(guard)
+        } else {
+            None
+        };
+        let Some(sandbox) = sandbox_entity::Entity::find_by_id(sandbox.id)
+            .one(pools.read())
+            .await?
+        else {
+            return Err(crate::MicrosandboxError::SandboxNotFound(sandbox.name));
+        };
+        if !matches!(
+            sandbox.status,
+            SandboxStatus::Running | SandboxStatus::Draining
+        ) {
+            return Ok(sandbox);
+        }
+        let run = Self::load_active_run(pools.read(), sandbox.id).await?;
 
         // No run record yet while Running means the sandbox is still starting up
         // (the child process has not inserted its PID). A Draining row with no
@@ -418,6 +521,13 @@ impl LocalBackend {
         // of view and should not keep stop callers polling forever.
         let Some(run) = run else {
             if sandbox.status == SandboxStatus::Draining {
+                if let Some((run_dir, sandboxes_dir)) = socket_roots {
+                    crate::runtime::remove_sandbox_socket_artifacts_at(
+                        run_dir,
+                        sandboxes_dir,
+                        &sandbox.name,
+                    )?;
+                }
                 let (terminal_status, reason) = Self::stale_runtime_terminal_state(sandbox.status);
                 Self::mark_sandbox_runtime_stale(
                     pools.write(),
@@ -441,6 +551,13 @@ impl LocalBackend {
             return Ok(sandbox);
         }
 
+        if let Some((run_dir, sandboxes_dir)) = socket_roots {
+            crate::runtime::remove_sandbox_socket_artifacts_at(
+                run_dir,
+                sandboxes_dir,
+                &sandbox.name,
+            )?;
+        }
         let (terminal_status, reason) = Self::stale_runtime_terminal_state(sandbox.status);
         Self::mark_sandbox_runtime_stale(
             pools.write(),
@@ -466,6 +583,19 @@ impl LocalBackend {
             .filter(run_entity::Column::SandboxId.eq(sandbox_id))
             .filter(run_entity::Column::Status.eq(run_entity::RunStatus::Running))
             .order_by_desc(run_entity::Column::StartedAt)
+            .one(db)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Load the most recent run record regardless of lifecycle status.
+    pub(crate) async fn load_latest_run(
+        db: &DbReadConnection,
+        sandbox_id: i32,
+    ) -> MicrosandboxResult<Option<run_entity::Model>> {
+        run_entity::Entity::find()
+            .filter(run_entity::Column::SandboxId.eq(sandbox_id))
+            .order_by_desc(run_entity::Column::Id)
             .one(db)
             .await
             .map_err(Into::into)
@@ -657,21 +787,12 @@ impl LocalBackend {
         microsandbox_utils::process::pid_is_alive(pid)
     }
 
-    /// Whether `pid` has exited (reaping it when we are the parent).
-    #[cfg(unix)]
-    fn pid_is_dead_or_reaped(pid: i32) -> bool {
-        let mut status = 0;
-        let result = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
-        if result == pid {
-            return true;
-        }
-
-        !Self::pid_is_alive(pid)
-    }
-
-    /// Whether `pid` has exited.
-    #[cfg(windows)]
-    fn pid_is_dead_or_reaped(pid: i32) -> bool {
+    /// Whether `pid` has exited without consuming its wait status.
+    ///
+    /// The runtime's owning `Child` or Tokio task must remain the sole reaper;
+    /// probing with `waitpid` here can steal the status and make that waiter
+    /// fail with `ECHILD`.
+    fn pid_has_exited(pid: i32) -> bool {
         !Self::pid_is_alive(pid)
     }
 
@@ -1011,6 +1132,23 @@ mod tests {
         pid
     }
 
+    #[test]
+    #[cfg(unix)]
+    fn pid_exit_probe_does_not_reap_child() {
+        let mut child = Command::new("sh").arg("-c").arg("exit 0").spawn().unwrap();
+        let pid = child.id() as i32;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+
+        // Wait until the process is a zombie. The exit probe must observe that
+        // state without consuming the status owned by `child` below.
+        while LocalBackend::pid_is_alive(pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert!(LocalBackend::pid_has_exited(pid));
+        assert!(child.wait().unwrap().success());
+    }
+
     #[tokio::test]
     async fn list_pages_after_filtering_by_labels() {
         let temp = tempdir().unwrap();
@@ -1063,6 +1201,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_reconcile_sandbox_runtime_state_marks_dead_processes_crashed() {
+        #[cfg(unix)]
+        let temp = tempfile::Builder::new()
+            .prefix("msb-lazy-reap")
+            .tempdir_in("/tmp")
+            .unwrap();
+        #[cfg(not(unix))]
         let temp = tempdir().unwrap();
         let db_path = temp.path().join("test.db");
         let pools = open_test_pools(&db_path).await;
@@ -1090,10 +1234,42 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let reconciled = LocalBackend::reconcile_sandbox_runtime_state(&pools, sandbox)
-            .await
+        let run_dir = temp.path().join("run");
+        let sandboxes_dir = temp.path().join("sandboxes");
+        #[cfg(unix)]
+        let socket_paths = {
+            let paths = microsandbox_runtime::ipc::sandbox_socket_paths(&run_dir, "stale");
+            std::fs::create_dir_all(&paths.canonical_dir).unwrap();
+            std::fs::write(&paths.agent, b"stale").unwrap();
+            std::fs::write(&paths.control, b"stale").unwrap();
+            microsandbox_runtime::ipc::publish_legacy_agent_link(&run_dir, "stale", &paths.agent)
+                .unwrap();
+            microsandbox_runtime::ipc::publish_legacy_control_link(
+                &run_dir,
+                "stale",
+                &paths.control,
+            )
             .unwrap();
+            paths
+        };
+        let reconciled = LocalBackend::reconcile_sandbox_runtime_state_with_paths(
+            &pools,
+            sandbox,
+            Some((&run_dir, &sandboxes_dir)),
+        )
+        .await
+        .unwrap();
         assert_eq!(reconciled.status, SandboxStatus::Crashed);
+        #[cfg(unix)]
+        for path in [
+            &socket_paths.agent,
+            &socket_paths.control,
+            &socket_paths.legacy_agent,
+            &socket_paths.legacy_control,
+            &socket_paths.canonical_dir,
+        ] {
+            assert!(std::fs::symlink_metadata(path).is_err());
+        }
 
         let run = run_entity::Entity::find_by_id(run_id)
             .one(pools.write())
@@ -1139,9 +1315,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let reconciled = LocalBackend::reconcile_sandbox_runtime_state(&pools, sandbox)
-            .await
-            .unwrap();
+        let reconciled =
+            LocalBackend::reconcile_sandbox_runtime_state_with_paths(&pools, sandbox, None)
+                .await
+                .unwrap();
         assert_eq!(reconciled.status, SandboxStatus::Stopped);
 
         let run = run_entity::Entity::find_by_id(run_id)
@@ -1176,9 +1353,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let reconciled = LocalBackend::reconcile_sandbox_runtime_state(&pools, sandbox)
-            .await
-            .unwrap();
+        let reconciled =
+            LocalBackend::reconcile_sandbox_runtime_state_with_paths(&pools, sandbox, None)
+                .await
+                .unwrap();
 
         assert_eq!(reconciled.status, SandboxStatus::Stopped);
     }
@@ -1322,7 +1500,8 @@ mod tests {
             .unwrap();
 
         for sandbox in stale {
-            let _ = LocalBackend::reconcile_sandbox_runtime_state(&pools, sandbox).await;
+            let _ = LocalBackend::reconcile_sandbox_runtime_state_with_paths(&pools, sandbox, None)
+                .await;
         }
 
         // --- Assertions ---

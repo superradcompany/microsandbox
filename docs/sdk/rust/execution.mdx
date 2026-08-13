@@ -5,27 +5,6 @@ description: Rust SDK - Command execution API reference
 
 Run commands inside a running sandbox: buffer the output in one call, stream it event by event, drive a shell, or bridge your terminal to an interactive PTY session. See [Commands](/sandboxes/commands) for usage examples.
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```rust
-use microsandbox::Sandbox;
-
-let sb = Sandbox::builder("api").image("python").create().await?;
-
-// Buffered: run and collect everything
-let out = sb.exec("python", ["-c", "print('hi')"]).await?;
-println!("{}", out.stdout()?);
-
-// Streaming: process output as it arrives
-let mut handle = sb.exec_stream("tail", ["-f", "/var/log/app.log"]).await?;
-while let Some(event) = handle.recv().await {
-    if let microsandbox::ExecEvent::Stdout(chunk) = event {
-        print!("{}", String::from_utf8_lossy(&chunk));
-    }
-}
-
-sb.stop().await?;
-```
 
 ## Default workload
 

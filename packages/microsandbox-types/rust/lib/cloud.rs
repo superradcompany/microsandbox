@@ -19,7 +19,7 @@ use crate::domain::{
     Rlimit, RlimitResource, RootDisk, RootfsSource, SandboxLogLevel, SandboxPolicy,
     SandboxResources, SandboxRuntimeOptions, SandboxSpec, SecretEntry, SecretInjection,
     SecretsConfig, SecurityProfile, StatVirtualization, TransparentHugePagePolicy, ViolationAction,
-    VolumeMount, default_private, default_strict,
+    VolumeMount, VsockSpec, default_private, default_strict,
 };
 use crate::modify::SecretSource;
 use crate::{TypesError, TypesResult};
@@ -102,14 +102,6 @@ pub struct CloudSandboxResources {
 
     /// Guest memory in MiB.
     pub memory_mib: u32,
-
-    /// Host CPU placement requested for the sandbox.
-    #[serde(default, skip_serializing_if = "CpuPlacement::is_inherit")]
-    pub cpu_placement: CpuPlacement,
-
-    /// Guest transparent huge-page policy selected at boot.
-    #[serde(default, skip_serializing_if = "TransparentHugePagePolicy::is_madvise")]
-    pub thp: TransparentHugePagePolicy,
 
     /// Writable disk size in MiB. Applies only to OCI root filesystems.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -987,8 +979,12 @@ impl TryFrom<CloudSandboxSpec> for SandboxSpec {
             // deserialization for legacy configs).
             max_cpus: spec.resources.vcpus,
             max_memory_mib: spec.resources.memory_mib,
-            cpu_placement: spec.resources.cpu_placement,
-            thp: spec.resources.thp,
+            // Host runtime policy never crosses the cloud wire. A managed
+            // service applies its own placement and guest-memory defaults
+            // after resolving the tenant-controlled resource request.
+            cpu_placement: CpuPlacement::Inherit,
+            placement_profile: None,
+            thp: TransparentHugePagePolicy::Madvise,
         };
 
         // Fields not present on `CloudNetworkSpec` are defaulted here, listed
@@ -1029,6 +1025,7 @@ impl TryFrom<CloudSandboxSpec> for SandboxSpec {
             mounts: spec.mounts.into_iter().map(Into::into).collect(),
             patches: spec.patches.into_iter().map(Into::into).collect(),
             network,
+            vsock: VsockSpec::default(),
             init: spec.init,
             pull_policy: spec.pull_policy.into(),
             security_profile: spec.security_profile,
@@ -1079,8 +1076,6 @@ impl From<SandboxSpec> for CloudSandboxSpec {
             resources: CloudSandboxResources {
                 vcpus: spec.resources.cpus,
                 memory_mib: spec.resources.memory_mib,
-                cpu_placement: spec.resources.cpu_placement,
-                thp: spec.resources.thp,
                 disk_size_mib,
             },
             runtime: CloudSandboxRuntimeOptions {
@@ -1117,8 +1112,6 @@ impl Default for CloudSandboxResources {
         Self {
             vcpus: resources.cpus,
             memory_mib: resources.memory_mib,
-            cpu_placement: resources.cpu_placement,
-            thp: resources.thp,
             disk_size_mib: None,
         }
     }
@@ -1508,17 +1501,25 @@ mod tests {
     }
 
     #[test]
-    fn cloud_resources_preserve_transparent_huge_page_policy() {
-        let mut req = CloudCreateSandboxRequest {
+    fn cloud_resources_do_not_carry_host_runtime_policy() {
+        let mut domain = SandboxSpec::try_from(CloudCreateSandboxRequest {
             spec: spec("agent-1"),
-        };
-        req.spec.resources.thp = TransparentHugePagePolicy::Always;
-
-        let domain = SandboxSpec::try_from(req).unwrap();
-        assert_eq!(domain.resources.thp, TransparentHugePagePolicy::Always);
+        })
+        .unwrap();
+        domain.resources.cpu_placement = CpuPlacement::Spread;
+        domain.resources.placement_profile = Some("locality".into());
+        domain.resources.thp = TransparentHugePagePolicy::Always;
 
         let cloud = CloudSandboxSpec::from(domain);
-        assert_eq!(cloud.resources.thp, TransparentHugePagePolicy::Always);
+        let wire = serde_json::to_value(&cloud.resources).unwrap();
+        assert!(wire.get("cpu_placement").is_none());
+        assert!(wire.get("placement_profile").is_none());
+        assert!(wire.get("thp").is_none());
+
+        let round_trip = SandboxSpec::try_from(cloud).unwrap();
+        assert_eq!(round_trip.resources.cpu_placement, CpuPlacement::Inherit);
+        assert!(round_trip.resources.placement_profile.is_none());
+        assert_eq!(round_trip.resources.thp, TransparentHugePagePolicy::Madvise);
     }
 
     #[test]

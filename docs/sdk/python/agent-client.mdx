@@ -7,16 +7,6 @@ description: Python SDK - Low-level agentd client reference
 
 All request and response bodies are raw CBOR bytes. The SDK handles framing and correlation ids, but it does not encode or decode the CBOR message body for you. The raw body is the full CBOR-encoded protocol `Message` body (`v`, `t`, and `p`), not just the inner payload.
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```python
-from microsandbox import AgentClient
-
-client = await AgentClient.connect_sandbox("dev")   # 1. connect
-ready = client.ready_bytes()                        # 2. inspect handshake
-frame = await client.request(0, body)               # 3. raw request/response
-await client.close()                                # 4. close
-```
 
 ## Constants
 

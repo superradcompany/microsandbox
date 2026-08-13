@@ -7,35 +7,6 @@ Configure a sandbox's network stack: a first-match-wins egress/ingress policy, p
 
 The Go SDK exposes networking as a single [`NetworkConfig`](#networkconfig) struct passed to [`WithNetwork`](#m-withnetwork). Common shapes come from the [`NetworkPolicy`](#networkpolicy) factory; custom firewalls are built by populating `NetworkConfig.Rules` directly.
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```go
-import m "github.com/superradcompany/microsandbox/sdk/go"
-
-// Public internet profile
-sb, err := m.CreateSandbox(ctx, "worker",
-    m.WithImage("alpine"),
-    m.WithNetwork(m.NetworkPolicy.FromProfiles(m.NetworkProfilePublic)),
-)
-
-// Or a custom first-match-wins firewall
-sb, err = m.CreateSandbox(ctx, "ci-runner",
-    m.WithImage("python:3.12"),
-    m.WithNetwork(&m.NetworkConfig{
-        DefaultEgress:  m.PolicyActionDeny,
-        DefaultIngress: m.PolicyActionAllow,
-        Rules: []m.PolicyRule{
-            {
-                Action:      m.PolicyActionAllow,
-                Direction:   m.PolicyDirectionEgress,
-                Destination: "api.example.com",
-                Protocol:    m.PolicyProtocolTCP,
-                Port:        "443",
-            },
-        },
-    }),
-)
-```
 
 ## Functions
 

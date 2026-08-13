@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import enum
+import os
 import sys
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -183,6 +184,11 @@ class Protocol(StrEnum):
 class PortProtocol(StrEnum):
     TCP = "tcp"
     UDP = "udp"
+
+
+class VsockSocketType(StrEnum):
+    STREAM = "stream"
+    DGRAM = "dgram"
 
 
 class DestGroup(StrEnum):
@@ -1501,6 +1507,30 @@ class PortBinding:
             "guest_port": self.guest_port,
             "bind": self.bind,
             "protocol": _enum_value(self.protocol, PortProtocol, "PortBinding.protocol"),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class VsockRoute:
+    """Host Unix socket or Windows named pipe exposed on host CID 2."""
+
+    host_socket: str | os.PathLike[str]
+    port: int
+    socket_type: VsockSocketType = VsockSocketType.STREAM
+
+    @classmethod
+    def stream(cls, host_socket: str | os.PathLike[str], port: int) -> VsockRoute:
+        return cls(host_socket=host_socket, port=port)
+
+    @classmethod
+    def dgram(cls, host_socket: str | os.PathLike[str], port: int) -> VsockRoute:
+        return cls(host_socket=host_socket, port=port, socket_type=VsockSocketType.DGRAM)
+
+    def _to_dict(self) -> dict:
+        return {
+            "host_socket": os.fspath(self.host_socket),
+            "port": self.port,
+            "socket_type": _enum_value(self.socket_type, VsockSocketType, "VsockRoute.socket_type"),
         }
 
 

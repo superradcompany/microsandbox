@@ -38,6 +38,7 @@
             "icon": "box",
             "pages": [
               "sandboxes/overview",
+              "sandbox-config",
               "sandboxes/cpu-placement",
               "sandboxes/lifecycle",
               "sandboxes/commands",
@@ -58,6 +59,7 @@
             "icon": "network-wired",
             "pages": [
               "networking/overview",
+              "networking/vsock",
               "networking/dns",
               "networking/tls"
             ]

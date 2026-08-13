@@ -809,6 +809,10 @@ fn default_port_protocol() -> String {
     "tcp".into()
 }
 
+fn default_vsock_socket_type() -> String {
+    "stream".into()
+}
+
 /// Custom policy. Parity-aligned with Node/Python: `default_egress` and
 /// `default_ingress` are the asymmetric default actions. Empty defaults to
 /// deny egress / allow ingress (matching the default public profile).
@@ -979,6 +983,7 @@ struct SandboxCreateOpts {
     max_memory_mib: Option<u32>,
     max_cpus: Option<u8>,
     cpu_placement: Option<String>,
+    placement_profile: Option<String>,
     thp: Option<String>,
     workdir: Option<String>,
     shell: Option<String>,
@@ -1037,6 +1042,9 @@ struct SandboxCreateOpts {
     /// Top-level port bindings with explicit bind addresses.
     #[serde(default)]
     port_bindings: Vec<PortBindingOpts>,
+    /// Guest-to-host virtio-vsock routes backed by host Unix sockets.
+    #[serde(default)]
+    vsock: Vec<VsockRouteOpts>,
     #[serde(default)]
     secrets: Vec<SecretOpts>,
     #[serde(default)]
@@ -1064,6 +1072,14 @@ struct PortBindingOpts {
     guest_port: u16,
     #[serde(default = "default_port_protocol")]
     protocol: String,
+}
+
+#[derive(serde::Deserialize)]
+struct VsockRouteOpts {
+    host_socket: String,
+    port: u32,
+    #[serde(default = "default_vsock_socket_type")]
+    socket_type: String,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -2103,6 +2119,9 @@ pub unsafe extern "C" fn msb_sandbox_create(
                     .map_err(FfiError::invalid_argument)?;
                 builder = builder.cpu_placement(policy);
             }
+            if let Some(placement_profile) = opts.placement_profile {
+                builder = builder.placement_profile(placement_profile);
+            }
             if let Some(thp) = opts.thp {
                 let policy = thp
                     .parse::<microsandbox::sandbox::TransparentHugePagePolicy>()
@@ -2206,6 +2225,18 @@ pub unsafe extern "C" fn msb_sandbox_create(
             }
             for port in &opts.port_bindings {
                 builder = apply_port_binding(builder, port)?;
+            }
+            for route in opts.vsock {
+                builder = match route.socket_type.as_str() {
+                    "" | "stream" => builder.vsock(route.host_socket, route.port),
+                    "dgram" => builder.vsock_dgram(route.host_socket, route.port),
+                    other => {
+                        return Err(FfiError::new(
+                            error_kind::INVALID_CONFIG,
+                            format!("invalid vsock socket type: {other}"),
+                        ));
+                    }
+                };
             }
             // Network (policy, DNS, TLS, ports-in-network).
             if let Some(ref net) = opts.network {

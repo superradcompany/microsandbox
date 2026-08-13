@@ -688,6 +688,7 @@ impl Default for SandboxConfig {
                     max_cpus: default_cpus(),
                     max_memory_mib: default_memory_mib(),
                     cpu_placement: Default::default(),
+                    placement_profile: None,
                     thp: TransparentHugePagePolicy::Madvise,
                 },
                 runtime: SandboxRuntimeOptions {
@@ -1406,6 +1407,7 @@ mod tests {
                 max_cpus: 2,
                 max_memory_mib: 1024,
                 cpu_placement: Default::default(),
+                placement_profile: None,
                 thp: TransparentHugePagePolicy::Madvise,
             },
             runtime: SandboxRuntimeOptions {

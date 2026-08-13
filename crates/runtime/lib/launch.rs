@@ -10,7 +10,7 @@
 
 use std::path::PathBuf;
 
-use microsandbox_types::{CpuPlacement, DeploymentProfile};
+use microsandbox_types::{CpuPlacement, DeploymentProfile, PlacementProfile, VsockRouteSpec};
 use serde::{Deserialize, Serialize};
 
 use microsandbox_types::TransparentHugePagePolicy;
@@ -42,6 +42,10 @@ pub struct LaunchConfig {
     /// Root directory holding every sandbox's persisted state.
     pub sandboxes_dir: PathBuf,
 
+    /// Root directory holding ephemeral host-runtime artifacts.
+    #[serde(default)]
+    pub run_dir: PathBuf,
+
     /// Internal directory containing process-held CPU allocation leases.
     pub cpu_lease_dir: PathBuf,
 
@@ -50,6 +54,14 @@ pub struct LaunchConfig {
 
     /// Requested host CPU placement policy.
     pub cpu_placement: CpuPlacement,
+
+    /// Host-defined profile name retained for diagnostics and missing-profile validation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_profile_name: Option<String>,
+
+    /// Host-resolved profile definition; sandbox clients submit only the name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_profile: Option<PlacementProfile>,
 
     /// Path to the Unix domain socket for the agent relay.
     pub agent_sock: PathBuf,
@@ -114,6 +126,10 @@ pub struct LaunchConfig {
     /// Sandbox slot for deterministic network address derivation.
     #[cfg(feature = "net")]
     pub sandbox_slot: u64,
+
+    /// Host Unix sockets exposed through virtio-vsock.
+    #[serde(default)]
+    pub vsock: Vec<VsockRouteSpec>,
 }
 
 /// Lifetime bounds for the sandbox.

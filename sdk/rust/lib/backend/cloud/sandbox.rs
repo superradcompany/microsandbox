@@ -413,6 +413,9 @@ fn reject_dropped_cloud_create_fields(config: &SandboxConfig) -> MicrosandboxRes
     if config.snapshot_upper_source.is_some() {
         return Err(unsupported("from_snapshot"));
     }
+    if !config.spec.vsock.is_empty() {
+        return Err(unsupported("vsock"));
+    }
 
     Ok(())
 }

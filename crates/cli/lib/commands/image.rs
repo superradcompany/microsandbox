@@ -153,6 +153,13 @@ pub struct ImagePruneArgs {
     pub quiet: bool,
 }
 
+/// Optional settings supplied by callers that need more than the normal pull defaults.
+#[derive(Default)]
+struct PullOverrides {
+    materialization: Option<pull::PullMaterialization>,
+    explicit_auth: Option<microsandbox_image::RegistryAuth>,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -168,7 +175,10 @@ pub async fn run(args: ImageArgs) -> anyhow::Result<()> {
                 args.insecure,
                 args.ca_certs,
                 microsandbox_image::PullPolicy::IfMissing,
-                args.materialize,
+                PullOverrides {
+                    materialization: args.materialize,
+                    ..PullOverrides::default()
+                },
             )
             .await
         }
@@ -190,7 +200,10 @@ pub async fn run_pull(args: pull::PullArgs) -> anyhow::Result<()> {
         args.insecure,
         args.ca_certs,
         microsandbox_image::PullPolicy::IfMissing,
-        args.materialize,
+        PullOverrides {
+            materialization: args.materialize,
+            ..PullOverrides::default()
+        },
     )
     .await
 }
@@ -203,9 +216,13 @@ async fn run_pull_inner(
     insecure: bool,
     cli_ca_certs: Option<String>,
     pull_policy: microsandbox_image::PullPolicy,
-    materialization: Option<pull::PullMaterialization>,
+    pull_overrides: PullOverrides,
 ) -> anyhow::Result<()> {
     let start = Instant::now();
+    let PullOverrides {
+        materialization,
+        explicit_auth,
+    } = pull_overrides;
 
     let backend = crate::commands::common::resolve_local_backend()?;
     let local = crate::commands::common::local_backend_ref(&backend)?;
@@ -272,7 +289,10 @@ async fn run_pull_inner(
 
     let _ = display_ready_rx.recv();
 
-    let auth = global.resolve_registry_auth(image_ref.registry())?;
+    let auth = match explicit_auth {
+        Some(auth) => auth,
+        None => global.resolve_registry_auth(image_ref.registry())?,
+    };
     let mut ca_certs = global.resolve_ca_certs().await?;
     if let Some(path) = &cli_ca_certs {
         let data = tokio::fs::read(path)
@@ -369,6 +389,16 @@ pub(crate) async fn pull_if_missing(
     quiet: bool,
     materialization: pull::PullMaterialization,
 ) -> anyhow::Result<()> {
+    pull_if_missing_with_auth(reference, quiet, materialization, None).await
+}
+
+/// Pull an image if missing, honoring an explicit per-sandbox registry credential.
+pub(crate) async fn pull_if_missing_with_auth(
+    reference: &str,
+    quiet: bool,
+    materialization: pull::PullMaterialization,
+    explicit_auth: Option<microsandbox_image::RegistryAuth>,
+) -> anyhow::Result<()> {
     // Local paths (directories, disk images) are not pullable.
     if reference.starts_with('.') || reference.starts_with('/') {
         return Ok(());
@@ -402,7 +432,10 @@ pub(crate) async fn pull_if_missing(
         false,
         None,
         microsandbox_image::PullPolicy::IfMissing,
-        Some(materialization),
+        PullOverrides {
+            materialization: Some(materialization),
+            explicit_auth,
+        },
     )
     .await
 }

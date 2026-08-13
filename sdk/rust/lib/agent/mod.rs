@@ -141,12 +141,12 @@ impl AgentClient {
     /// Resolve a sandbox name to its agent relay socket path **without
     /// connecting**.
     ///
-    /// Returns the same path [`connect_sandbox`] would dial — the hashed path
-    /// under the runtime directory when it fits the platform's Unix-socket
-    /// length limit, and the legacy name-derived path otherwise. Useful for
-    /// talking to `agentd` over a raw byte transport (e.g. a transparent relay
-    /// that splices bytes to/from the socket) instead of this frame client. The
-    /// sandbox need not be running.
+    /// Returns the same path [`connect_sandbox`] would dial: the canonical
+    /// per-sandbox runtime path, an existing legacy flat path when talking to
+    /// an older runtime, or the retained in-sandbox fallback for deep homes.
+    /// Useful for talking to `agentd` over a raw byte transport (e.g. a
+    /// transparent relay that splices bytes to/from the socket) instead of
+    /// this frame client. The sandbox need not be running.
     pub fn socket_path(name: &str) -> crate::MicrosandboxResult<std::path::PathBuf> {
         crate::runtime::agent_socket_path(name)
     }

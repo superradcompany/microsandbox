@@ -201,7 +201,9 @@ impl AgentListener {
     fn cleanup(&self, endpoint: &Path) {
         #[cfg(unix)]
         {
-            let _ = std::fs::remove_file(endpoint);
+            // The control endpoint is derived from the relay endpoint and is
+            // owned by the same runtime lifetime.
+            let _ = crate::ipc::remove_socket_pair(endpoint);
         }
 
         #[cfg(windows)]

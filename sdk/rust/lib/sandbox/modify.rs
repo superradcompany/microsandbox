@@ -430,9 +430,10 @@ impl SecretPatchBuilder {
         self
     }
 
-    /// Set the guest-visible placeholder. Placeholder changes cannot reach
-    /// already-running processes, so they classify as restart-required on a
-    /// running sandbox.
+    /// Set the guest-visible placeholder. New secrets default to
+    /// `$MSB_<env_var>`, matching create-time secret configuration.
+    /// Placeholder changes cannot reach already-running processes, so they
+    /// classify as restart-required on a running sandbox.
     pub fn placeholder(mut self, placeholder: impl Into<String>) -> Self {
         self.spec.placeholder = Some(placeholder.into());
         self
@@ -591,16 +592,38 @@ async fn grow_root_disk_now(
 }
 
 /// Path of the sandbox's host-side runtime control socket.
+#[cfg(windows)]
 fn control_socket_path(name: &str) -> MicrosandboxResult<std::path::PathBuf> {
     Ok(microsandbox_runtime::control::control_socket_path_for(
         &crate::runtime::agent_socket_path(name)?,
     ))
 }
 
+#[cfg(unix)]
+fn control_socket_path_candidates(name: &str) -> Vec<std::path::PathBuf> {
+    control_socket_paths(crate::runtime::sandbox_agent_socket_path_candidates(name))
+}
+
+#[cfg(unix)]
+fn control_socket_paths(
+    agent_candidates: impl IntoIterator<Item = std::path::PathBuf>,
+) -> Vec<std::path::PathBuf> {
+    agent_candidates
+        .into_iter()
+        .map(|path| microsandbox_runtime::control::control_socket_path_for(&path))
+        .collect()
+}
+
 /// Whether the running sandbox exposes the runtime control socket. Its absence
 /// means the runtime predates live control or the VM booted without any
 /// live-mutable capacity, so everything classifies as restart-required.
 fn control_socket_exists(name: &str) -> bool {
+    #[cfg(unix)]
+    return control_socket_path_candidates(name)
+        .into_iter()
+        .any(|path| path.exists());
+
+    #[cfg(not(unix))]
     control_socket_path(name).is_ok_and(|path| path.exists())
 }
 
@@ -667,18 +690,59 @@ async fn control_request(
     name: &str,
     request: String,
 ) -> MicrosandboxResult<microsandbox_runtime::control::ControlResponse> {
+    #[cfg(unix)]
+    {
+        let stream = connect_control_socket(control_socket_path_candidates(name))
+            .await
+            .map_err(|error| {
+                crate::MicrosandboxError::Runtime(format!(
+                    "failed to reach a runtime control socket for sandbox {name:?}: {error}"
+                ))
+            })?;
+        return control_request_over_stream(stream, &request).await;
+    }
+
+    #[cfg(windows)]
+    {
+        let path = control_socket_path(name)?;
+        let stream = connect_control_pipe(&path).await?;
+        control_request_over_stream(stream, &request).await
+    }
+}
+
+#[cfg(unix)]
+async fn connect_control_socket(
+    candidates: impl IntoIterator<Item = std::path::PathBuf>,
+) -> std::io::Result<tokio::net::UnixStream> {
+    let mut last_error = None;
+    for path in candidates {
+        if !path.exists() {
+            continue;
+        }
+        match tokio::net::UnixStream::connect(&path).await {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no runtime control endpoint exists",
+        )
+    }))
+}
+
+/// Send and receive one control exchange over an already-connected transport.
+async fn control_request_over_stream<S>(
+    mut stream: S,
+    request: &str,
+) -> MicrosandboxResult<microsandbox_runtime::control::ControlResponse>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    let path = control_socket_path(name)?;
-    #[cfg(unix)]
-    let mut stream = tokio::net::UnixStream::connect(&path).await.map_err(|e| {
-        crate::MicrosandboxError::Runtime(format!(
-            "failed to reach the runtime control socket at {}: {e}",
-            path.display()
-        ))
-    })?;
-    #[cfg(windows)]
-    let mut stream = connect_control_pipe(&path).await?;
     stream
         .write_all(request.as_bytes())
         .await
@@ -1005,7 +1069,7 @@ fn apply_secret_spec(
             placeholder: spec
                 .placeholder
                 .clone()
-                .unwrap_or_else(|| default_secret_ref(&spec.name)),
+                .unwrap_or_else(|| microsandbox_utils::secret::default_placeholder(&spec.name)),
             allowed_hosts: parse_host_patterns(&spec.allowed_hosts),
             injection: SecretInjection::default(),
             on_violation: None,
@@ -1228,7 +1292,7 @@ fn push_resource_changes(
     changes: &mut Vec<PlannedChange>,
     warnings: &mut Vec<ModificationWarning>,
 ) {
-    let resources = config.spec.resources;
+    let resources = &config.spec.resources;
     let desired = desired_resources(config, patch);
 
     if let Some(cpus) = patch.cpus
@@ -1529,7 +1593,7 @@ fn push_secret_changes(
                 spec.placeholder
                     .clone()
                     .or_else(|| existing.as_ref().map(|secret| secret.placeholder.clone()))
-                    .unwrap_or_else(|| default_secret_ref(&spec.name)),
+                    .unwrap_or_else(|| microsandbox_utils::secret::default_placeholder(&spec.name)),
             ),
             disposition,
             allow_hosts: if spec.allowed_hosts.is_empty() {
@@ -1582,7 +1646,7 @@ fn push_secret_changes(
                 existing
                     .as_ref()
                     .map(|secret| secret.placeholder.clone())
-                    .unwrap_or_else(|| default_secret_ref(name)),
+                    .unwrap_or_else(|| microsandbox_utils::secret::default_placeholder(name)),
             ),
             after_ref: None,
             disposition,
@@ -1892,7 +1956,7 @@ fn push_resource_conflicts(
 }
 
 fn desired_resources(config: &SandboxConfig, patch: &SandboxModificationPatch) -> DesiredResources {
-    let resources = config.spec.resources;
+    let resources = &config.spec.resources;
     let cpus = patch.cpus.unwrap_or(resources.cpus);
     let memory_mib = patch.memory_mib.unwrap_or(resources.memory_mib);
     let max_cpus = patch.max_cpus.unwrap_or(resources.max_cpus).max(cpus);
@@ -2253,10 +2317,6 @@ fn status_name(status: SandboxStatus) -> &'static str {
     }
 }
 
-fn default_secret_ref(name: &str) -> String {
-    format!("${name}")
-}
-
 fn format_mib(mib: u32) -> String {
     if mib >= 1024 && mib.is_multiple_of(1024) {
         format!("{} GiB", mib / 1024)
@@ -2275,6 +2335,49 @@ mod tests {
 
     use super::*;
     use crate::backend::LocalBackend;
+
+    #[test]
+    #[cfg(unix)]
+    fn new_control_client_selects_old_runtime_socket() {
+        let temp = tempfile::Builder::new()
+            .prefix("msb-control")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let run_dir = temp.path().join("run");
+        let paths = microsandbox_runtime::ipc::sandbox_socket_paths(&run_dir, "old-runtime");
+        std::fs::create_dir_all(paths.legacy_control.parent().unwrap()).unwrap();
+        let _listener = std::os::unix::net::UnixListener::bind(&paths.legacy_control).unwrap();
+
+        let selected = control_socket_paths(vec![paths.agent.clone(), paths.legacy_agent.clone()])
+            .into_iter()
+            .find(|path| path.exists())
+            .unwrap();
+
+        assert_eq!(selected, paths.legacy_control);
+        std::os::unix::net::UnixStream::connect(selected).unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn new_control_client_skips_stale_canonical_socket() {
+        let temp = tempfile::Builder::new()
+            .prefix("msb-control-fallback")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let run_dir = temp.path().join("run");
+        let paths = microsandbox_runtime::ipc::sandbox_socket_paths(&run_dir, "old-runtime");
+        std::fs::create_dir_all(&paths.canonical_dir).unwrap();
+        let stale = std::os::unix::net::UnixListener::bind(&paths.control).unwrap();
+        drop(stale);
+        std::fs::create_dir_all(paths.legacy_control.parent().unwrap()).unwrap();
+        let _live = tokio::net::UnixListener::bind(&paths.legacy_control).unwrap();
+
+        let stream = connect_control_socket(vec![paths.control, paths.legacy_control])
+            .await
+            .unwrap();
+
+        assert!(stream.peer_addr().is_ok());
+    }
 
     fn config(cpus: u8, memory_mib: u32) -> SandboxConfig {
         let mut config = SandboxConfig::default();
@@ -3300,7 +3403,7 @@ mod tests {
         );
         let json = serde_json::to_string(&plan).unwrap();
 
-        assert!(json.contains("$API_KEY"));
+        assert!(json.contains("$MSB_API_KEY"));
         assert!(json.contains("api.example.com"));
         assert!(!json.contains("real-secret-value"));
 
@@ -3750,7 +3853,7 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[test]
-    fn applying_new_source_spec_records_reference_not_value() {
+    fn applying_new_source_spec_uses_create_placeholder_default() {
         use microsandbox_network::secrets::config::HostPattern;
 
         let mut config = config(2, 1024);
@@ -3768,7 +3871,7 @@ mod tests {
                 var: "API_KEY".into()
             })
         );
-        assert_eq!(entry.placeholder, "$API_KEY");
+        assert_eq!(entry.placeholder, "$MSB_API_KEY");
         assert_eq!(
             entry.allowed_hosts,
             vec![HostPattern::Exact("api.example.com".into())]
