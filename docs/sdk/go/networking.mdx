@@ -284,6 +284,30 @@ The package-level `Rule` factory provides semantic low-level rules. `Rule.AllowD
 | `Rule.AllowDNS()` | [`PolicyRule`](#policyrule) | Allow gateway DNS over UDP and TCP port 53 |
 | `Rule.DenyDNS()` | [`PolicyRule`](#policyrule) | Deny gateway DNS over UDP and TCP port 53 |
 
+#### <span className="msb-recv">Rule.</span><span className="msb-hn">AllowDNS()</span>
+
+```go
+Rule.AllowDNS()
+```
+
+Allow gateway DNS over UDP and TCP port 53
+
+<p className="msb-label">Returns</p>
+
+[`PolicyRule`](#policyrule)
+
+#### <span className="msb-recv">Rule.</span><span className="msb-hn">DenyDNS()</span>
+
+```go
+Rule.DenyDNS()
+```
+
+Deny gateway DNS over UDP and TCP port 53
+
+<p className="msb-label">Returns</p>
+
+[`PolicyRule`](#policyrule)
+
 ```go
 network := m.NetworkPolicy.FromProfiles(m.NetworkProfilePublic)
 network.Rules = append([]m.PolicyRule{m.Rule.DenyDNS()}, network.Rules...)

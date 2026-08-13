@@ -665,7 +665,7 @@ Remove this snapshot. Delegates to [`Snapshot::remove(self.digest(), force)`](#s
 
 Snapshot-related methods that live on the sandbox builder and handle. See [Sandbox](/sdk/rust/sandbox) for the full sandbox API.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">from_snapshot()</span>
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">from_snapshot()</span>
 
 ```rust
 fn from_snapshot(self, path_or_name: impl Into<String>) -> Self
@@ -755,7 +755,7 @@ let snap = Snapshot::builder("after-pip-install")
 
 ---
 
-#### <span className="msb-recv">.</span><span className="msb-hn">from_sandbox()</span>
+#### <span className="msb-recv">snapshot_builder.</span><span className="msb-hn">from_sandbox()</span>
 <div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
@@ -775,7 +775,7 @@ Set the sandbox to capture. Required; [`build()`](#build) and [`create()`](#crea
 
 ---
 
-#### <span className="msb-recv">.</span><span className="msb-hn">dest_dir()</span>
+#### <span className="msb-recv">snapshot_builder.</span><span className="msb-hn">dest_dir()</span>
 <div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
@@ -793,7 +793,7 @@ Create the artifact under this parent directory instead of the default snapshots
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">label()</span>
+#### <span className="msb-recv">snapshot_builder.</span><span className="msb-hn">label()</span>
 
 ```rust
 fn label(self, key: impl Into<String>, value: impl Into<String>) -> Self
@@ -814,7 +814,7 @@ Add a user label. Can be called multiple times. Labels are sorted by key in the 
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">force()</span>
+#### <span className="msb-recv">snapshot_builder.</span><span className="msb-hn">force()</span>
 
 ```rust
 fn force(self) -> Self
@@ -822,7 +822,7 @@ fn force(self) -> Self
 
 Overwrite an existing artifact with the same name. Without this, creation fails with `SnapshotAlreadyExists` if the artifact directory exists.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">record_integrity()</span>
+#### <span className="msb-recv">snapshot_builder.</span><span className="msb-hn">record_integrity()</span>
 
 ```rust
 fn record_integrity(self) -> Self
@@ -832,7 +832,7 @@ Compute and record an upper-layer content-integrity hash during creation. Record
 
 ---
 
-#### <span className="msb-recv">.</span><span className="msb-hn">resumable()</span>
+#### <span className="msb-recv">snapshot_builder.</span><span className="msb-hn">resumable()</span>
 <div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
@@ -841,7 +841,7 @@ fn resumable(self) -> Self
 
 Request a resumable snapshot (disk plus VM state). Accepted by the builder, but [`create()`](#create) currently fails with `Unsupported`; resumable snapshots have not landed yet.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">build()</span>
+#### <span className="msb-recv">snapshot_builder.</span><span className="msb-hn">build()</span>
 
 ```rust
 fn build(self) -> MicrosandboxResult<SnapshotConfig>
@@ -858,7 +858,7 @@ Materialize the [`SnapshotConfig`](#snapshotconfig) without creating the snapsho
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">create()</span>
+#### <span className="msb-recv">snapshot_builder.</span><span className="msb-hn">create()</span>
 
 ```rust
 async fn create(self) -> MicrosandboxResult<Snapshot>

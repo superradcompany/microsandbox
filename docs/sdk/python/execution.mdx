@@ -380,6 +380,78 @@ A handle to a running streaming execution. It is an async iterator, so `async fo
 | kill() | `None` | *(async)* Send SIGKILL to the process |
 | resize(rows, cols) | `None` | *(async)* Resize the PTY to the given `uint16` dimensions |
 
+#### <span className="msb-recv">handle.</span><span className="msb-hn">take_stdin()</span>
+
+```python
+take_stdin()
+```
+
+Take the stdin writer. Returns `None` after the first call, or when stdin wasn't piped
+
+<p className="msb-label">Returns</p>
+
+[`ExecSink`](#execsink) ` \| None`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">recv()</span>
+
+```python
+recv()
+```
+
+*(async)* Receive the next event. Returns `None` when the stream ends
+
+<p className="msb-label">Returns</p>
+
+[`ExecEvent`](#execevent) ` \| None`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">wait()</span>
+
+```python
+wait()
+```
+
+*(async)* Wait for the process to exit. Returns `(code, success)`
+
+<p className="msb-label">Returns</p>
+
+`tuple[int, bool]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">collect()</span>
+
+```python
+collect()
+```
+
+*(async)* Drain remaining output and wait for exit
+
+<p className="msb-label">Returns</p>
+
+[`ExecOutput`](#execoutput)
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">signal()</span>
+
+```python
+signal(sig)
+```
+
+*(async)* Send a POSIX signal (numeric) to the process
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">kill()</span>
+
+```python
+kill()
+```
+
+*(async)* Send SIGKILL to the process
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">resize()</span>
+
+```python
+resize(rows, cols)
+```
+
+*(async)* Resize the PTY to the given `uint16` dimensions
+
 ## ExecSink
 
 
@@ -392,6 +464,22 @@ Writer for sending data to a running process's stdin. Obtained from [`ExecHandle
 | write(data) | `data: bytes` | *(async)* Write bytes to the process's stdin |
 | close() | - | *(async)* Close the sink. Sends EOF in non-TTY pipe mode; the guest PTY remains open in TTY mode |
 
+#### <span className="msb-recv">sink.</span><span className="msb-hn">write()</span>
+
+```python
+write(data)
+```
+
+*(async)* Write bytes to the process's stdin
+
+#### <span className="msb-recv">sink.</span><span className="msb-hn">close()</span>
+
+```python
+close()
+```
+
+*(async)* Close the sink. Sends EOF in non-TTY pipe mode; the guest PTY remains open in TTY mode
+
 ## Stdin
 
 <p className="msb-backref">Used by <a href="#sandbox-exec">exec()</a> · <a href="#sandbox-shell">shell()</a> · <a href="#sandbox-exec_stream">exec_stream()</a> · <a href="#sandbox-shell_stream">shell_stream()</a></p>
@@ -403,6 +491,30 @@ Frozen dataclass with factory methods for configuring process stdin. Pass the re
 | Stdin.null() | - | Connect stdin to `/dev/null` (default) |
 | Stdin.pipe() | - | Open a writable pipe. Write via [`take_stdin()`](#exechandle) on the handle |
 | Stdin.bytes(data) | `data: bytes` | Inline data sent before the process starts, then EOF |
+
+#### <span className="msb-recv">Stdin.</span><span className="msb-hn">null()</span>
+
+```python
+Stdin.null()
+```
+
+Connect stdin to `/dev/null` (default)
+
+#### <span className="msb-recv">Stdin.</span><span className="msb-hn">pipe()</span>
+
+```python
+Stdin.pipe()
+```
+
+Open a writable pipe. Write via [`take_stdin()`](#exechandle) on the handle
+
+#### <span className="msb-recv">Stdin.</span><span className="msb-hn">bytes()</span>
+
+```python
+Stdin.bytes(data)
+```
+
+Inline data sent before the process starts, then EOF
 
 The factories set the corresponding [`StdinMode`](#stdinmode) member.
 
@@ -421,6 +533,62 @@ Frozen dataclass describing a POSIX resource limit. Construct one directly or vi
 | Rlimit.fsize(limit) | `limit: int` | Max file size |
 | Rlimit.memlock(limit) | `limit: int` | Max locked memory |
 | Rlimit.stack(limit) | `limit: int` | Max stack size |
+
+#### <span className="msb-recv">Rlimit.</span><span className="msb-hn">nofile()</span>
+
+```python
+Rlimit.nofile(limit)
+```
+
+Max open file descriptors
+
+#### <span className="msb-recv">Rlimit.</span><span className="msb-hn">cpu()</span>
+
+```python
+Rlimit.cpu(secs)
+```
+
+CPU time limit in seconds
+
+#### <span className="msb-recv">Rlimit.</span><span className="msb-hn">as_()</span>
+
+```python
+Rlimit.as_(\*, soft, hard)
+```
+
+Virtual memory size
+
+#### <span className="msb-recv">Rlimit.</span><span className="msb-hn">nproc()</span>
+
+```python
+Rlimit.nproc(limit)
+```
+
+Max number of processes
+
+#### <span className="msb-recv">Rlimit.</span><span className="msb-hn">fsize()</span>
+
+```python
+Rlimit.fsize(limit)
+```
+
+Max file size
+
+#### <span className="msb-recv">Rlimit.</span><span className="msb-hn">memlock()</span>
+
+```python
+Rlimit.memlock(limit)
+```
+
+Max locked memory
+
+#### <span className="msb-recv">Rlimit.</span><span className="msb-hn">stack()</span>
+
+```python
+Rlimit.stack(limit)
+```
+
+Max stack size
 
 **Fields**
 

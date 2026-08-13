@@ -191,6 +191,102 @@ A lightweight metadata handle for a cached OCI image.
 | `last_used_at()` | `Option<DateTime<Utc>>` | Last referenced time |
 | `created_at()` | `Option<DateTime<Utc>>` | First-pulled time |
 
+#### <span className="msb-recv">h.</span><span className="msb-hn">reference()</span>
+
+```rust
+reference()
+```
+
+Image reference
+
+<p className="msb-label">Returns</p>
+
+`&str`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">size_bytes()</span>
+
+```rust
+size_bytes()
+```
+
+Total image size in bytes, when known
+
+<p className="msb-label">Returns</p>
+
+`Option<i64>`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">manifest_digest()</span>
+
+```rust
+manifest_digest()
+```
+
+Content-addressable manifest digest
+
+<p className="msb-label">Returns</p>
+
+`Option<&str>`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">architecture()</span>
+
+```rust
+architecture()
+```
+
+Resolved architecture
+
+<p className="msb-label">Returns</p>
+
+`Option<&str>`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">os()</span>
+
+```rust
+os()
+```
+
+Resolved operating system
+
+<p className="msb-label">Returns</p>
+
+`Option<&str>`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">layer_count()</span>
+
+```rust
+layer_count()
+```
+
+Number of layers
+
+<p className="msb-label">Returns</p>
+
+`usize`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">last_used_at()</span>
+
+```rust
+last_used_at()
+```
+
+Last referenced time
+
+<p className="msb-label">Returns</p>
+
+`Option<DateTime<Utc>>`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">created_at()</span>
+
+```rust
+created_at()
+```
+
+First-pulled time
+
+<p className="msb-label">Returns</p>
+
+`Option<DateTime<Utc>>`
+
 ## Types
 
 ### ImageDetail

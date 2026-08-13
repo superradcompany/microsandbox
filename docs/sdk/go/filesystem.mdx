@@ -623,6 +623,54 @@ An open streaming read from a guest file. Must be closed with `Close` when done.
 | `CopyTo(ctx context.Context, w io.Writer)` | `(int64, error)` | Drain into `w` honouring `ctx` for per-chunk cancellation |
 | `Close()` | `error` | Release the read stream handle |
 
+#### <span className="msb-recv">readStream.</span><span className="msb-hn">Recv()</span>
+
+```go
+Recv(ctx context.Context)
+```
+
+Receive the next chunk; returns `(nil, nil)` at EOF
+
+<p className="msb-label">Returns</p>
+
+`([]byte, error)`
+
+#### <span className="msb-recv">readStream.</span><span className="msb-hn">WriteTo()</span>
+
+```go
+WriteTo(w io.Writer)
+```
+
+Drain the stream into `w` using `context.Background()`; implements `io.WriterTo`
+
+<p className="msb-label">Returns</p>
+
+`(int64, error)`
+
+#### <span className="msb-recv">readStream.</span><span className="msb-hn">CopyTo()</span>
+
+```go
+CopyTo(ctx context.Context, w io.Writer)
+```
+
+Drain into `w` honouring `ctx` for per-chunk cancellation
+
+<p className="msb-label">Returns</p>
+
+`(int64, error)`
+
+#### <span className="msb-recv">readStream.</span><span className="msb-hn">Close()</span>
+
+```go
+Close()
+```
+
+Release the read stream handle
+
+<p className="msb-label">Returns</p>
+
+`error`
+
 On a write error or partial write, `WriteTo` and `CopyTo` return the partial byte count and leave the stream open so the caller can recover; close it explicitly in either case.
 
 ## FsWriteStream
@@ -637,6 +685,42 @@ An open streaming write to a guest file. Must be closed with `Close(ctx)` to fin
 | `Write(p []byte)` | `(int, error)` | Send a chunk; implements `io.Writer`, uses `context.Background()` internally |
 | `WriteCtx(ctx context.Context, data []byte)` | `error` | Send a chunk with explicit context control |
 | `Close(ctx context.Context)` | `error` | Send the EOF marker and wait for the guest to confirm; must be called to complete the write |
+
+#### <span className="msb-recv">writeStream.</span><span className="msb-hn">Write()</span>
+
+```go
+Write(p []byte)
+```
+
+Send a chunk; implements `io.Writer`, uses `context.Background()` internally
+
+<p className="msb-label">Returns</p>
+
+`(int, error)`
+
+#### <span className="msb-recv">writeStream.</span><span className="msb-hn">WriteCtx()</span>
+
+```go
+WriteCtx(ctx context.Context, data []byte)
+```
+
+Send a chunk with explicit context control
+
+<p className="msb-label">Returns</p>
+
+`error`
+
+#### <span className="msb-recv">writeStream.</span><span className="msb-hn">Close()</span>
+
+```go
+Close(ctx context.Context)
+```
+
+Send the EOF marker and wait for the guest to confirm; must be called to complete the write
+
+<p className="msb-label">Returns</p>
+
+`error`
 
 ## Types
 

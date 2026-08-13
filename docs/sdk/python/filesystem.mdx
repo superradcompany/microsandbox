@@ -488,6 +488,42 @@ Async stream for reading a file in chunks. Obtained via [`read_stream()`](#fs-re
 | `__aiter__` / `__anext__` | `bytes` | Async iterator. Use `async for chunk in stream:`. |
 | collect() | `bytes` | *(async)* Collect all remaining data into a single `bytes` object |
 
+#### <span className="msb-recv">stream.</span><span className="msb-hn">__aiter__()</span>
+
+```python
+__aiter__()
+```
+
+Async iterator. Use `async for chunk in stream:`.
+
+<p className="msb-label">Returns</p>
+
+`bytes`
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">__anext__()</span>
+
+```python
+__anext__()
+```
+
+Async iterator. Use `async for chunk in stream:`.
+
+<p className="msb-label">Returns</p>
+
+`bytes`
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">collect()</span>
+
+```python
+collect()
+```
+
+*(async)* Collect all remaining data into a single `bytes` object
+
+<p className="msb-label">Returns</p>
+
+`bytes`
+
 ## FsWriteSink
 
 
@@ -500,6 +536,46 @@ Async writer for streaming data into a file. Obtained via [`write_stream()`](#fs
 | write(data) | `None` | *(async)* Write a chunk of `bytes` to the file |
 | close() | `None` | *(async)* Send EOF and finalize the file |
 | `__aenter__` / `__aexit__` | `FsWriteSink` | *(async)* Use with `async with` for automatic close on exit |
+
+#### <span className="msb-recv">sink.</span><span className="msb-hn">write()</span>
+
+```python
+write(data)
+```
+
+*(async)* Write a chunk of `bytes` to the file
+
+#### <span className="msb-recv">sink.</span><span className="msb-hn">close()</span>
+
+```python
+close()
+```
+
+*(async)* Send EOF and finalize the file
+
+#### <span className="msb-recv">sink.</span><span className="msb-hn">__aenter__()</span>
+
+```python
+__aenter__()
+```
+
+*(async)* Use with `async with` for automatic close on exit
+
+<p className="msb-label">Returns</p>
+
+`FsWriteSink`
+
+#### <span className="msb-recv">sink.</span><span className="msb-hn">__aexit__()</span>
+
+```python
+__aexit__()
+```
+
+*(async)* Use with `async with` for automatic close on exit
+
+<p className="msb-label">Returns</p>
+
+`FsWriteSink`
 
 ## Types
 

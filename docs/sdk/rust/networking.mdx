@@ -219,7 +219,7 @@ Fluent builder for [`NetworkPolicy`](#networkpolicy), obtained via [`NetworkPoli
 
 State setters inside a closure (`.tcp()`, `.port()`) accumulate eagerly and are **not reset** between rule-adders, so a single closure can fan one state into several rules. Use separate closures for rules that need different state. See [State accumulation](/networking/overview) for the rationale.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">default_deny()</span>
+#### <span className="msb-recv">policy.</span><span className="msb-hn">default_deny()</span>
 
 ```rust
 fn default_deny(self) -> Self
@@ -227,7 +227,7 @@ fn default_deny(self) -> Self
 
 Set both `default_egress` and `default_ingress` to [`Deny`](#action).
 
-#### <span className="msb-recv">.</span><span className="msb-hn">default_allow()</span>
+#### <span className="msb-recv">policy.</span><span className="msb-hn">default_allow()</span>
 
 ```rust
 fn default_allow(self) -> Self
@@ -235,7 +235,7 @@ fn default_allow(self) -> Self
 
 Set both `default_egress` and `default_ingress` to [`Allow`](#action).
 
-#### <span className="msb-recv">.</span><span className="msb-hn">default_egress()</span>
+#### <span className="msb-recv">policy.</span><span className="msb-hn">default_egress()</span>
 
 ```rust
 fn default_egress(self, action: Action) -> Self
@@ -252,7 +252,7 @@ Per-direction override for the egress default action.
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">default_ingress()</span>
+#### <span className="msb-recv">policy.</span><span className="msb-hn">default_ingress()</span>
 
 ```rust
 fn default_ingress(self, action: Action) -> Self
@@ -269,7 +269,7 @@ Per-direction override for the ingress default action.
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">egress()</span>
+#### <span className="msb-recv">policy.</span><span className="msb-hn">egress()</span>
 
 ```rust
 fn egress<F>(self, f: F) -> Self
@@ -290,7 +290,7 @@ NetworkPolicy::builder()
 
 Sugar for [`rule()`](#rule) with direction pre-set to [`Egress`](#direction).
 
-#### <span className="msb-recv">.</span><span className="msb-hn">ingress()</span>
+#### <span className="msb-recv">policy.</span><span className="msb-hn">ingress()</span>
 
 ```rust
 fn ingress<F>(self, f: F) -> Self
@@ -300,7 +300,7 @@ where
 
 Sugar for [`rule()`](#rule) with direction pre-set to [`Ingress`](#direction).
 
-#### <span className="msb-recv">.</span><span className="msb-hn">any()</span>
+#### <span className="msb-recv">policy.</span><span className="msb-hn">any()</span>
 
 ```rust
 fn any<F>(self, f: F) -> Self
@@ -310,7 +310,7 @@ where
 
 Sugar for [`rule()`](#rule) with direction pre-set to [`Any`](#direction). Rules committed inside apply in both directions.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">rule()</span>
+#### <span className="msb-recv">policy.</span><span className="msb-hn">rule()</span>
 
 ```rust
 fn rule<F>(self, f: F) -> Self
@@ -330,7 +330,7 @@ NetworkPolicy::builder()
 
 Open a multi-rule batch closure. Direction must be set inside via [`.egress()`](#rb-egress), [`.ingress()`](#rb-ingress), or [`.any()`](#rb-any) before any rule-adder, otherwise [`build()`](#build) returns [`BuildError::DirectionNotSet`](#builderror).
 
-#### <span className="msb-recv">.</span><span className="msb-hn">build()</span>
+#### <span className="msb-recv">policy.</span><span className="msb-hn">build()</span>
 
 ```rust
 fn build(self) -> Result<NetworkPolicy, BuildError>
@@ -351,7 +351,7 @@ Consume the builder and produce a [`NetworkPolicy`](#networkpolicy). Lazy-parses
 
 The mutable builder handed to a [`NetworkPolicyBuilder`](#networkpolicybuilder) rule-batch closure. Direction, protocol, and port setters return `&mut Self` and accumulate eagerly; rule-adders commit one rule each using the current state. Protocols and ports have set semantics, so duplicates dedupe.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">egress()</span>
+#### <span className="msb-recv">rule.</span><span className="msb-hn">egress()</span>
 
 <a id="rb-egress"></a>
 
@@ -361,7 +361,7 @@ fn egress(&mut self) -> &mut Self
 
 Set direction to [`Egress`](#direction) for subsequent rule-adders. Last-write-wins.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">ingress()</span>
+#### <span className="msb-recv">rule.</span><span className="msb-hn">ingress()</span>
 
 <a id="rb-ingress"></a>
 
@@ -371,7 +371,7 @@ fn ingress(&mut self) -> &mut Self
 
 Set direction to [`Ingress`](#direction) for subsequent rule-adders. Last-write-wins.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">any()</span>
+#### <span className="msb-recv">rule.</span><span className="msb-hn">any()</span>
 
 <a id="rb-any"></a>
 
@@ -381,7 +381,7 @@ fn any(&mut self) -> &mut Self
 
 Set direction to [`Any`](#direction) for subsequent rule-adders. Rules committed after this apply in both directions. Last-write-wins.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">tcp()</span>
+#### <span className="msb-recv">rule.</span><span className="msb-hn">tcp()</span>
 
 ```rust
 fn tcp(&mut self) -> &mut Self
@@ -389,7 +389,7 @@ fn tcp(&mut self) -> &mut Self
 
 Add [`Tcp`](#protocol) to the protocols set.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">udp()</span>
+#### <span className="msb-recv">rule.</span><span className="msb-hn">udp()</span>
 
 ```rust
 fn udp(&mut self) -> &mut Self
@@ -397,7 +397,7 @@ fn udp(&mut self) -> &mut Self
 
 Add [`Udp`](#protocol) to the protocols set.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">icmpv4()</span>
+#### <span className="msb-recv">rule.</span><span className="msb-hn">icmpv4()</span>
 
 ```rust
 fn icmpv4(&mut self) -> &mut Self
@@ -405,7 +405,7 @@ fn icmpv4(&mut self) -> &mut Self
 
 Add [`Icmpv4`](#protocol) to the protocols set. Egress-only: an ICMP protocol on an `Ingress` or `Any` rule fails build with [`BuildError::IngressDoesNotSupportIcmp`](#builderror).
 
-#### <span className="msb-recv">.</span><span className="msb-hn">icmpv6()</span>
+#### <span className="msb-recv">rule.</span><span className="msb-hn">icmpv6()</span>
 
 ```rust
 fn icmpv6(&mut self) -> &mut Self
@@ -413,7 +413,7 @@ fn icmpv6(&mut self) -> &mut Self
 
 Add [`Icmpv6`](#protocol) to the protocols set. Egress-only; same rule as [`icmpv4()`](#icmpv4).
 
-#### <span className="msb-recv">.</span><span className="msb-hn">port()</span>
+#### <span className="msb-recv">rule.</span><span className="msb-hn">port()</span>
 
 <a id="port-1"></a>
 
@@ -432,7 +432,7 @@ Add a single port to the ports set. Always guest-side (egress destination port /
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">port_range()</span>
+#### <span className="msb-recv">rule.</span><span className="msb-hn">port_range()</span>
 
 ```rust
 fn port_range(&mut self, lo: u16, hi: u16) -> &mut Self
@@ -453,7 +453,7 @@ Add an inclusive port range.
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">ports()</span>
+#### <span className="msb-recv">rule.</span><span className="msb-hn">ports()</span>
 
 ```rust
 fn ports<I: IntoIterator<Item = u16>>(&mut self, ports: I) -> &mut Self
@@ -461,7 +461,7 @@ fn ports<I: IntoIterator<Item = u16>>(&mut self, ports: I) -> &mut Self
 
 Add multiple single ports. Equivalent to calling [`port()`](#port-1) once per element.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">allow_public()</span>
+#### <span className="msb-recv">rule.</span><span className="msb-hn">allow_public()</span>
 
 ```rust
 fn allow_public(&mut self) -> &mut Self
@@ -469,7 +469,7 @@ fn allow_public(&mut self) -> &mut Self
 
 Commit an allow rule for the [`Public`](#destinationgroup) group: every IP not in another named category. A matching [`deny_public()`](#deny_public) exists for each `allow_*` group adder below.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">allow_private()</span>
+#### <span className="msb-recv">rule.</span><span className="msb-hn">allow_private()</span>
 
 ```rust
 fn allow_private(&mut self) -> &mut Self
@@ -477,7 +477,7 @@ fn allow_private(&mut self) -> &mut Self
 
 Allow the [`Private`](#destinationgroup) group (RFC1918 + ULA + CGN).
 
-#### <span className="msb-recv">.</span><span className="msb-hn">allow_loopback()</span>
+#### <span className="msb-recv">rule.</span><span className="msb-hn">allow_loopback()</span>
 
 ```rust
 fn allow_loopback(&mut self) -> &mut Self
@@ -485,7 +485,7 @@ fn allow_loopback(&mut self) -> &mut Self
 
 Allow the [`Loopback`](#destinationgroup) group (`127.0.0.0/8`, `::1`): the **guest's own** loopback, not the host. To reach a service on the host's localhost use [`allow_host()`](#allow_host) instead. See the [loopback-vs-host trap](/networking/overview#loopback-vs-host-a-common-trap).
 
-#### <span className="msb-recv">.</span><span className="msb-hn">allow_link_local()</span>
+#### <span className="msb-recv">rule.</span><span className="msb-hn">allow_link_local()</span>
 
 ```rust
 fn allow_link_local(&mut self) -> &mut Self
@@ -493,7 +493,7 @@ fn allow_link_local(&mut self) -> &mut Self
 
 Allow the [`LinkLocal`](#destinationgroup) group (`169.254.0.0/16`, `fe80::/10`). Excludes the metadata IP `169.254.169.254`.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">allow_meta()</span>
+#### <span className="msb-recv">rule.</span><span className="msb-hn">allow_meta()</span>
 
 ```rust
 fn allow_meta(&mut self) -> &mut Self
@@ -501,7 +501,7 @@ fn allow_meta(&mut self) -> &mut Self
 
 Allow the [`Metadata`](#destinationgroup) group (`169.254.169.254`). **Dangerous on cloud hosts**: exposes IAM credentials.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">allow_multicast()</span>
+#### <span className="msb-recv">rule.</span><span className="msb-hn">allow_multicast()</span>
 
 ```rust
 fn allow_multicast(&mut self) -> &mut Self
@@ -509,7 +509,7 @@ fn allow_multicast(&mut self) -> &mut Self
 
 Allow the [`Multicast`](#destinationgroup) group (`224.0.0.0/4`, `ff00::/8`).
 
-#### <span className="msb-recv">.</span><span className="msb-hn">allow_host()</span>
+#### <span className="msb-recv">rule.</span><span className="msb-hn">allow_host()</span>
 
 ```rust
 fn allow_host(&mut self) -> &mut Self
@@ -517,7 +517,7 @@ fn allow_host(&mut self) -> &mut Self
 
 Allow the [`Host`](#destinationgroup) group: per-sandbox gateway IPs that back `host.microsandbox.internal`. This is the right shortcut for "let the sandbox reach my host's localhost", not [`allow_loopback()`](#allow_loopback).
 
-#### <span className="msb-recv">.</span><span className="msb-hn">deny_public()</span>
+#### <span className="msb-recv">rule.</span><span className="msb-hn">deny_public()</span>
 
 ```rust
 fn deny_public(&mut self) -> &mut Self
@@ -525,7 +525,7 @@ fn deny_public(&mut self) -> &mut Self
 
 Deny the [`Public`](#destinationgroup) group. Per-group `deny_*` adders mirror the `allow_*` set: `deny_private()`, `deny_loopback()`, `deny_link_local()`, `deny_meta()`, `deny_multicast()`, and `deny_host()`.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">allow_local()</span>
+#### <span className="msb-recv">rule.</span><span className="msb-hn">allow_local()</span>
 
 ```rust
 fn allow_local(&mut self) -> &mut Self
@@ -533,7 +533,7 @@ fn allow_local(&mut self) -> &mut Self
 
 Commit **three** allow rules atomically: [`Loopback`](#destinationgroup) + `LinkLocal` + `Host`. Each uses the closure's current state. `Metadata` is intentionally excluded; opt in via [`allow_meta()`](#allow_meta) separately.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">deny_local()</span>
+#### <span className="msb-recv">rule.</span><span className="msb-hn">deny_local()</span>
 
 ```rust
 fn deny_local(&mut self) -> &mut Self
@@ -541,7 +541,7 @@ fn deny_local(&mut self) -> &mut Self
 
 Commit three deny rules atomically: `Loopback` + `LinkLocal` + `Host`. `Metadata` is intentionally excluded.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">allow_domains()</span>
+#### <span className="msb-recv">rule.</span><span className="msb-hn">allow_domains()</span>
 
 <a id="allow_domains-1"></a>
 
@@ -567,7 +567,7 @@ NetworkPolicy::builder()
 
 Add one allow-[`Domain`](#destination) rule per name, inheriting the closure's current direction / protocol / port state. Lazy-parse: invalid names surface as [`BuildError::InvalidDomain`](#builderror) from [`build()`](#build).
 
-#### <span className="msb-recv">.</span><span className="msb-hn">deny_domains()</span>
+#### <span className="msb-recv">rule.</span><span className="msb-hn">deny_domains()</span>
 
 ```rust
 fn deny_domains<I, S>(&mut self, names: I) -> &mut Self
@@ -578,7 +578,7 @@ where
 
 Add one deny-[`Domain`](#destination) rule per name.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">allow_domain_suffixes()</span>
+#### <span className="msb-recv">rule.</span><span className="msb-hn">allow_domain_suffixes()</span>
 
 ```rust
 fn allow_domain_suffixes<I, S>(&mut self, suffixes: I) -> &mut Self
@@ -589,7 +589,7 @@ where
 
 Add one allow-[`DomainSuffix`](#destination) rule per suffix.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">deny_domain_suffixes()</span>
+#### <span className="msb-recv">rule.</span><span className="msb-hn">deny_domain_suffixes()</span>
 
 ```rust
 fn deny_domain_suffixes<I, S>(&mut self, suffixes: I) -> &mut Self
@@ -600,7 +600,7 @@ where
 
 Add one deny-[`DomainSuffix`](#destination) rule per suffix.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">allow()</span>
+#### <span className="msb-recv">rule.</span><span className="msb-hn">allow()</span>
 
 <a id="rb-allow"></a>
 
@@ -621,7 +621,7 @@ NetworkPolicy::builder()
 
 Begin an explicit-destination rule with action [`Allow`](#action). The returned [`RuleDestinationBuilder`](#ruledestinationbuilder) requires exactly one destination call to commit; dropping it without one adds no rule.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">deny()</span>
+#### <span className="msb-recv">rule.</span><span className="msb-hn">deny()</span>
 
 <a id="rb-deny"></a>
 
@@ -635,7 +635,7 @@ Begin an explicit-destination rule with action [`Deny`](#action).
 
 Returned by [`RuleBuilder::allow()`](#rb-allow) / [`RuleBuilder::deny()`](#rb-deny). Requires exactly one destination method call to commit the rule, then returns the `&mut RuleBuilder` so the chain continues. The type is `#[must_use]`: dropping it without a destination call adds no rule.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">ip()</span>
+#### <span className="msb-recv">destination.</span><span className="msb-hn">ip()</span>
 
 <a id="rd-ip"></a>
 
@@ -645,7 +645,7 @@ fn ip(self, ip: impl Into<String>) -> &'a mut RuleBuilder
 
 Commit with [`Destination::Cidr`](#destination) of the IP as `/32` (v4) or `/128` (v6). The string is parsed at [`build()`](#build); invalid values surface as [`BuildError::InvalidIp`](#builderror).
 
-#### <span className="msb-recv">.</span><span className="msb-hn">cidr()</span>
+#### <span className="msb-recv">destination.</span><span className="msb-hn">cidr()</span>
 
 <a id="rd-cidr"></a>
 
@@ -655,7 +655,7 @@ fn cidr(self, cidr: impl Into<String>) -> &'a mut RuleBuilder
 
 Commit with [`Destination::Cidr`](#destination). Invalid values surface as [`BuildError::InvalidCidr`](#builderror).
 
-#### <span className="msb-recv">.</span><span className="msb-hn">domain()</span>
+#### <span className="msb-recv">destination.</span><span className="msb-hn">domain()</span>
 
 <a id="rd-domain"></a>
 
@@ -665,7 +665,7 @@ fn domain(self, domain: impl Into<String>) -> &'a mut RuleBuilder
 
 Commit with [`Destination::Domain`](#destination). Matches only when a cached hostname for the remote IP equals this name (after canonicalization).
 
-#### <span className="msb-recv">.</span><span className="msb-hn">domain_suffix()</span>
+#### <span className="msb-recv">destination.</span><span className="msb-hn">domain_suffix()</span>
 
 <a id="rd-domain_suffix"></a>
 
@@ -675,7 +675,7 @@ fn domain_suffix(self, suffix: impl Into<String>) -> &'a mut RuleBuilder
 
 Commit with [`Destination::DomainSuffix`](#destination). Matches the apex domain itself and any subdomain. A single-label suffix (e.g. `com`) is rejected at build as [`BuildError::InvalidDomain`](#builderror).
 
-#### <span className="msb-recv">.</span><span className="msb-hn">group()</span>
+#### <span className="msb-recv">destination.</span><span className="msb-hn">group()</span>
 
 <a id="rd-group"></a>
 
@@ -685,7 +685,7 @@ fn group(self, group: DestinationGroup) -> &'a mut RuleBuilder
 
 Commit with [`Destination::Group`](#destination) for callers who already hold a [`DestinationGroup`](#destinationgroup) value.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">any()</span>
+#### <span className="msb-recv">destination.</span><span className="msb-hn">any()</span>
 
 <a id="rd-any"></a>
 
@@ -699,7 +699,7 @@ Commit with [`Destination::Any`](#destination): matches every remote.
 
 Builder for the sandbox's network stack, used in [`SandboxBuilder::network(|n| n...)`](/sdk/rust/sandbox#network). Every setter returns `Self`, so calls chain. Errors accumulated by nested builders cascade up: the outermost `SandboxBuilder::build()` surfaces them as [`MicrosandboxError::NetworkBuilder(BuildError)`](#builderror).
 
-#### <span className="msb-recv">.</span><span className="msb-hn">policy()</span>
+#### <span className="msb-recv">network.</span><span className="msb-hn">policy()</span>
 
 ```rust
 fn policy(self, policy: NetworkPolicy) -> Self
@@ -724,7 +724,7 @@ Set the network access policy. Pass a profile-composed or builder-constructed [`
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">port()</span>
+#### <span className="msb-recv">network.</span><span className="msb-hn">port()</span>
 
 <Tooltip tip="Publishing host ports is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -749,7 +749,7 @@ Publish a TCP port from the sandbox to the host. The default host bind address i
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">port_udp()</span>
+#### <span className="msb-recv">network.</span><span className="msb-hn">port_udp()</span>
 
 <Tooltip tip="Publishing host ports is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -759,7 +759,7 @@ fn port_udp(self, host_port: u16, guest_port: u16) -> Self
 
 Publish a UDP port. The default host bind address is `127.0.0.1`.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">port_bind()</span>
+#### <span className="msb-recv">network.</span><span className="msb-hn">port_bind()</span>
 
 <Tooltip tip="Publishing host ports is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -786,7 +786,7 @@ Publish a TCP port on a specific host bind address, such as `0.0.0.0`.
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">port_udp_bind()</span>
+#### <span className="msb-recv">network.</span><span className="msb-hn">port_udp_bind()</span>
 
 <Tooltip tip="Publishing host ports is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -796,7 +796,7 @@ fn port_udp_bind(self, host_bind: IpAddr, host_port: u16, guest_port: u16) -> Se
 
 Publish a UDP port on a specific host bind address.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">dns()</span>
+#### <span className="msb-recv">network.</span><span className="msb-hn">dns()</span>
 
 <Tooltip tip="Custom nameservers are not available on microsandbox cloud; cloud uses platform-managed DNS."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -819,7 +819,7 @@ use microsandbox_network::dns::Nameserver;
 
 Configure DNS interception. See [`DnsBuilder`](#dnsbuilder).
 
-#### <span className="msb-recv">.</span><span className="msb-hn">tls()</span>
+#### <span className="msb-recv">network.</span><span className="msb-hn">tls()</span>
 
 <Tooltip tip="TLS interception and host-CA trust are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -829,7 +829,7 @@ fn tls(self, f: impl FnOnce(TlsBuilder) -> TlsBuilder) -> Self
 
 Configure TLS interception. See [`TlsBuilder`](#tlsbuilder).
 
-#### <span className="msb-recv">.</span><span className="msb-hn">trust_host_cas()</span>
+#### <span className="msb-recv">network.</span><span className="msb-hn">trust_host_cas()</span>
 
 <Tooltip tip="TLS interception and host-CA trust are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -839,7 +839,7 @@ fn trust_host_cas(self, enabled: bool) -> Self
 
 Whether to ship the host's trusted root CAs into the guest at boot. Default: `false`. Opt in when egress HTTPS inside the sandbox needs to work behind corporate MITM proxies (Cloudflare Warp Zero Trust, Zscaler, Netskope, etc.): those proxies install a gateway CA on the host that's unknown to the guest's stock Mozilla bundle.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">max_connections()</span>
+#### <span className="msb-recv">network.</span><span className="msb-hn">max_connections()</span>
 
 ```rust
 fn max_connections(self, max: usize) -> Self
@@ -856,7 +856,7 @@ Limit the maximum number of concurrent network connections from the sandbox. Def
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">ipv4_pool()</span>
+#### <span className="msb-recv">network.</span><span className="msb-hn">ipv4_pool()</span>
 
 <Tooltip tip="Interface and IP-pool overrides are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -875,7 +875,7 @@ Set the IPv4 pool used to derive per-sandbox `/30` guest subnets. Defaults to `1
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">ipv6_pool()</span>
+#### <span className="msb-recv">network.</span><span className="msb-hn">ipv6_pool()</span>
 
 <Tooltip tip="Interface and IP-pool overrides are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -885,7 +885,7 @@ fn ipv6_pool(self, pool: Ipv6Network) -> Self
 
 Set the IPv6 pool used to derive per-sandbox `/64` guest prefixes. Defaults to `fd42:6d73:62::/48`. A pool with a prefix longer than `/64` records [`BuildError::InvalidIpv6Pool`](#builderror).
 
-#### <span className="msb-recv">.</span><span className="msb-hn">interface()</span>
+#### <span className="msb-recv">network.</span><span className="msb-hn">interface()</span>
 
 <Tooltip tip="Interface and IP-pool overrides are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -904,7 +904,7 @@ Override the guest interface settings wholesale: MAC, MTU, IPv4/IPv6 addresses, 
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">enabled()</span>
+#### <span className="msb-recv">network.</span><span className="msb-hn">enabled()</span>
 
 ```rust
 fn enabled(self, enabled: bool) -> Self
@@ -912,7 +912,7 @@ fn enabled(self, enabled: bool) -> Self
 
 Enable or disable networking. Default: `true`. To fully turn networking off, prefer [`SandboxBuilder::disable_network()`](/sdk/rust/sandbox#disable_network), which also sets the policy to [`NetworkPolicy::none()`](#networkpolicynone).
 
-#### <span className="msb-recv">.</span><span className="msb-hn">on_secret_violation()</span>
+#### <span className="msb-recv">network.</span><span className="msb-hn">on_secret_violation()</span>
 
 ```rust
 fn on_secret_violation(
@@ -936,7 +936,7 @@ Set the sandbox-wide action taken when a secret placeholder is detected in traff
 
 Passthrough hosts receive the placeholder unchanged. They do **not** receive real secret values.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">secret()</span>
+#### <span className="msb-recv">network.</span><span className="msb-hn">secret()</span>
 
 ```rust
 fn secret(self, f: impl FnOnce(SecretBuilder) -> SecretBuilder) -> Self
@@ -957,7 +957,7 @@ Add a secret via a closure builder. Mirrors [`SandboxBuilder::secret()`](/sdk/ru
 
 Builder for DNS interception, used in [`NetworkBuilder::dns(|d| d...)`](#dns). Owns rebind protection, nameserver pinning, and the per-query timeout. Every setter returns `Self`.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">nameservers()</span>
+#### <span className="msb-recv">dns.</span><span className="msb-hn">nameservers()</span>
 
 <Tooltip tip="Custom nameservers are not available on microsandbox cloud; cloud uses platform-managed DNS."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -979,7 +979,7 @@ Set the upstream nameservers to forward DNS queries to. Replaces any previously-
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">query_timeout_ms()</span>
+#### <span className="msb-recv">dns.</span><span className="msb-hn">query_timeout_ms()</span>
 
 ```rust
 fn query_timeout_ms(self, ms: u64) -> Self
@@ -987,7 +987,7 @@ fn query_timeout_ms(self, ms: u64) -> Self
 
 Set the per-DNS-query timeout in milliseconds. Default: `5000`.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">rebind_protection()</span>
+#### <span className="msb-recv">dns.</span><span className="msb-hn">rebind_protection()</span>
 
 ```rust
 fn rebind_protection(self, enabled: bool) -> Self
@@ -999,7 +999,7 @@ When enabled, DNS responses that resolve to private IP addresses are blocked, pr
 
 Builder for TLS interception, used in [`NetworkBuilder::tls(|t| t...)`](#tls). Creating it enables interception. Every setter returns `Self`.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">bypass()</span>
+#### <span className="msb-recv">tls.</span><span className="msb-hn">bypass()</span>
 
 ```rust
 fn bypass(self, pattern: impl Into<String>) -> Self
@@ -1016,7 +1016,7 @@ Skip TLS interception for hosts matching this glob (e.g. `"*.internal.corp"`). U
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">intercepted_ports()</span>
+#### <span className="msb-recv">tls.</span><span className="msb-hn">intercepted_ports()</span>
 
 <Tooltip tip="TLS interception and host-CA trust are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -1026,7 +1026,7 @@ fn intercepted_ports(self, ports: Vec<u16>) -> Self
 
 TCP ports where TLS interception is active. Default: `[443]`.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">verify_upstream()</span>
+#### <span className="msb-recv">tls.</span><span className="msb-hn">verify_upstream()</span>
 
 ```rust
 fn verify_upstream(self, verify: bool) -> Self
@@ -1034,7 +1034,7 @@ fn verify_upstream(self, verify: bool) -> Self
 
 Whether the proxy verifies upstream server certificates. Default: `true`. Set to `false` only for self-signed servers.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">block_quic()</span>
+#### <span className="msb-recv">tls.</span><span className="msb-hn">block_quic()</span>
 
 ```rust
 fn block_quic(self, block: bool) -> Self
@@ -1042,7 +1042,7 @@ fn block_quic(self, block: bool) -> Self
 
 Block QUIC/HTTP3 on intercepted ports, forcing TCP/TLS fallback. Default: `true`.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">intercept_ca_cert()</span>
+#### <span className="msb-recv">tls.</span><span className="msb-hn">intercept_ca_cert()</span>
 
 <Tooltip tip="TLS interception and host-CA trust are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -1052,7 +1052,7 @@ fn intercept_ca_cert(self, path: impl Into<PathBuf>) -> Self
 
 PEM file used as the intercepting CA's certificate. Pair with [`intercept_ca_key()`](#intercept_ca_key) to provide a stable CA across sandbox restarts. If unset, a CA is auto-generated and persisted.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">intercept_ca_key()</span>
+#### <span className="msb-recv">tls.</span><span className="msb-hn">intercept_ca_key()</span>
 
 <Tooltip tip="TLS interception and host-CA trust are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -1062,7 +1062,7 @@ fn intercept_ca_key(self, path: impl Into<PathBuf>) -> Self
 
 PEM file used as the intercepting CA's private key.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">upstream_ca_cert()</span>
+#### <span className="msb-recv">tls.</span><span className="msb-hn">upstream_ca_cert()</span>
 
 ```rust
 fn upstream_ca_cert(self, path: impl Into<PathBuf>) -> Self
@@ -1070,7 +1070,7 @@ fn upstream_ca_cert(self, path: impl Into<PathBuf>) -> Self
 
 PEM file with extra root CAs the proxy should trust when verifying every upstream server. Useful for self-signed or private upstream CAs. Can be called multiple times.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">upstream_ca_cert_for()</span>
+#### <span className="msb-recv">tls.</span><span className="msb-hn">upstream_ca_cert_for()</span>
 
 ```rust
 fn upstream_ca_cert_for(
@@ -1082,7 +1082,7 @@ fn upstream_ca_cert_for(
 
 PEM file with extra root CAs the proxy should trust only when the upstream SNI matches `pattern`. Pattern syntax matches [`bypass()`](#bypass): exact hosts and `*.suffix` wildcards are supported.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">verify_upstream_for()</span>
+#### <span className="msb-recv">tls.</span><span className="msb-hn">verify_upstream_for()</span>
 
 ```rust
 fn verify_upstream_for(
@@ -1098,7 +1098,7 @@ Whether the proxy verifies upstream server certificates only when the upstream S
 
 Builder for secret-violation behavior, used by [`NetworkBuilder::on_secret_violation()`](#on_secret_violation) and [`SecretBuilder::on_violation()`](/sdk/rust/secrets#on_violation). A blocking call (`block`, `block_and_log`, `block_and_terminate`) replaces any accumulated passthrough hosts; passthrough calls accumulate. When passthrough hosts are configured, non-matching hosts use the default action. Every setter returns `Self`. Produces a [`ViolationAction`](#violationaction).
 
-#### <span className="msb-recv">.</span><span className="msb-hn">block()</span>
+#### <span className="msb-recv">violation.</span><span className="msb-hn">block()</span>
 
 ```rust
 fn block(self) -> Self
@@ -1106,7 +1106,7 @@ fn block(self) -> Self
 
 Block the request silently.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">block_and_log()</span>
+#### <span className="msb-recv">violation.</span><span className="msb-hn">block_and_log()</span>
 
 ```rust
 fn block_and_log(self) -> Self
@@ -1114,7 +1114,7 @@ fn block_and_log(self) -> Self
 
 Block the request and emit a warning log on the host. This is the [`ViolationAction`](#violationaction) default.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">block_and_terminate()</span>
+#### <span className="msb-recv">violation.</span><span className="msb-hn">block_and_terminate()</span>
 
 ```rust
 fn block_and_terminate(self) -> Self
@@ -1122,7 +1122,7 @@ fn block_and_terminate(self) -> Self
 
 Block the request and terminate the entire sandbox.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">passthrough_host()</span>
+#### <span className="msb-recv">violation.</span><span className="msb-hn">passthrough_host()</span>
 
 ```rust
 fn passthrough_host(self, host: impl Into<String>) -> Self
@@ -1139,7 +1139,7 @@ Allow an exact host to receive secret placeholders unchanged (no substitution).
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">passthrough_host_pattern()</span>
+#### <span className="msb-recv">violation.</span><span className="msb-hn">passthrough_host_pattern()</span>
 
 ```rust
 fn passthrough_host_pattern(self, pattern: impl Into<String>) -> Self
@@ -1147,7 +1147,7 @@ fn passthrough_host_pattern(self, pattern: impl Into<String>) -> Self
 
 Allow hosts matching a wildcard pattern (e.g. `*.example.com`) to receive placeholders unchanged.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">passthrough_all_hosts()</span>
+#### <span className="msb-recv">violation.</span><span className="msb-hn">passthrough_all_hosts()</span>
 
 ```rust
 fn passthrough_all_hosts(self, i_understand_the_risk: bool) -> Self
@@ -1194,6 +1194,70 @@ Convenience constructors build any-protocol, any-port rules:
 | `Rule::allow_dns()` | Allow plain DNS (UDP/53 + TCP/53) to the gateway forwarder (`Group::Host`); the one-liner for opening DNS under deny-by-default. See [DNS as egress](/networking/dns#dns-as-egress) |
 | `Rule::deny_dns()` | Deny plain DNS (UDP/53 + TCP/53) to the gateway forwarder; place before profile-generated rules to override automatic DNS |
 
+#### <span className="msb-recv">Rule::</span><span className="msb-hn">allow_egress()</span>
+
+```rust
+Rule::allow_egress(destination)
+```
+
+Allow rule, direction `Egress`
+
+#### <span className="msb-recv">Rule::</span><span className="msb-hn">deny_egress()</span>
+
+```rust
+Rule::deny_egress(destination)
+```
+
+Deny rule, direction `Egress`
+
+#### <span className="msb-recv">Rule::</span><span className="msb-hn">allow_ingress()</span>
+
+```rust
+Rule::allow_ingress(destination)
+```
+
+Allow rule, direction `Ingress`
+
+#### <span className="msb-recv">Rule::</span><span className="msb-hn">deny_ingress()</span>
+
+```rust
+Rule::deny_ingress(destination)
+```
+
+Deny rule, direction `Ingress`
+
+#### <span className="msb-recv">Rule::</span><span className="msb-hn">allow_any()</span>
+
+```rust
+Rule::allow_any(destination)
+```
+
+Allow rule, direction `Any`
+
+#### <span className="msb-recv">Rule::</span><span className="msb-hn">deny_any()</span>
+
+```rust
+Rule::deny_any(destination)
+```
+
+Deny rule, direction `Any`
+
+#### <span className="msb-recv">Rule::</span><span className="msb-hn">allow_dns()</span>
+
+```rust
+Rule::allow_dns()
+```
+
+Allow plain DNS (UDP/53 + TCP/53) to the gateway forwarder (`Group::Host`); the one-liner for opening DNS under deny-by-default. See [DNS as egress](/networking/dns#dns-as-egress)
+
+#### <span className="msb-recv">Rule::</span><span className="msb-hn">deny_dns()</span>
+
+```rust
+Rule::deny_dns()
+```
+
+Deny plain DNS (UDP/53 + TCP/53) to the gateway forwarder; place before profile-generated rules to override automatic DNS
+
 ## PortRange
 
 
@@ -1211,6 +1275,30 @@ An inclusive port range.
 | `PortRange::single(port)` | Match a single port |
 | `PortRange::range(start, end)` | Match an inclusive range |
 | `contains(port)` | Whether `port` falls within the range |
+
+#### <span className="msb-recv">PortRange::</span><span className="msb-hn">single()</span>
+
+```rust
+PortRange::single(port)
+```
+
+Match a single port
+
+#### <span className="msb-recv">PortRange::</span><span className="msb-hn">range()</span>
+
+```rust
+PortRange::range(start, end)
+```
+
+Match an inclusive range
+
+#### <span className="msb-recv">PortRange::</span><span className="msb-hn">contains()</span>
+
+```rust
+contains(port)
+```
+
+Whether `port` falls within the range
 
 ## DomainName
 
@@ -1232,6 +1320,22 @@ Labels follow the permissive DNS grammar (RFC 2181 §11), so underscore-prefixed
 |--------|-------------|
 | `as_str()` | Borrow the canonical string form |
 | `try_into_suffix()` | Validate for use as a `DomainSuffix`; single-label names (e.g. `com`) are rejected |
+
+#### <span className="msb-recv">name.</span><span className="msb-hn">as_str()</span>
+
+```rust
+as_str()
+```
+
+Borrow the canonical string form
+
+#### <span className="msb-recv">name.</span><span className="msb-hn">try_into_suffix()</span>
+
+```rust
+try_into_suffix()
+```
+
+Validate for use as a `DomainSuffix`; single-label names (e.g. `com`) are rejected
 
 ## Types
 

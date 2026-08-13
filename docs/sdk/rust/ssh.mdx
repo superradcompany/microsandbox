@@ -620,6 +620,38 @@ Builder for SSH client options. Defaults: user `root`, terminal from `$TERM` (fa
 | `sftp()` | `bool` | Enable or disable SFTP on the internal server. Default `true`. |
 | `build()` | | Finalize the options. |
 
+#### <span className="msb-recv">client_options.</span><span className="msb-hn">user()</span>
+
+```rust
+user()
+```
+
+SSH login user. Default `root`.
+
+#### <span className="msb-recv">client_options.</span><span className="msb-hn">term()</span>
+
+```rust
+term()
+```
+
+Terminal name for interactive sessions.
+
+#### <span className="msb-recv">client_options.</span><span className="msb-hn">sftp()</span>
+
+```rust
+sftp()
+```
+
+Enable or disable SFTP on the internal server. Default `true`.
+
+#### <span className="msb-recv">client_options.</span><span className="msb-hn">build()</span>
+
+```rust
+build()
+```
+
+Finalize the options.
+
 ## SshExecOptionsBuilder
 
 
@@ -631,6 +663,22 @@ Builder for SSH exec options.
 |--------|------------|-------------|
 | `tty()` | `bool` | Request a PTY for the exec channel. Default `false`. |
 | `build()` | | Finalize the options. |
+
+#### <span className="msb-recv">exec_options.</span><span className="msb-hn">tty()</span>
+
+```rust
+tty()
+```
+
+Request a PTY for the exec channel. Default `false`.
+
+#### <span className="msb-recv">exec_options.</span><span className="msb-hn">build()</span>
+
+```rust
+build()
+```
+
+Finalize the options.
 
 ## SshAttachOptionsBuilder
 
@@ -644,6 +692,30 @@ Builder for interactive SSH attach options. Default terminal comes from `$TERM` 
 | `term()` | `impl Into<String>` | Terminal name for the shell. |
 | `detach_keys()` | `impl Into<String>` | Detach key sequence. |
 | `build()` | | Finalize the options. |
+
+#### <span className="msb-recv">attach_options.</span><span className="msb-hn">term()</span>
+
+```rust
+term()
+```
+
+Terminal name for the shell.
+
+#### <span className="msb-recv">attach_options.</span><span className="msb-hn">detach_keys()</span>
+
+```rust
+detach_keys()
+```
+
+Detach key sequence.
+
+#### <span className="msb-recv">attach_options.</span><span className="msb-hn">build()</span>
+
+```rust
+build()
+```
+
+Finalize the options.
 
 ## SshServerOptionsBuilder
 
@@ -661,6 +733,62 @@ Builder for SSH server options. SFTP is enabled by default; when no authorized k
 | `user()` | `impl Into<String>` | Override the guest user used for exec requests. |
 | `sftp()` | `bool` | Enable or disable SFTP. Default `true`. |
 | `build()` | | Finalize the options. |
+
+#### <span className="msb-recv">server_options.</span><span className="msb-hn">host_key_path()</span>
+
+```rust
+host_key_path()
+```
+
+Override the host private key path.
+
+#### <span className="msb-recv">server_options.</span><span className="msb-hn">host_key()</span>
+
+```rust
+host_key()
+```
+
+Use an in-memory host private key.
+
+#### <span className="msb-recv">server_options.</span><span className="msb-hn">authorized_keys_path()</span>
+
+```rust
+authorized_keys_path()
+```
+
+Override the authorized-keys path.
+
+#### <span className="msb-recv">server_options.</span><span className="msb-hn">authorized_key()</span>
+
+```rust
+authorized_key()
+```
+
+Add one in-memory authorized public key.
+
+#### <span className="msb-recv">server_options.</span><span className="msb-hn">user()</span>
+
+```rust
+user()
+```
+
+Override the guest user used for exec requests.
+
+#### <span className="msb-recv">server_options.</span><span className="msb-hn">sftp()</span>
+
+```rust
+sftp()
+```
+
+Enable or disable SFTP. Default `true`.
+
+#### <span className="msb-recv">server_options.</span><span className="msb-hn">build()</span>
+
+```rust
+build()
+```
+
+Finalize the options.
 
 ## SftpClient
 

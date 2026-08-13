@@ -1172,7 +1172,7 @@ Builder for configuring a named volume before creation. Implements `From<VolumeC
 
 Builder for configuring a named volume before creation. Obtained via [`Volume::builder(name)`](#volumebuilder). Directory-backed is the default; disk volumes require [`.disk()`](#disk) plus [`.size()`](#size). Every setter returns `Self`, so calls chain.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">directory()</span>
+#### <span className="msb-recv">volume_builder.</span><span className="msb-hn">directory()</span>
 
 ```rust
 fn directory(self) -> Self
@@ -1180,7 +1180,7 @@ fn directory(self) -> Self
 
 Create a directory-backed named volume (mounted through virtiofs). This is the default.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">disk()</span>
+#### <span className="msb-recv">volume_builder.</span><span className="msb-hn">disk()</span>
 
 <Tooltip tip="Disk-kind volumes are not available on microsandbox cloud; use a directory-backed named volume."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -1190,7 +1190,7 @@ fn disk(self) -> Self
 
 Create a raw ext4 disk-image named volume (mounted through virtio-blk). Requires [`.size()`](#size).
 
-#### <span className="msb-recv">.</span><span className="msb-hn">size()</span>
+#### <span className="msb-recv">volume_builder.</span><span className="msb-hn">size()</span>
 
 <Tooltip tip="Disk-kind volumes are not available on microsandbox cloud; use a directory-backed named volume."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -1223,7 +1223,7 @@ Set the disk volume's capacity. Required for disk volumes; rejected for director
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">quota()</span>
+#### <span className="msb-recv">volume_builder.</span><span className="msb-hn">quota()</span>
 
 <Tooltip tip="On microsandbox cloud, quota sets a storage cap and must be a whole number of GiB."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -1242,7 +1242,7 @@ Limit a directory volume's storage. Accepts a bare `u32` (MiB) or a `SizeExt` he
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">label()</span>
+#### <span className="msb-recv">volume_builder.</span><span className="msb-hn">label()</span>
 
 ```rust
 fn label(self, key: impl Into<String>, value: impl Into<String>) -> Self
@@ -1263,7 +1263,7 @@ Attach a key-value label for organizing and filtering volumes. Can be called mul
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">build()</span>
+#### <span className="msb-recv">volume_builder.</span><span className="msb-hn">build()</span>
 
 <a id="vb-build"></a>
 
@@ -1282,7 +1282,7 @@ Materialize the [`VolumeConfig`](#volumespec) without creating the volume. Pass 
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">create()</span>
+#### <span className="msb-recv">volume_builder.</span><span className="msb-hn">create()</span>
 
 <a id="vb-create"></a>
 
@@ -1339,7 +1339,7 @@ Builder for a sandbox volume mount, used in `SandboxBuilder::volume`. Builds a `
 
 Builder for configuring a volume mount on a sandbox. Used in `SandboxBuilder::volume(guest_path, |v| v...)` (see [`.volume()`](/sdk/rust/sandbox#volume)). Pick exactly one mount kind: [`.bind()`](#bind), [`.named()`](#named) / [`.named_with()`](#named_with), [`.tmpfs()`](#tmpfs), or [`.disk()`](#mb-disk). Kind-specific options are validated when the surrounding `SandboxBuilder` is finalized, so an option set on the wrong kind surfaces a clear error rather than being silently dropped.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">bind()</span>
+#### <span className="msb-recv">mount.</span><span className="msb-hn">bind()</span>
 
 ```rust
 fn bind(self, host: impl Into<PathBuf>) -> Self
@@ -1356,7 +1356,7 @@ Bind mount a host directory into the guest. Changes in the guest are reflected o
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">named()</span>
+#### <span className="msb-recv">mount.</span><span className="msb-hn">named()</span>
 
 ```rust
 fn named(self, name: impl Into<String>) -> Self
@@ -1373,7 +1373,7 @@ Mount a named volume created via [`Volume::create()`](#volumecreate). The volume
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">named_with()</span>
+#### <span className="msb-recv">mount.</span><span className="msb-hn">named_with()</span>
 
 <Tooltip tip="On microsandbox cloud, create the named volume before mounting; create-on-mount, disk-kind, and size are not available."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -1417,7 +1417,7 @@ Mount a named volume with explicit sandbox-time existence behavior, configured v
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">tmpfs()</span>
+#### <span className="msb-recv">mount.</span><span className="msb-hn">tmpfs()</span>
 
 ```rust
 fn tmpfs(self) -> Self
@@ -1425,7 +1425,7 @@ fn tmpfs(self) -> Self
 
 Use an in-memory filesystem. Contents are discarded when the sandbox stops. Good for scratch space, temp files, and build artifacts. Cap its size with [`.size()`](#mb-size).
 
-#### <span className="msb-recv">.</span><span className="msb-hn">disk()</span>
+#### <span className="msb-recv">mount.</span><span className="msb-hn">disk()</span>
 
 <Tooltip tip="On microsandbox cloud, the disk-image path resolves against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -1446,7 +1446,7 @@ Mount a host disk-image file as a virtio-blk device at the guest path. The forma
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">format()</span>
+#### <span className="msb-recv">mount.</span><span className="msb-hn">format()</span>
 
 ```rust
 fn format(self, format: DiskImageFormat) -> Self
@@ -1463,7 +1463,7 @@ Override the disk-image format for a [`.disk()`](#mb-disk) mount. Valid only wit
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">fstype()</span>
+#### <span className="msb-recv">mount.</span><span className="msb-hn">fstype()</span>
 
 ```rust
 fn fstype(self, fstype: impl Into<String>) -> Self
@@ -1480,7 +1480,7 @@ Set the inner filesystem type for a [`.disk()`](#mb-disk) mount, for example `"e
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">readonly()</span>
+#### <span className="msb-recv">mount.</span><span className="msb-hn">readonly()</span>
 
 ```rust
 fn readonly(self) -> Self
@@ -1488,7 +1488,7 @@ fn readonly(self) -> Self
 
 Prevent writes to this mount. Enforced both at the host (virtiofs server rejects writes) and in the guest (the kernel returns `EROFS`).
 
-#### <span className="msb-recv">.</span><span className="msb-hn">noexec()</span>
+#### <span className="msb-recv">mount.</span><span className="msb-hn">noexec()</span>
 
 ```rust
 fn noexec(self) -> Self
@@ -1496,7 +1496,7 @@ fn noexec(self) -> Self
 
 Prevent direct execution of files on this mount. Interpreters can still read scripts from the mount, such as `sh /mnt/script.sh`, because the interpreter binary executes from a different filesystem.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">nosuid()</span>
+#### <span className="msb-recv">mount.</span><span className="msb-hn">nosuid()</span>
 
 ```rust
 fn nosuid(self) -> Self
@@ -1504,7 +1504,7 @@ fn nosuid(self) -> Self
 
 Ignore setuid and setgid privilege elevation from files on this mount.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">nodev()</span>
+#### <span className="msb-recv">mount.</span><span className="msb-hn">nodev()</span>
 
 ```rust
 fn nodev(self) -> Self
@@ -1512,7 +1512,7 @@ fn nodev(self) -> Self
 
 Ignore device files on this mount.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">stat_virtualization()</span>
+#### <span className="msb-recv">mount.</span><span className="msb-hn">stat_virtualization()</span>
 
 ```rust
 fn stat_virtualization(self, policy: StatVirtualization) -> Self
@@ -1529,7 +1529,7 @@ Set the guest stat virtualization policy for a virtiofs-backed mount. Default: [
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">host_permissions()</span>
+#### <span className="msb-recv">mount.</span><span className="msb-hn">host_permissions()</span>
 
 ```rust
 fn host_permissions(self, policy: HostPermissions) -> Self
@@ -1546,7 +1546,7 @@ Set the host permission propagation policy for a virtiofs-backed mount. Default:
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">size()</span>
+#### <span className="msb-recv">mount.</span><span className="msb-hn">size()</span>
 
 <a id="mb-size"></a>
 
@@ -1565,7 +1565,7 @@ Set the size limit for a [`.tmpfs()`](#tmpfs) mount. Accepts a bare `u32` (MiB) 
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">build()</span>
+#### <span className="msb-recv">mount.</span><span className="msb-hn">build()</span>
 
 <a id="mb-build"></a>
 
@@ -1604,7 +1604,7 @@ Sub-builder for [`MountBuilder::named_with()`](#named_with). Selects sandbox-tim
 
 Sub-builder for [`MountBuilder::named_with()`](#named_with). Selects the sandbox-time existence behavior and, for `create` / `ensure_exists`, the creation metadata. Defaults to `existing` and directory-backed.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">existing()</span>
+#### <span className="msb-recv">named.</span><span className="msb-hn">existing()</span>
 
 <a id="nv-existing"></a>
 
@@ -1614,7 +1614,7 @@ fn existing(self) -> Self
 
 Require the named volume to already exist. This is the default.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">create()</span>
+#### <span className="msb-recv">named.</span><span className="msb-hn">create()</span>
 
 <a id="nv-create"></a>
 
@@ -1624,7 +1624,7 @@ fn create(self) -> Self
 
 Create the named volume at sandbox launch and fail if it already exists.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">ensure_exists()</span>
+#### <span className="msb-recv">named.</span><span className="msb-hn">ensure_exists()</span>
 
 <a id="nv-ensure_exists"></a>
 
@@ -1634,7 +1634,7 @@ fn ensure_exists(self) -> Self
 
 Create the named volume if it is missing, or reuse a compatible existing volume. Errors if an existing volume's kind, quota, capacity, or explicitly requested labels differ.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">name()</span>
+#### <span className="msb-recv">named.</span><span className="msb-hn">name()</span>
 
 <a id="nv-name"></a>
 
@@ -1653,7 +1653,7 @@ Override the volume name passed to [`named_with()`](#named_with).
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">directory()</span>
+#### <span className="msb-recv">named.</span><span className="msb-hn">directory()</span>
 
 <a id="nv-directory"></a>
 
@@ -1663,7 +1663,7 @@ fn directory(self) -> Self
 
 Use directory-backed storage for a created volume. This is the default. Clears any previously set disk capacity.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">disk()</span>
+#### <span className="msb-recv">named.</span><span className="msb-hn">disk()</span>
 
 <Tooltip tip="Disk-kind volumes are not available on microsandbox cloud; use a directory-backed named volume."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -1675,7 +1675,7 @@ fn disk(self) -> Self
 
 Use raw ext4 disk-image storage for a created volume. Requires [`.size()`](#nv-size). Clears any previously set quota.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">size()</span>
+#### <span className="msb-recv">named.</span><span className="msb-hn">size()</span>
 
 <Tooltip tip="Disk-kind volumes are not available on microsandbox cloud; use a directory-backed named volume."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -1696,7 +1696,7 @@ Set disk capacity for a created disk volume. Accepts a bare `u32` (MiB) or a `Si
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">quota()</span>
+#### <span className="msb-recv">named.</span><span className="msb-hn">quota()</span>
 
 <Tooltip tip="On microsandbox cloud, quota sets a storage cap and must be a whole number of GiB."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -1717,7 +1717,7 @@ Set a storage quota for a created directory volume. Accepts a bare `u32` (MiB) o
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">label()</span>
+#### <span className="msb-recv">named.</span><span className="msb-hn">label()</span>
 
 <a id="nv-label"></a>
 
@@ -1752,6 +1752,30 @@ A streaming reader for file data from a local volume directory. Returned by [`Vo
 | `recv()` | `Option<Bytes>` | Next chunk; `None` at EOF |
 | `collect()` | `Bytes` | Read the rest into one buffer |
 
+#### <span className="msb-recv">stream.</span><span className="msb-hn">recv()</span>
+
+```rust
+recv()
+```
+
+Next chunk; `None` at EOF
+
+<p className="msb-label">Returns</p>
+
+`Option<Bytes>`
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">collect()</span>
+
+```rust
+collect()
+```
+
+Read the rest into one buffer
+
+<p className="msb-label">Returns</p>
+
+`Bytes`
+
 ## VolumeFsWriteSink
 
 
@@ -1763,6 +1787,22 @@ A streaming writer for file data to a local volume directory. Returned by [`Volu
 |--------|---------|-------------|
 | `write(data)` | `()` | Append a chunk |
 | `close()` | `()` | Flush and close |
+
+#### <span className="msb-recv">sink.</span><span className="msb-hn">write()</span>
+
+```rust
+write(data)
+```
+
+Append a chunk
+
+#### <span className="msb-recv">sink.</span><span className="msb-hn">close()</span>
+
+```rust
+close()
+```
+
+Flush and close
 
 ## Types
 

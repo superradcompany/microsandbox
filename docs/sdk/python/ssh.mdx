@@ -359,6 +359,98 @@ High-level SFTP client session over an SSH connection. All methods are async.
 | symlink(target, link_path) | `None` | Create a symlink. |
 | close() | `None` | Close the SFTP session. |
 
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">read()</span>
+
+```python
+read(path)
+```
+
+Read a file into memory.
+
+<p className="msb-label">Returns</p>
+
+`bytes`
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">write()</span>
+
+```python
+write(path, data)
+```
+
+Write a file, creating or truncating it.
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">mkdir()</span>
+
+```python
+mkdir(path)
+```
+
+Create a directory.
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">remove_file()</span>
+
+```python
+remove_file(path)
+```
+
+Remove a file.
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">remove_dir()</span>
+
+```python
+remove_dir(path)
+```
+
+Remove an empty directory.
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">rename()</span>
+
+```python
+rename(old_path, new_path)
+```
+
+Rename a file or directory.
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">real_path()</span>
+
+```python
+real_path(path)
+```
+
+Resolve a path to its canonical absolute form.
+
+<p className="msb-label">Returns</p>
+
+`str`
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">read_link()</span>
+
+```python
+read_link(path)
+```
+
+Read a symlink target.
+
+<p className="msb-label">Returns</p>
+
+`str`
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">symlink()</span>
+
+```python
+symlink(target, link_path)
+```
+
+Create a symlink.
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">close()</span>
+
+```python
+close()
+```
+
+Close the SFTP session.
+
 ## Types
 
 ### SshOutput

@@ -595,6 +595,42 @@ Class methods `none()` and `allow_all()` construct terminal whole policies. `fro
 | `NetworkPolicy.allow_all()` | `NetworkPolicy` | Allow all ingress and egress traffic |
 | `NetworkPolicy.from_profiles(profiles)` | `NetworkPolicy` | Compose the selected canonical network profiles |
 
+#### <span className="msb-recv">NetworkPolicy.</span><span className="msb-hn">none()</span>
+
+```python
+NetworkPolicy.none()
+```
+
+Deny all ingress and egress traffic
+
+<p className="msb-label">Returns</p>
+
+`NetworkPolicy`
+
+#### <span className="msb-recv">NetworkPolicy.</span><span className="msb-hn">allow_all()</span>
+
+```python
+NetworkPolicy.allow_all()
+```
+
+Allow all ingress and egress traffic
+
+<p className="msb-label">Returns</p>
+
+`NetworkPolicy`
+
+#### <span className="msb-recv">NetworkPolicy.</span><span className="msb-hn">from_profiles()</span>
+
+```python
+NetworkPolicy.from_profiles(profiles)
+```
+
+Compose the selected canonical network profiles
+
+<p className="msb-label">Returns</p>
+
+`NetworkPolicy`
+
 ## Types
 
 ### NetworkProfile

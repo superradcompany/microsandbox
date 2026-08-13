@@ -840,6 +840,22 @@ Streaming reader for file data from the sandbox. Obtained via [`read_stream()`](
 | recv() | `recv(&mut self) -> MicrosandboxResult<Option<Bytes>>` | Receive the next chunk; `None` once the file is fully read. Errors if the guest reports a failure. |
 | collect() | `collect(self) -> MicrosandboxResult<Bytes>` | Consume the stream and collect all remaining chunks into a single buffer. |
 
+#### <span className="msb-recv">stream.</span><span className="msb-hn">recv()</span>
+
+```rust
+recv()
+```
+
+Receive the next chunk; `None` once the file is fully read. Errors if the guest reports a failure.
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">collect()</span>
+
+```rust
+collect()
+```
+
+Consume the stream and collect all remaining chunks into a single buffer.
+
 ## FsWriteSink
 
 
@@ -851,6 +867,22 @@ Streaming writer for file data to the sandbox. Obtained via [`write_stream()`](#
 |--------|-----------|-------------|
 | write() | `write(&self, data: impl AsRef<[u8]>) -> MicrosandboxResult<()>` | Write a chunk of data. |
 | close() | `close(self) -> MicrosandboxResult<()>` | Send EOF and wait for confirmation. Must be called to finalize the write; errors if the guest reports a write failure. |
+
+#### <span className="msb-recv">sink.</span><span className="msb-hn">write()</span>
+
+```rust
+write()
+```
+
+Write a chunk of data.
+
+#### <span className="msb-recv">sink.</span><span className="msb-hn">close()</span>
+
+```rust
+close()
+```
+
+Send EOF and wait for confirmation. Must be called to finalize the write; errors if the guest reports a write failure.
 
 ## Types
 

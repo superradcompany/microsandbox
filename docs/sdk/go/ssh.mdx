@@ -488,6 +488,126 @@ A high-level SFTP client session over an SSH connection. Obtained via [`SFTP()`]
 | Symlink(ctx, target, linkPath) | `error` | Create a symlink |
 | Close(ctx) | `error` | Close the session (consumes the handle) |
 
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">Read()</span>
+
+```go
+Read(ctx, path)
+```
+
+Read a file into memory
+
+<p className="msb-label">Returns</p>
+
+`([]byte, error)`
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">Write()</span>
+
+```go
+Write(ctx, path, data)
+```
+
+Write a file, creating or truncating it
+
+<p className="msb-label">Returns</p>
+
+`error`
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">Mkdir()</span>
+
+```go
+Mkdir(ctx, path)
+```
+
+Create a directory
+
+<p className="msb-label">Returns</p>
+
+`error`
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">RemoveFile()</span>
+
+```go
+RemoveFile(ctx, path)
+```
+
+Remove a file
+
+<p className="msb-label">Returns</p>
+
+`error`
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">RemoveDir()</span>
+
+```go
+RemoveDir(ctx, path)
+```
+
+Remove an empty directory
+
+<p className="msb-label">Returns</p>
+
+`error`
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">Rename()</span>
+
+```go
+Rename(ctx, oldPath, newPath)
+```
+
+Rename a file or directory
+
+<p className="msb-label">Returns</p>
+
+`error`
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">RealPath()</span>
+
+```go
+RealPath(ctx, path)
+```
+
+Resolve a path to its canonical absolute form
+
+<p className="msb-label">Returns</p>
+
+`(string, error)`
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">ReadLink()</span>
+
+```go
+ReadLink(ctx, path)
+```
+
+Read a symlink target
+
+<p className="msb-label">Returns</p>
+
+`(string, error)`
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">Symlink()</span>
+
+```go
+Symlink(ctx, target, linkPath)
+```
+
+Create a symlink
+
+<p className="msb-label">Returns</p>
+
+`error`
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">Close()</span>
+
+```go
+Close(ctx)
+```
+
+Close the session (consumes the handle)
+
+<p className="msb-label">Returns</p>
+
+`error`
+
 ## Types
 
 ### SSHClientOption

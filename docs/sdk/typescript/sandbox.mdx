@@ -827,7 +827,7 @@ Implements `AsyncDisposable` so the sandbox can be used with `await using`. When
 
 Fluent builder for configuring a sandbox before creation. Obtained via [`Sandbox.builder(name)`](#sandbox-builder). Every setter returns the same builder so calls chain. Examples are shown on the methods where usage is non-obvious.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">build()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">build()</span>
 
 ```typescript
 build(): Promise<SandboxConfig>
@@ -844,7 +844,7 @@ Materialize the [`SandboxConfig`](#sandboxconfig) without booting the sandbox. V
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">cpus()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">cpus()</span>
 
 ```typescript
 cpus(n: number): this
@@ -861,7 +861,7 @@ Set the number of virtual CPUs. This is a limit, not a reservation.
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">maxCpus()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">maxCpus()</span>
 
 <Tooltip tip="On microsandbox cloud these ceilings are not carried; the maximum is pinned to the initial value. Recreate the sandbox to resize."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -880,7 +880,7 @@ Set the boot-time maximum possible virtual CPU capacity. This reserves the envel
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">create()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">create()</span>
 
 ```typescript
 create(): Promise<Sandbox>
@@ -909,7 +909,7 @@ Build and boot the sandbox. By default the sandbox is attached - it stops when t
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">createWithPullProgress()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">createWithPullProgress()</span>
 
 <Tooltip tip="On microsandbox cloud, per-layer pull progress is not reported; creation still completes."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -946,7 +946,7 @@ Build and boot while streaming image pull progress. Returns a [`PullProgressCrea
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">detached()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">detached()</span>
 
 ```typescript
 detached(enabled: boolean): this
@@ -963,7 +963,7 @@ Create in detached/background mode when `true`. A detached sandbox survives afte
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">disableMetricsSample()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">disableMetricsSample()</span>
 
 <Tooltip tip="Metrics sampling does not apply on microsandbox cloud, where resource metrics are unavailable."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -973,7 +973,7 @@ disableMetricsSample(): this
 
 Disable periodic background metrics sampling for this sandbox.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">disableNetwork()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">disableNetwork()</span>
 
 ```typescript
 disableNetwork(): this
@@ -981,7 +981,7 @@ disableNetwork(): this
 
 Fully disable networking. No network interface is created.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">entrypoint()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">entrypoint()</span>
 
 ```typescript
 entrypoint(cmd: string[]): this
@@ -998,7 +998,7 @@ Override the image ENTRYPOINT used by default-workload execution. [`sandbox.exec
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">env()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">env()</span>
 
 ```typescript
 env(key: string, value: string): this
@@ -1019,7 +1019,7 @@ Set an environment variable visible to all commands. Can be called multiple time
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">envs()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">envs()</span>
 
 ```typescript
 envs(vars: Record<string, string>): this
@@ -1036,7 +1036,7 @@ Add many environment variables at once.
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">ephemeral()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">ephemeral()</span>
 
 ```typescript
 ephemeral(enabled: boolean): this
@@ -1053,7 +1053,7 @@ When `true`, the sandbox and all its persisted state are removed automatically o
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">fromSnapshot()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">fromSnapshot()</span>
 
 ```typescript
 fromSnapshot(pathOrName: string): this
@@ -1070,7 +1070,7 @@ Boot from a previously captured snapshot instead of a fresh image. The image ref
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">hostname()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">hostname()</span>
 
 <Tooltip tip="On microsandbox cloud, the hostname is assigned by the platform; a value set here is ignored."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -1089,7 +1089,7 @@ Set the guest hostname.
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">libkrunfwPath()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">libkrunfwPath()</span>
 
 ```typescript
 libkrunfwPath(path: string): this
@@ -1106,7 +1106,7 @@ Deprecated compatibility alias for older builder chains. This sets the same proc
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">idleTimeout()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">idleTimeout()</span>
 
 ```typescript
 idleTimeout(secs: number): this
@@ -1123,7 +1123,7 @@ Auto-drain the sandbox after this many seconds of inactivity (no active exec ses
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">image()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">image()</span>
 
 <Tooltip tip="On microsandbox cloud, only OCI image references are accepted; host-directory and disk-image root filesystems are local-only."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -1142,7 +1142,7 @@ Set the root filesystem source. Accepts OCI image names (`"alpine"`), local dire
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">imageWith()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">imageWith()</span>
 
 <Tooltip tip="On microsandbox cloud, only OCI image references are accepted; host-directory and disk-image root filesystems are local-only."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -1171,7 +1171,7 @@ Configure an explicit rootfs source. Use this for OCI-only settings such as the 
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">cmd()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">cmd()</span>
 
 ```typescript
 cmd(cmd: string[]): this
@@ -1186,7 +1186,7 @@ const sandbox = await Sandbox.builder("worker")
   .create();
 ```
 
-#### <span className="msb-recv">.</span><span className="msb-hn">init()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">init()</span>
 
 ```typescript
 init(cmd: string, args?: string[]): this
@@ -1218,7 +1218,7 @@ Hand off PID 1 inside the guest to `cmd` after agentd finishes its boot-time set
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">initWith()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">initWith()</span>
 
 ```typescript
 initWith(cmd: string, configure: (b: InitOptionsBuilder) => InitOptionsBuilder): this
@@ -1251,7 +1251,7 @@ Like [`init`](#init), but with a closure-builder for argv and env vars. The buil
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">label()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">label()</span>
 
 ```typescript
 label(key: string, value: string): this
@@ -1272,7 +1272,7 @@ Attach a single label to the sandbox. Labels can be matched later with [`Sandbox
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">labels()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">labels()</span>
 
 ```typescript
 labels(labels: Record<string, string>): this
@@ -1289,7 +1289,7 @@ Attach many labels at once.
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">logLevel()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">logLevel()</span>
 
 ```typescript
 logLevel(level: LogLevel): this
@@ -1306,7 +1306,7 @@ Override the sandbox process's log verbosity.
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">maxDuration()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">maxDuration()</span>
 
 ```typescript
 maxDuration(secs: number): this
@@ -1323,7 +1323,7 @@ Set the maximum sandbox lifetime in seconds. When exceeded, the sandbox is drain
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">memory()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">memory()</span>
 
 ```typescript
 memory(mib: number): this
@@ -1340,7 +1340,7 @@ Set the guest memory size in MiB. Physical pages are only allocated as the guest
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">maxMemory()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">maxMemory()</span>
 
 <Tooltip tip="On microsandbox cloud these ceilings are not carried; the maximum is pinned to the initial value. Recreate the sandbox to resize."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -1359,7 +1359,7 @@ Set the boot-time maximum hotpluggable guest memory in MiB. This reserves the en
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">thp()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">thp()</span>
 
 ```typescript
 thp(policy: "always" | "madvise" | "never"): this
@@ -1376,7 +1376,7 @@ Select the guest transparent huge-page policy applied through the kernel command
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">metricsSampleIntervalMs()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">metricsSampleIntervalMs()</span>
 
 <Tooltip tip="Metrics sampling does not apply on microsandbox cloud, where resource metrics are unavailable."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -1395,7 +1395,7 @@ Set the interval, in milliseconds, at which the host samples background metrics 
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">network()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">network()</span>
 
 ```typescript
 network(configure: (b: NetworkBuilder) => NetworkBuilder): this
@@ -1412,7 +1412,7 @@ Configure DNS, TLS, policy, and secrets. See [Networking](/sdk/typescript/networ
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">patch()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">patch()</span>
 
 ```typescript
 patch(configure: (b: PatchBuilder) => PatchBuilder): this
@@ -1440,7 +1440,7 @@ Modify the rootfs before the VM boots. Patches go into the writable layer - the 
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">port()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">port()</span>
 
 <Tooltip tip="Publishing host ports is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -1463,7 +1463,7 @@ Publish a TCP port from the sandbox to the host. The default host bind address i
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">portBind()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">portBind()</span>
 
 <Tooltip tip="Publishing host ports is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -1490,7 +1490,7 @@ Publish a TCP port on a specific host bind address, such as `"0.0.0.0"`.
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">portUdp()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">portUdp()</span>
 
 <Tooltip tip="Publishing host ports is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -1513,7 +1513,7 @@ Publish a UDP port. The default host bind address is `127.0.0.1`.
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">portUdpBind()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">portUdpBind()</span>
 
 <Tooltip tip="Publishing host ports is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -1540,7 +1540,7 @@ Publish a UDP port on a specific host bind address.
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">pullPolicy()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">pullPolicy()</span>
 
 ```typescript
 pullPolicy(policy: PullPolicy): this
@@ -1557,7 +1557,7 @@ Control when the OCI image is pulled from the registry.
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">quietLogs()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">quietLogs()</span>
 
 ```typescript
 quietLogs(): this
@@ -1565,7 +1565,7 @@ quietLogs(): this
 
 Suppress sandbox process log output.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">registry()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">registry()</span>
 
 <Tooltip tip="On microsandbox cloud, plain-HTTP and custom-CA registry options are not available; credential auth still works."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -1597,7 +1597,7 @@ Configure the OCI registry connection: authentication, insecure transport, and C
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">replace()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">replace()</span>
 
 <Tooltip tip="Replace-on-create is not available on microsandbox cloud; remove the existing sandbox first."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -1607,7 +1607,7 @@ replace(): this
 
 If a sandbox with the same name already exists, stop it (10s SIGTERM grace, then SIGKILL), remove it, and create a fresh one. Without this, creation fails on name conflict.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">replaceWithTimeout()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">replaceWithTimeout()</span>
 
 <Tooltip tip="Replace-on-create is not available on microsandbox cloud; remove the existing sandbox first."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -1626,7 +1626,7 @@ Same as [`replace()`](#replace) with a custom SIGTERM timeout in milliseconds. `
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">rlimit()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">rlimit()</span>
 
 ```typescript
 rlimit(resource: string, limit: number): this
@@ -1647,7 +1647,7 @@ Set a guest resource limit (a soft and hard limit at the same value). For separa
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">rlimitRange()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">rlimitRange()</span>
 
 ```typescript
 rlimitRange(resource: string, soft: number, hard: number): this
@@ -1672,7 +1672,7 @@ Set a guest resource limit with explicit soft and hard values.
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">script()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">script()</span>
 
 ```typescript
 script(name: string, content: string): this
@@ -1693,7 +1693,7 @@ Add a named script at `/.msb/scripts/` inside the guest. Scripts are added to `P
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">scripts()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">scripts()</span>
 
 ```typescript
 scripts(scripts: Record<string, string>): this
@@ -1710,7 +1710,7 @@ Add many named scripts at once.
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">security()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">security()</span>
 
 ```typescript
 security(profile: "default" | "restricted"): this
@@ -1727,7 +1727,7 @@ Set the in-guest security profile.
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">secret()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">secret()</span>
 
 ```typescript
 secret(configure: (b: SecretBuilder) => SecretBuilder): this
@@ -1744,7 +1744,7 @@ Add a secret with full configuration. See [Secrets](/sdk/typescript/secrets) for
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">secretEnv()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">secretEnv()</span>
 
 ```typescript
 secretEnv(envVar: string, value: string, allowedHost: string): this
@@ -1769,7 +1769,7 @@ Auto-placeholder shorthand for adding a header-injected secret. Generates a `$MS
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">shell()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">shell()</span>
 
 ```typescript
 shell(shell: string): this
@@ -1786,7 +1786,7 @@ Set the shell binary used by [`sandbox.shell()`](/sdk/typescript/execution).
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">user()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">user()</span>
 
 ```typescript
 user(user: string): this
@@ -1803,7 +1803,7 @@ Set the default guest user for all commands.
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">volume()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">volume()</span>
 
 ```typescript
 volume(guest: string, configure: (b: MountBuilder) => MountBuilder): this
@@ -1824,7 +1824,7 @@ Add a volume mount. See [Volumes](/sdk/typescript/volumes) for mount types.
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">workdir()</span>
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">workdir()</span>
 
 ```typescript
 workdir(path: string): this
@@ -1845,7 +1845,7 @@ Set the default working directory for all commands.
 
 Fluent builder for the ordered list of pre-boot rootfs patches. Used in `SandboxBuilder.patch(p => p...)`. Each method appends one operation; calls are chainable. By default a method that targets a path already present in the image errors at boot; pass `{ replace: true }` on the operation to allow overwriting. `mkdir` and `remove` are idempotent. See [Patches](/sandboxes/bootstrap#patches) for conceptual context.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">append()</span>
+#### <span className="msb-recv">patch.</span><span className="msb-hn">append()</span>
 
 ```typescript
 append(path: string, content: string): this
@@ -1866,7 +1866,7 @@ Append `content` to an existing file at `path`. If the file lives in a lower ima
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">copyDir()</span>
+#### <span className="msb-recv">patch.</span><span className="msb-hn">copyDir()</span>
 
 <Tooltip tip="On microsandbox cloud, host sources resolve against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -1893,7 +1893,7 @@ Recursively copy a host directory at `src` into the guest rootfs at `dst`.
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">copyFile()</span>
+#### <span className="msb-recv">patch.</span><span className="msb-hn">copyFile()</span>
 
 <Tooltip tip="On microsandbox cloud, host sources resolve against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -1924,7 +1924,7 @@ Copy a single host file at `src` into the guest rootfs at `dst`.
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">file()</span>
+#### <span className="msb-recv">patch.</span><span className="msb-hn">file()</span>
 
 ```typescript
 file(path: string, content: Buffer, opts?: { mode?: number; replace?: boolean }): this
@@ -1953,7 +1953,7 @@ Write raw bytes at `path`.
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">mkdir()</span>
+#### <span className="msb-recv">patch.</span><span className="msb-hn">mkdir()</span>
 
 <Tooltip tip="On microsandbox cloud, host sources resolve against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -1976,7 +1976,7 @@ Create a directory at `path`. Idempotent: a no-op if the directory already exist
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">remove()</span>
+#### <span className="msb-recv">patch.</span><span className="msb-hn">remove()</span>
 
 ```typescript
 remove(path: string): this
@@ -1993,7 +1993,7 @@ Delete a file or directory at `path`. Idempotent: a no-op if the path doesn't ex
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">symlink()</span>
+#### <span className="msb-recv">patch.</span><span className="msb-hn">symlink()</span>
 
 ```typescript
 symlink(target: string, link: string, opts?: { replace?: boolean }): this
@@ -2018,7 +2018,7 @@ Create a symlink at `link` pointing to `target`.
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">text()</span>
+#### <span className="msb-recv">patch.</span><span className="msb-hn">text()</span>
 
 ```typescript
 text(path: string, content: string, opts?: { mode?: number; replace?: boolean }): this
@@ -2063,6 +2063,18 @@ A class wrapping one captured log entry from `exec.log`. Bytes are exposed via `
 | cursor | `string` | Opaque resume token; pass to [`LogStreamOptions.fromCursor`](#logstreamoptions) to resume |
 | `text()` | `string` | Convenience: UTF-8 decode of `data` (lossy - invalid bytes are replaced) |
 
+#### <span className="msb-recv">entry.</span><span className="msb-hn">text()</span>
+
+```typescript
+text()
+```
+
+Convenience: UTF-8 decode of `data` (lossy - invalid bytes are replaced)
+
+<p className="msb-label">Returns</p>
+
+`string`
+
 ## LogStream
 
 
@@ -2075,6 +2087,18 @@ An async iterable of [`LogEntry`](#logentry) values. Drain it with `for await...
 | `recv()` | `Promise<`[`LogEntry`](#logentry)` \| null>` | Receive the next entry. Returns `null` when the stream ends. |
 | `[Symbol.asyncIterator]()` | `AsyncIterator<`[`LogEntry`](#logentry)`>` | Use with `for await...of` |
 | `[Symbol.asyncDispose]()` | `Promise<void>` | Stop iterating; safe to use with `await using` |
+
+#### <span className="msb-recv">logStream.</span><span className="msb-hn">recv()</span>
+
+```typescript
+recv()
+```
+
+Receive the next entry. Returns `null` when the stream ends.
+
+<p className="msb-label">Returns</p>
+
+`Promise<`[`LogEntry`](#logentry)` \| null>`
 
 ## MetricsStream
 
@@ -2089,6 +2113,18 @@ Async stream for receiving periodic metrics snapshots. Implements `AsyncDisposab
 | `[Symbol.asyncIterator]()` | `AsyncIterator<`[`SandboxMetrics`](#sandboxmetrics)`>` | Use with `for await...of` |
 | `[Symbol.asyncDispose]()` | `Promise<void>` | Stop iterating; safe to use with `await using` |
 
+#### <span className="msb-recv">metricsStream.</span><span className="msb-hn">recv()</span>
+
+```typescript
+recv()
+```
+
+Receive the next snapshot. Returns `null` when the stream ends.
+
+<p className="msb-label">Returns</p>
+
+`Promise<`[`SandboxMetrics`](#sandboxmetrics)` \| null>`
+
 ## PullProgressCreate
 
 
@@ -2102,6 +2138,18 @@ Async iterable creation handle returned by [`createWithPullProgress()`](#createw
 | `[Symbol.asyncIterator]()` | `AsyncIterator<`[`PullProgress`](#pullprogress)`>` | Use with `for await...of` |
 | `awaitSandbox()` | `Promise<`[`Sandbox`](#instance-methods)`>` | Resolve the underlying creation task and return the running sandbox |
 
+#### <span className="msb-recv">pull.</span><span className="msb-hn">awaitSandbox()</span>
+
+```typescript
+awaitSandbox()
+```
+
+Resolve the underlying creation task and return the running sandbox
+
+<p className="msb-label">Returns</p>
+
+`Promise<`[`Sandbox`](#instance-methods)`>`
+
 ## SandboxListBuilder
 
 
@@ -2113,6 +2161,38 @@ Fluent configuration passed to [`Sandbox.listWith()`](#sandbox-listwith). Keep t
 | `cursor(cursor)` | Continue after a previous page's `nextCursor` |
 | `label(key, value)` | Require one label; repeated calls are AND-matched |
 | `labels(record)` | Add several AND-matched labels |
+
+#### <span className="msb-recv">list.</span><span className="msb-hn">limit()</span>
+
+```typescript
+limit(n)
+```
+
+Set a page size from 1 through 100
+
+#### <span className="msb-recv">list.</span><span className="msb-hn">cursor()</span>
+
+```typescript
+cursor(cursor)
+```
+
+Continue after a previous page's `nextCursor`
+
+#### <span className="msb-recv">list.</span><span className="msb-hn">label()</span>
+
+```typescript
+label(key, value)
+```
+
+Require one label; repeated calls are AND-matched
+
+#### <span className="msb-recv">list.</span><span className="msb-hn">labels()</span>
+
+```typescript
+labels(record)
+```
+
+Add several AND-matched labels
 
 ## SandboxHandle
 
@@ -2152,6 +2232,270 @@ Handles from `Sandbox.get(name)` are **live** - they expose lifecycle methods (`
 | waitUntilStopped() | `Promise<`[`SandboxStopResult`](#sandboxstopresult)`>` | Block until the sandbox reaches terminal state |
 | remove() | `Promise<void>` | Delete sandbox and state |
 | snapshot(name) | `Promise<Snapshot>` | Snapshot this stopped sandbox under a bare name. See [Snapshots](/sdk/typescript/snapshots) |
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">config()</span>
+
+```typescript
+config()
+```
+
+Parsed configuration
+
+<p className="msb-label">Returns</p>
+
+[`SandboxConfig`](#sandboxconfig)
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">refresh()</span>
+
+```typescript
+refresh()
+```
+
+Re-read the handle's state from the database
+
+<p className="msb-label">Returns</p>
+
+`Promise<`[`SandboxHandle`](#sandboxhandle)`>`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">ping()</span>
+
+```typescript
+ping()
+```
+
+Check agent reachability without refreshing idle activity; does not start stopped sandboxes
+
+<p className="msb-label">Returns</p>
+
+`Promise<`[`SandboxPingResult`](#sandboxpingresult)`>`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">touch()</span>
+
+```typescript
+touch()
+```
+
+Explicitly refresh idle activity; does not start stopped sandboxes
+
+<p className="msb-label">Returns</p>
+
+`Promise<`[`SandboxTouchResult`](#sandboxtouchresult)`>`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">modify()</span>
+
+```typescript
+modify(opts?)
+```
+
+Plan or apply a configuration change; same options as [`modify()`](#sandbox-modify). Does not start stopped sandboxes; changes persist for the next boot
+
+<p className="msb-label">Returns</p>
+
+`Promise<`[`SandboxModificationPlan`](#sandboxmodificationplan)`>`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">metrics()</span>
+
+```typescript
+metrics()
+```
+
+Point-in-time resource metrics
+
+<p className="msb-label">Returns</p>
+
+`Promise<`[`SandboxMetrics`](#sandboxmetrics)`>`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">logs()</span>
+
+```typescript
+logs()
+```
+
+Read captured `exec.log` (works without starting)
+
+<p className="msb-label">Returns</p>
+
+`Promise<`[`LogEntry`](#logentry)`[]>`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">logStream()</span>
+
+```typescript
+logStream()
+```
+
+Stream captured `exec.log`, with optional follow
+
+<p className="msb-label">Returns</p>
+
+`Promise<`[`LogStream`](#logstream)`>`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">start()</span>
+
+```typescript
+start()
+```
+
+Start in attached mode
+
+<p className="msb-label">Returns</p>
+
+`Promise<`[`Sandbox`](#instance-methods)`>`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">startDetached()</span>
+
+```typescript
+startDetached()
+```
+
+Start in detached mode
+
+<p className="msb-label">Returns</p>
+
+`Promise<`[`Sandbox`](#instance-methods)`>`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">connect()</span>
+
+```typescript
+connect()
+```
+
+Connect to a running sandbox without taking ownership. Returns an error if it doesn't respond within 10_000 ms
+
+<p className="msb-label">Returns</p>
+
+`Promise<`[`Sandbox`](#instance-methods)`>`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">connectWithTimeout()</span>
+
+```typescript
+connectWithTimeout(timeoutMs)
+```
+
+Same as `connect()` with an explicit timeout in milliseconds
+
+<p className="msb-label">Returns</p>
+
+`Promise<`[`Sandbox`](#instance-methods)`>`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">stop()</span>
+
+```typescript
+stop()
+```
+
+Gracefully shut down. Waits up to 10_000 ms for pending writes to flush, then force-kills
+
+<p className="msb-label">Returns</p>
+
+`Promise<void>`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">stopWithTimeout()</span>
+
+```typescript
+stopWithTimeout(timeoutMs)
+```
+
+Same as `stop()` with an explicit timeout in milliseconds; `0` force-kills immediately
+
+<p className="msb-label">Returns</p>
+
+`Promise<void>`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">requestStop()</span>
+
+```typescript
+requestStop()
+```
+
+Request graceful shutdown without waiting
+
+<p className="msb-label">Returns</p>
+
+`Promise<void>`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">kill()</span>
+
+```typescript
+kill()
+```
+
+Force terminate and wait until stopped state is observed
+
+<p className="msb-label">Returns</p>
+
+`Promise<void>`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">killWithTimeout()</span>
+
+```typescript
+killWithTimeout(timeoutMs)
+```
+
+Same as `kill()` with an explicit observation timeout
+
+<p className="msb-label">Returns</p>
+
+`Promise<void>`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">requestKill()</span>
+
+```typescript
+requestKill()
+```
+
+Request force termination without waiting
+
+<p className="msb-label">Returns</p>
+
+`Promise<void>`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">requestDrain()</span>
+
+```typescript
+requestDrain()
+```
+
+Request graceful drain without waiting
+
+<p className="msb-label">Returns</p>
+
+`Promise<void>`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">waitUntilStopped()</span>
+
+```typescript
+waitUntilStopped()
+```
+
+Block until the sandbox reaches terminal state
+
+<p className="msb-label">Returns</p>
+
+`Promise<`[`SandboxStopResult`](#sandboxstopresult)`>`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">remove()</span>
+
+```typescript
+remove()
+```
+
+Delete sandbox and state
+
+<p className="msb-label">Returns</p>
+
+`Promise<void>`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot()</span>
+
+```typescript
+snapshot(name)
+```
+
+Snapshot this stopped sandbox under a bare name. See [Snapshots](/sdk/typescript/snapshots)
+
+<p className="msb-label">Returns</p>
+
+`Promise<Snapshot>`
 
 ## Types
 

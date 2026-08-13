@@ -435,6 +435,26 @@ A lightweight handle to a cached OCI image, returned by [`Image.get()`](#image-g
 | `await inspect()` | [`ImageDetail`](#imagedetail) | Fetch full detail for this image |
 | `await remove(*, force=False)` | `None` | Delete this image (raises [`ImageInUseError`](#errors) unless `force`) |
 
+#### <span className="msb-recv">handle.</span><span className="msb-hn">inspect()</span>
+
+```python
+await inspect()
+```
+
+Fetch full detail for this image
+
+<p className="msb-label">Returns</p>
+
+[`ImageDetail`](#imagedetail)
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">remove()</span>
+
+```python
+await remove(*, force=False)
+```
+
+Delete this image (raises [`ImageInUseError`](#errors) unless `force`)
+
 ## RootDisk
 
 Factory for writable OCI root disk configurations.
@@ -456,6 +476,42 @@ existing = RootDisk.disk(
 | `managed(size_mib=None)` | [`RootDiskConfig`](#rootdiskconfig) | Microsandbox-managed sparse ext4 disk |
 | `tmpfs(size_mib=None)` | [`RootDiskConfig`](#rootdiskconfig) | Ephemeral RAM-backed upper layer |
 | `disk(path, *, format=None, fstype=None)` | [`RootDiskConfig`](#rootdiskconfig) | User-supplied writable disk image |
+
+#### <span className="msb-recv">RootDisk.</span><span className="msb-hn">managed()</span>
+
+```python
+managed(size_mib=None)
+```
+
+Microsandbox-managed sparse ext4 disk
+
+<p className="msb-label">Returns</p>
+
+[`RootDiskConfig`](#rootdiskconfig)
+
+#### <span className="msb-recv">RootDisk.</span><span className="msb-hn">tmpfs()</span>
+
+```python
+tmpfs(size_mib=None)
+```
+
+Ephemeral RAM-backed upper layer
+
+<p className="msb-label">Returns</p>
+
+[`RootDiskConfig`](#rootdiskconfig)
+
+#### <span className="msb-recv">RootDisk.</span><span className="msb-hn">disk()</span>
+
+```python
+disk(path, *, format=None, fstype=None)
+```
+
+User-supplied writable disk image
+
+<p className="msb-label">Returns</p>
+
+[`RootDiskConfig`](#rootdiskconfig)
 
 ## Types
 

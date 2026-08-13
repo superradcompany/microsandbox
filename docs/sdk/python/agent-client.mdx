@@ -312,6 +312,30 @@ An open raw agent stream. Carries the protocol correlation id and is both an asy
 | `async with` | [`AgentStream`](#agentstream) | Async context manager; closes the stream on exit |
 | `async for` | [`RawFrame`](#rawframe) | Async iterator over frames until terminal or EOF |
 
+#### <span className="msb-recv">stream.</span><span className="msb-hn">next()</span>
+
+```python
+next()
+```
+
+Read the next frame; returns `None` at EOF
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[`[`RawFrame`](#rawframe)` \| None]`
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">close()</span>
+
+```python
+close()
+```
+
+Release the stream handle early; safe to call more than once
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[None]`
+
 <Accordion title="Example">
 
 ```python

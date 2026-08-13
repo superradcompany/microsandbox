@@ -83,6 +83,42 @@ h2 + h4:has(.msb-hn), h3 + h4:has(.msb-hn), .msb-member-group + h4:has(.msb-hn) 
 }
 h2 + .msb-member-group { margin-top: 1.5rem; }
 
+/* Collapse second-level entries in the right-hand table of contents while
+ * keeping each root type directly navigable. */
+#table-of-contents-content li:has(> .msb-toc-toggle) {
+  position: relative;
+}
+#table-of-contents-content .msb-toc-toggle {
+  position: absolute;
+  top: 0.18rem;
+  left: -1.15rem;
+  display: grid;
+  width: 1rem;
+  height: 1rem;
+  place-items: center;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  opacity: 0.55;
+  background: transparent;
+  cursor: pointer;
+}
+#table-of-contents-content .msb-toc-toggle:hover { opacity: 1; }
+#table-of-contents-content .msb-toc-toggle span {
+  width: 0.42rem;
+  height: 0.42rem;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 120ms ease;
+}
+#table-of-contents-content .msb-toc-toggle[aria-expanded="true"] span {
+  transform: rotate(45deg) translate(-0.08rem, -0.08rem);
+}
+#table-of-contents-content li[data-msb-expanded="false"] > ul {
+  display: none;
+}
+
 /* inline type links (in param/return rows) */
 .msb-type { color: #6d4bc4; }
 .dark .msb-type { color: #c9a4ff; }

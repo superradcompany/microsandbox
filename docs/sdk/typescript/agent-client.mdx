@@ -345,6 +345,42 @@ An open raw agent stream. Implements `AsyncIterableIterator<RawFrame>`, so it ca
 | return() | `Promise<IteratorResult<`[`RawFrame`](#rawframe)`>>` | Async-iterator early-exit hook; closes the stream |
 | [Symbol.asyncIterator]() | [`AgentStream`](#agentstream) | Returns itself so the stream is iterable |
 
+#### <span className="msb-recv">stream.</span><span className="msb-hn">next()</span>
+
+```typescript
+next()
+```
+
+Pull the next frame; `done` once terminal or exhausted
+
+<p className="msb-label">Returns</p>
+
+`Promise<IteratorResult<`[`RawFrame`](#rawframe)`>>`
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">close()</span>
+
+```typescript
+close()
+```
+
+Release the stream handle early (idempotent)
+
+<p className="msb-label">Returns</p>
+
+`Promise<void>`
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">return()</span>
+
+```typescript
+return()
+```
+
+Async-iterator early-exit hook; closes the stream
+
+<p className="msb-label">Returns</p>
+
+`Promise<IteratorResult<`[`RawFrame`](#rawframe)`>>`
+
 ## Types
 
 ### RawFrame

@@ -2104,6 +2104,294 @@ A lightweight reference to a sandbox's persisted state. Carries metadata (name, 
 | `Remove(ctx)` | `error` | Delete sandbox and persisted state |
 | `Snapshot(ctx, name)` | `(*SnapshotArtifact, error)` | Snapshot a stopped sandbox under a bare name |
 
+#### <span className="msb-recv">h.</span><span className="msb-hn">Name()</span>
+
+```go
+Name()
+```
+
+Sandbox name, up to 128 UTF-8 bytes
+
+<p className="msb-label">Returns</p>
+
+`string`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Status()</span>
+
+```go
+Status()
+```
+
+Last-known lifecycle status
+
+<p className="msb-label">Returns</p>
+
+[`SandboxStatus`](#sandboxstatus)
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">ConfigJSON()</span>
+
+```go
+ConfigJSON()
+```
+
+Raw JSON configuration
+
+<p className="msb-label">Returns</p>
+
+`string`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Config()</span>
+
+```go
+Config()
+```
+
+Parsed configuration
+
+<p className="msb-label">Returns</p>
+
+`(*`[`SandboxConfig`](#sandboxconfig)`, error)`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">CreatedAt()</span>
+
+```go
+CreatedAt()
+```
+
+Creation time, zero value if unknown
+
+<p className="msb-label">Returns</p>
+
+`time.Time`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">UpdatedAt()</span>
+
+```go
+UpdatedAt()
+```
+
+Last-update time, zero value if unknown
+
+<p className="msb-label">Returns</p>
+
+`time.Time`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Refresh()</span>
+
+```go
+Refresh(ctx)
+```
+
+Fresh handle for the same name
+
+<p className="msb-label">Returns</p>
+
+`(*SandboxHandle, error)`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Ping()</span>
+
+```go
+Ping(ctx)
+```
+
+Check agent reachability without refreshing idle activity; does not start stopped sandboxes
+
+<p className="msb-label">Returns</p>
+
+`(*`[`SandboxPingResult`](#sandboxpingresult)`, error)`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Touch()</span>
+
+```go
+Touch(ctx)
+```
+
+Explicitly refresh idle activity; does not start stopped sandboxes
+
+<p className="msb-label">Returns</p>
+
+`(*`[`SandboxTouchResult`](#sandboxtouchresult)`, error)`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Modify()</span>
+
+```go
+Modify(ctx, opts)
+```
+
+Plan or apply a configuration change; same [`ModifyOptions`](#modifyoptions) as [`Modify()`](#sb-modify). Does not start stopped sandboxes; changes persist for the next boot
+
+<p className="msb-label">Returns</p>
+
+`(*`[`SandboxModificationPlan`](#sandboxmodificationplan)`, error)`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Metrics()</span>
+
+```go
+Metrics(ctx)
+```
+
+Point-in-time resource metrics
+
+<p className="msb-label">Returns</p>
+
+`(*`[`Metrics`](#metrics)`, error)`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Logs()</span>
+
+```go
+Logs(ctx, opts)
+```
+
+Read captured `exec.log` (works without starting)
+
+<p className="msb-label">Returns</p>
+
+`([]`[`LogEntry`](#logentry)`, error)`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">LogStream()</span>
+
+```go
+LogStream(ctx, opts)
+```
+
+Stream captured output
+
+<p className="msb-label">Returns</p>
+
+`(*`[`LogStreamHandle`](#logstreamhandle)`, error)`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Connect()</span>
+
+```go
+Connect(ctx)
+```
+
+Reattach to the running sandbox
+
+<p className="msb-label">Returns</p>
+
+`(*`[`Sandbox`](#methods)`, error)`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Start()</span>
+
+```go
+Start(ctx)
+```
+
+Boot a stopped sandbox in attached mode
+
+<p className="msb-label">Returns</p>
+
+`(*`[`Sandbox`](#methods)`, error)`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">StartDetached()</span>
+
+```go
+StartDetached(ctx)
+```
+
+Boot a stopped sandbox in detached mode
+
+<p className="msb-label">Returns</p>
+
+`(*`[`Sandbox`](#methods)`, error)`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Stop()</span>
+
+```go
+Stop(ctx, opts...)
+```
+
+Graceful shutdown; accepts [`StopOption`](#withstoptimeout)
+
+<p className="msb-label">Returns</p>
+
+`error`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">RequestStop()</span>
+
+```go
+RequestStop(ctx)
+```
+
+Async stop request
+
+<p className="msb-label">Returns</p>
+
+`error`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Kill()</span>
+
+```go
+Kill(ctx, opts...)
+```
+
+Force terminate; accepts [`KillOption`](#withkilltimeout)
+
+<p className="msb-label">Returns</p>
+
+`error`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">RequestKill()</span>
+
+```go
+RequestKill(ctx)
+```
+
+Async kill request
+
+<p className="msb-label">Returns</p>
+
+`error`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">RequestDrain()</span>
+
+```go
+RequestDrain(ctx)
+```
+
+Async drain request
+
+<p className="msb-label">Returns</p>
+
+`error`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">WaitUntilStopped()</span>
+
+```go
+WaitUntilStopped(ctx)
+```
+
+Block until terminal state
+
+<p className="msb-label">Returns</p>
+
+`(*`[`SandboxStopResult`](#sandboxstopresult)`, error)`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Remove()</span>
+
+```go
+Remove(ctx)
+```
+
+Delete sandbox and persisted state
+
+<p className="msb-label">Returns</p>
+
+`error`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Snapshot()</span>
+
+```go
+Snapshot(ctx, name)
+```
+
+Snapshot a stopped sandbox under a bare name
+
+<p className="msb-label">Returns</p>
+
+`(*SnapshotArtifact, error)`
+
 ## MetricsStreamHandle
 
 
@@ -2115,6 +2403,30 @@ Live metrics subscription. Call `Close` to release Rust-side resources.
 |--------|---------|-------------|
 | `Recv(ctx)` | `(*`[`Metrics`](#metrics)`, error)` | Block until the next snapshot arrives. Returns `(nil, nil)` when the stream ends (sandbox exited) |
 | `Close()` | `error` | Stop the stream and release Rust-side resources |
+
+#### <span className="msb-recv">metricsStream.</span><span className="msb-hn">Recv()</span>
+
+```go
+Recv(ctx)
+```
+
+Block until the next snapshot arrives. Returns `(nil, nil)` when the stream ends (sandbox exited)
+
+<p className="msb-label">Returns</p>
+
+`(*`[`Metrics`](#metrics)`, error)`
+
+#### <span className="msb-recv">metricsStream.</span><span className="msb-hn">Close()</span>
+
+```go
+Close()
+```
+
+Stop the stream and release Rust-side resources
+
+<p className="msb-label">Returns</p>
+
+`error`
 
 ## LogEntry
 
@@ -2135,6 +2447,18 @@ A single captured log entry.
 |--------|---------|-------------|
 | `Text()` | `string` | Captured bytes as a string |
 
+#### <span className="msb-recv">entry.</span><span className="msb-hn">Text()</span>
+
+```go
+Text()
+```
+
+Captured bytes as a string
+
+<p className="msb-label">Returns</p>
+
+`string`
+
 ## LogStreamHandle
 
 
@@ -2146,6 +2470,30 @@ Live log subscription. Call `Close` to release Rust-side resources.
 |--------|---------|-------------|
 | `Recv(ctx)` | `(*`[`LogEntry`](#logentry)`, error)` | Block until the next entry arrives. Returns `(nil, nil)` when the stream ends |
 | `Close()` | `error` | Stop the stream and release Rust-side resources |
+
+#### <span className="msb-recv">logStream.</span><span className="msb-hn">Recv()</span>
+
+```go
+Recv(ctx)
+```
+
+Block until the next entry arrives. Returns `(nil, nil)` when the stream ends
+
+<p className="msb-label">Returns</p>
+
+`(*`[`LogEntry`](#logentry)`, error)`
+
+#### <span className="msb-recv">logStream.</span><span className="msb-hn">Close()</span>
+
+```go
+Close()
+```
+
+Stop the stream and release Rust-side resources
+
+<p className="msb-label">Returns</p>
+
+`error`
 
 ## Types
 

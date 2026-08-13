@@ -492,6 +492,30 @@ Async stream for reading a file in chunks. Implements `AsyncIterable<Uint8Array>
 | `[Symbol.asyncIterator]()` | `AsyncIterator<Uint8Array>` | Iterate chunks with `for await...of` |
 | `[Symbol.asyncDispose]()` | `Promise<void>` | Stop reading; runs on `await using` scope exit |
 
+#### <span className="msb-recv">stream.</span><span className="msb-hn">recv()</span>
+
+```typescript
+recv()
+```
+
+Receive the next chunk. Returns `null` when the file has been fully read.
+
+<p className="msb-label">Returns</p>
+
+`Promise<Uint8Array \| null>`
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">collect()</span>
+
+```typescript
+collect()
+```
+
+Drain the stream into a single buffer
+
+<p className="msb-label">Returns</p>
+
+`Promise<Uint8Array>`
+
 ## FsWriteSink
 
 
@@ -504,6 +528,30 @@ Streaming writer for a file. Implements `AsyncDisposable`, so it can be paired w
 | `write(data)` | `Uint8Array \| string` | `Promise<void>` | Append a chunk. Strings are encoded as UTF-8. |
 | `close()` | - | `Promise<void>` | Flush and close. Idempotent. |
 | `[Symbol.asyncDispose]()` | - | `Promise<void>` | Calls `close()` on `await using` scope exit |
+
+#### <span className="msb-recv">sink.</span><span className="msb-hn">write()</span>
+
+```typescript
+write(data)
+```
+
+Append a chunk. Strings are encoded as UTF-8.
+
+<p className="msb-label">Returns</p>
+
+`Promise<void>`
+
+#### <span className="msb-recv">sink.</span><span className="msb-hn">close()</span>
+
+```typescript
+close()
+```
+
+Flush and close. Idempotent.
+
+<p className="msb-label">Returns</p>
+
+`Promise<void>`
 
 ## Types
 

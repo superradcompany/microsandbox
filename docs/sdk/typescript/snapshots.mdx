@@ -19,7 +19,7 @@ import type { SaveOpts, SnapshotScope, SnapshotVerifyReport } from "microsandbox
 
 These entry points live on `SandboxBuilder` and `SandboxHandle`; they are the bridge between sandboxes and snapshot artifacts.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">fromSnapshot()</span>
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">fromSnapshot()</span>
 
 ```typescript
 fromSnapshot(pathOrName: string): SandboxBuilder
@@ -592,7 +592,7 @@ Fluent builder for a snapshot, returned by [`Snapshot.builder(name)`](#snapshotb
 
 ---
 
-#### <span className="msb-recv">.</span><span className="msb-hn">fromSandbox()</span>
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">fromSandbox()</span>
 <div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
@@ -612,7 +612,7 @@ Set the sandbox to capture. Required; [`.create()`](#create) fails without it.
 
 ---
 
-#### <span className="msb-recv">.</span><span className="msb-hn">destDir()</span>
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">destDir()</span>
 <div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
@@ -630,7 +630,7 @@ Create the artifact under this parent directory instead of the default snapshots
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">label()</span>
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">label()</span>
 
 ```typescript
 label(key: string, value: string): this
@@ -651,7 +651,7 @@ Add a `key=value` label to the snapshot manifest. May be called repeatedly.
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">force()</span>
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">force()</span>
 
 ```typescript
 force(): this
@@ -659,7 +659,7 @@ force(): this
 
 Overwrite an existing artifact with the same name instead of failing on conflict.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">recordIntegrity()</span>
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">recordIntegrity()</span>
 
 ```typescript
 recordIntegrity(): this
@@ -669,7 +669,7 @@ Compute and record a content-integrity hash of the upper layer at creation time,
 
 ---
 
-#### <span className="msb-recv">.</span><span className="msb-hn">resumable()</span>
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">resumable()</span>
 <div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```typescript
@@ -680,7 +680,7 @@ Request a `"resumable"` snapshot (disk plus VM state). Accepted by the builder, 
 
 ---
 
-#### <span className="msb-recv">.</span><span className="msb-hn">create()</span>
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">create()</span>
 
 ```typescript
 create(): Promise<Snapshot>

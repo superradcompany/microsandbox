@@ -477,9 +477,21 @@ A lightweight handle to a named volume, with its database metadata and a host-si
 | fs | [`VolumeFs`](#volumefs) | Host-side filesystem handle |
 | remove() | *(async)* `None` | Delete this volume |
 
+#### <span className="msb-recv">handle.</span><span className="msb-hn">remove()</span>
+
+```python
+remove()
+```
+
+Delete this volume
+
+<p className="msb-label">Returns</p>
+
+*(async)* `None`
+
 Read-only properties on a [`Volume`](#volume-create) returned by [`Volume.create()`](#volume-create).
 
-#### <span className="msb-recv">volume.</span><span className="msb-hn">name</span>
+#### <span className="msb-recv">handle.</span><span className="msb-hn">name</span>
 
 ```python
 name: str
@@ -487,7 +499,7 @@ name: str
 
 Volume name.
 
-#### <span className="msb-recv">volume.</span><span className="msb-hn">path</span>
+#### <span className="msb-recv">handle.</span><span className="msb-hn">path</span>
 
 ```python
 path: str
