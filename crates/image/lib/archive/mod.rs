@@ -1,6 +1,7 @@
 //! Docker archive load/save support.
 
 mod docker;
+mod tar_ext;
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports
