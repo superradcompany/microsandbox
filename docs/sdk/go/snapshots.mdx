@@ -10,7 +10,7 @@ Disk-only snapshots of a sandbox that is not running. Create artifacts from a st
 </Note>
 
 
-## Snapshot functions
+## Snapshot
 
 Package-level helpers for snapshot artifacts. Access them through the exported `Snapshot` value, e.g. `m.Snapshot.Create(ctx, ...)`.
 
@@ -352,7 +352,7 @@ h, err := m.Snapshot.Load(ctx, "/tmp/snap.tar.zst", "")
 
 </Accordion>
 
-## SandboxHandle methods
+## SandboxHandle
 
 Snapshots are taken from a metadata handle, so stop the sandbox first and then call [`GetSandbox`](/sdk/go/sandbox#getsandbox).
 
@@ -405,7 +405,30 @@ snap, err := h.Snapshot(ctx, "after-pip-install")
 
 </Accordion>
 
-## SnapshotArtifact methods
+## SnapshotArtifact
+
+<div className="msb-tags"><span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span></div>
+
+
+<p className="msb-backref">Returned by <a href="#snapshot-create">Snapshot.Create()</a> · <a href="#snapshot-open">Snapshot.Open()</a> · <a href="#snapshot-listdir">Snapshot.ListDir()</a> · <a href="#h-snapshot">h.Snapshot()</a> · <a href="#h-open">h.Open()</a></p>
+
+A snapshot artifact on disk. Fields are unexported; read them through the accessor methods below.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| [`Path()`](#s-path) | `string` | Artifact directory |
+| [`Digest()`](#s-digest) | `string` | Canonical manifest digest (`sha256:...`) |
+| [`SizeBytes()`](#s-sizebytes) | `uint64` | Apparent upper-layer size |
+| [`ImageRef()`](#s-imageref) | `string` | Image reference the snapshot was taken from |
+| [`ImageManifestDigest()`](#s-imagemanifestdigest) | `string` | Pinned OCI manifest digest |
+| [`Format()`](#s-format) | `string` | `"raw"` or `"qcow2"` |
+| [`Scope()`](#s-scope) | `string` | `SnapshotScopeDisk` or `SnapshotScopeResumable` |
+| [`Fstype()`](#s-fstype) | `string` | Filesystem type inside the upper layer |
+| [`Parent()`](#s-parent) | `*string` | Parent digest, or nil |
+| [`CreatedAt()`](#s-createdat) | `string` | RFC 3339 timestamp |
+| [`Labels()`](#s-labels) | `map[string]string` | User labels |
+| [`SourceSandbox()`](#s-sourcesandbox) | `*string` | Best-effort source sandbox name |
+| [`Verify(ctx)`](#s-verify) | `(*SnapshotVerifyReport, error)` | Recompute content integrity |
 
 An artifact on disk. The accessors below are plain field reads; only [`Verify`](#s-verify) touches the filesystem.
 
@@ -539,7 +562,28 @@ func (s *SnapshotArtifact) SourceSandbox() *string
 
 Best-effort source sandbox name, or `nil`. Returns a defensive copy.
 
-## SnapshotHandle methods
+## SnapshotHandle
+
+<div className="msb-tags"><span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span></div>
+
+
+<p className="msb-backref">Returned by <a href="#snapshot-get">Snapshot.Get()</a> · <a href="#snapshot-list">Snapshot.List()</a> · <a href="#snapshot-load">Snapshot.Load()</a></p>
+
+A lightweight handle backed by the local snapshot index. Fields are unexported; read them through the accessor methods below.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| [`Digest()`](#h-digest) | `string` | Manifest digest |
+| [`Name()`](#h-name) | `*string` | Bare-name alias, if indexed with one |
+| [`ParentDigest()`](#h-parentdigest) | `*string` | Parent digest, or nil |
+| [`ImageRef()`](#h-imageref) | `string` | Pinned image reference |
+| [`Format()`](#h-format) | `string` | `"raw"` or `"qcow2"` |
+| [`Scope()`](#h-scope) | `string` | `SnapshotScopeDisk` or `SnapshotScopeResumable` |
+| [`SizeBytes()`](#h-sizebytes) | `*uint64` | Apparent upper size at index time |
+| [`Path()`](#h-path) | `string` | Artifact directory |
+| [`CreatedAt()`](#h-createdat) | `time.Time` | Snapshot creation time |
+| [`Open(ctx)`](#h-open) | `(*SnapshotArtifact, error)` | Open the artifact metadata |
+| [`Remove(ctx, force)`](#h-remove) | `error` | Remove this snapshot |
 
 A lightweight handle backed by the local index. The accessors below are plain field reads; [`Open`](#h-open) and [`Remove`](#h-remove) take a context.
 
@@ -674,49 +718,20 @@ func (h *SnapshotHandle) CreatedAt() time.Time
 
 Snapshot creation time, decoded from the index's Unix timestamp.
 
+## Constants
+
+<p className="msb-member-group">Snapshot scopes</p>
+
+<p className="msb-backref">Returned by <a href="#s-scope">s.Scope()</a> · <a href="#h-scope">h.Scope()</a></p>
+
+Scope of what a snapshot captures. Every snapshot today is disk-only; the resumable scope (disk plus VM state) is reserved for resumable snapshots.
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `SnapshotScopeDisk` | `"disk"` | Disk-only snapshot |
+| `SnapshotScopeResumable` | `"resumable"` | Disk plus VM state (not yet supported) |
+
 ## Types
-
-### SnapshotArtifact<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
-
-<p className="msb-backref">Returned by <a href="#snapshot-create">Snapshot.Create()</a> · <a href="#snapshot-open">Snapshot.Open()</a> · <a href="#snapshot-listdir">Snapshot.ListDir()</a> · <a href="#h-snapshot">h.Snapshot()</a> · <a href="#h-open">h.Open()</a></p>
-
-A snapshot artifact on disk. Fields are unexported; read them through the accessor methods below.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`Path()`](#s-path) | `string` | Artifact directory |
-| [`Digest()`](#s-digest) | `string` | Canonical manifest digest (`sha256:...`) |
-| [`SizeBytes()`](#s-sizebytes) | `uint64` | Apparent upper-layer size |
-| [`ImageRef()`](#s-imageref) | `string` | Image reference the snapshot was taken from |
-| [`ImageManifestDigest()`](#s-imagemanifestdigest) | `string` | Pinned OCI manifest digest |
-| [`Format()`](#s-format) | `string` | `"raw"` or `"qcow2"` |
-| [`Scope()`](#s-scope) | `string` | `SnapshotScopeDisk` or `SnapshotScopeResumable` |
-| [`Fstype()`](#s-fstype) | `string` | Filesystem type inside the upper layer |
-| [`Parent()`](#s-parent) | `*string` | Parent digest, or nil |
-| [`CreatedAt()`](#s-createdat) | `string` | RFC 3339 timestamp |
-| [`Labels()`](#s-labels) | `map[string]string` | User labels |
-| [`SourceSandbox()`](#s-sourcesandbox) | `*string` | Best-effort source sandbox name |
-| [`Verify(ctx)`](#s-verify) | `(*SnapshotVerifyReport, error)` | Recompute content integrity |
-
-### SnapshotHandle<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
-
-<p className="msb-backref">Returned by <a href="#snapshot-get">Snapshot.Get()</a> · <a href="#snapshot-list">Snapshot.List()</a> · <a href="#snapshot-load">Snapshot.Load()</a></p>
-
-A lightweight handle backed by the local snapshot index. Fields are unexported; read them through the accessor methods below.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`Digest()`](#h-digest) | `string` | Manifest digest |
-| [`Name()`](#h-name) | `*string` | Bare-name alias, if indexed with one |
-| [`ParentDigest()`](#h-parentdigest) | `*string` | Parent digest, or nil |
-| [`ImageRef()`](#h-imageref) | `string` | Pinned image reference |
-| [`Format()`](#h-format) | `string` | `"raw"` or `"qcow2"` |
-| [`Scope()`](#h-scope) | `string` | `SnapshotScopeDisk` or `SnapshotScopeResumable` |
-| [`SizeBytes()`](#h-sizebytes) | `*uint64` | Apparent upper size at index time |
-| [`Path()`](#h-path) | `string` | Artifact directory |
-| [`CreatedAt()`](#h-createdat) | `time.Time` | Snapshot creation time |
-| [`Open(ctx)`](#h-open) | `(*SnapshotArtifact, error)` | Open the artifact metadata |
-| [`Remove(ctx, force)`](#h-remove) | `error` | Remove this snapshot |
 
 ### SnapshotCreateOptions<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
 
@@ -769,14 +784,3 @@ Upper-layer integrity details inside a [`SnapshotVerifyReport`](#snapshotverifyr
 | Kind | `string` | Integrity record kind |
 | Algorithm | `string` | Hash algorithm used |
 | Digest | `string` | Recomputed upper-layer digest |
-
-### Snapshot scope constants
-
-<p className="msb-backref">Returned by <a href="#s-scope">s.Scope()</a> · <a href="#h-scope">h.Scope()</a></p>
-
-Scope of what a snapshot captures. Every snapshot today is disk-only; the resumable scope (disk plus VM state) is reserved for resumable snapshots.
-
-| Constant | Value | Description |
-|----------|-------|-------------|
-| `SnapshotScopeDisk` | `"disk"` | Disk-only snapshot |
-| `SnapshotScopeResumable` | `"resumable"` | Disk plus VM state (not yet supported) |

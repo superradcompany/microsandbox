@@ -8,7 +8,17 @@ Configure a sandbox's network stack: a first-match-wins egress/ingress policy, p
 
 The default policy denies egress except for an implicit allow-public rule (plus DNS), and allows ingress with no rules. See the [defaults rationale](/networking/overview#defaults) for the asymmetry. `NetworkPolicy` and the builders live in `microsandbox_network`; `NetworkPolicy` is also re-exported from the crate root as `microsandbox::NetworkPolicy`.
 
-## NetworkPolicy static methods
+## NetworkPolicy
+
+<p className="msb-backref">Built by <a href="#networkpolicybuilder">NetworkPolicy::builder()</a> · used by <a href="#policy">policy()</a></p>
+
+An ordered rule list plus two per-direction defaults, evaluated first-match-wins. Egress evaluation considers rules where `direction ∈ {Egress, Any}`; ingress considers `{Ingress, Any}`. If no rule matches, the direction-specific default applies. `Default` is [`from_profiles([NetworkProfile::Public])`](#networkpolicyfrom_profiles).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| default_egress | [`Action`](#action) | Action when no egress-applicable rule matches |
+| default_ingress | [`Action`](#action) | Action when no ingress-applicable rule matches |
+| rules | `Vec<`[`Rule`](#rule)`>` | Ordered rules; first match wins per direction |
 
 A [`NetworkPolicy`](#networkpolicy) is an ordered rule list plus two per-direction defaults, evaluated first-match-wins. Compose common access shapes with [`from_profiles()`](#networkpolicyfrom_profiles); for anything custom, start from [`builder()`](#networkpolicybuilder).
 
@@ -79,7 +89,7 @@ let policy = NetworkPolicy::from_profiles([
 
 </Accordion>
 
-## NetworkPolicy instance methods
+<p className="msb-member-group">Instance methods</p>
 
 These methods consume `self` and return a modified policy, so they chain off a profile or a built policy. Each **prepends** its rules, so a later deny outranks a catch-all allow like `allow public` under first-match-wins. All return [`Result<NetworkPolicy, DomainNameError>`](#domainname) because the names are parsed eagerly.
 
@@ -1156,31 +1166,8 @@ Allow **any** host to receive placeholders unchanged. Takes effect only when `i_
 
 ---
 
-## Types
+## Rule
 
-### NetworkPolicy
-
-<p className="msb-backref">Built by <a href="#networkpolicybuilder">NetworkPolicy::builder()</a> · used by <a href="#policy">policy()</a></p>
-
-An ordered rule list plus two per-direction defaults, evaluated first-match-wins. Egress evaluation considers rules where `direction ∈ {Egress, Any}`; ingress considers `{Ingress, Any}`. If no rule matches, the direction-specific default applies. `Default` is [`from_profiles([NetworkProfile::Public])`](#networkpolicyfrom_profiles).
-
-| Field | Type | Description |
-|-------|------|-------------|
-| default_egress | [`Action`](#action) | Action when no egress-applicable rule matches |
-| default_ingress | [`Action`](#action) | Action when no ingress-applicable rule matches |
-| rules | `Vec<`[`Rule`](#rule)`>` | Ordered rules; first match wins per direction |
-
-### NetworkProfile
-
-Composable high-level access category accepted by [`NetworkPolicy::from_profiles()`](#networkpolicyfrom_profiles).
-
-| Variant | Access |
-|---------|--------|
-| `Public` | Public internet addresses |
-| `Private` | Private/LAN ranges (RFC 1918, RFC 4193 ULA, and CGN) |
-| `Host` | The sandbox host via its gateway addresses |
-
-### Rule
 
 <p className="msb-backref">Held by <a href="#networkpolicy">NetworkPolicy</a></p>
 
@@ -1206,6 +1193,57 @@ Convenience constructors build any-protocol, any-port rules:
 | `Rule::deny_any(destination)` | Deny rule, direction `Any` |
 | `Rule::allow_dns()` | Allow plain DNS (UDP/53 + TCP/53) to the gateway forwarder (`Group::Host`); the one-liner for opening DNS under deny-by-default. See [DNS as egress](/networking/dns#dns-as-egress) |
 | `Rule::deny_dns()` | Deny plain DNS (UDP/53 + TCP/53) to the gateway forwarder; place before profile-generated rules to override automatic DNS |
+
+## PortRange
+
+
+<p className="msb-backref">Held by <a href="#rule">Rule</a> · added by <a href="#port-1">port()</a> · <a href="#port_range">port_range()</a></p>
+
+An inclusive port range.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| start | `u16` | Start port (inclusive) |
+| end | `u16` | End port (inclusive) |
+
+| Method | Description |
+|--------|-------------|
+| `PortRange::single(port)` | Match a single port |
+| `PortRange::range(start, end)` | Match an inclusive range |
+| `contains(port)` | Whether `port` falls within the range |
+
+## DomainName
+
+
+<p className="msb-backref">Held by <a href="#destination">Destination::Domain / DomainSuffix</a></p>
+
+A validated DNS name. Construction goes through `str::parse` (or `TryFrom<String>`), which delegates to `hickory_proto::rr::Name` and canonicalizes the input (lowercased ASCII, leading and trailing dots stripped) so rule matching is a byte-wise compare against the DNS cache. Invalid inputs return a [`DomainNameError`](#builderror).
+
+```rust
+use microsandbox_network::policy::DomainName;
+
+let exact: DomainName = "PyPI.Org.".parse()?;      // -> "pypi.org"
+let suffix: DomainName = ".example.com".parse()?;  // -> "example.com"
+```
+
+Labels follow the permissive DNS grammar (RFC 2181 §11), so underscore-prefixed names like `_service._tcp.example.com` are accepted. The builder methods (`.domain(&str)`, `.domain_suffix(&str)`) take strings and parse them lazily at [`build()`](#build), so callers rarely construct `DomainName` directly.
+
+| Method | Description |
+|--------|-------------|
+| `as_str()` | Borrow the canonical string form |
+| `try_into_suffix()` | Validate for use as a `DomainSuffix`; single-label names (e.g. `com`) are rejected |
+
+## Types
+
+### NetworkProfile
+
+Composable high-level access category accepted by [`NetworkPolicy::from_profiles()`](#networkpolicyfrom_profiles).
+
+| Variant | Access |
+|---------|--------|
+| `Public` | Public internet addresses |
+| `Private` | Private/LAN ranges (RFC 1918, RFC 4193 ULA, and CGN) |
+| `Host` | The sandbox host via its gateway addresses |
 
 ### Action
 
@@ -1266,43 +1304,6 @@ Groups are disjoint with one carve-out: `Metadata` takes precedence over `LinkLo
 | `Icmpv6` | `"icmpv6"` |
 
 ICMP protocols are egress-only. A rule with direction `Ingress` or `Any` carrying an ICMP protocol fails build with [`BuildError::IngressDoesNotSupportIcmp`](#builderror).
-
-### PortRange
-
-<p className="msb-backref">Held by <a href="#rule">Rule</a> · added by <a href="#port-1">port()</a> · <a href="#port_range">port_range()</a></p>
-
-An inclusive port range.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| start | `u16` | Start port (inclusive) |
-| end | `u16` | End port (inclusive) |
-
-| Method | Description |
-|--------|-------------|
-| `PortRange::single(port)` | Match a single port |
-| `PortRange::range(start, end)` | Match an inclusive range |
-| `contains(port)` | Whether `port` falls within the range |
-
-### DomainName
-
-<p className="msb-backref">Held by <a href="#destination">Destination::Domain / DomainSuffix</a></p>
-
-A validated DNS name. Construction goes through `str::parse` (or `TryFrom<String>`), which delegates to `hickory_proto::rr::Name` and canonicalizes the input (lowercased ASCII, leading and trailing dots stripped) so rule matching is a byte-wise compare against the DNS cache. Invalid inputs return a [`DomainNameError`](#builderror).
-
-```rust
-use microsandbox_network::policy::DomainName;
-
-let exact: DomainName = "PyPI.Org.".parse()?;      // -> "pypi.org"
-let suffix: DomainName = ".example.com".parse()?;  // -> "example.com"
-```
-
-Labels follow the permissive DNS grammar (RFC 2181 §11), so underscore-prefixed names like `_service._tcp.example.com` are accepted. The builder methods (`.domain(&str)`, `.domain_suffix(&str)`) take strings and parse them lazily at [`build()`](#build), so callers rarely construct `DomainName` directly.
-
-| Method | Description |
-|--------|-------------|
-| `as_str()` | Borrow the canonical string form |
-| `try_into_suffix()` | Validate for use as a `DomainSuffix`; single-label names (e.g. `com`) are rejected |
 
 ### Nameserver
 

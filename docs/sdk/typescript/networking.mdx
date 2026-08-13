@@ -10,6 +10,18 @@ The default policy denies egress except for an implicit allow-public rule (plus 
 
 ## NetworkPolicy
 
+<p className="msb-backref">Used by <a href="#policy">NetworkBuilder.policy()</a> · returned by <a href="#networkpolicy">NetworkPolicy factories</a></p>
+
+Ordered rule list with per-direction defaults. First-match-wins is evaluated independently for egress and ingress.
+
+```typescript
+interface NetworkPolicy {
+  readonly defaultEgress: Action;
+  readonly defaultIngress: Action;
+  readonly rules: readonly Rule[];
+}
+```
+
 A [`NetworkPolicy`](#networkpolicy-2) is an ordered rule list plus two per-direction defaults, evaluated first-match-wins. Compose common access shapes with [`fromProfiles()`](#networkpolicyfromprofiles); for anything custom, start from [`builder()`](#networkpolicybuilder) or write a literal and pass it to [`NetworkBuilder.policy()`](#policy).
 
 ```typescript
@@ -121,7 +133,21 @@ const policy = NetworkPolicy.fromProfiles(["public", "private"]);
 
 </Accordion>
 
-## Rule, Destination, PortRange
+## Rule
+
+<p className="msb-backref">Used by <a href="#networkpolicy-2">NetworkPolicy.rules</a> · built via <a href="#rule-allowegress">Rule factories</a></p>
+
+A single ordered policy rule.
+
+```typescript
+interface Rule {
+  readonly direction: Direction;
+  readonly destination: Destination;
+  readonly protocols: readonly Protocol[]; // empty = any
+  readonly ports: readonly PortRange[];    // empty = any
+  readonly action: Action;
+}
+```
 
 Factories for the building blocks of a policy literal. [`Rule`](#rule-2) values pair a [`Destination`](#destination) with a direction and action; [`Destination`](#destination) and [`PortRange`](#portrange-2) construct the matchers.
 
@@ -269,6 +295,21 @@ denyDns(): Rule
 
 Deny plain gateway DNS (UDP/53 and TCP/53). Place this rule before profile-generated rules to override their automatic DNS access.
 
+## Destination
+
+<p className="msb-backref">Used by <a href="#rule-2">Rule.destination</a> · built via <a href="#destination-any">Destination factories</a></p>
+
+Destination filter. An internally-tagged union; use the [`Destination`](#destination) factory for constructors.
+
+```typescript
+type Destination =
+  | { kind: "any" }
+  | { kind: "cidr"; cidr: string }
+  | { kind: "domain"; domain: string }
+  | { kind: "domainSuffix"; suffix: string }
+  | { kind: "group"; group: DestinationGroup };
+```
+
 #### <span className="msb-recv">Destination.</span><span className="msb-hn">any()</span>
 
 ```typescript
@@ -344,6 +385,19 @@ Match a predefined address group.
     <div className="msb-param-desc">Group keyword.</div>
   </div>
 </div>
+
+## PortRange
+
+<p className="msb-backref">Used by <a href="#rule-2">Rule.ports</a> · built via <a href="#portrange-single">PortRange factories</a></p>
+
+Inclusive port range. Always interpreted as the guest-side port.
+
+```typescript
+interface PortRange {
+  readonly start: number;
+  readonly end: number;
+}
+```
 
 #### <span className="msb-recv">PortRange.</span><span className="msb-hn">single()</span>
 
@@ -1800,6 +1854,20 @@ Allow placeholders to pass through unchanged to any host. The explicit `iUnderst
 
 ---
 
+## InterfaceOverridesBuilder
+
+
+<p className="msb-backref">Used by <a href="#nb-interface">NetworkBuilder.interface()</a></p>
+
+Builder for per-sandbox network interface overrides.
+
+| Method | Description |
+|--------|-------------|
+| `.mac(mac)` | Set the interface MAC address |
+| `.mtu(mtu)` | Set the interface MTU |
+| `.ipv4(address)` | Pin a fixed IPv4 address |
+| `.ipv6(address)` | Pin a fixed IPv6 address |
+
 ## Types
 
 ### NetworkConfig
@@ -1821,42 +1889,12 @@ Built network configuration produced by `NetworkBuilder.build()`. Keys are camel
 | interface | `{ ipv4Pool?, ipv6Pool?, ipv4Address?, ipv6Address?, mac?, mtu? }` | Optional interface overrides |
 | trustHostCAs | `boolean` | Ship host CAs into the guest |
 
-### NetworkPolicy
-
-<p className="msb-backref">Used by <a href="#policy">NetworkBuilder.policy()</a> · returned by <a href="#networkpolicy">NetworkPolicy factories</a></p>
-
-Ordered rule list with per-direction defaults. First-match-wins is evaluated independently for egress and ingress.
-
-```typescript
-interface NetworkPolicy {
-  readonly defaultEgress: Action;
-  readonly defaultIngress: Action;
-  readonly rules: readonly Rule[];
-}
-```
-
 ### NetworkProfile
 
 Composable high-level access category accepted by [`NetworkPolicy.fromProfiles()`](#networkpolicyfromprofiles).
 
 ```typescript
 type NetworkProfile = "public" | "private" | "host";
-```
-
-### Rule
-
-<p className="msb-backref">Used by <a href="#networkpolicy-2">NetworkPolicy.rules</a> · built via <a href="#rule-allowegress">Rule factories</a></p>
-
-A single ordered policy rule.
-
-```typescript
-interface Rule {
-  readonly direction: Direction;
-  readonly destination: Destination;
-  readonly protocols: readonly Protocol[]; // empty = any
-  readonly ports: readonly PortRange[];    // empty = any
-  readonly action: Action;
-}
 ```
 
 ### Action
@@ -1877,21 +1915,6 @@ Direction the rule applies to.
 
 ```typescript
 type Direction = "egress" | "ingress" | "any";
-```
-
-### Destination
-
-<p className="msb-backref">Used by <a href="#rule-2">Rule.destination</a> · built via <a href="#destination-any">Destination factories</a></p>
-
-Destination filter. An internally-tagged union; use the [`Destination`](#destination) factory for constructors.
-
-```typescript
-type Destination =
-  | { kind: "any" }
-  | { kind: "cidr"; cidr: string }
-  | { kind: "domain"; domain: string }
-  | { kind: "domainSuffix"; suffix: string }
-  | { kind: "group"; group: DestinationGroup };
 ```
 
 ### DestinationGroup
@@ -1929,19 +1952,6 @@ Transport protocol filter. Empty `Rule.protocols` means "any protocol".
 
 ```typescript
 type Protocol = "tcp" | "udp" | "icmpv4" | "icmpv6";
-```
-
-### PortRange
-
-<p className="msb-backref">Used by <a href="#rule-2">Rule.ports</a> · built via <a href="#portrange-single">PortRange factories</a></p>
-
-Inclusive port range. Always interpreted as the guest-side port.
-
-```typescript
-interface PortRange {
-  readonly start: number;
-  readonly end: number;
-}
 ```
 
 ### PublishedPort
@@ -2002,16 +2012,3 @@ TLS interception configuration.
 |-------|------|-------------|
 | pattern | `string` | Exact host or `*.suffix` wildcard |
 | verify | `boolean` | Whether to verify certificates for matching upstream hosts |
-
-### InterfaceOverridesBuilder
-
-<p className="msb-backref">Used by <a href="#nb-interface">NetworkBuilder.interface()</a></p>
-
-Builder for per-sandbox network interface overrides.
-
-| Method | Description |
-|--------|-------------|
-| `.mac(mac)` | Set the interface MAC address |
-| `.mtu(mtu)` | Set the interface MTU |
-| `.ipv4(address)` | Pin a fixed IPv4 address |
-| `.ipv6(address)` | Pin a fixed IPv6 address |

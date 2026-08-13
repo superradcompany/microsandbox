@@ -478,6 +478,33 @@ Copy a file from the sandbox to the host machine.
   </div>
 </div>
 
+## FsReadStream
+
+
+<p className="msb-backref">Returned by <a href="#fs-readstream">readStream()</a></p>
+
+Async stream for reading a file in chunks. Implements `AsyncIterable<Uint8Array>` and `AsyncDisposable`, so it works with `for await...of` and `await using`.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `recv()` | `Promise<Uint8Array \| null>` | Receive the next chunk. Returns `null` when the file has been fully read. |
+| `collect()` | `Promise<Uint8Array>` | Drain the stream into a single buffer |
+| `[Symbol.asyncIterator]()` | `AsyncIterator<Uint8Array>` | Iterate chunks with `for await...of` |
+| `[Symbol.asyncDispose]()` | `Promise<void>` | Stop reading; runs on `await using` scope exit |
+
+## FsWriteSink
+
+
+<p className="msb-backref">Returned by <a href="#fs-writestream">writeStream()</a></p>
+
+Streaming writer for a file. Implements `AsyncDisposable`, so it can be paired with `await using`.
+
+| Method | Parameters | Returns | Description |
+|--------|-----------|---------|-------------|
+| `write(data)` | `Uint8Array \| string` | `Promise<void>` | Append a chunk. Strings are encoded as UTF-8. |
+| `close()` | - | `Promise<void>` | Flush and close. Idempotent. |
+| `[Symbol.asyncDispose]()` | - | `Promise<void>` | Calls `close()` on `await using` scope exit |
+
 ## Types
 
 ### FsEntry
@@ -523,28 +550,3 @@ type FsEntryKind = "file" | "directory" | "symlink" | "other";
 | `"directory"` | Directory |
 | `"symlink"` | Symbolic link |
 | `"other"` | Other entry type |
-
-### FsReadStream
-
-<p className="msb-backref">Returned by <a href="#fs-readstream">readStream()</a></p>
-
-Async stream for reading a file in chunks. Implements `AsyncIterable<Uint8Array>` and `AsyncDisposable`, so it works with `for await...of` and `await using`.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `recv()` | `Promise<Uint8Array \| null>` | Receive the next chunk. Returns `null` when the file has been fully read. |
-| `collect()` | `Promise<Uint8Array>` | Drain the stream into a single buffer |
-| `[Symbol.asyncIterator]()` | `AsyncIterator<Uint8Array>` | Iterate chunks with `for await...of` |
-| `[Symbol.asyncDispose]()` | `Promise<void>` | Stop reading; runs on `await using` scope exit |
-
-### FsWriteSink
-
-<p className="msb-backref">Returned by <a href="#fs-writestream">writeStream()</a></p>
-
-Streaming writer for a file. Implements `AsyncDisposable`, so it can be paired with `await using`.
-
-| Method | Parameters | Returns | Description |
-|--------|-----------|---------|-------------|
-| `write(data)` | `Uint8Array \| string` | `Promise<void>` | Append a chunk. Strings are encoded as UTF-8. |
-| `close()` | - | `Promise<void>` | Flush and close. Idempotent. |
-| `[Symbol.asyncDispose]()` | - | `Promise<void>` | Calls `close()` on `await using` scope exit |

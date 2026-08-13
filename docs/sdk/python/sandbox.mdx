@@ -7,7 +7,7 @@ Create and control a microVM sandbox: boot it from an image, run commands, strea
 
 For local runtime installation and verification, see [Runtime setup](/sdk/setup#install-and-verify).
 
-## Static methods
+## Sandbox
 
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">create()</span>
 
@@ -279,7 +279,7 @@ Delete a stopped sandbox by name. See [Remove](/sandboxes/lifecycle#remove) for 
   </div>
 </div>
 
-## Instance properties
+<p className="msb-member-group">Instance properties</p>
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">name</span>
 
@@ -352,7 +352,7 @@ Get a filesystem handle for reading and writing files inside the running sandbox
   </div>
 </div>
 
-## Instance methods
+<p className="msb-member-group">Instance methods</p>
 
 Command execution (`exec`, `exec_stream`, `shell`, `shell_stream`) is documented on the [Execution](/sdk/python/execution) page; SSH (`ssh`) on the [SSH](/sdk/python/ssh) page. The lifecycle, attach, metrics, and logs methods follow.
 
@@ -1239,6 +1239,97 @@ Create a symlink at `link` pointing to `target`.
   </div>
 </div>
 
+## SandboxHandle
+
+
+<p className="msb-backref">Returned by <a href="#sandbox-get">Sandbox.get()</a> · <a href="#sandbox-list">Sandbox.list()</a> · <a href="#sandbox-list_with">Sandbox.list_with()</a></p>
+
+A lightweight handle to an existing sandbox (running or stopped). Provides status, configuration, and lifecycle control **without** an active connection to the guest agent. You cannot `exec` or `fs` on a handle; call `.start()` or `.connect()` to upgrade to a full [`Sandbox`](#instance-methods).
+
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
+| name | `str` | Sandbox name, up to 128 UTF-8 bytes |
+| status | [`SandboxStatus`](#sandboxstatus) | Current status |
+| config_json | `str` | Raw JSON configuration |
+| created_at | `float \| None` | Creation timestamp (ms since epoch) |
+| updated_at | `float \| None` | Last update timestamp (ms since epoch) |
+| config() | `dict[str, Any]` | Parsed configuration |
+| refresh() | `Awaitable[`[`SandboxHandle`](#sandboxhandle)`]` | Re-fetch status and metadata, returning a fresh handle |
+| ping() | `Awaitable[`[`SandboxPingResult`](#sandboxpingresult)`]` | Check agent reachability without refreshing idle activity; does not start stopped sandboxes |
+| touch() | `Awaitable[`[`SandboxTouchResult`](#sandboxtouchresult)`]` | Explicitly refresh idle activity; does not start stopped sandboxes |
+| modify(...) | `Awaitable[`[`SandboxModificationPlan`](#sandboxmodificationplan)`]` | Plan or apply a configuration change; same kwargs as [`modify()`](#sb-modify). Does not start stopped sandboxes; changes persist for the next boot |
+| connect(timeout=None) | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Connect to a running sandbox, optionally with an explicit timeout in seconds |
+| start(*, detached=False) | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Start in attached or detached mode |
+| stop(timeout=None) | `Awaitable[None]` | Gracefully shut down and wait until stopped state is observed |
+| request_stop() | `Awaitable[None]` | Request graceful shutdown without waiting |
+| kill(timeout=None) | `Awaitable[None]` | Force terminate and wait until stopped state is observed |
+| request_kill() | `Awaitable[None]` | Request force termination without waiting |
+| request_drain() | `Awaitable[None]` | Request graceful drain without waiting |
+| wait_until_stopped() | `Awaitable[`[`SandboxStopResult`](#sandboxstopresult)`]` | Block until the sandbox reaches terminal state |
+| remove() | `Awaitable[None]` | Delete sandbox and state |
+| metrics() | `Awaitable[`[`SandboxMetrics`](#sandboxmetrics)`]` | Point-in-time resource metrics |
+| logs(...) | `Awaitable[list[`[`LogEntry`](#logentry)`]]` | Read captured `exec.log` (works without starting) |
+| log_stream(...) | `Awaitable[`[`LogStream`](#logstream)`]` | Stream captured log entries (works without starting) |
+| snapshot(name) | `Awaitable[Snapshot]` | Create a named [snapshot](/sdk/python/snapshots) of the sandbox |
+
+## MetricsStream
+
+
+<p className="msb-backref">Returned by <a href="#sb-metrics_stream">metrics_stream()</a></p>
+
+Async stream for receiving periodic metrics snapshots.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `__aiter__` / `__anext__` | [`SandboxMetrics`](#sandboxmetrics) | Use with `async for` |
+
+## LogEntry
+
+
+<p className="msb-backref">Returned by <a href="#sb-logs">logs()</a> · iterated from <a href="#logstream">LogStream</a></p>
+
+A single captured log entry returned by [`logs()`](#sb-logs) or iterated from a [`LogStream`](#logstream).
+
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
+| timestamp_ms | `float` | Wall-clock capture time (ms since Unix epoch, UTC) |
+| source | [`LogSource`](#logsource) | Where the chunk came from |
+| session_id | `int \| None` | Relay-monotonic session id; `None` for `"system"` entries |
+| cursor | `str` | Opaque resume token; pass back via `log_stream(from_cursor=...)` |
+| data | `bytes` | The chunk's raw bytes |
+| text() | `str` | Convenience: UTF-8 decode of `data` (lossy; invalid bytes are replaced) |
+
+## LogStream
+
+
+<p className="msb-backref">Returned by <a href="#sb-log_stream">log_stream()</a></p>
+
+Async stream of [`LogEntry`](#logentry) values, returned by [`log_stream()`](#sb-log_stream).
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `__aiter__` / `__anext__` | [`LogEntry`](#logentry) | Use with `async for` |
+
+## PullSession
+
+
+<p className="msb-backref">Returned by <a href="#sandbox-create_with_progress">create_with_progress()</a></p>
+
+Returned by [`create_with_progress()`](#sandbox-create_with_progress). The factory itself is synchronous; use the returned session as an async context manager to track image pull progress.
+
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
+| progress | `AsyncIterator[`[`PullEvent`](#pullevent)`]` | Async iterator of pull progress events |
+| result() | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Await once to get the final running sandbox. A second call raises `RuntimeError` |
+
+```python
+session = Sandbox.create_with_progress("my-sandbox", image="ubuntu:latest")
+async with session:
+    async for event in session.progress:
+        print(event)
+    sb = await session.result()
+```
+
 ## Types
 
 ### SandboxConfig
@@ -1354,38 +1445,6 @@ One stable, newest-first page returned by [`Sandbox.list()`](#sandbox-list) or [
 |----------|------|-------------|
 | `sandboxes` | `list[SandboxHandle]` | Handles in this page |
 | `next_cursor` | `str \| None` | Opaque continuation cursor, or `None` on the final page |
-
-### SandboxHandle
-
-<p className="msb-backref">Returned by <a href="#sandbox-get">Sandbox.get()</a> · <a href="#sandbox-list">Sandbox.list()</a> · <a href="#sandbox-list_with">Sandbox.list_with()</a></p>
-
-A lightweight handle to an existing sandbox (running or stopped). Provides status, configuration, and lifecycle control **without** an active connection to the guest agent. You cannot `exec` or `fs` on a handle; call `.start()` or `.connect()` to upgrade to a full [`Sandbox`](#instance-methods).
-
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| name | `str` | Sandbox name, up to 128 UTF-8 bytes |
-| status | [`SandboxStatus`](#sandboxstatus) | Current status |
-| config_json | `str` | Raw JSON configuration |
-| created_at | `float \| None` | Creation timestamp (ms since epoch) |
-| updated_at | `float \| None` | Last update timestamp (ms since epoch) |
-| config() | `dict[str, Any]` | Parsed configuration |
-| refresh() | `Awaitable[`[`SandboxHandle`](#sandboxhandle)`]` | Re-fetch status and metadata, returning a fresh handle |
-| ping() | `Awaitable[`[`SandboxPingResult`](#sandboxpingresult)`]` | Check agent reachability without refreshing idle activity; does not start stopped sandboxes |
-| touch() | `Awaitable[`[`SandboxTouchResult`](#sandboxtouchresult)`]` | Explicitly refresh idle activity; does not start stopped sandboxes |
-| modify(...) | `Awaitable[`[`SandboxModificationPlan`](#sandboxmodificationplan)`]` | Plan or apply a configuration change; same kwargs as [`modify()`](#sb-modify). Does not start stopped sandboxes; changes persist for the next boot |
-| connect(timeout=None) | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Connect to a running sandbox, optionally with an explicit timeout in seconds |
-| start(*, detached=False) | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Start in attached or detached mode |
-| stop(timeout=None) | `Awaitable[None]` | Gracefully shut down and wait until stopped state is observed |
-| request_stop() | `Awaitable[None]` | Request graceful shutdown without waiting |
-| kill(timeout=None) | `Awaitable[None]` | Force terminate and wait until stopped state is observed |
-| request_kill() | `Awaitable[None]` | Request force termination without waiting |
-| request_drain() | `Awaitable[None]` | Request graceful drain without waiting |
-| wait_until_stopped() | `Awaitable[`[`SandboxStopResult`](#sandboxstopresult)`]` | Block until the sandbox reaches terminal state |
-| remove() | `Awaitable[None]` | Delete sandbox and state |
-| metrics() | `Awaitable[`[`SandboxMetrics`](#sandboxmetrics)`]` | Point-in-time resource metrics |
-| logs(...) | `Awaitable[list[`[`LogEntry`](#logentry)`]]` | Read captured `exec.log` (works without starting) |
-| log_stream(...) | `Awaitable[`[`LogStream`](#logstream)`]` | Stream captured log entries (works without starting) |
-| snapshot(name) | `Awaitable[Snapshot]` | Create a named [snapshot](/sdk/python/snapshots) of the sandbox |
 
 ### SandboxPingResult
 
@@ -1588,41 +1647,6 @@ Point-in-time resource usage snapshot.
 | uptime_ms | `int` | Time since the sandbox was created (ms) |
 | timestamp_ms | `float` | When this measurement was taken (ms since epoch) |
 
-### MetricsStream
-
-<p className="msb-backref">Returned by <a href="#sb-metrics_stream">metrics_stream()</a></p>
-
-Async stream for receiving periodic metrics snapshots.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `__aiter__` / `__anext__` | [`SandboxMetrics`](#sandboxmetrics) | Use with `async for` |
-
-### LogEntry
-
-<p className="msb-backref">Returned by <a href="#sb-logs">logs()</a> · iterated from <a href="#logstream">LogStream</a></p>
-
-A single captured log entry returned by [`logs()`](#sb-logs) or iterated from a [`LogStream`](#logstream).
-
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| timestamp_ms | `float` | Wall-clock capture time (ms since Unix epoch, UTC) |
-| source | [`LogSource`](#logsource) | Where the chunk came from |
-| session_id | `int \| None` | Relay-monotonic session id; `None` for `"system"` entries |
-| cursor | `str` | Opaque resume token; pass back via `log_stream(from_cursor=...)` |
-| data | `bytes` | The chunk's raw bytes |
-| text() | `str` | Convenience: UTF-8 decode of `data` (lossy; invalid bytes are replaced) |
-
-### LogStream
-
-<p className="msb-backref">Returned by <a href="#sb-log_stream">log_stream()</a></p>
-
-Async stream of [`LogEntry`](#logentry) values, returned by [`log_stream()`](#sb-log_stream).
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `__aiter__` / `__anext__` | [`LogEntry`](#logentry) | Use with `async for` |
-
 ### LogSource
 
 <p className="msb-backref">Returned by <a href="#logentry">LogEntry.source</a></p>
@@ -1721,25 +1745,6 @@ Rootfs patch operation.
 | `PatchKind.SYMLINK` | `"symlink"` | Create a symbolic link |
 | `PatchKind.MKDIR` | `"mkdir"` | Create a directory |
 | `PatchKind.REMOVE` | `"remove"` | Remove a path |
-
-### PullSession
-
-<p className="msb-backref">Returned by <a href="#sandbox-create_with_progress">create_with_progress()</a></p>
-
-Returned by [`create_with_progress()`](#sandbox-create_with_progress). The factory itself is synchronous; use the returned session as an async context manager to track image pull progress.
-
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| progress | `AsyncIterator[`[`PullEvent`](#pullevent)`]` | Async iterator of pull progress events |
-| result() | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Await once to get the final running sandbox. A second call raises `RuntimeError` |
-
-```python
-session = Sandbox.create_with_progress("my-sandbox", image="ubuntu:latest")
-async with session:
-    async for event in session.progress:
-        print(event)
-    sb = await session.result()
-```
 
 ### PullEvent
 

@@ -34,7 +34,20 @@ const FLAG_SHUTDOWN = 0b0000_0100
 
 Frame flag: this message requests sandbox shutdown.
 
-## Static methods
+## AgentClient
+
+Low-level client for talking to `agentd` through the sandbox relay socket. All bodies are raw CBOR bytes: encode and decode them in your code with a library like `cbor-x`, and build typed convenience methods on top of this class. Construct it with one of the static connect methods.
+
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
+| AgentClient.connectSandbox(name, opts?) | `Promise<`[`AgentClient`](#agentclient)`>` | Connect by sandbox name |
+| AgentClient.connect(path, opts?) | `Promise<`[`AgentClient`](#agentclient)`>` | Connect by relay socket path |
+| AgentClient.socketPath(name) | `string` | Resolve the relay socket path without connecting |
+| request(flags, body) | `Promise<`[`RawFrame`](#rawframe)`>` | Send one frame, await one response |
+| stream(flags, body) | `Promise<`[`AgentStream`](#agentstream)`>` | Open a streaming session |
+| send(id, flags, body) | `Promise<void>` | Send a follow-up frame on a correlation id |
+| readyBytes() | `Buffer` | Cached `core.ready` handshake frame body |
+| close() | `Promise<void>` | Close the connection (idempotent) |
 
 #### <span className="msb-recv">AgentClient.</span><span className="msb-hn">connectSandbox()</span>
 
@@ -153,7 +166,7 @@ Resolve a sandbox's `agentd` relay socket path **without connecting**. Returns t
   </div>
 </div>
 
-## Instance methods
+<p className="msb-member-group">Instance methods</p>
 
 #### <span className="msb-recv">client.</span><span className="msb-hn">request()</span>
 
@@ -317,24 +330,8 @@ await client.close();
 
 Close the connection. Idempotent: calling it more than once is safe.
 
-## Types
+## AgentStream
 
-### AgentClient
-
-Low-level client for talking to `agentd` through the sandbox relay socket. All bodies are raw CBOR bytes: encode and decode them in your code with a library like `cbor-x`, and build typed convenience methods on top of this class. Construct it with one of the static connect methods.
-
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| AgentClient.connectSandbox(name, opts?) | `Promise<`[`AgentClient`](#agentclient)`>` | Connect by sandbox name |
-| AgentClient.connect(path, opts?) | `Promise<`[`AgentClient`](#agentclient)`>` | Connect by relay socket path |
-| AgentClient.socketPath(name) | `string` | Resolve the relay socket path without connecting |
-| request(flags, body) | `Promise<`[`RawFrame`](#rawframe)`>` | Send one frame, await one response |
-| stream(flags, body) | `Promise<`[`AgentStream`](#agentstream)`>` | Open a streaming session |
-| send(id, flags, body) | `Promise<void>` | Send a follow-up frame on a correlation id |
-| readyBytes() | `Buffer` | Cached `core.ready` handshake frame body |
-| close() | `Promise<void>` | Close the connection (idempotent) |
-
-### AgentStream
 
 <p className="msb-backref">Returned by <a href="#client-stream">stream()</a></p>
 
@@ -347,6 +344,8 @@ An open raw agent stream. Implements `AsyncIterableIterator<RawFrame>`, so it ca
 | close() | `Promise<void>` | Release the stream handle early (idempotent) |
 | return() | `Promise<IteratorResult<`[`RawFrame`](#rawframe)`>>` | Async-iterator early-exit hook; closes the stream |
 | [Symbol.asyncIterator]() | [`AgentStream`](#agentstream) | Returns itself so the stream is iterable |
+
+## Types
 
 ### RawFrame
 

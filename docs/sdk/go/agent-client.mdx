@@ -181,7 +181,20 @@ Resolve a sandbox's `agentd` relay socket path **without connecting**. Returns t
   </div>
 </div>
 
-## AgentClient methods
+## AgentClient
+
+<p className="msb-backref">Returned by <a href="#m-connectagentsandbox">ConnectAgentSandbox()</a> · <a href="#m-connectagentpath">ConnectAgentPath()</a></p>
+
+Low-level client for talking to `agentd` through the sandbox relay socket. All bodies are raw CBOR bytes: encode and decode them in your code with a library like `fxamacker/cbor`, and build typed convenience methods on top of this client. Construct it with one of the package-level connect functions.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| [`Request(ctx, flags, body)`](#c-request) | `(`[`*RawFrame`](#rawframe)`, error)` | Send one frame, await one response |
+| [`Stream(ctx, flags, body)`](#c-stream) | `(`[`*AgentStream`](#agentstream)`, error)` | Open a streaming session |
+| [`Send(ctx, id, flags, body)`](#c-send) | `error` | Send a follow-up frame on a correlation id |
+| [`ReadyBytes()`](#c-readybytes) | `([]byte, error)` | Cached `core.ready` handshake frame body |
+| [`Close()`](#c-close) | `error` | Release the handle (idempotent) |
+| [`CloseCtx(ctx)`](#c-closectx) | `error` | Release the handle with a context |
 
 #### <span className="msb-recv">c.</span><span className="msb-hn">Request()</span>
 
@@ -443,7 +456,17 @@ Release the client handle with a caller-controlled context. Like [`Close()`](#c-
   </div>
 </div>
 
-## AgentStream methods
+## AgentStream
+
+<p className="msb-backref">Returned by <a href="#c-stream">Stream()</a></p>
+
+An open raw agent streaming session. Drive it by calling [`Next()`](#s-next) until it returns `nil`, which happens after a frame carrying [`FlagTerminal`](#flagterminal) or when the underlying stream is exhausted.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| [`Next(ctx)`](#s-next) | `(`[`*RawFrame`](#rawframe)`, error)` | Pull the next frame; `nil` at EOF |
+| [`ID()`](#s-id) | `uint32` | Protocol correlation id; pass to [`Send()`](#c-send) for follow-up frames |
+| [`Close(ctx)`](#s-close) | `error` | Release the stream handle |
 
 #### <span className="msb-recv">s.</span><span className="msb-hn">Next()</span>
 
@@ -554,33 +577,6 @@ Release the stream handle.
 </div>
 
 ## Types
-
-### AgentClient
-
-<p className="msb-backref">Returned by <a href="#m-connectagentsandbox">ConnectAgentSandbox()</a> · <a href="#m-connectagentpath">ConnectAgentPath()</a></p>
-
-Low-level client for talking to `agentd` through the sandbox relay socket. All bodies are raw CBOR bytes: encode and decode them in your code with a library like `fxamacker/cbor`, and build typed convenience methods on top of this client. Construct it with one of the package-level connect functions.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`Request(ctx, flags, body)`](#c-request) | `(`[`*RawFrame`](#rawframe)`, error)` | Send one frame, await one response |
-| [`Stream(ctx, flags, body)`](#c-stream) | `(`[`*AgentStream`](#agentstream)`, error)` | Open a streaming session |
-| [`Send(ctx, id, flags, body)`](#c-send) | `error` | Send a follow-up frame on a correlation id |
-| [`ReadyBytes()`](#c-readybytes) | `([]byte, error)` | Cached `core.ready` handshake frame body |
-| [`Close()`](#c-close) | `error` | Release the handle (idempotent) |
-| [`CloseCtx(ctx)`](#c-closectx) | `error` | Release the handle with a context |
-
-### AgentStream
-
-<p className="msb-backref">Returned by <a href="#c-stream">Stream()</a></p>
-
-An open raw agent streaming session. Drive it by calling [`Next()`](#s-next) until it returns `nil`, which happens after a frame carrying [`FlagTerminal`](#flagterminal) or when the underlying stream is exhausted.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`Next(ctx)`](#s-next) | `(`[`*RawFrame`](#rawframe)`, error)` | Pull the next frame; `nil` at EOF |
-| [`ID()`](#s-id) | `uint32` | Protocol correlation id; pass to [`Send()`](#c-send) for follow-up frames |
-| [`Close(ctx)`](#s-close) | `error` | Release the stream handle |
 
 ### RawFrame
 

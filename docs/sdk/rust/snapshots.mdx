@@ -10,7 +10,7 @@ Capture a stopped sandbox's writable upper layer into a self-describing, content
 </Note>
 
 
-## Static methods
+## Snapshot
 
 #### <span className="msb-recv">Snapshot::</span><span className="msb-hn">builder()</span>
 
@@ -385,7 +385,7 @@ println!("loaded {}", h.digest());
 
 ---
 
-## Instance methods
+<p className="msb-member-group">Instance methods</p>
 
 Methods on an opened [`Snapshot`](#snapshotopen) artifact.
 
@@ -498,7 +498,27 @@ Recompute the upper layer's content hash and compare it against the manifest. Wa
   </div>
 </div>
 
-## SnapshotHandle methods
+## SnapshotHandle
+
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Returned by <a href="#snapshotget">Snapshot::get()</a> · <a href="#snapshotlist">Snapshot::list()</a> · <a href="#snapshotload">Snapshot::load()</a></p>
+
+A lightweight handle backed by a local index row. Use [`open()`](#h-open) to read the artifact metadata, and [`Snapshot::verify()`](#snap-verify) for explicit content verification. All accessors are listed under [SnapshotHandle methods](#snapshothandle-methods).
+
+| Method | Type | Description |
+|--------|------|-------------|
+| digest() | `&str` | Manifest digest (`sha256:hex`) |
+| name() | `Option<&str>` | Name alias; `None` for digest-only entries |
+| parent_digest() | `Option<&str>` | Parent snapshot digest, or `None` for a root |
+| scope() | [`SnapshotScope`](#snapshotscope) | Snapshot payload scope (`Disk` today) |
+| image_ref() | `&str` | Source image reference |
+| format() | [`SnapshotFormat`](#snapshotformat) | On-disk upper format |
+| size_bytes() | `Option<u64>` | Upper file size at index time |
+| created_at() | `chrono::NaiveDateTime` | Creation time from the manifest |
+| path() | `&Path` | Local artifact directory |
+| open() | `Result<`[`Snapshot`](#instance-methods)`>` | Open the underlying artifact |
+| remove(force) | `Result<()>` | Remove this snapshot |
 
 Accessors and lifecycle on a [`SnapshotHandle`](#snapshothandle) (an index row). Returned by [`Snapshot::get()`](#snapshotget), [`Snapshot::list()`](#snapshotlist), and [`Snapshot::load()`](#snapshotload).
 
@@ -641,7 +661,7 @@ Remove this snapshot. Delegates to [`Snapshot::remove(self.digest(), force)`](#s
   </div>
 </div>
 
-## Sandbox entry points
+## SandboxBuilder
 
 Snapshot-related methods that live on the sandbox builder and handle. See [Sandbox](/sdk/rust/sandbox) for the full sandbox API.
 
@@ -672,6 +692,8 @@ let sb = Sandbox::builder("api-restored")
     <div className="msb-param-desc">Bare name resolved under the default snapshots directory, or a path to an artifact directory.</div>
   </div>
 </div>
+
+## SandboxHandle
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">snapshot()</span>
 
@@ -854,28 +876,6 @@ Build and execute the snapshot in one step. Equivalent to [`Snapshot::create(sel
 </div>
 
 ## Types
-
-### SnapshotHandle
-
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
-
-<p className="msb-backref">Returned by <a href="#snapshotget">Snapshot::get()</a> · <a href="#snapshotlist">Snapshot::list()</a> · <a href="#snapshotload">Snapshot::load()</a></p>
-
-A lightweight handle backed by a local index row. Use [`open()`](#h-open) to read the artifact metadata, and [`Snapshot::verify()`](#snap-verify) for explicit content verification. All accessors are listed under [SnapshotHandle methods](#snapshothandle-methods).
-
-| Method | Type | Description |
-|--------|------|-------------|
-| digest() | `&str` | Manifest digest (`sha256:hex`) |
-| name() | `Option<&str>` | Name alias; `None` for digest-only entries |
-| parent_digest() | `Option<&str>` | Parent snapshot digest, or `None` for a root |
-| scope() | [`SnapshotScope`](#snapshotscope) | Snapshot payload scope (`Disk` today) |
-| image_ref() | `&str` | Source image reference |
-| format() | [`SnapshotFormat`](#snapshotformat) | On-disk upper format |
-| size_bytes() | `Option<u64>` | Upper file size at index time |
-| created_at() | `chrono::NaiveDateTime` | Creation time from the manifest |
-| path() | `&Path` | Local artifact directory |
-| open() | `Result<`[`Snapshot`](#instance-methods)`>` | Open the underlying artifact |
-| remove(force) | `Result<()>` | Remove this snapshot |
 
 ### SnapshotConfig
 

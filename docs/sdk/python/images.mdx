@@ -10,7 +10,7 @@ from microsandbox import Image
 ```
 
 
-## Source factory
+## Image
 
 These static methods return an [`ImageSource`](#imagesource) you can pass as the `image=` kwarg to [`Sandbox.create()`](/sdk/python/sandbox). A plain string also works (`image="python:3.12"`); use the factory when you need OCI-only options like the writable upper size, or to be explicit about a bind or disk source.
 
@@ -144,7 +144,7 @@ Create a rootfs source backed by a disk image. The format is inferred from the f
   </div>
 </div>
 
-## Cache management
+<p className="msb-member-group">Cache management</p>
 
 These static methods inspect and prune images already pulled into the local OCI cache. They require a local backend; on a cloud backend they raise `UnsupportedError`.
 
@@ -413,24 +413,29 @@ await Image.save(["python:3.12", "app:local"], output_path="bundle.tar")
 
 </Accordion>
 
-## Types
+## ImageHandle
 
-### ImageSource
 
-<p className="msb-backref">Returned by <a href="#image-oci">oci()</a> · <a href="#image-bind">bind()</a> · <a href="#image-disk">disk()</a></p>
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
-Explicit rootfs image source. Build one with [`Image.oci()`](#image-oci), [`Image.bind()`](#image-bind), or [`Image.disk()`](#image-disk), then pass it as the `image=` kwarg to [`Sandbox.create()`](/sdk/python/sandbox). A frozen dataclass; treat its fields as opaque.
+<p className="msb-backref">Returned by <a href="#image-get">get()</a> · <a href="#image-list">list()</a> · <a href="#image-load">load()</a></p>
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `_type` | [`ImageSourceKind`](#imagesourcekind) | Source kind |
-| `_path` | `str \| None` | Host path for `bind` / `disk` sources |
-| `_reference` | `str \| None` | OCI reference for `oci` sources |
-| `_upper_size_mib` | `int \| None` | Writable overlay upper size in MiB (OCI only) |
-| `_fstype` | `str \| None` | Filesystem type for `disk` sources |
-| `_format` | [`DiskImageFormat`](#diskimageformat)` \| None` | Disk image format (inferred from extension) |
+A lightweight handle to a cached OCI image, returned by [`Image.get()`](#image-get), [`Image.list()`](#image-list), and [`Image.load()`](#image-load). Properties are read-only attributes; the two methods are async.
 
-### RootDisk
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
+| `reference` | `str` | Image reference |
+| `size_bytes` | `int \| None` | Total size in bytes, or `None` when unknown |
+| `manifest_digest` | `str \| None` | Content-addressable manifest digest |
+| `architecture` | `str \| None` | Resolved architecture |
+| `os` | `str \| None` | Resolved operating system |
+| `layer_count` | `int` | Number of layers |
+| `last_used_at` | `float \| None` | Last referenced time, milliseconds since epoch |
+| `created_at` | `float \| None` | First-pulled time, milliseconds since epoch |
+| `await inspect()` | [`ImageDetail`](#imagedetail) | Fetch full detail for this image |
+| `await remove(*, force=False)` | `None` | Delete this image (raises [`ImageInUseError`](#errors) unless `force`) |
+
+## RootDisk
 
 Factory for writable OCI root disk configurations.
 
@@ -452,6 +457,23 @@ existing = RootDisk.disk(
 | `tmpfs(size_mib=None)` | [`RootDiskConfig`](#rootdiskconfig) | Ephemeral RAM-backed upper layer |
 | `disk(path, *, format=None, fstype=None)` | [`RootDiskConfig`](#rootdiskconfig) | User-supplied writable disk image |
 
+## Types
+
+### ImageSource
+
+<p className="msb-backref">Returned by <a href="#image-oci">oci()</a> · <a href="#image-bind">bind()</a> · <a href="#image-disk">disk()</a></p>
+
+Explicit rootfs image source. Build one with [`Image.oci()`](#image-oci), [`Image.bind()`](#image-bind), or [`Image.disk()`](#image-disk), then pass it as the `image=` kwarg to [`Sandbox.create()`](/sdk/python/sandbox). A frozen dataclass; treat its fields as opaque.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `_type` | [`ImageSourceKind`](#imagesourcekind) | Source kind |
+| `_path` | `str \| None` | Host path for `bind` / `disk` sources |
+| `_reference` | `str \| None` | OCI reference for `oci` sources |
+| `_upper_size_mib` | `int \| None` | Writable overlay upper size in MiB (OCI only) |
+| `_fstype` | `str \| None` | Filesystem type for `disk` sources |
+| `_format` | [`DiskImageFormat`](#diskimageformat)` \| None` | Disk image format (inferred from extension) |
+
 ### RootDiskConfig
 
 Frozen root disk configuration produced by [`RootDisk`](#rootdisk).
@@ -463,27 +485,6 @@ Frozen root disk configuration produced by [`RootDisk`](#rootdisk).
 | `path` | `str \| None` | User-supplied disk image path |
 | `format` | [`DiskImageFormat`](#diskimageformat)` \| None` | Disk image format |
 | `fstype` | `str \| None` | Inner filesystem type |
-
-### ImageHandle
-
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
-
-<p className="msb-backref">Returned by <a href="#image-get">get()</a> · <a href="#image-list">list()</a> · <a href="#image-load">load()</a></p>
-
-A lightweight handle to a cached OCI image, returned by [`Image.get()`](#image-get), [`Image.list()`](#image-list), and [`Image.load()`](#image-load). Properties are read-only attributes; the two methods are async.
-
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| `reference` | `str` | Image reference |
-| `size_bytes` | `int \| None` | Total size in bytes, or `None` when unknown |
-| `manifest_digest` | `str \| None` | Content-addressable manifest digest |
-| `architecture` | `str \| None` | Resolved architecture |
-| `os` | `str \| None` | Resolved operating system |
-| `layer_count` | `int` | Number of layers |
-| `last_used_at` | `float \| None` | Last referenced time, milliseconds since epoch |
-| `created_at` | `float \| None` | First-pulled time, milliseconds since epoch |
-| `await inspect()` | [`ImageDetail`](#imagedetail) | Fetch full detail for this image |
-| `await remove(*, force=False)` | `None` | Delete this image (raises [`ImageInUseError`](#errors) unless `force`) |
 
 ### ImageDetail
 

@@ -6,7 +6,7 @@ description: TypeScript SDK - Volume API reference
 Create and manage named volumes: persistent storage that lives independently of any sandbox. Build a volume, look one up, read and write its files from the host, then delete it. See [Volumes](/sandboxes/volumes) for usage examples and patterns.
 
 
-## Static methods
+## Volume
 
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">getDefault()</span>
 
@@ -145,7 +145,7 @@ Delete a named volume and its contents. Fails if the volume is currently mounted
   </div>
 </div>
 
-## Instance methods
+<p className="msb-member-group">Instance members</p>
 
 #### <span className="msb-recv">volume.</span><span className="msb-hn">name</span>
 
@@ -344,7 +344,27 @@ Build and create the volume on disk, returning a [`Volume`](#instance-methods).
   </div>
 </div>
 
-## VolumeFs methods
+## VolumeFs
+
+<p className="msb-backref">Returned by <a href="#volume-fs">volume.fs()</a> · <a href="#volumehandle">VolumeHandle.fs()</a></p>
+
+Host-side filesystem operations on a volume's directory. The methods mirror [`SandboxFsOps`](/sdk/typescript/filesystem) but run directly on the host with no sandbox booted. See the [VolumeFs methods](#volumefs-methods) section above for full per-method details.
+
+| Method | Type | Description |
+|--------|------|-------------|
+| read(path) | `Promise<Uint8Array>` | Read a file as bytes |
+| readToString(path) | `Promise<string>` | Read a file as a UTF-8 string |
+| readStream(path) | `Promise<`[`VolumeFsReadStream`](#volumefsreadstream)`>` | Open a streaming reader |
+| write(path, data) | `Promise<void>` | Write a file (bytes or string) |
+| writeStream(path) | `Promise<`[`VolumeFsWriteSink`](#volumefswritesink)`>` | Open a streaming writer |
+| list(path) | `Promise<`[`FsEntry`](/sdk/typescript/filesystem#fsentry)`[]>` | List directory entries |
+| mkdir(path) | `Promise<void>` | Create a directory, with parents |
+| removeDir(path) | `Promise<void>` | Recursively remove a directory |
+| remove(path) | `Promise<void>` | Remove a file |
+| copy(from, to) | `Promise<void>` | Copy a file or directory |
+| rename(from, to) | `Promise<void>` | Move or rename a file or directory |
+| stat(path) | `Promise<`[`FsMetadata`](/sdk/typescript/filesystem#fsmetadata)`>` | Get file metadata |
+| exists(path) | `Promise<boolean>` | Check whether a path exists |
 
 Host-side filesystem operations on a volume's directory. Obtained via [`volume.fs()`](#volume-fs) or [`VolumeHandle.fs()`](#volumehandle). All operations run directly on the host without booting a sandbox. Paths are relative to the volume's root directory. Every method is async.
 
@@ -768,9 +788,8 @@ Check whether a path exists.
   </div>
 </div>
 
-## Types
+## VolumeHandle
 
-### VolumeHandle
 
 <p className="msb-backref">Returned by <a href="#volume-get">Volume.get()</a> · <a href="#volume-list">Volume.list()</a></p>
 
@@ -790,29 +809,8 @@ A handle to an existing named volume, carrying its metadata. Handles from [`Volu
 | fs() | [`VolumeFs`](#volumefs) | Host-side filesystem (live handles only; throws on read-only handles) |
 | remove() | `Promise<void>` | Delete this volume (live handles only; throws on read-only handles) |
 
-### VolumeFs
+## VolumeFsReadStream
 
-<p className="msb-backref">Returned by <a href="#volume-fs">volume.fs()</a> · <a href="#volumehandle">VolumeHandle.fs()</a></p>
-
-Host-side filesystem operations on a volume's directory. The methods mirror [`SandboxFsOps`](/sdk/typescript/filesystem) but run directly on the host with no sandbox booted. See the [VolumeFs methods](#volumefs-methods) section above for full per-method details.
-
-| Method | Type | Description |
-|--------|------|-------------|
-| read(path) | `Promise<Uint8Array>` | Read a file as bytes |
-| readToString(path) | `Promise<string>` | Read a file as a UTF-8 string |
-| readStream(path) | `Promise<`[`VolumeFsReadStream`](#volumefsreadstream)`>` | Open a streaming reader |
-| write(path, data) | `Promise<void>` | Write a file (bytes or string) |
-| writeStream(path) | `Promise<`[`VolumeFsWriteSink`](#volumefswritesink)`>` | Open a streaming writer |
-| list(path) | `Promise<`[`FsEntry`](/sdk/typescript/filesystem#fsentry)`[]>` | List directory entries |
-| mkdir(path) | `Promise<void>` | Create a directory, with parents |
-| removeDir(path) | `Promise<void>` | Recursively remove a directory |
-| remove(path) | `Promise<void>` | Remove a file |
-| copy(from, to) | `Promise<void>` | Copy a file or directory |
-| rename(from, to) | `Promise<void>` | Move or rename a file or directory |
-| stat(path) | `Promise<`[`FsMetadata`](/sdk/typescript/filesystem#fsmetadata)`>` | Get file metadata |
-| exists(path) | `Promise<boolean>` | Check whether a path exists |
-
-### VolumeFsReadStream
 
 <p className="msb-backref">Returned by <a href="#volumefs-methods">VolumeFs.readStream()</a></p>
 
@@ -825,7 +823,8 @@ A streaming reader over a volume file. Implements `AsyncIterable<Uint8Array>` an
 | [Symbol.asyncIterator]() | `AsyncIterator<Uint8Array>` | Iterate chunks with `for await` |
 | [Symbol.asyncDispose]() | `Promise<void>` | Mark the stream done (for `using`) |
 
-### VolumeFsWriteSink
+## VolumeFsWriteSink
+
 
 <p className="msb-backref">Returned by <a href="#volumefs-methods">VolumeFs.writeStream()</a></p>
 

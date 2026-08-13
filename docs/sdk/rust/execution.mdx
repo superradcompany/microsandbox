@@ -19,7 +19,7 @@ let sb = Sandbox::builder("worker")
 
 let out = sb.exec_default_with(|e| e.env("LOG_LEVEL", "debug")).await?;
 ```
-## Run methods
+## Sandbox
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">exec()</span>
 
@@ -364,7 +364,7 @@ Run a shell command with per-execution overrides and streaming I/O. As with [`sh
   </div>
 </div>
 
-## Attach methods
+<p className="msb-member-group">Attach methods</p>
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">attach()</span>
 
@@ -924,9 +924,8 @@ Finalize the options. Called automatically by [`attach_with()`](#sb-attach_with)
   </div>
 </div>
 
-## Types
+## ExecHandle
 
-### ExecHandle
 
 <p className="msb-backref">Returned by <a href="#sb-exec_stream">exec_stream()</a> · <a href="#sb-exec_stream_with">exec_stream_with()</a> · <a href="#sb-shell_stream">shell_stream()</a> · <a href="#sb-shell_stream_with">shell_stream_with()</a></p>
 
@@ -944,7 +943,8 @@ A handle to a running streaming execution. Receives [`ExecEvent`](#execevent)s a
 | kill() | `Result<()>` | Send SIGKILL to the process. |
 | resize(rows, cols) | `Result<()>` | Resize the PTY for this session. |
 
-### ExecControl
+## ExecControl
+
 
 <p className="msb-backref">Returned by <a href="#exechandle">ExecHandle.control()</a></p>
 
@@ -957,7 +957,8 @@ A cloneable, lightweight control handle for a streaming exec session. Lets a tas
 | kill() | `Result<()>` | Send SIGKILL to the process. |
 | resize(rows, cols) | `Result<()>` | Resize the PTY for this session. |
 
-### ExecSink
+## ExecSink
+
 
 <p className="msb-backref">Returned by <a href="#exechandle">ExecHandle.take_stdin()</a></p>
 
@@ -967,6 +968,23 @@ A writer for sending data to a running process's stdin. Obtained via [`ExecHandl
 |--------|-----------|-------------|
 | write(data) | `data: impl AsRef<[u8]>` | Write bytes to the process's stdin. |
 | close() | - | Close stdin. The process sees EOF on its stdin. |
+
+## ExecOutput
+
+
+<p className="msb-backref">Returned by <a href="#sb-exec">exec()</a> · <a href="#sb-exec_with">exec_with()</a> · <a href="#sb-shell">shell()</a> · <a href="#sb-shell_with">shell_with()</a> · <a href="#exechandle">ExecHandle.collect()</a></p>
+
+The result of a completed command execution. Holds the exit status and all captured output.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| status() | [`ExitStatus`](#exitstatus) | Exit code and success flag. |
+| stdout() | `Result<String, FromUtf8Error>` | Collected stdout decoded as UTF-8. Errors if the output is not valid UTF-8. |
+| stderr() | `Result<String, FromUtf8Error>` | Collected stderr decoded as UTF-8. |
+| stdout_bytes() | `&Bytes` | Raw stdout bytes without decoding. |
+| stderr_bytes() | `&Bytes` | Raw stderr bytes without decoding. |
+
+## Types
 
 ### ExecEvent
 
@@ -982,20 +1000,6 @@ An event emitted by a streaming execution.
 | `Exited` | `code: i32` | The process exited normally. `code` is the exit code. |
 | `Failed` | `ExecFailed` | The process failed to spawn (binary not found, permission denied, etc.). The user code never ran. Terminal: no further events follow. |
 | `StdinError` | `ExecStdinError` | A stdin write to the child failed (e.g. broken pipe). Non-terminal: the session keeps running and may still emit output and an `Exited` event. |
-
-### ExecOutput
-
-<p className="msb-backref">Returned by <a href="#sb-exec">exec()</a> · <a href="#sb-exec_with">exec_with()</a> · <a href="#sb-shell">shell()</a> · <a href="#sb-shell_with">shell_with()</a> · <a href="#exechandle">ExecHandle.collect()</a></p>
-
-The result of a completed command execution. Holds the exit status and all captured output.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| status() | [`ExitStatus`](#exitstatus) | Exit code and success flag. |
-| stdout() | `Result<String, FromUtf8Error>` | Collected stdout decoded as UTF-8. Errors if the output is not valid UTF-8. |
-| stderr() | `Result<String, FromUtf8Error>` | Collected stderr decoded as UTF-8. |
-| stdout_bytes() | `&Bytes` | Raw stdout bytes without decoding. |
-| stderr_bytes() | `&Bytes` | Raw stderr bytes without decoding. |
 
 ### ExitStatus
 

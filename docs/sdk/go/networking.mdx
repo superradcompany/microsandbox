@@ -279,13 +279,18 @@ Permit all network traffic, including private addresses and the host machine.
 
 The package-level `Rule` factory provides semantic low-level rules. `Rule.AllowDNS()` returns a [`PolicyRule`](#policyrule) allowing gateway UDP/53 and TCP/53; `Rule.DenyDNS()` returns its deny counterpart. Put `Rule.DenyDNS()` before profile-generated rules when you need to override automatic DNS access.
 
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `Rule.AllowDNS()` | [`PolicyRule`](#policyrule) | Allow gateway DNS over UDP and TCP port 53 |
+| `Rule.DenyDNS()` | [`PolicyRule`](#policyrule) | Deny gateway DNS over UDP and TCP port 53 |
+
 ```go
 network := m.NetworkPolicy.FromProfiles(m.NetworkProfilePublic)
 network.Rules = append([]m.PolicyRule{m.Rule.DenyDNS()}, network.Rules...)
 ```
 
 
-## Custom rules
+<p className="msb-member-group">Custom rules</p>
 
 Build a custom firewall by populating [`NetworkConfig.Rules`](#networkconfig). Rules are evaluated **first-match-wins** per direction; `DefaultEgress` and `DefaultIngress` set the fall-through action. A broad rule placed before a narrow one swallows it, so put specific rules first.
 
@@ -309,6 +314,24 @@ sb, err := m.CreateSandbox(ctx, "ci-runner",
     }),
 )
 ```
+
+## Constants
+
+<p className="msb-member-group">Destination groups</p>
+
+<p className="msb-backref">Used by <a href="#policyrule">PolicyRule.Destination</a></p>
+
+The `Destination` field on [`PolicyRule`](#policyrule) accepts these well-known group names alongside literal CIDRs and domains. A domain prefixed with `.` becomes a suffix match: `.example.com` matches `api.example.com` but not `example.com`.
+
+| Value | Description |
+|-------|-------------|
+| `"public"` | Every address not in any other group |
+| `"private"` | Private/RFC 1918 addresses + ULA + CGN (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`, `fc00::/7`) |
+| `"loopback"` | Loopback addresses (`127.0.0.0/8`, `::1`); the **guest's own** loopback, not the host. See [Reaching the host](/networking/overview#reaching-the-host) |
+| `"link-local"` | Link-local addresses (`169.254.0.0/16`, `fe80::/10`) excluding metadata |
+| `"metadata"` | Cloud metadata endpoints (`169.254.169.254`) |
+| `"multicast"` | Multicast addresses (`224.0.0.0/4`, `ff00::/8`) |
+| `"host"` | The host machine, reached via `host.microsandbox.internal`. The right group for "let the sandbox reach my host's localhost", not `"loopback"` |
 
 ## Types
 
@@ -485,19 +508,3 @@ Composable profile names accepted by [`NetworkPolicy.FromProfiles()`](#networkpo
 | `NetworkProfilePublic` | `"public"` | Public internet addresses |
 | `NetworkProfilePrivate` | `"private"` | Private/LAN ranges |
 | `NetworkProfileHost` | `"host"` | Sandbox host gateway addresses |
-
-### Destination groups
-
-<p className="msb-backref">Used by <a href="#policyrule">PolicyRule.Destination</a></p>
-
-The `Destination` field on [`PolicyRule`](#policyrule) accepts these well-known group names alongside literal CIDRs and domains. A domain prefixed with `.` becomes a suffix match: `.example.com` matches `api.example.com` but not `example.com`.
-
-| Value | Description |
-|-------|-------------|
-| `"public"` | Every address not in any other group |
-| `"private"` | Private/RFC 1918 addresses + ULA + CGN (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`, `fc00::/7`) |
-| `"loopback"` | Loopback addresses (`127.0.0.0/8`, `::1`); the **guest's own** loopback, not the host. See [Reaching the host](/networking/overview#reaching-the-host) |
-| `"link-local"` | Link-local addresses (`169.254.0.0/16`, `fe80::/10`) excluding metadata |
-| `"metadata"` | Cloud metadata endpoints (`169.254.169.254`) |
-| `"multicast"` | Multicast addresses (`224.0.0.0/4`, `ff00::/8`) |
-| `"host"` | The host machine, reached via `host.microsandbox.internal`. The right group for "let the sandbox reach my host's localhost", not `"loopback"` |

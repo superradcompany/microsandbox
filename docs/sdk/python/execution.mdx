@@ -18,7 +18,7 @@ sandbox = await Sandbox.create(
 )
 out = await sandbox.exec_default(env={"LOG_LEVEL": "debug"})
 ```
-## Run and collect
+## Sandbox
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">exec()</span>
 
@@ -154,7 +154,7 @@ Run a command through the sandbox's configured shell (defaults to `/bin/sh`). Sh
   </div>
 </div>
 
-## Stream
+<p className="msb-member-group">Stream methods</p>
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">exec_stream()</span>
 
@@ -273,7 +273,7 @@ Streaming variant of [`shell()`](#sandbox-shell): runs `script` through the conf
   </div>
 </div>
 
-## Attach
+<p className="msb-member-group">Attach methods</p>
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">attach()</span>
 
@@ -362,6 +362,74 @@ Bridge your terminal to the sandbox's default shell in a fully interactive PTY s
   </div>
 </div>
 
+## ExecHandle
+
+
+<p className="msb-backref">Returned by <a href="#sandbox-exec_stream">exec_stream()</a> · <a href="#sandbox-shell_stream">shell_stream()</a></p>
+
+A handle to a running streaming execution. It is an async iterator, so `async for event in handle:` yields each [`ExecEvent`](#execevent) until the stream ends. `signal()`, `kill()`, and `resize()` may run while another task is waiting in `recv()`; concurrent receive, wait, and collect operations are not supported.
+
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
+| id | `str` | Correlation ID for this execution |
+| take_stdin() | [`ExecSink`](#execsink) ` \| None` | Take the stdin writer. Returns `None` after the first call, or when stdin wasn't piped |
+| recv() | [`ExecEvent`](#execevent) ` \| None` | *(async)* Receive the next event. Returns `None` when the stream ends |
+| wait() | `tuple[int, bool]` | *(async)* Wait for the process to exit. Returns `(code, success)` |
+| collect() | [`ExecOutput`](#execoutput) | *(async)* Drain remaining output and wait for exit |
+| signal(sig) | `None` | *(async)* Send a POSIX signal (numeric) to the process |
+| kill() | `None` | *(async)* Send SIGKILL to the process |
+| resize(rows, cols) | `None` | *(async)* Resize the PTY to the given `uint16` dimensions |
+
+## ExecSink
+
+
+<p className="msb-backref">Returned by <a href="#exechandle">ExecHandle.take_stdin()</a></p>
+
+Writer for sending data to a running process's stdin. Obtained from [`ExecHandle.take_stdin()`](#exechandle) when the execution was configured with `stdin=Stdin.pipe()`.
+
+| Method | Parameters | Description |
+|--------|-----------|-------------|
+| write(data) | `data: bytes` | *(async)* Write bytes to the process's stdin |
+| close() | - | *(async)* Close the sink. Sends EOF in non-TTY pipe mode; the guest PTY remains open in TTY mode |
+
+## Stdin
+
+<p className="msb-backref">Used by <a href="#sandbox-exec">exec()</a> · <a href="#sandbox-shell">shell()</a> · <a href="#sandbox-exec_stream">exec_stream()</a> · <a href="#sandbox-shell_stream">shell_stream()</a></p>
+
+Frozen dataclass with factory methods for configuring process stdin. Pass the result as the `stdin` argument to an exec or shell method. Raw `bytes` are also accepted directly and are sent inline.
+
+| Factory | Parameters | Description |
+|---------|-----------|-------------|
+| Stdin.null() | - | Connect stdin to `/dev/null` (default) |
+| Stdin.pipe() | - | Open a writable pipe. Write via [`take_stdin()`](#exechandle) on the handle |
+| Stdin.bytes(data) | `data: bytes` | Inline data sent before the process starts, then EOF |
+
+The factories set the corresponding [`StdinMode`](#stdinmode) member.
+
+## Rlimit
+
+<p className="msb-backref">Used by <a href="#sandbox-exec">exec()</a> · <a href="#sandbox-shell">shell()</a> · <a href="#sandbox-exec_stream">exec_stream()</a> · <a href="#sandbox-shell_stream">shell_stream()</a></p>
+
+Frozen dataclass describing a POSIX resource limit. Construct one directly or via a factory, then pass a list as the `rlimits` argument.
+
+| Factory | Parameters | Description |
+|---------|-----------|-------------|
+| Rlimit.nofile(limit) | `limit: int` | Max open file descriptors |
+| Rlimit.cpu(secs) | `secs: int` | CPU time limit in seconds |
+| Rlimit.as_(\*, soft, hard) | `soft: int, hard: int` | Virtual memory size |
+| Rlimit.nproc(limit) | `limit: int` | Max number of processes |
+| Rlimit.fsize(limit) | `limit: int` | Max file size |
+| Rlimit.memlock(limit) | `limit: int` | Max locked memory |
+| Rlimit.stack(limit) | `limit: int` | Max stack size |
+
+**Fields**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| resource | [`RlimitResource`](#rlimitresource) | Which resource is limited |
+| soft | `int` | Soft limit |
+| hard | `int` | Hard limit |
+
 ## Types
 
 ### ExecOptions
@@ -396,34 +464,6 @@ The result of a completed command execution: collected output plus exit status. 
 | stderr_text | `str` | Collected stderr decoded as UTF-8. Raises on invalid encoding |
 | stdout_bytes | `bytes` | Raw stdout bytes |
 | stderr_bytes | `bytes` | Raw stderr bytes |
-
-### ExecHandle
-
-<p className="msb-backref">Returned by <a href="#sandbox-exec_stream">exec_stream()</a> · <a href="#sandbox-shell_stream">shell_stream()</a></p>
-
-A handle to a running streaming execution. It is an async iterator, so `async for event in handle:` yields each [`ExecEvent`](#execevent) until the stream ends. `signal()`, `kill()`, and `resize()` may run while another task is waiting in `recv()`; concurrent receive, wait, and collect operations are not supported.
-
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| id | `str` | Correlation ID for this execution |
-| take_stdin() | [`ExecSink`](#execsink) ` \| None` | Take the stdin writer. Returns `None` after the first call, or when stdin wasn't piped |
-| recv() | [`ExecEvent`](#execevent) ` \| None` | *(async)* Receive the next event. Returns `None` when the stream ends |
-| wait() | `tuple[int, bool]` | *(async)* Wait for the process to exit. Returns `(code, success)` |
-| collect() | [`ExecOutput`](#execoutput) | *(async)* Drain remaining output and wait for exit |
-| signal(sig) | `None` | *(async)* Send a POSIX signal (numeric) to the process |
-| kill() | `None` | *(async)* Send SIGKILL to the process |
-| resize(rows, cols) | `None` | *(async)* Resize the PTY to the given `uint16` dimensions |
-
-### ExecSink
-
-<p className="msb-backref">Returned by <a href="#exechandle">ExecHandle.take_stdin()</a></p>
-
-Writer for sending data to a running process's stdin. Obtained from [`ExecHandle.take_stdin()`](#exechandle) when the execution was configured with `stdin=Stdin.pipe()`.
-
-| Method | Parameters | Description |
-|--------|-----------|-------------|
-| write(data) | `data: bytes` | *(async)* Write bytes to the process's stdin |
-| close() | - | *(async)* Close the sink. Sends EOF in non-TTY pipe mode; the guest PTY remains open in TTY mode |
 
 ### ExecEvent
 
@@ -464,20 +504,6 @@ Frozen dataclass describing a process exit result. [`ExecHandle.wait()`](#execha
 | code | `int` | Process exit code |
 | success | `bool` | `True` when `code == 0` |
 
-### Stdin
-
-<p className="msb-backref">Used by <a href="#sandbox-exec">exec()</a> · <a href="#sandbox-shell">shell()</a> · <a href="#sandbox-exec_stream">exec_stream()</a> · <a href="#sandbox-shell_stream">shell_stream()</a></p>
-
-Frozen dataclass with factory methods for configuring process stdin. Pass the result as the `stdin` argument to an exec or shell method. Raw `bytes` are also accepted directly and are sent inline.
-
-| Factory | Parameters | Description |
-|---------|-----------|-------------|
-| Stdin.null() | - | Connect stdin to `/dev/null` (default) |
-| Stdin.pipe() | - | Open a writable pipe. Write via [`take_stdin()`](#exechandle) on the handle |
-| Stdin.bytes(data) | `data: bytes` | Inline data sent before the process starts, then EOF |
-
-The factories set the corresponding [`StdinMode`](#stdinmode) member.
-
 ### StdinMode
 
 <p className="msb-backref">Used internally by <a href="#stdin">Stdin</a></p>
@@ -489,30 +515,6 @@ String enum (`enum.StrEnum`) identifying how command stdin is connected.
 | `StdinMode.NULL` | `"null"` | Connect stdin to `/dev/null` |
 | `StdinMode.PIPE` | `"pipe"` | Expose a writable [`ExecSink`](#execsink) |
 | `StdinMode.BYTES` | `"bytes"` | Send inline bytes, then EOF |
-
-### Rlimit
-
-<p className="msb-backref">Used by <a href="#sandbox-exec">exec()</a> · <a href="#sandbox-shell">shell()</a> · <a href="#sandbox-exec_stream">exec_stream()</a> · <a href="#sandbox-shell_stream">shell_stream()</a></p>
-
-Frozen dataclass describing a POSIX resource limit. Construct one directly or via a factory, then pass a list as the `rlimits` argument.
-
-| Factory | Parameters | Description |
-|---------|-----------|-------------|
-| Rlimit.nofile(limit) | `limit: int` | Max open file descriptors |
-| Rlimit.cpu(secs) | `secs: int` | CPU time limit in seconds |
-| Rlimit.as_(\*, soft, hard) | `soft: int, hard: int` | Virtual memory size |
-| Rlimit.nproc(limit) | `limit: int` | Max number of processes |
-| Rlimit.fsize(limit) | `limit: int` | Max file size |
-| Rlimit.memlock(limit) | `limit: int` | Max locked memory |
-| Rlimit.stack(limit) | `limit: int` | Max stack size |
-
-**Fields**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| resource | [`RlimitResource`](#rlimitresource) | Which resource is limited |
-| soft | `int` | Soft limit |
-| hard | `int` | Hard limit |
 
 ### RlimitResource
 

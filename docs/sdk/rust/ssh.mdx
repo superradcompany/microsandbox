@@ -39,6 +39,21 @@ Return the SSH namespace for this sandbox. The namespace holds the SSH client an
 
 ## SandboxSshOps
 
+<p className="msb-backref">Returned by <a href="#sb-ssh">sb.ssh()</a></p>
+
+SSH namespace for a sandbox. Cheap to clone; holds a clone of the sandbox.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| [`connect()`](#ssh-connect) | `SshClient` | Open a client with defaults. |
+| [`open_client()`](#ssh-open_client) | `SshClient` | Alias of `connect()`. |
+| [`connect_with()`](#ssh-connect_with) | `SshClient` | Open a client with options. |
+| [`open_client_with()`](#ssh-open_client_with) | `SshClient` | Alias of `connect_with()`. |
+| [`server()`](#ssh-server) | `SshServer` | Prepare a server endpoint. |
+| [`prepare_server()`](#ssh-prepare_server) | `SshServer` | Alias of `server()`. |
+| [`server_with()`](#ssh-server_with) | `SshServer` | Server endpoint with options. |
+| [`prepare_server_with()`](#ssh-prepare_server_with) | `SshServer` | Alias of `server_with()`. |
+
 SSH namespace for a sandbox, obtained from [`sb.ssh()`](#sb-ssh). Client sessions work with local and cloud sandboxes through the selected backend's authenticated agent connection. Reusable server endpoints can use explicit host-key and authorized-key paths with either backend; their implicit key-file defaults are local-only.
 
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">connect()</span>
@@ -275,6 +290,19 @@ Alias for [`server_with`](#ssh-server_with).
 
 ## SshClient
 
+<p className="msb-backref">Returned by <a href="#ssh-connect">ssh.connect()</a>, <a href="#ssh-connect_with">ssh.connect_with()</a></p>
+
+Native in-process SSH client session. Aborts its internal server task on drop.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| [`exec()`](#client-exec) | `SshOutput` | Run a command. |
+| [`exec_with()`](#client-exec_with) | `SshOutput` | Run with options. |
+| [`attach()`](#client-attach) | `i32` | Interactive shell. |
+| [`attach_with()`](#client-attach_with) | `i32` | Attach with options. |
+| [`sftp()`](#client-sftp) | `SftpClient` | Open an SFTP session. |
+| [`close()`](#client-close) | `()` | Close the session. |
+
 A connected, native in-process SSH client session, obtained from [`connect`](#ssh-connect) or [`connect_with`](#ssh-connect_with). Aborts its internal server task on drop.
 
 #### <span className="msb-recv">client.</span><span className="msb-hn">exec()</span>
@@ -463,6 +491,15 @@ Close this native SSH client session. Sends a disconnect and aborts the internal
 
 ## SshServer
 
+<p className="msb-backref">Returned by <a href="#ssh-server">ssh.server()</a>, <a href="#ssh-server_with">ssh.server_with()</a></p>
+
+Reusable SSH server endpoint for a sandbox. Cloneable.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| [`serve()`](#server-serve) | `()` | Serve one connection. |
+| [`serve_connection()`](#server-serve_connection) | `()` | Alias of `serve()`. |
+
 A reusable SSH server endpoint for a sandbox, obtained from [`server`](#ssh-server) or [`server_with`](#ssh-server_with). Cloneable; each call to [`serve`](#server-serve) handles one connection.
 
 #### <span className="msb-recv">server.</span><span className="msb-hn">serve()</span>
@@ -515,6 +552,14 @@ Alias for [`serve`](#server-serve).
 
 ## SshStdioStream
 
+<p className="msb-backref">Used by <a href="#server-serve">server.serve()</a></p>
+
+Ordered duplex stream backed by this process's stdin and stdout. Implements `AsyncRead` and `AsyncWrite`.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| [`new()`](#sshstdiostreamnew) | `SshStdioStream` | Create a stdio transport stream. |
+
 #### <span className="msb-recv">SshStdioStream::</span><span className="msb-hn">new()</span>
 
 ```rust
@@ -561,84 +606,8 @@ pub const DEFAULT_SSH_PORT: u16 = 2222;
 
 Default SSH listener port used by the CLI adapter when binding a sandbox SSH endpoint.
 
-## Types
+## SshClientOptionsBuilder
 
-### SshOutput
-
-<p className="msb-backref">Returned by <a href="#client-exec">client.exec()</a>, <a href="#client-exec_with">client.exec_with()</a></p>
-
-Output from an SSH exec request.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `status` | `i32` | Exit status code. |
-| `stdout` | `Bytes` | Captured stdout bytes. |
-| `stderr` | `Bytes` | Captured stderr bytes (folded into stdout when a PTY is allocated). |
-
-### SandboxSshOps
-
-<p className="msb-backref">Returned by <a href="#sb-ssh">sb.ssh()</a></p>
-
-SSH namespace for a sandbox. Cheap to clone; holds a clone of the sandbox.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`connect()`](#ssh-connect) | `SshClient` | Open a client with defaults. |
-| [`open_client()`](#ssh-open_client) | `SshClient` | Alias of `connect()`. |
-| [`connect_with()`](#ssh-connect_with) | `SshClient` | Open a client with options. |
-| [`open_client_with()`](#ssh-open_client_with) | `SshClient` | Alias of `connect_with()`. |
-| [`server()`](#ssh-server) | `SshServer` | Prepare a server endpoint. |
-| [`prepare_server()`](#ssh-prepare_server) | `SshServer` | Alias of `server()`. |
-| [`server_with()`](#ssh-server_with) | `SshServer` | Server endpoint with options. |
-| [`prepare_server_with()`](#ssh-prepare_server_with) | `SshServer` | Alias of `server_with()`. |
-
-### SshClient
-
-<p className="msb-backref">Returned by <a href="#ssh-connect">ssh.connect()</a>, <a href="#ssh-connect_with">ssh.connect_with()</a></p>
-
-Native in-process SSH client session. Aborts its internal server task on drop.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`exec()`](#client-exec) | `SshOutput` | Run a command. |
-| [`exec_with()`](#client-exec_with) | `SshOutput` | Run with options. |
-| [`attach()`](#client-attach) | `i32` | Interactive shell. |
-| [`attach_with()`](#client-attach_with) | `i32` | Attach with options. |
-| [`sftp()`](#client-sftp) | `SftpClient` | Open an SFTP session. |
-| [`close()`](#client-close) | `()` | Close the session. |
-
-### SshServer
-
-<p className="msb-backref">Returned by <a href="#ssh-server">ssh.server()</a>, <a href="#ssh-server_with">ssh.server_with()</a></p>
-
-Reusable SSH server endpoint for a sandbox. Cloneable.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`serve()`](#server-serve) | `()` | Serve one connection. |
-| [`serve_connection()`](#server-serve_connection) | `()` | Alias of `serve()`. |
-
-### SftpClient
-
-<p className="msb-backref">Returned by <a href="#client-sftp">client.sftp()</a></p>
-
-High-level SFTP client session.
-
-```rust
-pub type SftpClient = russh_sftp::client::SftpSession;
-```
-
-### SshStdioStream
-
-<p className="msb-backref">Used by <a href="#server-serve">server.serve()</a></p>
-
-Ordered duplex stream backed by this process's stdin and stdout. Implements `AsyncRead` and `AsyncWrite`.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`new()`](#sshstdiostreamnew) | `SshStdioStream` | Create a stdio transport stream. |
-
-### SshClientOptionsBuilder
 
 <p className="msb-backref">Used by <a href="#ssh-connect_with">ssh.connect_with()</a></p>
 
@@ -651,7 +620,8 @@ Builder for SSH client options. Defaults: user `root`, terminal from `$TERM` (fa
 | `sftp()` | `bool` | Enable or disable SFTP on the internal server. Default `true`. |
 | `build()` | | Finalize the options. |
 
-### SshExecOptionsBuilder
+## SshExecOptionsBuilder
+
 
 <p className="msb-backref">Used by <a href="#client-exec_with">client.exec_with()</a></p>
 
@@ -662,7 +632,8 @@ Builder for SSH exec options.
 | `tty()` | `bool` | Request a PTY for the exec channel. Default `false`. |
 | `build()` | | Finalize the options. |
 
-### SshAttachOptionsBuilder
+## SshAttachOptionsBuilder
+
 
 <p className="msb-backref">Used by <a href="#client-attach_with">client.attach_with()</a></p>
 
@@ -674,7 +645,8 @@ Builder for interactive SSH attach options. Default terminal comes from `$TERM` 
 | `detach_keys()` | `impl Into<String>` | Detach key sequence. |
 | `build()` | | Finalize the options. |
 
-### SshServerOptionsBuilder
+## SshServerOptionsBuilder
+
 
 <p className="msb-backref">Used by <a href="#ssh-server_with">ssh.server_with()</a></p>
 
@@ -689,3 +661,27 @@ Builder for SSH server options. SFTP is enabled by default; when no authorized k
 | `user()` | `impl Into<String>` | Override the guest user used for exec requests. |
 | `sftp()` | `bool` | Enable or disable SFTP. Default `true`. |
 | `build()` | | Finalize the options. |
+
+## SftpClient
+
+<p className="msb-backref">Returned by <a href="#client-sftp">client.sftp()</a></p>
+
+High-level SFTP client session.
+
+```rust
+pub type SftpClient = russh_sftp::client::SftpSession;
+```
+
+## Types
+
+### SshOutput
+
+<p className="msb-backref">Returned by <a href="#client-exec">client.exec()</a>, <a href="#client-exec_with">client.exec_with()</a></p>
+
+Output from an SSH exec request.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `status` | `i32` | Exit status code. |
+| `stdout` | `Bytes` | Captured stdout bytes. |
+| `stderr` | `Bytes` | Captured stderr bytes (folded into stdout when a PTY is allocated). |

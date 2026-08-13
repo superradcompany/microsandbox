@@ -96,7 +96,11 @@ Like [`connect_sandbox`](#agentconnect_sandbox), but with an explicit handshake 
   </div>
 </div>
 
-## AgentClient: static methods
+## AgentClient
+
+<p className="msb-backref">Returned by <a href="#agentconnect_sandbox">agent::connect_sandbox()</a>, <a href="#agentclientconnect">AgentClient::connect()</a> · wrapped by <a href="#agentbridge">AgentBridge</a></p>
+
+Client for communicating with `agentd` through a running sandbox's relay. A newtype over the underlying `microsandbox_agent_client::AgentClient`; the typed and raw transport methods reach the inner client through `Deref`. See the [static](#agentclient-static-methods) and [instance](#agentclient-instance-methods) method sections above.
 
 #### <span className="msb-recv">AgentClient::</span><span className="msb-hn">connect()</span>
 
@@ -331,7 +335,7 @@ Check a message type against an explicit negotiated generation. The single place
   </div>
 </div>
 
-## AgentClient: instance methods
+<p className="msb-member-group">Instance methods</p>
 
 #### <span className="msb-recv">client.</span><span className="msb-hn">request()</span>
 
@@ -1061,12 +1065,6 @@ bridge.close().await;
 Close the connection. Idempotent. After close, every operation except another close returns [`AgentClientError::Closed`](#agentclienterror).
 
 ## Types
-
-### AgentClient
-
-<p className="msb-backref">Returned by <a href="#agentconnect_sandbox">agent::connect_sandbox()</a>, <a href="#agentclientconnect">AgentClient::connect()</a> · wrapped by <a href="#agentbridge">AgentBridge</a></p>
-
-Client for communicating with `agentd` through a running sandbox's relay. A newtype over the underlying `microsandbox_agent_client::AgentClient`; the typed and raw transport methods reach the inner client through `Deref`. See the [static](#agentclient-static-methods) and [instance](#agentclient-instance-methods) method sections above.
 
 ### BridgeFrame
 

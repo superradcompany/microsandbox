@@ -6,7 +6,7 @@ description: Go SDK - Filesystem API reference
 Read and write files inside a running sandbox over the same host-guest channel as command execution: no SSH, no network. See [Filesystem](/sandboxes/filesystem) for usage examples. For bulk file transfer, prefer a [volume](/sdk/go/volumes).
 
 
-## Methods
+## SandboxFSOps
 
 The accessor is obtained from a running sandbox via [`sb.FS()`](/sdk/go/sandbox#fs). Every method takes a `context.Context` first and returns an `error` (wrapped, inspectable with `m.IsKind`).
 
@@ -609,6 +609,35 @@ Open a streaming writer for a file. Use this for files too large to fit in memor
   </div>
 </div>
 
+## FsReadStream
+
+
+<p className="msb-backref">Returned by <a href="#fs-readstream">ReadStream()</a></p>
+
+An open streaming read from a guest file. Must be closed with `Close` when done.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `Recv(ctx context.Context)` | `([]byte, error)` | Receive the next chunk; returns `(nil, nil)` at EOF |
+| `WriteTo(w io.Writer)` | `(int64, error)` | Drain the stream into `w` using `context.Background()`; implements `io.WriterTo` |
+| `CopyTo(ctx context.Context, w io.Writer)` | `(int64, error)` | Drain into `w` honouring `ctx` for per-chunk cancellation |
+| `Close()` | `error` | Release the read stream handle |
+
+On a write error or partial write, `WriteTo` and `CopyTo` return the partial byte count and leave the stream open so the caller can recover; close it explicitly in either case.
+
+## FsWriteStream
+
+
+<p className="msb-backref">Returned by <a href="#fs-writestream">WriteStream()</a></p>
+
+An open streaming write to a guest file. Must be closed with `Close(ctx)` to finalise the write.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `Write(p []byte)` | `(int, error)` | Send a chunk; implements `io.Writer`, uses `context.Background()` internally |
+| `WriteCtx(ctx context.Context, data []byte)` | `error` | Send a chunk with explicit context control |
+| `Close(ctx context.Context)` | `error` | Send the EOF marker and wait for the guest to confirm; must be called to complete the write |
+
 ## Types
 
 ### FsEntry
@@ -650,30 +679,3 @@ Detailed file metadata.
 | Mode | `uint32` | Unix permission bits |
 | ModTime | `time.Time` | Last modified timestamp; zero value if the guest did not report one |
 | IsDir | `bool` | Whether the path is a directory |
-
-### FsReadStream
-
-<p className="msb-backref">Returned by <a href="#fs-readstream">ReadStream()</a></p>
-
-An open streaming read from a guest file. Must be closed with `Close` when done.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `Recv(ctx context.Context)` | `([]byte, error)` | Receive the next chunk; returns `(nil, nil)` at EOF |
-| `WriteTo(w io.Writer)` | `(int64, error)` | Drain the stream into `w` using `context.Background()`; implements `io.WriterTo` |
-| `CopyTo(ctx context.Context, w io.Writer)` | `(int64, error)` | Drain into `w` honouring `ctx` for per-chunk cancellation |
-| `Close()` | `error` | Release the read stream handle |
-
-On a write error or partial write, `WriteTo` and `CopyTo` return the partial byte count and leave the stream open so the caller can recover; close it explicitly in either case.
-
-### FsWriteStream
-
-<p className="msb-backref">Returned by <a href="#fs-writestream">WriteStream()</a></p>
-
-An open streaming write to a guest file. Must be closed with `Close(ctx)` to finalise the write.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `Write(p []byte)` | `(int, error)` | Send a chunk; implements `io.Writer`, uses `context.Background()` internally |
-| `WriteCtx(ctx context.Context, data []byte)` | `error` | Send a chunk with explicit context control |
-| `Close(ctx context.Context)` | `error` | Send the EOF marker and wait for the guest to confirm; must be called to complete the write |

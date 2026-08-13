@@ -10,7 +10,7 @@ use microsandbox::{Image, ImagePruneReport};
 ```
 
 
-## Ambient cache methods
+## Image
 
 These methods resolve the active backend with `microsandbox::backend::default_backend()`. They are convenient for normal local programs and fail with `Unsupported` when the active backend is cloud.
 
@@ -144,7 +144,7 @@ Image::save(&references, Path::new("python.tar"), ImageArchiveFormat::Docker).aw
 
 </Accordion>
 
-## Explicit local variants
+<p className="msb-member-group">Explicit local variants</p>
 
 Use these when your program owns a specific `LocalBackend` and should not depend on the process default backend.
 
@@ -173,9 +173,8 @@ let report = Image::prune_local(&backend).await?;
 | `load_local` | `async fn load_local(local: &LocalBackend, input: &Path, tags: Vec<String>) -> MicrosandboxResult<Vec<ImageHandle>>` |
 | `save_local` | `async fn save_local(local: &LocalBackend, references: &[String], output: &Path, format: ImageArchiveFormat) -> MicrosandboxResult<()>` |
 
-## Types
+## ImageHandle
 
-### ImageHandle
 
 <p className="msb-backref">Returned by <a href="#image-get">get()</a> · <a href="#image-list">list()</a></p>
 
@@ -191,6 +190,8 @@ A lightweight metadata handle for a cached OCI image.
 | `layer_count()` | `usize` | Number of layers |
 | `last_used_at()` | `Option<DateTime<Utc>>` | Last referenced time |
 | `created_at()` | `Option<DateTime<Utc>>` | First-pulled time |
+
+## Types
 
 ### ImageDetail
 

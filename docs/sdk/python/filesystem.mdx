@@ -8,7 +8,7 @@ Read, write, and manage files inside a running sandbox. Operations go through th
 
 The handle is reached through the `sb.fs` property on a running [`Sandbox`](/sdk/python/sandbox). All methods are coroutines, so `await` each call.
 
-## Methods
+## SandboxFsOps
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read()</span>
 
@@ -476,6 +476,31 @@ Copy a file from the sandbox out to the host machine.
   </div>
 </div>
 
+## FsReadStream
+
+
+<p className="msb-backref">Returned by <a href="#fs-read_stream">read_stream()</a></p>
+
+Async stream for reading a file in chunks. Obtained via [`read_stream()`](#fs-read_stream). Iterate it with `async for chunk in stream:`, or call `collect()` to gather everything at once.
+
+| Method / Protocol | Returns | Description |
+|-------------------|---------|-------------|
+| `__aiter__` / `__anext__` | `bytes` | Async iterator. Use `async for chunk in stream:`. |
+| collect() | `bytes` | *(async)* Collect all remaining data into a single `bytes` object |
+
+## FsWriteSink
+
+
+<p className="msb-backref">Returned by <a href="#fs-write_stream">write_stream()</a></p>
+
+Async writer for streaming data into a file. Obtained via [`write_stream()`](#fs-write_stream). Supports the async context manager protocol, so `async with` closes the sink on exit.
+
+| Method / Protocol | Returns | Description |
+|-------------------|---------|-------------|
+| write(data) | `None` | *(async)* Write a chunk of `bytes` to the file |
+| close() | `None` | *(async)* Send EOF and finalize the file |
+| `__aenter__` / `__aexit__` | `FsWriteSink` | *(async)* Use with `async with` for automatic close on exit |
+
 ## Types
 
 ### FsEntry
@@ -525,26 +550,3 @@ Detailed file metadata, returned by [`stat()`](#fs-stat).
 | readonly | `bool` | Whether the file is read-only |
 | modified | `float \| None` | Last-modified time, milliseconds since the Unix epoch |
 | created | `float \| None` | Creation time, milliseconds since the Unix epoch |
-
-### FsReadStream
-
-<p className="msb-backref">Returned by <a href="#fs-read_stream">read_stream()</a></p>
-
-Async stream for reading a file in chunks. Obtained via [`read_stream()`](#fs-read_stream). Iterate it with `async for chunk in stream:`, or call `collect()` to gather everything at once.
-
-| Method / Protocol | Returns | Description |
-|-------------------|---------|-------------|
-| `__aiter__` / `__anext__` | `bytes` | Async iterator. Use `async for chunk in stream:`. |
-| collect() | `bytes` | *(async)* Collect all remaining data into a single `bytes` object |
-
-### FsWriteSink
-
-<p className="msb-backref">Returned by <a href="#fs-write_stream">write_stream()</a></p>
-
-Async writer for streaming data into a file. Obtained via [`write_stream()`](#fs-write_stream). Supports the async context manager protocol, so `async with` closes the sink on exit.
-
-| Method / Protocol | Returns | Description |
-|-------------------|---------|-------------|
-| write(data) | `None` | *(async)* Write a chunk of `bytes` to the file |
-| close() | `None` | *(async)* Send EOF and finalize the file |
-| `__aenter__` / `__aexit__` | `FsWriteSink` | *(async)* Use with `async with` for automatic close on exit |

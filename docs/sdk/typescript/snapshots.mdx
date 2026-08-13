@@ -15,7 +15,7 @@ import type { SaveOpts, SnapshotScope, SnapshotVerifyReport } from "microsandbox
 </Note>
 
 
-## Capture and boot
+## SandboxBuilder
 
 These entry points live on `SandboxBuilder` and `SandboxHandle`; they are the bridge between sandboxes and snapshot artifacts.
 
@@ -55,6 +55,8 @@ Boot a fresh sandbox from a snapshot artifact. Mutually exclusive with [`.image(
   </div>
 </div>
 
+## SandboxHandle
+
 #### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot()</span>
 
 ```typescript
@@ -93,7 +95,7 @@ const snap = await h.snapshot("after-pip-install");
 
 ---
 
-## Snapshot static methods
+## Snapshot
 
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">builder()</span>
 
@@ -404,7 +406,7 @@ console.log("loaded", h.digest);
 
 ---
 
-## Snapshot instance members {#snapshot-instance}
+<p className="msb-member-group">Instance members</p>
 
 A `Snapshot` is a snapshot artifact on disk. The artifact is a directory containing the `snapshot.json` descriptor and the captured `upper.ext4`. The directory is the source of truth; the local DB index is just a rebuildable cache. Returned by [`Snapshot.builder().create()`](#snapshotbuilder), [`Snapshot.open()`](#snapshot-open), and [`handle.snapshot()`](#handle-snapshot).
 
@@ -539,6 +541,51 @@ Recompute the upper layer's content hash and compare against the manifest. Walks
   </div>
 </div>
 
+## SnapshotHandle
+
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+
+Lightweight handle backed by an index row. Values are snapshotted from the index at construction time; call [`Snapshot.get()`](#snapshot-get) again for a fresh reading if needed. Handles from [`Snapshot.list()`](#snapshot-list) are read-only and throw on [`open()`](#snapshothandleopen) / [`remove()`](#snapshothandleremove); fetch a live handle via [`Snapshot.get()`](#snapshot-get) for those lifecycle methods.
+
+<p className="msb-backref">Returned by <a href="#snapshot-get">Snapshot.get()</a>, <a href="#snapshot-list">Snapshot.list()</a>, <a href="#snapshot-load">Snapshot.load()</a></p>
+
+| Member | Type | Description |
+|--------|------|-------------|
+| `digest` | `string` | Manifest digest (`sha256:hex`), the canonical identity. |
+| `name` | `string \| null` | Convenience name; `null` for digest-only entries. |
+| `parentDigest` | `string \| null` | Parent snapshot's manifest digest, or `null` for a root. |
+| `scope` | [`SnapshotScope`](#snapshotscope-type) | Snapshot payload scope (`"disk"` today). |
+| `imageRef` | `string` | Image reference the snapshot was taken from. |
+| `format` | `"raw" \| "qcow2"` | On-disk format of the upper layer. |
+| `sizeBytes` | `bigint \| null` | Apparent size of the upper file at index time. |
+| `createdAt` | `Date` | Snapshot creation time (from manifest). |
+| `path` | `string` | Local artifact directory path. |
+| `open()` | `Promise<`[`Snapshot`](#snapshot-instance)`>` | Open and metadata-validate the underlying artifact. |
+| `remove(opts?)` | `Promise<void>` | Remove the artifact and its index row; refuses on children unless `force`. |
+
+#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">open()</span> {#snapshothandleopen}
+
+```typescript
+open(): Promise<Snapshot>
+```
+
+Open and metadata-validate the underlying artifact. Throws if this handle is read-only (came from [`Snapshot.list()`](#snapshot-list)); fetch a live handle via [`Snapshot.get()`](#snapshot-get) first.
+
+#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">remove()</span> {#snapshothandleremove}
+
+```typescript
+remove(opts?: { force?: boolean }): Promise<void>
+```
+
+Remove the artifact and its index row. Refuses if the snapshot has indexed children unless `force` is set. Throws if this handle is read-only.
+
+```typescript
+const h = await Snapshot.get("after-pip-install");
+const snap = await h.open();          // metadata-validated
+await h.remove({ force: false });     // refuse if it has children
+```
+
 ## SnapshotBuilder
 
 Fluent builder for a snapshot, returned by [`Snapshot.builder(name)`](#snapshotbuilder). Every setter mutates in place and returns `this`, so calls chain. The source sandbox is required: call [`.fromSandbox()`](#fromsandbox) before [`.create()`](#create).
@@ -663,50 +710,6 @@ Capture the configured snapshot and return the resulting artifact.
 </div>
 
 ## Types
-
-### SnapshotHandle <span className="msb-tag is-type">class</span>
-
-Lightweight handle backed by an index row. Values are snapshotted from the index at construction time; call [`Snapshot.get()`](#snapshot-get) again for a fresh reading if needed. Handles from [`Snapshot.list()`](#snapshot-list) are read-only and throw on [`open()`](#snapshothandleopen) / [`remove()`](#snapshothandleremove); fetch a live handle via [`Snapshot.get()`](#snapshot-get) for those lifecycle methods.
-
-<p className="msb-backref">Returned by <a href="#snapshot-get">Snapshot.get()</a>, <a href="#snapshot-list">Snapshot.list()</a>, <a href="#snapshot-load">Snapshot.load()</a></p>
-
-| Member | Type | Description |
-|--------|------|-------------|
-| `digest` | `string` | Manifest digest (`sha256:hex`), the canonical identity. |
-| `name` | `string \| null` | Convenience name; `null` for digest-only entries. |
-| `parentDigest` | `string \| null` | Parent snapshot's manifest digest, or `null` for a root. |
-| `scope` | [`SnapshotScope`](#snapshotscope-type) | Snapshot payload scope (`"disk"` today). |
-| `imageRef` | `string` | Image reference the snapshot was taken from. |
-| `format` | `"raw" \| "qcow2"` | On-disk format of the upper layer. |
-| `sizeBytes` | `bigint \| null` | Apparent size of the upper file at index time. |
-| `createdAt` | `Date` | Snapshot creation time (from manifest). |
-| `path` | `string` | Local artifact directory path. |
-| `open()` | `Promise<`[`Snapshot`](#snapshot-instance)`>` | Open and metadata-validate the underlying artifact. |
-| `remove(opts?)` | `Promise<void>` | Remove the artifact and its index row; refuses on children unless `force`. |
-
-<p className="msb-label" id="snapshothandleopen">snapshotHandle.open()</p>
-
-```typescript
-open(): Promise<Snapshot>
-```
-
-Open and metadata-validate the underlying artifact. Throws if this handle is read-only (came from [`Snapshot.list()`](#snapshot-list)); fetch a live handle via [`Snapshot.get()`](#snapshot-get) first.
-
-<p className="msb-label" id="snapshothandleremove">snapshotHandle.remove()</p>
-
-```typescript
-remove(opts?: { force?: boolean }): Promise<void>
-```
-
-Remove the artifact and its index row. Refuses if the snapshot has indexed children unless `force` is set. Throws if this handle is read-only.
-
-```typescript
-const h = await Snapshot.get("after-pip-install");
-const snap = await h.open();          // metadata-validated
-await h.remove({ force: false });     // refuse if it has children
-```
-
----
 
 ### SaveOpts <span className="msb-tag is-type">interface</span>
 

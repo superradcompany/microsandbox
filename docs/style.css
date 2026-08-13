@@ -67,10 +67,21 @@ body {
 h4:has(.msb-hn) { margin-top: 5rem !important; }
 /* but the first method directly under a section heading needs far less; the
  * section heading already separates it from what came before. */
-h2 + h4:has(.msb-hn), h3 + h4:has(.msb-hn) { margin-top: 1.5rem !important; }
+h2 + h4:has(.msb-hn), h3 + h4:has(.msb-hn), .msb-member-group + h4:has(.msb-hn) { margin-top: 1.5rem !important; }
 .msb-hn { font-family: var(--font-mono, monospace); font-weight: 500; }
 .msb-recv { font-family: var(--font-mono, monospace); font-weight: 400; color: #a3a29c; }
 .dark .msb-recv { color: #6f6e68; }
+
+/* Labels inside a type reference keep related member families scannable
+ * without adding another level to the right-hand table of contents. */
+.msb-member-group {
+  margin: 3rem 0 0.75rem;
+  font-size: 0.875rem;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  opacity: 0.72;
+}
+h2 + .msb-member-group { margin-top: 1.5rem; }
 
 /* inline type links (in param/return rows) */
 .msb-type { color: #6d4bc4; }

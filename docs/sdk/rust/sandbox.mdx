@@ -7,7 +7,7 @@ Create and control a microVM sandbox: boot it from an image, run commands, strea
 
 For local runtime installation and verification, see [Runtime setup](/sdk/setup#install-and-verify).
 
-## Static methods
+## Sandbox
 
 #### <span className="msb-recv">Sandbox::</span><span className="msb-hn">builder()</span>
 
@@ -220,7 +220,7 @@ Restart a stopped sandbox in detached mode. The sandbox survives after your proc
   </div>
 </div>
 
-## Instance methods
+<p className="msb-member-group">Instance methods</p>
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">config()</span>
 
@@ -2065,6 +2065,160 @@ Set the working directory for future execs. On a running sandbox this applies to
   </div>
 </div>
 
+## RegistryConfigBuilder
+
+
+<p className="msb-backref">Used by <a href="#registry">registry()</a></p>
+
+Builder passed to [`registry()`](#registry) for per-sandbox registry connection settings.
+
+| Method | Description |
+|--------|-------------|
+| `auth(auth: RegistryAuth)` | Set explicit credentials for the image registry |
+| `insecure()` | Use plain HTTP for the registry |
+| `ca_certs(pem_data: Vec<u8>)` | Trust additional PEM-encoded CA certificates |
+
+## SandboxListBuilder
+
+
+Fluent configuration passed to [`Sandbox::list_with()`](#sandboxlist_with). Keep the labels and limit unchanged when continuing with a cursor.
+
+| Method | Description |
+|--------|-------------|
+| `limit(n)` | Set a page size from 1 through 100 |
+| `cursor(cursor)` | Continue after a previous page's `next_cursor` |
+| `label(key, value)` | Require one label; repeated calls are AND-matched |
+| `labels(iterable)` | Add several AND-matched labels |
+
+## SandboxHandle
+
+
+<p className="msb-backref">Returned by <a href="#sandboxget">Sandbox::get()</a> · <a href="#sandboxlist">Sandbox::list()</a></p>
+
+A lightweight handle to an existing sandbox (running or stopped). Obtained via [`Sandbox::get()`](#sandboxget) or [`Sandbox::list()`](#sandboxlist). Provides status, configuration, and lifecycle control **without** an active connection to the guest agent. You cannot `exec` or `fs` on a handle - call `.start()` or `.connect()` to upgrade to a full [`Sandbox`](#instance-methods).
+
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
+| config() | `Result<`[`SandboxConfig`](#sandboxconfig)`>` | Parsed configuration |
+| config_json() | `&str` | Raw JSON configuration |
+| connect() | `Result<`[`Sandbox`](#instance-methods)`>` | Connect to a running sandbox; returns an error if it doesn't respond within ten seconds |
+| connect_with_timeout(timeout) | `Result<`[`Sandbox`](#instance-methods)`>` | Same as `connect()` with an explicit timeout |
+| created_at() | `Option<DateTime<Utc>>` | Creation timestamp |
+| kill() | `Result<()>` | Force terminate and wait until stopped state is observed |
+| kill_with_timeout(timeout) | `Result<()>` | Same as `kill()` with an explicit observation timeout |
+| logs() | `Result<Vec<`[`LogEntry`](#logentry)`>>` | Read captured `exec.log` (works without starting) |
+| metrics() | `Result<`[`SandboxMetrics`](#sandboxmetrics)`>` | Point-in-time resource metrics |
+| modify() | [`SandboxModificationBuilder`](#sandboxmodificationbuilder) | Start planning a configuration change (works without starting; changes on a stopped sandbox persist for the next boot) |
+| name() | `&str` | Sandbox name, up to 128 UTF-8 bytes |
+| ping() | `Result<`[`SandboxPingResult`](#sandboxpingresult)`>` | Check agent reachability without refreshing idle activity |
+| remove() | `Result<()>` | Delete sandbox and state |
+| request_drain() | `Result<()>` | Request graceful drain without waiting |
+| request_kill() | `Result<()>` | Request force termination without waiting |
+| request_stop() | `Result<()>` | Request graceful shutdown without waiting |
+| start() | `Result<`[`Sandbox`](#instance-methods)`>` | Start in attached mode |
+| start_detached() | `Result<`[`Sandbox`](#instance-methods)`>` | Start in detached mode |
+| status() | [`SandboxStatus`](#sandboxstatus) | Current status |
+| stop() | `Result<()>` | Gracefully shut down. Waits up to ten seconds for pending writes to flush, then force-kills |
+| stop_with_timeout(timeout) | `Result<()>` | Same as `stop()` with an explicit timeout; `Duration::ZERO` force-kills immediately |
+| touch() | `Result<`[`SandboxTouchResult`](#sandboxtouchresult)`>` | Explicitly refresh the sandbox idle timer |
+| updated_at() | `Option<DateTime<Utc>>` | Last update timestamp |
+| wait_until_stopped() | `Result<`[`SandboxStopResult`](#sandboxstopresult)`>` | Block until terminal state is observed |
+
+## SecretPatchBuilder
+
+<p className="msb-backref">Used by <a href="#sandboxmodificationbuilder-secret">secret()</a></p>
+
+Fluent builder for one declarative secret patch inside [`SandboxModificationBuilder::secret()`](#sandboxmodificationbuilder-secret). It shares the create-time [`SecretBuilder`](/sdk/rust/secrets#secretbuilder) vocabulary: name the secret, provide material by source reference or raw value, set the placeholder when needed, and declare the allowed hosts.
+
+Import path: `microsandbox::sandbox::SecretPatchBuilder`.
+
+Prefer `source(...)` over `value(...)` when the value can be referenced; see the at-rest note on [`secret_env()`](#secret_env) and [Secrets](/sandboxes/secrets) for the full model.
+
+#### <span className="msb-recv">.</span><span className="msb-hn" id="secretpatchbuilder-env">env()</span>
+
+```rust
+fn env(self, name: impl Into<String>) -> Self
+```
+
+Name the secret. This is the environment variable that exposes the placeholder inside the guest. **Required.**
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Secret name, usually the environment variable name.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">.</span><span className="msb-hn" id="secretpatchbuilder-source">source()</span>
+
+```rust
+fn source(self, source: SecretSource) -> Self
+```
+
+Provide the secret material as a host-side [`SecretSource`](#secretsource) reference. The durable config records only the reference, and the value is resolved host-side when the change applies. Mutually exclusive with `value(...)`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>source</code><a className="msb-type" href="#secretsource">SecretSource</a></div>
+    <div className="msb-param-desc">Host-side reference for the secret material.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">.</span><span className="msb-hn" id="secretpatchbuilder-value">value()</span>
+
+```rust
+fn value(self, value: impl Into<String>) -> Self
+```
+
+Provide the secret material as a raw value, for embedders that hold only a value. The value is zeroized on drop, redacted from `Debug`, and never enters the plan. Applying a value persists it into the durable config until a later source-based rotate migrates it to a reference, the same at-rest property as `secret_env()`. Mutually exclusive with `source(...)`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>value</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Raw secret value held by the embedding process.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">.</span><span className="msb-hn" id="secretpatchbuilder-placeholder">placeholder()</span>
+
+```rust
+fn placeholder(self, placeholder: impl Into<String>) -> Self
+```
+
+Set the guest-visible placeholder. Placeholder changes cannot reach already-running processes, so they classify as `requires restart` on a running sandbox.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>placeholder</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Guest-visible placeholder string.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">.</span><span className="msb-hn" id="secretpatchbuilder-allow_host">allow_host()</span>
+
+```rust
+fn allow_host(self, host: impl Into<String>) -> Self
+```
+
+Add an allowed host pattern, such as `api.example.com`, `*.example.org`, or `*`. A non-empty list replaces the secret's current allow-list; an empty list leaves it unchanged. A new secret needs at least one.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>host</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Allowed exact host, wildcard host pattern, or <code>*</code>.</div>
+  </div>
+</div>
+
 ## Types
 
 ### LogEntry
@@ -2164,18 +2318,6 @@ Credentials for authenticating to a private container registry.
 |---------|--------|-------------|
 | `Basic` | - `username: String` <br/> - `password: String` | Username and password authentication |
 
-### RegistryConfigBuilder
-
-<p className="msb-backref">Used by <a href="#registry">registry()</a></p>
-
-Builder passed to [`registry()`](#registry) for per-sandbox registry connection settings.
-
-| Method | Description |
-|--------|-------------|
-| `auth(auth: RegistryAuth)` | Set explicit credentials for the image registry |
-| `insecure()` | Use plain HTTP for the registry |
-| `ca_certs(pem_data: Vec<u8>)` | Trust additional PEM-encoded CA certificates |
-
 ### SandboxConfig
 
 <p className="msb-backref">Returned by <a href="#sb-config">config()</a> · <a href="#build">build()</a></p>
@@ -2208,50 +2350,6 @@ One stable, newest-first page returned by [`Sandbox::list()`](#sandboxlist) or [
 | `sandboxes` | `Vec<SandboxHandle>` | Handles in this page |
 | `next_cursor` | `Option<String>` | Opaque continuation cursor, or `None` on the final page |
 
-### SandboxListBuilder
-
-Fluent configuration passed to [`Sandbox::list_with()`](#sandboxlist_with). Keep the labels and limit unchanged when continuing with a cursor.
-
-| Method | Description |
-|--------|-------------|
-| `limit(n)` | Set a page size from 1 through 100 |
-| `cursor(cursor)` | Continue after a previous page's `next_cursor` |
-| `label(key, value)` | Require one label; repeated calls are AND-matched |
-| `labels(iterable)` | Add several AND-matched labels |
-
-### SandboxHandle
-
-<p className="msb-backref">Returned by <a href="#sandboxget">Sandbox::get()</a> · <a href="#sandboxlist">Sandbox::list()</a></p>
-
-A lightweight handle to an existing sandbox (running or stopped). Obtained via [`Sandbox::get()`](#sandboxget) or [`Sandbox::list()`](#sandboxlist). Provides status, configuration, and lifecycle control **without** an active connection to the guest agent. You cannot `exec` or `fs` on a handle - call `.start()` or `.connect()` to upgrade to a full [`Sandbox`](#instance-methods).
-
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| config() | `Result<`[`SandboxConfig`](#sandboxconfig)`>` | Parsed configuration |
-| config_json() | `&str` | Raw JSON configuration |
-| connect() | `Result<`[`Sandbox`](#instance-methods)`>` | Connect to a running sandbox; returns an error if it doesn't respond within ten seconds |
-| connect_with_timeout(timeout) | `Result<`[`Sandbox`](#instance-methods)`>` | Same as `connect()` with an explicit timeout |
-| created_at() | `Option<DateTime<Utc>>` | Creation timestamp |
-| kill() | `Result<()>` | Force terminate and wait until stopped state is observed |
-| kill_with_timeout(timeout) | `Result<()>` | Same as `kill()` with an explicit observation timeout |
-| logs() | `Result<Vec<`[`LogEntry`](#logentry)`>>` | Read captured `exec.log` (works without starting) |
-| metrics() | `Result<`[`SandboxMetrics`](#sandboxmetrics)`>` | Point-in-time resource metrics |
-| modify() | [`SandboxModificationBuilder`](#sandboxmodificationbuilder) | Start planning a configuration change (works without starting; changes on a stopped sandbox persist for the next boot) |
-| name() | `&str` | Sandbox name, up to 128 UTF-8 bytes |
-| ping() | `Result<`[`SandboxPingResult`](#sandboxpingresult)`>` | Check agent reachability without refreshing idle activity |
-| remove() | `Result<()>` | Delete sandbox and state |
-| request_drain() | `Result<()>` | Request graceful drain without waiting |
-| request_kill() | `Result<()>` | Request force termination without waiting |
-| request_stop() | `Result<()>` | Request graceful shutdown without waiting |
-| start() | `Result<`[`Sandbox`](#instance-methods)`>` | Start in attached mode |
-| start_detached() | `Result<`[`Sandbox`](#instance-methods)`>` | Start in detached mode |
-| status() | [`SandboxStatus`](#sandboxstatus) | Current status |
-| stop() | `Result<()>` | Gracefully shut down. Waits up to ten seconds for pending writes to flush, then force-kills |
-| stop_with_timeout(timeout) | `Result<()>` | Same as `stop()` with an explicit timeout; `Duration::ZERO` force-kills immediately |
-| touch() | `Result<`[`SandboxTouchResult`](#sandboxtouchresult)`>` | Explicitly refresh the sandbox idle timer |
-| updated_at() | `Option<DateTime<Utc>>` | Last update timestamp |
-| wait_until_stopped() | `Result<`[`SandboxStopResult`](#sandboxstopresult)`>` | Block until terminal state is observed |
-
 ### SandboxModificationPlan
 
 <p className="msb-backref">Returned by <a href="#dry_run">dry_run()</a> · <a href="#apply">apply()</a></p>
@@ -2268,101 +2366,6 @@ Dry-run or apply plan for a sandbox modification. Values never appear in a plan:
 | conflicts | `Vec<ModificationConflict>` | Conflicts (`field` + `message`) that must be resolved before the patch can apply |
 | warnings | `Vec<ModificationWarning>` | Non-fatal warnings (`field` + `message`) about the patch or current runtime capabilities, e.g. the future-execs-only env caveat |
 | resize_status | `Vec<`[`ResourceResizeStatus`](#resourceresizestatus)`>` | Live resource resize outcomes, populated by `apply()` when a live change ran |
-
-### SecretPatchBuilder
-
-<p className="msb-backref">Used by <a href="#sandboxmodificationbuilder-secret">secret()</a></p>
-
-Fluent builder for one declarative secret patch inside [`SandboxModificationBuilder::secret()`](#sandboxmodificationbuilder-secret). It shares the create-time [`SecretBuilder`](/sdk/rust/secrets#secretbuilder) vocabulary: name the secret, provide material by source reference or raw value, set the placeholder when needed, and declare the allowed hosts.
-
-Import path: `microsandbox::sandbox::SecretPatchBuilder`.
-
-Prefer `source(...)` over `value(...)` when the value can be referenced; see the at-rest note on [`secret_env()`](#secret_env) and [Secrets](/sandboxes/secrets) for the full model.
-
-#### <span className="msb-recv">.</span><span className="msb-hn" id="secretpatchbuilder-env">env()</span>
-
-```rust
-fn env(self, name: impl Into<String>) -> Self
-```
-
-Name the secret. This is the environment variable that exposes the placeholder inside the guest. **Required.**
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>name</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
-    <div className="msb-param-desc">Secret name, usually the environment variable name.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">.</span><span className="msb-hn" id="secretpatchbuilder-source">source()</span>
-
-```rust
-fn source(self, source: SecretSource) -> Self
-```
-
-Provide the secret material as a host-side [`SecretSource`](#secretsource) reference. The durable config records only the reference, and the value is resolved host-side when the change applies. Mutually exclusive with `value(...)`.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>source</code><a className="msb-type" href="#secretsource">SecretSource</a></div>
-    <div className="msb-param-desc">Host-side reference for the secret material.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">.</span><span className="msb-hn" id="secretpatchbuilder-value">value()</span>
-
-```rust
-fn value(self, value: impl Into<String>) -> Self
-```
-
-Provide the secret material as a raw value, for embedders that hold only a value. The value is zeroized on drop, redacted from `Debug`, and never enters the plan. Applying a value persists it into the durable config until a later source-based rotate migrates it to a reference, the same at-rest property as `secret_env()`. Mutually exclusive with `source(...)`.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>value</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
-    <div className="msb-param-desc">Raw secret value held by the embedding process.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">.</span><span className="msb-hn" id="secretpatchbuilder-placeholder">placeholder()</span>
-
-```rust
-fn placeholder(self, placeholder: impl Into<String>) -> Self
-```
-
-Set the guest-visible placeholder. Placeholder changes cannot reach already-running processes, so they classify as `requires restart` on a running sandbox.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>placeholder</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
-    <div className="msb-param-desc">Guest-visible placeholder string.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">.</span><span className="msb-hn" id="secretpatchbuilder-allow_host">allow_host()</span>
-
-```rust
-fn allow_host(self, host: impl Into<String>) -> Self
-```
-
-Add an allowed host pattern, such as `api.example.com`, `*.example.org`, or `*`. A non-empty list replaces the secret's current allow-list; an empty list leaves it unchanged. A new secret needs at least one.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>host</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
-    <div className="msb-param-desc">Allowed exact host, wildcard host pattern, or <code>*</code>.</div>
-  </div>
-</div>
 
 ### SecretSource
 

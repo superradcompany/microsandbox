@@ -308,7 +308,7 @@ Return a point-in-time [`Metrics`](#metrics) snapshot for every running sandbox,
 
 Runtime installation and verification helpers are documented under [Runtime setup](/sdk/setup#install-and-verify). The Go-only version helpers are under [Inspect Go versions](/sdk/setup#inspect-go-versions).
 
-## Methods
+## Sandbox
 
 The `*Sandbox` returned by [`CreateSandbox`](#m-createsandbox), [`StartSandbox`](#m-startsandbox), and [`SandboxHandle.Connect`](#sandboxhandle) carries the methods below. `*Sandbox` is **safe for concurrent use** from multiple goroutines. The command-execution methods, `Exec`, `ExecStream`, `Shell`, and `ShellStream`, live on the same value and are documented under [Execution](/sdk/go/execution).
 
@@ -1744,7 +1744,91 @@ Set how long [`Kill`](#sb-kill) waits for stopped-state observation. Default: 5 
 
 The setup-only `WithSkipDownload()` option is documented under [Runtime setup](/sdk/setup#customize-installation).
 
+<p className="msb-member-group">Attach options</p>
+
+#### <span className="msb-hn">WithAttachCwd()</span>
+
+```go
+func WithAttachCwd(path string) AttachOption
+```
+
+Set the working directory for the attached session. Defaults to the sandbox's workdir.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Absolute path inside the guest.</div>
+  </div>
+</div>
+
+#### <span className="msb-hn">WithAttachUser()</span>
+
+```go
+func WithAttachUser(user string) AttachOption
+```
+
+Run the attached session as the given guest user instead of the sandbox's default user (set via [`WithUser`](#withuser)).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>user</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Guest user as a UID or name, optionally <code>user:group</code>.</div>
+  </div>
+</div>
+
+#### <span className="msb-hn">WithAttachEnv()</span>
+
+```go
+func WithAttachEnv(env map[string]string) AttachOption
+```
+
+Add environment variables for the attached session, merged on top of the sandbox's env. Called repeatedly, maps merge; later keys overwrite earlier ones.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>env</code><span className="msb-type">map[string]string</span></div>
+    <div className="msb-param-desc">Environment variables to set.</div>
+  </div>
+</div>
+
+#### <span className="msb-hn">WithAttachDetachKeys()</span>
+
+```go
+func WithAttachDetachKeys(keys string) AttachOption
+```
+
+Set the key sequence that detaches from the session without stopping it. Uses Docker-style syntax: `ctrl-]` (the default), `ctrl-p,ctrl-q`, or a single character like `q`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>keys</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Detach key sequence.</div>
+  </div>
+</div>
+
 ## Patch
+
+<p className="msb-backref">Produces <a href="#patchconfig">PatchConfig</a> for <a href="#withpatches">WithPatches()</a></p>
+
+Package-level factory namespace for [`PatchConfig`](#patchconfig) values. See the [Patch](#patch) section for its methods.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| [`Text(path, content, opts)`](#patch-text) | [`PatchConfig`](#patchconfig) | Write UTF-8 text |
+| [`Append(path, content)`](#patch-append) | [`PatchConfig`](#patchconfig) | Append to an existing file |
+| [`Mkdir(path, opts)`](#patch-mkdir) | [`PatchConfig`](#patchconfig) | Create a directory (idempotent) |
+| [`Remove(path)`](#patch-remove) | [`PatchConfig`](#patchconfig) | Delete a file or directory (idempotent) |
+| [`Symlink(target, link, opts)`](#patch-symlink) | [`PatchConfig`](#patchconfig) | Create a symlink |
+| [`CopyFile(src, dst, opts)`](#patch-copyfile) | [`PatchConfig`](#patchconfig) | Copy a host file into the rootfs |
+| [`CopyDir(src, dst, opts)`](#patch-copydir) | [`PatchConfig`](#patchconfig) | Copy a host directory into the rootfs |
 
 Factory that constructs rootfs patches for [`WithPatches`](#withpatches). Access via the package-level `Patch` value. Each method returns a [`PatchConfig`](#patchconfig). `Mkdir` and `Remove` are idempotent; other operations error at boot when targeting a path already present in the image unless `Replace: true` is passed in [`PatchOptions`](#patchoptions). See [Patches](/sandboxes/bootstrap#patches) for conceptual context.
 
@@ -1915,6 +1999,15 @@ Recursively copy a host directory at `src` into the guest rootfs at `dst`. Only 
 
 ## Init
 
+<p className="msb-backref">Produces <a href="#initconfig">InitConfig</a> for <a href="#withinit">WithInit()</a></p>
+
+Package-level factory namespace for [`InitConfig`](#initconfig) values. See the [Init](#init) section for its methods.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| [`Auto()`](#init-auto) | [`InitConfig`](#initconfig) | Auto-detect a guest init |
+| [`Cmd(cmd, opts)`](#init-cmd) | [`InitConfig`](#initconfig) | Explicit init binary with argv and env |
+
 Factory that constructs [`InitConfig`](#initconfig) values for [`WithInit`](#withinit), handing off PID 1 inside the guest after agentd setup. Access via the package-level `Init` value. See [Custom init system](/sandboxes/bootstrap#custom-init-system) for image picks and shutdown semantics.
 
 #### <span className="msb-recv">Init.</span><span className="msb-hn">Auto()</span>
@@ -1977,9 +2070,8 @@ Specify the init binary explicitly with optional argv and env. `cmd` must be an 
   </div>
 </div>
 
-## Types
+## SandboxHandle
 
-### SandboxHandle
 
 <p className="msb-backref">Returned by <a href="#m-getsandbox">GetSandbox()</a> · <a href="#m-listsandboxes">ListSandboxes()</a> · <a href="#m-listsandboxeswith">ListSandboxesWith()</a></p>
 
@@ -2011,6 +2103,51 @@ A lightweight reference to a sandbox's persisted state. Carries metadata (name, 
 | `WaitUntilStopped(ctx)` | `(*`[`SandboxStopResult`](#sandboxstopresult)`, error)` | Block until terminal state |
 | `Remove(ctx)` | `error` | Delete sandbox and persisted state |
 | `Snapshot(ctx, name)` | `(*SnapshotArtifact, error)` | Snapshot a stopped sandbox under a bare name |
+
+## MetricsStreamHandle
+
+
+<p className="msb-backref">Returned by <a href="#sb-metricsstream">MetricsStream()</a></p>
+
+Live metrics subscription. Call `Close` to release Rust-side resources.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `Recv(ctx)` | `(*`[`Metrics`](#metrics)`, error)` | Block until the next snapshot arrives. Returns `(nil, nil)` when the stream ends (sandbox exited) |
+| `Close()` | `error` | Stop the stream and release Rust-side resources |
+
+## LogEntry
+
+
+<p className="msb-backref">Returned by <a href="#sb-logs">Logs()</a> · <a href="#sb-logstream">LogStream()</a></p>
+
+A single captured log entry.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Source | [`LogSource`](#logsource) | Origin of the captured data |
+| SessionID | `*uint64` | Relay-monotonic session id; nil for system entries |
+| Timestamp | `time.Time` | Wall-clock capture time on the host |
+| Data | `[]byte` | The captured bytes |
+| Cursor | `string` | Opaque resume token; pass to [`LogStreamOptions.FromCursor`](#logstreamoptions) |
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `Text()` | `string` | Captured bytes as a string |
+
+## LogStreamHandle
+
+
+<p className="msb-backref">Returned by <a href="#sb-logstream">LogStream()</a></p>
+
+Live log subscription. Call `Close` to release Rust-side resources.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `Recv(ctx)` | `(*`[`LogEntry`](#logentry)`, error)` | Block until the next entry arrives. Returns `(nil, nil)` when the stream ends |
+| `Close()` | `error` | Stop the stream and release Rust-side resources |
+
+## Types
 
 ### SandboxPingResult
 
@@ -2210,74 +2347,6 @@ type AttachOption func(*AttachConfig)
 
 A functional option that mutates an [`AttachConfig`](#attachconfig). Construct them with the `WithAttach*` functions below.
 
-#### <span className="msb-hn">WithAttachCwd()</span>
-
-```go
-func WithAttachCwd(path string) AttachOption
-```
-
-Set the working directory for the attached session. Defaults to the sandbox's workdir.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Absolute path inside the guest.</div>
-  </div>
-</div>
-
-#### <span className="msb-hn">WithAttachUser()</span>
-
-```go
-func WithAttachUser(user string) AttachOption
-```
-
-Run the attached session as the given guest user instead of the sandbox's default user (set via [`WithUser`](#withuser)).
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>user</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Guest user as a UID or name, optionally <code>user:group</code>.</div>
-  </div>
-</div>
-
-#### <span className="msb-hn">WithAttachEnv()</span>
-
-```go
-func WithAttachEnv(env map[string]string) AttachOption
-```
-
-Add environment variables for the attached session, merged on top of the sandbox's env. Called repeatedly, maps merge; later keys overwrite earlier ones.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>env</code><span className="msb-type">map[string]string</span></div>
-    <div className="msb-param-desc">Environment variables to set.</div>
-  </div>
-</div>
-
-#### <span className="msb-hn">WithAttachDetachKeys()</span>
-
-```go
-func WithAttachDetachKeys(keys string) AttachOption
-```
-
-Set the key sequence that detaches from the session without stopping it. Uses Docker-style syntax: `ctrl-]` (the default), `ctrl-p,ctrl-q`, or a single character like `q`.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>keys</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Detach key sequence.</div>
-  </div>
-</div>
-
 ### Metrics
 
 <p className="msb-backref">Returned by <a href="#sb-metrics">Metrics()</a> · <a href="#sb-metricsstream">MetricsStream()</a> · <a href="#m-allsandboxmetrics">AllSandboxMetrics()</a></p>
@@ -2300,17 +2369,6 @@ Point-in-time resource usage snapshot.
 | UpperFreeBytes | `*uint64` | Guest-visible OCI upper filesystem free bytes when the protected reporter is available and fresh |
 | UpperHostAllocatedBytes | `*uint64` | Host-allocated bytes for the writable OCI upper image when available |
 | Uptime | `time.Duration` | Time since the sandbox was created |
-
-### MetricsStreamHandle
-
-<p className="msb-backref">Returned by <a href="#sb-metricsstream">MetricsStream()</a></p>
-
-Live metrics subscription. Call `Close` to release Rust-side resources.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `Recv(ctx)` | `(*`[`Metrics`](#metrics)`, error)` | Block until the next snapshot arrives. Returns `(nil, nil)` when the stream ends (sandbox exited) |
-| `Close()` | `error` | Stop the stream and release Rust-side resources |
 
 ### SandboxStopResult
 
@@ -2343,24 +2401,6 @@ type SandboxStatus string
 | `SandboxStatusDraining` | `"draining"` | Graceful shutdown in progress; existing commands finish, new ones rejected |
 | `SandboxStatusPaused` | `"paused"` | VM is paused |
 
-### LogEntry
-
-<p className="msb-backref">Returned by <a href="#sb-logs">Logs()</a> · <a href="#sb-logstream">LogStream()</a></p>
-
-A single captured log entry.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| Source | [`LogSource`](#logsource) | Origin of the captured data |
-| SessionID | `*uint64` | Relay-monotonic session id; nil for system entries |
-| Timestamp | `time.Time` | Wall-clock capture time on the host |
-| Data | `[]byte` | The captured bytes |
-| Cursor | `string` | Opaque resume token; pass to [`LogStreamOptions.FromCursor`](#logstreamoptions) |
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `Text()` | `string` | Captured bytes as a string |
-
 ### LogOptions
 
 <p className="msb-backref">Used by <a href="#sb-logs">Logs()</a></p>
@@ -2387,17 +2427,6 @@ Configures a live log stream. The zero value reads the default sources from the 
 | FromCursor | `string` | Resume strictly after the entry whose `Cursor` matches; mutually exclusive with `Since` |
 | Until | `time.Time` | Stop at the first entry with timestamp >= this |
 | Follow | `bool` | Keep the stream open past EOF and yield new entries as written |
-
-### LogStreamHandle
-
-<p className="msb-backref">Returned by <a href="#sb-logstream">LogStream()</a></p>
-
-Live log subscription. Call `Close` to release Rust-side resources.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `Recv(ctx)` | `(*`[`LogEntry`](#logentry)`, error)` | Block until the next entry arrives. Returns `(nil, nil)` when the stream ends |
-| `Close()` | `error` | Stop the stream and release Rust-side resources |
 
 ### LogSource
 
@@ -2499,17 +2528,6 @@ Tuning struct for [`Init.Cmd`](#init-cmd) beyond the required cmd.
 | Args | `[]string` | Supplemental argv |
 | Env | `map[string]string` | Extra env vars |
 
-### Init
-
-<p className="msb-backref">Produces <a href="#initconfig">InitConfig</a> for <a href="#withinit">WithInit()</a></p>
-
-Package-level factory namespace for [`InitConfig`](#initconfig) values. See the [Init](#init) section for its methods.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`Auto()`](#init-auto) | [`InitConfig`](#initconfig) | Auto-detect a guest init |
-| [`Cmd(cmd, opts)`](#init-cmd) | [`InitConfig`](#initconfig) | Explicit init binary with argv and env |
-
 ### PatchConfig
 
 <p className="msb-backref">Built by <a href="#patch">Patch</a> · used by <a href="#withpatches">WithPatches()</a></p>
@@ -2559,22 +2577,6 @@ Discriminator for [`PatchConfig`](#patchconfig). Prefer the [`Patch`](#patch) fa
 | `PatchKindCopyFile` | `"copy_file"` |
 | `PatchKindCopyDir` | `"copy_dir"` |
 
-### Patch
-
-<p className="msb-backref">Produces <a href="#patchconfig">PatchConfig</a> for <a href="#withpatches">WithPatches()</a></p>
-
-Package-level factory namespace for [`PatchConfig`](#patchconfig) values. See the [Patch](#patch) section for its methods.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`Text(path, content, opts)`](#patch-text) | [`PatchConfig`](#patchconfig) | Write UTF-8 text |
-| [`Append(path, content)`](#patch-append) | [`PatchConfig`](#patchconfig) | Append to an existing file |
-| [`Mkdir(path, opts)`](#patch-mkdir) | [`PatchConfig`](#patchconfig) | Create a directory (idempotent) |
-| [`Remove(path)`](#patch-remove) | [`PatchConfig`](#patchconfig) | Delete a file or directory (idempotent) |
-| [`Symlink(target, link, opts)`](#patch-symlink) | [`PatchConfig`](#patchconfig) | Create a symlink |
-| [`CopyFile(src, dst, opts)`](#patch-copyfile) | [`PatchConfig`](#patchconfig) | Copy a host file into the rootfs |
-| [`CopyDir(src, dst, opts)`](#patch-copydir) | [`PatchConfig`](#patchconfig) | Copy a host directory into the rootfs |
-
-<span id="setupoption"></span>
+### SetupOption
 
 The setup-only `SetupOption` type is documented under [Runtime setup](/sdk/setup#customize-installation).

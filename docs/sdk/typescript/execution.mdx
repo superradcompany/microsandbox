@@ -17,7 +17,7 @@ const sandbox = await Sandbox.builder("worker")
   .create();
 const out = await sandbox.execDefaultWith((e) => e.env("LOG_LEVEL", "debug"));
 ```
-## Run and collect
+## Sandbox
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">exec()</span>
 
@@ -165,7 +165,7 @@ Bridge your terminal to the sandbox's default shell in a fully interactive PTY s
   </div>
 </div>
 
-## Stream and attach
+<p className="msb-member-group">Stream and attach</p>
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">execStream()</span>
 
@@ -374,9 +374,8 @@ Interactive PTY attach with options for arguments, environment variables, workin
   </div>
 </div>
 
-## Types
+## ExecOutput
 
-### ExecOutput
 
 <p className="msb-backref">Returned by <a href="#sandbox-exec">exec()</a> · <a href="#sandbox-execwith">execWith()</a> · <a href="#sandbox-shell">shell()</a> · <a href="#exechandle">ExecHandle.collect()</a></p>
 
@@ -392,7 +391,8 @@ The result of a completed command execution: collected output plus exit status. 
 | `stdoutBytes()` | `Uint8Array` | Raw stdout bytes |
 | `stderrBytes()` | `Uint8Array` | Raw stderr bytes |
 
-### ExecHandle
+## ExecHandle
+
 
 <p className="msb-backref">Returned by <a href="#sandbox-execstream">execStream()</a> · <a href="#sandbox-execstreamwith">execStreamWith()</a> · <a href="#sandbox-shellstream">shellStream()</a></p>
 
@@ -410,7 +410,8 @@ A handle to a running streaming execution. Implements `AsyncIterable<ExecEvent>`
 | `[Symbol.asyncIterator]()` | `AsyncIterator<`[`ExecEvent`](#execevent)`>` | Iterate events with `for await...of` |
 | `[Symbol.asyncDispose]()` | `Promise<void>` | Best-effort kill on `await using` scope exit |
 
-### ExecSink
+## ExecSink
+
 
 <p className="msb-backref">Returned by <a href="#exechandle">ExecHandle.takeStdin()</a></p>
 
@@ -421,6 +422,63 @@ Writer for sending data to a running process's stdin. Implements `AsyncDisposabl
 | `write(data)` | `(data: Uint8Array \| string) => Promise<void>` | Write bytes to the process's stdin. Strings are UTF-8 encoded |
 | `close()` | `() => Promise<void>` | Close the sink. Sends EOF in non-TTY pipe mode; the guest PTY remains open in TTY mode |
 | `[Symbol.asyncDispose]()` | `() => Promise<void>` | Calls `close()` on `await using` scope exit |
+
+## ExecOptionsBuilder
+
+
+<p className="msb-backref">Used by <a href="#sandbox-execwith">execWith()</a> · <a href="#sandbox-execstreamwith">execStreamWith()</a></p>
+
+Fluent builder passed to the callback in `execWith(cmd, b => ...)` and `execStreamWith(cmd, b => ...)`. Every setter mutates the builder and returns it, so calls chain.
+
+| Method | Type | Description |
+|--------|------|-------------|
+| `arg(arg)` | `(arg: string) => this` | Append a single argument |
+| `args(args)` | `(args: string[]) => this` | Append many arguments |
+| `cwd(cwd)` | `(cwd: string) => this` | Working directory |
+| `user(user)` | `(user: string) => this` | Guest user |
+| `env(key, value)` | `(key: string, value: string) => this` | Add a single env var |
+| `envs(vars)` | `(vars: Record<string, string>) => this` | Add many env vars |
+| `timeout(ms)` | `(ms: number) => this` | Kill the process after this many milliseconds |
+| `stdinNull()` | `() => this` | Connect stdin to `/dev/null` (default) |
+| `stdinPipe()` | `() => this` | Open a writable stdin pipe; read it back with [`ExecHandle.takeStdin()`](#exechandle) |
+| `stdinBytes(data)` | `(data: Buffer) => this` | Pre-supply stdin bytes and close it |
+| `tty(enabled)` | `(enabled: boolean) => this` | Allocate a pseudo-terminal |
+| `rlimit(resource, limit)` | `(resource: `[`RlimitResource`](#rlimitresource)`, limit: number) => this` | Set both soft and hard rlimit |
+| `rlimitRange(resource, soft, hard)` | `(resource: `[`RlimitResource`](#rlimitresource)`, soft: number, hard: number) => this` | Set distinct soft and hard rlimits |
+
+## AttachOptionsBuilder
+
+
+<p className="msb-backref">Used by <a href="#sandbox-attachwith">attachWith()</a></p>
+
+Fluent builder passed to the callback in `attachWith(cmd, b => ...)`. Every setter mutates the builder and returns it, so calls chain.
+
+| Method | Type | Description |
+|--------|------|-------------|
+| `arg(arg)` | `(arg: string) => this` | Append a single argument |
+| `args(args)` | `(args: string[]) => this` | Append many arguments |
+| `cwd(cwd)` | `(cwd: string) => this` | Working directory |
+| `user(user)` | `(user: string) => this` | Guest user |
+| `env(key, value)` | `(key: string, value: string) => this` | Add a single env var |
+| `envs(vars)` | `(vars: Record<string, string>) => this` | Add many env vars |
+| `detachKeys(spec)` | `(spec: string) => this` | Detach key sequence (e.g. `"ctrl-]"` or `"ctrl-p,ctrl-q"`) |
+| `rlimit(resource, limit)` | `(resource: `[`RlimitResource`](#rlimitresource)`, limit: number) => this` | Set both soft and hard rlimit |
+| `rlimitRange(resource, soft, hard)` | `(resource: `[`RlimitResource`](#rlimitresource)`, soft: number, hard: number) => this` | Set distinct soft and hard rlimits |
+
+## Stdin
+
+
+<p className="msb-backref">Produces <a href="#stdinmode">StdinMode</a></p>
+
+Helper factory for constructing a [`StdinMode`](#stdinmode). Equivalent to the `stdinNull` / `stdinPipe` / `stdinBytes` setters on [`ExecOptionsBuilder`](#execoptionsbuilder).
+
+| Method | Type | Description |
+|--------|------|-------------|
+| `Stdin.null()` | `() => `[`StdinMode`](#stdinmode) | Connect stdin to `/dev/null` |
+| `Stdin.pipe()` | `() => `[`StdinMode`](#stdinmode) | Open a writable pipe; caller writes via [`ExecHandle.takeStdin()`](#exechandle) |
+| `Stdin.bytes(data)` | `(data: Uint8Array \| string) => `[`StdinMode`](#stdinmode) | Send the given bytes (or UTF-8-encoded string) and close stdin |
+
+## Types
 
 ### ExecEvent
 
@@ -453,58 +511,6 @@ The exit result of a process.
 |-------|------|-------------|
 | code | `number` | Process exit code |
 | success | `boolean` | `true` when `code === 0` |
-
-### ExecOptionsBuilder
-
-<p className="msb-backref">Used by <a href="#sandbox-execwith">execWith()</a> · <a href="#sandbox-execstreamwith">execStreamWith()</a></p>
-
-Fluent builder passed to the callback in `execWith(cmd, b => ...)` and `execStreamWith(cmd, b => ...)`. Every setter mutates the builder and returns it, so calls chain.
-
-| Method | Type | Description |
-|--------|------|-------------|
-| `arg(arg)` | `(arg: string) => this` | Append a single argument |
-| `args(args)` | `(args: string[]) => this` | Append many arguments |
-| `cwd(cwd)` | `(cwd: string) => this` | Working directory |
-| `user(user)` | `(user: string) => this` | Guest user |
-| `env(key, value)` | `(key: string, value: string) => this` | Add a single env var |
-| `envs(vars)` | `(vars: Record<string, string>) => this` | Add many env vars |
-| `timeout(ms)` | `(ms: number) => this` | Kill the process after this many milliseconds |
-| `stdinNull()` | `() => this` | Connect stdin to `/dev/null` (default) |
-| `stdinPipe()` | `() => this` | Open a writable stdin pipe; read it back with [`ExecHandle.takeStdin()`](#exechandle) |
-| `stdinBytes(data)` | `(data: Buffer) => this` | Pre-supply stdin bytes and close it |
-| `tty(enabled)` | `(enabled: boolean) => this` | Allocate a pseudo-terminal |
-| `rlimit(resource, limit)` | `(resource: `[`RlimitResource`](#rlimitresource)`, limit: number) => this` | Set both soft and hard rlimit |
-| `rlimitRange(resource, soft, hard)` | `(resource: `[`RlimitResource`](#rlimitresource)`, soft: number, hard: number) => this` | Set distinct soft and hard rlimits |
-
-### AttachOptionsBuilder
-
-<p className="msb-backref">Used by <a href="#sandbox-attachwith">attachWith()</a></p>
-
-Fluent builder passed to the callback in `attachWith(cmd, b => ...)`. Every setter mutates the builder and returns it, so calls chain.
-
-| Method | Type | Description |
-|--------|------|-------------|
-| `arg(arg)` | `(arg: string) => this` | Append a single argument |
-| `args(args)` | `(args: string[]) => this` | Append many arguments |
-| `cwd(cwd)` | `(cwd: string) => this` | Working directory |
-| `user(user)` | `(user: string) => this` | Guest user |
-| `env(key, value)` | `(key: string, value: string) => this` | Add a single env var |
-| `envs(vars)` | `(vars: Record<string, string>) => this` | Add many env vars |
-| `detachKeys(spec)` | `(spec: string) => this` | Detach key sequence (e.g. `"ctrl-]"` or `"ctrl-p,ctrl-q"`) |
-| `rlimit(resource, limit)` | `(resource: `[`RlimitResource`](#rlimitresource)`, limit: number) => this` | Set both soft and hard rlimit |
-| `rlimitRange(resource, soft, hard)` | `(resource: `[`RlimitResource`](#rlimitresource)`, soft: number, hard: number) => this` | Set distinct soft and hard rlimits |
-
-### Stdin
-
-<p className="msb-backref">Produces <a href="#stdinmode">StdinMode</a></p>
-
-Helper factory for constructing a [`StdinMode`](#stdinmode). Equivalent to the `stdinNull` / `stdinPipe` / `stdinBytes` setters on [`ExecOptionsBuilder`](#execoptionsbuilder).
-
-| Method | Type | Description |
-|--------|------|-------------|
-| `Stdin.null()` | `() => `[`StdinMode`](#stdinmode) | Connect stdin to `/dev/null` |
-| `Stdin.pipe()` | `() => `[`StdinMode`](#stdinmode) | Open a writable pipe; caller writes via [`ExecHandle.takeStdin()`](#exechandle) |
-| `Stdin.bytes(data)` | `(data: Uint8Array \| string) => `[`StdinMode`](#stdinmode) | Send the given bytes (or UTF-8-encoded string) and close stdin |
 
 ### StdinMode
 
