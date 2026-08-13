@@ -324,6 +324,67 @@ jobs:
           name: go-ffi-linux-x86_64
           path: target/debug/libmicrosandbox_go_ffi.so
 
+  rust-integration-build:
+    name: Build Rust integration tests
+    needs: [build-linux-x86_64, changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      # Keep the archive small while preserving file:line backtraces.
+      CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+      CARGO_PROFILE_TEST_DEBUG: "line-tables-only"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Set up sccache
+        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+        with:
+          cache-bin: false
+          cache-targets: false
+
+      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2
+        with:
+          tool: cargo-nextest@0.9.143
+
+      - name: Set up mold
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+
+      - name: Download runtime artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: msb-linux-x86_64
+          path: build/
+
+      - name: Build nextest archive
+        run: |
+          chmod +x build/agentd build/msb
+          mkdir -p artifacts
+          export LD_LIBRARY_PATH="${{ github.workspace }}/build"
+          mold -run cargo nextest archive -p microsandbox --tests \
+            --archive-file artifacts/rust-integration-tests.tar.zst
+
+      - name: Upload nextest archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rust-integration-tests-linux-x86_64
+          path: artifacts/rust-integration-tests.tar.zst
+          compression-level: 0
+
   check:
     name: Check (${{ matrix.target }})
     needs: [build-kernel, build-agentd-aarch64, changes]
@@ -890,25 +951,11 @@ jobs:
   # ---------------------------------------------------------------------------
   integration-test:
     name: Integration Tests
-    needs: [build-linux-x86_64, changes]
-    if: needs.changes.outputs.code == 'true'
+    needs: [build-linux-x86_64, rust-integration-build, changes]
+    if: always() && needs.changes.outputs.code == 'true' && needs.build-linux-x86_64.result == 'success' && needs.rust-integration-build.result == 'success'
     runs-on: self-hosted-ubuntu-2404-x64
     # Bound a wedged run so it can't squat a shared runner for the 6h default.
     timeout-minutes: 45
-    # Only this and the Python lane compile Rust on the self-hosted box after
-    # the artifact-first split. Twelve jobs per lane bound their worst overlap at
-    # 24 compiler threads on the 32-core host while preserving build speed.
-    env:
-      CARGO_BUILD_JOBS: "12"
-      CARGO_INCREMENTAL: "0"
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: "true"
-      # Full debuginfo for the dozen-plus integration-test binaries is
-      # ~14 GiB of target/ and has filled the shared runner disk mid-link,
-      # killing rust-lld with SIGBUS (#1162). line-tables-only keeps
-      # file:line in backtraces — all CI needs — at a fraction of the size.
-      CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
-      CARGO_PROFILE_TEST_DEBUG: "line-tables-only"
     steps:
       - name: Clean workspace
         run: |
@@ -922,33 +969,21 @@ jobs:
       - name: Clean runner disk
         run: scripts/ci/clean-runner-disk.sh
 
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-
-      - name: Isolate sccache server
-        run: |
-          rm -f "${RUNNER_TEMP}/sccache.sock"
-          echo "SCCACHE_SERVER_UDS=${RUNNER_TEMP}/sccache.sock" >> "$GITHUB_ENV"
-          echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1" >> "$GITHUB_ENV"
-
-      - name: Set up sccache
-        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: v0.16.0
-
-      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
-        with:
-          cache-bin: false
-          cache-targets: false
-
       - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2
         with:
-          tool: cargo-nextest
+          tool: cargo-nextest@0.9.143
 
       # -- Download pre-built artifacts --
       - name: Download build artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: msb-linux-x86_64
+          path: build/
+
+      - name: Download nextest archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rust-integration-tests-linux-x86_64
           path: build/
 
       # -- Install msb + libkrunfw --
@@ -960,10 +995,6 @@ jobs:
           install -m644 build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} ~/.microsandbox/lib/
           ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} ~/.microsandbox/lib/libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
           ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} ~/.microsandbox/lib/libkrunfw.so
-
-      # -- Build deps for the host test graph --
-      - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev mold
 
       - name: Prepare pre-built agentd
         # upload-artifact normalizes executable bits. The runtime build already
@@ -989,7 +1020,11 @@ jobs:
           integration_config="$RUNNER_TEMP/msb-integration-config.json"
           printf '%s\n' '{"runtime":{"block_writeback":{"mode":"auto","pool_mib":4096}}}' > "$integration_config"
           export MSB_CONFIG_PATH="$integration_config"
-          mold -run cargo nextest run -p microsandbox --tests --run-ignored=only --test-threads 2
+          cargo-nextest nextest run \
+            --archive-file build/rust-integration-tests.tar.zst \
+            --workspace-remap "${{ github.workspace }}" \
+            --run-ignored=only \
+            --test-threads 2
 
       - name: Disk usage
         if: always()
@@ -1496,6 +1531,7 @@ jobs:
       - build-agentd-x86_64
       - build-linux-x86_64
       - go-ffi-build
+      - rust-integration-build
       - check
       - windows-quality
       - windows-build
