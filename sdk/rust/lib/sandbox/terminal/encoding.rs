@@ -1,15 +1,16 @@
 //! Encoding conversion at the Windows console boundary.
 //!
-//! The console's byte-oriented entry points (`WriteFile`, which the console
-//! treats as `WriteConsoleA`) interpret bytes in the console's current code
-//! page, which mangles the UTF-8 a sandbox guest produces. The wide entry point
-//! `WriteConsoleW` is code-page independent, but it speaks UTF-16, so the host
-//! has to convert.
+//! The console's byte-oriented entry points (`WriteFile`/`ReadFile`, which the
+//! console treats as `WriteConsoleA`/`ReadConsoleA`) interpret bytes in the
+//! console's current code page, which mangles the UTF-8 a sandbox guest speaks.
+//! The wide entry points `WriteConsoleW`/`ReadConsoleW` are code-page
+//! independent, but they speak UTF-16, so the host has to convert.
 //!
 //! Conversion has to be incremental. Guest output reaches the host in transport
 //! frames sized by the guest's PTY reads, so a multi-byte character routinely
-//! straddles a frame boundary. The decoder therefore carries the incomplete tail
-//! of one chunk over into the next.
+//! straddles a frame boundary; console input can likewise split a surrogate pair
+//! across two reads. Each decoder therefore carries the incomplete tail of one
+//! chunk over into the next.
 //!
 //! The conversion logic is deliberately free of Win32 calls so it can be unit
 //! tested on any platform.
@@ -45,6 +46,16 @@ const REPLACEMENT: u16 = 0xFFFD;
 pub(super) struct Utf8ToUtf16Decoder {
     /// Trailing bytes of an incomplete sequence, awaiting the next chunk.
     carry: Vec<u8>,
+}
+
+/// Decodes UTF-16 units read by `ReadConsoleW` into UTF-8 bytes for the guest.
+///
+/// Unpaired surrogates are replaced with `U+FFFD`; a high surrogate at the end of
+/// a chunk is held back in case its low surrogate arrives in the next one.
+#[derive(Debug, Default)]
+pub(super) struct Utf16ToUtf8Decoder {
+    /// A high surrogate awaiting its pair in the next chunk.
+    carry: Option<u16>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -130,6 +141,49 @@ impl Utf8ToUtf16Decoder {
     }
 }
 
+impl Utf16ToUtf8Decoder {
+    /// Decode `units`, returning the UTF-8 bytes that are now complete.
+    ///
+    /// A trailing high surrogate produces no output and is carried into the
+    /// following call.
+    pub(super) fn decode(&mut self, units: &[u16]) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(units.len());
+        let mut buf = [0u8; 4];
+        let mut pending = self.carry.take();
+
+        for &unit in units {
+            if let Some(high) = pending.take() {
+                if is_low_surrogate(unit) {
+                    let code =
+                        0x1_0000 + (u32::from(high - 0xD800) << 10) + u32::from(unit - 0xDC00);
+                    let ch = char::from_u32(code).unwrap_or(char::REPLACEMENT_CHARACTER);
+                    bytes.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                    continue;
+                }
+
+                // The carried high surrogate never found its pair.
+                bytes.extend_from_slice(
+                    char::REPLACEMENT_CHARACTER.encode_utf8(&mut buf).as_bytes(),
+                );
+            }
+
+            if is_high_surrogate(unit) {
+                pending = Some(unit);
+            } else if is_low_surrogate(unit) {
+                bytes.extend_from_slice(
+                    char::REPLACEMENT_CHARACTER.encode_utf8(&mut buf).as_bytes(),
+                );
+            } else {
+                let ch = char::from_u32(u32::from(unit)).unwrap_or(char::REPLACEMENT_CHARACTER);
+                bytes.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+            }
+        }
+
+        self.carry = pending;
+        bytes
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -159,6 +213,11 @@ pub(super) fn surrogate_safe_split(units: &[u16], max: usize) -> usize {
 /// Whether `unit` is the leading half of a UTF-16 surrogate pair.
 fn is_high_surrogate(unit: u16) -> bool {
     (0xD800..0xDC00).contains(&unit)
+}
+
+/// Whether `unit` is the trailing half of a UTF-16 surrogate pair.
+fn is_low_surrogate(unit: u16) -> bool {
+    (0xDC00..0xE000).contains(&unit)
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -288,6 +347,69 @@ mod tests {
         let mut decoder = Utf8ToUtf16Decoder::default();
         assert_eq!(decoder.decode(b"complete"), utf16("complete"));
         assert!(decoder.finish().is_empty());
+    }
+
+    #[test]
+    fn test_utf16_decoder_encodes_bmp_text() {
+        let mut decoder = Utf16ToUtf8Decoder::default();
+        assert_eq!(
+            decoder.decode(&utf16("héllo 日本語")),
+            "héllo 日本語".as_bytes()
+        );
+    }
+
+    #[test]
+    fn test_utf16_decoder_joins_surrogate_pair_across_chunks() {
+        let units = utf16("🚀");
+        assert_eq!(units.len(), 2, "rocket must be a surrogate pair");
+
+        let mut decoder = Utf16ToUtf8Decoder::default();
+        assert!(decoder.decode(&units[..1]).is_empty());
+        assert_eq!(decoder.decode(&units[1..]), "🚀".as_bytes());
+    }
+
+    #[test]
+    fn test_utf16_decoder_replaces_unpaired_low_surrogate() {
+        let mut decoder = Utf16ToUtf8Decoder::default();
+        assert_eq!(
+            decoder.decode(&[0xDC00]),
+            char::REPLACEMENT_CHARACTER.to_string().as_bytes()
+        );
+    }
+
+    #[test]
+    fn test_utf16_decoder_replaces_high_surrogate_without_pair() {
+        let mut decoder = Utf16ToUtf8Decoder::default();
+        assert!(decoder.decode(&[0xD83D]).is_empty());
+
+        // 'a' arrives where the low surrogate should have been.
+        let mut expected = char::REPLACEMENT_CHARACTER.to_string().into_bytes();
+        expected.extend_from_slice(b"a");
+        assert_eq!(decoder.decode(&utf16("a")), expected);
+    }
+
+    #[test]
+    fn test_utf16_decoder_preserves_ascii_control_bytes() {
+        // Detach-key matching runs on the encoded bytes, so control characters
+        // must round-trip byte-for-byte.
+        let mut decoder = Utf16ToUtf8Decoder::default();
+        assert_eq!(decoder.decode(&[0x1D]), vec![0x1D]);
+        assert_eq!(decoder.decode(&[0x10, 0x11]), vec![0x10, 0x11]);
+    }
+
+    #[test]
+    fn test_round_trip_through_both_decoders_one_byte_at_a_time() {
+        let text = "ascii — ✓ ⠋ 日本語 🚀 done";
+        let mut to_utf16 = Utf8ToUtf16Decoder::default();
+        let mut to_utf8 = Utf16ToUtf8Decoder::default();
+
+        let mut bytes = Vec::new();
+        for byte in text.as_bytes() {
+            let units = to_utf16.decode(&[*byte]);
+            bytes.extend(to_utf8.decode(&units));
+        }
+
+        assert_eq!(String::from_utf8(bytes).unwrap(), text);
     }
 
     #[test]

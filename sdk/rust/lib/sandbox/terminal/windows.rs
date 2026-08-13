@@ -12,16 +12,14 @@ use windows_sys::Win32::{
         CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
         WAIT_TIMEOUT,
     },
-    Storage::FileSystem::{
-        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, ReadFile,
-    },
+    Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING},
     System::{
         Console::{
             CONSOLE_SCREEN_BUFFER_INFO, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_MOUSE_INPUT,
             ENABLE_PROCESSED_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT,
             ENABLE_VIRTUAL_TERMINAL_PROCESSING, ENABLE_WINDOW_INPUT, GetConsoleMode,
-            GetConsoleScreenBufferInfo, GetStdHandle, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
-            SetConsoleMode, WriteConsoleW,
+            GetConsoleScreenBufferInfo, GetStdHandle, ReadConsoleW, STD_INPUT_HANDLE,
+            STD_OUTPUT_HANDLE, SetConsoleMode, WriteConsoleW,
         },
         IO::CancelSynchronousIo,
         Threading::{CreateEventW, SetEvent, WaitForMultipleObjects},
@@ -30,14 +28,18 @@ use windows_sys::Win32::{
 
 use crate::{MicrosandboxError, MicrosandboxResult};
 
-use super::encoding::{MAX_CONSOLE_WRITE_UNITS, Utf8ToUtf16Decoder, surrogate_safe_split};
+use super::encoding::{
+    MAX_CONSOLE_WRITE_UNITS, Utf8ToUtf16Decoder, Utf16ToUtf8Decoder, surrogate_safe_split,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
 
 const TERMINAL_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
-const TERMINAL_INPUT_BUFFER_SIZE: usize = 4096;
+/// Console input buffer size, in UTF-16 units (not bytes) because input is
+/// read with `ReadConsoleW`.
+const TERMINAL_INPUT_BUFFER_UNITS: usize = 2048;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -200,6 +202,9 @@ impl WindowsTerminalEventPump {
             let output = output_handle as HANDLE;
             let stop_handle = stop_handle as HANDLE;
             let mut last_size = terminal_size_from_output(output);
+
+            // Outside the loop: a surrogate pair can straddle two reads.
+            let mut decoder = Utf16ToUtf8Decoder::default();
             let wait_handles = [input, stop_handle];
             let timeout_ms = TERMINAL_EVENT_POLL_INTERVAL.as_millis() as u32;
 
@@ -218,15 +223,19 @@ impl WindowsTerminalEventPump {
                 }
 
                 if wait_result == WAIT_OBJECT_0 {
-                    let mut input_buf = [0u8; TERMINAL_INPUT_BUFFER_SIZE];
-                    let mut bytes_read = 0u32;
+                    // `ReadConsoleW` rather than `ReadFile`, which the console
+                    // treats as `ReadConsoleA` and so encodes typed text in the
+                    // console's input code page instead of the UTF-8 the guest
+                    // expects.
+                    let mut input_buf = [0u16; TERMINAL_INPUT_BUFFER_UNITS];
+                    let mut units_read = 0u32;
                     let result = unsafe {
-                        ReadFile(
+                        ReadConsoleW(
                             input,
                             input_buf.as_mut_ptr().cast(),
                             input_buf.len() as u32,
-                            &mut bytes_read,
-                            ptr::null_mut(),
+                            &mut units_read,
+                            ptr::null(),
                         )
                     };
 
@@ -238,12 +247,15 @@ impl WindowsTerminalEventPump {
                         break;
                     }
 
-                    if bytes_read == 0 {
+                    if units_read == 0 {
                         break;
                     }
 
-                    let data = input_buf[..bytes_read as usize].to_vec();
-                    if tx.send(WindowsTerminalEvent::Input(data)).is_err() {
+                    let data = decoder.decode(&input_buf[..units_read as usize]);
+
+                    // A read that held nothing but a high surrogate yields no
+                    // bytes yet; wait for its pair instead of sending nothing.
+                    if !data.is_empty() && tx.send(WindowsTerminalEvent::Input(data)).is_err() {
                         break;
                     }
                 } else if wait_result != WAIT_TIMEOUT {
@@ -285,10 +297,10 @@ impl Drop for WindowsTerminalEventPump {
         let _ = unsafe { SetEvent(self.stop.0) };
         if let Some(handle) = self.handle.take() {
             // The pump thread may already be blocked in a synchronous
-            // console ReadFile. The stop event only prevents the next
-            // wait from entering another read, so cancel the in-flight
-            // read before joining or finite guest commands appear to
-            // hang until the user presses another key.
+            // console read. The stop event only prevents the next wait
+            // from entering another read, so cancel the in-flight read
+            // before joining or finite guest commands appear to hang
+            // until the user presses another key.
             let _ = unsafe { CancelSynchronousIo(handle.as_raw_handle() as HANDLE) };
             let _ = handle.join();
         }
