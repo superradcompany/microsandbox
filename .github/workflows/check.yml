@@ -1380,17 +1380,15 @@ jobs:
     timeout-minutes: 45
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 2
       matrix:
         include:
           - shard: 0
-            label: 1/4
+            total: 2
+            label: 1/2
           - shard: 1
-            label: 2/4
-          - shard: 2
-            label: 3/4
-          - shard: 3
-            label: 4/4
+            total: 2
+            label: 2/2
     steps:
       - name: Clean workspace
         run: |
@@ -1460,7 +1458,7 @@ jobs:
           )
           selected_tests=()
           for index in "${!all_tests[@]}"; do
-            if (( index % 4 == ${{ matrix.shard }} )); then
+            if (( index % ${{ matrix.total }} == ${{ matrix.shard }} )); then
               selected_tests+=("${all_tests[$index]}")
             fi
           done
