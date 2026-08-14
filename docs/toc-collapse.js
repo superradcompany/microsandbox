@@ -1,3 +1,4 @@
+// Mintlify automatically loads every .js file in the documentation content directory.
 (() => {
   const CONTENT_ID = "table-of-contents-content";
   const ROOT_SELECTOR = ':scope > li:has(> a[href^="#"])';
