@@ -5,10 +5,6 @@ description: TypeScript SDK - Sandbox API reference
 
 Create and control a microVM sandbox: boot it from an image, run commands, stream logs and metrics, then shut it down. See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
 
-The TypeScript SDK uses a **builder-only** entry point. Start every new sandbox from `Sandbox.builder(name)` and chain configuration calls before terminating with `.create()`. Use `.detached(true)` before `.create()` for detached/background mode. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes.
-
-`libkrunfw` selection is process-level, not per sandbox. See [Runtime setup](/sdk/setup#override-runtime-paths) for installation, verification, and path overrides.
-
 ## Functions
 
 #### <span className="msb-hn">allSandboxMetrics()</span>
