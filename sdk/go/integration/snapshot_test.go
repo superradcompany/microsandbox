@@ -13,6 +13,11 @@ import (
 	microsandbox "github.com/superradcompany/microsandbox/sdk/go"
 )
 
+// Snapshot behavior does not depend on the production-sized 4 GiB writable
+// layer. Keep these end-to-end artifacts small so copy, hash, and archive work
+// does not dominate the Go integration suite.
+const snapshotIntegrationRootDiskSizeMiB = 256
+
 func TestSandboxHandleSnapshotAndWithFromSnapshotFork(t *testing.T) {
 	ctx := integrationCtx(t)
 	baseName := uniqueIntegrationName(t, "go-sdk-snapshot-base")
@@ -25,13 +30,21 @@ func TestSandboxHandleSnapshotAndWithFromSnapshotFork(t *testing.T) {
 		removeSnapshotBestEffort(snapshotName)
 	})
 
-	base, err := createSandbox(t, ctx, baseName, microsandbox.WithImage(goIntegrationImage))
+	phaseStart := time.Now()
+	base, err := createSandbox(t, ctx, baseName,
+		microsandbox.WithImage(goIntegrationImage),
+		microsandbox.WithRootDisk(microsandbox.RootDisk.Managed(snapshotIntegrationRootDiskSizeMiB)),
+	)
 	if err != nil {
 		t.Fatalf("CreateSandbox base: %v", err)
 	}
+	logSnapshotPhase(t, "create base sandbox", phaseStart)
+
+	phaseStart = time.Now()
 	if err := base.Stop(ctx); err != nil {
 		t.Fatalf("Stop base: %v", err)
 	}
+	logSnapshotPhase(t, "stop base sandbox", phaseStart)
 	if err := base.Close(); err != nil {
 		t.Fatalf("Close base: %v", err)
 	}
@@ -40,10 +53,12 @@ func TestSandboxHandleSnapshotAndWithFromSnapshotFork(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSandbox base: %v", err)
 	}
+	phaseStart = time.Now()
 	artifact, err := baseHandle.Snapshot(ctx, snapshotName)
 	if err != nil {
 		t.Fatalf("SandboxHandle.Snapshot: %v", err)
 	}
+	logSnapshotPhase(t, "create snapshot", phaseStart)
 	if artifact.Digest() == "" {
 		t.Fatal("Snapshot artifact has empty digest")
 	}
@@ -54,10 +69,12 @@ func TestSandboxHandleSnapshotAndWithFromSnapshotFork(t *testing.T) {
 		t.Fatalf("Snapshot artifact has invalid size: %v", sizeBytes)
 	}
 
+	phaseStart = time.Now()
 	report, err := artifact.Verify(ctx)
 	if err != nil {
 		t.Fatalf("SnapshotArtifact.Verify: %v", err)
 	}
+	logSnapshotPhase(t, "verify snapshot", phaseStart)
 	if report.Digest == "" || report.Path == "" {
 		t.Fatalf("Verify returned incomplete report: %+v", report)
 	}
@@ -96,10 +113,12 @@ func TestSandboxHandleSnapshotAndWithFromSnapshotFork(t *testing.T) {
 		t.Fatalf("Snapshot.List did not include digest %q", artifact.Digest())
 	}
 
+	phaseStart = time.Now()
 	fork, err := createSandbox(t, ctx, forkName, microsandbox.WithFromSnapshot(snapshotName))
 	if err != nil {
 		t.Fatalf("CreateSandbox with WithFromSnapshot: %v", err)
 	}
+	logSnapshotPhase(t, "create sandbox from snapshot", phaseStart)
 	defer func() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -134,17 +153,26 @@ func TestSnapshotCreateAndSnapshotDirectoryOps(t *testing.T) {
 		removeSnapshotBestEffort(snapshotName)
 	})
 
-	base, err := createSandbox(t, ctx, baseName, microsandbox.WithImage(goIntegrationImage))
+	phaseStart := time.Now()
+	base, err := createSandbox(t, ctx, baseName,
+		microsandbox.WithImage(goIntegrationImage),
+		microsandbox.WithRootDisk(microsandbox.RootDisk.Managed(snapshotIntegrationRootDiskSizeMiB)),
+	)
 	if err != nil {
 		t.Fatalf("CreateSandbox base: %v", err)
 	}
+	logSnapshotPhase(t, "create base sandbox", phaseStart)
+
+	phaseStart = time.Now()
 	if err := base.Stop(ctx); err != nil {
 		t.Fatalf("Stop base: %v", err)
 	}
+	logSnapshotPhase(t, "stop base sandbox", phaseStart)
 	if err := base.Close(); err != nil {
 		t.Fatalf("Close base: %v", err)
 	}
 
+	phaseStart = time.Now()
 	artifact, err := microsandbox.Snapshot.Create(ctx, microsandbox.SnapshotCreateOptions{
 		Name:        snapshotName,
 		FromSandbox: baseName,
@@ -152,6 +180,7 @@ func TestSnapshotCreateAndSnapshotDirectoryOps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Snapshot.Create: %v", err)
 	}
+	logSnapshotPhase(t, "create snapshot", phaseStart)
 	snapshotDir := artifact.Path()
 	if filepath.Base(snapshotDir) != snapshotName {
 		t.Fatalf("Snapshot.Create path = %q, want basename %q", snapshotDir, snapshotName)
@@ -189,10 +218,12 @@ func TestSnapshotCreateAndSnapshotDirectoryOps(t *testing.T) {
 	}
 
 	archivePath := filepath.Join(t.TempDir(), "snapshot.tar")
+	phaseStart = time.Now()
 	if err := microsandbox.Snapshot.Save(ctx, snapshotName, archivePath,
 		microsandbox.SnapshotSaveOptions{PlainTar: true}); err != nil {
 		t.Fatalf("Snapshot.Save: %v", err)
 	}
+	logSnapshotPhase(t, "save snapshot archive", phaseStart)
 
 	// VM startup and snapshot export can consume most of the shared test context on busy
 	// self-hosted runners. Keep import independently bounded so it receives the same full
@@ -200,16 +231,23 @@ func TestSnapshotCreateAndSnapshotDirectoryOps(t *testing.T) {
 	loadCtx, cancelLoad := context.WithTimeout(context.Background(), integrationTestTimeout)
 	t.Cleanup(cancelLoad)
 	importDir := filepath.Join(t.TempDir(), "imported")
+	phaseStart = time.Now()
 	imported, err := microsandbox.Snapshot.Load(loadCtx, archivePath, importDir)
 	if err != nil {
 		t.Fatalf("Snapshot.Load: %v", err)
 	}
+	logSnapshotPhase(t, "load snapshot archive", phaseStart)
 	t.Cleanup(func() {
 		removeSnapshotBestEffort(imported.Path())
 	})
 	if imported.Digest() != artifact.Digest() {
 		t.Fatalf("Snapshot.Load digest = %q, want %q", imported.Digest(), artifact.Digest())
 	}
+}
+
+func logSnapshotPhase(t *testing.T, phase string, started time.Time) {
+	t.Helper()
+	t.Logf("snapshot phase %q completed in %s", phase, time.Since(started).Round(time.Millisecond))
 }
 
 func uniqueIntegrationName(t *testing.T, prefix string) string {

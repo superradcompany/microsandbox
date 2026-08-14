@@ -1,0 +1,74 @@
+name: Test Platform
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        description: Platform label used for artifacts and caches.
+        required: true
+        type: string
+      runner:
+        description: GitHub Actions runner label.
+        required: true
+        type: string
+      os:
+        description: Operating-system family (linux or darwin).
+        required: true
+        type: string
+      agentd_target:
+        description: Rust target for native Linux agentd tests.
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_TIMEOUT: "120"
+  CARGO_HTTP_MULTIPLEXING: "false"
+
+jobs:
+  test:
+    name: Test (${{ inputs.target }})
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+        with:
+          cache-bin: false
+          cache-targets: true
+
+      - name: Install build deps (Linux)
+        if: inputs.os == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools libcap-ng-dev
+
+      # Reuse the runtime already built by Check Platform. The SDK build script
+      # discovers build/ in CI, so unit tests no longer repeat the release/LTO
+      # msb, agentd, and libkrunfw build.
+      - name: Download runtime artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: msb-${{ inputs.target }}
+          path: build/
+
+      - name: Test agentd (Linux)
+        if: inputs.os == 'linux'
+        run: |
+          rustup target add --toolchain stable ${{ inputs.agentd_target }}
+          cargo +stable test --manifest-path crates/agentd/Cargo.toml --target ${{ inputs.agentd_target }}
+
+      - name: Set up mold (Linux host link)
+        if: inputs.os == 'linux'
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+
+      - name: Test workspace
+        run: cargo +stable test --workspace --exclude microsandbox-agentd

@@ -36,9 +36,11 @@
   },
   "scripts": {
     "build:native": "napi build --release --platform --js index.cjs --dts index.d.ts --output-dir native",
+    "build:native:ci": "napi build --profile ci --platform --js index.cjs --dts index.d.ts --output-dir native",
     "build:native:debug": "napi build --platform --js index.cjs --dts index.d.ts --output-dir native",
     "build:ts": "tsc -p tsconfig.json",
     "build": "npm run build:native && npm run build:ts",
+    "build:ci": "npm run build:native:ci && npm run build:ts",
     "test": "vitest run",
     "test:unit": "vitest run tests/unit",
     "test:smoke": "vitest run tests/smoke.test.ts",

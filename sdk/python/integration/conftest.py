@@ -2,13 +2,30 @@
 
 from __future__ import annotations
 
+import os
 from contextlib import suppress
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from integration.helpers import IMAGE, remove_sandbox, remove_volume, unique_name
 from microsandbox import Sandbox, Volume
+
+
+def _isolate_xdist_worker_home() -> None:
+    """Give each pytest-xdist worker independent microsandbox state."""
+    worker = os.environ.get("PYTEST_XDIST_WORKER")
+    root = os.environ.get("MSB_HOME")
+    if worker is None or root is None:
+        return
+
+    worker_home = Path(root) / worker
+    worker_home.mkdir(parents=True, exist_ok=True)
+    os.environ["MSB_HOME"] = str(worker_home)
+
+
+_isolate_xdist_worker_home()
 
 
 @pytest.fixture
