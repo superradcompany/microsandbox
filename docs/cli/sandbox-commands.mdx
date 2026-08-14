@@ -66,8 +66,8 @@ Common flags:
 | `--secret` | Inject a host-held secret for an allowed destination |
 | `--tmpfs` | Mount an in-memory filesystem |
 | `--copy`, `--copy-file`, `--copy-dir`, `--mkdir`, `--rm` | Patch the rootfs before boot |
-| `--conf` | Load a sparse [sandbox configuration](/sandbox-config). Repeatable |
-| `--net-conf`, `--resource-conf`, `--runtime-conf`, `--fs-conf`, `--secret-conf`, `--script-conf` | Load an unwrapped, concern-specific [scoped config](/sandbox-config#scoped-config-files). Repeatable |
+| `--conf` | Load a sparse [sandbox configuration](/cli/configuration). Repeatable |
+| `--net-conf`, `--resource-conf`, `--runtime-conf`, `--fs-conf`, `--secret-conf`, `--script-conf` | Load an unwrapped, concern-specific [scoped config](/cli/configuration#scoped-config-files). Repeatable |
 
 Use `msb run --help` for the full flag list.
 
@@ -548,8 +548,8 @@ msb install --list                   # List installed commands
 | `--no-pull` | Don't pull the image before installing |
 | `--tmp` | Create a fresh sandbox on every invocation (no persistent state) |
 | `-l`, `--list` | List all installed sandbox commands |
-| `--conf` | Load an explicit sparse [sandbox configuration](/sandbox-config). Repeatable |
-| `--net-conf`, `--resource-conf`, `--runtime-conf`, `--fs-conf`, `--secret-conf`, `--script-conf` | Load an explicit [scoped config](/sandbox-config#scoped-config-files). Repeatable |
+| `--conf` | Load an explicit sparse [sandbox configuration](/cli/configuration). Repeatable |
+| `--net-conf`, `--resource-conf`, `--runtime-conf`, `--fs-conf`, `--secret-conf`, `--script-conf` | Load an explicit [scoped config](/cli/configuration#scoped-config-files). Repeatable |
 
 ## msb uninstall
 

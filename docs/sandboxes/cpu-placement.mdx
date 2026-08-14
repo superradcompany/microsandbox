@@ -1,21 +1,21 @@
 ---
 title: CPU placement
-description: Place sandbox vCPU threads across or within host physical cores
+description: Choose where sandbox vCPU threads run on the host
 icon: "microchip"
 ---
 
-Microsandbox normally inherits the CPU scheduling and affinity constraints of the process that starts it. On Linux and Windows hosts, you can instead ask Microsandbox to coordinate its own vCPU placement across sandboxes that share the same `MSB_HOME`.
+By default, sandbox vCPU threads follow the host scheduler. On Linux and Windows, Microsandbox can place those threads for you.
 
-## Policies
+## Choose a policy
 
-| Policy | Behavior |
+| Policy | What it does |
 | --- | --- |
-| `inherit` | Default. Performs no topology discovery, allocation work, lease creation, or affinity calls. |
-| `auto` | Uses untouched physical cores first, then unused SMT siblings, then fairly shares logical CPUs under pressure. |
-| `spread` | Preserves the widest practical distribution across physical cores, then SMT siblings, then shared logical CPUs. |
-| `compact` | Fills SMT siblings and minimizes the physical cores used while exclusive capacity remains, then shares logical CPUs without creating a single unbounded hotspot. |
+| `inherit` | Leaves placement to the host scheduler. This is the default. |
+| `auto` | Uses available physical cores first, then shares CPUs when needed. |
+| `spread` | Spreads work across physical cores. |
+| `compact` | Keeps work on fewer physical cores for better cache locality. |
 
-Managed placement accounts for `max_cpus`, including guest CPUs that are offline at boot. Ordinary policies do not reject creation when cooperative CPU capacity is exhausted: multiple vCPU threads may be pinned to the same logical CPU and the host scheduler time-slices them. Runtime logs distinguish exclusive from shared placement. If topology discovery or cooperative coordination is unavailable, ordinary policies visibly fall back to `inherit`; `strict_single` remains fail-closed.
+Start with `auto` on a dedicated host. Use `spread` for CPU-heavy throughput work. Use `compact` when cache locality or packing more sandboxes onto a host matters most.
 
 <CodeGroup>
 ```bash CLI
@@ -63,9 +63,11 @@ sb, err := m.CreateSandbox(ctx, "worker",
 ```
 </CodeGroup>
 
-## Keep CPU and memory together
+## Keep CPU and memory on one NUMA node
 
-On a NUMA host, a named placement profile can keep a sandbox's maximum CPU and memory capacity on one host node. The host operator defines the profile in `config.json`:
+Large hosts can have more than one NUMA node. A placement profile can keep a sandbox's CPU and memory on the same node.
+
+First, define a named profile in the [global config](/configuration):
 
 ```json
 {
@@ -80,62 +82,25 @@ On a NUMA host, a named placement profile can keep a sandbox's maximum CPU and m
 }
 ```
 
-The sandbox selects only the host-approved name. Its CPU policy still controls how logical processors are chosen inside that node.
+Then select it when you create the sandbox:
 
-<CodeGroup>
-```bash CLI
-msb create python:3.12 --name worker --cpus 2 --cpu-placement auto --placement-profile latency
+```bash
+msb create python:3.12 \
+  --name worker \
+  --cpus 2 \
+  --cpu-placement auto \
+  --placement-profile latency
 ```
 
-```rust Rust
-let sb = Sandbox::builder("worker")
-    .image("python:3.12")
-    .cpus(2)
-    .cpu_placement(CpuPlacement::Auto)
-    .placement_profile("latency")
-    .create()
-    .await?;
-```
+`prefer_single` uses one node when enough CPU and memory are available. Otherwise, it falls back to normal placement. Use `strict_single` when the sandbox should fail instead of falling back.
 
-```typescript TypeScript
-await using sb = await Sandbox.builder("worker")
-  .image("python:3.12")
-  .cpus(2)
-  .cpuPlacement("auto")
-  .placementProfile("latency")
-  .create();
-```
+## What placement guarantees
 
-```python Python
-sb = await Sandbox.create(
-    "worker",
-    image="python:3.12",
-    cpus=2,
-    cpu_placement="auto",
-    placement_profile="latency",
-)
-```
+- Microsandbox coordinates only sandboxes that share the same `MSB_HOME`.
+- Placement considers the sandbox's maximum CPU count, not only the CPUs online at boot.
+- When exclusive CPU capacity runs out, normal policies may share logical CPUs.
+- Placement does not isolate unrelated host processes or reserve dedicated cores.
+- On macOS, managed policies fall back to `inherit` because hard CPU affinity is not available through a public API.
+- If placement cannot be applied, normal policies fall back to `inherit`. A `strict_single` profile fails instead.
 
-```go Go
-sb, err := m.CreateSandbox(ctx, "worker",
-    m.WithImage("python:3.12"),
-    m.WithCPUs(2),
-    m.WithCPUPlacement(m.CPUPlacementAuto),
-    m.WithPlacementProfile("latency"),
-)
-```
-</CodeGroup>
-
-Planning uses `max_cpus` and `max_memory_mib`, not just the boot values. A sandbox fits one node only when that node has enough currently unassigned logical CPUs for every possible vCPU, enough current memory for boot, and enough cooperative total memory for its configured maximum. CPU time-sharing never counts as strict single-node capacity. Multi-node guest placement is not enabled in this release: `prefer_single` keeps the best ordinary CPU plan but falls back to inherited host NUMA and memory behavior when one node cannot fit, while `strict_single` returns a capacity error. `follow_cpu` similarly falls back to inherited memory placement if selected CPUs span nodes or the node lacks the requested memory capacity, unless it is paired with `strict_single`. Ordinary Linux placement uses a soft multi-node preference so memory can spill under pressure; `strict_single` uses a required binding. Windows uses the actual processor-to-NUMA-node mapping, but keeps ordinary memory inherited because preferred-node allocation cannot be undone after a later partial CPU fallback. A Windows `strict_single` profile can use required preferred-node allocation. `inherit` leaves host memory policy unchanged.
-
-## Scope and guarantees
-
-Managed placement asks libkrun to apply affinity to its vCPU threads before they enter guest execution: Linux uses the process affinity mask and `sched_setaffinity`, while Windows uses the calling runtime thread's processor-group affinity and `SetThreadGroupAffinity`. Every vCPU waits behind a startup barrier while libkrun reports what the operating system actually applied. For ordinary policies, successful pins remain in force and only rejected vCPUs inherit scheduler placement; Microsandbox removes their tentative catalog reservations before the guest runs. Any partial CPU result also returns ordinary `follow_cpu` memory to inherited policy. A `strict_single` profile keeps required enforcement and fails before guest execution instead. On heterogeneous Windows processors, the planner prefers the higher-performance core class reported by Windows. Placement does not isolate unrelated host processes, pin VMM or device-worker threads, or promise dedicated cores.
-
-Windows planning currently stays within the runtime thread's inherited primary processor group. Processor-group coordinates are preserved in the allocation catalog and libkrun affinity map, but one runtime process does not spread a sandbox across multiple Windows processor groups. This is immaterial on hosts with at most 64 logical processors and avoids expanding an affinity boundary inherited from the caller.
-
-Coordination is local to one Microsandbox catalog and lease directory. Sandboxes using different `MSB_HOME` values do not share reservations. Provider deployments that need machine-wide cooperative placement should configure one machine-wide allocation domain.
-
-On macOS, `auto`, `spread`, and `compact` visibly resolve to inherited scheduling because Apple does not expose an equivalent public hard-affinity API. A profile using `strict_single` still fails because its locality guarantee cannot be enforced.
-
-See [Optimization](/sandboxes/optimization#cpu-placement) for workload selection guidance and the interaction with host topology, THP, and interrupt acceleration.
+Use `msb inspect worker` to see the resolved policy and placement result.

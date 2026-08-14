@@ -47,7 +47,6 @@
             "icon": "box",
             "pages": [
               "sandboxes/overview",
-              "sandbox-config",
               "sandboxes/lifecycle",
               "sandboxes/commands",
               "sandboxes/filesystem",
@@ -63,14 +62,6 @@
             ]
           },
           {
-            "group": "Performance",
-            "icon": "bolt",
-            "pages": [
-              "sandboxes/optimization",
-              "sandboxes/cpu-placement"
-            ]
-          },
-          {
             "group": "Networking",
             "icon": "network-wired",
             "pages": [
@@ -81,19 +72,27 @@
             ]
           },
           {
+            "group": "OCI Images",
+            "icon": "layer-group",
+            "pages": [
+              "images/overview",
+              "images/disk-images"
+            ]
+          },
+          {
+            "group": "Performance",
+            "icon": "bolt",
+            "pages": [
+              "sandboxes/optimization",
+              "sandboxes/cpu-placement"
+            ]
+          },
+          {
             "group": "Observability",
             "icon": "gauge",
             "pages": [
               "observability/msb-metrics",
               "observability/deep-dive"
-            ]
-          },
-          {
-            "group": "Images",
-            "icon": "layer-group",
-            "pages": [
-              "images/overview",
-              "images/disk-images"
             ]
           },
           {
@@ -199,6 +198,7 @@
             "icon": "terminal",
             "pages": [
               "cli/overview",
+              "cli/configuration",
               "cli/sandbox-commands",
               "cli/ssh-commands",
               "cli/volume-commands",
@@ -424,6 +424,10 @@
     {
       "source": "/networking/vsock",
       "destination": "/networking/host-sockets"
+    },
+    {
+      "source": "/sandbox-config",
+      "destination": "/cli/configuration"
     }
   ],
   "integrations": {
