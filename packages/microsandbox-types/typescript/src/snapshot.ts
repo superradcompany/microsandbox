@@ -102,18 +102,36 @@ export type UpperLayer = {
    */
   size_bytes: number;
   /**
-   * Mandatory semantic payload integrity.
+   * Optional semantic payload integrity. The field itself is required so
+   * readers distinguish an intentional `null` from a malformed descriptor.
    */
-  integrity: UpperIntegrity;
+  integrity: UpperIntegrity | null;
 };
 
 export type UpperIntegrity = {
-  /**
-   * Digest algorithm name.
-   */
-  algorithm: string;
+  "algorithm": "sha256";
   /**
    * Algorithm output in qualified digest form.
    */
   digest: string;
+} | {
+  "algorithm": "msb-sparse-sha256-v1";
+  /**
+   * Algorithm output in qualified digest form.
+   */
+  digest: string;
+} | {
+  "algorithm": "msb-file-merkle-blake3-v1";
+  /**
+   * Domain-separated Merkle root in qualified digest form.
+   */
+  root: string;
+  /**
+   * Exact logical file length bound into the final root.
+   */
+  logical_size: number;
+  /**
+   * Fixed leaf size. Exactly [`FILE_MERKLE_BLAKE3_LEAF_SIZE`].
+   */
+  leaf_size: number;
 };
