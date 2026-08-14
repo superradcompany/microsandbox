@@ -4,8 +4,15 @@
 
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use ipnetwork::{Ipv4Network, Ipv6Network};
+use microsandbox_types::{
+    NetworkRateLimitDirection, NetworkRateLimiterConfig, RateLimiterConfig, ScopedUpstreamCaCert,
+    ScopedVerifyUpstream, TlsConfig, TokenBucketConfig,
+};
+use microsandbox_utils::size::Bytes;
+use zeroize::Zeroizing;
 
 use crate::config::{
     DnsConfig, InterfaceOverrides, MAX_NETWORK_CONNECTIONS, NetworkConfig, PortProtocol,
@@ -13,12 +20,9 @@ use crate::config::{
 };
 use crate::dns::Nameserver;
 use crate::policy::{BuildError, NetworkPolicy};
-use zeroize::Zeroizing;
-
 use crate::secrets::config::{
     HostPattern, SecretEntry, SecretInjection, SecretSource, ViolationAction,
 };
-use microsandbox_types::{ScopedUpstreamCaCert, ScopedVerifyUpstream, TlsConfig};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -65,6 +69,47 @@ pub struct SecretBuilder {
 #[derive(Default)]
 pub struct ViolationActionBuilder {
     action: ViolationAction,
+}
+
+/// Fluent builder for both directions of a [`NetworkRateLimiterConfig`].
+///
+/// ```ignore
+/// .rate_limiter(|r| r
+///     .egress(|r| r.bandwidth(1.mib(), Duration::from_secs(1)))
+///     .ingress(|r| r.ops(1_000, Duration::from_secs(1)))
+/// )
+/// ```
+#[derive(Default)]
+pub struct NetworkRateLimiterBuilder {
+    config: NetworkRateLimiterConfig,
+    errors: Vec<BuildError>,
+}
+
+/// Fluent builder for one direction's [`RateLimiterConfig`].
+///
+/// ```ignore
+/// .egress(|r| r
+///     .bandwidth(1.mib(), Duration::from_secs(1))
+///     .bandwidth_burst(512.kib())
+///     .ops(1_000, Duration::from_secs(1))
+///     .ops_burst(500)
+/// )
+/// ```
+pub struct RateLimiterBuilder {
+    direction: NetworkRateLimitDirection,
+    bandwidth: Option<TokenBucketConfig>,
+    ops: Option<TokenBucketConfig>,
+    bandwidth_burst: Option<u64>,
+    ops_burst: Option<u64>,
+    /// First bucket whose refill interval cannot be represented on the wire.
+    refill_error: Option<(&'static str, RefillTimeError)>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RefillTimeError {
+    TooShort,
+    Precision,
+    TooLong,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -280,6 +325,27 @@ impl NetworkBuilder {
     /// unknown to the guest's stock Mozilla bundle.
     pub fn trust_host_cas(mut self, enabled: bool) -> Self {
         self.config.trust_host_cas = enabled;
+        self
+    }
+
+    /// Configure egress and ingress traffic rate limits. Applies on the next
+    /// sandbox start.
+    ///
+    /// ```ignore
+    /// .rate_limiter(|r| r
+    ///     .egress(|r| r
+    ///         .bandwidth(1.mib(), Duration::from_secs(1))
+    ///         .ops(1_000, Duration::from_secs(1)))
+    /// )
+    /// ```
+    pub fn rate_limiter(
+        mut self,
+        f: impl FnOnce(NetworkRateLimiterBuilder) -> NetworkRateLimiterBuilder,
+    ) -> Self {
+        match f(NetworkRateLimiterBuilder::new()).build() {
+            Ok(limiter) => self.config.rate_limiter = Some(limiter),
+            Err(err) => self.errors.push(err),
+        }
         self
     }
 
@@ -626,6 +692,162 @@ impl SecretBuilder {
     }
 }
 
+impl NetworkRateLimiterBuilder {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Limit guest-to-runtime (egress) traffic.
+    pub fn egress(mut self, f: impl FnOnce(RateLimiterBuilder) -> RateLimiterBuilder) -> Self {
+        match f(RateLimiterBuilder::new(NetworkRateLimitDirection::Egress)).build() {
+            Ok(limiter) => self.config.egress = Some(limiter),
+            Err(err) => self.errors.push(err),
+        }
+        self
+    }
+
+    /// Limit runtime-to-guest (ingress) traffic.
+    pub fn ingress(mut self, f: impl FnOnce(RateLimiterBuilder) -> RateLimiterBuilder) -> Self {
+        match f(RateLimiterBuilder::new(NetworkRateLimitDirection::Ingress)).build() {
+            Ok(limiter) => self.config.ingress = Some(limiter),
+            Err(err) => self.errors.push(err),
+        }
+        self
+    }
+
+    /// Consume the builder and return both configured directions.
+    pub fn build(mut self) -> Result<NetworkRateLimiterConfig, BuildError> {
+        if let Some(error) = self.errors.drain(..).next() {
+            return Err(error);
+        }
+        if self.config.egress.is_none() && self.config.ingress.is_none() {
+            return Err(BuildError::EmptyNetworkRateLimiter);
+        }
+        Ok(self.config)
+    }
+}
+
+impl RateLimiterBuilder {
+    fn new(direction: NetworkRateLimitDirection) -> Self {
+        Self {
+            direction,
+            bandwidth: None,
+            ops: None,
+            bandwidth_burst: None,
+            ops_burst: None,
+            refill_error: None,
+        }
+    }
+
+    /// Cap bandwidth at `size` bytes per `refill_time`.
+    ///
+    /// `refill_time` must be at least one millisecond and exactly representable
+    /// as a whole number of milliseconds.
+    ///
+    /// ```ignore
+    /// .bandwidth(1.mib(), Duration::from_secs(1))
+    /// ```
+    pub fn bandwidth(mut self, size: impl Into<Bytes>, refill_time: Duration) -> Self {
+        match refill_time_ms(refill_time) {
+            Ok(refill_time_ms) => {
+                self.bandwidth = Some(TokenBucketConfig {
+                    size: size.into().as_u64(),
+                    refill_time_ms,
+                    one_time_burst: 0,
+                });
+            }
+            Err(error) => {
+                self.refill_error.get_or_insert(("bandwidth", error));
+            }
+        }
+        self
+    }
+
+    /// Grant a one-time startup burst of `burst` bytes on top of the
+    /// bandwidth bucket. Requires [`bandwidth`](Self::bandwidth).
+    pub fn bandwidth_burst(mut self, burst: impl Into<Bytes>) -> Self {
+        self.bandwidth_burst = Some(burst.into().as_u64());
+        self
+    }
+
+    /// Cap packet rate at `count` frames per `refill_time`.
+    ///
+    /// `refill_time` must be at least one millisecond and exactly representable
+    /// as a whole number of milliseconds.
+    ///
+    /// ```ignore
+    /// .ops(1_000, Duration::from_secs(1))
+    /// ```
+    pub fn ops(mut self, count: u64, refill_time: Duration) -> Self {
+        match refill_time_ms(refill_time) {
+            Ok(refill_time_ms) => {
+                self.ops = Some(TokenBucketConfig {
+                    size: count,
+                    refill_time_ms,
+                    one_time_burst: 0,
+                });
+            }
+            Err(error) => {
+                self.refill_error.get_or_insert(("ops", error));
+            }
+        }
+        self
+    }
+
+    /// Grant a one-time startup burst of `count` frames on top of the ops
+    /// bucket. Requires [`ops`](Self::ops).
+    pub fn ops_burst(mut self, count: u64) -> Self {
+        self.ops_burst = Some(count);
+        self
+    }
+
+    /// Consume the builder and return the validated configuration.
+    pub fn build(self) -> Result<RateLimiterConfig, BuildError> {
+        let direction = self.direction;
+        if let Some((bucket, error)) = self.refill_error {
+            return Err(match error {
+                RefillTimeError::TooShort => {
+                    BuildError::RateLimitRefillTooShort { direction, bucket }
+                }
+                RefillTimeError::Precision => {
+                    BuildError::RateLimitRefillPrecision { direction, bucket }
+                }
+                RefillTimeError::TooLong => {
+                    BuildError::RateLimitRefillTooLong { direction, bucket }
+                }
+            });
+        }
+
+        let mut config = RateLimiterConfig {
+            bandwidth: self.bandwidth,
+            ops: self.ops,
+        };
+        if let Some(burst) = self.bandwidth_burst {
+            let Some(bandwidth) = &mut config.bandwidth else {
+                return Err(BuildError::RateLimitBurstWithoutBucket {
+                    direction,
+                    bucket: "bandwidth",
+                });
+            };
+            bandwidth.one_time_burst = burst;
+        }
+        if let Some(burst) = self.ops_burst {
+            let Some(ops) = &mut config.ops else {
+                return Err(BuildError::RateLimitBurstWithoutBucket {
+                    direction,
+                    bucket: "ops",
+                });
+            };
+            ops.one_time_burst = burst;
+        }
+
+        config
+            .validate()
+            .map_err(|source| BuildError::InvalidRateLimitConfig { direction, source })?;
+        Ok(config)
+    }
+}
+
 impl ViolationActionBuilder {
     /// Start building a violation action.
     pub fn new() -> Self {
@@ -687,6 +909,23 @@ impl ViolationActionBuilder {
     pub fn build(self) -> ViolationAction {
         self.action
     }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+/// Convert a refill interval to its exact whole-millisecond wire value.
+fn refill_time_ms(refill_time: Duration) -> Result<u64, RefillTimeError> {
+    if refill_time < Duration::from_millis(1) {
+        return Err(RefillTimeError::TooShort);
+    }
+    let refill_time_ms =
+        u64::try_from(refill_time.as_millis()).map_err(|_| RefillTimeError::TooLong)?;
+    if !refill_time.subsec_nanos().is_multiple_of(1_000_000) {
+        return Err(RefillTimeError::Precision);
+    }
+    Ok(refill_time_ms)
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -912,6 +1151,136 @@ mod tests {
         assert_eq!(
             action,
             ViolationAction::Passthrough(vec![HostPattern::Exact("facebook.com".into())])
+        );
+    }
+
+    #[test]
+    fn rate_limiter_builder_sets_buckets_and_bursts() {
+        use microsandbox_utils::size::SizeExt;
+
+        let cfg = NetworkBuilder::new()
+            .rate_limiter(|r| {
+                r.egress(|r| {
+                    r.bandwidth(1.mib(), Duration::from_secs(1))
+                        .bandwidth_burst(512.kib())
+                        .ops(1_000, Duration::from_secs(1))
+                        .ops_burst(500)
+                })
+                .ingress(|r| r.bandwidth(2.mib(), Duration::from_millis(500)))
+            })
+            .build()
+            .unwrap();
+
+        let rate_limiter = cfg.rate_limiter.unwrap();
+        let egress = rate_limiter.egress.unwrap();
+        let bandwidth = egress.bandwidth.unwrap();
+        assert_eq!(bandwidth.size, 1024 * 1024);
+        assert_eq!(bandwidth.refill_time_ms, 1000);
+        assert_eq!(bandwidth.one_time_burst, 512 * 1024);
+        let ops = egress.ops.unwrap();
+        assert_eq!(ops.size, 1_000);
+        assert_eq!(ops.refill_time_ms, 1000);
+        assert_eq!(ops.one_time_burst, 500);
+
+        let ingress = rate_limiter.ingress.unwrap();
+        assert_eq!(ingress.bandwidth.unwrap().refill_time_ms, 500);
+        assert!(ingress.ops.is_none());
+    }
+
+    #[test]
+    fn rate_limiters_default_to_unlimited() {
+        let cfg = NetworkBuilder::new().build().unwrap();
+        assert!(cfg.rate_limiter.is_none());
+    }
+
+    #[test]
+    fn rate_limiter_builder_rejects_empty_limiter() {
+        let err = NetworkBuilder::new()
+            .rate_limiter(|r| r.egress(|r| r))
+            .build()
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "egress rate limiter: rate limiter must configure at least one of bandwidth or ops"
+        );
+    }
+
+    #[test]
+    fn network_rate_limiter_builder_rejects_missing_directions() {
+        let err = NetworkBuilder::new()
+            .rate_limiter(|r| r)
+            .build()
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "rate limiter must configure at least one of egress or ingress"
+        );
+    }
+
+    #[test]
+    fn rate_limiter_builder_rejects_zero_size_and_unrepresentable_refill() {
+        let err = NetworkBuilder::new()
+            .rate_limiter(|r| r.ingress(|r| r.bandwidth(0u64, Duration::from_secs(1))))
+            .build()
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "ingress rate limiter: bandwidth bucket: size must be greater than zero"
+        );
+
+        let err = NetworkBuilder::new()
+            .rate_limiter(|r| r.egress(|r| r.ops(10, Duration::ZERO)))
+            .build()
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "egress rate limiter: ops refill interval must be at least one millisecond"
+        );
+
+        let err = NetworkBuilder::new()
+            .rate_limiter(|r| r.egress(|r| r.ops(10, Duration::from_micros(1_500))))
+            .build()
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "egress rate limiter: ops refill interval must be a whole number of milliseconds"
+        );
+    }
+
+    #[test]
+    fn rate_limiter_builder_rejects_burst_without_bucket() {
+        use microsandbox_utils::size::SizeExt;
+
+        let err = NetworkBuilder::new()
+            .rate_limiter(|r| r.egress(|r| r.bandwidth_burst(512.kib())))
+            .build()
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "egress rate limiter: bandwidth_burst requires the bandwidth bucket"
+        );
+
+        let err = NetworkBuilder::new()
+            .rate_limiter(|r| {
+                r.ingress(|r| r.bandwidth(1.mib(), Duration::from_secs(1)).ops_burst(5))
+            })
+            .build()
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "ingress rate limiter: ops_burst requires the ops bucket"
+        );
+    }
+
+    #[test]
+    fn rate_limiter_builder_rejects_refill_interval_overflow() {
+        let err = NetworkBuilder::new()
+            .rate_limiter(|r| r.egress(|r| r.ops(10, Duration::MAX)))
+            .build()
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "egress rate limiter: ops refill interval overflows u64 milliseconds"
         );
     }
 

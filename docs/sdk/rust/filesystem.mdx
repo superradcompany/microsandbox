@@ -565,7 +565,7 @@ println!("{:?}", link_meta.kind);
 
 </Accordion>
 
-Get metadata, choosing whether to follow a final symlink. With `follow_symlink = false` you stat the link itself rather than its target. Local backend only; cloud returns `Unsupported`.
+Get metadata, choosing whether to follow a final symlink. With `follow_symlink = false` you stat the link itself rather than its target.
 
 <p className="msb-label">Parameters</p>
 
@@ -608,7 +608,7 @@ sb.fs().set_stat("/app/run.sh", true, FsSetAttrs {
 
 </Accordion>
 
-Update metadata on a file or directory: mode, owner uid/gid, size, and access/modification times. Only the fields you set on [`FsSetAttrs`](#fssetattrs) are applied. Local backend only; cloud returns `Unsupported`.
+Update metadata on a file or directory: mode, owner uid/gid, size, and access/modification times. Only the fields you set on [`FsSetAttrs`](#fssetattrs) are applied.
 
 <p className="msb-label">Parameters</p>
 
@@ -642,7 +642,7 @@ println!("-> {target}");
 
 </Accordion>
 
-Read the target of a symbolic link, returning the literal target text. Local backend only; cloud returns `Unsupported`.
+Read the target of a symbolic link, returning the literal target text.
 
 <p className="msb-label">Parameters</p>
 
@@ -676,7 +676,7 @@ sb.fs().symlink("/app/releases/v2", "/app/current").await?;
 
 </Accordion>
 
-Create a symbolic link at `link_path` that points to `target`. Local backend only; cloud returns `Unsupported`.
+Create a symbolic link at `link_path` that points to `target`.
 
 <p className="msb-label">Parameters</p>
 
@@ -828,7 +828,7 @@ Copy a file from the sandbox to the host machine.
 
 <p className="msb-backref">Returned by <a href="/sdk/rust/sandbox#sb-fs">sb.fs()</a></p>
 
-Filesystem operations handle for a running sandbox, borrowing the parent sandbox's backend and name (it is generic over a lifetime, `SandboxFsOps<'a>`). Every method dispatches through the same host-guest channel as command execution. Local routes to `core.fs.*` agent messages; cloud returns `Unsupported` per method until cloud guest-fs lands. All operations are listed in the sections above.
+Filesystem operations handle for a running sandbox, borrowing the parent sandbox's backend and name (it is generic over a lifetime, `SandboxFsOps<'a>`). Every method dispatches through the same host-guest channel as command execution: `core.fs.*` agent messages over the relay socket locally, or the agent WebSocket route on cloud. Handle-based helpers (`stat_handle` and friends) require the live local agent client and return `Unsupported` on cloud. All operations are listed in the sections above.
 
 `with_backend(backend, name)` is a public constructor for FFI shims that re-assemble a `SandboxFsOps` per call; most callers obtain one via [`sb.fs()`](/sdk/rust/sandbox#sb-fs).
 

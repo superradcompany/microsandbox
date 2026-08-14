@@ -483,6 +483,8 @@ Host-side filesystem operations on a named volume, obtained via the `fs` propert
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read()</span>
 
+<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```python
 async def read(path: str) -> bytes
 ```
@@ -518,6 +520,8 @@ Read the entire contents of a file as raw bytes.
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_text()</span>
 
+<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```python
 async def read_text(path: str) -> str
 ```
@@ -543,6 +547,8 @@ Read the entire contents of a file and decode it as UTF-8.
 </div>
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">write()</span>
+
+<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def write(path: str, data: bytes) -> None

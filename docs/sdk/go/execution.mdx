@@ -7,7 +7,6 @@ Run commands inside a running sandbox, collect their output, stream events live,
 
 The exec API mirrors `os/exec` conventions: a **non-zero exit code is not a Go error**. Transport, timeout, and spawn-failure paths return an `error`; a program that ran and exited non-zero is a normal [`*ExecOutput`](#execoutput) result, inspect [`Success()`](#out-success) or [`ExitCode()`](#out-exitcode).
 
-
 ## Default workload
 
 `CreateSandbox` boots the sandbox without executing its image workload. `ExecDefault` resolves the effective OCI ENTRYPOINT and CMD; `ExecDefaultStream` streams it and `AttachDefault` runs it in an interactive PTY. They return `ErrNoDefaultCommand` when no executable default exists and never fall back to a shell.
@@ -20,7 +19,6 @@ sb, err := m.CreateSandbox(ctx, "worker",
 )
 out, err := sb.ExecDefault(ctx, m.WithExecEnv(map[string]string{"LOG_LEVEL": "debug"}))
 ```
-
 ## Sandbox methods
 
 The exec entry points live on [`*Sandbox`](/sdk/go/sandbox#instance-methods).

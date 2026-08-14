@@ -61,6 +61,8 @@ The OCI image's own labels (`LABEL` instructions, `org.opencontainers.image.*`, 
 
 ## Change while running
 
+<Tooltip tip="modify is not yet available on microsandbox cloud; set labels at create time."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 Add, change, or remove labels without recreating the sandbox:
 
 <CodeGroup>
@@ -125,7 +127,7 @@ msb restart --label app=engine     # restart every match
 msb rm --force --label app=engine  # remove every match
 ```
 
-It works the same on `ps`, `ls`, `start`, `stop`, `restart`, `ping`, `touch`, and `rm`.
+It works the same on `ps`, `ls`, `start`, `stop`, `restart`, `ping`, `touch`, and `rm`. On cloud, `ping` and `touch` are not yet available.
 
 ## Attribute metrics
 

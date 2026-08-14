@@ -11,7 +11,9 @@ use std::thread::JoinHandle;
 
 use ipnetwork::{Ipv4Network, Ipv6Network};
 use microsandbox_protocol::{ENV_HOST_ALIAS, ENV_NET, ENV_NET_IPV4, ENV_NET_IPV6};
-use microsandbox_types::DeploymentProfile;
+use microsandbox_types::{
+    DeploymentProfile, NetworkRateLimitDirection, RateLimitConfigError, RateLimiterConfig,
+};
 use msb_krun::backends::net::NetBackend;
 
 use crate::backend::SmoltcpBackend;
@@ -88,6 +90,20 @@ pub enum NetworkInitError {
     /// TLS interception state failed to initialize.
     #[error("TLS initialization failed: {0}")]
     Tls(#[from] TlsStateError),
+
+    /// A stored rate limiter configuration failed validation.
+    #[error("invalid {direction} rate limiter: {source}")]
+    InvalidRateLimit {
+        /// Which limiter is invalid: `egress` or `ingress`.
+        direction: NetworkRateLimitDirection,
+        /// Underlying validation error.
+        #[source]
+        source: RateLimitConfigError,
+    },
+
+    /// A stored network rate limiter has neither direction configured.
+    #[error("invalid network rate limiter: at least one of egress or ingress is required")]
+    EmptyNetworkRateLimiter,
 }
 
 /// Handle for installing host-side termination behavior into the network stack.
@@ -227,6 +243,34 @@ impl SmoltcpNetwork {
             .unwrap_or(DEFAULT_QUEUE_CAPACITY)
             .max(DEFAULT_QUEUE_CAPACITY);
         let shared = Arc::new(SharedState::new(queue_capacity));
+        // Every write path validates rate limiters (`NetworkBuilder::build`),
+        // but a stored config bypasses the builder: fail startup cleanly
+        // instead of panicking on a corrupted spec.
+        if config.rate_limiter.as_ref().is_some_and(|rate_limiter| {
+            rate_limiter.egress.is_none() && rate_limiter.ingress.is_none()
+        }) {
+            return Err(NetworkInitError::EmptyNetworkRateLimiter);
+        }
+        config
+            .rate_limiter
+            .as_ref()
+            .and_then(|rate_limiter| rate_limiter.ingress.as_ref())
+            .map(RateLimiterConfig::validate)
+            .transpose()
+            .map_err(|source| NetworkInitError::InvalidRateLimit {
+                direction: NetworkRateLimitDirection::Ingress,
+                source,
+            })?;
+        config
+            .rate_limiter
+            .as_ref()
+            .and_then(|rate_limiter| rate_limiter.egress.as_ref())
+            .map(RateLimiterConfig::validate)
+            .transpose()
+            .map_err(|source| NetworkInitError::InvalidRateLimit {
+                direction: NetworkRateLimitDirection::Egress,
+                source,
+            })?;
         let backend = SmoltcpBackend::new(shared.clone());
 
         let secrets = SecretsHandle::new(config.secrets.clone());
@@ -808,6 +852,36 @@ mod tests {
                 configured,
                 limit: MAX_NETWORK_CONNECTIONS
             } if configured == MAX_NETWORK_CONNECTIONS + 1
+        ));
+    }
+
+    /// A stored config bypasses the builder's validation, so an invalid
+    /// limiter must fail startup cleanly instead of panicking.
+    #[test]
+    fn new_with_routes_rejects_invalid_rate_limiter() {
+        let mut config = NetworkConfig {
+            rate_limiter: Some(microsandbox_types::NetworkRateLimiterConfig {
+                egress: None,
+                ingress: Some(microsandbox_types::RateLimiterConfig {
+                    bandwidth: None,
+                    ops: None,
+                }),
+            }),
+            ..NetworkConfig::default()
+        };
+        config.tls.enabled = false;
+
+        let err = match SmoltcpNetwork::new_with_routes(config, 0, true, false) {
+            Ok(_) => panic!("empty rate limiter should fail"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(
+            err,
+            NetworkInitError::InvalidRateLimit {
+                direction: NetworkRateLimitDirection::Ingress,
+                source: RateLimitConfigError::EmptyLimiter,
+            }
         ));
     }
 }

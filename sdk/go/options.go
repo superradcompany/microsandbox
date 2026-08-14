@@ -1087,6 +1087,10 @@ type NetworkConfig struct {
 	// MaxConnections caps concurrent network connections from the sandbox.
 	MaxConnections *uint
 
+	// RateLimiter configures local egress and ingress traffic limits. Nil means
+	// unlimited in both directions.
+	RateLimiter *NetworkRateLimiterConfig
+
 	// OnSecretViolation is the sandbox-wide action when a secret is sent to
 	// a disallowed host. Per-secret overrides via SecretEntry.OnViolation.
 	OnSecretViolation ViolationAction
@@ -1103,6 +1107,37 @@ type DNSConfig struct {
 	Nameservers []string
 	// QueryTimeoutMs caps DNS query latency.
 	QueryTimeoutMs *uint64
+}
+
+// RateLimiterConfig limits one traffic direction. A nil bucket leaves that
+// dimension unlimited.
+type RateLimiterConfig struct {
+	// Bandwidth caps throughput in bytes.
+	Bandwidth *TokenBucketConfig
+	// Ops caps packet rate in frames.
+	Ops *TokenBucketConfig
+}
+
+// NetworkRateLimiterConfig groups local network limits by traffic direction.
+type NetworkRateLimiterConfig struct {
+	// Egress throttles guest-to-runtime traffic. Nil means unlimited.
+	Egress *RateLimiterConfig
+	// Ingress throttles runtime-to-guest traffic. Nil means unlimited.
+	Ingress *RateLimiterConfig
+}
+
+// TokenBucketConfig describes a token bucket. The bucket starts full and
+// refills continuously: Size tokens every RefillTime.
+type TokenBucketConfig struct {
+	// Size is the bucket capacity in tokens: bytes for bandwidth buckets,
+	// frames for ops buckets.
+	Size uint64
+	// RefillTime is the time it takes to refill Size tokens. It must be at
+	// least one millisecond and a whole number of milliseconds.
+	RefillTime time.Duration
+	// OneTimeBurst grants extra tokens available at startup; the burst
+	// never refills. Optional.
+	OneTimeBurst uint64
 }
 
 // PolicyRule is a single firewall rule.

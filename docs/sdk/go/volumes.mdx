@@ -5,7 +5,6 @@ description: Go SDK - Volume API reference
 
 Create and manage named persistent volumes, read and write their data directly on the host, and attach them (or bind mounts, tmpfs, and disk images) to sandboxes. See [Volumes](/sandboxes/volumes) for usage examples and patterns.
 
-
 Named volumes are managed by microsandbox and stored by default under `~/.microsandbox/volumes/<name>/`. They persist independently of any sandbox. There is no Rust-side resource to release: `Remove` deletes the on-disk state and the DB record.
 
 ## Functions
@@ -196,6 +195,8 @@ Return the host filesystem path of the volume's data directory.
 
 #### <span className="msb-recv">v.</span><span className="msb-hn">FS()</span>
 
+<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```go
 func (v *Volume) FS() *VolumeFs
 ```
@@ -331,6 +332,8 @@ Return the creation timestamp, or the zero `time.Time` value if unknown.
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">FS()</span>
 
+<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```go
 func (h *VolumeHandle) FS() *VolumeFs
 ```
@@ -381,6 +384,8 @@ Return the absolute host path of the volume's data directory.
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">Read()</span>
 
+<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```go
 func (fs *VolumeFs) Read(ctx context.Context, relPath string) ([]byte, error)
 ```
@@ -407,6 +412,8 @@ Read the contents of a file relative to the volume root.
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">ReadString()</span>
 
+<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```go
 func (fs *VolumeFs) ReadString(ctx context.Context, relPath string) (string, error)
 ```
@@ -414,6 +421,8 @@ func (fs *VolumeFs) ReadString(ctx context.Context, relPath string) (string, err
 Read a file and return its contents as a UTF-8 string.
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">Write()</span>
+
+<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (fs *VolumeFs) Write(ctx context.Context, relPath string, data []byte) error
@@ -435,6 +444,8 @@ Write data to a file, creating or truncating it. Created files use mode `0o644`.
 </div>
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">WriteString()</span>
+
+<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (fs *VolumeFs) WriteString(ctx context.Context, relPath, content string) error
@@ -489,6 +500,8 @@ Functional options passed to [`CreateVolume`](#createvolume), plus the [`Mount`]
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithVolumeKind()</span>
 
+<Tooltip tip="Disk-kind volumes are not available on microsandbox cloud; use a directory-backed named volume."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```go
 func WithVolumeKind(kind VolumeKind) VolumeOption
 ```
@@ -505,6 +518,8 @@ Select the volume kind. Valid values are [`VolumeKindDir`](#volumekind) (default
 </div>
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithVolumeSize()</span>
+
+<Tooltip tip="Disk-kind volumes are not available on microsandbox cloud; use a directory-backed named volume."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func WithVolumeSize(mebibytes uint32) VolumeOption
@@ -687,6 +702,8 @@ Mount an ephemeral in-memory filesystem. Contents are discarded when the sandbox
 </div>
 
 #### <span className="msb-recv">Mount.</span><span className="msb-hn">Disk()</span>
+
+<Tooltip tip="On microsandbox cloud, the disk-image path resolves against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (mountFactory) Disk(hostPath string, opts DiskOptions) MountConfig
@@ -885,7 +902,7 @@ Tuning struct for [`Mount.Bind`](#mount-bind), [`Mount.Named`](#mount-named), an
 | `Noexec` | `bool` | Prevent direct execution from the mount |
 | `Nosuid` | `bool` | Ignore setuid and setgid privilege elevation from files on the mount |
 | `Nodev` | `bool` | Ignore device files on the mount |
-| `QuotaMiB` | `uint32` | Guest-write quota in MiB, bounding growth beyond the host directory's existing contents; zero keeps the protective default (bind mounts only — named volumes use [`NamedVolumeOptions.QuotaMiB`](#namedvolumeoptions)) |
+| `QuotaMiB` | `uint32` | Guest-write quota in MiB, bounding growth beyond the host directory's existing contents; zero keeps the protective default (bind mounts only; named volumes use [`NamedVolumeOptions.QuotaMiB`](#namedvolumeoptions)) |
 | `StatVirtualization` | `StatVirtualization` | Per-mount stat-virtualization policy (virtiofs only) |
 | `HostPermissions` | `HostPermissions` | Per-mount host-permission propagation policy (virtiofs only) |
 

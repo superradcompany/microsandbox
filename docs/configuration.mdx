@@ -1,6 +1,6 @@
 ---
-title: Global configuration
-description: Global config.json reference
+title: Global config
+description: Reference for the global config.json shared by the CLI and SDKs
 icon: "gear"
 ---
 
@@ -109,8 +109,8 @@ microsandbox reads its global configuration from `~/.microsandbox/config.json`. 
 | `runtime` | [reference](#runtime) | Host runtime performance policy |
 | `registries` | [reference](#registries) | Container registry authentication |
 | `metrics` | [reference](#metrics) | Live metrics shared-memory registry settings |
-| `active_profile` | `null` | Default backend profile name |
-| `profiles` | `{}` | Named backend profiles |
+| `active_profile` | `null` | Default [backend profile](#profiles) name |
+| `profiles` | [reference](#profiles) | Named [backend profiles](/getting-started/backends) |
 
 ## `deployment_profile`
 
@@ -175,6 +175,8 @@ let backend = LocalBackend::builder()
 let cfg = backend.config();
 let msb = cfg.resolve_msb_path()?;
 ```
+
+`LocalBackend` has two plain constructors alongside the builder. `LocalBackend::lazy()` is synchronous and defers opening (and migrating) the local sandbox database until the first operation; it is what backend resolution uses when no backend is set explicitly. `LocalBackend::new().await?` opens the database up front, so startup fails fast if the database is unusable.
 
 ## `sandbox_defaults`
 
@@ -318,97 +320,19 @@ When pulling from a registry, microsandbox resolves credentials in this order:
 |-------|---------|-------------|
 | `capacity` | `0` | Number of slots reserved in the live metrics shared-memory registry. `0` uses the built-in default. Stop all sandboxes for the same home before changing this value. |
 
-## Backend profiles
+## `profiles`
 
-Backend profiles let CLI and SDK calls choose between the local runtime and a cloud backend from the same `config.json` file.
+Named backend profiles keyed by profile name; `active_profile` selects the default. How profiles participate in backend selection, including the full resolution order, is documented in [Backends](/getting-started/backends).
 
-```json
-{
-  "active_profile": "prod",
-  "profiles": {
-    "prod": {
-      "backend": "cloud",
-      "api_key_ref": "env:MSB_API_KEY"
-    },
-    "local": {
-      "backend": "local"
-    }
-  }
-}
-```
+| Field | Default | Description |
+|-------|---------|-------------|
+| `backend` | required | `local` or `cloud` |
+| `api_key_ref` | none | Credential reference; required for `cloud` profiles |
+| `url` | `https://api.microsandbox.dev` | Cloud endpoint override for development, self-hosted, or on-prem control planes |
 
-Use `active_profile` for the default profile. Use `MSB_PROFILE=<name>` to override it for a single command:
-
-```bash
-MSB_PROFILE=prod msb run python -- python -V
-```
-
-Cloud profiles require `api_key_ref`. The `url` field is optional and defaults to `https://api.microsandbox.dev`; set it only for a development, self-hosted, or on-prem control plane. Supported credential references are:
+Supported credential references for `api_key_ref`:
 
 | Prefix | Description |
 |--------|-------------|
 | `env:<VAR_NAME>` | Read the API key from an environment variable |
 | `inline:<API_KEY>` | Store the API key directly in `config.json`; use only for development or CI |
-
-Backend resolution uses this order:
-
-1. Programmatic backend set by the SDK
-2. `MSB_BACKEND=local|cloud`
-3. `MSB_PROFILE=<name>`
-4. `active_profile`
-5. Local runtime
-
-Cloud is opt-in. For hosted cloud usage, select it explicitly and provide the credential separately:
-
-```bash
-export MSB_BACKEND=cloud
-export MSB_API_KEY=msb_...
-```
-
-`MSB_API_URL` is optional and defaults to `https://api.microsandbox.dev`. It only overrides the endpoint. Neither `MSB_API_KEY` nor `MSB_API_URL` selects Cloud on its own, so leaving cloud credentials in a shell does not unexpectedly reroute local workloads.
-
-Selecting a cloud profile with `MSB_PROFILE` or `active_profile` is also explicit Cloud intent when that profile has `"backend": "cloud"`. `MSB_BACKEND=cloud` without a usable API key or cloud profile returns a configuration error; it never falls back to Local.
-
-### Inspect the active backend
-
-Use `msb context` before running CLI commands when you want to confirm where sandboxes will execute. The human-readable output uses the regular CLI table style; JSON is available for scripts:
-
-```bash
-msb context
-msb context --format json
-```
-
-`msb ctx` is a shorter alias for `msb context`.
-
-The SDKs expose the same secret-safe information. It includes the backend kind, cloud API URL, selection source, and profile when applicable, but never the API key:
-
-<CodeGroup>
-```typescript TypeScript
-import { defaultBackendInfo } from "microsandbox";
-
-console.log(defaultBackendInfo());
-console.log(sandbox.backendKind);
-```
-
-```python Python
-from microsandbox import default_backend_info
-
-print(default_backend_info())
-print(sandbox.backend_kind)
-```
-
-```rust Rust
-let info = microsandbox::default_backend_info();
-println!("{}", info.kind.as_str());
-println!("{}", sandbox.backend_kind().as_str());
-```
-
-```go Go
-info, err := microsandbox.DefaultBackendInfo()
-if err != nil {
-    return err
-}
-fmt.Println(info.Kind)
-fmt.Println(sandbox.BackendKind())
-```
-</CodeGroup>

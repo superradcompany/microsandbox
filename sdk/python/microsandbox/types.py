@@ -1511,6 +1511,71 @@ class PortBinding:
 
 
 @dataclass(frozen=True, slots=True)
+class TokenBucket:
+    """One token bucket of a rate limiter.
+
+    The bucket starts full and refills continuously at ``size`` tokens per
+    ``refill_time_ms``. ``one_time_burst`` grants extra startup tokens that
+    are spent before the regular budget and never refill.
+    """
+    size: int
+    """Bucket capacity in tokens: bytes for bandwidth, frames for ops."""
+    refill_time_ms: int
+    """Time to refill ``size`` tokens, in milliseconds."""
+    one_time_burst: int = 0
+    """Extra tokens granted once at startup. Default: 0."""
+
+    def _to_dict(self) -> dict:
+        d: dict = {"size": self.size, "refill_time_ms": self.refill_time_ms}
+        if self.one_time_burst:
+            d["one_time_burst"] = self.one_time_burst
+        return d
+
+
+@dataclass(frozen=True, slots=True)
+class RateLimiter:
+    """Rate limiter for one traffic direction.
+
+    Caps bandwidth (bytes) and packet rate (frames) independently; a
+    missing bucket leaves that dimension unlimited.
+    """
+    bandwidth: TokenBucket | None = None
+    """Bandwidth bucket. One token is one byte of frame data."""
+    ops: TokenBucket | None = None
+    """Operations bucket. One token is one network frame."""
+
+    def _to_dict(self) -> dict:
+        d: dict = {}
+        if self.bandwidth is not None:
+            d["bandwidth"] = self.bandwidth._to_dict()
+        if self.ops is not None:
+            d["ops"] = self.ops._to_dict()
+        return d
+
+
+@dataclass(frozen=True, slots=True)
+class NetworkRateLimiter:
+    """Egress and ingress rate limits for a local sandbox network."""
+
+    egress: RateLimiter | None = None
+    """Guest-to-runtime rate limiter. ``None`` means unlimited."""
+    ingress: RateLimiter | None = None
+    """Runtime-to-guest rate limiter. ``None`` means unlimited."""
+
+    def _to_dict(self) -> dict:
+        d: dict = {}
+        if self.egress is not None:
+            if not isinstance(self.egress, RateLimiter):
+                raise TypeError("NetworkRateLimiter.egress must be RateLimiter or None")
+            d["egress"] = self.egress._to_dict()
+        if self.ingress is not None:
+            if not isinstance(self.ingress, RateLimiter):
+                raise TypeError("NetworkRateLimiter.ingress must be RateLimiter or None")
+            d["ingress"] = self.ingress._to_dict()
+        return d
+
+
+@dataclass(frozen=True, slots=True)
 class VsockRoute:
     """Host Unix socket or Windows named pipe exposed on host CID 2."""
 
@@ -1558,6 +1623,8 @@ class Network:
     """IPv6 pool used to derive per-sandbox /64 guest prefixes. Defaults
     to ``fd42:6d73:62::/48``."""
     max_connections: int | None = None
+    rate_limiter: NetworkRateLimiter | None = None
+    """Local egress and ingress rate limits. ``None`` means unlimited."""
     on_secret_violation: ViolationAction | ViolationPolicy = ViolationAction.BLOCK_AND_LOG
 
     @classmethod
@@ -1611,6 +1678,10 @@ class Network:
             d["ipv6_pool"] = self.ipv6_pool
         if self.max_connections is not None:
             d["max_connections"] = self.max_connections
+        if self.rate_limiter is not None:
+            if not isinstance(self.rate_limiter, NetworkRateLimiter):
+                raise TypeError("Network.rate_limiter must be NetworkRateLimiter or None")
+            d["rate_limiter"] = self.rate_limiter._to_dict()
         violation = violation_policy_to_dict(self.on_secret_violation)
         if violation != str(ViolationAction.BLOCK_AND_LOG):
             d["on_secret_violation"] = violation

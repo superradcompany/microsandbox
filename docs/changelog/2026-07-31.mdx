@@ -1,0 +1,83 @@
+---
+title: "Week of July 31, 2026"
+sidebarTitle: "Week of the 31st"
+description: "Unified cloud backend in every SDK with paginated sandbox listings, per-registry insecure and custom-CA overrides in Go and Python, msb completion for shell tab-completion, a shared log registry for tailing many sandboxes, and fixes for guest TCP half-close, DNS upstream failover, and cloud exec reconnects."
+icon: "bolt"
+---
+
+<Tip>
+  **Released this week:** [v0.6.8](https://github.com/superradcompany/microsandbox/releases/tag/v0.6.8)
+</Tip>
+
+## New features
+
+**Unified cloud backend across every SDK**
+
+The Rust, Python, TypeScript, and Go SDKs now share one public sandbox and volume API across local and cloud backends. Set `MSB_API_KEY` (and, if you self-host, `MSB_API_URL`), and the same `Sandbox.create(...)` you already use for local sandboxes now handles create, exec, SSH, filesystem operations, and volume management against the hosted service. Hosted usage defaults to `https://api.microsandbox.dev`. Only the API key selects the cloud backend, so setting `MSB_API_URL` on its own keeps you on the local backend.
+
+```bash
+export MSB_API_KEY="msb_ak_..."
+```
+
+```python
+import asyncio
+from microsandbox import Sandbox
+
+async def main() -> None:
+    sandbox = await Sandbox.create("sdk-demo", image="alpine:3.19")
+    try:
+        result = await sandbox.shell("echo hello from microsandbox")
+        print(result.stdout_text, end="")
+    finally:
+        await sandbox.stop()
+        await Sandbox.remove("sdk-demo")
+
+asyncio.run(main())
+```
+
+`Sandbox.list` now returns a bounded `SandboxPage` with an opaque cursor, a page limit, and label filters. The default `list()` call is unchanged for quick use; larger or filtered scans use each language's `list_with` configuration form. This is a breaking change for callers that expected an unbounded list.
+
+**Per-registry insecure and custom-CA overrides in Go and Python**
+
+The Go and Python SDKs can now pull from a plain-HTTP registry or one using a private CA without host-level configuration. Both surfaces mirror the Rust and TypeScript builders.
+
+```python
+sb = await Sandbox.create(
+    "worker",
+    image="localhost:5050/my-app:latest",
+    registry_insecure=True,
+    registry_ca_certs=["/etc/ssl/private-ca.pem"],
+)
+```
+
+```go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("localhost:5050/my-app:latest"),
+    m.WithRegistryInsecure(),
+    m.WithRegistryCACertsPath("/etc/ssl/private-ca.pem"),
+)
+```
+
+CA-cert paths are read at create time, so an unreadable file fails immediately instead of mid-pull. See the [images overview](/images/overview).
+
+**`msb completion` for shell tab-completion**
+
+`msb completion <shell>` prints a completion script for `bash`, `zsh`, `fish`, `elvish`, or `powershell` to stdout, so users and packagers can wire up tab completion without a helper package.
+
+```bash
+msb completion zsh > "${fpath[1]}/_msb"
+```
+
+See the [CLI overview](/cli/overview).
+
+**Other features**
+
+- **Shared log registry for many followed streams.** A new `LogRegistry` lets a single process tail logs from many sandboxes at once without exhausting the OS watcher quota. One watcher is shared across every followed stream, so processes that would previously hit `fs.inotify.max_user_instances` on Linux (default 128) now scale to many more sandboxes. Use `Sandbox::logger()` to get a `SandboxLogger` you can register with the shared registry. Standalone `log_stream(follow = true)` behavior is unchanged.
+
+## Bug fixes
+
+- Long-lived proxied TCP connections no longer leak connection-table slots when the guest closes cleanly. A guest FIN is now propagated to the upstream write half instead of leaving the smoltcp socket in `CLOSE_WAIT` forever. Previously, on sandboxes whose upstreams do not idle-close, the 256-slot connection table filled up and guest egress went dark until the sandbox was restarted. Legal TCP half-close is preserved, so a guest that does `shutdown(SHUT_WR)` and then reads still receives a server response.
+- Two follow-up half-close races are also fixed: connections that reach `CLOSE_WAIT` before the proxy task is spawned are handed off correctly, and pending DNS-over-TLS responses are preserved after the guest sends EOF.
+- DNS resolution now fails over to later upstreams when the first is unreachable. The forwarder previously kept only the first configured upstream, so a broken first nameserver made every lookup fail even when a later server was healthy. Each configured upstream is now tried in order and moves on after a per-query timeout or transport failure. Answers that arrive, including `SERVFAIL` and `REFUSED`, are treated as answers and do not trigger a retry against the next server.
+- `msb exec` and `msb ssh` now work against running cloud sandboxes. Previously the CLI could not reopen an authenticated agent connection to a hosted sandbox for exec, SSH, or filesystem operations. Cloud reconnect no longer requires OpenSSL on the host.
+- The Python SDK now correctly disambiguates inline PEM `bytes` from PEM file paths in `registry_ca_certs`, so inline certificate data is not mistakenly interpreted as a filename.

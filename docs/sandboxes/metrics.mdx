@@ -4,6 +4,8 @@ description: Monitor sandbox resource usage
 icon: "chart-line"
 ---
 
+<Tooltip tip="SDK and CLI resource metrics are not yet available on microsandbox cloud; instrument the workload with an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 Query resource usage for a running sandbox: CPU, memory, and more. Get a single point-in-time snapshot, or open a streaming subscription that delivers updates at a fixed interval.
 
 OCI sandboxes also expose optional upper filesystem fields for capacity dashboards. Guest-visible `upper_used_bytes` and `upper_free_bytes` are available when the protected bundled-kernel reporter is fresh. Host-observed `upper_host_allocated_bytes` is available when microsandbox can inspect the writable upper image from the host. SDKs surface those as nullable fields (`Option`, `null`, `None`, or `nil`) because custom kernels and non-OCI roots may not provide them.

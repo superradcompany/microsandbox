@@ -508,6 +508,18 @@ export declare class NetworkBuilder {
   /** Trust the host's root CAs inside the guest. Default: false. */
   trustHostCAs(enabled: boolean): this
   /**
+   * Configure local egress and ingress rate limits. Applies on the next
+   * sandbox start.
+   *
+   * ```js
+   * .rateLimiter((r) => r
+   *   .egress((r) => r
+   *     .bandwidth(1_048_576, 1_000)
+   *     .ops(1_000, 1_000)))
+   * ```
+   */
+  rateLimiter(configure: (arg: JsNetworkRateLimiterBuilder) => JsNetworkRateLimiterBuilder): this
+  /**
    * Snapshot the accumulated configuration as a JSON string. The TS
    * layer parses + key-remaps to camelCase before returning to the
    * caller.
@@ -558,6 +570,16 @@ export declare class NetworkPolicyBuilder {
   build(): NetworkPolicy
 }
 export type JsNetworkPolicyBuilder = NetworkPolicyBuilder
+
+/** Fluent builder grouping egress and ingress rate limits. */
+export declare class NetworkRateLimiterBuilder {
+  constructor()
+  /** Configure guest-to-runtime traffic limits. */
+  egress(configure: (arg: RateLimiterBuilder) => RateLimiterBuilder): this
+  /** Configure runtime-to-guest traffic limits. */
+  ingress(configure: (arg: RateLimiterBuilder) => RateLimiterBuilder): this
+}
+export type JsNetworkRateLimiterBuilder = NetworkRateLimiterBuilder
 
 /** Fluent builder for an ordered list of pre-boot rootfs patches. */
 export declare class PatchBuilder {
@@ -629,6 +651,29 @@ export declare class PullProgressStream {
   [Symbol.asyncIterator](): AsyncGenerator<PullProgressEvent, void, undefined>
 }
 export type JsPullProgressStream = PullProgressStream
+
+/**
+ * Fluent builder for one direction's network rate limiter. Chainable
+ * setters accumulate bucket values for `NetworkRateLimiterBuilder`.
+ */
+export declare class RateLimiterBuilder {
+  constructor()
+  /** Cap bandwidth at `sizeBytes` bytes per `refillTimeMs` milliseconds. */
+  bandwidth(sizeBytes: number, refillTimeMs: number): this
+  /**
+   * Grant a one-time startup burst of `sizeBytes` bytes on top of the
+   * bandwidth bucket. Requires `bandwidth()`.
+   */
+  bandwidthBurst(sizeBytes: number): this
+  /** Cap packet rate at `count` frames per `refillTimeMs` milliseconds. */
+  ops(count: number, refillTimeMs: number): this
+  /**
+   * Grant a one-time startup burst of `count` frames on top of the ops
+   * bucket. Requires `ops()`.
+   */
+  opsBurst(count: number): this
+}
+export type JsRateLimiterBuilder = RateLimiterBuilder
 
 /** Fluent builder for OCI registry connection settings. */
 export declare class RegistryConfigBuilder {

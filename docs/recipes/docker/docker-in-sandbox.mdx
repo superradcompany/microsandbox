@@ -4,6 +4,8 @@ description: Start dockerd inside a microsandbox VM and run containers from an i
 icon: "docker"
 ---
 
+<Tooltip tip="On microsandbox cloud, create the named volume separately (no disk-kind or size options) and omit replace-on-create; those settings are not available."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 This recipe starts a complete Docker environment inside a microsandbox VM. It is useful for sandboxed builds, agent workflows that need their own Docker daemon, or experiments you do not want leaking onto the dev machine. The host's Docker setup, if any, is left untouched.
 
 The command below boots the `docker:dind` image, starts Docker inside the sandbox, waits for it to be ready, and then opens an interactive shell. From there, Docker commands run against the daemon inside the sandbox, not your host.

@@ -222,3 +222,139 @@ details.accordion:has(.code-block) { margin-top: 0.5rem !important; }
   .msb-params { grid-template-columns: 1fr; }
   .msb-param { row-gap: 2px; }
 }
+
+/* ----------------------------------------------------------------------------
+ * Availability badges: small pills rendered inside headings to mark sections
+ * whose feature is local-only (not yet on cloud).
+ * -------------------------------------------------------------------------- */
+.msb-badge-local {
+  display: inline-block;
+  margin-top: -0.35rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: 9999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #5f3caf;
+  background: #f6efff;
+  border: 1px solid rgba(109, 75, 196, 0.25);
+}
+
+.dark .msb-badge-local {
+  color: #c9b1ff;
+  background: rgba(191, 132, 254, 0.12);
+  border-color: rgba(191, 132, 254, 0.3);
+}
+
+.msb-badge-local svg,
+.msb-badge-local [class*="mask"] {
+  display: inline-block;
+  vertical-align: -0.12em;
+  margin-left: 0.1rem;
+}
+
+/* The info icon is the tooltip affordance; drop the wrapper's dotted underline. */
+span:has(> .msb-badge-local) {
+  text-decoration: none !important;
+}
+
+.msb-badge-limited {
+  display: inline-block;
+  margin-top: -0.35rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: 9999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #8a5a00;
+  background: #fdf6e7;
+  border: 1px solid rgba(180, 120, 0, 0.28);
+}
+
+.dark .msb-badge-limited {
+  color: #e8c37a;
+  background: rgba(232, 195, 122, 0.1);
+  border-color: rgba(232, 195, 122, 0.28);
+}
+
+.msb-badge-limited svg,
+.msb-badge-limited [class*="mask"] {
+  display: inline-block;
+  vertical-align: -0.12em;
+  margin-left: 0.1rem;
+}
+
+span:has(> .msb-badge-limited) {
+  text-decoration: none !important;
+}
+
+/* Masked tooltip icons inherit each pill's text color. */
+.msb-badge-local svg,
+.msb-badge-local [class*="mask"],
+.msb-badge-limited svg,
+.msb-badge-limited [class*="mask"] {
+  background-color: currentColor !important;
+}
+
+.msb-badge-cloud {
+  display: inline-block;
+  margin-top: -0.35rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: 9999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #0b6bcb;
+  background: #eef6ff;
+  border: 1px solid rgba(11, 107, 203, 0.25);
+}
+
+.dark .msb-badge-cloud {
+  color: #8ec2f2;
+  background: rgba(142, 194, 242, 0.1);
+  border-color: rgba(142, 194, 242, 0.28);
+}
+
+.msb-badge-cloud svg,
+.msb-badge-cloud [class*="mask"] {
+  display: inline-block;
+  vertical-align: -0.12em;
+  margin-left: 0.1rem;
+  background-color: currentColor !important;
+}
+
+span:has(> .msb-badge-cloud) {
+  text-decoration: none !important;
+}
+
+/* Neutral cloud-note pill: behaves differently on cloud but fully works (not a limitation). */
+.msb-badge-note {
+  display: inline-block;
+  margin-top: -0.35rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: 9999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #475569;
+  background: #f1f5f9;
+  border: 1px solid rgba(71, 85, 105, 0.2);
+}
+
+.dark .msb-badge-note {
+  color: #94a3b8;
+  background: rgba(148, 163, 184, 0.1);
+  border-color: rgba(148, 163, 184, 0.24);
+}
+
+.msb-badge-note svg,
+.msb-badge-note [class*="mask"] {
+  display: inline-block;
+  vertical-align: -0.12em;
+  margin-left: 0.1rem;
+  background-color: currentColor !important;
+}
+
+span:has(> .msb-badge-note) {
+  text-decoration: none !important;
+}

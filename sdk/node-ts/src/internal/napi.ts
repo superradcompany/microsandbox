@@ -58,6 +58,8 @@ export interface NativeBindings {
   readonly RuleBuilder: NapiBuilderCtor<NapiRuleBuilder>;
   readonly RuleDestinationBuilder: NapiBuilderCtor<NapiRuleDestinationBuilder>;
   readonly InterfaceOverridesBuilder: NapiBuilderCtor<NapiInterfaceOverridesBuilder>;
+  readonly NetworkRateLimiterBuilder: NapiBuilderCtor<NapiNetworkRateLimiterBuilder>;
+  readonly RateLimiterBuilder: NapiBuilderCtor<NapiRateLimiterBuilder>;
   readonly PullProgressStream: { prototype: NapiPullProgressStream };
   readonly PullProgressCreate: { prototype: NapiPullProgressCreate };
   readonly MountBuilder: new (guestPath: string) => NapiMountBuilder;
@@ -962,7 +964,22 @@ export interface NapiNetworkBuilder {
   ipv4Pool(pool: string): this;
   ipv6Pool(pool: string): this;
   trustHostCAs(enabled: boolean): this;
+  rateLimiter(
+    configure: (b: NapiNetworkRateLimiterBuilder) => NapiNetworkRateLimiterBuilder,
+  ): this;
   build(): NetworkConfig;
+}
+
+export interface NapiRateLimiterBuilder {
+  bandwidth(sizeBytes: number, refillTimeMs: number): this;
+  bandwidthBurst(sizeBytes: number): this;
+  ops(count: number, refillTimeMs: number): this;
+  opsBurst(count: number): this;
+}
+
+export interface NapiNetworkRateLimiterBuilder {
+  egress(configure: (b: NapiRateLimiterBuilder) => NapiRateLimiterBuilder): this;
+  ingress(configure: (b: NapiRateLimiterBuilder) => NapiRateLimiterBuilder): this;
 }
 
 export interface NapiInterfaceOverridesBuilder {

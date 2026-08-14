@@ -72,6 +72,8 @@ Open a native in-process SSH client connected to the sandbox.
 
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">prepareServer()</span>
 
+<Tooltip tip="On microsandbox cloud, the reusable server works when you supply explicit host-key and authorized-key material; the convenience defaults are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```typescript
 prepareServer(opts?: SshServerOptions): Promise<SshServer>
 ```

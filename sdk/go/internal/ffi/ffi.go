@@ -1635,19 +1635,40 @@ type MountSpec struct {
 
 // NetworkOptions is the JSON representation of the network config block.
 type NetworkOptions struct {
-	CustomPolicy        *CustomNetworkPolicy `json:"custom_policy,omitempty"`
-	DNS                 *DNSOptions          `json:"dns,omitempty"`
-	DNSRebindProtection *bool                `json:"dns_rebind_protection,omitempty"`
-	DenyDomains         []string             `json:"deny_domains,omitempty"`
-	DenyDomainSuffixes  []string             `json:"deny_domain_suffixes,omitempty"`
-	TLS                 *TLSOptions          `json:"tls,omitempty"`
-	Ports               map[uint16]uint16    `json:"ports,omitempty"`
-	PortBindings        []PortBindingOptions `json:"port_bindings,omitempty"`
-	IPv4Pool            string               `json:"ipv4_pool,omitempty"`
-	IPv6Pool            string               `json:"ipv6_pool,omitempty"`
-	MaxConnections      *uint                `json:"max_connections,omitempty"`
-	OnSecretViolation   string               `json:"on_secret_violation,omitempty"`
-	TrustHostCAs        *bool                `json:"trust_host_cas,omitempty"`
+	CustomPolicy        *CustomNetworkPolicy       `json:"custom_policy,omitempty"`
+	DNS                 *DNSOptions                `json:"dns,omitempty"`
+	DNSRebindProtection *bool                      `json:"dns_rebind_protection,omitempty"`
+	DenyDomains         []string                   `json:"deny_domains,omitempty"`
+	DenyDomainSuffixes  []string                   `json:"deny_domain_suffixes,omitempty"`
+	TLS                 *TLSOptions                `json:"tls,omitempty"`
+	Ports               map[uint16]uint16          `json:"ports,omitempty"`
+	PortBindings        []PortBindingOptions       `json:"port_bindings,omitempty"`
+	IPv4Pool            string                     `json:"ipv4_pool,omitempty"`
+	IPv6Pool            string                     `json:"ipv6_pool,omitempty"`
+	MaxConnections      *uint                      `json:"max_connections,omitempty"`
+	RateLimiter         *NetworkRateLimiterOptions `json:"rate_limiter,omitempty"`
+	OnSecretViolation   string                     `json:"on_secret_violation,omitempty"`
+	TrustHostCAs        *bool                      `json:"trust_host_cas,omitempty"`
+}
+
+// RateLimiterOptions limits one traffic direction; a nil bucket leaves that
+// dimension unlimited.
+type RateLimiterOptions struct {
+	Bandwidth *TokenBucketOptions `json:"bandwidth,omitempty"`
+	Ops       *TokenBucketOptions `json:"ops,omitempty"`
+}
+
+// NetworkRateLimiterOptions groups local network limits by direction.
+type NetworkRateLimiterOptions struct {
+	Egress  *RateLimiterOptions `json:"egress,omitempty"`
+	Ingress *RateLimiterOptions `json:"ingress,omitempty"`
+}
+
+// TokenBucketOptions is the JSON representation of a token bucket.
+type TokenBucketOptions struct {
+	Size         uint64 `json:"size"`
+	RefillTimeMs uint64 `json:"refill_time_ms"`
+	OneTimeBurst uint64 `json:"one_time_burst,omitempty"`
 }
 
 // PortBindingOptions publishes a host port on a specific host bind address.
