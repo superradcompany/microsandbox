@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::bulk::BulkOffer;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -14,6 +16,10 @@ pub struct TcpConnect {
 
     /// Destination TCP port.
     pub port: u16,
+
+    /// Generation-7 bidirectional raw-bulk offer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bulk: Option<BulkOffer>,
 }
 
 /// Confirmation that a TCP connection was opened.
@@ -60,6 +66,7 @@ mod tests {
         let connect = TcpConnect {
             host: "127.0.0.1".to_string(),
             port: 8080,
+            bulk: None,
         };
         let mut buf = Vec::new();
         ciborium::into_writer(&connect, &mut buf).unwrap();

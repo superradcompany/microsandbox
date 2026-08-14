@@ -18,10 +18,14 @@
 use std::{collections::HashSet, fs};
 
 use microsandbox_protocol::{
+    bulk::{
+        BULK_FORMAT_RAW_V1, BULK_HEADER_SIZE, DEFAULT_BULK_RECORD_PAYLOAD, DEFAULT_BULK_WINDOW,
+        MAX_BULK_RECORD_PAYLOAD, MAX_BULK_WINDOW, MIN_BULK_RECORD_PAYLOAD,
+    },
     codec::MAX_FRAME_SIZE,
     message::{
-        FLAG_SESSION_START, FLAG_SHUTDOWN, FLAG_TERMINAL, FRAME_HEADER_SIZE, MessageType,
-        PROTOCOL_VERSION,
+        FLAG_BULK, FLAG_SESSION_START, FLAG_SHUTDOWN, FLAG_TERMINAL, FRAME_HEADER_SIZE,
+        MessageType, PROTOCOL_VERSION,
     },
 };
 use serde_json::{Value, json};
@@ -46,6 +50,16 @@ fn render_surface() -> String {
             "flag_terminal": FLAG_TERMINAL,
             "flag_session_start": FLAG_SESSION_START,
             "flag_shutdown": FLAG_SHUTDOWN,
+            "flag_bulk": FLAG_BULK,
+        },
+        "bulk": {
+            "format_raw_v1": BULK_FORMAT_RAW_V1,
+            "header_size": BULK_HEADER_SIZE,
+            "min_record_payload": MIN_BULK_RECORD_PAYLOAD,
+            "default_record_payload": DEFAULT_BULK_RECORD_PAYLOAD,
+            "max_record_payload": MAX_BULK_RECORD_PAYLOAD,
+            "default_window": DEFAULT_BULK_WINDOW,
+            "max_window": MAX_BULK_WINDOW,
         },
         "message_types": message_types,
     });

@@ -13,6 +13,7 @@ use nix::sys::signal::Signal;
 use tokio::io::AsyncReadExt;
 use tokio::sync::{Semaphore, mpsc};
 
+use microsandbox_protocol::bulk::BulkRecord;
 use microsandbox_protocol::exec::{ExecFailed, ExecFailureKind, ExecRequest};
 
 use crate::config::SecurityProfile;
@@ -155,6 +156,9 @@ pub enum SessionOutput {
 
     /// Pre-encoded frame bytes to write directly to the serial output buffer.
     Raw(RawSessionOutput),
+
+    /// Generation-7 raw bulk record whose payload remains separately owned.
+    Bulk(BulkSessionOutput),
 }
 
 /// One queued session event and the data-budget capacity owned by its buffer.
@@ -189,6 +193,15 @@ pub struct RawSessionOutput {
 
     /// Session table entry completed by the frame, if any.
     pub completion: Option<RawSessionCompletion>,
+}
+
+/// Raw bulk output plus activity metadata known by its producer.
+pub struct BulkSessionOutput {
+    /// Validated record whose payload is written with the fixed header via `writev`.
+    pub record: BulkRecord,
+
+    /// Activity represented by the record.
+    pub activity: RawActivity,
 }
 
 /// Activity represented by a pre-encoded session frame.
@@ -279,11 +292,19 @@ impl RawSessionOutput {
     }
 }
 
+impl BulkSessionOutput {
+    /// Creates a raw bulk output event.
+    pub fn new(record: BulkRecord, activity: RawActivity) -> Self {
+        Self { record, activity }
+    }
+}
+
 impl SessionOutput {
     /// Bytes retained by this event that count against bulk output capacity.
     fn budget_bytes(&self) -> usize {
         let allocation = match self {
             Self::Stdout(data) | Self::Stderr(data) => data.capacity(),
+            Self::Bulk(output) => output.record.payload.len(),
             Self::Raw(output)
                 if output.activity.fs_bytes != 0 || output.activity.tcp_bytes != 0 =>
             {
@@ -1552,7 +1573,7 @@ mod tests {
                 match envelope.output {
                     SessionOutput::Stdout(data) => stdout.extend_from_slice(&data),
                     SessionOutput::Exited(code) => panic!("session exited early with {code}"),
-                    SessionOutput::Stderr(_) | SessionOutput::Raw(_) => {}
+                    SessionOutput::Stderr(_) | SessionOutput::Raw(_) | SessionOutput::Bulk(_) => {}
                 }
             }
         })
@@ -1889,7 +1910,7 @@ mod tests {
                         exit = Some(code);
                         break;
                     }
-                    SessionOutput::Stderr(_) | SessionOutput::Raw(_) => {}
+                    SessionOutput::Stderr(_) | SessionOutput::Raw(_) | SessionOutput::Bulk(_) => {}
                 }
             }
         })

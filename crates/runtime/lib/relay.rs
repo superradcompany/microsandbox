@@ -22,7 +22,8 @@ use microsandbox_protocol::codec::{self, MAX_FRAME_SIZE};
 use microsandbox_protocol::core::{InitAck, InitResolved, RelayClientDisconnected};
 use microsandbox_protocol::exec::{ExecRequest, ExecSignal, ExecStderr, ExecStdout};
 use microsandbox_protocol::message::{
-    FLAG_SESSION_START, FLAG_SHUTDOWN, FLAG_TERMINAL, FRAME_HEADER_SIZE, Message, MessageType,
+    FLAG_BULK, FLAG_SESSION_START, FLAG_SHUTDOWN, FLAG_TERMINAL, FRAME_HEADER_SIZE, Message,
+    MessageType,
 };
 use microsandbox_protocol::{AGENT_RELAY_ID_RANGE_STEP, AGENT_RELAY_MAX_CLIENTS};
 #[cfg(unix)]
@@ -985,6 +986,14 @@ async fn ring_reader_task(
         }
 
         for frame in frames.drain(..) {
+            if !has_valid_frame_flags(frame.flags) {
+                tracing::warn!(
+                    flags = frame.flags,
+                    id = frame.id,
+                    "agent relay: dropping guest frame with invalid flag combination"
+                );
+                continue;
+            }
             let client_slot = frame.id / AGENT_RELAY_ID_RANGE_STEP;
             let client_slot = client_slot.min(AGENT_RELAY_MAX_CLIENTS - 1);
 
@@ -994,7 +1003,9 @@ async fn ring_reader_task(
             // when a log writer is attached. The CBOR decode is only
             // done when there is a writer, so the no-capture path is
             // unchanged.
-            if let Some(writer) = log_writer.as_ref() {
+            if frame.flags != FLAG_BULK
+                && let Some(writer) = log_writer.as_ref()
+            {
                 tap_frame_into_log(&frame, writer, &session_registry);
             }
 
@@ -1126,6 +1137,15 @@ async fn client_reader_task(
                 break;
             }
         };
+
+        if !has_valid_frame_flags(frame.flags) {
+            tracing::warn!(
+                flags = frame.flags,
+                id = frame.id,
+                "agent relay: client slot={slot} sent an invalid flag combination"
+            );
+            break;
+        }
 
         // Track session starts for disconnect cleanup.
         let is_session_start = (frame.flags & FLAG_SESSION_START) != 0;
@@ -1289,6 +1309,14 @@ fn is_client_frame_allowed(id: u32, flags: u8, id_start: u32, id_end_exclusive: 
     is_shutdown_control || (id >= id_start && id < id_end_exclusive)
 }
 
+/// Validate the complete generation-7 flag byte without interpreting an opaque frame body.
+fn has_valid_frame_flags(flags: u8) -> bool {
+    matches!(
+        flags,
+        0 | FLAG_TERMINAL | FLAG_SESSION_START | FLAG_SHUTDOWN | FLAG_BULK
+    )
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -1353,6 +1381,13 @@ mod tests {
     #[test]
     fn client_frame_validation_allows_shutdown_control_id_zero() {
         assert!(is_client_frame_allowed(0, FLAG_SHUTDOWN, 10, 20));
+    }
+
+    #[test]
+    fn raw_bulk_flag_is_exclusive() {
+        assert!(has_valid_frame_flags(FLAG_BULK));
+        assert!(!has_valid_frame_flags(FLAG_BULK | FLAG_TERMINAL));
+        assert!(!has_valid_frame_flags(0x80));
     }
 
     #[tokio::test]

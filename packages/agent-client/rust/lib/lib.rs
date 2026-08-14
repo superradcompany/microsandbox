@@ -32,7 +32,7 @@ pub mod transports {
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-pub use client::{AgentClient, AgentProtocol};
+pub use client::{AgentClient, AgentFrame, AgentProtocol};
 pub use error::{AgentClientError, AgentClientResult};
 pub use message::{EncodedMessage, IntoOutboundMessage, OutboundMessage, TypedMessage};
 pub use stream::AgentStream;

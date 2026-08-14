@@ -42,6 +42,10 @@ pub enum ProtocolError {
         min: u32,
     },
 
+    /// A generation-7 raw bulk record violates its universal wire shape.
+    #[error("invalid bulk frame: {0}")]
+    InvalidBulkFrame(String),
+
     /// Unexpected end of stream.
     #[error("unexpected end of stream")]
     UnexpectedEof,

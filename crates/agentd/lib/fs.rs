@@ -11,19 +11,27 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use microsandbox_protocol::AGENT_RELAY_ID_RANGE_STEP;
+use microsandbox_protocol::bulk::{
+    BULK_FLOW_MASK_GUEST_TO_HOST, BULK_FLOW_MASK_HOST_TO_GUEST, BulkAccepted, BulkCredit,
+    BulkFinish, BulkFlow, BulkKind, BulkOffer, BulkReceiveState, BulkRecord, BulkSendState,
+    DEFAULT_BULK_WINDOW,
+};
 use microsandbox_protocol::codec;
 use microsandbox_protocol::fs::{
     FS_CHUNK_SIZE, FsData, FsEntryInfo, FsOp, FsOpenOptions, FsRequest, FsResponse, FsResponseData,
     FsSetAttrs,
 };
 use microsandbox_protocol::message::{Message, MessageType};
+use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 use tokio::task::JoinHandle;
 
 use crate::session::{
-    RawActivity, RawSessionCompletion, RawSessionOutput, SessionOutput, SessionOutputSender,
+    BulkSessionOutput, RawActivity, RawSessionCompletion, RawSessionOutput, SessionOutput,
+    SessionOutputSender,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -56,6 +64,7 @@ pub struct FsWriteSession {
     append: bool,
     expected_len: Option<u64>,
     written: u64,
+    bulk: Option<BulkReceiveState>,
 }
 
 /// Tracks an in-progress streaming read operation.
@@ -63,6 +72,7 @@ pub struct FsReadSession {
     owner_id: u32,
     handle: u64,
     task: JoinHandle<()>,
+    credit_tx: Option<watch::Sender<Option<BulkCredit>>>,
 }
 
 /// A filesystem stream session started by a request.
@@ -268,6 +278,23 @@ impl FsReadSession {
     pub fn abort(self) {
         self.task.abort();
     }
+
+    /// Delivers the latest absolute credit update to a generation-7 read task.
+    pub fn apply_credit(&self, credit: BulkCredit) -> Result<(), String> {
+        let Some(tx) = &self.credit_tx else {
+            return Err("filesystem read session is not using raw bulk".into());
+        };
+        if credit.kind != BulkKind::Filesystem || credit.flow != BulkFlow::GuestToHost {
+            return Err("filesystem read received credit for another kind or flow".into());
+        }
+        tx.send_replace(Some(credit));
+        Ok(())
+    }
+
+    /// Whether this read session negotiated generation-7 raw bulk.
+    pub fn is_bulk(&self) -> bool {
+        self.credit_tx.is_some()
+    }
 }
 
 impl FsWriteSession {
@@ -279,6 +306,11 @@ impl FsWriteSession {
     /// Filesystem handle being written.
     pub fn handle(&self) -> u64 {
         self.handle
+    }
+
+    /// Whether this write session negotiated generation-7 raw bulk.
+    pub fn is_bulk(&self) -> bool {
+        self.bulk.is_some()
     }
 }
 
@@ -301,12 +333,31 @@ fn same_relay_client(left: u32, right: u32) -> bool {
 /// Handles an incoming `FsRequest` message.
 pub async fn handle_fs_request(
     id: u32,
+    protocol_version: u8,
     req: FsRequest,
     state: &mut FsState,
     out_buf: &mut Vec<u8>,
     session_tx: &SessionOutputSender,
 ) -> Result<Option<FsStreamSession>, String> {
-    match req.op {
+    let FsRequest { op, bulk } = req;
+    if bulk.is_some() && protocol_version < 7 {
+        encode_response(
+            id,
+            error_response("raw bulk offer requires protocol generation 7".into()),
+            out_buf,
+        )?;
+        return Ok(None);
+    }
+    if bulk.is_some() && !matches!(&op, FsOp::Read { .. } | FsOp::Write { .. }) {
+        encode_response(
+            id,
+            error_response("raw bulk is only valid for streaming reads and writes".into()),
+            out_buf,
+        )?;
+        return Ok(None);
+    }
+
+    match op {
         FsOp::RealPath { path } => {
             let resp = handle_realpath(&path).await;
             encode_response(id, resp, out_buf)?;
@@ -391,13 +442,36 @@ pub async fn handle_fs_request(
         } => match state.file(id, handle, true, false) {
             Ok((file, _, _)) => {
                 let tx = session_tx.clone();
-                let task = tokio::spawn(async move {
-                    handle_read_stream(id, file, offset, len, &tx).await;
-                });
+                let (task, credit_tx) = match bulk {
+                    Some(offer) => {
+                        let accepted = accept_fs_read_offer(offer)?;
+                        encode_control(MessageType::BulkAccepted, id, &accepted, out_buf)?;
+                        let sender = BulkSendState::new(
+                            BulkKind::Filesystem,
+                            BulkFlow::GuestToHost,
+                            accepted.max_record_payload,
+                            accepted.guest_to_host_credit_limit,
+                        )
+                        .map_err(|error| format!("accept read bulk state: {error}"))?;
+                        let (credit_tx, credit_rx) = watch::channel(None);
+                        let task = tokio::spawn(async move {
+                            handle_bulk_read_stream(id, file, offset, len, sender, credit_rx, &tx)
+                                .await;
+                        });
+                        (task, Some(credit_tx))
+                    }
+                    None => {
+                        let task = tokio::spawn(async move {
+                            handle_read_stream(id, file, offset, len, &tx).await;
+                        });
+                        (task, None)
+                    }
+                };
                 Ok(Some(FsStreamSession::Read(FsReadSession {
                     owner_id: id,
                     handle,
                     task,
+                    credit_tx,
                 })))
             }
             Err(e) => {
@@ -410,15 +484,35 @@ pub async fn handle_fs_request(
             offset,
             len,
         } => match state.file(id, handle, false, true) {
-            Ok((file, append, _)) => Ok(Some(FsStreamSession::Write(FsWriteSession {
-                owner_id: id,
-                handle,
-                file,
-                offset,
-                append,
-                expected_len: len,
-                written: 0,
-            }))),
+            Ok((file, append, _)) => {
+                let bulk = match bulk {
+                    Some(offer) => {
+                        let accepted = accept_fs_write_offer(offer)?;
+                        encode_control(MessageType::BulkAccepted, id, &accepted, out_buf)?;
+                        Some(
+                            BulkReceiveState::new(
+                                BulkKind::Filesystem,
+                                BulkFlow::HostToGuest,
+                                accepted.max_record_payload,
+                                accepted.host_to_guest_credit_limit,
+                                DEFAULT_BULK_WINDOW,
+                            )
+                            .map_err(|error| format!("accept write bulk state: {error}"))?,
+                        )
+                    }
+                    None => None,
+                };
+                Ok(Some(FsStreamSession::Write(FsWriteSession {
+                    owner_id: id,
+                    handle,
+                    file,
+                    offset,
+                    append,
+                    expected_len: len,
+                    written: 0,
+                    bulk,
+                })))
+            }
             Err(e) => {
                 encode_response(id, error_response(format!("write: {e}")), out_buf)?;
                 Ok(None)
@@ -452,6 +546,14 @@ pub async fn handle_fs_data(
     session: &mut FsWriteSession,
     out_buf: &mut Vec<u8>,
 ) -> Result<bool, String> {
+    if session.bulk.is_some() {
+        encode_response(
+            id,
+            error_response("CBOR filesystem data is invalid after raw bulk acceptance".into()),
+            out_buf,
+        )?;
+        return Ok(true);
+    }
     if data.data.is_empty() {
         if let Some(expected) = session.expected_len
             && session.written != expected
@@ -499,6 +601,94 @@ pub async fn handle_fs_data(
         session.written = session.written.saturating_add(data.data.len() as u64);
         Ok(false)
     }
+}
+
+/// Handles one generation-7 raw record for a filesystem write correlation.
+pub async fn handle_fs_bulk_record(
+    id: u32,
+    record: &BulkRecord,
+    session: &mut FsWriteSession,
+    out_buf: &mut Vec<u8>,
+) -> Result<bool, String> {
+    let Some(receiver) = session.bulk.as_mut() else {
+        return Err("raw bulk record sent to a generation-6 filesystem write".into());
+    };
+    let end = receiver
+        .accept_record(record)
+        .map_err(|error| format!("invalid filesystem bulk record: {error}"))?;
+
+    if let Some(expected) = session.expected_len
+        && end > expected
+    {
+        encode_response(
+            id,
+            error_response(format!(
+                "write length mismatch: expected {expected}, received at least {end}"
+            )),
+            out_buf,
+        )?;
+        return Ok(true);
+    }
+
+    let mut file = session.file.lock().await;
+    if !session.append
+        && let Err(error) = file.seek(std::io::SeekFrom::Start(session.offset)).await
+    {
+        encode_response(id, error_response(format!("seek: {error}")), out_buf)?;
+        return Ok(true);
+    }
+    if let Err(error) = file.write_all(&record.payload).await {
+        encode_response(id, error_response(format!("write: {error}")), out_buf)?;
+        return Ok(true);
+    }
+    drop(file);
+
+    session.offset = session.offset.saturating_add(record.payload.len() as u64);
+    session.written = end;
+    if let Some(credit) = receiver
+        .consume(end)
+        .map_err(|error| format!("advance filesystem bulk credit: {error}"))?
+    {
+        encode_control(MessageType::BulkCredit, id, &credit, out_buf)?;
+    }
+    Ok(false)
+}
+
+/// Handles the exact end marker for a generation-7 filesystem write.
+pub async fn handle_fs_bulk_finish(
+    id: u32,
+    finish: BulkFinish,
+    session: &mut FsWriteSession,
+    out_buf: &mut Vec<u8>,
+) -> Result<bool, String> {
+    let Some(receiver) = session.bulk.as_mut() else {
+        return Err("bulk finish sent to a generation-6 filesystem write".into());
+    };
+    receiver
+        .accept_finish(finish)
+        .map_err(|error| format!("invalid filesystem bulk finish: {error}"))?;
+
+    if let Some(expected) = session.expected_len
+        && session.written != expected
+    {
+        encode_response(
+            id,
+            error_response(format!(
+                "write length mismatch: expected {expected}, wrote {}",
+                session.written
+            )),
+            out_buf,
+        )?;
+        return Ok(true);
+    }
+
+    let mut file = session.file.lock().await;
+    if let Err(error) = file.flush().await {
+        encode_response(id, error_response(format!("flush: {error}")), out_buf)?;
+        return Ok(true);
+    }
+    encode_response(id, ok_response(None), out_buf)?;
+    Ok(true)
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -746,6 +936,155 @@ async fn handle_rename(src: &str, dst: &str) -> FsResponse {
     }
 }
 
+fn accept_fs_read_offer(offer: BulkOffer) -> Result<BulkAccepted, String> {
+    let offer = offer
+        .validate()
+        .map_err(|error| format!("invalid filesystem read bulk offer: {error}"))?;
+    if offer.guest_to_host_credit_limit == 0 {
+        return Err("filesystem read bulk offer must grant guest-to-host credit".into());
+    }
+    Ok(BulkAccepted {
+        kind: BulkKind::Filesystem,
+        flows: BULK_FLOW_MASK_GUEST_TO_HOST,
+        format: offer.format,
+        max_record_payload: offer
+            .max_record_payload
+            .min(microsandbox_protocol::bulk::DEFAULT_BULK_RECORD_PAYLOAD),
+        host_to_guest_credit_limit: 0,
+        guest_to_host_credit_limit: offer.guest_to_host_credit_limit,
+    })
+}
+
+fn accept_fs_write_offer(offer: BulkOffer) -> Result<BulkAccepted, String> {
+    let offer = offer
+        .validate()
+        .map_err(|error| format!("invalid filesystem write bulk offer: {error}"))?;
+    if offer.guest_to_host_credit_limit != 0 {
+        return Err("filesystem write bulk offer must not grant guest-to-host credit".into());
+    }
+    Ok(BulkAccepted {
+        kind: BulkKind::Filesystem,
+        flows: BULK_FLOW_MASK_HOST_TO_GUEST,
+        format: offer.format,
+        max_record_payload: offer
+            .max_record_payload
+            .min(microsandbox_protocol::bulk::DEFAULT_BULK_RECORD_PAYLOAD),
+        host_to_guest_credit_limit: DEFAULT_BULK_WINDOW,
+        guest_to_host_credit_limit: 0,
+    })
+}
+
+async fn handle_bulk_read_stream(
+    id: u32,
+    file: Arc<Mutex<tokio::fs::File>>,
+    offset: u64,
+    len: Option<u64>,
+    mut sender: BulkSendState,
+    mut credit_rx: watch::Receiver<Option<BulkCredit>>,
+    tx: &SessionOutputSender,
+) {
+    let mut file = file.lock().await;
+    if let Err(error) = file.seek(std::io::SeekFrom::Start(offset)).await {
+        send_raw_response(id, false, Some(format!("seek: {error}")), None, tx).await;
+        return;
+    }
+
+    let mut remaining = len;
+    loop {
+        if remaining == Some(0) {
+            break;
+        }
+        while sender.available_credit() == 0 {
+            if credit_rx.changed().await.is_err() {
+                return;
+            }
+            let Some(credit) = *credit_rx.borrow_and_update() else {
+                continue;
+            };
+            if let Err(error) = sender.apply_credit(credit) {
+                send_raw_response(
+                    id,
+                    false,
+                    Some(format!("invalid filesystem bulk credit: {error}")),
+                    None,
+                    tx,
+                )
+                .await;
+                return;
+            }
+        }
+
+        let read_len = sender
+            .available_credit()
+            .min(sender.max_record_payload() as u64)
+            .min(remaining.unwrap_or(u64::MAX)) as usize;
+        let Some(permit) = tx.reserve(read_len).await else {
+            return;
+        };
+        let mut payload = vec![0u8; read_len];
+        match file.read(&mut payload).await {
+            Ok(0) => break,
+            Ok(read) => {
+                payload.truncate(read);
+                if let Some(remaining) = &mut remaining {
+                    *remaining = remaining.saturating_sub(read as u64);
+                }
+                let record_offset = match sender.admit(read) {
+                    Ok(offset) => offset,
+                    Err(error) => {
+                        send_raw_response(
+                            id,
+                            false,
+                            Some(format!("admit filesystem bulk record: {error}")),
+                            None,
+                            tx,
+                        )
+                        .await;
+                        return;
+                    }
+                };
+                let record = BulkRecord {
+                    id,
+                    kind: BulkKind::Filesystem,
+                    flow: BulkFlow::GuestToHost,
+                    offset: record_offset,
+                    payload: Bytes::from(payload),
+                };
+                let output = BulkSessionOutput::new(record, RawActivity::fs_bytes(read));
+                if !tx
+                    .send_reserved(id, SessionOutput::Bulk(output), permit)
+                    .await
+                {
+                    return;
+                }
+            }
+            Err(error) => {
+                send_raw_response(id, false, Some(format!("read: {error}")), None, tx).await;
+                return;
+            }
+        }
+    }
+
+    let finish = match sender.finish() {
+        Ok(finish) => finish,
+        Err(error) => {
+            send_raw_response(
+                id,
+                false,
+                Some(format!("finish filesystem bulk read: {error}")),
+                None,
+                tx,
+            )
+            .await;
+            return;
+        }
+    };
+    if !send_raw_control(id, MessageType::BulkFinish, &finish, None, tx).await {
+        return;
+    }
+    send_raw_response(id, true, None, None, tx).await;
+}
+
 async fn handle_read_stream(
     id: u32,
     file: Arc<Mutex<tokio::fs::File>>,
@@ -991,6 +1330,41 @@ fn encode_response(id: u32, resp: FsResponse, out_buf: &mut Vec<u8>) -> Result<(
     Ok(())
 }
 
+fn encode_control<T: Serialize>(
+    message_type: MessageType,
+    id: u32,
+    payload: &T,
+    out_buf: &mut Vec<u8>,
+) -> Result<(), String> {
+    let message = Message::with_payload(message_type, id, payload)
+        .map_err(|error| format!("encode {}: {error}", message_type.as_str()))?;
+    codec::encode_to_buf(&message, out_buf)
+        .map_err(|error| format!("encode {} frame: {error}", message_type.as_str()))
+}
+
+async fn send_raw_control<T: Serialize>(
+    id: u32,
+    message_type: MessageType,
+    payload: &T,
+    completion: Option<RawSessionCompletion>,
+    tx: &SessionOutputSender,
+) -> bool {
+    let mut frame = Vec::new();
+    if let Err(error) = encode_control(message_type, id, payload, &mut frame) {
+        eprintln!("failed to {error}");
+        return false;
+    }
+    tx.send(
+        id,
+        SessionOutput::Raw(RawSessionOutput::new(
+            frame,
+            RawActivity::guest_message(),
+            completion,
+        )),
+    )
+    .await
+}
+
 async fn send_raw_response(
     id: u32,
     ok: bool,
@@ -1126,4 +1500,149 @@ fn unknown_entry_info(path: &str) -> FsEntryInfo {
 fn cstring_path(path: impl AsRef<Path>) -> Result<CString, String> {
     CString::new(path.as_ref().as_os_str().as_bytes())
         .map_err(|e| format!("path contains NUL: {e}"))
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn raw_bulk_write_requires_exact_offsets_and_finish_length() {
+        let path = test_path("bulk-write");
+        let file = tokio::fs::File::create(&path).await.unwrap();
+        let mut session = FsWriteSession {
+            owner_id: 1,
+            handle: 1,
+            file: Arc::new(Mutex::new(file)),
+            offset: 0,
+            append: false,
+            expected_len: Some(7),
+            written: 0,
+            bulk: Some(
+                BulkReceiveState::new(
+                    BulkKind::Filesystem,
+                    BulkFlow::HostToGuest,
+                    microsandbox_protocol::bulk::DEFAULT_BULK_RECORD_PAYLOAD,
+                    DEFAULT_BULK_WINDOW,
+                    DEFAULT_BULK_WINDOW,
+                )
+                .unwrap(),
+            ),
+        };
+        let mut out = Vec::new();
+
+        let wrong_offset = BulkRecord {
+            id: 1,
+            kind: BulkKind::Filesystem,
+            flow: BulkFlow::HostToGuest,
+            offset: 1,
+            payload: Bytes::from_static(b"ignored"),
+        };
+        assert!(
+            handle_fs_bulk_record(1, &wrong_offset, &mut session, &mut out)
+                .await
+                .unwrap_err()
+                .contains("does not match expected")
+        );
+
+        let record = BulkRecord {
+            offset: 0,
+            ..wrong_offset
+        };
+        assert!(
+            !handle_fs_bulk_record(1, &record, &mut session, &mut out)
+                .await
+                .unwrap()
+        );
+        assert!(
+            handle_fs_bulk_finish(
+                1,
+                BulkFinish {
+                    kind: BulkKind::Filesystem,
+                    flow: BulkFlow::HostToGuest,
+                    final_offset: 7,
+                },
+                &mut session,
+                &mut out,
+            )
+            .await
+            .unwrap()
+        );
+        drop(session);
+
+        let response = codec::try_decode_from_buf(&mut out).unwrap().unwrap();
+        assert_eq!(response.t, MessageType::FsResponse);
+        assert!(response.payload::<FsResponse>().unwrap().ok);
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), b"ignored");
+        tokio::fs::remove_file(path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn raw_bulk_read_emits_payload_exact_finish_then_terminal_response() {
+        let path = test_path("bulk-read");
+        tokio::fs::write(&path, b"raw-read-payload").await.unwrap();
+        let file = tokio::fs::File::open(&path).await.unwrap();
+        let sender = BulkSendState::new(
+            BulkKind::Filesystem,
+            BulkFlow::GuestToHost,
+            microsandbox_protocol::bulk::DEFAULT_BULK_RECORD_PAYLOAD,
+            DEFAULT_BULK_WINDOW,
+        )
+        .unwrap();
+        let (_credit_tx, credit_rx) = watch::channel(None);
+        let (session_tx, mut session_rx) = SessionOutputSender::channel();
+
+        handle_bulk_read_stream(
+            2,
+            Arc::new(Mutex::new(file)),
+            0,
+            None,
+            sender,
+            credit_rx,
+            &session_tx,
+        )
+        .await;
+
+        let first = session_rx.recv().await.unwrap();
+        let SessionOutput::Bulk(first) = first.output else {
+            panic!("expected raw filesystem record");
+        };
+        assert_eq!(first.record.offset, 0);
+        assert_eq!(
+            first.record.payload,
+            Bytes::from_static(b"raw-read-payload")
+        );
+
+        let finish = decode_raw_output(session_rx.recv().await.unwrap().output);
+        assert_eq!(finish.t, MessageType::BulkFinish);
+        let finish: BulkFinish = finish.payload().unwrap();
+        assert_eq!(finish.final_offset, b"raw-read-payload".len() as u64);
+        let response = decode_raw_output(session_rx.recv().await.unwrap().output);
+        assert_eq!(response.t, MessageType::FsResponse);
+        assert!(response.payload::<FsResponse>().unwrap().ok);
+        tokio::fs::remove_file(path).await.unwrap();
+    }
+
+    fn decode_raw_output(output: SessionOutput) -> Message {
+        let SessionOutput::Raw(mut output) = output else {
+            panic!("expected raw control frame");
+        };
+        codec::try_decode_from_buf(&mut output.frame)
+            .unwrap()
+            .unwrap()
+    }
+
+    fn test_path(name: &str) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("msb-agentd-{name}-{}-{unique}", std::process::id()))
+    }
 }

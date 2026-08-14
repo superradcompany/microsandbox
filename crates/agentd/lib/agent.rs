@@ -15,7 +15,10 @@ use tokio::sync::watch;
 use tokio::time::{self, Duration};
 
 use microsandbox_protocol::HANDOFF_POWEROFF_TIMEOUT;
-use microsandbox_protocol::codec::{self, MAX_FRAME_SIZE};
+use microsandbox_protocol::bulk::{
+    BulkCancel, BulkCancelReason, BulkCredit, BulkFinish, BulkFlow, BulkKind, BulkRecord,
+};
+use microsandbox_protocol::codec::{self, DecodedFrame, MAX_FRAME_SIZE};
 use microsandbox_protocol::core::{
     ClockSync, CoreError, CoreErrorKind, InitAck, InitResolved, Ping, Pong, Ready,
     RelayClientDisconnected, ResolvedUser, Touch, Touched,
@@ -24,7 +27,7 @@ use microsandbox_protocol::exec::{
     ExecExited, ExecFailed, ExecFailureKind, ExecRequest, ExecResize, ExecSignal, ExecStarted,
     ExecStderr, ExecStdin, ExecStdinError, ExecStdout,
 };
-use microsandbox_protocol::fs::{FsData, FsRequest};
+use microsandbox_protocol::fs::{FsData, FsRequest, FsResponse};
 use microsandbox_protocol::heartbeat::{ActivityCounters, Heartbeat};
 use microsandbox_protocol::message::{Message, MessageType};
 use microsandbox_protocol::tcp::{TcpClose, TcpConnect, TcpData, TcpEof, TcpFailed};
@@ -240,9 +243,22 @@ pub async fn run(
                             // message-level failures are reported on the same
                             // correlation ID with `core.error`; unrecoverable
                             // frame-level failures still close the agent loop.
-                            while let Some(msg) = codec::try_decode_from_bytes(&mut serial_in_buf)
+                            while let Some(frame) = codec::try_decode_frame_from_bytes(&mut serial_in_buf)
                                 .map_err(|e| AgentdError::ExecSession(format!("decode frame: {e}")))?
                             {
+                                let DecodedFrame::Control(msg) = frame else {
+                                    let DecodedFrame::Bulk(record) = frame else {
+                                        unreachable!();
+                                    };
+                                    handle_bulk_record(
+                                        record,
+                                        &mut state,
+                                        &mut activity,
+                                        &mut serial_out_buf,
+                                    ).await?;
+                                    publish_heartbeat_snapshot(&heartbeat_tx, &state, &activity);
+                                    continue;
+                                };
                                 if msg.flags != msg.t.flags() {
                                     let out_before = serial_out_buf.len();
                                     encode_core_error_if_supported(
@@ -353,6 +369,13 @@ pub async fn run(
                         }
                         write_all_async_fd(&async_port, &output.frame).await?;
                     }
+                    SessionOutput::Bulk(output) => {
+                        apply_raw_activity(output.activity, &mut activity);
+                        if !serial_out_buf.is_empty() {
+                            flush_write_buf(&async_port, &mut serial_out_buf).await?;
+                        }
+                        write_bulk_record_async_fd(&async_port, &output.record).await?;
+                    }
                 }
                 publish_heartbeat_snapshot(&heartbeat_tx, &state, &activity);
 
@@ -407,6 +430,74 @@ pub fn report_init_context(port_file: &File, default_user: Option<&str>) -> Agen
 //--------------------------------------------------------------------------------------------------
 
 /// Handles a single incoming message from the host.
+async fn handle_bulk_record(
+    record: BulkRecord,
+    state: &mut AgentState,
+    activity: &mut ActivityTracker,
+    out_buf: &mut Vec<u8>,
+) -> AgentdResult<()> {
+    activity.record_host_message();
+    match record.kind {
+        BulkKind::Filesystem => {
+            if record.flow != BulkFlow::HostToGuest {
+                encode_bulk_fs_failure(
+                    record.id,
+                    "host sent a filesystem record in the guest-to-host flow".into(),
+                    out_buf,
+                )?;
+                if let Some(session) = state.read_sessions.remove(&record.id) {
+                    session.abort();
+                }
+                state.write_sessions.remove(&record.id);
+                return Ok(());
+            }
+
+            let result = match state.write_sessions.get_mut(&record.id) {
+                Some(session) => {
+                    fs::handle_fs_bulk_record(record.id, &record, session, out_buf).await
+                }
+                None => Err(format!("unknown filesystem write session: {}", record.id)),
+            };
+            match result {
+                Ok(true) => {
+                    state.write_sessions.remove(&record.id);
+                }
+                Ok(false) => activity.add_fs_bytes(record.payload.len()),
+                Err(error) => {
+                    state.write_sessions.remove(&record.id);
+                    encode_bulk_fs_failure(record.id, error, out_buf)?;
+                }
+            }
+        }
+        BulkKind::Tcp => {
+            if record.flow != BulkFlow::HostToGuest {
+                encode_bulk_tcp_failure(
+                    record.id,
+                    "host sent a TCP record in the guest-to-host flow".into(),
+                    out_buf,
+                )?;
+                if let Some(session) = state.tcp_sessions.remove(&record.id) {
+                    session.close();
+                }
+                return Ok(());
+            }
+            let result = match state.tcp_sessions.get(&record.id) {
+                Some(session) => session.write_bulk(record.clone()).await,
+                None => Err(format!("unknown TCP session: {}", record.id)),
+            };
+            if let Err(error) = result {
+                encode_bulk_tcp_failure(record.id, error, out_buf)?;
+                if let Some(session) = state.tcp_sessions.remove(&record.id) {
+                    session.close();
+                }
+            } else {
+                activity.add_tcp_bytes(record.payload.len());
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn handle_message(
     msg: Message,
     state: &mut AgentState,
@@ -538,7 +629,9 @@ async fn handle_message(
             let Some(req) = decode_payload_or_core_error::<FsRequest>(&msg, out_buf)? else {
                 return Ok(());
             };
-            match fs::handle_fs_request(msg.id, req, &mut state.fs, out_buf, session_tx).await {
+            match fs::handle_fs_request(msg.id, msg.v, req, &mut state.fs, out_buf, session_tx)
+                .await
+            {
                 Ok(Some(FsStreamSession::Read(rs))) => {
                     state.read_sessions.insert(msg.id, rs);
                 }
@@ -585,10 +678,119 @@ async fn handle_message(
             }
         }
 
+        MessageType::BulkCredit => {
+            let Some(credit) = decode_payload_or_core_error::<BulkCredit>(&msg, out_buf)? else {
+                return Ok(());
+            };
+            match credit.kind {
+                BulkKind::Filesystem => {
+                    let result = state
+                        .read_sessions
+                        .get(&msg.id)
+                        .ok_or_else(|| format!("unknown filesystem read session: {}", msg.id))
+                        .and_then(|session| session.apply_credit(credit));
+                    if let Err(error) = result {
+                        if let Some(session) = state.read_sessions.remove(&msg.id) {
+                            session.abort();
+                        }
+                        encode_bulk_fs_failure(msg.id, error, out_buf)?;
+                    }
+                }
+                BulkKind::Tcp => {
+                    let result = match state.tcp_sessions.get(&msg.id) {
+                        Some(session) => session.apply_credit(credit).await,
+                        None => Err(format!("unknown TCP session: {}", msg.id)),
+                    };
+                    if let Err(error) = result {
+                        encode_bulk_tcp_failure(msg.id, error, out_buf)?;
+                        if let Some(session) = state.tcp_sessions.remove(&msg.id) {
+                            session.close();
+                        }
+                    }
+                }
+            }
+        }
+
+        MessageType::BulkFinish => {
+            let Some(finish) = decode_payload_or_core_error::<BulkFinish>(&msg, out_buf)? else {
+                return Ok(());
+            };
+            match finish.kind {
+                BulkKind::Filesystem => {
+                    let result = match state.write_sessions.get_mut(&msg.id) {
+                        Some(session) => {
+                            fs::handle_fs_bulk_finish(msg.id, finish, session, out_buf).await
+                        }
+                        None => Err(format!("unknown filesystem write session: {}", msg.id)),
+                    };
+                    match result {
+                        Ok(true) => {
+                            state.write_sessions.remove(&msg.id);
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            state.write_sessions.remove(&msg.id);
+                            encode_bulk_fs_failure(msg.id, error, out_buf)?;
+                        }
+                    }
+                }
+                BulkKind::Tcp => {
+                    let result = match state.tcp_sessions.get(&msg.id) {
+                        Some(session) => session.finish_bulk(finish).await,
+                        None => Err(format!("unknown TCP session: {}", msg.id)),
+                    };
+                    if let Err(error) = result {
+                        encode_bulk_tcp_failure(msg.id, error, out_buf)?;
+                        if let Some(session) = state.tcp_sessions.remove(&msg.id) {
+                            session.close();
+                        }
+                    }
+                }
+            }
+        }
+
+        MessageType::BulkCancel => {
+            let Some(cancel) = decode_payload_or_core_error::<BulkCancel>(&msg, out_buf)? else {
+                return Ok(());
+            };
+            match cancel.kind {
+                BulkKind::Filesystem => {
+                    state.write_sessions.remove(&msg.id);
+                    if let Some(session) = state.read_sessions.remove(&msg.id) {
+                        session.abort();
+                    }
+                }
+                BulkKind::Tcp => {
+                    if let Some(session) = state.tcp_sessions.remove(&msg.id) {
+                        session.close();
+                    }
+                }
+            }
+        }
+
+        MessageType::BulkAccepted => {
+            encode_core_error_if_supported(
+                &msg,
+                msg.id,
+                CoreErrorKind::UnsupportedMessageType,
+                "host cannot accept a guest-initiated bulk offer".into(),
+                Some(msg.t.as_str().to_string()),
+                out_buf,
+            )?;
+        }
+
         MessageType::TcpConnect => {
             let Some(req) = decode_payload_or_core_error::<TcpConnect>(&msg, out_buf)? else {
                 return Ok(());
             };
+            if req.bulk.is_some() && msg.v < 7 {
+                encode_tcp_failed(
+                    msg.id,
+                    "raw bulk offer requires protocol generation 7".into(),
+                    out_buf,
+                )?;
+                return Ok(());
+            }
             // The connect runs inside the session task; the agent loop never
             // blocks on it. Success or failure arrives later as a tcp frame.
             let session = TcpSession::open(msg.id, req, session_tx);
@@ -933,6 +1135,60 @@ fn encode_tcp_failed(id: u32, error: String, out_buf: &mut Vec<u8>) -> AgentdRes
     Ok(())
 }
 
+fn encode_bulk_fs_failure(id: u32, error: String, out_buf: &mut Vec<u8>) -> AgentdResult<()> {
+    encode_bulk_cancel(
+        id,
+        BulkKind::Filesystem,
+        BulkCancelReason::ProtocolState,
+        error.clone(),
+        out_buf,
+    )?;
+    let response = Message::with_payload(
+        MessageType::FsResponse,
+        id,
+        &FsResponse {
+            ok: false,
+            error: Some(error),
+            data: None,
+        },
+    )
+    .map_err(|error| AgentdError::ExecSession(format!("encode fs failure: {error}")))?;
+    codec::encode_to_buf(&response, out_buf)
+        .map_err(|error| AgentdError::ExecSession(format!("encode fs failure frame: {error}")))
+}
+
+fn encode_bulk_tcp_failure(id: u32, error: String, out_buf: &mut Vec<u8>) -> AgentdResult<()> {
+    encode_bulk_cancel(
+        id,
+        BulkKind::Tcp,
+        BulkCancelReason::ProtocolState,
+        error.clone(),
+        out_buf,
+    )?;
+    encode_tcp_failed(id, error, out_buf)
+}
+
+fn encode_bulk_cancel(
+    id: u32,
+    kind: BulkKind,
+    reason: BulkCancelReason,
+    message: String,
+    out_buf: &mut Vec<u8>,
+) -> AgentdResult<()> {
+    let cancel = Message::with_payload(
+        MessageType::BulkCancel,
+        id,
+        &BulkCancel {
+            kind,
+            reason,
+            message,
+        },
+    )
+    .map_err(|error| AgentdError::ExecSession(format!("encode bulk cancel: {error}")))?;
+    codec::encode_to_buf(&cancel, out_buf)
+        .map_err(|error| AgentdError::ExecSession(format!("encode bulk cancel frame: {error}")))
+}
+
 fn encode_core_error_if_supported(
     source: &Message,
     id: u32,
@@ -1194,6 +1450,47 @@ async fn write_all_async_fd(fd: &AsyncFd<std::fs::File>, buf: &[u8]) -> AgentdRe
     Ok(())
 }
 
+/// Writes a raw bulk header and payload with cursor-safe `writev` calls.
+async fn write_bulk_record_async_fd(
+    fd: &AsyncFd<std::fs::File>,
+    record: &BulkRecord,
+) -> AgentdResult<()> {
+    let header = codec::encode_bulk_header(record)
+        .map_err(|error| AgentdError::ExecSession(format!("encode bulk header: {error}")))?;
+    let mut header_offset = 0;
+    let mut payload_offset = 0;
+
+    while header_offset < header.len() || payload_offset < record.payload.len() {
+        let mut guard = fd.writable().await?;
+        let result = guard.try_io(|inner| {
+            write_vectored_to_fd(
+                inner.get_ref().as_raw_fd(),
+                &header[header_offset..],
+                &record.payload[payload_offset..],
+            )
+        });
+        let written = match result {
+            Ok(Ok(0)) => {
+                return Err(std::io::Error::from(std::io::ErrorKind::WriteZero).into());
+            }
+            Ok(Ok(written)) => written,
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Ok(Err(error)) => return Err(error.into()),
+            Err(_would_block) => continue,
+        };
+
+        let header_remaining = header.len() - header_offset;
+        if written < header_remaining {
+            header_offset += written;
+        } else {
+            header_offset = header.len();
+            payload_offset += written - header_remaining;
+        }
+    }
+
+    Ok(())
+}
+
 /// Writes to a raw fd (non-blocking).
 fn write_to_fd(fd: i32, buf: &[u8]) -> std::io::Result<usize> {
     let n = unsafe { libc::write(fd, buf.as_ptr() as *const libc::c_void, buf.len()) };
@@ -1201,6 +1498,30 @@ fn write_to_fd(fd: i32, buf: &[u8]) -> std::io::Result<usize> {
         Err(std::io::Error::last_os_error())
     } else {
         Ok(n as usize)
+    }
+}
+
+fn write_vectored_to_fd(fd: i32, header: &[u8], payload: &[u8]) -> std::io::Result<usize> {
+    if header.is_empty() {
+        return write_to_fd(fd, payload);
+    }
+
+    let vectors = [
+        libc::iovec {
+            iov_base: header.as_ptr().cast_mut().cast(),
+            iov_len: header.len(),
+        },
+        libc::iovec {
+            iov_base: payload.as_ptr().cast_mut().cast(),
+            iov_len: payload.len(),
+        },
+    ];
+    let vector_count = if payload.is_empty() { 1 } else { 2 };
+    let written = unsafe { libc::writev(fd, vectors.as_ptr(), vector_count) };
+    if written < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(written as usize)
     }
 }
 
