@@ -282,13 +282,29 @@ pub(super) async fn save_snapshot(
     let write_result: MicrosandboxResult<()> = async {
         if opts.plain_tar {
             let mut builder = Builder::new(out_file);
-            write_archive_entries(&mut builder, &snapshots, &cache_files, &head, &opts).await?;
+            // Entry writers retain hashing and sparse-I/O buffers across await
+            // points. Keep that state off Windows' smaller worker stack.
+            Box::pin(write_archive_entries(
+                &mut builder,
+                &snapshots,
+                &cache_files,
+                &head,
+                &opts,
+            ))
+            .await?;
             let mut inner = builder.into_inner().await?;
             tokio::io::AsyncWriteExt::shutdown(&mut inner).await?;
         } else {
             let writer = ZstdEncoder::new(out_file);
             let mut builder = Builder::new(writer);
-            write_archive_entries(&mut builder, &snapshots, &cache_files, &head, &opts).await?;
+            Box::pin(write_archive_entries(
+                &mut builder,
+                &snapshots,
+                &cache_files,
+                &head,
+                &opts,
+            ))
+            .await?;
             let mut inner = builder.into_inner().await?;
             tokio::io::AsyncWriteExt::shutdown(&mut inner).await?;
         }
@@ -301,9 +317,15 @@ pub(super) async fn save_snapshot(
     }
     let durable = tokio::fs::OpenOptions::new()
         .read(true)
+        // FlushFileBuffers requires a write-capable handle on Windows.
+        .write(true)
         .open(&temp_out)
         .await?;
     durable.sync_all().await?;
+    // Windows will not replace a file while this durability handle is still
+    // open. Close it explicitly before the atomic rename; relying on the
+    // function-scope drop kept the source locked until after MoveFileExW.
+    drop(durable);
     replace_archive(&temp_out, out).await?;
     #[cfg(unix)]
     if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
@@ -391,7 +413,15 @@ pub(super) async fn load_snapshot(
     let head_path = snapshots_dir.join(&head_relative);
 
     ensure_promote_targets_available(snapshot_stage.path(), &snapshots_dir).await?;
-    install_staged_cache(cache_stage.path(), &cache_dir, &head_manifest).await?;
+    // Cache installation carries hashing buffers across await points. Keep
+    // that future on the heap so the archive loader remains within Windows'
+    // smaller default worker-thread stack.
+    Box::pin(install_staged_cache(
+        cache_stage.path(),
+        &cache_dir,
+        &head_manifest,
+    ))
+    .await?;
     promote_stage(snapshot_stage.path(), &snapshots_dir).await?;
 
     let snap = store::open_snapshot(local, head_path.to_string_lossy().as_ref()).await?;
