@@ -70,7 +70,9 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: build/libkrunfw*
-          key: libkrunfw-${{ inputs.target }}-${{ hashFiles('vendor/libkrunfw/**') }}
+          # Include the reusable workflow because its inline build recipe and
+          # ABI/version environment also determine the cached output.
+          key: libkrunfw-${{ inputs.target }}-${{ hashFiles('vendor/libkrunfw/**', '.github/workflows/check-platform.yml') }}
 
       - name: Build libkrunfw (Linux)
         if: steps.cache-libkrunfw.outputs.cache-hit != 'true' && inputs.os == 'linux'

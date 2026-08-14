@@ -4,8 +4,8 @@ set -euo pipefail
 
 # By default, provision eight additional repository-scoped GitHub Actions
 # runners on the existing Ubuntu host, bringing runner01..runner12 online.
-# Each runner gets a distinct Unix user and work tree so concurrent checkouts
-# and per-user ~/.microsandbox state cannot collide.
+# Each runner gets a distinct unprivileged Unix user and work tree so concurrent
+# checkouts and per-user ~/.microsandbox state cannot collide.
 #
 # Run as root with a short-lived repository registration token:
 #   sudo REPOSITORY_URL=https://github.com/OWNER/REPO \
@@ -40,16 +40,49 @@ trap 'rm -f "${archive_path}"' EXIT
 curl --fail --location --retry 5 --output "${archive_path}" "${RUNNER_URL}"
 printf '%s  %s\n' "${RUNNER_SHA256}" "${archive_path}" | sha256sum --check --status
 
-sudoers_tmp=$(mktemp "${TMPDIR:-/tmp}/microsandbox-actions-runners.XXXXXX")
-trap 'rm -f "${archive_path}" "${sudoers_tmp}"' EXIT
+# Install the only extra package needed by the KVM jobs before dropping to the
+# runner accounts. Pull-request code runs as these users, so they must not have
+# Docker access or any sudo path back to the host's root account.
+if ! command -v unzip >/dev/null 2>&1; then
+  apt-get update
+  apt-get install -y unzip
+fi
+rm -f /etc/sudoers.d/actions-runner-apt
 
-# Match the existing runner01..runner04 host policy. Group membership grants
-# KVM and Docker access, while sudo remains restricted to apt-get.
-groupadd --force actions-runner
-printf '%%actions-runner ALL=(root) NOPASSWD: /usr/bin/apt-get\n' > "${sudoers_tmp}"
-chmod 0440 "${sudoers_tmp}"
-visudo -c -f "${sudoers_tmp}"
-install -o root -g root -m 0440 "${sudoers_tmp}" /etc/sudoers.d/actions-runner-apt
+# Revoke the legacy privileges from every runnerNN account, including the
+# original runner01..runner04 users that predate this provisioner.
+while IFS=: read -r existing_user _; do
+  if [[ ${existing_user} != "${RUNNER_USER_PREFIX}"* ]]; then
+    continue
+  fi
+
+  runner_suffix=${existing_user#"${RUNNER_USER_PREFIX}"}
+  if [[ ! ${runner_suffix} =~ ^[0-9]+$ ]]; then
+    continue
+  fi
+
+  privileges_revoked=false
+  for privileged_group in docker actions-runner; do
+    if id -nG "${existing_user}" | tr ' ' '\n' | grep -Fxq "${privileged_group}"; then
+      gpasswd --delete "${existing_user}" "${privileged_group}" >/dev/null
+      privileges_revoked=true
+    fi
+  done
+
+  # A running service retains its old supplementary groups until it restarts.
+  # Restart only services whose account memberships changed.
+  if [[ ${privileges_revoked} == true ]]; then
+    existing_home=$(getent passwd "${existing_user}" | cut -d: -f6)
+    existing_runner_dir="${existing_home}/actions-runner"
+    if [[ -x "${existing_runner_dir}/svc.sh" && -f "${existing_runner_dir}/.service" ]]; then
+      (
+        cd "${existing_runner_dir}"
+        ./svc.sh stop
+        ./svc.sh start
+      )
+    fi
+  fi
+done < <(getent passwd)
 
 for index in $(seq "${RUNNER_FIRST}" "${RUNNER_LAST}"); do
   suffix=$(printf '%02d' "${index}")
@@ -57,9 +90,9 @@ for index in $(seq "${RUNNER_FIRST}" "${RUNNER_LAST}"); do
   runner_name="${RUNNER_PREFIX}${suffix}"
 
   if ! id "${runner_user}" >/dev/null 2>&1; then
-    useradd --create-home --shell /bin/bash --groups kvm,docker,actions-runner "${runner_user}"
+    useradd --create-home --shell /bin/bash --groups kvm "${runner_user}"
   fi
-  usermod --append --groups kvm,docker,actions-runner "${runner_user}"
+  usermod --append --groups kvm "${runner_user}"
 
   runner_home=$(getent passwd "${runner_user}" | cut -d: -f6)
   runner_dir="${runner_home}/actions-runner"

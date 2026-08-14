@@ -37,7 +37,9 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: vendor/libkrunfw/kernel.c
-          key: kernel-c-aarch64-${{ hashFiles('vendor/libkrunfw/**') }}
+          # The build recipe is inline below, so hash this workflow along with
+          # the source to prevent reusing output built with stale flags.
+          key: kernel-c-aarch64-${{ hashFiles('vendor/libkrunfw/**', '.github/workflows/release.yml') }}
 
       - name: Install kernel build deps
         if: steps.cache-kernel.outputs.cache-hit != 'true'
@@ -68,7 +70,9 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: vendor/libkrunfw/kernel.c
-          key: kernel-c-x86_64-${{ hashFiles('vendor/libkrunfw/**') }}
+          # The build recipe is inline below, so hash this workflow along with
+          # the source to prevent reusing output built with stale flags.
+          key: kernel-c-x86_64-${{ hashFiles('vendor/libkrunfw/**', '.github/workflows/release.yml') }}
 
       - name: Install kernel build deps
         if: steps.cache-kernel.outputs.cache-hit != 'true'
@@ -231,7 +235,9 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: build/libkrunfw*
-          key: libkrunfw-${{ matrix.target }}-${{ hashFiles('vendor/libkrunfw/**') }}
+          # Include the inline build recipe and ABI/version environment in the
+          # key as well as the libkrunfw source.
+          key: libkrunfw-${{ matrix.target }}-${{ hashFiles('vendor/libkrunfw/**', '.github/workflows/release.yml') }}
 
       - name: Build libkrunfw (Linux)
         if: steps.cache-libkrunfw.outputs.cache-hit != 'true' && matrix.os == 'linux'
