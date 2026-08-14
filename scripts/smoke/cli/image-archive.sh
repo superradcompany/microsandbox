@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 MSB_BIN="${MSB_BIN:-${ROOT_DIR}/build/msb}"
-IMAGE="${MSB_CLI_SMOKE_DOCKER_IMAGE:-docker.io/library/alpine:3.20}"
+IMAGE="${MSB_CLI_SMOKE_DOCKER_IMAGE:-mirror.gcr.io/library/alpine:3.20}"
 TAG="${MSB_CLI_SMOKE_ARCHIVE_TAG:-msb-archive-smoke:ci}"
 
 if [[ ! -x "$MSB_BIN" ]]; then
