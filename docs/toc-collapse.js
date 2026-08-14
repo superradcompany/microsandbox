@@ -2,6 +2,7 @@
   const CONTENT_ID = "table-of-contents-content";
   const ROOT_SELECTOR = ':scope > li:has(> a[href^="#"])';
   const TOGGLE_CLASS = "msb-toc-toggle";
+  const MANUAL_COLLAPSE_ATTRIBUTE = "data-msb-manually-collapsed";
 
   const directLink = (item) =>
     Array.from(item.children).find(
@@ -45,11 +46,17 @@
       toggle.innerHTML = '<span aria-hidden="true"></span>';
       toggle.addEventListener("click", () => {
         const expanded = item.dataset.msbExpanded !== "true";
-        if (expanded) collapsePeers(item);
+        if (expanded) {
+          item.removeAttribute(MANUAL_COLLAPSE_ATTRIBUTE);
+          collapsePeers(item);
+        } else {
+          item.setAttribute(MANUAL_COLLAPSE_ATTRIBUTE, "true");
+        }
         setExpanded(item, toggle, expanded);
       });
       link.addEventListener("click", () => {
         if (item.dataset.msbExpanded === "true") return;
+        item.removeAttribute(MANUAL_COLLAPSE_ATTRIBUTE);
         collapsePeers(item);
         setExpanded(item, toggle, true);
       });
@@ -59,7 +66,21 @@
     }
   };
 
-  const observer = new MutationObserver(enhance);
+  const observer = new MutationObserver((records) => {
+    enhance();
+
+    for (const record of records) {
+      if (record.type !== "attributes" || record.attributeName !== "data-active") continue;
+      const item = record.target;
+      if (!(item instanceof HTMLElement) || !item.hasAttribute("data-active")) continue;
+      if (item.getAttribute(MANUAL_COLLAPSE_ATTRIBUTE) === "true") continue;
+
+      const toggle = item.querySelector(`:scope > .${TOGGLE_CLASS}`);
+      if (!toggle) continue;
+      collapsePeers(item);
+      setExpanded(item, toggle, true);
+    }
+  });
 
   const start = () => {
     enhance();
