@@ -616,12 +616,6 @@ Open a streaming writer for a file. Use this for files too large to fit in memor
 
 An open streaming read from a guest file. Must be closed with `Close` when done.
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `Recv(ctx context.Context)` | `([]byte, error)` | Receive the next chunk; returns `(nil, nil)` at EOF |
-| `WriteTo(w io.Writer)` | `(int64, error)` | Drain the stream into `w` using `context.Background()`; implements `io.WriterTo` |
-| `CopyTo(ctx context.Context, w io.Writer)` | `(int64, error)` | Drain into `w` honouring `ctx` for per-chunk cancellation |
-| `Close()` | `error` | Release the read stream handle |
 
 #### <span className="msb-recv">readStream.</span><span className="msb-hn">Recv()</span>
 
@@ -680,11 +674,6 @@ On a write error or partial write, `WriteTo` and `CopyTo` return the partial byt
 
 An open streaming write to a guest file. Must be closed with `Close(ctx)` to finalise the write.
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `Write(p []byte)` | `(int, error)` | Send a chunk; implements `io.Writer`, uses `context.Background()` internally |
-| `WriteCtx(ctx context.Context, data []byte)` | `error` | Send a chunk with explicit context control |
-| `Close(ctx context.Context)` | `error` | Send the EOF marker and wait for the guest to confirm; must be called to complete the write |
 
 #### <span className="msb-recv">writeStream.</span><span className="msb-hn">Write()</span>
 

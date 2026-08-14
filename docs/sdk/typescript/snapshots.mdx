@@ -97,6 +97,109 @@ const snap = await h.snapshot("after-pip-install");
 
 ## Snapshot
 
+<p className="msb-member-group">Instance properties</p>
+
+A `Snapshot` is a snapshot artifact on disk. The artifact directory is the source of truth; the local database index is a rebuildable cache.
+
+#### <span className="msb-recv">snap.</span><span className="msb-hn">path</span>
+
+```typescript
+get path(): string
+```
+
+Path to the artifact directory.
+
+#### <span className="msb-recv">snap.</span><span className="msb-hn">digest</span>
+
+```typescript
+get digest(): string
+```
+
+Canonical content digest (`sha256:hex`). The snapshot's identity.
+
+#### <span className="msb-recv">snap.</span><span className="msb-hn">sizeBytes</span>
+
+```typescript
+get sizeBytes(): bigint
+```
+
+Apparent size of the captured upper layer in bytes (sparse on disk).
+
+#### <span className="msb-recv">snap.</span><span className="msb-hn">imageRef</span>
+
+```typescript
+get imageRef(): string
+```
+
+Image reference the snapshot was taken from.
+
+#### <span className="msb-recv">snap.</span><span className="msb-hn">imageManifestDigest</span>
+
+```typescript
+get imageManifestDigest(): string
+```
+
+OCI manifest digest of the pinned image.
+
+#### <span className="msb-recv">snap.</span><span className="msb-hn">format</span>
+
+```typescript
+get format(): "raw" | "qcow2"
+```
+
+On-disk format of the upper layer.
+
+#### <span className="msb-recv">snap.</span><span className="msb-hn">scope</span>
+<div className="msb-tags"><span className="msb-tag is-instance">getter</span></div>
+
+```typescript
+get scope(): SnapshotScope
+```
+
+Snapshot scope: `"disk"` for a disk-only snapshot, `"resumable"` once resumable snapshots land. Always `"disk"` today. See [`SnapshotScope`](#snapshotscope-type).
+
+#### <span className="msb-recv">snap.</span><span className="msb-hn">fstype</span>
+
+```typescript
+get fstype(): string
+```
+
+Filesystem type inside the upper (e.g. `"ext4"`).
+
+#### <span className="msb-recv">snap.</span><span className="msb-hn">parent</span>
+
+```typescript
+get parent(): string | null
+```
+
+Manifest digest of the parent snapshot, or `null` for a root.
+
+#### <span className="msb-recv">snap.</span><span className="msb-hn">createdAt</span>
+
+```typescript
+get createdAt(): string
+```
+
+RFC 3339 timestamp when the snapshot was created.
+
+#### <span className="msb-recv">snap.</span><span className="msb-hn">labels</span>
+
+```typescript
+get labels(): ReadonlyArray<readonly [string, string]>
+```
+
+User-supplied labels (sorted by key in canonical form), as `[key, value]` pairs.
+
+#### <span className="msb-recv">snap.</span><span className="msb-hn">sourceSandbox</span>
+
+```typescript
+get sourceSandbox(): string | null
+```
+
+Best-effort source-sandbox name, if recorded. `null` when the manifest has no source recorded.
+
+<p className="msb-member-group">Static methods</p>
+
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">builder()</span>
 
 ```typescript
@@ -406,110 +509,7 @@ console.log("loaded", h.digest);
 
 ---
 
-<p className="msb-member-group">Instance members</p>
-
-A `Snapshot` is a snapshot artifact on disk. The artifact is a directory containing the `snapshot.json` descriptor and the captured `upper.ext4`. The directory is the source of truth; the local DB index is just a rebuildable cache. Returned by [`Snapshot.builder().create()`](#snapshotbuilder), [`Snapshot.open()`](#snapshot-open), and [`handle.snapshot()`](#handle-snapshot).
-
-#### <span className="msb-recv">snap.</span><span className="msb-hn">path</span>
-
-```typescript
-get path(): string
-```
-
-Path to the artifact directory.
-
-#### <span className="msb-recv">snap.</span><span className="msb-hn">digest</span>
-
-```typescript
-get digest(): string
-```
-
-Canonical content digest (`sha256:hex`). The snapshot's identity.
-
-#### <span className="msb-recv">snap.</span><span className="msb-hn">sizeBytes</span>
-
-```typescript
-get sizeBytes(): bigint
-```
-
-Apparent size of the captured upper layer in bytes (sparse on disk).
-
-#### <span className="msb-recv">snap.</span><span className="msb-hn">imageRef</span>
-
-```typescript
-get imageRef(): string
-```
-
-Image reference the snapshot was taken from.
-
-#### <span className="msb-recv">snap.</span><span className="msb-hn">imageManifestDigest</span>
-
-```typescript
-get imageManifestDigest(): string
-```
-
-OCI manifest digest of the pinned image.
-
-#### <span className="msb-recv">snap.</span><span className="msb-hn">format</span>
-
-```typescript
-get format(): "raw" | "qcow2"
-```
-
-On-disk format of the upper layer.
-
----
-
-#### <span className="msb-recv">snap.</span><span className="msb-hn">scope</span>
-<div className="msb-tags"><span className="msb-tag is-instance">getter</span></div>
-
-```typescript
-get scope(): SnapshotScope
-```
-
-Snapshot scope: `"disk"` for a disk-only snapshot, `"resumable"` once resumable snapshots land. Always `"disk"` today. See [`SnapshotScope`](#snapshotscope-type).
-
----
-
-#### <span className="msb-recv">snap.</span><span className="msb-hn">fstype</span>
-
-```typescript
-get fstype(): string
-```
-
-Filesystem type inside the upper (e.g. `"ext4"`).
-
-#### <span className="msb-recv">snap.</span><span className="msb-hn">parent</span>
-
-```typescript
-get parent(): string | null
-```
-
-Manifest digest of the parent snapshot, or `null` for a root.
-
-#### <span className="msb-recv">snap.</span><span className="msb-hn">createdAt</span>
-
-```typescript
-get createdAt(): string
-```
-
-RFC 3339 timestamp when the snapshot was created.
-
-#### <span className="msb-recv">snap.</span><span className="msb-hn">labels</span>
-
-```typescript
-get labels(): ReadonlyArray<readonly [string, string]>
-```
-
-User-supplied labels (sorted by key in canonical form), as `[key, value]` pairs.
-
-#### <span className="msb-recv">snap.</span><span className="msb-hn">sourceSandbox</span>
-
-```typescript
-get sourceSandbox(): string | null
-```
-
-Best-effort source-sandbox name, if recorded. `null` when the manifest has no source recorded.
+<p className="msb-member-group">Instance methods</p>
 
 #### <span className="msb-recv">snap.</span><span className="msb-hn">verify()</span>
 
@@ -550,19 +550,59 @@ Lightweight handle backed by an index row. Values are snapshotted from the index
 
 <p className="msb-backref">Returned by <a href="#snapshot-get">Snapshot.get()</a>, <a href="#snapshot-list">Snapshot.list()</a>, <a href="#snapshot-load">Snapshot.load()</a></p>
 
-| Member | Type | Description |
-|--------|------|-------------|
-| `digest` | `string` | Manifest digest (`sha256:hex`), the canonical identity. |
-| `name` | `string \| null` | Convenience name; `null` for digest-only entries. |
-| `parentDigest` | `string \| null` | Parent snapshot's manifest digest, or `null` for a root. |
-| `scope` | [`SnapshotScope`](#snapshotscope-type) | Snapshot payload scope (`"disk"` today). |
-| `imageRef` | `string` | Image reference the snapshot was taken from. |
-| `format` | `"raw" \| "qcow2"` | On-disk format of the upper layer. |
-| `sizeBytes` | `bigint \| null` | Apparent size of the upper file at index time. |
-| `createdAt` | `Date` | Snapshot creation time (from manifest). |
-| `path` | `string` | Local artifact directory path. |
-| `open()` | `Promise<`[`Snapshot`](#snapshot-instance)`>` | Open and metadata-validate the underlying artifact. |
-| `remove(opts?)` | `Promise<void>` | Remove the artifact and its index row; refuses on children unless `force`. |
+#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">digest</span>
+
+`string`
+
+Manifest digest (`sha256:hex`), the canonical identity.
+
+#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">name</span>
+
+`string \| null`
+
+Convenience name; `null` for digest-only entries.
+
+#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">parentDigest</span>
+
+`string \| null`
+
+Parent snapshot's manifest digest, or `null` for a root.
+
+#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">scope</span>
+
+[`SnapshotScope`](#snapshotscope-type)
+
+Snapshot payload scope (`"disk"` today).
+
+#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">imageRef</span>
+
+`string`
+
+Image reference the snapshot was taken from.
+
+#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">format</span>
+
+`"raw" \| "qcow2"`
+
+On-disk format of the upper layer.
+
+#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">sizeBytes</span>
+
+`bigint \| null`
+
+Apparent size of the upper file at index time.
+
+#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">createdAt</span>
+
+`Date`
+
+Snapshot creation time (from manifest).
+
+#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">path</span>
+
+`string`
+
+Local artifact directory path.
 
 #### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">open()</span> {#snapshothandleopen}
 

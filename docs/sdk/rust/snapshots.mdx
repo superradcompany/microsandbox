@@ -506,19 +506,6 @@ Recompute the upper layer's content hash and compare it against the manifest. Wa
 
 A lightweight handle backed by a local index row. Use [`open()`](#h-open) to read the artifact metadata, and [`Snapshot::verify()`](#snap-verify) for explicit content verification. All accessors are listed under [SnapshotHandle methods](#snapshothandle-methods).
 
-| Method | Type | Description |
-|--------|------|-------------|
-| digest() | `&str` | Manifest digest (`sha256:hex`) |
-| name() | `Option<&str>` | Name alias; `None` for digest-only entries |
-| parent_digest() | `Option<&str>` | Parent snapshot digest, or `None` for a root |
-| scope() | [`SnapshotScope`](#snapshotscope) | Snapshot payload scope (`Disk` today) |
-| image_ref() | `&str` | Source image reference |
-| format() | [`SnapshotFormat`](#snapshotformat) | On-disk upper format |
-| size_bytes() | `Option<u64>` | Upper file size at index time |
-| created_at() | `chrono::NaiveDateTime` | Creation time from the manifest |
-| path() | `&Path` | Local artifact directory |
-| open() | `Result<`[`Snapshot`](#instance-methods)`>` | Open the underlying artifact |
-| remove(force) | `Result<()>` | Remove this snapshot |
 
 Accessors and lifecycle on a [`SnapshotHandle`](#snapshothandle) (an index row). Returned by [`Snapshot::get()`](#snapshotget), [`Snapshot::list()`](#snapshotlist), and [`Snapshot::load()`](#snapshotload).
 

@@ -483,10 +483,6 @@ Copy a file from the sandbox out to the host machine.
 
 Async stream for reading a file in chunks. Obtained via [`read_stream()`](#fs-read_stream). Iterate it with `async for chunk in stream:`, or call `collect()` to gather everything at once.
 
-| Method / Protocol | Returns | Description |
-|-------------------|---------|-------------|
-| `__aiter__` / `__anext__` | `bytes` | Async iterator. Use `async for chunk in stream:`. |
-| collect() | `bytes` | *(async)* Collect all remaining data into a single `bytes` object |
 
 #### <span className="msb-recv">stream.</span><span className="msb-hn">__aiter__()</span>
 
@@ -531,11 +527,6 @@ collect()
 
 Async writer for streaming data into a file. Obtained via [`write_stream()`](#fs-write_stream). Supports the async context manager protocol, so `async with` closes the sink on exit.
 
-| Method / Protocol | Returns | Description |
-|-------------------|---------|-------------|
-| write(data) | `None` | *(async)* Write a chunk of `bytes` to the file |
-| close() | `None` | *(async)* Send EOF and finalize the file |
-| `__aenter__` / `__aexit__` | `FsWriteSink` | *(async)* Use with `async with` for automatic close on exit |
 
 #### <span className="msb-recv">sink.</span><span className="msb-hn">write()</span>
 

@@ -12,19 +12,6 @@ A live named volume, carrying the backend it was created on. Returned by [`Volum
 
 <p className="msb-backref">Returned by <a href="#volumecreate">Volume::create()</a> · <a href="#vb-create">VolumeBuilder::create()</a></p>
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`name()`](#vol-name) | `&str` | Volume name |
-| [`kind()`](#vol-kind) | [`VolumeKind`](#volumekind) | Directory or disk |
-| [`fs()`](#vol-fs) | [`VolumeFs`](#volumefs) | Host-side filesystem handle |
-| [`path()`](#vol-path) | `MicrosandboxResult<&Path>` | Host data directory (local only) |
-| [`disk_path()`](#vol-disk_path) | `Option<PathBuf>` | Host `disk.raw` path for disk volumes |
-| [`capacity_bytes()`](#vol-capacity_bytes) | `Option<u64>` | Disk capacity in bytes |
-| [`disk_format()`](#vol-disk_format) | `Option<&str>` | Disk image format |
-| [`disk_fstype()`](#vol-disk_fstype) | `Option<&str>` | Inner disk filesystem |
-| [`backend_kind()`](#vol-backend_kind) | `BackendKind` | Local or cloud |
-| [`local()`](#vol-local) | `Option<&VolumeLocalState>` | Local-only state |
-| [`cloud()`](#vol-cloud) | `Option<&VolumeCloudState>` | Cloud-only state |
 
 #### <span className="msb-recv">Volume::</span><span className="msb-hn">get_default()</span>
 
@@ -421,23 +408,6 @@ A lightweight handle to a volume, exposing metadata plus filesystem and delete o
 
 <p className="msb-backref">Returned by <a href="#volumeget">Volume::get()</a> · <a href="#volumelist">Volume::list()</a></p>
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`name()`](#h-name) | `&str` | Volume name |
-| [`kind()`](#h-kind) | [`VolumeKind`](#volumekind) | Directory or disk |
-| [`fs()`](#h-fs) | [`VolumeFs`](#volumefs) | Host-side filesystem handle |
-| [`remove()`](#h-remove) | `MicrosandboxResult<()>` | Delete this volume |
-| [`used_bytes()`](#h-used_bytes) | `u64` | Usage snapshot at read time |
-| [`quota_mib()`](#h-quota_mib) | `Option<u32>` | Storage quota in MiB |
-| [`capacity_bytes()`](#h-capacity_bytes) | `Option<u64>` | Disk capacity in bytes |
-| [`disk_format()`](#h-disk_format) | `Option<&str>` | Disk image format |
-| [`disk_fstype()`](#h-disk_fstype) | `Option<&str>` | Inner disk filesystem |
-| [`disk_path()`](#h-disk_path) | `Option<PathBuf>` | Host `disk.raw` path |
-| [`labels()`](#h-labels) | `&[(String, String)]` | Key-value labels |
-| [`created_at()`](#h-created_at) | `Option<DateTime<Utc>>` | Creation time |
-| [`backend_kind()`](#h-backend_kind) | `BackendKind` | Local or cloud |
-| [`local()`](#h-local) | `Option<&VolumeHandleLocalState>` | Local-only state |
-| [`cloud()`](#h-cloud) | `Option<&VolumeHandleCloudState>` | Cloud-only state |
 
 A lightweight handle returned by [`Volume::get()`](#volumeget) and [`Volume::list()`](#volumelist). Exposes metadata captured at read time plus filesystem and delete operations, without holding a live [`Volume`](#volume).
 
@@ -714,21 +684,6 @@ Host-side filesystem operations on a volume. Borrows the parent's backend and na
 
 <p className="msb-backref">Returned by <a href="#vol-fs">Volume::fs()</a> · <a href="#h-fs">VolumeHandle::fs()</a></p>
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`read()`](#fs-read) | `Bytes` | Read bytes |
-| [`read_to_string()`](#fs-read_to_string) | `String` | Read UTF-8 text |
-| [`read_stream()`](#fs-read_stream) | [`VolumeFsReadStream`](#volumefsreadstream) | Stream a file in |
-| [`write()`](#fs-write) | `()` | Write bytes |
-| [`write_stream()`](#fs-write_stream) | [`VolumeFsWriteSink`](#volumefswritesink) | Stream a file out |
-| [`list()`](#fs-list) | `Vec<`[`FsEntry`](/sdk/rust/filesystem#fsentry)`>` | List a directory |
-| [`mkdir()`](#fs-mkdir) | `()` | Create a directory |
-| [`remove()`](#fs-remove) | `()` | Delete a file |
-| [`remove_dir()`](#fs-remove_dir) | `()` | Delete a directory recursively |
-| [`copy()`](#fs-copy) | `()` | Copy a file |
-| [`rename()`](#fs-rename) | `()` | Rename / move |
-| [`stat()`](#fs-stat) | [`FsMetadata`](/sdk/rust/filesystem#fsmetadata) | Metadata |
-| [`exists()`](#fs-exists) | `bool` | Existence check |
 
 `VolumeFs::with_backend(backend, name)` is also available as a public constructor for FFI shims that re-assemble a handle per call; most callers use `Volume::fs()` / `VolumeHandle::fs()`.
 
@@ -1160,15 +1115,6 @@ Builder for configuring a named volume before creation. Implements `From<VolumeC
 
 <p className="msb-backref">Returned by <a href="#volumebuilder">Volume::builder()</a></p>
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`directory()`](#directory) | `Self` | Directory-backed (default) |
-| [`disk()`](#disk) | `Self` | Raw ext4 disk-image volume |
-| [`size()`](#size) | `Self` | Disk capacity (required for disk) |
-| [`quota()`](#quota) | `Self` | Directory storage quota |
-| [`label()`](#label) | `Self` | Attach a label |
-| [`build()`](#vb-build) | [`VolumeConfig`](#volumespec) | Materialize config |
-| [`create()`](#vb-create) | [`Volume`](#volume) | Create the volume |
 
 Builder for configuring a named volume before creation. Obtained via [`Volume::builder(name)`](#volumebuilder). Directory-backed is the default; disk volumes require [`.disk()`](#disk) plus [`.size()`](#size). Every setter returns `Self`, so calls chain.
 
@@ -1319,23 +1265,6 @@ Builder for a sandbox volume mount, used in `SandboxBuilder::volume`. Builds a `
 
 <p className="msb-backref">Used by <a href="/sdk/rust/sandbox#volume">SandboxBuilder::volume()</a></p>
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`bind()`](#bind) | `Self` | Bind a host directory |
-| [`named()`](#named) | `Self` | Mount an existing named volume |
-| [`named_with()`](#named_with) | `Self` | Mount with sandbox-time provisioning |
-| [`tmpfs()`](#tmpfs) | `Self` | In-memory filesystem |
-| [`disk()`](#mb-disk) | `Self` | Host disk image as virtio-blk |
-| [`format()`](#format) | `Self` | Disk image format (disk only) |
-| [`fstype()`](#fstype) | `Self` | Inner filesystem type (disk only) |
-| [`readonly()`](#readonly) | `Self` | Block writes |
-| [`noexec()`](#noexec) | `Self` | Block direct execution |
-| [`nosuid()`](#nosuid) | `Self` | Ignore setuid/setgid |
-| [`nodev()`](#nodev) | `Self` | Ignore device files |
-| [`stat_virtualization()`](#stat_virtualization) | `Self` | Stat virtualization policy (virtiofs) |
-| [`host_permissions()`](#host_permissions) | `Self` | Host permission policy (virtiofs) |
-| [`size()`](#mb-size) | `Self` | tmpfs size limit |
-| [`build()`](#mb-build) | `MicrosandboxResult<VolumeMount>` | Validate and materialize |
 
 Builder for configuring a volume mount on a sandbox. Used in `SandboxBuilder::volume(guest_path, |v| v...)` (see [`.volume()`](/sdk/rust/sandbox#volume)). Pick exactly one mount kind: [`.bind()`](#bind), [`.named()`](#named) / [`.named_with()`](#named_with), [`.tmpfs()`](#tmpfs), or [`.disk()`](#mb-disk). Kind-specific options are validated when the surrounding `SandboxBuilder` is finalized, so an option set on the wrong kind surfaces a clear error rather than being silently dropped.
 
@@ -1590,17 +1519,6 @@ Sub-builder for [`MountBuilder::named_with()`](#named_with). Selects sandbox-tim
 
 <p className="msb-backref">Used by <a href="#named_with">MountBuilder::named_with()</a></p>
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`existing()`](#nv-existing) | `Self` | Require the volume to exist (default) |
-| [`create()`](#nv-create) | `Self` | Create, fail if it exists |
-| [`ensure_exists()`](#nv-ensure_exists) | `Self` | Create if missing, else reuse |
-| [`name()`](#nv-name) | `Self` | Override the volume name |
-| [`directory()`](#nv-directory) | `Self` | Directory-backed (default) |
-| [`disk()`](#nv-disk) | `Self` | Disk-backed; requires `size` |
-| [`size()`](#nv-size) | `Self` | Disk capacity |
-| [`quota()`](#nv-quota) | `Self` | Directory quota |
-| [`label()`](#nv-label) | `Self` | Attach a label |
 
 Sub-builder for [`MountBuilder::named_with()`](#named_with). Selects the sandbox-time existence behavior and, for `create` / `ensure_exists`, the creation metadata. Defaults to `existing` and directory-backed.
 
@@ -1747,10 +1665,6 @@ A streaming reader for file data from a local volume directory. Returned by [`Vo
 
 <p className="msb-backref">Returned by <a href="#fs-read_stream">VolumeFs::read_stream()</a></p>
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `recv()` | `Option<Bytes>` | Next chunk; `None` at EOF |
-| `collect()` | `Bytes` | Read the rest into one buffer |
 
 #### <span className="msb-recv">stream.</span><span className="msb-hn">recv()</span>
 
@@ -1783,10 +1697,6 @@ A streaming writer for file data to a local volume directory. Returned by [`Volu
 
 <p className="msb-backref">Returned by <a href="#fs-write_stream">VolumeFs::write_stream()</a></p>
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `write(data)` | `()` | Append a chunk |
-| `close()` | `()` | Flush and close |
 
 #### <span className="msb-recv">sink.</span><span className="msb-hn">write()</span>
 

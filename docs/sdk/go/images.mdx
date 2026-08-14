@@ -352,18 +352,6 @@ if err != nil {
 
 A lightweight metadata reference to a cached OCI image. Fields are unexported; read them through the accessor methods below. Embedded in [`ImageDetail`](#imagedetail).
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [Reference()](#h-reference) | `string` | Image reference |
-| [ManifestDigest()](#h-manifestdigest) | `string` | Content-addressable manifest digest, or empty |
-| [Architecture()](#h-architecture) | `string` | Resolved architecture, or empty |
-| [OS()](#h-os) | `string` | Resolved operating system, or empty |
-| [LayerCount()](#h-layercount) | `uint` | Number of layers |
-| [SizeBytes()](#h-sizebytes) | `*int64` | Total size in bytes, or `nil` when unknown |
-| [CreatedAt()](#h-createdat) | `time.Time` | First-pulled time, or the zero value |
-| [LastUsedAt()](#h-lastusedat) | `time.Time` | Last-referenced time, or the zero value |
-| [Remove(ctx, force)](#h-remove) | `error` | Delete this image |
-| [Inspect(ctx)](#h-inspect) | `(*ImageDetail, error)` | Fetch full detail for this image |
 
 Instance methods on [`*ImageHandle`](#imagehandle), the metadata reference returned by [`Image.Get`](#image-get) and [`Image.List`](#image-list). The accessors are pure reads of cached metadata; only `Remove` and `Inspect` take a context and reach the runtime.
 

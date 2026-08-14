@@ -102,24 +102,95 @@ sb = await Sandbox.create("worker", image="python:3.12")
 
 A fully-parsed snapshot artifact. Properties are read-only attributes (not async).
 
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| `path` | `str` | Path to the artifact directory |
-| `digest` | `str` | Canonical content digest (`sha256:hex`). The snapshot's identity |
-| `size_bytes` | `int \| None` | Apparent size of the captured upper layer in bytes (sparse on disk), when recorded |
-| `image_ref` | `str` | Image reference the snapshot was taken from |
-| `image_manifest_digest` | `str` | OCI manifest digest of the pinned image |
-| `state_kind` | [`SnapshotStateKind`](#snapshotstatekind) | File-backed or checkpoint-backed state |
-| `format` | [`SnapshotFormat`](#snapshotformat)` \| None` | On-disk format for file-backed state |
-| `scope` | [`SnapshotScope`](#snapshotscope) | Captured state scope |
-| `fstype` | `str \| None` | Filesystem type for file-backed state (e.g. `"ext4"`) |
-| `checkpoint_id` | `str \| None` | Checkpoint identifier for checkpoint-backed state |
-| `checkpoint_manifest_digest` | `str \| None` | Checkpoint manifest digest for checkpoint-backed state |
-| `parent` | `str \| None` | Parent snapshot's digest, or `None` for a root |
-| `created_at` | `str` | RFC 3339 timestamp |
-| `labels` | `dict[str, str]` | User-supplied labels |
-| `source_sandbox` | `str \| None` | Best-effort source-sandbox name |
-| `verify()` | `Awaitable[dict[str, Any]]` | Recompute and check the upper-layer integrity hash. See [`verify()`](#snap-verify) |
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">path</span>
+
+`str`
+
+Path to the artifact directory
+
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">digest</span>
+
+`str`
+
+Canonical content digest (`sha256:hex`). The snapshot's identity
+
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">size_bytes</span>
+
+`int \| None`
+
+Apparent size of the captured upper layer in bytes (sparse on disk), when recorded
+
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">image_ref</span>
+
+`str`
+
+Image reference the snapshot was taken from
+
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">image_manifest_digest</span>
+
+`str`
+
+OCI manifest digest of the pinned image
+
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">state_kind</span>
+
+[`SnapshotStateKind`](#snapshotstatekind)
+
+File-backed or checkpoint-backed state
+
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">format</span>
+
+[`SnapshotFormat`](#snapshotformat)` \| None`
+
+On-disk format for file-backed state
+
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">scope</span>
+
+[`SnapshotScope`](#snapshotscope)
+
+Captured state scope
+
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">fstype</span>
+
+`str \| None`
+
+Filesystem type for file-backed state (e.g. `"ext4"`)
+
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">checkpoint_id</span>
+
+`str \| None`
+
+Checkpoint identifier for checkpoint-backed state
+
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">checkpoint_manifest_digest</span>
+
+`str \| None`
+
+Checkpoint manifest digest for checkpoint-backed state
+
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">parent</span>
+
+`str \| None`
+
+Parent snapshot's digest, or `None` for a root
+
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">created_at</span>
+
+`str`
+
+RFC 3339 timestamp
+
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">labels</span>
+
+`dict[str, str]`
+
+User-supplied labels
+
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">source_sandbox</span>
+
+`str \| None`
+
+Best-effort source-sandbox name
 
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">create()</span>
 
@@ -568,26 +639,101 @@ The report shape:
 
 Lightweight handle backed by an index row. Properties are read-only attributes (not async).
 
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| `digest` | `str` | Manifest digest, canonical identity |
-| `name` | `str \| None` | Convenience alias |
-| `parent_digest` | `str \| None` | Parent snapshot digest, or `None` for a root |
-| `image_ref` | `str` | Image the snapshot was taken from |
-| `state_kind` | [`SnapshotStateKind`](#snapshotstatekind) | File-backed or checkpoint-backed state |
-| `format` | [`SnapshotFormat`](#snapshotformat)` \| None` | On-disk format for file-backed state |
-| `scope` | [`SnapshotScope`](#snapshotscope) | Captured state scope |
-| `fstype` | `str \| None` | Filesystem type for file-backed state |
-| `checkpoint_manifest_digest` | `str \| None` | Checkpoint manifest digest for checkpoint-backed state |
-| `size_bytes` | `int \| None` | Apparent upper size at index time |
-| `locality` | `str` | Artifact locality reported by the index |
-| `availability` | `str` | Artifact availability reported by the index |
-| `migration_state` | `str` | Current migration state |
-| `migration_error_code` | `str \| None` | Migration error code, when migration failed |
-| `created_at` | `float` | ms since Unix epoch |
-| `path` | `str` | Local artifact directory path |
-| `open()` | `Awaitable[`[`Snapshot`](#snapshot)`]` | Load full metadata. See [`open()`](#handle-open) |
-| `remove(force=False)` | `Awaitable[None]` | Delete the artifact and its index row. See [`remove()`](#handle-remove) |
+#### <span className="msb-recv">handle.</span><span className="msb-hn">digest</span>
+
+`str`
+
+Manifest digest, canonical identity
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">name</span>
+
+`str \| None`
+
+Convenience alias
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">parent_digest</span>
+
+`str \| None`
+
+Parent snapshot digest, or `None` for a root
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">image_ref</span>
+
+`str`
+
+Image the snapshot was taken from
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">state_kind</span>
+
+[`SnapshotStateKind`](#snapshotstatekind)
+
+File-backed or checkpoint-backed state
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">format</span>
+
+[`SnapshotFormat`](#snapshotformat)` \| None`
+
+On-disk format for file-backed state
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">scope</span>
+
+[`SnapshotScope`](#snapshotscope)
+
+Captured state scope
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">fstype</span>
+
+`str \| None`
+
+Filesystem type for file-backed state
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">checkpoint_manifest_digest</span>
+
+`str \| None`
+
+Checkpoint manifest digest for checkpoint-backed state
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">size_bytes</span>
+
+`int \| None`
+
+Apparent upper size at index time
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">locality</span>
+
+`str`
+
+Artifact locality reported by the index
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">availability</span>
+
+`str`
+
+Artifact availability reported by the index
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">migration_state</span>
+
+`str`
+
+Current migration state
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">migration_error_code</span>
+
+`str \| None`
+
+Migration error code, when migration failed
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">created_at</span>
+
+`float`
+
+ms since Unix epoch
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">path</span>
+
+`str`
+
+Local artifact directory path
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">open()</span>
 

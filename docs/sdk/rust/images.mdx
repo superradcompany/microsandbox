@@ -163,15 +163,47 @@ Image::remove_local(&backend, detail.handle.reference(), false).await?;
 let report = Image::prune_local(&backend).await?;
 ```
 
-| Method | Signature |
-|--------|-----------|
-| `get_local` | `async fn get_local(local: &LocalBackend, reference: &str) -> MicrosandboxResult<ImageHandle>` |
-| `list_local` | `async fn list_local(local: &LocalBackend) -> MicrosandboxResult<Vec<ImageHandle>>` |
-| `inspect_local` | `async fn inspect_local(local: &LocalBackend, reference: &str) -> MicrosandboxResult<ImageDetail>` |
-| `remove_local` | `async fn remove_local(local: &LocalBackend, reference: &str, force: bool) -> MicrosandboxResult<()>` |
-| `prune_local` | `async fn prune_local(local: &LocalBackend) -> MicrosandboxResult<ImagePruneReport>` |
-| `load_local` | `async fn load_local(local: &LocalBackend, input: &Path, tags: Vec<String>) -> MicrosandboxResult<Vec<ImageHandle>>` |
-| `save_local` | `async fn save_local(local: &LocalBackend, references: &[String], output: &Path, format: ImageArchiveFormat) -> MicrosandboxResult<()>` |
+#### <span className="msb-recv">Image::</span><span className="msb-hn">get_local()</span>
+
+```rust
+async fn get_local(local: &LocalBackend, reference: &str) -> MicrosandboxResult<ImageHandle>
+```
+
+#### <span className="msb-recv">Image::</span><span className="msb-hn">list_local()</span>
+
+```rust
+async fn list_local(local: &LocalBackend) -> MicrosandboxResult<Vec<ImageHandle>>
+```
+
+#### <span className="msb-recv">Image::</span><span className="msb-hn">inspect_local()</span>
+
+```rust
+async fn inspect_local(local: &LocalBackend, reference: &str) -> MicrosandboxResult<ImageDetail>
+```
+
+#### <span className="msb-recv">Image::</span><span className="msb-hn">remove_local()</span>
+
+```rust
+async fn remove_local(local: &LocalBackend, reference: &str, force: bool) -> MicrosandboxResult<()>
+```
+
+#### <span className="msb-recv">Image::</span><span className="msb-hn">prune_local()</span>
+
+```rust
+async fn prune_local(local: &LocalBackend) -> MicrosandboxResult<ImagePruneReport>
+```
+
+#### <span className="msb-recv">Image::</span><span className="msb-hn">load_local()</span>
+
+```rust
+async fn load_local(local: &LocalBackend, input: &Path, tags: Vec<String>) -> MicrosandboxResult<Vec<ImageHandle>>
+```
+
+#### <span className="msb-recv">Image::</span><span className="msb-hn">save_local()</span>
+
+```rust
+async fn save_local(local: &LocalBackend, references: &[String], output: &Path, format: ImageArchiveFormat) -> MicrosandboxResult<()>
+```
 
 ## ImageHandle
 
@@ -180,16 +212,6 @@ let report = Image::prune_local(&backend).await?;
 
 A lightweight metadata handle for a cached OCI image.
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `reference()` | `&str` | Image reference |
-| `size_bytes()` | `Option<i64>` | Total image size in bytes, when known |
-| `manifest_digest()` | `Option<&str>` | Content-addressable manifest digest |
-| `architecture()` | `Option<&str>` | Resolved architecture |
-| `os()` | `Option<&str>` | Resolved operating system |
-| `layer_count()` | `usize` | Number of layers |
-| `last_used_at()` | `Option<DateTime<Utc>>` | Last referenced time |
-| `created_at()` | `Option<DateTime<Utc>>` | First-pulled time |
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">reference()</span>
 

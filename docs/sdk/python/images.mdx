@@ -422,18 +422,53 @@ await Image.save(["python:3.12", "app:local"], output_path="bundle.tar")
 
 A lightweight handle to a cached OCI image, returned by [`Image.get()`](#image-get), [`Image.list()`](#image-list), and [`Image.load()`](#image-load). Properties are read-only attributes; the two methods are async.
 
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| `reference` | `str` | Image reference |
-| `size_bytes` | `int \| None` | Total size in bytes, or `None` when unknown |
-| `manifest_digest` | `str \| None` | Content-addressable manifest digest |
-| `architecture` | `str \| None` | Resolved architecture |
-| `os` | `str \| None` | Resolved operating system |
-| `layer_count` | `int` | Number of layers |
-| `last_used_at` | `float \| None` | Last referenced time, milliseconds since epoch |
-| `created_at` | `float \| None` | First-pulled time, milliseconds since epoch |
-| `await inspect()` | [`ImageDetail`](#imagedetail) | Fetch full detail for this image |
-| `await remove(*, force=False)` | `None` | Delete this image (raises [`ImageInUseError`](#errors) unless `force`) |
+#### <span className="msb-recv">handle.</span><span className="msb-hn">reference</span>
+
+`str`
+
+Image reference
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">size_bytes</span>
+
+`int \| None`
+
+Total size in bytes, or `None` when unknown
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">manifest_digest</span>
+
+`str \| None`
+
+Content-addressable manifest digest
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">architecture</span>
+
+`str \| None`
+
+Resolved architecture
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">os</span>
+
+`str \| None`
+
+Resolved operating system
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">layer_count</span>
+
+`int`
+
+Number of layers
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">last_used_at</span>
+
+`float \| None`
+
+Last referenced time, milliseconds since epoch
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">created_at</span>
+
+`float \| None`
+
+First-pulled time, milliseconds since epoch
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">inspect()</span>
 
@@ -471,11 +506,6 @@ existing = RootDisk.disk(
 )
 ```
 
-| Factory | Returns | Description |
-|---------|---------|-------------|
-| `managed(size_mib=None)` | [`RootDiskConfig`](#rootdiskconfig) | Microsandbox-managed sparse ext4 disk |
-| `tmpfs(size_mib=None)` | [`RootDiskConfig`](#rootdiskconfig) | Ephemeral RAM-backed upper layer |
-| `disk(path, *, format=None, fstype=None)` | [`RootDiskConfig`](#rootdiskconfig) | User-supplied writable disk image |
 
 #### <span className="msb-recv">RootDisk.</span><span className="msb-hn">managed()</span>
 

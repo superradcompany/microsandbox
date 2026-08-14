@@ -962,7 +962,58 @@ Convenience wrapper around [`OwnsLifecycle`](#sb-ownslifecycle) that swallows th
 
 ## Options
 
-Functional options for [`CreateSandbox`](#m-createsandbox). Map and slice options merge across repeated calls; single-value setters like [`WithImage`](#withimage) replace.
+Functional options for creating and listing sandboxes. Map and slice options merge across repeated calls; single-value setters like [`WithImage`](#withimage) replace.
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithListLimit()</span>
+
+```go
+func WithListLimit(limit uint32) SandboxListOption
+```
+
+Set the maximum number of sandboxes returned in a page. The limit must be between 1 and 100.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>limit</code><span className="msb-type">uint32</span></div>
+    <div className="msb-param-desc">Maximum number of sandboxes in the page.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithListCursor()</span>
+
+```go
+func WithListCursor(cursor string) SandboxListOption
+```
+
+Continue listing after a previous page's `NextCursor`. Keep the same label filters when requesting the next page.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cursor</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Opaque cursor returned by the previous page.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithListLabels()</span>
+
+```go
+func WithListLabels(labels map[string]string) SandboxListOption
+```
+
+Require every supplied label. Repeated selectors are AND-matched.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>labels</code><span className="msb-type">map[string]string</span></div>
+    <div className="msb-param-desc">Label key-value pairs that every result must match.</div>
+  </div>
+</div>
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithImage()</span>
 
@@ -1818,15 +1869,6 @@ Set the key sequence that detaches from the session without stopping it. Uses Do
 
 Package-level factory namespace for [`PatchConfig`](#patchconfig) values. See the [Patch](#patch) section for its methods.
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`Text(path, content, opts)`](#patch-text) | [`PatchConfig`](#patchconfig) | Write UTF-8 text |
-| [`Append(path, content)`](#patch-append) | [`PatchConfig`](#patchconfig) | Append to an existing file |
-| [`Mkdir(path, opts)`](#patch-mkdir) | [`PatchConfig`](#patchconfig) | Create a directory (idempotent) |
-| [`Remove(path)`](#patch-remove) | [`PatchConfig`](#patchconfig) | Delete a file or directory (idempotent) |
-| [`Symlink(target, link, opts)`](#patch-symlink) | [`PatchConfig`](#patchconfig) | Create a symlink |
-| [`CopyFile(src, dst, opts)`](#patch-copyfile) | [`PatchConfig`](#patchconfig) | Copy a host file into the rootfs |
-| [`CopyDir(src, dst, opts)`](#patch-copydir) | [`PatchConfig`](#patchconfig) | Copy a host directory into the rootfs |
 
 Factory that constructs rootfs patches for [`WithPatches`](#withpatches). Access via the package-level `Patch` value. Each method returns a [`PatchConfig`](#patchconfig). `Mkdir` and `Remove` are idempotent; other operations error at boot when targeting a path already present in the image unless `Replace: true` is passed in [`PatchOptions`](#patchoptions). See [Patches](/sandboxes/bootstrap#patches) for conceptual context.
 
@@ -2001,10 +2043,6 @@ Recursively copy a host directory at `src` into the guest rootfs at `dst`. Only 
 
 Package-level factory namespace for [`InitConfig`](#initconfig) values. See the [Init](#init) section for its methods.
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`Auto()`](#init-auto) | [`InitConfig`](#initconfig) | Auto-detect a guest init |
-| [`Cmd(cmd, opts)`](#init-cmd) | [`InitConfig`](#initconfig) | Explicit init binary with argv and env |
 
 Factory that constructs [`InitConfig`](#initconfig) values for [`WithInit`](#withinit), handing off PID 1 inside the guest after agentd setup. Access via the package-level `Init` value. See [Custom init system](/sandboxes/bootstrap#custom-init-system) for image picks and shutdown semantics.
 
@@ -2075,32 +2113,6 @@ Specify the init binary explicitly with optional argv and env. `cmd` must be an 
 
 A lightweight reference to a sandbox's persisted state. Carries metadata (name, status, config JSON, timestamps) and offers lifecycle methods that operate on the sandbox **without** an active guest-agent connection. You cannot `Exec` or `FS` on a handle. Call `Connect` or `Start` to upgrade to a full [`*Sandbox`](#methods).
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `Name()` | `string` | Sandbox name, up to 128 UTF-8 bytes |
-| `Status()` | [`SandboxStatus`](#sandboxstatus) | Last-known lifecycle status |
-| `ConfigJSON()` | `string` | Raw JSON configuration |
-| `Config()` | `(*`[`SandboxConfig`](#sandboxconfig)`, error)` | Parsed configuration |
-| `CreatedAt()` | `time.Time` | Creation time, zero value if unknown |
-| `UpdatedAt()` | `time.Time` | Last-update time, zero value if unknown |
-| `Refresh(ctx)` | `(*SandboxHandle, error)` | Fresh handle for the same name |
-| `Ping(ctx)` | `(*`[`SandboxPingResult`](#sandboxpingresult)`, error)` | Check agent reachability without refreshing idle activity; does not start stopped sandboxes |
-| `Touch(ctx)` | `(*`[`SandboxTouchResult`](#sandboxtouchresult)`, error)` | Explicitly refresh idle activity; does not start stopped sandboxes |
-| `Modify(ctx, opts)` | `(*`[`SandboxModificationPlan`](#sandboxmodificationplan)`, error)` | Plan or apply a configuration change; same [`ModifyOptions`](#modifyoptions) as [`Modify()`](#sb-modify). Does not start stopped sandboxes; changes persist for the next boot |
-| `Metrics(ctx)` | `(*`[`Metrics`](#metrics)`, error)` | Point-in-time resource metrics |
-| `Logs(ctx, opts)` | `([]`[`LogEntry`](#logentry)`, error)` | Read captured `exec.log` (works without starting) |
-| `LogStream(ctx, opts)` | `(*`[`LogStreamHandle`](#logstreamhandle)`, error)` | Stream captured output |
-| `Connect(ctx)` | `(*`[`Sandbox`](#methods)`, error)` | Reattach to the running sandbox |
-| `Start(ctx)` | `(*`[`Sandbox`](#methods)`, error)` | Boot a stopped sandbox in attached mode |
-| `StartDetached(ctx)` | `(*`[`Sandbox`](#methods)`, error)` | Boot a stopped sandbox in detached mode |
-| `Stop(ctx, opts...)` | `error` | Graceful shutdown; accepts [`StopOption`](#withstoptimeout) |
-| `RequestStop(ctx)` | `error` | Async stop request |
-| `Kill(ctx, opts...)` | `error` | Force terminate; accepts [`KillOption`](#withkilltimeout) |
-| `RequestKill(ctx)` | `error` | Async kill request |
-| `RequestDrain(ctx)` | `error` | Async drain request |
-| `WaitUntilStopped(ctx)` | `(*`[`SandboxStopResult`](#sandboxstopresult)`, error)` | Block until terminal state |
-| `Remove(ctx)` | `error` | Delete sandbox and persisted state |
-| `Snapshot(ctx, name)` | `(*SnapshotArtifact, error)` | Snapshot a stopped sandbox under a bare name |
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">Name()</span>
 
@@ -2397,10 +2409,6 @@ Snapshot a stopped sandbox under a bare name
 
 Live metrics subscription. Call `Close` to release Rust-side resources.
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `Recv(ctx)` | `(*`[`Metrics`](#metrics)`, error)` | Block until the next snapshot arrives. Returns `(nil, nil)` when the stream ends (sandbox exited) |
-| `Close()` | `error` | Stop the stream and release Rust-side resources |
 
 #### <span className="msb-recv">metricsStream.</span><span className="msb-hn">Recv()</span>
 
@@ -2433,17 +2441,36 @@ Stop the stream and release Rust-side resources
 
 A single captured log entry.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| Source | [`LogSource`](#logsource) | Origin of the captured data |
-| SessionID | `*uint64` | Relay-monotonic session id; nil for system entries |
-| Timestamp | `time.Time` | Wall-clock capture time on the host |
-| Data | `[]byte` | The captured bytes |
-| Cursor | `string` | Opaque resume token; pass to [`LogStreamOptions.FromCursor`](#logstreamoptions) |
+#### <span className="msb-recv">entry.</span><span className="msb-hn">Source</span>
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `Text()` | `string` | Captured bytes as a string |
+[`LogSource`](#logsource)
+
+Origin of the captured data
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">SessionID</span>
+
+`*uint64`
+
+Relay-monotonic session id; nil for system entries
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">Timestamp</span>
+
+`time.Time`
+
+Wall-clock capture time on the host
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">Data</span>
+
+`[]byte`
+
+The captured bytes
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">Cursor</span>
+
+`string`
+
+Opaque resume token; pass to [`LogStreamOptions.FromCursor`](#logstreamoptions)
+
 
 #### <span className="msb-recv">entry.</span><span className="msb-hn">Text()</span>
 
@@ -2464,10 +2491,6 @@ Captured bytes as a string
 
 Live log subscription. Call `Close` to release Rust-side resources.
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `Recv(ctx)` | `(*`[`LogEntry`](#logentry)`, error)` | Block until the next entry arrives. Returns `(nil, nil)` when the stream ends |
-| `Close()` | `error` | Stop the stream and release Rust-side resources |
 
 #### <span className="msb-recv">logStream.</span><span className="msb-hn">Recv()</span>
 
@@ -2607,12 +2630,6 @@ One stable, newest-first page returned by [`ListSandboxes`](#m-listsandboxes) or
 ### SandboxListOption
 
 Functional options accepted by [`ListSandboxesWith`](#m-listsandboxeswith).
-
-| Function | Description |
-|----------|-------------|
-| `WithListLimit(n)` | Set a page size from 1 through 100 |
-| `WithListCursor(cursor)` | Continue after a previous page's `NextCursor` |
-| `WithListLabels(labels)` | Require every supplied label; selectors are AND-matched |
 
 ### SandboxConfig
 

@@ -279,10 +279,6 @@ Permit all network traffic, including private addresses and the host machine.
 
 The package-level `Rule` factory provides semantic low-level rules. `Rule.AllowDNS()` returns a [`PolicyRule`](#policyrule) allowing gateway UDP/53 and TCP/53; `Rule.DenyDNS()` returns its deny counterpart. Put `Rule.DenyDNS()` before profile-generated rules when you need to override automatic DNS access.
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `Rule.AllowDNS()` | [`PolicyRule`](#policyrule) | Allow gateway DNS over UDP and TCP port 53 |
-| `Rule.DenyDNS()` | [`PolicyRule`](#policyrule) | Deny gateway DNS over UDP and TCP port 53 |
 
 #### <span className="msb-recv">Rule.</span><span className="msb-hn">AllowDNS()</span>
 

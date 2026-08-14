@@ -43,16 +43,6 @@ Return the SSH namespace for this sandbox. The namespace holds the SSH client an
 
 SSH namespace for a sandbox. Cheap to clone; holds a clone of the sandbox.
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`connect()`](#ssh-connect) | `SshClient` | Open a client with defaults. |
-| [`open_client()`](#ssh-open_client) | `SshClient` | Alias of `connect()`. |
-| [`connect_with()`](#ssh-connect_with) | `SshClient` | Open a client with options. |
-| [`open_client_with()`](#ssh-open_client_with) | `SshClient` | Alias of `connect_with()`. |
-| [`server()`](#ssh-server) | `SshServer` | Prepare a server endpoint. |
-| [`prepare_server()`](#ssh-prepare_server) | `SshServer` | Alias of `server()`. |
-| [`server_with()`](#ssh-server_with) | `SshServer` | Server endpoint with options. |
-| [`prepare_server_with()`](#ssh-prepare_server_with) | `SshServer` | Alias of `server_with()`. |
 
 SSH namespace for a sandbox, obtained from [`sb.ssh()`](#sb-ssh). Client sessions work with local and cloud sandboxes through the selected backend's authenticated agent connection. Reusable server endpoints can use explicit host-key and authorized-key paths with either backend; their implicit key-file defaults are local-only.
 
@@ -294,14 +284,6 @@ Alias for [`server_with`](#ssh-server_with).
 
 Native in-process SSH client session. Aborts its internal server task on drop.
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`exec()`](#client-exec) | `SshOutput` | Run a command. |
-| [`exec_with()`](#client-exec_with) | `SshOutput` | Run with options. |
-| [`attach()`](#client-attach) | `i32` | Interactive shell. |
-| [`attach_with()`](#client-attach_with) | `i32` | Attach with options. |
-| [`sftp()`](#client-sftp) | `SftpClient` | Open an SFTP session. |
-| [`close()`](#client-close) | `()` | Close the session. |
 
 A connected, native in-process SSH client session, obtained from [`connect`](#ssh-connect) or [`connect_with`](#ssh-connect_with). Aborts its internal server task on drop.
 
@@ -495,10 +477,6 @@ Close this native SSH client session. Sends a disconnect and aborts the internal
 
 Reusable SSH server endpoint for a sandbox. Cloneable.
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`serve()`](#server-serve) | `()` | Serve one connection. |
-| [`serve_connection()`](#server-serve_connection) | `()` | Alias of `serve()`. |
 
 A reusable SSH server endpoint for a sandbox, obtained from [`server`](#ssh-server) or [`server_with`](#ssh-server_with). Cloneable; each call to [`serve`](#server-serve) handles one connection.
 
@@ -556,9 +534,6 @@ Alias for [`serve`](#server-serve).
 
 Ordered duplex stream backed by this process's stdin and stdout. Implements `AsyncRead` and `AsyncWrite`.
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`new()`](#sshstdiostreamnew) | `SshStdioStream` | Create a stdio transport stream. |
 
 #### <span className="msb-recv">SshStdioStream::</span><span className="msb-hn">new()</span>
 
@@ -613,12 +588,6 @@ Default SSH listener port used by the CLI adapter when binding a sandbox SSH end
 
 Builder for SSH client options. Defaults: user `root`, terminal from `$TERM` (falling back to `xterm`), SFTP enabled.
 
-| Method | Parameters | Description |
-|--------|------------|-------------|
-| `user()` | `impl Into<String>` | SSH login user. Default `root`. |
-| `term()` | `impl Into<String>` | Terminal name for interactive sessions. |
-| `sftp()` | `bool` | Enable or disable SFTP on the internal server. Default `true`. |
-| `build()` | | Finalize the options. |
 
 #### <span className="msb-recv">client_options.</span><span className="msb-hn">user()</span>
 
@@ -659,10 +628,6 @@ Finalize the options.
 
 Builder for SSH exec options.
 
-| Method | Parameters | Description |
-|--------|------------|-------------|
-| `tty()` | `bool` | Request a PTY for the exec channel. Default `false`. |
-| `build()` | | Finalize the options. |
 
 #### <span className="msb-recv">exec_options.</span><span className="msb-hn">tty()</span>
 
@@ -687,11 +652,6 @@ Finalize the options.
 
 Builder for interactive SSH attach options. Default terminal comes from `$TERM` (falling back to `xterm`); detach keys default to the standard sequence.
 
-| Method | Parameters | Description |
-|--------|------------|-------------|
-| `term()` | `impl Into<String>` | Terminal name for the shell. |
-| `detach_keys()` | `impl Into<String>` | Detach key sequence. |
-| `build()` | | Finalize the options. |
 
 #### <span className="msb-recv">attach_options.</span><span className="msb-hn">term()</span>
 
@@ -724,15 +684,6 @@ Finalize the options.
 
 Builder for SSH server options. SFTP is enabled by default; when no authorized keys are provided, the default authorized-keys file is loaded.
 
-| Method | Parameters | Description |
-|--------|------------|-------------|
-| `host_key_path()` | `impl Into<PathBuf>` | Override the host private key path. |
-| `host_key()` | `PrivateKey` | Use an in-memory host private key. |
-| `authorized_keys_path()` | `impl Into<PathBuf>` | Override the authorized-keys path. |
-| `authorized_key()` | `impl Into<String>` | Add one in-memory authorized public key. |
-| `user()` | `impl Into<String>` | Override the guest user used for exec requests. |
-| `sftp()` | `bool` | Enable or disable SFTP. Default `true`. |
-| `build()` | | Finalize the options. |
 
 #### <span className="msb-recv">server_options.</span><span className="msb-hn">host_key_path()</span>
 

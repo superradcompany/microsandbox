@@ -38,16 +38,6 @@ Frame flag: this message requests sandbox shutdown.
 
 Low-level client for talking to `agentd` through the sandbox relay socket. All bodies are raw CBOR bytes: encode and decode them in your code with a library like `cbor-x`, and build typed convenience methods on top of this class. Construct it with one of the static connect methods.
 
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| AgentClient.connectSandbox(name, opts?) | `Promise<`[`AgentClient`](#agentclient)`>` | Connect by sandbox name |
-| AgentClient.connect(path, opts?) | `Promise<`[`AgentClient`](#agentclient)`>` | Connect by relay socket path |
-| AgentClient.socketPath(name) | `string` | Resolve the relay socket path without connecting |
-| request(flags, body) | `Promise<`[`RawFrame`](#rawframe)`>` | Send one frame, await one response |
-| stream(flags, body) | `Promise<`[`AgentStream`](#agentstream)`>` | Open a streaming session |
-| send(id, flags, body) | `Promise<void>` | Send a follow-up frame on a correlation id |
-| readyBytes() | `Buffer` | Cached `core.ready` handshake frame body |
-| close() | `Promise<void>` | Close the connection (idempotent) |
 
 #### <span className="msb-recv">AgentClient.</span><span className="msb-hn">connectSandbox()</span>
 
@@ -337,13 +327,12 @@ Close the connection. Idempotent: calling it more than once is safe.
 
 An open raw agent stream. Implements `AsyncIterableIterator<RawFrame>`, so it can be driven with `for await`. The iterator ends after a frame carrying [`FLAG_TERMINAL`](#flag_terminal) or when the underlying stream is exhausted.
 
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| id | `number` | Protocol correlation id; pass to [`send()`](#client-send) for follow-up frames |
-| next() | `Promise<IteratorResult<`[`RawFrame`](#rawframe)`>>` | Pull the next frame; `done` once terminal or exhausted |
-| close() | `Promise<void>` | Release the stream handle early (idempotent) |
-| return() | `Promise<IteratorResult<`[`RawFrame`](#rawframe)`>>` | Async-iterator early-exit hook; closes the stream |
-| [Symbol.asyncIterator]() | [`AgentStream`](#agentstream) | Returns itself so the stream is iterable |
+#### <span className="msb-recv">stream.</span><span className="msb-hn">id</span>
+
+`number`
+
+Protocol correlation id; pass to [`send()`](#client-send) for follow-up frames
+
 
 #### <span className="msb-recv">stream.</span><span className="msb-hn">next()</span>
 
@@ -380,6 +369,18 @@ Async-iterator early-exit hook; closes the stream
 <p className="msb-label">Returns</p>
 
 `Promise<IteratorResult<`[`RawFrame`](#rawframe)`>>`
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">[Symbol.asyncIterator]()</span>
+
+```typescript
+[Symbol.asyncIterator]()
+```
+
+Returns itself so the stream is iterable
+
+<p className="msb-label">Returns</p>
+
+[`AgentStream`](#agentstream)
 
 ## Types
 

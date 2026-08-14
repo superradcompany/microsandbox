@@ -179,12 +179,6 @@ A named persistent volume carrying its host-side path. Returned by [`CreateVolum
 
 <p className="msb-backref">Returned by <a href="#createvolume">CreateVolume()</a></p>
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`Name()`](#v-name) | `string` | Volume name |
-| [`Path()`](#v-path) | `string` | Host filesystem path of the data directory |
-| [`FS()`](#v-fs) | [`*VolumeFs`](#volumefs) | Filesystem accessor |
-| [`Remove(ctx)`](#v-remove) | `error` | Delete this volume (all sandboxes using it must be stopped) |
 
 A `Volume` is returned by [`CreateVolume`](#createvolume) and carries the volume's name and host path.
 
@@ -254,20 +248,6 @@ Metadata reference for a named volume. Obtain via [`GetVolume`](#getvolume) or [
 
 <p className="msb-backref">Returned by <a href="#getvolume">GetVolume()</a> · <a href="#listvolumes">ListVolumes()</a></p>
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`Name()`](#h-name) | `string` | Volume name |
-| [`Path()`](#h-path) | `string` | Host filesystem path of the data directory |
-| [`Kind()`](#h-kind) | [`VolumeKind`](#volumekind) | Volume kind: `VolumeKindDir` or `VolumeKindDisk` |
-| [`QuotaMiB()`](#h-quotamib) | `*uint32` | Quota in MiB, or `nil` if unlimited |
-| [`UsedBytes()`](#h-usedbytes) | `uint64` | Current disk usage in bytes |
-| [`CapacityBytes()`](#h-capacitybytes) | `*uint64` | Disk capacity in bytes, or `nil` |
-| [`DiskFormat()`](#h-diskformat) | `*string` | Disk image format, or `nil` |
-| [`DiskFstype()`](#h-diskfstype) | `*string` | Disk filesystem type, or `nil` |
-| [`Labels()`](#h-labels) | `map[string]string` | Metadata labels |
-| [`CreatedAt()`](#h-createdat) | `time.Time` | Creation timestamp, zero value if unknown |
-| [`FS()`](#h-fs) | [`*VolumeFs`](#volumefs) | Filesystem accessor |
-| [`Remove(ctx)`](#h-remove) | `error` | Delete this volume |
 
 A `VolumeHandle` is the metadata reference returned by [`GetVolume`](#getvolume) and [`ListVolumes`](#listvolumes).
 
@@ -393,17 +373,6 @@ Filesystem operations on a volume's data directory. Obtain via [`Volume.FS()`](#
 
 <p className="msb-backref">Returned by <a href="#v-fs">Volume.FS()</a> · <a href="#h-fs">VolumeHandle.FS()</a></p>
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`Root()`](#vfs-root) | `string` | Absolute host path of the data directory |
-| [`Read(ctx, relPath)`](#vfs-read) | `([]byte, error)` | Read file bytes |
-| [`ReadString(ctx, relPath)`](#vfs-readstring) | `(string, error)` | Read file as a UTF-8 string |
-| [`Write(ctx, relPath, data)`](#vfs-write) | `error` | Write bytes, creating or truncating |
-| [`WriteString(ctx, relPath, content)`](#vfs-writestring) | `error` | Write a string |
-| [`Mkdir(ctx, relPath)`](#vfs-mkdir) | `error` | Create a directory tree |
-| [`Remove(ctx, relPath)`](#vfs-remove) | `error` | Delete a file or empty directory |
-| [`RemoveAll(ctx, relPath)`](#vfs-removeall) | `error` | Recursive delete |
-| [`Exists(ctx, relPath)`](#vfs-exists) | `(bool, error)` | Check for existence |
 
 Filesystem operations on a volume's data directory. Obtain via [`Volume.FS()`](#v-fs) or [`VolumeHandle.FS()`](#h-fs). Local operations run directly on the host filesystem, while Cloud operations use the authenticated Cloud API. No running sandbox or agent protocol is required.
 
@@ -790,28 +759,102 @@ Discriminated mount configuration produced by the [`Mount`](#options) factory he
 
 <p className="msb-backref">Returned by <a href="#mount-bind">Mount.Bind()</a> · <a href="#mount-named">Mount.Named()</a> · <a href="#mount-namedwith">Mount.NamedWith()</a> · <a href="#mount-tmpfs">Mount.Tmpfs()</a> · <a href="#mount-disk">Mount.Disk()</a></p>
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `Bind` | `string` | Host path for bind mounts |
-| `Named` | `string` | Volume name for named mounts |
-| `NamedMode` | `string` | Provisioning mode for named mounts (`"existing"`, `"create"`, `"ensure-exists"`) |
-| `NamedKind` | `string` | Kind for provisioned named mounts (`"dir"` or `"disk"`) |
-| `QuotaMiB` | `uint32` | Quota in MiB for provisioned directory volumes |
-| `Tmpfs` | `bool` | Set for tmpfs mounts |
-| `Disk` | `string` | Host path for disk images |
-| `Format` | `string` | Disk format |
-| `Fstype` | `string` | Inner filesystem type |
-| `Readonly` | `bool` | Whether the mount is read-only |
-| `Noexec` | `bool` | Whether direct execution from the mount is disabled |
-| `Nosuid` | `bool` | Whether setuid/setgid elevation from files on the mount is ignored |
-| `Nodev` | `bool` | Whether device files on the mount are ignored |
-| `SizeMiB` | `uint32` | Size limit for tmpfs / capacity for provisioned disk volumes |
-| `StatVirtualization` | `StatVirtualization` | Per-mount stat-virtualization policy (bind / named only) |
-| `HostPermissions` | `HostPermissions` | Per-mount host-permission propagation policy (bind / named only) |
+#### <span className="msb-recv">mount.</span><span className="msb-hn">Bind</span>
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `Kind()` | [`MountKind`](#mountkind) | Which mount flavour this is |
+`string`
+
+Host path for bind mounts
+
+#### <span className="msb-recv">mount.</span><span className="msb-hn">Named</span>
+
+`string`
+
+Volume name for named mounts
+
+#### <span className="msb-recv">mount.</span><span className="msb-hn">NamedMode</span>
+
+`string`
+
+Provisioning mode for named mounts (`"existing"`, `"create"`, `"ensure-exists"`)
+
+#### <span className="msb-recv">mount.</span><span className="msb-hn">NamedKind</span>
+
+`string`
+
+Kind for provisioned named mounts (`"dir"` or `"disk"`)
+
+#### <span className="msb-recv">mount.</span><span className="msb-hn">QuotaMiB</span>
+
+`uint32`
+
+Quota in MiB for provisioned directory volumes
+
+#### <span className="msb-recv">mount.</span><span className="msb-hn">Tmpfs</span>
+
+`bool`
+
+Set for tmpfs mounts
+
+#### <span className="msb-recv">mount.</span><span className="msb-hn">Disk</span>
+
+`string`
+
+Host path for disk images
+
+#### <span className="msb-recv">mount.</span><span className="msb-hn">Format</span>
+
+`string`
+
+Disk format
+
+#### <span className="msb-recv">mount.</span><span className="msb-hn">Fstype</span>
+
+`string`
+
+Inner filesystem type
+
+#### <span className="msb-recv">mount.</span><span className="msb-hn">Readonly</span>
+
+`bool`
+
+Whether the mount is read-only
+
+#### <span className="msb-recv">mount.</span><span className="msb-hn">Noexec</span>
+
+`bool`
+
+Whether direct execution from the mount is disabled
+
+#### <span className="msb-recv">mount.</span><span className="msb-hn">Nosuid</span>
+
+`bool`
+
+Whether setuid/setgid elevation from files on the mount is ignored
+
+#### <span className="msb-recv">mount.</span><span className="msb-hn">Nodev</span>
+
+`bool`
+
+Whether device files on the mount are ignored
+
+#### <span className="msb-recv">mount.</span><span className="msb-hn">SizeMiB</span>
+
+`uint32`
+
+Size limit for tmpfs / capacity for provisioned disk volumes
+
+#### <span className="msb-recv">mount.</span><span className="msb-hn">StatVirtualization</span>
+
+`StatVirtualization`
+
+Per-mount stat-virtualization policy (bind / named only)
+
+#### <span className="msb-recv">mount.</span><span className="msb-hn">HostPermissions</span>
+
+`HostPermissions`
+
+Per-mount host-permission propagation policy (bind / named only)
+
 
 #### <span className="msb-recv">mount.</span><span className="msb-hn">Kind()</span>
 

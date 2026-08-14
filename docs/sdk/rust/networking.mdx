@@ -14,11 +14,23 @@ The default policy denies egress except for an implicit allow-public rule (plus 
 
 An ordered rule list plus two per-direction defaults, evaluated first-match-wins. Egress evaluation considers rules where `direction ∈ {Egress, Any}`; ingress considers `{Ingress, Any}`. If no rule matches, the direction-specific default applies. `Default` is [`from_profiles([NetworkProfile::Public])`](#networkpolicyfrom_profiles).
 
-| Field | Type | Description |
-|-------|------|-------------|
-| default_egress | [`Action`](#action) | Action when no egress-applicable rule matches |
-| default_ingress | [`Action`](#action) | Action when no ingress-applicable rule matches |
-| rules | `Vec<`[`Rule`](#rule)`>` | Ordered rules; first match wins per direction |
+#### <span className="msb-recv">NetworkPolicy::</span><span className="msb-hn">default_egress</span>
+
+[`Action`](#action)
+
+Action when no egress-applicable rule matches
+
+#### <span className="msb-recv">NetworkPolicy::</span><span className="msb-hn">default_ingress</span>
+
+[`Action`](#action)
+
+Action when no ingress-applicable rule matches
+
+#### <span className="msb-recv">NetworkPolicy::</span><span className="msb-hn">rules</span>
+
+`Vec<`[`Rule`](#rule)`>`
+
+Ordered rules; first match wins per direction
 
 A [`NetworkPolicy`](#networkpolicy) is an ordered rule list plus two per-direction defaults, evaluated first-match-wins. Compose common access shapes with [`from_profiles()`](#networkpolicyfrom_profiles); for anything custom, start from [`builder()`](#networkpolicybuilder).
 
@@ -1173,26 +1185,38 @@ Allow **any** host to receive placeholders unchanged. Takes effect only when `i_
 
 A single policy rule. The `destination` interpretation is direction-dependent: egress destination, or ingress peer/source. `ports` is always the guest-side port (egress destination port / ingress listening port).
 
-| Field | Type | Description |
-|-------|------|-------------|
-| direction | [`Direction`](#direction) | Which evaluator considers this rule |
-| destination | [`Destination`](#destination) | Target filter |
-| protocols | `Vec<`[`Protocol`](#protocol)`>` | Set semantics; empty = any protocol |
-| ports | `Vec<`[`PortRange`](#portrange)`>` | Set semantics; empty = any port |
-| action | [`Action`](#action) | What to do on match |
+#### <span className="msb-recv">Rule::</span><span className="msb-hn">direction</span>
+
+[`Direction`](#direction)
+
+Which evaluator considers this rule
+
+#### <span className="msb-recv">Rule::</span><span className="msb-hn">destination</span>
+
+[`Destination`](#destination)
+
+Target filter
+
+#### <span className="msb-recv">Rule::</span><span className="msb-hn">protocols</span>
+
+`Vec<`[`Protocol`](#protocol)`>`
+
+Set semantics; empty = any protocol
+
+#### <span className="msb-recv">Rule::</span><span className="msb-hn">ports</span>
+
+`Vec<`[`PortRange`](#portrange)`>`
+
+Set semantics; empty = any port
+
+#### <span className="msb-recv">Rule::</span><span className="msb-hn">action</span>
+
+[`Action`](#action)
+
+What to do on match
 
 Convenience constructors build any-protocol, any-port rules:
 
-| Method | Description |
-|--------|-------------|
-| `Rule::allow_egress(destination)` | Allow rule, direction `Egress` |
-| `Rule::deny_egress(destination)` | Deny rule, direction `Egress` |
-| `Rule::allow_ingress(destination)` | Allow rule, direction `Ingress` |
-| `Rule::deny_ingress(destination)` | Deny rule, direction `Ingress` |
-| `Rule::allow_any(destination)` | Allow rule, direction `Any` |
-| `Rule::deny_any(destination)` | Deny rule, direction `Any` |
-| `Rule::allow_dns()` | Allow plain DNS (UDP/53 + TCP/53) to the gateway forwarder (`Group::Host`); the one-liner for opening DNS under deny-by-default. See [DNS as egress](/networking/dns#dns-as-egress) |
-| `Rule::deny_dns()` | Deny plain DNS (UDP/53 + TCP/53) to the gateway forwarder; place before profile-generated rules to override automatic DNS |
 
 #### <span className="msb-recv">Rule::</span><span className="msb-hn">allow_egress()</span>
 
@@ -1265,16 +1289,18 @@ Deny plain DNS (UDP/53 + TCP/53) to the gateway forwarder; place before profile-
 
 An inclusive port range.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| start | `u16` | Start port (inclusive) |
-| end | `u16` | End port (inclusive) |
+#### <span className="msb-recv">PortRange::</span><span className="msb-hn">start</span>
 
-| Method | Description |
-|--------|-------------|
-| `PortRange::single(port)` | Match a single port |
-| `PortRange::range(start, end)` | Match an inclusive range |
-| `contains(port)` | Whether `port` falls within the range |
+`u16`
+
+Start port (inclusive)
+
+#### <span className="msb-recv">PortRange::</span><span className="msb-hn">end</span>
+
+`u16`
+
+End port (inclusive)
+
 
 #### <span className="msb-recv">PortRange::</span><span className="msb-hn">single()</span>
 
@@ -1316,10 +1342,6 @@ let suffix: DomainName = ".example.com".parse()?;  // -> "example.com"
 
 Labels follow the permissive DNS grammar (RFC 2181 §11), so underscore-prefixed names like `_service._tcp.example.com` are accepted. The builder methods (`.domain(&str)`, `.domain_suffix(&str)`) take strings and parse them lazily at [`build()`](#build), so callers rarely construct `DomainName` directly.
 
-| Method | Description |
-|--------|-------------|
-| `as_str()` | Borrow the canonical string form |
-| `try_into_suffix()` | Validate for use as a `DomainSuffix`; single-label names (e.g. `com`) are rejected |
 
 #### <span className="msb-recv">name.</span><span className="msb-hn">as_str()</span>
 

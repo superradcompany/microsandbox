@@ -40,10 +40,6 @@ Return the SSH operations namespace for this sandbox. The namespace groups the c
 
 SSH operations namespace for a sandbox. Obtained via [`sb.SSH()`](#sb-ssh). Holds no resources; it groups the client and server entry points.
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`OpenClient(ctx, opts...)`](#ssh-openclient) | `(`[`*SSHClient`](#sshclient)`, error)` | Open a native in-process SSH client |
-| [`PrepareServer(ctx, opts...)`](#ssh-prepareserver) | `(`[`*SSHServer`](#sshserver)`, error)` | Prepare a reusable SSH server endpoint |
 
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">OpenClient()</span>
 
@@ -150,12 +146,6 @@ Prepare a reusable SSH server endpoint for this sandbox. Loads or creates the ho
 
 A native in-process SSH client session. Obtained via [`OpenClient()`](#ssh-openclient).
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`Exec(ctx, command, opts...)`](#c-exec) | `(`[`*SSHOutput`](#sshoutput)`, error)` | Run a command and collect output |
-| [`Attach(ctx, opts...)`](#c-attach) | `(int, error)` | Bridge the local terminal to an interactive shell |
-| [`SFTP(ctx)`](#c-sftp) | `(`[`*SFTPClient`](#sftpclient)`, error)` | Open an SFTP session over this connection |
-| [`Close(ctx)`](#c-close) | `error` | Close the session (consumes the handle) |
 
 #### <span className="msb-recv">c.</span><span className="msb-hn">Exec()</span>
 
@@ -345,10 +335,6 @@ Close this SSH client session. The handle is consumed; do not use it after closi
 
 A prepared SSH server endpoint for a sandbox. Obtained via [`PrepareServer()`](#ssh-prepareserver).
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`ServeConnection(ctx)`](#srv-serveconnection) | `error` | Serve one SSH transport over stdin/stdout |
-| [`Close(ctx)`](#srv-close) | `error` | Release the endpoint (consumes the handle) |
 
 #### <span className="msb-recv">srv.</span><span className="msb-hn">ServeConnection()</span>
 
@@ -432,12 +418,23 @@ Release this prepared server endpoint. The handle is consumed; do not use it aft
 
 The output from an SSH exec request.
 
-| Field / Method | Type | Description |
-|----------------|------|-------------|
-| Status | `int` | Exit status code |
-| Stdout | `[]byte` | Captured stdout bytes |
-| Stderr | `[]byte` | Captured stderr bytes |
-| [`Success()`](#o-success) | `bool` | `true` when `Status` is `0` |
+#### <span className="msb-recv">o.</span><span className="msb-hn">Status</span>
+
+`int`
+
+Exit status code
+
+#### <span className="msb-recv">o.</span><span className="msb-hn">Stdout</span>
+
+`[]byte`
+
+Captured stdout bytes
+
+#### <span className="msb-recv">o.</span><span className="msb-hn">Stderr</span>
+
+`[]byte`
+
+Captured stderr bytes
 
 #### <span className="msb-recv">o.</span><span className="msb-hn">Success()</span>
 
@@ -475,18 +472,6 @@ Report whether the command exited with status `0`.
 
 A high-level SFTP client session over an SSH connection. Obtained via [`SFTP()`](#c-sftp).
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| Read(ctx, path) | `([]byte, error)` | Read a file into memory |
-| Write(ctx, path, data) | `error` | Write a file, creating or truncating it |
-| Mkdir(ctx, path) | `error` | Create a directory |
-| RemoveFile(ctx, path) | `error` | Remove a file |
-| RemoveDir(ctx, path) | `error` | Remove an empty directory |
-| Rename(ctx, oldPath, newPath) | `error` | Rename a file or directory |
-| RealPath(ctx, path) | `(string, error)` | Resolve a path to its canonical absolute form |
-| ReadLink(ctx, path) | `(string, error)` | Read a symlink target |
-| Symlink(ctx, target, linkPath) | `error` | Create a symlink |
-| Close(ctx) | `error` | Close the session (consumes the handle) |
 
 #### <span className="msb-recv">sftp.</span><span className="msb-hn">Read()</span>
 

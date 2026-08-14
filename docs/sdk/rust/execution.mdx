@@ -931,17 +931,6 @@ Finalize the options. Called automatically by [`attach_with()`](#sb-attach_with)
 
 A handle to a running streaming execution. Receives [`ExecEvent`](#execevent)s as the process produces output, and provides control over stdin, signals, and the PTY size.
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| recv() | `Option<`[`ExecEvent`](#execevent)`>` | Receive the next event. `None` when the session has ended and all output has been delivered. |
-| wait() | `Result<`[`ExitStatus`](#exitstatus)`>` | Wait for the process to exit, discarding any remaining output. |
-| collect() | `Result<`[`ExecOutput`](#execoutput)`>` | Wait for exit and collect all remaining stdout/stderr. |
-| id() | `String` | Session ID for this execution. Can be used to reattach later. |
-| control() | [`ExecControl`](#execcontrol) | A cloneable control handle for sending signals and resizes from another task. |
-| take_stdin() | `Option<`[`ExecSink`](#execsink)`>` | Take the stdin writer. Only available if `stdin_pipe()` was set; returns `None` after the first call. |
-| signal(signal) | `Result<()>` | Send a POSIX signal to the process (e.g. `libc::SIGTERM`). |
-| kill() | `Result<()>` | Send SIGKILL to the process. |
-| resize(rows, cols) | `Result<()>` | Resize the PTY for this session. |
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">recv()</span>
 
@@ -1058,12 +1047,6 @@ Resize the PTY for this session.
 
 A cloneable, lightweight control handle for a streaming exec session. Lets a task other than the one owning the [`ExecHandle`](#exechandle) send signals and PTY resizes. Carries no event stream.
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| id() | `String` | Session ID for this execution. |
-| signal(signal) | `Result<()>` | Send a POSIX signal to the process (e.g. `libc::SIGTERM`). |
-| kill() | `Result<()>` | Send SIGKILL to the process. |
-| resize(rows, cols) | `Result<()>` | Resize the PTY for this session. |
 
 #### <span className="msb-recv">control.</span><span className="msb-hn">id()</span>
 
@@ -1120,10 +1103,6 @@ Resize the PTY for this session.
 
 A writer for sending data to a running process's stdin. Obtained via [`ExecHandle::take_stdin()`](#exechandle) after enabling [`stdin_pipe()`](#stdin_pipe).
 
-| Method | Parameters | Description |
-|--------|-----------|-------------|
-| write(data) | `data: impl AsRef<[u8]>` | Write bytes to the process's stdin. |
-| close() | - | Close stdin. The process sees EOF on its stdin. |
 
 #### <span className="msb-recv">sink.</span><span className="msb-hn">write()</span>
 
@@ -1148,13 +1127,6 @@ Close stdin. The process sees EOF on its stdin.
 
 The result of a completed command execution. Holds the exit status and all captured output.
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| status() | [`ExitStatus`](#exitstatus) | Exit code and success flag. |
-| stdout() | `Result<String, FromUtf8Error>` | Collected stdout decoded as UTF-8. Errors if the output is not valid UTF-8. |
-| stderr() | `Result<String, FromUtf8Error>` | Collected stderr decoded as UTF-8. |
-| stdout_bytes() | `&Bytes` | Raw stdout bytes without decoding. |
-| stderr_bytes() | `&Bytes` | Raw stderr bytes without decoding. |
 
 #### <span className="msb-recv">out.</span><span className="msb-hn">status()</span>
 

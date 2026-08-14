@@ -39,10 +39,6 @@ Return the SSH namespace for this sandbox. The namespace holds the SSH client an
 
 SSH namespace for a sandbox.
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`open_client()`](#ssh-open_client) | [`SshClient`](#sshclient) | *(async)* Open a client. |
-| [`prepare_server()`](#ssh-prepare_server) | [`SshServer`](#sshserver) | *(async)* Prepare a server endpoint. |
 
 SSH namespace for a sandbox, obtained from [`sb.ssh()`](#sb-ssh). Client sessions work with local and cloud sandboxes through the selected backend's authenticated agent connection. Reusable server endpoints can use explicit host-key and authorized-key paths with either backend; their implicit key-file defaults are local-only.
 
@@ -159,12 +155,6 @@ Prepare a reusable SSH server endpoint for this sandbox. Loads or creates the ho
 
 Native in-process SSH client session.
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`exec(command, *, tty=False)`](#client-exec) | [`SshOutput`](#sshoutput) | *(async)* Run a command. |
-| [`attach(*, term=None, detach_keys=None)`](#client-attach) | `int` | *(async)* Interactive shell. |
-| [`sftp()`](#client-sftp) | [`SftpClient`](#sftpclient) | *(async)* Open an SFTP session. |
-| [`close()`](#client-close) | `None` | *(async)* Close the session. |
 
 A connected, native in-process SSH client session, obtained from [`ssh.open_client()`](#ssh-open_client).
 
@@ -299,10 +289,6 @@ Close this native SSH client session. Sends a disconnect and aborts the internal
 
 Reusable SSH server endpoint for a sandbox.
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`serve_connection()`](#server-serve_connection) | `None` | *(async)* Serve one connection over stdin/stdout. |
-| [`close()`](#server-close) | `None` | Release the prepared endpoint. |
 
 A reusable SSH server endpoint for a sandbox, obtained from [`ssh.prepare_server()`](#ssh-prepare_server).
 
@@ -346,18 +332,6 @@ Release this prepared server endpoint. This method is synchronous.
 
 High-level SFTP client session over an SSH connection. All methods are async.
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| read(path) | `bytes` | Read a file into memory. |
-| write(path, data) | `None` | Write a file, creating or truncating it. |
-| mkdir(path) | `None` | Create a directory. |
-| remove_file(path) | `None` | Remove a file. |
-| remove_dir(path) | `None` | Remove an empty directory. |
-| rename(old_path, new_path) | `None` | Rename a file or directory. |
-| real_path(path) | `str` | Resolve a path to its canonical absolute form. |
-| read_link(path) | `str` | Read a symlink target. |
-| symlink(target, link_path) | `None` | Create a symlink. |
-| close() | `None` | Close the SFTP session. |
 
 #### <span className="msb-recv">sftp.</span><span className="msb-hn">read()</span>
 

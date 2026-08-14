@@ -369,16 +369,11 @@ Bridge your terminal to the sandbox's default shell in a fully interactive PTY s
 
 A handle to a running streaming execution. It is an async iterator, so `async for event in handle:` yields each [`ExecEvent`](#execevent) until the stream ends. `signal()`, `kill()`, and `resize()` may run while another task is waiting in `recv()`; concurrent receive, wait, and collect operations are not supported.
 
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| id | `str` | Correlation ID for this execution |
-| take_stdin() | [`ExecSink`](#execsink) ` \| None` | Take the stdin writer. Returns `None` after the first call, or when stdin wasn't piped |
-| recv() | [`ExecEvent`](#execevent) ` \| None` | *(async)* Receive the next event. Returns `None` when the stream ends |
-| wait() | `tuple[int, bool]` | *(async)* Wait for the process to exit. Returns `(code, success)` |
-| collect() | [`ExecOutput`](#execoutput) | *(async)* Drain remaining output and wait for exit |
-| signal(sig) | `None` | *(async)* Send a POSIX signal (numeric) to the process |
-| kill() | `None` | *(async)* Send SIGKILL to the process |
-| resize(rows, cols) | `None` | *(async)* Resize the PTY to the given `uint16` dimensions |
+#### <span className="msb-recv">handle.</span><span className="msb-hn">id</span>
+
+`str`
+
+Correlation ID for this execution
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">take_stdin()</span>
 
@@ -459,10 +454,6 @@ resize(rows, cols)
 
 Writer for sending data to a running process's stdin. Obtained from [`ExecHandle.take_stdin()`](#exechandle) when the execution was configured with `stdin=Stdin.pipe()`.
 
-| Method | Parameters | Description |
-|--------|-----------|-------------|
-| write(data) | `data: bytes` | *(async)* Write bytes to the process's stdin |
-| close() | - | *(async)* Close the sink. Sends EOF in non-TTY pipe mode; the guest PTY remains open in TTY mode |
 
 #### <span className="msb-recv">sink.</span><span className="msb-hn">write()</span>
 
@@ -486,11 +477,6 @@ close()
 
 Frozen dataclass with factory methods for configuring process stdin. Pass the result as the `stdin` argument to an exec or shell method. Raw `bytes` are also accepted directly and are sent inline.
 
-| Factory | Parameters | Description |
-|---------|-----------|-------------|
-| Stdin.null() | - | Connect stdin to `/dev/null` (default) |
-| Stdin.pipe() | - | Open a writable pipe. Write via [`take_stdin()`](#exechandle) on the handle |
-| Stdin.bytes(data) | `data: bytes` | Inline data sent before the process starts, then EOF |
 
 #### <span className="msb-recv">Stdin.</span><span className="msb-hn">null()</span>
 
@@ -524,15 +510,23 @@ The factories set the corresponding [`StdinMode`](#stdinmode) member.
 
 Frozen dataclass describing a POSIX resource limit. Construct one directly or via a factory, then pass a list as the `rlimits` argument.
 
-| Factory | Parameters | Description |
-|---------|-----------|-------------|
-| Rlimit.nofile(limit) | `limit: int` | Max open file descriptors |
-| Rlimit.cpu(secs) | `secs: int` | CPU time limit in seconds |
-| Rlimit.as_(\*, soft, hard) | `soft: int, hard: int` | Virtual memory size |
-| Rlimit.nproc(limit) | `limit: int` | Max number of processes |
-| Rlimit.fsize(limit) | `limit: int` | Max file size |
-| Rlimit.memlock(limit) | `limit: int` | Max locked memory |
-| Rlimit.stack(limit) | `limit: int` | Max stack size |
+#### <span className="msb-recv">rlimit.</span><span className="msb-hn">resource</span>
+
+[`RlimitResource`](#rlimitresource)
+
+Which resource is limited
+
+#### <span className="msb-recv">rlimit.</span><span className="msb-hn">soft</span>
+
+`int`
+
+Soft limit
+
+#### <span className="msb-recv">rlimit.</span><span className="msb-hn">hard</span>
+
+`int`
+
+Hard limit
 
 #### <span className="msb-recv">Rlimit.</span><span className="msb-hn">nofile()</span>
 
@@ -589,14 +583,6 @@ Rlimit.stack(limit)
 ```
 
 Max stack size
-
-**Fields**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| resource | [`RlimitResource`](#rlimitresource) | Which resource is limited |
-| soft | `int` | Soft limit |
-| hard | `int` | Hard limit |
 
 ## Types
 

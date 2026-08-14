@@ -2072,11 +2072,6 @@ Set the working directory for future execs. On a running sandbox this applies to
 
 Builder passed to [`registry()`](#registry) for per-sandbox registry connection settings.
 
-| Method | Description |
-|--------|-------------|
-| `auth(auth: RegistryAuth)` | Set explicit credentials for the image registry |
-| `insecure()` | Use plain HTTP for the registry |
-| `ca_certs(pem_data: Vec<u8>)` | Trust additional PEM-encoded CA certificates |
 
 #### <span className="msb-recv">registry.</span><span className="msb-hn">auth()</span>
 
@@ -2107,12 +2102,6 @@ Trust additional PEM-encoded CA certificates
 
 Fluent configuration passed to [`Sandbox::list_with()`](#sandboxlist_with). Keep the labels and limit unchanged when continuing with a cursor.
 
-| Method | Description |
-|--------|-------------|
-| `limit(n)` | Set a page size from 1 through 100 |
-| `cursor(cursor)` | Continue after a previous page's `next_cursor` |
-| `label(key, value)` | Require one label; repeated calls are AND-matched |
-| `labels(iterable)` | Add several AND-matched labels |
 
 #### <span className="msb-recv">list.</span><span className="msb-hn">limit()</span>
 
@@ -2153,32 +2142,6 @@ Add several AND-matched labels
 
 A lightweight handle to an existing sandbox (running or stopped). Obtained via [`Sandbox::get()`](#sandboxget) or [`Sandbox::list()`](#sandboxlist). Provides status, configuration, and lifecycle control **without** an active connection to the guest agent. You cannot `exec` or `fs` on a handle - call `.start()` or `.connect()` to upgrade to a full [`Sandbox`](#instance-methods).
 
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| config() | `Result<`[`SandboxConfig`](#sandboxconfig)`>` | Parsed configuration |
-| config_json() | `&str` | Raw JSON configuration |
-| connect() | `Result<`[`Sandbox`](#instance-methods)`>` | Connect to a running sandbox; returns an error if it doesn't respond within ten seconds |
-| connect_with_timeout(timeout) | `Result<`[`Sandbox`](#instance-methods)`>` | Same as `connect()` with an explicit timeout |
-| created_at() | `Option<DateTime<Utc>>` | Creation timestamp |
-| kill() | `Result<()>` | Force terminate and wait until stopped state is observed |
-| kill_with_timeout(timeout) | `Result<()>` | Same as `kill()` with an explicit observation timeout |
-| logs() | `Result<Vec<`[`LogEntry`](#logentry)`>>` | Read captured `exec.log` (works without starting) |
-| metrics() | `Result<`[`SandboxMetrics`](#sandboxmetrics)`>` | Point-in-time resource metrics |
-| modify() | [`SandboxModificationBuilder`](#sandboxmodificationbuilder) | Start planning a configuration change (works without starting; changes on a stopped sandbox persist for the next boot) |
-| name() | `&str` | Sandbox name, up to 128 UTF-8 bytes |
-| ping() | `Result<`[`SandboxPingResult`](#sandboxpingresult)`>` | Check agent reachability without refreshing idle activity |
-| remove() | `Result<()>` | Delete sandbox and state |
-| request_drain() | `Result<()>` | Request graceful drain without waiting |
-| request_kill() | `Result<()>` | Request force termination without waiting |
-| request_stop() | `Result<()>` | Request graceful shutdown without waiting |
-| start() | `Result<`[`Sandbox`](#instance-methods)`>` | Start in attached mode |
-| start_detached() | `Result<`[`Sandbox`](#instance-methods)`>` | Start in detached mode |
-| status() | [`SandboxStatus`](#sandboxstatus) | Current status |
-| stop() | `Result<()>` | Gracefully shut down. Waits up to ten seconds for pending writes to flush, then force-kills |
-| stop_with_timeout(timeout) | `Result<()>` | Same as `stop()` with an explicit timeout; `Duration::ZERO` force-kills immediately |
-| touch() | `Result<`[`SandboxTouchResult`](#sandboxtouchresult)`>` | Explicitly refresh the sandbox idle timer |
-| updated_at() | `Option<DateTime<Utc>>` | Last update timestamp |
-| wait_until_stopped() | `Result<`[`SandboxStopResult`](#sandboxstopresult)`>` | Block until terminal state is observed |
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">config()</span>
 

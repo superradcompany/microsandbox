@@ -835,10 +835,6 @@ Copy a file from the sandbox to the host machine.
 
 Streaming reader for file data from the sandbox. Obtained via [`read_stream()`](#fs-read_stream) or [`read_handle_stream()`](#fs-read_handle_stream).
 
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| recv() | `recv(&mut self) -> MicrosandboxResult<Option<Bytes>>` | Receive the next chunk; `None` once the file is fully read. Errors if the guest reports a failure. |
-| collect() | `collect(self) -> MicrosandboxResult<Bytes>` | Consume the stream and collect all remaining chunks into a single buffer. |
 
 #### <span className="msb-recv">stream.</span><span className="msb-hn">recv()</span>
 
@@ -863,10 +859,6 @@ Consume the stream and collect all remaining chunks into a single buffer.
 
 Streaming writer for file data to the sandbox. Obtained via [`write_stream()`](#fs-write_stream) or [`write_handle_stream()`](#fs-write_handle_stream).
 
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| write() | `write(&self, data: impl AsRef<[u8]>) -> MicrosandboxResult<()>` | Write a chunk of data. |
-| close() | `close(self) -> MicrosandboxResult<()>` | Send EOF and wait for confirmation. Must be called to finalize the write; errors if the guest reports a write failure. |
 
 #### <span className="msb-recv">sink.</span><span className="msb-hn">write()</span>
 

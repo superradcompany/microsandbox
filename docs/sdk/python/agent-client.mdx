@@ -304,13 +304,11 @@ Close the client. Calling it more than once is safe.
 
 An open raw agent stream. Carries the protocol correlation id and is both an async context manager and an async iterator of [`RawFrame`](#rawframe). Iteration stops once a frame with `FLAG_TERMINAL` set is delivered or the stream reaches EOF.
 
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| id | `int` | Protocol correlation id; pass to [`send()`](#client-send) for follow-up frames |
-| next() | `Awaitable[`[`RawFrame`](#rawframe)` \| None]` | Read the next frame; returns `None` at EOF |
-| close() | `Awaitable[None]` | Release the stream handle early; safe to call more than once |
-| `async with` | [`AgentStream`](#agentstream) | Async context manager; closes the stream on exit |
-| `async for` | [`RawFrame`](#rawframe) | Async iterator over frames until terminal or EOF |
+#### <span className="msb-recv">stream.</span><span className="msb-hn">id</span>
+
+`int`
+
+Protocol correlation id; pass to [`send()`](#client-send) for follow-up frames
 
 #### <span className="msb-recv">stream.</span><span className="msb-hn">next()</span>
 

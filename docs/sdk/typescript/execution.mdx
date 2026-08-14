@@ -381,15 +381,23 @@ Interactive PTY attach with options for arguments, environment variables, workin
 
 The result of a completed command execution: collected output plus exit status. In TTY mode, `stdoutBytes()` contains the combined terminal output and `stderrBytes()` is empty because a PTY doesn't preserve separate stdout and stderr streams.
 
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| `code` | `number` (getter) | Process exit code |
-| `success` | `boolean` (getter) | `true` when `code === 0` |
-| `status` | [`ExitStatus`](#exitstatus) (getter) | Exit status object |
-| `stdout()` | `string` | Collected stdout decoded as UTF-8 (lossy on invalid sequences) |
-| `stderr()` | `string` | Collected stderr decoded as UTF-8 (lossy on invalid sequences) |
-| `stdoutBytes()` | `Uint8Array` | Raw stdout bytes |
-| `stderrBytes()` | `Uint8Array` | Raw stderr bytes |
+#### <span className="msb-recv">output.</span><span className="msb-hn">code</span>
+
+`number` (getter)
+
+Process exit code
+
+#### <span className="msb-recv">output.</span><span className="msb-hn">success</span>
+
+`boolean` (getter)
+
+`true` when `code === 0`
+
+#### <span className="msb-recv">output.</span><span className="msb-hn">status</span>
+
+[`ExitStatus`](#exitstatus) (getter)
+
+Exit status object
 
 #### <span className="msb-recv">output.</span><span className="msb-hn">stdout()</span>
 
@@ -445,18 +453,6 @@ Raw stderr bytes
 <p className="msb-backref">Returned by <a href="#sandbox-execstream">execStream()</a> · <a href="#sandbox-execstreamwith">execStreamWith()</a> · <a href="#sandbox-shellstream">shellStream()</a></p>
 
 A handle to a running streaming execution. Implements `AsyncIterable<ExecEvent>` and `AsyncDisposable`, so it works with `for await...of` and `await using`. `signal()`, `kill()`, and `resize()` may run while another task is waiting in `recv()`; concurrent receive, wait, and collect operations are not supported.
-
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| `recv()` | `Promise<`[`ExecEvent`](#execevent)` \| null>` | Receive the next event, or `null` once the stream ends |
-| `takeStdin()` | `Promise<`[`ExecSink`](#execsink)` \| null>` | Take ownership of the stdin sink. Returns `null` after the first call |
-| `wait()` | `Promise<`[`ExitStatus`](#exitstatus)`>` | Wait for the process to exit |
-| `collect()` | `Promise<`[`ExecOutput`](#execoutput)`>` | Drain stdout/stderr and wait for exit |
-| `signal(signal)` | `Promise<void>` | Send a POSIX signal (numeric) to the process |
-| `kill()` | `Promise<void>` | Force-terminate the process |
-| `resize(rows, cols)` | `Promise<void>` | Resize the PTY to the given unsigned 16-bit dimensions |
-| `[Symbol.asyncIterator]()` | `AsyncIterator<`[`ExecEvent`](#execevent)`>` | Iterate events with `for await...of` |
-| `[Symbol.asyncDispose]()` | `Promise<void>` | Best-effort kill on `await using` scope exit |
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">recv()</span>
 
@@ -542,18 +538,36 @@ Resize the PTY to the given unsigned 16-bit dimensions
 
 `Promise<void>`
 
+#### <span className="msb-recv">handle.</span><span className="msb-hn">[Symbol.asyncIterator]()</span>
+
+```typescript
+[Symbol.asyncIterator]()
+```
+
+Iterate events with `for await...of`
+
+<p className="msb-label">Returns</p>
+
+`AsyncIterator<`[`ExecEvent`](#execevent)`>`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">[Symbol.asyncDispose]()</span>
+
+```typescript
+[Symbol.asyncDispose]()
+```
+
+Best-effort kill on `await using` scope exit
+
+<p className="msb-label">Returns</p>
+
+`Promise<void>`
+
 ## ExecSink
 
 
 <p className="msb-backref">Returned by <a href="#exechandle">ExecHandle.takeStdin()</a></p>
 
 Writer for sending data to a running process's stdin. Implements `AsyncDisposable`. Obtained from [`ExecHandle.takeStdin()`](#exechandle) when the execution was configured with [`.stdinPipe()`](#execoptionsbuilder).
-
-| Method | Type | Description |
-|--------|------|-------------|
-| `write(data)` | `(data: Uint8Array \| string) => Promise<void>` | Write bytes to the process's stdin. Strings are UTF-8 encoded |
-| `close()` | `() => Promise<void>` | Close the sink. Sends EOF in non-TTY pipe mode; the guest PTY remains open in TTY mode |
-| `[Symbol.asyncDispose]()` | `() => Promise<void>` | Calls `close()` on `await using` scope exit |
 
 #### <span className="msb-recv">sink.</span><span className="msb-hn">write()</span>
 
@@ -579,6 +593,18 @@ Close the sink. Sends EOF in non-TTY pipe mode; the guest PTY remains open in TT
 
 `() => Promise<void>`
 
+#### <span className="msb-recv">sink.</span><span className="msb-hn">[Symbol.asyncDispose]()</span>
+
+```typescript
+[Symbol.asyncDispose]()
+```
+
+Calls `close()` on `await using` scope exit
+
+<p className="msb-label">Returns</p>
+
+`Promise<void>`
+
 ## ExecOptionsBuilder
 
 
@@ -586,21 +612,6 @@ Close the sink. Sends EOF in non-TTY pipe mode; the guest PTY remains open in TT
 
 Fluent builder passed to the callback in `execWith(cmd, b => ...)` and `execStreamWith(cmd, b => ...)`. Every setter mutates the builder and returns it, so calls chain.
 
-| Method | Type | Description |
-|--------|------|-------------|
-| `arg(arg)` | `(arg: string) => this` | Append a single argument |
-| `args(args)` | `(args: string[]) => this` | Append many arguments |
-| `cwd(cwd)` | `(cwd: string) => this` | Working directory |
-| `user(user)` | `(user: string) => this` | Guest user |
-| `env(key, value)` | `(key: string, value: string) => this` | Add a single env var |
-| `envs(vars)` | `(vars: Record<string, string>) => this` | Add many env vars |
-| `timeout(ms)` | `(ms: number) => this` | Kill the process after this many milliseconds |
-| `stdinNull()` | `() => this` | Connect stdin to `/dev/null` (default) |
-| `stdinPipe()` | `() => this` | Open a writable stdin pipe; read it back with [`ExecHandle.takeStdin()`](#exechandle) |
-| `stdinBytes(data)` | `(data: Buffer) => this` | Pre-supply stdin bytes and close it |
-| `tty(enabled)` | `(enabled: boolean) => this` | Allocate a pseudo-terminal |
-| `rlimit(resource, limit)` | `(resource: `[`RlimitResource`](#rlimitresource)`, limit: number) => this` | Set both soft and hard rlimit |
-| `rlimitRange(resource, soft, hard)` | `(resource: `[`RlimitResource`](#rlimitresource)`, soft: number, hard: number) => this` | Set distinct soft and hard rlimits |
 
 #### <span className="msb-recv">execOptions.</span><span className="msb-hn">arg()</span>
 
@@ -765,17 +776,6 @@ Set distinct soft and hard rlimits
 
 Fluent builder passed to the callback in `attachWith(cmd, b => ...)`. Every setter mutates the builder and returns it, so calls chain.
 
-| Method | Type | Description |
-|--------|------|-------------|
-| `arg(arg)` | `(arg: string) => this` | Append a single argument |
-| `args(args)` | `(args: string[]) => this` | Append many arguments |
-| `cwd(cwd)` | `(cwd: string) => this` | Working directory |
-| `user(user)` | `(user: string) => this` | Guest user |
-| `env(key, value)` | `(key: string, value: string) => this` | Add a single env var |
-| `envs(vars)` | `(vars: Record<string, string>) => this` | Add many env vars |
-| `detachKeys(spec)` | `(spec: string) => this` | Detach key sequence (e.g. `"ctrl-]"` or `"ctrl-p,ctrl-q"`) |
-| `rlimit(resource, limit)` | `(resource: `[`RlimitResource`](#rlimitresource)`, limit: number) => this` | Set both soft and hard rlimit |
-| `rlimitRange(resource, soft, hard)` | `(resource: `[`RlimitResource`](#rlimitresource)`, soft: number, hard: number) => this` | Set distinct soft and hard rlimits |
 
 #### <span className="msb-recv">attachOptions.</span><span className="msb-hn">arg()</span>
 
@@ -892,11 +892,6 @@ Set distinct soft and hard rlimits
 
 Helper factory for constructing a [`StdinMode`](#stdinmode). Equivalent to the `stdinNull` / `stdinPipe` / `stdinBytes` setters on [`ExecOptionsBuilder`](#execoptionsbuilder).
 
-| Method | Type | Description |
-|--------|------|-------------|
-| `Stdin.null()` | `() => `[`StdinMode`](#stdinmode) | Connect stdin to `/dev/null` |
-| `Stdin.pipe()` | `() => `[`StdinMode`](#stdinmode) | Open a writable pipe; caller writes via [`ExecHandle.takeStdin()`](#exechandle) |
-| `Stdin.bytes(data)` | `(data: Uint8Array \| string) => `[`StdinMode`](#stdinmode) | Send the given bytes (or UTF-8-encoded string) and close stdin |
 
 #### <span className="msb-recv">Stdin.</span><span className="msb-hn">null()</span>
 
