@@ -948,8 +948,10 @@ jobs:
           chmod +x build/msb
           ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} build/libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
           ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} build/libkrunfw.so
-          scripts/smoke/cli/image-archive.sh
-          scripts/smoke/cli/split-irqchip-bind-net.sh
+          # Existing runner services may not inherit recently-added groups
+          # until restart. Activate each required device group per smoke test.
+          sg docker -c 'scripts/smoke/cli/image-archive.sh'
+          sg kvm -c 'scripts/smoke/cli/split-irqchip-bind-net.sh'
 
       - name: Disk usage
         if: always()
