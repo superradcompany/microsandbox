@@ -92,6 +92,41 @@ When running microsandbox inside another VM or container, the outer environment 
 
 For Docker-based workflows, pass `/dev/kvm` into the container. See [Docker on Linux](/recipes/docker/docker) for the container flags.
 
+## Interrupt acceleration
+
+On Linux x86 hosts, `msb doctor` reports AMD AVIC or Intel APICv when the applicable KVM capability can be inspected:
+
+```text
+KVM AVIC   enabled (x2AVIC available)
+KVM APICv  enabled by KVM policy
+```
+
+Doctor reports host policy and advertised capability, not proof that one running sandbox used hardware acceleration. An outer hypervisor may hide the capability on nested or cloud VMs.
+
+If the capability is available but disabled, doctor prints the current-boot module reload command. Stop every KVM user before unloading either module; reloading it affects every VM on the host.
+
+<Accordion title="Current-boot KVM policy commands">
+
+AMD:
+
+```bash
+sudo modprobe -r kvm_amd && sudo modprobe kvm_amd avic=1
+cat /sys/module/kvm_amd/parameters/avic
+```
+
+Intel:
+
+```bash
+sudo modprobe -r kvm_intel && sudo modprobe kvm_intel enable_apicv=1
+cat /sys/module/kvm_intel/parameters/enable_apicv
+```
+
+Do not run either command while `/dev/kvm` has users. A distribution may build KVM into the kernel, prevent module removal, or require the setting in its boot configuration instead.
+
+</Accordion>
+
+Microsandbox never changes this host-wide policy automatically. See [Optimization](/sandboxes/optimization#host-interrupt-acceleration) for when interrupt acceleration matters.
+
 ## Linux userland
 
 Use a normal glibc-based Linux host for the local runtime. Minimal or musl-only environments, such as a bare Alpine host image, are not the tested path for running local microsandbox sandboxes.

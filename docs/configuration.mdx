@@ -184,7 +184,7 @@ Defaults applied to local sandboxes unless overridden per-sandbox. Cloud backend
 
 Explicit CLI or SDK options win over `config.json`, and `config.json` wins over built-in defaults. Microsandbox resolves the effective values once when it creates a local sandbox and persists that resolved sandbox configuration; changing the global file affects future creations, not existing sandboxes.
 
-For workload effects, host requirements, filesystem expectations, and verification steps for these settings, see [Performance optimization](/optimization/overview).
+For workload effects, host requirements, filesystem expectations, and verification steps for these settings, see [Optimization](/sandboxes/optimization).
 
 | Field | Default | Description |
 |-------|---------|-------------|
@@ -249,7 +249,7 @@ Use a fixed policy only when representative measurements justify a different per
 
 `pool_mib` is a live pressure budget, not eagerly allocated RAM. Every eligible writable disk in the same `MSB_HOME` receives a weighted max-min fair share: disks with a smaller configured maximum keep that smaller value, and the remaining pool is divided equally across the rest. Creating another sandbox never fails merely because this pool is full. Existing VMMs observe membership changes within 250 ms; if a disk already owns more dirty data than its new share, libkrun retires accounted ranges and pauses later writes until it converges below the target. A guest write already reserved before the target changed is allowed to complete safely. `fixed` and an explicitly pooled `auto` policy are unsupported on other hosts.
 
-Hardware CRC32C, the guest kernel preemption model, x2APIC, APICv/AVIC capability, vCPU affinity mechanics, and the pure-Rust ext4 writer are implementation or capability details rather than user policy, so they intentionally have no global config keys. The [performance guide](/optimization/overview#optimizations-that-are-not-knobs) explains how those automatic layers interact with the configurable policy.
+Hardware CRC32C, the guest kernel preemption model, x2APIC, APICv/AVIC capability, vCPU affinity mechanics, and the pure-Rust ext4 writer are implementation or capability details rather than user policy, so they intentionally have no global config keys. The [optimization guide](/sandboxes/optimization#optimizations-that-are-not-knobs) explains how those automatic layers interact with the configurable policy.
 
 ## `registries`
 

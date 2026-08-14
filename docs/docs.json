@@ -48,6 +48,7 @@
             "pages": [
               "sandboxes/overview",
               "sandbox-config",
+              "sandboxes/optimization",
               "sandboxes/cpu-placement",
               "sandboxes/lifecycle",
               "sandboxes/commands",
@@ -302,13 +303,6 @@
             "pages": [
               "GET /v1/members"
             ]
-          },
-          {
-            "group": "Performance",
-            "icon": "bolt",
-            "pages": [
-              "optimization/overview"
-            ]
           }
         ]
       },
@@ -416,6 +410,12 @@
       }
     ]
   },
+  "redirects": [
+    {
+      "source": "/optimization/overview",
+      "destination": "/sandboxes/optimization"
+    }
+  ],
   "integrations": {
     "posthog": {
       "apiKey": "phc_mMJPTEQbarHl4JMTdFBcgw5v612dmQrvKv5mcK3KJ3O",
