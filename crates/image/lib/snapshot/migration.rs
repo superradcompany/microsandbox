@@ -11,9 +11,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use microsandbox_types::snapshot::{
-    DESCRIPTOR_FILENAME, FILE_MERKLE_BLAKE3_LEAF_SIZE, FileSnapshotState, ImageRef, Manifest,
-    SCHEMA_VERSION, SNAPSHOT_ARTIFACT_KIND, SnapshotFormat, SnapshotScope, SnapshotState,
-    UpperIntegrity, UpperLayer,
+    DESCRIPTOR_FILENAME, FileSnapshotState, ImageRef, Manifest, SCHEMA_VERSION,
+    SNAPSHOT_ARTIFACT_KIND, SnapshotFormat, SnapshotScope, SnapshotState, UpperIntegrity,
+    UpperLayer,
 };
 
 use crate::error::{ImageError, ImageResult};
@@ -430,7 +430,7 @@ mod tests {
         let current = UpperIntegrity::FileMerkleBlake3V1 {
             root: format!("blake3:{}", "b".repeat(64)),
             logical_size: 5,
-            leaf_size: FILE_MERKLE_BLAKE3_LEAF_SIZE,
+            leaf_size: microsandbox_types::snapshot::FILE_MERKLE_BLAKE3_LEAF_SIZE,
         };
         let SnapshotState::File(file) = &mut translated.target.state else {
             panic!("fixture must contain file state");

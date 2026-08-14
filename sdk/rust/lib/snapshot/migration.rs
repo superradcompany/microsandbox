@@ -19,9 +19,7 @@ use microsandbox_image::snapshot::migration::{
     V066_BACKUP_FILENAME, V066_DESCRIPTOR_FILENAME, V066PayloadIdentity, V066SourceInfo,
     inspect_v066_source, translate_v066_forward,
 };
-use microsandbox_types::snapshot::{
-    DESCRIPTOR_FILENAME, Manifest, SnapshotFormat, SnapshotState,
-};
+use microsandbox_types::snapshot::{DESCRIPTOR_FILENAME, Manifest, SnapshotFormat, SnapshotState};
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement, TransactionTrait};
 
 use crate::{MicrosandboxError, MicrosandboxResult};
