@@ -265,15 +265,6 @@ Walk `dir` and rebuild the local index from the artifacts it finds.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-n, err := m.Snapshot.Reindex(ctx, "/srv/snapshots")
-fmt.Printf("indexed %d snapshots\n", n)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">Save()</span>
@@ -324,14 +315,6 @@ err := m.Snapshot.Save(ctx, "after-pip-install", "/tmp/snap.tar.zst",
 ```go
 func (snapshotFactory) Load(ctx context.Context, archive, dest string) (*SnapshotHandle, error)
 ```
-
-<Accordion title="Example">
-
-```go
-h, err := m.Snapshot.Import(ctx, "/tmp/snap.tar.zst", "")
-```
-
-</Accordion>
 
 Unpack a snapshot archive into the snapshots directory or an explicit `dest` directory. Pass `""` for the default destination.
 
@@ -458,17 +441,6 @@ if report.Upper.Kind == "not_recorded" {
 ```
 
 </Accordion>
-
-Recompute recorded content integrity for this snapshot. Returns `not_recorded` without reading payload contents when the artifact has no integrity value.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshotverifyreportstruct">*SnapshotVerifyReport</a></div>
-    <div className="msb-param-desc">Recomputed digest and upper-layer status.</div>
-  </div>
-</div>
 
 #### <span className="msb-recv">s.</span><span className="msb-hn">Path()</span>
 
