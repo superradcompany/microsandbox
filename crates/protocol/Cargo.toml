@@ -11,6 +11,7 @@ edition.workspace = true
 path = "lib/lib.rs"
 
 [dependencies]
+bytes.workspace = true
 chrono.workspace = true
 ciborium.workspace = true
 microsandbox-types.workspace = true

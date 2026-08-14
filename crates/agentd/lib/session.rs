@@ -11,7 +11,7 @@ use std::{iter, mem, ptr};
 use nix::pty;
 use nix::sys::signal::Signal;
 use tokio::io::AsyncReadExt;
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 
 use microsandbox_protocol::exec::{ExecFailed, ExecFailureKind, ExecRequest};
 
@@ -31,6 +31,15 @@ const PR_CAPBSET_DROP: libc::c_int = 24;
 const PR_CAP_AMBIENT: libc::c_int = 47;
 const PR_CAP_AMBIENT_CLEAR_ALL: libc::c_int = 4;
 const DEFAULT_USER_SPEC: &str = "0:0";
+
+/// Aggregate guest-to-host data retained outside the serial output buffer.
+const SESSION_OUTPUT_BYTE_CAPACITY: usize = 32 * 1024 * 1024;
+
+/// Allocation granularity used by the data budget.
+const SESSION_OUTPUT_BUDGET_GRANULE: usize = 4096;
+
+/// Maximum number of data or control events waiting for the serial writer.
+const SESSION_OUTPUT_ITEM_CAPACITY: usize = 1024;
 
 //--------------------------------------------------------------------------------------------------
 // Functions: classify
@@ -148,6 +157,28 @@ pub enum SessionOutput {
     Raw(RawSessionOutput),
 }
 
+/// One queued session event and the data-budget capacity owned by its buffer.
+pub struct SessionOutputEnvelope {
+    /// Correlation ID for the session event.
+    pub id: u32,
+
+    /// Event consumed by the main serial loop.
+    pub output: SessionOutput,
+
+    /// Capacity follows the allocation and is released only after serial output consumes it.
+    _permit: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+/// Capacity reserved before a producer reads or encodes a data-bearing event.
+pub struct SessionOutputPermit(tokio::sync::OwnedSemaphorePermit);
+
+/// Cloneable producer for the byte-bounded session output queue.
+#[derive(Clone)]
+pub struct SessionOutputSender {
+    tx: mpsc::Sender<SessionOutputEnvelope>,
+    data_budget: Arc<Semaphore>,
+}
+
 /// Pre-encoded session output plus the accounting metadata known by its producer.
 pub struct RawSessionOutput {
     /// Encoded protocol frame bytes.
@@ -248,6 +279,93 @@ impl RawSessionOutput {
     }
 }
 
+impl SessionOutput {
+    /// Bytes retained by this event that count against bulk output capacity.
+    fn budget_bytes(&self) -> usize {
+        let allocation = match self {
+            Self::Stdout(data) | Self::Stderr(data) => data.capacity(),
+            Self::Raw(output)
+                if output.activity.fs_bytes != 0 || output.activity.tcp_bytes != 0 =>
+            {
+                output.frame.capacity()
+            }
+            Self::Exited(_) | Self::Raw(_) => 0,
+        };
+
+        allocation
+            .checked_add(SESSION_OUTPUT_BUDGET_GRANULE - 1)
+            .map(|bytes| bytes / SESSION_OUTPUT_BUDGET_GRANULE * SESSION_OUTPUT_BUDGET_GRANULE)
+            .unwrap_or(usize::MAX)
+    }
+}
+
+impl SessionOutputSender {
+    /// Create one ordered queue with a separate byte budget for data-bearing events.
+    pub fn channel() -> (Self, mpsc::Receiver<SessionOutputEnvelope>) {
+        let (tx, rx) = mpsc::channel(SESSION_OUTPUT_ITEM_CAPACITY);
+        (
+            Self {
+                tx,
+                data_budget: Arc::new(Semaphore::new(SESSION_OUTPUT_BYTE_CAPACITY)),
+            },
+            rx,
+        )
+    }
+
+    /// Queue an event after its retained allocation has acquired aggregate capacity.
+    pub async fn send(&self, id: u32, output: SessionOutput) -> bool {
+        let budget_bytes = output.budget_bytes();
+        let Some(permit) = self.reserve(budget_bytes).await else {
+            eprintln!("agentd session output {id} exceeds byte budget: {budget_bytes} bytes");
+            return false;
+        };
+
+        self.send_reserved(id, output, permit).await
+    }
+
+    /// Reserve capacity before reading or encoding up to `max_bytes` of output.
+    pub async fn reserve(&self, max_bytes: usize) -> Option<SessionOutputPermit> {
+        let budget_bytes = max_bytes.checked_add(SESSION_OUTPUT_BUDGET_GRANULE - 1)?
+            / SESSION_OUTPUT_BUDGET_GRANULE
+            * SESSION_OUTPUT_BUDGET_GRANULE;
+        if budget_bytes > SESSION_OUTPUT_BYTE_CAPACITY {
+            return None;
+        }
+        let permit_count = u32::try_from(budget_bytes).ok()?;
+        Arc::clone(&self.data_budget)
+            .acquire_many_owned(permit_count)
+            .await
+            .ok()
+            .map(SessionOutputPermit)
+    }
+
+    /// Queue output using capacity obtained before the producer created its allocation.
+    pub async fn send_reserved(
+        &self,
+        id: u32,
+        output: SessionOutput,
+        permit: SessionOutputPermit,
+    ) -> bool {
+        let charged = output.budget_bytes();
+        if charged > permit.0.num_permits() {
+            eprintln!(
+                "agentd session output {id} exceeded its reservation: {charged} > {} bytes",
+                permit.0.num_permits()
+            );
+            return false;
+        }
+
+        self.tx
+            .send(SessionOutputEnvelope {
+                id,
+                output,
+                _permit: (charged != 0).then_some(permit.0),
+            })
+            .await
+            .is_ok()
+    }
+}
+
 impl RawActivity {
     /// A guest-to-host frame with no byte counter.
     pub fn guest_message() -> Self {
@@ -284,7 +402,7 @@ impl ExecSession {
     pub fn spawn(
         id: u32,
         req: &ExecRequest,
-        tx: mpsc::UnboundedSender<(u32, SessionOutput)>,
+        tx: SessionOutputSender,
         default_user: Option<&str>,
         security_profile: SecurityProfile,
     ) -> AgentdResult<Self> {
@@ -371,7 +489,7 @@ impl ExecSession {
     fn spawn_pty(
         id: u32,
         req: &ExecRequest,
-        tx: mpsc::UnboundedSender<(u32, SessionOutput)>,
+        tx: SessionOutputSender,
         default_user: Option<&str>,
         security_profile: SecurityProfile,
         process_manager: &Arc<ProcessManager>,
@@ -583,7 +701,7 @@ impl ExecSession {
     fn spawn_pipe(
         id: u32,
         req: &ExecRequest,
-        tx: mpsc::UnboundedSender<(u32, SessionOutput)>,
+        tx: SessionOutputSender,
         default_user: Option<&str>,
         security_profile: SecurityProfile,
         process_manager: &Arc<ProcessManager>,
@@ -1165,9 +1283,10 @@ async fn pty_reader_task(
     id: u32,
     master_fd: OwnedFd,
     exit_watcher: ProcessExitWatcher,
-    tx: mpsc::UnboundedSender<(u32, SessionOutput)>,
+    tx: SessionOutputSender,
 ) {
     let tx_output = tx.clone();
+    let runtime_handle = tokio::runtime::Handle::current();
     let read_result = tokio::task::spawn_blocking(move || {
         // PTY masters are safer with a dedicated blocking read loop than with
         // edge-driven readiness. Fast writers followed by process exit can
@@ -1183,10 +1302,16 @@ async fn pty_reader_task(
             let n = unsafe { libc::read(raw, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
 
             if n > 0 {
-                if tx_output
-                    .send((id, SessionOutput::Stdout(buf[..n as usize].to_vec())))
-                    .is_err()
-                {
+                let n = n as usize;
+                let sent = runtime_handle.block_on(async {
+                    let Some(permit) = tx_output.reserve(n).await else {
+                        return false;
+                    };
+                    tx_output
+                        .send_reserved(id, SessionOutput::Stdout(buf[..n].to_vec()), permit)
+                        .await
+                });
+                if !sent {
                     break;
                 }
                 continue;
@@ -1209,7 +1334,7 @@ async fn pty_reader_task(
     let _ = read_result;
 
     let code = exit_watcher.await;
-    let _ = tx.send((id, SessionOutput::Exited(code)));
+    let _ = tx.send(id, SessionOutput::Exited(code)).await;
 }
 
 /// Background task that reads from piped stdout/stderr and sends output events.
@@ -1218,7 +1343,7 @@ async fn pipe_reader_task(
     stdout: Option<tokio::process::ChildStdout>,
     stderr: Option<tokio::process::ChildStderr>,
     exit_watcher: ProcessExitWatcher,
-    tx: mpsc::UnboundedSender<(u32, SessionOutput)>,
+    tx: SessionOutputSender,
 ) {
     let mut stdout = stdout;
     let mut stderr = stderr;
@@ -1242,7 +1367,19 @@ async fn pipe_reader_task(
                         stdout_eof = true;
                     }
                     Ok(n) => {
-                        let _ = tx.send((id, SessionOutput::Stdout(stdout_buf[..n].to_vec())));
+                        let Some(permit) = tx.reserve(n).await else {
+                            break;
+                        };
+                        if !tx
+                            .send_reserved(
+                                id,
+                                SessionOutput::Stdout(stdout_buf[..n].to_vec()),
+                                permit,
+                            )
+                            .await
+                        {
+                            break;
+                        }
                     }
                 }
             }
@@ -1258,7 +1395,19 @@ async fn pipe_reader_task(
                         stderr_eof = true;
                     }
                     Ok(n) => {
-                        let _ = tx.send((id, SessionOutput::Stderr(stderr_buf[..n].to_vec())));
+                        let Some(permit) = tx.reserve(n).await else {
+                            break;
+                        };
+                        if !tx
+                            .send_reserved(
+                                id,
+                                SessionOutput::Stderr(stderr_buf[..n].to_vec()),
+                                permit,
+                            )
+                            .await
+                        {
+                            break;
+                        }
                     }
                 }
             }
@@ -1267,7 +1416,7 @@ async fn pipe_reader_task(
 
     let code = exit_watcher.await;
 
-    let _ = tx.send((id, SessionOutput::Exited(code)));
+    let _ = tx.send(id, SessionOutput::Exited(code)).await;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1298,6 +1447,38 @@ mod tests {
     const RUNTIME_TEST_NAME: &str = "session::tests::test_spawn_survives_runtime_replacement";
     const PIPE_OWNER_HELPER_ENV: &str = "MSB_AGENTD_PIPE_OWNER_HELPER";
     const PIPE_OWNER_HELPER_SENTINEL: &str = "pipe-owner-helper-passed";
+
+    #[tokio::test]
+    async fn session_output_permit_lives_until_envelope_is_consumed() {
+        let (tx, mut rx) = SessionOutputSender::channel();
+        assert!(tx.send(7, SessionOutput::Stdout(vec![0; 4096])).await);
+        assert_eq!(
+            tx.data_budget.available_permits(),
+            SESSION_OUTPUT_BYTE_CAPACITY - 4096
+        );
+
+        let envelope = rx.recv().await.unwrap();
+        assert_eq!(
+            tx.data_budget.available_permits(),
+            SESSION_OUTPUT_BYTE_CAPACITY - 4096
+        );
+        drop(envelope);
+        assert_eq!(
+            tx.data_budget.available_permits(),
+            SESSION_OUTPUT_BYTE_CAPACITY
+        );
+    }
+
+    #[tokio::test]
+    async fn control_output_remains_admissible_when_data_budget_is_exhausted() {
+        let (tx, mut rx) = SessionOutputSender::channel();
+        let full_budget = tx.reserve(SESSION_OUTPUT_BYTE_CAPACITY).await.unwrap();
+
+        assert!(tx.send(9, SessionOutput::Exited(0)).await);
+        let envelope = rx.recv().await.unwrap();
+        assert!(matches!(envelope.output, SessionOutput::Exited(0)));
+        drop(full_budget);
+    }
     const PIPE_OWNER_TEST_NAME: &str =
         "session::tests::test_piped_process_exit_outlives_spawning_runtime";
 
@@ -1347,7 +1528,7 @@ mod tests {
             std::io::Error::last_os_error()
         );
 
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = SessionOutputSender::channel();
         let req = ExecRequest {
             cmd: "/bin/sh".to_string(),
             args: vec!["-c".to_string(), "sleep 30 & echo $!".to_string()],
@@ -1366,9 +1547,9 @@ mod tests {
         let mut stdout = Vec::new();
         time::timeout(Duration::from_secs(10), async {
             while !stdout.contains(&b'\n') {
-                let (id, output) = rx.recv().await.expect("session output");
-                assert_eq!(id, 17);
-                match output {
+                let envelope = rx.recv().await.expect("session output");
+                assert_eq!(envelope.id, 17);
+                match envelope.output {
                     SessionOutput::Stdout(data) => stdout.extend_from_slice(&data),
                     SessionOutput::Exited(code) => panic!("session exited early with {code}"),
                     SessionOutput::Stderr(_) | SessionOutput::Raw(_) => {}
@@ -1415,9 +1596,9 @@ mod tests {
             .expect("signal descendants through completed process registration");
         let exit = time::timeout(Duration::from_secs(5), async {
             loop {
-                let (id, output) = rx.recv().await.expect("session output after signal");
-                assert_eq!(id, 17);
-                if let SessionOutput::Exited(code) = output {
+                let envelope = rx.recv().await.expect("session output after signal");
+                assert_eq!(envelope.id, 17);
+                if let SessionOutput::Exited(code) = envelope.output {
                     break code;
                 }
             }
@@ -1484,7 +1665,7 @@ mod tests {
         const PROCESS_COUNT: u32 = 12;
 
         let runtime_handle = tokio::runtime::Handle::current();
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = SessionOutputSender::channel();
         let mut spawn_threads = Vec::new();
         for offset in 0..PROCESS_COUNT {
             let handle = runtime_handle.clone();
@@ -1521,9 +1702,9 @@ mod tests {
         let mut exits = HashMap::new();
         time::timeout(Duration::from_secs(15), async {
             while exits.len() < PROCESS_COUNT as usize {
-                let (id, output) = rx.recv().await.expect("session output");
-                if let SessionOutput::Exited(code) = output {
-                    exits.insert(id, code);
+                let envelope = rx.recv().await.expect("session output");
+                if let SessionOutput::Exited(code) = envelope.output {
+                    exits.insert(envelope.id, code);
                 }
             }
         })
@@ -1580,7 +1761,7 @@ mod tests {
     }
 
     async fn run_single_pipe_spawn(id: u32, code: i32) {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = SessionOutputSender::channel();
         let req = ExecRequest {
             cmd: "/bin/sh".to_string(),
             args: vec!["-c".to_string(), format!("exit {code}")],
@@ -1597,9 +1778,9 @@ mod tests {
 
         let actual = time::timeout(Duration::from_secs(5), async {
             loop {
-                let (actual_id, output) = rx.recv().await.expect("session output");
-                assert_eq!(actual_id, id);
-                if let SessionOutput::Exited(actual) = output {
+                let envelope = rx.recv().await.expect("session output");
+                assert_eq!(envelope.id, id);
+                if let SessionOutput::Exited(actual) = envelope.output {
                     break actual;
                 }
             }
@@ -1677,7 +1858,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pty_reader_drains_ready_fd() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = SessionOutputSender::channel();
         let req = ExecRequest {
             cmd: "/bin/sh".to_string(),
             args: vec![
@@ -1700,9 +1881,9 @@ mod tests {
         let mut exit = None;
 
         let recv_result = time::timeout(Duration::from_secs(15), async {
-            while let Some((id, output)) = rx.recv().await {
-                assert_eq!(id, 7);
-                match output {
+            while let Some(envelope) = rx.recv().await {
+                assert_eq!(envelope.id, 7);
+                match envelope.output {
                     SessionOutput::Stdout(data) => stdout.extend_from_slice(&data),
                     SessionOutput::Exited(code) => {
                         exit = Some(code);
@@ -1891,7 +2072,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_spawn_pipe_error_does_not_include_probe_details() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = SessionOutputSender::channel();
         let req = ExecRequest {
             cmd: "/definitely/not/a/real/binary".to_string(),
             args: Vec::new(),

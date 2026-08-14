@@ -9,12 +9,13 @@
 //! handshake so that the relay can route agent responses back to the correct
 //! client without rewriting frame headers.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::IoSlice;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 #[cfg(unix)]
 use microsandbox_filesystem::{BindIdentityMap, BindIdentityMapHandle};
 use microsandbox_protocol::codec::{self, MAX_FRAME_SIZE};
@@ -26,12 +27,12 @@ use microsandbox_protocol::message::{
 use microsandbox_protocol::{AGENT_RELAY_ID_RANGE_STEP, AGENT_RELAY_MAX_CLIENTS};
 #[cfg(unix)]
 use tokio::io::unix::AsyncFd;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::net::UnixListener;
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::{NamedPipeServer, PipeMode, ServerOptions};
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{Mutex, Semaphore, mpsc, watch};
 
 use crate::clock::spawn_clock_sync_task;
 use crate::console::ConsoleSharedState;
@@ -73,7 +74,23 @@ type SessionRegistry = std::sync::Mutex<HashMap<u32, SessionInfo>>;
 const LEN_PREFIX_SIZE: usize = 4;
 
 /// Capacity of the per-client write channel.
-const CLIENT_WRITE_CHANNEL_CAPACITY: usize = 64;
+const CLIENT_WRITE_CHANNEL_CAPACITY: usize = 2;
+
+/// Aggregate guest-to-client bytes retained by the relay.
+const CLIENT_OUTPUT_BYTE_CAPACITY: usize = 32 * 1024 * 1024;
+
+/// Allocation granularity used for relay output admission.
+const OUTPUT_BUDGET_GRANULE: usize = 4096;
+
+/// Maximum bytes opportunistically coalesced in one client socket batch.
+const CLIENT_WRITE_BATCH_BYTES: usize = 256 * 1024;
+
+/// Maximum frame slices opportunistically coalesced in one client socket batch.
+const CLIENT_WRITE_BATCH_FRAMES: usize = 64;
+
+/// At most eight generation-6 frames may wait between clients and the console.
+/// Since a frame is capped at 4 MiB, this bounds the channel at 32 MiB.
+const AGENT_WRITE_CHANNEL_CAPACITY: usize = 8;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -86,7 +103,13 @@ struct ClientState {
     /// Channel for sending frames to this client's writer task.
     /// Using a channel avoids holding the client mutex across async writes.
     /// Uses `Bytes` for zero-copy frame forwarding from the ring buffer.
-    write_tx: mpsc::Sender<Bytes>,
+    write_tx: mpsc::Sender<ClientWrite>,
+}
+
+/// A client-bound frame whose aggregate capacity lives until the socket accepts it.
+struct ClientWrite {
+    data: Bytes,
+    _permit: tokio::sync::OwnedSemaphorePermit,
 }
 
 /// The agent relay running in the sandbox process.
@@ -322,6 +345,8 @@ impl AgentRelay {
             self.shared.tx_wake.drain();
             while let Some(chunk) = self.shared.tx_ring.pop() {
                 buf.extend_from_slice(&chunk);
+                drop(chunk);
+                self.shared.tx_capacity_wake.wake();
             }
 
             // Try to extract complete frames.
@@ -402,7 +427,7 @@ impl AgentRelay {
         mut shutdown: watch::Receiver<bool>,
         drain_tx: mpsc::Sender<()>,
     ) -> RuntimeResult<()> {
-        let ready_frame = self.ready_frame.ok_or_else(|| {
+        let ready_frame = self.ready_frame.take().ok_or_else(|| {
             RuntimeError::Custom("agent relay: run() called before wait_ready()".into())
         })?;
 
@@ -411,7 +436,7 @@ impl AgentRelay {
 
         // Bounded channel for client reader tasks to send frames to the ring writer.
         // Backpressure prevents unbounded memory growth from client floods.
-        let (agent_tx, agent_rx) = mpsc::channel::<Vec<u8>>(256);
+        let (agent_tx, agent_rx) = mpsc::channel::<Bytes>(AGENT_WRITE_CHANNEL_CAPACITY);
 
         // Track which client slots are in use.
         let used_slots: Arc<Mutex<HashSet<u32>>> = Arc::new(Mutex::new(HashSet::new()));
@@ -440,11 +465,13 @@ impl AgentRelay {
         let next_session_id: Arc<AtomicU64> = Arc::new(AtomicU64::new(1));
         let clients_for_reader = Arc::clone(&clients);
         let shared_for_reader = Arc::clone(&self.shared);
+        let client_output_budget = Arc::new(Semaphore::new(CLIENT_OUTPUT_BYTE_CAPACITY));
         let log_writer_for_reader = self.log_writer.clone();
         let registry_for_reader = Arc::clone(&session_registry);
         let ring_reader_handle = tokio::spawn(ring_reader_task(
             shared_for_reader,
             clients_for_reader,
+            client_output_budget,
             log_writer_for_reader,
             registry_for_reader,
         ));
@@ -505,10 +532,37 @@ impl AgentRelay {
                             // Spawn a per-client writer task so the ring reader
                             // never holds the mutex across async writes.
                             let (write_tx, mut write_rx) =
-                                mpsc::channel::<Bytes>(CLIENT_WRITE_CHANNEL_CAPACITY);
+                                mpsc::channel::<ClientWrite>(CLIENT_WRITE_CHANNEL_CAPACITY);
                             tokio::spawn(async move {
-                                while let Some(data) = write_rx.recv().await {
-                                    if let Err(e) = writer_half.write_all(&data).await {
+                                let mut batch = VecDeque::new();
+                                let mut deferred = None;
+                                loop {
+                                    let write = match deferred.take() {
+                                        Some(write) => write,
+                                        None => match write_rx.recv().await {
+                                            Some(write) => write,
+                                            None => break,
+                                        },
+                                    };
+                                    let mut batch_bytes = write.data.len();
+                                    batch.push_back(write);
+                                    while batch.len() < CLIENT_WRITE_BATCH_FRAMES
+                                        && batch_bytes < CLIENT_WRITE_BATCH_BYTES
+                                    {
+                                        let Ok(write) = write_rx.try_recv() else {
+                                            break;
+                                        };
+                                        if batch_bytes.saturating_add(write.data.len())
+                                            > CLIENT_WRITE_BATCH_BYTES
+                                        {
+                                            deferred = Some(write);
+                                            break;
+                                        }
+                                        batch_bytes = batch_bytes.saturating_add(write.data.len());
+                                        batch.push_back(write);
+                                    }
+
+                                    if let Err(e) = write_client_batch(&mut writer_half, &mut batch).await {
                                         tracing::error!(
                                             "agent relay: client writer slot={slot} failed: {e}"
                                         );
@@ -568,12 +622,37 @@ impl AgentRelay {
         // Clean up the local IPC endpoint.
         self.listener.cleanup(&self.endpoint);
 
+        // Wake any libkrun or relay producer blocked on console capacity.
+        self.shared.close();
+
         // Abort background tasks.
         clock_sync_handle.abort();
         ring_writer_handle.abort();
         ring_reader_handle.abort();
 
         Ok(())
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl Drop for AgentRelay {
+    fn drop(&mut self) {
+        // The console write-capacity hook may be sleeping on a libkrun thread. Every relay exit,
+        // including readiness failure or task cancellation, must wake it before VM teardown.
+        self.shared.close();
+        self.listener.cleanup(&self.endpoint);
+        let guest_to_host = self.shared.tx_ring.snapshot();
+        let host_to_guest = self.shared.rx_ring.snapshot();
+        tracing::debug!(
+            guest_to_host_high_water = guest_to_host.high_water_bytes,
+            guest_to_host_full_events = guest_to_host.full_events,
+            host_to_guest_high_water = host_to_guest.high_water_bytes,
+            host_to_guest_full_events = host_to_guest.full_events,
+            "agent relay console queue summary"
+        );
     }
 }
 
@@ -590,10 +669,11 @@ pub(crate) fn push_guest_frame_blocking(
 
 pub(crate) fn push_guest_frame_until(
     shared: &ConsoleSharedState,
-    mut frame: Vec<u8>,
+    frame: Vec<u8>,
     timeout: std::time::Duration,
 ) -> RuntimeResult<()> {
     let deadline = std::time::Instant::now() + timeout;
+    let mut frame = Bytes::from(frame);
 
     loop {
         match shared.rx_ring.push(frame) {
@@ -603,12 +683,19 @@ pub(crate) fn push_guest_frame_until(
             }
             Err(returned) => {
                 frame = returned;
-                if std::time::Instant::now() >= deadline {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
                     return Err(RuntimeError::Custom(
                         "timed out sending frame to agentd".into(),
                     ));
                 }
-                std::thread::sleep(std::time::Duration::from_millis(1));
+
+                // Drain then re-check to avoid losing a capacity transition racing the wait.
+                shared.rx_capacity_wake.drain();
+                if shared.rx_ring.can_fit(frame.len()) {
+                    continue;
+                }
+                let _ = shared.rx_capacity_wake.wait_timeout(remaining);
             }
         }
     }
@@ -660,6 +747,37 @@ fn try_extract_frame(buf: &mut BytesMut) -> Option<RawFrame> {
 /// Decode raw frame bytes into a protocol `Message`.
 fn decode_frame(buf: &[u8]) -> RuntimeResult<Message> {
     codec::decode_message_frame(buf).map_err(|e| RuntimeError::Custom(format!("decode frame: {e}")))
+}
+
+/// Write a client batch with cursor advancement so short writes never compact frame tails.
+async fn write_client_batch<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    batch: &mut VecDeque<ClientWrite>,
+) -> std::io::Result<()> {
+    while !batch.is_empty() {
+        let slices: Vec<IoSlice<'_>> = batch
+            .iter()
+            .take(CLIENT_WRITE_BATCH_FRAMES)
+            .map(|write| IoSlice::new(&write.data))
+            .collect();
+        let written = writer.write_vectored(&slices).await?;
+        if written == 0 {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+
+        let mut remaining = written;
+        while remaining != 0 {
+            let front = batch.front_mut().expect("non-empty batch after write");
+            if remaining < front.data.len() {
+                front.data.advance(remaining);
+                remaining = 0;
+            } else {
+                remaining -= front.data.len();
+                batch.pop_front();
+            }
+        }
+    }
+    writer.flush().await
 }
 
 /// Tap a guest-originated frame into `exec.log` if it belongs to the
@@ -727,7 +845,16 @@ fn tap_frame_into_log(frame: &RawFrame, writer: &LogWriter, session_registry: &S
 
 /// Background task that pushes client frames into the rx_ring for the guest.
 /// Retries on full ring with backoff to avoid dropping frames.
-async fn ring_writer_task(shared: Arc<ConsoleSharedState>, mut rx: mpsc::Receiver<Vec<u8>>) {
+async fn ring_writer_task(shared: Arc<ConsoleSharedState>, mut rx: mpsc::Receiver<Bytes>) {
+    #[cfg(unix)]
+    let capacity_fd = match AsyncFd::new(shared.rx_capacity_wake.as_raw_fd()) {
+        Ok(fd) => fd,
+        Err(error) => {
+            tracing::error!(%error, "agent relay: failed to watch console capacity");
+            return;
+        }
+    };
+
     while let Some(frame_bytes) = rx.recv().await {
         let mut data = frame_bytes;
         let mut attempts = 0u64;
@@ -746,7 +873,37 @@ async fn ring_writer_task(shared: Arc<ConsoleSharedState>, mut rx: mpsc::Receive
                         );
                     }
                     data = returned;
-                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    if shared.is_closed() {
+                        return;
+                    }
+
+                    shared.rx_capacity_wake.drain();
+                    if shared.rx_ring.can_fit(data.len()) {
+                        continue;
+                    }
+
+                    #[cfg(unix)]
+                    {
+                        let mut guard = match capacity_fd.readable().await {
+                            Ok(guard) => guard,
+                            Err(error) => {
+                                tracing::error!(%error, "agent relay: console capacity wait failed");
+                                return;
+                            }
+                        };
+                        guard.clear_ready();
+                    }
+
+                    #[cfg(windows)]
+                    {
+                        let shared_for_wait = Arc::clone(&shared);
+                        let _ = tokio::task::spawn_blocking(move || {
+                            shared_for_wait
+                                .rx_capacity_wake
+                                .wait_timeout(std::time::Duration::from_secs(60))
+                        })
+                        .await;
+                    }
                 }
             }
         }
@@ -765,6 +922,7 @@ async fn ring_writer_task(shared: Arc<ConsoleSharedState>, mut rx: mpsc::Receive
 async fn ring_reader_task(
     shared: Arc<ConsoleSharedState>,
     clients: Arc<Mutex<HashMap<u32, ClientState>>>,
+    output_budget: Arc<Semaphore>,
     log_writer: Option<Arc<LogWriter>>,
     session_registry: Arc<SessionRegistry>,
 ) {
@@ -816,6 +974,8 @@ async fn ring_reader_task(
         shared.tx_wake.drain();
         while let Some(chunk) = shared.tx_ring.pop() {
             buf.extend_from_slice(&chunk);
+            drop(chunk);
+            shared.tx_capacity_wake.wake();
         }
 
         // Extract all complete frames first, then route them.
@@ -854,7 +1014,26 @@ async fn ring_reader_task(
 
             match writer_result {
                 Ok(write_tx) => {
-                    if write_tx.send(frame.data).await.is_err() {
+                    let charged = frame.data.len().saturating_add(OUTPUT_BUDGET_GRANULE - 1)
+                        / OUTPUT_BUDGET_GRANULE
+                        * OUTPUT_BUDGET_GRANULE;
+                    let Ok(charged) = u32::try_from(charged) else {
+                        tracing::error!("agent relay: client frame budget overflow");
+                        continue;
+                    };
+                    let permit = match Arc::clone(&output_budget).acquire_many_owned(charged).await
+                    {
+                        Ok(permit) => permit,
+                        Err(_) => return,
+                    };
+                    if write_tx
+                        .send(ClientWrite {
+                            data: frame.data,
+                            _permit: permit,
+                        })
+                        .await
+                        .is_err()
+                    {
                         tracing::error!("agent relay: write channel closed for slot={client_slot}");
                     }
                 }
@@ -930,7 +1109,7 @@ async fn read_raw_frame<R: AsyncReadExt + Unpin>(reader: &mut R) -> RuntimeResul
 async fn client_reader_task(
     slot: u32,
     mut reader: impl AsyncRead + Unpin + Send + 'static,
-    agent_tx: mpsc::Sender<Vec<u8>>,
+    agent_tx: mpsc::Sender<Bytes>,
     clients: Arc<Mutex<HashMap<u32, ClientState>>>,
     used_slots: Arc<Mutex<HashSet<u32>>>,
     drain_tx: mpsc::Sender<()>,
@@ -1016,7 +1195,7 @@ async fn client_reader_task(
         }
 
         // Forward frame to ring writer (bounded — applies backpressure).
-        if agent_tx.send(frame.data.to_vec()).await.is_err() {
+        if agent_tx.send(frame.data).await.is_err() {
             tracing::error!("agent relay: ring writer channel closed");
             break;
         }
@@ -1061,7 +1240,7 @@ async fn client_reader_task(
                 continue;
             }
 
-            if agent_tx.send(buf).await.is_err() {
+            if agent_tx.send(Bytes::from(buf)).await.is_err() {
                 tracing::error!("agent relay: ring writer channel closed during cleanup");
                 break;
             }
@@ -1085,7 +1264,7 @@ async fn client_reader_task(
     let mut buf = Vec::new();
     match codec::encode_to_buf(&disconnect_msg, &mut buf) {
         Ok(()) => {
-            if agent_tx.send(buf).await.is_err() {
+            if agent_tx.send(Bytes::from(buf)).await.is_err() {
                 tracing::error!("agent relay: ring writer channel closed during fs cleanup");
             }
         }
@@ -1116,6 +1295,9 @@ fn is_client_frame_allowed(id: u32, flags: u8, id_start: u32, id_end_exclusive: 
 
 #[cfg(test)]
 mod tests {
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
     use super::*;
 
     use microsandbox_protocol::core::Ready;
@@ -1174,9 +1356,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn client_batch_handles_short_vectored_writes_and_releases_budget() {
+        let budget = Arc::new(Semaphore::new(8));
+        let first = Arc::clone(&budget).acquire_many_owned(3).await.unwrap();
+        let second = Arc::clone(&budget).acquire_many_owned(5).await.unwrap();
+        let mut batch = VecDeque::from([
+            ClientWrite {
+                data: Bytes::from_static(b"abc"),
+                _permit: first,
+            },
+            ClientWrite {
+                data: Bytes::from_static(b"defgh"),
+                _permit: second,
+            },
+        ]);
+        let mut writer = ShortVectoredWriter {
+            max_write: 2,
+            ..Default::default()
+        };
+
+        write_client_batch(&mut writer, &mut batch).await.unwrap();
+
+        assert_eq!(writer.bytes, b"abcdefgh");
+        assert!(batch.is_empty());
+        assert_eq!(budget.available_permits(), 8);
+    }
+
+    #[tokio::test]
     #[cfg(unix)]
     async fn wait_ready_rejects_ready_before_init_when_maps_are_pending() {
-        let shared = Arc::new(ConsoleSharedState::with_capacity(8));
+        let shared = Arc::new(ConsoleSharedState::with_capacity(64 * 1024));
         let handle = Arc::new(std::sync::OnceLock::new());
         let sock_path = test_agent_endpoint("ready-before-init");
         let mut relay = AgentRelay::new(&sock_path, Arc::clone(&shared))
@@ -1209,7 +1418,7 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn wait_ready_installs_init_map_before_ready() {
-        let shared = Arc::new(ConsoleSharedState::with_capacity(8));
+        let shared = Arc::new(ConsoleSharedState::with_capacity(64 * 1024));
         let handle = Arc::new(std::sync::OnceLock::new());
         let sock_path = test_agent_endpoint("init-map");
         let mut relay = AgentRelay::new(&sock_path, Arc::clone(&shared))
@@ -1258,7 +1467,7 @@ mod tests {
 
     #[tokio::test]
     async fn wait_ready_skips_init_requirement_when_no_bind_map_pending() {
-        let shared = Arc::new(ConsoleSharedState::with_capacity(8));
+        let shared = Arc::new(ConsoleSharedState::with_capacity(64 * 1024));
         let sock_path = test_agent_endpoint("no-bind-map");
         let mut relay = AgentRelay::new(&sock_path, Arc::clone(&shared))
             .await
@@ -1287,5 +1496,54 @@ mod tests {
             shared.rx_ring.pop().is_none(),
             "no init context means no ack should be sent"
         );
+    }
+
+    #[derive(Default)]
+    struct ShortVectoredWriter {
+        bytes: Vec<u8>,
+        max_write: usize,
+    }
+
+    impl AsyncWrite for ShortVectoredWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            let len = buf.len().min(self.max_write);
+            self.bytes.extend_from_slice(&buf[..len]);
+            Poll::Ready(Ok(len))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn is_write_vectored(&self) -> bool {
+            true
+        }
+
+        fn poll_write_vectored(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            bufs: &[IoSlice<'_>],
+        ) -> Poll<std::io::Result<usize>> {
+            let mut remaining = self.max_write;
+            let mut written = 0;
+            for buf in bufs {
+                let len = buf.len().min(remaining);
+                self.bytes.extend_from_slice(&buf[..len]);
+                written += len;
+                remaining -= len;
+                if remaining == 0 {
+                    break;
+                }
+            }
+            Poll::Ready(Ok(written))
+        }
     }
 }

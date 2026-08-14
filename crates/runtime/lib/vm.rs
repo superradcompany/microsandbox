@@ -2931,7 +2931,7 @@ mod tests {
 
         request_guest_shutdown(&shared).unwrap();
 
-        let mut frame = shared.rx_ring.pop().unwrap();
+        let mut frame = shared.rx_ring.pop().unwrap().to_vec();
         let msg = codec::try_decode_from_buf(&mut frame).unwrap().unwrap();
         assert_eq!(msg.t, MessageType::Shutdown);
         assert_eq!(msg.id, 0);
@@ -2975,7 +2975,7 @@ mod tests {
 
     #[test]
     fn test_request_guest_shutdown_with_timeout_fails_when_ring_full() {
-        let shared = ConsoleSharedState::with_capacity(1);
+        let shared = ConsoleSharedState::with_capacity(8);
         shared.rx_ring.push(b"occupied".to_vec()).unwrap();
 
         let err = request_guest_shutdown_with_timeout(&shared, Duration::ZERO).unwrap_err();

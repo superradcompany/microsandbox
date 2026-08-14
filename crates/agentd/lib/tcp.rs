@@ -14,7 +14,12 @@ use microsandbox_protocol::codec;
 use microsandbox_protocol::message::{Message, MessageType};
 use microsandbox_protocol::tcp::{TcpClosed, TcpConnect, TcpConnected, TcpData, TcpEof, TcpFailed};
 
-use crate::session::{RawActivity, RawSessionCompletion, RawSessionOutput, SessionOutput};
+#[cfg(test)]
+use crate::session::SessionOutputEnvelope;
+use crate::session::{
+    RawActivity, RawSessionCompletion, RawSessionOutput, SessionOutput, SessionOutputPermit,
+    SessionOutputSender,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -22,6 +27,12 @@ use crate::session::{RawActivity, RawSessionCompletion, RawSessionOutput, Sessio
 
 /// TCP stream read chunk size.
 const TCP_CHUNK_SIZE: usize = 64 * 1024;
+
+/// Capacity reserved before cloning and encoding one TCP data chunk.
+///
+/// The factor of two covers CBOR/framing overhead and allocator growth while keeping hundreds of
+/// TCP chunks eligible under the aggregate 32 MiB output budget.
+const TCP_OUTPUT_RESERVATION: usize = 2 * TCP_CHUNK_SIZE;
 
 /// How many host->guest command frames may queue before the agent loop has to
 /// wait. Bounding this turns a slow or stalled destination into backpressure
@@ -105,11 +116,7 @@ impl TcpSession {
     /// `core.tcp.failed` on error/timeout over `session_tx`; the host correlates
     /// either reply by id. The returned session is live immediately, with
     /// commands queued until the connect completes.
-    pub fn open(
-        id: u32,
-        req: TcpConnect,
-        session_tx: &mpsc::UnboundedSender<(u32, SessionOutput)>,
-    ) -> Self {
+    pub fn open(id: u32, req: TcpConnect, session_tx: &SessionOutputSender) -> Self {
         let (commands_tx, commands_rx) = mpsc::channel(TCP_COMMAND_CAPACITY);
         let output_tx = session_tx.clone();
         let task = tokio::spawn(async move {
@@ -138,7 +145,7 @@ async fn connect_and_relay(
     id: u32,
     req: TcpConnect,
     commands: mpsc::Receiver<TcpCommand>,
-    tx: mpsc::UnboundedSender<(u32, SessionOutput)>,
+    tx: SessionOutputSender,
 ) {
     let connect = TcpStream::connect((req.host.as_str(), req.port));
     let stream = match tokio::time::timeout(TCP_CONNECT_TIMEOUT, connect).await {
@@ -153,7 +160,8 @@ async fn connect_and_relay(
                 RawActivity::guest_message(),
                 Some(RawSessionCompletion::Tcp),
                 &tx,
-            );
+            )
+            .await;
             return;
         }
         Err(_elapsed) => {
@@ -166,7 +174,8 @@ async fn connect_and_relay(
                 RawActivity::guest_message(),
                 Some(RawSessionCompletion::Tcp),
                 &tx,
-            );
+            )
+            .await;
             return;
         }
     };
@@ -178,7 +187,9 @@ async fn connect_and_relay(
         RawActivity::guest_message(),
         None,
         &tx,
-    ) {
+    )
+    .await
+    {
         return;
     }
 
@@ -189,7 +200,7 @@ async fn relay_tcp_session(
     id: u32,
     mut stream: TcpStream,
     mut commands: mpsc::Receiver<TcpCommand>,
-    tx: mpsc::UnboundedSender<(u32, SessionOutput)>,
+    tx: SessionOutputSender,
 ) {
     let mut read_buf = vec![0u8; TCP_CHUNK_SIZE];
     let mut terminal_sent = false;
@@ -209,19 +220,17 @@ async fn relay_tcp_session(
                             RawActivity::guest_message(),
                             None,
                             &tx,
-                        );
+                        )
+                        .await;
                         read_eof = true;
                     }
                     Ok(n) => {
+                        let Some(permit) = tx.reserve(TCP_OUTPUT_RESERVATION).await else {
+                            break;
+                        };
                         let data = read_buf[..n].to_vec();
-                        if !send_raw_tcp_message(
-                            id,
-                            MessageType::TcpData,
-                            &TcpData { data },
-                            RawActivity::tcp_bytes(n),
-                            None,
-                            &tx,
-                        ) {
+                        if !send_raw_tcp_data(id, data, n, permit, &tx).await
+                        {
                             break;
                         }
                     }
@@ -235,7 +244,8 @@ async fn relay_tcp_session(
                             RawActivity::guest_message(),
                             Some(RawSessionCompletion::Tcp),
                             &tx,
-                        );
+                        )
+                        .await;
                         break;
                     }
                 }
@@ -253,7 +263,8 @@ async fn relay_tcp_session(
                                 RawActivity::guest_message(),
                                 Some(RawSessionCompletion::Tcp),
                                 &tx,
-                            );
+                            )
+                            .await;
                             break;
                         }
                     }
@@ -268,7 +279,8 @@ async fn relay_tcp_session(
                                 RawActivity::guest_message(),
                                 Some(RawSessionCompletion::Tcp),
                                 &tx,
-                            );
+                            )
+                            .await;
                             break;
                         }
                     }
@@ -288,7 +300,8 @@ async fn relay_tcp_session(
             RawActivity::guest_message(),
             Some(RawSessionCompletion::Tcp),
             &tx,
-        );
+        )
+        .await;
     }
 }
 
@@ -303,24 +316,54 @@ fn encode_tcp_message<T: serde::Serialize>(
     Ok(())
 }
 
-fn send_raw_tcp_message<T: serde::Serialize>(
+async fn send_raw_tcp_message<T: serde::Serialize>(
     id: u32,
     t: MessageType,
     payload: &T,
     activity: RawActivity,
     completion: Option<RawSessionCompletion>,
-    tx: &mpsc::UnboundedSender<(u32, SessionOutput)>,
+    tx: &SessionOutputSender,
 ) -> bool {
     let mut buf = Vec::new();
     match encode_tcp_message(id, t, payload, &mut buf) {
-        Ok(()) => tx
-            .send((
+        Ok(()) => {
+            tx.send(
                 id,
                 SessionOutput::Raw(RawSessionOutput::new(buf, activity, completion)),
-            ))
-            .is_ok(),
+            )
+            .await
+        }
         Err(e) => {
             eprintln!("failed to encode tcp message for {id}: {e}");
+            false
+        }
+    }
+}
+
+/// Encode a TCP data event only after its retained allocation has reserved capacity.
+async fn send_raw_tcp_data(
+    id: u32,
+    data: Vec<u8>,
+    byte_count: usize,
+    permit: SessionOutputPermit,
+    tx: &SessionOutputSender,
+) -> bool {
+    let mut buf = Vec::new();
+    match encode_tcp_message(id, MessageType::TcpData, &TcpData { data }, &mut buf) {
+        Ok(()) => {
+            tx.send_reserved(
+                id,
+                SessionOutput::Raw(RawSessionOutput::new(
+                    buf,
+                    RawActivity::tcp_bytes(byte_count),
+                    None,
+                )),
+                permit,
+            )
+            .await
+        }
+        Err(error) => {
+            eprintln!("failed to encode TCP data for {id}: {error}");
             false
         }
     }
@@ -341,7 +384,7 @@ mod tests {
 
     #[tokio::test]
     async fn connect_failure_sends_terminal_failed() {
-        let (session_tx, mut session_rx) = mpsc::unbounded_channel();
+        let (session_tx, mut session_rx) = SessionOutputSender::channel();
 
         let session = TcpSession::open(
             7,
@@ -366,7 +409,7 @@ mod tests {
     async fn close_request_finishes_session_task() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let (session_tx, mut session_rx) = mpsc::unbounded_channel();
+        let (session_tx, mut session_rx) = SessionOutputSender::channel();
         let accept_task = tokio::spawn(async move {
             let (_socket, _) = listener.accept().await.unwrap();
             tokio::time::sleep(Duration::from_secs(5)).await;
@@ -394,7 +437,7 @@ mod tests {
     async fn destination_eof_keeps_session_open_for_host_writes() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let (session_tx, mut session_rx) = mpsc::unbounded_channel();
+        let (session_tx, mut session_rx) = SessionOutputSender::channel();
 
         // The destination half-closes its write side, then keeps reading so it
         // still receives whatever the host sends after the EOF.
@@ -456,9 +499,9 @@ mod tests {
         codec::try_decode_from_buf(buf).unwrap().unwrap()
     }
 
-    async fn recv_message(rx: &mut mpsc::UnboundedReceiver<(u32, SessionOutput)>) -> Message {
-        let (_id, output) = rx.recv().await.unwrap();
-        let SessionOutput::Raw(mut output) = output else {
+    async fn recv_message(rx: &mut mpsc::Receiver<SessionOutputEnvelope>) -> Message {
+        let envelope = rx.recv().await.unwrap();
+        let SessionOutput::Raw(mut output) = envelope.output else {
             panic!("expected SessionOutput::Raw frame");
         };
         decode_one_message(&mut output.frame)

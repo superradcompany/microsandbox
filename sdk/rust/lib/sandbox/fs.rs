@@ -126,6 +126,8 @@ pub struct FsReadStream {
     // `fs_read_stream` returns and `rx` would receive nothing.
     client: Option<Arc<AgentClient>>,
     close_handle: Option<FsHandle>,
+    /// Set only after a terminal `FsResponse`; channel closure alone is an error.
+    finished: bool,
 }
 
 /// A streaming writer for file data to the sandbox.
@@ -535,6 +537,7 @@ impl FsReadStream {
             rx,
             client: Some(client),
             close_handle,
+            finished: false,
         }
     }
 
@@ -543,6 +546,10 @@ impl FsReadStream {
     /// Returns `None` when the stream is complete (after `FsResponse`).
     /// Returns an error if the guest reported a failure.
     pub async fn recv(&mut self) -> MicrosandboxResult<Option<Bytes>> {
+        if self.finished {
+            return Ok(None);
+        }
+
         while let Some(msg) = self.rx.recv().await {
             match msg.t {
                 MessageType::FsData => {
@@ -554,6 +561,7 @@ impl FsReadStream {
                 MessageType::FsResponse => {
                     let resp: FsResponse = msg.payload()?;
                     let close_result = self.close_owned_handle().await;
+                    self.finished = true;
                     if !resp.ok {
                         return Err(MicrosandboxError::SandboxFsOps(
                             resp.error.unwrap_or_else(|| "unknown error".into()),
@@ -566,7 +574,9 @@ impl FsReadStream {
             }
         }
         self.close_owned_handle().await?;
-        Ok(None)
+        Err(MicrosandboxError::SandboxFsOps(
+            "filesystem read stream closed before terminal response".into(),
+        ))
     }
 
     /// Collect all remaining data into bytes.
@@ -608,9 +618,12 @@ impl FsWriteSink {
 
     /// Write a chunk of data.
     pub async fn write(&self, data: impl AsRef<[u8]>) -> MicrosandboxResult<()> {
-        let fs_data = FsData {
-            data: data.as_ref().to_vec(),
-        };
+        self.write_owned(data.as_ref().to_vec()).await
+    }
+
+    /// Write an already-owned chunk without cloning it at the SDK stream boundary.
+    async fn write_owned(&self, data: Vec<u8>) -> MicrosandboxResult<()> {
+        let fs_data = FsData { data };
         self.client
             .send(self.id, MessageType::FsData, &fs_data)
             .await
@@ -748,8 +761,10 @@ pub(crate) mod agent {
         },
         message::MessageType,
     };
-    use tokio::io::AsyncReadExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    #[cfg(windows)]
+    use crate::error::{Operation, UnsupportedReason};
     use crate::{MicrosandboxError, MicrosandboxResult, agent::AgentClient, backend::Backend};
 
     use super::{
@@ -1347,13 +1362,14 @@ pub(crate) mod agent {
     ) -> MicrosandboxResult<()> {
         let mut file = tokio::fs::File::open(host_path).await?;
         let sink = write_stream(backend, name, guest_path).await?;
-        let mut buf = vec![0u8; FS_CHUNK_SIZE];
         loop {
+            let mut buf = vec![0u8; FS_CHUNK_SIZE];
             let n = file.read(&mut buf).await?;
             if n == 0 {
                 break;
             }
-            sink.write(&buf[..n]).await?;
+            buf.truncate(n);
+            sink.write_owned(buf).await?;
         }
         sink.close().await
     }
@@ -1364,9 +1380,298 @@ pub(crate) mod agent {
         guest_path: &str,
         host_path: &Path,
     ) -> MicrosandboxResult<()> {
-        let data = read(backend, name, guest_path).await?;
-        tokio::fs::write(host_path, &data).await?;
+        #[cfg(windows)]
+        {
+            let _ = (backend, name, guest_path, host_path);
+            return Err(MicrosandboxError::unsupported(
+                Operation::SandboxFs,
+                UnsupportedReason::RequiresUnixHost,
+            ));
+        }
+
+        #[cfg(unix)]
+        {
+            let (std_file, temp_path) = prepare_host_copy_target(host_path).await?;
+            let mut file = tokio::fs::File::from_std(std_file);
+            let mut stream = read_stream(backend, name, guest_path).await?;
+            let mut received = 0u64;
+
+            while let Some(chunk) = stream.recv().await? {
+                file.write_all(&chunk).await?;
+                received = received.checked_add(chunk.len() as u64).ok_or_else(|| {
+                    MicrosandboxError::SandboxFsOps(
+                        "copied file size exceeds the supported u64 range".into(),
+                    )
+                })?;
+            }
+
+            file.flush().await?;
+            let written = file.metadata().await?.len();
+            if written != received {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("host copy byte-count mismatch: received {received}, wrote {written}"),
+                )
+                .into());
+            }
+            file.sync_all().await?;
+            drop(file);
+
+            publish_host_copy_target(temp_path, host_path)?;
+            tracing::debug!(bytes = received, path = %host_path.display(), "copied guest file to host");
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    async fn prepare_host_copy_target(
+        host_path: &Path,
+    ) -> MicrosandboxResult<(std::fs::File, tempfile::TempPath)> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let host_path = host_path.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let existing_mode = match std::fs::symlink_metadata(&host_path) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "refusing to replace symbolic-link destination {}",
+                            host_path.display()
+                        ),
+                    ));
+                }
+                Ok(metadata) if metadata.is_dir() => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::IsADirectory,
+                        format!("copy destination is a directory: {}", host_path.display()),
+                    ));
+                }
+                Ok(metadata) => Some(metadata.permissions().mode() & 0o7777),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error),
+            };
+
+            let parent = host_path
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            let file_name = host_path.file_name().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("copy destination has no file name: {}", host_path.display()),
+                )
+            })?;
+            let prefix = format!(".{}.msb-copy-", file_name.to_string_lossy());
+            let named = tempfile::Builder::new()
+                .prefix(&prefix)
+                .tempfile_in(parent)?;
+            if let Some(mode) = existing_mode {
+                named
+                    .as_file()
+                    .set_permissions(std::fs::Permissions::from_mode(mode))?;
+            } else {
+                // NamedTempFile is owner-only by default. Set the mode explicitly so this
+                // security property does not depend on a future tempfile implementation.
+                named
+                    .as_file()
+                    .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            }
+            let (file, path) = named.into_parts();
+            Ok((file, path))
+        })
+        .await
+        .map_err(|error| MicrosandboxError::Custom(format!("host copy worker failed: {error}")))?
+        .map_err(Into::into)
+    }
+
+    #[cfg(unix)]
+    fn publish_host_copy_target(
+        temp_path: tempfile::TempPath,
+        host_path: &Path,
+    ) -> MicrosandboxResult<()> {
+        // Re-check immediately before rename. Atomic rename never follows a symlink, but
+        // rejecting it keeps the public behavior explicit even if the path changed mid-copy.
+        match std::fs::symlink_metadata(host_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "refusing to replace symbolic-link destination {}",
+                        host_path.display()
+                    ),
+                )
+                .into());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+
+        // Keep the final lstat+rename in one non-awaiting region. Once publication starts, task
+        // cancellation cannot report failure while a detached blocking worker commits later.
+        temp_path.persist(host_path).map_err(|error| error.error)?;
         Ok(())
+    }
+
+    #[cfg(all(test, unix))]
+    mod tests {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        use super::*;
+
+        #[tokio::test]
+        async fn host_copy_target_atomically_replaces_and_preserves_mode() {
+            let dir = tempfile::tempdir().unwrap();
+            let destination = dir.path().join("artifact.bin");
+            std::fs::write(&destination, b"old").unwrap();
+            std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+            let (file, temp_path) = prepare_host_copy_target(&destination).await.unwrap();
+            let mut file = tokio::fs::File::from_std(file);
+            file.write_all(b"complete replacement").await.unwrap();
+            file.sync_all().await.unwrap();
+            drop(file);
+            publish_host_copy_target(temp_path, &destination).unwrap();
+
+            assert_eq!(
+                std::fs::read(&destination).unwrap(),
+                b"complete replacement"
+            );
+            assert_eq!(
+                std::fs::metadata(&destination)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o640
+            );
+        }
+
+        #[tokio::test]
+        async fn cancelled_host_copy_removes_temp_and_keeps_destination() {
+            let dir = tempfile::tempdir().unwrap();
+            let destination = dir.path().join("artifact.bin");
+            std::fs::write(&destination, b"original").unwrap();
+
+            let (file, temp_path) = prepare_host_copy_target(&destination).await.unwrap();
+            let temp_name = temp_path.to_path_buf();
+            drop(file);
+            drop(temp_path);
+
+            assert!(!temp_name.exists());
+            assert_eq!(std::fs::read(&destination).unwrap(), b"original");
+        }
+
+        #[tokio::test]
+        async fn new_host_copy_target_is_owner_only() {
+            let dir = tempfile::tempdir().unwrap();
+            let destination = dir.path().join("new.bin");
+            let (file, temp_path) = prepare_host_copy_target(&destination).await.unwrap();
+            drop(file);
+            publish_host_copy_target(temp_path, &destination).unwrap();
+
+            assert_eq!(
+                std::fs::metadata(&destination)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+
+        #[tokio::test]
+        async fn host_copy_rejects_symbolic_link_destination() {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("target.bin");
+            let destination = dir.path().join("link.bin");
+            std::fs::write(&target, b"target").unwrap();
+            symlink(&target, &destination).unwrap();
+
+            let error = prepare_host_copy_target(&destination).await.unwrap_err();
+            assert!(matches!(
+                error,
+                MicrosandboxError::Io(ref error)
+                    if error.kind() == std::io::ErrorKind::InvalidInput
+            ));
+            assert_eq!(std::fs::read(&target).unwrap(), b"target");
+        }
+
+        #[tokio::test]
+        async fn host_copy_rechecks_symbolic_link_before_publish() {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("target.bin");
+            let destination = dir.path().join("link.bin");
+            std::fs::write(&target, b"target").unwrap();
+            let (file, temp_path) = prepare_host_copy_target(&destination).await.unwrap();
+            drop(file);
+            symlink(&target, &destination).unwrap();
+
+            let error = publish_host_copy_target(temp_path, &destination).unwrap_err();
+            assert!(matches!(
+                error,
+                MicrosandboxError::Io(ref error)
+                    if error.kind() == std::io::ErrorKind::InvalidInput
+            ));
+            assert!(
+                std::fs::symlink_metadata(&destination)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn read_stream_rejects_channel_close_without_terminal_response() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(tx);
+        let mut stream = FsReadStream {
+            rx,
+            client: None,
+            close_handle: None,
+            finished: false,
+        };
+
+        let error = stream.recv().await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("closed before terminal response")
+        );
+    }
+
+    #[tokio::test]
+    async fn read_stream_finishes_only_after_success_response() {
+        let (tx, rx) = mpsc::channel(1);
+        let response = FsResponse {
+            ok: true,
+            error: None,
+            data: None,
+        };
+        tx.send(Message::with_payload(MessageType::FsResponse, 1, &response).unwrap())
+            .await
+            .unwrap();
+        drop(tx);
+        let mut stream = FsReadStream {
+            rx,
+            client: None,
+            close_handle: None,
+            finished: false,
+        };
+
+        assert!(stream.recv().await.unwrap().is_none());
+        assert!(stream.recv().await.unwrap().is_none());
     }
 }
 

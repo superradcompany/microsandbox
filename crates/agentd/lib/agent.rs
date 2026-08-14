@@ -8,9 +8,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+use bytes::BytesMut;
 use chrono::Utc;
 use tokio::io::unix::AsyncFd;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 use tokio::time::{self, Duration};
 
 use microsandbox_protocol::HANDOFF_POWEROFF_TIMEOUT;
@@ -34,7 +35,8 @@ use crate::fs::{FsReadSession, FsState, FsStreamSession, FsWriteSession};
 use crate::process::ProcessManager;
 use crate::serial::AGENT_PORT_NAME;
 use crate::session::{
-    ExecSession, RawActivity, RawSessionCompletion, SessionOutput, resolve_default_user,
+    ExecSession, RawActivity, RawSessionCompletion, SessionOutput, SessionOutputSender,
+    resolve_default_user,
 };
 use crate::tcp::TcpSession;
 use crate::{clock, fs, handoff, heartbeat, serial};
@@ -155,13 +157,13 @@ pub async fn run(
 
     // Buffer for serial reads.
     let mut read_buf = vec![0u8; SERIAL_READ_BUF_SIZE];
-    let mut serial_in_buf = Vec::new();
+    let mut serial_in_buf = BytesMut::new();
     let mut serial_out_buf = Vec::new();
 
     let mut state = AgentState::default();
 
     // Channel for session output events.
-    let (session_tx, mut session_rx) = mpsc::unbounded_channel::<(u32, SessionOutput)>();
+    let (session_tx, mut session_rx) = SessionOutputSender::channel();
 
     // Heartbeat/activity state.
     let mut activity = ActivityTracker::new();
@@ -238,19 +240,9 @@ pub async fn run(
                             // message-level failures are reported on the same
                             // correlation ID with `core.error`; unrecoverable
                             // frame-level failures still close the agent loop.
-                            while let Some(frame) = codec::try_decode_raw_from_buf(&mut serial_in_buf)
+                            while let Some(msg) = codec::try_decode_from_bytes(&mut serial_in_buf)
                                 .map_err(|e| AgentdError::ExecSession(format!("decode frame: {e}")))?
                             {
-                                let id = frame.id;
-                                let msg = match codec::raw_frame_to_message(frame) {
-                                    Ok(msg) => msg,
-                                    Err(e) => {
-                                        return Err(AgentdError::ExecSession(format!(
-                                            "decode message for id {id}: {e}"
-                                        )));
-                                    }
-                                };
-
                                 if msg.flags != msg.t.flags() {
                                     let out_before = serial_out_buf.len();
                                     encode_core_error_if_supported(
@@ -316,8 +308,9 @@ pub async fn run(
             }
 
             // Receive output events from session reader tasks.
-            Some((id, output)) = session_rx.recv() => {
-                match output {
+            Some(envelope) = session_rx.recv() => {
+                let id = envelope.id;
+                match envelope.output {
                     SessionOutput::Stdout(data) => {
                         let len = data.len();
                         let msg = Message::with_payload(MessageType::ExecStdout, id, &ExecStdout { data })
@@ -352,8 +345,13 @@ pub async fn run(
                             &mut state.read_sessions,
                             &mut state.tcp_sessions,
                         );
-                        // Pre-encoded frame — write directly to output buffer.
-                        serial_out_buf.extend_from_slice(&output.frame);
+                        // The producer already owns an encoded frame. Write from that allocation
+                        // directly so multi-megabyte FS/TCP frames are not copied into a second
+                        // serial staging buffer.
+                        if !serial_out_buf.is_empty() {
+                            flush_write_buf(&async_port, &mut serial_out_buf).await?;
+                        }
+                        write_all_async_fd(&async_port, &output.frame).await?;
                     }
                 }
                 publish_heartbeat_snapshot(&heartbeat_tx, &state, &activity);
@@ -413,7 +411,7 @@ async fn handle_message(
     msg: Message,
     state: &mut AgentState,
     activity: &mut ActivityTracker,
-    session_tx: &mpsc::UnboundedSender<(u32, SessionOutput)>,
+    session_tx: &SessionOutputSender,
     out_buf: &mut Vec<u8>,
     config: &AgentdConfig,
 ) -> AgentdResult<()> {
@@ -1171,11 +1169,22 @@ fn write_all_to_fd(fd: i32, mut buf: &[u8], deadline: Instant) -> AgentdResult<(
 
 /// Flushes the write buffer to the async fd.
 async fn flush_write_buf(fd: &AsyncFd<std::fs::File>, buf: &mut Vec<u8>) -> AgentdResult<()> {
-    while !buf.is_empty() {
+    write_all_async_fd(fd, buf).await?;
+    buf.clear();
+    Ok(())
+}
+
+/// Write an immutable region to the nonblocking serial descriptor with cursor advancement.
+async fn write_all_async_fd(fd: &AsyncFd<std::fs::File>, buf: &[u8]) -> AgentdResult<()> {
+    let mut written = 0;
+    while written < buf.len() {
         let mut guard = fd.writable().await?;
-        match guard.try_io(|inner| write_to_fd(inner.get_ref().as_raw_fd(), buf)) {
+        match guard.try_io(|inner| write_to_fd(inner.get_ref().as_raw_fd(), &buf[written..])) {
             Ok(Ok(n)) => {
-                buf.drain(..n);
+                if n == 0 {
+                    return Err(std::io::Error::from(std::io::ErrorKind::WriteZero).into());
+                }
+                written += n;
             }
             Ok(Err(e)) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Ok(Err(e)) => return Err(e.into()),
