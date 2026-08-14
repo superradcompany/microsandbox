@@ -58,6 +58,15 @@ lto = true
 strip = true
 panic = "abort"
 
+# CI artifacts exercise optimized code without paying the full release/LTO
+# cost. The release workflow remains the only place that uses `release`.
+[profile.ci]
+inherits = "release"
+opt-level = 1
+codegen-units = 16
+lto = false
+strip = false
+
 [workspace.dependencies]
 # Internal crates. Versioned here so a release bumps one place, not every
 # manifest; members reference them via `{ workspace = true }`.

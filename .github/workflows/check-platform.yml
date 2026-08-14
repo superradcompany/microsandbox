@@ -115,8 +115,8 @@ jobs:
 
       - name: Build msb
         run: |
-          cargo build --release --no-default-features --features net,ssh -p microsandbox-cli
-          cp target/release/msb build/msb
+          cargo build --profile ci --no-default-features --features net,ssh -p microsandbox-cli
+          cp target/ci/msb build/msb
 
       - name: Codesign msb (macOS)
         if: inputs.os == 'darwin'
@@ -216,7 +216,7 @@ jobs:
         run: |
           node scripts/prune-platform-optional-deps.mjs
           npm install --package-lock=false
-          npm run build
+          npm run build:ci
 
   python-build:
     name: Python build (${{ inputs.target }})
@@ -271,7 +271,7 @@ jobs:
           # `uv sync` otherwise builds the local extension before maturin does
           # it again. Build one wheel, install it, and test that exact artifact.
           uv sync --group dev --no-install-project
-          uv run --no-sync maturin build --release --out dist
+          uv run --no-sync maturin build --profile ci --out dist
           uv pip install --reinstall dist/*.whl
           # Run outside sdk/python so the source tree cannot shadow the wheel.
           cd ../..

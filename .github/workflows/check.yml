@@ -145,9 +145,9 @@ jobs:
       - name: Build agentd
         run: |
           rustup target add --toolchain stable aarch64-unknown-linux-musl
-          cargo +stable build --release --manifest-path crates/agentd/Cargo.toml --target aarch64-unknown-linux-musl
+          cargo +stable build --profile ci --manifest-path crates/agentd/Cargo.toml --target aarch64-unknown-linux-musl
           mkdir -p build
-          cp target/aarch64-unknown-linux-musl/release/agentd build/agentd
+          cp target/aarch64-unknown-linux-musl/ci/agentd build/agentd
 
       - name: Upload agentd
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -185,9 +185,9 @@ jobs:
       - name: Build agentd
         run: |
           rustup target add --toolchain stable x86_64-unknown-linux-musl
-          cargo +stable build --release --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl
+          cargo +stable build --profile ci --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl
           mkdir -p build
-          cp target/x86_64-unknown-linux-musl/release/agentd build/agentd
+          cp target/x86_64-unknown-linux-musl/ci/agentd build/agentd
 
       - name: Upload agentd
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -260,15 +260,14 @@ jobs:
           ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
           ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} libkrunfw.so
 
-      # mold complements sccache: sccache cannot cache final executable links,
-      # while mold shortens the release/LTO link on Linux host targets.
+      # mold complements sccache: sccache cannot cache final executable links.
       - name: Set up mold
         uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
 
       - name: Build msb
         run: |
-          cargo build --release --no-default-features --features net,ssh -p microsandbox-cli
-          cp target/release/msb build/msb
+          cargo build --profile ci --no-default-features --features net,ssh -p microsandbox-cli
+          cp target/ci/msb build/msb
 
       # Upload immediately. All KVM lanes can begin while independent quality
       # and cross-platform checks continue in parallel.
@@ -316,13 +315,13 @@ jobs:
         uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
 
       - name: Build Go FFI
-        run: cargo build -p microsandbox-go
+        run: cargo build --profile ci -p microsandbox-go
 
       - name: Upload Go FFI artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: go-ffi-linux-x86_64
-          path: target/debug/libmicrosandbox_go_ffi.so
+          path: target/ci/libmicrosandbox_go_ffi.so
 
   rust-integration-build:
     name: Build Rust integration tests
@@ -645,12 +644,10 @@ jobs:
           $ErrorActionPreference = "Stop"
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
-          cargo +stable build --release --no-default-features --features net,ssh -p microsandbox-cli --target ${{ matrix.rust_target }}
+          cargo +stable build --profile ci --no-default-features --features net,ssh -p microsandbox-cli --target ${{ matrix.rust_target }}
 
-      # Pull requests only need to prove that the current FFI links for the
-      # target. Main retains the production release/LTO build validation.
-      - name: Build Go FFI cdylib (pull request)
-        if: matrix.component == 'Go' && github.event_name == 'pull_request'
+      - name: Build Go FFI cdylib
+        if: matrix.component == 'Go'
         shell: pwsh
         env:
           RUSTFLAGS: -C target-feature=+crt-static
@@ -658,18 +655,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
-          cargo +stable build -p microsandbox-go --target ${{ matrix.rust_target }}
-
-      - name: Build Go FFI cdylib (main)
-        if: matrix.component == 'Go' && github.event_name != 'pull_request'
-        shell: pwsh
-        env:
-          RUSTFLAGS: -C target-feature=+crt-static
-        run: |
-          $ErrorActionPreference = "Stop"
-          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
-          Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
-          cargo +stable build --release -p microsandbox-go --target ${{ matrix.rust_target }}
+          cargo +stable build --profile ci -p microsandbox-go --target ${{ matrix.rust_target }}
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         if: matrix.component == 'Go'
@@ -817,7 +803,7 @@ jobs:
         run: |
           node scripts/prune-platform-optional-deps.mjs
           npm install --package-lock=false
-          npm run build
+          npm run build:ci
 
       - name: Build MCP server
         working-directory: mcp
@@ -904,7 +890,7 @@ jobs:
           # Avoid uv's implicit editable build; every x86 Python lane consumes
           # the exact same cp310-abi3 wheel produced here.
           uv sync --group dev --no-install-project
-          mold -run uv run --no-sync maturin build --release --out dist
+          mold -run uv run --no-sync maturin build --profile ci --out dist
 
       - name: Upload Python wheel
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
