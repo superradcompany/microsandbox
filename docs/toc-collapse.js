@@ -20,6 +20,14 @@
     );
   };
 
+  const collapsePeers = (item) => {
+    for (const peer of item.parentElement?.querySelectorAll(ROOT_SELECTOR) ?? []) {
+      if (peer === item) continue;
+      const peerToggle = peer.querySelector(`:scope > .${TOGGLE_CLASS}`);
+      if (peerToggle) setExpanded(peer, peerToggle, false);
+    }
+  };
+
   const enhance = () => {
     const content = document.getElementById(CONTENT_ID);
     if (!content) return;
@@ -29,19 +37,16 @@
       const link = directLink(item);
       const existingToggle = item.querySelector(`:scope > .${TOGGLE_CLASS}`);
       if (!childList || !link) continue;
-      if (existingToggle) {
-        if (item.hasAttribute("data-active") && item.dataset.msbExpanded !== "true") {
-          setExpanded(item, existingToggle, true);
-        }
-        continue;
-      }
+      if (existingToggle) continue;
 
       const toggle = document.createElement("button");
       toggle.type = "button";
       toggle.className = TOGGLE_CLASS;
       toggle.innerHTML = '<span aria-hidden="true"></span>';
       toggle.addEventListener("click", () => {
-        setExpanded(item, toggle, item.dataset.msbExpanded !== "true");
+        const expanded = item.dataset.msbExpanded !== "true";
+        if (expanded) collapsePeers(item);
+        setExpanded(item, toggle, expanded);
       });
 
       item.insertBefore(toggle, link);

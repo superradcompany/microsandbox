@@ -87,23 +87,28 @@ h2 + .msb-member-group { margin-top: 1.5rem; }
  * keeping each root type directly navigable. */
 #table-of-contents-content li:has(> .msb-toc-toggle) {
   position: relative;
+  padding-left: 1.35rem;
 }
 #table-of-contents-content .msb-toc-toggle {
   position: absolute;
-  top: 0.18rem;
-  left: -1.15rem;
+  z-index: 1;
+  top: 0.2rem;
+  left: 0;
   display: grid;
-  width: 1rem;
-  height: 1rem;
+  width: 1.25rem;
+  height: 1.25rem;
   place-items: center;
   border: 0;
   padding: 0;
   color: inherit;
-  opacity: 0.55;
+  opacity: 0.75;
   background: transparent;
   cursor: pointer;
 }
-#table-of-contents-content .msb-toc-toggle:hover { opacity: 1; }
+#table-of-contents-content .msb-toc-toggle:hover,
+#table-of-contents-content .msb-toc-toggle:focus-visible {
+  opacity: 1;
+}
 #table-of-contents-content .msb-toc-toggle span {
   width: 0.42rem;
   height: 0.42rem;
