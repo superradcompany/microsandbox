@@ -5573,29 +5573,41 @@ fn snapshot_json(s: &Snapshot) -> serde_json::Value {
         upper_file,
         upper_integrity_algorithm,
         upper_integrity_digest,
+        upper_integrity_root,
+        upper_integrity_logical_size,
+        upper_integrity_leaf_size,
         checkpoint_id,
         checkpoint_manifest_digest,
     ) = match &manifest.state {
-        microsandbox::snapshot::SnapshotState::File(state) => (
-            "file",
-            Some(snapshot_format_str(state.format)),
-            Some(state.fstype.as_str()),
-            Some(state.upper.file.as_str()),
-            state
-                .upper
-                .integrity
-                .as_ref()
-                .map(microsandbox::UpperIntegrity::algorithm),
-            state
-                .upper
-                .integrity
-                .as_ref()
-                .map(microsandbox::UpperIntegrity::value),
-            None,
-            None,
-        ),
+        microsandbox::snapshot::SnapshotState::File(state) => {
+            let integrity = state.upper.integrity.as_ref();
+            let (root, logical_size, leaf_size) = match integrity {
+                Some(microsandbox::UpperIntegrity::FileMerkleBlake3V1 {
+                    root,
+                    logical_size,
+                    leaf_size,
+                }) => (Some(root.as_str()), Some(*logical_size), Some(*leaf_size)),
+                _ => (None, None, None),
+            };
+            (
+                "file",
+                Some(snapshot_format_str(state.format)),
+                Some(state.fstype.as_str()),
+                Some(state.upper.file.as_str()),
+                integrity.map(microsandbox::UpperIntegrity::algorithm),
+                integrity.map(microsandbox::UpperIntegrity::value),
+                root,
+                logical_size,
+                leaf_size,
+                None,
+                None,
+            )
+        }
         microsandbox::snapshot::SnapshotState::Checkpoint(state) => (
             "checkpoint",
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -5618,6 +5630,9 @@ fn snapshot_json(s: &Snapshot) -> serde_json::Value {
         "upper_file": upper_file,
         "upper_integrity_algorithm": upper_integrity_algorithm,
         "upper_integrity_digest": upper_integrity_digest,
+        "upper_integrity_root": upper_integrity_root,
+        "upper_integrity_logical_size": upper_integrity_logical_size,
+        "upper_integrity_leaf_size": upper_integrity_leaf_size,
         "checkpoint_id": checkpoint_id,
         "checkpoint_manifest_digest": checkpoint_manifest_digest,
         "parent": manifest.parent,

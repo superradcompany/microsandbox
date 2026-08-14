@@ -16,6 +16,8 @@ function projectedSnapshot(
     upperFile: "upper.ext4",
     upperIntegrityAlgorithm: "msb-sparse-sha256-v1",
     upperIntegrityDigest: `sha256:${"c".repeat(64)}`,
+    upperIntegrityLogicalSize: null,
+    upperIntegrityLeafSize: null,
     checkpointId: null,
     checkpointManifestDigest: null,
     parent: null,
@@ -52,6 +54,8 @@ describe("Snapshot native projections", () => {
       upperFile: null,
       upperIntegrityAlgorithm: null,
       upperIntegrityDigest: null,
+      upperIntegrityLogicalSize: null,
+      upperIntegrityLeafSize: null,
       checkpointId: "checkpoint-1",
       checkpointManifestDigest: `sha256:${"d".repeat(64)}`,
     });
@@ -77,6 +81,29 @@ describe("Snapshot native projections", () => {
     expect(() => projectedSnapshot({ stateKind: "future" }).state).toThrow(
       "unknown stateKind future",
     );
+  });
+
+  it("preserves all Merkle descriptor parameters", () => {
+    const root = `blake3:${"d".repeat(64)}`;
+    const snapshot = projectedSnapshot({
+      upperIntegrityAlgorithm: "msb-file-merkle-blake3-v1",
+      upperIntegrityDigest: root,
+      upperIntegrityLogicalSize: 4096n,
+      upperIntegrityLeafSize: 65536,
+    });
+
+    expect(snapshot.state).toMatchObject({
+      kind: "file",
+      upper: {
+        integrity: {
+          algorithm: "msb-file-merkle-blake3-v1",
+          digest: root,
+          root,
+          logicalSize: 4096n,
+          leafSize: 65536,
+        },
+      },
+    });
   });
 
   it("rejects malformed verification reports", async () => {
@@ -111,6 +138,8 @@ describe("Snapshot native projections", () => {
     const snapshot = projectedSnapshot({
       upperIntegrityAlgorithm: null,
       upperIntegrityDigest: null,
+      upperIntegrityLogicalSize: null,
+      upperIntegrityLeafSize: null,
       verify: async () => ({
         digest: `sha256:${"a".repeat(64)}`,
         path: "/snapshots/example",

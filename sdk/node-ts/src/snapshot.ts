@@ -25,10 +25,20 @@ export type SnapshotState =
       readonly upper: {
         readonly file: string;
         readonly sizeBytes: bigint;
-        readonly integrity: {
-          readonly algorithm: string;
-          readonly digest: string;
-        } | null;
+        readonly integrity:
+          | {
+              readonly algorithm: "sha256" | "msb-sparse-sha256-v1";
+              readonly digest: string;
+            }
+          | {
+              readonly algorithm: "msb-file-merkle-blake3-v1";
+              /** Compatibility alias for `root`. */
+              readonly digest: string;
+              readonly root: string;
+              readonly logicalSize: bigint;
+              readonly leafSize: number;
+            }
+          | null;
       };
     }
   | {
@@ -238,20 +248,50 @@ export class Snapshot {
     if (typeof sizeBytes !== "bigint") {
       throw invalidProjection("missing file-state sizeBytes");
     }
-    const integrity =
-      this.inner.upperIntegrityAlgorithm == null &&
-      this.inner.upperIntegrityDigest == null
-        ? null
-        : {
-            algorithm: requiredProjectionString(
-              this.inner.upperIntegrityAlgorithm,
-              "upperIntegrityAlgorithm",
-            ),
-            digest: requiredProjectionString(
-              this.inner.upperIntegrityDigest,
-              "upperIntegrityDigest",
-            ),
-          };
+    const algorithm = this.inner.upperIntegrityAlgorithm;
+    const value = this.inner.upperIntegrityDigest;
+    let projectedIntegrity: Extract<SnapshotState, { kind: "file" }>["upper"]["integrity"];
+    if (algorithm == null && value == null) {
+      projectedIntegrity = null;
+    } else {
+      const requiredAlgorithm = requiredProjectionString(
+        algorithm,
+        "upperIntegrityAlgorithm",
+      );
+      const requiredValue = requiredProjectionString(
+        value,
+        "upperIntegrityDigest",
+      );
+      if (requiredAlgorithm === "msb-file-merkle-blake3-v1") {
+        const logicalSize = this.inner.upperIntegrityLogicalSize;
+        const leafSize = this.inner.upperIntegrityLeafSize;
+        if (typeof logicalSize !== "bigint") {
+          throw invalidProjection("missing upperIntegrityLogicalSize");
+        }
+        if (typeof leafSize !== "number") {
+          throw invalidProjection("missing upperIntegrityLeafSize");
+        }
+        projectedIntegrity = {
+          algorithm: requiredAlgorithm,
+          digest: requiredValue,
+          root: requiredValue,
+          logicalSize,
+          leafSize,
+        };
+      } else if (
+        requiredAlgorithm === "sha256" ||
+        requiredAlgorithm === "msb-sparse-sha256-v1"
+      ) {
+        projectedIntegrity = {
+          algorithm: requiredAlgorithm,
+          digest: requiredValue,
+        };
+      } else {
+        throw invalidProjection(
+          `unknown upper integrity algorithm ${requiredAlgorithm}`,
+        );
+      }
+    }
 
     return {
       kind: "file",
@@ -260,7 +300,7 @@ export class Snapshot {
       upper: {
         file: requiredProjectionString(this.inner.upperFile, "upperFile"),
         sizeBytes,
-        integrity,
+        integrity: projectedIntegrity,
       },
     };
   }

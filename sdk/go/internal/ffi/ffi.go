@@ -4547,24 +4547,27 @@ func ImageSave(ctx context.Context, references []string, outputPath string, form
 // ---------------------------------------------------------------------------
 
 type SnapshotInfo struct {
-	Path                     string            `json:"path"`
-	Digest                   string            `json:"digest"`
-	SizeBytes                *uint64           `json:"size_bytes"`
-	ImageRef                 string            `json:"image_ref"`
-	ImageManifestDigest      string            `json:"image_manifest_digest"`
-	Scope                    string            `json:"scope"`
-	StateKind                string            `json:"state_kind"`
-	Format                   *string           `json:"format"`
-	Fstype                   *string           `json:"fstype"`
-	UpperFile                *string           `json:"upper_file"`
-	UpperIntegrityAlgorithm  *string           `json:"upper_integrity_algorithm"`
-	UpperIntegrityDigest     *string           `json:"upper_integrity_digest"`
-	CheckpointID             *string           `json:"checkpoint_id"`
-	CheckpointManifestDigest *string           `json:"checkpoint_manifest_digest"`
-	Parent                   *string           `json:"parent"`
-	CreatedAt                string            `json:"created_at"`
-	Labels                   map[string]string `json:"labels"`
-	SourceSandbox            *string           `json:"source_sandbox"`
+	Path                      string            `json:"path"`
+	Digest                    string            `json:"digest"`
+	SizeBytes                 *uint64           `json:"size_bytes"`
+	ImageRef                  string            `json:"image_ref"`
+	ImageManifestDigest       string            `json:"image_manifest_digest"`
+	Scope                     string            `json:"scope"`
+	StateKind                 string            `json:"state_kind"`
+	Format                    *string           `json:"format"`
+	Fstype                    *string           `json:"fstype"`
+	UpperFile                 *string           `json:"upper_file"`
+	UpperIntegrityAlgorithm   *string           `json:"upper_integrity_algorithm"`
+	UpperIntegrityDigest      *string           `json:"upper_integrity_digest"`
+	UpperIntegrityRoot        *string           `json:"upper_integrity_root"`
+	UpperIntegrityLogicalSize *uint64           `json:"upper_integrity_logical_size"`
+	UpperIntegrityLeafSize    *uint32           `json:"upper_integrity_leaf_size"`
+	CheckpointID              *string           `json:"checkpoint_id"`
+	CheckpointManifestDigest  *string           `json:"checkpoint_manifest_digest"`
+	Parent                    *string           `json:"parent"`
+	CreatedAt                 string            `json:"created_at"`
+	Labels                    map[string]string `json:"labels"`
+	SourceSandbox             *string           `json:"source_sandbox"`
 }
 
 type SnapshotHandleInfo struct {

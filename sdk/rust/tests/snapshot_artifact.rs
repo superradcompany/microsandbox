@@ -369,6 +369,35 @@ fn write_regular_file_archive(archive: &Path, path: &str, payload: &[u8]) {
     builder.finish().unwrap();
 }
 
+/// Flip one stored byte without touching the member header. Tar's header
+/// checksum therefore still passes, leaving member transport integrity as the
+/// check that must reject the archive.
+fn corrupt_dense_tar_member(archive: &Path, suffix: &str) {
+    const BLOCK: usize = 512;
+
+    let mut bytes = std::fs::read(archive).unwrap();
+    let mut offset = 0usize;
+    while offset + BLOCK <= bytes.len() {
+        if bytes[offset..offset + BLOCK].iter().all(|byte| *byte == 0) {
+            break;
+        }
+        let mut header = Header::new_old();
+        header
+            .as_mut_bytes()
+            .copy_from_slice(&bytes[offset..offset + BLOCK]);
+        let size = header.entry_size().unwrap() as usize;
+        let path = header.path().unwrap();
+        if path.to_string_lossy().ends_with(suffix) {
+            assert!(size > 0, "selected archive member is empty");
+            bytes[offset + BLOCK] ^= 0x01;
+            std::fs::write(archive, bytes).unwrap();
+            return;
+        }
+        offset += BLOCK + size.div_ceil(BLOCK) * BLOCK;
+    }
+    panic!("archive member ending in {suffix} was not found");
+}
+
 fn write_v066_archive(archive: &Path, prefix: &str, upper: &[u8]) {
     let file = std::fs::File::create(archive).unwrap();
     let mut builder = Builder::new(file);
@@ -950,6 +979,35 @@ async fn load_rejects_corrupt_header_checksum() {
     assert!(
         err.contains("checksum mismatch"),
         "expected checksum rejection, got: {err}"
+    );
+}
+
+/// Persistent payload integrity is optional, but the archive boundary always
+/// binds the stored payload bytes while they flow through save/load.
+#[tokio::test]
+async fn load_rejects_payload_corruption_without_recorded_snapshot_integrity() {
+    let tmp = TempDir::new().unwrap();
+    let (dir, _) = make_artifact(tmp.path(), "src-transport", b"transport bytes");
+    let archive = tmp.path().join("transport.tar");
+    Snapshot::save(
+        dir.to_string_lossy().as_ref(),
+        &archive,
+        microsandbox::snapshot::SaveOpts {
+            plain_tar: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    corrupt_dense_tar_member(&archive, "/upper.ext4");
+    let err = Snapshot::load(&archive, Some(&tmp.path().join("dest")))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("transport integrity mismatch"),
+        "expected transport rejection, got: {err}"
     );
 }
 

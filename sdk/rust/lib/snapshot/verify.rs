@@ -1,17 +1,18 @@
 //! Snapshot content verification.
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io;
 use std::io::{Read, Seek, SeekFrom};
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
+use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason};
 use microsandbox_image::snapshot::{FILE_MERKLE_BLAKE3_LEAF_SIZE, SnapshotState, UpperIntegrity};
 use microsandbox_utils::extent::ExtentMap;
 use rayon::prelude::*;
 use sha2::{Digest as _, Sha256};
-use tokio::io::AsyncReadExt;
-
-use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason};
 
 use super::Snapshot;
 
@@ -58,6 +59,20 @@ pub enum UpperVerifyStatus {
 struct MerkleAccumulator {
     nodes: Vec<Option<[u8; 32]>>,
     processed_leaves: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct VerificationSourceIdentity {
+    len: u64,
+    modified: Option<SystemTime>,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(unix)]
+    changed_seconds: i64,
+    #[cfg(unix)]
+    changed_nanos: i64,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -116,15 +131,20 @@ pub(super) async fn verify_snapshot(snap: &Snapshot) -> MicrosandboxResult<Snaps
     };
 
     let upper_path = snap.path().join(&file_state.upper.file);
+    let payload = open_verification_source(&upper_path)?;
+    let before = verification_source_identity(&payload.metadata()?);
     let actual = match expected {
-        UpperIntegrity::Sha256 { .. } => UpperIntegrity::Sha256 {
-            digest: sha256_file(&upper_path).await?,
-        },
-        UpperIntegrity::SparseSha256V1 { .. } => {
-            compute_legacy_sparse_integrity(&upper_path).await?
+        UpperIntegrity::Sha256 { .. } => {
+            compute_sha256_integrity_from_file(payload.try_clone()?).await?
         }
-        UpperIntegrity::FileMerkleBlake3V1 { .. } => compute_merkle_integrity(&upper_path).await?,
+        UpperIntegrity::SparseSha256V1 { .. } => {
+            compute_legacy_sparse_integrity_from_file(payload.try_clone()?).await?
+        }
+        UpperIntegrity::FileMerkleBlake3V1 { .. } => {
+            compute_merkle_integrity_from_file(payload.try_clone()?).await?
+        }
     };
+    ensure_verification_source_unchanged(&payload, &upper_path, &before)?;
 
     if actual != *expected {
         return Err(MicrosandboxError::SnapshotIntegrity(format!(
@@ -152,11 +172,13 @@ pub(super) async fn compute_merkle_integrity(path: &Path) -> MicrosandboxResult<
         .map_err(Into::into)
 }
 
-pub(super) async fn compute_legacy_sparse_integrity(
-    path: &Path,
+/// Compute current integrity through a handle the caller has already confined
+/// and pinned. This is used by downgrade so source and target algorithms bind
+/// the same inode rather than reopening a mutable path.
+pub(super) async fn compute_merkle_integrity_from_file(
+    file: File,
 ) -> MicrosandboxResult<UpperIntegrity> {
-    let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || legacy_sparse_integrity_blocking(&path))
+    tokio::task::spawn_blocking(move || merkle_integrity_from_file(file))
         .await
         .map_err(|error| MicrosandboxError::Custom(format!("snapshot integrity task: {error}")))?
         .map_err(Into::into)
@@ -173,12 +195,76 @@ pub(super) async fn compute_legacy_sparse_integrity_from_file(
         .map_err(Into::into)
 }
 
+pub(super) fn open_verification_source(path: &Path) -> MicrosandboxResult<File> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(MicrosandboxError::SnapshotIntegrity(format!(
+            "snapshot payload is not a confined regular file: {}",
+            path.display()
+        )));
+    }
+
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW);
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(MicrosandboxError::SnapshotIntegrity(format!(
+            "snapshot payload is not a regular file: {}",
+            path.display()
+        )));
+    }
+    Ok(file)
+}
+
+pub(super) fn verification_source_identity(
+    metadata: &std::fs::Metadata,
+) -> VerificationSourceIdentity {
+    VerificationSourceIdentity {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+        #[cfg(unix)]
+        device: metadata.dev(),
+        #[cfg(unix)]
+        inode: metadata.ino(),
+        #[cfg(unix)]
+        changed_seconds: metadata.ctime(),
+        #[cfg(unix)]
+        changed_nanos: metadata.ctime_nsec(),
+    }
+}
+
+pub(super) fn ensure_verification_source_unchanged(
+    file: &File,
+    path: &Path,
+    before: &VerificationSourceIdentity,
+) -> MicrosandboxResult<()> {
+    let handle_after = verification_source_identity(&file.metadata()?);
+    let path_metadata = std::fs::symlink_metadata(path)?;
+    if path_metadata.file_type().is_symlink() || !path_metadata.is_file() {
+        return Err(MicrosandboxError::SnapshotIntegrity(
+            "snapshot payload binding changed during verification".into(),
+        ));
+    }
+    let path_after = verification_source_identity(&path_metadata);
+    if &handle_after != before || &path_after != before {
+        return Err(MicrosandboxError::SnapshotIntegrity(
+            "snapshot payload changed during verification".into(),
+        ));
+    }
+    Ok(())
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions: BLAKE3 Merkle Helpers
 //--------------------------------------------------------------------------------------------------
 
 fn merkle_integrity_blocking(path: &Path) -> io::Result<UpperIntegrity> {
-    let mut file = File::open(path)?;
+    merkle_integrity_from_file(File::open(path)?)
+}
+
+fn merkle_integrity_from_file(mut file: File) -> io::Result<UpperIntegrity> {
     let logical_size = file.metadata()?.len();
     let leaf_size = u64::from(FILE_MERKLE_BLAKE3_LEAF_SIZE);
     let logical_leaf_count = logical_size.div_ceil(leaf_size).max(1);
@@ -337,24 +423,26 @@ fn hash_parent(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
 // Functions: Legacy SHA Helpers
 //--------------------------------------------------------------------------------------------------
 
-async fn sha256_file(path: &Path) -> MicrosandboxResult<String> {
-    let mut file = tokio::fs::File::open(path).await?;
+async fn compute_sha256_integrity_from_file(file: File) -> MicrosandboxResult<UpperIntegrity> {
+    tokio::task::spawn_blocking(move || sha256_integrity_from_file(file))
+        .await
+        .map_err(|error| MicrosandboxError::Custom(format!("snapshot integrity task: {error}")))?
+        .map_err(Into::into)
+}
+
+fn sha256_integrity_from_file(mut file: File) -> io::Result<UpperIntegrity> {
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 1024 * 1024];
     loop {
-        let read = file.read(&mut buffer).await?;
+        let read = file.read(&mut buffer)?;
         if read == 0 {
             break;
         }
         hasher.update(&buffer[..read]);
     }
-    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
-}
-
-/// Preserve the exact released logical-byte algorithm for explicit
-/// verification of old descriptors. New captures never use this function.
-fn legacy_sparse_integrity_blocking(path: &Path) -> io::Result<UpperIntegrity> {
-    legacy_sparse_integrity_from_file(File::open(path)?)
+    Ok(UpperIntegrity::Sha256 {
+        digest: format!("sha256:{}", hex::encode(hasher.finalize())),
+    })
 }
 
 fn legacy_sparse_integrity_from_file(mut file: File) -> io::Result<UpperIntegrity> {
@@ -520,5 +608,21 @@ mod tests {
             integrity.value(),
             "blake3:733a84a145df6c2139c33096e7584c1d8f42b0b981ec7e847b1bf6db73bec941"
         );
+    }
+
+    #[test]
+    fn verification_identity_detects_mutation_after_hash_input_is_pinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("upper.ext4");
+        std::fs::write(&path, b"before").unwrap();
+        let file = open_verification_source(&path).unwrap();
+        let before = verification_source_identity(&file.metadata().unwrap());
+
+        let mut writer = OpenOptions::new().append(true).open(&path).unwrap();
+        writer.write_all(b" after").unwrap();
+        writer.sync_all().unwrap();
+
+        let error = ensure_verification_source_unchanged(&file, &path, &before).unwrap_err();
+        assert!(error.to_string().contains("changed during verification"));
     }
 }

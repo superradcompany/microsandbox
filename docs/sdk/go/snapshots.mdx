@@ -450,7 +450,11 @@ report, err := snap.Verify(ctx)
 if err != nil {
     return err
 }
-fmt.Println(report.Upper.Digest)
+if report.Upper.Kind == "not_recorded" {
+    fmt.Println("snapshot has no recorded payload integrity")
+} else {
+    fmt.Println(report.Upper.Digest)
+}
 ```
 
 </Accordion>

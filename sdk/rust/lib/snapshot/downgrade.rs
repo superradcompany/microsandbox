@@ -974,27 +974,35 @@ async fn validate_payload(
             ),
         );
     }
-    let before_modified = metadata.modified().ok();
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    options.custom_flags(libc::O_NOFOLLOW);
-    let mut payload = options.open(&payload_path)?;
+    let mut payload = super::verify::open_verification_source(&payload_path)?;
+    let before = super::verify::verification_source_identity(&payload.metadata()?);
     let identity = super::migration::inspect_payload(&mut payload)?;
     let target_integrity = match &file.upper.integrity {
-        Some(UpperIntegrity::FileMerkleBlake3V1 { .. }) if convert_current_integrity => Some(
-            super::verify::compute_legacy_sparse_integrity_from_file(payload.try_clone()?).await?,
-        ),
+        Some(expected @ UpperIntegrity::FileMerkleBlake3V1 { .. }) if convert_current_integrity => {
+            let actual =
+                super::verify::compute_merkle_integrity_from_file(payload.try_clone()?).await?;
+            if actual != *expected {
+                return downgrade_error(
+                    path,
+                    "preflight",
+                    "payload does not match its recorded BLAKE3 integrity",
+                );
+            }
+            Some(
+                super::verify::compute_legacy_sparse_integrity_from_file(payload.try_clone()?)
+                    .await?,
+            )
+        }
         integrity => integrity.clone(),
     };
-    let after = payload.metadata()?;
-    if after.len() != metadata.len() || after.modified().ok() != before_modified {
-        return downgrade_error(
-            path,
-            "preflight",
-            "payload changed during downgrade preflight",
-        );
-    }
+    super::verify::ensure_verification_source_unchanged(&payload, &payload_path, &before).map_err(
+        |_| MicrosandboxError::SnapshotMigration {
+            code: "snapshot_downgrade_unrepresentable".into(),
+            phase: "preflight".into(),
+            artifact: path.display().to_string(),
+            detail: "payload changed during downgrade preflight".into(),
+        },
+    )?;
     if identity.size_bytes != file.upper.size_bytes {
         return downgrade_error(
             path,
@@ -1267,7 +1275,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_merkle_integrity_is_projected_for_v066() {
+    async fn native_merkle_integrity_is_verified_and_projected_for_v066() {
         let temp = tempfile::tempdir().unwrap();
         let db_path = temp.path().join("msb.db");
         let snapshots = temp.path().join("snapshots");
@@ -1301,11 +1309,11 @@ mod tests {
         let SnapshotState::File(file) = &mut manifest.state else {
             panic!("fixture must contain file state");
         };
-        file.upper.integrity = Some(UpperIntegrity::FileMerkleBlake3V1 {
-            root: format!("blake3:{}", "b".repeat(64)),
-            logical_size: 5,
-            leaf_size: microsandbox_image::snapshot::FILE_MERKLE_BLAKE3_LEAF_SIZE,
-        });
+        file.upper.integrity = Some(
+            super::super::verify::compute_merkle_integrity(&artifact.join("upper.ext4"))
+                .await
+                .unwrap(),
+        );
         let canonical = manifest.to_canonical_bytes().unwrap();
         let digest = manifest.digest().unwrap();
         std::fs::write(&descriptor_path, canonical).unwrap();
@@ -1330,10 +1338,11 @@ mod tests {
                 .expect("preflight must render the legacy descriptor"),
         )
         .unwrap();
-        let expected =
-            super::super::verify::compute_legacy_sparse_integrity(&artifact.join("upper.ext4"))
-                .await
-                .unwrap();
+        let expected = super::super::verify::compute_legacy_sparse_integrity_from_file(
+            std::fs::File::open(artifact.join("upper.ext4")).unwrap(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             target["upper"]["integrity"]["algorithm"],
@@ -1342,5 +1351,20 @@ mod tests {
         assert_eq!(target["upper"]["integrity"]["digest"], expected.value());
         assert!(artifact.join(DESCRIPTOR_FILENAME).exists());
         assert!(!artifact.join(V066_DESCRIPTOR_FILENAME).exists());
+
+        // Downgrade must not replace a mismatching current root with a freshly
+        // computed legacy digest, which would legitimize corrupted bytes.
+        let SnapshotState::File(file) = &mut manifest.state else {
+            unreachable!()
+        };
+        file.upper.integrity = Some(UpperIntegrity::FileMerkleBlake3V1 {
+            root: format!("blake3:{}", "b".repeat(64)),
+            logical_size: 5,
+            leaf_size: microsandbox_image::snapshot::FILE_MERKLE_BLAKE3_LEAF_SIZE,
+        });
+        let error = validate_payload(&artifact, &manifest, true)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("recorded BLAKE3 integrity"));
     }
 }

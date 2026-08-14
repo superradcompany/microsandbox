@@ -5,7 +5,7 @@ use microsandbox::snapshot::SaveOpts as RustSaveOpts;
 use microsandbox::{
     Snapshot as RustSnapshot, SnapshotFormat as RustSnapshotFormat,
     SnapshotHandle as RustSnapshotHandle, SnapshotScope as RustSnapshotScope,
-    UpperVerifyStatus as RustUpperVerifyStatus,
+    UpperIntegrity as RustUpperIntegrity, UpperVerifyStatus as RustUpperVerifyStatus,
 };
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -255,6 +255,34 @@ impl JsSnapshot {
             .as_file()
             .and_then(|state| state.upper.integrity.as_ref())
             .map(|integrity| integrity.value().into())
+    }
+
+    #[napi(getter)]
+    pub fn upper_integrity_logical_size(&self) -> Option<BigInt> {
+        self.inner
+            .manifest()
+            .state
+            .as_file()
+            .and_then(|state| state.upper.integrity.as_ref())
+            .and_then(|integrity| match integrity {
+                RustUpperIntegrity::FileMerkleBlake3V1 { logical_size, .. } => {
+                    Some(BigInt::from(*logical_size))
+                }
+                _ => None,
+            })
+    }
+
+    #[napi(getter)]
+    pub fn upper_integrity_leaf_size(&self) -> Option<u32> {
+        self.inner
+            .manifest()
+            .state
+            .as_file()
+            .and_then(|state| state.upper.integrity.as_ref())
+            .and_then(|integrity| match integrity {
+                RustUpperIntegrity::FileMerkleBlake3V1 { leaf_size, .. } => Some(*leaf_size),
+                _ => None,
+            })
     }
 
     #[napi(getter)]

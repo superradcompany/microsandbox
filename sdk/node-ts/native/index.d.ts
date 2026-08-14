@@ -1448,6 +1448,8 @@ export declare class Snapshot {
   get upperFile(): string | null
   get upperIntegrityAlgorithm(): string | null
   get upperIntegrityDigest(): string | null
+  get upperIntegrityLogicalSize(): bigint | null
+  get upperIntegrityLeafSize(): number | null
   get checkpointId(): string | null
   get checkpointManifestDigest(): string | null
   get parent(): string | null
