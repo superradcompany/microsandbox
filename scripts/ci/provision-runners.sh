@@ -40,12 +40,12 @@ trap 'rm -f "${archive_path}"' EXIT
 curl --fail --location --retry 5 --output "${archive_path}" "${RUNNER_URL}"
 printf '%s  %s\n' "${RUNNER_SHA256}" "${archive_path}" | sha256sum --check --status
 
-# Install the only extra package needed by the KVM jobs before dropping to the
-# runner accounts. Pull-request code runs as these users, so they must not have
-# Docker access or any sudo path back to the host's root account.
-if ! command -v unzip >/dev/null 2>&1; then
+# Install the extra packages needed by the KVM jobs before dropping to the
+# runner accounts. Skopeo exports test images without access to the privileged
+# Docker daemon. Pull-request code must not have Docker or sudo access.
+if ! command -v unzip >/dev/null 2>&1 || ! command -v skopeo >/dev/null 2>&1; then
   apt-get update
-  apt-get install -y unzip
+  apt-get install -y skopeo unzip
 fi
 rm -f /etc/sudoers.d/actions-runner-apt
 

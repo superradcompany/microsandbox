@@ -4,16 +4,11 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 MSB_BIN="${MSB_BIN:-${ROOT_DIR}/build/msb}"
-IMAGE="${MSB_CLI_SMOKE_DOCKER_IMAGE:-alpine:3.20}"
+IMAGE="${MSB_CLI_SMOKE_DOCKER_IMAGE:-docker.io/library/alpine:3.20}"
 TAG="${MSB_CLI_SMOKE_ARCHIVE_TAG:-msb-archive-smoke:ci}"
 
 if [[ ! -x "$MSB_BIN" ]]; then
   echo "msb binary is not executable: $MSB_BIN" >&2
-  exit 1
-fi
-
-if ! command -v docker >/dev/null 2>&1; then
-  echo "docker is required for image archive smoke tests" >&2
   exit 1
 fi
 
@@ -34,8 +29,19 @@ cleanup() {
 }
 trap cleanup EXIT
 
-docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull "$IMAGE" >/dev/null
-docker save "$IMAGE" -o "$smoke_root/docker-input.tar"
+# Persistent pull-request runners must not access the root-equivalent Docker
+# socket, so prefer a daemonless export when skopeo is available.
+if command -v skopeo >/dev/null 2>&1; then
+  skopeo copy --retry-times 5 \
+    "docker://${IMAGE}" \
+    "docker-archive:${smoke_root}/docker-input.tar:${TAG}"
+elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull "$IMAGE" >/dev/null
+  docker save "$IMAGE" -o "$smoke_root/docker-input.tar"
+else
+  echo "skopeo or an accessible Docker daemon is required for image archive smoke tests" >&2
+  exit 1
+fi
 
 "$MSB_BIN" load -i "$smoke_root/docker-input.tar" --tag "$TAG" --quiet
 "$MSB_BIN" save -o "$smoke_root/docker-output.tar" --quiet "$TAG"
