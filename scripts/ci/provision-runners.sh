@@ -34,11 +34,39 @@ if (( RUNNER_FIRST < 1 || RUNNER_LAST < RUNNER_FIRST )); then
   exit 1
 fi
 
+repository_path=${REPOSITORY_URL#https://github.com/}
+repository_path=${repository_path%.git}
+repository_path=${repository_path%/}
+if [[ ! ${repository_path} =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+  echo "unsupported GitHub repository URL: ${REPOSITORY_URL}" >&2
+  exit 1
+fi
+runner_service_scope=${repository_path//\//-}
+
+runner_services_for() {
+  local runner_user=$1
+  local runner_dir=$2
+  local service_name
+
+  while read -r service_name _; do
+    if [[ -z ${service_name} ]]; then
+      continue
+    fi
+
+    if [[ $(systemctl show --property=User --value "${service_name}") == "${runner_user}" ]] &&
+      [[ $(systemctl show --property=WorkingDirectory --value "${service_name}") == "${runner_dir}" ]]; then
+      printf '%s\n' "${service_name}"
+    fi
+  done < <(systemctl list-unit-files --type=service --no-legend 'actions.runner.*.service')
+}
+
 archive_path=$(mktemp "${TMPDIR:-/tmp}/actions-runner.XXXXXX.tar.gz")
-trap 'rm -f "${archive_path}"' EXIT
+unit_template_path=$(mktemp "${TMPDIR:-/tmp}/actions-runner-unit.XXXXXX.service")
+trap 'rm -f "${archive_path}" "${unit_template_path}"' EXIT
 
 curl --fail --location --retry 5 --output "${archive_path}" "${RUNNER_URL}"
 printf '%s  %s\n' "${RUNNER_SHA256}" "${archive_path}" | sha256sum --check --status
+chmod 0644 "${archive_path}"
 
 # Install the extra packages needed by the KVM jobs before dropping to the
 # runner accounts. Skopeo exports test images without access to the privileged
@@ -70,16 +98,18 @@ while IFS=: read -r existing_user _; do
   done
 
   # A running service retains its old supplementary groups until it restarts.
-  # Restart only services whose account memberships changed.
+  # Discover it through root-controlled systemd metadata rather than trusting
+  # the runner-writable svc.sh or .service files.
   if [[ ${privileges_revoked} == true ]]; then
     existing_home=$(getent passwd "${existing_user}" | cut -d: -f6)
     existing_runner_dir="${existing_home}/actions-runner"
-    if [[ -x "${existing_runner_dir}/svc.sh" && -f "${existing_runner_dir}/.service" ]]; then
-      (
-        cd "${existing_runner_dir}"
-        ./svc.sh stop
-        ./svc.sh start
-      )
+    mapfile -t existing_services < <(runner_services_for "${existing_user}" "${existing_runner_dir}")
+    if (( ${#existing_services[@]} > 1 )); then
+      echo "multiple services found for ${existing_user}: ${existing_services[*]}" >&2
+      exit 1
+    fi
+    if (( ${#existing_services[@]} == 1 )); then
+      systemctl restart "${existing_services[0]}"
     fi
   fi
 done < <(getent passwd)
@@ -96,10 +126,13 @@ for index in $(seq "${RUNNER_FIRST}" "${RUNNER_LAST}"); do
 
   runner_home=$(getent passwd "${runner_user}" | cut -d: -f6)
   runner_dir="${runner_home}/actions-runner"
+  if [[ -L ${runner_dir} ]]; then
+    echo "refusing to use symlinked runner directory: ${runner_dir}" >&2
+    exit 1
+  fi
   install -d -o "${runner_user}" -g "${runner_user}" -m 0755 "${runner_dir}"
-  if [[ ! -x "${runner_dir}/config.sh" ]]; then
-    tar -xzf "${archive_path}" -C "${runner_dir}"
-    chown -R "${runner_user}:${runner_user}" "${runner_dir}"
+  if [[ ! -x "${runner_dir}/config.sh" || ! -f "${runner_dir}/.runner" ]]; then
+    runuser -u "${runner_user}" -- tar -xzf "${archive_path}" -C "${runner_dir}"
   fi
 
   if [[ ! -f "${runner_dir}/.runner" ]]; then
@@ -112,26 +145,62 @@ for index in $(seq "${RUNNER_FIRST}" "${RUNNER_LAST}"); do
       --unattended
   fi
 
-  if [[ ! -f "${runner_dir}/.service" ]]; then
-    service_name=$(sed -n 's/^SVC_NAME="\([^"]*\)"/\1/p' "${runner_dir}/svc.sh")
-    if [[ -n "${service_name}" && -f "/etc/systemd/system/${service_name}" ]]; then
-      # Adopt a service left by an interrupted earlier installation. Removing
-      # and reinstalling it recreates runsvc.sh and the local .service marker.
-      (
-        cd "${runner_dir}"
-        ./svc.sh uninstall
-      )
-    fi
-    (
-      cd "${runner_dir}"
-      ./svc.sh install "${runner_user}"
-    )
+  if [[ ! -x "${runner_dir}/runsvc.sh" ]]; then
+    runuser -u "${runner_user}" -- \
+      install -m 0755 "${runner_dir}/bin/runsvc.sh" "${runner_dir}/runsvc.sh"
   fi
 
-  (
-    cd "${runner_dir}"
-    ./svc.sh start
-  )
+  service_name="actions.runner.${runner_service_scope}.${runner_name}.service"
+  unit_path="/etc/systemd/system/${service_name}"
+  mapfile -t runner_services < <(runner_services_for "${runner_user}" "${runner_dir}")
+  if (( ${#runner_services[@]} > 1 )); then
+    echo "multiple services found for ${runner_user}: ${runner_services[*]}" >&2
+    exit 1
+  fi
+  if (( ${#runner_services[@]} == 1 )) && [[ ${runner_services[0]} != "${service_name}" ]]; then
+    echo "unexpected service for ${runner_user}: ${runner_services[0]}" >&2
+    exit 1
+  fi
+  if [[ -L ${unit_path} ]]; then
+    echo "refusing to replace symlinked systemd unit: ${unit_path}" >&2
+    exit 1
+  fi
+
+  cat > "${unit_template_path}" <<EOF
+[Unit]
+Description=GitHub Actions Runner (${runner_service_scope}.${runner_name})
+After=network-online.target
+
+[Service]
+ExecStart=${runner_dir}/runsvc.sh
+User=${runner_user}
+WorkingDirectory=${runner_dir}
+KillMode=process
+KillSignal=SIGTERM
+TimeoutStopSec=5min
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  unit_changed=false
+  if [[ ! -f ${unit_path} ]] || ! cmp --silent "${unit_template_path}" "${unit_path}"; then
+    install -o root -g root -m 0644 "${unit_template_path}" "${unit_path}"
+    systemctl daemon-reload
+    unit_changed=true
+  else
+    chown root:root "${unit_path}"
+    chmod 0644 "${unit_path}"
+  fi
+
+  printf '%s\n' "${service_name}" |
+    runuser -u "${runner_user}" -- tee "${runner_dir}/.service" >/dev/null
+  systemctl enable "${service_name}"
+  if [[ ${unit_changed} == true ]] && systemctl is-active --quiet "${service_name}"; then
+    systemctl restart "${service_name}"
+  else
+    systemctl start "${service_name}"
+  fi
 
 done
 
