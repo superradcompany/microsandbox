@@ -1,11 +1,11 @@
 ---
-title: Virtio-vsock
-sidebarTitle: "Virtio-vsock"
+title: Host sockets
+sidebarTitle: "Host sockets"
 description: Expose explicit host Unix socket or Windows named-pipe services directly to guest AF_VSOCK applications
 icon: "arrows-left-right"
 ---
 
-Virtio-vsock provides local guest-to-host communication without IP networking, TSI interception, SSH forwarding, or an agentd proxy. A guest application opens an `AF_VSOCK` socket and addresses host CID `2` plus the configured port. Microsandbox connects that route to one explicit local endpoint: a Unix socket on macOS or Linux, or a local named pipe on Windows.
+Host sockets use virtio-vsock for local guest-to-host communication without IP networking, TSI interception, SSH forwarding, or an agentd proxy. A guest application opens an `AF_VSOCK` socket and addresses host CID `2` plus the configured port. Microsandbox connects that route to one explicit local endpoint: a Unix socket on macOS or Linux, or a local named pipe on Windows.
 
 ```bash
 # SOCK_STREAM is the default.

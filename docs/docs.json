@@ -48,8 +48,6 @@
             "pages": [
               "sandboxes/overview",
               "sandbox-config",
-              "sandboxes/optimization",
-              "sandboxes/cpu-placement",
               "sandboxes/lifecycle",
               "sandboxes/commands",
               "sandboxes/filesystem",
@@ -65,11 +63,19 @@
             ]
           },
           {
+            "group": "Performance",
+            "icon": "bolt",
+            "pages": [
+              "sandboxes/optimization",
+              "sandboxes/cpu-placement"
+            ]
+          },
+          {
             "group": "Networking",
             "icon": "network-wired",
             "pages": [
               "networking/overview",
-              "networking/vsock",
+              "networking/host-sockets",
               "networking/dns",
               "networking/tls"
             ]
@@ -414,6 +420,10 @@
     {
       "source": "/optimization/overview",
       "destination": "/sandboxes/optimization"
+    },
+    {
+      "source": "/networking/vsock",
+      "destination": "/networking/host-sockets"
     }
   ],
   "integrations": {
