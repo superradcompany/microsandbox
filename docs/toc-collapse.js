@@ -48,6 +48,11 @@
         if (expanded) collapsePeers(item);
         setExpanded(item, toggle, expanded);
       });
+      link.addEventListener("click", () => {
+        if (item.dataset.msbExpanded === "true") return;
+        collapsePeers(item);
+        setExpanded(item, toggle, true);
+      });
 
       item.insertBefore(toggle, link);
       setExpanded(item, toggle, item.hasAttribute("data-active"));
