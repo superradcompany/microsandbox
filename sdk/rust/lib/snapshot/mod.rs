@@ -363,10 +363,11 @@ impl SnapshotBuilder {
         self
     }
 
-    /// Retained source-compatibility setter.
+    /// Record persistent file integrity while creating the snapshot.
     ///
-    /// Final schema 1 always computes and records file-state integrity, so
-    /// calling this method no longer changes creation behavior.
+    /// Integrity is disabled by default so ordinary local capture does not
+    /// add a second full payload pass. Explicit verification reports
+    /// `NotRecorded` for snapshots created without this option.
     pub fn record_integrity(mut self) -> Self {
         self.record_integrity = true;
         self

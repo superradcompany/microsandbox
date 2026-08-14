@@ -5,6 +5,8 @@ description: Pull and manage OCI images from the CLI
 icon: "layer-group"
 ---
 
+<Tooltip tip="Image commands manage the local cache. On microsandbox cloud, specify an OCI image when creating the sandbox and it is pulled for you."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ## msb pull
 
 Pre-pull an image to the local cache. Layers are fetched in parallel with per-layer progress bars. Once cached, layers are content-addressable and deduplicated, so shared layers across images are only stored once.

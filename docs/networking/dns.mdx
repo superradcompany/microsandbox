@@ -98,6 +98,8 @@ msb create python --name safe-agent --net-default allow \
 
 ## Pinning nameservers
 
+<Tooltip tip="Custom nameservers are not available on microsandbox cloud; cloud sandboxes use platform-managed DNS."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 By default the sandbox picks up the host's resolver list automatically:
 
 - **macOS**: reads `State:/Network/Global/DNS` from the system configuration store, with `/etc/resolv.conf` as a fallback when the store isn't available.

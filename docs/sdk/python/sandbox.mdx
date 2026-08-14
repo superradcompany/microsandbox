@@ -5,6 +5,7 @@ description: Python SDK - Sandbox API reference
 
 Create and control a microVM sandbox: boot it from an image, run commands, stream logs and metrics, then shut it down. See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
 
+For local runtime installation and verification, see [Runtime setup](/sdk/setup#install-and-verify).
 
 ## Static methods
 
@@ -267,7 +268,7 @@ await Sandbox.remove("api")
 
 </Accordion>
 
-Delete a stopped sandbox and all its state from disk (configuration, logs, runtime directory). Fails if the sandbox is still running; stop it first.
+Delete a stopped sandbox by name. See [Remove](/sandboxes/lifecycle#remove) for the exact local deletion scope and the external resources that are preserved. Fails if the sandbox is still running; stop it first.
 
 <p className="msb-label">Parameters</p>
 
@@ -306,6 +307,8 @@ The sandbox name. This is an async method; call `await sb.name()`.
 </div>
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">owns_lifecycle</span>
+
+<Tooltip tip="On microsandbox cloud this is false; the cloud worker owns the sandbox process, not your handle."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 @property
@@ -443,6 +446,8 @@ Attach your terminal to the sandbox's default shell for an interactive session.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">ping()</span>
 
+<Tooltip tip="Not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```python
 async def ping(self) -> SandboxPingResult
 ```
@@ -469,6 +474,8 @@ Check that the running sandbox's guest agent is reachable without refreshing idl
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">touch()</span>
 
+<Tooltip tip="Not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```python
 async def touch(self) -> SandboxTouchResult
 ```
@@ -494,6 +501,8 @@ Explicitly refresh the running sandbox's idle activity. This sends `core.touch`,
 </div>
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">modify()</span>
+
+<Tooltip tip="modify is not available on microsandbox cloud; recreate the sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def modify(
@@ -653,6 +662,8 @@ A live CPU or memory resize can take a moment to settle. The new limits are enfo
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">metrics()</span>
 
+<Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```python
 async def metrics(self) -> SandboxMetrics
 ```
@@ -678,6 +689,8 @@ Get a point-in-time snapshot of the sandbox's resource usage: CPU, memory, disk 
 </div>
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">metrics_stream()</span>
+
+<Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def metrics_stream(self, interval: float = 1.0) -> MetricsStream
@@ -714,6 +727,8 @@ Stream resource metrics at a regular interval. The returned [`MetricsStream`](#m
 </div>
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">logs()</span>
+
+<Tooltip tip="Bounded log reads are not available on microsandbox cloud; follow live with log streaming and persist output externally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def logs(
@@ -789,6 +804,8 @@ The default sources are `STDOUT`, `STDERR`, and `OUTPUT` (PTY-merged). Add `LogR
 </div>
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">log_stream()</span>
+
+<Tooltip tip="On microsandbox cloud, log streaming is follow-only; set follow. Bounded, non-follow reads are not available."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def log_stream(
@@ -890,6 +907,8 @@ Request graceful shutdown and return once the request is sent, without waiting f
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">kill()</span>
 
+<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```python
 async def kill(self, timeout: float | None = None) -> None
 ```
@@ -915,6 +934,8 @@ Force-terminate the sandbox and wait until stopped state is observed. No gracefu
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">request_kill()</span>
 
+<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```python
 async def request_kill(self) -> None
 ```
@@ -930,6 +951,8 @@ await sb.request_kill()
 Request force termination and return once the signal is sent, without waiting for stopped state.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">request_drain()</span>
+
+<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def request_drain(self) -> None
@@ -1090,6 +1113,8 @@ Append `content` to an existing file at `path`. If the file lives in a lower ima
 
 #### <span className="msb-recv">Patch.</span><span className="msb-hn">mkdir()</span>
 
+<Tooltip tip="On microsandbox cloud, host sources resolve against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```python
 @staticmethod
 def mkdir(path: str, *, mode: int | None = None) -> PatchConfig
@@ -1130,6 +1155,8 @@ Delete a file or directory at `path`. Idempotent: a no-op if the path doesn't ex
 
 #### <span className="msb-recv">Patch.</span><span className="msb-hn">copy_file()</span>
 
+<Tooltip tip="On microsandbox cloud, host sources resolve against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```python
 @staticmethod
 def copy_file(src: str, dst: str, *, mode: int | None = None, replace: bool = False) -> PatchConfig
@@ -1159,6 +1186,8 @@ Copy a single host file at `src` into the guest rootfs at `dst`.
 </div>
 
 #### <span className="msb-recv">Patch.</span><span className="msb-hn">copy_dir()</span>
+
+<Tooltip tip="On microsandbox cloud, host sources resolve against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 @staticmethod

@@ -38,6 +38,8 @@ Frame flag: this message requests sandbox shutdown. Also available as `FLAG_SHUT
 
 #### <span className="msb-recv">m.</span><span className="msb-hn">ConnectAgentSandbox()</span>
 
+<Tooltip tip="Connecting an agent client by socket path is local-only; on microsandbox cloud the SDK uses the agent WebSocket route internally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```go
 func ConnectAgentSandbox(ctx context.Context, name string) (*AgentClient, error)
 ```
@@ -83,6 +85,8 @@ Connect to a running sandbox by name. Resolves the sandbox's relay socket path a
 </div>
 
 #### <span className="msb-recv">m.</span><span className="msb-hn">ConnectAgentPath()</span>
+
+<Tooltip tip="Connecting an agent client by socket path is local-only; on microsandbox cloud the SDK uses the agent WebSocket route internally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func ConnectAgentPath(ctx context.Context, path string) (*AgentClient, error)
@@ -134,6 +138,8 @@ Connect to an `agentd` relay socket by path. Use this when you already have the 
 </div>
 
 #### <span className="msb-recv">m.</span><span className="msb-hn">AgentSocketPath()</span>
+
+<Tooltip tip="Connecting an agent client by socket path is local-only; on microsandbox cloud the SDK uses the agent WebSocket route internally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func AgentSocketPath(name string) (string, error)

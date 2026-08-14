@@ -265,15 +265,6 @@ Walk `dir` and rebuild the local index from the artifacts it finds.
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-n, err := m.Snapshot.Reindex(ctx, "/srv/snapshots")
-fmt.Printf("indexed %d snapshots\n", n)
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">Save()</span>
@@ -324,14 +315,6 @@ err := m.Snapshot.Save(ctx, "after-pip-install", "/tmp/snap.tar.zst",
 ```go
 func (snapshotFactory) Load(ctx context.Context, archive, dest string) (*SnapshotHandle, error)
 ```
-
-<Accordion title="Example">
-
-```go
-h, err := m.Snapshot.Import(ctx, "/tmp/snap.tar.zst", "")
-```
-
-</Accordion>
 
 Unpack a snapshot archive into the snapshots directory or an explicit `dest` directory. Pass `""` for the default destination.
 
@@ -432,7 +415,7 @@ An artifact on disk. The accessors below are plain field reads; only [`Verify`](
 func (s *SnapshotArtifact) Verify(ctx context.Context) (*SnapshotVerifyReport, error)
 ```
 
-Recompute the upper layer's content hash and compare against the manifest. Walks data extents only, so a 4 GiB sparse file with a few MB of data verifies in milliseconds. The report's `Upper.Kind` is `"not_recorded"` when the artifact was created without [`RecordIntegrity`](#snapshotcreateoptionsstruct), and `"verified"` when the recorded hash matched.
+Recompute the upper layer's recorded content integrity and compare against the descriptor. Current BLAKE3 Merkle integrity skips known all-hole subtrees and hashes allocated leaves in batches; released SHA descriptors retain their exact, potentially O(logical size), verifier. The report's `Upper.Kind` is `"not_recorded"` when the artifact was created without [`RecordIntegrity`](#snapshotcreateoptionsstruct), and `"verified"` when the recorded value matched.
 
 <p className="msb-label">Returns</p>
 
@@ -450,21 +433,14 @@ report, err := snap.Verify(ctx)
 if err != nil {
     return err
 }
-fmt.Println(report.Upper.Digest)
+if report.Upper.Kind == "not_recorded" {
+    fmt.Println("snapshot has no recorded payload integrity")
+} else {
+    fmt.Println(report.Upper.Digest)
+}
 ```
 
 </Accordion>
-
-Recompute recorded content integrity for this snapshot. Requires that the artifact was created with [`RecordIntegrity`](#snapshotcreateoptionsstruct) set.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshotverifyreportstruct">*SnapshotVerifyReport</a></div>
-    <div className="msb-param-desc">Recomputed digest and upper-layer status.</div>
-  </div>
-</div>
 
 #### <span className="msb-recv">s.</span><span className="msb-hn">Path()</span>
 

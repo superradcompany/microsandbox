@@ -167,6 +167,8 @@ data, err := sftp.Read(ctx, "/tmp/hello.txt")
 
 ## External clients
 
+<Tooltip tip="msb ssh serve is not available on microsandbox cloud. The SDK reusable server works when you supply explicit host-key and authorized-key material; native sessions work unchanged."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 External client mode exposes a sandbox as an SSH server for tools that already speak SSH. This is the closest match for normal SSH usage: authorize a public key, serve the sandbox, then connect with `ssh` or `sftp`.
 
 ### Authorize a key

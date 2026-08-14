@@ -67,3 +67,41 @@ func TestFFIWireShape_SnapshotCreateDestDir(t *testing.T) {
 		t.Fatal("resumable must not appear in payload when unset")
 	}
 }
+
+func TestSnapshotStateProjectionDistinguishesMissingAndMerkleIntegrity(t *testing.T) {
+	format := "raw"
+	fstype := "ext4"
+	upperFile := "upper.ext4"
+	without := snapshotStateFromInfo(&ffi.SnapshotInfo{
+		StateKind: "file",
+		Format:    &format,
+		Fstype:    &fstype,
+		UpperFile: &upperFile,
+	})
+	if without.File == nil || without.File.HasIntegrity {
+		t.Fatalf("missing integrity projected as recorded: %#v", without.File)
+	}
+
+	algorithm := "msb-file-merkle-blake3-v1"
+	root := "blake3:" + strings.Repeat("d", 64)
+	logicalSize := uint64(4096)
+	leafSize := uint32(65536)
+	withMerkle := snapshotStateFromInfo(&ffi.SnapshotInfo{
+		StateKind:                 "file",
+		Format:                    &format,
+		Fstype:                    &fstype,
+		UpperFile:                 &upperFile,
+		UpperIntegrityAlgorithm:   &algorithm,
+		UpperIntegrityDigest:      &root,
+		UpperIntegrityRoot:        &root,
+		UpperIntegrityLogicalSize: &logicalSize,
+		UpperIntegrityLeafSize:    &leafSize,
+	})
+	if withMerkle.File == nil || !withMerkle.File.HasIntegrity {
+		t.Fatalf("recorded Merkle integrity was lost: %#v", withMerkle.File)
+	}
+	got := withMerkle.File.Integrity
+	if got.Algorithm != algorithm || got.Digest != root || got.Root != root || got.LogicalSize != logicalSize || got.LeafSize != leafSize {
+		t.Fatalf("Merkle integrity projection = %#v", got)
+	}
+}

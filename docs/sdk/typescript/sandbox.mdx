@@ -7,8 +7,17 @@ Create and control a microVM sandbox: boot it from an image, run commands, strea
 
 The TypeScript SDK uses a **builder-only** entry point. Start every new sandbox from `Sandbox.builder(name)` and chain configuration calls before terminating with `.create()`. Use `.detached(true)` before `.create()` for detached/background mode. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes.
 
-`libkrunfw` selection is process-level, not per sandbox. To use a custom library, call `setRuntimeLibkrunfwPath(path)` before creating local sandboxes, set `MSB_LIBKRUNFW_PATH`, or configure `paths.libkrunfw`.
+`libkrunfw` selection is process-level, not per sandbox. See [Runtime setup](/sdk/setup#override-runtime-paths) for installation, verification, and path overrides.
 
+## Functions
+
+#### <span className="msb-hn">allSandboxMetrics()</span>
+
+```typescript
+allSandboxMetrics(): Promise<Record<string, SandboxMetrics>>
+```
+
+Return one [`SandboxMetrics`](#sandboxmetrics) snapshot for every running sandbox, keyed by sandbox name. See [Metrics](/sandboxes/metrics) for a complete example.
 
 ## Static methods
 
@@ -167,7 +176,7 @@ await Sandbox.remove("api");
 
 </Accordion>
 
-Delete a stopped sandbox and all its state from disk (configuration, logs, runtime directory). Fails if the sandbox is still running - stop it first.
+Delete a stopped sandbox by name. See [Remove](/sandboxes/lifecycle#remove) for the exact local deletion scope and the external resources that are preserved. Fails if the sandbox is still running—stop it first.
 
 <p className="msb-label">Parameters</p>
 
@@ -321,6 +330,8 @@ Get a filesystem handle for reading and writing files inside the running sandbox
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">kill()</span>
 
+<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```typescript
 kill(): Promise<void>
 ```
@@ -336,6 +347,8 @@ await sandbox.kill(); // no graceful shutdown
 Force-terminate the sandbox and wait until stopped state is observed. No graceful shutdown - use when the sandbox is unresponsive. Pending writes that the workload hasn't `fsync`'d may be lost, same durability semantics as a sudden power loss on a physical machine. Prefer [`stop()`](#sandbox-stop) for graceful shutdown that gives the workload a chance to flush.
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">killWithTimeout()</span>
+
+<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 killWithTimeout(timeoutMs: number): Promise<void>
@@ -361,6 +374,8 @@ Force-terminate the sandbox and wait up to `timeoutMs` for stopped-state observa
 </div>
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">logs()</span>
+
+<Tooltip tip="Bounded log reads are not available on microsandbox cloud; follow live with log streaming and persist output externally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 logs(opts?: LogReadOptions): Promise<LogEntry[]>
@@ -422,6 +437,8 @@ The default sources are `"stdout"`, `"stderr"`, and `"output"` (PTY-merged). Pas
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">logStream()</span>
 
+<Tooltip tip="On microsandbox cloud, log streaming is follow-only; set follow. Bounded, non-follow reads are not available."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```typescript
 logStream(opts?: LogStreamOptions): Promise<LogStream>
 ```
@@ -459,6 +476,8 @@ Stream captured output as it appears, with optional follow. Backed by the same o
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">ping()</span>
 
+<Tooltip tip="Not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```typescript
 ping(): Promise<SandboxPingResult>
 ```
@@ -484,6 +503,8 @@ Check that the running sandbox's guest agent is reachable without refreshing idl
 </div>
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">touch()</span>
+
+<Tooltip tip="Not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 touch(): Promise<SandboxTouchResult>
@@ -511,6 +532,8 @@ Explicitly refresh the running sandbox's idle activity. This sends `core.touch`,
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">modify()</span>
 
+<Tooltip tip="modify is not available on microsandbox cloud; recreate the sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```typescript
 modify(opts?: ModifyOptions): Promise<SandboxModificationPlan>
 ```
@@ -532,7 +555,6 @@ for (const c of preview.changes) {
 
 // Make an env change active now by restarting
 await sandbox.modify({ env: { MODE: "prod" }, policy: "restart" });
-
 // Grow the managed OCI root disk offline and restart
 await sandbox.modify({ rootDiskSize: 8192, policy: "restart" });
 
@@ -578,6 +600,8 @@ A live CPU or memory resize can take a moment to settle. The new limits are enfo
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">metrics()</span>
 
+<Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```typescript
 metrics(): Promise<SandboxMetrics>
 ```
@@ -603,6 +627,8 @@ Get a point-in-time snapshot of the sandbox's resource usage: CPU, memory, disk 
 </div>
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">metricsStream()</span>
+
+<Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 metricsStream(intervalMs: number): Promise<MetricsStream>
@@ -641,6 +667,8 @@ Stream resource metrics at a regular interval. The returned [`MetricsStream`](#m
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">requestDrain()</span>
 
+<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```typescript
 requestDrain(): Promise<void>
 ```
@@ -657,6 +685,8 @@ await sandbox.waitUntilStopped();
 Request a graceful drain and return once the request is sent. Existing commands run to completion, but new `exec` calls are rejected. The sandbox transitions to `stopped` when all in-flight commands finish. Use [`waitUntilStopped()`](#sandbox-waituntilstopped) when the caller needs stopped-state observation. Useful for zero-downtime rotation of worker sandboxes.
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">requestKill()</span>
+
+<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 requestKill(): Promise<void>
@@ -774,6 +804,8 @@ Block until the sandbox is observed in a terminal non-running state, without tri
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">[Symbol.asyncDispose]()</span>
 
+<Tooltip tip="On microsandbox cloud this does not stop the sandbox; the cloud handle does not own the host process, so call stop() or remove() explicitly."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```typescript
 [Symbol.asyncDispose](): Promise<void>
 ```
@@ -831,6 +863,8 @@ Set the number of virtual CPUs. This is a limit, not a reservation.
 
 #### <span className="msb-recv">.</span><span className="msb-hn">maxCpus()</span>
 
+<Tooltip tip="On microsandbox cloud these ceilings are not carried; the maximum is pinned to the initial value. Recreate the sandbox to resize."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```typescript
 maxCpus(n: number): this
 ```
@@ -876,6 +910,8 @@ Build and boot the sandbox. By default the sandbox is attached - it stops when t
 </div>
 
 #### <span className="msb-recv">.</span><span className="msb-hn">createWithPullProgress()</span>
+
+<Tooltip tip="On microsandbox cloud, per-layer pull progress is not reported; creation still completes."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 createWithPullProgress(): Promise<PullProgressCreate>
@@ -928,6 +964,8 @@ Create in detached/background mode when `true`. A detached sandbox survives afte
 </div>
 
 #### <span className="msb-recv">.</span><span className="msb-hn">disableMetricsSample()</span>
+
+<Tooltip tip="Metrics sampling does not apply on microsandbox cloud, where resource metrics are unavailable."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 disableMetricsSample(): this
@@ -1034,6 +1072,8 @@ Boot from a previously captured snapshot instead of a fresh image. The image ref
 
 #### <span className="msb-recv">.</span><span className="msb-hn">hostname()</span>
 
+<Tooltip tip="On microsandbox cloud, the hostname is assigned by the platform; a value set here is ignored."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```typescript
 hostname(name: string): this
 ```
@@ -1085,6 +1125,8 @@ Auto-drain the sandbox after this many seconds of inactivity (no active exec ses
 
 #### <span className="msb-recv">.</span><span className="msb-hn">image()</span>
 
+<Tooltip tip="On microsandbox cloud, only OCI image references are accepted; host-directory and disk-image root filesystems are local-only."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```typescript
 image(src: string): this
 ```
@@ -1101,6 +1143,8 @@ Set the root filesystem source. Accepts OCI image names (`"alpine"`), local dire
 </div>
 
 #### <span className="msb-recv">.</span><span className="msb-hn">imageWith()</span>
+
+<Tooltip tip="On microsandbox cloud, only OCI image references are accepted; host-directory and disk-image root filesystems are local-only."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 imageWith(configure: (b: ImageBuilder) => ImageBuilder): this
@@ -1298,6 +1342,8 @@ Set the guest memory size in MiB. Physical pages are only allocated as the guest
 
 #### <span className="msb-recv">.</span><span className="msb-hn">maxMemory()</span>
 
+<Tooltip tip="On microsandbox cloud these ceilings are not carried; the maximum is pinned to the initial value. Recreate the sandbox to resize."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```typescript
 maxMemory(mib: number): this
 ```
@@ -1331,6 +1377,8 @@ Select the guest transparent huge-page policy applied through the kernel command
 </div>
 
 #### <span className="msb-recv">.</span><span className="msb-hn">metricsSampleIntervalMs()</span>
+
+<Tooltip tip="Metrics sampling does not apply on microsandbox cloud, where resource metrics are unavailable."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 metricsSampleIntervalMs(ms: number): this
@@ -1394,6 +1442,8 @@ Modify the rootfs before the VM boots. Patches go into the writable layer - the 
 
 #### <span className="msb-recv">.</span><span className="msb-hn">port()</span>
 
+<Tooltip tip="Publishing host ports is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```typescript
 port(host: number, guest: number): this
 ```
@@ -1414,6 +1464,8 @@ Publish a TCP port from the sandbox to the host. The default host bind address i
 </div>
 
 #### <span className="msb-recv">.</span><span className="msb-hn">portBind()</span>
+
+<Tooltip tip="Publishing host ports is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 portBind(bind: string, host: number, guest: number): this
@@ -1440,6 +1492,8 @@ Publish a TCP port on a specific host bind address, such as `"0.0.0.0"`.
 
 #### <span className="msb-recv">.</span><span className="msb-hn">portUdp()</span>
 
+<Tooltip tip="Publishing host ports is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```typescript
 portUdp(host: number, guest: number): this
 ```
@@ -1460,6 +1514,8 @@ Publish a UDP port. The default host bind address is `127.0.0.1`.
 </div>
 
 #### <span className="msb-recv">.</span><span className="msb-hn">portUdpBind()</span>
+
+<Tooltip tip="Publishing host ports is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 portUdpBind(bind: string, host: number, guest: number): this
@@ -1511,8 +1567,10 @@ Suppress sandbox process log output.
 
 #### <span className="msb-recv">.</span><span className="msb-hn">registry()</span>
 
+<Tooltip tip="On microsandbox cloud, plain-HTTP and custom-CA registry options are not available; credential auth still works."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```typescript
-registry(configure: (b: RegistryBuilder) => RegistryBuilder): this
+registry(configure: (b: RegistryConfigBuilder) => RegistryConfigBuilder): this
 ```
 
 <Accordion title="Example">
@@ -1520,7 +1578,9 @@ registry(configure: (b: RegistryBuilder) => RegistryBuilder): this
 ```typescript
 const sandbox = await Sandbox.builder("worker")
   .image("registry.internal/app:latest")
-  .registry((r) => r.auth("user", "token"))
+  .registry((r) =>
+    r.auth({ kind: "basic", username: "user", password: "token" }),
+  )
   .create();
 ```
 
@@ -1532,12 +1592,14 @@ Configure the OCI registry connection: authentication, insecure transport, and C
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><code>configure</code><span className="msb-type">(b: RegistryBuilder) =&gt; RegistryBuilder</span></div>
-    <div className="msb-param-desc">Configure the registry.</div>
+    <div className="msb-param-key"><code>configure</code><a className="msb-type" href="#registryconfigbuilder">(b: RegistryConfigBuilder) =&gt; RegistryConfigBuilder</a></div>
+    <div className="msb-param-desc">Configure registry authentication, transport, and CA certificates.</div>
   </div>
 </div>
 
 #### <span className="msb-recv">.</span><span className="msb-hn">replace()</span>
+
+<Tooltip tip="Replace-on-create is not available on microsandbox cloud; remove the existing sandbox first."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 replace(): this
@@ -1546,6 +1608,8 @@ replace(): this
 If a sandbox with the same name already exists, stop it (10s SIGTERM grace, then SIGKILL), remove it, and create a fresh one. Without this, creation fails on name conflict.
 
 #### <span className="msb-recv">.</span><span className="msb-hn">replaceWithTimeout()</span>
+
+<Tooltip tip="Replace-on-create is not available on microsandbox cloud; remove the existing sandbox first."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 replaceWithTimeout(timeoutMs: number): this
@@ -1804,6 +1868,8 @@ Append `content` to an existing file at `path`. If the file lives in a lower ima
 
 #### <span className="msb-recv">.</span><span className="msb-hn">copyDir()</span>
 
+<Tooltip tip="On microsandbox cloud, host sources resolve against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```typescript
 copyDir(src: string, dst: string, opts?: { replace?: boolean }): this
 ```
@@ -1828,6 +1894,8 @@ Recursively copy a host directory at `src` into the guest rootfs at `dst`.
 </div>
 
 #### <span className="msb-recv">.</span><span className="msb-hn">copyFile()</span>
+
+<Tooltip tip="On microsandbox cloud, host sources resolve against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 copyFile(src: string, dst: string, opts?: { mode?: number; replace?: boolean }): this
@@ -1886,6 +1954,8 @@ Write raw bytes at `path`.
 </div>
 
 #### <span className="msb-recv">.</span><span className="msb-hn">mkdir()</span>
+
+<Tooltip tip="On microsandbox cloud, host sources resolve against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 mkdir(path: string, opts?: { mode?: number }): this
@@ -2162,6 +2232,48 @@ Async iterable creation handle returned by [`createWithPullProgress()`](#createw
 | `[Symbol.asyncIterator]()` | `AsyncIterator<`[`PullProgress`](#pullprogress)`>` | Use with `for await...of` |
 | `awaitSandbox()` | `Promise<`[`Sandbox`](#instance-methods)`>` | Resolve the underlying creation task and return the running sandbox |
 
+### RegistryAuth
+
+Authentication used when pulling images from an OCI registry.
+
+```typescript
+type RegistryAuth =
+  | { kind: "anonymous" }
+  | { kind: "basic"; username: string; password: string };
+```
+
+### RegistryConfigBuilder
+
+Fluent builder for OCI registry connection settings. Obtain it through [`SandboxBuilder.registry()`](#registry); the callback's returned builder is stored in the sandbox configuration.
+
+```typescript
+.registry((r) =>
+  r.auth({ kind: "basic", username: "user", password: "token" })
+    .caCertsPath("/etc/company-registry-ca.pem"),
+)
+```
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `auth(auth)` | `this` | Set [`RegistryAuth`](#registryauth) credentials. |
+| `insecure()` | `this` | Use plain HTTP instead of TLS. |
+| `caCerts(pemData)` | `this` | Add a PEM-encoded CA certificate from a Node.js `Buffer`. May be called repeatedly. |
+| `caCertsPath(path)` | `this` | Read and add a PEM-encoded CA certificate from a filesystem path. |
+| `build()` | [`RegistryConfig`](#registryconfig) | Snapshot the accumulated registry configuration. |
+
+### RegistryConfig
+
+<p className="msb-backref">Built by <a href="#registryconfigbuilder">RegistryConfigBuilder</a> · stored in <a href="#sandboxconfig">SandboxConfig.registry</a></p>
+
+OCI registry connection settings produced by [`RegistryConfigBuilder.build()`](#registryconfigbuilder).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| auth | [`RegistryAuth`](#registryauth)` \| undefined` | Registry authentication, if configured. |
+| insecure | `boolean` | Whether to use plain HTTP instead of TLS. |
+| caCertsCount | `number` | Number of CA certificates added through `caCerts()` or `caCertsPath()`. |
+| caCertsPath | `string \| undefined` | Last CA certificate path passed to `caCertsPath()`, if any. |
+
 ### SandboxConfig
 
 <p className="msb-backref">Returned by <a href="#sandbox-config">config()</a> · <a href="#build">build()</a></p>
@@ -2196,7 +2308,7 @@ Configuration object produced by [`build()`](#build) and returned by [`config()`
 | idleTimeoutSecs | `number \| null` | Stop after idle time |
 | portsTcp | `Array<readonly [number, number]>` | TCP host→guest mappings |
 | portsUdp | `Array<readonly [number, number]>` | UDP host→guest mappings |
-| registry | `RegistryConfig \| null` | Registry connection settings |
+| registry | [`RegistryConfig`](#registryconfig)` \| null` | Registry connection settings |
 | network | `NetworkConfig \| null` | Network configuration |
 | disableNetwork | `boolean` | Disable networking entirely |
 | secrets | `SecretEntry[]` | Secret entries (top-level) |

@@ -3,6 +3,8 @@ title: Images
 description: Go SDK - Image cache API reference
 ---
 
+<Tooltip tip="The image-cache API manages the local cache and is local-only. On microsandbox cloud, specify an OCI image when creating the sandbox and it is pulled for you."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 Inspect and prune the local OCI image cache: the images that sandbox creation has already pulled. Images can also be loaded into the cache from local archives and saved back out to archive files, so locally built images work without a registry. Everything is reached through the package-level `Image` value, or through an [`ImageHandle`](#imagehandle) once you hold one.
 
 ```go
@@ -234,18 +236,6 @@ Remove cached image data that is not used by any sandbox or indexed snapshot. Re
   </div>
 </div>
 
-<Accordion title="Example">
-
-```go
-report, err := m.Image.Prune(ctx)
-if err != nil {
-    return err
-}
-fmt.Println(report.LayersRemoved, "layers removed")
-```
-
-</Accordion>
-
 ---
 
 #### <span className="msb-recv">Image.</span><span className="msb-hn">Load()</span>
@@ -255,7 +245,7 @@ fmt.Println(report.LayersRemoved, "layers removed")
 func (imageFactory) Load(ctx context.Context, inputPath string, tags ...string) ([]*ImageHandle, error)
 ```
 
-Import images from a local archive — a `docker save` tarball or an OCI Image Layout archive — into the cache, so locally built images can be used without a registry. Variadic `tags` apply extra references to the first image in the archive.
+Import images from a local archive (a `docker save` tarball or an OCI Image Layout archive) into the cache, so locally built images can be used without a registry. Variadic `tags` apply extra references to the first image in the archive.
 
 <p className="msb-label">Parameters</p>
 

@@ -1,0 +1,96 @@
+---
+title: "Week of August 7, 2026"
+description: "A first-class Ruby SDK, flat OCI root disks, deployment profiles, default-workload execution, host performance improvements, cloud volume filesystem access, and reliability fixes."
+icon: "bolt"
+---
+
+## New features
+
+**Ruby SDK**
+
+microsandbox now ships a first-class Ruby 3.1+ gem backed by a native Magnus extension. The SDK covers sandbox lifecycle, exec and shell, guest filesystem, logs, metrics, images, volumes, snapshots, SSH exec, and explicit local or cloud backend selection. It supports default-deny network allowlists and hostname-scoped secret injection, releases Ruby's GVL around blocking calls, and rebuilds the native runtime after `fork(2)` so Puma, Resque, and Solid Queue process models are safe.
+
+```ruby
+require "microsandbox"
+
+Microsandbox::Sandbox.with(name: "worker", image: "alpine:3.19") do |sb|
+  result = sb.shell("echo hello from ruby")
+  puts result.stdout_text
+end
+```
+
+**Flat OCI root disks**
+
+Sandboxes can now boot from a single ext4 root disk materialized directly from an OCI image, in addition to the default layered EROFS plus OverlayFS. Flat root disks skip the overlay stack at runtime, produce a resizable ext4 filesystem, and are content-addressed and cached across sandboxes. `msb pull IMAGE --materialize layered|flat|all` prepares either or both compositions, and the new `--root-disk flat[:SIZE][,fstype=ext4][,clone=auto|copy|reflink]` selects the flat backing at create time. The option is exposed in every SDK.
+
+```bash
+msb pull python:3.12 --materialize flat
+msb run --root-disk flat:8GiB python -- python -V
+```
+
+See the [sandboxes overview](/sandboxes/overview).
+
+**Single- and multi-tenant deployment profiles**
+
+A new `DeploymentProfile` sits alongside the existing in-guest security profile and is available in Rust, Python, TypeScript, Go, and the CLI. `SingleTenant` preserves the requested local runtime configuration. `MultiTenant` intersects tenant policy with a host-owned public-network floor. The floor blocks private, loopback, link-local, multicast, metadata, and host destinations across TCP, UDP, ICMP, and DNS. It also forces DNS rebinding protection, disables tenant nameserver and interface overrides, prevents host CA import and published host ports, and caps concurrent connections. Tenant policy can still narrow the remaining public space but cannot broaden the floor.
+
+```python
+from microsandbox import DeploymentProfile, Sandbox
+
+sb = await Sandbox.create(
+    "job",
+    image="alpine:3.19",
+    deployment_profile=DeploymentProfile.MULTI_TENANT,
+)
+```
+
+**Explicit default-workload execution**
+
+`Sandbox.create(...)` is now strictly boot-only in every SDK. To run the image's resolved OCI `ENTRYPOINT` and `CMD`, use the new default-workload APIs: buffered, streaming, and interactive variants across Rust, Python, TypeScript, and Go. The CLI and runtime share one argv resolver, and `msb run IMAGE -- ...` still performs a one-shot `CMD` override.
+
+```typescript
+const sandbox = await Sandbox.builder("worker")
+  .image("example/worker:latest")
+  .cmd(["worker.py", "--once"])
+  .create();
+const output = await sandbox.execDefault();
+```
+
+**Integrated host performance stack**
+
+Sandboxes now use a measured performance stack by default. Topology-aware CPU placement (`inherit`, `auto`, `spread`, `compact`), per-sandbox guest transparent-huge-page policy, x2APIC and AMD AVIC / Intel APICv integration, and bounded buffered block writeback are exposed across the CLI and Rust, Python, TypeScript, and Go SDKs. Linux gets an automatic per-disk writeback window capped at 1536 MiB and scaled to a bounded host-global admission pool; macOS and Windows keep their existing platform behavior. `msb doctor` gains platform-gated root-clone, AVIC, and APICv guidance without changing privileged host policy on its own.
+
+**Cloud filesystem access on default volumes**
+
+`Volume.get_default` is now available on the cloud backend in every SDK, and the full `VolumeFs` surface works against cloud default and managed directory volumes: read, write, streaming read and write, list, stat, exists, mkdir, remove, copy, and rename. Cloud filesystem requests are routed by immutable UUID rather than mutable display name, so renames no longer race concurrent operations. Local `Volume.get_default` remains explicitly unsupported to avoid accidental host access.
+
+See [volumes](/sandboxes/volumes).
+
+**Other features**
+
+- **Root disk resizing in every SDK.** The TypeScript, Python, and Go SDKs now expose `rootDiskSize` / `root_disk_size` / `RootDiskSizeMiB` on `modify()`, mapped to the canonical `root_disk_size_mib` patch field. Restart and next-start semantics and backing-specific limits are documented in the [tuning guide](/sandboxes/tuning).
+- **Active backend context.** New `default_backend_info()` / `defaultBackendInfo()` accessors, and per-sandbox `backendKind` / `backend_kind` fields, let applications inspect the resolved default backend, its cloud API URL, the selector that chose it, and its profile. The API key is never included. A new `msb context` command prints the same information, and `create`, `remove`, `exec`, and `ssh` show a short backend notice. Invalid cloud CLI configuration now fails closed instead of silently dispatching locally. See [backends](/getting-started/backends).
+- **Go SDK: attach as non-default guest users.** The Go SDK gains `AttachWith`, with `WithAttachUser`, `WithAttachCwd`, `WithAttachEnv`, and `WithAttachDetachKeys`, matching the Python and TypeScript surface. The existing `Attach` API is unchanged. See the [Go SDK reference](/sdk/go/execution).
+
+## Breaking changes
+
+- **Python SDK closed values are enums.** Backend selection, sandbox modification policy, volume and image configuration, snapshot metadata, network destination discriminators, patch kinds, and log sources now require exported `StrEnum` members instead of raw strings. Native getters return enum members. `SandboxStatus` also gains the runtime's `CREATED` and `STARTING` states.
+
+  ```python
+  from microsandbox import BackendKind, Network, NetworkProfile, set_default_backend
+
+  set_default_backend(BackendKind.CLOUD)
+  network = Network.from_profiles(NetworkProfile.PUBLIC)
+  ```
+
+- **Explicit cloud backend selection is now required.** Setting `MSB_API_KEY` alone no longer selects the cloud. Cloud intent must be declared through `MSB_BACKEND=cloud`, a selected cloud profile, or a programmatic backend setter. Invalid cloud configuration returns `InvalidConfig` instead of falling back to local execution. See [backends](/getting-started/backends).
+
+## Bug fixes
+
+- Cloud SDK agent WebSockets now trust platform-installed certificate authorities. This restores `msb exec`, SSH, and filesystem operations from nested sandboxes and TLS-inspected environments, where the previous WebPKI-only root store rejected the handshake with `UnknownIssuer` even though HTTPS API calls succeeded.
+- Cloud log streams now include PTY `output` in the default source set, matching local behavior. Cloud `create` also rejects local-only options that the cloud wire contract cannot preserve, returning the typed `Unsupported(ConfigField)` error instead of silently dropping settings.
+- Windows read-only file handles no longer return spurious `EACCES` on close over virtiofs. The guest `FUSE_FLUSH` on `close(2)` previously called `FlushFileBuffers` on handles without `GENERIC_WRITE`, which failed with `ERROR_ACCESS_DENIED` and aborted tools like Node's `readFileSync` UTF-8 fast path. Read-only handles now skip flush entirely.
+- Windows `msb self update` now uses the same deferred scheduled-task swap as `msb self downgrade`, so the running CLI never overwrites itself. Bundles are staged and digest-verified outside the live install, the invoking process is awaited, and the swap retries through Task Scheduler while another process holds an artifact. Repeated PowerShell installs replace files correctly, and a lock failure reports the exact PID before any artifact changes.
+- `agentd` now has a process-wide child-status owner. Concurrent `exec` sessions no longer lose fast exits to competing waiters, and adopted descendants are reaped instead of accumulating as zombies. Signal termination, spawn failures, pipe and PTY status delivery, and large interleaved output all continue to behave as before.
+- Per-sandbox metrics gauges no longer accumulate stale sandbox identities. Stopped sandboxes are dropped from OTLP payloads on the next collection, so `msb-metrics` state cannot grow without bound and exceed receiver payload limits.
+- `Image.inspect` and `msb image inspect --format json` now return the OCI config labels present in the source image. The parser already preserved labels; the database upsert previously discarded them and reported no labels for labeled images.

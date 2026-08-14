@@ -4,30 +4,13 @@ description: Persist and share data across sandboxes
 icon: "hard-drive"
 ---
 
-Volumes give a sandbox direct filesystem access to host-side storage or in-memory filesystems. They're useful for persisting data across restarts, sharing data between sandboxes, or mounting host data into the guest. They're also significantly faster than the [filesystem API](/sandboxes/filesystem) (which transfers files individually), so for anything beyond ad-hoc reads and writes, volumes are the way to go.
+<Note>
+  **Cloud:** Volumes use fast block storage managed by the platform. Every organization automatically gets an undeletable **host volume**: think of it as the disk of the one computer all its sandboxes run on, and it is what bind and disk-image mounts resolve against.
+</Note>
 
-microsandbox supports four types of mounts: bind mounts, named volumes, tmpfs, and disk-image volumes.
+Volumes give a sandbox persistent or shared storage by mounting host data, managed storage, disk images, or in-memory filesystems into the guest. Mounts provide direct filesystem access and are significantly faster than the [filesystem API](/sandboxes/filesystem), which transfers files individually, so they are preferable for anything beyond ad-hoc reads and writes.
 
-Mounts use normal Linux behavior by default: writable, executable, suid-enabled, and device-enabled. Adjust with:
-
-- `readonly` / `ro` when the guest should not write to the mount.
-- `noexec` when files on the mount should not be executed directly.
-- `nosuid` when setuid/setgid bits should be ignored.
-- `nodev` when device files should be ignored.
-
-`noexec` does not stop interpreters from reading scripts from the mount, for example `sh /app/src/script.sh`.
-
-For stronger in-guest hardening, create the sandbox with the restricted security profile. Restricted sandboxes set `no_new_privs`, drop mount-admin capability from user commands, and force `nosuid,nodev` on user mounts. This profile is incompatible with workloads such as `sudo` and Docker-in-Docker.
-
-CLI mount flags use `SOURCE:DEST[:OPTIONS]`. The `:` before `OPTIONS` starts the option block, and commas separate options inside that block.
-
-| Flag | Source | Options |
-|------|--------|---------|
-| `--mount-dir` | Host directory | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror` |
-| `--mount-file` | Host file | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror` |
-| `--mount-named` | Named volume | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `kind=dir\|disk`, `size=<size>` for `kind=disk`, `quota=<size>` for directory volumes; directory-backed named volumes also support `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror` |
-| `--mount-disk` | Host disk image | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `format=raw\|qcow2\|vmdk`, `fstype=<type>` |
-| `--tmpfs` | Guest path | `ro`, `rw`, `noexec`, `nosuid`, `nodev`; size may be passed as `PATH:SIZE[:OPTIONS]` |
+microsandbox supports four mount types on both backends: bind mounts, named volumes, disk-image volumes, and tmpfs.
 
 ## Cloud default volume
 
@@ -58,6 +41,8 @@ err = volume.FS().WriteString("state.json", `{"ready":true}`)
 The default volume is isolated to the authenticated Cloud organization and cannot be removed. Default-volume lookup is deliberately unsupported on the local backend: forgetting an API key cannot expose or modify files from your machine. Named local volumes continue to live under `~/.microsandbox/volumes/` and retain their existing direct filesystem API.
 
 ## Bind mounts
+
+<Tooltip tip="The host path resolves against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Mount a directory from the host directly into the sandbox. Changes inside the sandbox are reflected on the host, and vice versa.
 
@@ -120,6 +105,8 @@ msb create alpine --name config-reader \
 ```
 
 ## Named volumes
+
+<Tooltip tip="On microsandbox cloud, create named volumes before mounting them; create-on-mount, disk-kind volumes, and size are not available, and quota must be a whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 microsandbox manages named volumes and stores them by default under `~/.microsandbox/volumes/<name>/`. They persist independently of any sandbox, so you can create a volume, populate it, and mount it into different sandboxes over time.
 
@@ -251,6 +238,8 @@ msb create docker:dind --name docker-demo \
 
 ### Sharing and host-side access
 
+<Tooltip tip="Host-side access to an unmounted volume is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem instead."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 Mount the same directory-backed named volume into multiple sandboxes when they need to share files. Use `readonly` on consumers that should not write. Disk-backed named volumes are attached as block devices; use one writable sandbox at a time, or read-only mounts where sharing is intended.
 
 Directory-backed named volumes are also accessible from the host without a running sandbox, so you can pre-populate a cache or inspect output after the sandbox stops. Disk-backed named volumes store guest data inside `disk.raw`; host filesystem helpers operate on the managed volume directory, not the filesystem inside the disk image.
@@ -286,6 +275,8 @@ msb volume rm old-cache
 </CodeGroup>
 
 ## Disk-image volumes
+
+<Tooltip tip="The host path resolves against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Disk-image volumes attach a host disk image as a virtio-blk device and mount its inner filesystem at a guest path. Use them when you want persistent state isolated from ordinary host filesystem metadata, or when distributing a prebuilt filesystem image. The disk format defaults from the file extension (`.qcow2`, `.raw`, `.vmdk`; otherwise raw), and the inner filesystem type is auto-detected unless you set `fstype`.
 
@@ -375,6 +366,31 @@ msb create alpine --name worker \
 ```
 
 </CodeGroup>
+
+## Mount options
+
+Mounts use normal Linux behavior by default: writable, executable, suid-enabled, and device-enabled. Adjust with:
+
+- `readonly` / `ro` when the guest should not write to the mount.
+- `noexec` when files on the mount should not be executed directly.
+- `nosuid` when setuid/setgid bits should be ignored.
+- `nodev` when device files should be ignored.
+
+`noexec` does not stop interpreters from reading scripts from the mount, for example `sh /app/src/script.sh`.
+
+For stronger in-guest hardening, create the sandbox with the restricted security profile. Restricted sandboxes set `no_new_privs`, drop mount-admin capability from user commands, and force `nosuid,nodev` on user mounts. This profile is incompatible with workloads such as `sudo` and Docker-in-Docker.
+
+### CLI syntax and flags
+
+CLI mount flags use `SOURCE:DEST[:OPTIONS]`. The `:` before `OPTIONS` starts the option block, and commas separate options inside that block.
+
+| Flag | Source | Options |
+|------|--------|---------|
+| `--mount-dir` | Host directory | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror` |
+| `--mount-file` | Host file | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror` |
+| `--mount-named` | Named volume | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `kind=dir\|disk`, `size=<size>` for `kind=disk`, `quota=<size>` for directory volumes; directory-backed named volumes also support `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror` |
+| `--mount-disk` | Host disk image | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `format=raw\|qcow2\|vmdk`, `fstype=<type>` |
+| `--tmpfs` | Guest path | `ro`, `rw`, `noexec`, `nosuid`, `nodev`; size may be passed as `PATH:SIZE[:OPTIONS]` |
 
 ## Combining mounts
 

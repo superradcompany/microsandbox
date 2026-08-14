@@ -5,6 +5,8 @@ description: msb-metrics, the sidecar binary that ships microsandbox metrics ove
 icon: "gauge"
 ---
 
+<Tooltip tip="msb-metrics reads host-local shared memory, so it applies to the local runtime and self-hosted deployments only."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 `msb-metrics` is a sibling process. It reads the microsandbox
 shared-memory metrics registry on a fixed interval and ships
 per-sandbox metrics to any OpenTelemetry-compatible backend.

@@ -58,6 +58,8 @@ export interface NativeBindings {
   readonly RuleBuilder: NapiBuilderCtor<NapiRuleBuilder>;
   readonly RuleDestinationBuilder: NapiBuilderCtor<NapiRuleDestinationBuilder>;
   readonly InterfaceOverridesBuilder: NapiBuilderCtor<NapiInterfaceOverridesBuilder>;
+  readonly NetworkRateLimiterBuilder: NapiBuilderCtor<NapiNetworkRateLimiterBuilder>;
+  readonly RateLimiterBuilder: NapiBuilderCtor<NapiRateLimiterBuilder>;
   readonly PullProgressStream: { prototype: NapiPullProgressStream };
   readonly PullProgressCreate: { prototype: NapiPullProgressCreate };
   readonly MountBuilder: new (guestPath: string) => NapiMountBuilder;
@@ -179,6 +181,7 @@ export interface NapiSandboxBuilderSetters {
   cpus(n: number): this;
   maxCpus(n: number): this;
   cpuPlacement(policy: "inherit" | "auto" | "spread" | "compact"): this;
+  placementProfile(profile: string): this;
   memory(mib: number): this;
   maxMemory(mib: number): this;
   thp(policy: "always" | "madvise" | "never"): this;
@@ -572,6 +575,8 @@ export interface NapiSnapshot {
   readonly upperFile: string | null | undefined;
   readonly upperIntegrityAlgorithm: string | null | undefined;
   readonly upperIntegrityDigest: string | null | undefined;
+  readonly upperIntegrityLogicalSize: bigint | null | undefined;
+  readonly upperIntegrityLeafSize: number | null | undefined;
   readonly checkpointId: string | null | undefined;
   readonly checkpointManifestDigest: string | null | undefined;
   readonly parent: string | null | undefined;
@@ -635,7 +640,7 @@ export interface NapiSnapshotRemoveOptions {
 export interface NapiSnapshotVerifyReport {
   readonly digest: string;
   readonly path: string;
-  readonly upperKind: string; // "verified"
+  readonly upperKind: string; // "notRecorded" | "verified"
   readonly upperAlgorithm: string | null | undefined;
   readonly upperDigest: string | null | undefined;
 }
@@ -959,7 +964,22 @@ export interface NapiNetworkBuilder {
   ipv4Pool(pool: string): this;
   ipv6Pool(pool: string): this;
   trustHostCAs(enabled: boolean): this;
+  rateLimiter(
+    configure: (b: NapiNetworkRateLimiterBuilder) => NapiNetworkRateLimiterBuilder,
+  ): this;
   build(): NetworkConfig;
+}
+
+export interface NapiRateLimiterBuilder {
+  bandwidth(sizeBytes: number, refillTimeMs: number): this;
+  bandwidthBurst(sizeBytes: number): this;
+  ops(count: number, refillTimeMs: number): this;
+  opsBurst(count: number): this;
+}
+
+export interface NapiNetworkRateLimiterBuilder {
+  egress(configure: (b: NapiRateLimiterBuilder) => NapiRateLimiterBuilder): this;
+  ingress(configure: (b: NapiRateLimiterBuilder) => NapiRateLimiterBuilder): this;
 }
 
 export interface NapiInterfaceOverridesBuilder {

@@ -85,6 +85,8 @@ Open a native in-process SSH client to this sandbox. Generates an ephemeral Ed25
 
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">PrepareServer()</span>
 
+<Tooltip tip="On microsandbox cloud, the reusable server works when you supply explicit host-key and authorized-key material; the convenience defaults are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```go
 func (ssh *SandboxSSHOps) PrepareServer(ctx context.Context, opts ...SSHServerOption) (*SSHServer, error)
 ```

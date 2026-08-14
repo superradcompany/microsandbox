@@ -4,6 +4,8 @@ description: Forward msb-metrics output to Grafana Cloud (or anywhere) via local
 icon: "route"
 ---
 
+<Tooltip tip="This page covers msb-metrics, which reads host-local shared memory and is local-only. It does not apply to microsandbox cloud sandboxes."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 <Note>
 This recipe ships data emitted by [`msb-metrics`](/observability/msb-metrics).
 See the msb-metrics page for the flag reference, metric names, and
@@ -66,7 +68,7 @@ the upstream connection, and the buffering through hiccups.
     }
     ```
 
-    Sub the OTLP gateway region for yours.
+    Substitute your OTLP gateway region.
   </Step>
 
   <Step title="Start Alloy">

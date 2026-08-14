@@ -328,6 +328,7 @@ func TestFFIWireShape_ScalarKnobs(t *testing.T) {
 		WithMaxMemory(4096),
 		WithMaxCPUs(8),
 		WithCPUPlacement(CPUPlacementSpread),
+		WithPlacementProfile("latency"),
 		WithWorkdir("/app"),
 		WithShell("/bin/bash"),
 		WithHostname("sb"),
@@ -347,6 +348,7 @@ func TestFFIWireShape_ScalarKnobs(t *testing.T) {
 	}{
 		{"image", "alpine"},
 		{"cpu_placement", "spread"},
+		{"placement_profile", "latency"},
 		{"memory_mib", float64(512)},
 		{"cpus", float64(2)},
 		{"max_memory_mib", float64(4096)},
@@ -734,6 +736,122 @@ func TestFFIWireShape_NetworkCustomRules(t *testing.T) {
 	ns := dns["nameservers"].([]any)
 	if len(ns) != 1 || ns[0] != "1.1.1.1:53" {
 		t.Fatalf("dns.nameservers = %v", ns)
+	}
+}
+
+func TestBuildFFINetworkRateLimiters(t *testing.T) {
+	out := buildFFINetwork(&NetworkConfig{
+		RateLimiter: &NetworkRateLimiterConfig{
+			Egress: &RateLimiterConfig{
+				Bandwidth: &TokenBucketConfig{
+					Size:         1 << 20,
+					RefillTime:   time.Second,
+					OneTimeBurst: 512 << 10,
+				},
+				Ops: &TokenBucketConfig{Size: 1000, RefillTime: 100 * time.Millisecond},
+			},
+			Ingress: &RateLimiterConfig{
+				Bandwidth: &TokenBucketConfig{Size: 2 << 20, RefillTime: 500 * time.Millisecond},
+			},
+		},
+	})
+
+	egress := out.RateLimiter.Egress
+	if egress == nil || egress.Bandwidth == nil || egress.Ops == nil {
+		t.Fatalf("egress rate limiter = %+v", egress)
+	}
+	if egress.Bandwidth.Size != 1<<20 || egress.Bandwidth.RefillTimeMs != 1000 {
+		t.Fatalf("egress bandwidth = %+v", egress.Bandwidth)
+	}
+	if egress.Bandwidth.OneTimeBurst != 512<<10 {
+		t.Fatalf("egress bandwidth burst = %d", egress.Bandwidth.OneTimeBurst)
+	}
+	if egress.Ops.Size != 1000 || egress.Ops.RefillTimeMs != 100 || egress.Ops.OneTimeBurst != 0 {
+		t.Fatalf("egress ops = %+v", egress.Ops)
+	}
+
+	ingress := out.RateLimiter.Ingress
+	if ingress == nil || ingress.Bandwidth == nil {
+		t.Fatalf("ingress rate limiter = %+v", ingress)
+	}
+	if ingress.Ops != nil {
+		t.Fatalf("ingress ops should stay nil, got %+v", ingress.Ops)
+	}
+	if ingress.Bandwidth.Size != 2<<20 || ingress.Bandwidth.RefillTimeMs != 500 {
+		t.Fatalf("ingress bandwidth = %+v", ingress.Bandwidth)
+	}
+}
+
+func TestBuildFFINetworkRateLimitersNil(t *testing.T) {
+	out := buildFFINetwork(&NetworkConfig{})
+	if out.RateLimiter != nil {
+		t.Fatalf("nil rate limiters should stay nil: %+v", out)
+	}
+}
+
+func TestBuildFFITokenBucketKeepsInvalidRefillTimesInvalid(t *testing.T) {
+	for _, refillTime := range []time.Duration{
+		-time.Second,
+		0,
+		time.Microsecond,
+		1500 * time.Microsecond,
+	} {
+		out := buildFFITokenBucket(&TokenBucketConfig{Size: 1, RefillTime: refillTime})
+		if out.RefillTimeMs != 0 {
+			t.Fatalf("refill time %s became %dms", refillTime, out.RefillTimeMs)
+		}
+	}
+
+	out := buildFFITokenBucket(&TokenBucketConfig{Size: 1, RefillTime: time.Millisecond})
+	if out.RefillTimeMs != 1 {
+		t.Fatalf("1ms refill time became %dms", out.RefillTimeMs)
+	}
+}
+
+func TestFFIWireShape_NetworkRateLimiters(t *testing.T) {
+	got := marshalCreateOptions(t,
+		WithImage("alpine"),
+		WithNetwork(&NetworkConfig{
+			RateLimiter: &NetworkRateLimiterConfig{
+				Egress: &RateLimiterConfig{
+					Bandwidth: &TokenBucketConfig{
+						Size:         1 << 20,
+						RefillTime:   time.Second,
+						OneTimeBurst: 512 << 10,
+					},
+				},
+				Ingress: &RateLimiterConfig{
+					Ops: &TokenBucketConfig{Size: 1000, RefillTime: 100 * time.Millisecond},
+				},
+			},
+		}),
+	)
+	net := mustField(t, got, "network").(map[string]any)
+	rateLimiter := net["rate_limiter"].(map[string]any)
+
+	egress := rateLimiter["egress"].(map[string]any)
+	bw := egress["bandwidth"].(map[string]any)
+	if bw["size"] != float64(1<<20) || bw["refill_time_ms"] != float64(1000) {
+		t.Fatalf("egress bandwidth = %v", bw)
+	}
+	if bw["one_time_burst"] != float64(512<<10) {
+		t.Fatalf("egress bandwidth burst = %v", bw["one_time_burst"])
+	}
+	if _, present := egress["ops"]; present {
+		t.Fatalf("nil ops bucket should be omitted: %v", egress)
+	}
+
+	ingress := rateLimiter["ingress"].(map[string]any)
+	ops := ingress["ops"].(map[string]any)
+	if ops["size"] != float64(1000) || ops["refill_time_ms"] != float64(100) {
+		t.Fatalf("ingress ops = %v", ops)
+	}
+	// A zero burst must not reach the wire; the Rust side defaults it.
+	if _, present := ops["one_time_burst"]; present {
+		t.Fatalf("zero one_time_burst should be omitted: %v", ops)
+	}
+	if _, present := ingress["bandwidth"]; present {
+		t.Fatalf("nil bandwidth bucket should be omitted: %v", ingress)
 	}
 }
 

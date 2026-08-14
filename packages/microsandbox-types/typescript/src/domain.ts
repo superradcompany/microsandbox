@@ -11,8 +11,6 @@ export type EnvVar = {
   value: string;
 };
 
-export type CpuPlacement = "inherit" | "auto" | "spread" | "compact";
-
 export type HandoffInit = {
   /**
    * Init binary: absolute path inside the guest rootfs, or the literal `auto`.
@@ -80,8 +78,6 @@ export type MountOptions = {
 };
 
 export type StatVirtualization = "strict" | "relaxed" | "off";
-
-export type TransparentHugePagePolicy = "always" | "madvise" | "never";
 
 export type HostPermissions = "private" | "mirror";
 

@@ -103,14 +103,6 @@ pub struct CloudSandboxResources {
     /// Guest memory in MiB.
     pub memory_mib: u32,
 
-    /// Host CPU placement requested for the sandbox.
-    #[serde(default, skip_serializing_if = "CpuPlacement::is_inherit")]
-    pub cpu_placement: CpuPlacement,
-
-    /// Guest transparent huge-page policy selected at boot.
-    #[serde(default, skip_serializing_if = "TransparentHugePagePolicy::is_madvise")]
-    pub thp: TransparentHugePagePolicy,
-
     /// Writable disk size in MiB. Applies only to OCI root filesystems.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_size_mib: Option<u32>,
@@ -737,9 +729,9 @@ impl From<VolumeMount> for CloudVolumeMount {
 }
 
 /// Cloud network specification: a subset of the domain [`NetworkSpec`].
-/// Interface overrides, host port mapping, DNS, TLS interception, and host-CA
-/// trust are not part of this type. `deny_unknown_fields` — posting an omitted
-/// field is an error, not a silent drop.
+/// Interface overrides, host port mapping, DNS, TLS interception, rate limits,
+/// and host-CA trust are not part of this type. `deny_unknown_fields` — posting
+/// an omitted field is an error, not a silent drop.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -987,8 +979,12 @@ impl TryFrom<CloudSandboxSpec> for SandboxSpec {
             // deserialization for legacy configs).
             max_cpus: spec.resources.vcpus,
             max_memory_mib: spec.resources.memory_mib,
-            cpu_placement: spec.resources.cpu_placement,
-            thp: spec.resources.thp,
+            // Host runtime policy never crosses the cloud wire. A managed
+            // service applies its own placement and guest-memory defaults
+            // after resolving the tenant-controlled resource request.
+            cpu_placement: CpuPlacement::Inherit,
+            placement_profile: None,
+            thp: TransparentHugePagePolicy::Madvise,
         };
 
         // Fields not present on `CloudNetworkSpec` are defaulted here, listed
@@ -1003,6 +999,7 @@ impl TryFrom<CloudSandboxSpec> for SandboxSpec {
             tls: None,
             secrets: spec.network.secrets.map(Into::into),
             max_connections: spec.network.max_connections,
+            rate_limiter: None,
             trust_host_cas: false,
         };
         let runtime = SandboxRuntimeOptions {
@@ -1080,8 +1077,6 @@ impl From<SandboxSpec> for CloudSandboxSpec {
             resources: CloudSandboxResources {
                 vcpus: spec.resources.cpus,
                 memory_mib: spec.resources.memory_mib,
-                cpu_placement: spec.resources.cpu_placement,
-                thp: spec.resources.thp,
                 disk_size_mib,
             },
             runtime: CloudSandboxRuntimeOptions {
@@ -1118,8 +1113,6 @@ impl Default for CloudSandboxResources {
         Self {
             vcpus: resources.cpus,
             memory_mib: resources.memory_mib,
-            cpu_placement: resources.cpu_placement,
-            thp: resources.thp,
             disk_size_mib: None,
         }
     }
@@ -1411,6 +1404,20 @@ mod tests {
     }
 
     #[test]
+    fn cloud_network_rejects_rate_limit_configuration() {
+        let error = serde_json::from_value::<CloudNetworkSpec>(serde_json::json!({
+            "rate_limiter": {
+                "egress": {
+                    "bandwidth": {"size": 1024, "refill_time_ms": 1000}
+                }
+            }
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unknown field `rate_limiter`"));
+    }
+
+    #[test]
     fn cloud_rootfs_source_uses_internal_tagging() {
         let json = serde_json::to_value(CloudRootfsSource::Oci {
             reference: "python:3.12".into(),
@@ -1509,17 +1516,25 @@ mod tests {
     }
 
     #[test]
-    fn cloud_resources_preserve_transparent_huge_page_policy() {
-        let mut req = CloudCreateSandboxRequest {
+    fn cloud_resources_do_not_carry_host_runtime_policy() {
+        let mut domain = SandboxSpec::try_from(CloudCreateSandboxRequest {
             spec: spec("agent-1"),
-        };
-        req.spec.resources.thp = TransparentHugePagePolicy::Always;
-
-        let domain = SandboxSpec::try_from(req).unwrap();
-        assert_eq!(domain.resources.thp, TransparentHugePagePolicy::Always);
+        })
+        .unwrap();
+        domain.resources.cpu_placement = CpuPlacement::Spread;
+        domain.resources.placement_profile = Some("locality".into());
+        domain.resources.thp = TransparentHugePagePolicy::Always;
 
         let cloud = CloudSandboxSpec::from(domain);
-        assert_eq!(cloud.resources.thp, TransparentHugePagePolicy::Always);
+        let wire = serde_json::to_value(&cloud.resources).unwrap();
+        assert!(wire.get("cpu_placement").is_none());
+        assert!(wire.get("placement_profile").is_none());
+        assert!(wire.get("thp").is_none());
+
+        let round_trip = SandboxSpec::try_from(cloud).unwrap();
+        assert_eq!(round_trip.resources.cpu_placement, CpuPlacement::Inherit);
+        assert!(round_trip.resources.placement_profile.is_none());
+        assert_eq!(round_trip.resources.thp, TransparentHugePagePolicy::Madvise);
     }
 
     #[test]

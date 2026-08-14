@@ -7,6 +7,8 @@ icon: "book"
 
 The `msb` CLI lets you create, manage, and interact with sandboxes from the terminal. It auto-detects TTY and interactivity, so no `-it` flags are needed. If your terminal is interactive, `msb` acts accordingly.
 
+The same CLI drives [microsandbox cloud](/cloud/overview) when an API key is set. A few commands are local-only or limited on cloud, including image-cache commands, `msb metrics`, bounded `msb logs`, `msb ssh serve`, and disk-sized volume creation. Individual pages flag these commands, and the [compatibility matrix](/cloud/compatibility) lists them.
+
 ## Install
 
 <CodeGroup>
@@ -14,12 +16,16 @@ The `msb` CLI lets you create, manage, and interact with sandboxes from the term
 curl -fsSL https://install.microsandbox.dev | sh
 ```
 
+```bash Homebrew (macOS)
+brew install superradcompany/tap/microsandbox
+```
+
 ```powershell CLI (Windows)
 irm https://install.microsandbox.dev/windows | iex
 ```
 </CodeGroup>
 
-On Linux and macOS, the installer writes the runtime to `~/.microsandbox/` and creates command links in `~/.local/bin/`. It does not edit shell startup files. If `~/.local/bin` is not on your `PATH`, the installer prints the command to add it. On Windows, use PowerShell; Windows support is currently in preview, and Windows 11 is the tested path.
+On Linux and macOS, the install script writes the runtime to `~/.microsandbox/` and creates command links in `~/.local/bin/`. It does not edit shell startup files. If `~/.local/bin` is not on your `PATH`, the installer prints the command to add it. On macOS, Homebrew provides the same CLI through the official tap. On Windows, use PowerShell; Windows support is currently in preview, and Windows 11 is the tested path.
 
 <Note>
   microsandbox requires glibc-based Linux with KVM enabled, macOS with Apple Silicon (M-series chip), or Windows 11 with Windows Hypervisor Platform enabled. Local sandboxes use hardware virtualization. See [Linux troubleshooting](/troubleshooting/linux), [macOS troubleshooting](/troubleshooting/macos), or [Windows troubleshooting](/troubleshooting/windows) for platform-specific notes.

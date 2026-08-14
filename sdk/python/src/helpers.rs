@@ -21,6 +21,7 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
     "max_memory",
     "max_cpus",
     "cpu_placement",
+    "placement_profile",
     "thp",
     "workdir",
     "shell",
@@ -335,6 +336,9 @@ pub fn sandbox_builder_from_args(
             .parse::<CpuPlacement>()
             .map_err(pyo3::exceptions::PyValueError::new_err)?;
         builder = builder.cpu_placement(policy);
+    }
+    if let Some(placement_profile) = extract_opt::<String>(kwargs, "placement_profile")? {
+        builder = builder.placement_profile(placement_profile);
     }
     if let Some(thp) = extract_opt::<String>(kwargs, "thp")? {
         let policy = thp
@@ -1256,6 +1260,26 @@ fn apply_network(
         builder = builder.network(|n| n.max_connections(max));
     }
 
+    // Rate limiters (egress = guest -> runtime, ingress = runtime -> guest).
+    if let Some(rate_limiter) = net.get_item("rate_limiter")?
+        && !rate_limiter.is_none()
+    {
+        let rate_limiter: Bound<'_, PyDict> = rate_limiter.downcast::<PyDict>()?.clone();
+        let egress = parse_rate_limiter(&rate_limiter, "egress")?;
+        let ingress = parse_rate_limiter(&rate_limiter, "ingress")?;
+        builder = builder.network(move |n| {
+            n.rate_limiter(|mut r| {
+                if let Some(limiter) = &egress {
+                    r = r.egress(|direction| apply_rate_limiter(direction, limiter));
+                }
+                if let Some(limiter) = &ingress {
+                    r = r.ingress(|direction| apply_rate_limiter(direction, limiter));
+                }
+                r
+            })
+        });
+    }
+
     // Guest IPv4 pool.
     if let Some(raw) = extract_opt::<String>(net, "ipv4_pool")? {
         let pool: ipnetwork::Ipv4Network = raw.parse().map_err(|e| {
@@ -1400,6 +1424,75 @@ fn apply_ports(
     }
 
     Ok(builder)
+}
+
+/// Token bucket values from a Python `TokenBucket` dict.
+struct TokenBucketOpts {
+    size: u64,
+    refill_time_ms: u64,
+    one_time_burst: u64,
+}
+
+/// Rate limiter values from a Python `RateLimiter` dict.
+struct RateLimiterOpts {
+    bandwidth: Option<TokenBucketOpts>,
+    ops: Option<TokenBucketOpts>,
+}
+
+fn parse_rate_limiter(net: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<RateLimiterOpts>> {
+    let Some(obj) = net.get_item(key)? else {
+        return Ok(None);
+    };
+    if obj.is_none() {
+        return Ok(None);
+    }
+    let limiter: Bound<'_, PyDict> = obj.downcast::<PyDict>()?.clone();
+    Ok(Some(RateLimiterOpts {
+        bandwidth: parse_token_bucket(&limiter, "bandwidth")?,
+        ops: parse_token_bucket(&limiter, "ops")?,
+    }))
+}
+
+fn parse_token_bucket(limiter: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<TokenBucketOpts>> {
+    let Some(obj) = limiter.get_item(key)? else {
+        return Ok(None);
+    };
+    if obj.is_none() {
+        return Ok(None);
+    }
+    let bucket: Bound<'_, PyDict> = obj.downcast::<PyDict>()?.clone();
+    Ok(Some(TokenBucketOpts {
+        size: extract_required(&bucket, "size")?,
+        refill_time_ms: extract_required(&bucket, "refill_time_ms")?,
+        one_time_burst: extract_opt(&bucket, "one_time_burst")?.unwrap_or(0),
+    }))
+}
+
+/// Apply parsed rate limiter values to the Rust builder. Validation
+/// happens in `NetworkBuilder::build`.
+fn apply_rate_limiter(
+    mut r: microsandbox_network::builder::RateLimiterBuilder,
+    opts: &RateLimiterOpts,
+) -> microsandbox_network::builder::RateLimiterBuilder {
+    if let Some(bandwidth) = &opts.bandwidth {
+        r = r.bandwidth(
+            bandwidth.size,
+            std::time::Duration::from_millis(bandwidth.refill_time_ms),
+        );
+        if bandwidth.one_time_burst > 0 {
+            r = r.bandwidth_burst(bandwidth.one_time_burst);
+        }
+    }
+    if let Some(ops) = &opts.ops {
+        r = r.ops(
+            ops.size,
+            std::time::Duration::from_millis(ops.refill_time_ms),
+        );
+        if ops.one_time_burst > 0 {
+            r = r.ops_burst(ops.one_time_burst);
+        }
+    }
+    r
 }
 
 /// Apply the compact `{host_socket: port}` stream shorthand or a sequence of

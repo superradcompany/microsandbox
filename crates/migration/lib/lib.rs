@@ -20,7 +20,9 @@ mod m20260714_000001_add_snapshot_scope;
 mod m20260719_000001_create_cpu_allocations;
 mod m20260723_000001_snapshot_artifact_transition;
 mod m20260803_000001_create_writeback_allocations;
+mod m20260808_000001_create_memory_allocation_nodes;
 mod m20260810_000001_rebuild_sandbox_labels;
+mod m20260813_000001_share_cpu_allocations;
 pub mod schema_metadata;
 
 use sea_orm_migration::prelude::*;
@@ -66,7 +68,9 @@ impl MigratorTrait for Migrator {
             Box::new(m20260723_000001_snapshot_artifact_transition::Migration),
             Box::new(m20260719_000001_create_cpu_allocations::Migration),
             Box::new(m20260803_000001_create_writeback_allocations::Migration),
+            Box::new(m20260808_000001_create_memory_allocation_nodes::Migration),
             Box::new(m20260810_000001_rebuild_sandbox_labels::Migration),
+            Box::new(m20260813_000001_share_cpu_allocations::Migration),
         ]
     }
 }

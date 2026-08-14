@@ -8,6 +8,7 @@
 pub(crate) mod attach;
 mod builder;
 pub(crate) mod config;
+mod config_patch;
 pub mod exec;
 pub(crate) mod flat_rootfs;
 pub mod fs;
@@ -101,6 +102,15 @@ pub use crate::logs::{LogEntry, LogOptions, LogSource, LogStreamOptions};
 pub use attach::AttachOptionsBuilder;
 pub use builder::{RegistryConfigBuilder, SandboxBuilder};
 pub use config::SandboxConfig;
+#[cfg(feature = "net")]
+pub use config_patch::{
+    DnsConfigPatch, NetworkConfigPatch, NetworkPolicyConfigPatch, SecretConfigPatch,
+    SecretEntryConfigPatch, TlsConfigPatch,
+};
+pub use config_patch::{
+    FilesystemConfigPatch, InitConfigPatch, ResourceConfigPatch, RuntimeConfigPatch,
+    SandboxConfigPatch, SandboxImagePatch, ScriptConfigPatch,
+};
 pub use exec::{ExecOptionsBuilder, ExecOutput, Rlimit, RlimitResource};
 pub use fs::{
     FsEntry, FsEntryKind, FsHandle, FsMetadata, FsOpenOptions, FsReadStream, FsSetAttrs,
@@ -116,9 +126,13 @@ pub use microsandbox_image::{PullProgress, PullProgressHandle};
 #[cfg(feature = "net")]
 pub use microsandbox_network::builder::SecretBuilder;
 #[cfg(feature = "net")]
-pub use microsandbox_network::config::NetworkConfig;
+pub use microsandbox_network::config::{NetworkConfig, PublishedPort};
 #[cfg(feature = "net")]
-pub use microsandbox_network::policy::{NetworkPolicy, NetworkProfile};
+pub use microsandbox_network::dns::Nameserver;
+#[cfg(feature = "net")]
+pub use microsandbox_network::policy::{
+    Action as NetworkAction, NetworkPolicy, NetworkProfile, Rule as NetworkRule,
+};
 pub use microsandbox_runtime::logging::LogLevel;
 pub use microsandbox_types::{CpuPlacement, PullPolicy};
 pub use microsandbox_types::{
@@ -126,6 +140,8 @@ pub use microsandbox_types::{
     PublishedPortSpec, SandboxLogLevel, SandboxResources, SandboxRuntimeOptions, SandboxSpec,
     TransparentHugePagePolicy, VsockRouteSpec, VsockSocketType, VsockSpec,
 };
+#[cfg(feature = "net")]
+pub use microsandbox_types::{HostPattern, SecretInjection};
 pub use modify::{
     ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,
     ModificationPolicy, ModificationWarning, PlannedChange, ResourceConvergenceState, ResourceKind,

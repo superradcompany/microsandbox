@@ -1342,7 +1342,9 @@ mod tests {
     use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set};
     use tempfile::tempdir;
 
-    use super::{sandbox_entity, sandbox_label_entity, sandbox_runtime_endpoint_is_live};
+    #[cfg(unix)]
+    use super::sandbox_runtime_endpoint_is_live;
+    use super::{sandbox_entity, sandbox_label_entity};
     use crate::backend::{Backend, LocalBackend};
     use crate::runtime::SpawnMode;
     use crate::sandbox::{

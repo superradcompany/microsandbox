@@ -294,6 +294,12 @@ pub struct VmConfig {
     /// Requested host CPU placement policy.
     pub cpu_placement: CpuPlacement,
 
+    /// Selected host profile name, retained for diagnostics.
+    pub placement_profile_name: Option<String>,
+
+    /// Host-resolved placement behavior.
+    pub placement_profile: Option<microsandbox_types::PlacementProfile>,
+
     /// Per-writable-raw-disk hard budget for buffered host dirty data.
     pub block_writeback_limit_bytes: Option<u64>,
 
@@ -391,6 +397,12 @@ struct BindIdentityMapRegistration {
 }
 
 #[cfg(feature = "net")]
+struct KrunNetworkRateLimiters {
+    rx: Option<msb_krun::RateLimiterConfig>,
+    tx: Option<msb_krun::RateLimiterConfig>,
+}
+
+#[cfg(feature = "net")]
 type NetworkTerminationHandle = microsandbox_network::network::TerminationHandle;
 
 #[cfg(not(feature = "net"))]
@@ -445,6 +457,7 @@ impl std::fmt::Debug for VmConfig {
             .field("memory_mib", &self.memory_mib)
             .field("max_cpus", &self.max_cpus)
             .field("max_memory_mib", &self.max_memory_mib)
+            .field("placement_profile_name", &self.placement_profile_name)
             .field(
                 "block_writeback_limit_bytes",
                 &self.block_writeback_limit_bytes,
@@ -575,8 +588,13 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         &db,
         run_db_id,
         &config.cpu_lease_dir,
-        config.vm.cpu_placement,
-        config.vm.max_cpus.max(config.vm.vcpus),
+        crate::cpu::PlacementRequest {
+            policy: config.vm.cpu_placement,
+            max_vcpus: config.vm.max_cpus.max(config.vm.vcpus),
+            boot_memory_mib: config.vm.memory_mib,
+            max_memory_mib: config.vm.max_memory_mib.max(config.vm.memory_mib),
+            profile: config.vm.placement_profile,
+        },
     )) {
         Ok(guard) => Arc::new(guard),
         Err(error) => {
@@ -692,6 +710,11 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     let exit_metrics_writer = metrics_writer.clone();
     let exit_cpu_guard = Arc::clone(&cpu_guard);
     let exit_writeback_guard = Arc::clone(&writeback_guard);
+    let placement_rt_handle = tokio_rt.handle().clone();
+    let placement_db = db.clone();
+    let placement_cpu_guard = Arc::clone(&cpu_guard);
+    let resolved_numa_topology = cpu_guard.numa_topology();
+    let placement_required = cpu_guard.placement_required();
     #[cfg(windows)]
     let _agent_console_pipe_bridge = AgentConsolePipeBridge::spawn(
         agent_console_pipe_name(config.sandbox_id),
@@ -699,6 +722,11 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         tokio_rt.handle(),
     )
     .map_err(|e| RuntimeError::Custom(format!("agent console pipe bridge: {e}")))?;
+    let host_placement = HostPlacement {
+        vcpu_targets: cpu_guard.vcpu_targets(),
+        required: placement_required,
+        numa_topology: resolved_numa_topology,
+    };
     let build_result = build_vm(
         &config,
         console_backend,
@@ -817,8 +845,29 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                 tracing::debug!(error = %err, slot = writer.slot(), "metrics slot release at exit");
             }
         },
+        move |report: &msb_krun::PlacementReport| {
+            let pinned = report
+                .vcpus
+                .iter()
+                .filter(|result| matches!(result, msb_krun::VcpuPlacementResult::Pinned { .. }))
+                .count();
+            if let Err(error) =
+                placement_rt_handle.block_on(placement_cpu_guard.reconcile(&placement_db, report))
+            {
+                // Placement is already effective at the OS boundary. A catalog failure must not
+                // turn an ordinary best-effort policy into a sandbox-creation failure; the
+                // process-held lease remains conservative until exit or stale-lease recovery.
+                tracing::warn!(%error, "record effective host placement");
+            }
+            tracing::info!(
+                pinned_vcpus = pinned,
+                inherited_vcpus = report.vcpus.len().saturating_sub(pinned),
+                memory = ?report.memory,
+                "host placement acknowledged before guest execution"
+            );
+        },
         tokio_rt.handle().clone(),
-        cpu_guard.vcpu_targets(),
+        host_placement,
         writeback_limit.as_ref(),
     );
     let (
@@ -1335,12 +1384,19 @@ fn is_writeback_limited_disk(format: msb_krun::DiskImageFormat, read_only: bool)
 }
 
 /// Build the `Vm` from config with an exit observer for cleanup.
+struct HostPlacement<'a> {
+    vcpu_targets: Option<&'a [crate::cpu::LogicalCpuId]>,
+    required: bool,
+    numa_topology: Option<msb_krun::NumaTopology>,
+}
+
 fn build_vm(
     config: &Config,
     console_backend: AgentConsoleBackend,
     on_exit: impl Fn(i32) + Send + 'static,
+    on_placement: impl FnOnce(&msb_krun::PlacementReport) + Send + 'static,
     tokio_handle: tokio::runtime::Handle,
-    vcpu_targets: Option<&[crate::cpu::LogicalCpuId]>,
+    host_placement: HostPlacement<'_>,
     writeback_limit: Option<&msb_krun::WritebackLimit>,
 ) -> RuntimeResult<VmBuildOutput> {
     let mut exec_env = config.vm.env.clone();
@@ -1361,14 +1417,20 @@ fn build_vm(
                 .max_vcpus(vm.max_cpus.max(vm.vcpus))
                 .max_memory_mib((vm.max_memory_mib.max(vm.memory_mib)) as usize)
                 .balloon_stats_interval(balloon_stats_interval);
-            if let Some(targets) = vcpu_targets {
-                m = m.vcpu_affinity(
-                    targets
-                        .iter()
-                        .copied()
-                        .map(|cpu| msb_krun::HostCpuId::in_group(cpu.group, cpu.index))
-                        .collect(),
-                );
+            if let Some(targets) = host_placement.vcpu_targets {
+                let affinity = targets
+                    .iter()
+                    .copied()
+                    .map(|cpu| msb_krun::HostCpuId::in_group(cpu.group, cpu.index))
+                    .collect();
+                m = if host_placement.required {
+                    m.vcpu_affinity(affinity)
+                } else {
+                    m.try_vcpu_affinity(affinity)
+                };
+            }
+            if let Some(topology) = host_placement.numa_topology {
+                m = m.numa_topology(topology);
             }
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             {
@@ -1680,6 +1742,7 @@ fn build_vm(
             .secrets
             .validate()
             .map_err(|err| RuntimeError::Custom(format!("invalid network secrets: {err}")))?;
+        let rate_limiters = to_krun_network_rate_limiters(&vm.network);
 
         let mut network = microsandbox_network::network::SmoltcpNetwork::new_with_profile(
             vm.network.clone(),
@@ -1716,7 +1779,16 @@ fn build_vm(
             exec_env.push(format!("{key}={value}"));
         }
 
-        builder = builder.net(move |n| n.mac(guest_mac).custom(net_backend));
+        builder = builder.net(move |mut n| {
+            n = n.mac(guest_mac);
+            if let Some(config) = rate_limiters.rx {
+                n = n.rx_rate_limiter(config);
+            }
+            if let Some(config) = rate_limiters.tx {
+                n = n.tx_rate_limiter(config);
+            }
+            n.custom(net_backend)
+        });
     }
 
     // Execution configuration.
@@ -1766,7 +1838,7 @@ fn build_vm(
     }
 
     // Exit observer — runs synchronously before _exit() for DB cleanup.
-    builder = builder.on_exit(on_exit);
+    builder = builder.on_placement(on_placement).on_exit(on_exit);
 
     let vm = builder
         .build()
@@ -1784,6 +1856,39 @@ fn build_vm(
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+#[cfg(feature = "net")]
+fn to_krun_network_rate_limiters(
+    config: &microsandbox_network::config::NetworkConfig,
+) -> KrunNetworkRateLimiters {
+    let rate_limiter = config.rate_limiter.as_ref();
+    KrunNetworkRateLimiters {
+        rx: rate_limiter
+            .and_then(|rate_limiter| rate_limiter.ingress.as_ref())
+            .map(to_krun_rate_limiter),
+        tx: rate_limiter
+            .and_then(|rate_limiter| rate_limiter.egress.as_ref())
+            .map(to_krun_rate_limiter),
+    }
+}
+
+#[cfg(feature = "net")]
+fn to_krun_rate_limiter(
+    config: &microsandbox_types::RateLimiterConfig,
+) -> msb_krun::RateLimiterConfig {
+    fn bucket(config: &microsandbox_types::TokenBucketConfig) -> msb_krun::TokenBucketConfig {
+        msb_krun::TokenBucketConfig {
+            size: config.size,
+            refill_time: Duration::from_millis(config.refill_time_ms),
+            one_time_burst: config.one_time_burst,
+        }
+    }
+
+    msb_krun::RateLimiterConfig {
+        bandwidth: config.bandwidth.as_ref().map(bucket),
+        ops: config.ops.as_ref().map(bucket),
+    }
+}
 
 async fn monitor_writeback_pressure(
     guard: Arc<crate::writeback::WritebackPressureGuard>,
@@ -2525,6 +2630,8 @@ fn thp_kernel_cmdline(policy: microsandbox_types::TransparentHugePagePolicy) -> 
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "net")]
+    use super::to_krun_network_rate_limiters;
     #[cfg(unix)]
     use super::{
         BindIdentityMapRegistration, PARENT_WATCH_DETACH, ParentWatchdogSignal,
@@ -2552,6 +2659,65 @@ mod tests {
             gid: 0,
             pid: 1,
         }
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn network_rate_limiters_map_directions_without_losing_precision() {
+        let egress = microsandbox_types::RateLimiterConfig {
+            bandwidth: Some(microsandbox_types::TokenBucketConfig {
+                size: 1_048_576,
+                refill_time_ms: 1_234,
+                one_time_burst: 524_288,
+            }),
+            ops: Some(microsandbox_types::TokenBucketConfig {
+                size: 1_000,
+                refill_time_ms: 7,
+                one_time_burst: 12,
+            }),
+        };
+        let ingress = microsandbox_types::RateLimiterConfig {
+            bandwidth: Some(microsandbox_types::TokenBucketConfig {
+                size: 2_048,
+                refill_time_ms: 99,
+                one_time_burst: 256,
+            }),
+            ops: None,
+        };
+        let config = microsandbox_network::config::NetworkConfig {
+            rate_limiter: Some(microsandbox_types::NetworkRateLimiterConfig {
+                egress: Some(egress),
+                ingress: Some(ingress),
+            }),
+            ..Default::default()
+        };
+
+        let mapped = to_krun_network_rate_limiters(&config);
+
+        assert_eq!(
+            mapped.tx.as_ref().unwrap().bandwidth.as_ref().unwrap(),
+            &msb_krun::TokenBucketConfig {
+                size: 1_048_576,
+                refill_time: Duration::from_millis(1_234),
+                one_time_burst: 524_288,
+            }
+        );
+        assert_eq!(
+            mapped.tx.unwrap().ops.unwrap(),
+            msb_krun::TokenBucketConfig {
+                size: 1_000,
+                refill_time: Duration::from_millis(7),
+                one_time_burst: 12,
+            }
+        );
+        assert_eq!(
+            mapped.rx.unwrap().bandwidth.unwrap(),
+            msb_krun::TokenBucketConfig {
+                size: 2_048,
+                refill_time: Duration::from_millis(99),
+                one_time_burst: 256,
+            }
+        );
     }
 
     #[test]

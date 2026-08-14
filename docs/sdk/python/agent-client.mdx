@@ -20,6 +20,8 @@ All request and response bodies are raw CBOR bytes. The SDK handles framing and 
 
 #### <span className="msb-recv">AgentClient.</span><span className="msb-hn">connect_sandbox()</span>
 
+<Tooltip tip="Connecting an agent client by socket path is local-only; on microsandbox cloud the SDK uses the agent WebSocket route internally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```python
 @classmethod
 async def connect_sandbox(cls, name: str, *, timeout: float | None = None) -> AgentClient
@@ -58,6 +60,8 @@ Connect to a running sandbox by name. Sandbox names are limited to 128 UTF-8 byt
 </div>
 
 #### <span className="msb-recv">AgentClient.</span><span className="msb-hn">connect()</span>
+
+<Tooltip tip="Connecting an agent client by socket path is local-only; on microsandbox cloud the SDK uses the agent WebSocket route internally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 @classmethod
@@ -98,6 +102,8 @@ Connect to an agent relay socket by path. Use this when you already know the soc
 </div>
 
 #### <span className="msb-recv">AgentClient.</span><span className="msb-hn">socket_path()</span>
+
+<Tooltip tip="Connecting an agent client by socket path is local-only; on microsandbox cloud the SDK uses the agent WebSocket route internally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 @staticmethod

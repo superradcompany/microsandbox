@@ -5,7 +5,6 @@ description: Rust SDK - Command execution API reference
 
 Run commands inside a running sandbox: buffer the output in one call, stream it event by event, drive a shell, or bridge your terminal to an interactive PTY session. See [Commands](/sandboxes/commands) for usage examples.
 
-
 ## Default workload
 
 `create()` boots the sandbox without executing its image workload. `exec_default()` resolves the effective OCI ENTRYPOINT and CMD, then runs it through the guest agent. Use `exec_default_with(...)` for per-call options, `exec_default_stream()` / `exec_default_stream_with(...)` for streaming, and `attach_default()` / `attach_default_with(...)` for a PTY. These methods return `MicrosandboxError::NoDefaultCommand` when no executable default exists; they never fall back to a shell.
@@ -20,7 +19,6 @@ let sb = Sandbox::builder("worker")
 
 let out = sb.exec_default_with(|e| e.env("LOG_LEVEL", "debug")).await?;
 ```
-
 ## Run methods
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">exec()</span>

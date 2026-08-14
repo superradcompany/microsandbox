@@ -203,6 +203,14 @@ pub fn run(args: SandboxArgs) -> ! {
     } else {
         None
     };
+    if let Some(profile_name) = &launch.placement_profile_name
+        && launch.placement_profile.is_none()
+    {
+        eprintln!(
+            "placement profile `{profile_name}` is not defined in runtime.placement_profiles"
+        );
+        std::process::exit(2);
+    }
     let vm_config = VmConfig {
         libkrunfw_path: launch.libkrunfw_path,
         thp: launch.thp,
@@ -214,6 +222,8 @@ pub fn run(args: SandboxArgs) -> ! {
             .unwrap_or(args.memory_mib)
             .max(args.memory_mib),
         cpu_placement: launch.cpu_placement,
+        placement_profile_name: launch.placement_profile_name,
+        placement_profile: launch.placement_profile,
         block_writeback_limit_bytes: launch.block_writeback_limit_bytes,
         rootfs_path: launch.rootfs.path,
         rootfs_follow_root_symlinks: launch.rootfs.follow_root_symlinks,

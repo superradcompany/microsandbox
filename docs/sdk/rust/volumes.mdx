@@ -226,6 +226,8 @@ The storage kind: [`Directory`](#volumekind) or [`Disk`](#volumekind).
 
 #### <span className="msb-recv">vol.</span><span className="msb-hn">fs()</span>
 
+<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```rust
 fn fs(&self) -> VolumeFs<'_>
 ```
@@ -378,6 +380,8 @@ Local-only volume state. Returns `Some` for local-backed volumes, `None` for clo
 
 #### <span className="msb-recv">vol.</span><span className="msb-hn">cloud()</span>
 
+<Tooltip tip="Returns state only for cloud-backed volumes; None on the local backend."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```rust
 fn cloud(&self) -> Option<&VolumeCloudState>
 ```
@@ -432,6 +436,8 @@ The storage kind: [`Directory`](#volumekind) or [`Disk`](#volumekind).
 </div>
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">fs()</span>
+
+<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 fn fs(&self) -> VolumeFs<'_>
@@ -645,6 +651,8 @@ Local-only handle state. Returns `Some` for local-backed handles, `None` for clo
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">cloud()</span>
 
+<Tooltip tip="Returns state only for cloud-backed volume handles; None on the local backend."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```rust
 fn cloud(&self) -> Option<&VolumeHandleCloudState>
 ```
@@ -665,6 +673,8 @@ Cloud-only handle state. Returns `Some` for cloud-backed handles, `None` for loc
 Host-side filesystem operations on a named volume, obtained via [`Volume::fs()`](#vol-fs) or [`VolumeHandle::fs()`](#h-fs). Unlike [`SandboxFsOps`](/sdk/rust/filesystem), which goes through the agent protocol, `VolumeFs` reads and writes the volume's bytes directly. Paths are relative to the volume root; a leading `/` is stripped, and path traversal outside the root is rejected.
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read()</span>
+
+<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn read(&self, path: &str) -> MicrosandboxResult<Bytes>
@@ -700,6 +710,8 @@ Read an entire file into memory as raw bytes.
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_to_string()</span>
 
+<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```rust
 async fn read_to_string(&self, path: &str) -> MicrosandboxResult<String>
 ```
@@ -733,6 +745,8 @@ Read an entire file into memory as a UTF-8 string.
 </div>
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_stream()</span>
+
+<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn read_stream(&self, path: &str) -> MicrosandboxResult<VolumeFsReadStream>
@@ -771,6 +785,8 @@ Open a file for streaming reads. Returns a [`VolumeFsReadStream`](#volumefsreads
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">write()</span>
 
+<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```rust
 async fn write(&self, path: &str, data: impl AsRef<[u8]>) -> MicrosandboxResult<()>
 ```
@@ -799,6 +815,8 @@ Write data to a file, creating parent directories as needed. Overwrites if the f
 </div>
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">write_stream()</span>
+
+<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn write_stream(&self, path: &str) -> MicrosandboxResult<VolumeFsWriteSink>
@@ -1088,6 +1106,8 @@ Create a directory-backed named volume (mounted through virtiofs). This is the d
 
 #### <span className="msb-recv">.</span><span className="msb-hn">disk()</span>
 
+<Tooltip tip="Disk-kind volumes are not available on microsandbox cloud; use a directory-backed named volume."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```rust
 fn disk(self) -> Self
 ```
@@ -1095,6 +1115,8 @@ fn disk(self) -> Self
 Create a raw ext4 disk-image named volume (mounted through virtio-blk). Requires [`.size()`](#size).
 
 #### <span className="msb-recv">.</span><span className="msb-hn">size()</span>
+
+<Tooltip tip="Disk-kind volumes are not available on microsandbox cloud; use a directory-backed named volume."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 fn size(self, size: impl Into<Mebibytes>) -> Self
@@ -1126,6 +1148,8 @@ Set the disk volume's capacity. Required for disk volumes; rejected for director
 </div>
 
 #### <span className="msb-recv">.</span><span className="msb-hn">quota()</span>
+
+<Tooltip tip="On microsandbox cloud, quota sets a storage cap and must be a whole number of GiB."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 fn quota(self, size: impl Into<Mebibytes>) -> Self
@@ -1253,6 +1277,8 @@ Mount a named volume created via [`Volume::create()`](#volumecreate). The volume
 
 #### <span className="msb-recv">.</span><span className="msb-hn">named_with()</span>
 
+<Tooltip tip="On microsandbox cloud, create the named volume before mounting; create-on-mount, disk-kind, and size are not available."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```rust
 fn named_with(
     self,
@@ -1302,6 +1328,8 @@ fn tmpfs(self) -> Self
 Use an in-memory filesystem. Contents are discarded when the sandbox stops. Good for scratch space, temp files, and build artifacts. Cap its size with [`.size()`](#mb-size).
 
 #### <span className="msb-recv">.</span><span className="msb-hn">disk()</span>
+
+<Tooltip tip="On microsandbox cloud, the disk-image path resolves against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 <a id="mb-disk"></a>
 
@@ -1523,6 +1551,8 @@ Use directory-backed storage for a created volume. This is the default. Clears a
 
 #### <span className="msb-recv">.</span><span className="msb-hn">disk()</span>
 
+<Tooltip tip="Disk-kind volumes are not available on microsandbox cloud; use a directory-backed named volume."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 <a id="nv-disk"></a>
 
 ```rust
@@ -1532,6 +1562,8 @@ fn disk(self) -> Self
 Use raw ext4 disk-image storage for a created volume. Requires [`.size()`](#nv-size). Clears any previously set quota.
 
 #### <span className="msb-recv">.</span><span className="msb-hn">size()</span>
+
+<Tooltip tip="Disk-kind volumes are not available on microsandbox cloud; use a directory-backed named volume."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 <a id="nv-size"></a>
 
@@ -1551,6 +1583,8 @@ Set disk capacity for a created disk volume. Accepts a bare `u32` (MiB) or a `Si
 </div>
 
 #### <span className="msb-recv">.</span><span className="msb-hn">quota()</span>
+
+<Tooltip tip="On microsandbox cloud, quota sets a storage cap and must be a whole number of GiB."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 <a id="nv-quota"></a>
 

@@ -2540,6 +2540,14 @@ fn sandbox_cli_args(
         cpu_lease_dir: local.config().run_dir().join("cpu-leases"),
         writeback_lease_dir: local.config().run_dir().join("writeback-leases"),
         cpu_placement: config.spec.resources.cpu_placement,
+        placement_profile_name: config.spec.resources.placement_profile.clone(),
+        placement_profile: config
+            .spec
+            .resources
+            .placement_profile
+            .as_ref()
+            .and_then(|name| local.config().runtime.placement_profiles.get(name))
+            .copied(),
         agent_sock: agent_sock_path.to_path_buf(),
         libkrunfw_path: libkrunfw_path.to_path_buf(),
         thp: config.spec.resources.thp,
@@ -4922,6 +4930,7 @@ mod tests {
         assert_eq!(
             block_writeback_policy(&RuntimeConfig {
                 block_writeback: BlockWritebackConfig::Off {},
+                ..Default::default()
             })
             .unwrap(),
             (None, None)

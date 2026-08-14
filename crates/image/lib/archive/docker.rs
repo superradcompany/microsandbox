@@ -20,6 +20,8 @@ use crate::{
     tar::Compression,
 };
 
+use super::tar_ext::TarBuilderExt;
+
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
@@ -1585,10 +1587,8 @@ fn append_erofs_entry<W: Write>(
             if let Some(first_path) = hardlinks.get(&entry.nid) {
                 header.set_entry_type(tar::EntryType::Link);
                 header.set_size(0);
-                header.set_link_name(first_path).map_err(ImageError::Io)?;
-                header.set_cksum();
                 builder
-                    .append_data(&mut header, &entry.path, io::empty())
+                    .append_link(&mut header, &entry.path, first_path)
                     .map_err(ImageError::Io)?;
                 return Ok(());
             }
@@ -1614,13 +1614,7 @@ fn append_erofs_entry<W: Write>(
             header.set_entry_type(tar::EntryType::Symlink);
             header.set_size(0);
             let target = reader.read_link_by_nid(entry.nid).map_err(ImageError::Io)?;
-            header
-                .set_link_name_literal(target)
-                .map_err(ImageError::Io)?;
-            header.set_cksum();
-            builder
-                .append_data(&mut header, &entry.path, io::empty())
-                .map_err(ImageError::Io)?;
+            builder.append_link_literal(&mut header, &entry.path, &target)?;
         }
         ErofsEntryKind::CharDevice | ErofsEntryKind::BlockDevice => {
             header.set_entry_type(if entry.kind == ErofsEntryKind::CharDevice {
@@ -2231,6 +2225,86 @@ mod tests {
 
         assert_eq!(reloaded.len(), 1);
         assert_eq!(reloaded[0].reference, "complex:latest");
+    }
+
+    #[test]
+    fn docker_archive_save_preserves_long_link_targets() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let temp = tempdir().unwrap();
+        let input = temp.path().join("long-links.tar");
+        let long_target = format!("deep/{}config.txt", "component/".repeat(12));
+        let long_symlink_path = format!("links/{}link", "component/".repeat(12));
+        let relative_symlink_target = "../../etc/passwd";
+        let short_symlink_target = r"..\..\etc\passwd";
+        let long_symlink_target = format!(r"..\{}..\etc\passwd", "component\\".repeat(12));
+        let mut layer_bytes = Vec::new();
+        {
+            let mut layer = tar::Builder::new(&mut layer_bytes);
+            append_test_file(&mut layer, &long_target, b"shared config\n", 0o644, 0, 0, 1);
+            append_test_hardlink(&mut layer, "zz-hardlink", &long_target);
+            append_test_symlink(&mut layer, "zz-relative-symlink", relative_symlink_target);
+            append_test_symlink(&mut layer, "zz-short-symlink", short_symlink_target);
+            append_test_symlink(&mut layer, &long_symlink_path, &long_symlink_target);
+            layer.finish().unwrap();
+        }
+        write_test_docker_archive_from_layer(&input, "long-links:latest", layer_bytes);
+
+        let first_cache = temp.path().join("cache-1");
+        let loaded = runtime
+            .block_on(load_archive(
+                &first_cache,
+                &input,
+                ImageLoadOptions::default(),
+            ))
+            .unwrap();
+
+        let saved = temp.path().join("saved-long-links.tar");
+        let request = save_request_from_loaded(&loaded[0]);
+        let cache = GlobalCache::new(&first_cache).unwrap();
+        save_docker_archive(&cache, &saved, &[request]).unwrap();
+
+        let entries = saved_layer_entries(&saved);
+        assert_eq!(
+            entries.get("zz-hardlink").unwrap().link_name.as_deref(),
+            Some(long_target.as_str())
+        );
+        assert_eq!(
+            entries
+                .get("zz-short-symlink")
+                .unwrap()
+                .link_name
+                .as_deref(),
+            Some(short_symlink_target)
+        );
+        assert_eq!(
+            entries
+                .get("zz-relative-symlink")
+                .unwrap()
+                .link_name
+                .as_deref(),
+            Some(relative_symlink_target)
+        );
+        assert_eq!(
+            entries
+                .get(&long_symlink_path)
+                .unwrap()
+                .link_name
+                .as_deref(),
+            Some(long_symlink_target.as_str())
+        );
+
+        let second_cache = temp.path().join("cache-2");
+        let reloaded = runtime
+            .block_on(load_archive(
+                &second_cache,
+                &saved,
+                ImageLoadOptions::default(),
+            ))
+            .unwrap();
+        assert_eq!(reloaded[0].reference, "long-links:latest");
     }
 
     #[test]
@@ -3134,20 +3208,18 @@ mod tests {
     fn append_test_hardlink(layer: &mut tar::Builder<&mut Vec<u8>>, path: &str, target: &str) {
         let mut header = tar::Header::new_gnu();
         header.set_entry_type(tar::EntryType::Link);
-        header.set_link_name(target).unwrap();
         header.set_size(0);
-        header.set_cksum();
-        layer.append_data(&mut header, path, io::empty()).unwrap();
+        layer.append_link(&mut header, path, target).unwrap();
     }
 
     fn append_test_symlink(layer: &mut tar::Builder<&mut Vec<u8>>, path: &str, target: &str) {
         let mut header = tar::Header::new_gnu();
         header.set_entry_type(tar::EntryType::Symlink);
-        header.set_link_name(target).unwrap();
         header.set_mode(0o777);
         header.set_size(0);
-        header.set_cksum();
-        layer.append_data(&mut header, path, io::empty()).unwrap();
+        layer
+            .append_link_literal(&mut header, Path::new(path), target.as_bytes())
+            .unwrap();
     }
 
     #[derive(Debug)]
