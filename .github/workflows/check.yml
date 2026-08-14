@@ -326,7 +326,7 @@ jobs:
 
   rust-integration-build:
     name: Build Rust integration tests
-    needs: [build-linux-x86_64, changes]
+    needs: [build-agentd-x86_64, changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 45
@@ -339,8 +339,6 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: "line-tables-only"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          submodules: true
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
@@ -364,18 +362,21 @@ jobs:
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
 
-      - name: Download runtime artifacts
+      - name: Download agentd
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: msb-linux-x86_64
+          name: agentd-x86_64-linux-musl
           path: build/
 
       - name: Build nextest archive
         run: |
-          chmod +x build/agentd build/msb
+          chmod +x build/agentd
           mkdir -p artifacts
-          export LD_LIBRARY_PATH="${{ github.workspace }}/build"
+          # The target KVM job installs the freshly built runtime separately.
+          # Omitting `prebuilt` here avoids waiting for that artifact solely to
+          # satisfy SDK build scripts; the downloaded current agentd is embedded.
           mold -run cargo nextest archive -p microsandbox --tests \
+            --no-default-features --features keyring,net \
             --archive-file artifacts/rust-integration-tests.tar.zst
 
       - name: Upload nextest archive
