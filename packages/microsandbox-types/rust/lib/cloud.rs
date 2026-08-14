@@ -1952,8 +1952,8 @@ mod tests {
 
     fn sample_snapshot_manifest() -> SnapshotManifest {
         use crate::snapshot::{
-            FileSnapshotState, ImageRef, SCHEMA_VERSION, SNAPSHOT_ARTIFACT_KIND, SPARSE_SHA256_V1,
-            SnapshotFormat, SnapshotScope, SnapshotState, UpperIntegrity, UpperLayer,
+            FileSnapshotState, ImageRef, SCHEMA_VERSION, SNAPSHOT_ARTIFACT_KIND, SnapshotFormat,
+            SnapshotScope, SnapshotState, UpperIntegrity, UpperLayer,
         };
 
         SnapshotManifest {
@@ -1975,12 +1975,11 @@ mod tests {
                 upper: UpperLayer {
                     file: "upper.ext4".into(),
                     size_bytes: 4_294_967_296,
-                    integrity: UpperIntegrity {
-                        algorithm: SPARSE_SHA256_V1.into(),
+                    integrity: Some(UpperIntegrity::SparseSha256V1 {
                         digest:
                             "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                                 .into(),
-                    },
+                    }),
                 },
             }),
             labels: BTreeMap::new(),

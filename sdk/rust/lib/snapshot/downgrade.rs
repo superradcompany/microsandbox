@@ -17,9 +17,7 @@ use chrono::Utc;
 use microsandbox_image::snapshot::migration::{
     V066_BACKUP_FILENAME, V066_DESCRIPTOR_FILENAME, inspect_v066_source, translate_v066_reverse,
 };
-use microsandbox_types::snapshot::{
-    DESCRIPTOR_FILENAME, FILE_MERKLE_BLAKE3_LEAF_SIZE, Manifest, SnapshotState, UpperIntegrity,
-};
+use microsandbox_types::snapshot::{DESCRIPTOR_FILENAME, Manifest, SnapshotState, UpperIntegrity};
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement, TransactionTrait};
 use serde::Serialize;
 
@@ -1362,7 +1360,7 @@ mod tests {
         file.upper.integrity = Some(UpperIntegrity::FileMerkleBlake3V1 {
             root: format!("blake3:{}", "b".repeat(64)),
             logical_size: 5,
-            leaf_size: FILE_MERKLE_BLAKE3_LEAF_SIZE,
+            leaf_size: microsandbox_types::snapshot::FILE_MERKLE_BLAKE3_LEAF_SIZE,
         });
         let error = validate_payload(&artifact, &manifest, true)
             .await
