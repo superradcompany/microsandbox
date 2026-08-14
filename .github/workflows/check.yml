@@ -1313,7 +1313,7 @@ jobs:
           MSB_HOME=$(mktemp -d -p /tmp msb-python-XXXXXX)
           trap 'rm -rf "$MSB_HOME"' EXIT
           export MSB_HOME
-          uv run --project sdk/python --no-sync pytest -n 2 --dist loadscope sdk/python/integration
+          uv run --project sdk/python --no-sync pytest --import-mode=importlib -n 2 --dist loadscope sdk/python/integration
 
       - name: Disk usage
         if: always()
