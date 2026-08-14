@@ -369,7 +369,7 @@ await Snapshot.save("after-pip-install", "./baseline.tar.zst", {
 static load(archive: string, dest?: string): Promise<SnapshotHandle>
 ```
 
-Unpack a snapshot archive (`.tar.zst` or `.tar`) into the snapshots directory, verifying recorded integrity on the way in. Compression is detected from magic bytes.
+Unpack a snapshot archive (`.tar.zst` or `.tar`) into the snapshots directory. Structural and archive-entry checks run during import; recorded payload integrity is preserved for explicit [`verify()`](#snap-verify). Compression is detected from magic bytes.
 
 <p className="msb-label">Parameters</p>
 
