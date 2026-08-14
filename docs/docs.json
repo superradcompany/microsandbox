@@ -80,19 +80,19 @@
             ]
           },
           {
-            "group": "Performance",
-            "icon": "bolt",
-            "pages": [
-              "sandboxes/optimization",
-              "sandboxes/cpu-placement"
-            ]
-          },
-          {
             "group": "Observability",
             "icon": "gauge",
             "pages": [
               "observability/msb-metrics",
               "observability/deep-dive"
+            ]
+          },
+          {
+            "group": "Performance",
+            "icon": "bolt",
+            "pages": [
+              "sandboxes/optimization",
+              "sandboxes/cpu-placement"
             ]
           },
           {
