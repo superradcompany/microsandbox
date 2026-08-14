@@ -39,7 +39,11 @@ jobs:
           path: vendor/libkrunfw/kernel.c
           # The build recipe is inline below, so hash this workflow along with
           # the source to prevent reusing output built with stale flags.
-          key: kernel-c-aarch64-${{ hashFiles('vendor/libkrunfw/**', '.github/workflows/release.yml') }}
+          key: kernel-c-aarch64-${{ hashFiles('vendor/libkrunfw/**', '.github/actions/cache-libkrunfw-kernel/action.yml', '.github/workflows/release.yml') }}
+
+      - name: Prepare kernel source
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
+        uses: ./.github/actions/cache-libkrunfw-kernel
 
       - name: Install kernel build deps
         if: steps.cache-kernel.outputs.cache-hit != 'true'
@@ -72,7 +76,11 @@ jobs:
           path: vendor/libkrunfw/kernel.c
           # The build recipe is inline below, so hash this workflow along with
           # the source to prevent reusing output built with stale flags.
-          key: kernel-c-x86_64-${{ hashFiles('vendor/libkrunfw/**', '.github/workflows/release.yml') }}
+          key: kernel-c-x86_64-${{ hashFiles('vendor/libkrunfw/**', '.github/actions/cache-libkrunfw-kernel/action.yml', '.github/workflows/release.yml') }}
+
+      - name: Prepare kernel source
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
+        uses: ./.github/actions/cache-libkrunfw-kernel
 
       - name: Install kernel build deps
         if: steps.cache-kernel.outputs.cache-hit != 'true'
@@ -237,7 +245,11 @@ jobs:
           path: build/libkrunfw*
           # Include the inline build recipe and ABI/version environment in the
           # key as well as the libkrunfw source.
-          key: libkrunfw-${{ matrix.target }}-${{ hashFiles('vendor/libkrunfw/**', '.github/workflows/release.yml') }}
+          key: libkrunfw-${{ matrix.target }}-${{ hashFiles('vendor/libkrunfw/**', '.github/actions/cache-libkrunfw-kernel/action.yml', '.github/workflows/release.yml') }}
+
+      - name: Prepare kernel source (Linux)
+        if: steps.cache-libkrunfw.outputs.cache-hit != 'true' && matrix.os == 'linux'
+        uses: ./.github/actions/cache-libkrunfw-kernel
 
       - name: Build libkrunfw (Linux)
         if: steps.cache-libkrunfw.outputs.cache-hit != 'true' && matrix.os == 'linux'

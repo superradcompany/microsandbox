@@ -72,7 +72,11 @@ jobs:
           path: build/libkrunfw*
           # Include the reusable workflow because its inline build recipe and
           # ABI/version environment also determine the cached output.
-          key: libkrunfw-${{ inputs.target }}-${{ hashFiles('vendor/libkrunfw/**', '.github/workflows/check-platform.yml') }}
+          key: libkrunfw-${{ inputs.target }}-${{ hashFiles('vendor/libkrunfw/**', '.github/actions/cache-libkrunfw-kernel/action.yml', '.github/workflows/check-platform.yml') }}
+
+      - name: Prepare kernel source (Linux)
+        if: steps.cache-libkrunfw.outputs.cache-hit != 'true' && inputs.os == 'linux'
+        uses: ./.github/actions/cache-libkrunfw-kernel
 
       - name: Build libkrunfw (Linux)
         if: steps.cache-libkrunfw.outputs.cache-hit != 'true' && inputs.os == 'linux'
