@@ -387,7 +387,7 @@ console.log("imported", h.digest);
 
 </Accordion>
 
-Unpack a snapshot archive (`.tar.zst` or `.tar`) into the snapshots directory, verifying recorded integrity on the way in. Compression is detected from magic bytes.
+Unpack a snapshot archive (`.tar.zst` or `.tar`) into the snapshots directory. Structural and archive-entry checks run during import; recorded payload integrity is preserved for explicit [`verify()`](#snap-verify). Compression is detected from magic bytes.
 
 <p className="msb-label">Parameters</p>
 
@@ -546,7 +546,7 @@ if (report.upper.kind === "verified") {
 
 </Accordion>
 
-Recompute the upper layer's content hash and compare against the manifest. Walks data extents only, so a 4 GiB sparse file with a few MB of data verifies in milliseconds. The report's `upper.kind` is `"notRecorded"` when the manifest has no integrity hash recorded.
+Recompute the upper layer's recorded content integrity and compare against the descriptor. Current BLAKE3 Merkle integrity skips known all-hole subtrees and hashes allocated leaves in batches; released SHA descriptors retain their exact, potentially O(logical size), verifier. The report's `upper.kind` is `"notRecorded"` when no integrity was recorded.
 
 <p className="msb-label">Returns</p>
 

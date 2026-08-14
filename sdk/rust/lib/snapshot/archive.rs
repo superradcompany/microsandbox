@@ -22,7 +22,7 @@ use microsandbox_image::snapshot::{
     DESCRIPTOR_FILENAME, MAX_JSON_SAFE_INTEGER, SnapshotState, UpperIntegrity,
 };
 use microsandbox_utils::extent::{self, ExtentMap};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio_tar::{Builder, EntryType, Header};
@@ -91,7 +91,8 @@ struct ArchiveEntry {
     included: bool,
     encoded_size: u64,
     apparent_size: u64,
-    integrity: UpperIntegrity,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    integrity: Option<UpperIntegrity>,
 }
 
 /// Allocation map of a sparse file, in tar-block granularity.
@@ -133,7 +134,6 @@ pub(super) async fn save_snapshot(
     // Collect the artifact dirs we need to ship: the head snapshot
     // and (optionally) all ancestors via parent_digest.
     let head = store::open_snapshot(local, name_or_path).await?;
-    head.verify().await?;
     let mut parents: Vec<Snapshot> = Vec::new();
 
     if opts.with_parents {
@@ -142,7 +142,6 @@ pub(super) async fn save_snapshot(
             let parent_path = resolve_parent_artifact(local, &parent_digest).await?;
             let parent =
                 store::open_snapshot(local, parent_path.to_string_lossy().as_ref()).await?;
-            parent.verify().await?;
             parents.push(parent.clone());
             current = parent.manifest().parent.clone();
         }
@@ -469,10 +468,9 @@ async fn build_archive_inventory(
             included: true,
             encoded_size: descriptor_size,
             apparent_size: descriptor_size,
-            integrity: UpperIntegrity {
-                algorithm: "sha256".into(),
+            integrity: Some(UpperIntegrity::Sha256 {
                 digest: snapshot.digest().to_string(),
-            },
+            }),
         });
 
         if let SnapshotState::File(file) = &snapshot.manifest().state {
@@ -508,10 +506,7 @@ async fn build_archive_inventory(
             included: true,
             encoded_size: size,
             apparent_size: size,
-            integrity: UpperIntegrity {
-                algorithm: "sha256".into(),
-                digest,
-            },
+            integrity: Some(UpperIntegrity::Sha256 { digest }),
         });
     }
 
@@ -1209,6 +1204,14 @@ fn valid_archive_filename(value: &str) -> bool {
     !value.is_empty() && value.len() <= 255 && value != "." && value != ".."
 }
 
+fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 async fn validate_archive_inventory(
     path: &Path,
     observed: &HashMap<String, (u64, u64)>,
@@ -1330,10 +1333,16 @@ async fn validate_archive_inventory(
                 entry.path
             )));
         }
-        if entry.integrity.algorithm == "sha256" {
+        // File-payload integrity belongs to the snapshot descriptor and is
+        // deliberately explicit, even when an old descriptor calls its
+        // algorithm plain `sha256`. Descriptor and image entry hashes are
+        // archive-level bindings and remain mandatory here.
+        if entry.kind != "file-payload"
+            && let Some(UpperIntegrity::Sha256 { digest }) = &entry.integrity
+        {
             let target = inventory_entry_target(&entry.path, snapshots_dir, cache_dir)?;
             let actual = format!("sha256:{}", hex::encode(file_sha256(&target).await?));
-            if actual != entry.integrity.digest {
+            if actual != *digest {
                 return Err(MicrosandboxError::Custom(format!(
                     "archive entry integrity mismatch: {}",
                     entry.path
@@ -1344,7 +1353,10 @@ async fn validate_archive_inventory(
             let owner = entry.owner_snapshot.as_deref().ok_or_else(|| {
                 MicrosandboxError::Custom("snapshot descriptor has no owner".into())
             })?;
-            if entry.integrity.algorithm != "sha256" || entry.integrity.digest != owner {
+            if !matches!(
+                &entry.integrity,
+                Some(UpperIntegrity::Sha256 { digest }) if digest == owner
+            ) {
                 return Err(MicrosandboxError::Custom(format!(
                     "snapshot descriptor identity mismatch: {}",
                     entry.path
@@ -1441,7 +1453,9 @@ fn validate_inventory_snapshot_bindings(
                 }
             }
             "image-metadata" | "image-object" => {
-                if entry.owner_snapshot.is_some() || entry.integrity.algorithm != "sha256" {
+                if entry.owner_snapshot.is_some()
+                    || !matches!(&entry.integrity, Some(UpperIntegrity::Sha256 { .. }))
+                {
                     return Err(MicrosandboxError::Custom(format!(
                         "invalid image entry binding: {}",
                         entry.path
@@ -1520,9 +1534,7 @@ async fn verify_imported_snapshots(
         if !seen.insert(dir.clone()) {
             continue;
         }
-        let snap = store::open_snapshot(local, dir.to_string_lossy().as_ref()).await?;
-        snap.verify().await?;
-        snapshots.push(snap);
+        snapshots.push(store::open_snapshot(local, dir.to_string_lossy().as_ref()).await?);
     }
 
     if snapshots.is_empty() {

@@ -28,7 +28,7 @@ export type SnapshotState =
         readonly integrity: {
           readonly algorithm: string;
           readonly digest: string;
-        };
+        } | null;
       };
     }
   | {
@@ -49,18 +49,22 @@ export interface SaveOpts {
   plainTar?: boolean;
 }
 
-/**
- * Result of `Snapshot.verify()` for mandatory file-state integrity.
- */
-export type SnapshotVerifyReport = {
-  readonly digest: string;
-  readonly path: string;
-  readonly upper: {
-    readonly kind: "verified";
-    readonly algorithm: string;
-    readonly digest: string;
-  };
-};
+/** Result of an explicit `Snapshot.verify()` call. */
+export type SnapshotVerifyReport =
+  | {
+      readonly digest: string;
+      readonly path: string;
+      readonly upper: { readonly kind: "notRecorded" };
+    }
+  | {
+      readonly digest: string;
+      readonly path: string;
+      readonly upper: {
+        readonly kind: "verified";
+        readonly algorithm: string;
+        readonly digest: string;
+      };
+    };
 
 /**
  * Fluent builder for a snapshot. Returned by `Snapshot.builder(name)`.
@@ -180,8 +184,8 @@ export class Snapshot {
 
   /**
    * Unpack a snapshot archive (`.tar.zst` or `.tar`) into the
-   * snapshots directory, verifying recorded integrity on the way in.
-   * Compression is detected from magic bytes.
+   * snapshots directory. Recorded payload integrity is preserved for
+   * explicit verification. Compression is detected from magic bytes.
    */
   static async load(archive: string, dest?: string): Promise<SnapshotHandle> {
     const raw = await withMappedErrors(() => napi.Snapshot.load(archive, dest));
@@ -234,6 +238,20 @@ export class Snapshot {
     if (typeof sizeBytes !== "bigint") {
       throw invalidProjection("missing file-state sizeBytes");
     }
+    const integrity =
+      this.inner.upperIntegrityAlgorithm == null &&
+      this.inner.upperIntegrityDigest == null
+        ? null
+        : {
+            algorithm: requiredProjectionString(
+              this.inner.upperIntegrityAlgorithm,
+              "upperIntegrityAlgorithm",
+            ),
+            digest: requiredProjectionString(
+              this.inner.upperIntegrityDigest,
+              "upperIntegrityDigest",
+            ),
+          };
 
     return {
       kind: "file",
@@ -242,16 +260,7 @@ export class Snapshot {
       upper: {
         file: requiredProjectionString(this.inner.upperFile, "upperFile"),
         sizeBytes,
-        integrity: {
-          algorithm: requiredProjectionString(
-            this.inner.upperIntegrityAlgorithm,
-            "upperIntegrityAlgorithm",
-          ),
-          digest: requiredProjectionString(
-            this.inner.upperIntegrityDigest,
-            "upperIntegrityDigest",
-          ),
-        },
+        integrity,
       },
     };
   }
@@ -302,9 +311,9 @@ export class Snapshot {
   }
 
   /**
-   * Recompute the upper layer's content hash and compare against the
-   * manifest. Walks data extents only, so a 4 GiB sparse file with a
-   * few MB of data verifies in milliseconds.
+   * Recompute recorded payload integrity and compare it with the
+   * descriptor. Returns `notRecorded` without reading payload contents
+   * when creation did not request integrity.
    *
  * Checkpoint-state verification remains unavailable until its provider
  * closure implementation lands.
@@ -327,21 +336,28 @@ function wrapBuilder(nb: InstanceType<typeof napi.SnapshotBuilder>): SnapshotBui
 
 /** @internal */
 function verifyReportToTs(r: NapiSnapshotVerifyReport): SnapshotVerifyReport {
-  if (r.upperKind !== "verified") {
-    throw invalidProjection(`unknown verification kind ${r.upperKind}`);
+  if (r.upperKind === "notRecorded") {
+    return {
+      digest: r.digest,
+      path: r.path,
+      upper: { kind: "notRecorded" },
+    };
   }
-  return {
-    digest: r.digest,
-    path: r.path,
-    upper: {
-      kind: "verified",
-      algorithm: requiredProjectionString(
-        r.upperAlgorithm,
-        "verify.upperAlgorithm",
-      ),
-      digest: requiredProjectionString(r.upperDigest, "verify.upperDigest"),
-    },
-  };
+  if (r.upperKind === "verified") {
+    return {
+      digest: r.digest,
+      path: r.path,
+      upper: {
+        kind: "verified",
+        algorithm: requiredProjectionString(
+          r.upperAlgorithm,
+          "verify.upperAlgorithm",
+        ),
+        digest: requiredProjectionString(r.upperDigest, "verify.upperDigest"),
+      },
+    };
+  }
+  throw invalidProjection(`unknown verification kind ${r.upperKind}`);
 }
 
 /** @internal */

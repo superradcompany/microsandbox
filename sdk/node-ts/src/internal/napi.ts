@@ -636,7 +636,7 @@ export interface NapiSnapshotRemoveOptions {
 export interface NapiSnapshotVerifyReport {
   readonly digest: string;
   readonly path: string;
-  readonly upperKind: string; // "verified"
+  readonly upperKind: string; // "notRecorded" | "verified"
   readonly upperAlgorithm: string | null | undefined;
   readonly upperDigest: string | null | undefined;
 }

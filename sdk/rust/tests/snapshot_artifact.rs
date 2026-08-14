@@ -14,8 +14,8 @@ use microsandbox::Snapshot;
 use microsandbox::backend::{Backend, LocalBackend};
 use microsandbox_image::snapshot::{
     CheckpointSnapshotState, DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, FileSnapshotState, ImageRef,
-    Manifest, SCHEMA_VERSION, SNAPSHOT_ARTIFACT_KIND, SPARSE_SHA256_V1, SnapshotFormat,
-    SnapshotScope, SnapshotState, UpperIntegrity, UpperLayer,
+    Manifest, SCHEMA_VERSION, SNAPSHOT_ARTIFACT_KIND, SnapshotFormat, SnapshotScope, SnapshotState,
+    UpperIntegrity, UpperLayer,
 };
 use sha2::{Digest, Sha256};
 use tar::{Builder, EntryType, Header};
@@ -90,12 +90,11 @@ fn sample_manifest(upper_size: u64) -> Manifest {
             upper: UpperLayer {
                 file: DEFAULT_UPPER_FILE.into(),
                 size_bytes: upper_size,
-                integrity: UpperIntegrity {
-                    algorithm: SPARSE_SHA256_V1.into(),
+                integrity: Some(UpperIntegrity::SparseSha256V1 {
                     digest:
                         "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                             .into(),
-                },
+                }),
             },
         }),
         labels: BTreeMap::new(),
@@ -157,8 +156,6 @@ fn make_artifact_with_parent_and_integrity(
     let upper_path = dir.join(DEFAULT_UPPER_FILE);
     std::fs::write(&upper_path, upper_bytes).unwrap();
 
-    let _ = record_integrity;
-
     let mut manifest = sample_manifest(upper_bytes.len() as u64);
     manifest.parent = parent_digest;
     manifest.state = SnapshotState::File(FileSnapshotState {
@@ -167,10 +164,9 @@ fn make_artifact_with_parent_and_integrity(
         upper: UpperLayer {
             file: DEFAULT_UPPER_FILE.into(),
             size_bytes: upper_bytes.len() as u64,
-            integrity: UpperIntegrity {
-                algorithm: SPARSE_SHA256_V1.into(),
+            integrity: record_integrity.then(|| UpperIntegrity::SparseSha256V1 {
                 digest: sparse_digest(upper_bytes),
-            },
+            }),
         },
     });
     let bytes = manifest.to_canonical_bytes().unwrap();
@@ -198,10 +194,9 @@ fn make_artifact_with_image(
     let file = manifest.state.as_file().unwrap().clone();
     manifest.state = SnapshotState::File(FileSnapshotState {
         upper: UpperLayer {
-            integrity: UpperIntegrity {
-                algorithm: SPARSE_SHA256_V1.into(),
+            integrity: Some(UpperIntegrity::SparseSha256V1 {
                 digest: sparse_digest(upper_bytes),
-            },
+            }),
             ..file.upper
         },
         ..file
@@ -281,10 +276,9 @@ fn make_sparse_artifact(
     let file = manifest.state.as_file().unwrap().clone();
     manifest.state = SnapshotState::File(FileSnapshotState {
         upper: UpperLayer {
-            integrity: UpperIntegrity {
-                algorithm: SPARSE_SHA256_V1.into(),
+            integrity: Some(UpperIntegrity::SparseSha256V1 {
                 digest: sparse_digest(&logical),
-            },
+            }),
             ..file.upper
         },
         ..file
@@ -359,26 +353,6 @@ async fn seed_image_cache(cache: &microsandbox_image::GlobalCache) -> SeededImag
         image_digest,
         diff_id,
     }
-}
-
-fn write_archive_from_artifacts(archive: &Path, artifacts: &[(&Path, &str)]) {
-    let file = std::fs::File::create(archive).unwrap();
-    let mut builder = Builder::new(file);
-    for (artifact, archive_name) in artifacts {
-        builder
-            .append_path_with_name(
-                artifact.join(DESCRIPTOR_FILENAME),
-                format!("{archive_name}/{DESCRIPTOR_FILENAME}"),
-            )
-            .unwrap();
-        builder
-            .append_path_with_name(
-                artifact.join(DEFAULT_UPPER_FILE),
-                format!("{archive_name}/{DEFAULT_UPPER_FILE}"),
-            )
-            .unwrap();
-    }
-    builder.finish().unwrap();
 }
 
 fn write_regular_file_archive(archive: &Path, path: &str, payload: &[u8]) {
@@ -606,7 +580,26 @@ async fn verify_rejects_tampered_upper_contents() {
         .unwrap();
     let err = snap.verify().await.unwrap_err();
     let msg = format!("{err}");
-    assert!(msg.contains("digest mismatch"), "unexpected error: {msg}");
+    assert!(
+        msg.contains("integrity mismatch"),
+        "unexpected error: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn verify_reports_not_recorded_without_reading_payload_contents() {
+    let tmp = TempDir::new().unwrap();
+    let (dir, _) = make_artifact(tmp.path(), "snap-unchecked", b"original");
+    std::fs::write(dir.join(DEFAULT_UPPER_FILE), b"tampered").unwrap();
+
+    let snapshot = Snapshot::open(dir.to_string_lossy().as_ref())
+        .await
+        .unwrap();
+    let report = snapshot.verify().await.unwrap();
+    assert!(matches!(
+        report.upper,
+        microsandbox::snapshot::UpperVerifyStatus::NotRecorded
+    ));
 }
 
 #[tokio::test]
@@ -1151,33 +1144,26 @@ fn manifest_validation_rejects_upper_file_that_escapes_artifact() {
 }
 
 #[tokio::test]
-async fn load_verifies_every_snapshot_manifest_before_indexing() {
+async fn archive_round_trip_preserves_integrity_without_implicitly_executing_it() {
     let tmp = TempDir::new().unwrap();
     let (bad_dir, _) = make_artifact_with_integrity(tmp.path(), "bad-snap", b"original", true);
     std::fs::write(bad_dir.join(DEFAULT_UPPER_FILE), b"tampered").unwrap();
-    let (good_dir, _) = make_artifact(tmp.path(), "good-snap", b"good");
-    let archive = tmp.path().join("multi.tar");
-    write_archive_from_artifacts(
+    let archive = tmp.path().join("tampered.tar");
+    Snapshot::save(
+        bad_dir.to_string_lossy().as_ref(),
         &archive,
-        &[
-            (bad_dir.as_path(), "bad-snap"),
-            (good_dir.as_path(), "good-snap"),
-        ],
-    );
+        microsandbox::snapshot::SaveOpts::default(),
+    )
+    .await
+    .unwrap();
 
     let dest = tmp.path().join("imported");
-    let err = Snapshot::load(&archive, Some(&dest))
+    let handle = Snapshot::load(&archive, Some(&dest)).await.unwrap();
+    let imported = Snapshot::open(handle.path().to_string_lossy().as_ref())
         .await
-        .expect_err("expected tampered sibling to fail import");
-
-    assert!(
-        err.to_string().contains("unsupported path"),
-        "unexpected error: {err}"
-    );
-    assert!(
-        !dest.join("bad-snap").exists() && !dest.join("good-snap").exists(),
-        "failed import promoted staged snapshots"
-    );
+        .unwrap();
+    let error = imported.verify().await.unwrap_err();
+    assert!(error.to_string().contains("integrity mismatch"));
 }
 
 #[tokio::test]

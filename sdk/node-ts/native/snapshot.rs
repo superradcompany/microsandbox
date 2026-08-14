@@ -42,8 +42,8 @@ pub struct JsSaveOpts {
 
 /// Result of `Snapshot.verify()`.
 ///
-/// `upperKind` is `"verified"` when the mandatory file-state integrity
-/// matched. `upperAlgorithm` and `upperDigest` carry the verified binding.
+/// `upperKind` is `"notRecorded"` when integrity is absent or `"verified"`
+/// when the recorded value matched. The other fields carry that binding.
 #[napi(object, js_name = "SnapshotVerifyReport")]
 pub struct JsSnapshotVerifyReport {
     pub digest: String,
@@ -243,7 +243,8 @@ impl JsSnapshot {
             .manifest()
             .state
             .as_file()
-            .map(|state| state.upper.integrity.algorithm.clone())
+            .and_then(|state| state.upper.integrity.as_ref())
+            .map(|integrity| integrity.algorithm().into())
     }
 
     #[napi(getter)]
@@ -252,7 +253,8 @@ impl JsSnapshot {
             .manifest()
             .state
             .as_file()
-            .map(|state| state.upper.integrity.digest.clone())
+            .and_then(|state| state.upper.integrity.as_ref())
+            .map(|integrity| integrity.value().into())
     }
 
     #[napi(getter)]
@@ -462,6 +464,7 @@ fn verify_report_to_js(
     report: microsandbox::snapshot::SnapshotVerifyReport,
 ) -> JsSnapshotVerifyReport {
     let (kind, algorithm, digest) = match report.upper {
+        RustUpperVerifyStatus::NotRecorded => ("notRecorded".to_string(), None, None),
         RustUpperVerifyStatus::Verified { algorithm, digest } => {
             ("verified".to_string(), Some(algorithm), Some(digest))
         }

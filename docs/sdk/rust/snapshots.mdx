@@ -294,7 +294,7 @@ println!("indexed {n} snapshots");
 async fn save(name_or_path: &str, out: &Path, opts: SaveOpts) -> MicrosandboxResult<()>
 ```
 
-Bundle a snapshot into a `.tar.zst` archive (or plain `.tar`) at `out`. The head snapshot is verified before bundling. The recorded manifest is archived as-is, so create the snapshot with [`record_integrity()`](#record_integrity) when the archive will cross a trust boundary. See [`SaveOpts`](#saveopts) to also include ancestors and the OCI image cache.
+Bundle a snapshot into a `.tar.zst` archive (or plain `.tar`) at `out`. Recorded payload integrity is preserved but not executed implicitly; call [`verify()`](#snap-verify) when an independent content scan is part of your workflow. See [`SaveOpts`](#saveopts) to also include ancestors and the OCI image cache.
 
 <p className="msb-label">Parameters</p>
 
@@ -348,7 +348,7 @@ println!("loaded {}", h.digest());
 
 </Accordion>
 
-Unpack a snapshot archive (`.tar.zst` or `.tar`, detected from magic bytes) into the snapshots directory (or `dest`), routing any bundled image-cache entries into the global cache and registering everything found in the index. Recorded integrity is verified as artifacts land. Returns a handle for the head snapshot.
+Unpack a snapshot archive (`.tar.zst` or `.tar`, detected from magic bytes) into the snapshots directory (or `dest`), routing any bundled image-cache entries into the global cache and registering everything found in the index. Structural and archive-entry checks remain mandatory, while recorded payload integrity is preserved for explicit [`verify()`](#snap-verify). Returns a handle for the head snapshot.
 
 <p className="msb-label">Parameters</p>
 
@@ -487,7 +487,7 @@ match snap.verify().await?.upper {
 
 </Accordion>
 
-Recompute the upper layer's content hash and compare it against the manifest. Walks data extents only, so a multi-GiB sparse file with a little data verifies in milliseconds. Returns `NotRecorded` when the manifest has no integrity descriptor; errors with `SnapshotIntegrity` on mismatch.
+Recompute the upper layer's recorded content integrity and compare it against the descriptor. Current BLAKE3 Merkle integrity skips known all-hole subtrees and hashes allocated leaves in batches. Released SHA algorithms retain their exact verifier and may still cost O(logical size). Returns `NotRecorded` without reading payload contents when the descriptor has `integrity: null`; errors with `SnapshotIntegrity` on mismatch.
 
 <p className="msb-label">Returns</p>
 
@@ -662,7 +662,7 @@ let sb = Sandbox::builder("api-restored")
 
 </Accordion>
 
-`SandboxBuilder` setter. Boot a fresh sandbox from a snapshot artifact. The snapshot already pins the image reference and digest, so this is mutually exclusive with [`image()`](/sdk/rust/sandbox#image) and [`image_with()`](/sdk/rust/sandbox#image_with). The artifact is opened and its integrity verified at [`create()`](/sdk/rust/sandbox#create) time, not here.
+`SandboxBuilder` setter. Boot a fresh sandbox from a snapshot artifact. The snapshot already pins the image reference and digest, so this is mutually exclusive with [`image()`](/sdk/rust/sandbox#image) and [`image_with()`](/sdk/rust/sandbox#image_with). The artifact is structurally opened at [`create()`](/sdk/rust/sandbox#create) time; persistent payload integrity is checked only through explicit [`Snapshot::verify()`](#snap-verify).
 
 <p className="msb-label">Parameters</p>
 
@@ -806,7 +806,7 @@ Overwrite an existing artifact with the same name. Without this, creation fails 
 fn record_integrity(self) -> Self
 ```
 
-Compute and record an upper-layer content-integrity hash during creation. Recorded integrity is what [`verify()`](#snap-verify) checks and what save/load rely on when crossing a trust boundary.
+Compute and record sparse-aware BLAKE3 Merkle integrity during creation. [`verify()`](#snap-verify) checks it explicitly; ordinary open, boot, save, load, and upgrade preserve the value without adding an independent payload pass.
 
 ---
 
@@ -1005,5 +1005,8 @@ Content integrity descriptor for the captured upper layer.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| algorithm | `String` | Digest algorithm name (e.g. `msb-sparse-sha256-v1`) |
-| digest | `String` | Algorithm output, in `sha256:hex` form for current algorithms |
+| Variant | Serialized algorithm | Fields | Purpose |
+|---------|----------------------|--------|---------|
+| `Sha256` | `sha256` | `digest` | Exact released compatibility |
+| `SparseSha256V1` | `msb-sparse-sha256-v1` | `digest` | Exact released sparse-SHA compatibility |
+| `FileMerkleBlake3V1` | `msb-file-merkle-blake3-v1` | `root`, `logical_size`, `leaf_size` | Current opt-in sparse-aware integrity |

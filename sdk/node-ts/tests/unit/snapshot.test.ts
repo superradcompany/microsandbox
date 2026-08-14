@@ -106,4 +106,26 @@ describe("Snapshot native projections", () => {
       "unknown verification kind skipped",
     );
   });
+
+  it("projects snapshots without recorded integrity", async () => {
+    const snapshot = projectedSnapshot({
+      upperIntegrityAlgorithm: null,
+      upperIntegrityDigest: null,
+      verify: async () => ({
+        digest: `sha256:${"a".repeat(64)}`,
+        path: "/snapshots/example",
+        upperKind: "notRecorded",
+        upperAlgorithm: null,
+        upperDigest: null,
+      }),
+    });
+
+    expect(snapshot.state).toMatchObject({
+      kind: "file",
+      upper: { integrity: null },
+    });
+    await expect(snapshot.verify()).resolves.toMatchObject({
+      upper: { kind: "notRecorded" },
+    });
+  });
 });

@@ -236,7 +236,7 @@ Archives default to `.tar.zst`. Pass `--plain-tar` for a plain `.tar`. SDKs expo
 
 ## Integrity verification
 
-By default, snapshot creation records enough metadata to validate the artifact without hashing the full writable layer. Opt in to a content-integrity hash when crossing a trust boundary:
+By default, snapshot creation records structural metadata without hashing the writable layer. Opt in when you need a persistent content check. Current snapshots use a fixed 64 KiB-leaf BLAKE3 Merkle tree: known sparse holes collapse into precomputed zero subtrees, while allocated bytes are read and hashed.
 
 <CodeGroup>
 ```rust Rust
@@ -306,7 +306,7 @@ msb snapshot inspect after-pip-install --verify
 
 </CodeGroup>
 
-`msb snapshot save` bundles the snapshot as it exists on disk. `msb snapshot load` verifies recorded integrity when the archive includes it, so create snapshots with `--integrity` before saving across a trust boundary.
+`msb snapshot save` and `msb snapshot load` preserve recorded integrity but do not silently execute it. They still enforce the archive grammar, path confinement, entry sizes, descriptor identities, and ordinary archive-entry hashes. Run `msb snapshot verify` explicitly after receiving a snapshot when your workflow requires an independent payload scan. Released `msb-sparse-sha256-v1` descriptors remain readable and verifiable, but ordinary open, boot, save, load, and upgrade paths do not pay their full logical-size SHA cost.
 
 ## Use cases
 

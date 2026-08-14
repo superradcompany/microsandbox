@@ -5581,8 +5581,16 @@ fn snapshot_json(s: &Snapshot) -> serde_json::Value {
             Some(snapshot_format_str(state.format)),
             Some(state.fstype.as_str()),
             Some(state.upper.file.as_str()),
-            Some(state.upper.integrity.algorithm.as_str()),
-            Some(state.upper.integrity.digest.as_str()),
+            state
+                .upper
+                .integrity
+                .as_ref()
+                .map(microsandbox::UpperIntegrity::algorithm),
+            state
+                .upper
+                .integrity
+                .as_ref()
+                .map(microsandbox::UpperIntegrity::value),
             None,
             None,
         ),
@@ -5642,6 +5650,7 @@ fn snapshot_handle_json(h: &microsandbox::SnapshotHandle) -> serde_json::Value {
 
 fn verify_report_json(report: microsandbox::snapshot::SnapshotVerifyReport) -> serde_json::Value {
     let upper = match report.upper {
+        UpperVerifyStatus::NotRecorded => serde_json::json!({"kind":"not_recorded"}),
         UpperVerifyStatus::Verified { algorithm, digest } => {
             serde_json::json!({"kind":"verified","algorithm":algorithm,"digest":digest})
         }

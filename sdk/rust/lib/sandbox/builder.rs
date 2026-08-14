@@ -1117,8 +1117,8 @@ impl SandboxBuilder {
     ///
     /// The snapshot already pins the image reference and digest, so
     /// this method is mutually exclusive with [`image`](Self::image)
-    /// and [`image_with`](Self::image_with). The snapshot is opened
-    /// (and its integrity verified) at `create()` time, not here.
+    /// and [`image_with`](Self::image_with). The snapshot is structurally
+    /// opened at `create()` time; content verification stays explicit.
     ///
     /// `path_or_name` accepts either a path to a snapshot artifact
     /// directory (or a bare name resolved under the default snapshots

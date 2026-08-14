@@ -2313,8 +2313,8 @@ export interface SnapshotRemoveOptions {
 /**
  * Result of `Snapshot.verify()`.
  *
- * `upperKind` is `"verified"` when the mandatory file-state integrity
- * matched. `upperAlgorithm` and `upperDigest` carry the verified binding.
+ * `upperKind` is `"notRecorded"` when integrity is absent or `"verified"`
+ * when the recorded value matched. The other fields carry that binding.
  */
 export interface SnapshotVerifyReport {
   digest: string

@@ -36,6 +36,12 @@ pub const DEFAULT_UPPER_FILE: &str = "upper.ext4";
 /// Semantic sparse-file digest for raw upper files.
 pub const SPARSE_SHA256_V1: &str = "msb-sparse-sha256-v1";
 
+/// Sparse-aware Merkle integrity for current file snapshot payloads.
+pub const FILE_MERKLE_BLAKE3_V1: &str = "msb-file-merkle-blake3-v1";
+
+/// Fixed leaf size defined by [`FILE_MERKLE_BLAKE3_V1`].
+pub const FILE_MERKLE_BLAKE3_LEAF_SIZE: u32 = 64 * 1024;
+
 /// Largest integer that all public JSON consumers can represent exactly.
 pub const MAX_JSON_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
@@ -94,18 +100,39 @@ pub struct UpperLayer {
     pub file: String,
     /// Apparent file size, including sparse holes.
     pub size_bytes: u64,
-    /// Mandatory semantic payload integrity.
-    pub integrity: UpperIntegrity,
+    /// Optional semantic payload integrity. The field itself is required so
+    /// readers distinguish an intentional `null` from a malformed descriptor.
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub integrity: Option<UpperIntegrity>,
 }
 
 /// Content integrity descriptor for a file-state upper layer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct UpperIntegrity {
-    /// Digest algorithm name.
-    pub algorithm: String,
-    /// Algorithm output in qualified digest form.
-    pub digest: String,
+#[serde(tag = "algorithm", deny_unknown_fields)]
+pub enum UpperIntegrity {
+    /// Ordinary SHA-256 retained only for exact legacy compatibility and
+    /// archive metadata. New file snapshots never emit this variant.
+    #[serde(rename = "sha256")]
+    Sha256 {
+        /// Algorithm output in qualified digest form.
+        digest: String,
+    },
+    /// Released logical-byte sparse SHA-256 representation.
+    #[serde(rename = "msb-sparse-sha256-v1")]
+    SparseSha256V1 {
+        /// Algorithm output in qualified digest form.
+        digest: String,
+    },
+    /// Current sparse-aware fixed-leaf BLAKE3 Merkle representation.
+    #[serde(rename = "msb-file-merkle-blake3-v1")]
+    FileMerkleBlake3V1 {
+        /// Domain-separated Merkle root in qualified digest form.
+        root: String,
+        /// Exact logical file length bound into the final root.
+        logical_size: u64,
+        /// Fixed leaf size. Exactly [`FILE_MERKLE_BLAKE3_LEAF_SIZE`].
+        leaf_size: u32,
+    },
 }
 
 /// Concrete file-backed snapshot state.
@@ -209,6 +236,25 @@ impl SnapshotState {
     }
 }
 
+impl UpperIntegrity {
+    /// Return the stable algorithm identifier serialized in the descriptor.
+    pub const fn algorithm(&self) -> &'static str {
+        match self {
+            Self::Sha256 { .. } => "sha256",
+            Self::SparseSha256V1 { .. } => SPARSE_SHA256_V1,
+            Self::FileMerkleBlake3V1 { .. } => FILE_MERKLE_BLAKE3_V1,
+        }
+    }
+
+    /// Return the qualified digest or root used by SDK projections.
+    pub fn value(&self) -> &str {
+        match self {
+            Self::Sha256 { digest } | Self::SparseSha256V1 { digest } => digest,
+            Self::FileMerkleBlake3V1 { root, .. } => root,
+        }
+    }
+}
+
 impl Manifest {
     /// Validate descriptor invariants.
     pub fn validate(&self) -> ImageResult<()> {
@@ -248,16 +294,33 @@ impl Manifest {
                         file.upper.size_bytes
                     ));
                 }
-                if file.upper.integrity.algorithm != SPARSE_SHA256_V1 {
-                    return descriptor_error(format!(
-                        "unsupported state.upper.integrity.algorithm: {}",
-                        file.upper.integrity.algorithm
-                    ));
+                if let Some(integrity) = &file.upper.integrity {
+                    match integrity {
+                        UpperIntegrity::Sha256 { digest }
+                        | UpperIntegrity::SparseSha256V1 { digest } => {
+                            validate_sha256_digest(digest, "state.upper.integrity.digest")?;
+                        }
+                        UpperIntegrity::FileMerkleBlake3V1 {
+                            root,
+                            logical_size,
+                            leaf_size,
+                        } => {
+                            validate_blake3_digest(root, "state.upper.integrity.root")?;
+                            if *logical_size != file.upper.size_bytes {
+                                return descriptor_error(format!(
+                                    "state.upper.integrity.logical_size {} does not match state.upper.size_bytes {}",
+                                    logical_size, file.upper.size_bytes
+                                ));
+                            }
+                            if *leaf_size != FILE_MERKLE_BLAKE3_LEAF_SIZE {
+                                return descriptor_error(format!(
+                                    "state.upper.integrity.leaf_size must be {}: {}",
+                                    FILE_MERKLE_BLAKE3_LEAF_SIZE, leaf_size
+                                ));
+                            }
+                        }
+                    }
                 }
-                validate_sha256_digest(
-                    &file.upper.integrity.digest,
-                    "state.upper.integrity.digest",
-                )?;
             }
             SnapshotState::Checkpoint(checkpoint) => {
                 if checkpoint.checkpoint_id.is_empty() {
@@ -439,6 +502,22 @@ fn validate_sha256_digest(value: &str, field: &str) -> ImageResult<()> {
     Ok(())
 }
 
+fn validate_blake3_digest(value: &str, field: &str) -> ImageResult<()> {
+    let Some(encoded) = value.strip_prefix("blake3:") else {
+        return descriptor_error(format!("{field} must use blake3: {value}"));
+    };
+    if encoded.len() != 64
+        || !encoded
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return descriptor_error(format!(
+            "{field} must contain 64 lowercase hexadecimal digits: {value}"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_artifact_filename(value: &str, field: &str) -> ImageResult<()> {
     let mut components = Path::new(value).components();
     let Some(Component::Normal(name)) = components.next() else {
@@ -546,12 +625,11 @@ mod tests {
                 upper: UpperLayer {
                     file: DEFAULT_UPPER_FILE.into(),
                     size_bytes: 4_294_967_296,
-                    integrity: UpperIntegrity {
-                        algorithm: SPARSE_SHA256_V1.into(),
+                    integrity: Some(UpperIntegrity::SparseSha256V1 {
                         digest:
                             "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                                 .into(),
-                    },
+                    }),
                 },
             }),
             labels: BTreeMap::from([
@@ -615,6 +693,47 @@ mod tests {
             );
         let error = Manifest::from_bytes(value.as_bytes()).unwrap_err();
         assert!(error.to_string().contains("integrity"));
+    }
+
+    #[test]
+    fn accepts_explicitly_unrecorded_integrity() {
+        let mut manifest = sample_manifest();
+        let file = manifest.state.as_file().unwrap().clone();
+        manifest.state = SnapshotState::File(FileSnapshotState {
+            upper: UpperLayer {
+                integrity: None,
+                ..file.upper
+            },
+            ..file
+        });
+
+        let bytes = manifest.to_canonical_bytes().unwrap();
+        assert!(
+            std::str::from_utf8(&bytes)
+                .unwrap()
+                .contains(r#""integrity":null"#)
+        );
+        assert_eq!(Manifest::from_bytes(&bytes).unwrap(), manifest);
+    }
+
+    #[test]
+    fn validates_current_merkle_shape() {
+        let mut manifest = sample_manifest();
+        let file = manifest.state.as_file().unwrap().clone();
+        manifest.state = SnapshotState::File(FileSnapshotState {
+            upper: UpperLayer {
+                integrity: Some(UpperIntegrity::FileMerkleBlake3V1 {
+                    root: "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .into(),
+                    logical_size: file.upper.size_bytes,
+                    leaf_size: FILE_MERKLE_BLAKE3_LEAF_SIZE,
+                }),
+                ..file.upper
+            },
+            ..file
+        });
+
+        assert!(manifest.to_canonical_bytes().is_ok());
     }
 
     #[test]
