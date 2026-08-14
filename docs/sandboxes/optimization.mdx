@@ -25,7 +25,7 @@ msb inspect worker
 | Tune large memory mappings | Keep THP at `madvise`, then benchmark `always` |
 | Control buffered disk pressure on Linux | Keep block writeback at `auto` |
 
-## Flat OCI root disks
+## Storage layout: layered or flat
 
 The default layered root shares OCI layers between sandboxes. A flat root turns the image into one ext4 disk and clones it for each sandbox. This can improve creation time and filesystem-heavy workloads on hosts with copy-on-write cloning.
 
@@ -80,6 +80,10 @@ This setting has no effect on non-Linux hosts, read-only disks, or direct I/O. S
 On Linux x86 hosts, AMD AVIC and Intel APICv can make virtual interrupt delivery faster. These are host KVM settings, not sandbox settings.
 
 Check their status with `msb doctor`. Read [Linux troubleshooting](/troubleshooting/linux#interrupt-acceleration) before changing a KVM module because the change affects every VM on the host.
+
+## Optimizations that are not knobs
+
+Microsandbox automatically selects compatible filesystem, guest kernel, interrupt, and vCPU affinity optimizations. These implementation details do not have user-facing settings.
 
 ## Measure the result
 
