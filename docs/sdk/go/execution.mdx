@@ -813,6 +813,7 @@ Configures a single [`Exec`](#sb-exec) or [`ExecStream`](#sb-execstream) call. M
 | `TTY` | `bool` | Allocate a pseudo-terminal; default `false` |
 | `User` | `string` | Guest user (UID or name) |
 | `Env` | `map[string]string` | Per-command environment variables |
+| `CombinedOutput` | `bool` | Redirect stderr into stdout (`2>&1`), preserving interleaved write order; default `false` |
 
 ### ExecOption
 
@@ -923,6 +924,26 @@ When enabled, the guest process runs with its stdin, stdout, and stderr connecte
     <div className="msb-param-desc"><code>true</code> to allocate a pseudo-terminal.</div>
   </div>
 </div>
+
+#### <span className="msb-hn">WithExecCombinedOutput()</span>
+
+```go
+func WithExecCombinedOutput() ExecOption
+```
+
+<Accordion title="Example">
+
+```go
+out, err := sb.Exec(ctx, "sh",
+    []string{"-c", "echo one; echo two >&2; echo three"},
+    m.WithExecCombinedOutput(),
+)
+fmt.Print(out.Stdout()) // "one\ntwo\nthree\n"
+```
+
+</Accordion>
+
+Redirect the command's stderr into its stdout stream (like `2>&1` in a shell), preserving the interleaved order of writes. All output is then reported through [`Stdout`](#out-stdout) — [`Stderr`](#out-stderr) stays empty and streaming sessions emit no [`ExecEventStderr`](#execeventkind) events. It has no effect with [`WithExecTTY(true)`](#withexectty) (a PTY is already a single combined stream). Sandboxes running an older guest runtime ignore the option and keep the streams separate; restart the sandbox to pick up the current runtime.
 
 #### <span className="msb-hn">WithExecUser()</span>
 

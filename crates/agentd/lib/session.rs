@@ -279,7 +279,8 @@ impl RawActivity {
 impl ExecSession {
     /// Spawns a new exec session.
     ///
-    /// If `req.tty` is true, uses a PTY. Otherwise, uses piped stdin/stdout/stderr.
+    /// If `req.tty` is true, uses a PTY. Otherwise, uses piped stdin/stdout/stderr;
+    /// with `req.combined_output`, stderr shares the stdout pipe (`2>&1`).
     /// A background task is spawned to read output and send events via `tx`.
     pub fn spawn(
         id: u32,
@@ -591,8 +592,16 @@ impl ExecSession {
         let mut cmd = Command::new(&req.cmd);
         cmd.args(&req.args)
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stdout(Stdio::piped());
+
+        // For combined output the child's stderr is pointed at the stdout
+        // pipe via dup2 in pre_exec (below), so no stderr pipe is created;
+        // sharing one pipe is what preserves the interleaved write order.
+        if req.combined_output {
+            cmd.stderr(Stdio::null());
+        } else {
+            cmd.stderr(Stdio::piped());
+        }
 
         for var in &req.env {
             if let Some((key, val)) = var.split_once('=') {
@@ -611,8 +620,15 @@ impl ExecSession {
 
         // Apply the security profile and resource limits in the child before exec.
         let parsed_rlimits = rlimit::to_libc(&req.rlimits);
+        let combined_output = req.combined_output;
         unsafe {
             cmd.pre_exec(move || {
+                // The standard library has already dup2'd the pipes onto fds
+                // 0-2 by the time pre_exec closures run, so redirecting fd 2
+                // onto fd 1 here lands stderr writes in the stdout pipe.
+                if combined_output && libc::dup2(libc::STDOUT_FILENO, libc::STDERR_FILENO) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
                 // Become a session (and process-group) leader so signals sent
                 // to the group reach every descendant the command spawns, not
                 // just the direct child. The PTY path does the same for its
@@ -1692,6 +1708,7 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            combined_output: false,
         };
 
         let session = ExecSession::spawn(7, &req, tx, None, SecurityProfile::Default)
@@ -1735,6 +1752,67 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_pipe_combined_output_preserves_interleaved_order() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        // Alternating stdout/stderr writes from one sequential process. Each
+        // echo is a single small write, so with a shared pipe the arrival
+        // order must match the emission order exactly.
+        let req = ExecRequest {
+            cmd: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "i=0; while [ $i -lt 32 ]; do echo out$i; echo err$i 1>&2; i=$((i+1)); done"
+                    .to_string(),
+            ],
+            env: vec!["PATH=/usr/local/bin:/usr/bin:/bin".to_string()],
+            cwd: None,
+            user: None,
+            tty: false,
+            rows: 24,
+            cols: 80,
+            rlimits: Vec::new(),
+            combined_output: true,
+        };
+
+        let session = ExecSession::spawn(9, &req, tx, None, SecurityProfile::Default)
+            .expect("spawn pipe session");
+        let mut stdout = Vec::new();
+        let mut stderr_events = 0usize;
+        let mut exit = None;
+
+        let recv_result = time::timeout(Duration::from_secs(15), async {
+            while let Some((id, output)) = rx.recv().await {
+                assert_eq!(id, 9);
+                match output {
+                    SessionOutput::Stdout(data) => stdout.extend_from_slice(&data),
+                    SessionOutput::Stderr(_) => stderr_events += 1,
+                    SessionOutput::Exited(code) => {
+                        exit = Some(code);
+                        break;
+                    }
+                    SessionOutput::Raw(_) => {}
+                }
+            }
+        })
+        .await;
+
+        if recv_result.is_err() {
+            let _ = session.send_signal(libc::SIGKILL);
+            panic!("timed out waiting for combined output");
+        }
+
+        assert_eq!(exit, Some(0));
+        assert_eq!(stderr_events, 0, "combined mode must not emit stderr");
+
+        let expected: String = (0..32).map(|i| format!("out{i}\nerr{i}\n")).collect();
+        assert_eq!(
+            String::from_utf8_lossy(&stdout),
+            expected,
+            "stderr writes must interleave into stdout in emission order",
+        );
+    }
+
     #[test]
     fn test_resolve_user_spec_for_current_uid_gid() {
         let uid = unsafe { libc::getuid() };
@@ -1756,6 +1834,7 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            combined_output: false,
         };
 
         let resolved = resolve_requested_user(&req, Some("0:0")).expect("resolve requested user");
@@ -1774,6 +1853,7 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            combined_output: false,
         };
 
         let uid = unsafe { libc::getuid() };
@@ -1797,6 +1877,7 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            combined_output: false,
         };
 
         let resolved = resolve_requested_user(&req, None).expect("resolve absent user");
@@ -1821,6 +1902,7 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            combined_output: false,
         };
         let user = ResolvedUser {
             uid: 1000,
@@ -1850,6 +1932,7 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            combined_output: false,
         };
         let root = resolve_user_spec(DEFAULT_USER_SPEC).expect("resolve implicit root");
 
@@ -1874,6 +1957,7 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            combined_output: false,
         };
         let user = ResolvedUser {
             uid: 1000,
@@ -1902,6 +1986,7 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            combined_output: false,
         };
 
         // Use the process-wide manager because other tests may have already

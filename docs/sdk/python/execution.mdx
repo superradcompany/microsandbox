@@ -33,6 +33,7 @@ async def exec(
     timeout: float | None = None,
     stdin: Stdin | bytes | None = None,
     tty: bool = False,
+    combined_output: bool = False,
     rlimits: list[Rlimit] | None = None,
 ) -> ExecOutput
 ```
@@ -91,6 +92,10 @@ Run a command inside the sandbox and wait for it to complete, buffering all stdo
     <div className="msb-param-desc">Allocate a pseudo-terminal, merging stdout and stderr.</div>
   </div>
   <div className="msb-param">
+    <div className="msb-param-key"><code>combined_output</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Redirect stderr into stdout (like <code>2&gt;&amp;1</code>), preserving the interleaved order of writes. All output is then reported as stdout and stderr stays empty. No effect with <code>tty</code> (a PTY is already a single combined stream); ignored by sandboxes running an older guest runtime (streams stay separate — restart the sandbox to pick up the current runtime).</div>
+  </div>
+  <div className="msb-param">
     <div className="msb-param-key"><code>rlimits</code><a className="msb-type" href="#rlimit">list[Rlimit] | None</a></div>
     <div className="msb-param-desc">POSIX resource limits applied to the process.</div>
   </div>
@@ -117,6 +122,7 @@ async def shell(
     timeout: float | None = None,
     stdin: Stdin | bytes | None = None,
     tty: bool = False,
+    combined_output: bool = False,
     rlimits: list[Rlimit] | None = None,
 ) -> ExecOutput
 ```
@@ -140,7 +146,7 @@ Run a command through the sandbox's configured shell (defaults to `/bin/sh`). Sh
     <div className="msb-param-desc">Shell command string (e.g. <code>"ls -la /app &amp;&amp; echo done"</code>).</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>cwd, user, env, timeout, stdin, tty, rlimits</code></div>
+    <div className="msb-param-key"><code>cwd, user, env, timeout, stdin, tty, combined_output, rlimits</code></div>
     <div className="msb-param-desc">Same per-call options as <a className="msb-type" href="#sandbox-exec">exec()</a>.</div>
   </div>
 </div>
@@ -169,6 +175,7 @@ async def exec_stream(
     timeout: float | None = None,
     stdin: Stdin | bytes | None = None,
     tty: bool = False,
+    combined_output: bool = False,
     rlimits: list[Rlimit] | None = None,
 ) -> ExecHandle
 ```
@@ -204,7 +211,7 @@ Run a command with streaming output. Returns an [`ExecHandle`](#exechandle) that
     <div className="msb-param-desc">Command arguments, or a typed options mapping.</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>cwd, user, env, timeout, stdin, tty, rlimits</code></div>
+    <div className="msb-param-key"><code>cwd, user, env, timeout, stdin, tty, combined_output, rlimits</code></div>
     <div className="msb-param-desc">Same per-call options as <a className="msb-type" href="#sandbox-exec">exec()</a>.</div>
   </div>
 </div>
@@ -230,6 +237,7 @@ async def shell_stream(
     timeout: float | None = None,
     stdin: Stdin | bytes | None = None,
     tty: bool = False,
+    combined_output: bool = False,
     rlimits: list[Rlimit] | None = None,
 ) -> ExecHandle
 ```
@@ -259,7 +267,7 @@ Streaming variant of [`shell()`](#sandbox-shell): runs `script` through the conf
     <div className="msb-param-desc">Shell command string.</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>cwd, user, env, timeout, stdin, tty, rlimits</code></div>
+    <div className="msb-param-key"><code>cwd, user, env, timeout, stdin, tty, combined_output, rlimits</code></div>
     <div className="msb-param-desc">Same per-call options as <a className="msb-type" href="#sandbox-exec">exec()</a>.</div>
   </div>
 </div>

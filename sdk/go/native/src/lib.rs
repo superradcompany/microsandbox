@@ -3842,6 +3842,7 @@ struct ExecOpts {
     timeout_secs: Option<u64>,
     stdin_pipe: Option<bool>,
     tty: Option<bool>,
+    combined_output: Option<bool>,
     user: Option<String>,
     #[serde(default)]
     env: HashMap<String, String>,
@@ -3873,6 +3874,9 @@ pub unsafe extern "C" fn msb_sandbox_exec(
                     }
                     if let Some(tty) = opts.tty {
                         b = b.tty(tty);
+                    }
+                    if let Some(combined) = opts.combined_output {
+                        b = b.combined_output(combined);
                     }
                     if let Some(secs) = opts.timeout_secs {
                         b = b.timeout(Duration::from_secs(secs));
@@ -4722,6 +4726,9 @@ pub unsafe extern "C" fn msb_sandbox_exec_stream(
                     }
                     if let Some(tty) = opts.tty {
                         b = b.tty(tty);
+                    }
+                    if let Some(combined) = opts.combined_output {
+                        b = b.combined_output(combined);
                     }
                     if let Some(cwd) = opts.cwd {
                         b = b.cwd(cwd);

@@ -48,6 +48,12 @@ pub struct ExecArgs {
     #[arg(long)]
     pub rlimit: Vec<String>,
 
+    /// Combine the command's stderr into its stdout stream (like `2>&1`),
+    /// preserving the interleaved order of writes. All output is then
+    /// written to stdout. PTY sessions (`--tty`) are already combined.
+    #[arg(long)]
+    pub combined_output: bool,
+
     /// Suppress progress output.
     #[arg(short, long)]
     pub quiet: bool,
@@ -137,7 +143,15 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
 
     if args.stream {
         return run_stream(
-            &sandbox, cmd, cmd_args, &env_pairs, &workdir, &args.user, timeout, &rlimits,
+            &sandbox,
+            cmd,
+            cmd_args,
+            &env_pairs,
+            &workdir,
+            &args.user,
+            timeout,
+            &rlimits,
+            args.combined_output,
         )
         .await;
     }
@@ -183,6 +197,9 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
                 );
                 if args.tty {
                     e = e.tty(true);
+                }
+                if args.combined_output {
+                    e = e.combined_output(true);
                 }
                 e
             })
@@ -255,11 +272,14 @@ async fn run_stream(
     user: &Option<String>,
     timeout: Option<Duration>,
     rlimits: &[(RlimitResource, u64, u64)],
+    combined_output: bool,
 ) -> anyhow::Result<()> {
     let mut handle = match sandbox
         .exec_stream_with(cmd, |e| {
             apply_common_exec_opts(
-                e.args(cmd_args).stdin_pipe(),
+                e.args(cmd_args)
+                    .stdin_pipe()
+                    .combined_output(combined_output),
                 env_pairs,
                 workdir,
                 user,
