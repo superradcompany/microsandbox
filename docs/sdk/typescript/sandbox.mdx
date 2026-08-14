@@ -2493,6 +2493,85 @@ Snapshot this stopped sandbox under a bare name. See [Snapshots](/sdk/typescript
 
 `Promise<Snapshot>`
 
+## RegistryConfigBuilder
+
+Fluent builder for OCI registry connection settings. Obtain it through [`SandboxBuilder.registry()`](#registry); the callback's returned builder is stored in the sandbox configuration.
+
+```typescript
+.registry((r) =>
+  r.auth({ kind: "basic", username: "user", password: "token" })
+    .caCertsPath("/etc/company-registry-ca.pem"),
+)
+```
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `auth(auth)` | `this` | Set [`RegistryAuth`](#registryauth) credentials. |
+| `insecure()` | `this` | Use plain HTTP instead of TLS. |
+| `caCerts(pemData)` | `this` | Add a PEM-encoded CA certificate from a Node.js `Buffer`. May be called repeatedly. |
+| `caCertsPath(path)` | `this` | Read and add a PEM-encoded CA certificate from a filesystem path. |
+| `build()` | [`RegistryConfig`](#registryconfig) | Snapshot the accumulated registry configuration. |
+
+#### <span className="msb-recv">registry.</span><span className="msb-hn">auth()</span>
+
+```typescript
+auth(auth: RegistryAuth): this
+```
+
+Set registry authentication credentials.
+
+<p className="msb-label">Returns</p>
+
+`this`
+
+#### <span className="msb-recv">registry.</span><span className="msb-hn">insecure()</span>
+
+```typescript
+insecure(): this
+```
+
+Use plain HTTP instead of TLS.
+
+<p className="msb-label">Returns</p>
+
+`this`
+
+#### <span className="msb-recv">registry.</span><span className="msb-hn">caCerts()</span>
+
+```typescript
+caCerts(pemData: Buffer): this
+```
+
+Add a PEM-encoded CA certificate. May be called repeatedly.
+
+<p className="msb-label">Returns</p>
+
+`this`
+
+#### <span className="msb-recv">registry.</span><span className="msb-hn">caCertsPath()</span>
+
+```typescript
+caCertsPath(path: string): this
+```
+
+Read and add a PEM-encoded CA certificate from a filesystem path.
+
+<p className="msb-label">Returns</p>
+
+`this`
+
+#### <span className="msb-recv">registry.</span><span className="msb-hn">build()</span>
+
+```typescript
+build(): RegistryConfig
+```
+
+Snapshot the accumulated registry configuration.
+
+<p className="msb-label">Returns</p>
+
+[`RegistryConfig`](#registryconfig)
+
 ## Types
 
 ### LogLevel
@@ -2627,18 +2706,6 @@ Image pull and materialize progress event emitted by [`PullProgressCreate`](#pul
 
 `totalDownloadBytes` and `totalBytes` on the `"resolved"` / `"layerDownloadProgress"` variants may be absent if the manifest omits sizes.
 
-### PullProgressCreate
-
-<p className="msb-backref">Returned by <a href="#createwithpullprogress">createWithPullProgress()</a></p>
-
-Async iterable creation handle returned by [`createWithPullProgress()`](#createwithpullprogress). Yields [`PullProgress`](#pullprogress) events as the image is resolved, downloaded, and materialized. Call `awaitSandbox()` after iteration to obtain the live sandbox.
-
-| Method / Property | Returns | Description |
-|-------------------|---------|-------------|
-| progress | `NapiPullProgressStream` | The underlying progress event stream |
-| `[Symbol.asyncIterator]()` | `AsyncIterator<`[`PullProgress`](#pullprogress)`>` | Use with `for await...of` |
-| `awaitSandbox()` | `Promise<`[`Sandbox`](#instance-methods)`>` | Resolve the underlying creation task and return the running sandbox |
-
 ### RegistryAuth
 
 Authentication used when pulling images from an OCI registry.
@@ -2648,25 +2715,6 @@ type RegistryAuth =
   | { kind: "anonymous" }
   | { kind: "basic"; username: string; password: string };
 ```
-
-### RegistryConfigBuilder
-
-Fluent builder for OCI registry connection settings. Obtain it through [`SandboxBuilder.registry()`](#registry); the callback's returned builder is stored in the sandbox configuration.
-
-```typescript
-.registry((r) =>
-  r.auth({ kind: "basic", username: "user", password: "token" })
-    .caCertsPath("/etc/company-registry-ca.pem"),
-)
-```
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `auth(auth)` | `this` | Set [`RegistryAuth`](#registryauth) credentials. |
-| `insecure()` | `this` | Use plain HTTP instead of TLS. |
-| `caCerts(pemData)` | `this` | Add a PEM-encoded CA certificate from a Node.js `Buffer`. May be called repeatedly. |
-| `caCertsPath(path)` | `this` | Read and add a PEM-encoded CA certificate from a filesystem path. |
-| `build()` | [`RegistryConfig`](#registryconfig) | Snapshot the accumulated registry configuration. |
 
 ### RegistryConfig
 
