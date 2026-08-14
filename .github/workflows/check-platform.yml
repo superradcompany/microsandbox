@@ -268,9 +268,18 @@ jobs:
       - name: Build and test Python SDK
         working-directory: sdk/python
         run: |
-          uv sync --group dev
-          uv run maturin develop --release
-          uv run pytest
+          # `uv sync` otherwise builds the local extension before maturin does
+          # it again. Build one wheel, install it, and test that exact artifact.
+          uv sync --group dev --no-install-project
+          uv run --no-sync maturin build --release --out dist
+          uv pip install --reinstall dist/*.whl
+          # Run outside sdk/python so the source tree cannot shadow the wheel.
+          cd ../..
+          uv run --project sdk/python --no-sync pytest sdk/python/tests
+
+      - name: Report compiler cache health
+        if: always()
+        run: python3 scripts/ci/report-sccache.py
 
   go-build:
     name: Go build (${{ inputs.target }})

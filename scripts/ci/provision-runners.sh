@@ -103,4 +103,4 @@ for index in $(seq "${RUNNER_FIRST}" "${RUNNER_LAST}"); do
 done
 
 echo "provisioned runners ${RUNNER_FIRST}..${RUNNER_LAST} under per-user home directories"
-echo "all runners share this host; CI limits the two compiler-heavy lanes to 12 jobs each"
+echo "all runners share this host; CI bounds parallel KVM work within each test lane"
