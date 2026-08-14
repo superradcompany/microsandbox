@@ -201,13 +201,22 @@ pub(super) fn surrogate_safe_split(units: &[u16], max: usize) -> usize {
         return 0;
     }
 
-    // Only a high surrogate immediately before the cut is a problem: its low
-    // half would begin the next write.
-    if is_high_surrogate(units[max - 1]) {
+    if split_separates_surrogate_pair(units, max) {
         max - 1
     } else {
         max
     }
+}
+
+/// Whether splitting `units` at `index` separates a UTF-16 surrogate pair.
+///
+/// Besides choosing safe chunk boundaries, this detects when a successful
+/// partial `WriteConsoleW` call stopped between the two halves of a pair.
+pub(super) fn split_separates_surrogate_pair(units: &[u16], index: usize) -> bool {
+    index > 0
+        && index < units.len()
+        && is_high_surrogate(units[index - 1])
+        && is_low_surrogate(units[index])
 }
 
 /// Whether `unit` is the leading half of a UTF-16 surrogate pair.
@@ -453,5 +462,16 @@ mod tests {
     #[test]
     fn test_surrogate_safe_split_handles_zero_max() {
         assert_eq!(surrogate_safe_split(&utf16("abc"), 0), 0);
+    }
+
+    #[test]
+    fn test_split_separates_surrogate_pair_detects_partial_write_boundary() {
+        let units = utf16("a🚀a");
+
+        assert!(split_separates_surrogate_pair(&units, 2));
+        assert!(!split_separates_surrogate_pair(&units, 0));
+        assert!(!split_separates_surrogate_pair(&units, 1));
+        assert!(!split_separates_surrogate_pair(&units, 3));
+        assert!(!split_separates_surrogate_pair(&units, units.len()));
     }
 }

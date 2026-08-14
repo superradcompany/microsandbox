@@ -29,7 +29,8 @@ use windows_sys::Win32::{
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 use super::encoding::{
-    MAX_CONSOLE_WRITE_UNITS, Utf8ToUtf16Decoder, Utf16ToUtf8Decoder, surrogate_safe_split,
+    MAX_CONSOLE_WRITE_UNITS, Utf8ToUtf16Decoder, Utf16ToUtf8Decoder,
+    split_separates_surrogate_pair, surrogate_safe_split,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -150,33 +151,46 @@ impl WindowsTerminalGuard {
         let mut offset = 0usize;
         while offset < units.len() {
             let chunk_len = surrogate_safe_split(&units[offset..], MAX_CONSOLE_WRITE_UNITS);
-            let mut written = 0u32;
-            let result = unsafe {
-                WriteConsoleW(
-                    self.output.raw,
-                    units[offset..].as_ptr(),
-                    chunk_len as u32,
-                    &mut written,
-                    ptr::null(),
-                )
-            };
-            if result == 0 {
-                return Err(MicrosandboxError::Terminal(format!(
-                    "terminal output: {}",
-                    std::io::Error::last_os_error()
-                )));
+            let written = self.write_console_once(&units[offset..offset + chunk_len])?;
+            offset += written;
+
+            if written < chunk_len && split_separates_surrogate_pair(units, offset) {
+                // A successful partial write can still stop after the high
+                // half of a surrogate pair. Write its low half immediately,
+                // matching Rust's Windows stdout recovery, before continuing.
+                offset += self.write_console_once(&units[offset..offset + 1])?;
             }
-            if written == 0 {
-                // No progress would mean silently dropping the rest of the
-                // guest's output; fail loudly instead.
-                return Err(MicrosandboxError::Terminal(
-                    "terminal output: console accepted no characters".to_string(),
-                ));
-            }
-            offset += written as usize;
         }
 
         Ok(())
+    }
+
+    fn write_console_once(&self, units: &[u16]) -> MicrosandboxResult<usize> {
+        let mut written = 0u32;
+        let result = unsafe {
+            WriteConsoleW(
+                self.output.raw,
+                units.as_ptr(),
+                units.len() as u32,
+                &mut written,
+                ptr::null(),
+            )
+        };
+        if result == 0 {
+            return Err(MicrosandboxError::Terminal(format!(
+                "terminal output: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        if written == 0 {
+            // No progress would mean silently dropping the rest of the
+            // guest's output; fail loudly instead.
+            return Err(MicrosandboxError::Terminal(
+                "terminal output: console accepted no characters".to_string(),
+            ));
+        }
+
+        Ok(written as usize)
     }
 }
 
