@@ -14,6 +14,8 @@ use std::iter;
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use async_compression::tokio::bufread::ZstdDecoder;
 use async_compression::tokio::write::ZstdEncoder;
@@ -22,10 +24,10 @@ use microsandbox_image::snapshot::{
     DESCRIPTOR_FILENAME, MAX_JSON_SAFE_INTEGER, SnapshotState, UpperIntegrity,
 };
 use microsandbox_utils::extent::{self, ExtentMap};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest as _, Sha256};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
-use tokio_tar::{Builder, EntryType, Header};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader, ReadBuf};
+use tokio_tar::{Builder, EntryType, Header, HeaderMode};
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{
     MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
@@ -35,6 +37,18 @@ use crate::backend::LocalBackend;
 use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason};
 
 use super::{Snapshot, SnapshotHandle, store};
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+const ARCHIVE_MEMBER_TRANSPORT_ALGORITHM: &str = "msb-archive-member-blake3-v1";
+const ARCHIVE_MEMBER_TRANSPORT_DOMAIN: &[u8] = b"msb-archive-member-blake3-v1\0";
+const TAR_BLOCK: u64 = 512;
+
+// Sparse-map slots inline in a GNU header / per extended sparse block.
+const GNU_HEADER_SPARSE_SLOTS: usize = 4;
+const GNU_EXT_SPARSE_SLOTS: usize = 21;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -91,7 +105,32 @@ struct ArchiveEntry {
     included: bool,
     encoded_size: u64,
     apparent_size: u64,
-    integrity: UpperIntegrity,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    integrity: Option<UpperIntegrity>,
+    /// Package-bound integrity computed while this member's stored bytes flow.
+    /// Released inventory archives omit this field and remain readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transport_integrity: Option<ArchiveTransportIntegrity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArchiveTransportIntegrity {
+    algorithm: String,
+    digest: String,
+}
+
+struct ObservedArchiveEntry {
+    encoded_size: u64,
+    apparent_size: u64,
+    transport_integrity: ArchiveTransportIntegrity,
+}
+
+/// Updates a member transport hash as the archive writer consumes the source.
+struct TransportHashingReader<R> {
+    inner: R,
+    hasher: blake3::Hasher,
+    bytes_read: u64,
 }
 
 /// Allocation map of a sparse file, in tar-block granularity.
@@ -119,6 +158,32 @@ impl SparseMap {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl<R> AsyncRead for TransportHashingReader<R>
+where
+    R: AsyncRead + Unpin,
+{
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        match Pin::new(&mut self.inner).poll_read(cx, buf) {
+            Poll::Ready(Ok(())) => {
+                let read = &buf.filled()[before..];
+                self.hasher.update(read);
+                self.bytes_read += read.len() as u64;
+                Poll::Ready(Ok(()))
+            }
+            other => other,
+        }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
@@ -133,7 +198,6 @@ pub(super) async fn save_snapshot(
     // Collect the artifact dirs we need to ship: the head snapshot
     // and (optionally) all ancestors via parent_digest.
     let head = store::open_snapshot(local, name_or_path).await?;
-    head.verify().await?;
     let mut parents: Vec<Snapshot> = Vec::new();
 
     if opts.with_parents {
@@ -142,7 +206,6 @@ pub(super) async fn save_snapshot(
             let parent_path = resolve_parent_artifact(local, &parent_digest).await?;
             let parent =
                 store::open_snapshot(local, parent_path.to_string_lossy().as_ref()).await?;
-            parent.verify().await?;
             parents.push(parent.clone());
             current = parent.manifest().parent.clone();
         }
@@ -219,13 +282,29 @@ pub(super) async fn save_snapshot(
     let write_result: MicrosandboxResult<()> = async {
         if opts.plain_tar {
             let mut builder = Builder::new(out_file);
-            write_archive_entries(&mut builder, &snapshots, &cache_files, &head, &opts).await?;
+            // Entry writers retain hashing and sparse-I/O buffers across await
+            // points. Keep that state off Windows' smaller worker stack.
+            Box::pin(write_archive_entries(
+                &mut builder,
+                &snapshots,
+                &cache_files,
+                &head,
+                &opts,
+            ))
+            .await?;
             let mut inner = builder.into_inner().await?;
             tokio::io::AsyncWriteExt::shutdown(&mut inner).await?;
         } else {
             let writer = ZstdEncoder::new(out_file);
             let mut builder = Builder::new(writer);
-            write_archive_entries(&mut builder, &snapshots, &cache_files, &head, &opts).await?;
+            Box::pin(write_archive_entries(
+                &mut builder,
+                &snapshots,
+                &cache_files,
+                &head,
+                &opts,
+            ))
+            .await?;
             let mut inner = builder.into_inner().await?;
             tokio::io::AsyncWriteExt::shutdown(&mut inner).await?;
         }
@@ -238,9 +317,15 @@ pub(super) async fn save_snapshot(
     }
     let durable = tokio::fs::OpenOptions::new()
         .read(true)
+        // FlushFileBuffers requires a write-capable handle on Windows.
+        .write(true)
         .open(&temp_out)
         .await?;
     durable.sync_all().await?;
+    // Windows will not replace a file while this durability handle is still
+    // open. Close it explicitly before the atomic rename; relying on the
+    // function-scope drop kept the source locked until after MoveFileExW.
+    drop(durable);
     replace_archive(&temp_out, out).await?;
     #[cfg(unix)]
     if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
@@ -328,7 +413,15 @@ pub(super) async fn load_snapshot(
     let head_path = snapshots_dir.join(&head_relative);
 
     ensure_promote_targets_available(snapshot_stage.path(), &snapshots_dir).await?;
-    install_staged_cache(cache_stage.path(), &cache_dir, &head_manifest).await?;
+    // Cache installation carries hashing buffers across await points. Keep
+    // that future on the heap so the archive loader remains within Windows'
+    // smaller default worker-thread stack.
+    Box::pin(install_staged_cache(
+        cache_stage.path(),
+        &cache_dir,
+        &head_manifest,
+    ))
+    .await?;
     promote_stage(snapshot_stage.path(), &snapshots_dir).await?;
 
     let snap = store::open_snapshot(local, head_path.to_string_lossy().as_ref()).await?;
@@ -393,36 +486,51 @@ async fn write_archive_entries<W>(
 where
     W: tokio::io::AsyncWrite + Unpin + Send,
 {
-    let inventory = build_archive_inventory(snapshots, cache_files, head, opts).await?;
+    let mut inventory = build_archive_inventory(snapshots, cache_files, head, opts).await?;
+
+    // The inventory is also the write allowlist. Never sweep artifact
+    // directories: migration backups, locks, journals and unknown files are
+    // intentionally not exportable. Member hashes are filled while these
+    // required writes consume the source; archive.json is written last so no
+    // payload needs a preparatory content pass.
+    for snapshot in snapshots {
+        let hex = digest_hex(snapshot.digest())?;
+        let descriptor = snapshot.path().join(DESCRIPTOR_FILENAME);
+        let descriptor_name = format!("snapshots/{hex}/{DESCRIPTOR_FILENAME}");
+        let transport = append_artifact_file(
+            builder,
+            &descriptor,
+            &descriptor_name,
+            "snapshot-descriptor",
+        )
+        .await?;
+        set_archive_transport(&mut inventory, &descriptor_name, transport)?;
+        if let SnapshotState::File(file) = &snapshot.manifest().state {
+            let payload_name = format!("files/{hex}/{}", file.upper.file);
+            let transport = append_artifact_file(
+                builder,
+                &snapshot.path().join(&file.upper.file),
+                &payload_name,
+                "file-payload",
+            )
+            .await?;
+            set_archive_transport(&mut inventory, &payload_name, transport)?;
+        }
+    }
+    for (path, archive_name) in cache_files {
+        let kind = if archive_name.contains("/manifests/") {
+            "image-metadata"
+        } else {
+            "image-object"
+        };
+        let transport = append_artifact_file(builder, path, archive_name, kind).await?;
+        set_archive_transport(&mut inventory, archive_name, transport)?;
+    }
+
     let inventory_bytes = serde_json::to_vec(&inventory).map_err(|error| {
         MicrosandboxError::Custom(format!("serialize archive inventory: {error}"))
     })?;
     append_bytes(builder, "archive.json", &inventory_bytes).await?;
-
-    // The inventory is also the write allowlist. Never sweep artifact
-    // directories: migration backups, locks, journals and unknown files are
-    // intentionally not exportable.
-    for snapshot in snapshots {
-        let hex = digest_hex(snapshot.digest())?;
-        let descriptor = snapshot.path().join(DESCRIPTOR_FILENAME);
-        append_artifact_file(
-            builder,
-            &descriptor,
-            format!("snapshots/{hex}/{DESCRIPTOR_FILENAME}"),
-        )
-        .await?;
-        if let SnapshotState::File(file) = &snapshot.manifest().state {
-            append_artifact_file(
-                builder,
-                &snapshot.path().join(&file.upper.file),
-                format!("files/{hex}/{}", file.upper.file),
-            )
-            .await?;
-        }
-    }
-    for (path, archive_name) in cache_files {
-        append_artifact_file(builder, path, archive_name.clone()).await?;
-    }
     Ok(())
 }
 
@@ -469,10 +577,10 @@ async fn build_archive_inventory(
             included: true,
             encoded_size: descriptor_size,
             apparent_size: descriptor_size,
-            integrity: UpperIntegrity {
-                algorithm: "sha256".into(),
+            integrity: Some(UpperIntegrity::Sha256 {
                 digest: snapshot.digest().to_string(),
-            },
+            }),
+            transport_integrity: None,
         });
 
         if let SnapshotState::File(file) = &snapshot.manifest().state {
@@ -489,6 +597,7 @@ async fn build_archive_inventory(
                 encoded_size,
                 apparent_size: file.upper.size_bytes,
                 integrity: file.upper.integrity.clone(),
+                transport_integrity: None,
             });
         }
     }
@@ -508,10 +617,8 @@ async fn build_archive_inventory(
             included: true,
             encoded_size: size,
             apparent_size: size,
-            integrity: UpperIntegrity {
-                algorithm: "sha256".into(),
-                digest,
-            },
+            integrity: Some(UpperIntegrity::Sha256 { digest }),
+            transport_integrity: None,
         });
     }
 
@@ -535,8 +642,62 @@ async fn build_archive_inventory(
         entries,
         protection_requirements: Vec::new(),
         extensions: BTreeMap::new(),
-        requires: Vec::new(),
+        requires: vec![ARCHIVE_MEMBER_TRANSPORT_ALGORITHM.into()],
     })
+}
+
+fn set_archive_transport(
+    inventory: &mut ArchiveInventory,
+    path: &str,
+    transport: ArchiveTransportIntegrity,
+) -> MicrosandboxResult<()> {
+    let entry = inventory
+        .entries
+        .iter_mut()
+        .find(|entry| entry.path == path)
+        .ok_or_else(|| {
+            MicrosandboxError::Custom(format!(
+                "archive writer produced an uninventoried member: {path}"
+            ))
+        })?;
+    entry.transport_integrity = Some(transport);
+    Ok(())
+}
+
+/// Construct the stable member hash prefix. Length-prefixing text and binding
+/// both sizes plus the exact sparse map keeps unlike archive records from
+/// sharing a byte representation.
+fn archive_transport_hasher(
+    kind: &str,
+    path: &str,
+    encoded_size: u64,
+    apparent_size: u64,
+    sparse_ranges: &[(u64, u64)],
+) -> blake3::Hasher {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(ARCHIVE_MEMBER_TRANSPORT_DOMAIN);
+    update_transport_text(&mut hasher, kind);
+    update_transport_text(&mut hasher, path);
+    hasher.update(&encoded_size.to_le_bytes());
+    hasher.update(&apparent_size.to_le_bytes());
+    hasher.update(&(sparse_ranges.len() as u64).to_le_bytes());
+    for (offset, len) in sparse_ranges {
+        hasher.update(&offset.to_le_bytes());
+        hasher.update(&len.to_le_bytes());
+    }
+    hasher
+}
+
+fn update_transport_text(hasher: &mut blake3::Hasher, value: &str) {
+    hasher.update(&(value.len() as u64).to_le_bytes());
+    hasher.update(value.as_bytes());
+}
+
+fn finish_archive_transport(hasher: blake3::Hasher) -> ArchiveTransportIntegrity {
+    ArchiveTransportIntegrity {
+        algorithm: ARCHIVE_MEMBER_TRANSPORT_ALGORITHM.into(),
+        digest: format!("blake3:{}", hasher.finalize().to_hex()),
+    }
 }
 
 async fn archive_encoded_size(path: &Path) -> MicrosandboxResult<u64> {
@@ -581,23 +742,44 @@ fn archive_temp_path(out: &Path) -> MicrosandboxResult<PathBuf> {
 async fn append_artifact_file<W>(
     builder: &mut Builder<W>,
     path: &Path,
-    name: String,
-) -> MicrosandboxResult<()>
+    name: &str,
+    kind: &str,
+) -> MicrosandboxResult<ArchiveTransportIntegrity>
 where
     W: tokio::io::AsyncWrite + Unpin + Send,
 {
-    if try_append_sparse(builder, path, &name).await? {
-        return Ok(());
+    if let Some(integrity) = try_append_sparse(builder, path, name, kind).await? {
+        return Ok(integrity);
     }
-    builder.append_path_with_name(path, name).await?;
-    Ok(())
+
+    let metadata = tokio::fs::metadata(path).await?;
+    if !metadata.is_file() {
+        return Err(MicrosandboxError::Custom(format!(
+            "archive source is not a regular file: {}",
+            path.display()
+        )));
+    }
+    let size = metadata.len();
+    let mut header = Header::new_gnu();
+    header.set_metadata_in_mode(&metadata, HeaderMode::Complete);
+    header.set_size(size);
+    header.set_cksum();
+
+    let file = tokio::fs::File::open(path).await?;
+    let mut source = TransportHashingReader {
+        inner: file,
+        hasher: archive_transport_hasher(kind, name, size, size, &[]),
+        bytes_read: 0,
+    };
+    builder.append_data(&mut header, name, &mut source).await?;
+    if source.bytes_read != size {
+        return Err(MicrosandboxError::Custom(format!(
+            "archive source changed while reading {name}: expected {size} bytes, read {}",
+            source.bytes_read
+        )));
+    }
+    Ok(finish_archive_transport(source.hasher))
 }
-
-const TAR_BLOCK: u64 = 512;
-
-// Sparse-map slots inline in a GNU header / per extended sparse block.
-const GNU_HEADER_SPARSE_SLOTS: usize = 4;
-const GNU_EXT_SPARSE_SLOTS: usize = 21;
 
 /// Append `path` as an old-GNU sparse entry if it has holes. Returns `false` without writing anything when the file is better served by the dense path (no holes, empty, extents
 /// not enumerable on this filesystem, or a name too long for the fixed GNU header path field).
@@ -605,16 +787,17 @@ async fn try_append_sparse<W>(
     builder: &mut Builder<W>,
     path: &Path,
     name: &str,
-) -> MicrosandboxResult<bool>
+    kind: &str,
+) -> MicrosandboxResult<Option<ArchiveTransportIntegrity>>
 where
     W: tokio::io::AsyncWrite + Unpin + Send,
 {
     use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-    use tokio_tar::{GnuExtSparseHeader, HeaderMode};
+    use tokio_tar::GnuExtSparseHeader;
 
     let meta = tokio::fs::metadata(path).await?;
     if !meta.is_file() {
-        return Ok(false);
+        return Ok(None);
     }
     let map = {
         let path = path.to_path_buf();
@@ -623,14 +806,14 @@ where
             .map_err(|e| MicrosandboxError::Custom(format!("snapshot export scan task: {e}")))??
     };
     let Some(map) = map.as_ref().and_then(tar_sparse_map) else {
-        return Ok(false);
+        return Ok(None);
     };
 
     let mut header = Header::new_gnu();
     header.set_metadata_in_mode(&meta, HeaderMode::Complete);
     if header.set_path(name).is_err() {
         // Needs a GNU long-name entry; the dense path emits one.
-        return Ok(false);
+        return Ok(None);
     }
     header.set_entry_type(EntryType::GNUSparse);
     header.set_size(map.archived);
@@ -673,16 +856,24 @@ where
 
     let mut file = tokio::fs::File::open(path).await?;
     let mut written: u64 = 0;
+    let mut transport = archive_transport_hasher(kind, name, map.archived, map.len, &entries);
+    let mut buffer = vec![0u8; 1024 * 1024];
     for (offset, numbytes) in &map.segments {
         file.seek(std::io::SeekFrom::Start(*offset)).await?;
-        let mut segment = (&mut file).take(*numbytes);
-        let copied = tokio::io::copy(&mut segment, dst).await?;
-        if copied != *numbytes {
-            return Err(MicrosandboxError::Custom(format!(
-                "upper file truncated during export: extent at {offset} expected {numbytes} bytes, read {copied}"
-            )));
+        let mut remaining = *numbytes;
+        while remaining > 0 {
+            let wanted = remaining.min(buffer.len() as u64) as usize;
+            let read = file.read(&mut buffer[..wanted]).await?;
+            if read == 0 {
+                return Err(MicrosandboxError::Custom(format!(
+                    "archive source truncated during export: extent at {offset} expected {numbytes} bytes"
+                )));
+            }
+            transport.update(&buffer[..read]);
+            dst.write_all(&buffer[..read]).await?;
+            written += read as u64;
+            remaining -= read as u64;
         }
-        written += copied;
     }
     debug_assert_eq!(written, map.archived);
 
@@ -691,7 +882,7 @@ where
         dst.write_all(&[0u8; TAR_BLOCK as usize][..pad as usize])
             .await?;
     }
-    Ok(true)
+    Ok(Some(finish_archive_transport(transport)))
 }
 
 /// Round an [`ExtentMap`]'s byte extents outward to tar blocks and merge runs that touch: sparse readers require every data run before the last to be a multiple of 512. `None`
@@ -761,7 +952,7 @@ where
 {
     let mut reader = BufReader::with_capacity(256 * 1024, reader);
     let mut manifest_dirs: Vec<PathBuf> = Vec::new();
-    let mut observed_files: HashMap<String, (u64, u64)> = HashMap::new();
+    let mut observed_files: HashMap<String, ObservedArchiveEntry> = HashMap::new();
     let mut extraction_targets = HashSet::new();
     let mut inventory_path = None;
     let mut block = [0u8; TAR_BLOCK as usize];
@@ -871,20 +1062,40 @@ where
         }
 
         let entry_size = header.entry_size()?;
-        match entry_type {
+        let kind = archive_member_kind(&components);
+        let transport_integrity = match entry_type {
             EntryType::Directory => unreachable!("directories were handled above"),
             EntryType::GNUSparse => {
-                unpack_sparse_entry(&mut reader, &header, entry_size, &target).await?;
+                let integrity = unpack_sparse_entry(
+                    &mut reader,
+                    &header,
+                    entry_size,
+                    &target,
+                    kind,
+                    &archive_path,
+                )
+                .await?;
                 apply_entry_mode(&header, &target).await?;
+                integrity
             }
             // Regular / Continuous — the only other types validation lets through.
             _ => {
-                unpack_dense_entry(&mut reader, entry_size, &target).await?;
+                let integrity =
+                    unpack_dense_entry(&mut reader, entry_size, &target, kind, &archive_path)
+                        .await?;
                 apply_entry_mode(&header, &target).await?;
+                integrity
             }
-        }
+        };
         let apparent_size = tokio::fs::metadata(&target).await?.len();
-        observed_files.insert(archive_path, (entry_size, apparent_size));
+        observed_files.insert(
+            archive_path,
+            ObservedArchiveEntry {
+                encoded_size: entry_size,
+                apparent_size,
+                transport_integrity,
+            },
+        );
 
         if descriptor && let Some(parent) = target.parent() {
             manifest_dirs.push(parent.to_path_buf());
@@ -986,21 +1197,34 @@ fn tar_pad(size: u64) -> u64 {
 }
 
 /// Stream a dense entry's bytes into `target`.
-async fn unpack_dense_entry<R>(reader: &mut R, size: u64, target: &Path) -> MicrosandboxResult<()>
+async fn unpack_dense_entry<R>(
+    reader: &mut R,
+    size: u64,
+    target: &Path,
+    kind: &str,
+    archive_path: &str,
+) -> MicrosandboxResult<ArchiveTransportIntegrity>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
     use tokio::io::AsyncWriteExt;
 
     let mut file = tokio::fs::File::create(target).await?;
-    let copied = tokio::io::copy(&mut (&mut *reader).take(size), &mut file).await?;
+    let mut source = TransportHashingReader {
+        inner: (&mut *reader).take(size),
+        hasher: archive_transport_hasher(kind, archive_path, size, size, &[]),
+        bytes_read: 0,
+    };
+    let copied = tokio::io::copy(&mut source, &mut file).await?;
     if copied != size {
         return Err(MicrosandboxError::Custom(
             "archive truncated mid-entry".into(),
         ));
     }
     file.flush().await?;
-    discard_exact(reader, tar_pad(size)).await
+    let TransportHashingReader { hasher, .. } = source;
+    discard_exact(reader, tar_pad(size)).await?;
+    Ok(finish_archive_transport(hasher))
 }
 
 /// Restore an old-GNU sparse entry map-driven: parse the sparse map (inline slots plus chained extended records), enforce its invariants, then copy each data run straight off the
@@ -1011,7 +1235,9 @@ async fn unpack_sparse_entry<R>(
     header: &Header,
     archived: u64,
     target: &Path,
-) -> MicrosandboxResult<()>
+    kind: &str,
+    archive_path: &str,
+) -> MicrosandboxResult<ArchiveTransportIntegrity>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
@@ -1103,13 +1329,20 @@ where
     let _ = extent::mark_sparse(&std_file);
     std_file.set_len(realsize)?;
     let mut file = tokio::fs::File::from_std(std_file);
+    let mut transport = archive_transport_hasher(kind, archive_path, archived, realsize, &map);
 
     for (offset, numbytes) in &map {
         if *numbytes == 0 {
             continue;
         }
         file.seek(std::io::SeekFrom::Start(*offset)).await?;
-        let copied = tokio::io::copy(&mut (&mut *reader).take(*numbytes), &mut file).await?;
+        let mut source = TransportHashingReader {
+            inner: (&mut *reader).take(*numbytes),
+            hasher: transport,
+            bytes_read: 0,
+        };
+        let copied = tokio::io::copy(&mut source, &mut file).await?;
+        transport = source.hasher;
         if copied != *numbytes {
             return Err(MicrosandboxError::Custom(
                 "archive truncated mid-entry".into(),
@@ -1138,7 +1371,7 @@ where
         }
     }
 
-    Ok(())
+    Ok(finish_archive_transport(transport))
 }
 
 /// Apply the entry's recorded permission bits to the restored file.
@@ -1188,6 +1421,19 @@ fn validate_archive_directory(components: &[&str], path: &Path) -> MicrosandboxR
     Ok(())
 }
 
+fn archive_member_kind(components: &[&str]) -> &'static str {
+    match components {
+        ["archive.json"] => "archive-inventory",
+        ["snapshots", _, _] => "snapshot-descriptor",
+        ["files", _, _] => "file-payload",
+        ["images" | "cache", "manifests", _] => "image-metadata",
+        ["images" | "cache", _, _] => "image-object",
+        [_, V066_DESCRIPTOR_FILENAME] => "legacy-snapshot-descriptor",
+        [_, "upper.ext4"] => "legacy-file-payload",
+        _ => "unknown",
+    }
+}
+
 fn valid_archive_digest_hex(value: &str) -> bool {
     value.len() == 64
         && value
@@ -1209,9 +1455,17 @@ fn valid_archive_filename(value: &str) -> bool {
     !value.is_empty() && value.len() <= 255 && value != "." && value != ".."
 }
 
+fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 async fn validate_archive_inventory(
     path: &Path,
-    observed: &HashMap<String, (u64, u64)>,
+    observed: &HashMap<String, ObservedArchiveEntry>,
     snapshots_dir: &Path,
     cache_dir: &Path,
 ) -> MicrosandboxResult<ArchiveInventory> {
@@ -1248,15 +1502,19 @@ async fn validate_archive_inventory(
             )),
         ));
     }
-    if !inventory.requires.is_empty() {
-        return Err(MicrosandboxError::unsupported(
-            Operation::SnapshotOps,
-            UnsupportedReason::NotAvailable(format!(
-                "snapshot archive requires unsupported extensions: {:?}",
-                inventory.requires
-            )),
-        ));
-    }
+    let requires_transport = match inventory.requires.as_slice() {
+        [] => false,
+        [requirement] if requirement == ARCHIVE_MEMBER_TRANSPORT_ALGORITHM => true,
+        _ => {
+            return Err(MicrosandboxError::unsupported(
+                Operation::SnapshotOps,
+                UnsupportedReason::NotAvailable(format!(
+                    "snapshot archive requires unsupported extensions: {:?}",
+                    inventory.requires
+                )),
+            ));
+        }
+    };
     if inventory
         .suggested_name
         .as_deref()
@@ -1318,22 +1576,48 @@ async fn validate_archive_inventory(
                 entry.path
             )));
         }
-        let Some((encoded, apparent)) = observed.get(&entry.path) else {
+        let Some(observed_entry) = observed.get(&entry.path) else {
             return Err(MicrosandboxError::Custom(format!(
                 "inventoried entry is missing: {}",
                 entry.path
             )));
         };
-        if *encoded != entry.encoded_size || *apparent != entry.apparent_size {
+        if observed_entry.encoded_size != entry.encoded_size
+            || observed_entry.apparent_size != entry.apparent_size
+        {
             return Err(MicrosandboxError::Custom(format!(
                 "archive entry size mismatch: {}",
                 entry.path
             )));
         }
-        if entry.integrity.algorithm == "sha256" {
+        match &entry.transport_integrity {
+            Some(expected) => {
+                validate_archive_transport(expected, &entry.path)?;
+                if *expected != observed_entry.transport_integrity {
+                    return Err(MicrosandboxError::Custom(format!(
+                        "archive member transport integrity mismatch: {}",
+                        entry.path
+                    )));
+                }
+            }
+            None if requires_transport => {
+                return Err(MicrosandboxError::Custom(format!(
+                    "archive member is missing required transport integrity: {}",
+                    entry.path
+                )));
+            }
+            None => {}
+        }
+        // File-payload integrity belongs to the snapshot descriptor and is
+        // deliberately explicit, even when an old descriptor calls its
+        // algorithm plain `sha256`. Descriptor and image entry hashes are
+        // archive-level bindings and remain mandatory here.
+        if entry.kind != "file-payload"
+            && let Some(UpperIntegrity::Sha256 { digest }) = &entry.integrity
+        {
             let target = inventory_entry_target(&entry.path, snapshots_dir, cache_dir)?;
             let actual = format!("sha256:{}", hex::encode(file_sha256(&target).await?));
-            if actual != entry.integrity.digest {
+            if actual != *digest {
                 return Err(MicrosandboxError::Custom(format!(
                     "archive entry integrity mismatch: {}",
                     entry.path
@@ -1344,7 +1628,10 @@ async fn validate_archive_inventory(
             let owner = entry.owner_snapshot.as_deref().ok_or_else(|| {
                 MicrosandboxError::Custom("snapshot descriptor has no owner".into())
             })?;
-            if entry.integrity.algorithm != "sha256" || entry.integrity.digest != owner {
+            if !matches!(
+                &entry.integrity,
+                Some(UpperIntegrity::Sha256 { digest }) if digest == owner
+            ) {
                 return Err(MicrosandboxError::Custom(format!(
                     "snapshot descriptor identity mismatch: {}",
                     entry.path
@@ -1369,6 +1656,24 @@ async fn validate_archive_inventory(
         ));
     }
     Ok(inventory)
+}
+
+fn validate_archive_transport(
+    integrity: &ArchiveTransportIntegrity,
+    path: &str,
+) -> MicrosandboxResult<()> {
+    if integrity.algorithm != ARCHIVE_MEMBER_TRANSPORT_ALGORITHM
+        || !integrity.digest.starts_with("blake3:")
+        || integrity.digest.len() != "blake3:".len() + 64
+        || !integrity.digest["blake3:".len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(MicrosandboxError::Custom(format!(
+            "invalid archive member transport integrity: {path}"
+        )));
+    }
+    Ok(())
 }
 
 fn inventory_entry_target(
@@ -1441,7 +1746,9 @@ fn validate_inventory_snapshot_bindings(
                 }
             }
             "image-metadata" | "image-object" => {
-                if entry.owner_snapshot.is_some() || entry.integrity.algorithm != "sha256" {
+                if entry.owner_snapshot.is_some()
+                    || !matches!(&entry.integrity, Some(UpperIntegrity::Sha256 { .. }))
+                {
                     return Err(MicrosandboxError::Custom(format!(
                         "invalid image entry binding: {}",
                         entry.path
@@ -1520,9 +1827,7 @@ async fn verify_imported_snapshots(
         if !seen.insert(dir.clone()) {
             continue;
         }
-        let snap = store::open_snapshot(local, dir.to_string_lossy().as_ref()).await?;
-        snap.verify().await?;
-        snapshots.push(snap);
+        snapshots.push(store::open_snapshot(local, dir.to_string_lossy().as_ref()).await?);
     }
 
     if snapshots.is_empty() {
@@ -1993,6 +2298,15 @@ mod tests {
     fn digest_hex_rejects_uppercase_identity() {
         let uppercase = format!("sha256:{}", "A".repeat(64));
         assert!(digest_hex(&uppercase).is_err());
+    }
+
+    #[test]
+    fn released_archive_entry_without_transport_integrity_stays_canonical() {
+        let released = br#"{"path":"files/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/upper.ext4","owner_snapshot":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","kind":"file-payload","included":true,"encoded_size":5,"apparent_size":5,"integrity":null}"#;
+
+        let entry: ArchiveEntry = serde_json::from_slice(released).unwrap();
+        assert_eq!(entry.transport_integrity, None);
+        assert_eq!(serde_json::to_vec(&entry).unwrap(), released);
     }
 
     #[tokio::test]

@@ -252,6 +252,76 @@ Use an explicit bind address, such as `0.0.0.0`, only when you intentionally wan
 
 On Windows, the first published port may trigger a Windows Defender Firewall prompt for `msb.exe` because the runtime opens a host listening socket. For local development, keep the bind address on `127.0.0.1`. Only allow private/public network access in the firewall prompt when you intentionally bind a published port beyond loopback.
 
+## Rate limits
+
+Sandboxes are unlimited by default. Optional per-sandbox rate limiters cap outbound (egress) and inbound (ingress) traffic independently. Each limiter has two token buckets: a bandwidth bucket measured in bytes, and an ops bucket measured in packets. Buckets start full, refill continuously, and can carry a one-time startup burst that never refills. Limits are set at creation and take effect on the next sandbox start.
+
+<CodeGroup>
+```rust Rust
+use std::time::Duration;
+use microsandbox::size::SizeExt;
+
+let sb = Sandbox::builder("throttled")
+    .image("python")
+    .network(|n| n.rate_limiter(|r| r.egress(|r| r
+        .bandwidth(1.mib(), Duration::from_secs(1))
+        .bandwidth_burst(512.kib())
+        .ops(1_000, Duration::from_secs(1)))))
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+await using sb = await Sandbox.builder("throttled")
+    .image("python")
+    .network((n) => n.rateLimiter((r) => r.egress((r) => r
+        .bandwidth(1_048_576, 1_000)
+        .bandwidthBurst(524_288)
+        .ops(1_000, 1_000))))
+    .create();
+```
+
+```python Python
+from microsandbox import Network, NetworkRateLimiter, RateLimiter, Sandbox, TokenBucket
+
+sb = await Sandbox.create(
+    "throttled",
+    image="python",
+    network=Network(
+        rate_limiter=NetworkRateLimiter(
+            egress=RateLimiter(
+                bandwidth=TokenBucket(size=1_048_576, refill_time_ms=1_000, one_time_burst=524_288),
+                ops=TokenBucket(size=1_000, refill_time_ms=1_000),
+            ),
+        ),
+    ),
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "throttled",
+    m.WithImage("python"),
+    m.WithNetwork(&m.NetworkConfig{
+        RateLimiter: &m.NetworkRateLimiterConfig{
+            Egress: &m.RateLimiterConfig{
+                Bandwidth: &m.TokenBucketConfig{Size: 1 << 20, RefillTime: time.Second, OneTimeBurst: 512 << 10},
+                Ops:       &m.TokenBucketConfig{Size: 1000, RefillTime: time.Second},
+            },
+        },
+    }),
+)
+```
+
+```bash CLI
+msb create python --name throttled \
+  --net-egress-bandwidth 1M/1s \
+  --net-egress-bandwidth-burst 512K \
+  --net-egress-ops 1000/1s
+```
+</CodeGroup>
+
+The `--net-ingress-*` flags mirror the egress flags for inbound traffic (`--net-ingress-bandwidth`, `--net-ingress-bandwidth-burst`, `--net-ingress-ops`, `--net-ingress-ops-burst`). Sizes accept raw bytes plus `K`, `M`, and `G` suffixes; the interval defaults to one second when omitted. A frame larger than the bandwidth bucket is delivered once and the limiter then pauses long enough to pay it off, so oversized packets are throttled instead of stuck.
+
 ## Reaching the host
 
 <Tooltip tip="The host group is backend-relative; on microsandbox cloud it does not refer to the machine running the SDK or CLI, so expose local services through a reachable network endpoint."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>

@@ -591,6 +591,27 @@ Limit the maximum number of concurrent network connections from the sandbox.
   </div>
 </div>
 
+#### <span className="msb-recv">network.</span><span className="msb-hn">rateLimiter()</span>
+
+```typescript
+rateLimiter(configure: (r: NetworkRateLimiterBuilder) => NetworkRateLimiterBuilder): this
+```
+
+<Accordion title="Example">
+
+```typescript
+.network((n) => n.rateLimiter((r) => r
+  .egress((r) => r
+    .bandwidth(1_048_576, 1_000)
+    .bandwidthBurst(524_288)
+    .ops(1_000, 1_000))
+  .ingress((r) => r.ops(1_000, 1_000))))
+```
+
+</Accordion>
+
+Configure local network rate limits. Egress and ingress are independently optional; an omitted direction is unlimited. The limit applies on the next sandbox start. Cloud network configuration does not expose rate limits.
+
 #### <span className="msb-recv">network.</span><span className="msb-hn">ipv4Pool()</span>
 
 <Tooltip tip="Interface and IP-pool overrides are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
@@ -1764,6 +1785,77 @@ Allow placeholders to pass through unchanged to any host. The explicit `iUnderst
   </div>
 </div>
 
+## NetworkRateLimiterBuilder
+
+Groups local rate limits by traffic direction. Supplied to [`NetworkBuilder.rateLimiter()`](#ratelimiter).
+
+#### <span className="msb-recv">.</span><span className="msb-hn">egress()</span>
+
+```typescript
+egress(configure: (r: RateLimiterBuilder) => RateLimiterBuilder): this
+```
+
+Configure the guest-to-runtime direction.
+
+#### <span className="msb-recv">.</span><span className="msb-hn">ingress()</span>
+
+```typescript
+ingress(configure: (r: RateLimiterBuilder) => RateLimiterBuilder): this
+```
+
+Configure the runtime-to-guest direction.
+
+## RateLimiterBuilder
+
+Builder for one direction's rate limiter, supplied to [`NetworkRateLimiterBuilder.egress()`](#egress) or [`ingress()`](#ingress). A limiter caps bandwidth (bytes) and packet rate (frames) independently; leaving a bucket unset leaves that dimension unlimited. Buckets start full plus their one-time burst and refill continuously. Every setter returns `this`.
+
+Validation runs at `NetworkBuilder.build()`: a limiter with neither bucket, a zero bucket size or refill interval, or a burst without its bucket throws. Bucket values must be non-negative integers.
+
+#### <span className="msb-recv">.</span><span className="msb-hn">bandwidth()</span>
+
+```typescript
+bandwidth(sizeBytes: number, refillTimeMs: number): this
+```
+
+Cap bandwidth at `sizeBytes` bytes per `refillTimeMs` milliseconds.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>sizeBytes</code><span className="msb-type">number</span></div>
+    <div className="msb-param-desc">Bucket capacity in bytes.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>refillTimeMs</code><span className="msb-type">number</span></div>
+    <div className="msb-param-desc">Time to refill the full bucket, in milliseconds.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">.</span><span className="msb-hn">bandwidthBurst()</span>
+
+```typescript
+bandwidthBurst(sizeBytes: number): this
+```
+
+Grant a one-time startup burst of extra bytes on top of the bandwidth bucket. The burst is spent before the regular budget and never refills. Requires `bandwidth()`.
+
+#### <span className="msb-recv">.</span><span className="msb-hn">ops()</span>
+
+```typescript
+ops(count: number, refillTimeMs: number): this
+```
+
+Cap packet rate at `count` frames per `refillTimeMs` milliseconds.
+
+#### <span className="msb-recv">.</span><span className="msb-hn">opsBurst()</span>
+
+```typescript
+opsBurst(count: number): this
+```
+
+Grant a one-time startup burst of extra frames on top of the ops bucket. Requires `ops()`.
+
 ---
 
 ## InterfaceOverridesBuilder
@@ -1824,6 +1916,7 @@ Built network configuration produced by `NetworkBuilder.build()`. Keys are camel
 | secrets | `readonly SecretEntry[]` | Secret entries |
 | secretViolation | [`ViolationAction`](/sdk/typescript/secrets#violationaction) ` \| null` | Action on disallowed secret use |
 | maxConnections | `number \| null` | Maximum concurrent connections |
+| rateLimiter | [`NetworkRateLimiterConfig`](#networkratelimiterconfig) ` \| null` | Local rate limits grouped by direction |
 | interface | `{ ipv4Pool?, ipv6Pool?, ipv4Address?, ipv6Address?, mac?, mtu? }` | Optional interface overrides |
 | trustHostCAs | `boolean` | Ship host CAs into the guest |
 
@@ -1950,3 +2043,43 @@ TLS interception configuration.
 |-------|------|-------------|
 | pattern | `string` | Exact host or `*.suffix` wildcard |
 | verify | `boolean` | Whether to verify certificates for matching upstream hosts |
+
+### NetworkRateLimiterConfig
+
+<p className="msb-backref">Used by <a href="#networkconfig">NetworkConfig.rateLimiter</a></p>
+
+```typescript
+interface NetworkRateLimiterConfig {
+  readonly egress?: RateLimiterConfig;
+  readonly ingress?: RateLimiterConfig;
+}
+```
+
+Local network rate limits grouped by direction. An omitted direction is unlimited.
+
+### RateLimiterConfig
+
+<p className="msb-backref">Held by <a href="#networkratelimiterconfig">NetworkRateLimiterConfig</a></p>
+
+```typescript
+interface RateLimiterConfig {
+  readonly bandwidth?: TokenBucketConfig;
+  readonly ops?: TokenBucketConfig;
+}
+```
+
+Rate limiter for one traffic direction. A missing bucket leaves that dimension unlimited.
+
+### TokenBucketConfig
+
+<p className="msb-backref">Held by <a href="#ratelimiterconfig">RateLimiterConfig</a></p>
+
+One token bucket of a rate limiter: starts full, refills continuously at `size` tokens per `refillTimeMs`, and the one-time burst never refills.
+
+```typescript
+interface TokenBucketConfig {
+  readonly size: number;
+  readonly refillTimeMs: number;
+  readonly oneTimeBurst: number;
+}
+```

@@ -58,6 +58,15 @@ lto = true
 strip = true
 panic = "abort"
 
+# CI artifacts exercise optimized code without paying the full release/LTO
+# cost. The release workflow remains the only place that uses `release`.
+[profile.ci]
+inherits = "release"
+opt-level = 1
+codegen-units = 16
+lto = false
+strip = false
+
 [workspace.dependencies]
 # Internal crates. Versioned here so a release bumps one place, not every
 # manifest; members reference them via `{ workspace = true }`.
@@ -89,6 +98,7 @@ anyhow = "1.0"
 astral-tokio-tar = "0.6"
 base64 = "0.23"
 async-compression = "0.4"
+blake3 = "1.8"
 bytes = "1.9"
 chrono = { version = "0.4", features = ["serde"] }
 ciborium = "0.2"
@@ -114,6 +124,7 @@ notify = "8"
 oci-client = "0.17"
 oci-spec = "0.10.0"
 rand = "0.10.1"
+rayon = "1.11"
 reflink-copy = "0.1"
 reqwest = { version = "0.13", features = ["json", "stream"] }
 resolv-conf = "0.7"

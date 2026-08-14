@@ -56,6 +56,29 @@ impl SmoltcpBackend {
     pub fn new(shared: Arc<SharedState>) -> Self {
         Self { shared }
     }
+
+    fn read_frame_from_ring(&mut self, buf: &mut [u8]) -> Result<usize, ReadError> {
+        self.shared.rx_wake.drain();
+
+        let frame = self.shared.rx_ring.pop().ok_or(ReadError::NothingRead)?;
+
+        let total_len = VIRTIO_NET_HDR_LEN + frame.len();
+        if total_len > buf.len() {
+            // Frame too large for the buffer — drop it to avoid panicking.
+            tracing::debug!(
+                frame_len = frame.len(),
+                buf_len = buf.len(),
+                "dropping oversized frame from rx_ring"
+            );
+            return Err(ReadError::NothingRead);
+        }
+
+        // Prepend zeroed virtio-net header.
+        buf[..VIRTIO_NET_HDR_LEN].fill(0);
+        buf[VIRTIO_NET_HDR_LEN..total_len].copy_from_slice(&frame);
+
+        Ok(total_len)
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -87,26 +110,7 @@ impl NetBackend for SmoltcpBackend {
     /// Deliver a frame from smoltcp to the guest. Prepends a zeroed
     /// virtio-net header.
     fn read_frame(&mut self, buf: &mut [u8]) -> Result<usize, ReadError> {
-        self.shared.rx_wake.drain();
-
-        let frame = self.shared.rx_ring.pop().ok_or(ReadError::NothingRead)?;
-
-        let total_len = VIRTIO_NET_HDR_LEN + frame.len();
-        if total_len > buf.len() {
-            // Frame too large for the buffer — drop it to avoid panicking.
-            tracing::debug!(
-                frame_len = frame.len(),
-                buf_len = buf.len(),
-                "dropping oversized frame from rx_ring"
-            );
-            return Err(ReadError::NothingRead);
-        }
-
-        // Prepend zeroed virtio-net header.
-        buf[..VIRTIO_NET_HDR_LEN].fill(0);
-        buf[VIRTIO_NET_HDR_LEN..total_len].copy_from_slice(&frame);
-
-        Ok(total_len)
+        self.read_frame_from_ring(buf)
     }
 
     /// No partial writes — queue push is atomic.

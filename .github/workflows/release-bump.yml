@@ -56,9 +56,9 @@ jobs:
       - name: Build agentd for local cargo checks
         run: |
           rustup target add x86_64-unknown-linux-musl
-          cargo build --release --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl
+          cargo build --profile ci --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl
           mkdir -p build
-          cp target/x86_64-unknown-linux-musl/release/agentd build/agentd
+          cp target/x86_64-unknown-linux-musl/ci/agentd build/agentd
 
       - name: Build local runtime placeholders for cargo check
         run: |

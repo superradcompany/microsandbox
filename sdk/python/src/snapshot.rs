@@ -206,8 +206,8 @@ impl PySnapshot {
     }
 
     /// Unpack a snapshot archive (`.tar.zst` or `.tar`) into the
-    /// snapshots directory, verifying recorded integrity on the way
-    /// in.
+    /// snapshots directory, preserving recorded integrity for explicit
+    /// verification.
     #[staticmethod]
     #[pyo3(signature = (archive, *, dest = None))]
     fn load<'py>(
@@ -346,8 +346,8 @@ impl PySnapshot {
 
     /// Verify recorded content integrity.
     ///
-    /// Returns mandatory file-state integrity with `kind="verified"`,
-    /// `algorithm`, and `digest`.
+    /// Returns `kind="not_recorded"` when no integrity was requested, or
+    /// `kind="verified"` with the matching algorithm and digest.
     fn verify<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let snap = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -355,6 +355,9 @@ impl PySnapshot {
             Python::with_gil(|py| -> PyResult<PyObject> {
                 let upper = PyDict::new(py);
                 match report.upper {
+                    RustUpperVerifyStatus::NotRecorded => {
+                        upper.set_item("kind", "not_recorded")?;
+                    }
                     RustUpperVerifyStatus::Verified { algorithm, digest } => {
                         upper.set_item("kind", "verified")?;
                         upper.set_item("algorithm", algorithm)?;

@@ -377,12 +377,18 @@ export const RuleDestinationBuilder = napi.RuleDestinationBuilder;
 export type RuleDestinationBuilder = NapiRuleDestinationBuilder;
 import type {
   NapiInterfaceOverridesBuilder,
+  NapiNetworkRateLimiterBuilder,
   NapiPullProgressEvent,
   NapiPullProgressStream,
+  NapiRateLimiterBuilder,
   NapiVolumeMount,
 } from "./internal/napi.js";
 export const InterfaceOverridesBuilder = napi.InterfaceOverridesBuilder;
 export type InterfaceOverridesBuilder = NapiInterfaceOverridesBuilder;
+export const NetworkRateLimiterBuilder = napi.NetworkRateLimiterBuilder;
+export type NetworkRateLimiterBuilder = NapiNetworkRateLimiterBuilder;
+export const RateLimiterBuilder = napi.RateLimiterBuilder;
+export type RateLimiterBuilder = NapiRateLimiterBuilder;
 export type PullProgressEvent = NapiPullProgressEvent;
 export type PullProgressStream = NapiPullProgressStream;
 

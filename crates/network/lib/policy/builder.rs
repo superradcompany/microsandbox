@@ -32,6 +32,7 @@
 use std::str::FromStr;
 
 use ipnetwork::IpNetwork;
+use microsandbox_types::{NetworkRateLimitDirection, RateLimitConfigError};
 
 use crate::secrets::config::SecretConfigError;
 
@@ -126,6 +127,58 @@ pub enum BuildError {
         /// Underlying secret validation error.
         #[from]
         source: SecretConfigError,
+    },
+
+    /// A rate limiter failed validation.
+    #[error("{direction} rate limiter: {source}")]
+    InvalidRateLimitConfig {
+        /// Which limiter is invalid: `egress` or `ingress`.
+        direction: NetworkRateLimitDirection,
+        /// Underlying rate limit validation error.
+        #[source]
+        source: RateLimitConfigError,
+    },
+
+    /// A network rate limiter was configured without either direction.
+    #[error("rate limiter must configure at least one of egress or ingress")]
+    EmptyNetworkRateLimiter,
+
+    /// A one-time burst was set without its corresponding bucket.
+    #[error("{direction} rate limiter: {bucket}_burst requires the {bucket} bucket")]
+    RateLimitBurstWithoutBucket {
+        /// Which limiter is invalid: `egress` or `ingress`.
+        direction: NetworkRateLimitDirection,
+        /// The bucket the burst belongs to: `bandwidth` or `ops`.
+        bucket: &'static str,
+    },
+
+    /// A rate limiter refill interval is shorter than the wire format supports.
+    #[error("{direction} rate limiter: {bucket} refill interval must be at least one millisecond")]
+    RateLimitRefillTooShort {
+        /// Which limiter is invalid: `egress` or `ingress`.
+        direction: NetworkRateLimitDirection,
+        /// The bucket with the short interval: `bandwidth` or `ops`.
+        bucket: &'static str,
+    },
+
+    /// A rate limiter refill interval cannot be represented exactly in milliseconds.
+    #[error(
+        "{direction} rate limiter: {bucket} refill interval must be a whole number of milliseconds"
+    )]
+    RateLimitRefillPrecision {
+        /// Which limiter is invalid: `egress` or `ingress`.
+        direction: NetworkRateLimitDirection,
+        /// The bucket with the fractional-millisecond interval: `bandwidth` or `ops`.
+        bucket: &'static str,
+    },
+
+    /// A rate limiter refill interval does not fit in u64 milliseconds.
+    #[error("{direction} rate limiter: {bucket} refill interval overflows u64 milliseconds")]
+    RateLimitRefillTooLong {
+        /// Which limiter is invalid: `egress` or `ingress`.
+        direction: NetworkRateLimitDirection,
+        /// The bucket with the overflowing interval: `bandwidth` or `ops`.
+        bucket: &'static str,
     },
 }
 

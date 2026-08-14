@@ -4,7 +4,9 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::File;
 #[cfg(not(unix))]
 use std::fs::OpenOptions;
-use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(unix)]
+use std::io::Read;
+use std::io::Write;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(unix)]
@@ -17,12 +19,8 @@ use microsandbox_image::snapshot::migration::{
     V066_BACKUP_FILENAME, V066_DESCRIPTOR_FILENAME, V066PayloadIdentity, V066SourceInfo,
     inspect_v066_source, translate_v066_forward,
 };
-use microsandbox_image::snapshot::{
-    DESCRIPTOR_FILENAME, Manifest, SPARSE_SHA256_V1, SnapshotState, UpperIntegrity,
-};
-use microsandbox_utils::extent::ExtentMap;
+use microsandbox_image::snapshot::{DESCRIPTOR_FILENAME, Manifest, SnapshotState};
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement, TransactionTrait};
-use sha2::{Digest as _, Sha256};
 
 use crate::{MicrosandboxError, MicrosandboxResult};
 
@@ -77,13 +75,13 @@ struct FileIdentity {
     changed_nanos: i64,
 }
 
-struct HashedCandidate {
+struct InspectedCandidate {
     pinned: PinnedCandidate,
     payload: V066PayloadIdentity,
 }
 
 struct PlannedCandidate {
-    hashed: HashedCandidate,
+    inspected: InspectedCandidate,
     target: Manifest,
     target_bytes: Vec<u8>,
     target_digest: String,
@@ -156,18 +154,18 @@ pub(crate) async fn normalize_staged(
     if pinned.is_empty() {
         return Ok(());
     }
-    let mut hashed = Vec::with_capacity(pinned.len());
+    let mut inspected = Vec::with_capacity(pinned.len());
     for candidate in pinned {
-        hashed.push(
-            tokio::task::spawn_blocking(move || hash_candidate(candidate))
+        inspected.push(
+            tokio::task::spawn_blocking(move || inspect_candidate(candidate))
                 .await
                 .map_err(|error| {
-                    MicrosandboxError::Custom(format!("staged snapshot hash task: {error}"))
+                    MicrosandboxError::Custom(format!("staged snapshot inspection task: {error}"))
                 })??,
         );
     }
     let canonical = indexed_canonical_digests(pools.write().inner()).await?;
-    let (planned, failures) = plan_graph(hashed, &canonical);
+    let (planned, failures) = plan_graph(inspected, &canonical);
     if let Some((_, error)) = failures.into_iter().next() {
         return Err(error);
     }
@@ -224,15 +222,15 @@ async fn reconcile_paths(
         }
     }
 
-    let mut hashed = Vec::new();
+    let mut inspected = Vec::new();
     for candidate in pinned {
         let path = candidate.path.clone();
-        match tokio::task::spawn_blocking(move || hash_candidate(candidate))
+        match tokio::task::spawn_blocking(move || inspect_candidate(candidate))
             .await
             .map_err(|error| {
-                MicrosandboxError::Custom(format!("snapshot migration hash task: {error}"))
+                MicrosandboxError::Custom(format!("snapshot migration inspection task: {error}"))
             })? {
-            Ok(candidate) => hashed.push(candidate),
+            Ok(candidate) => inspected.push(candidate),
             Err(error) => {
                 report.blocked += 1;
                 record_blocked_path(db, &path, &error).await?;
@@ -241,7 +239,7 @@ async fn reconcile_paths(
     }
 
     let canonical_digests = indexed_canonical_digests(db).await?;
-    let (planned, graph_failures) = plan_graph(hashed, &canonical_digests);
+    let (planned, graph_failures) = plan_graph(inspected, &canonical_digests);
     for (path, error) in graph_failures {
         report.blocked += 1;
         record_blocked_path(db, &path, &error).await?;
@@ -258,18 +256,18 @@ async fn reconcile_paths(
     for candidate in &planned {
         if let Err(error) = publish_descriptor(candidate) {
             for blocked in &planned {
-                record_blocked_path(db, &blocked.hashed.pinned.path, &error).await?;
+                record_blocked_path(db, &blocked.inspected.pinned.path, &error).await?;
             }
             report.blocked += planned.len();
             return Ok(report);
         }
-        journal_phase(db, &candidate.hashed.pinned.path, "descriptor_published").await?;
+        journal_phase(db, &candidate.inspected.pinned.path, "descriptor_published").await?;
     }
 
     publish_index_component(db, &planned).await?;
     for candidate in &planned {
         retire_legacy_descriptor(candidate)?;
-        journal_complete(db, &candidate.hashed.pinned.path).await?;
+        journal_complete(db, &candidate.inspected.pinned.path).await?;
         report.migrated += 1;
     }
 
@@ -401,25 +399,25 @@ fn pin_candidate(path: PathBuf) -> MicrosandboxResult<PinnedCandidate> {
     }
 }
 
-fn hash_candidate(mut candidate: PinnedCandidate) -> MicrosandboxResult<HashedCandidate> {
-    let payload = hash_payload(&mut candidate.payload)?;
+fn inspect_candidate(mut candidate: PinnedCandidate) -> MicrosandboxResult<InspectedCandidate> {
+    let payload = inspect_payload(&mut candidate.payload)?;
     let after = file_identity(&candidate.payload)?;
     if after != candidate.payload_before {
         return migration_error(
             "legacy_descriptor_changed_during_migration",
             "discovered",
             &candidate.path,
-            "payload identity or change metadata changed while hashing",
+            "payload identity or change metadata changed while planning",
         );
     }
-    Ok(HashedCandidate {
+    Ok(InspectedCandidate {
         pinned: candidate,
         payload,
     })
 }
 
 fn plan_graph(
-    candidates: Vec<HashedCandidate>,
+    candidates: Vec<InspectedCandidate>,
     canonical_digests: &HashSet<String>,
 ) -> (Vec<PlannedCandidate>, Vec<(PathBuf, MicrosandboxError)>) {
     let mut by_source = HashMap::new();
@@ -477,7 +475,7 @@ fn plan_graph(
 #[allow(clippy::too_many_arguments)]
 fn visit_candidate(
     index: usize,
-    candidates: &[HashedCandidate],
+    candidates: &[InspectedCandidate],
     by_source: &HashMap<String, usize>,
     canonical_digests: &HashSet<String>,
     visiting: &mut HashSet<usize>,
@@ -577,7 +575,7 @@ fn visit_candidate(
     translated.insert(
         index,
         PlannedCandidate {
-            hashed: HashedCandidate {
+            inspected: InspectedCandidate {
                 pinned: clone_pinned_for_plan(&candidates[index])?,
                 payload: candidates[index].payload.clone(),
             },
@@ -592,7 +590,7 @@ fn visit_candidate(
     Ok(target_digest)
 }
 
-fn clone_pinned_for_plan(candidate: &HashedCandidate) -> MicrosandboxResult<PinnedCandidate> {
+fn clone_pinned_for_plan(candidate: &InspectedCandidate) -> MicrosandboxResult<PinnedCandidate> {
     Ok(PinnedCandidate {
         path: candidate.pinned.path.clone(),
         source_bytes: candidate.pinned.source_bytes.clone(),
@@ -610,7 +608,7 @@ fn publish_descriptor(candidate: &PlannedCandidate) -> MicrosandboxResult<()> {
     #[cfg(unix)]
     {
         if let Ok(mut existing) = openat_file(
-            &candidate.hashed.pinned.directory,
+            &candidate.inspected.pinned.directory,
             DESCRIPTOR_FILENAME,
             libc::O_RDONLY | libc::O_NOFOLLOW,
             0,
@@ -623,13 +621,13 @@ fn publish_descriptor(candidate: &PlannedCandidate) -> MicrosandboxResult<()> {
             return migration_error(
                 "legacy_target_collision",
                 "planned",
-                &candidate.hashed.pinned.path,
+                &candidate.inspected.pinned.path,
                 "an unexpected snapshot.json already exists",
             );
         }
         let temp_name = format!(".snapshot.json.migrate.{}", std::process::id());
         let mut temp = openat_file(
-            &candidate.hashed.pinned.directory,
+            &candidate.inspected.pinned.directory,
             &temp_name,
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW,
             0o600,
@@ -638,17 +636,17 @@ fn publish_descriptor(candidate: &PlannedCandidate) -> MicrosandboxResult<()> {
         temp.sync_all()?;
         drop(temp);
         renameat(
-            &candidate.hashed.pinned.directory,
+            &candidate.inspected.pinned.directory,
             &temp_name,
             DESCRIPTOR_FILENAME,
         )?;
-        candidate.hashed.pinned.directory.sync_all()?;
+        candidate.inspected.pinned.directory.sync_all()?;
         Ok(())
     }
 
     #[cfg(not(unix))]
     {
-        let target = candidate.hashed.pinned.path.join(DESCRIPTOR_FILENAME);
+        let target = candidate.inspected.pinned.path.join(DESCRIPTOR_FILENAME);
         if target.exists() {
             if std::fs::read(&target)? == candidate.target_bytes {
                 return Ok(());
@@ -656,12 +654,12 @@ fn publish_descriptor(candidate: &PlannedCandidate) -> MicrosandboxResult<()> {
             return migration_error(
                 "legacy_target_collision",
                 "planned",
-                &candidate.hashed.pinned.path,
+                &candidate.inspected.pinned.path,
                 "an unexpected snapshot.json already exists",
             );
         }
         let temp = candidate
-            .hashed
+            .inspected
             .pinned
             .path
             .join(format!(".snapshot.json.migrate.{}", std::process::id()));
@@ -680,7 +678,7 @@ fn retire_legacy_descriptor(candidate: &PlannedCandidate) -> MicrosandboxResult<
     #[cfg(unix)]
     {
         if openat_file(
-            &candidate.hashed.pinned.directory,
+            &candidate.inspected.pinned.directory,
             V066_BACKUP_FILENAME,
             libc::O_RDONLY | libc::O_NOFOLLOW,
             0,
@@ -690,28 +688,32 @@ fn retire_legacy_descriptor(candidate: &PlannedCandidate) -> MicrosandboxResult<
             return migration_error(
                 "legacy_migration_recovery_required",
                 "index_published",
-                &candidate.hashed.pinned.path,
+                &candidate.inspected.pinned.path,
                 "legacy backup already exists while manifest.json is still active",
             );
         }
         renameat(
-            &candidate.hashed.pinned.directory,
+            &candidate.inspected.pinned.directory,
             V066_DESCRIPTOR_FILENAME,
             V066_BACKUP_FILENAME,
         )?;
-        candidate.hashed.pinned.directory.sync_all()?;
+        candidate.inspected.pinned.directory.sync_all()?;
         Ok(())
     }
 
     #[cfg(not(unix))]
     {
-        let source = candidate.hashed.pinned.path.join(V066_DESCRIPTOR_FILENAME);
-        let backup = candidate.hashed.pinned.path.join(V066_BACKUP_FILENAME);
+        let source = candidate
+            .inspected
+            .pinned
+            .path
+            .join(V066_DESCRIPTOR_FILENAME);
+        let backup = candidate.inspected.pinned.path.join(V066_BACKUP_FILENAME);
         if backup.exists() {
             return migration_error(
                 "legacy_migration_recovery_required",
                 "index_published",
-                &candidate.hashed.pinned.path,
+                &candidate.inspected.pinned.path,
                 "legacy backup already exists while manifest.json is still active",
             );
         }
@@ -777,14 +779,14 @@ async fn preflight_target_collisions(
         .collect::<Result<_, sea_orm::DbErr>>()?;
     let mut targets = HashMap::new();
     for candidate in planned {
-        let path = candidate.hashed.pinned.path.display().to_string();
+        let path = candidate.inspected.pinned.path.display().to_string();
         if let Some(other) = existing.get(&candidate.target_digest)
             && other != &path
         {
             return migration_error(
                 "legacy_target_collision",
                 "planned",
-                &candidate.hashed.pinned.path,
+                &candidate.inspected.pinned.path,
                 format!("target identity already belongs to {other}"),
             );
         }
@@ -794,7 +796,7 @@ async fn preflight_target_collisions(
             return migration_error(
                 "legacy_target_collision",
                 "planned",
-                &candidate.hashed.pinned.path,
+                &candidate.inspected.pinned.path,
                 format!("target identity is planned at both {other} and {path}"),
             );
         }
@@ -809,13 +811,19 @@ async fn publish_index_component(
     let transaction = db.begin().await?;
     for candidate in planned {
         revalidate_planned_candidate(candidate)?;
-        let path = candidate.hashed.pinned.path.display().to_string();
+        let path = candidate.inspected.pinned.path.display().to_string();
         transaction
             .execute_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Sqlite,
                 "DELETE FROM snapshot_index WHERE digest = ? OR artifact_path = ?",
                 [
-                    candidate.hashed.pinned.source.source_digest.clone().into(),
+                    candidate
+                        .inspected
+                        .pinned
+                        .source
+                        .source_digest
+                        .clone()
+                        .into(),
                     path.clone().into(),
                 ],
             ))
@@ -843,24 +851,26 @@ async fn publish_index_component(
 }
 
 fn revalidate_planned_candidate(candidate: &PlannedCandidate) -> MicrosandboxResult<()> {
-    if file_identity(&candidate.hashed.pinned.payload)? != candidate.hashed.pinned.payload_before {
+    if file_identity(&candidate.inspected.pinned.payload)?
+        != candidate.inspected.pinned.payload_before
+    {
         return migration_error(
             "legacy_descriptor_changed_during_migration",
             "descriptor_published",
-            &candidate.hashed.pinned.path,
+            &candidate.inspected.pinned.path,
             "payload identity changed before index publication",
         );
     }
     #[cfg(unix)]
     let (source, target) = {
         let mut source = openat_file(
-            &candidate.hashed.pinned.directory,
+            &candidate.inspected.pinned.directory,
             V066_DESCRIPTOR_FILENAME,
             libc::O_RDONLY | libc::O_NOFOLLOW,
             0,
         )?;
         let mut target = openat_file(
-            &candidate.hashed.pinned.directory,
+            &candidate.inspected.pinned.directory,
             DESCRIPTOR_FILENAME,
             libc::O_RDONLY | libc::O_NOFOLLOW,
             0,
@@ -873,14 +883,20 @@ fn revalidate_planned_candidate(candidate: &PlannedCandidate) -> MicrosandboxRes
     };
     #[cfg(not(unix))]
     let (source, target) = (
-        std::fs::read(candidate.hashed.pinned.path.join(V066_DESCRIPTOR_FILENAME))?,
-        std::fs::read(candidate.hashed.pinned.path.join(DESCRIPTOR_FILENAME))?,
+        std::fs::read(
+            candidate
+                .inspected
+                .pinned
+                .path
+                .join(V066_DESCRIPTOR_FILENAME),
+        )?,
+        std::fs::read(candidate.inspected.pinned.path.join(DESCRIPTOR_FILENAME))?,
     );
-    if source != candidate.hashed.pinned.source_bytes || target != candidate.target_bytes {
+    if source != candidate.inspected.pinned.source_bytes || target != candidate.target_bytes {
         return migration_error(
             "legacy_descriptor_changed_during_migration",
             "descriptor_published",
-            &candidate.hashed.pinned.path,
+            &candidate.inspected.pinned.path,
             "source or target descriptor changed before index publication",
         );
     }
@@ -898,7 +914,7 @@ where
         .map_err(|error| MicrosandboxError::SnapshotMigration {
             code: "legacy_descriptor_malformed".into(),
             phase: "index_published".into(),
-            artifact: candidate.hashed.pinned.path.display().to_string(),
+            artifact: candidate.inspected.pinned.path.display().to_string(),
             detail: bounded_detail(error.to_string()),
         })?
         .naive_utc();
@@ -910,7 +926,7 @@ where
         microsandbox_image::snapshot::SnapshotFormat::Qcow2 => "qcow2",
     };
     let name = candidate
-        .hashed
+        .inspected
         .pinned
         .path
         .file_name()
@@ -927,7 +943,7 @@ where
             candidate.target.image.manifest_digest.clone().into(),
             format.into(),
             file.fstype.clone().into(),
-            candidate.hashed.pinned.path.display().to_string().into(),
+            candidate.inspected.pinned.path.display().to_string().into(),
             i64::try_from(file.upper.size_bytes)
                 .map_err(|_| MicrosandboxError::SnapshotIntegrity("snapshot size does not fit SQLite".into()))?
                 .into(),
@@ -965,21 +981,27 @@ async fn journal_planned(
     db: &DatabaseConnection,
     candidate: &PlannedCandidate,
 ) -> MicrosandboxResult<()> {
-    let file_identity = format_file_identity(&candidate.hashed.pinned.payload_before);
+    let file_identity = format_file_identity(&candidate.inspected.pinned.payload_before);
+    let payload_integrity = candidate
+        .target
+        .state
+        .as_file()
+        .and_then(|file| file.upper.integrity.as_ref())
+        .map(|integrity| integrity.value().to_string());
     db.execute_raw(Statement::from_sql_and_values(
         DatabaseBackend::Sqlite,
         "UPDATE snapshot_artifact_migration SET target_digest = ?, target_parent_digest = ?, payload_integrity = ?, payload_size = ?, payload_file_identity = ?, phase = 'planned', updated_at = ?, error_code = NULL, error_detail = NULL WHERE kind = ? AND artifact_path = ?",
         [
             candidate.target_digest.clone().into(),
             candidate.target_parent_digest.clone().into(),
-            candidate.hashed.payload.sparse_integrity.digest.clone().into(),
-            i64::try_from(candidate.hashed.payload.size_bytes)
+            payload_integrity.into(),
+            i64::try_from(candidate.inspected.payload.size_bytes)
                 .map_err(|_| MicrosandboxError::SnapshotIntegrity("snapshot size does not fit SQLite".into()))?
                 .into(),
             file_identity.into(),
             Utc::now().naive_utc().into(),
             MIGRATION_KIND.into(),
-            candidate.hashed.pinned.path.display().to_string().into(),
+            candidate.inspected.pinned.path.display().to_string().into(),
         ],
     ))
     .await?;
@@ -1105,88 +1127,15 @@ async fn load_blocked_error(
 }
 
 //--------------------------------------------------------------------------------------------------
-// Functions: File Integrity and Confinement
+// Functions: File Metadata and Confinement
 //--------------------------------------------------------------------------------------------------
 
-pub(super) fn hash_payload(file: &mut File) -> MicrosandboxResult<V066PayloadIdentity> {
-    let len = file.metadata()?.len();
-    let mut sparse = Sha256::new();
-    sparse.update(b"msb-sparse-sha256-v1\0");
-    sparse.update(len.to_le_bytes());
-    let mut ordinary = Sha256::new();
-
-    match ExtentMap::scan_file(file)? {
-        Some(map) => {
-            let mut offset = 0;
-            for (start, extent_len) in map.extents {
-                if start > offset {
-                    hash_zeroes(start - offset, &mut sparse, &mut ordinary);
-                }
-                hash_extent(file, start, extent_len, &mut sparse, &mut ordinary)?;
-                offset = start + extent_len;
-            }
-            if offset < len {
-                hash_zeroes(len - offset, &mut sparse, &mut ordinary);
-            }
-        }
-        None => {
-            file.seek(SeekFrom::Start(0))?;
-            let mut buffer = vec![0; 1024 * 1024];
-            loop {
-                let read = file.read(&mut buffer)?;
-                if read == 0 {
-                    break;
-                }
-                sparse.update(&buffer[..read]);
-                ordinary.update(&buffer[..read]);
-            }
-        }
-    }
-
+pub(super) fn inspect_payload(file: &mut File) -> MicrosandboxResult<V066PayloadIdentity> {
+    // Descriptor migration inspects only pinned metadata and never consumes
+    // payload bytes or executes a released integrity algorithm.
     Ok(V066PayloadIdentity {
-        size_bytes: len,
-        sparse_integrity: UpperIntegrity {
-            algorithm: SPARSE_SHA256_V1.into(),
-            digest: format!("sha256:{}", hex::encode(sparse.finalize())),
-        },
-        sha256: format!("sha256:{}", hex::encode(ordinary.finalize())),
+        size_bytes: file.metadata()?.len(),
     })
-}
-
-fn hash_extent(
-    file: &mut File,
-    offset: u64,
-    len: u64,
-    sparse: &mut Sha256,
-    ordinary: &mut Sha256,
-) -> std::io::Result<()> {
-    let mut buffer = vec![0; 1024 * 1024];
-    let mut consumed = 0;
-    file.seek(SeekFrom::Start(offset))?;
-    while consumed < len {
-        let wanted = (len - consumed).min(buffer.len() as u64) as usize;
-        let read = file.read(&mut buffer[..wanted])?;
-        if read == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "payload truncated while hashing",
-            ));
-        }
-        sparse.update(&buffer[..read]);
-        ordinary.update(&buffer[..read]);
-        consumed += read as u64;
-    }
-    Ok(())
-}
-
-fn hash_zeroes(mut len: u64, sparse: &mut Sha256, ordinary: &mut Sha256) {
-    static ZEROES: [u8; 1024 * 1024] = [0; 1024 * 1024];
-    while len > 0 {
-        let chunk = len.min(ZEROES.len() as u64) as usize;
-        sparse.update(&ZEROES[..chunk]);
-        ordinary.update(&ZEROES[..chunk]);
-        len -= chunk as u64;
-    }
 }
 
 fn file_identity(file: &File) -> MicrosandboxResult<FileIdentity> {

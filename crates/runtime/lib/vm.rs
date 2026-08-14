@@ -397,6 +397,12 @@ struct BindIdentityMapRegistration {
 }
 
 #[cfg(feature = "net")]
+struct KrunNetworkRateLimiters {
+    rx: Option<msb_krun::RateLimiterConfig>,
+    tx: Option<msb_krun::RateLimiterConfig>,
+}
+
+#[cfg(feature = "net")]
 type NetworkTerminationHandle = microsandbox_network::network::TerminationHandle;
 
 #[cfg(not(feature = "net"))]
@@ -1736,6 +1742,7 @@ fn build_vm(
             .secrets
             .validate()
             .map_err(|err| RuntimeError::Custom(format!("invalid network secrets: {err}")))?;
+        let rate_limiters = to_krun_network_rate_limiters(&vm.network);
 
         let mut network = microsandbox_network::network::SmoltcpNetwork::new_with_profile(
             vm.network.clone(),
@@ -1772,7 +1779,16 @@ fn build_vm(
             exec_env.push(format!("{key}={value}"));
         }
 
-        builder = builder.net(move |n| n.mac(guest_mac).custom(net_backend));
+        builder = builder.net(move |mut n| {
+            n = n.mac(guest_mac);
+            if let Some(config) = rate_limiters.rx {
+                n = n.rx_rate_limiter(config);
+            }
+            if let Some(config) = rate_limiters.tx {
+                n = n.tx_rate_limiter(config);
+            }
+            n.custom(net_backend)
+        });
     }
 
     // Execution configuration.
@@ -1840,6 +1856,39 @@ fn build_vm(
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+#[cfg(feature = "net")]
+fn to_krun_network_rate_limiters(
+    config: &microsandbox_network::config::NetworkConfig,
+) -> KrunNetworkRateLimiters {
+    let rate_limiter = config.rate_limiter.as_ref();
+    KrunNetworkRateLimiters {
+        rx: rate_limiter
+            .and_then(|rate_limiter| rate_limiter.ingress.as_ref())
+            .map(to_krun_rate_limiter),
+        tx: rate_limiter
+            .and_then(|rate_limiter| rate_limiter.egress.as_ref())
+            .map(to_krun_rate_limiter),
+    }
+}
+
+#[cfg(feature = "net")]
+fn to_krun_rate_limiter(
+    config: &microsandbox_types::RateLimiterConfig,
+) -> msb_krun::RateLimiterConfig {
+    fn bucket(config: &microsandbox_types::TokenBucketConfig) -> msb_krun::TokenBucketConfig {
+        msb_krun::TokenBucketConfig {
+            size: config.size,
+            refill_time: Duration::from_millis(config.refill_time_ms),
+            one_time_burst: config.one_time_burst,
+        }
+    }
+
+    msb_krun::RateLimiterConfig {
+        bandwidth: config.bandwidth.as_ref().map(bucket),
+        ops: config.ops.as_ref().map(bucket),
+    }
+}
 
 async fn monitor_writeback_pressure(
     guard: Arc<crate::writeback::WritebackPressureGuard>,
@@ -2581,6 +2630,8 @@ fn thp_kernel_cmdline(policy: microsandbox_types::TransparentHugePagePolicy) -> 
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "net")]
+    use super::to_krun_network_rate_limiters;
     #[cfg(unix)]
     use super::{
         BindIdentityMapRegistration, PARENT_WATCH_DETACH, ParentWatchdogSignal,
@@ -2608,6 +2659,65 @@ mod tests {
             gid: 0,
             pid: 1,
         }
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn network_rate_limiters_map_directions_without_losing_precision() {
+        let egress = microsandbox_types::RateLimiterConfig {
+            bandwidth: Some(microsandbox_types::TokenBucketConfig {
+                size: 1_048_576,
+                refill_time_ms: 1_234,
+                one_time_burst: 524_288,
+            }),
+            ops: Some(microsandbox_types::TokenBucketConfig {
+                size: 1_000,
+                refill_time_ms: 7,
+                one_time_burst: 12,
+            }),
+        };
+        let ingress = microsandbox_types::RateLimiterConfig {
+            bandwidth: Some(microsandbox_types::TokenBucketConfig {
+                size: 2_048,
+                refill_time_ms: 99,
+                one_time_burst: 256,
+            }),
+            ops: None,
+        };
+        let config = microsandbox_network::config::NetworkConfig {
+            rate_limiter: Some(microsandbox_types::NetworkRateLimiterConfig {
+                egress: Some(egress),
+                ingress: Some(ingress),
+            }),
+            ..Default::default()
+        };
+
+        let mapped = to_krun_network_rate_limiters(&config);
+
+        assert_eq!(
+            mapped.tx.as_ref().unwrap().bandwidth.as_ref().unwrap(),
+            &msb_krun::TokenBucketConfig {
+                size: 1_048_576,
+                refill_time: Duration::from_millis(1_234),
+                one_time_burst: 524_288,
+            }
+        );
+        assert_eq!(
+            mapped.tx.unwrap().ops.unwrap(),
+            msb_krun::TokenBucketConfig {
+                size: 1_000,
+                refill_time: Duration::from_millis(7),
+                one_time_burst: 12,
+            }
+        );
+        assert_eq!(
+            mapped.rx.unwrap().bandwidth.unwrap(),
+            msb_krun::TokenBucketConfig {
+                size: 2_048,
+                refill_time: Duration::from_millis(99),
+                one_time_burst: 256,
+            }
+        );
     }
 
     #[test]

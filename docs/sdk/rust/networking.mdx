@@ -861,6 +861,30 @@ Limit the maximum number of concurrent network connections from the sandbox. Def
   </div>
 </div>
 
+#### <span className="msb-recv">network.</span><span className="msb-hn">rate_limiter()</span>
+
+```rust
+fn rate_limiter(self, f: impl FnOnce(NetworkRateLimiterBuilder) -> NetworkRateLimiterBuilder) -> Self
+```
+
+<Accordion title="Example">
+
+```rust
+use std::time::Duration;
+use microsandbox::size::SizeExt;
+
+.network(|n| n.rate_limiter(|r| r
+    .egress(|r| r
+        .bandwidth(1.mib(), Duration::from_secs(1))
+        .bandwidth_burst(512.kib())
+        .ops(1_000, Duration::from_secs(1)))
+    .ingress(|r| r.ops(1_000, Duration::from_secs(1)))))
+```
+
+</Accordion>
+
+Configure local network rate limits. Egress and ingress are independently optional; an omitted direction is unlimited. The limit applies on the next sandbox start. Cloud network configuration does not expose rate limits.
+
 #### <span className="msb-recv">network.</span><span className="msb-hn">ipv4_pool()</span>
 
 <Tooltip tip="Interface and IP-pool overrides are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
@@ -1169,6 +1193,77 @@ Allow **any** host to receive placeholders unchanged. Takes effect only when `i_
   </div>
 </div>
 
+## NetworkRateLimiterBuilder
+
+Groups local rate limits by traffic direction. Supplied to [`NetworkBuilder::rate_limiter()`](#rate_limiter).
+
+#### <span className="msb-recv">.</span><span className="msb-hn">egress()</span>
+
+```rust
+fn egress(self, f: impl FnOnce(RateLimiterBuilder) -> RateLimiterBuilder) -> Self
+```
+
+Configure the guest-to-runtime direction.
+
+#### <span className="msb-recv">.</span><span className="msb-hn">ingress()</span>
+
+```rust
+fn ingress(self, f: impl FnOnce(RateLimiterBuilder) -> RateLimiterBuilder) -> Self
+```
+
+Configure the runtime-to-guest direction.
+
+## RateLimiterBuilder
+
+Builder for one direction's rate limiter, supplied to [`NetworkRateLimiterBuilder::egress()`](#egress) or [`ingress()`](#ingress). A limiter caps bandwidth (bytes) and packet rate (frames) independently; leaving a bucket unset leaves that dimension unlimited. Buckets start full plus their one-time burst and refill continuously. Every setter returns `Self`.
+
+Validation runs at `NetworkBuilder::build()`: a limiter with neither bucket, a zero bucket size or refill interval, a burst without its bucket, or a refill interval that does not fit in u64 milliseconds surfaces as [`BuildError`](#builderror).
+
+#### <span className="msb-recv">.</span><span className="msb-hn">bandwidth()</span>
+
+```rust
+fn bandwidth(self, size: impl Into<Bytes>, refill_time: Duration) -> Self
+```
+
+Cap bandwidth at `size` bytes per `refill_time`. Size accepts a bare `u64` byte count or the unit helpers from `microsandbox::size::SizeExt` (`1.mib()`, `512.kib()`).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>size</code><span className="msb-type">impl Into&lt;Bytes&gt;</span></div>
+    <div className="msb-param-desc">Bucket capacity in bytes.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>refill_time</code><span className="msb-type">Duration</span></div>
+    <div className="msb-param-desc">Time to refill the full bucket.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">.</span><span className="msb-hn">bandwidth_burst()</span>
+
+```rust
+fn bandwidth_burst(self, burst: impl Into<Bytes>) -> Self
+```
+
+Grant a one-time startup burst of extra bytes on top of the bandwidth bucket. The burst is spent before the regular budget and never refills. Requires [`bandwidth()`](#bandwidth).
+
+#### <span className="msb-recv">.</span><span className="msb-hn">ops()</span>
+
+```rust
+fn ops(self, count: u64, refill_time: Duration) -> Self
+```
+
+Cap packet rate at `count` frames per `refill_time`.
+
+#### <span className="msb-recv">.</span><span className="msb-hn">ops_burst()</span>
+
+```rust
+fn ops_burst(self, count: u64) -> Self
+```
+
+Grant a one-time startup burst of extra frames on top of the ops bucket. Requires [`ops()`](#ops).
+
 ---
 
 ## Rule
@@ -1443,6 +1538,40 @@ Per-sandbox guest interface overrides. Every field is optional; an omitted field
 | ipv6_address | `Option<Ipv6Addr>` | Guest IPv6 address. Default: derived from slot within `ipv6_pool` |
 | ipv6_pool | `Option<Ipv6Network>` | IPv6 pool guest prefixes are derived from. Default: `fd42:6d73:62::/48` |
 
+### NetworkRateLimiterConfig
+
+<p className="msb-backref">Built by <a href="#networkratelimiterbuilder">NetworkRateLimiterBuilder</a> · used by <a href="#rate_limiter">rate_limiter()</a></p>
+
+Local network rate limits grouped by direction. An omitted direction is unlimited.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| egress | `Option<`[`RateLimiterConfig`](#ratelimiterconfig)`>` | Guest-to-runtime limit |
+| ingress | `Option<`[`RateLimiterConfig`](#ratelimiterconfig)`>` | Runtime-to-guest limit |
+
+### RateLimiterConfig
+
+<p className="msb-backref">Built by <a href="#ratelimiterbuilder">RateLimiterBuilder</a> · held by <a href="#networkratelimiterconfig">NetworkRateLimiterConfig</a></p>
+
+Rate limiter for one traffic direction. A missing bucket leaves that dimension unlimited.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| bandwidth | `Option<`[`TokenBucketConfig`](#tokenbucketconfig)`>` | Byte budget; one token per byte of frame data |
+| ops | `Option<`[`TokenBucketConfig`](#tokenbucketconfig)`>` | Packet budget; one token per network frame |
+
+### TokenBucketConfig
+
+<p className="msb-backref">Held by <a href="#ratelimiterconfig">RateLimiterConfig</a></p>
+
+One token bucket of a rate limiter. The bucket starts full and refills continuously at `size` tokens per `refill_time_ms`; the one-time burst is spent before the regular budget and never refills.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| size | `u64` | Bucket capacity in tokens; must be greater than zero |
+| refill_time_ms | `u64` | Time to refill `size` tokens, in milliseconds; must be greater than zero |
+| one_time_burst | `u64` | Extra startup-only tokens. Default: `0` |
+
 ### BuildError
 
 <p className="msb-backref">Returned by <a href="#build">NetworkPolicyBuilder::build()</a> · wrapped by <a href="#networkbuilder">NetworkBuilder</a></p>
@@ -1461,6 +1590,10 @@ Errors surfaced by the builders' `build()` methods. The same enum covers [`Netwo
 | `InvalidPortRange { rule_index, lo, hi }` | `.port_range(lo, hi)` had `lo > hi` |
 | `IngressDoesNotSupportIcmp { rule_index }` | ICMP protocol on a non-egress rule |
 | `InvalidSecretConfig { source }` | A secret entry failed validation |
+| `InvalidRateLimitConfig { direction, source }` | A rate limiter had no buckets, a zero bucket size, or a zero refill interval |
+| `EmptyNetworkRateLimiter` | `rate_limiter()` configured neither egress nor ingress |
+| `RateLimitBurstWithoutBucket { direction, bucket }` | `bandwidth_burst()` / `ops_burst()` without the matching bucket |
+| `RateLimitRefillTooLong { direction, bucket }` | A refill interval that does not fit in u64 milliseconds |
 
 Inside `SandboxBuilder::build()`, `BuildError` is wrapped as `MicrosandboxError::NetworkBuilder(BuildError)`.
 

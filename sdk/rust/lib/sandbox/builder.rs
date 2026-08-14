@@ -1117,8 +1117,8 @@ impl SandboxBuilder {
     ///
     /// The snapshot already pins the image reference and digest, so
     /// this method is mutually exclusive with [`image`](Self::image)
-    /// and [`image_with`](Self::image_with). The snapshot is opened
-    /// (and its integrity verified) at `create()` time, not here.
+    /// and [`image_with`](Self::image_with). The snapshot is structurally
+    /// opened at `create()` time; content verification stays explicit.
     ///
     /// `path_or_name` accepts either a path to a snapshot artifact
     /// directory (or a bare name resolved under the default snapshots
@@ -2464,6 +2464,64 @@ mod tests {
         let network = config.local_network_config().unwrap();
         assert_eq!(network.secrets.secrets.len(), 1);
         assert_eq!(network.max_connections, Some(128));
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn test_builder_network_rate_limiters_land_in_the_spec() {
+        use std::time::Duration;
+
+        use microsandbox_utils::size::SizeExt;
+
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .network(|n| {
+                n.rate_limiter(|r| {
+                    r.egress(|r| {
+                        r.bandwidth(1.mib(), Duration::from_secs(1))
+                            .bandwidth_burst(512.kib())
+                            .ops(1_000, Duration::from_secs(1))
+                            .ops_burst(500)
+                    })
+                })
+            })
+            .build()
+            .await
+            .unwrap();
+
+        let rate_limiter = config
+            .spec
+            .network
+            .rate_limiter
+            .as_ref()
+            .expect("network rate limiter persisted");
+        let egress = rate_limiter
+            .egress
+            .as_ref()
+            .expect("egress limiter persisted");
+        let bandwidth = egress.bandwidth.as_ref().unwrap();
+        assert_eq!(bandwidth.size, 1024 * 1024);
+        assert_eq!(bandwidth.refill_time_ms, 1000);
+        assert_eq!(bandwidth.one_time_burst, 512 * 1024);
+        assert_eq!(egress.ops.as_ref().unwrap().one_time_burst, 500);
+        assert!(rate_limiter.ingress.is_none());
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn test_builder_rejects_invalid_rate_limiter() {
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .network(|n| n.rate_limiter(|r| r.ingress(|r| r)))
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("rate limiter must configure at least one of bandwidth or ops"),
+            "unexpected error: {err}"
+        );
     }
 
     #[cfg(feature = "net")]

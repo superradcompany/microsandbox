@@ -80,6 +80,12 @@ IPv6 pool used for per-sandbox `/64` guest prefixes. Defaults to `fd42:6d73:62::
 
 Maximum concurrent connections
 
+#### <span className="msb-recv">network.</span><span className="msb-hn">rate_limiter</span>
+
+[`NetworkRateLimiter`](#networkratelimiter)` \| None` · Default: `None`
+
+Local ingress and egress rate limits. Cloud network configuration does not expose this field
+
 #### <span className="msb-recv">network.</span><span className="msb-hn">on_secret_violation</span>
 
 [`ViolationAction`](/sdk/python/secrets#violationaction)` \| `[`ViolationPolicy`](/sdk/python/secrets#violationpolicy) · Default: `BLOCK_AND_LOG`
@@ -813,6 +819,46 @@ ScopedVerifyUpstream(
 |-------|------|-------------|
 | pattern | `str` | Exact host or `*.suffix` wildcard |
 | verify | `bool` | Whether to verify certificates for matching upstream hosts |
+
+### NetworkRateLimiter
+
+<div className="msb-tags"><span className="msb-tag is-type">dataclass</span></div>
+
+<p className="msb-backref">Used by <a href="#network">Network.rate_limiter</a></p>
+
+Groups local network limits by traffic direction. An omitted direction is unlimited.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| egress | [`RateLimiter`](#ratelimiter)` \| None` | Guest-to-runtime rate limiter |
+| ingress | [`RateLimiter`](#ratelimiter)` \| None` | Runtime-to-guest rate limiter |
+
+### RateLimiter
+
+<div className="msb-tags"><span className="msb-tag is-type">dataclass</span></div>
+
+<p className="msb-backref">Held by <a href="#networkratelimiter">NetworkRateLimiter</a></p>
+
+Limits bandwidth and packet rate for one traffic direction.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| bandwidth | [`TokenBucket`](#tokenbucket)` \| None` | Byte budget; one token per byte of frame data |
+| ops | [`TokenBucket`](#tokenbucket)` \| None` | Packet budget; one token per network frame |
+
+### TokenBucket
+
+<div className="msb-tags"><span className="msb-tag is-type">dataclass</span></div>
+
+<p className="msb-backref">Used by <a href="#ratelimiter">RateLimiter</a></p>
+
+Token-bucket configuration for one rate-limiter dimension.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| size | `int` | Bucket capacity in bytes or frames. Must be greater than zero |
+| refill_time_ms | `int` | Time to refill `size` tokens. Must be greater than zero |
+| one_time_burst | `int` | Extra startup-only tokens. Default: `0` |
 
 ### Action
 
