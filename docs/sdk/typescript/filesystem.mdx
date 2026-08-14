@@ -3,12 +3,9 @@ title: Filesystem
 description: TypeScript SDK - Filesystem API reference
 ---
 
-Read and write files inside a running sandbox over the same host-guest channel as command execution: no SSH, no network. Obtain a handle with `sandbox.fs()`. See [Filesystem](/sandboxes/filesystem) for usage examples. For bulk transfers, consider a [bind-mounted volume](/sandboxes/volumes) instead.
-
+Read and write files inside a running sandbox. See [Filesystem](/sandboxes/filesystem) for usage examples.
 
 ## SandboxFsOps
-
-Filesystem handle for a running sandbox, obtained via [`sandbox.fs()`](/sdk/typescript/sandbox#sandbox-fs). Every method is async and returns a `Promise`. Paths are absolute inside the guest.
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read()</span>
 

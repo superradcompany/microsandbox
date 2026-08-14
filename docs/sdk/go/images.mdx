@@ -5,12 +5,7 @@ description: Go SDK - Image cache API reference
 
 <Tooltip tip="The image-cache API manages the local cache and is local-only. On microsandbox cloud, specify an OCI image when creating the sandbox and it is pulled for you."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Inspect and prune the local OCI image cache: the images that sandbox creation has already pulled. Images can also be loaded into the cache from local archives and saved back out to archive files, so locally built images work without a registry. Everything is reached through the package-level `Image` value, or through an [`ImageHandle`](#imagehandle) once you hold one.
-
-```go
-import m "github.com/superradcompany/microsandbox/sdk/go"
-```
-
+Inspect and manage the local OCI image cache.
 
 ## Image
 
@@ -350,10 +345,7 @@ if err != nil {
 
 <p className="msb-backref">Returned by <a href="#image-get">Image.Get()</a> · <a href="#image-list">Image.List()</a></p>
 
-A lightweight metadata reference to a cached OCI image. Fields are unexported; read them through the accessor methods below. Embedded in [`ImageDetail`](#imagedetail).
-
-
-Instance methods on [`*ImageHandle`](#imagehandle), the metadata reference returned by [`Image.Get`](#image-get) and [`Image.List`](#image-list). The accessors are pure reads of cached metadata; only `Remove` and `Inspect` take a context and reach the runtime.
+A metadata handle for a cached OCI image.
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">Reference()</span>
 

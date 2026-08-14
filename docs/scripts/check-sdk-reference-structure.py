@@ -27,6 +27,7 @@ GENERIC_ROOTS = {
     "cache management",
     "capture and boot",
     "constructors",
+    "default workload",
     "explicit local variants",
     "instance properties",
     "inspect",

@@ -1015,7 +1015,7 @@ Release the handle without stopping the sandbox. The sandbox continues running a
 
 ## Patch
 
-Factory class for rootfs patches passed to `Sandbox.create(..., patches=[...])`. Each static method returns a [`PatchConfig`](#patchconfig). By default a patch that targets a path already present in the image errors at boot; pass `replace=True` on the operation to allow overwriting. `mkdir` and `remove` are idempotent. See [Patches](/sandboxes/bootstrap#patches) for conceptual context.
+Factory for pre-boot root filesystem patches.
 
 #### <span className="msb-recv">Patch.</span><span className="msb-hn">text()</span>
 
@@ -1246,7 +1246,7 @@ Create a symlink at `link` pointing to `target`.
 
 <p className="msb-backref">Returned by <a href="#sandbox-get">Sandbox.get()</a> · <a href="#sandbox-list">Sandbox.list()</a> · <a href="#sandbox-list_with">Sandbox.list_with()</a></p>
 
-A lightweight handle to an existing sandbox (running or stopped). Provides status, configuration, and lifecycle control **without** an active connection to the guest agent. You cannot `exec` or `fs` on a handle; call `.start()` or `.connect()` to upgrade to a full [`Sandbox`](#instance-methods).
+A metadata and lifecycle handle for an existing sandbox.
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">name</span>
 

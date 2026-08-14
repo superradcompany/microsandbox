@@ -3,18 +3,9 @@ title: Filesystem
 description: Rust SDK - Filesystem API reference
 ---
 
-Read, write, list, and manipulate files inside a running sandbox. Obtained via [`sb.fs()`](/sdk/rust/sandbox#sb-fs). Every op dispatches through the same host-guest channel as command execution, so there is no SSH and no network involved. Path-style helpers are the usual choice; handle-style helpers are available for callers that need POSIX-like file descriptor reuse. For bulk file movement, prefer a [volume](/sdk/rust/volumes) that gives the guest direct filesystem access. See [Filesystem](/sandboxes/filesystem) for conceptual usage.
-
-
-`sb.fs()` is synchronous and just borrows the sandbox's backend and name; the work happens on the `await`ed methods below, every one of which is `async`.
+Read and write files inside a running sandbox. See [Filesystem](/sandboxes/filesystem) for usage examples.
 
 ## SandboxFsOps
-
-<p className="msb-backref">Returned by <a href="/sdk/rust/sandbox#sb-fs">sb.fs()</a></p>
-
-Filesystem operations handle for a running sandbox, borrowing the parent sandbox's backend and name (it is generic over a lifetime, `SandboxFsOps<'a>`). Every method dispatches through the same host-guest channel as command execution: `core.fs.*` agent messages over the relay socket locally, or the agent WebSocket route on cloud. Handle-based helpers (`stat_handle` and friends) require the live local agent client and return `Unsupported` on cloud.
-
-`with_backend(backend, name)` is a public constructor for FFI shims that re-assemble a `SandboxFsOps` per call; most callers obtain one via [`sb.fs()`](/sdk/rust/sandbox#sb-fs).
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read()</span>
 

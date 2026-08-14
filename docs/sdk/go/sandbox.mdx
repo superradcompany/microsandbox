@@ -308,7 +308,7 @@ Runtime installation and verification helpers are documented under [Runtime setu
 
 ## Sandbox
 
-The `*Sandbox` returned by [`CreateSandbox`](#m-createsandbox), [`StartSandbox`](#m-startsandbox), and [`SandboxHandle.Connect`](#sandboxhandle) carries the methods below. `*Sandbox` is **safe for concurrent use** from multiple goroutines. The command-execution methods, `Exec`, `ExecStream`, `Shell`, and `ShellStream`, live on the same value and are documented under [Execution](/sdk/go/execution).
+A live sandbox connection that is safe for concurrent use.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Name()</span>
 
@@ -1867,10 +1867,7 @@ Set the key sequence that detaches from the session without stopping it. Uses Do
 
 <p className="msb-backref">Produces <a href="#patchconfig">PatchConfig</a> for <a href="#withpatches">WithPatches()</a></p>
 
-Package-level factory namespace for [`PatchConfig`](#patchconfig) values. See the [Patch](#patch) section for its methods.
-
-
-Factory that constructs rootfs patches for [`WithPatches`](#withpatches). Access via the package-level `Patch` value. Each method returns a [`PatchConfig`](#patchconfig). `Mkdir` and `Remove` are idempotent; other operations error at boot when targeting a path already present in the image unless `Replace: true` is passed in [`PatchOptions`](#patchoptions). See [Patches](/sandboxes/bootstrap#patches) for conceptual context.
+Factory for [`PatchConfig`](#patchconfig) values.
 
 #### <span className="msb-recv">Patch.</span><span className="msb-hn">Text()</span>
 
@@ -2041,10 +2038,7 @@ Recursively copy a host directory at `src` into the guest rootfs at `dst`. Only 
 
 <p className="msb-backref">Produces <a href="#initconfig">InitConfig</a> for <a href="#withinit">WithInit()</a></p>
 
-Package-level factory namespace for [`InitConfig`](#initconfig) values. See the [Init](#init) section for its methods.
-
-
-Factory that constructs [`InitConfig`](#initconfig) values for [`WithInit`](#withinit), handing off PID 1 inside the guest after agentd setup. Access via the package-level `Init` value. See [Custom init system](/sandboxes/bootstrap#custom-init-system) for image picks and shutdown semantics.
+Factory for [`InitConfig`](#initconfig) values.
 
 #### <span className="msb-recv">Init.</span><span className="msb-hn">Auto()</span>
 
@@ -2111,7 +2105,7 @@ Specify the init binary explicitly with optional argv and env. `cmd` must be an 
 
 <p className="msb-backref">Returned by <a href="#m-getsandbox">GetSandbox()</a> · <a href="#m-listsandboxes">ListSandboxes()</a> · <a href="#m-listsandboxeswith">ListSandboxesWith()</a></p>
 
-A lightweight reference to a sandbox's persisted state. Carries metadata (name, status, config JSON, timestamps) and offers lifecycle methods that operate on the sandbox **without** an active guest-agent connection. You cannot `Exec` or `FS` on a handle. Call `Connect` or `Start` to upgrade to a full [`*Sandbox`](#methods).
+A sandbox metadata and lifecycle handle that does not require an active guest-agent connection.
 
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">Name()</span>

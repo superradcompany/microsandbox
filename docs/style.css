@@ -67,7 +67,21 @@ body {
 h4:has(.msb-hn) { margin-top: 5rem !important; }
 /* but the first method directly under a section heading needs far less; the
  * section heading already separates it from what came before. */
-h2 + h4:has(.msb-hn), h3 + h4:has(.msb-hn), .msb-member-group + h4:has(.msb-hn) { margin-top: 1.5rem !important; }
+h2 + h4:has(.msb-hn),
+h2 + p + h4:has(.msb-hn),
+h2 + p + p + h4:has(.msb-hn),
+h2 + span + h4:has(.msb-hn),
+h2 + p + span + h4:has(.msb-hn),
+h2 + div + h4:has(.msb-hn),
+h2 + div + p + h4:has(.msb-hn),
+h2 + div + p + p + h4:has(.msb-hn),
+h2 + div + span + h4:has(.msb-hn),
+h2 + div + p + span + h4:has(.msb-hn),
+h3 + h4:has(.msb-hn),
+.msb-backref + h4:has(.msb-hn),
+.msb-member-group + h4:has(.msb-hn) {
+  margin-top: 1.5rem !important;
+}
 .msb-hn { font-family: var(--font-mono, monospace); font-weight: 500; }
 .msb-recv { font-family: var(--font-mono, monospace); font-weight: 400; color: #a3a29c; }
 .dark .msb-recv { color: #6f6e68; }

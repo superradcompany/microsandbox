@@ -3,73 +3,13 @@ title: Networking
 description: TypeScript SDK - Network API reference
 ---
 
-Configure a sandbox's network stack: a first-match-wins egress/ingress policy, published ports, DNS interception, TLS interception, and secret-violation handling. See [Networking](/networking/overview) for the conceptual overview and [TLS Interception](/networking/tls) for proxy details.
-
-
-The default policy denies egress except for an implicit allow-public rule (plus DNS), and allows ingress with no rules. See the [defaults rationale](/networking/overview#defaults) for the asymmetry. `NetworkPolicy`, `Rule`, `Destination`, and `PortRange` each merge a value-type interface with a factory namespace under one name, all re-exported from `microsandbox`.
+Configure sandbox networking. See [Networking](/networking/overview) for usage and policy concepts.
 
 ## NetworkPolicy
 
 <p className="msb-backref">Used by <a href="#policy">NetworkBuilder.policy()</a> · returned by <a href="#networkpolicy">NetworkPolicy factories</a></p>
 
 Ordered rule list with per-direction defaults. First-match-wins is evaluated independently for egress and ingress.
-
-```typescript
-interface NetworkPolicy {
-  readonly defaultEgress: Action;
-  readonly defaultIngress: Action;
-  readonly rules: readonly Rule[];
-}
-```
-
-A [`NetworkPolicy`](#networkpolicy-2) is an ordered rule list plus two per-direction defaults, evaluated first-match-wins. Compose common access shapes with [`fromProfiles()`](#networkpolicyfromprofiles); for anything custom, start from [`builder()`](#networkpolicybuilder) or write a literal and pass it to [`NetworkBuilder.policy()`](#policy).
-
-```typescript
-import { NetworkPolicy, Rule, Destination } from "microsandbox";
-
-// Custom policy literal
-const custom: NetworkPolicy = {
-  defaultEgress: "deny",
-  defaultIngress: "allow",
-  rules: [
-    Rule.allowEgress(Destination.domain("api.example.com")),
-    Rule.denyEgress(Destination.group("metadata")),
-  ],
-};
-
-// Or via the builder
-const built = NetworkPolicy.builder()
-  .defaultDeny()
-  .egress((e) => e.tcp().port(443).allowPublic())
-  .build();
-```
-
-### Rule order matters
-
-The first matching rule wins, so a broad rule placed before a narrow one swallows it:
-
-```typescript
-const policy: NetworkPolicy = {
-  defaultEgress: "deny",
-  defaultIngress: "allow",
-  rules: [
-    Rule.allowEgress(Destination.cidr("10.0.0.0/8")),  // matches everything in 10.x
-    Rule.denyEgress(Destination.cidr("10.0.0.5/32")),  // never reached
-  ],
-};
-```
-
-Put specific rules before general ones.
-
-### Shadow detection
-
-[`NetworkPolicyBuilder.build()`](#build) walks the rules and warns when a rule is fully covered by an earlier one in the same direction. Only `cidr` and `group` destinations are checked; domain coverage depends on runtime DNS and is skipped. Builds still succeed; the warning surfaces as a host-side `tracing::warn!` from the Rust core:
-
-```text
-WARN rule #1 (Egress Cidr(10.0.0.5/32) Deny) is shadowed by rule #0 (Egress Cidr(10.0.0.0/8) Allow); to narrow, place the more specific rule first
-```
-
-Policy literals constructed via `Rule.allowEgress(...)` etc. do not run through the builder and skip this check.
 
 #### <span className="msb-recv">NetworkPolicy.</span><span className="msb-hn">builder()</span>
 
@@ -148,8 +88,6 @@ interface Rule {
   readonly action: Action;
 }
 ```
-
-Factories for the building blocks of a policy literal. [`Rule`](#rule-2) values pair a [`Destination`](#destination) with a direction and action; [`Destination`](#destination) and [`PortRange`](#portrange-2) construct the matchers.
 
 #### <span className="msb-recv">Rule.</span><span className="msb-hn">allowEgress()</span>
 
@@ -866,17 +804,7 @@ Materialize the accumulated state into a [`NetworkConfig`](#networkconfig). The 
 
 ## NetworkPolicyBuilder
 
-Fluent builder for [`NetworkPolicy`](#networkpolicy-2). The closure passed to `.rule()` / `.egress()` / `.ingress()` / `.any()` receives a [`RuleBuilder`](#rulebuilder); state setters and rule-adders chain freely. The first parse / validation failure surfaces from [`build()`](#build).
-
-```typescript
-import { NetworkPolicy } from "microsandbox";
-
-const policy = NetworkPolicy.builder()
-  .defaultDeny()
-  .egress((e) => e.tcp().port(443).allowPublic().allowPrivate())
-  .rule((r) => r.any().deny((d) => d.ip("198.51.100.5")))
-  .build();
-```
+Fluent builder for [`NetworkPolicy`](#networkpolicy-2).
 
 #### <span className="msb-recv">policy.</span><span className="msb-hn">defaultDeny()</span>
 
@@ -1015,23 +943,7 @@ Materialize the accumulated state into a [`NetworkPolicy`](#networkpolicy-2). La
 
 ## RuleBuilder
 
-Per-rule-batch builder. Lives only inside the callback passed to `.rule()` / `.egress()` / `.ingress()` / `.any()` on a [`NetworkPolicyBuilder`](#networkpolicybuilder). State setters and rule-adders interleave freely; state accumulates eagerly across the callback and is **not reset** between adders:
-
-```typescript
-NetworkPolicy.builder()
-  .egress((r) =>
-    r
-      .tcp().port(443).allowPublic()    // rule 1: egress, TCP, 443, allow Public
-      .udp().allowPrivate(),            // rule 2: egress, [TCP, UDP], 443, allow Private
-  )
-  .build();
-```
-
-Use separate `.rule()` / `.egress()` callbacks for rules that need different state.
-
-### Direction setters
-
-Last-write-wins. ICMP rule-adders are egress-only at build time.
+Builder for one policy-rule batch.
 
 #### <span className="msb-recv" id="rb-egress">rule.</span><span className="msb-hn">egress()</span>
 

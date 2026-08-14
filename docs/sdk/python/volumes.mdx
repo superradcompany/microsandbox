@@ -3,14 +3,11 @@ title: Volumes
 description: Python SDK - Volume API reference
 ---
 
-Create and manage named persistent volumes, and build the mount configs that attach storage to a sandbox. See [Volumes](/sandboxes/volumes) for usage examples and patterns.
-
+Create, manage, and mount named volumes. See [Volumes](/sandboxes/volumes) for usage examples.
 
 ## Volume
 
 <p className="msb-member-group">Instance properties</p>
-
-Read-only properties on a `Volume` returned by `Volume.create()`.
 
 #### <span className="msb-recv">volume.</span><span className="msb-hn">name</span>
 
@@ -29,8 +26,6 @@ path: str
 Host path to the volume's directory.
 
 <p className="msb-member-group">Static methods</p>
-
-Static methods on `Volume` that manage named persistent volumes. Volumes live independently of any sandbox, stored by default under `~/.microsandbox/volumes/<name>/`.
 
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">get_default()</span>
 
@@ -561,10 +556,7 @@ Delete this volume
 
 <p className="msb-backref">Returned by <a href="#volumehandle">VolumeHandle.fs</a></p>
 
-Host-side filesystem operations on a named volume. No running sandbox is required. See the [VolumeFs methods](#volumefs-methods) above for the full API.
-
-
-Host-side filesystem operations on a named volume, obtained via the `fs` property on a [`VolumeHandle`](#volumehandle). These run directly on the host filesystem; no running sandbox is required. All paths are relative to the volume root.
+Host-side filesystem operations for a named volume.
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read()</span>
 

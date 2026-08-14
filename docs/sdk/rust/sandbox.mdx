@@ -1518,7 +1518,7 @@ Set the default working directory for all commands.
 
 ## PatchBuilder
 
-Fluent builder for the ordered list of pre-boot rootfs patches. Used in `SandboxBuilder::patch(|p| p...)`. Each method appends one operation; calls are chainable. By default a method that targets a path already present in the image errors at boot; pass `replace = true` on the operation to allow overwriting. `mkdir` and `remove` are idempotent. See [Patches](/sandboxes/bootstrap#patches) for conceptual context.
+Builder for pre-boot root filesystem patches.
 
 #### <span className="msb-recv">patch.</span><span className="msb-hn">append()</span>
 
@@ -1742,11 +1742,7 @@ Write UTF-8 text content at `path`.
 
 ## SandboxModificationBuilder
 
-Fluent builder for changing an existing sandbox's configuration. Obtained via [`sb.modify()`](#sb-modify) or [`SandboxHandle::modify()`](#sandboxhandle). Nothing happens until you finish with [`dry_run()`](#dry_run) or [`apply()`](#apply); both return a [`SandboxModificationPlan`](#sandboxmodificationplan) that labels each change `live`, `next start`, `requires restart`, or `unsupported`.
-
-Apply is all-or-nothing: if any change conflicts, is unsupported, or needs a restart you did not allow, the call fails and nothing changes.
-
-CPU and memory changes take effect immediately on a running sandbox as long as the new values stay within [`max_cpus`](#max_cpus) / [`max_memory`](#max_memory); raising those limits requires a restart, so reserve headroom at create time. Env and workdir changes affect future execs only; running processes keep their current environment (the plan notes this as a warning). The CLI equivalent is [`msb modify`](/cli/sandbox-commands#msb-modify).
+Builder for planning or applying sandbox configuration changes.
 
 #### <span className="msb-recv">modification.</span><span className="msb-hn">apply()</span>
 
@@ -2140,7 +2136,7 @@ Add several AND-matched labels
 
 <p className="msb-backref">Returned by <a href="#sandboxget">Sandbox::get()</a> · <a href="#sandboxlist">Sandbox::list()</a></p>
 
-A lightweight handle to an existing sandbox (running or stopped). Obtained via [`Sandbox::get()`](#sandboxget) or [`Sandbox::list()`](#sandboxlist). Provides status, configuration, and lifecycle control **without** an active connection to the guest agent. You cannot `exec` or `fs` on a handle - call `.start()` or `.connect()` to upgrade to a full [`Sandbox`](#instance-methods).
+A sandbox metadata and lifecycle handle that does not require an active guest-agent connection.
 
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">config()</span>
@@ -2435,11 +2431,7 @@ Block until terminal state is observed
 
 <p className="msb-backref">Used by <a href="#sandboxmodificationbuilder-secret">secret()</a></p>
 
-Fluent builder for one declarative secret patch inside [`SandboxModificationBuilder::secret()`](#sandboxmodificationbuilder-secret). It shares the create-time [`SecretBuilder`](/sdk/rust/secrets#secretbuilder) vocabulary: name the secret, provide material by source reference or raw value, set the placeholder when needed, and declare the allowed hosts.
-
-Import path: `microsandbox::sandbox::SecretPatchBuilder`.
-
-Prefer `source(...)` over `value(...)` when the value can be referenced; see the at-rest note on [`secret_env()`](#secret_env) and [Secrets](/sandboxes/secrets) for the full model.
+Builder for one declarative secret change.
 
 #### <span className="msb-recv">secret.</span><span className="msb-hn" id="secretpatchbuilder-env">env()</span>
 

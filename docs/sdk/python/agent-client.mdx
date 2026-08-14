@@ -3,10 +3,7 @@ title: Agent client
 description: Python SDK - Low-level agentd client reference
 ---
 
-`AgentClient` is the low-level raw transport for talking to `agentd` through a running sandbox's relay socket. For most applications, use [`Sandbox`](/sdk/python/sandbox), [`exec`](/sdk/python/execution), and [`fs`](/sdk/python/filesystem) instead. Reach for this API when you are building protocol-level tools or higher-level SDK helpers.
-
-All request and response bodies are raw CBOR bytes. The SDK handles framing and correlation ids, but it does not encode or decode the CBOR message body for you. The raw body is the full CBOR-encoded protocol `Message` body (`v`, `t`, and `p`), not just the inner payload.
-
+Low-level raw CBOR transport for communicating with `agentd` through a sandbox relay.
 
 ## Constants
 
@@ -302,7 +299,7 @@ Close the client. Calling it more than once is safe.
 
 <p className="msb-backref">Returned by <a href="#client-stream">stream()</a></p>
 
-An open raw agent stream. Carries the protocol correlation id and is both an async context manager and an async iterator of [`RawFrame`](#rawframe). Iteration stops once a frame with `FLAG_TERMINAL` set is delivered or the stream reaches EOF.
+An async iterator of raw agent frames.
 
 #### <span className="msb-recv">stream.</span><span className="msb-hn">id</span>
 

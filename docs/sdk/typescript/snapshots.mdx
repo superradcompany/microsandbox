@@ -3,17 +3,7 @@ title: Snapshots
 description: TypeScript SDK - Snapshot API reference
 ---
 
-Capture the disk state of a stopped sandbox into a portable artifact, then boot fresh sandboxes from it. See [Snapshots](/sandboxes/snapshots) for concepts and walkthroughs.
-
-```typescript
-import { Sandbox, Snapshot, SnapshotHandle } from "microsandbox";
-import type { SaveOpts, SnapshotScope, SnapshotVerifyReport } from "microsandbox";
-```
-
-<Note>
-  Snapshots are **disk-only** and require a sandbox that is not running (stopped or crashed).
-</Note>
-
+Create and manage disk-only snapshots of stopped sandboxes. See [Snapshots](/sandboxes/snapshots) for usage and lifecycle concepts.
 
 ## SandboxBuilder
 
@@ -546,7 +536,7 @@ Recompute the upper layer's content hash and compare against the manifest. Walks
 <div className="msb-tags"><span className="msb-tag is-type">class</span></div>
 
 
-Lightweight handle backed by an index row. Values are snapshotted from the index at construction time; call [`Snapshot.get()`](#snapshot-get) again for a fresh reading if needed. Handles from [`Snapshot.list()`](#snapshot-list) are read-only and throw on [`open()`](#snapshothandleopen) / [`remove()`](#snapshothandleremove); fetch a live handle via [`Snapshot.get()`](#snapshot-get) for those lifecycle methods.
+A metadata and lifecycle handle for an existing snapshot.
 
 <p className="msb-backref">Returned by <a href="#snapshot-get">Snapshot.get()</a>, <a href="#snapshot-list">Snapshot.list()</a>, <a href="#snapshot-load">Snapshot.load()</a></p>
 

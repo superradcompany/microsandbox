@@ -3,21 +3,8 @@ title: Execution
 description: Python SDK - Command execution API reference
 ---
 
-Run commands inside a running sandbox: collect output in one shot, stream events as they arrive, or bridge your terminal to an interactive PTY. These methods live on a running [`Sandbox`](/sdk/python/sandbox). See [Commands](/sandboxes/commands) for usage examples.
+Run commands inside a running sandbox. See [Commands](/sandboxes/commands) for usage examples.
 
-## Default workload
-
-`Sandbox.create(...)` boots the sandbox without executing its image workload. `exec_default()` resolves the effective OCI ENTRYPOINT and CMD; `exec_default_stream()` streams it and `attach_default()` runs it in an interactive PTY. All three accept the same per-call options as their literal counterparts. They raise `NoDefaultCommandError` when no executable default exists and never fall back to a shell.
-
-```python
-sandbox = await Sandbox.create(
-    "worker",
-    image="example/worker:latest",
-    entrypoint=["python", "-u"],
-    cmd=["worker.py", "--once"],
-)
-out = await sandbox.exec_default(env={"LOG_LEVEL": "debug"})
-```
 ## Sandbox
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">exec()</span>
@@ -367,7 +354,7 @@ Bridge your terminal to the sandbox's default shell in a fully interactive PTY s
 
 <p className="msb-backref">Returned by <a href="#sandbox-exec_stream">exec_stream()</a> · <a href="#sandbox-shell_stream">shell_stream()</a></p>
 
-A handle to a running streaming execution. It is an async iterator, so `async for event in handle:` yields each [`ExecEvent`](#execevent) until the stream ends. `signal()`, `kill()`, and `resize()` may run while another task is waiting in `recv()`; concurrent receive, wait, and collect operations are not supported.
+A handle to a running streaming execution and its events.
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">id</span>
 
@@ -475,7 +462,7 @@ close()
 
 <p className="msb-backref">Used by <a href="#sandbox-exec">exec()</a> · <a href="#sandbox-shell">shell()</a> · <a href="#sandbox-exec_stream">exec_stream()</a> · <a href="#sandbox-shell_stream">shell_stream()</a></p>
 
-Frozen dataclass with factory methods for configuring process stdin. Pass the result as the `stdin` argument to an exec or shell method. Raw `bytes` are also accepted directly and are sent inline.
+Factory for process stdin configuration.
 
 
 #### <span className="msb-recv">Stdin.</span><span className="msb-hn">null()</span>

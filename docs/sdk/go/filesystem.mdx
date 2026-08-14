@@ -3,12 +3,9 @@ title: Filesystem
 description: Go SDK - Filesystem API reference
 ---
 
-Read and write files inside a running sandbox over the same host-guest channel as command execution: no SSH, no network. See [Filesystem](/sandboxes/filesystem) for usage examples. For bulk file transfer, prefer a [volume](/sdk/go/volumes).
-
+Read and write files inside a running sandbox. See [Filesystem](/sandboxes/filesystem) for usage examples.
 
 ## SandboxFSOps
-
-The accessor is obtained from a running sandbox via [`sb.FS()`](/sdk/go/sandbox#fs). Every method takes a `context.Context` first and returns an `error` (wrapped, inspectable with `m.IsKind`).
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">Read()</span>
 

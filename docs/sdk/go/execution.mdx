@@ -3,22 +3,8 @@ title: Execution
 description: Go SDK - Command execution API reference
 ---
 
-Run commands inside a running sandbox, collect their output, stream events live, or drive an interactive pseudo-terminal programmatically. See [Commands](/sandboxes/commands) for usage examples.
+Run commands inside a running sandbox. Non-zero exit codes are returned in [`ExecOutput`](#execoutput), not as Go errors. See [Commands](/sandboxes/commands) for usage examples.
 
-The exec API mirrors `os/exec` conventions: a **non-zero exit code is not a Go error**. Transport, timeout, and spawn-failure paths return an `error`; a program that ran and exited non-zero is a normal [`*ExecOutput`](#execoutput) result, inspect [`Success()`](#out-success) or [`ExitCode()`](#out-exitcode).
-
-## Default workload
-
-`CreateSandbox` boots the sandbox without executing its image workload. `ExecDefault` resolves the effective OCI ENTRYPOINT and CMD; `ExecDefaultStream` streams it and `AttachDefault` runs it in an interactive PTY. They return `ErrNoDefaultCommand` when no executable default exists and never fall back to a shell.
-
-```go
-sb, err := m.CreateSandbox(ctx, "worker",
-    m.WithImage("example/worker:latest"),
-    m.WithEntrypoint("python", "-u"),
-    m.WithCmd("worker.py", "--once"),
-)
-out, err := sb.ExecDefault(ctx, m.WithExecEnv(map[string]string{"LOG_LEVEL": "debug"}))
-```
 ## Sandbox
 
 The exec entry points live on [`*Sandbox`](/sdk/go/sandbox#instance-methods).
@@ -233,10 +219,7 @@ Run `/bin/sh -c command` with streaming output. A convenience wrapper over [`Exe
 
 <p className="msb-backref">Returned by <a href="#sb-execstream">sb.ExecStream()</a> · <a href="#sb-shellstream">sb.ShellStream()</a></p>
 
-A live streaming exec session. Must be closed with [`Close`](#h-close) when done to release Rust-side resources. `Signal`, `Kill`, and `Resize` may run concurrently with `Recv`; other method combinations, including multiple concurrent `Recv` calls, are not supported.
-
-
-A live streaming exec session returned by [`ExecStream`](#sb-execstream) and [`ShellStream`](#sb-shellstream). [`Signal`](#h-signal), [`Kill`](#h-kill), and [`Resize`](#h-resize) may be called concurrently with [`Recv`](#h-recv), allowing a control goroutine to act while another goroutine waits for terminal output. Other method combinations, including concurrent `Recv` calls, are not supported.
+A handle to a running streaming execution and its events.
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">ID()</span>
 
@@ -504,10 +487,7 @@ Release the Rust-side exec handle. Does not kill the running process; call [`Sig
 
 <p className="msb-backref">Returned by <a href="#sb-exec">sb.Exec()</a> · <a href="#sb-shell">sb.Shell()</a> · <a href="#h-collect">h.Collect()</a></p>
 
-The collected result of a command execution. A non-zero `ExitCode` is not treated as a Go error, callers inspect [`Success`](#out-success) or [`ExitCode`](#out-exitcode) explicitly, matching how `os/exec.Cmd.Output` works against a script that exits non-zero. In TTY mode, `Stdout` contains the combined terminal output and `Stderr` is empty because a PTY cannot preserve separate stdout and stderr streams.
-
-
-The collected result of a completed command execution, returned by [`Exec`](#sb-exec), [`Shell`](#sb-shell), and [`Collect`](#h-collect).
+Collected output and exit status. Non-zero exit codes are results, not Go errors.
 
 #### <span className="msb-recv">out.</span><span className="msb-hn">Stdout()</span>
 
@@ -620,9 +600,6 @@ type ExecSink = ffi.ExecSink
 ```
 
 A write-only pipe to a running process's stdin. Implements `io.WriteCloser`.
-
-
-A write-only pipe to a running process's stdin, obtained from [`ExecHandle.TakeStdin`](#h-takestdin). Implements `io.WriteCloser`. `Write` and `Close` use `context.Background()` under the hood; for caller-controlled cancellation use [`WriteCtx`](#sink-writectx), or tear the session down via [`ExecHandle.Kill`](#h-kill) / [`Close`](#h-close).
 
 #### <span className="msb-recv">sink.</span><span className="msb-hn">Write()</span>
 

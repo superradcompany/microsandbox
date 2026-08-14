@@ -3,8 +3,7 @@ title: Volumes
 description: TypeScript SDK - Volume API reference
 ---
 
-Create and manage named volumes: persistent storage that lives independently of any sandbox. Build a volume, look one up, read and write its files from the host, then delete it. See [Volumes](/sandboxes/volumes) for usage examples and patterns.
-
+Create, manage, and mount named volumes. See [Volumes](/sandboxes/volumes) for usage examples.
 
 ## Volume
 
@@ -352,10 +351,7 @@ Build and create the volume on disk, returning a [`Volume`](#instance-methods).
 
 <p className="msb-backref">Returned by <a href="#volume-fs">volume.fs()</a> · <a href="#volumehandle">VolumeHandle.fs()</a></p>
 
-Host-side filesystem operations on a volume's directory. The methods mirror [`SandboxFsOps`](/sdk/typescript/filesystem) but run directly on the host with no sandbox booted. See the [VolumeFs methods](#volumefs-methods) section above for full per-method details.
-
-
-Host-side filesystem operations on a volume's directory. Obtained via [`volume.fs()`](#volume-fs) or [`VolumeHandle.fs()`](#volumehandle). All operations run directly on the host without booting a sandbox. Paths are relative to the volume's root directory. Every method is async.
+Host-side filesystem operations for a named volume.
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">read()</span>
 
@@ -782,7 +778,7 @@ Check whether a path exists.
 
 <p className="msb-backref">Returned by <a href="#volume-get">Volume.get()</a> · <a href="#volume-list">Volume.list()</a></p>
 
-A handle to an existing named volume, carrying its metadata. Handles from [`Volume.get()`](#volume-get) are **live**: `.fs()` and `.remove()` work. Handles in the array from [`Volume.list()`](#volume-list) are **read-only**: those two methods throw, so call `Volume.get(name)` to upgrade.
+A metadata and lifecycle handle for an existing volume.
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">name</span>
 

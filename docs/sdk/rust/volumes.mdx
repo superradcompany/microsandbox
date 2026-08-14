@@ -3,15 +3,9 @@ title: Volumes
 description: Rust SDK - Volume API reference
 ---
 
-Create and manage named volumes: persistent storage that lives independently of any sandbox. Read and write a volume's files directly from the host, or mount it into a sandbox. See [Volumes](/sandboxes/volumes) for usage examples and patterns.
-
+Create, manage, and mount named volumes. See [Volumes](/sandboxes/volumes) for usage examples.
 
 ## Volume
-
-A live named volume, carrying the backend it was created on. Returned by [`Volume::create()`](#volumecreate) and [`VolumeBuilder::create()`](#vb-create).
-
-<p className="msb-backref">Returned by <a href="#volumecreate">Volume::create()</a> · <a href="#vb-create">VolumeBuilder::create()</a></p>
-
 
 #### <span className="msb-recv">Volume::</span><span className="msb-hn">get_default()</span>
 
@@ -404,12 +398,9 @@ Cloud-only volume state. Returns `Some` for cloud-backed volumes, `None` for loc
 
 ## VolumeHandle
 
-A lightweight handle to a volume, exposing metadata plus filesystem and delete operations without a live [`Volume`](#volume).
-
 <p className="msb-backref">Returned by <a href="#volumeget">Volume::get()</a> · <a href="#volumelist">Volume::list()</a></p>
 
-
-A lightweight handle returned by [`Volume::get()`](#volumeget) and [`Volume::list()`](#volumelist). Exposes metadata captured at read time plus filesystem and delete operations, without holding a live [`Volume`](#volume).
+A metadata and lifecycle handle for a named volume.
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">name()</span>
 
@@ -680,14 +671,9 @@ Cloud-only handle state. Returns `Some` for cloud-backed handles, `None` for loc
 
 ## VolumeFs
 
-Host-side filesystem operations on a volume. Borrows the parent's backend and name and dispatches each op through the backend. A lifetime-bound handle (`VolumeFs<'_>`).
-
 <p className="msb-backref">Returned by <a href="#vol-fs">Volume::fs()</a> · <a href="#h-fs">VolumeHandle::fs()</a></p>
 
-
-`VolumeFs::with_backend(backend, name)` is also available as a public constructor for FFI shims that re-assemble a handle per call; most callers use `Volume::fs()` / `VolumeHandle::fs()`.
-
-Host-side filesystem operations on a named volume, obtained via [`Volume::fs()`](#vol-fs) or [`VolumeHandle::fs()`](#h-fs). Unlike [`SandboxFsOps`](/sdk/rust/filesystem), which goes through the agent protocol, `VolumeFs` reads and writes the volume's bytes directly. Paths are relative to the volume root; a leading `/` is stripped, and path traversal outside the root is rejected.
+Host-side filesystem operations for a named volume.
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read()</span>
 
@@ -1111,12 +1097,9 @@ Check whether a file or directory exists at the given path. Returns `false` rath
 
 ## VolumeBuilder
 
-Builder for configuring a named volume before creation. Implements `From<VolumeConfig>`.
-
 <p className="msb-backref">Returned by <a href="#volumebuilder">Volume::builder()</a></p>
 
-
-Builder for configuring a named volume before creation. Obtained via [`Volume::builder(name)`](#volumebuilder). Directory-backed is the default; disk volumes require [`.disk()`](#disk) plus [`.size()`](#size). Every setter returns `Self`, so calls chain.
+Builder for configuring a named volume.
 
 #### <span className="msb-recv">volume_builder.</span><span className="msb-hn">directory()</span>
 
@@ -1261,12 +1244,9 @@ Create the volume on the active backend. Equivalent to `Volume::create(self.buil
 
 ## MountBuilder
 
-Builder for a sandbox volume mount, used in `SandboxBuilder::volume`. Builds a `VolumeMount`.
-
 <p className="msb-backref">Used by <a href="/sdk/rust/sandbox#volume">SandboxBuilder::volume()</a></p>
 
-
-Builder for configuring a volume mount on a sandbox. Used in `SandboxBuilder::volume(guest_path, |v| v...)` (see [`.volume()`](/sdk/rust/sandbox#volume)). Pick exactly one mount kind: [`.bind()`](#bind), [`.named()`](#named) / [`.named_with()`](#named_with), [`.tmpfs()`](#tmpfs), or [`.disk()`](#mb-disk). Kind-specific options are validated when the surrounding `SandboxBuilder` is finalized, so an option set on the wrong kind surfaces a clear error rather than being silently dropped.
+Builder for configuring a sandbox volume mount.
 
 #### <span className="msb-recv">mount.</span><span className="msb-hn">bind()</span>
 

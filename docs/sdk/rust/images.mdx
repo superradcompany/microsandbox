@@ -3,12 +3,7 @@ title: Images
 description: Rust SDK - Image cache API reference
 ---
 
-Inspect, remove, prune, and import/export the local OCI image cache: the images that sandbox creation has already pulled. The ambient `Image::*` methods use the active default backend and return `Unsupported` when that backend is cloud. The `*_local` variants take an explicit `LocalBackend` and never consult ambient backend state.
-
-```rust
-use microsandbox::{Image, ImagePruneReport};
-```
-
+Inspect and manage the local OCI image cache.
 
 ## Image
 

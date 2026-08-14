@@ -41,10 +41,7 @@ Return the SSH namespace for this sandbox. The namespace holds the SSH client an
 
 <p className="msb-backref">Returned by <a href="#sb-ssh">sb.ssh()</a></p>
 
-SSH namespace for a sandbox. Cheap to clone; holds a clone of the sandbox.
-
-
-SSH namespace for a sandbox, obtained from [`sb.ssh()`](#sb-ssh). Client sessions work with local and cloud sandboxes through the selected backend's authenticated agent connection. Reusable server endpoints can use explicit host-key and authorized-key paths with either backend; their implicit key-file defaults are local-only.
+SSH operations for a sandbox.
 
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">connect()</span>
 
@@ -282,10 +279,7 @@ Alias for [`server_with`](#ssh-server_with).
 
 <p className="msb-backref">Returned by <a href="#ssh-connect">ssh.connect()</a>, <a href="#ssh-connect_with">ssh.connect_with()</a></p>
 
-Native in-process SSH client session. Aborts its internal server task on drop.
-
-
-A connected, native in-process SSH client session, obtained from [`connect`](#ssh-connect) or [`connect_with`](#ssh-connect_with). Aborts its internal server task on drop.
+Native in-process SSH client session.
 
 #### <span className="msb-recv">client.</span><span className="msb-hn">exec()</span>
 
@@ -475,10 +469,7 @@ Close this native SSH client session. Sends a disconnect and aborts the internal
 
 <p className="msb-backref">Returned by <a href="#ssh-server">ssh.server()</a>, <a href="#ssh-server_with">ssh.server_with()</a></p>
 
-Reusable SSH server endpoint for a sandbox. Cloneable.
-
-
-A reusable SSH server endpoint for a sandbox, obtained from [`server`](#ssh-server) or [`server_with`](#ssh-server_with). Cloneable; each call to [`serve`](#server-serve) handles one connection.
+Reusable SSH server endpoint for a sandbox.
 
 #### <span className="msb-recv">server.</span><span className="msb-hn">serve()</span>
 

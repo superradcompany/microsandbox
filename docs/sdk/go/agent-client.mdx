@@ -3,10 +3,7 @@ title: Agent client
 description: Go SDK - Low-level agentd client reference
 ---
 
-`AgentClient` is the low-level raw transport for talking to `agentd` through a running sandbox's relay socket. For most applications, use [`Sandbox`](/sdk/go/sandbox), [`Exec`](/sdk/go/execution), and filesystem helpers instead. Reach for this API when you are building protocol-level tools or higher-level SDK helpers.
-
-All request and response bodies are raw CBOR bytes. The SDK handles framing and correlation ids, but it does not encode or decode the CBOR message body for you: decode it with a library such as `fxamacker/cbor`. The raw body is the full CBOR-encoded protocol `Message` body (`v`, `t`, `p`), not just the inner payload.
-
+Low-level raw CBOR transport for communicating with `agentd` through a sandbox relay.
 
 ## Constants
 
@@ -185,7 +182,7 @@ Resolve a sandbox's `agentd` relay socket path **without connecting**. Returns t
 
 <p className="msb-backref">Returned by <a href="#m-connectagentsandbox">ConnectAgentSandbox()</a> · <a href="#m-connectagentpath">ConnectAgentPath()</a></p>
 
-Low-level client for talking to `agentd` through the sandbox relay socket. All bodies are raw CBOR bytes: encode and decode them in your code with a library like `fxamacker/cbor`, and build typed convenience methods on top of this client. Construct it with one of the package-level connect functions.
+Low-level client for raw agent frames.
 
 
 #### <span className="msb-recv">c.</span><span className="msb-hn">Request()</span>

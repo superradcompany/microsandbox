@@ -3,15 +3,7 @@ title: Agent client
 description: Rust SDK - Low-level agentd client reference
 ---
 
-`AgentClient` is the low-level transport for talking to `agentd` through a running sandbox's relay socket. For most applications, use [`Sandbox`](/sdk/rust/sandbox), [`exec`](/sdk/rust/execution), and [`fs`](/sdk/rust/filesystem) instead. Reach for `AgentClient` when you are building a protocol-level integration or an SDK layer. [`AgentBridge`](#agentbridge) wraps the same connection in concrete, FFI-shaped types for the Node, Python, and Go bindings.
-
-The client has two tiers that share one socket and one background reader task:
-
-- **Typed** methods encode and decode microsandbox protocol messages for you.
-- **Raw** methods move framed CBOR bytes without decoding the message body.
-
-The raw body is the full CBOR-encoded protocol `Message` body (`v`, `t`, and `p`), not just the inner payload. The typed and raw methods reach the connection through `Deref` to the underlying client; everything below is callable directly on the value `connect_sandbox` returns.
-
+Low-level typed and raw transport for communicating with `agentd` through a sandbox relay.
 
 ## Module functions
 
@@ -100,7 +92,7 @@ Like [`connect_sandbox`](#agentconnect_sandbox), but with an explicit handshake 
 
 <p className="msb-backref">Returned by <a href="#agentconnect_sandbox">agent::connect_sandbox()</a>, <a href="#agentclientconnect">AgentClient::connect()</a> · wrapped by <a href="#agentbridge">AgentBridge</a></p>
 
-Client for communicating with `agentd` through a running sandbox's relay. A newtype over the underlying `microsandbox_agent_client::AgentClient`; the typed and raw transport methods reach the inner client through `Deref`. See the [static](#agentclient-static-methods) and [instance](#agentclient-instance-methods) method sections above.
+Low-level client for raw agent frames.
 
 #### <span className="msb-recv">AgentClient::</span><span className="msb-hn">connect()</span>
 
@@ -770,7 +762,7 @@ Close the client by consuming it. Drops the writer and aborts the reader task; a
 
 ## AgentBridge
 
-Bytes-in/bytes-out wrapper around [`AgentClient`](#agentclient), with concrete, monomorphic types suitable for crossing FFI boundaries. The Node, Python, and Go bindings build on it. No generics, no consuming-`self` methods, no callbacks across FFI: each method takes `&self` and is idempotent where the underlying operation allows. CBOR (de)serialization happens entirely in the caller's language; the bridge only moves bytes. One instance owns one Unix-socket connection; multiple concurrent streams are supported, each identified by an opaque [`StreamHandle`](#streamhandle).
+FFI-friendly bytes-in/bytes-out wrapper around [`AgentClient`](#agentclient).
 
 #### <span className="msb-recv">AgentBridge::</span><span className="msb-hn">connect_sandbox()</span>
 

@@ -3,16 +3,13 @@ title: Networking
 description: Rust SDK - Network API reference
 ---
 
-Configure a sandbox's network stack: a first-match-wins egress/ingress policy, published ports, DNS interception, TLS interception, and secret-violation handling. See [Networking](/networking/overview) for the conceptual overview and [TLS Interception](/networking/tls) for proxy details.
-
-
-The default policy denies egress except for an implicit allow-public rule (plus DNS), and allows ingress with no rules. See the [defaults rationale](/networking/overview#defaults) for the asymmetry. `NetworkPolicy` and the builders live in `microsandbox_network`; `NetworkPolicy` is also re-exported from the crate root as `microsandbox::NetworkPolicy`.
+Configure sandbox networking. See [Networking](/networking/overview) for usage and policy concepts.
 
 ## NetworkPolicy
 
 <p className="msb-backref">Built by <a href="#networkpolicybuilder">NetworkPolicy::builder()</a> · used by <a href="#policy">policy()</a></p>
 
-An ordered rule list plus two per-direction defaults, evaluated first-match-wins. Egress evaluation considers rules where `direction ∈ {Egress, Any}`; ingress considers `{Ingress, Any}`. If no rule matches, the direction-specific default applies. `Default` is [`from_profiles([NetworkProfile::Public])`](#networkpolicyfrom_profiles).
+Ordered rules with per-direction defaults.
 
 #### <span className="msb-recv">NetworkPolicy::</span><span className="msb-hn">default_egress</span>
 
@@ -31,8 +28,6 @@ Action when no ingress-applicable rule matches
 `Vec<`[`Rule`](#rule)`>`
 
 Ordered rules; first match wins per direction
-
-A [`NetworkPolicy`](#networkpolicy) is an ordered rule list plus two per-direction defaults, evaluated first-match-wins. Compose common access shapes with [`from_profiles()`](#networkpolicyfrom_profiles); for anything custom, start from [`builder()`](#networkpolicybuilder).
 
 #### <span className="msb-recv">NetworkPolicy::</span><span className="msb-hn">builder()</span>
 
@@ -227,9 +222,7 @@ Prepend one deny-[`DomainSuffix`](#destination) egress rule per suffix.
 
 ## NetworkPolicyBuilder
 
-Fluent builder for [`NetworkPolicy`](#networkpolicy), obtained via [`NetworkPolicy::builder()`](#networkpolicybuilder). Defaults and rule-batch closures interleave; the build is deferred. The closure signature for [`rule()`](#rule) / [`egress()`](#egress) / [`ingress()`](#ingress) / [`any()`](#any) is `FnOnce(&mut RuleBuilder) -> &mut RuleBuilder`. A chain ending in any rule-adder (`.allow_public()`, `.deny().ip(...)`, etc.) returns the builder reference and satisfies the bound; multi-statement bodies end with an explicit `r` return.
-
-State setters inside a closure (`.tcp()`, `.port()`) accumulate eagerly and are **not reset** between rule-adders, so a single closure can fan one state into several rules. Use separate closures for rules that need different state. See [State accumulation](/networking/overview) for the rationale.
+Fluent builder for [`NetworkPolicy`](#networkpolicy).
 
 #### <span className="msb-recv">policy.</span><span className="msb-hn">default_deny()</span>
 
@@ -361,7 +354,7 @@ Consume the builder and produce a [`NetworkPolicy`](#networkpolicy). Lazy-parses
 
 ## RuleBuilder
 
-The mutable builder handed to a [`NetworkPolicyBuilder`](#networkpolicybuilder) rule-batch closure. Direction, protocol, and port setters return `&mut Self` and accumulate eagerly; rule-adders commit one rule each using the current state. Protocols and ports have set semantics, so duplicates dedupe.
+Builder for one policy-rule batch.
 
 #### <span className="msb-recv">rule.</span><span className="msb-hn">egress()</span>
 
@@ -645,7 +638,7 @@ Begin an explicit-destination rule with action [`Deny`](#action).
 
 ## RuleDestinationBuilder
 
-Returned by [`RuleBuilder::allow()`](#rb-allow) / [`RuleBuilder::deny()`](#rb-deny). Requires exactly one destination method call to commit the rule, then returns the `&mut RuleBuilder` so the chain continues. The type is `#[must_use]`: dropping it without a destination call adds no rule.
+Builder for a rule destination.
 
 #### <span className="msb-recv">destination.</span><span className="msb-hn">ip()</span>
 
@@ -1108,7 +1101,7 @@ Whether the proxy verifies upstream server certificates only when the upstream S
 
 ## ViolationActionBuilder
 
-Builder for secret-violation behavior, used by [`NetworkBuilder::on_secret_violation()`](#on_secret_violation) and [`SecretBuilder::on_violation()`](/sdk/rust/secrets#on_violation). A blocking call (`block`, `block_and_log`, `block_and_terminate`) replaces any accumulated passthrough hosts; passthrough calls accumulate. When passthrough hosts are configured, non-matching hosts use the default action. Every setter returns `Self`. Produces a [`ViolationAction`](#violationaction).
+Builder for secret-violation behavior.
 
 #### <span className="msb-recv">violation.</span><span className="msb-hn">block()</span>
 
@@ -1331,16 +1324,7 @@ Whether `port` falls within the range
 
 <p className="msb-backref">Held by <a href="#destination">Destination::Domain / DomainSuffix</a></p>
 
-A validated DNS name. Construction goes through `str::parse` (or `TryFrom<String>`), which delegates to `hickory_proto::rr::Name` and canonicalizes the input (lowercased ASCII, leading and trailing dots stripped) so rule matching is a byte-wise compare against the DNS cache. Invalid inputs return a [`DomainNameError`](#builderror).
-
-```rust
-use microsandbox_network::policy::DomainName;
-
-let exact: DomainName = "PyPI.Org.".parse()?;      // -> "pypi.org"
-let suffix: DomainName = ".example.com".parse()?;  // -> "example.com"
-```
-
-Labels follow the permissive DNS grammar (RFC 2181 §11), so underscore-prefixed names like `_service._tcp.example.com` are accepted. The builder methods (`.domain(&str)`, `.domain_suffix(&str)`) take strings and parse them lazily at [`build()`](#build), so callers rarely construct `DomainName` directly.
+A validated, canonical DNS name.
 
 
 #### <span className="msb-recv">name.</span><span className="msb-hn">as_str()</span>

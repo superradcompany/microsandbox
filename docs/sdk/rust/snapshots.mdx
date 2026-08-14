@@ -3,12 +3,7 @@ title: Snapshots
 description: Rust SDK - Snapshot API reference
 ---
 
-Capture a stopped sandbox's writable upper layer into a self-describing, content-addressed artifact on disk, then list, verify, save, load, or boot a fresh sandbox from it. See [Snapshots](/sandboxes/snapshots) for concepts and walkthroughs; this page is the Rust SDK reference.
-
-<Note>
-  Snapshots are **local-only** and **disk-only** today: they capture a sandbox that is stopped or crashed, and every operation runs against the default local backend. Cloud snapshots and qcow2 backing chains are deferred.
-</Note>
-
+Create and manage disk-only snapshots of stopped sandboxes. See [Snapshots](/sandboxes/snapshots) for usage and lifecycle concepts.
 
 ## Snapshot
 
@@ -504,10 +499,7 @@ Recompute the upper layer's content hash and compare it against the manifest. Wa
 
 <p className="msb-backref">Returned by <a href="#snapshotget">Snapshot::get()</a> · <a href="#snapshotlist">Snapshot::list()</a> · <a href="#snapshotload">Snapshot::load()</a></p>
 
-A lightweight handle backed by a local index row. Use [`open()`](#h-open) to read the artifact metadata, and [`Snapshot::verify()`](#snap-verify) for explicit content verification. All accessors are listed under [SnapshotHandle methods](#snapshothandle-methods).
-
-
-Accessors and lifecycle on a [`SnapshotHandle`](#snapshothandle) (an index row). Returned by [`Snapshot::get()`](#snapshotget), [`Snapshot::list()`](#snapshotlist), and [`Snapshot::load()`](#snapshotload).
+A snapshot handle backed by the local index.
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">digest()</span>
 
@@ -728,17 +720,7 @@ let snap = h.snapshot_to("/data/snapshots/baseline").await?;
 
 ## SnapshotBuilder
 
-Builder for a [`SnapshotConfig`](#snapshotconfig). Obtained via [`Snapshot::builder(name)`](#snapshotbuilder). A source sandbox is required ([`from_sandbox`](#from_sandbox)); the other setters are optional. Every setter returns `Self`, so calls chain.
-
-```rust
-let snap = Snapshot::builder("after-pip-install")
-    .from_sandbox("api")           // sandbox to capture
-    .label("stage", "post-deps")
-    .force()                       // overwrite if it exists
-    .record_integrity()            // hash the upper layer
-    .create()
-    .await?;
-```
+Builder for snapshot configuration.
 
 ---
 

@@ -3,20 +3,8 @@ title: Execution
 description: TypeScript SDK - Command execution API reference
 ---
 
-Run commands inside a running sandbox: collect output in one shot, stream it as it arrives, attach an interactive PTY, or pipe data to stdin. These methods live on a running [`Sandbox`](/sdk/typescript/sandbox). See [Commands](/sandboxes/commands) for usage examples.
+Run commands inside a running sandbox. See [Commands](/sandboxes/commands) for usage examples.
 
-## Default workload
-
-`create()` boots the sandbox without executing its image workload. `execDefault()` resolves the effective OCI ENTRYPOINT and CMD; `execDefaultStream()` streams it and `attachDefault()` runs it in an interactive PTY. The `*With` variants accept the existing execution-option builders. They throw `NoDefaultCommandError` when no executable default exists and never fall back to a shell.
-
-```typescript
-const sandbox = await Sandbox.builder("worker")
-  .image("example/worker:latest")
-  .entrypoint(["python", "-u"])
-  .cmd(["worker.py", "--once"])
-  .create();
-const out = await sandbox.execDefaultWith((e) => e.env("LOG_LEVEL", "debug"));
-```
 ## Sandbox
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">exec()</span>
@@ -379,7 +367,7 @@ Interactive PTY attach with options for arguments, environment variables, workin
 
 <p className="msb-backref">Returned by <a href="#sandbox-exec">exec()</a> · <a href="#sandbox-execwith">execWith()</a> · <a href="#sandbox-shell">shell()</a> · <a href="#exechandle">ExecHandle.collect()</a></p>
 
-The result of a completed command execution: collected output plus exit status. In TTY mode, `stdoutBytes()` contains the combined terminal output and `stderrBytes()` is empty because a PTY doesn't preserve separate stdout and stderr streams.
+Collected output and exit status.
 
 #### <span className="msb-recv">output.</span><span className="msb-hn">code</span>
 
@@ -452,7 +440,7 @@ Raw stderr bytes
 
 <p className="msb-backref">Returned by <a href="#sandbox-execstream">execStream()</a> · <a href="#sandbox-execstreamwith">execStreamWith()</a> · <a href="#sandbox-shellstream">shellStream()</a></p>
 
-A handle to a running streaming execution. Implements `AsyncIterable<ExecEvent>` and `AsyncDisposable`, so it works with `for await...of` and `await using`. `signal()`, `kill()`, and `resize()` may run while another task is waiting in `recv()`; concurrent receive, wait, and collect operations are not supported.
+A handle to a running streaming execution and its events.
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">recv()</span>
 

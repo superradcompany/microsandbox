@@ -1839,7 +1839,7 @@ Set the default working directory for all commands.
 
 ## PatchBuilder
 
-Fluent builder for the ordered list of pre-boot rootfs patches. Used in `SandboxBuilder.patch(p => p...)`. Each method appends one operation; calls are chainable. By default a method that targets a path already present in the image errors at boot; pass `{ replace: true }` on the operation to allow overwriting. `mkdir` and `remove` are idempotent. See [Patches](/sandboxes/bootstrap#patches) for conceptual context.
+Builder for pre-boot root filesystem patches.
 
 #### <span className="msb-recv">patch.</span><span className="msb-hn">append()</span>
 
@@ -2258,9 +2258,7 @@ Add several AND-matched labels
 
 <p className="msb-backref">Returned by <a href="#sandbox-get">Sandbox.get()</a> · <a href="#sandbox-list">Sandbox.list()</a> · <a href="#sandbox-listwith">Sandbox.listWith()</a></p>
 
-A lightweight handle to an existing sandbox (running or stopped). Obtained via [`Sandbox.get()`](#sandbox-get), [`Sandbox.list()`](#sandbox-list), or [`Sandbox.listWith()`](#sandbox-listwith). Provides status, configuration, and lifecycle control without an active connection to the guest agent.
-
-Handles from `Sandbox.get(name)` are **live** - they expose lifecycle methods (`start`, `stop`, `kill`, `connect`, etc). Handles in pages returned by `Sandbox.list()` / `Sandbox.listWith()` are **read-only**: calling lifecycle methods on them throws. Use `Sandbox.get(name)` to upgrade to a live handle.
+A metadata and lifecycle handle for an existing sandbox.
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">name</span>
 
