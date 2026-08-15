@@ -8,6 +8,7 @@ on:
       - .github/workflows/release.yml
       - .github/workflows/release-platform.yml
       - .github/workflows/release-windows.yml
+      - .github/actions/cache-libkrunfw-kernel/action.yml
       - scripts/ci/publish-crates.py
       - scripts/ci/validate-release-artifacts.py
       - scripts/ci/wait-for-npm-packages.mjs
@@ -32,11 +33,34 @@ permissions:
   contents: read
 
 jobs:
+  # Fetch and verify the large kernel archive once, then fan it out to both
+  # firmware architectures over GitHub's artifact network.
+  kernel-sources:
+    name: Kernel sources
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Checkout libkrunfw sources
+        run: git submodule update --init --depth 1 vendor/libkrunfw
+
+      - name: Prepare kernel source
+        uses: ./.github/actions/cache-libkrunfw-kernel
+
+      - name: Upload kernel source archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: kernel-source
+          path: vendor/libkrunfw/tarballs/*.tar.gz
+          compression-level: 0
+
   # Build each firmware bundle once. Linux consumes the shared library directly;
   # macOS and Windows consume the matching generated kernel.c.
   firmware-aarch64:
     name: Firmware (aarch64)
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    needs: kernel-sources
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -57,6 +81,13 @@ jobs:
         if: steps.cache-firmware.outputs.cache-hit != 'true'
         run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
 
+      - name: Download kernel source archive
+        if: steps.cache-firmware.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v8.0.1
+        with:
+          name: kernel-source
+          path: vendor/libkrunfw/tarballs
+
       - name: Build firmware
         if: steps.cache-firmware.outputs.cache-hit != 'true'
         working-directory: vendor/libkrunfw
@@ -74,6 +105,7 @@ jobs:
   firmware-x86_64:
     name: Firmware (x86_64)
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    needs: kernel-sources
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -93,6 +125,13 @@ jobs:
       - name: Install firmware build dependencies
         if: steps.cache-firmware.outputs.cache-hit != 'true'
         run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
+
+      - name: Download kernel source archive
+        if: steps.cache-firmware.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v8.0.1
+        with:
+          name: kernel-source
+          path: vendor/libkrunfw/tarballs
 
       - name: Build firmware
         if: steps.cache-firmware.outputs.cache-hit != 'true'
