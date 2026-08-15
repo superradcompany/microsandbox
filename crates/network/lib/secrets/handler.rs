@@ -221,6 +221,7 @@ struct ChunkedRewriteResult {
 
 /// Event emitted by the chunked transfer parser.
 enum ChunkedBodyEvent<'a> {
+    SizeLine(&'a [u8]),
     Payload(&'a [u8]),
     ZeroChunk,
     TrailerLine(&'a [u8]),
@@ -291,6 +292,8 @@ enum RequestLocation {
     Query,
     BasicAuth,
     Body,
+    ChunkMetadata,
+    Trailer,
     Unknown,
 }
 
@@ -403,7 +406,13 @@ impl IneligibleSecret {
             RequestLocation::Header | RequestLocation::BasicAuth => self.substitution.headers,
             RequestLocation::Query => self.substitution.query,
             RequestLocation::Body => self.substitution.body,
-            RequestLocation::Unknown => false,
+            // Chunk framing metadata and trailers are not substitution targets.
+            // They therefore remain protected even when another substitution
+            // scope is enabled; only explicit placeholder passthrough may allow
+            // an unchanged placeholder there.
+            RequestLocation::ChunkMetadata
+            | RequestLocation::Trailer
+            | RequestLocation::Unknown => false,
         }
     }
 }
@@ -454,6 +463,8 @@ impl fmt::Display for RequestLocation {
             Self::Query => "query",
             Self::BasicAuth => "authorization_basic",
             Self::Body => "body",
+            Self::ChunkMetadata => "chunk_metadata",
+            Self::Trailer => "trailer",
             Self::Unknown => "unknown",
         };
         f.write_str(value)
@@ -1051,13 +1062,20 @@ impl SecretsHandler {
         headers: &str,
     ) -> Result<Cow<'a, [u8]>, SecretViolationAction> {
         if self.needs_body_substitution() && !has_non_identity_content_encoding(headers) {
-            return self.substitute_chunked_rewrite_ready(
-                parent,
-                header_bytes,
-                after_headers,
-                headers,
-            );
+            return self.substitute_chunked_rewrite_ready(header_bytes, after_headers, headers);
         }
+
+        // Chunked parsing below owns every post-header byte. Scan the complete
+        // header block independently so its bytes cannot contaminate payload or
+        // framing-metadata detection across a later network read.
+        self.http1_request_summary = Some(http1_request_summary(headers));
+        self.apply_blocking_action(self.detect_http1_fragment_blocking_action(
+            &[],
+            header_bytes,
+            headers,
+            RequestLocation::Unknown,
+        ))?;
+        self.prev_tail.clear();
 
         let mut state = ChunkedBodyState::default();
         let body_end =
@@ -1068,18 +1086,10 @@ impl SecretsHandler {
         };
         let this_request = &parent[..header_bytes.len() + body_part.len()];
 
-        self.apply_blocking_action(self.detect_blocking_action(
-            this_request,
-            headers,
-            RequestLocation::Unknown,
-        ))?;
-        self.prev_tail.clear();
-
         self.http_state = if body_end.is_some() {
             self.http1_request_summary = None;
             HttpState::AwaitingHeaders
         } else {
-            self.http1_request_summary = Some(http1_request_summary(headers));
             HttpState::InChunkedBody { state }
         };
 
@@ -1100,31 +1110,33 @@ impl SecretsHandler {
     /// Handle a chunked request that needs body substitution.
     fn substitute_chunked_rewrite_ready<'a>(
         &mut self,
-        parent: &'a [u8],
         header_bytes: &'a [u8],
         after_headers: &'a [u8],
         headers: &str,
     ) -> Result<Cow<'a, [u8]>, SecretViolationAction> {
-        let mut state = ChunkedRewriteState::default();
-        let rewrite = self.rewrite_chunked_body_part(&mut state, after_headers)?;
-        let (body_part, spillover) = match rewrite.body_end {
-            Some(end) => after_headers.split_at(end),
-            None => (after_headers, &[] as &[u8]),
-        };
-        let this_request = &parent[..header_bytes.len() + body_part.len()];
-
-        self.apply_blocking_action(self.detect_blocking_action(
-            this_request,
+        // Keep request headers and chunked framing in separate detector
+        // domains. The parser events below scan payload and metadata exactly
+        // once using their own state.
+        self.http1_request_summary = Some(http1_request_summary(headers));
+        self.apply_blocking_action(self.detect_http1_fragment_blocking_action(
+            &[],
+            header_bytes,
             headers,
             RequestLocation::Unknown,
         ))?;
         self.prev_tail.clear();
 
+        let mut state = ChunkedRewriteState::default();
+        let rewrite = self.rewrite_chunked_body_part(&mut state, after_headers)?;
+        let spillover = match rewrite.body_end {
+            Some(end) => &after_headers[end..],
+            None => &[] as &[u8],
+        };
+
         self.http_state = if rewrite.body_end.is_some() {
             self.http1_request_summary = None;
             HttpState::AwaitingHeaders
         } else {
-            self.http1_request_summary = Some(http1_request_summary(headers));
             HttpState::InChunkedRewriteBody { state }
         };
 
@@ -1223,13 +1235,6 @@ impl SecretsHandler {
             None => (data, &[] as &[u8]),
         };
 
-        self.apply_blocking_action(self.detect_blocking_action(
-            body_part,
-            "",
-            RequestLocation::Body,
-        ))?;
-        self.update_tail(body_part);
-
         self.http_state = if body_end.is_some() {
             self.http1_request_summary = None;
             HttpState::AwaitingHeaders
@@ -1248,17 +1253,10 @@ impl SecretsHandler {
         mut state: ChunkedRewriteState,
     ) -> Result<Cow<'a, [u8]>, SecretViolationAction> {
         let rewrite = self.rewrite_chunked_body_part(&mut state, data)?;
-        let (body_part, spillover) = match rewrite.body_end {
-            Some(end) => data.split_at(end),
-            None => (data, &[] as &[u8]),
+        let spillover = match rewrite.body_end {
+            Some(end) => &data[end..],
+            None => &[] as &[u8],
         };
-
-        self.apply_blocking_action(self.detect_blocking_action(
-            body_part,
-            "",
-            RequestLocation::Body,
-        ))?;
-        self.update_tail(body_part);
 
         self.http_state = if rewrite.body_end.is_some() {
             self.http1_request_summary = None;
@@ -1396,24 +1394,29 @@ impl SecretsHandler {
     ) -> Result<Option<usize>, SecretViolationAction> {
         let mut decoded_tail = std::mem::take(&mut state.decoded_tail);
         let body_end = process_chunked_body(state, data, |event| {
-            let ChunkedBodyEvent::Payload(payload) = event else {
-                return Ok(());
-            };
-            self.block_unsupported_body_placeholder(&decoded_tail, payload)?;
-            self.apply_blocking_action(detect_blocking_action_with_tail(
-                &self.ineligible_for_substitution,
-                &decoded_tail,
-                payload,
-                "",
-                RequestProtocol::Http1,
-                RequestLocation::Body,
-                None,
-            ))?;
-            update_tail_buffer(
-                &mut decoded_tail,
-                payload,
-                self.max_detection_window_len.saturating_sub(1),
-            );
+            match event {
+                ChunkedBodyEvent::SizeLine(line) => {
+                    self.apply_chunked_metadata_policy(line, RequestLocation::ChunkMetadata)?;
+                }
+                ChunkedBodyEvent::Payload(payload) => {
+                    self.block_unsupported_body_placeholder(&decoded_tail, payload)?;
+                    self.apply_blocking_action(self.detect_http1_fragment_blocking_action(
+                        &decoded_tail,
+                        payload,
+                        "",
+                        RequestLocation::Body,
+                    ))?;
+                    update_tail_buffer(
+                        &mut decoded_tail,
+                        payload,
+                        self.max_detection_window_len.saturating_sub(1),
+                    );
+                }
+                ChunkedBodyEvent::ZeroChunk => {}
+                ChunkedBodyEvent::TrailerLine(line) => {
+                    self.apply_chunked_metadata_policy(line, RequestLocation::Trailer)?;
+                }
+            }
             Ok(())
         });
         state.decoded_tail = decoded_tail;
@@ -1431,15 +1434,15 @@ impl SecretsHandler {
 
         let body_end = process_chunked_body(&mut state.parser, data, |event| {
             match event {
+                ChunkedBodyEvent::SizeLine(line) => {
+                    self.apply_chunked_metadata_policy(line, RequestLocation::ChunkMetadata)?;
+                }
                 ChunkedBodyEvent::Payload(payload) => {
-                    self.apply_blocking_action(detect_blocking_action_with_tail(
-                        &self.ineligible_for_substitution,
+                    self.apply_blocking_action(self.detect_http1_fragment_blocking_action(
                         &decoded_tail,
                         payload,
                         "",
-                        RequestProtocol::Http1,
                         RequestLocation::Body,
-                        None,
                     ))?;
                     update_tail_buffer(
                         &mut decoded_tail,
@@ -1457,6 +1460,7 @@ impl SecretsHandler {
                     output.extend_from_slice(b"0\r\n");
                 }
                 ChunkedBodyEvent::TrailerLine(trailer_line) => {
+                    self.apply_chunked_metadata_policy(trailer_line, RequestLocation::Trailer)?;
                     output.extend_from_slice(trailer_line);
                 }
             }
@@ -1602,22 +1606,61 @@ impl SecretsHandler {
         headers: &str,
         location_hint: RequestLocation,
     ) -> Option<SecretViolationReport> {
+        self.detect_http1_fragment_blocking_action(&self.prev_tail, data, headers, location_hint)
+    }
+
+    /// Detect a violation inside one semantically scoped HTTP/1 fragment.
+    /// The caller supplies only a tail from the same logical byte stream.
+    fn detect_http1_fragment_blocking_action(
+        &self,
+        prev_tail: &[u8],
+        data: &[u8],
+        headers: &str,
+        location_hint: RequestLocation,
+    ) -> Option<SecretViolationReport> {
         let mut report = detect_blocking_action_with_tail(
             &self.ineligible_for_substitution,
-            &self.prev_tail,
+            prev_tail,
             data,
             headers,
             RequestProtocol::Http1,
             location_hint,
             None,
         );
-        if headers.is_empty()
-            && let Some(report) = &mut report
+        if let Some(report) = &mut report
             && let Some(summary) = &self.http1_request_summary
         {
             report.apply_request_summary(summary);
         }
         report
+    }
+
+    /// Enforce placeholder policy for chunk extensions and trailers.
+    ///
+    /// These locations are parsed as complete bounded lines, so they need no
+    /// sliding tail. Trailer text is supplied as header context solely to
+    /// retain encoded Basic-auth detection; the explicit location keeps it
+    /// outside the ordinary substitutable header section.
+    fn apply_chunked_metadata_policy(
+        &self,
+        line: &[u8],
+        location: RequestLocation,
+    ) -> Result<(), SecretViolationAction> {
+        debug_assert!(matches!(
+            location,
+            RequestLocation::ChunkMetadata | RequestLocation::Trailer
+        ));
+        let headers = if location == RequestLocation::Trailer {
+            std::str::from_utf8(line).unwrap_or_default()
+        } else {
+            ""
+        };
+        self.apply_blocking_action(self.detect_http1_fragment_blocking_action(
+            &[],
+            line,
+            headers,
+            location,
+        ))
     }
 
     /// Update the sliding-window tail with the trailing bytes of `data`, so
@@ -2760,14 +2803,22 @@ fn detect_blocking_action_with_tail(
         .any(|window| window == b"\\u")
         .then(|| json_unescape(scan));
     let basic_auth_credentials = decoded_basic_auth_credentials(headers);
-    let request = request_summary(headers, protocol);
+    let request = if is_scoped_fragment_location(location_hint) {
+        RequestSummary::default()
+    } else {
+        request_summary(headers, protocol)
+    };
 
     let mut detected = None;
     for secret in ineligible_for_substitution {
         // Body-only scans use their location-scoped tail to catch a
         // placeholder split across reads. Structured requests use the
         // current request bytes so a previous location cannot taint them.
-        let raw_scan = if headers.is_empty() { scan } else { data };
+        let raw_scan = if headers.is_empty() || is_scoped_fragment_location(location_hint) {
+            scan
+        } else {
+            data
+        };
         if let Some((location, match_form)) = detect_disallowed_raw_match(
             secret,
             raw_scan,
@@ -2823,12 +2874,16 @@ fn detect_disallowed_raw_match(
             .any(|decoded| decoded.contains(&secret.placeholder))
     {
         return Some((
-            RequestLocation::BasicAuth,
+            if is_scoped_fragment_location(location_hint) {
+                location_hint
+            } else {
+                RequestLocation::BasicAuth
+            },
             PlaceholderMatchForm::BasicAuthDecoded,
         ));
     }
 
-    if headers.is_empty() {
+    if headers.is_empty() || is_scoped_fragment_location(location_hint) {
         return (!secret.substitution_allows(location_hint) && contains_bytes(scan, needle))
             .then_some((location_hint, PlaceholderMatchForm::Raw));
     }
@@ -2878,7 +2933,11 @@ fn detect_secret_match(
         .any(|decoded| decoded.contains(&secret.placeholder))
     {
         return Some((
-            RequestLocation::BasicAuth,
+            if is_scoped_fragment_location(location_hint) {
+                location_hint
+            } else {
+                RequestLocation::BasicAuth
+            },
             PlaceholderMatchForm::BasicAuthDecoded,
         ));
     }
@@ -2909,7 +2968,7 @@ fn classify_decoded_match_location(
     placeholder: &str,
     location_hint: RequestLocation,
 ) -> RequestLocation {
-    if location_hint != RequestLocation::Unknown && headers.is_empty() {
+    if is_scoped_fragment_location(location_hint) {
         return location_hint;
     }
     if !headers.is_empty() {
@@ -2948,6 +3007,16 @@ fn classify_decoded_match_location(
         return location_hint;
     }
     RequestLocation::Unknown
+}
+
+/// Locations whose bytes have already been separated from the request header
+/// block by a protocol parser. They must never be reclassified from adjacent
+/// bytes or from header-like syntax inside the fragment.
+fn is_scoped_fragment_location(location: RequestLocation) -> bool {
+    matches!(
+        location,
+        RequestLocation::Body | RequestLocation::ChunkMetadata | RequestLocation::Trailer
+    )
 }
 
 fn classify_header_match_location(headers: &str, placeholder: &str) -> RequestLocation {
@@ -2990,9 +3059,8 @@ fn consume_chunked_body(
     process_chunked_body(state, data, |_| Ok(()))
 }
 
-/// Process chunked body bytes and call `on_payload` with decoded chunk payload
-/// slices, `on_zero_chunk` when the terminating chunk is parsed, and
-/// `on_trailer_line` with each complete trailer line including its CRLF.
+/// Process chunked body bytes and emit complete size/extension lines, decoded
+/// payload slices, the terminating zero chunk, and complete trailer lines.
 fn process_chunked_body<E>(
     state: &mut ChunkedBodyState,
     data: &[u8],
@@ -3014,6 +3082,10 @@ where
                 if state.line.ends_with(b"\r\n") {
                     let line = &state.line[..state.line.len() - 2];
                     let size = parse_chunk_size(line)?;
+                    // Emit the complete bounded line before clearing it so a
+                    // placeholder split across network reads is still scanned
+                    // without a cross-location sliding tail.
+                    on_event(ChunkedBodyEvent::SizeLine(&state.line))?;
                     state.line.clear();
                     state.phase = if size == 0 {
                         on_event(ChunkedBodyEvent::ZeroChunk)?;
@@ -3870,6 +3942,157 @@ mod tests {
             handler.substitute(input).unwrap_err(),
             SecretViolationAction::Block
         );
+    }
+
+    #[test]
+    fn split_chunked_trailer_blocks_for_wrong_host() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler = SecretsHandler::new(&config, "evil.com", true);
+
+        let first = b"POST / HTTP/1.1\r\nHost: evil.com\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n0\r\nX-Token: $K";
+        assert_eq!(handler.substitute(first).unwrap().as_ref(), first);
+        assert_eq!(
+            handler.substitute(b"EY\r\n\r\n").unwrap_err(),
+            SecretViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn split_chunked_trailer_blocks_when_header_substitution_is_enabled() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.substitution.body = true;
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        // Trailers are not part of the substitutable header section. The
+        // rewrite path buffers this partial line, then blocks it unless the
+        // destination has explicit placeholder passthrough permission.
+        let first = b"POST / HTTP/1.1\r\nHost: api.openai.com\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n0\r\nX-Token: $K";
+        let output = handler.substitute(first).unwrap();
+        assert!(!output.as_ref().ends_with(b"$K"));
+        assert_eq!(
+            handler.substitute(b"EY\r\n\r\n").unwrap_err(),
+            SecretViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn split_chunk_extension_blocks_for_wrong_host() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler = SecretsHandler::new(&config, "evil.com", true);
+
+        let first =
+            b"POST / HTTP/1.1\r\nHost: evil.com\r\nTransfer-Encoding: chunked\r\n\r\n1;token=$K";
+        assert_eq!(handler.substitute(first).unwrap().as_ref(), first);
+        assert_eq!(
+            handler.substitute(b"EY\r\nx\r\n0\r\n\r\n").unwrap_err(),
+            SecretViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn split_chunk_extension_blocks_during_body_rewrite() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.substitution.body = true;
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let first = b"POST / HTTP/1.1\r\nHost: api.openai.com\r\nTransfer-Encoding: chunked\r\n\r\n1;token=$K";
+        let output = handler.substitute(first).unwrap();
+        assert!(!output.as_ref().ends_with(b"$K"));
+        assert_eq!(
+            handler.substitute(b"EY\r\nx\r\n0\r\n\r\n").unwrap_err(),
+            SecretViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn chunked_passthrough_allows_split_metadata_placeholders() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.passthrough_hosts = vec![HostPattern::Exact("evil.com".into())];
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "evil.com", true);
+
+        let fragments: [&[u8]; 3] = [
+            b"POST / HTTP/1.1\r\nHost: evil.com\r\nTransfer-Encoding: chunked\r\n\r\n1;token=$K",
+            b"EY\r\nx\r\n0\r\nX-Token: $K",
+            b"EY\r\n\r\n",
+        ];
+        for fragment in fragments {
+            assert_eq!(handler.substitute(fragment).unwrap().as_ref(), fragment);
+        }
+    }
+
+    #[test]
+    fn chunked_rewrite_substitutes_body_and_preserves_passthrough_trailer() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.substitution.body = true;
+        secret.passthrough_hosts = vec![HostPattern::Exact("api.openai.com".into())];
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let input = b"POST / HTTP/1.1\r\nHost: api.openai.com\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n$KEY\r\n0\r\nX-Token: $KEY\r\n\r\n";
+        let output = handler.substitute(input).unwrap().into_owned();
+        let (_, body) = split_http_body(&output);
+        let (decoded, trailers, consumed) = decode_chunked_payload(body);
+
+        assert_eq!(decoded, b"real-secret");
+        assert_eq!(trailers, b"X-Token: $KEY\r\n\r\n");
+        assert_eq!(consumed, body.len());
+    }
+
+    #[test]
+    fn chunked_detection_does_not_join_distinct_protocol_locations() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler = SecretsHandler::new(&config, "evil.com", true);
+
+        // None of these semantic locations contains the complete placeholder:
+        // a chunk extension ends in `$K`, payload starts with `EY`, a later
+        // payload ends in `$K`, and the trailer starts with `EY`.
+        let input = b"POST / HTTP/1.1\r\nHost: evil.com\r\nTransfer-Encoding: chunked\r\n\r\n2;note=$K\r\nEY\r\n2\r\n$K\r\n0\r\nEY: yes\r\n\r\n";
+        assert_eq!(handler.substitute(input).unwrap().as_ref(), input);
+    }
+
+    #[test]
+    fn basic_auth_placeholder_in_chunked_trailer_is_blocked() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler = SecretsHandler::new(&config, "evil.com", true);
+
+        // base64("admin:$KEY") has no raw placeholder bytes, so trailer
+        // detection must retain the encoded Basic-auth scan used by headers.
+        let input = b"POST / HTTP/1.1\r\nHost: evil.com\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nAuthorization: Basic YWRtaW46JEtFWQ==\r\n\r\n";
+        assert_eq!(
+            handler.substitute(input).unwrap_err(),
+            SecretViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn chunked_trailer_violation_keeps_original_request_context() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler = SecretsHandler::new(&config, "evil.com", true);
+        handler.http1_request_summary = Some(http1_request_summary(
+            "POST /upload?ignored=yes HTTP/1.1\r\nHost: evil.com\r\n\r\n",
+        ));
+
+        let trailer = b"Authorization: Basic YWRtaW46JEtFWQ==\r\n";
+        let report = handler
+            .detect_http1_fragment_blocking_action(
+                &[],
+                trailer,
+                std::str::from_utf8(trailer).unwrap(),
+                RequestLocation::Trailer,
+            )
+            .unwrap();
+
+        assert_eq!(report.location, RequestLocation::Trailer);
+        assert!(matches!(
+            report.match_form,
+            PlaceholderMatchForm::BasicAuthDecoded
+        ));
+        assert_eq!(report.method.as_deref(), Some("POST"));
+        assert_eq!(report.path.as_deref(), Some("/upload"));
+        assert_eq!(report.host.as_deref(), Some("evil.com"));
     }
 
     #[test]
