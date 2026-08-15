@@ -138,9 +138,9 @@ Internal (unpublished) workspace members:
 
 | Crate | Path | Description |
 | --- | --- | --- |
-| `test-utils` | `crates/test-utils` | Internal test helpers and the `#[msb_test]` attribute |
-| `test-macros` | `crates/test-macros` | Proc-macro behind `#[msb_test]` (re-exported by `test-utils`) |
-| `test-init` | `crates/test-init` | Tiny static guest init binary for handoff integration tests |
+| `test-utils` | `crates/testing/utils` | Internal test helpers and the `#[msb_test]` attribute |
+| `test-macros` | `crates/testing/macros` | Proc-macro behind `#[msb_test]` (re-exported by `test-utils`) |
+| `test-init` | `crates/testing/init` | Tiny static guest init binary for handoff integration tests |
 | `microsandbox-node` | `sdk/node-ts` | NAPI bindings behind the Node.js SDK |
 | `microsandbox-py` | `sdk/python` | PyO3 bindings behind the Python SDK |
 | `microsandbox-go` | `sdk/go/native` | C-ABI FFI layer behind the Go SDK |
