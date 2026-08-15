@@ -5,14 +5,9 @@ description: Go SDK - Image cache API reference
 
 <Tooltip tip="The image-cache API manages the local cache and is local-only. On microsandbox cloud, specify an OCI image when creating the sandbox and it is pulled for you."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Inspect and prune the local OCI image cache: the images that sandbox creation has already pulled. Images can also be loaded into the cache from local archives and saved back out to archive files, so locally built images work without a registry. Everything is reached through the package-level `Image` value, or through an [`ImageHandle`](#imagehandle) once you hold one.
+Inspect and manage the local OCI image cache.
 
-```go
-import m "github.com/superradcompany/microsandbox/sdk/go"
-```
-
-
-## Functions
+## Image
 
 #### <span className="msb-recv">Image.</span><span className="msb-hn">Get()</span>
 
@@ -346,9 +341,11 @@ if err != nil {
 
 ---
 
-## Methods
+## ImageHandle
 
-Instance methods on [`*ImageHandle`](#imagehandle), the metadata reference returned by [`Image.Get`](#image-get) and [`Image.List`](#image-list). The accessors are pure reads of cached metadata; only `Remove` and `Inspect` take a context and reach the runtime.
+<p className="msb-backref">Returned by <a href="#image-get">Image.Get()</a> · <a href="#image-list">Image.List()</a></p>
+
+A metadata handle for a cached OCI image.
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">Reference()</span>
 
@@ -577,25 +574,6 @@ Return the full detail for this image. Equivalent to [`Image.Inspect(ctx, h.Refe
 </div>
 
 ## Types
-
-### ImageHandle
-
-<p className="msb-backref">Returned by <a href="#image-get">Image.Get()</a> · <a href="#image-list">Image.List()</a></p>
-
-A lightweight metadata reference to a cached OCI image. Fields are unexported; read them through the accessor methods below. Embedded in [`ImageDetail`](#imagedetail).
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [Reference()](#h-reference) | `string` | Image reference |
-| [ManifestDigest()](#h-manifestdigest) | `string` | Content-addressable manifest digest, or empty |
-| [Architecture()](#h-architecture) | `string` | Resolved architecture, or empty |
-| [OS()](#h-os) | `string` | Resolved operating system, or empty |
-| [LayerCount()](#h-layercount) | `uint` | Number of layers |
-| [SizeBytes()](#h-sizebytes) | `*int64` | Total size in bytes, or `nil` when unknown |
-| [CreatedAt()](#h-createdat) | `time.Time` | First-pulled time, or the zero value |
-| [LastUsedAt()](#h-lastusedat) | `time.Time` | Last-referenced time, or the zero value |
-| [Remove(ctx, force)](#h-remove) | `error` | Delete this image |
-| [Inspect(ctx)](#h-inspect) | `(*ImageDetail, error)` | Fetch full detail for this image |
 
 ### ImageDetail
 

@@ -60,7 +60,13 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: vendor/libkrunfw/kernel.c
-          key: kernel-c-aarch64-${{ hashFiles('vendor/libkrunfw/**') }}
+          # The build recipe is inline below, so hash this workflow along with
+          # the source to prevent reusing output built with stale flags.
+          key: kernel-c-aarch64-${{ hashFiles('vendor/libkrunfw/**', '.github/actions/cache-libkrunfw-kernel/action.yml', '.github/workflows/check.yml') }}
+
+      - name: Prepare kernel source
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
+        uses: ./.github/actions/cache-libkrunfw-kernel
 
       - name: Install kernel build deps
         if: steps.cache-kernel.outputs.cache-hit != 'true'
@@ -94,7 +100,13 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: vendor/libkrunfw/kernel.c
-          key: kernel-c-x86_64-${{ hashFiles('vendor/libkrunfw/**') }}
+          # The build recipe is inline below, so hash this workflow along with
+          # the source to prevent reusing output built with stale flags.
+          key: kernel-c-x86_64-${{ hashFiles('vendor/libkrunfw/**', '.github/actions/cache-libkrunfw-kernel/action.yml', '.github/workflows/check.yml') }}
+
+      - name: Prepare kernel source
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
+        uses: ./.github/actions/cache-libkrunfw-kernel
 
       - name: Install kernel build deps
         if: steps.cache-kernel.outputs.cache-hit != 'true'
@@ -225,7 +237,13 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: build/libkrunfw*
-          key: libkrunfw-linux-x86_64-${{ hashFiles('vendor/libkrunfw/**') }}
+          # Include the inline build recipe and ABI/version environment in the
+          # key as well as the libkrunfw source.
+          key: libkrunfw-linux-x86_64-${{ hashFiles('vendor/libkrunfw/**', '.github/actions/cache-libkrunfw-kernel/action.yml', '.github/workflows/check.yml') }}
+
+      - name: Prepare kernel source
+        if: steps.cache-libkrunfw.outputs.cache-hit != 'true'
+        uses: ./.github/actions/cache-libkrunfw-kernel
 
       - name: Build libkrunfw
         if: steps.cache-libkrunfw.outputs.cache-hit != 'true'
@@ -1140,24 +1158,15 @@ jobs:
           export MSB_HOME
           npm test
 
-      # setup-bun downloads a zipped release; unzip isn't preinstalled on
-      # the self-hosted runner.
-      - name: Install unzip
+      # setup-bun downloads a zipped release. The host provisioner installs
+      # unzip so pull-request jobs never need sudo access.
+      - name: Verify unzip is available
         if: matrix.runtime == 'bun'
         run: |
-          if command -v unzip >/dev/null 2>&1; then
-            exit 0
+          if ! command -v unzip >/dev/null 2>&1; then
+            echo "::error::unzip is missing; rerun scripts/ci/provision-runners.sh on the host"
+            exit 1
           fi
-
-          for attempt in {1..10}; do
-            if sudo apt-get update && sudo apt-get install -y unzip; then
-              exit 0
-            fi
-            echo "apt-get install unzip failed on attempt ${attempt}; retrying..."
-            sleep 10
-          done
-
-          exit 1
 
       - if: matrix.runtime == 'bun'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2

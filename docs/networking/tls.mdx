@@ -1,23 +1,23 @@
 ---
 title: TLS interception
-description: HTTPS inspection with an auto-generated CA
+description: Inspect HTTPS traffic and manage certificate trust
 icon: "lock"
 ---
 
-<Tooltip tip="TLS interception and host-CA trust are not yet available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="TLS interception and host CA trust are not available on Microsandbox Cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Enable HTTPS traffic inspection so policy rules, logging, and other controls can see plaintext request data. microsandbox terminates TLS on the host side and re-encrypts to the upstream server. That's how features like per-host secret injection and URL-level policy checks can see inside what would otherwise be an opaque stream.
+TLS interception lets Microsandbox inspect HTTPS traffic. This enables URL policy checks, request logging, and secure secret injection for matching hosts.
 
 ## How it works
 
-When you enable TLS interception:
+When interception is enabled, Microsandbox:
 
-1. microsandbox loads the interception CA. By default this is a host-global development CA persisted under `~/.microsandbox/tls/ca.{crt,key}` so repeated sandboxes can reuse the same trusted root. You can provide custom CA paths with `intercept_ca_cert()` and `intercept_ca_key()` when a sandbox or environment needs its own CA.
-2. microsandbox updates the guest's trust store to trust this CA.
-3. When the guest opens an HTTPS connection, the host-side proxy intercepts the handshake, generates a leaf certificate for the target domain on the fly, and signs it with the configured interception CA.
-4. The proxy opens its own TLS connection to the upstream server and bridges the two.
+1. Loads an interception certificate authority, or CA.
+2. Adds that CA to the guest's trust store.
+3. Creates a certificate for each intercepted host.
+4. Opens a separate verified TLS connection to the upstream server.
 
-The default CA is intentionally local to the host, not to one sandbox lifetime. Remove `~/.microsandbox/tls/ca.crt` and `~/.microsandbox/tls/ca.key` if you want microsandbox to generate a fresh default CA. Use explicit CA paths when you do not want to share the default across sandboxes on the same machine.
+The default CA is stored at `~/.microsandbox/tls/ca.{crt,key}` and reused by local sandboxes. Delete both files to generate a new CA. Use the intercept CA certificate and key settings when sandboxes should use a CA that you provide.
 
 ## Enabling interception
 
@@ -27,12 +27,10 @@ use microsandbox::Sandbox;
 
 let sb = Sandbox::builder("worker")
     .image("python")
-    .network(|n| n
-        .tls(|t| t
-            .bypass("pinned-api.example.com")
-            .bypass("*.gov")
-        )
-    )
+    .network(|n| n.tls(|t| t
+        .bypass("pinned-api.example.com")
+        .bypass("*.gov")
+    ))
     .create()
     .await?;
 ```
@@ -41,11 +39,11 @@ let sb = Sandbox::builder("worker")
 import { Sandbox } from "microsandbox";
 
 await using sb = await Sandbox.builder("worker")
-    .image("python")
-    .network((n) => n.tls((t) =>
-        t.bypass("pinned-api.example.com").bypass("*.gov"),
-    ))
-    .create();
+  .image("python")
+  .network((n) => n.tls((t) =>
+    t.bypass("pinned-api.example.com").bypass("*.gov"),
+  ))
+  .create();
 ```
 
 ```python Python
@@ -77,29 +75,31 @@ msb create python --name worker \
   --tls-bypass "pinned-api.example.com" \
   --tls-bypass "*.gov"
 ```
-
 </CodeGroup>
 
 ## Bypass patterns
 
-Some domains don't play well with interception, typically ones whose clients pin a specific certificate or public key instead of trusting the system CA store. Software update channels (browser autoupdate, macOS `softwareupdate`, package-manager mirrors that ship a pinned signing CA) and vendor SDKs that bundle their own pinned CA are the usual suspects. Add them to the bypass list and their traffic flows through as-is, encrypted end-to-end between the guest and the upstream server.
+Some clients trust a specific certificate or public key instead of the guest's trust store. Interception will fail for these clients.
 
-Bypass patterns accept exact matches (`api.example.com`) and wildcards (`*.gov`, `*.apple.com`).
+Add their hosts to the bypass list. Exact domains such as `api.example.com` and wildcards such as `*.apple.com` are supported. Bypassed traffic stays encrypted between the guest and upstream server, so content-based policy checks and secret injection do not apply.
 
 ## Upstream CA trust
 
-By default, the TLS proxy verifies upstream server certificates using the host's native root store. Add global upstream CAs when every intercepted host should trust the same private root. Add scoped upstream CAs when only specific host patterns should trust a private root. Disable upstream verification for ephemeral hosts where you cannot get a PEM. Disabling upstream verification is the proxy-side equivalent of `curl -k`: interception still happens, but microsandbox does not authenticate the proxy-to-upstream TLS certificate for matching hosts.
+The proxy verifies upstream certificates with the host's root store by default. You can add:
+
+- a CA trusted for every intercepted host
+- a CA trusted only for matching hosts
+- a host pattern that skips upstream verification
 
 <CodeGroup>
 ```rust Rust
 let sb = Sandbox::builder("agent")
     .image("python")
-    .network(|n| n.tls(|t| {
-        t.upstream_ca_cert("/etc/ssl/corp-root.pem")
-         .upstream_ca_cert_for("api.internal.example.com", "./certs/api-ca.pem")
-         .upstream_ca_cert_for("*.svc.cluster.local", "./certs/k8s-ca.pem")
-         .verify_upstream_for("*.preview.internal", false)
-    }))
+    .network(|n| n.tls(|t| t
+        .upstream_ca_cert("/etc/ssl/corp-root.pem")
+        .upstream_ca_cert_for("api.internal.example.com", "./certs/api-ca.pem")
+        .verify_upstream_for("*.preview.internal", false)
+    ))
     .create()
     .await?;
 ```
@@ -109,31 +109,26 @@ msb create python --name agent \
   --tls-intercept \
   --tls-upstream-ca-cert /etc/ssl/corp-root.pem \
   --tls-upstream-ca-cert-for 'api.internal.example.com=./certs/api-ca.pem' \
-  --tls-upstream-ca-cert-for '*.svc.cluster.local=./certs/k8s-ca.pem' \
   --tls-no-verify-upstream-for '*.preview.internal'
 ```
 </CodeGroup>
 
+Skipping verification is similar to using `curl -k`. Use it only for hosts you control and only when a trusted CA is not available.
+
 ## Limits
 
-- **Pinned clients bypass the trust store.** Any client that pins the server's certificate or public key (rather than trusting the system CA) will fail TLS interception and needs to be bypassed explicitly.
-- **Bypassed traffic is opaque.** Policy checks that depend on inspecting request content (URL-based rules, secret injection with `require_tls_identity`, and HTTP `Host` / `:authority` / SNI alignment checks) don't apply on bypassed domains.
-- **Client certificates are not proxied.** mTLS flows where the guest is the one presenting a client certificate aren't supported through interception; add those hosts to the bypass list.
+- Clients that pin certificates or public keys must be bypassed.
+- Bypassed traffic cannot use content-based policy checks or secret injection.
+- Guest client certificates are not proxied. Bypass hosts that require guest mTLS.
+- QUIC and HTTP/3 traffic are not intercepted.
 
 ## Trusting host CAs
 
-Corporate TLS-inspecting proxies (Cloudflare Warp Zero Trust, Zscaler, Netskope, Palo Alto, ...) terminate outbound HTTPS at the host and re-sign it with a gateway CA. The corporate rollout installs that CA in your macOS Keychain or Linux trust store, so HTTPS works silently on the host. Inside a sandbox it doesn't: the guest's stock Mozilla bundle has never seen the gateway CA, so `apk update`, `pip install`, `curl`, and any SDK fetch fail with `server certificate not trusted`.
+Corporate proxies often replace server certificates with certificates signed by a company CA. The host trusts that CA, but a sandbox normally does not. Commands such as `apk update`, `pip install`, and `curl` can then fail with a certificate error.
 
-By default the sandbox does not extend host trust into the guest, so the guest validates TLS strictly against its stock Mozilla bundle. Opt in when you need the guest to trust whatever the host trusts. At sandbox boot, microsandbox copies the host's trusted root CAs into the guest and appends them to the system CA bundle.
-
-<Note>
-**Security:** this extends the guest's trust to whatever the host trusts. That's the point for MITM-proxy environments, but it also means an attacker who can plant a CA on the host now has that trust inside every sandbox.
-
-It matches the existing threat model (a host-access attacker already owns the sandbox), but worth knowing before enabling on a host with an unfamiliar trust store.
-</Note>
+Enable host CA trust to copy trusted host roots into the guest when it starts:
 
 <CodeGroup>
-
 ```rust Rust
 let sb = Sandbox::builder("devbox")
     .image("alpine")
@@ -144,9 +139,9 @@ let sb = Sandbox::builder("devbox")
 
 ```typescript TypeScript
 await using sb = await Sandbox.builder("devbox")
-    .image("alpine")
-    .network((n) => n.trustHostCAs(true))
-    .create();
+  .image("alpine")
+  .network((n) => n.trustHostCAs(true))
+  .create();
 ```
 
 ```python Python
@@ -170,16 +165,25 @@ sb, err := m.CreateSandbox(ctx, "devbox",
 ```bash CLI
 msb run alpine --trust-host-cas -- apk update
 ```
-
 </CodeGroup>
 
-### Interaction with TLS interception
+<Note>
+Host CA trust gives the guest every root certificate trusted by the host. Enable it only when you trust the host's CA store.
+</Note>
 
-TLS interception also covers the corporate-proxy case, but only on the ports it's configured for (default `[443]`), and only for non-bypassed domains. It doesn't touch QUIC / HTTP/3 flows. Everything outside that scope (gRPC, Postgres / Redis / Mongo TLS, custom 8443, non-intercepted ports, bypassed domains) goes over raw TLS from the guest, where host-CA trust is what makes certificate validation succeed.
+## Interaction with TLS interception
 
-The two features compose. Turn on host-CA trust alongside TLS interception when you need both: interception provides richer inspection on the ports it covers, host-CA trust covers everything else. Leave it off to keep the guest's TLS stack validating strictly against its stock Mozilla bundle.
+TLS interception covers configured ports, with port `443` enabled by default. TLS interception and host CA trust solve different problems:
+
+| Feature | Covers |
+| --- | --- |
+| TLS interception | Configured TLS ports and hosts that are not bypassed |
+| Host CA trust | Any guest connection that uses the guest's system trust store |
+
+Use both when you need HTTPS inspection and also need raw TLS connections to trust corporate certificates. Raw TLS includes bypassed hosts, custom TLS ports, and protocols such as Postgres or Redis over TLS.
 
 ## See also
 
-- [DNS](/networking/dns): the DNS interceptor is what makes per-host rules possible, and DoT interception reuses this TLS path
-- [Network defenses](/security/network): how TLS interception interacts with SSRF defenses, and [secret handling](/security/secrets) for credential injection
+- [DNS](/networking/dns) explains DNS policy and DNS over TLS.
+- [Network defenses](/security/network) explains SSRF protection.
+- [Secret handling](/security/secrets) explains credential injection.

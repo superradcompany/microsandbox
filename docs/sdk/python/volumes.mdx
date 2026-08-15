@@ -3,12 +3,29 @@ title: Volumes
 description: Python SDK - Volume API reference
 ---
 
-Create and manage named persistent volumes, and build the mount configs that attach storage to a sandbox. See [Volumes](/sandboxes/volumes) for usage examples and patterns.
+Create, manage, and mount named volumes. See [Volumes](/sandboxes/volumes) for usage examples.
 
+## Volume
 
-## Static methods
+<p className="msb-member-group">Instance properties</p>
 
-Static methods on `Volume` that manage named persistent volumes. Volumes live independently of any sandbox, stored by default under `~/.microsandbox/volumes/<name>/`.
+#### <span className="msb-recv">volume.</span><span className="msb-hn">name</span>
+
+```python
+name: str
+```
+
+Volume name.
+
+#### <span className="msb-recv">volume.</span><span className="msb-hn">path</span>
+
+```python
+path: str
+```
+
+Host path to the volume's directory.
+
+<p className="msb-member-group">Static methods</p>
 
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">get_default()</span>
 
@@ -170,7 +187,7 @@ Delete a named volume and its contents. Fails if the volume is currently mounted
   </div>
 </div>
 
-## Mount factories
+<p className="msb-member-group">Mount factories</p>
 
 Static factory methods on `Volume` that build a [`MountConfig`](#mountconfig). Pass the result as a value in the `volumes` dict when creating a sandbox, keyed by the guest mount point.
 
@@ -457,29 +474,89 @@ Mount a host disk image as a virtio-blk device. `format` is the disk image forma
   </div>
 </div>
 
-## Instance properties
+## VolumeHandle
 
-Read-only properties on a [`Volume`](#volume-create) returned by [`Volume.create()`](#volume-create).
+<p className="msb-backref">Returned by <a href="#volume-get">Volume.get()</a>, <a href="#volume-list">Volume.list()</a></p>
 
-#### <span className="msb-recv">volume.</span><span className="msb-hn">name</span>
+A lightweight handle to a named volume, with its database metadata and a host-side filesystem accessor.
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">name</span>
+
+`str`
+
+Volume name
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">kind</span>
+
+[`VolumeKind`](#volumekind)
+
+Volume storage kind
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">quota_mib</span>
+
+`int \| None`
+
+Storage quota in MiB
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">used_bytes</span>
+
+`int`
+
+Current disk usage in bytes
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">capacity_bytes</span>
+
+`int \| None`
+
+Disk capacity in bytes
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">disk_format</span>
+
+[`DiskImageFormat`](#diskimageformat)` \| None`
+
+Disk image format
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">disk_fstype</span>
+
+`str \| None`
+
+Disk filesystem type
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">labels</span>
+
+`dict[str, str]`
+
+Metadata labels
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">created_at</span>
+
+`float \| None`
+
+Creation timestamp (ms since epoch)
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">fs</span>
+
+[`VolumeFs`](#volumefs)
+
+Host-side filesystem handle
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">remove()</span>
 
 ```python
-name: str
+remove()
 ```
 
-Volume name.
+Delete this volume
 
-#### <span className="msb-recv">volume.</span><span className="msb-hn">path</span>
+<p className="msb-label">Returns</p>
 
-```python
-path: str
-```
+*(async)* `None`
 
-Host path to the volume's directory.
+## VolumeFs
 
-## VolumeFs methods
+<p className="msb-backref">Returned by <a href="#volumehandle">VolumeHandle.fs</a></p>
 
-Host-side filesystem operations on a named volume, obtained via the `fs` property on a [`VolumeHandle`](#volumehandle). These run directly on the host filesystem; no running sandbox is required. All paths are relative to the volume root.
+Host-side filesystem operations for a named volume.
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read()</span>
 
@@ -665,42 +742,6 @@ Check whether a path exists within the volume.
 </div>
 
 ## Types
-
-### VolumeHandle
-
-<p className="msb-backref">Returned by <a href="#volume-get">Volume.get()</a>, <a href="#volume-list">Volume.list()</a></p>
-
-A lightweight handle to a named volume, with its database metadata and a host-side filesystem accessor.
-
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| name | `str` | Volume name |
-| kind | [`VolumeKind`](#volumekind) | Volume storage kind |
-| quota_mib | `int \| None` | Storage quota in MiB |
-| used_bytes | `int` | Current disk usage in bytes |
-| capacity_bytes | `int \| None` | Disk capacity in bytes |
-| disk_format | [`DiskImageFormat`](#diskimageformat)` \| None` | Disk image format |
-| disk_fstype | `str \| None` | Disk filesystem type |
-| labels | `dict[str, str]` | Metadata labels |
-| created_at | `float \| None` | Creation timestamp (ms since epoch) |
-| fs | [`VolumeFs`](#volumefs) | Host-side filesystem handle |
-| remove() | *(async)* `None` | Delete this volume |
-
-### VolumeFs
-
-<p className="msb-backref">Returned by <a href="#volumehandle">VolumeHandle.fs</a></p>
-
-Host-side filesystem operations on a named volume. No running sandbox is required. See the [VolumeFs methods](#volumefs-methods) above for the full API.
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| [read](#fs-read) | `read(path) -> bytes` | Read a file as raw bytes |
-| [read_text](#fs-read_text) | `read_text(path) -> str` | Read a file as UTF-8 text |
-| [write](#fs-write) | `write(path, data) -> None` | Write bytes to a file |
-| [list](#fs-list) | `list(path) -> list[FsEntry]` | List a directory |
-| [mkdir](#fs-mkdir) | `mkdir(path) -> None` | Create a directory |
-| [remove_file](#fs-remove_file) | `remove_file(path) -> None` | Remove a file |
-| [exists](#fs-exists) | `exists(path) -> bool` | Check a path exists |
 
 ### MountConfig
 

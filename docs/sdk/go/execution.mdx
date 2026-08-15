@@ -3,23 +3,9 @@ title: Execution
 description: Go SDK - Command execution API reference
 ---
 
-Run commands inside a running sandbox, collect their output, stream events live, or drive an interactive pseudo-terminal programmatically. See [Commands](/sandboxes/commands) for usage examples.
+Run commands inside a running sandbox. Non-zero exit codes are returned in [`ExecOutput`](#execoutput), not as Go errors. See [Commands](/sandboxes/commands) for usage examples.
 
-The exec API mirrors `os/exec` conventions: a **non-zero exit code is not a Go error**. Transport, timeout, and spawn-failure paths return an `error`; a program that ran and exited non-zero is a normal [`*ExecOutput`](#execoutput) result, inspect [`Success()`](#out-success) or [`ExitCode()`](#out-exitcode).
-
-## Default workload
-
-`CreateSandbox` boots the sandbox without executing its image workload. `ExecDefault` resolves the effective OCI ENTRYPOINT and CMD; `ExecDefaultStream` streams it and `AttachDefault` runs it in an interactive PTY. They return `ErrNoDefaultCommand` when no executable default exists and never fall back to a shell.
-
-```go
-sb, err := m.CreateSandbox(ctx, "worker",
-    m.WithImage("example/worker:latest"),
-    m.WithEntrypoint("python", "-u"),
-    m.WithCmd("worker.py", "--once"),
-)
-out, err := sb.ExecDefault(ctx, m.WithExecEnv(map[string]string{"LOG_LEVEL": "debug"}))
-```
-## Sandbox methods
+## Sandbox
 
 The exec entry points live on [`*Sandbox`](/sdk/go/sandbox#instance-methods).
 
@@ -229,9 +215,11 @@ Run `/bin/sh -c command` with streaming output. A convenience wrapper over [`Exe
   </div>
 </div>
 
-## ExecHandle methods
+## ExecHandle
 
-A live streaming exec session returned by [`ExecStream`](#sb-execstream) and [`ShellStream`](#sb-shellstream). [`Signal`](#h-signal), [`Kill`](#h-kill), and [`Resize`](#h-resize) may be called concurrently with [`Recv`](#h-recv), allowing a control goroutine to act while another goroutine waits for terminal output. Other method combinations, including concurrent `Recv` calls, are not supported.
+<p className="msb-backref">Returned by <a href="#sb-execstream">sb.ExecStream()</a> · <a href="#sb-shellstream">sb.ShellStream()</a></p>
+
+A handle to a running streaming execution and its events.
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">ID()</span>
 
@@ -495,9 +483,11 @@ defer h.Close()
 
 Release the Rust-side exec handle. Does not kill the running process; call [`Signal`](#h-signal) or [`Kill`](#h-kill) first if you need to terminate it. Safe to call after `ExecEventDone` has been received.
 
-## ExecOutput methods
+## ExecOutput
 
-The collected result of a completed command execution, returned by [`Exec`](#sb-exec), [`Shell`](#sb-shell), and [`Collect`](#h-collect).
+<p className="msb-backref">Returned by <a href="#sb-exec">sb.Exec()</a> · <a href="#sb-shell">sb.Shell()</a> · <a href="#h-collect">h.Collect()</a></p>
+
+Collected output and exit status. Non-zero exit codes are results, not Go errors.
 
 #### <span className="msb-recv">out.</span><span className="msb-hn">Stdout()</span>
 
@@ -601,9 +591,15 @@ Reports whether the command exited with code `0`.
   </div>
 </div>
 
-## ExecSink methods
+## ExecSink
 
-A write-only pipe to a running process's stdin, obtained from [`ExecHandle.TakeStdin`](#h-takestdin). Implements `io.WriteCloser`. `Write` and `Close` use `context.Background()` under the hood; for caller-controlled cancellation use [`WriteCtx`](#sink-writectx), or tear the session down via [`ExecHandle.Kill`](#h-kill) / [`Close`](#h-close).
+<p className="msb-backref">Returned by <a href="#h-takestdin">h.TakeStdin()</a></p>
+
+```go
+type ExecSink = ffi.ExecSink
+```
+
+A write-only pipe to a running process's stdin. Implements `io.WriteCloser`.
 
 #### <span className="msb-recv">sink.</span><span className="msb-hn">Write()</span>
 
@@ -696,133 +692,7 @@ sink.Close()
 
 Close the stdin sink. In non-TTY pipe mode this sends EOF to the process. In TTY mode it prevents further writes through this sink, but the guest PTY remains open; send the terminal's EOF control character (usually `\x04` in canonical mode) when the interactive program needs one. Implements `io.Closer`.
 
-## Types
-
-### ExecOutput
-
-<p className="msb-backref">Returned by <a href="#sb-exec">sb.Exec()</a> · <a href="#sb-shell">sb.Shell()</a> · <a href="#h-collect">h.Collect()</a></p>
-
-The collected result of a command execution. A non-zero `ExitCode` is not treated as a Go error, callers inspect [`Success`](#out-success) or [`ExitCode`](#out-exitcode) explicitly, matching how `os/exec.Cmd.Output` works against a script that exits non-zero. In TTY mode, `Stdout` contains the combined terminal output and `Stderr` is empty because a PTY cannot preserve separate stdout and stderr streams.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`Stdout()`](#out-stdout) | `string` | Captured stdout as a string |
-| [`StdoutBytes()`](#out-stdoutbytes) | `[]byte` | Raw stdout bytes |
-| [`Stderr()`](#out-stderr) | `string` | Captured stderr as a string |
-| [`StderrBytes()`](#out-stderrbytes) | `[]byte` | Raw stderr bytes |
-| [`ExitCode()`](#out-exitcode) | `int` | Exit code, or `-1` if the guest did not report one |
-| [`Success()`](#out-success) | `bool` | `true` if `ExitCode()` is `0` |
-
-### ExecHandle
-
-<p className="msb-backref">Returned by <a href="#sb-execstream">sb.ExecStream()</a> · <a href="#sb-shellstream">sb.ShellStream()</a></p>
-
-A live streaming exec session. Must be closed with [`Close`](#h-close) when done to release Rust-side resources. `Signal`, `Kill`, and `Resize` may run concurrently with `Recv`; other method combinations, including multiple concurrent `Recv` calls, are not supported.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`ID()`](#h-id) | `(string, error)` | Session correlation id assigned by the guest agent |
-| [`TakeStdin()`](#h-takestdin) | [`*ExecSink`](#execsink) | Take the stdin writer (single-take; only with `WithExecStdinPipe`) |
-| [`Recv(ctx)`](#h-recv) | [`(*ExecEvent, error)`](#execevent) | Block until the next event arrives |
-| [`Collect(ctx)`](#h-collect) | [`(*ExecOutput, error)`](#execoutput) | Drain remaining output into an `ExecOutput` |
-| [`Wait(ctx)`](#h-wait) | `(int, error)` | Wait for exit, discarding output; returns the exit code |
-| [`Kill(ctx)`](#h-kill) | `error` | Send SIGKILL |
-| [`Signal(ctx, signal)`](#h-signal) | `error` | Send a Unix signal |
-| [`Resize(ctx, rows, cols)`](#h-resize) | `error` | Resize the pseudo-terminal |
-| [`Close()`](#h-close) | `error` | Release the Rust-side handle |
-
-### ExecSink
-
-<p className="msb-backref">Returned by <a href="#h-takestdin">h.TakeStdin()</a></p>
-
-```go
-type ExecSink = ffi.ExecSink
-```
-
-A write-only pipe to a running process's stdin. Implements `io.WriteCloser`.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`Write(p)`](#sink-write) | `(int, error)` | Implements `io.Writer` |
-| [`WriteCtx(ctx, p)`](#sink-writectx) | `(int, error)` | Write with explicit context |
-| [`Close()`](#sink-close) | `error` | Close the sink; sends EOF in non-TTY pipe mode |
-
-### ExecEvent
-
-<p className="msb-backref">Returned by <a href="#h-recv">h.Recv()</a></p>
-
-One event from a streaming exec session. [`Kind`](#execeventkind) identifies which fields are populated.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `Kind` | [`ExecEventKind`](#execeventkind) | Identifies which fields are populated |
-| `PID` | `uint32` | Guest process id, set on `ExecEventStarted` |
-| `Data` | `[]byte` | Chunk of stdout or stderr, set on `ExecEventStdout` / `ExecEventStderr` |
-| `ExitCode` | `int` | Process exit code, set on `ExecEventExited` |
-| `Failure` | [`*ExecFailure`](#execfailure) | Failure detail, set on `ExecEventFailed` and `ExecEventStdinError` |
-
-### ExecEventKind
-
-<p className="msb-backref">Field of <a href="#execevent">ExecEvent</a></p>
-
-```go
-type ExecEventKind = ffi.ExecEventKind
-```
-
-Identifies what an [`ExecEvent`](#execevent) carries.
-
-| Constant | Description |
-|----------|-------------|
-| `ExecEventStarted` | Sent once when the guest process starts; `PID` is valid |
-| `ExecEventStdout` | A chunk of stdout; in TTY mode, carries the combined terminal output stream. `Data` is valid |
-| `ExecEventStderr` | A chunk of stderr; not emitted separately in TTY mode. `Data` is valid |
-| `ExecEventExited` | The process exited; `ExitCode` is valid |
-| `ExecEventFailed` | The user program never started (binary missing, permission denied, ...); `Failure` is valid and `ExitCode` is not meaningful |
-| `ExecEventStdinError` | A stdin write failed; `Failure` is valid. Non-terminal: the process may still exit normally |
-| `ExecEventDone` | All events have been consumed |
-
-### ExecFailure
-
-<p className="msb-backref">Field of <a href="#execevent">ExecEvent</a></p>
-
-```go
-type ExecFailure = ffi.ExecFailure
-```
-
-Structured detail about a failed-to-start exec, populated on `ExecEventFailed` and `ExecEventStdinError`. See [Error Handling](/sdk/errors#spawn-time-exec-failures) for the kinds it carries (`not_found`, `permission_denied`, etc.) and how to branch on them.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `Kind` | `string` | Failure category, e.g. `not_found`, `permission_denied` |
-| `Errno` | `*int` | Underlying errno, if known |
-| `ErrnoName` | `string` | Symbolic errno name, if known |
-| `Message` | `string` | Human-readable failure message |
-| `Path` | `string` | Offending path, if applicable |
-
-### ExecConfig
-
-<p className="msb-backref">Populated by <a href="#execoption">ExecOption</a></p>
-
-Configures a single [`Exec`](#sb-exec) or [`ExecStream`](#sb-execstream) call. Most callers set fields through the `WithExec*` functional options; `ExecConfig` is exported for parity with the other SDKs' config types.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `Cwd` | `string` | Working directory inside the guest |
-| `Timeout` | `time.Duration` | Kill the process after this duration; sub-second precision is rounded up |
-| `StdinPipe` | `bool` | Enable a stdin pipe; required for [`TakeStdin`](#h-takestdin) |
-| `TTY` | `bool` | Allocate a pseudo-terminal; default `false` |
-| `User` | `string` | Guest user (UID or name) |
-| `Env` | `map[string]string` | Per-command environment variables |
-
-### ExecOption
-
-<p className="msb-backref">Accepted by <a href="#sb-exec">sb.Exec()</a> · <a href="#sb-shell">sb.Shell()</a> · <a href="#sb-execstream">sb.ExecStream()</a> · <a href="#sb-shellstream">sb.ShellStream()</a></p>
-
-```go
-type ExecOption func(*ExecConfig)
-```
-
-A functional option that mutates an [`ExecConfig`](#execconfig). Construct them with the `WithExec*` functions below.
+## Options
 
 #### <span className="msb-hn">WithExecCwd()</span>
 
@@ -968,3 +838,82 @@ Add per-command environment variables. Called repeatedly, maps merge; later keys
     <div className="msb-param-desc">Environment variables for this command.</div>
   </div>
 </div>
+
+## Types
+
+### ExecEvent
+
+<p className="msb-backref">Returned by <a href="#h-recv">h.Recv()</a></p>
+
+One event from a streaming exec session. [`Kind`](#execeventkind) identifies which fields are populated.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Kind` | [`ExecEventKind`](#execeventkind) | Identifies which fields are populated |
+| `PID` | `uint32` | Guest process id, set on `ExecEventStarted` |
+| `Data` | `[]byte` | Chunk of stdout or stderr, set on `ExecEventStdout` / `ExecEventStderr` |
+| `ExitCode` | `int` | Process exit code, set on `ExecEventExited` |
+| `Failure` | [`*ExecFailure`](#execfailure) | Failure detail, set on `ExecEventFailed` and `ExecEventStdinError` |
+
+### ExecEventKind
+
+<p className="msb-backref">Field of <a href="#execevent">ExecEvent</a></p>
+
+```go
+type ExecEventKind = ffi.ExecEventKind
+```
+
+Identifies what an [`ExecEvent`](#execevent) carries.
+
+| Constant | Description |
+|----------|-------------|
+| `ExecEventStarted` | Sent once when the guest process starts; `PID` is valid |
+| `ExecEventStdout` | A chunk of stdout; in TTY mode, carries the combined terminal output stream. `Data` is valid |
+| `ExecEventStderr` | A chunk of stderr; not emitted separately in TTY mode. `Data` is valid |
+| `ExecEventExited` | The process exited; `ExitCode` is valid |
+| `ExecEventFailed` | The user program never started (binary missing, permission denied, ...); `Failure` is valid and `ExitCode` is not meaningful |
+| `ExecEventStdinError` | A stdin write failed; `Failure` is valid. Non-terminal: the process may still exit normally |
+| `ExecEventDone` | All events have been consumed |
+
+### ExecFailure
+
+<p className="msb-backref">Field of <a href="#execevent">ExecEvent</a></p>
+
+```go
+type ExecFailure = ffi.ExecFailure
+```
+
+Structured detail about a failed-to-start exec, populated on `ExecEventFailed` and `ExecEventStdinError`. See [Error Handling](/sdk/errors#spawn-time-exec-failures) for the kinds it carries (`not_found`, `permission_denied`, etc.) and how to branch on them.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Kind` | `string` | Failure category, e.g. `not_found`, `permission_denied` |
+| `Errno` | `*int` | Underlying errno, if known |
+| `ErrnoName` | `string` | Symbolic errno name, if known |
+| `Message` | `string` | Human-readable failure message |
+| `Path` | `string` | Offending path, if applicable |
+
+### ExecConfig
+
+<p className="msb-backref">Populated by <a href="#execoption">ExecOption</a></p>
+
+Configures a single [`Exec`](#sb-exec) or [`ExecStream`](#sb-execstream) call. Most callers set fields through the `WithExec*` functional options; `ExecConfig` is exported for parity with the other SDKs' config types.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Cwd` | `string` | Working directory inside the guest |
+| `Timeout` | `time.Duration` | Kill the process after this duration; sub-second precision is rounded up |
+| `StdinPipe` | `bool` | Enable a stdin pipe; required for [`TakeStdin`](#h-takestdin) |
+| `TTY` | `bool` | Allocate a pseudo-terminal; default `false` |
+| `User` | `string` | Guest user (UID or name) |
+| `Env` | `map[string]string` | Per-command environment variables |
+
+### ExecOption
+
+<p className="msb-backref">Accepted by <a href="#sb-exec">sb.Exec()</a> · <a href="#sb-shell">sb.Shell()</a> · <a href="#sb-execstream">sb.ExecStream()</a> · <a href="#sb-shellstream">sb.ShellStream()</a></p>
+
+```go
+type ExecOption func(*ExecConfig)
+```
+
+A functional option that mutates an [`ExecConfig`](#execconfig). Construct them with the `WithExec*` functions below.

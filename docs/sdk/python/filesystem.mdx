@@ -3,12 +3,9 @@ title: Filesystem
 description: Python SDK - Filesystem API reference
 ---
 
-Read, write, and manage files inside a running sandbox. Operations go through the same host-guest channel as command execution: no SSH, no network. See [Filesystem](/sandboxes/filesystem) for usage examples. For bulk file movement, prefer a [volume](/sandboxes/volumes).
+Read and write files inside a running sandbox. See [Filesystem](/sandboxes/filesystem) for usage examples.
 
-
-The handle is reached through the `sb.fs` property on a running [`Sandbox`](/sdk/python/sandbox). All methods are coroutines, so `await` each call.
-
-## Methods
+## SandboxFsOps
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read()</span>
 
@@ -476,6 +473,98 @@ Copy a file from the sandbox out to the host machine.
   </div>
 </div>
 
+## FsReadStream
+
+
+<p className="msb-backref">Returned by <a href="#fs-read_stream">read_stream()</a></p>
+
+Async stream for reading a file in chunks. Obtained via [`read_stream()`](#fs-read_stream). Iterate it with `async for chunk in stream:`, or call `collect()` to gather everything at once.
+
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">__aiter__()</span>
+
+```python
+__aiter__()
+```
+
+Async iterator. Use `async for chunk in stream:`.
+
+<p className="msb-label">Returns</p>
+
+`bytes`
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">__anext__()</span>
+
+```python
+__anext__()
+```
+
+Async iterator. Use `async for chunk in stream:`.
+
+<p className="msb-label">Returns</p>
+
+`bytes`
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">collect()</span>
+
+```python
+collect()
+```
+
+*(async)* Collect all remaining data into a single `bytes` object
+
+<p className="msb-label">Returns</p>
+
+`bytes`
+
+## FsWriteSink
+
+
+<p className="msb-backref">Returned by <a href="#fs-write_stream">write_stream()</a></p>
+
+Async writer for streaming data into a file. Obtained via [`write_stream()`](#fs-write_stream). Supports the async context manager protocol, so `async with` closes the sink on exit.
+
+
+#### <span className="msb-recv">sink.</span><span className="msb-hn">write()</span>
+
+```python
+write(data)
+```
+
+*(async)* Write a chunk of `bytes` to the file
+
+#### <span className="msb-recv">sink.</span><span className="msb-hn">close()</span>
+
+```python
+close()
+```
+
+*(async)* Send EOF and finalize the file
+
+#### <span className="msb-recv">sink.</span><span className="msb-hn">__aenter__()</span>
+
+```python
+__aenter__()
+```
+
+*(async)* Use with `async with` for automatic close on exit
+
+<p className="msb-label">Returns</p>
+
+`FsWriteSink`
+
+#### <span className="msb-recv">sink.</span><span className="msb-hn">__aexit__()</span>
+
+```python
+__aexit__()
+```
+
+*(async)* Use with `async with` for automatic close on exit
+
+<p className="msb-label">Returns</p>
+
+`FsWriteSink`
+
 ## Types
 
 ### FsEntry
@@ -525,26 +614,3 @@ Detailed file metadata, returned by [`stat()`](#fs-stat).
 | readonly | `bool` | Whether the file is read-only |
 | modified | `float \| None` | Last-modified time, milliseconds since the Unix epoch |
 | created | `float \| None` | Creation time, milliseconds since the Unix epoch |
-
-### FsReadStream
-
-<p className="msb-backref">Returned by <a href="#fs-read_stream">read_stream()</a></p>
-
-Async stream for reading a file in chunks. Obtained via [`read_stream()`](#fs-read_stream). Iterate it with `async for chunk in stream:`, or call `collect()` to gather everything at once.
-
-| Method / Protocol | Returns | Description |
-|-------------------|---------|-------------|
-| `__aiter__` / `__anext__` | `bytes` | Async iterator. Use `async for chunk in stream:`. |
-| collect() | `bytes` | *(async)* Collect all remaining data into a single `bytes` object |
-
-### FsWriteSink
-
-<p className="msb-backref">Returned by <a href="#fs-write_stream">write_stream()</a></p>
-
-Async writer for streaming data into a file. Obtained via [`write_stream()`](#fs-write_stream). Supports the async context manager protocol, so `async with` closes the sink on exit.
-
-| Method / Protocol | Returns | Description |
-|-------------------|---------|-------------|
-| write(data) | `None` | *(async)* Write a chunk of `bytes` to the file |
-| close() | `None` | *(async)* Send EOF and finalize the file |
-| `__aenter__` / `__aexit__` | `FsWriteSink` | *(async)* Use with `async with` for automatic close on exit |

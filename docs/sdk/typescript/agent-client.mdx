@@ -3,10 +3,7 @@ title: Agent client
 description: TypeScript SDK - Low-level agentd client reference
 ---
 
-`AgentClient` is the low-level raw transport for talking to `agentd` through a running sandbox's relay socket. For most applications, use [`Sandbox`](/sdk/typescript/sandbox), [`exec`](/sdk/typescript/execution), and [`fs`](/sdk/typescript/filesystem) instead. Reach for this API when you are building protocol-level tools or higher-level SDK helpers.
-
-All request and response bodies are raw CBOR bytes. The SDK handles framing and correlation ids, but it does not encode or decode the CBOR message body for you: decode it with a library such as `cbor-x`. The raw body is the full CBOR-encoded protocol `Message` body (`v`, `t`, `p`), not just the inner payload.
-
+Low-level raw CBOR transport for communicating with `agentd` through a sandbox relay.
 
 ## Constants
 
@@ -34,7 +31,10 @@ const FLAG_SHUTDOWN = 0b0000_0100
 
 Frame flag: this message requests sandbox shutdown.
 
-## Static methods
+## AgentClient
+
+Low-level client for raw agent frames.
+
 
 #### <span className="msb-recv">AgentClient.</span><span className="msb-hn">connectSandbox()</span>
 
@@ -153,7 +153,7 @@ Resolve a sandbox's `agentd` relay socket path **without connecting**. Returns t
   </div>
 </div>
 
-## Instance methods
+<p className="msb-member-group">Instance methods</p>
 
 #### <span className="msb-recv">client.</span><span className="msb-hn">request()</span>
 
@@ -317,36 +317,69 @@ await client.close();
 
 Close the connection. Idempotent: calling it more than once is safe.
 
-## Types
+## AgentStream
 
-### AgentClient
-
-Low-level client for talking to `agentd` through the sandbox relay socket. All bodies are raw CBOR bytes: encode and decode them in your code with a library like `cbor-x`, and build typed convenience methods on top of this class. Construct it with one of the static connect methods.
-
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| AgentClient.connectSandbox(name, opts?) | `Promise<`[`AgentClient`](#agentclient)`>` | Connect by sandbox name |
-| AgentClient.connect(path, opts?) | `Promise<`[`AgentClient`](#agentclient)`>` | Connect by relay socket path |
-| AgentClient.socketPath(name) | `string` | Resolve the relay socket path without connecting |
-| request(flags, body) | `Promise<`[`RawFrame`](#rawframe)`>` | Send one frame, await one response |
-| stream(flags, body) | `Promise<`[`AgentStream`](#agentstream)`>` | Open a streaming session |
-| send(id, flags, body) | `Promise<void>` | Send a follow-up frame on a correlation id |
-| readyBytes() | `Buffer` | Cached `core.ready` handshake frame body |
-| close() | `Promise<void>` | Close the connection (idempotent) |
-
-### AgentStream
 
 <p className="msb-backref">Returned by <a href="#client-stream">stream()</a></p>
 
 An open raw agent stream. Implements `AsyncIterableIterator<RawFrame>`, so it can be driven with `for await`. The iterator ends after a frame carrying [`FLAG_TERMINAL`](#flag_terminal) or when the underlying stream is exhausted.
 
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| id | `number` | Protocol correlation id; pass to [`send()`](#client-send) for follow-up frames |
-| next() | `Promise<IteratorResult<`[`RawFrame`](#rawframe)`>>` | Pull the next frame; `done` once terminal or exhausted |
-| close() | `Promise<void>` | Release the stream handle early (idempotent) |
-| return() | `Promise<IteratorResult<`[`RawFrame`](#rawframe)`>>` | Async-iterator early-exit hook; closes the stream |
-| [Symbol.asyncIterator]() | [`AgentStream`](#agentstream) | Returns itself so the stream is iterable |
+#### <span className="msb-recv">stream.</span><span className="msb-hn">id</span>
+
+`number`
+
+Protocol correlation id; pass to [`send()`](#client-send) for follow-up frames
+
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">next()</span>
+
+```typescript
+next()
+```
+
+Pull the next frame; `done` once terminal or exhausted
+
+<p className="msb-label">Returns</p>
+
+`Promise<IteratorResult<`[`RawFrame`](#rawframe)`>>`
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">close()</span>
+
+```typescript
+close()
+```
+
+Release the stream handle early (idempotent)
+
+<p className="msb-label">Returns</p>
+
+`Promise<void>`
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">return()</span>
+
+```typescript
+return()
+```
+
+Async-iterator early-exit hook; closes the stream
+
+<p className="msb-label">Returns</p>
+
+`Promise<IteratorResult<`[`RawFrame`](#rawframe)`>>`
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">[Symbol.asyncIterator]()</span>
+
+```typescript
+[Symbol.asyncIterator]()
+```
+
+Returns itself so the stream is iterable
+
+<p className="msb-label">Returns</p>
+
+[`AgentStream`](#agentstream)
+
+## Types
 
 ### RawFrame
 

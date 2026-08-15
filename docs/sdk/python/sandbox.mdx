@@ -7,7 +7,57 @@ Create and control a microVM sandbox: boot it from an image, run commands, strea
 
 For local runtime installation and verification, see [Runtime setup](/sdk/setup#install-and-verify).
 
-## Static methods
+## Sandbox
+
+<p className="msb-member-group">Instance properties</p>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">owns_lifecycle</span>
+
+<Tooltip tip="On microsandbox cloud this is false; the cloud worker owns the sandbox process, not your handle."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```python
+@property
+async def owns_lifecycle(self) -> bool
+```
+
+Whether this handle owns the sandbox lifecycle. A sandbox returned directly by [`create()`](#sandbox-create) or [`start()`](#sandbox-start) owns lifecycle, including when created with `detached=True`, until you call [`detach()`](#sb-detach). Handles upgraded via [`SandboxHandle.connect()`](#sandboxhandle) do not own lifecycle. This is an async property; use `await sb.owns_lifecycle`.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc"><code>True</code> if this handle owns the lifecycle.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">fs</span>
+
+```python
+@property
+def fs(self) -> SandboxFsOps
+```
+
+<Accordion title="Example">
+
+```python
+await sb.fs.write("/tmp/hello.txt", b"hi")
+```
+
+</Accordion>
+
+Get a filesystem handle for reading and writing files inside the running sandbox. This is a synchronous property; use `sb.fs` (no `await`). See [Filesystem](/sdk/python/filesystem) for API details.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="/sdk/python/filesystem">SandboxFsOps</a></div>
+    <div className="msb-param-desc">Filesystem handle.</div>
+  </div>
+</div>
+
+<p className="msb-member-group">Static methods</p>
 
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">create()</span>
 
@@ -279,9 +329,11 @@ Delete a stopped sandbox by name. See [Remove](/sandboxes/lifecycle#remove) for 
   </div>
 </div>
 
-## Instance properties
+<p className="msb-member-group">Instance methods</p>
 
-#### <span className="msb-recv">sb.</span><span className="msb-hn">name</span>
+Command execution (`exec`, `exec_stream`, `shell`, `shell_stream`) is documented on the [Execution](/sdk/python/execution) page; SSH (`ssh`) on the [SSH](/sdk/python/ssh) page. The lifecycle, attach, metrics, and logs methods follow.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">name()</span>
 
 ```python
 async def name(self) -> str
@@ -295,7 +347,7 @@ print(await sb.name())
 
 </Accordion>
 
-The sandbox name. This is an async method; call `await sb.name()`.
+Return the sandbox name.
 
 <p className="msb-label">Returns</p>
 
@@ -305,56 +357,6 @@ The sandbox name. This is an async method; call `await sb.name()`.
     <div className="msb-param-desc">Sandbox name, up to 128 UTF-8 bytes.</div>
   </div>
 </div>
-
-#### <span className="msb-recv">sb.</span><span className="msb-hn">owns_lifecycle</span>
-
-<Tooltip tip="On microsandbox cloud this is false; the cloud worker owns the sandbox process, not your handle."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```python
-@property
-async def owns_lifecycle(self) -> bool
-```
-
-Whether this handle owns the sandbox lifecycle. A sandbox returned directly by [`create()`](#sandbox-create) or [`start()`](#sandbox-start) owns lifecycle, including when created with `detached=True`, until you call [`detach()`](#sb-detach). Handles upgraded via [`SandboxHandle.connect()`](#sandboxhandle) do not own lifecycle. This is an async property; use `await sb.owns_lifecycle`.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">bool</span></div>
-    <div className="msb-param-desc"><code>True</code> if this handle owns the lifecycle.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">sb.</span><span className="msb-hn">fs</span>
-
-```python
-@property
-def fs(self) -> SandboxFsOps
-```
-
-<Accordion title="Example">
-
-```python
-await sb.fs.write("/tmp/hello.txt", b"hi")
-```
-
-</Accordion>
-
-Get a filesystem handle for reading and writing files inside the running sandbox. This is a synchronous property; use `sb.fs` (no `await`). See [Filesystem](/sdk/python/filesystem) for API details.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="/sdk/python/filesystem">SandboxFsOps</a></div>
-    <div className="msb-param-desc">Filesystem handle.</div>
-  </div>
-</div>
-
-## Instance methods
-
-Command execution (`exec`, `exec_stream`, `shell`, `shell_stream`) is documented on the [Execution](/sdk/python/execution) page; SSH (`ssh`) on the [SSH](/sdk/python/ssh) page. The lifecycle, attach, metrics, and logs methods follow.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">attach()</span>
 
@@ -1013,7 +1015,7 @@ Release the handle without stopping the sandbox. The sandbox continues running a
 
 ## Patch
 
-Factory class for rootfs patches passed to `Sandbox.create(..., patches=[...])`. Each static method returns a [`PatchConfig`](#patchconfig). By default a patch that targets a path already present in the image errors at boot; pass `replace=True` on the operation to allow overwriting. `mkdir` and `remove` are idempotent. See [Patches](/sandboxes/bootstrap#patches) for conceptual context.
+Factory for pre-boot root filesystem patches.
 
 #### <span className="msb-recv">Patch.</span><span className="msb-hn">text()</span>
 
@@ -1239,6 +1241,405 @@ Create a symlink at `link` pointing to `target`.
   </div>
 </div>
 
+## SandboxHandle
+
+
+<p className="msb-backref">Returned by <a href="#sandbox-get">Sandbox.get()</a> · <a href="#sandbox-list">Sandbox.list()</a> · <a href="#sandbox-list_with">Sandbox.list_with()</a></p>
+
+A metadata and lifecycle handle for an existing sandbox.
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">name</span>
+
+`str`
+
+Sandbox name, up to 128 UTF-8 bytes
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">status</span>
+
+[`SandboxStatus`](#sandboxstatus)
+
+Current status
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">config_json</span>
+
+`str`
+
+Raw JSON configuration
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">created_at</span>
+
+`float \| None`
+
+Creation timestamp (ms since epoch)
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">updated_at</span>
+
+`float \| None`
+
+Last update timestamp (ms since epoch)
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">config()</span>
+
+```python
+config()
+```
+
+Parsed configuration
+
+<p className="msb-label">Returns</p>
+
+`dict[str, Any]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">refresh()</span>
+
+```python
+refresh()
+```
+
+Re-fetch status and metadata, returning a fresh handle
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[`[`SandboxHandle`](#sandboxhandle)`]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">ping()</span>
+
+```python
+ping()
+```
+
+Check agent reachability without refreshing idle activity; does not start stopped sandboxes
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[`[`SandboxPingResult`](#sandboxpingresult)`]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">touch()</span>
+
+```python
+touch()
+```
+
+Explicitly refresh idle activity; does not start stopped sandboxes
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[`[`SandboxTouchResult`](#sandboxtouchresult)`]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">modify()</span>
+
+```python
+modify(...)
+```
+
+Plan or apply a configuration change; same kwargs as [`modify()`](#sb-modify). Does not start stopped sandboxes; changes persist for the next boot
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[`[`SandboxModificationPlan`](#sandboxmodificationplan)`]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">connect()</span>
+
+```python
+connect(timeout=None)
+```
+
+Connect to a running sandbox, optionally with an explicit timeout in seconds
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[`[`Sandbox`](#instance-methods)`]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">start()</span>
+
+```python
+start(*, detached=False)
+```
+
+Start in attached or detached mode
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[`[`Sandbox`](#instance-methods)`]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">stop()</span>
+
+```python
+stop(timeout=None)
+```
+
+Gracefully shut down and wait until stopped state is observed
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[None]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">request_stop()</span>
+
+```python
+request_stop()
+```
+
+Request graceful shutdown without waiting
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[None]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">kill()</span>
+
+```python
+kill(timeout=None)
+```
+
+Force terminate and wait until stopped state is observed
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[None]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">request_kill()</span>
+
+```python
+request_kill()
+```
+
+Request force termination without waiting
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[None]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">request_drain()</span>
+
+```python
+request_drain()
+```
+
+Request graceful drain without waiting
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[None]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">wait_until_stopped()</span>
+
+```python
+wait_until_stopped()
+```
+
+Block until the sandbox reaches terminal state
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[`[`SandboxStopResult`](#sandboxstopresult)`]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">remove()</span>
+
+```python
+remove()
+```
+
+Delete sandbox and state
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[None]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">metrics()</span>
+
+```python
+metrics()
+```
+
+Point-in-time resource metrics
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[`[`SandboxMetrics`](#sandboxmetrics)`]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">logs()</span>
+
+```python
+logs(...)
+```
+
+Read captured `exec.log` (works without starting)
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[list[`[`LogEntry`](#logentry)`]]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">log_stream()</span>
+
+```python
+log_stream(...)
+```
+
+Stream captured log entries (works without starting)
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[`[`LogStream`](#logstream)`]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot()</span>
+
+```python
+snapshot(name)
+```
+
+Create a named [snapshot](/sdk/python/snapshots) of the sandbox
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[Snapshot]`
+
+## MetricsStream
+
+
+<p className="msb-backref">Returned by <a href="#sb-metrics_stream">metrics_stream()</a></p>
+
+Async stream for receiving periodic metrics snapshots.
+
+
+#### <span className="msb-recv">metrics_stream.</span><span className="msb-hn">__aiter__()</span>
+
+```python
+__aiter__()
+```
+
+Use with `async for`
+
+<p className="msb-label">Returns</p>
+
+[`SandboxMetrics`](#sandboxmetrics)
+
+#### <span className="msb-recv">metrics_stream.</span><span className="msb-hn">__anext__()</span>
+
+```python
+__anext__()
+```
+
+Use with `async for`
+
+<p className="msb-label">Returns</p>
+
+[`SandboxMetrics`](#sandboxmetrics)
+
+## LogEntry
+
+
+<p className="msb-backref">Returned by <a href="#sb-logs">logs()</a> · iterated from <a href="#logstream">LogStream</a></p>
+
+A single captured log entry returned by [`logs()`](#sb-logs) or iterated from a [`LogStream`](#logstream).
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">timestamp_ms</span>
+
+`float`
+
+Wall-clock capture time (ms since Unix epoch, UTC)
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">source</span>
+
+[`LogSource`](#logsource)
+
+Where the chunk came from
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">session_id</span>
+
+`int \| None`
+
+Relay-monotonic session id; `None` for `"system"` entries
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">cursor</span>
+
+`str`
+
+Opaque resume token; pass back via `log_stream(from_cursor=...)`
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">data</span>
+
+`bytes`
+
+The chunk's raw bytes
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">text()</span>
+
+```python
+text()
+```
+
+Convenience: UTF-8 decode of `data` (lossy; invalid bytes are replaced)
+
+<p className="msb-label">Returns</p>
+
+`str`
+
+## LogStream
+
+
+<p className="msb-backref">Returned by <a href="#sb-log_stream">log_stream()</a></p>
+
+Async stream of [`LogEntry`](#logentry) values, returned by [`log_stream()`](#sb-log_stream).
+
+
+#### <span className="msb-recv">log_stream.</span><span className="msb-hn">__aiter__()</span>
+
+```python
+__aiter__()
+```
+
+Use with `async for`
+
+<p className="msb-label">Returns</p>
+
+[`LogEntry`](#logentry)
+
+#### <span className="msb-recv">log_stream.</span><span className="msb-hn">__anext__()</span>
+
+```python
+__anext__()
+```
+
+Use with `async for`
+
+<p className="msb-label">Returns</p>
+
+[`LogEntry`](#logentry)
+
+## PullSession
+
+
+<p className="msb-backref">Returned by <a href="#sandbox-create_with_progress">create_with_progress()</a></p>
+
+Returned by [`create_with_progress()`](#sandbox-create_with_progress). The factory itself is synchronous; use the returned session as an async context manager to track image pull progress.
+
+#### <span className="msb-recv">session.</span><span className="msb-hn">progress</span>
+
+`AsyncIterator[`[`PullEvent`](#pullevent)`]`
+
+Async iterator of pull progress events
+
+#### <span className="msb-recv">session.</span><span className="msb-hn">result()</span>
+
+```python
+result()
+```
+
+Await once to get the final running sandbox. A second call raises `RuntimeError`
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[`[`Sandbox`](#instance-methods)`]`
+
+```python
+session = Sandbox.create_with_progress("my-sandbox", image="ubuntu:latest")
+async with session:
+    async for event in session.progress:
+        print(event)
+    sb = await session.result()
+```
+
 ## Types
 
 ### SandboxConfig
@@ -1354,38 +1755,6 @@ One stable, newest-first page returned by [`Sandbox.list()`](#sandbox-list) or [
 |----------|------|-------------|
 | `sandboxes` | `list[SandboxHandle]` | Handles in this page |
 | `next_cursor` | `str \| None` | Opaque continuation cursor, or `None` on the final page |
-
-### SandboxHandle
-
-<p className="msb-backref">Returned by <a href="#sandbox-get">Sandbox.get()</a> · <a href="#sandbox-list">Sandbox.list()</a> · <a href="#sandbox-list_with">Sandbox.list_with()</a></p>
-
-A lightweight handle to an existing sandbox (running or stopped). Provides status, configuration, and lifecycle control **without** an active connection to the guest agent. You cannot `exec` or `fs` on a handle; call `.start()` or `.connect()` to upgrade to a full [`Sandbox`](#instance-methods).
-
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| name | `str` | Sandbox name, up to 128 UTF-8 bytes |
-| status | [`SandboxStatus`](#sandboxstatus) | Current status |
-| config_json | `str` | Raw JSON configuration |
-| created_at | `float \| None` | Creation timestamp (ms since epoch) |
-| updated_at | `float \| None` | Last update timestamp (ms since epoch) |
-| config() | `dict[str, Any]` | Parsed configuration |
-| refresh() | `Awaitable[`[`SandboxHandle`](#sandboxhandle)`]` | Re-fetch status and metadata, returning a fresh handle |
-| ping() | `Awaitable[`[`SandboxPingResult`](#sandboxpingresult)`]` | Check agent reachability without refreshing idle activity; does not start stopped sandboxes |
-| touch() | `Awaitable[`[`SandboxTouchResult`](#sandboxtouchresult)`]` | Explicitly refresh idle activity; does not start stopped sandboxes |
-| modify(...) | `Awaitable[`[`SandboxModificationPlan`](#sandboxmodificationplan)`]` | Plan or apply a configuration change; same kwargs as [`modify()`](#sb-modify). Does not start stopped sandboxes; changes persist for the next boot |
-| connect(timeout=None) | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Connect to a running sandbox, optionally with an explicit timeout in seconds |
-| start(*, detached=False) | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Start in attached or detached mode |
-| stop(timeout=None) | `Awaitable[None]` | Gracefully shut down and wait until stopped state is observed |
-| request_stop() | `Awaitable[None]` | Request graceful shutdown without waiting |
-| kill(timeout=None) | `Awaitable[None]` | Force terminate and wait until stopped state is observed |
-| request_kill() | `Awaitable[None]` | Request force termination without waiting |
-| request_drain() | `Awaitable[None]` | Request graceful drain without waiting |
-| wait_until_stopped() | `Awaitable[`[`SandboxStopResult`](#sandboxstopresult)`]` | Block until the sandbox reaches terminal state |
-| remove() | `Awaitable[None]` | Delete sandbox and state |
-| metrics() | `Awaitable[`[`SandboxMetrics`](#sandboxmetrics)`]` | Point-in-time resource metrics |
-| logs(...) | `Awaitable[list[`[`LogEntry`](#logentry)`]]` | Read captured `exec.log` (works without starting) |
-| log_stream(...) | `Awaitable[`[`LogStream`](#logstream)`]` | Stream captured log entries (works without starting) |
-| snapshot(name) | `Awaitable[Snapshot]` | Create a named [snapshot](/sdk/python/snapshots) of the sandbox |
 
 ### SandboxPingResult
 
@@ -1588,41 +1957,6 @@ Point-in-time resource usage snapshot.
 | uptime_ms | `int` | Time since the sandbox was created (ms) |
 | timestamp_ms | `float` | When this measurement was taken (ms since epoch) |
 
-### MetricsStream
-
-<p className="msb-backref">Returned by <a href="#sb-metrics_stream">metrics_stream()</a></p>
-
-Async stream for receiving periodic metrics snapshots.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `__aiter__` / `__anext__` | [`SandboxMetrics`](#sandboxmetrics) | Use with `async for` |
-
-### LogEntry
-
-<p className="msb-backref">Returned by <a href="#sb-logs">logs()</a> · iterated from <a href="#logstream">LogStream</a></p>
-
-A single captured log entry returned by [`logs()`](#sb-logs) or iterated from a [`LogStream`](#logstream).
-
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| timestamp_ms | `float` | Wall-clock capture time (ms since Unix epoch, UTC) |
-| source | [`LogSource`](#logsource) | Where the chunk came from |
-| session_id | `int \| None` | Relay-monotonic session id; `None` for `"system"` entries |
-| cursor | `str` | Opaque resume token; pass back via `log_stream(from_cursor=...)` |
-| data | `bytes` | The chunk's raw bytes |
-| text() | `str` | Convenience: UTF-8 decode of `data` (lossy; invalid bytes are replaced) |
-
-### LogStream
-
-<p className="msb-backref">Returned by <a href="#sb-log_stream">log_stream()</a></p>
-
-Async stream of [`LogEntry`](#logentry) values, returned by [`log_stream()`](#sb-log_stream).
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `__aiter__` / `__anext__` | [`LogEntry`](#logentry) | Use with `async for` |
-
 ### LogSource
 
 <p className="msb-backref">Returned by <a href="#logentry">LogEntry.source</a></p>
@@ -1721,25 +2055,6 @@ Rootfs patch operation.
 | `PatchKind.SYMLINK` | `"symlink"` | Create a symbolic link |
 | `PatchKind.MKDIR` | `"mkdir"` | Create a directory |
 | `PatchKind.REMOVE` | `"remove"` | Remove a path |
-
-### PullSession
-
-<p className="msb-backref">Returned by <a href="#sandbox-create_with_progress">create_with_progress()</a></p>
-
-Returned by [`create_with_progress()`](#sandbox-create_with_progress). The factory itself is synchronous; use the returned session as an async context manager to track image pull progress.
-
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| progress | `AsyncIterator[`[`PullEvent`](#pullevent)`]` | Async iterator of pull progress events |
-| result() | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Await once to get the final running sandbox. A second call raises `RuntimeError` |
-
-```python
-session = Sandbox.create_with_progress("my-sandbox", image="ubuntu:latest")
-async with session:
-    async for event in session.progress:
-        print(event)
-    sb = await session.result()
-```
 
 ### PullEvent
 
