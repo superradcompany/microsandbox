@@ -37,9 +37,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--plan", action="store_true", help="print the publication waves only")
     parser.add_argument(
-        "--package-only",
+        "--validate-only",
         action="store_true",
-        help="package every release crate without publishing",
+        help="validate package manifests and assemble registry-independent crates",
     )
     parser.add_argument("--timeout", type=int, default=180, help="registry visibility timeout")
     parser.add_argument("--root", action="append", dest="roots", help="published root crate")
@@ -193,14 +193,24 @@ def wait_until_indexed(packages: list[Package], timeout: int) -> None:
         delay = min(delay * 2, 20)
 
 
-def package_all(packages: dict[str, Package]) -> None:
-    for package in sorted(packages.values(), key=lambda item: item.name):
+def list_package_files(packages: list[Package]) -> None:
+    """Validate each package manifest without resolving unpublished dependencies."""
+    for package in sorted(packages, key=lambda item: item.name):
+        subprocess.run(["cargo", "package", "-p", package.name, "--list"], check=True)
+
+
+def package_all(packages: list[Package]) -> None:
+    for package in sorted(packages, key=lambda item: item.name):
         subprocess.run(["cargo", "package", "-p", package.name, "--no-verify"], check=True)
 
 
 def publish(waves: list[list[Package]], timeout: int) -> None:
-    package_all({package.name: package for wave in waves for package in wave})
     for number, wave in enumerate(waves, start=1):
+        # Cargo normalizes path dependencies to registry dependencies while it
+        # packages a crate. Package one wave at a time, after the prior wave is
+        # indexed, so a brand-new release never tries to resolve unpublished
+        # internal versions.
+        package_all(wave)
         newly_published = []
         names = ", ".join(package.name for package in wave)
         print(f"publishing wave {number}: {names}", flush=True)
@@ -228,8 +238,13 @@ def main() -> None:
     roots = tuple(args.roots or DEFAULT_ROOTS)
     waves = dependency_waves(publication_closure(cargo_metadata(), roots))
     print(json.dumps([[package.name for package in wave] for wave in waves], indent=2))
-    if args.package_only:
-        package_all({package.name: package for wave in waves for package in wave})
+    if args.validate_only:
+        packages = [package for wave in waves for package in wave]
+        list_package_files(packages)
+        # Only the first wave is registry-independent. Higher waves can be
+        # assembled once these archives have actually been published and
+        # indexed, which publish() enforces without fixed sleeps.
+        package_all(waves[0])
     elif not args.plan:
         publish(waves, args.timeout)
 
