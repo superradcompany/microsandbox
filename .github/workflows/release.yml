@@ -37,7 +37,6 @@ jobs:
   # firmware architectures over GitHub's artifact network.
   kernel-sources:
     name: Kernel sources
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -59,7 +58,6 @@ jobs:
   # macOS and Windows consume the matching generated kernel.c.
   firmware-aarch64:
     name: Firmware (aarch64)
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     needs: kernel-sources
     runs-on: ubuntu-24.04-arm
     steps:
@@ -104,7 +102,6 @@ jobs:
 
   firmware-x86_64:
     name: Firmware (x86_64)
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     needs: kernel-sources
     runs-on: ubuntu-latest
     steps:
@@ -151,7 +148,6 @@ jobs:
   # per guest architecture and fan it out to every matching host platform.
   agentd-aarch64:
     name: Agentd (aarch64-linux-musl)
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -181,7 +177,6 @@ jobs:
 
   agentd-x86_64:
     name: Agentd (x86_64-linux-musl)
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -211,7 +206,6 @@ jobs:
 
   linux-x86_64:
     name: Linux x86_64
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     needs: [firmware-x86_64, agentd-x86_64]
     uses: ./.github/workflows/release-platform.yml
     with:
@@ -231,7 +225,6 @@ jobs:
 
   linux-aarch64:
     name: Linux aarch64
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     needs: [firmware-aarch64, agentd-aarch64]
     uses: ./.github/workflows/release-platform.yml
     with:
@@ -251,7 +244,6 @@ jobs:
 
   darwin-aarch64:
     name: macOS aarch64
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     needs: [firmware-aarch64, agentd-aarch64]
     uses: ./.github/workflows/release-platform.yml
     with:
@@ -271,7 +263,6 @@ jobs:
 
   windows-x86_64:
     name: Windows x86_64
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     needs: [firmware-x86_64, agentd-x86_64]
     uses: ./.github/workflows/release-windows.yml
     with:
@@ -292,7 +283,6 @@ jobs:
 
   windows-aarch64:
     name: Windows aarch64
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     needs: [firmware-aarch64, agentd-aarch64]
     uses: ./.github/workflows/release-windows.yml
     with:
@@ -312,13 +302,13 @@ jobs:
       go_bundle_name: libmicrosandbox_go_ffi-windows-arm64.dll
 
   # ---------------------------------------------------------------------------
-  # Legacy tag-release graph. Keep it live while the PR/manual canary validates
-  # the optimized graph above, then switch publishers in a follow-up commit.
+  # Legacy tag-release graph. Keep this disabled as an in-file rollback
+  # reference until the optimized graph has proven itself on live tags.
   # ---------------------------------------------------------------------------
   # Build kernel.c on Linux for macOS libkrunfw linking
   build-kernel:
     name: Build kernel.c (aarch64)
-    if: github.event_name == 'push'
+    if: ${{ false }}
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -356,7 +346,7 @@ jobs:
 
   build-kernel-x86_64:
     name: Build kernel.c (x86_64)
-    if: github.event_name == 'push'
+    if: ${{ false }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -397,7 +387,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build-agentd-aarch64:
     name: Build agentd (aarch64-linux-musl)
-    if: github.event_name == 'push'
+    if: ${{ false }}
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -428,7 +418,7 @@ jobs:
 
   build-agentd-x86_64:
     name: Build agentd (x86_64-linux-musl)
-    if: github.event_name == 'push'
+    if: ${{ false }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -463,7 +453,7 @@ jobs:
   build:
     name: Build (${{ matrix.target }})
     needs: [build-kernel, build-agentd-aarch64]
-    if: github.event_name == 'push' && always()
+    if: ${{ false }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -716,7 +706,7 @@ jobs:
   build-windows:
     name: Build Windows (${{ matrix.target }})
     needs: [build-kernel, build-kernel-x86_64, build-agentd-aarch64, build-agentd-x86_64]
-    if: github.event_name == 'push'
+    if: ${{ false }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -909,11 +899,11 @@ jobs:
           name: release-${{ matrix.target }}
           path: artifacts/
 
-  # Canary barrier: prove every platform and SDK payload is complete before a
-  # follow-up commit switches the live publishers to this graph.
+  # Completeness barrier: no publisher may run until every platform and SDK
+  # payload has been built and the exact release manifest has been verified.
   release-ready:
     name: Validate complete release
-    if: (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && always()
+    if: always()
     needs:
       - linux-x86_64
       - linux-aarch64
@@ -976,7 +966,7 @@ jobs:
   # ---------------------------------------------------------------------------
   assemble:
     name: Assemble Release
-    needs: [build, build-windows]
+    needs: release-ready
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -1165,7 +1155,7 @@ jobs:
   # ---------------------------------------------------------------------------
   npm-publish:
     name: Publish npm packages
-    needs: [build, build-windows]
+    needs: release-ready
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
@@ -1364,47 +1354,25 @@ jobs:
   # ---------------------------------------------------------------------------
   crates-publish:
     name: Publish crates
-    needs: build
+    needs: release-ready
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          submodules: true
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          for crate in \
-            microsandbox-utils \
-            microsandbox-types \
-            microsandbox-protocol \
-            microsandbox-agent-client \
-            microsandbox-agentd \
-            microsandbox-db \
-            microsandbox-migration \
-            microsandbox-image \
-            microsandbox-filesystem \
-            microsandbox-network \
-            microsandbox-metrics \
-            microsandbox-metrics-collector \
-            microsandbox-runtime \
-            microsandbox \
-            microsandbox-cli; do
-            echo "Publishing $crate..."
-            cargo publish -p "$crate" --no-verify
-            sleep 60
-          done
+        run: python3 scripts/ci/publish-crates.py
 
   # ---------------------------------------------------------------------------
   # Publish Python SDK to PyPI
   # ---------------------------------------------------------------------------
   pypi-publish:
     name: Publish Python SDK
-    needs: [build, build-windows]
+    needs: release-ready
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -1513,7 +1481,7 @@ jobs:
   # ---------------------------------------------------------------------------
   docker-build:
     name: Docker (${{ matrix.arch }})
-    needs: build
+    needs: release-ready
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ${{ matrix.runner }}
     permissions:

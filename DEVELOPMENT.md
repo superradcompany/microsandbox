@@ -252,12 +252,12 @@ git push origin v0.X.Y
 
 The release workflow (`.github/workflows/release.yml`) will:
 
-1. Build `msb`, `agentd`, `msb-metrics`, and `libkrunfw` for release platforms (linux-x86_64, linux-aarch64, darwin-aarch64, windows-x86_64, windows-aarch64)
+1. Build shared `agentd` and `libkrunfw` artifacts once, then build full-release `msb`, `msb-metrics`, Go FFI, Node, and Python artifacts in parallel for each release platform (linux-x86_64, linux-aarch64, darwin-aarch64, windows-x86_64, windows-aarch64)
 2. Create Unix platform bundles (`.tar.gz`) and Windows platform bundles (`.zip`) with SHA256 checksums
 3. Create a GitHub release with the bundles and installer scripts (`install.sh` and `install.ps1`)
 4. Publish the npm packages: `microsandbox` (+ platform sub-packages), `@microsandbox/agent-client`, and `@microsandbox/types`
 5. Publish the MCP server to npm (`microsandbox-mcp`, from the `mcp/` submodule)
-6. Publish Rust crates to crates.io (in dependency order, 15 crates)
+6. Discover and publish all 16 Rust crates to crates.io in dependency waves, waiting only for the sparse-index entries required by the next wave
 7. Publish the Python SDK to PyPI (`microsandbox`)
 8. Tag the Go SDK (`sdk/go/vX.Y.Z`)
 9. Build and publish Docker images to GHCR
