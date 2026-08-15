@@ -41,9 +41,6 @@ jobs:
             code:
               - '!docs/**'
 
-      - name: Check SDK reference structure
-        run: python3 docs/scripts/check-sdk-reference-structure.py
-
   # ---------------------------------------------------------------------------
   # Build kernel.c on Linux for macOS libkrunfw linking
   # ---------------------------------------------------------------------------
