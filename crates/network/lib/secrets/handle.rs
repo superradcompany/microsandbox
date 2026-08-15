@@ -120,7 +120,7 @@ impl SecretsHandle {
 
 #[cfg(test)]
 mod tests {
-    use super::super::config::{SecretEntry, SecretInjection};
+    use super::super::config::{SecretEntry, SecretSubstitution};
     use super::*;
 
     fn config_with_secret(name: &str, value: &str) -> SecretsConfig {
@@ -131,8 +131,9 @@ mod tests {
                 source: None,
                 placeholder: format!("$MSB_{name}"),
                 allowed_hosts: vec![HostPattern::Exact("api.example.com".into())],
-                injection: SecretInjection::default(),
-                on_violation: None,
+                substitution: SecretSubstitution::default(),
+                passthrough_hosts: Vec::new(),
+                violation_action: None,
                 require_tls_identity: true,
             }],
             ..SecretsConfig::default()

@@ -1647,7 +1647,7 @@ type NetworkOptions struct {
 	IPv6Pool            string                     `json:"ipv6_pool,omitempty"`
 	MaxConnections      *uint                      `json:"max_connections,omitempty"`
 	RateLimiter         *NetworkRateLimiterOptions `json:"rate_limiter,omitempty"`
-	OnSecretViolation   string                     `json:"on_secret_violation,omitempty"`
+	SecretViolationAction string                   `json:"secret_violation_action,omitempty"`
 	TrustHostCAs        *bool                      `json:"trust_host_cas,omitempty"`
 }
 
@@ -1740,13 +1740,21 @@ type ScopedVerifyUpstream struct {
 
 // SecretOptions is the JSON representation of a single credential.
 type SecretOptions struct {
-	EnvVar            string   `json:"env_var"`
-	Value             string   `json:"value"`
-	AllowHosts        []string `json:"allow_hosts,omitempty"`
-	AllowHostPatterns []string `json:"allow_host_patterns,omitempty"`
-	Placeholder       string   `json:"placeholder,omitempty"`
-	RequireTLS        *bool    `json:"require_tls,omitempty"`
-	OnViolation       string   `json:"on_violation,omitempty"`
+	EnvVar              string                     `json:"env_var"`
+	Value               string                     `json:"value"`
+	Allow               []string                   `json:"allow,omitempty"`
+	Passthrough         []string                   `json:"passthrough,omitempty"`
+	Placeholder         string                     `json:"placeholder,omitempty"`
+	RequireTLSIdentity  *bool                      `json:"require_tls_identity,omitempty"`
+	Substitution        SecretSubstitutionOptions  `json:"substitution,omitempty"`
+	ViolationAction     string                     `json:"violation_action,omitempty"`
+}
+
+// SecretSubstitutionOptions selects request locations for substitution.
+type SecretSubstitutionOptions struct {
+	Headers *bool `json:"headers,omitempty"`
+	Query   bool  `json:"query,omitempty"`
+	Body    bool  `json:"body,omitempty"`
 }
 
 // PatchOptions is the JSON representation of a single rootfs patch.

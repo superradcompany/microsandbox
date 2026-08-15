@@ -1199,6 +1199,7 @@ pub(crate) fn build_secret_patches(
             value: value.unwrap_or_default().into(),
             placeholder,
             allowed_hosts,
+            ..SecretModificationPatch::default()
         });
     }
     Ok(patches)

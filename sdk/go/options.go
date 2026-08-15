@@ -1091,9 +1091,8 @@ type NetworkConfig struct {
 	// unlimited in both directions.
 	RateLimiter *NetworkRateLimiterConfig
 
-	// OnSecretViolation is the sandbox-wide action when a secret is sent to
-	// a disallowed host. Per-secret overrides via SecretEntry.OnViolation.
-	OnSecretViolation ViolationAction
+	// SecretViolationAction is the sandbox-wide action for blocked placeholders.
+	SecretViolationAction ViolationAction
 
 	// TrustHostCAs ships the host's extra CA bundles into the guest.
 	TrustHostCAs *bool
@@ -1321,36 +1320,43 @@ type SecretEntry struct {
 	// Value is the actual secret; it never crosses the FFI into the guest.
 	Value string
 
-	// AllowHosts restricts substitution to exact host matches.
-	AllowHosts []string
+	// Allow lists exact or wildcard hosts that may receive the real secret.
+	Allow []string
 
-	// AllowHostPatterns restricts substitution to wildcard host patterns
-	// (e.g. "*.openai.com").
-	AllowHostPatterns []string
+	// Passthrough lists hosts that may receive the unchanged placeholder.
+	Passthrough []string
 
 	// Placeholder is the string used inside the sandbox in place of the secret.
 	// Auto-generated from EnvVar when empty. Custom values must be non-empty,
 	// at most 1024 bytes, and cannot contain NUL, CR, or LF.
 	Placeholder string
 
-	// RequireTLS requires a verified TLS identity before substituting.
+	// RequireTLSIdentity requires a verified TLS identity before substituting.
 	// Defaults to true when nil.
-	RequireTLS *bool
+	RequireTLSIdentity *bool
 
-	// OnViolation overrides the sandbox-level action when this secret is
-	// detected going to a disallowed host. The last non-empty value across
-	// all secrets wins (matches Node/Python behaviour, since the runtime
-	// applies it network-wide).
-	OnViolation ViolationAction
+	// Substitution selects request locations where the placeholder becomes the secret.
+	Substitution SecretSubstitution
+
+	// ViolationAction overrides the sandbox-level blocking action for this secret.
+	ViolationAction ViolationAction
+}
+
+// SecretSubstitution selects request locations where substitution is enabled.
+type SecretSubstitution struct {
+	Headers *bool
+	Query   bool
+	Body    bool
 }
 
 // SecretEnvOptions tunes Secret.Env beyond the required envVar and value.
 type SecretEnvOptions struct {
-	AllowHosts        []string
-	AllowHostPatterns []string
-	Placeholder       string
-	RequireTLS        *bool
-	OnViolation       ViolationAction
+	Allow              []string
+	Passthrough        []string
+	Placeholder        string
+	RequireTLSIdentity *bool
+	Substitution       SecretSubstitution
+	ViolationAction    ViolationAction
 }
 
 // secretFactory is the factory namespace matching Node's `Secret.env(...)` and
@@ -1361,7 +1367,7 @@ type secretFactory struct{}
 //
 //	microsandbox.Secret.Env("OPENAI_API_KEY",
 //	    os.Getenv("OPENAI_API_KEY"),
-//	    microsandbox.SecretEnvOptions{AllowHosts: []string{"api.openai.com"}},
+//	    microsandbox.SecretEnvOptions{Allow: []string{"api.openai.com"}},
 //	)
 var Secret secretFactory
 
@@ -1371,11 +1377,12 @@ func (secretFactory) Env(envVar, value string, opts SecretEnvOptions) SecretEntr
 	return SecretEntry{
 		EnvVar:            envVar,
 		Value:             value,
-		AllowHosts:        opts.AllowHosts,
-		AllowHostPatterns: opts.AllowHostPatterns,
-		Placeholder:       opts.Placeholder,
-		RequireTLS:        opts.RequireTLS,
-		OnViolation:       opts.OnViolation,
+		Allow:              opts.Allow,
+		Passthrough:        opts.Passthrough,
+		Placeholder:        opts.Placeholder,
+		RequireTLSIdentity: opts.RequireTLSIdentity,
+		Substitution:       opts.Substitution,
+		ViolationAction:    opts.ViolationAction,
 	}
 }
 

@@ -81,19 +81,15 @@ export type StatVirtualization = "strict" | "relaxed" | "off";
 
 export type HostPermissions = "private" | "mirror";
 
-export type SecretInjection = {
+export type SecretSubstitution = {
   /**
    * Substitute in HTTP headers (default: true).
    */
   headers: boolean;
   /**
-   * Substitute in HTTP Basic Auth (default: true).
-   */
-  basic_auth: boolean;
-  /**
    * Substitute in URL query parameters (default: false).
    */
-  query_params: boolean;
+  query: boolean;
   /**
    * Substitute in request body (default: false).
    *

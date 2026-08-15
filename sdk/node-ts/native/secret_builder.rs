@@ -4,8 +4,6 @@ use napi_derive::napi;
 use microsandbox_network::builder::SecretBuilder as RustSecretBuilder;
 use microsandbox_network::secrets::config::SecretEntry as RustSecretEntry;
 
-use crate::violation_action_builder::JsViolationActionBuilder;
-
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -26,19 +24,20 @@ pub struct JsSecretEntry {
     pub allowed_host_patterns: Vec<String>,
     /// Allow any host. **Dangerous** — secret can be exfiltrated.
     pub allow_any_host: bool,
+    /// Hosts allowed to receive the placeholder unchanged.
+    pub passthrough_hosts: Vec<String>,
     /// Require verified TLS identity before substituting (default: true).
     pub require_tls_identity: bool,
     /// Where the secret may be injected into requests.
-    pub injection: JsSecretInjection,
+    pub substitution: JsSecretSubstitution,
 }
 
 /// Injection sites for a secret value.
 #[derive(Clone)]
-#[napi(object, js_name = "SecretInjection")]
-pub struct JsSecretInjection {
+#[napi(object, js_name = "SecretSubstitution")]
+pub struct JsSecretSubstitution {
     pub headers: bool,
-    pub basic_auth: bool,
-    pub query_params: bool,
+    pub query: bool,
     pub body: bool,
 }
 
@@ -85,19 +84,11 @@ impl JsSecretBuilder {
         self
     }
 
-    /// Add an allowed exact-match host.
-    #[napi(js_name = "allowHost")]
-    pub fn allow_host(&mut self, host: String) -> &Self {
+    /// Add a host allowed to receive the substituted secret value.
+    #[napi]
+    pub fn allow(&mut self, host: String) -> &Self {
         let prev = self.take_inner();
-        self.inner = Some(prev.allow_host(host));
-        self
-    }
-
-    /// Add an allowed wildcard host pattern (e.g. `*.openai.com`).
-    #[napi(js_name = "allowHostPattern")]
-    pub fn allow_host_pattern(&mut self, pattern: String) -> &Self {
-        let prev = self.take_inner();
-        self.inner = Some(prev.allow_host_pattern(pattern));
+        self.inner = Some(prev.allow(host));
         self
     }
 
@@ -118,53 +109,44 @@ impl JsSecretBuilder {
         self
     }
 
-    /// Configure header injection (default: true).
-    #[napi(js_name = "injectHeaders")]
-    pub fn inject_headers(&mut self, enabled: bool) -> &Self {
+    /// Allow a host to receive the unchanged placeholder.
+    #[napi(js_name = "allowPassthroughFor")]
+    pub fn allow_passthrough_for(&mut self, host: String) -> &Self {
         let prev = self.take_inner();
-        self.inner = Some(prev.inject_headers(enabled));
+        self.inner = Some(prev.allow_passthrough_for(host));
         self
     }
 
-    /// Configure Basic Auth injection (default: true).
-    #[napi(js_name = "injectBasicAuth")]
-    pub fn inject_basic_auth(&mut self, enabled: bool) -> &Self {
+    /// Configure header substitution (default: true).
+    #[napi(js_name = "substituteInHeaders")]
+    pub fn substitute_in_headers(&mut self, enabled: bool) -> &Self {
         let prev = self.take_inner();
-        self.inner = Some(prev.inject_basic_auth(enabled));
+        self.inner = Some(prev.substitute_in_headers(enabled));
         self
     }
 
-    /// Configure URL query parameter injection (default: false).
-    #[napi(js_name = "injectQuery")]
-    pub fn inject_query(&mut self, enabled: bool) -> &Self {
+    /// Configure URL query parameter substitution (default: false).
+    #[napi(js_name = "substituteInQuery")]
+    pub fn substitute_in_query(&mut self, enabled: bool) -> &Self {
         let prev = self.take_inner();
-        self.inner = Some(prev.inject_query(enabled));
+        self.inner = Some(prev.substitute_in_query(enabled));
         self
     }
 
-    /// Configure request body injection (default: false).
-    #[napi(js_name = "injectBody")]
-    pub fn inject_body(&mut self, enabled: bool) -> &Self {
+    /// Configure request body substitution (default: false).
+    #[napi(js_name = "substituteInBody")]
+    pub fn substitute_in_body(&mut self, enabled: bool) -> &Self {
         let prev = self.take_inner();
-        self.inner = Some(prev.inject_body(enabled));
+        self.inner = Some(prev.substitute_in_body(enabled));
         self
     }
 
-    /// Configure violation behavior for this secret.
-    #[napi(js_name = "onViolation")]
-    pub fn on_violation(
-        &mut self,
-        env: &Env,
-        configure: Function<
-            ClassInstance<JsViolationActionBuilder>,
-            ClassInstance<JsViolationActionBuilder>,
-        >,
-    ) -> Result<&Self> {
-        let initial = JsViolationActionBuilder::new().into_instance(env)?;
-        let mut returned = configure.call(initial)?;
-        let violation_builder = returned.take_inner_builder()?;
+    /// Configure the blocking action for this secret.
+    #[napi(js_name = "violationAction")]
+    pub fn violation_action(&mut self, action: String) -> Result<&Self> {
+        let action = parse_violation_action(&action)?;
         let prev = self.take_inner();
-        self.inner = Some(prev.on_violation(|_default| violation_builder));
+        self.inner = Some(prev.violation_action(action));
         Ok(self)
     }
 
@@ -239,12 +221,38 @@ pub(crate) fn to_js_secret_entry(entry: RustSecretEntry) -> JsSecretEntry {
         allowed_hosts,
         allowed_host_patterns,
         allow_any_host,
+        passthrough_hosts: entry
+            .passthrough_hosts
+            .into_iter()
+            .map(host_pattern_string)
+            .collect(),
         require_tls_identity: entry.require_tls_identity,
-        injection: JsSecretInjection {
-            headers: entry.injection.headers,
-            basic_auth: entry.injection.basic_auth,
-            query_params: entry.injection.query_params,
-            body: entry.injection.body,
+        substitution: JsSecretSubstitution {
+            headers: entry.substitution.headers,
+            query: entry.substitution.query,
+            body: entry.substitution.body,
         },
+    }
+}
+
+fn host_pattern_string(pattern: microsandbox_network::secrets::config::HostPattern) -> String {
+    match pattern {
+        microsandbox_network::secrets::config::HostPattern::Exact(value)
+        | microsandbox_network::secrets::config::HostPattern::Wildcard(value) => value,
+        microsandbox_network::secrets::config::HostPattern::Any => "*".to_string(),
+    }
+}
+
+pub(crate) fn parse_violation_action(
+    action: &str,
+) -> Result<microsandbox_network::secrets::config::SecretViolationAction> {
+    use microsandbox_network::secrets::config::SecretViolationAction;
+    match action {
+        "block" => Ok(SecretViolationAction::Block),
+        "block-and-log" => Ok(SecretViolationAction::BlockAndLog),
+        "block-and-terminate" => Ok(SecretViolationAction::BlockAndTerminate),
+        other => Err(napi::Error::from_reason(format!(
+            "invalid secret violation action: {other}"
+        ))),
     }
 }

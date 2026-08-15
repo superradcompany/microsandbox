@@ -196,19 +196,47 @@ fn apply_secret_args(
 ) -> anyhow::Result<SandboxModificationBuilder> {
     // Group hosts by secret name so repeated `--secret NAME@HOST[,HOST...]`
     // flags accumulate into one declarative spec per name.
-    let mut specs: Vec<(String, Vec<String>)> = Vec::new();
+    let mut specs: Vec<common::ParsedSecret> = Vec::new();
     for secret in &args.secrets {
-        let (name, hosts) = common::parse_secret(secret, "modify")?;
-        match specs.iter_mut().find(|(existing, _)| *existing == name) {
-            Some((_, existing_hosts)) => existing_hosts.extend(hosts),
-            None => specs.push((name, hosts)),
+        let parsed = common::parse_secret(secret, "modify")?;
+        match specs
+            .iter_mut()
+            .find(|existing| existing.env_var == parsed.env_var)
+        {
+            Some(existing) => {
+                for host in parsed.allowed_hosts {
+                    if !existing.allowed_hosts.contains(&host) {
+                        existing.allowed_hosts.push(host);
+                    }
+                }
+                for host in parsed.passthrough_hosts {
+                    if !existing.passthrough_hosts.contains(&host) {
+                        existing.passthrough_hosts.push(host);
+                    }
+                }
+                existing.substitute_headers &= parsed.substitute_headers;
+                existing.substitute_query |= parsed.substitute_query;
+                existing.substitute_body |= parsed.substitute_body;
+            }
+            None => specs.push(parsed),
         }
     }
-    for (name, hosts) in specs {
+    for spec in specs {
+        let name = spec.env_var;
         builder = builder.secret(|mut s| {
-            s = s.env(&name).source(SecretSource::Env { var: name.clone() });
-            for host in hosts {
-                s = s.allow_host(host);
+            s = s
+                .env(&name)
+                .source(SecretSource::Env { var: name.clone() })
+                .substitution(microsandbox_types::SecretSubstitution {
+                    headers: spec.substitute_headers,
+                    query: spec.substitute_query,
+                    body: spec.substitute_body,
+                });
+            for host in spec.allowed_hosts {
+                s = s.allow(host);
+            }
+            for host in spec.passthrough_hosts {
+                s = s.allow_passthrough_for(host);
             }
             s
         });
@@ -601,7 +629,7 @@ fn replayed_args(args: &ModifyArgs) -> String {
     }
     for secret in &args.secrets {
         let sanitized = common::parse_secret(secret, "modify")
-            .map(|(name, hosts)| format!("{name}@{}", hosts.join(",")))
+            .map(|parsed| format!("{}@{}", parsed.env_var, parsed.allowed_hosts.join(",")))
             .unwrap_or_else(|_| "<secret>".to_string());
         rendered.push(format!("--secret {sanitized}"));
     }

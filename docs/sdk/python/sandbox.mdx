@@ -1683,7 +1683,7 @@ The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_wit
 | ports | `Mapping[int, int] \| Sequence[`[`PortBinding`](/sdk/python/networking#portbinding)`]` | `{}` | Port mappings. Mapping form is TCP and binds to `127.0.0.1`; use `PortBinding` for explicit bind addresses or UDP |
 | network | [`Network`](/sdk/python/networking#network) | public profile | Network policy and configuration |
 | secrets | `Sequence[`[`SecretEntry`](/sdk/python/secrets#secretentry)`]` | `[]` | Secret injection |
-| on_secret_violation | [`ViolationAction`](/sdk/python/secrets#violationaction)` \| `[`ViolationPolicy`](/sdk/python/secrets#violationpolicy) | `BLOCK_AND_LOG` | Sandbox-wide default action when a secret placeholder would leak to a non-eligible destination. Shorthand for `Network.on_secret_violation`; if both are provided, this top-level value takes precedence. See [Violation policy](/sdk/python/secrets#violation-policy) |
+| secret_violation_action | [`ViolationAction`](/sdk/python/secrets#violationaction) | `BLOCK_AND_LOG` | Sandbox-wide default action when a secret placeholder would leak to a non-eligible destination. Shorthand for `Network.secret_violation_action`; if both are provided, this top-level value takes precedence. |
 | detached | `bool` | `False` | If `True`, spawn the sandbox in detached mode; call [`detach()`](#sb-detach) before dropping the returned handle when it should keep running |
 
 ### InitConfig

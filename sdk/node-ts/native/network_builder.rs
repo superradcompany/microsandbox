@@ -11,9 +11,8 @@ use crate::dns_builder::JsDnsBuilder;
 use crate::interface_overrides_builder::JsInterfaceOverridesBuilder;
 use crate::network_policy_builder::JsNetworkPolicyBuilder;
 use crate::rate_limiter_builder::{JsNetworkRateLimiterBuilder, RateLimiterValues};
-use crate::secret_builder::JsSecretBuilder;
+use crate::secret_builder::{JsSecretBuilder, parse_violation_action};
 use crate::tls_builder::JsTlsBuilder;
-use crate::violation_action_builder::JsViolationActionBuilder;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -222,21 +221,12 @@ impl JsNetworkBuilder {
         Ok(self)
     }
 
-    /// Configure the violation action for secrets.
-    #[napi(js_name = "onSecretViolation")]
-    pub fn on_secret_violation(
-        &mut self,
-        env: &Env,
-        configure: Function<
-            ClassInstance<JsViolationActionBuilder>,
-            ClassInstance<JsViolationActionBuilder>,
-        >,
-    ) -> Result<&Self> {
-        let initial = JsViolationActionBuilder::new().into_instance(env)?;
-        let mut returned = configure.call(initial)?;
-        let violation_builder = returned.take_inner_builder()?;
+    /// Configure the default blocking action for secret placeholders.
+    #[napi(js_name = "secretViolationAction")]
+    pub fn secret_violation_action(&mut self, action: String) -> Result<&Self> {
+        let action = parse_violation_action(&action)?;
         let prev = self.take_inner();
-        self.inner = Some(prev.on_secret_violation(|_default| violation_builder));
+        self.inner = Some(prev.secret_violation_action(action));
         Ok(self)
     }
 

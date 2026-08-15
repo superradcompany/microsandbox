@@ -9,7 +9,7 @@ use microsandbox_network::dns::Nameserver;
 #[cfg(feature = "net")]
 use microsandbox_network::policy::{Action, NetworkPolicy, Rule};
 #[cfg(feature = "net")]
-use microsandbox_types::{HostPattern, SecretInjection, SecretSource};
+use microsandbox_types::{HostPattern, SecretSource, SecretSubstitution, SecretViolationAction};
 use microsandbox_types::{PullPolicy, Rlimit, SecurityProfile};
 #[cfg(feature = "net")]
 use zeroize::Zeroizing;
@@ -156,6 +156,7 @@ pub struct TlsConfigPatch {
 #[derive(Clone, Default)]
 pub struct SecretConfigPatch {
     secrets: BTreeMap<String, SecretEntryConfigPatch>,
+    violation_action: Option<SecretViolationAction>,
 }
 
 /// Sparse configuration for one protected secret.
@@ -163,8 +164,11 @@ pub struct SecretConfigPatch {
 #[derive(Clone, Default)]
 pub struct SecretEntryConfigPatch {
     material: Option<SecretMaterial>,
+    placeholder: Option<String>,
     allowed_hosts: Option<Vec<HostPattern>>,
-    injection: Option<SecretInjection>,
+    substitution: Option<SecretSubstitution>,
+    passthrough_hosts: Option<Vec<HostPattern>>,
+    violation_action: Option<SecretViolationAction>,
     require_tls_identity: Option<bool>,
 }
 
@@ -959,11 +963,18 @@ impl SecretConfigPatch {
         self
     }
 
+    /// Set the default action for blocked secret placeholders.
+    pub fn violation_action(mut self, value: SecretViolationAction) -> Self {
+        self.violation_action = Some(value);
+        self
+    }
+
     /// Overlay another secret patch by name and then by field.
     pub fn overlay(mut self, higher: Self) -> Self {
         for (name, patch) in higher.secrets {
             self = self.secret(name, patch);
         }
+        replace(&mut self.violation_action, higher.violation_action);
         self
     }
 
@@ -983,17 +994,22 @@ impl SecretConfigPatch {
                 env_var: name.clone(),
                 value,
                 source,
-                placeholder: microsandbox_utils::secret::default_placeholder(&name),
+                placeholder: patch
+                    .placeholder
+                    .unwrap_or_else(|| microsandbox_utils::secret::default_placeholder(&name)),
                 allowed_hosts: patch.allowed_hosts.unwrap_or_default(),
-                injection: patch.injection.unwrap_or(SecretInjection {
+                substitution: patch.substitution.unwrap_or(SecretSubstitution {
                     headers: true,
-                    basic_auth: false,
-                    query_params: false,
+                    query: false,
                     body: false,
                 }),
-                on_violation: None,
+                passthrough_hosts: patch.passthrough_hosts.unwrap_or_default(),
+                violation_action: patch.violation_action,
                 require_tls_identity: patch.require_tls_identity.unwrap_or(true),
             });
+        }
+        if let Some(action) = self.violation_action {
+            builder = builder.secret_violation_action(action);
         }
         builder
     }
@@ -1018,15 +1034,33 @@ impl SecretEntryConfigPatch {
         self
     }
 
+    /// Set the guest-visible placeholder.
+    pub fn placeholder(mut self, value: impl Into<String>) -> Self {
+        self.placeholder = Some(value.into());
+        self
+    }
+
     /// Replace allowed host patterns.
     pub fn allowed_hosts(mut self, value: Vec<HostPattern>) -> Self {
         self.allowed_hosts = Some(value);
         self
     }
 
-    /// Replace injection locations.
-    pub fn injection(mut self, value: SecretInjection) -> Self {
-        self.injection = Some(value);
+    /// Replace hosts allowed to receive the unchanged placeholder.
+    pub fn passthrough_hosts(mut self, value: Vec<HostPattern>) -> Self {
+        self.passthrough_hosts = Some(value);
+        self
+    }
+
+    /// Set the blocking action for this secret.
+    pub fn violation_action(mut self, value: SecretViolationAction) -> Self {
+        self.violation_action = Some(value);
+        self
+    }
+
+    /// Replace substitution locations.
+    pub fn substitution(mut self, value: SecretSubstitution) -> Self {
+        self.substitution = Some(value);
         self
     }
 
@@ -1039,8 +1073,11 @@ impl SecretEntryConfigPatch {
     /// Overlay another secret-entry patch.
     pub fn overlay(mut self, higher: Self) -> Self {
         replace(&mut self.material, higher.material);
+        replace(&mut self.placeholder, higher.placeholder);
         replace(&mut self.allowed_hosts, higher.allowed_hosts);
-        replace(&mut self.injection, higher.injection);
+        replace(&mut self.substitution, higher.substitution);
+        replace(&mut self.passthrough_hosts, higher.passthrough_hosts);
+        replace(&mut self.violation_action, higher.violation_action);
         replace(&mut self.require_tls_identity, higher.require_tls_identity);
         self
     }

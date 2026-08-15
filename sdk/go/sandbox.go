@@ -179,13 +179,18 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 
 	for _, s := range o.Secrets {
 		ffiOpts.Secrets = append(ffiOpts.Secrets, ffi.SecretOptions{
-			EnvVar:            s.EnvVar,
-			Value:             s.Value,
-			AllowHosts:        s.AllowHosts,
-			AllowHostPatterns: s.AllowHostPatterns,
-			Placeholder:       s.Placeholder,
-			RequireTLS:        s.RequireTLS,
-			OnViolation:       string(s.OnViolation),
+			EnvVar:             s.EnvVar,
+			Value:              s.Value,
+			Allow:              s.Allow,
+			Passthrough:        s.Passthrough,
+			Placeholder:        s.Placeholder,
+			RequireTLSIdentity: s.RequireTLSIdentity,
+			Substitution: ffi.SecretSubstitutionOptions{
+				Headers: s.Substitution.Headers,
+				Query:   s.Substitution.Query,
+				Body:    s.Substitution.Body,
+			},
+			ViolationAction: string(s.ViolationAction),
 		})
 	}
 
@@ -310,7 +315,7 @@ func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 		IPv6Pool:            n.IPv6Pool,
 		MaxConnections:      n.MaxConnections,
 		RateLimiter:         buildFFINetworkRateLimiter(n.RateLimiter),
-		OnSecretViolation:   string(n.OnSecretViolation),
+		SecretViolationAction: string(n.SecretViolationAction),
 		TrustHostCAs:        n.TrustHostCAs,
 	}
 
