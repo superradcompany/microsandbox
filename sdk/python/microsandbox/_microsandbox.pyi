@@ -34,7 +34,6 @@ from microsandbox.types import (
     SandboxModificationPlan,
     SandboxStatus,
     SecretEntry,
-    SecretSubstitution,
     SecretModifySpec,
     SecurityProfile,
     SnapshotFormat,

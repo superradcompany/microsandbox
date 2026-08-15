@@ -1035,7 +1035,7 @@ func TestSecretPlaceholderSubstitution(t *testing.T) {
 			"MY_API_KEY",
 			"super-secret-value-xyz",
 			microsandbox.SecretEnvOptions{
-				AllowHosts:  []string{"api.example.com"},
+				Allow:       []string{"api.example.com"},
 				Placeholder: "$MY_API_KEY_PLACEHOLDER",
 			},
 		)),

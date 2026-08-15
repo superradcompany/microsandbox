@@ -2557,6 +2557,7 @@ mod tests {
                 placeholder: "$MSB_API_KEY".into(),
                 allowed_hosts: vec![HostPattern::Exact("api.example.com".into())],
                 substitution: SecretSubstitution::default(),
+                passthrough_hosts: Vec::new(),
                 violation_action: None,
                 require_tls_identity: true,
             })

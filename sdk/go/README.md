@@ -250,7 +250,7 @@ sb, err := microsandbox.CreateSandbox(ctx, "go-readme-agent",
     microsandbox.WithSecrets(microsandbox.Secret.Env(
         "OPENAI_API_KEY",
         os.Getenv("OPENAI_API_KEY"),
-        microsandbox.SecretEnvOptions{AllowHosts: []string{"api.openai.com"}},
+        microsandbox.SecretEnvOptions{Allow: []string{"api.openai.com"}},
     )),
     microsandbox.WithReplace(),
 )

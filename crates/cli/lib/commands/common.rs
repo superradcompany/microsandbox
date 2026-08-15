@@ -532,7 +532,7 @@ pub struct SandboxOpts {
     pub tls_no_verify_upstream_for: Vec<String>,
 
     // --- Secrets ---
-    /// Configure a protected secret (ENV[:OPTIONS]@HOST[,HOST...]).
+    /// Configure a protected secret (`ENV[:OPTIONS]@HOST[,HOST...]`).
     /// The value is read from the host environment variable ENV at start time
     /// and stored only as a source reference, never inlined in the sandbox
     /// config. Inline `ENV=VALUE@HOST` is rejected; export the value and use
