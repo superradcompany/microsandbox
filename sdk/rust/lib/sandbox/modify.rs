@@ -3428,6 +3428,7 @@ mod tests {
                 value: zeroize::Zeroizing::new(String::new()),
                 placeholder: None,
                 allowed_hosts: vec!["api.example.com".to_string()],
+                ..SecretModificationPatch::default()
             }],
             ..SandboxModificationPatch::default()
         };
@@ -3475,6 +3476,7 @@ mod tests {
             placeholder: format!("$MSB_{name}"),
             allowed_hosts: vec![HostPattern::Exact("api.example.com".into())],
             substitution: SecretSubstitution::default(),
+            passthrough_hosts: Vec::new(),
             violation_action: None,
             require_tls_identity: true,
         });

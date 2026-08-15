@@ -899,7 +899,7 @@ func TestFFIWireShape_KitchenSinkDoesNotPanic(t *testing.T) {
 			TLS: &TLSConfig{Bypass: []string{"*.googleapis.com"}},
 		}),
 		WithSecrets(Secret.Env("K", "v", SecretEnvOptions{
-			AllowHosts: []string{"h"},
+			Allow: []string{"h"},
 		})),
 		WithPatches(Patch.Mkdir("/app", PatchOptions{})),
 		WithPorts(map[uint16]uint16{8080: 80}),

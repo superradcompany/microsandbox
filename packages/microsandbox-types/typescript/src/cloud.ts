@@ -390,7 +390,7 @@ export type CloudNetworkSpec = {
    */
   policy: NetworkPolicy | null;
   /**
-   * Secret-injection config.
+   * Secret-substitution config.
    */
   secrets: CloudSecretsConfig | null;
   /**
@@ -435,7 +435,9 @@ export type CloudSecretEntry = {
    * Where the secret may be injected.
    */
   substitution: SecretSubstitution;
-  /** Hosts allowed to receive the placeholder unchanged. */
+  /**
+   * Hosts allowed to receive the placeholder unchanged.
+   */
   passthrough_hosts: Array<CloudHostPattern>;
   /**
    * Per-secret violation action overriding the config default.
@@ -475,10 +477,9 @@ export type CloudHostPattern = {
   value: string;
 } | { "type": "any" };
 
-export type CloudViolationAction =
-  | { "type": "block" }
-  | { "type": "block_and_log" }
-  | { "type": "block_and_terminate" };
+export type CloudViolationAction = { "type": "block" } | {
+  "type": "block_and_log";
+} | { "type": "block_and_terminate" };
 
 export type CloudCreateSandboxResponse = {
   /**
