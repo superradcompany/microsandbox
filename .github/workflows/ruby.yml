@@ -65,10 +65,20 @@ jobs:
           cache-bin: false
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev musl-tools
 
       - name: Install Ruby build dependencies
         run: gem install rake rake-compiler test-unit rb_sys --no-document
+
+      # Ruby deliberately compiles the Rust SDK without its prebuilt feature.
+      # Stage the guest agent from this checkout so the filesystem crate can
+      # embed it without reaching for an unpublished GitHub release asset.
+      - name: Build agentd for local SDK checks
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --profile ci --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl
+          mkdir -p build
+          cp target/x86_64-unknown-linux-musl/ci/agentd build/agentd
 
       - name: Check Rust extension
         working-directory: sdk/ruby/ext/microsandbox
@@ -88,7 +98,7 @@ jobs:
         run: |
           gem build microsandbox.gemspec
           gem install --local microsandbox-*.gem --no-document
-          ruby --disable-gems -e 'require "rubygems"; require "microsandbox"; abort unless Microsandbox.version == "0.6.8"'
+          ruby --disable-gems -e 'require "rubygems"; require "microsandbox"; abort unless Microsandbox.version == "0.6.9"'
 
       - name: Restore standalone Ruby lockfile
         if: always()

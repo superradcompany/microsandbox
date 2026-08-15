@@ -5,7 +5,7 @@ use std::{
     mem::ManuallyDrop,
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicPtr, AtomicU32, Ordering},
     },
     time::Duration,
@@ -45,11 +45,54 @@ unsafe extern "C" {
     ) -> *mut c_void;
 }
 
-/// Carrier for a oneshot receiver, accessed from the C callback inside
-/// `rb_thread_call_without_gvl`.
+/// Per-call completion state created in the process that starts the operation.
+///
+/// Tokio's blocking oneshot receiver caches a thread parker. Reusing that
+/// inherited cache after `fork(2)` can dereference stale synchronization state,
+/// so the Ruby extension waits on a fresh condition variable instead.
+struct BlockingState<T> {
+    result: Mutex<Option<T>>,
+    ready: Condvar,
+}
+
+impl<T> BlockingState<T> {
+    fn new() -> Self {
+        Self {
+            result: Mutex::new(None),
+            ready: Condvar::new(),
+        }
+    }
+
+    fn complete(&self, value: T) {
+        let mut result = self
+            .result
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *result = Some(value);
+        self.ready.notify_one();
+    }
+
+    fn wait(&self) -> T {
+        let mut result = self
+            .result
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        loop {
+            if let Some(value) = result.take() {
+                return value;
+            }
+            result = self
+                .ready
+                .wait(result)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+    }
+}
+
+/// Carrier accessed from the C callback inside `rb_thread_call_without_gvl`.
 struct BlockingRecv<T> {
-    rx: Option<tokio::sync::oneshot::Receiver<T>>,
-    result: Option<std::thread::Result<Option<T>>>,
+    state: Arc<BlockingState<Result<T, tokio::task::JoinError>>>,
+    result: Option<std::thread::Result<Result<T, tokio::task::JoinError>>>,
 }
 
 fn catch_callback<F, T>(callback: F) -> std::thread::Result<T>
@@ -71,13 +114,7 @@ fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
 
 unsafe extern "C" fn do_blocking_recv<T>(data: *mut c_void) -> *mut c_void {
     let carrier = unsafe { &mut *(data as *mut BlockingRecv<T>) };
-    let receiver = carrier.rx.take();
-    carrier.result = Some(catch_callback(move || {
-        receiver
-            .expect("GVL callback invoked twice")
-            .blocking_recv()
-            .ok()
-    }));
+    carrier.result = Some(catch_callback(|| carrier.state.wait()));
     std::ptr::null_mut()
 }
 
@@ -205,12 +242,15 @@ where
     F: Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    runtime()?.spawn(async move {
-        let _ = tx.send(future.await);
+    let runtime = runtime()?;
+    let state = Arc::new(BlockingState::new());
+    let task = runtime.spawn(future);
+    let completion = Arc::clone(&state);
+    runtime.spawn(async move {
+        completion.complete(task.await);
     });
     let mut carrier = BlockingRecv {
-        rx: Some(rx),
+        state,
         result: None,
     };
     unsafe {
@@ -222,11 +262,23 @@ where
         );
     }
     match carrier.result.take() {
-        Some(Ok(Some(value))) => Ok(value),
-        Some(Ok(None)) => Err(Error::new(
+        Some(Ok(Ok(value))) => Ok(value),
+        Some(Ok(Err(error))) if error.is_cancelled() => Err(Error::new(
             ruby.exception_runtime_error(),
             "sandbox operation was canceled",
         )),
+        Some(Ok(Err(error))) => {
+            let message = if error.is_panic() {
+                let panic = error.into_panic();
+                panic_message(panic.as_ref()).to_owned()
+            } else {
+                error.to_string()
+            };
+            Err(Error::new(
+                ruby.exception_runtime_error(),
+                format!("native operation panicked while the Ruby GVL was released: {message}"),
+            ))
+        }
         Some(Err(panic)) => Err(Error::new(
             ruby.exception_runtime_error(),
             format!(
@@ -2171,7 +2223,19 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
 
 #[cfg(test)]
 mod runtime_tests {
-    use super::{catch_callback, panic_message};
+    use std::{sync::Arc, thread};
+
+    use super::{BlockingState, catch_callback, panic_message};
+
+    #[test]
+    fn blocking_state_waits_for_completion() {
+        let state = Arc::new(BlockingState::new());
+        let completion = Arc::clone(&state);
+        let worker = thread::spawn(move || completion.complete(42));
+
+        assert_eq!(state.wait(), 42);
+        worker.join().unwrap();
+    }
 
     #[test]
     fn no_gvl_callback_panics_are_captured() {
