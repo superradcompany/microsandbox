@@ -6,7 +6,7 @@ on:
   pull_request:
     paths:
       - .github/workflows/release.yml
-      - .github/workflows/release-platform.yml
+      - .github/workflows/release-unix.yml
       - .github/workflows/release-windows.yml
       - .github/actions/cache-libkrunfw-kernel/action.yml
       - scripts/ci/publish-crates.py
@@ -207,7 +207,7 @@ jobs:
   linux-x86_64:
     name: Linux x86_64
     needs: [firmware-x86_64, agentd-x86_64]
-    uses: ./.github/workflows/release-platform.yml
+    uses: ./.github/workflows/release-unix.yml
     with:
       target: linux-x86_64
       runner: ubuntu-latest
@@ -226,7 +226,7 @@ jobs:
   linux-aarch64:
     name: Linux aarch64
     needs: [firmware-aarch64, agentd-aarch64]
-    uses: ./.github/workflows/release-platform.yml
+    uses: ./.github/workflows/release-unix.yml
     with:
       target: linux-aarch64
       runner: ubuntu-24.04-arm
@@ -245,7 +245,7 @@ jobs:
   darwin-aarch64:
     name: macOS aarch64
     needs: [firmware-aarch64, agentd-aarch64]
-    uses: ./.github/workflows/release-platform.yml
+    uses: ./.github/workflows/release-unix.yml
     with:
       target: darwin-aarch64
       runner: macos-14

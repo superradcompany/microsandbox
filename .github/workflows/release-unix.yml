@@ -1,4 +1,4 @@
-name: Release Platform
+name: Release Unix
 
 on:
   workflow_call:
