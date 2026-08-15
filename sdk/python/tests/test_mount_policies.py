@@ -9,10 +9,12 @@ from __future__ import annotations
 import pytest
 
 from microsandbox import (
+    DeploymentProfile,
     DiskImageFormat,
     HostPermissions,
     MountConfig,
     MountKind,
+    NamedVolumeMode,
     SecurityProfile,
     StatVirtualization,
 )
@@ -26,7 +28,7 @@ def test_bind_default_omits_policies() -> None:
     assert d["bind"] == "/host/data"
 
 
-def test_bind_accepts_policy_strings() -> None:
+def test_bind_rejects_policy_strings() -> None:
     mc = MountConfig(
         kind=MountKind.BIND,
         bind="/host/data",
@@ -34,15 +36,8 @@ def test_bind_accepts_policy_strings() -> None:
         stat_virtualization="relaxed",
         host_permissions="mirror",
     )
-    assert mc._to_dict() == {
-        "readonly": True,
-        "noexec": False,
-        "nosuid": False,
-        "nodev": False,
-        "bind": "/host/data",
-        "stat_virtualization": "relaxed",
-        "host_permissions": "mirror",
-    }
+    with pytest.raises(TypeError, match=r"MountConfig\.stat_virtualization"):
+        mc._to_dict()
 
 
 def test_bind_serializes_security_mount_flags() -> None:
@@ -111,6 +106,27 @@ def test_disk_rejects_stat_virt_at_serialization() -> None:
         mc._to_dict()
 
 
+def test_inactive_named_mode_is_validated_before_mount_dispatch() -> None:
+    mc = MountConfig(
+        kind=MountKind.BIND,
+        bind="/host/data",
+        named_mode="existing",  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(TypeError, match=r"MountConfig\.named_mode"):
+        mc._to_dict()
+
+
+def test_named_mode_uses_canonical_enum_name() -> None:
+    mc = MountConfig(
+        kind=MountKind.NAMED,
+        named="my-vol",
+        named_mode=NamedVolumeMode.ENSURE_EXISTS,
+    )
+
+    assert mc._to_dict()["named_mode"] == "ensure-exists"
+
+
 def test_stat_virtualization_str_values() -> None:
     assert StatVirtualization.STRICT.value == "strict"
     assert StatVirtualization.RELAXED.value == "relaxed"
@@ -125,3 +141,8 @@ def test_host_permissions_str_values() -> None:
 def test_security_profile_str_values() -> None:
     assert SecurityProfile.DEFAULT.value == "default"
     assert SecurityProfile.RESTRICTED.value == "restricted"
+
+
+def test_deployment_profile_str_values() -> None:
+    assert DeploymentProfile.SINGLE_TENANT.value == "single-tenant"
+    assert DeploymentProfile.MULTI_TENANT.value == "multi-tenant"

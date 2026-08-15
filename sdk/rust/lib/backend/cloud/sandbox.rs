@@ -22,7 +22,8 @@ use crate::sandbox::{
 use crate::{MicrosandboxError, MicrosandboxResult};
 use microsandbox_image::RegistryAuth;
 use microsandbox_types::{
-    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudSandboxStatus,
+    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudSandboxStatus, RootDisk,
+    SandboxRuntimeOptions, TlsConfig,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -275,6 +276,7 @@ impl TryFrom<SandboxConfig> for CloudCreateBody {
                 UnsupportedReason::ConfigField("ca_certs"),
             ));
         }
+        reject_dropped_cloud_create_fields(&config)?;
         #[cfg(feature = "net")]
         {
             // Only flag user-set opt-in fields the cloud's create contract does
@@ -294,7 +296,19 @@ impl TryFrom<SandboxConfig> for CloudCreateBody {
         // Cloud only supports OCI rootfs; reject the local-only rootfs kinds before
         // handing the spec to the control plane. Borrow so the spec isn't moved.
         match &config.spec.image {
-            RootfsSource::Oci(_) => {}
+            RootfsSource::Oci(oci) => {
+                if matches!(
+                    oci.root_disk,
+                    Some(
+                        RootDisk::Tmpfs { .. } | RootDisk::DiskImage { .. } | RootDisk::Flat { .. }
+                    )
+                ) {
+                    return Err(MicrosandboxError::unsupported(
+                        Operation::SandboxCreate,
+                        UnsupportedReason::ConfigField("non-managed root_disk"),
+                    ));
+                }
+            }
             RootfsSource::Bind { .. } => {
                 return Err(MicrosandboxError::unsupported(
                     Operation::SandboxCreate,
@@ -338,6 +352,106 @@ impl TryFrom<SandboxConfig> for CloudCreateBody {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Reject SDK configuration whose meaning is absent from the current cloud
+/// wire shape. Failing at the backend boundary prevents a successful create
+/// from quietly producing a sandbox different from the one requested.
+fn reject_dropped_cloud_create_fields(config: &SandboxConfig) -> MicrosandboxResult<()> {
+    let unsupported = |field| {
+        MicrosandboxError::unsupported(
+            Operation::SandboxCreate,
+            UnsupportedReason::ConfigField(field),
+        )
+    };
+
+    if config.spec.resources.max_cpus != config.spec.resources.cpus {
+        return Err(unsupported("max_cpus"));
+    }
+    if config.spec.resources.max_memory_mib != config.spec.resources.memory_mib {
+        return Err(unsupported("max_memory"));
+    }
+    if config.spec.runtime.hostname.is_some() {
+        return Err(unsupported("hostname"));
+    }
+
+    // The shared default is harmless because Cloud owns metrics collection.
+    // Any caller override would otherwise be mistaken for an honored guest
+    // sampling configuration.
+    let runtime_defaults = SandboxRuntimeOptions::default();
+    if config.spec.runtime.metrics_sample_interval_ms != runtime_defaults.metrics_sample_interval_ms
+    {
+        return Err(unsupported("metrics_sample_interval"));
+    }
+    if config.spec.runtime.disable_metrics_sample {
+        return Err(unsupported("disable_metrics_sample"));
+    }
+
+    if config
+        .spec
+        .network
+        .interface
+        .as_ref()
+        .is_some_and(|interface| interface != &Default::default())
+    {
+        return Err(unsupported("network.interface"));
+    }
+    if let Some(tls) = &config.spec.network.tls
+        && !cloud_tls_config_is_harmless(tls, config)?
+    {
+        return Err(unsupported("network.tls"));
+    }
+    if config.spec.network.rate_limiter.is_some() {
+        return Err(unsupported("network.rate_limiter"));
+    }
+
+    if config
+        .spec
+        .mounts
+        .iter()
+        .any(|mount| mount.named_create().is_some())
+    {
+        return Err(unsupported("named volume inline create"));
+    }
+
+    if config.snapshot_upper_source.is_some() {
+        return Err(unsupported("from_snapshot"));
+    }
+    if !config.spec.vsock.is_empty() {
+        return Err(unsupported("vsock"));
+    }
+
+    Ok(())
+}
+
+/// Return whether a TLS subdocument only contains defaults the cloud owns.
+/// Secret helpers enable TLS as an implementation detail; preserve that path
+/// while rejecting actual interception customization that the wire drops.
+fn cloud_tls_config_is_harmless(
+    tls: &TlsConfig,
+    config: &SandboxConfig,
+) -> MicrosandboxResult<bool> {
+    let actual = serde_json::to_value(tls)?;
+    let default = serde_json::to_value(TlsConfig::default())?;
+    if actual == default {
+        return Ok(true);
+    }
+
+    let has_secrets = config
+        .spec
+        .network
+        .secrets
+        .as_ref()
+        .is_some_and(|secrets| !secrets.secrets.is_empty());
+    if !has_secrets {
+        return Ok(false);
+    }
+
+    let secret_helper_default = TlsConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    Ok(actual == serde_json::to_value(secret_helper_default)?)
+}
 
 /// Map [`CloudSandboxStatus`] to the SDK's [`SandboxStatus`] enum.
 ///
@@ -422,7 +536,10 @@ pub(crate) fn sandbox_config_from_cloud_spec(
 
 #[cfg(test)]
 mod tests {
-    use microsandbox_types::CloudSandboxSpec;
+    use microsandbox_types::{
+        CloudSandboxSpec, HostPermissions, MountOptions, NamedVolumeCreate, NamedVolumeMode,
+        StatVirtualization, VolumeKind, VolumeMount,
+    };
 
     use super::*;
     use crate::sandbox::{EnvVar, OciRootfsSource, RootDisk, SandboxBuilder, SandboxSpec};
@@ -503,6 +620,21 @@ mod tests {
             },
             ..Default::default()
         };
+
+        let err = CloudCreateBody::try_from(config).unwrap_err();
+        assert!(matches!(err, MicrosandboxError::Unsupported { .. }));
+    }
+
+    #[test]
+    fn cloud_create_request_rejects_flat_root_disk() {
+        let mut config = base_cloud_config();
+        if let RootfsSource::Oci(oci) = &mut config.spec.image {
+            oci.root_disk = Some(RootDisk::Flat {
+                size_mib: Some(8192),
+                fstype: None,
+                clone: microsandbox_types::FlatClone::Auto,
+            });
+        }
 
         let err = CloudCreateBody::try_from(config).unwrap_err();
         assert!(matches!(err, MicrosandboxError::Unsupported { .. }));
@@ -606,6 +738,140 @@ mod tests {
         assert!(matches!(err, MicrosandboxError::Unsupported { .. }));
     }
 
+    #[test]
+    fn cloud_create_request_rejects_fields_missing_from_the_wire() {
+        let cases: [(&str, fn(&mut SandboxConfig)); 8] = [
+            ("max_cpus", |config| config.spec.resources.max_cpus = 2),
+            ("max_memory", |config| {
+                config.spec.resources.max_memory_mib = 1024
+            }),
+            ("hostname", |config| {
+                config.spec.runtime.hostname = Some("worker".into())
+            }),
+            ("metrics_sample_interval", |config| {
+                config.spec.runtime.metrics_sample_interval_ms = Some(2500)
+            }),
+            ("disable_metrics_sample", |config| {
+                config.spec.runtime.disable_metrics_sample = true
+            }),
+            ("network.interface", |config| {
+                config.spec.network.interface = Some(microsandbox_types::InterfaceOverrides {
+                    mtu: Some(1400),
+                    ..Default::default()
+                })
+            }),
+            ("network.tls", |config| {
+                let mut tls = TlsConfig::default();
+                tls.bypass.push("*.internal.example".into());
+                config.spec.network.tls = Some(tls);
+            }),
+            ("from_snapshot", |config| {
+                config.snapshot_upper_source = Some("snapshot/upper.ext4".into())
+            }),
+        ];
+
+        for (field, mutate) in cases {
+            let mut config = base_cloud_config();
+            mutate(&mut config);
+
+            assert_unsupported_config_field(config, field);
+        }
+    }
+
+    #[test]
+    fn cloud_create_request_rejects_non_managed_oci_root_disks() {
+        for root_disk in [
+            RootDisk::tmpfs(256),
+            RootDisk::DiskImage {
+                path: "upper.raw".into(),
+                format: crate::sandbox::DiskImageFormat::Raw,
+                fstype: Some("ext4".into()),
+            },
+        ] {
+            let mut config = base_cloud_config();
+            let RootfsSource::Oci(oci) = &mut config.spec.image else {
+                panic!("fixture must use an OCI image");
+            };
+            oci.root_disk = Some(root_disk);
+
+            assert_unsupported_config_field(config, "non-managed root_disk");
+        }
+    }
+
+    #[test]
+    fn cloud_create_request_rejects_inline_named_volume_creation() {
+        let mut config = base_cloud_config();
+        config.spec.mounts.push(VolumeMount::Named {
+            name: "cache".into(),
+            guest: "/cache".into(),
+            create: Some(NamedVolumeCreate {
+                mode: NamedVolumeMode::EnsureExists,
+                name: "cache".into(),
+                kind: VolumeKind::Directory,
+                quota_mib: None,
+                capacity_mib: None,
+                labels: Vec::new(),
+            }),
+            options: MountOptions::default(),
+            stat_virtualization: StatVirtualization::Strict,
+            host_permissions: HostPermissions::Private,
+            follow_root_symlinks: false,
+        });
+
+        assert_unsupported_config_field(config, "named volume inline create");
+    }
+
+    #[test]
+    fn cloud_create_request_accepts_harmless_omitted_defaults() {
+        let mut config = base_cloud_config();
+        config.spec.resources.cpus = 2;
+        config.spec.resources.max_cpus = 2;
+        config.spec.resources.memory_mib = 1024;
+        config.spec.resources.max_memory_mib = 1024;
+        config.spec.network.interface = Some(Default::default());
+        config.spec.network.tls = Some(TlsConfig::default());
+        config.spec.mounts.push(VolumeMount::Named {
+            name: "cache".into(),
+            guest: "/cache".into(),
+            create: None,
+            options: MountOptions::default(),
+            stat_virtualization: StatVirtualization::Strict,
+            host_permissions: HostPermissions::Private,
+            // Resolution is intentionally selected by the cloud volume
+            // service, so this local-only switch must not reject the request.
+            follow_root_symlinks: true,
+        });
+
+        let req = CloudCreateBody::try_from(config).unwrap();
+
+        assert_eq!(req.envelope.spec.resources.vcpus, 2);
+        assert_eq!(req.envelope.spec.resources.memory_mib, 1024);
+        assert_eq!(req.envelope.spec.mounts.len(), 1);
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn cloud_create_request_accepts_tls_enabled_by_secret_helper() {
+        let config = SandboxBuilder::new("agent-1")
+            .image("python:3.12")
+            .secret_env("API_KEY", "secret", "api.example.com")
+            .build()
+            .await
+            .unwrap();
+
+        let req = CloudCreateBody::try_from(config).unwrap();
+
+        assert_eq!(
+            req.envelope
+                .spec
+                .network
+                .secrets
+                .as_ref()
+                .map(|secrets| secrets.entries.len()),
+            Some(1),
+        );
+    }
+
     #[cfg(feature = "net")]
     #[test]
     fn cloud_create_request_rejects_published_ports() {
@@ -620,6 +886,25 @@ mod tests {
                 protocol: microsandbox_types::PortProtocol::Tcp,
                 host_bind: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST).to_string(),
             });
+        let err = CloudCreateBody::try_from(config).unwrap_err();
+        assert!(matches!(err, MicrosandboxError::Unsupported { .. }));
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn cloud_create_request_rejects_rate_limiters() {
+        let mut config = base_cloud_config();
+        config.spec.network.rate_limiter = Some(microsandbox_types::NetworkRateLimiterConfig {
+            egress: None,
+            ingress: Some(microsandbox_types::RateLimiterConfig {
+                bandwidth: Some(microsandbox_types::TokenBucketConfig {
+                    size: 1024 * 1024,
+                    refill_time_ms: 1000,
+                    one_time_burst: 0,
+                }),
+                ops: None,
+            }),
+        });
         let err = CloudCreateBody::try_from(config).unwrap_err();
         assert!(matches!(err, MicrosandboxError::Unsupported { .. }));
     }
@@ -768,6 +1053,19 @@ mod tests {
         ] {
             assert!(ensure_cloud_sandbox_ready(&cloud_response(status)).is_err());
         }
+    }
+
+    /// Assert that Cloud rejects a create option with a stable typed reason.
+    fn assert_unsupported_config_field(config: SandboxConfig, expected: &'static str) {
+        let err = CloudCreateBody::try_from(config).unwrap_err();
+
+        assert!(matches!(
+            err,
+            MicrosandboxError::Unsupported {
+                op: Operation::SandboxCreate,
+                reason: UnsupportedReason::ConfigField(field),
+            } if field == expected
+        ));
     }
 
     /// Minimal response fixture for create-readiness assertions.

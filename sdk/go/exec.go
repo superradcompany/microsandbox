@@ -48,6 +48,28 @@ func (e *ExecOutput) ExitCode() int { return e.exitCode }
 // Success reports whether the command exited with code 0.
 func (e *ExecOutput) Success() bool { return e.exitCode == 0 }
 
+// ExecDefault runs the sandbox's effective OCI entrypoint and CMD.
+// A missing executable default is returned as ErrNoDefaultCommand.
+func (s *Sandbox) ExecDefault(ctx context.Context, opts ...ExecOption) (*ExecOutput, error) {
+	o := ExecConfig{}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	ffiOpts := ffi.ExecOptions{Cwd: o.Cwd, TTY: o.TTY, User: o.User, Env: o.Env}
+	if o.Timeout > 0 {
+		ffiOpts.TimeoutSecs = timeoutSecsCeil(o.Timeout)
+	}
+	res, err := s.inner.ExecDefault(ctx, ffiOpts)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &ExecOutput{
+		stdout:   []byte(res.Stdout),
+		stderr:   []byte(res.Stderr),
+		exitCode: res.ExitCode,
+	}, nil
+}
+
 // Exec runs a command in the sandbox and returns its collected output.
 // The returned error is non-nil only on transport/runtime failures; a
 // non-zero exit code is reported via ExecOutput.ExitCode, not as an error.
@@ -252,6 +274,23 @@ func (s *Sandbox) ExecStream(ctx context.Context, cmd string, args []string, opt
 		return nil, wrapFFI(err)
 	}
 	return &ExecHandle{inner: h}, nil
+}
+
+// ExecDefaultStream starts a streaming exec of the effective OCI entrypoint and CMD.
+func (s *Sandbox) ExecDefaultStream(ctx context.Context, opts ...ExecOption) (*ExecHandle, error) {
+	o := ExecConfig{}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	ffiOpts := ffi.ExecOptions{Cwd: o.Cwd, StdinPipe: o.StdinPipe, TTY: o.TTY, User: o.User, Env: o.Env}
+	if o.Timeout > 0 {
+		ffiOpts.TimeoutSecs = timeoutSecsCeil(o.Timeout)
+	}
+	handle, err := s.inner.ExecDefaultStream(ctx, ffiOpts)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &ExecHandle{inner: handle}, nil
 }
 
 // ShellStream runs `/bin/sh -c command` with streaming output.

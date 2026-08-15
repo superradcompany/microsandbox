@@ -64,11 +64,12 @@ type SnapshotState struct {
 }
 
 type SnapshotFileState struct {
-	Format    string
-	Fstype    string
-	UpperFile string
-	SizeBytes uint64
-	Integrity SnapshotIntegrity
+	Format       string
+	Fstype       string
+	UpperFile    string
+	SizeBytes    uint64
+	HasIntegrity bool
+	Integrity    SnapshotIntegrity
 }
 
 type SnapshotCheckpointState struct {
@@ -77,8 +78,11 @@ type SnapshotCheckpointState struct {
 }
 
 type SnapshotIntegrity struct {
-	Algorithm string
-	Digest    string
+	Algorithm   string
+	Digest      string
+	Root        string
+	LogicalSize uint64
+	LeafSize    uint32
 }
 
 // SnapshotArtifact is a snapshot artifact on disk.
@@ -343,9 +347,25 @@ func snapshotStateFromInfo(info *ffi.SnapshotInfo) SnapshotState {
 		state.SizeBytes = *info.SizeBytes
 	}
 	if info.UpperIntegrityAlgorithm != nil {
+		state.HasIntegrity = true
 		state.Integrity.Algorithm = *info.UpperIntegrityAlgorithm
 	}
-	if info.UpperIntegrityDigest != nil {
+	if info.UpperIntegrityAlgorithm != nil && *info.UpperIntegrityAlgorithm == "msb-file-merkle-blake3-v1" {
+		// Digest remains the compatibility spelling for callers written before
+		// Merkle descriptors exposed their structural parameters.
+		if info.UpperIntegrityDigest != nil {
+			state.Integrity.Digest = *info.UpperIntegrityDigest
+		}
+		if info.UpperIntegrityRoot != nil {
+			state.Integrity.Root = *info.UpperIntegrityRoot
+		}
+		if info.UpperIntegrityLogicalSize != nil {
+			state.Integrity.LogicalSize = *info.UpperIntegrityLogicalSize
+		}
+		if info.UpperIntegrityLeafSize != nil {
+			state.Integrity.LeafSize = *info.UpperIntegrityLeafSize
+		}
+	} else if info.UpperIntegrityDigest != nil {
 		state.Integrity.Digest = *info.UpperIntegrityDigest
 	}
 	return SnapshotState{Kind: "file", File: state}

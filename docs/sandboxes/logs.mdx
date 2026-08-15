@@ -4,6 +4,8 @@ description: Capture, read, and diagnose sandbox output
 icon: "scroll"
 ---
 
+<Tooltip tip="Live SDK log following works on microsandbox cloud; historical and bounded log reads are not yet available. Persist followed output externally when you need retention."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 Every sandbox records captured output to disk so you can read it later, even after the sandbox stops or crashes. Use `msb logs <name>` from the CLI or `logs()` from the SDK.
 
 ## Read logs
@@ -66,7 +68,12 @@ const recent = await handle.logs({
 ```
 
 ```python Python
-recent = await handle.logs(tail=50, sources=["stdout", "stderr"])
+from microsandbox import LogReadSource
+
+recent = await handle.logs(
+    tail=50,
+    sources=[LogReadSource.STDOUT, LogReadSource.STDERR],
+)
 ```
 
 ```go Go

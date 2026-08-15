@@ -3,18 +3,20 @@
 import asyncio
 import time
 
-from microsandbox import Sandbox, default_backend_kind
+from microsandbox import BackendKind, LogReadSource, Sandbox, SandboxStatus, default_backend_kind
 
 
 def configure_cloud_backend():
-    if default_backend_kind() != "cloud":
-        raise RuntimeError("set MSB_API_KEY or select a cloud profile")
+    if default_backend_kind() is not BackendKind.CLOUD:
+        raise RuntimeError(
+            "set MSB_BACKEND=cloud with MSB_API_KEY, or select a cloud profile"
+        )
 
 
 async def wait_until_stopped(name: str):
     for _ in range(30):
         handle = await Sandbox.get(name)
-        if handle.status == "stopped":
+        if handle.status is SandboxStatus.STOPPED:
             return
         await asyncio.sleep(1)
     raise TimeoutError(f"sandbox {name} did not stop within 30s")
@@ -45,7 +47,11 @@ async def main():
     print(output.stdout_text, end="")
 
     stream = await sandbox.log_stream(
-        sources=["stdout", "stderr", "system"],
+        sources=[
+            LogReadSource.STDOUT,
+            LogReadSource.STDERR,
+            LogReadSource.SYSTEM,
+        ],
         follow=True,
     )
 

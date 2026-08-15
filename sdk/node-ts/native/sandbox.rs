@@ -27,6 +27,7 @@ use crate::types::*;
 #[napi]
 pub struct Sandbox {
     inner: Arc<Mutex<Option<microsandbox::sandbox::Sandbox>>>,
+    backend_kind: &'static str,
 }
 
 /// One page returned by `Sandbox.list` / `Sandbox.listWith`.
@@ -70,8 +71,10 @@ pub struct JsLogStream {
 
 impl Sandbox {
     pub fn from_rust(inner: microsandbox::sandbox::Sandbox) -> Self {
+        let backend_kind = inner.backend_kind().as_str();
         Sandbox {
             inner: Arc::new(Mutex::new(Some(inner))),
+            backend_kind,
         }
     }
 }
@@ -90,9 +93,7 @@ impl Sandbox {
         let inner = microsandbox::sandbox::Sandbox::start(&name)
             .await
             .map_err(to_napi_error)?;
-        Ok(Sandbox {
-            inner: Arc::new(Mutex::new(Some(inner))),
-        })
+        Ok(Sandbox::from_rust(inner))
     }
 
     /// Start an existing stopped sandbox (detached mode).
@@ -103,9 +104,7 @@ impl Sandbox {
         let inner = microsandbox::sandbox::Sandbox::start_detached(&name)
             .await
             .map_err(to_napi_error)?;
-        Ok(Sandbox {
-            inner: Arc::new(Mutex::new(Some(inner))),
-        })
+        Ok(Sandbox::from_rust(inner))
     }
 
     //----------------------------------------------------------------------------------------------
@@ -167,6 +166,12 @@ impl Sandbox {
     // Properties
     //----------------------------------------------------------------------------------------------
 
+    /// Backend retained by this sandbox (`"local"` or `"cloud"`).
+    #[napi(getter)]
+    pub fn backend_kind(&self) -> &'static str {
+        self.backend_kind
+    }
+
     /// Sandbox name. Names are limited to 128 UTF-8 bytes.
     #[napi(getter)]
     pub async fn name(&self) -> Result<String> {
@@ -197,6 +202,56 @@ impl Sandbox {
     //----------------------------------------------------------------------------------------------
     // Execution
     //----------------------------------------------------------------------------------------------
+
+    /// Execute the sandbox's effective OCI entrypoint and CMD.
+    #[napi]
+    pub async fn exec_default(&self) -> Result<ExecOutput> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let output = sb.exec_default().await.map_err(to_napi_error)?;
+        Ok(ExecOutput::from_rust(output))
+    }
+
+    /// Execute the sandbox's effective OCI entrypoint and CMD using a populated options builder.
+    #[napi(js_name = "execDefaultWithBuilder")]
+    pub async unsafe fn exec_default_with_builder(
+        &self,
+        builder: &mut JsExecOptionsBuilder,
+    ) -> Result<ExecOutput> {
+        let opts_builder = builder.take_inner_builder()?;
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let output = sb
+            .exec_default_with(|_default| opts_builder)
+            .await
+            .map_err(to_napi_error)?;
+        Ok(ExecOutput::from_rust(output))
+    }
+
+    /// Execute the sandbox's effective OCI entrypoint and CMD with streaming I/O.
+    #[napi]
+    pub async fn exec_default_stream(&self) -> Result<JsExecHandle> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let handle = sb.exec_default_stream().await.map_err(to_napi_error)?;
+        Ok(JsExecHandle::from_rust(handle))
+    }
+
+    /// Stream the sandbox's effective OCI entrypoint and CMD using a populated options builder.
+    #[napi(js_name = "execDefaultStreamWithBuilder")]
+    pub async unsafe fn exec_default_stream_with_builder(
+        &self,
+        builder: &mut JsExecOptionsBuilder,
+    ) -> Result<JsExecHandle> {
+        let opts_builder = builder.take_inner_builder()?;
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let handle = sb
+            .exec_default_stream_with(|_default| opts_builder)
+            .await
+            .map_err(to_napi_error)?;
+        Ok(JsExecHandle::from_rust(handle))
+    }
 
     /// Execute a command and wait for completion.
     #[napi]
@@ -394,6 +449,28 @@ impl Sandbox {
     //----------------------------------------------------------------------------------------------
     // Attach
     //----------------------------------------------------------------------------------------------
+
+    /// Attach to the sandbox's effective OCI entrypoint and CMD.
+    #[napi]
+    pub async fn attach_default(&self) -> Result<i32> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        sb.attach_default().await.map_err(to_napi_error)
+    }
+
+    /// Attach to the sandbox's effective OCI entrypoint and CMD using a populated options builder.
+    #[napi(js_name = "attachDefaultWithBuilder")]
+    pub async unsafe fn attach_default_with_builder(
+        &self,
+        builder: &mut JsAttachOptionsBuilder,
+    ) -> Result<i32> {
+        let opts_builder = builder.take_inner_builder()?;
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        sb.attach_default_with(|_default| opts_builder)
+            .await
+            .map_err(to_napi_error)
+    }
 
     /// Attach to an interactive PTY session inside the sandbox.
     ///
@@ -893,6 +970,7 @@ pub(crate) fn configure_modify(
         max_cpus: options.max_cpus.map(cpu_count_u8).transpose()?,
         memory_mib: options.memory_mib,
         max_memory_mib: options.max_memory_mib,
+        root_disk_size_mib: options.root_disk_size_mib,
         env: env_pairs
             .into_iter()
             .map(|(key, value)| EnvVar::new(key, value))
@@ -903,8 +981,6 @@ pub(crate) fn configure_modify(
         workdir: options.workdir.clone(),
         secrets,
         secrets_remove: options.secrets_remove.clone().unwrap_or_default(),
-        // Patch fields without an option surface here stay unset.
-        ..Default::default()
     };
 
     let builder = builder.with_patch(patch);

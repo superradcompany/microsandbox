@@ -72,6 +72,8 @@ These snippets assume you already have a live `sandbox: Sandbox`.
 ```python
 import sys
 
+from microsandbox import ExecEventType
+
 output = await sandbox.exec("python3", ["-c", "print(1 + 1)"])
 print(output.stdout_text)
 print(output.exit_code)
@@ -90,11 +92,11 @@ output = await sandbox.exec(
 handle = await sandbox.exec_stream("tail", ["-f", "/var/log/app.log"])
 async for event in handle:
     match event.event_type:
-        case "stdout":
+        case ExecEventType.STDOUT:
             sys.stdout.buffer.write(event.data)
-        case "stderr":
+        case ExecEventType.STDERR:
             sys.stderr.buffer.write(event.data)
-        case "exited":
+        case ExecEventType.EXITED:
             break
 ```
 
@@ -147,7 +149,7 @@ await reader.stop()
 ### Network, DNS, and Ports
 
 ```python
-from microsandbox import Network, Sandbox
+from microsandbox import Network, NetworkProfile, Sandbox
 from microsandbox.types import DnsConfig
 
 isolated = await Sandbox.create(
@@ -172,7 +174,7 @@ web = await Sandbox.create(
     "python-readme-web",
     image="python",
     ports={8080: 80},
-    network=Network.from_profiles("public"),
+    network=Network.from_profiles(NetworkProfile.PUBLIC),
     replace=True,
 )
 ```

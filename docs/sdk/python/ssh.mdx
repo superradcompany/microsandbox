@@ -5,18 +5,6 @@ description: Python SDK - SSH API reference
 
 Reach a running sandbox over SSH: open a native in-process SSH client, run exec requests, attach an interactive shell, transfer files over SFTP, or stand up a reusable server endpoint that serves connections over stdin/stdout. See [SSH](/sandboxes/ssh) for usage flows.
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```python
-from microsandbox import Sandbox
-
-async with await Sandbox.create("api", image="python") as sb:
-    client = await sb.ssh().open_client()       # 1. open an SSH client
-    out = await client.exec("python -V")        # 2. run a command
-    print(out.stdout_text)
-
-    await client.close()                        # 3. close the session
-```
 
 ## Sandbox
 
@@ -47,7 +35,9 @@ Return the SSH namespace for this sandbox. The namespace holds the SSH client an
 
 ## SandboxSshOps
 
-SSH namespace for a sandbox, obtained from [`sb.ssh()`](#sb-ssh). Client sessions work with local and cloud sandboxes through the selected backend's authenticated agent connection. Reusable server endpoints can use explicit host-key and authorized-key paths with either backend; their implicit key-file defaults are local-only.
+<p className="msb-backref">Returned by <a href="#sb-ssh">sb.ssh()</a></p>
+
+SSH operations for a sandbox.
 
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">open_client()</span>
 
@@ -98,6 +88,8 @@ Connect a native in-process SSH client to this sandbox. Generates an ephemeral c
 </div>
 
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">prepare_server()</span>
+
+<Tooltip tip="On microsandbox cloud, serving works when you supply explicit host-key and authorized-key material; the convenience defaults are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def prepare_server(
@@ -155,6 +147,11 @@ Prepare a reusable SSH server endpoint for this sandbox. Loads or creates the ho
 </div>
 
 ## SshClient
+
+<p className="msb-backref">Returned by <a href="#ssh-open_client">ssh.open_client()</a></p>
+
+Native in-process SSH client session.
+
 
 A connected, native in-process SSH client session, obtained from [`ssh.open_client()`](#ssh-open_client).
 
@@ -285,6 +282,11 @@ Close this native SSH client session. Sends a disconnect and aborts the internal
 
 ## SshServer
 
+<p className="msb-backref">Returned by <a href="#ssh-prepare_server">ssh.prepare_server()</a></p>
+
+Reusable SSH server endpoint for a sandbox.
+
+
 A reusable SSH server endpoint for a sandbox, obtained from [`ssh.prepare_server()`](#ssh-prepare_server).
 
 #### <span className="msb-recv">server.</span><span className="msb-hn">serve_connection()</span>
@@ -320,61 +322,107 @@ server.close()
 
 Release this prepared server endpoint. This method is synchronous.
 
-## Types
+## SftpClient
 
-### SandboxSshOps
-
-<p className="msb-backref">Returned by <a href="#sb-ssh">sb.ssh()</a></p>
-
-SSH namespace for a sandbox.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`open_client()`](#ssh-open_client) | [`SshClient`](#sshclient) | *(async)* Open a client. |
-| [`prepare_server()`](#ssh-prepare_server) | [`SshServer`](#sshserver) | *(async)* Prepare a server endpoint. |
-
-### SshClient
-
-<p className="msb-backref">Returned by <a href="#ssh-open_client">ssh.open_client()</a></p>
-
-Native in-process SSH client session.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`exec(command, *, tty=False)`](#client-exec) | [`SshOutput`](#sshoutput) | *(async)* Run a command. |
-| [`attach(*, term=None, detach_keys=None)`](#client-attach) | `int` | *(async)* Interactive shell. |
-| [`sftp()`](#client-sftp) | [`SftpClient`](#sftpclient) | *(async)* Open an SFTP session. |
-| [`close()`](#client-close) | `None` | *(async)* Close the session. |
-
-### SshServer
-
-<p className="msb-backref">Returned by <a href="#ssh-prepare_server">ssh.prepare_server()</a></p>
-
-Reusable SSH server endpoint for a sandbox.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`serve_connection()`](#server-serve_connection) | `None` | *(async)* Serve one connection over stdin/stdout. |
-| [`close()`](#server-close) | `None` | Release the prepared endpoint. |
-
-### SftpClient
 
 <p className="msb-backref">Returned by <a href="#client-sftp">client.sftp()</a></p>
 
 High-level SFTP client session over an SSH connection. All methods are async.
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| read(path) | `bytes` | Read a file into memory. |
-| write(path, data) | `None` | Write a file, creating or truncating it. |
-| mkdir(path) | `None` | Create a directory. |
-| remove_file(path) | `None` | Remove a file. |
-| remove_dir(path) | `None` | Remove an empty directory. |
-| rename(old_path, new_path) | `None` | Rename a file or directory. |
-| real_path(path) | `str` | Resolve a path to its canonical absolute form. |
-| read_link(path) | `str` | Read a symlink target. |
-| symlink(target, link_path) | `None` | Create a symlink. |
-| close() | `None` | Close the SFTP session. |
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">read()</span>
+
+```python
+read(path)
+```
+
+Read a file into memory.
+
+<p className="msb-label">Returns</p>
+
+`bytes`
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">write()</span>
+
+```python
+write(path, data)
+```
+
+Write a file, creating or truncating it.
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">mkdir()</span>
+
+```python
+mkdir(path)
+```
+
+Create a directory.
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">remove_file()</span>
+
+```python
+remove_file(path)
+```
+
+Remove a file.
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">remove_dir()</span>
+
+```python
+remove_dir(path)
+```
+
+Remove an empty directory.
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">rename()</span>
+
+```python
+rename(old_path, new_path)
+```
+
+Rename a file or directory.
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">real_path()</span>
+
+```python
+real_path(path)
+```
+
+Resolve a path to its canonical absolute form.
+
+<p className="msb-label">Returns</p>
+
+`str`
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">read_link()</span>
+
+```python
+read_link(path)
+```
+
+Read a symlink target.
+
+<p className="msb-label">Returns</p>
+
+`str`
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">symlink()</span>
+
+```python
+symlink(target, link_path)
+```
+
+Create a symlink.
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">close()</span>
+
+```python
+close()
+```
+
+Close the SFTP session.
+
+## Types
 
 ### SshOutput
 

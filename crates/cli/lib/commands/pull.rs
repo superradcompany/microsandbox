@@ -3,7 +3,7 @@
 //! The pull logic lives in [`super::image::run_pull`]; this module only
 //! defines the shared [`PullArgs`] struct.
 
-use clap::Args;
+use clap::{Args, ValueEnum};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -30,4 +30,63 @@ pub struct PullArgs {
     /// Path to a PEM file containing additional CA root certificates to trust.
     #[arg(long, value_name = "PATH")]
     pub ca_certs: Option<String>,
+
+    /// Rootfs artifacts to prepare in addition to downloaded OCI content.
+    ///
+    /// When omitted, a configured flat OCI root-disk default selects flat materialization;
+    /// otherwise the layered representation is prepared.
+    #[arg(long, value_enum)]
+    pub materialize: Option<PullMaterialization>,
+}
+
+/// Rootfs representation prepared by `msb pull`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum PullMaterialization {
+    /// Prepare the existing stitched layered rootfs.
+    #[default]
+    Layered,
+    /// Prepare reusable EROFS layers and one flat ext4 rootfs, skipping fsmeta/VMDK.
+    Flat,
+    /// Prepare both layered and flat rootfs artifacts.
+    All,
+}
+
+impl PullMaterialization {
+    pub(super) const fn image_materialization(self) -> microsandbox_image::RootfsMaterialization {
+        match self {
+            Self::Layered => microsandbox_image::RootfsMaterialization::Layered,
+            Self::Flat => microsandbox_image::RootfsMaterialization::Flat,
+            Self::All => microsandbox_image::RootfsMaterialization::All,
+        }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        pull: PullArgs,
+    }
+
+    #[test]
+    fn materialization_mode_distinguishes_omitted_and_explicit_flat() {
+        let default = TestCli::try_parse_from(["test", "alpine"]).unwrap();
+        assert_eq!(default.pull.materialize, None);
+
+        let flat = TestCli::try_parse_from(["test", "alpine", "--materialize", "flat"]).unwrap();
+        assert_eq!(flat.pull.materialize, Some(PullMaterialization::Flat));
+        assert_eq!(
+            flat.pull.materialize.unwrap().image_materialization(),
+            microsandbox_image::RootfsMaterialization::Flat
+        );
+    }
 }

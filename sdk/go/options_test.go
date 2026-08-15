@@ -62,6 +62,21 @@ func TestWithRootDiskDiskImage(t *testing.T) {
 	}
 }
 
+func TestWithRootDiskFlat(t *testing.T) {
+	o := SandboxConfig{}
+	WithRootDisk(RootDisk.Flat(RootDiskFlatOptions{
+		SizeMiB: 8192,
+		Fstype:  "ext4",
+		Clone:   FlatCloneReflink,
+	}))(&o)
+	if o.RootDisk == nil || o.RootDisk.Kind() != RootDiskKindFlat {
+		t.Fatalf("RootDisk = %#v, want flat config", o.RootDisk)
+	}
+	if o.RootDisk.SizeMiB != 8192 || o.RootDisk.Fstype != "ext4" || o.RootDisk.Clone != FlatCloneReflink {
+		t.Errorf("flat fields = %#v", o.RootDisk)
+	}
+}
+
 func TestWithOCIUpperSizeIsManagedRootDiskAlias(t *testing.T) {
 	o := SandboxConfig{}
 	WithOCIUpperSize(8192)(&o)
@@ -135,6 +150,30 @@ func TestWithMaxCPUs(t *testing.T) {
 	}
 }
 
+func TestWithCPUPlacement(t *testing.T) {
+	o := SandboxConfig{}
+	WithCPUPlacement(CPUPlacementSpread)(&o)
+	if o.CPUPlacement != CPUPlacementSpread {
+		t.Errorf("got %q, want %q", o.CPUPlacement, CPUPlacementSpread)
+	}
+}
+
+func TestWithPlacementProfile(t *testing.T) {
+	o := SandboxConfig{}
+	WithPlacementProfile("latency")(&o)
+	if o.PlacementProfile != "latency" {
+		t.Errorf("got %q, want %q", o.PlacementProfile, "latency")
+	}
+}
+
+func TestWithTHP(t *testing.T) {
+	o := SandboxConfig{}
+	WithTHP(THPAlways)(&o)
+	if o.THP != THPAlways {
+		t.Errorf("got %q, want %q", o.THP, THPAlways)
+	}
+}
+
 func TestWithWorkdir(t *testing.T) {
 	o := SandboxConfig{}
 	WithWorkdir("/app")(&o)
@@ -190,6 +229,44 @@ func TestWithExecTTY(t *testing.T) {
 	WithExecTTY(false)(&o)
 	if o.TTY {
 		t.Fatal("TTY should be disabled")
+	}
+}
+
+func TestWithAttachUser(t *testing.T) {
+	o := AttachConfig{}
+	WithAttachUser("dev")(&o)
+	if o.User != "dev" {
+		t.Errorf("got %q, want %q", o.User, "dev")
+	}
+}
+
+func TestWithAttachCwd(t *testing.T) {
+	o := AttachConfig{}
+	WithAttachCwd("/app")(&o)
+	if o.Cwd != "/app" {
+		t.Errorf("got %q, want %q", o.Cwd, "/app")
+	}
+}
+
+func TestWithAttachDetachKeys(t *testing.T) {
+	o := AttachConfig{}
+	WithAttachDetachKeys("ctrl-q")(&o)
+	if o.DetachKeys != "ctrl-q" {
+		t.Errorf("got %q, want %q", o.DetachKeys, "ctrl-q")
+	}
+}
+
+func TestWithAttachEnvMerges(t *testing.T) {
+	o := AttachConfig{}
+	if o.Env != nil {
+		t.Fatal("Env should start nil")
+	}
+	WithAttachEnv(map[string]string{"A": "1", "B": "2"})(&o)
+	WithAttachEnv(map[string]string{"B": "overwritten", "C": "3"})(&o)
+
+	want := map[string]string{"A": "1", "B": "overwritten", "C": "3"}
+	if !reflect.DeepEqual(o.Env, want) {
+		t.Errorf("got %v, want %v", o.Env, want)
 	}
 }
 
@@ -620,6 +697,19 @@ func TestWithEntrypoint(t *testing.T) {
 	}
 }
 
+func TestWithCmd(t *testing.T) {
+	o := SandboxConfig{}
+	WithCmd("worker.py", "--once")(&o)
+	if len(o.Cmd) != 2 || o.Cmd[0] != "worker.py" {
+		t.Errorf("Cmd: got %v", o.Cmd)
+	}
+
+	WithCmd()(&o)
+	if o.Cmd == nil || len(o.Cmd) != 0 {
+		t.Errorf("Cmd clear: got %#v", o.Cmd)
+	}
+}
+
 func TestWithInitFactories(t *testing.T) {
 	o := SandboxConfig{}
 	WithInit(Init.Auto())(&o)
@@ -666,6 +756,32 @@ func TestSandboxConfigUnmarshalJSONIncludesPersistedInit(t *testing.T) {
 	wantEnv := map[string]string{"FOO": "BAR", "PATH": "/usr/bin:/bin"}
 	if !reflect.DeepEqual(cfg.Init.Env, wantEnv) {
 		t.Errorf("Init.Env = %v, want %v", cfg.Init.Env, wantEnv)
+	}
+}
+
+func TestSandboxConfigUnmarshalJSONIncludesRuntimeCommandTemplate(t *testing.T) {
+	var cfg SandboxConfig
+	data := []byte(`{
+		"name": "worker",
+		"image": "alpine",
+		"runtime": {
+			"workdir": "/app",
+			"entrypoint": ["python", "-u"],
+			"cmd": ["worker.py", "--once"]
+		}
+	}`)
+
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("UnmarshalJSON: %v", err)
+	}
+	if cfg.Workdir != "/app" {
+		t.Errorf("Workdir = %q, want /app", cfg.Workdir)
+	}
+	if !reflect.DeepEqual(cfg.Entrypoint, []string{"python", "-u"}) {
+		t.Errorf("Entrypoint = %v", cfg.Entrypoint)
+	}
+	if !reflect.DeepEqual(cfg.Cmd, []string{"worker.py", "--once"}) {
+		t.Errorf("Cmd = %v", cfg.Cmd)
 	}
 }
 

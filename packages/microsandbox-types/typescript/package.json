@@ -1,6 +1,6 @@
 {
   "name": "@microsandbox/types",
-  "version": "0.6.8",
+  "version": "0.6.9",
   "type": "module",
   "main": "./dist/cloud.js",
   "types": "./dist/cloud.d.ts",

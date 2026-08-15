@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from microsandbox import (
     Action,
     DestGroup,
@@ -106,8 +108,8 @@ def test_terminal_policy_constructors_set_both_defaults() -> None:
 def test_unknown_profile_is_rejected() -> None:
     try:
         NetworkPolicy.from_profiles(["bogus"])
-    except ValueError as error:
-        assert "bogus" in str(error)
+    except TypeError as error:
+        assert "NetworkProfile" in str(error)
     else:
         raise AssertionError("unknown profile should be rejected")
 
@@ -130,3 +132,19 @@ def test_removed_string_presets_fail_with_migration_guidance() -> None:
 def test_deny_dns_is_action_inverse_of_allow_dns() -> None:
     assert all(rule.action is Action.DENY for rule in Rule.deny_dns())
     assert [rule.protocol for rule in Rule.deny_dns()] == [Protocol.UDP, Protocol.TCP]
+
+
+def test_empty_raw_protocol_is_rejected_instead_of_omitted() -> None:
+    policy = NetworkPolicy(rules=(Rule.allow(protocol=""),))  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match=r"Rule\.protocol"):
+        policy._to_dict()
+
+
+def test_unrelated_string_enum_is_not_a_destination_shorthand() -> None:
+    policy = NetworkPolicy(
+        rules=(Rule.allow(destination=Protocol.TCP),),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(TypeError, match=r"Rule\.destination"):
+        policy._to_dict()

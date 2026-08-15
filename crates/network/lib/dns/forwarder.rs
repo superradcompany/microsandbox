@@ -96,6 +96,9 @@ pub(crate) struct DnsForwarder {
     /// Network policy. Direct-path queries consult this for outbound
     /// permission to the chosen `@target` resolver IP.
     network_policy: Arc<NetworkPolicy>,
+    /// Optional host-owned policy floor. Direct resolvers and private DNS
+    /// answers must pass this policy in addition to the tenant policy.
+    platform_policy: Option<Arc<NetworkPolicy>>,
     /// Cross-thread network state. Used both for policy evaluation on
     /// the direct-upstream path (Domain rules may match the resolver IP
     /// if the guest resolved it) and for caching the resolved addresses
@@ -254,7 +257,12 @@ impl DnsForwarder {
                     _ => None,
                 };
                 if private_addr.is_some_and(|addr| {
-                    !policy_allows_rebind_address(&self.network_policy, &self.shared, addr)
+                    !policies_allow_rebind_address(
+                        &self.network_policy,
+                        self.platform_policy.as_deref(),
+                        &self.shared,
+                        addr,
+                    )
                 }) {
                     tracing::debug!(
                         domain = %domain,
@@ -312,9 +320,10 @@ impl DnsForwarder {
         transport: Transport,
         sni: Option<&str>,
     ) -> UpstreamChoice {
-        match decide_upstream(
+        match decide_upstream_with_platform(
             &self.gateway_ips,
             &self.network_policy,
+            self.platform_policy.as_deref(),
             &self.shared,
             original_dst,
             transport,
@@ -435,13 +444,21 @@ impl DnsForwarder {
         config: Arc<NormalizedDnsConfig>,
         gateway_ips: Arc<HashSet<IpAddr>>,
         network_policy: Arc<NetworkPolicy>,
+        platform_policy: Option<Arc<NetworkPolicy>>,
         shared: Arc<SharedState>,
         gateway: GatewayIps,
     ) -> DnsForwarderHandle {
         let (forwarder_tx, forwarder_rx) = watch::channel(None);
         handle.spawn(async move {
-            let Some(forwarder) =
-                Self::build(config, gateway_ips, network_policy, shared, gateway).await
+            let Some(forwarder) = Self::build(
+                config,
+                gateway_ips,
+                network_policy,
+                platform_policy,
+                shared,
+                gateway,
+            )
+            .await
             else {
                 // Drop forwarder_tx by returning; waiters observe init
                 // failure as `Self::wait().await == None`.
@@ -459,6 +476,7 @@ impl DnsForwarder {
         config: Arc<NormalizedDnsConfig>,
         gateway_ips: Arc<HashSet<IpAddr>>,
         network_policy: Arc<NetworkPolicy>,
+        platform_policy: Option<Arc<NetworkPolicy>>,
         shared: Arc<SharedState>,
         gateway: GatewayIps,
     ) -> Option<Arc<Self>> {
@@ -512,6 +530,7 @@ impl DnsForwarder {
             configured,
             gateway_ips,
             network_policy,
+            platform_policy,
             shared,
             gateway,
             config,
@@ -533,6 +552,40 @@ impl DnsForwarder {
         handle.changed().await.ok()?;
         handle.borrow().clone()
     }
+
+    /// Build a forwarder for proxy tests whose queries are handled locally.
+    #[cfg(test)]
+    pub(crate) async fn for_proxy_test(shared: Arc<SharedState>, gateway: GatewayIps) -> Arc<Self> {
+        let config = Arc::new(NormalizedDnsConfig::from_config(
+            crate::config::DnsConfig::default(),
+        ));
+        let upstream = SocketAddr::from(([127, 0, 0, 1], 9));
+        let udp = build_udp_client(upstream, config.query_timeout)
+            .await
+            .expect("test UDP client should initialize");
+        let gateway_ips = Arc::new(
+            gateway
+                .ipv4
+                .map(IpAddr::V4)
+                .into_iter()
+                .chain(gateway.ipv6.map(IpAddr::V6))
+                .collect(),
+        );
+
+        Arc::new(Self {
+            configured: vec![ConfiguredUpstream {
+                addr: upstream,
+                udp,
+                tcp: OnceCell::new(),
+            }],
+            gateway_ips,
+            network_policy: Arc::new(NetworkPolicy::allow_all()),
+            platform_policy: None,
+            shared,
+            gateway,
+            config,
+        })
+    }
 }
 
 /// Return whether a private/reserved DNS answer was explicitly made reachable.
@@ -540,15 +593,32 @@ impl DnsForwarder {
 /// Rebind protection remains fail-closed unless an address-only TCP or UDP
 /// policy evaluation allows the answer. Port-scoped rules do not qualify here;
 /// they cannot be evaluated safely before the guest chooses a connection port.
+#[cfg(test)]
 fn policy_allows_rebind_address(
     policy: &NetworkPolicy,
+    shared: &SharedState,
+    addr: IpAddr,
+) -> bool {
+    policies_allow_rebind_address(policy, None, shared, addr)
+}
+
+/// Return whether both the platform floor and tenant policy admit a private answer.
+fn policies_allow_rebind_address(
+    policy: &NetworkPolicy,
+    platform_policy: Option<&NetworkPolicy>,
     shared: &SharedState,
     addr: IpAddr,
 ) -> bool {
     [crate::policy::Protocol::Tcp, crate::policy::Protocol::Udp]
         .into_iter()
         .any(|protocol| {
-            policy.evaluate_explicit_egress_ip(addr, protocol, shared) == Some(Action::Allow)
+            let platform_allows = platform_policy.is_none_or(|platform| {
+                platform
+                    .evaluate_egress_ip(addr, protocol, shared)
+                    .is_allow()
+            });
+            platform_allows
+                && policy.evaluate_explicit_egress_ip(addr, protocol, shared) == Some(Action::Allow)
         })
 }
 
@@ -560,9 +630,21 @@ fn policy_allows_rebind_address(
 /// the gateway IP set, and the network policy. Pure function — no
 /// upstream connection happens here. Lifted out of [`DnsForwarder`] so
 /// the rule logic is testable without a real upstream client.
+#[cfg(test)]
 fn decide_upstream(
     gateway_ips: &HashSet<IpAddr>,
     policy: &NetworkPolicy,
+    shared: &SharedState,
+    original_dst: Option<IpAddr>,
+    transport: Transport,
+) -> UpstreamDecision {
+    decide_upstream_with_platform(gateway_ips, policy, None, shared, original_dst, transport)
+}
+
+fn decide_upstream_with_platform(
+    gateway_ips: &HashSet<IpAddr>,
+    policy: &NetworkPolicy,
+    platform_policy: Option<&NetworkPolicy>,
     shared: &SharedState,
     original_dst: Option<IpAddr>,
     transport: Transport,
@@ -579,7 +661,11 @@ fn decide_upstream(
     // the egress policy for that resolver IP over the transport's
     // corresponding port and protocol.
     let policy_dst = SocketAddr::new(dst, transport.upstream_port());
-    if policy
+    if platform_policy.is_some_and(|platform| {
+        platform
+            .evaluate_egress(policy_dst, transport.policy_protocol(), shared)
+            .is_deny()
+    }) || policy
         .evaluate_egress(policy_dst, transport.policy_protocol(), shared)
         .is_deny()
     {
@@ -867,6 +953,7 @@ mod tests {
             configured,
             gateway_ips: Arc::new(HashSet::from([gateway_ip])),
             network_policy: Arc::new(NetworkPolicy::from_profiles([NetworkProfile::Public])),
+            platform_policy: None,
             shared: Arc::new(SharedState::new(4)),
             gateway: GatewayIps {
                 ipv4: Some("10.0.0.1".parse().unwrap()),
@@ -1003,6 +1090,20 @@ mod tests {
             &policy,
             &shared,
             "10.20.30.40".parse().unwrap()
+        ));
+    }
+
+    #[test]
+    fn platform_public_floor_rejects_tenant_allowed_private_dns_answer() {
+        let tenant = NetworkPolicy::from_profiles([NetworkProfile::Private]);
+        let platform = NetworkPolicy::from_profiles([NetworkProfile::Public]);
+        let shared = SharedState::new(4);
+
+        assert!(!policies_allow_rebind_address(
+            &tenant,
+            Some(&platform),
+            &shared,
+            "10.0.0.7".parse().unwrap(),
         ));
     }
 
@@ -1316,6 +1417,27 @@ mod tests {
         assert_eq!(
             decide_upstream(&gw, &policy, &shared, dst, Transport::Udp),
             UpstreamDecision::Configured
+        );
+    }
+
+    #[test]
+    fn platform_public_floor_denies_private_direct_resolver() {
+        let gateways = gateway_set();
+        let shared = SharedState::new(4);
+        let tenant = NetworkPolicy::allow_all();
+        let platform = NetworkPolicy::from_profiles([NetworkProfile::Public]);
+        let dst = Some(IpAddr::V4("10.0.0.53".parse().unwrap()));
+
+        assert_eq!(
+            decide_upstream_with_platform(
+                &gateways,
+                &tenant,
+                Some(&platform),
+                &shared,
+                dst,
+                Transport::Udp,
+            ),
+            UpstreamDecision::PolicyDenied
         );
     }
 

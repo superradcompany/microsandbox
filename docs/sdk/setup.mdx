@@ -1,0 +1,155 @@
+---
+title: Runtime setup
+description: Install, verify, and configure microsandbox runtime dependencies from every SDK
+icon: "download"
+---
+
+Local sandboxes use the `msb` executable and `libkrunfw` library. Depending on the SDK and installation method, those runtime files may already be bundled or may need to be downloaded. Each SDK exposes helpers that let an application verify the runtime before creating its first sandbox.
+
+The default install root is `~/.microsandbox/` (`%USERPROFILE%\.microsandbox` on Windows). Explicit setup is useful when you want installation failures to surface at process startup or when you are preparing an offline environment.
+
+## Install and verify
+
+Check for the runtime and install it only when needed. These installation helpers are idempotent and reuse a matching installation.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::setup;
+
+if !setup::is_installed() {
+    setup::install().await?;
+}
+```
+
+```typescript TypeScript
+import { install, isInstalled } from "microsandbox";
+
+if (!isInstalled()) {
+  await install();
+}
+```
+
+```python Python
+from microsandbox import install, is_installed
+
+if not is_installed():
+    await install()
+```
+
+```go Go
+import m "github.com/superradcompany/microsandbox/sdk/go"
+
+if !m.IsInstalled() {
+    if err := m.EnsureInstalled(ctx); err != nil {
+        return err
+    }
+}
+```
+</CodeGroup>
+
+| SDK | Install | Check | Behavior |
+|-----|---------|-------|----------|
+| Rust | `setup::install() -> MicrosandboxResult<()>` | `setup::is_installed() -> bool` | Downloads the SDK's pinned runtime and verifies it. |
+| TypeScript | `install(): Promise<void>` | `isInstalled(): boolean` | Downloads the package's pinned runtime and verifies it. |
+| Python | `install() -> None` (async) | `is_installed() -> bool` | Installs and verifies the runtime; release wheels normally bundle matching files. |
+| Go | `EnsureInstalled(ctx, ...SetupOption) error` | `IsInstalled() bool` | Installs `msb` and `libkrunfw`; the Go FFI library is embedded separately. |
+
+## Customize installation
+
+Rust and TypeScript expose builders for custom install roots, versions, verification, and forced downloads. Go exposes `WithSkipDownload()` for pre-provisioned or air-gapped environments. Python's setup helper uses the default installation behavior.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::setup::Setup;
+
+Setup::builder()
+    .base_dir("/opt/microsandbox")
+    .version("0.6.8")
+    .skip_verify(false)
+    .force(true)
+    .build()
+    .install()
+    .await?;
+```
+
+```typescript TypeScript
+import { setup } from "microsandbox";
+
+await setup()
+  .baseDir("/opt/microsandbox")
+  .version("0.6.8")
+  .skipVerify(false)
+  .force(true)
+  .install();
+```
+
+```go Go
+import m "github.com/superradcompany/microsandbox/sdk/go"
+
+// Do not download. Return an error if the runtime was not pre-provisioned.
+if err := m.EnsureInstalled(ctx, m.WithSkipDownload()); err != nil {
+    return err
+}
+```
+</CodeGroup>
+
+| Option | SDKs | Description |
+|--------|------|-------------|
+| Install root | Rust: `base_dir(path)`<br />TypeScript: `baseDir(path)` | Override `~/.microsandbox/`. |
+| Runtime version | Rust: `version(version)`<br />TypeScript: `version(version)` | Install a specific runtime version instead of the SDK's pinned version. |
+| Skip verification | Rust: `skip_verify(enabled)`<br />TypeScript: `skipVerify(enabled)` | Skip post-install verification. |
+| Force download | Rust: `force(enabled)`<br />TypeScript: `force(enabled)` | Download again even when matching files are present. |
+| Skip download | Go: `WithSkipDownload()` | Require the runtime to be present without fetching it. |
+
+<span id="go-with-skip-download"></span>
+<span id="go-setupoption"></span>
+
+In Go, `WithSkipDownload()` returns a `SetupOption`, whose exported type is `func(*setupConfig)`. Options apply only to the first `EnsureInstalled()` call.
+
+## Override runtime paths
+
+The Rust, TypeScript, and Python SDKs can override the process-wide `libkrunfw` path directly. Call the setter before creating a local sandbox.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::set_libkrunfw_path;
+
+set_libkrunfw_path("/opt/microsandbox/lib/libkrunfw.dylib");
+```
+
+```typescript TypeScript
+import { setRuntimeLibkrunfwPath } from "microsandbox";
+
+setRuntimeLibkrunfwPath("/opt/microsandbox/lib/libkrunfw.dylib");
+```
+
+```python Python
+from microsandbox import set_libkrunfw_path
+
+set_libkrunfw_path("/opt/microsandbox/lib/libkrunfw.dylib")
+```
+</CodeGroup>
+
+Environment variables work across the SDKs and take precedence over SDK-provided or configured paths:
+
+| Variable | Purpose |
+|----------|---------|
+| `MSB_PATH` | Override the `msb` executable used by local SDK operations. |
+| `MSB_LIBKRUNFW_PATH` | Override the `libkrunfw` shared library loaded by the process. |
+
+Set these process-wide overrides before creating any local sandbox. They do not belong to an individual sandbox configuration.
+
+## Inspect Go versions
+
+Go also exposes the SDK's pinned release version and the version reported by the loaded FFI library:
+
+```go
+sdkVersion := m.SDKVersion()
+
+runtimeVersion, err := m.RuntimeVersion()
+if err != nil {
+    return err
+}
+```
+
+`SDKVersion() string` does not load the FFI library. `RuntimeVersion() (string, error)` loads it automatically on first use and returns an error if loading fails.

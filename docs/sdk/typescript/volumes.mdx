@@ -3,25 +3,61 @@ title: Volumes
 description: TypeScript SDK - Volume API reference
 ---
 
-Create and manage named volumes: persistent storage that lives independently of any sandbox. Build a volume, look one up, read and write its files from the host, then delete it. See [Volumes](/sandboxes/volumes) for usage examples and patterns.
+Create, manage, and mount named volumes. See [Volumes](/sandboxes/volumes) for usage examples.
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
+## Volume
+
+<p className="msb-member-group">Instance properties</p>
+
+#### <span className="msb-recv">volume.</span><span className="msb-hn">name</span>
 
 ```typescript
-import { Volume } from "microsandbox";
-
-const data = await Volume.builder("my-data")    // 1. configure
-  .label("env", "prod")
-  .create();                                    // 2. create on disk
-
-const vfs = data.fs();                          // 3. host-side I/O
-await vfs.write("seed.txt", "hello");
-console.log(await vfs.list(""));
-
-await Volume.remove("my-data");                 // 4. delete
+get name(): string
 ```
 
-## Static methods
+The volume's name.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Volume name.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">volume.</span><span className="msb-hn">path</span>
+
+```typescript
+get path(): string
+```
+
+Absolute host path to the volume's directory. By default volumes live under `~/.microsandbox/volumes/<name>/`.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Absolute host directory path.</div>
+  </div>
+</div>
+
+<p className="msb-member-group">Static methods</p>
+
+#### <span className="msb-recv">Volume.</span><span className="msb-hn">getDefault()</span>
+
+```typescript
+static getDefault(): Promise<VolumeHandle>
+```
+
+Get the Cloud account's always-present default volume. It has no user-assigned name, cannot be removed, and supports direct filesystem operations through `.fs()`. The local backend returns a typed `Unsupported` error; it never substitutes a directory from the caller's machine.
+
+```typescript
+const volume = await Volume.getDefault();
+await volume.fs().write("customers/acme.json", JSON.stringify({ active: true }));
+console.log(await volume.fs().readToString("customers/acme.json"));
+```
 
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">builder()</span>
 
@@ -146,43 +182,11 @@ Delete a named volume and its contents. Fails if the volume is currently mounted
   </div>
 </div>
 
-## Instance methods
-
-#### <span className="msb-recv">volume.</span><span className="msb-hn">name</span>
-
-```typescript
-get name(): string
-```
-
-The volume's name.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Volume name.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">volume.</span><span className="msb-hn">path</span>
-
-```typescript
-get path(): string
-```
-
-Absolute host path to the volume's directory. By default volumes live under `~/.microsandbox/volumes/<name>/`.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Absolute host directory path.</div>
-  </div>
-</div>
+<p className="msb-member-group">Instance methods</p>
 
 #### <span className="msb-recv">volume.</span><span className="msb-hn">fs()</span>
+
+<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 fs(): VolumeFs
@@ -198,7 +202,7 @@ console.log(await vfs.readToString("seed.txt"));
 
 </Accordion>
 
-Get a host-side filesystem handle for this volume's directory. Reads and writes happen directly on the host, with no sandbox running. See [`VolumeFs`](#volumefs-methods) for the full API.
+Get a filesystem handle for this volume. Local reads and writes use the managed host directory; Cloud reads and writes use the authenticated volume API. No sandbox needs to be running. See [`VolumeFs`](#volumefs-methods) for the full API.
 
 <p className="msb-label">Returns</p>
 
@@ -213,7 +217,7 @@ Get a host-side filesystem handle for this volume's directory. Reads and writes 
 
 Fluent builder for a named volume. Obtained via [`Volume.builder(name)`](#volume-builder). Directory-backed volumes are the default; call [`disk()`](#disk) plus [`size()`](#size) for a disk-backed volume. Every setter returns the builder, so calls chain.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">directory()</span>
+#### <span className="msb-recv">volumeBuilder.</span><span className="msb-hn">directory()</span>
 
 ```typescript
 directory(): this
@@ -221,7 +225,9 @@ directory(): this
 
 Create a directory-backed volume. This is the default, so calling it is only needed for clarity.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">disk()</span>
+#### <span className="msb-recv">volumeBuilder.</span><span className="msb-hn">disk()</span>
+
+<Tooltip tip="Disk-kind volumes are not available on microsandbox cloud; use a directory-backed named volume."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 disk(): this
@@ -240,7 +246,9 @@ const dockerData = await Volume.builder("docker-data")
 
 Create a raw ext4 disk-backed volume. Pair with [`size()`](#size) to set the capacity.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">size()</span>
+#### <span className="msb-recv">volumeBuilder.</span><span className="msb-hn">size()</span>
+
+<Tooltip tip="Disk-kind volumes are not available on microsandbox cloud; use a directory-backed named volume."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 size(mib: number): this
@@ -257,7 +265,9 @@ Set the disk capacity in MiB. Required after [`disk()`](#disk).
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">quota()</span>
+#### <span className="msb-recv">volumeBuilder.</span><span className="msb-hn">quota()</span>
+
+<Tooltip tip="On microsandbox cloud, quota sets a storage cap and must be a whole number of GiB."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 quota(mib: number): this
@@ -274,7 +284,7 @@ Record a quota in MiB as metadata for directory-backed volumes.
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">label()</span>
+#### <span className="msb-recv">volumeBuilder.</span><span className="msb-hn">label()</span>
 
 ```typescript
 label(key: string, value: string): this
@@ -295,7 +305,7 @@ Add a metadata label. Can be called multiple times.
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">build()</span>
+#### <span className="msb-recv">volumeBuilder.</span><span className="msb-hn">build()</span>
 
 ```typescript
 build(): { name: string; kind: string; quotaMib?: number | null; capacityMib?: number | null; labels: Record<string, string> }
@@ -312,7 +322,7 @@ Materialize the volume configuration without creating the volume on disk. To cre
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">create()</span>
+#### <span className="msb-recv">volumeBuilder.</span><span className="msb-hn">create()</span>
 
 ```typescript
 create(): Promise<Volume>
@@ -337,11 +347,15 @@ Build and create the volume on disk, returning a [`Volume`](#instance-methods).
   </div>
 </div>
 
-## VolumeFs methods
+## VolumeFs
 
-Host-side filesystem operations on a volume's directory. Obtained via [`volume.fs()`](#volume-fs) or [`VolumeHandle.fs()`](#volumehandle). All operations run directly on the host without booting a sandbox. Paths are relative to the volume's root directory. Every method is async.
+<p className="msb-backref">Returned by <a href="#volume-fs">volume.fs()</a> · <a href="#volumehandle">VolumeHandle.fs()</a></p>
+
+Host-side filesystem operations for a named volume.
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">read()</span>
+
+<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 read(path: string): Promise<Uint8Array>
@@ -377,6 +391,8 @@ Read a file's full contents as bytes.
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">readToString()</span>
 
+<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```typescript
 readToString(path: string): Promise<string>
 ```
@@ -410,6 +426,8 @@ Read a file's full contents as a UTF-8 string.
 </div>
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">readStream()</span>
+
+<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 readStream(path: string): Promise<VolumeFsReadStream>
@@ -448,6 +466,8 @@ Open a streaming reader for a file, for chunked reads of large files without loa
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">write()</span>
 
+<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```typescript
 write(path: string, data: Uint8Array | string): Promise<void>
 ```
@@ -476,6 +496,8 @@ Write a file, replacing any existing contents. Strings are encoded as UTF-8.
 </div>
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">writeStream()</span>
+
+<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 writeStream(path: string): Promise<VolumeFsWriteSink>
@@ -751,71 +773,184 @@ Check whether a path exists.
   </div>
 </div>
 
-## Types
+## VolumeHandle
 
-### VolumeHandle
 
 <p className="msb-backref">Returned by <a href="#volume-get">Volume.get()</a> · <a href="#volume-list">Volume.list()</a></p>
 
-A handle to an existing named volume, carrying its metadata. Handles from [`Volume.get()`](#volume-get) are **live**: `.fs()` and `.remove()` work. Handles in the array from [`Volume.list()`](#volume-list) are **read-only**: those two methods throw, so call `Volume.get(name)` to upgrade.
+A metadata and lifecycle handle for an existing volume.
 
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| name | `string` | Volume name |
-| kind | `string` | Volume kind (`"dir"` or `"disk"`) |
-| quotaMib | `number \| null` | Recorded storage quota in MiB |
-| usedBytes | `number` | Current disk usage in bytes |
-| capacityBytes | `number \| null` | Disk capacity in bytes (disk volumes) |
-| diskFormat | `string \| null` | Disk image format (disk volumes) |
-| diskFstype | `string \| null` | Inner disk filesystem (disk volumes) |
-| labels | `ReadonlyArray<readonly [string, string]>` | Metadata labels |
-| createdAt | `Date \| null` | Creation timestamp |
-| fs() | [`VolumeFs`](#volumefs) | Host-side filesystem (live handles only; throws on read-only handles) |
-| remove() | `Promise<void>` | Delete this volume (live handles only; throws on read-only handles) |
+#### <span className="msb-recv">handle.</span><span className="msb-hn">name</span>
 
-### VolumeFs
+`string`
 
-<p className="msb-backref">Returned by <a href="#volume-fs">volume.fs()</a> · <a href="#volumehandle">VolumeHandle.fs()</a></p>
+Volume name
 
-Host-side filesystem operations on a volume's directory. The methods mirror [`SandboxFsOps`](/sdk/typescript/filesystem) but run directly on the host with no sandbox booted. See the [VolumeFs methods](#volumefs-methods) section above for full per-method details.
+#### <span className="msb-recv">handle.</span><span className="msb-hn">kind</span>
 
-| Method | Type | Description |
-|--------|------|-------------|
-| read(path) | `Promise<Uint8Array>` | Read a file as bytes |
-| readToString(path) | `Promise<string>` | Read a file as a UTF-8 string |
-| readStream(path) | `Promise<`[`VolumeFsReadStream`](#volumefsreadstream)`>` | Open a streaming reader |
-| write(path, data) | `Promise<void>` | Write a file (bytes or string) |
-| writeStream(path) | `Promise<`[`VolumeFsWriteSink`](#volumefswritesink)`>` | Open a streaming writer |
-| list(path) | `Promise<`[`FsEntry`](/sdk/typescript/filesystem#fsentry)`[]>` | List directory entries |
-| mkdir(path) | `Promise<void>` | Create a directory, with parents |
-| removeDir(path) | `Promise<void>` | Recursively remove a directory |
-| remove(path) | `Promise<void>` | Remove a file |
-| copy(from, to) | `Promise<void>` | Copy a file or directory |
-| rename(from, to) | `Promise<void>` | Move or rename a file or directory |
-| stat(path) | `Promise<`[`FsMetadata`](/sdk/typescript/filesystem#fsmetadata)`>` | Get file metadata |
-| exists(path) | `Promise<boolean>` | Check whether a path exists |
+`string`
 
-### VolumeFsReadStream
+Volume kind (`"dir"` or `"disk"`)
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">quotaMib</span>
+
+`number \| null`
+
+Recorded storage quota in MiB
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">usedBytes</span>
+
+`number`
+
+Current disk usage in bytes
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">capacityBytes</span>
+
+`number \| null`
+
+Disk capacity in bytes (disk volumes)
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">diskFormat</span>
+
+`string \| null`
+
+Disk image format (disk volumes)
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">diskFstype</span>
+
+`string \| null`
+
+Inner disk filesystem (disk volumes)
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">labels</span>
+
+`ReadonlyArray<readonly [string, string]>`
+
+Metadata labels
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">createdAt</span>
+
+`Date \| null`
+
+Creation timestamp
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">fs()</span>
+
+```typescript
+fs()
+```
+
+Host-side filesystem (live handles only; throws on read-only handles)
+
+<p className="msb-label">Returns</p>
+
+[`VolumeFs`](#volumefs)
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">remove()</span>
+
+```typescript
+remove()
+```
+
+Delete this volume (live handles only; throws on read-only handles)
+
+<p className="msb-label">Returns</p>
+
+`Promise<void>`
+## VolumeFsReadStream
+
 
 <p className="msb-backref">Returned by <a href="#volumefs-methods">VolumeFs.readStream()</a></p>
 
 A streaming reader over a volume file. Implements `AsyncIterable<Uint8Array>` and `AsyncDisposable`, so it works with `for await` and `using`.
 
-| Method | Type | Description |
-|--------|------|-------------|
-| recv() | `Promise<Uint8Array \| null>` | Read the next chunk; `null` when the stream is exhausted |
-| collect() | `Promise<Uint8Array>` | Drain the stream into a single byte array |
-| [Symbol.asyncIterator]() | `AsyncIterator<Uint8Array>` | Iterate chunks with `for await` |
-| [Symbol.asyncDispose]() | `Promise<void>` | Mark the stream done (for `using`) |
+#### <span className="msb-recv">stream.</span><span className="msb-hn">recv()</span>
 
-### VolumeFsWriteSink
+```typescript
+recv()
+```
+
+Read the next chunk; `null` when the stream is exhausted
+
+<p className="msb-label">Returns</p>
+
+`Promise<Uint8Array \| null>`
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">collect()</span>
+
+```typescript
+collect()
+```
+
+Drain the stream into a single byte array
+
+<p className="msb-label">Returns</p>
+
+`Promise<Uint8Array>`
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">[Symbol.asyncIterator]()</span>
+
+```typescript
+[Symbol.asyncIterator]()
+```
+
+Iterate chunks with `for await`
+
+<p className="msb-label">Returns</p>
+
+`AsyncIterator<Uint8Array>`
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">[Symbol.asyncDispose]()</span>
+
+```typescript
+[Symbol.asyncDispose]()
+```
+
+Mark the stream done (for `using`)
+
+<p className="msb-label">Returns</p>
+
+`Promise<void>`
+
+## VolumeFsWriteSink
+
 
 <p className="msb-backref">Returned by <a href="#volumefs-methods">VolumeFs.writeStream()</a></p>
 
 A streaming writer for a volume file. Implements `AsyncDisposable`, so `await using` closes it automatically.
 
-| Method | Type | Description |
-|--------|------|-------------|
-| write(data) | `Promise<void>` | Write a chunk (`Uint8Array` or UTF-8 string) |
-| close() | `Promise<void>` | Flush and close the sink; idempotent |
-| [Symbol.asyncDispose]() | `Promise<void>` | Close the sink (for `await using`) |
+#### <span className="msb-recv">sink.</span><span className="msb-hn">write()</span>
+
+```typescript
+write(data)
+```
+
+Write a chunk (`Uint8Array` or UTF-8 string)
+
+<p className="msb-label">Returns</p>
+
+`Promise<void>`
+
+#### <span className="msb-recv">sink.</span><span className="msb-hn">close()</span>
+
+```typescript
+close()
+```
+
+Flush and close the sink; idempotent
+
+<p className="msb-label">Returns</p>
+
+`Promise<void>`
+
+#### <span className="msb-recv">sink.</span><span className="msb-hn">[Symbol.asyncDispose]()</span>
+
+```typescript
+[Symbol.asyncDispose]()
+```
+
+Close the sink (for `await using`)
+
+<p className="msb-label">Returns</p>
+
+`Promise<void>`

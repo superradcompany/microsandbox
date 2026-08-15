@@ -8,6 +8,48 @@ Command execution doesn't use SSH or the network. There's a dedicated channel be
 
 One nice consequence: `exec` works even when a sandbox has networking fully disabled.
 
+## Run the image default workload
+
+Sandbox creation is boot-only: configuring an image, ENTRYPOINT, or CMD does not execute that workload. Use the default-workload methods when you want the SDK to resolve the effective OCI `ENTRYPOINT + CMD` and run it. A configured CMD override replaces the image CMD, while the effective entrypoint is preserved. If neither field supplies an executable, these methods return the typed `NoDefaultCommand` error instead of falling back to a shell.
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .image("example/worker:latest")
+    .cmd(["worker.py", "--once"])
+    .create()
+    .await?;
+let output = sb.exec_default().await?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.builder("worker")
+  .image("example/worker:latest")
+  .cmd(["worker.py", "--once"])
+  .create();
+const output = await sb.execDefault();
+```
+
+```python Python
+sb = await Sandbox.create(
+    "worker",
+    image="example/worker:latest",
+    cmd=["worker.py", "--once"],
+)
+output = await sb.exec_default()
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("example/worker:latest"),
+    m.WithCmd("worker.py", "--once"),
+)
+output, err := sb.ExecDefault(ctx)
+```
+</CodeGroup>
+
+Streaming variants are `exec_default_stream`, `execDefaultStream`, and `ExecDefaultStream`. Interactive variants are `attach_default`, `attachDefault`, and `AttachDefault`. Literal `exec` and `attach` continue to ignore ENTRYPOINT and CMD.
+
 ## Execute a command
 
 Run a command and wait for it to complete. You get back the exit code, stdout, and stderr.
@@ -161,13 +203,15 @@ for await (const event of handle) {
 ```
 
 ```python Python
+from microsandbox import ExecEventType
+
 handle = await sb.exec_stream("tail", ["-f", "/var/log/app.log"])
 
 async for event in handle:
     match event.event_type:
-        case "stdout": print(event.data.decode(), end="")
-        case "stderr": print(event.data.decode(), end="", file=sys.stderr)
-        case "exited": print(f"Exited: {event.code}")
+        case ExecEventType.STDOUT: print(event.data.decode(), end="")
+        case ExecEventType.STDERR: print(event.data.decode(), end="", file=sys.stderr)
+        case ExecEventType.EXITED: print(f"Exited: {event.code}")
 ```
 
 ```go Go
@@ -238,8 +282,13 @@ if err != nil {
 }
 fmt.Println("shell exited with", exitCode)
 
-// Attach to a specific command.
-exitCode, err = sb.Attach(ctx, "python")
+// Attach to a specific command with options.
+exitCode, err = sb.AttachWith(ctx, "python", nil,
+    m.WithAttachUser("dev"),
+    m.WithAttachEnv(map[string]string{"DEBUG": "1"}),
+    m.WithAttachCwd("/app"),
+    m.WithAttachDetachKeys("ctrl-q"),
+)
 if err != nil {
     return err
 }

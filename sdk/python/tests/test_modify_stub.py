@@ -6,12 +6,14 @@ import ast
 from pathlib import Path
 
 STUB_PATH = Path(__file__).parent.parent / "microsandbox" / "_microsandbox.pyi"
+TYPES_PATH = Path(__file__).parent.parent / "microsandbox" / "types.py"
 
 EXPECTED_KWARGS = [
     "cpus",
     "max_cpus",
     "memory",
     "max_memory",
+    "root_disk_size",
     "env",
     "env_rm",
     "labels",
@@ -38,8 +40,8 @@ def _stub_tree() -> ast.Module:
     return ast.parse(STUB_PATH.read_text())
 
 
-def test_secret_modify_spec_stub_keys() -> None:
-    tree = _stub_tree()
+def test_secret_modify_spec_keys() -> None:
+    tree = ast.parse(TYPES_PATH.read_text())
     for node in tree.body:
         if isinstance(node, ast.ClassDef) and node.name == "SecretModifySpec":
             keys = [
@@ -49,7 +51,7 @@ def test_secret_modify_spec_stub_keys() -> None:
             ]
             assert keys == ["env", "value", "store", "placeholder", "allowed_hosts"]
             return
-    raise AssertionError("SecretModifySpec missing from stub")
+    raise AssertionError("SecretModifySpec missing from public types")
 
 
 def test_sandbox_modify_stub_signature() -> None:
@@ -61,7 +63,5 @@ def test_sandbox_modify_stub_signature() -> None:
         # All modify kwargs are optional.
         assert len(method.args.kw_defaults) == len(kwargs)
         assert all(default is not None for default in method.args.kw_defaults)
-        # Returns the parsed plan JSON as a dict.
-        assert isinstance(method.returns, ast.Subscript)
-        assert isinstance(method.returns.value, ast.Name)
-        assert method.returns.value.id == "dict"
+        assert isinstance(method.returns, ast.Name)
+        assert method.returns.id == "SandboxModificationPlan"

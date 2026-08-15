@@ -508,6 +508,18 @@ export declare class NetworkBuilder {
   /** Trust the host's root CAs inside the guest. Default: false. */
   trustHostCAs(enabled: boolean): this
   /**
+   * Configure local egress and ingress rate limits. Applies on the next
+   * sandbox start.
+   *
+   * ```js
+   * .rateLimiter((r) => r
+   *   .egress((r) => r
+   *     .bandwidth(1_048_576, 1_000)
+   *     .ops(1_000, 1_000)))
+   * ```
+   */
+  rateLimiter(configure: (arg: JsNetworkRateLimiterBuilder) => JsNetworkRateLimiterBuilder): this
+  /**
    * Snapshot the accumulated configuration as a JSON string. The TS
    * layer parses + key-remaps to camelCase before returning to the
    * caller.
@@ -558,6 +570,16 @@ export declare class NetworkPolicyBuilder {
   build(): NetworkPolicy
 }
 export type JsNetworkPolicyBuilder = NetworkPolicyBuilder
+
+/** Fluent builder grouping egress and ingress rate limits. */
+export declare class NetworkRateLimiterBuilder {
+  constructor()
+  /** Configure guest-to-runtime traffic limits. */
+  egress(configure: (arg: RateLimiterBuilder) => RateLimiterBuilder): this
+  /** Configure runtime-to-guest traffic limits. */
+  ingress(configure: (arg: RateLimiterBuilder) => RateLimiterBuilder): this
+}
+export type JsNetworkRateLimiterBuilder = NetworkRateLimiterBuilder
 
 /** Fluent builder for an ordered list of pre-boot rootfs patches. */
 export declare class PatchBuilder {
@@ -630,6 +652,29 @@ export declare class PullProgressStream {
 }
 export type JsPullProgressStream = PullProgressStream
 
+/**
+ * Fluent builder for one direction's network rate limiter. Chainable
+ * setters accumulate bucket values for `NetworkRateLimiterBuilder`.
+ */
+export declare class RateLimiterBuilder {
+  constructor()
+  /** Cap bandwidth at `sizeBytes` bytes per `refillTimeMs` milliseconds. */
+  bandwidth(sizeBytes: number, refillTimeMs: number): this
+  /**
+   * Grant a one-time startup burst of `sizeBytes` bytes on top of the
+   * bandwidth bucket. Requires `bandwidth()`.
+   */
+  bandwidthBurst(sizeBytes: number): this
+  /** Cap packet rate at `count` frames per `refillTimeMs` milliseconds. */
+  ops(count: number, refillTimeMs: number): this
+  /**
+   * Grant a one-time startup burst of `count` frames on top of the ops
+   * bucket. Requires `ops()`.
+   */
+  opsBurst(count: number): this
+}
+export type JsRateLimiterBuilder = RateLimiterBuilder
+
 /** Fluent builder for OCI registry connection settings. */
 export declare class RegistryConfigBuilder {
   constructor()
@@ -655,7 +700,7 @@ export declare class RegistryConfigBuilder {
 export type JsRegistryConfigBuilder = RegistryConfigBuilder
 
 /**
- * Fluent builder for the writable rootfs layer (root disk) of an OCI image.
+ * Fluent builder for the root disk of an OCI image.
  *
  * Used inside `ImageBuilder.rootDisk((d) => ...)`:
  *
@@ -663,12 +708,13 @@ export type JsRegistryConfigBuilder = RegistryConfigBuilder
  * .imageWith((i) => i.oci("python:3.12").rootDisk(8192))                       // managed, sized
  * .imageWith((i) => i.oci("python:3.12").rootDisk((d) => d.tmpfs().size(512))) // RAM-backed
  * .imageWith((i) => i.oci("python:3.12").rootDisk((d) => d.disk("./scratch.img").fstype("ext4")))
+ * .imageWith((i) => i.oci("python:3.12").rootDisk((d) => d.flat().size(8192)))
  * ```
  */
 export declare class RootDiskBuilder {
   constructor()
   /**
-   * Size in MiB. Valid for the managed (default) and tmpfs kinds; a
+   * Size in MiB. Valid for the managed (default), tmpfs, and flat kinds; a
    * user-supplied disk image is sized by the image file itself.
    */
   size(mib: number): this
@@ -677,6 +723,8 @@ export declare class RootDiskBuilder {
    * every boot, and the size counts against guest memory.
    */
   tmpfs(): this
+  /** Use a complete flat ext4 OCI rootfs without guest OverlayFS. */
+  flat(): this
   /**
    * Use a user-supplied disk image as the upper, attached writable. The
    * format is derived from the file extension (`.img`/`.raw` → raw,
@@ -689,10 +737,12 @@ export declare class RootDiskBuilder {
    */
   format(format: string): this
   /**
-   * Inner filesystem type of the disk image (e.g. `"ext4"`). Only valid
-   * after `.disk()`.
+   * Inner filesystem type (currently `"ext4"` for flat roots). Valid
+   * after `.disk()` or `.flat()`.
    */
   fstype(fstype: string): this
+  /** Select `"auto"`, `"copy"`, or `"reflink"` private-disk provisioning. */
+  cloneStrategy(strategy: string): this
 }
 export type JsRootDiskBuilder = RootDiskBuilder
 
@@ -849,6 +899,8 @@ export declare class Sandbox {
    * Sandbox names are limited to 128 UTF-8 bytes.
    */
   static remove(name: string): Promise<void>
+  /** Backend retained by this sandbox (`"local"` or `"cloud"`). */
+  get backendKind(): string
   /** Sandbox name. Names are limited to 128 UTF-8 bytes. */
   get name(): Promise<string>
   /** Whether this handle owns the sandbox lifecycle (attached mode). */
@@ -859,6 +911,14 @@ export declare class Sandbox {
    * The TS layer parses + camelCase-remaps this into a plain object.
    */
   configJson(): Promise<string>
+  /** Execute the sandbox's effective OCI entrypoint and CMD. */
+  execDefault(): Promise<ExecOutput>
+  /** Execute the sandbox's effective OCI entrypoint and CMD using a populated options builder. */
+  execDefaultWithBuilder(builder: ExecOptionsBuilder): Promise<ExecOutput>
+  /** Execute the sandbox's effective OCI entrypoint and CMD with streaming I/O. */
+  execDefaultStream(): Promise<ExecHandle>
+  /** Stream the sandbox's effective OCI entrypoint and CMD using a populated options builder. */
+  execDefaultStreamWithBuilder(builder: ExecOptionsBuilder): Promise<ExecHandle>
   /** Execute a command and wait for completion. */
   exec(cmd: string, args?: Array<string> | undefined | null): Promise<ExecOutput>
   /**
@@ -898,6 +958,10 @@ export declare class Sandbox {
   modify(options?: SandboxModifyOptions | undefined | null): Promise<string>
   /** Stream metrics snapshots at the requested interval (in milliseconds). */
   metricsStream(intervalMs: number): Promise<MetricsStream>
+  /** Attach to the sandbox's effective OCI entrypoint and CMD. */
+  attachDefault(): Promise<number>
+  /** Attach to the sandbox's effective OCI entrypoint and CMD using a populated options builder. */
+  attachDefaultWithBuilder(builder: AttachOptionsBuilder): Promise<number>
   /**
    * Attach to an interactive PTY session inside the sandbox.
    *
@@ -981,11 +1045,12 @@ export declare class SandboxBuilder {
    * Sugar over `imageWith((i) => i.oci(...).rootDisk(...))` — the root
    * disk lives on the OCI rootfs source, so an OCI image must be set
    * first. Pass a number of MiB for a managed root disk, or a callback
-   * for the tmpfs and disk-image kinds:
+   * for the tmpfs, flat, and disk-image kinds:
    *
    * ```ts
    * .image("python").rootDisk(8192)
    * .image("python").rootDisk((d) => d.tmpfs().size(512))
+   * .image("python").rootDisk((d) => d.flat().size(8192).cloneStrategy("auto"))
    * .image("python").rootDisk((d) => d.disk("./scratch.img"))
    * ```
    */
@@ -1000,10 +1065,16 @@ export declare class SandboxBuilder {
   cpus(count: number): this
   /** Boot-time maximum possible virtual CPUs. */
   maxCpus(count: number): this
+  /** Host CPU placement policy. */
+  cpuPlacement(policy: string): this
+  /** Host-defined placement profile name. */
+  placementProfile(profile: string): this
   /** Guest memory in MiB. */
   memory(mib: number): this
   /** Boot-time maximum hotpluggable guest memory in MiB. */
   maxMemory(mib: number): this
+  /** Guest transparent huge-page policy selected at boot. */
+  thp(policy: 'always' | 'madvise' | 'never'): this
   /** Override log verbosity: `"trace" | "debug" | "info" | "warn" | "error"`. */
   logLevel(level: string): this
   /** Suppress sandbox logs. */
@@ -1028,6 +1099,11 @@ export declare class SandboxBuilder {
   shell(shell: string): this
   /** In-guest security profile (`"default"` or `"restricted"`). */
   security(profile: string): this
+  /**
+   * Host-runtime deployment profile (`"single-tenant"` or `"multi-tenant"`).
+   * Managed backends may enforce their own profile.
+   */
+  deploymentProfile(profile: string): this
   /** Configure registry connection settings via a callback. */
   registry(configure: (arg: RegistryConfigBuilder) => RegistryConfigBuilder): this
   /**
@@ -1052,6 +1128,8 @@ export declare class SandboxBuilder {
   replaceWithTimeout(timeoutMs: number): this
   /** Override the image entrypoint. */
   entrypoint(cmd: Array<string>): this
+  /** Override the image CMD used by default-workload execution. */
+  cmd(cmd: Array<string>): this
   /**
    * Hand off PID 1 to a guest init binary after agentd's setup.
    *
@@ -1095,6 +1173,10 @@ export declare class SandboxBuilder {
   portUdp(hostPort: number, guestPort: number): this
   /** Publish a UDP port from host -> guest on a specific host bind address. */
   portUdpBind(bind: string, hostPort: number, guestPort: number): this
+  /** Expose a host Unix stream socket or local Windows named pipe on a guest-to-host vsock port. */
+  vsock(hostPath: string, port: number): this
+  /** Expose a host Unix datagram socket on a guest-to-host vsock port. */
+  vsockDgram(hostPath: string, port: number): this
   /** Add a secret via a callback. */
   secret(configure: (arg: JsSecretBuilder) => JsSecretBuilder): this
   /**
@@ -1207,6 +1289,8 @@ export declare class SandboxHandle {
   get name(): string
   /** Status at time of query: "running", "stopped", "crashed", or "draining". */
   get status(): string
+  /** Backend retained by this handle (`"local"` or `"cloud"`). */
+  get backendKind(): string
   /** Raw config JSON string from the database. */
   get configJson(): string
   /** Return a fresh handle for the same sandbox. */
@@ -1409,6 +1493,8 @@ export declare class Snapshot {
   get upperFile(): string | null
   get upperIntegrityAlgorithm(): string | null
   get upperIntegrityDigest(): string | null
+  get upperIntegrityLogicalSize(): bigint | null
+  get upperIntegrityLeafSize(): number | null
   get checkpointId(): string | null
   get checkpointManifestDigest(): string | null
   get parent(): string | null
@@ -1547,11 +1633,12 @@ export type JsViolationActionBuilder = ViolationActionBuilder
 
 export declare class Volume {
   static get(name: string): Promise<VolumeHandle>
+  static getDefault(): Promise<VolumeHandle>
   static list(): Promise<Array<VolumeInfo>>
   static remove(name: string): Promise<void>
   get name(): string
   get path(): string
-  /** Host-side filesystem operations on this volume's directory. */
+  /** Direct filesystem operations through this volume's bound backend. */
   fs(): VolumeFs
 }
 export type JsVolume = Volume
@@ -1620,6 +1707,7 @@ export type JsVolumeFsWriteSink = VolumeFsWriteSink
 
 export declare class VolumeHandle {
   get name(): string
+  get isDefault(): boolean
   get quotaMib(): number | null
   get kind(): string
   get usedBytes(): number
@@ -1629,7 +1717,7 @@ export declare class VolumeHandle {
   get labels(): Record<string, string>
   get createdAt(): number | null
   remove(): Promise<void>
-  /** Host-side filesystem operations on this volume's directory. */
+  /** Direct filesystem operations through this volume's bound backend. */
   fs(): VolumeFs
 }
 export type JsVolumeHandle = VolumeHandle
@@ -1652,6 +1740,9 @@ export interface AttachOptions {
   detachKeys?: string
   rlimits: Array<JsRlimit>
 }
+
+/** Return secret-safe information about the active default backend. */
+export declare function defaultBackendInfo(): JsBackendInfo
 
 /** Return the active default backend kind (`"local"` or `"cloud"`). */
 export declare function defaultBackendKind(): string
@@ -1813,6 +1904,14 @@ export declare function install(): Promise<void>
 
 /** Check if msb and libkrunfw are installed and available. */
 export declare function isInstalled(): boolean
+
+/** Secret-safe backend diagnostics returned to JavaScript. */
+export interface JsBackendInfo {
+  kind: string
+  apiUrl?: string
+  source: string
+  profile?: string
+}
 
 /** One page returned by `Sandbox.list` / `Sandbox.listWith`. */
 export interface JsSandboxPage {
@@ -2084,7 +2183,7 @@ export interface SandboxMetrics {
 /**
  * Options accepted by `Sandbox.modify()` / `SandboxHandle.modify()`.
  *
- * `memoryMib` / `maxMemoryMib` are in MiB. `policy` is `"no_restart"`
+ * `memoryMib` / `maxMemoryMib` / `rootDiskSizeMib` are in MiB. `policy` is `"no_restart"`
  * (default), `"next_start"`, or `"restart"`. With `dryRun: true` the plan
  * is computed without applying anything.
  */
@@ -2093,6 +2192,7 @@ export interface SandboxModifyOptions {
   maxCpus?: number
   memoryMib?: number
   maxMemoryMib?: number
+  rootDiskSizeMib?: number
   env?: Record<string, string>
   envRemove?: Array<string>
   labels?: Record<string, string>
@@ -2193,8 +2293,8 @@ export interface SecretModifySpec {
 /**
  * Set the process-wide default backend.
  *
- * `kind="local"` selects the local backend. `kind="cloud"` requires either
- * `url` + `api_key`, or `profile`.
+ * `kind="local"` selects the local backend. `kind="cloud"` requires either an
+ * API key (with an optional URL override), or a profile.
  */
 export declare function setDefaultBackend(kind: string, url?: string | undefined | null, apiKey?: string | undefined | null, profile?: string | undefined | null): void
 
@@ -2260,8 +2360,8 @@ export interface SnapshotRemoveOptions {
 /**
  * Result of `Snapshot.verify()`.
  *
- * `upperKind` is `"verified"` when the mandatory file-state integrity
- * matched. `upperAlgorithm` and `upperDigest` carry the verified binding.
+ * `upperKind` is `"notRecorded"` when integrity is absent or `"verified"`
+ * when the recorded value matched. The other fields carry that binding.
  */
 export interface SnapshotVerifyReport {
   digest: string
@@ -2349,6 +2449,7 @@ export interface VolumeConfig {
 /** Volume handle info from the database. */
 export interface VolumeInfo {
   name: string
+  isDefault: boolean
   kind: string
   quotaMib?: number
   usedBytes: number

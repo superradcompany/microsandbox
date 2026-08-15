@@ -12,6 +12,7 @@ use microsandbox::{
 };
 
 use crate::error::to_py_err;
+use crate::helpers::str_enum_member;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -205,8 +206,8 @@ impl PySnapshot {
     }
 
     /// Unpack a snapshot archive (`.tar.zst` or `.tar`) into the
-    /// snapshots directory, verifying recorded integrity on the way
-    /// in.
+    /// snapshots directory, preserving recorded integrity for explicit
+    /// verification.
     #[staticmethod]
     #[pyo3(signature = (archive, *, dest = None))]
     fn load<'py>(
@@ -258,18 +259,20 @@ impl PySnapshot {
 
     /// Closed descriptor state kind (`"file"` or `"checkpoint"`).
     #[getter]
-    fn state_kind(&self) -> &'static str {
-        self.inner.manifest().state.kind()
+    fn state_kind(&self, py: Python<'_>) -> PyResult<PyObject> {
+        str_enum_member(py, "SnapshotStateKind", self.inner.manifest().state.kind())
     }
 
     /// On-disk format for file state.
     #[getter]
-    fn format(&self) -> Option<&'static str> {
+    fn format(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
         self.inner
             .manifest()
             .state
             .as_file()
             .map(|state| format_str(state.format))
+            .map(|format| str_enum_member(py, "SnapshotFormat", format))
+            .transpose()
     }
 
     /// Filesystem type inside the upper (e.g. `"ext4"`).
@@ -308,10 +311,14 @@ impl PySnapshot {
         self.inner.manifest().parent.as_deref()
     }
 
-    /// Snapshot payload scope (`"disk"` today).
+    /// Snapshot payload scope as a `SnapshotScope` member (`DISK` today).
     #[getter]
-    fn scope(&self) -> &'static str {
-        format_scope(self.inner.manifest().scope)
+    fn scope(&self, py: Python<'_>) -> PyResult<PyObject> {
+        str_enum_member(
+            py,
+            "SnapshotScope",
+            format_scope(self.inner.manifest().scope),
+        )
     }
 
     /// RFC 3339 timestamp when the snapshot was created.
@@ -339,8 +346,8 @@ impl PySnapshot {
 
     /// Verify recorded content integrity.
     ///
-    /// Returns mandatory file-state integrity with `kind="verified"`,
-    /// `algorithm`, and `digest`.
+    /// Returns `kind="not_recorded"` when no integrity was requested, or
+    /// `kind="verified"` with the matching algorithm and digest.
     fn verify<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let snap = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -348,6 +355,9 @@ impl PySnapshot {
             Python::with_gil(|py| -> PyResult<PyObject> {
                 let upper = PyDict::new(py);
                 match report.upper {
+                    RustUpperVerifyStatus::NotRecorded => {
+                        upper.set_item("kind", "not_recorded")?;
+                    }
                     RustUpperVerifyStatus::Verified { algorithm, digest } => {
                         upper.set_item("kind", "verified")?;
                         upper.set_item("algorithm", algorithm)?;
@@ -392,8 +402,8 @@ impl PySnapshotHandle {
     }
 
     #[getter]
-    fn scope(&self) -> &'static str {
-        format_scope(self.inner.scope())
+    fn scope(&self, py: Python<'_>) -> PyResult<PyObject> {
+        str_enum_member(py, "SnapshotScope", format_scope(self.inner.scope()))
     }
 
     #[getter]
@@ -402,13 +412,17 @@ impl PySnapshotHandle {
     }
 
     #[getter]
-    fn state_kind(&self) -> &str {
-        self.inner.state_kind()
+    fn state_kind(&self, py: Python<'_>) -> PyResult<PyObject> {
+        str_enum_member(py, "SnapshotStateKind", self.inner.state_kind())
     }
 
     #[getter]
-    fn format(&self) -> Option<&'static str> {
-        self.inner.format().map(format_str)
+    fn format(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+        self.inner
+            .format()
+            .map(format_str)
+            .map(|format| str_enum_member(py, "SnapshotFormat", format))
+            .transpose()
     }
 
     #[getter]

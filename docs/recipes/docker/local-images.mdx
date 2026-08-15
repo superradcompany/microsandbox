@@ -5,6 +5,8 @@ description: Use locally built Docker images with microsandbox
 icon: "boxes-stacked"
 ---
 
+<Tooltip tip="This recipe uses the local image cache. On microsandbox cloud, specify an OCI image when creating the sandbox and it is pulled for you."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 microsandbox cannot read Docker's private local image store directly. If you build an image locally with `docker build`, export it with `docker save` and load it into microsandbox:
 
 ```bash

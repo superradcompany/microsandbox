@@ -23,6 +23,21 @@ pub enum PullPolicy {
     Never,
 }
 
+/// Filesystem representations produced by an image pull.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RootfsMaterialization {
+    /// Produce the stitched EROFS, fsmeta and VMDK representation.
+    #[default]
+    Layered,
+
+    /// Produce a reusable flat ext4 rootfs without layered-only artifacts.
+    Flat,
+
+    /// Produce both layered and flat rootfs representations from one layer stage.
+    All,
+}
+
 /// Options for [`Registry::pull()`](crate::Registry::pull).
 #[derive(Debug, Clone, Default)]
 pub struct PullOptions {
@@ -31,6 +46,9 @@ pub struct PullOptions {
 
     /// Re-download blobs and re-materialize rootfs images even if cached.
     pub force: bool,
+
+    /// Filesystem representations to prepare. Defaults to [`RootfsMaterialization::Layered`].
+    pub materialization: RootfsMaterialization,
 }
 
 /// Result of a successful image pull.
@@ -46,6 +64,22 @@ pub struct PullResult {
 
     /// True if all layers were already cached and no downloads occurred.
     pub cached: bool,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl RootfsMaterialization {
+    /// Whether the pull must produce the stitched layered representation.
+    pub const fn includes_layered(self) -> bool {
+        matches!(self, Self::Layered | Self::All)
+    }
+
+    /// Whether the pull must produce a flat ext4 representation.
+    pub const fn includes_flat(self) -> bool {
+        matches!(self, Self::Flat | Self::All)
+    }
 }
 
 //--------------------------------------------------------------------------------------------------

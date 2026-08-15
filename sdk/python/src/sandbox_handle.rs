@@ -5,6 +5,7 @@ use pyo3::types::{PyBool, PyDict, PyList};
 use tokio::sync::Mutex;
 
 use crate::error::to_py_err;
+use crate::helpers::{extract_str_enum, str_enum_member};
 use crate::metrics::convert_metrics;
 use crate::sandbox::{
     PySandbox, PySandboxPingResult, PySandboxStopResult, PySandboxTouchResult, optional_duration,
@@ -45,14 +46,28 @@ impl PySandboxHandle {
         Ok(guard.name().to_string())
     }
 
-    /// Status: "running", "stopped", "crashed", "draining", or "paused".
+    /// Current sandbox lifecycle status.
     #[getter]
-    fn status(&self) -> PyResult<String> {
+    fn status(&self, py: Python<'_>) -> PyResult<PyObject> {
         let guard = self
             .inner
             .try_lock()
             .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("handle is busy"))?;
-        Ok(format!("{:?}", guard.status_snapshot()).to_lowercase())
+        str_enum_member(
+            py,
+            "SandboxStatus",
+            &format!("{:?}", guard.status_snapshot()).to_lowercase(),
+        )
+    }
+
+    /// Backend retained by this handle (`"local"` or `"cloud"`).
+    #[getter]
+    fn backend_kind(&self) -> PyResult<String> {
+        let guard = self
+            .inner
+            .try_lock()
+            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("handle is busy"))?;
+        Ok(guard.backend_kind().as_str().to_string())
     }
 
     /// Raw config JSON string.
@@ -144,9 +159,9 @@ impl PySandboxHandle {
 
     /// Plan or apply a sandbox modification. Returns the plan as a dict.
     ///
-    /// `memory` / `max_memory` are in MiB. `policy` is `"no_restart"`
-    /// (default), `"next_start"`, or `"restart"`. With `dry_run=True` the
-    /// plan is computed without applying anything.
+    /// `memory` / `max_memory` are in MiB. `policy` is a
+    /// `ModificationPolicy`; with `dry_run=True` the plan is computed without
+    /// applying anything.
     ///
     /// `secrets` maps secret names to spec dicts with at most one of
     /// `"env"` / `"value"` / `"store"`, plus optional `"placeholder"` and
@@ -157,6 +172,7 @@ impl PySandboxHandle {
         max_cpus = None,
         memory = None,
         max_memory = None,
+        root_disk_size = None,
         env = None,
         env_rm = None,
         labels = None,
@@ -175,6 +191,7 @@ impl PySandboxHandle {
         max_cpus: Option<u8>,
         memory: Option<u32>,
         max_memory: Option<u32>,
+        root_disk_size: Option<u32>,
         env: Option<std::collections::HashMap<String, String>>,
         env_rm: Option<Vec<String>>,
         labels: Option<std::collections::HashMap<String, String>>,
@@ -184,15 +201,29 @@ impl PySandboxHandle {
             std::collections::HashMap<String, std::collections::HashMap<String, Py<PyAny>>>,
         >,
         secrets_rm: Option<Vec<String>>,
-        policy: Option<String>,
+        policy: Option<Py<PyAny>>,
         dry_run: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         let secrets = crate::sandbox::build_secret_patches(py, secrets)?;
         let patch = crate::sandbox::build_modify_patch(
-            cpus, max_cpus, memory, max_memory, env, env_rm, labels, labels_rm, workdir, secrets,
+            cpus,
+            max_cpus,
+            memory,
+            max_memory,
+            root_disk_size,
+            env,
+            env_rm,
+            labels,
+            labels_rm,
+            workdir,
+            secrets,
             secrets_rm,
         );
+        let policy = policy
+            .as_ref()
+            .map(|value| extract_str_enum(value.bind(py), "ModificationPolicy"))
+            .transpose()?;
         let policy = crate::sandbox::parse_modify_policy(policy.as_deref())?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let guard = inner.lock().await;
@@ -214,10 +245,10 @@ impl PySandboxHandle {
         tail: Option<usize>,
         since_ms: Option<f64>,
         until_ms: Option<f64>,
-        sources: Option<Vec<String>>,
+        sources: Option<Vec<Py<PyAny>>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let opts = crate::logs::parse_log_options(tail, since_ms, until_ms, sources)?;
+        let opts = crate::logs::parse_log_options(py, tail, since_ms, until_ms, sources)?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let guard = inner.lock().await;
             let entries = guard.logs(&opts).await.map_err(to_py_err)?;
@@ -244,7 +275,7 @@ impl PySandboxHandle {
     fn log_stream<'py>(
         &self,
         py: Python<'py>,
-        sources: Option<Vec<String>>,
+        sources: Option<Vec<Py<PyAny>>>,
         since_ms: Option<f64>,
         from_cursor: Option<String>,
         until_ms: Option<f64>,
@@ -252,6 +283,7 @@ impl PySandboxHandle {
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         let opts = crate::logs::parse_log_stream_options(
+            py,
             sources,
             since_ms,
             from_cursor,

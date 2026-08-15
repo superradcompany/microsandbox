@@ -1,12 +1,12 @@
 ---
 title: "Introduction"
-description: "Easy, fast, local microVMs for untrusted workloads"
+description: "Easy, fast microVMs for untrusted workloads"
 icon: "house"
 ---
 
-microsandbox is a local microVM runtime for untrusted workloads: AI agents, user code, plugins, package installs, CI jobs, dev environments, scrapers, and automation.
+microsandbox is a local-first microVM runtime for untrusted workloads: AI agents, user code, plugins, package installs, CI jobs, dev environments, scrapers, and automation.
 
-Each sandbox is a lightweight VM with its own Linux kernel, filesystem, and network boundary. Your app or the `msb` CLI starts it locally, talks to it through a host-guest command channel, and controls what it can access.
+Each sandbox is a lightweight VM with its own Linux kernel, filesystem, and network boundary. Your app or the `msb` CLI starts it on your machine or on [microsandbox cloud](/cloud/overview) with an API key, talks to it through a host-guest command channel, and controls what it can access.
 
 It keeps the familiar workflow of OCI images and command execution, while moving risky work out of the host process.
 
@@ -22,6 +22,7 @@ It keeps the familiar workflow of OCI images and command execution, while moving
 
 - **Hardware isolation.** Each sandbox is a VM, not a container namespace on the host kernel.
 - **Local runtime.** The SDK starts the sandbox process directly. No daemon, remote service, or infrastructure setup.
+- **Cloud when you want it.** The same SDK and CLI run sandboxes on [hosted infrastructure](/cloud/overview); an API key is the only change.
 - **Fast startup.** Sandboxes are lightweight enough to create from application code.
 - **Docker-like inputs.** Use familiar OCI images from Docker Hub, GHCR, ECR, GCR, or another registry.
 - **Programmable controls.** Configure resources, volumes, secrets, networking, and lifecycle from the CLI or SDK.
@@ -111,8 +112,8 @@ fmt.Println(out.Stdout())
     Install microsandbox and run your first sandbox.
   </Card>
 
-  <Card title="Tuning" icon="sliders" href="/sandboxes/tuning">
-    Learn how sandbox settings change.
+  <Card title="microsandbox cloud" icon="cloud" href="/cloud/overview">
+    Run the same sandboxes on hosted infrastructure.
   </Card>
 
   <Card title="CLI overview" icon="terminal" href="/cli/overview">

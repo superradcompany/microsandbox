@@ -4,7 +4,11 @@
 //! can run local sandboxes. Rendering (colors, glyphs, hint formatting) lives
 //! in the CLI so this layer stays presentation-agnostic.
 
+use std::fs::File;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+
+use microsandbox_utils::copy::{FastCopyStrategy, fast_copy_with_strategy};
 
 use crate::config::{self, LocalConfig};
 
@@ -130,6 +134,14 @@ impl Check {
         }
     }
 
+    pub(crate) fn warn(label: &str, value: &str) -> Self {
+        Self {
+            label: label.to_string(),
+            state: CheckState::Warn,
+            value: value.to_string(),
+        }
+    }
+
     pub(crate) fn info(label: &str, value: &str) -> Self {
         Self {
             label: label.to_string(),
@@ -231,7 +243,16 @@ fn runtime_section() -> (Section, Vec<Problem>) {
     let msb = resolve_msb_runtime_file(&config);
     let libkrunfw = resolve_libkrunfw_runtime_file(&config);
 
-    runtime_section_from_results(&base, config_error, msb, libkrunfw)
+    let (mut section, problems) = runtime_section_from_results(&base, config_error, msb, libkrunfw);
+
+    // `clone=auto` is only cheap when both artifacts live on a filesystem whose native clone
+    // primitive succeeds. Probe the configured home itself so bind mounts and per-directory
+    // volume boundaries are represented instead of guessing from the host's filesystem type.
+    if base.is_dir() {
+        section.checks.push(root_clone_check(&base));
+    }
+
+    (section, problems)
 }
 
 fn runtime_section_from_results(
@@ -299,6 +320,52 @@ fn runtime_file_check(label: &str, result: &Result<PathBuf, String>) -> Check {
     }
 }
 
+/// Resolve the strategy that `clone=auto` can use inside `MSB_HOME`.
+fn root_clone_check(base: &Path) -> Check {
+    match probe_root_clone(base) {
+        Ok(FastCopyStrategy::Reflink) => Check::pass("Root clone", "reflink supported"),
+        Ok(FastCopyStrategy::SparseCopy) => {
+            Check::warn("Root clone", "copy fallback — reflink unavailable")
+        }
+        Err(error) => Check::warn(
+            "Root clone",
+            &format!("not checked — {}", concise_io_error(&error)),
+        ),
+    }
+}
+
+/// Exercise the same portable clone implementation used by flat sandbox roots.
+fn probe_root_clone(base: &Path) -> io::Result<FastCopyStrategy> {
+    const PROBE_LEN: usize = 64 * 1024;
+
+    let probe = tempfile::Builder::new()
+        .prefix(".msb-doctor-clone-")
+        .tempdir_in(base)?;
+    let source = probe.path().join("source");
+    let destination = probe.path().join("destination");
+
+    // ReFS block clones require cluster-aligned ranges. A 64-KiB data-bearing file is accepted by
+    // both of its common cluster sizes and also prevents a sparse-hole shortcut from masquerading
+    // as a successful clone on other platforms.
+    let mut source_file = File::create(&source)?;
+    source_file.write_all(&vec![0xa5; PROBE_LEN])?;
+    source_file.sync_all()?;
+    drop(source_file);
+
+    let (_, strategy) = fast_copy_with_strategy(&source, &destination)?;
+    probe.close()?;
+    Ok(strategy)
+}
+
+fn concise_io_error(error: &io::Error) -> &'static str {
+    match error.kind() {
+        io::ErrorKind::NotFound => "MSB_HOME is unavailable",
+        io::ErrorKind::PermissionDenied => "permission denied",
+        io::ErrorKind::StorageFull => "storage is full",
+        _ => "probe failed",
+    }
+}
+
 fn resolve_msb_runtime_file(config: &LocalConfig) -> Result<PathBuf, String> {
     let path = config
         .resolve_msb_path()
@@ -358,6 +425,19 @@ fn unsupported_host_section() -> (Section, Vec<Problem>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn root_clone_probe_cleans_up_its_temporary_files() {
+        let base = tempfile::tempdir().unwrap();
+
+        let strategy = probe_root_clone(base.path()).unwrap();
+
+        assert!(matches!(
+            strategy,
+            FastCopyStrategy::Reflink | FastCopyStrategy::SparseCopy
+        ));
+        assert_eq!(std::fs::read_dir(base.path()).unwrap().count(), 0);
+    }
 
     #[test]
     fn runtime_section_accepts_resolved_side_by_side_runtime() {

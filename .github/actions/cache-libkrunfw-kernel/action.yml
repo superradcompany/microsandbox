@@ -1,0 +1,77 @@
+name: Cache libkrunfw kernel source
+description: Download, verify, and cache the kernel source used by libkrunfw.
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve kernel source
+      id: kernel-source
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        kernel_version=$(sed -n 's/^KERNEL_VERSION = //p' vendor/libkrunfw/Makefile)
+        kernel_tarball=$(sed -n 's/^KERNEL_TARBALL = //p' vendor/libkrunfw/Makefile)
+
+        case "${kernel_version}:${kernel_tarball}" in
+          linux-6.12.99:'tarballs/$(KERNEL_VERSION).tar.gz')
+            # Published in kernel.org's signed v6.x sha256sums.asc index.
+            kernel_sha256=194eef900ade82df74ed1d695daa45d03ee4bb415cae4f936a3dbaab2dbbb951
+            ;;
+          *)
+            echo "::error::Add the checksum for ${kernel_version} (${kernel_tarball}) to ${GITHUB_ACTION_PATH}/action.yml"
+            exit 1
+            ;;
+        esac
+
+        kernel_filename="${kernel_version}.tar.gz"
+        kernel_path="vendor/libkrunfw/tarballs/${kernel_filename}"
+        kernel_url="https://cdn.kernel.org/pub/linux/kernel/v6.x/${kernel_filename}"
+
+        {
+          echo "cache-key=libkrunfw-kernel-source-${kernel_version}-${kernel_sha256}"
+          echo "path=${kernel_path}"
+          echo "sha256=${kernel_sha256}"
+          echo "url=${kernel_url}"
+        } >> "${GITHUB_OUTPUT}"
+
+    - name: Restore kernel source
+      id: kernel-source-cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.kernel-source.outputs.path }}
+        key: ${{ steps.kernel-source.outputs.cache-key }}
+
+    - name: Download kernel source
+      if: steps.kernel-source-cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        KERNEL_PATH: ${{ steps.kernel-source.outputs.path }}
+        KERNEL_URL: ${{ steps.kernel-source.outputs.url }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$(dirname "${KERNEL_PATH}")"
+        curl \
+          --fail \
+          --location \
+          --http1.1 \
+          --retry 5 \
+          --retry-all-errors \
+          --retry-delay 2 \
+          --continue-at - \
+          --output "${KERNEL_PATH}" \
+          "${KERNEL_URL}"
+
+    - name: Verify kernel source
+      shell: bash
+      env:
+        KERNEL_PATH: ${{ steps.kernel-source.outputs.path }}
+        KERNEL_SHA256: ${{ steps.kernel-source.outputs.sha256 }}
+      run: printf '%s  %s\n' "${KERNEL_SHA256}" "${KERNEL_PATH}" | sha256sum --check --strict -
+
+    - name: Save kernel source
+      if: steps.kernel-source-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.kernel-source.outputs.path }}
+        key: ${{ steps.kernel-source.outputs.cache-key }}

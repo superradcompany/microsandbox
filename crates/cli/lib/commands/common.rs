@@ -3,13 +3,16 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use clap::Args;
+use clap::{Arg, ArgAction, ArgMatches, Args, Command, FromArgMatches};
 use microsandbox::VolumeKind;
 use microsandbox::backend::{Backend, LocalBackend};
 use microsandbox::sandbox::{
-    DiskImageFormat, MountBuilder, Patch, RootDiskBuilder, Sandbox, SandboxBuilder, SandboxHandle,
-    SecurityProfile,
+    CpuPlacement, DeploymentProfile, DiskImageFormat, FlatClone, MountBuilder, Patch,
+    RootDiskBuilder, Sandbox, SandboxBuilder, SandboxHandle, SecurityProfile,
+    TransparentHugePagePolicy, VsockSocketType,
 };
+#[cfg(feature = "net")]
+use microsandbox_types::NetworkRateLimitDirection;
 
 use crate::ui;
 
@@ -46,9 +49,48 @@ pub fn local_backend_ref(backend: &Arc<dyn Backend>) -> anyhow::Result<&LocalBac
 // Types
 //--------------------------------------------------------------------------------------------------
 
+/// Sparse configuration files accepted by single-sandbox commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SandboxConfigKind {
+    /// A sparse root sandbox configuration.
+    Root,
+    /// An unwrapped network configuration.
+    Network,
+    /// An unwrapped resource and lifecycle configuration.
+    Resources,
+    /// An unwrapped runtime configuration.
+    Runtime,
+    /// An unwrapped filesystem configuration.
+    Filesystem,
+    /// An unwrapped secret-name map.
+    Secrets,
+    /// An unwrapped script-name map.
+    Scripts,
+}
+
+/// One configuration source in its original command-line position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SandboxConfigSource {
+    /// The schema expected for this source.
+    pub(crate) kind: SandboxConfigKind,
+    /// The file to load.
+    pub(crate) path: PathBuf,
+}
+
+/// Sparse configuration files accepted by single-sandbox commands.
+#[derive(Debug, Default)]
+pub struct SandboxConfigSources {
+    /// Sources sorted by their occurrence on the command line.
+    sources: Vec<SandboxConfigSource>,
+}
+
 /// Common sandbox configuration flags shared between `msb run` and `msb create`.
 #[derive(Debug, Default, Args)]
 pub struct SandboxOpts {
+    /// Sparse root and scoped configuration inputs.
+    #[command(flatten)]
+    pub config: SandboxConfigSources,
+
     /// Name for the sandbox. Auto-generated if omitted. Maximum 128 UTF-8 bytes.
     #[arg(short, long)]
     pub name: Option<String>,
@@ -61,6 +103,14 @@ pub struct SandboxOpts {
     #[arg(long = "max-cpus")]
     pub max_cpus: Option<u8>,
 
+    /// Host CPU placement policy (inherit, auto, spread, compact).
+    #[arg(long = "cpu-placement", value_name = "POLICY")]
+    pub cpu_placement: Option<CpuPlacement>,
+
+    /// Host-defined placement profile name.
+    #[arg(long = "placement-profile", value_name = "NAME")]
+    pub placement_profile: Option<String>,
+
     /// Amount of memory to allocate (e.g. 512M, 1G).
     #[arg(short, long)]
     pub memory: Option<String>,
@@ -68,6 +118,10 @@ pub struct SandboxOpts {
     /// Boot-time maximum hotpluggable memory (e.g. 1G, 8G).
     #[arg(long = "max-memory", value_name = "SIZE")]
     pub max_memory: Option<String>,
+
+    /// Guest transparent huge-page policy selected at boot.
+    #[arg(long, value_name = "POLICY", value_parser = ["always", "madvise", "never"])]
+    pub thp: Option<String>,
 
     /// Mount a host path or named volume into the sandbox (`SOURCE:DEST[:OPTIONS]`).
     #[arg(short, long)]
@@ -131,6 +185,11 @@ pub struct SandboxOpts {
     /// In-guest security profile (default or restricted).
     #[arg(long, value_parser = ["default", "restricted"])]
     pub security: Option<String>,
+
+    /// Host-runtime deployment profile (single-tenant or multi-tenant).
+    /// Managed backends may enforce their own profile.
+    #[arg(long = "deployment-profile", value_parser = ["single-tenant", "multi-tenant"])]
+    pub deployment_profile: Option<String>,
 
     /// Register a shell snippet as a named script (NAME=BODY). The body
     /// supports `\n`, `\t`, `\r`, `\\`, `\"`, `\'` escapes; unknown escapes
@@ -214,7 +273,7 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub pull: Option<String>,
 
-    /// Writable rootfs layer for OCI images (e.g. 8G, tmpfs:2G,
+    /// Root disk for OCI images (e.g. 8G, tmpfs:2G, flat:8G,
     /// ./scratch.img, ./scratch.qcow2:format=qcow2,fstype=ext4).
     #[arg(long = "root-disk", value_name = "SPEC")]
     pub root_disk: Option<String>,
@@ -240,6 +299,14 @@ pub struct SandboxOpts {
     /// Stop the sandbox after this period of inactivity (e.g. 30s, 5m, 1h).
     #[arg(long)]
     pub idle_timeout: Option<String>,
+
+    // --- Host communication ---
+    /// Expose a host local-IPC endpoint on a guest-to-host vsock port.
+    ///
+    /// Syntax: HOST_PATH:PORT, optionally followed by /stream or /dgram.
+    /// Stream is the default. Repeat the flag to expose multiple services.
+    #[arg(long, value_name = "HOST_PATH:PORT[/stream|/dgram]")]
+    pub vsock: Vec<String>,
 
     // --- Networking (requires "net" feature) ---
     /// Forward a host port to the sandbox (HOST:GUEST, BIND_ADDR:HOST:GUEST, and /udp variants).
@@ -345,6 +412,54 @@ pub struct SandboxOpts {
     #[cfg(feature = "net")]
     #[arg(long = "net-default-ingress", value_name = "ACTION")]
     pub net_default_ingress: Option<String>,
+
+    /// Limit outbound (egress) bandwidth, e.g. 1M/1s. SIZE accepts
+    /// raw bytes plus K, M, and G suffixes; the interval defaults to one
+    /// second when omitted. Applies on the next sandbox start.
+    #[cfg(feature = "net")]
+    #[arg(long = "net-egress-bandwidth", value_name = "SIZE[/DURATION]")]
+    pub net_egress_bandwidth: Option<String>,
+
+    /// One-time startup burst for the egress bandwidth limit, e.g. 512K.
+    /// Requires --net-egress-bandwidth.
+    #[cfg(feature = "net")]
+    #[arg(long = "net-egress-bandwidth-burst", value_name = "SIZE")]
+    pub net_egress_bandwidth_burst: Option<String>,
+
+    /// Limit outbound (egress) packet rate, e.g. 1000/1s. The
+    /// interval defaults to one second when omitted.
+    #[cfg(feature = "net")]
+    #[arg(long = "net-egress-ops", value_name = "COUNT[/DURATION]")]
+    pub net_egress_ops: Option<String>,
+
+    /// One-time startup burst for the egress packet-rate limit.
+    /// Requires --net-egress-ops.
+    #[cfg(feature = "net")]
+    #[arg(long = "net-egress-ops-burst", value_name = "COUNT")]
+    pub net_egress_ops_burst: Option<u64>,
+
+    /// Limit inbound (ingress) bandwidth, e.g. 1M/1s. Same syntax
+    /// as --net-egress-bandwidth.
+    #[cfg(feature = "net")]
+    #[arg(long = "net-ingress-bandwidth", value_name = "SIZE[/DURATION]")]
+    pub net_ingress_bandwidth: Option<String>,
+
+    /// One-time startup burst for the ingress bandwidth limit.
+    /// Requires --net-ingress-bandwidth.
+    #[cfg(feature = "net")]
+    #[arg(long = "net-ingress-bandwidth-burst", value_name = "SIZE")]
+    pub net_ingress_bandwidth_burst: Option<String>,
+
+    /// Limit inbound (ingress) packet rate, e.g. 1000/1s.
+    #[cfg(feature = "net")]
+    #[arg(long = "net-ingress-ops", value_name = "COUNT[/DURATION]")]
+    pub net_ingress_ops: Option<String>,
+
+    /// One-time startup burst for the ingress packet-rate limit.
+    /// Requires --net-ingress-ops.
+    #[cfg(feature = "net")]
+    #[arg(long = "net-ingress-ops-burst", value_name = "COUNT")]
+    pub net_ingress_ops_burst: Option<u64>,
 
     /// Limit the number of concurrent network connections.
     #[cfg(feature = "net")]
@@ -482,8 +597,11 @@ impl SandboxOpts {
     pub fn has_creation_flags(&self) -> bool {
         let base = self.cpus.is_some()
             || self.max_cpus.is_some()
+            || self.cpu_placement.is_some()
+            || self.placement_profile.is_some()
             || self.memory.is_some()
             || self.max_memory.is_some()
+            || self.thp.is_some()
             || !self.volume.is_empty()
             || !self.mount_dir.is_empty()
             || !self.mount_file.is_empty()
@@ -513,7 +631,8 @@ impl SandboxOpts {
             || self.log_level.is_some()
             || self.max_duration.is_some()
             || self.idle_timeout.is_some()
-            || self.security.is_some();
+            || self.security.is_some()
+            || !self.vsock.is_empty();
 
         #[cfg(feature = "net")]
         let net = !self.port.is_empty()
@@ -526,6 +645,14 @@ impl SandboxOpts {
             || self.net_default.is_some()
             || self.net_default_egress.is_some()
             || self.net_default_ingress.is_some()
+            || self.net_egress_bandwidth.is_some()
+            || self.net_egress_bandwidth_burst.is_some()
+            || self.net_egress_ops.is_some()
+            || self.net_egress_ops_burst.is_some()
+            || self.net_ingress_bandwidth.is_some()
+            || self.net_ingress_bandwidth_burst.is_some()
+            || self.net_ingress_ops.is_some()
+            || self.net_ingress_ops_burst.is_some()
             || self.max_connections.is_some()
             || self.trust_host_cas
             || self.tls_intercept
@@ -543,7 +670,152 @@ impl SandboxOpts {
         #[cfg(not(feature = "net"))]
         let net = false;
 
-        base || net
+        base || net || self.config.any()
+    }
+}
+
+impl SandboxConfigSources {
+    /// Returns true when at least one explicit config path was supplied.
+    pub fn any(&self) -> bool {
+        !self.sources.is_empty()
+    }
+
+    /// Iterate over configuration sources in command-line order.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &SandboxConfigSource> {
+        self.sources.iter()
+    }
+
+    #[cfg(test)]
+    /// Append a source while constructing resolver fixtures.
+    pub(crate) fn source(mut self, kind: SandboxConfigKind, path: impl Into<PathBuf>) -> Self {
+        self.sources.push(SandboxConfigSource {
+            kind,
+            path: path.into(),
+        });
+        self
+    }
+}
+
+impl SandboxConfigKind {
+    /// Every supported source kind, in declaration order for help output.
+    const ALL: [Self; 7] = [
+        Self::Root,
+        Self::Network,
+        Self::Resources,
+        Self::Runtime,
+        Self::Filesystem,
+        Self::Secrets,
+        Self::Scripts,
+    ];
+
+    /// The clap argument identifier used by cross-argument constraints.
+    const fn id(self) -> &'static str {
+        match self {
+            Self::Root => "conf",
+            Self::Network => "net_conf",
+            Self::Resources => "resource_conf",
+            Self::Runtime => "runtime_conf",
+            Self::Filesystem => "fs_conf",
+            Self::Secrets => "secret_conf",
+            Self::Scripts => "script_conf",
+        }
+    }
+
+    /// The long option spelling, without its leading dashes.
+    const fn long(self) -> &'static str {
+        match self {
+            Self::Root => "conf",
+            Self::Network => "net-conf",
+            Self::Resources => "resource-conf",
+            Self::Runtime => "runtime-conf",
+            Self::Filesystem => "fs-conf",
+            Self::Secrets => "secret-conf",
+            Self::Scripts => "script-conf",
+        }
+    }
+
+    /// The long option spelling used when persisting an installed alias.
+    pub(crate) fn flag(self) -> String {
+        format!("--{}", self.long())
+    }
+
+    /// User-facing help for this configuration source.
+    const fn help(self) -> &'static str {
+        match self {
+            Self::Root => "Load a sparse single-sandbox configuration",
+            Self::Network => "Load an unwrapped network configuration",
+            Self::Resources => "Load an unwrapped resource and lifecycle configuration",
+            Self::Runtime => "Load an unwrapped runtime configuration",
+            Self::Filesystem => "Load an unwrapped filesystem configuration",
+            Self::Secrets => "Load an unwrapped secret-name map",
+            Self::Scripts => "Load an unwrapped script-name map",
+        }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl Args for SandboxConfigSources {
+    fn augment_args(command: Command) -> Command {
+        SandboxConfigKind::ALL
+            .into_iter()
+            .fold(command, |command, kind| {
+                command.arg(
+                    Arg::new(kind.id())
+                        .long(kind.long())
+                        .value_name("PATH")
+                        .help(kind.help())
+                        .action(ArgAction::Append)
+                        .value_parser(clap::value_parser!(PathBuf)),
+                )
+            })
+    }
+
+    fn augment_args_for_update(command: Command) -> Command {
+        Self::augment_args(command)
+    }
+}
+
+impl FromArgMatches for SandboxConfigSources {
+    fn from_arg_matches(matches: &ArgMatches) -> Result<Self, clap::Error> {
+        let mut indexed_sources = Vec::new();
+
+        for kind in SandboxConfigKind::ALL {
+            let Some(indices) = matches.indices_of(kind.id()) else {
+                continue;
+            };
+            let Some(paths) = matches.get_many::<PathBuf>(kind.id()) else {
+                continue;
+            };
+
+            indexed_sources.extend(indices.zip(paths).map(|(index, path)| {
+                (
+                    index,
+                    SandboxConfigSource {
+                        kind,
+                        path: path.clone(),
+                    },
+                )
+            }));
+        }
+
+        // Clap retains an index for each value. Sorting those indices recovers interleaving across
+        // independently named flags, which separate Vec fields cannot represent.
+        indexed_sources.sort_by_key(|(index, _)| *index);
+
+        Ok(Self {
+            sources: indexed_sources
+                .into_iter()
+                .map(|(_, source)| source)
+                .collect(),
+        })
+    }
+
+    fn update_from_arg_matches(&mut self, matches: &ArgMatches) -> Result<(), clap::Error> {
+        *self = Self::from_arg_matches(matches)?;
+        Ok(())
     }
 }
 
@@ -553,8 +825,27 @@ impl SandboxOpts {
 
 /// Apply common sandbox options to a builder.
 pub fn apply_sandbox_opts(
+    builder: SandboxBuilder,
+    opts: &SandboxOpts,
+) -> anyhow::Result<SandboxBuilder> {
+    apply_sandbox_opts_inner(builder, opts, true)
+}
+
+/// Apply explicit CLI options after a sparse configuration patch.
+///
+/// The SDK patch has already populated lower-precedence values. Normal builder methods applied by
+/// this adapter therefore retain the same last-write-wins behavior as direct SDK usage.
+pub fn apply_sandbox_opts_after_config(
+    builder: SandboxBuilder,
+    opts: &SandboxOpts,
+) -> anyhow::Result<SandboxBuilder> {
+    apply_sandbox_opts_inner(builder, opts, true)
+}
+
+fn apply_sandbox_opts_inner(
     mut builder: SandboxBuilder,
     opts: &SandboxOpts,
+    _apply_cli_network_policy: bool,
 ) -> anyhow::Result<SandboxBuilder> {
     // --- Basic resources ---
     if let Some(cpus) = opts.cpus {
@@ -563,11 +854,23 @@ pub fn apply_sandbox_opts(
     if let Some(max_cpus) = opts.max_cpus {
         builder = builder.max_cpus(max_cpus);
     }
+    if let Some(cpu_placement) = opts.cpu_placement {
+        builder = builder.cpu_placement(cpu_placement);
+    }
+    if let Some(ref placement_profile) = opts.placement_profile {
+        builder = builder.placement_profile(placement_profile);
+    }
     if let Some(ref mem) = opts.memory {
         builder = builder.memory(ui::parse_size_mib(mem).map_err(anyhow::Error::msg)?);
     }
     if let Some(ref max_memory) = opts.max_memory {
         builder = builder.max_memory(ui::parse_size_mib(max_memory).map_err(anyhow::Error::msg)?);
+    }
+    if let Some(ref thp) = opts.thp {
+        let policy = thp
+            .parse::<TransparentHugePagePolicy>()
+            .map_err(anyhow::Error::msg)?;
+        builder = builder.thp(policy);
     }
     if let Some(ref workdir) = opts.workdir {
         builder = builder.workdir(workdir);
@@ -670,6 +973,9 @@ pub fn apply_sandbox_opts(
     if let Some(ref security) = opts.security {
         builder = builder.security(parse_security_profile(security)?);
     }
+    if let Some(ref profile) = opts.deployment_profile {
+        builder = builder.deployment_profile(parse_deployment_profile(profile)?);
+    }
 
     // --- Handoff init ---
     // clap's `requires = "init"` already enforces that --init-arg /
@@ -709,13 +1015,54 @@ pub fn apply_sandbox_opts(
         builder = builder.idle_timeout(parse_duration_secs(dur)?);
     }
 
+    // --- Host communication ---
+    for route in &opts.vsock {
+        let (host_socket, port, socket_type) = parse_vsock_route(route)?;
+        builder = match socket_type {
+            VsockSocketType::Stream => builder.vsock(host_socket, port),
+            VsockSocketType::Dgram => builder.vsock_dgram(host_socket, port),
+        };
+    }
+
     // --- Networking ---
     #[cfg(feature = "net")]
     {
-        builder = apply_network_opts(builder, opts)?;
+        builder = apply_network_opts(builder, opts, _apply_cli_network_policy)?;
     }
 
     Ok(builder)
+}
+
+/// Parse `HOST_PATH:PORT[/stream|/dgram]` without treating colons in the
+/// host path as separators. Stream is intentionally the compact default.
+fn parse_vsock_route(spec: &str) -> anyhow::Result<(PathBuf, u32, VsockSocketType)> {
+    let (host_socket, endpoint) = spec.rsplit_once(':').ok_or_else(|| {
+        anyhow::anyhow!("--vsock must use HOST_PATH:PORT[/stream|/dgram], got {spec:?}")
+    })?;
+    if host_socket.is_empty() {
+        anyhow::bail!("--vsock host path cannot be empty");
+    }
+
+    let (port, socket_type) = match endpoint.rsplit_once('/') {
+        None => (endpoint, VsockSocketType::Stream),
+        Some((port, "stream")) => (port, VsockSocketType::Stream),
+        Some((port, "dgram")) => (port, VsockSocketType::Dgram),
+        Some((_, kind)) => {
+            anyhow::bail!("--vsock socket type must be stream or dgram, got {kind:?}")
+        }
+    };
+    let port = port.parse::<u32>().map_err(|_| {
+        anyhow::anyhow!("--vsock port must be an unsigned 32-bit integer, got {port:?}")
+    })?;
+    let host_socket = PathBuf::from(host_socket);
+    if !host_socket.is_absolute() {
+        anyhow::bail!(
+            "--vsock host path must be absolute, got {}",
+            host_socket.display()
+        );
+    }
+
+    Ok((host_socket, port, socket_type))
 }
 
 /// Parsed `--root-disk` value, classified before it touches the builder.
@@ -731,6 +1078,11 @@ enum RootDiskSpec {
         path: String,
         format: Option<DiskImageFormat>,
         fstype: Option<String>,
+    },
+    Flat {
+        size_mib: Option<u32>,
+        fstype: Option<String>,
+        clone: FlatClone,
     },
 }
 
@@ -759,6 +1111,20 @@ impl RootDiskSpec {
                 }
                 d
             }
+            Self::Flat {
+                size_mib,
+                fstype,
+                clone,
+            } => {
+                d = d.flat().clone_strategy(clone);
+                if let Some(size_mib) = size_mib {
+                    d = d.size(size_mib);
+                }
+                if let Some(fstype) = fstype {
+                    d = d.fstype(fstype);
+                }
+                d
+            }
         }
     }
 }
@@ -767,11 +1133,13 @@ impl RootDiskSpec {
 /// the volume flags: a bare size means the managed ext4 upper, `tmpfs[:SIZE]`
 /// a RAM-backed upper, and a path a user-supplied disk image with optional
 /// comma-separated options after a colon (`format=raw|qcow2`, `fstype=...`).
+/// `flat[:SIZE]` selects one complete managed root filesystem and accepts
+/// `fstype=` plus `clone=` options.
 fn parse_root_disk_spec(spec: &str) -> anyhow::Result<RootDiskSpec> {
     let spec = spec.trim();
     if spec.is_empty() {
         anyhow::bail!(
-            "--root-disk requires a value (e.g. 8G, tmpfs:2G, ./scratch.qcow2:format=qcow2)"
+            "--root-disk requires a value (e.g. 8G, tmpfs:2G, flat:8G, ./scratch.qcow2:format=qcow2)"
         );
     }
 
@@ -783,6 +1151,16 @@ fn parse_root_disk_spec(spec: &str) -> anyhow::Result<RootDiskSpec> {
         return Ok(RootDiskSpec::Tmpfs {
             size_mib: Some(size_mib),
         });
+    }
+    if spec == "flat" {
+        return Ok(RootDiskSpec::Flat {
+            size_mib: None,
+            fstype: None,
+            clone: FlatClone::Auto,
+        });
+    }
+    if let Some(options) = spec.strip_prefix("flat:") {
+        return parse_flat_root_disk_options(options);
     }
 
     // Split SOURCE[:OPTIONS] on the first colon that isn't a Windows drive
@@ -810,13 +1188,68 @@ fn parse_root_disk_spec(spec: &str) -> anyhow::Result<RootDiskSpec> {
 
     if options.is_some() {
         anyhow::bail!(
-            "--root-disk: options after ':' are only valid for a disk image path (e.g. ./scratch.qcow2:format=qcow2,fstype=ext4)"
+            "--root-disk: options after ':' are only valid for flat or a disk image path (e.g. flat:8G,clone=auto or ./scratch.qcow2:format=qcow2,fstype=ext4)"
         );
     }
     let size_mib = ui::parse_size_mib(source).map_err(|err| {
-        anyhow::anyhow!("--root-disk: {err} (expected a size, tmpfs[:SIZE], or an image path)")
+        anyhow::anyhow!(
+            "--root-disk: {err} (expected a size, tmpfs[:SIZE], flat[:SIZE][,OPTIONS], or an image path)"
+        )
     })?;
     Ok(RootDiskSpec::Managed { size_mib })
+}
+
+/// Parse `flat[:SIZE][,fstype=TYPE][,clone=auto|copy|reflink]`.
+fn parse_flat_root_disk_options(options: &str) -> anyhow::Result<RootDiskSpec> {
+    if options.trim().is_empty() {
+        anyhow::bail!("--root-disk: flat: requires a size or option after ':'");
+    }
+
+    let mut size_mib = None;
+    let mut fstype = None;
+    let mut clone = FlatClone::Auto;
+    let mut clone_set = false;
+    for (index, token) in options.split(',').map(str::trim).enumerate() {
+        if token.is_empty() {
+            anyhow::bail!("--root-disk: empty flat root option");
+        }
+        let option = token
+            .split_once('=')
+            .map(|(key, value)| (key.trim(), value.trim()));
+        match option {
+            Some(("fstype", value)) if !value.is_empty() => {
+                if fstype.replace(value.to_string()).is_some() {
+                    anyhow::bail!("--root-disk: duplicate fstype option");
+                }
+            }
+            Some(("clone", value)) => {
+                if clone_set {
+                    anyhow::bail!("--root-disk: duplicate clone option");
+                }
+                clone = match value {
+                    "auto" => FlatClone::Auto,
+                    "copy" => FlatClone::Copy,
+                    "reflink" => FlatClone::Reflink,
+                    other => anyhow::bail!(
+                        "--root-disk: unsupported flat clone strategy '{other}' (expected auto, copy, or reflink)"
+                    ),
+                };
+                clone_set = true;
+            }
+            None if index == 0 => {
+                size_mib = Some(ui::parse_size_mib(token).map_err(anyhow::Error::msg)?);
+            }
+            _ => anyhow::bail!(
+                "--root-disk: unknown flat option '{token}' (expected an optional leading size, fstype=..., or clone=auto|copy|reflink)"
+            ),
+        }
+    }
+
+    Ok(RootDiskSpec::Flat {
+        size_mib,
+        fstype,
+        clone,
+    })
 }
 
 /// Find the colon starting the options segment, skipping a Windows drive colon.
@@ -1487,8 +1920,11 @@ fn ensure_host_kind(context: &str, source: &str, kind: HostPathKind) -> anyhow::
 fn apply_network_opts(
     mut builder: SandboxBuilder,
     opts: &SandboxOpts,
+    apply_cli_network_config: bool,
 ) -> anyhow::Result<SandboxBuilder> {
     use microsandbox_network::dns::Nameserver;
+
+    use crate::net_rule::parse_rule_list;
 
     // Port mappings.
     for port_str in &opts.port {
@@ -1498,6 +1934,11 @@ fn apply_network_opts(
         } else {
             builder.port_bind(bind, host, guest)
         };
+    }
+
+    // Some callers intentionally apply only additive ports after resolving network settings.
+    if !apply_cli_network_config {
+        return Ok(builder);
     }
 
     // Secrets. `create` persists a host-side source reference, not the raw
@@ -1539,6 +1980,14 @@ fn apply_network_opts(
         || opts.net_default_ingress.is_some()
         || opts.net_ipv4_pool.is_some()
         || opts.net_ipv6_pool.is_some()
+        || opts.net_egress_bandwidth.is_some()
+        || opts.net_egress_bandwidth_burst.is_some()
+        || opts.net_egress_ops.is_some()
+        || opts.net_egress_ops_burst.is_some()
+        || opts.net_ingress_bandwidth.is_some()
+        || opts.net_ingress_bandwidth_burst.is_some()
+        || opts.net_ingress_ops.is_some()
+        || opts.net_ingress_ops_burst.is_some()
         || opts.max_connections.is_some()
         || opts.trust_host_cas
         || opts.tls_intercept
@@ -1568,6 +2017,22 @@ fn apply_network_opts(
             opts.net_default_egress.as_deref(),
             opts.net_default_ingress.as_deref(),
         )?;
+        let replaces_configured_base = !opts.net.is_empty()
+            || opts.no_net
+            || opts.net_default.is_some()
+            || opts.net_default_egress.is_some()
+            || opts.net_default_ingress.is_some();
+        if replaces_configured_base {
+            if let Some(policy) = network_policy {
+                builder = builder.replace_network_policy_preserving_config_rules(policy);
+            }
+        } else if !opts.net_rule.is_empty() {
+            let mut rules = Vec::new();
+            for value in &opts.net_rule {
+                rules.extend(parse_rule_list(value).map_err(anyhow::Error::from)?);
+            }
+            builder = builder.prepend_network_policy_rules(rules);
+        }
         let max_conn = opts.max_connections;
         let ipv4_pool = opts
             .net_ipv4_pool
@@ -1600,22 +2065,35 @@ fn apply_network_opts(
             .collect::<anyhow::Result<Vec<_>>>()?;
         let no_verify_upstream_for = opts.tls_no_verify_upstream_for.clone();
         let violation_action = parse_violation_action(&opts.on_secret_violation)?;
+        let egress_rate_limiter = parse_rate_limiter_flags(
+            NetworkRateLimitDirection::Egress,
+            opts.net_egress_bandwidth.as_deref(),
+            opts.net_egress_bandwidth_burst.as_deref(),
+            opts.net_egress_ops.as_deref(),
+            opts.net_egress_ops_burst,
+        )?;
+        let ingress_rate_limiter = parse_rate_limiter_flags(
+            NetworkRateLimitDirection::Ingress,
+            opts.net_ingress_bandwidth.as_deref(),
+            opts.net_ingress_bandwidth_burst.as_deref(),
+            opts.net_ingress_ops.as_deref(),
+            opts.net_ingress_ops_burst,
+        )?;
 
         builder = builder.network(move |mut n| {
-            n = n.dns(move |mut d| {
-                if no_dns_rebind {
-                    d = d.rebind_protection(false);
-                }
-                if !dns_nameservers.is_empty() {
-                    d = d.nameservers(dns_nameservers);
-                }
-                if let Some(ms) = dns_query_timeout_ms {
-                    d = d.query_timeout_ms(ms);
-                }
-                d
-            });
-            if let Some(policy) = network_policy {
-                n = n.policy(policy);
+            if no_dns_rebind || !dns_nameservers.is_empty() || dns_query_timeout_ms.is_some() {
+                n = n.dns_overlay(move |mut d| {
+                    if no_dns_rebind {
+                        d = d.rebind_protection(false);
+                    }
+                    if !dns_nameservers.is_empty() {
+                        d = d.nameservers(dns_nameservers);
+                    }
+                    if let Some(ms) = dns_query_timeout_ms {
+                        d = d.query_timeout_ms(ms);
+                    }
+                    d
+                });
             }
             if let Some(max) = max_conn {
                 n = n.max_connections(max);
@@ -1628,6 +2106,17 @@ fn apply_network_opts(
             }
             if trust_host_cas {
                 n = n.trust_host_cas(true);
+            }
+            if egress_rate_limiter.is_some() || ingress_rate_limiter.is_some() {
+                n = n.rate_limiter(|mut r| {
+                    if let Some(limiter) = &egress_rate_limiter {
+                        r = r.egress(|direction| limiter.apply(direction));
+                    }
+                    if let Some(limiter) = &ingress_rate_limiter {
+                        r = r.ingress(|direction| limiter.apply(direction));
+                    }
+                    r
+                });
             }
             if let Some(action) = violation_action {
                 n = n.on_secret_violation(|_| {
@@ -1654,7 +2143,8 @@ fn apply_network_opts(
                 let upstream_ca_cert = upstream_ca_cert.clone();
                 let scoped_upstream_ca_cert = scoped_upstream_ca_cert.clone();
                 let no_verify_upstream_for = no_verify_upstream_for.clone();
-                n = n.tls(move |mut t| {
+                n = n.tls_overlay(move |mut t| {
+                    t = t.enabled(true);
                     if !tls_ports.is_empty() {
                         t = t.intercepted_ports(tls_ports);
                     }
@@ -1728,6 +2218,101 @@ pub fn parse_duration(s: &str) -> anyhow::Result<std::time::Duration> {
     }
 }
 
+/// Parsed values of one direction's `--net-{egress,ingress}-*` rate limit flags.
+#[cfg(feature = "net")]
+struct CliRateLimiter {
+    bandwidth: Option<(u64, std::time::Duration)>,
+    bandwidth_burst: Option<u64>,
+    ops: Option<(u64, std::time::Duration)>,
+    ops_burst: Option<u64>,
+}
+
+#[cfg(feature = "net")]
+impl CliRateLimiter {
+    /// Apply the parsed flags to the SDK builder, which validates the
+    /// combination (bucket sizes, bursts without buckets) at build time.
+    fn apply(
+        &self,
+        mut r: microsandbox_network::builder::RateLimiterBuilder,
+    ) -> microsandbox_network::builder::RateLimiterBuilder {
+        if let Some((size, per)) = self.bandwidth {
+            r = r.bandwidth(size, per);
+        }
+        if let Some(burst) = self.bandwidth_burst {
+            r = r.bandwidth_burst(burst);
+        }
+        if let Some((count, per)) = self.ops {
+            r = r.ops(count, per);
+        }
+        if let Some(burst) = self.ops_burst {
+            r = r.ops_burst(burst);
+        }
+        r
+    }
+}
+
+/// Parse one direction's rate limit flags. Returns `None` when none of
+/// the four flags is set.
+#[cfg(feature = "net")]
+fn parse_rate_limiter_flags(
+    direction: NetworkRateLimitDirection,
+    bandwidth: Option<&str>,
+    bandwidth_burst: Option<&str>,
+    ops: Option<&str>,
+    ops_burst: Option<u64>,
+) -> anyhow::Result<Option<CliRateLimiter>> {
+    if bandwidth.is_none() && bandwidth_burst.is_none() && ops.is_none() && ops_burst.is_none() {
+        return Ok(None);
+    }
+
+    let bandwidth = bandwidth
+        .map(|spec| {
+            parse_rate(&format!("--net-{direction}-bandwidth"), spec, |s| {
+                ui::parse_size_bytes(s).map_err(anyhow::Error::msg)
+            })
+        })
+        .transpose()?;
+    let bandwidth_burst = bandwidth_burst
+        .map(|s| {
+            ui::parse_size_bytes(s)
+                .map_err(|e| anyhow::anyhow!("--net-{direction}-bandwidth-burst: {e}"))
+        })
+        .transpose()?;
+    let ops = ops
+        .map(|spec| {
+            parse_rate(&format!("--net-{direction}-ops"), spec, |s| {
+                s.parse::<u64>().map_err(anyhow::Error::from)
+            })
+        })
+        .transpose()?;
+
+    Ok(Some(CliRateLimiter {
+        bandwidth,
+        bandwidth_burst,
+        ops,
+        ops_burst,
+    }))
+}
+
+/// Parse a `VALUE/DURATION` rate spec like `1M/1s` or `1000/1s`. A bare
+/// value means per second.
+#[cfg(feature = "net")]
+fn parse_rate(
+    flag: &str,
+    spec: &str,
+    parse_value: impl Fn(&str) -> anyhow::Result<u64>,
+) -> anyhow::Result<(u64, std::time::Duration)> {
+    let (value, duration) = match spec.split_once('/') {
+        Some((value, duration)) => (
+            value,
+            parse_duration(duration).map_err(|e| anyhow::anyhow!("{flag}: {e}"))?,
+        ),
+        None => (spec, std::time::Duration::from_secs(1)),
+    };
+    let value = parse_value(value.trim()).map_err(|e| anyhow::anyhow!("{flag}: {e}"))?;
+    Ok((value, duration))
+}
+
 /// Assemble a [`NetworkPolicy`] from `--net`, `--net-rule`,
 /// `--net-default*`, and `--no-net`. Returns `None` when no flag is set.
 /// Multiple profile and rule invocations concatenate in argv order.
@@ -1736,7 +2321,7 @@ pub fn parse_duration(s: &str) -> anyhow::Result<std::time::Duration> {
 /// it with the explicit defaults, so the four default-source params are
 /// mutually exclusive on the caller side.
 #[cfg(feature = "net")]
-fn build_network_policy(
+pub(crate) fn build_network_policy(
     profile_args: &[String],
     rule_args: &[String],
     no_net: bool,
@@ -1866,7 +2451,7 @@ fn build_network_policy(
 ///
 /// IPv6 bind addresses must be bracketed, e.g. `[::]:8080:80`.
 #[cfg(feature = "net")]
-fn parse_port_mapping(spec: &str) -> anyhow::Result<(std::net::IpAddr, u16, u16, bool)> {
+pub(crate) fn parse_port_mapping(spec: &str) -> anyhow::Result<(std::net::IpAddr, u16, u16, bool)> {
     use std::net::{IpAddr, Ipv4Addr};
 
     let (port_part, udp) = if let Some(p) = spec.strip_suffix("/udp") {
@@ -1976,7 +2561,7 @@ fn allow_secret_host(
 
 /// Parse a scoped upstream CA spec: `PATTERN=PATH`.
 #[cfg(feature = "net")]
-fn parse_scoped_upstream_ca_cert(spec: &str) -> anyhow::Result<(String, PathBuf)> {
+pub(crate) fn parse_scoped_upstream_ca_cert(spec: &str) -> anyhow::Result<(String, PathBuf)> {
     let (pattern, path) = spec
         .split_once('=')
         .filter(|(pattern, path)| !pattern.is_empty() && !path.is_empty())
@@ -1987,7 +2572,7 @@ fn parse_scoped_upstream_ca_cert(spec: &str) -> anyhow::Result<(String, PathBuf)
 
 /// Parse a violation action string.
 #[cfg(feature = "net")]
-fn parse_violation_action(
+pub(crate) fn parse_violation_action(
     s: &Option<String>,
 ) -> anyhow::Result<Option<microsandbox_network::secrets::config::ViolationAction>> {
     use microsandbox_network::secrets::config::{HostPattern, ViolationAction};
@@ -2064,6 +2649,14 @@ fn parse_security_profile(value: &str) -> anyhow::Result<SecurityProfile> {
     }
 }
 
+fn parse_deployment_profile(value: &str) -> anyhow::Result<DeploymentProfile> {
+    match value {
+        "single-tenant" | "single_tenant" => Ok(DeploymentProfile::SingleTenant),
+        "multi-tenant" | "multi_tenant" => Ok(DeploymentProfile::MultiTenant),
+        other => anyhow::bail!("invalid deployment profile {other:?}"),
+    }
+}
+
 /// Resolve `--script` / `--script-raw` / `--script-path` specs into a
 /// deduped list of `(name, content)` pairs preserving argv order:
 /// inline shell snippets first, then raw inline, then path-backed.
@@ -2122,7 +2715,7 @@ fn parse_script_spec(spec: &str, flag: &str) -> anyhow::Result<(String, String)>
 /// line or fail to exec interactively. Whitespace (including newlines)
 /// and NUL break shebang parsing; an empty string or `/` leave no
 /// interpreter for the kernel to run.
-fn validate_shell(shell: &str) -> anyhow::Result<()> {
+pub(crate) fn validate_shell(shell: &str) -> anyhow::Result<()> {
     if shell.is_empty() {
         anyhow::bail!("--shell must not be empty");
     }
@@ -2180,7 +2773,7 @@ fn decode_script_escapes(input: &str) -> String {
 
 /// Wrap a decoded shell snippet with the generated shebang and ensure
 /// a trailing newline so the file is well-formed.
-fn wrap_shell_script(shell: Option<&str>, body: &str) -> String {
+pub(crate) fn wrap_shell_script(shell: Option<&str>, body: &str) -> String {
     let mut script = script_shebang(shell);
     script.push('\n');
     script.push_str(body);
@@ -2250,25 +2843,15 @@ pub fn resolve_command(
     user_command: Vec<String>,
     interactive: bool,
 ) -> anyhow::Result<(Option<String>, Vec<String>)> {
-    // User supplied an explicit command — prepend entrypoint if set.
-    if !user_command.is_empty() {
-        return match &config.spec.runtime.entrypoint {
-            Some(ep) if !ep.is_empty() => {
-                let bin = ep[0].clone();
-                let args = ep[1..].iter().cloned().chain(user_command).collect();
-                Ok((Some(bin), args))
-            }
-            _ => {
-                let mut parts = user_command;
-                let cmd = parts.remove(0);
-                Ok((Some(cmd), parts))
-            }
-        };
-    }
-
-    // No user command — try the image's entrypoint/cmd.
-    if let Some((cmd, cmd_args)) = resolve_image_command(config) {
-        return Ok((Some(cmd), cmd_args));
+    let cmd_override = (!user_command.is_empty()).then_some(user_command.as_slice());
+    match microsandbox_types::resolve_default_command(
+        config.spec.runtime.entrypoint.as_deref(),
+        config.spec.runtime.cmd.as_deref(),
+        cmd_override,
+    ) {
+        Ok(command) => return Ok((Some(command.program), command.args)),
+        Err(microsandbox_types::CommandResolutionError::NoDefaultCommand) => {}
+        Err(error) => return Err(error.into()),
     }
 
     // Fall back to configured shell (or /bin/sh) in interactive mode.
@@ -2300,35 +2883,6 @@ pub fn resolve_exec_command(
     }
 
     resolve_command(config, user_command, interactive)
-}
-
-/// Resolve the default process from OCI image config.
-///
-/// Follows OCI semantics:
-/// - `entrypoint` + `cmd`: entrypoint is the binary, cmd provides default arguments.
-/// - `entrypoint` only: entrypoint is the full command.
-/// - `cmd` only: cmd[0] is the binary, cmd[1..] are arguments.
-/// - Neither set: returns `None`.
-fn resolve_image_command(
-    config: &microsandbox::sandbox::SandboxConfig,
-) -> Option<(String, Vec<String>)> {
-    match (&config.spec.runtime.entrypoint, &config.spec.runtime.cmd) {
-        (Some(ep), cmd) if !ep.is_empty() => {
-            let bin = ep[0].clone();
-            let args = ep[1..]
-                .iter()
-                .chain(cmd.iter().flatten())
-                .cloned()
-                .collect();
-            Some((bin, args))
-        }
-        (_, Some(cmd)) if !cmd.is_empty() => {
-            let bin = cmd[0].clone();
-            let args = cmd[1..].to_vec();
-            Some((bin, args))
-        }
-        _ => None,
-    }
 }
 
 /// Parse an rlimit spec: `RESOURCE=LIMIT` or `RESOURCE=SOFT:HARD`.
@@ -2439,6 +2993,108 @@ mod tests {
     };
 
     use super::*;
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn parse_rate_splits_value_and_duration() {
+        let bytes = |s: &str| ui::parse_size_bytes(s).map_err(anyhow::Error::msg);
+
+        let (size, per) = parse_rate("--net-egress-bandwidth", "1M/1s", bytes).unwrap();
+        assert_eq!(size, 1024 * 1024);
+        assert_eq!(per, std::time::Duration::from_secs(1));
+
+        // A bare value means per second.
+        let (count, per) = parse_rate("--net-egress-ops", "1000", |s| {
+            s.parse::<u64>().map_err(anyhow::Error::from)
+        })
+        .unwrap();
+        assert_eq!(count, 1000);
+        assert_eq!(per, std::time::Duration::from_secs(1));
+
+        let (size, per) = parse_rate("--net-ingress-bandwidth", "512K/500ms", bytes).unwrap();
+        assert_eq!(size, 512 * 1024);
+        assert_eq!(per, std::time::Duration::from_millis(500));
+
+        let err = parse_rate("--net-egress-ops", "abc/1s", |s| {
+            s.parse::<u64>().map_err(anyhow::Error::from)
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("--net-egress-ops"), "unexpected error: {err}");
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn parse_rate_limiter_flags_maps_all_four_flags() {
+        let limiter = parse_rate_limiter_flags(
+            NetworkRateLimitDirection::Egress,
+            Some("1M/1s"),
+            Some("512K"),
+            Some("1000/1s"),
+            Some(500),
+        )
+        .unwrap()
+        .expect("limiter should be present");
+
+        assert_eq!(
+            limiter.bandwidth,
+            Some((1024 * 1024, std::time::Duration::from_secs(1)))
+        );
+        assert_eq!(limiter.bandwidth_burst, Some(512 * 1024));
+        assert_eq!(limiter.ops, Some((1000, std::time::Duration::from_secs(1))));
+        assert_eq!(limiter.ops_burst, Some(500));
+
+        assert!(
+            parse_rate_limiter_flags(NetworkRateLimitDirection::Ingress, None, None, None, None,)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_vsock_route_defaults_to_stream() {
+        let route = parse_vsock_route("/run/host-api.sock:5000").unwrap();
+        assert_eq!(route.0, PathBuf::from("/run/host-api.sock"));
+        assert_eq!(route.1, 5000);
+        assert_eq!(route.2, VsockSocketType::Stream);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_vsock_route_accepts_explicit_socket_types() {
+        let stream = parse_vsock_route("/run/host-api.sock:5000/stream").unwrap();
+        let dgram = parse_vsock_route("/run/events.sock:5001/dgram").unwrap();
+
+        assert_eq!(stream.2, VsockSocketType::Stream);
+        assert_eq!(dgram.2, VsockSocketType::Dgram);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_vsock_route_rejects_relative_paths_and_unknown_types() {
+        assert!(
+            parse_vsock_route("run/host-api.sock:5000")
+                .unwrap_err()
+                .to_string()
+                .contains("absolute")
+        );
+        assert!(
+            parse_vsock_route("/run/host-api.sock:5000/seqpacket")
+                .unwrap_err()
+                .to_string()
+                .contains("stream or dgram")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn parse_vsock_route_accepts_named_pipe_with_default_stream() {
+        let route = parse_vsock_route(r"\\.\pipe\host-api:5000").unwrap();
+        assert_eq!(route.0, PathBuf::from(r"\\.\pipe\host-api"));
+        assert_eq!(route.1, 5000);
+        assert_eq!(route.2, VsockSocketType::Stream);
+    }
 
     #[test]
     fn parse_secret_returns_env_and_host_reference() {
@@ -2575,6 +3231,38 @@ mod tests {
         assert_eq!(build("tmpfs"), RootDisk::Tmpfs { size_mib: None });
         assert_eq!(build("tmpfs:2G"), RootDisk::tmpfs(2048));
         assert_eq!(
+            build("flat"),
+            RootDisk::Flat {
+                size_mib: None,
+                fstype: None,
+                clone: FlatClone::Auto,
+            }
+        );
+        assert_eq!(
+            build("flat:8G,clone=reflink"),
+            RootDisk::Flat {
+                size_mib: Some(8192),
+                fstype: None,
+                clone: FlatClone::Reflink,
+            }
+        );
+        assert_eq!(
+            build("flat:fstype=ext4,clone=copy"),
+            RootDisk::Flat {
+                size_mib: None,
+                fstype: Some("ext4".into()),
+                clone: FlatClone::Copy,
+            }
+        );
+        assert_eq!(
+            build("flat: fstype = ext4 , clone = copy"),
+            RootDisk::Flat {
+                size_mib: None,
+                fstype: Some("ext4".into()),
+                clone: FlatClone::Copy,
+            }
+        );
+        assert_eq!(
             build("./scratch.img"),
             RootDisk::DiskImage {
                 path: "./scratch.img".into(),
@@ -2609,7 +3297,10 @@ mod tests {
         );
 
         let err = parse_root_disk_spec("8G:fstype=ext4").unwrap_err();
-        assert!(err.to_string().contains("only valid for a disk image path"));
+        assert!(
+            err.to_string()
+                .contains("only valid for flat or a disk image path")
+        );
 
         let err = parse_root_disk_spec("./scratch.vmdk:format=vmdk").unwrap_err();
         assert!(err.to_string().contains("unsupported format"));
@@ -2639,6 +3330,46 @@ mod tests {
             ),
             other => panic!("expected Oci, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn apply_sandbox_opts_sets_transparent_huge_page_policy() {
+        let opts = SandboxOpts {
+            thp: Some("always".to_string()),
+            ..Default::default()
+        };
+        let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(config.spec.resources.thp, TransparentHugePagePolicy::Always);
+    }
+
+    #[tokio::test]
+    async fn apply_sandbox_opts_sets_flat_root_disk() {
+        let opts = SandboxOpts {
+            root_disk: Some("flat:8G,fstype=ext4,clone=reflink".to_string()),
+            ..Default::default()
+        };
+        let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        let RootfsSource::Oci(oci) = config.spec.image else {
+            panic!("expected Oci");
+        };
+        assert_eq!(
+            oci.root_disk,
+            Some(microsandbox::sandbox::RootDisk::Flat {
+                size_mib: Some(8192),
+                fstype: Some("ext4".to_string()),
+                clone: FlatClone::Reflink,
+            })
+        );
     }
 
     #[tokio::test]
@@ -2675,6 +3406,57 @@ mod tests {
             .unwrap();
 
         assert_eq!(config.spec.security_profile, SecurityProfile::Restricted);
+    }
+
+    #[tokio::test]
+    async fn apply_sandbox_opts_sets_deployment_profile() {
+        let opts = SandboxOpts {
+            deployment_profile: Some("multi-tenant".to_string()),
+            ..Default::default()
+        };
+        let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            config.spec.deployment_profile,
+            DeploymentProfile::MultiTenant
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_sandbox_opts_sets_cpu_placement() {
+        let opts = SandboxOpts {
+            cpu_placement: Some(CpuPlacement::Spread),
+            ..Default::default()
+        };
+        let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(config.spec.resources.cpu_placement, CpuPlacement::Spread);
+    }
+
+    #[tokio::test]
+    async fn apply_sandbox_opts_sets_placement_profile() {
+        let opts = SandboxOpts {
+            placement_profile: Some("latency".to_string()),
+            ..Default::default()
+        };
+        let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            config.spec.resources.placement_profile.as_deref(),
+            Some("latency")
+        );
     }
 
     #[tokio::test]
@@ -3212,6 +3994,27 @@ mod tests {
 
         assert_eq!(cmd.as_deref(), Some("start"));
         assert_eq!(args, vec!["date".to_string()]);
+    }
+
+    #[test]
+    fn resolve_command_replaces_stored_cmd_with_run_override() {
+        let config = command_config(Some(&["start", "--verbose"]), Some(&["serve", "--http"]));
+        let (cmd, args) = resolve_command(
+            &config,
+            vec!["worker".to_string(), "--once".to_string()],
+            false,
+        )
+        .expect("resolve command");
+
+        assert_eq!(cmd.as_deref(), Some("start"));
+        assert_eq!(
+            args,
+            vec![
+                "--verbose".to_string(),
+                "worker".to_string(),
+                "--once".to_string()
+            ]
+        );
     }
 
     #[test]

@@ -5,20 +5,59 @@ description: Python SDK - Sandbox API reference
 
 Create and control a microVM sandbox: boot it from an image, run commands, stream logs and metrics, then shut it down. See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
+For local runtime installation and verification, see [Runtime setup](/sdk/setup#install-and-verify).
+
+## Sandbox
+
+<p className="msb-member-group">Instance properties</p>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">owns_lifecycle</span>
+
+<Tooltip tip="On microsandbox cloud this is false; the cloud worker owns the sandbox process, not your handle."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
-from microsandbox import Sandbox
-
-# 1. configure + 2. boot the microVM
-async with await Sandbox.create("api", image="python", memory=1024) as sb:
-    # 3. run
-    out = await sb.exec("python", ["-V"])
-    print(out.stdout_text)
-# 4. on exit the sandbox is killed and its state removed
+@property
+async def owns_lifecycle(self) -> bool
 ```
 
-## Static methods
+Whether this handle owns the sandbox lifecycle. A sandbox returned directly by [`create()`](#sandbox-create) or [`start()`](#sandbox-start) owns lifecycle, including when created with `detached=True`, until you call [`detach()`](#sb-detach). Handles upgraded via [`SandboxHandle.connect()`](#sandboxhandle) do not own lifecycle. This is an async property; use `await sb.owns_lifecycle`.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc"><code>True</code> if this handle owns the lifecycle.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">fs</span>
+
+```python
+@property
+def fs(self) -> SandboxFsOps
+```
+
+<Accordion title="Example">
+
+```python
+await sb.fs.write("/tmp/hello.txt", b"hi")
+```
+
+</Accordion>
+
+Get a filesystem handle for reading and writing files inside the running sandbox. This is a synchronous property; use `sb.fs` (no `await`). See [Filesystem](/sdk/python/filesystem) for API details.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="/sdk/python/filesystem">SandboxFsOps</a></div>
+    <div className="msb-param-desc">Filesystem handle.</div>
+  </div>
+</div>
+
+<p className="msb-member-group">Static methods</p>
 
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">create()</span>
 
@@ -279,7 +318,7 @@ await Sandbox.remove("api")
 
 </Accordion>
 
-Delete a stopped sandbox and all its state from disk (configuration, logs, runtime directory). Fails if the sandbox is still running; stop it first.
+Delete a stopped sandbox by name. See [Remove](/sandboxes/lifecycle#remove) for the exact local deletion scope and the external resources that are preserved. Fails if the sandbox is still running; stop it first.
 
 <p className="msb-label">Parameters</p>
 
@@ -290,9 +329,11 @@ Delete a stopped sandbox and all its state from disk (configuration, logs, runti
   </div>
 </div>
 
-## Instance properties
+<p className="msb-member-group">Instance methods</p>
 
-#### <span className="msb-recv">sb.</span><span className="msb-hn">name</span>
+Command execution (`exec`, `exec_stream`, `shell`, `shell_stream`) is documented on the [Execution](/sdk/python/execution) page; SSH (`ssh`) on the [SSH](/sdk/python/ssh) page. The lifecycle, attach, metrics, and logs methods follow.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">name()</span>
 
 ```python
 async def name(self) -> str
@@ -306,7 +347,7 @@ print(await sb.name())
 
 </Accordion>
 
-The sandbox name. This is an async method; call `await sb.name()`.
+Return the sandbox name.
 
 <p className="msb-label">Returns</p>
 
@@ -316,54 +357,6 @@ The sandbox name. This is an async method; call `await sb.name()`.
     <div className="msb-param-desc">Sandbox name, up to 128 UTF-8 bytes.</div>
   </div>
 </div>
-
-#### <span className="msb-recv">sb.</span><span className="msb-hn">owns_lifecycle</span>
-
-```python
-@property
-async def owns_lifecycle(self) -> bool
-```
-
-Whether this handle owns the sandbox lifecycle. A sandbox returned directly by [`create()`](#sandbox-create) or [`start()`](#sandbox-start) owns lifecycle, including when created with `detached=True`, until you call [`detach()`](#sb-detach). Handles upgraded via [`SandboxHandle.connect()`](#sandboxhandle) do not own lifecycle. This is an async property; use `await sb.owns_lifecycle`.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">bool</span></div>
-    <div className="msb-param-desc"><code>True</code> if this handle owns the lifecycle.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">sb.</span><span className="msb-hn">fs</span>
-
-```python
-@property
-def fs(self) -> SandboxFsOps
-```
-
-<Accordion title="Example">
-
-```python
-await sb.fs.write("/tmp/hello.txt", b"hi")
-```
-
-</Accordion>
-
-Get a filesystem handle for reading and writing files inside the running sandbox. This is a synchronous property; use `sb.fs` (no `await`). See [Filesystem](/sdk/python/filesystem) for API details.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="/sdk/python/filesystem">SandboxFsOps</a></div>
-    <div className="msb-param-desc">Filesystem handle.</div>
-  </div>
-</div>
-
-## Instance methods
-
-Command execution (`exec`, `exec_stream`, `shell`, `shell_stream`) is documented on the [Execution](/sdk/python/execution) page; SSH (`ssh`) on the [SSH](/sdk/python/ssh) page. The lifecycle, attach, metrics, and logs methods follow.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">attach()</span>
 
@@ -455,6 +448,8 @@ Attach your terminal to the sandbox's default shell for an interactive session.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">ping()</span>
 
+<Tooltip tip="Not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```python
 async def ping(self) -> SandboxPingResult
 ```
@@ -480,6 +475,8 @@ Check that the running sandbox's guest agent is reachable without refreshing idl
 </div>
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">touch()</span>
+
+<Tooltip tip="Not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def touch(self) -> SandboxTouchResult
@@ -507,6 +504,8 @@ Explicitly refresh the running sandbox's idle activity. This sends `core.touch`,
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">modify()</span>
 
+<Tooltip tip="modify is not available on microsandbox cloud; recreate the sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```python
 async def modify(
     self,
@@ -515,53 +514,81 @@ async def modify(
     max_cpus: int | None = None,
     memory: int | None = None,
     max_memory: int | None = None,
+    root_disk_size: int | None = None,
     env: Mapping[str, str] | None = None,
     env_rm: list[str] | None = None,
     labels: Mapping[str, str] | None = None,
     labels_rm: list[str] | None = None,
     workdir: str | None = None,
-    policy: str | None = None,
+    secrets: Mapping[str, SecretModifySpec] | None = None,
+    secrets_rm: list[str] | None = None,
+    policy: ModificationPolicy | None = None,
     dry_run: bool = False,
-) -> dict[str, Any]
+) -> SandboxModificationPlan
 ```
 
 <Accordion title="Example">
 
 ```python
+from microsandbox import (
+    ModificationDisposition,
+    ModificationPolicy,
+    ResourceConvergenceState,
+)
+
 # Live resize: applies to the running VM when within the booted capacity
 plan = await sb.modify(cpus=4, memory=4096)
 for r in plan.get("resize_status", []):
-    print(f'{r["resource"]}: {r["requested"]} -> {r["actual"]} ({r["state"]})')
+    if r["state"] is ResourceConvergenceState.APPLIED:
+        print(f'{r["resource"]}: {r["requested"]} -> {r["actual"]}')
 
 # Preview a change without applying it
 plan = await sb.modify(max_memory=16384, dry_run=True)
 for change in plan["changes"]:
-    print(f'{change["field"]}: {change["disposition"]}')
+    if change["disposition"] is ModificationDisposition.REQUIRES_RESTART:
+        print(f'{change["field"]} needs a restart')
 
 # Make an env change active now by restarting
-await sb.modify(env={"MODE": "prod"}, policy="restart")
+await sb.modify(env={"MODE": "prod"}, policy=ModificationPolicy.RESTART)
+
+# Grow the managed OCI root disk offline and restart
+await sb.modify(root_disk_size=8192, policy=ModificationPolicy.RESTART)
+
+# Add or rotate a host-environment secret; restart if it is newly added
+await sb.modify(
+    secrets={
+        "API_KEY": {
+            "env": "API_KEY",
+            "allowed_hosts": ["api.example.com"],
+        },
+    },
+    policy=ModificationPolicy.RESTART,
+)
+
+# Remove an existing secret
+await sb.modify(secrets_rm=["OLD_API_KEY"])
 ```
 
 </Accordion>
 
-Plan or apply a configuration change. The returned plan labels each change `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`, and apply is all-or-nothing.
+Plan or apply a configuration change. The returned plan uses [`ModificationDisposition`](#modificationdisposition) to classify when each change takes effect, and apply is all-or-nothing.
 
-`cpus` and `memory` resize live within the `max_cpus` / `max_memory` ceilings; raising a ceiling requires a restart. Env and workdir changes affect future execs only. On a stopped sandbox, changes are saved for the next boot.
+`cpus` and `memory` resize live within the `max_cpus` / `max_memory` ceilings; raising a ceiling requires a restart. `root_disk_size` changes are offline: managed and flat OCI root disks grow only, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected. Env and workdir changes affect future execs only. On a stopped sandbox, changes are saved for the next boot.
 
-Secret changes are Rust-SDK and CLI only for now. The CLI equivalent is [`msb modify`](/cli/sandbox-commands#msb-modify).
+Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source—`env`, `value`, or `store`—and may also set `placeholder` and `allowed_hosts`; omitting a source updates only the other supplied fields. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `secrets_rm`.
 
-The returned plan dict mirrors the canonical JSON shape:
+The returned [`SandboxModificationPlan`](#sandboxmodificationplan) is a typed dictionary:
 
 | Key | Type | Description |
 |-----|------|-------------|
 | `sandbox` | `str` | Sandbox being modified |
-| `status` | `str` | Status used for classification (`"running"`, `"stopped"`, ...) |
+| `status` | [`SandboxStatus`](#sandboxstatus) | Status used for classification |
 | `applied` | `bool` | Whether the changes were applied; `False` with `dry_run=True` |
-| `policy` | `str` | Policy used to produce the plan |
-| `changes` | `list[dict]` | One entry per field: `field`, `change` (`"added"`, `"updated"`, `"removed"`), `before`, `after`, `disposition`, optional `reason` |
+| `policy` | [`ModificationPolicy`](#modificationpolicy) | Policy used to produce the plan |
+| `changes` | `list[ConfigPlannedChange \| SecretPlannedChange]` | Typed config or secret changes, discriminated by [`PlannedChangeKind`](#plannedchangekind) |
 | `conflicts` | `list[dict]` | Conflicts (`field` + `message`) that must be resolved before the patch can apply |
 | `warnings` | `list[dict]` | Non-fatal warnings (`field` + `message`), e.g. the future-execs-only env caveat |
-| `resize_status` | `list[dict]` | Live resize outcomes after apply, per resource: `resource` (`"cpus"` / `"memory"`), `requested`, `actual`, `enforced`, `state` (`"accepted"`, `"converging"`, `"applied"`, `"guest-refused"`, `"failed"`). Omitted when no live resize ran |
+| `resize_status` | `list[ResourceResizeStatus]` | Live resize outcomes after apply, using [`ResourceKind`](#resourcekind) and [`ResourceConvergenceState`](#resourceconvergencestate). Omitted when no live resize ran |
 
 A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and `resize_status` reports when the sandbox has finished adjusting.
 
@@ -585,6 +612,10 @@ A live CPU or memory resize can take a moment to settle. The new limits are enfo
     <div className="msb-param-desc">Boot-time maximum hotpluggable memory in MiB (restart-backed).</div>
   </div>
   <div className="msb-param">
+    <div className="msb-param-key"><code>root_disk_size</code><span className="msb-type">int | None</span></div>
+    <div className="msb-param-desc">Desired root disk size in MiB. Managed and flat OCI disks are grow-only; applies on restart or next start.</div>
+  </div>
+  <div className="msb-param">
     <div className="msb-param-key"><code>env</code><span className="msb-type">Mapping[str, str] | None</span></div>
     <div className="msb-param-desc">Environment variables to set for future execs.</div>
   </div>
@@ -605,8 +636,16 @@ A live CPU or memory resize can take a moment to settle. The new limits are enfo
     <div className="msb-param-desc">Working directory for future execs.</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>policy</code><span className="msb-type">str | None</span></div>
-    <div className="msb-param-desc"><code>"no_restart"</code> (default) applies only changes that can complete without restarting; <code>"next_start"</code> persists changes for the next start without mutating a running VM; <code>"restart"</code> restarts if needed so restart-required changes become active now.</div>
+    <div className="msb-param-key"><code>secrets</code><span className="msb-type">Mapping[str, SecretModifySpec] | None</span></div>
+    <div className="msb-param-desc">Desired secret specs keyed by secret name. Each spec may contain at most one of <code>env</code>, <code>value</code>, or <code>store</code>, plus optional <code>placeholder</code> and <code>allowed_hosts</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>secrets_rm</code><span className="msb-type">list[str] | None</span></div>
+    <div className="msb-param-desc">Secret names to remove explicitly.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>policy</code><a className="msb-type" href="#modificationpolicy">ModificationPolicy | None</a></div>
+    <div className="msb-param-desc"><code>NO_RESTART</code> (default) applies only changes that can complete without restarting; <code>NEXT_START</code> persists changes for the next start without mutating a running VM; <code>RESTART</code> restarts if needed so restart-required changes become active now.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>dry_run</code><span className="msb-type">bool</span></div>
@@ -618,12 +657,14 @@ A live CPU or memory resize can take a moment to settle. The new limits are enfo
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">dict[str, Any]</span></div>
+    <div className="msb-param-key"><a className="msb-type" href="#sandboxmodificationplan">SandboxModificationPlan</a></div>
     <div className="msb-param-desc">The modification plan, applied unless <code>dry_run=True</code>.</div>
   </div>
 </div>
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">metrics()</span>
+
+<Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def metrics(self) -> SandboxMetrics
@@ -650,6 +691,8 @@ Get a point-in-time snapshot of the sandbox's resource usage: CPU, memory, disk 
 </div>
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">metrics_stream()</span>
+
+<Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def metrics_stream(self, interval: float = 1.0) -> MetricsStream
@@ -687,6 +730,8 @@ Stream resource metrics at a regular interval. The returned [`MetricsStream`](#m
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">logs()</span>
 
+<Tooltip tip="Bounded log reads are not available on microsandbox cloud; follow live with log streaming and persist output externally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```python
 async def logs(
     self,
@@ -701,7 +746,7 @@ async def logs(
 
 ```python
 import time
-from microsandbox import Sandbox
+from microsandbox import LogReadSource, Sandbox
 
 handle = await Sandbox.get("web")
 
@@ -715,7 +760,12 @@ for e in entries:
 recent = await handle.logs(
     tail=50,
     since_ms=(time.time() - 3600) * 1000,
-    sources=["stdout", "stderr", "output", "system"],
+    sources=[
+        LogReadSource.STDOUT,
+        LogReadSource.STDERR,
+        LogReadSource.OUTPUT,
+        LogReadSource.SYSTEM,
+    ],
 )
 ```
 
@@ -723,7 +773,7 @@ recent = await handle.logs(
 
 Read captured output from the sandbox's `exec.log`. Backed by an on-disk JSON Lines file the runtime writes via the relay tap. Works on running and stopped sandboxes alike; there is no protocol traffic. The same method is available on [`SandboxHandle`](#sandboxhandle) for callers that don't want to start the sandbox first.
 
-The default sources are `"stdout"`, `"stderr"`, and `"output"` (PTY-merged). Pass `"system"` to also include synthetic lifecycle markers and runtime/kernel diagnostic lines, or `"all"` as shorthand for all four. Timestamps are exposed as `float` ms since the Unix epoch (UTC) for parity with [`SandboxMetrics.timestamp_ms`](#sandboxmetrics).
+The default sources are `STDOUT`, `STDERR`, and `OUTPUT` (PTY-merged). Add `LogReadSource.SYSTEM` to include synthetic lifecycle markers and runtime/kernel diagnostic lines, or use `LogReadSource.ALL` as shorthand for all four. Timestamps are exposed as `float` ms since the Unix epoch (UTC) for parity with [`SandboxMetrics.timestamp_ms`](#sandboxmetrics).
 
 <p className="msb-label">Parameters</p>
 
@@ -741,8 +791,8 @@ The default sources are `"stdout"`, `"stderr"`, and `"output"` (PTY-merged). Pas
     <div className="msb-param-desc">Exclusive upper bound on entry timestamp (ms since epoch).</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>sources</code><a className="msb-type" href="#logsource">list[LogReadSource] | None</a></div>
-    <div className="msb-param-desc">Sources to include. <code>None</code> = <code>["stdout", "stderr", "output"]</code>. Add <code>"system"</code> to merge runtime/kernel diagnostics, or use <code>"all"</code> for all four.</div>
+    <div className="msb-param-key"><code>sources</code><a className="msb-type" href="#logreadsource">list[LogReadSource] | None</a></div>
+    <div className="msb-param-desc">Sources to include. <code>None</code> selects <code>STDOUT</code>, <code>STDERR</code>, and <code>OUTPUT</code>. Add <code>SYSTEM</code> to merge runtime/kernel diagnostics, or use <code>ALL</code> for all four.</div>
   </div>
 </div>
 
@@ -756,6 +806,8 @@ The default sources are `"stdout"`, `"stderr"`, and `"output"` (PTY-merged). Pas
 </div>
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">log_stream()</span>
+
+<Tooltip tip="On microsandbox cloud, log streaming is follow-only; set follow. Bounded, non-follow reads are not available."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def log_stream(
@@ -784,7 +836,7 @@ Stream captured log entries as a [`LogStream`](#logstream). With `follow=True` t
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><code>sources</code><a className="msb-type" href="#logsource">list[LogReadSource] | None</a></div>
+    <div className="msb-param-key"><code>sources</code><a className="msb-type" href="#logreadsource">list[LogReadSource] | None</a></div>
     <div className="msb-param-desc">Sources to include. Same semantics as <a href="#sb-logs">logs()</a>.</div>
   </div>
   <div className="msb-param">
@@ -857,6 +909,8 @@ Request graceful shutdown and return once the request is sent, without waiting f
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">kill()</span>
 
+<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```python
 async def kill(self, timeout: float | None = None) -> None
 ```
@@ -882,6 +936,8 @@ Force-terminate the sandbox and wait until stopped state is observed. No gracefu
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">request_kill()</span>
 
+<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```python
 async def request_kill(self) -> None
 ```
@@ -897,6 +953,8 @@ await sb.request_kill()
 Request force termination and return once the signal is sent, without waiting for stopped state.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">request_drain()</span>
+
+<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def request_drain(self) -> None
@@ -957,7 +1015,7 @@ Release the handle without stopping the sandbox. The sandbox continues running a
 
 ## Patch
 
-Factory class for rootfs patches passed to `Sandbox.create(..., patches=[...])`. Each static method returns a [`PatchConfig`](#patchconfig). By default a patch that targets a path already present in the image errors at boot; pass `replace=True` on the operation to allow overwriting. `mkdir` and `remove` are idempotent. See [Patches](/sandboxes/bootstrap#patches) for conceptual context.
+Factory for pre-boot root filesystem patches.
 
 #### <span className="msb-recv">Patch.</span><span className="msb-hn">text()</span>
 
@@ -1003,6 +1061,36 @@ Write UTF-8 text content at `path`.
   </div>
 </div>
 
+#### <span className="msb-recv">Patch.</span><span className="msb-hn">file()</span>
+
+```python
+@staticmethod
+def file(path: str, content: bytes, *, mode: int | None = None, replace: bool = False) -> PatchConfig
+```
+
+Write arbitrary bytes at `path`. Use [`text()`](#patch-text) for UTF-8 text.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Absolute path inside the guest.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>content</code><span className="msb-type">bytes</span></div>
+    <div className="msb-param-desc">Binary file content.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>mode</code><span className="msb-type">int | None</span></div>
+    <div className="msb-param-desc">File mode, e.g. <code>0o644</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>replace</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">When <code>True</code>, overwrite an existing path.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">Patch.</span><span className="msb-hn">append()</span>
 
 ```python
@@ -1026,6 +1114,8 @@ Append `content` to an existing file at `path`. If the file lives in a lower ima
 </div>
 
 #### <span className="msb-recv">Patch.</span><span className="msb-hn">mkdir()</span>
+
+<Tooltip tip="On microsandbox cloud, host sources resolve against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 @staticmethod
@@ -1067,6 +1157,8 @@ Delete a file or directory at `path`. Idempotent: a no-op if the path doesn't ex
 
 #### <span className="msb-recv">Patch.</span><span className="msb-hn">copy_file()</span>
 
+<Tooltip tip="On microsandbox cloud, host sources resolve against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```python
 @staticmethod
 def copy_file(src: str, dst: str, *, mode: int | None = None, replace: bool = False) -> PatchConfig
@@ -1096,6 +1188,8 @@ Copy a single host file at `src` into the guest rootfs at `dst`.
 </div>
 
 #### <span className="msb-recv">Patch.</span><span className="msb-hn">copy_dir()</span>
+
+<Tooltip tip="On microsandbox cloud, host sources resolve against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 @staticmethod
@@ -1147,6 +1241,405 @@ Create a symlink at `link` pointing to `target`.
   </div>
 </div>
 
+## SandboxHandle
+
+
+<p className="msb-backref">Returned by <a href="#sandbox-get">Sandbox.get()</a> · <a href="#sandbox-list">Sandbox.list()</a> · <a href="#sandbox-list_with">Sandbox.list_with()</a></p>
+
+A metadata and lifecycle handle for an existing sandbox.
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">name</span>
+
+`str`
+
+Sandbox name, up to 128 UTF-8 bytes
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">status</span>
+
+[`SandboxStatus`](#sandboxstatus)
+
+Current status
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">config_json</span>
+
+`str`
+
+Raw JSON configuration
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">created_at</span>
+
+`float \| None`
+
+Creation timestamp (ms since epoch)
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">updated_at</span>
+
+`float \| None`
+
+Last update timestamp (ms since epoch)
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">config()</span>
+
+```python
+config()
+```
+
+Parsed configuration
+
+<p className="msb-label">Returns</p>
+
+`dict[str, Any]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">refresh()</span>
+
+```python
+refresh()
+```
+
+Re-fetch status and metadata, returning a fresh handle
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[`[`SandboxHandle`](#sandboxhandle)`]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">ping()</span>
+
+```python
+ping()
+```
+
+Check agent reachability without refreshing idle activity; does not start stopped sandboxes
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[`[`SandboxPingResult`](#sandboxpingresult)`]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">touch()</span>
+
+```python
+touch()
+```
+
+Explicitly refresh idle activity; does not start stopped sandboxes
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[`[`SandboxTouchResult`](#sandboxtouchresult)`]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">modify()</span>
+
+```python
+modify(...)
+```
+
+Plan or apply a configuration change; same kwargs as [`modify()`](#sb-modify). Does not start stopped sandboxes; changes persist for the next boot
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[`[`SandboxModificationPlan`](#sandboxmodificationplan)`]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">connect()</span>
+
+```python
+connect(timeout=None)
+```
+
+Connect to a running sandbox, optionally with an explicit timeout in seconds
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[`[`Sandbox`](#instance-methods)`]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">start()</span>
+
+```python
+start(*, detached=False)
+```
+
+Start in attached or detached mode
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[`[`Sandbox`](#instance-methods)`]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">stop()</span>
+
+```python
+stop(timeout=None)
+```
+
+Gracefully shut down and wait until stopped state is observed
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[None]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">request_stop()</span>
+
+```python
+request_stop()
+```
+
+Request graceful shutdown without waiting
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[None]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">kill()</span>
+
+```python
+kill(timeout=None)
+```
+
+Force terminate and wait until stopped state is observed
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[None]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">request_kill()</span>
+
+```python
+request_kill()
+```
+
+Request force termination without waiting
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[None]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">request_drain()</span>
+
+```python
+request_drain()
+```
+
+Request graceful drain without waiting
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[None]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">wait_until_stopped()</span>
+
+```python
+wait_until_stopped()
+```
+
+Block until the sandbox reaches terminal state
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[`[`SandboxStopResult`](#sandboxstopresult)`]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">remove()</span>
+
+```python
+remove()
+```
+
+Delete sandbox and state
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[None]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">metrics()</span>
+
+```python
+metrics()
+```
+
+Point-in-time resource metrics
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[`[`SandboxMetrics`](#sandboxmetrics)`]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">logs()</span>
+
+```python
+logs(...)
+```
+
+Read captured `exec.log` (works without starting)
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[list[`[`LogEntry`](#logentry)`]]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">log_stream()</span>
+
+```python
+log_stream(...)
+```
+
+Stream captured log entries (works without starting)
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[`[`LogStream`](#logstream)`]`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot()</span>
+
+```python
+snapshot(name)
+```
+
+Create a named [snapshot](/sdk/python/snapshots) of the sandbox
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[Snapshot]`
+
+## MetricsStream
+
+
+<p className="msb-backref">Returned by <a href="#sb-metrics_stream">metrics_stream()</a></p>
+
+Async stream for receiving periodic metrics snapshots.
+
+
+#### <span className="msb-recv">metrics_stream.</span><span className="msb-hn">__aiter__()</span>
+
+```python
+__aiter__()
+```
+
+Use with `async for`
+
+<p className="msb-label">Returns</p>
+
+[`SandboxMetrics`](#sandboxmetrics)
+
+#### <span className="msb-recv">metrics_stream.</span><span className="msb-hn">__anext__()</span>
+
+```python
+__anext__()
+```
+
+Use with `async for`
+
+<p className="msb-label">Returns</p>
+
+[`SandboxMetrics`](#sandboxmetrics)
+
+## LogEntry
+
+
+<p className="msb-backref">Returned by <a href="#sb-logs">logs()</a> · iterated from <a href="#logstream">LogStream</a></p>
+
+A single captured log entry returned by [`logs()`](#sb-logs) or iterated from a [`LogStream`](#logstream).
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">timestamp_ms</span>
+
+`float`
+
+Wall-clock capture time (ms since Unix epoch, UTC)
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">source</span>
+
+[`LogSource`](#logsource)
+
+Where the chunk came from
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">session_id</span>
+
+`int \| None`
+
+Relay-monotonic session id; `None` for `"system"` entries
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">cursor</span>
+
+`str`
+
+Opaque resume token; pass back via `log_stream(from_cursor=...)`
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">data</span>
+
+`bytes`
+
+The chunk's raw bytes
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">text()</span>
+
+```python
+text()
+```
+
+Convenience: UTF-8 decode of `data` (lossy; invalid bytes are replaced)
+
+<p className="msb-label">Returns</p>
+
+`str`
+
+## LogStream
+
+
+<p className="msb-backref">Returned by <a href="#sb-log_stream">log_stream()</a></p>
+
+Async stream of [`LogEntry`](#logentry) values, returned by [`log_stream()`](#sb-log_stream).
+
+
+#### <span className="msb-recv">log_stream.</span><span className="msb-hn">__aiter__()</span>
+
+```python
+__aiter__()
+```
+
+Use with `async for`
+
+<p className="msb-label">Returns</p>
+
+[`LogEntry`](#logentry)
+
+#### <span className="msb-recv">log_stream.</span><span className="msb-hn">__anext__()</span>
+
+```python
+__anext__()
+```
+
+Use with `async for`
+
+<p className="msb-label">Returns</p>
+
+[`LogEntry`](#logentry)
+
+## PullSession
+
+
+<p className="msb-backref">Returned by <a href="#sandbox-create_with_progress">create_with_progress()</a></p>
+
+Returned by [`create_with_progress()`](#sandbox-create_with_progress). The factory itself is synchronous; use the returned session as an async context manager to track image pull progress.
+
+#### <span className="msb-recv">session.</span><span className="msb-hn">progress</span>
+
+`AsyncIterator[`[`PullEvent`](#pullevent)`]`
+
+Async iterator of pull progress events
+
+#### <span className="msb-recv">session.</span><span className="msb-hn">result()</span>
+
+```python
+result()
+```
+
+Await once to get the final running sandbox. A second call raises `RuntimeError`
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[`[`Sandbox`](#instance-methods)`]`
+
+```python
+session = Sandbox.create_with_progress("my-sandbox", image="ubuntu:latest")
+async with session:
+    async for event in session.progress:
+        print(event)
+    sb = await session.result()
+```
+
 ## Types
 
 ### SandboxConfig
@@ -1157,37 +1650,39 @@ The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_wit
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| image | `str \| `[`ImageSource`](/sdk/python/images) | - | OCI image, local path, or disk image. Required unless `from_snapshot=` is passed. Use `Image.oci("python:3.12", upper_size_mib=8192)` to set an OCI upper size |
-| from_snapshot | `str \| os.PathLike` | - | Snapshot artifact to boot from instead of `image=`. Mutually exclusive with `image=` |
+| image | `str \| os.PathLike[str] \| `[`ImageSource`](/sdk/python/images) | - | OCI image, local path, or disk image. Required unless `from_snapshot=` is passed. Use `Image.oci("python:3.12", root_disk=RootDisk.managed(8192))` to set a managed OCI root-disk size |
+| from_snapshot | `str \| os.PathLike[str]` | - | Snapshot artifact to boot from instead of `image=`. Mutually exclusive with `image=` |
 | cpus | `int` | `1` | Virtual CPUs. This is a limit, not a reservation |
 | max_cpus | `int` | same as `cpus` | Boot-time maximum possible virtual CPUs |
 | memory | `int` | `512` | Guest memory in MiB. This is a limit, not a reservation |
 | max_memory | `int` | same as `memory` | Boot-time maximum hotpluggable memory in MiB |
+| thp | `"always" \| "madvise" \| "never"` | `"madvise"` | Guest transparent huge-page policy selected at boot |
 | workdir | `str` | - | Default working directory for commands |
 | shell | `str` | `"/bin/sh"` | Shell for `shell()` calls |
-| security | [`SecurityProfile`](#securityprofile) `\| str` | `"default"` | In-guest security profile. `"restricted"` sets `no_new_privs`, drops mount-admin capability from user commands, and forces `nosuid,nodev` on user mounts |
+| security | [`SecurityProfile`](#securityprofile) | `DEFAULT` | In-guest security profile. `RESTRICTED` sets `no_new_privs`, drops mount-admin capability from user commands, and forces `nosuid,nodev` on user mounts |
 | hostname | `str` | - | Guest hostname |
 | user | `str` | - | Default guest user |
-| entrypoint | `list[str]` | - | Override the image's stored ENTRYPOINT. Consulted by `msb exec` / `msb run` (CLI command resolution), **not** by `sb.exec` / `sb.shell` which pass `cmd` literally |
-| init | `str \| dict \| `[`InitConfig`](#initconfig) | - | Hand off PID 1 to a guest init binary. See [Custom init system](/sandboxes/bootstrap#custom-init-system) and [`InitConfig`](#initconfig) for accepted shapes |
+| entrypoint | `Sequence[str]` | - | Override the image's stored ENTRYPOINT used by `exec_default`; literal `exec` and `shell` ignore it |
+| cmd | `Sequence[str]` | - | Override the image's stored CMD used by `exec_default`; an empty sequence clears CMD |
+| init | `str \| `[`InitConfig`](#initconfig)` \| `[`InitOptions`](#initoptions) | - | Hand off PID 1 to a guest init binary. See [Custom init system](/sandboxes/bootstrap#custom-init-system) and [`InitConfig`](#initconfig) for accepted shapes |
 | replace | `bool` | `False` | Replace an existing sandbox with the same name (10s SIGTERM grace, then SIGKILL) |
 | replace_with_timeout | `float` | `10` | Seconds to wait after `SIGTERM` before escalating to `SIGKILL` (`0` skips `SIGTERM`). Implies `replace=True` |
 | max_duration | `float` | - | Maximum sandbox lifetime in seconds |
 | idle_timeout | `float` | - | Idle timeout in seconds |
 | ephemeral | `bool` | `False` | If `True`, the sandbox and all its persisted state are removed automatically once it stops, rather than left on disk for restart |
-| env | `dict[str, str]` | `{}` | Environment variables visible to all commands |
-| labels | `dict[str, str]` | `{}` | User-defined labels attached to the sandbox. Filter with [`list_with()`](#sandbox-list_with); see [Select in bulk](/sandboxes/labels#select-in-bulk). Keys starting with `sandbox.`, `microsandbox.`, or `service.` are reserved and rejected |
-| scripts | `dict[str, str]` | `{}` | Named scripts mounted at `/.msb/scripts/` and added to `PATH` |
-| pull_policy | `str \| `[`PullPolicy`](#pullpolicy) | `"if-missing"` | Image pull behavior |
-| log_level | `str \| `[`LogLevel`](#loglevel) | - | Override log verbosity |
+| env | `Mapping[str, str]` | `{}` | Environment variables visible to all commands |
+| labels | `Mapping[str, str]` | `{}` | User-defined labels attached to the sandbox. Filter with [`list_with()`](#sandbox-list_with); see [Select in bulk](/sandboxes/labels#select-in-bulk). Keys starting with `sandbox.`, `microsandbox.`, or `service.` are reserved and rejected |
+| scripts | `Mapping[str, str]` | `{}` | Named scripts mounted at `/.msb/scripts/` and added to `PATH` |
+| pull_policy | [`PullPolicy`](#pullpolicy) | `IF_MISSING` | Image pull behavior |
+| log_level | [`LogLevel`](#loglevel) | - | Override log verbosity |
 | registry_auth | [`RegistryAuth`](#registryauth) | - | Private registry credentials |
 | registry_insecure | `bool` | `False` | Pull images over plain HTTP instead of HTTPS (local or self-hosted registries) |
 | registry_ca_certs | `list[bytes \| bytearray \| str \| os.PathLike]` | `[]` | Additional CA roots for image pulls. File paths are read when `create()` is called. |
-| volumes | `dict[str, `[`MountConfig`](/sdk/python/volumes)`]` | `{}` | Volume mounts. See [Volumes](/sdk/python/volumes) |
-| patches | `list[`[`PatchConfig`](#patchconfig)`]` | `[]` | Rootfs modifications applied before boot |
-| ports | `dict[int, int] \| Sequence[`[`PortBinding`](/sdk/python/networking#portbinding)`]` | `{}` | Port mappings. Dict form is TCP and binds to `127.0.0.1`; use `PortBinding` for explicit bind addresses or UDP |
+| volumes | `Mapping[str, `[`MountConfig`](/sdk/python/volumes)`]` | `{}` | Volume mounts. See [Volumes](/sdk/python/volumes) |
+| patches | `Sequence[`[`PatchConfig`](#patchconfig)`]` | `[]` | Rootfs modifications applied before boot |
+| ports | `Mapping[int, int] \| Sequence[`[`PortBinding`](/sdk/python/networking#portbinding)`]` | `{}` | Port mappings. Mapping form is TCP and binds to `127.0.0.1`; use `PortBinding` for explicit bind addresses or UDP |
 | network | [`Network`](/sdk/python/networking#network) | public profile | Network policy and configuration |
-| secrets | `list[`[`SecretEntry`](/sdk/python/secrets#secretentry)`]` | `[]` | Secret injection |
+| secrets | `Sequence[`[`SecretEntry`](/sdk/python/secrets#secretentry)`]` | `[]` | Secret injection |
 | on_secret_violation | [`ViolationAction`](/sdk/python/secrets#violationaction)` \| `[`ViolationPolicy`](/sdk/python/secrets#violationpolicy) | `BLOCK_AND_LOG` | Sandbox-wide default action when a secret placeholder would leak to a non-eligible destination. Shorthand for `Network.on_secret_violation`; if both are provided, this top-level value takes precedence. See [Violation policy](/sdk/python/secrets#violation-policy) |
 | detached | `bool` | `False` | If `True`, spawn the sandbox in detached mode; call [`detach()`](#sb-detach) before dropping the returned handle when it should keep running |
 
@@ -1203,7 +1698,7 @@ Custom init specification. Pass it (or one of the equivalent shorthand shapes) a
 | args | `tuple[str, ...]` | `()` | Supplemental argv (`argv[0]` is implicitly `cmd`) |
 | env | `Mapping[str, str]` | `{}` | Extra env vars merged on top of the inherited env |
 
-The `init=` kwarg follows the same shape as other structured `create` kwargs: a bare scalar for the simple case, or a dataclass / dict for the rich case.
+The `init=` kwarg accepts a bare scalar for the simple case, an [`InitConfig`](#initconfig) dataclass, or an [`InitOptions`](#initoptions) typed dictionary for the rich case.
 
 | Form | Equivalent to |
 |------|---------------|
@@ -1229,16 +1724,28 @@ sb = await Sandbox.create(
 )
 ```
 
+### InitOptions
+
+<p className="msb-backref">Used by <a href="#sandboxconfig">create(init=...)</a></p>
+
+Typed-dictionary form of [`InitConfig`](#initconfig). `cmd` is required; `args` and `env` are optional.
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `cmd` | `str` | Absolute path or `"auto"` to the init binary |
+| `args` | `list[str]` | Supplemental argv |
+| `env` | `dict[str, str]` | Extra environment variables |
+
 ### SecurityProfile
 
 <p className="msb-backref">Used by <a href="#sandboxconfig">create(security=...)</a></p>
 
-Sandbox-wide in-guest security profile. A `StrEnum`, so the string values are accepted directly.
+Sandbox-wide in-guest security profile.
 
-| Value | Description |
-|-------|-------------|
-| `"default"` | Standard profile |
-| `"restricted"` | Sets `no_new_privs`, drops mount-admin capability from user commands, and forces `nosuid,nodev` on user mounts |
+| Member | Value | Description |
+|--------|-------|-------------|
+| `SecurityProfile.DEFAULT` | `"default"` | Standard profile |
+| `SecurityProfile.RESTRICTED` | `"restricted"` | Sets `no_new_privs`, drops mount-admin capability from user commands, and forces `nosuid,nodev` on user mounts |
 
 ### SandboxPage
 
@@ -1248,38 +1755,6 @@ One stable, newest-first page returned by [`Sandbox.list()`](#sandbox-list) or [
 |----------|------|-------------|
 | `sandboxes` | `list[SandboxHandle]` | Handles in this page |
 | `next_cursor` | `str \| None` | Opaque continuation cursor, or `None` on the final page |
-
-### SandboxHandle
-
-<p className="msb-backref">Returned by <a href="#sandbox-get">Sandbox.get()</a> · <a href="#sandbox-list">Sandbox.list()</a> · <a href="#sandbox-list_with">Sandbox.list_with()</a></p>
-
-A lightweight handle to an existing sandbox (running or stopped). Provides status, configuration, and lifecycle control **without** an active connection to the guest agent. You cannot `exec` or `fs` on a handle; call `.start()` or `.connect()` to upgrade to a full [`Sandbox`](#instance-methods).
-
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| name | `str` | Sandbox name, up to 128 UTF-8 bytes |
-| status | `str` | Current status. See [`SandboxStatus`](#sandboxstatus) |
-| config_json | `str` | Raw JSON configuration |
-| created_at | `float \| None` | Creation timestamp (ms since epoch) |
-| updated_at | `float \| None` | Last update timestamp (ms since epoch) |
-| config() | `dict[str, Any]` | Parsed configuration |
-| refresh() | `Awaitable[`[`SandboxHandle`](#sandboxhandle)`]` | Re-fetch status and metadata, returning a fresh handle |
-| ping() | `Awaitable[`[`SandboxPingResult`](#sandboxpingresult)`]` | Check agent reachability without refreshing idle activity; does not start stopped sandboxes |
-| touch() | `Awaitable[`[`SandboxTouchResult`](#sandboxtouchresult)`]` | Explicitly refresh idle activity; does not start stopped sandboxes |
-| modify(...) | `Awaitable[dict[str, Any]]` | Plan or apply a configuration change; same kwargs as [`modify()`](#sb-modify). Does not start stopped sandboxes; changes persist for the next boot |
-| connect(timeout=None) | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Connect to a running sandbox, optionally with an explicit timeout in seconds |
-| start(*, detached=False) | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Start in attached or detached mode |
-| stop(timeout=None) | `Awaitable[None]` | Gracefully shut down and wait until stopped state is observed |
-| request_stop() | `Awaitable[None]` | Request graceful shutdown without waiting |
-| kill(timeout=None) | `Awaitable[None]` | Force terminate and wait until stopped state is observed |
-| request_kill() | `Awaitable[None]` | Request force termination without waiting |
-| request_drain() | `Awaitable[None]` | Request graceful drain without waiting |
-| wait_until_stopped() | `Awaitable[`[`SandboxStopResult`](#sandboxstopresult)`]` | Block until the sandbox reaches terminal state |
-| remove() | `Awaitable[None]` | Delete sandbox and state |
-| metrics() | `Awaitable[`[`SandboxMetrics`](#sandboxmetrics)`]` | Point-in-time resource metrics |
-| logs(...) | `Awaitable[list[`[`LogEntry`](#logentry)`]]` | Read captured `exec.log` (works without starting) |
-| log_stream(...) | `Awaitable[`[`LogStream`](#logstream)`]` | Stream captured log entries (works without starting) |
-| snapshot(name) | `Awaitable[Snapshot]` | Create a named [snapshot](/sdk/python/snapshots) of the sandbox |
 
 ### SandboxPingResult
 
@@ -1312,7 +1787,7 @@ Observed terminal sandbox state returned by [`wait_until_stopped()`](#sb-wait_un
 | Property | Type | Description |
 |----------|------|-------------|
 | name | `str` | Sandbox name |
-| status | `str` | Terminal status that was observed. See [`SandboxStatus`](#sandboxstatus) |
+| status | [`SandboxStatus`](#sandboxstatus) | Terminal status that was observed |
 | exit_code | `int \| None` | Process exit code when it is available |
 | signal | `int \| None` | Terminating signal number when the sandbox was killed by a signal |
 | observed_at | `float` | When the terminal state was observed (ms since epoch) |
@@ -1322,15 +1797,141 @@ Observed terminal sandbox state returned by [`wait_until_stopped()`](#sb-wait_un
 
 <p className="msb-backref">Used by <a href="#sandboxhandle">SandboxHandle.status</a> · <a href="#sandboxstopresult">SandboxStopResult.status</a></p>
 
-The string status values a sandbox can report. A `StrEnum`, exposed as plain strings on `status` fields.
+Sandbox lifecycle status returned by `status` fields.
 
-| Value | Description |
-|-------|-------------|
-| `"running"` | Guest agent is ready; `exec`, `shell`, `fs` work |
-| `"stopped"` | VM shut down; configuration persisted; can be restarted |
-| `"crashed"` | VM exited unexpectedly (kernel panic, OOM, etc.) |
-| `"draining"` | Graceful shutdown in progress; existing commands finish, new ones rejected |
-| `"paused"` | VM paused |
+| Member | Value | Description |
+|--------|-------|-------------|
+| `SandboxStatus.CREATED` | `"created"` | Sandbox metadata exists but the VM has not started |
+| `SandboxStatus.STARTING` | `"starting"` | A start request is in progress |
+| `SandboxStatus.RUNNING` | `"running"` | Guest agent is ready; `exec`, `shell`, and `fs` work |
+| `SandboxStatus.STOPPED` | `"stopped"` | VM shut down; configuration persisted; can be restarted |
+| `SandboxStatus.CRASHED` | `"crashed"` | VM exited unexpectedly (kernel panic, OOM, etc.) |
+| `SandboxStatus.DRAINING` | `"draining"` | Graceful shutdown in progress; existing commands finish, new ones rejected |
+| `SandboxStatus.PAUSED` | `"paused"` | VM paused |
+
+### BackendKind
+
+<p className="msb-backref">Used by <code>set_default_backend()</code> · <code>backend_scope()</code> · returned by <code>default_backend_kind()</code></p>
+
+Selected sandbox backend.
+
+| Member | Value | Description |
+|--------|-------|-------------|
+| `BackendKind.LOCAL` | `"local"` | Local libkrun backend |
+| `BackendKind.CLOUD` | `"cloud"` | Microsandbox cloud backend; requires an API key or named profile |
+
+```python
+from microsandbox import BackendKind, set_default_backend
+
+set_default_backend(BackendKind.CLOUD, profile="production")
+```
+
+### ModificationPolicy
+
+<p className="msb-backref">Used by <a href="#sb-modify">modify(policy=...)</a></p>
+
+Controls how sandbox modifications that cannot apply live are handled.
+
+| Member | Value | Description |
+|--------|-------|-------------|
+| `ModificationPolicy.NO_RESTART` | `"no_restart"` | Apply only changes that do not require a restart |
+| `ModificationPolicy.NEXT_START` | `"next_start"` | Persist changes for the next start without restarting a running VM |
+| `ModificationPolicy.RESTART` | `"restart"` | Restart when required so changes become active immediately |
+
+### SecretModifySpec
+
+<p className="msb-backref">Used by <a href="#sb-modify">modify(secrets=...)</a></p>
+
+Desired state for one secret. `env`, `value`, and `store` are mutually exclusive sources. Omit all three to update only the placeholder or allowed hosts.
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `env` | `str` | Host environment variable to resolve when applying the modification |
+| `value` | `str` | Raw secret value. Stored in the durable sandbox config until replaced by a source reference |
+| `store` | `str` | Reserved for a host-side secret store reference; currently unsupported |
+| `placeholder` | `str` | Explicit guest-visible placeholder. New secrets default to `$MSB_<NAME>` |
+| `allowed_hosts` | `list[str]` | Desired allowed host patterns. A new secret requires at least one; an empty list leaves existing hosts unchanged |
+
+### SandboxModificationPlan
+
+Typed dictionary returned by `Sandbox.modify()` and `SandboxHandle.modify()`. Config changes and secret changes use different typed shapes and are discriminated by their `kind` member.
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `sandbox` | `str` | Sandbox being modified |
+| `status` | [`SandboxStatus`](#sandboxstatus) | Status used to classify the requested changes |
+| `applied` | `bool` | Whether the plan was applied |
+| `policy` | [`ModificationPolicy`](#modificationpolicy) | Policy used to produce the plan |
+| `changes` | `list[ConfigPlannedChange \| SecretPlannedChange]` | Planned changes |
+| `conflicts` | `list[ModificationConflict]` | Blocking conflicts, each with `field` and `message` |
+| `warnings` | `list[ModificationWarning]` | Non-fatal warnings, each with `field` and `message` |
+| `resize_status` | `list[ResourceResizeStatus]` | Optional live-resize convergence results |
+
+`ConfigPlannedChange` has `kind`, `field`, `change`, and `disposition`, plus optional `before`, `after`, and `reason`. `SecretPlannedChange` has `kind`, `field`, `name`, `change`, and `disposition`, plus optional `before_ref`, `after_ref`, `allow_hosts`, and `reason`. Secret values never appear in a plan.
+
+### PlannedChangeKind
+
+Discriminator for entries in `SandboxModificationPlan.changes`.
+
+| Member | Value | Description |
+|--------|-------|-------------|
+| `PlannedChangeKind.CONFIG` | `"config"` | Ordinary configuration change |
+| `PlannedChangeKind.SECRET` | `"secret"` | Secret metadata or material change |
+
+### ChangeKind
+
+Natural operation for a configuration change.
+
+| Member | Value | Description |
+|--------|-------|-------------|
+| `ChangeKind.ADDED` | `"added"` | A field is being added |
+| `ChangeKind.UPDATED` | `"updated"` | A field is being updated |
+| `ChangeKind.REMOVED` | `"removed"` | A field is being removed |
+
+### SecretChangeKind
+
+Natural operation for a secret change.
+
+| Member | Value | Description |
+|--------|-------|-------------|
+| `SecretChangeKind.ADDED` | `"added"` | A secret is being added |
+| `SecretChangeKind.ROTATED` | `"rotated"` | Secret material is being rotated |
+| `SecretChangeKind.REMOVED` | `"removed"` | A secret is being removed |
+| `SecretChangeKind.RENAMED` | `"renamed"` | A secret is being renamed |
+| `SecretChangeKind.HOSTS_UPDATED` | `"hosts updated"` | Allowed hosts are being updated |
+| `SecretChangeKind.PLACEHOLDER_UPDATED` | `"placeholder updated"` | The guest-visible placeholder is being updated |
+
+### ModificationDisposition
+
+When or whether a planned change can take effect.
+
+| Member | Value | Description |
+|--------|-------|-------------|
+| `ModificationDisposition.LIVE` | `"live"` | Applies to the running VM now |
+| `ModificationDisposition.NEXT_START` | `"next start"` | Applies the next time the sandbox starts |
+| `ModificationDisposition.REQUIRES_RESTART` | `"requires restart"` | Requires a restart before taking effect |
+| `ModificationDisposition.UNSUPPORTED` | `"unsupported"` | Cannot be changed through `modify()` |
+
+### ResourceKind
+
+Resource reported by a live-resize result.
+
+| Member | Value | Description |
+|--------|-------|-------------|
+| `ResourceKind.CPUS` | `"cpus"` | vCPU count |
+| `ResourceKind.MEMORY` | `"memory"` | Guest memory |
+
+### ResourceConvergenceState
+
+Observed convergence state for an accepted live resize.
+
+| Member | Value | Description |
+|--------|-------|-------------|
+| `ResourceConvergenceState.ACCEPTED` | `"accepted"` | Runtime accepted the request |
+| `ResourceConvergenceState.CONVERGING` | `"converging"` | Guest and VMM are still converging |
+| `ResourceConvergenceState.APPLIED` | `"applied"` | Desired, actual, and enforced values match |
+| `ResourceConvergenceState.GUEST_REFUSED` | `"guest-refused"` | Guest refused or failed to cooperate |
+| `ResourceConvergenceState.FAILED` | `"failed"` | Resize failed |
 
 ### SandboxMetrics
 
@@ -1356,80 +1957,58 @@ Point-in-time resource usage snapshot.
 | uptime_ms | `int` | Time since the sandbox was created (ms) |
 | timestamp_ms | `float` | When this measurement was taken (ms since epoch) |
 
-### MetricsStream
-
-<p className="msb-backref">Returned by <a href="#sb-metrics_stream">metrics_stream()</a></p>
-
-Async stream for receiving periodic metrics snapshots.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `__aiter__` / `__anext__` | [`SandboxMetrics`](#sandboxmetrics) | Use with `async for` |
-
-### LogEntry
-
-<p className="msb-backref">Returned by <a href="#sb-logs">logs()</a> · iterated from <a href="#logstream">LogStream</a></p>
-
-A single captured log entry returned by [`logs()`](#sb-logs) or iterated from a [`LogStream`](#logstream).
-
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| timestamp_ms | `float` | Wall-clock capture time (ms since Unix epoch, UTC) |
-| source | [`LogSource`](#logsource) | Where the chunk came from |
-| session_id | `int \| None` | Relay-monotonic session id; `None` for `"system"` entries |
-| cursor | `str` | Opaque resume token; pass back via `log_stream(from_cursor=...)` |
-| data | `bytes` | The chunk's raw bytes |
-| text() | `str` | Convenience: UTF-8 decode of `data` (lossy; invalid bytes are replaced) |
-
-### LogStream
-
-<p className="msb-backref">Returned by <a href="#sb-log_stream">log_stream()</a></p>
-
-Async stream of [`LogEntry`](#logentry) values, returned by [`log_stream()`](#sb-log_stream).
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `__aiter__` / `__anext__` | [`LogEntry`](#logentry) | Use with `async for` |
-
 ### LogSource
 
-<p className="msb-backref">Used by <a href="#logentry">LogEntry.source</a> · <a href="#sb-logs">logs(sources=...)</a></p>
+<p className="msb-backref">Returned by <a href="#logentry">LogEntry.source</a></p>
 
-The string values the `source` field on a [`LogEntry`](#logentry) can take, also accepted by `logs(sources=[...])` and `log_stream(sources=[...])`. The read form additionally accepts `"all"`.
+Source attached to each [`LogEntry`](#logentry).
 
-| Value | Description |
-|-------|-------------|
-| `"stdout"` | Captured from a session's stdout (pipe mode, streams stayed separated) |
-| `"stderr"` | Captured from a session's stderr (pipe mode) |
-| `"output"` | Captured from a session running in PTY mode. PTY allocation merges stdout and stderr at the kernel level inside the guest, so they arrive as a single stream, tagged `"output"` rather than mislabeled as `"stdout"` |
-| `"system"` | Synthetic entry: lifecycle markers in `exec.log` plus runtime/kernel diagnostic lines merged in at read time when `"system"` is requested |
-| `"all"` | Read shorthand for all four sources (accepted by `sources=`, never returned on an entry) |
+| Member | Value | Description |
+|--------|-------|-------------|
+| `LogSource.STDOUT` | `"stdout"` | Captured from a session's stdout (pipe mode, streams stayed separated) |
+| `LogSource.STDERR` | `"stderr"` | Captured from a session's stderr (pipe mode) |
+| `LogSource.OUTPUT` | `"output"` | Captured from a PTY session, where stdout and stderr are merged by the guest kernel |
+| `LogSource.SYSTEM` | `"system"` | Synthetic lifecycle or runtime diagnostic entry |
+
+### LogReadSource
+
+<p className="msb-backref">Used by <a href="#sb-logs">logs(sources=...)</a> · <a href="#sb-log_stream">log_stream(sources=...)</a></p>
+
+Log source selector accepted by `logs()` and `log_stream()`.
+
+| Member | Value | Description |
+|--------|-------|-------------|
+| `LogReadSource.STDOUT` | `"stdout"` | Select stdout entries |
+| `LogReadSource.STDERR` | `"stderr"` | Select stderr entries |
+| `LogReadSource.OUTPUT` | `"output"` | Select PTY-merged output entries |
+| `LogReadSource.SYSTEM` | `"system"` | Select lifecycle and runtime diagnostic entries |
+| `LogReadSource.ALL` | `"all"` | Select all four sources |
 
 ### LogLevel
 
 <p className="msb-backref">Used by <a href="#sandboxconfig">create(log_level=...)</a></p>
 
-Sandbox process log verbosity. A `StrEnum`, so the string values are accepted directly.
+Sandbox process log verbosity.
 
-| Value | Description |
-|-------|-------------|
-| `"trace"` | Most verbose, all diagnostic output |
-| `"debug"` | Debug and higher |
-| `"info"` | Info and higher |
-| `"warn"` | Warnings and errors only |
-| `"error"` | Errors only |
+| Member | Value | Description |
+|--------|-------|-------------|
+| `LogLevel.TRACE` | `"trace"` | Most verbose, all diagnostic output |
+| `LogLevel.DEBUG` | `"debug"` | Debug and higher |
+| `LogLevel.INFO` | `"info"` | Info and higher |
+| `LogLevel.WARN` | `"warn"` | Warnings and errors only |
+| `LogLevel.ERROR` | `"error"` | Errors only |
 
 ### PullPolicy
 
 <p className="msb-backref">Used by <a href="#sandboxconfig">create(pull_policy=...)</a></p>
 
-Controls when the SDK fetches an OCI image from the registry. A `StrEnum`, so the string values are accepted directly.
+Controls when the SDK fetches an OCI image from the registry.
 
-| Value | Description |
-|-------|-------------|
-| `"always"` | Pull the image every time, even if cached locally |
-| `"if-missing"` | Pull only if the image is not already cached. This is the default |
-| `"never"` | Never pull; fail if the image is not cached locally |
+| Member | Value | Description |
+|--------|-------|-------------|
+| `PullPolicy.ALWAYS` | `"always"` | Pull the image every time, even if cached locally |
+| `PullPolicy.IF_MISSING` | `"if-missing"` | Pull only if the image is not already cached. This is the default |
+| `PullPolicy.NEVER` | `"never"` | Never pull; fail if the image is not cached locally |
 
 ### RegistryAuth
 
@@ -1450,34 +2029,32 @@ A single rootfs patch. Produced by the [`Patch`](#patch) factory; you'd normally
 
 | Field | Type | Description |
 |-------|------|-------------|
-| kind | `str` | One of `"text"`, `"file"`, `"copy_file"`, `"copy_dir"`, `"symlink"`, `"mkdir"`, `"remove"`, `"append"` |
-| path | `str \| None` | Absolute guest path (text / mkdir / remove / append) |
-| content | `str \| None` | Text content (text / append) |
+| kind | [`PatchKind`](#patchkind) | Patch operation |
+| path | `str \| None` | Absolute guest path (text / file / mkdir / remove / append) |
+| content | `str \| bytes \| None` | Text content for `TEXT` / `APPEND`, or binary content for `FILE` |
 | src | `str \| None` | Host source path (copy_file / copy_dir) |
 | dst | `str \| None` | Guest destination path (copy_file / copy_dir) |
 | target | `str \| None` | Symlink target |
 | link | `str \| None` | Symlink path |
-| mode | `int \| None` | File / directory mode (e.g. `0o644`) |
-| replace | `bool` | When `True`, overwrite an existing path at the destination. Defaults to `False` |
+| mode | `int \| None` | File / directory mode for text, file, copy-file, or mkdir patches (e.g. `0o644`) |
+| replace | `bool` | When `True`, overwrite an existing destination for text, file, copy, or symlink patches. Defaults to `False` |
 
-### PullSession
+### PatchKind
 
-<p className="msb-backref">Returned by <a href="#sandbox-create_with_progress">create_with_progress()</a></p>
+<p className="msb-backref">Used by <a href="#patchconfig">PatchConfig.kind</a></p>
 
-Returned by [`create_with_progress()`](#sandbox-create_with_progress). The factory itself is synchronous; use the returned session as an async context manager to track image pull progress.
+Rootfs patch operation.
 
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| progress | `AsyncIterator[`[`PullEvent`](#pullevent)`]` | Async iterator of pull progress events |
-| result() | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Await once to get the final running sandbox. A second call raises `RuntimeError` |
-
-```python
-session = Sandbox.create_with_progress("my-sandbox", image="ubuntu:latest")
-async with session:
-    async for event in session.progress:
-        print(event)
-    sb = await session.result()
-```
+| Member | Value | Description |
+|--------|-------|-------------|
+| `PatchKind.TEXT` | `"text"` | Write a UTF-8 text file |
+| `PatchKind.FILE` | `"file"` | Write an arbitrary binary file |
+| `PatchKind.APPEND` | `"append"` | Append to a text file |
+| `PatchKind.COPY_FILE` | `"copy_file"` | Copy a host file into the guest |
+| `PatchKind.COPY_DIR` | `"copy_dir"` | Copy a host directory into the guest |
+| `PatchKind.SYMLINK` | `"symlink"` | Create a symbolic link |
+| `PatchKind.MKDIR` | `"mkdir"` | Create a directory |
+| `PatchKind.REMOVE` | `"remove"` | Remove a path |
 
 ### PullEvent
 
@@ -1487,7 +2064,7 @@ Native event object emitted by [`PullSession.progress`](#pullsession). Inspect `
 
 | Field | Type | Description |
 |-------|------|-------------|
-| event_type | `str` | Event tag, e.g. `"resolving"`, `"resolved"`, `"layer_download_progress"`, `"complete"` |
+| event_type | [`PullEventType`](#pulleventtype) | Event discriminator |
 | reference | `str \| None` | Image reference being pulled |
 | manifest_digest | `str \| None` | Resolved manifest digest |
 | layer_count | `int \| None` | Number of layers |
@@ -1500,12 +2077,35 @@ Native event object emitted by [`PullSession.progress`](#pullsession). Inspect `
 | bytes_read | `int \| None` | Bytes read during materialization |
 
 ```python
+from microsandbox import PullEventType, Sandbox
+
 session = Sandbox.create_with_progress("my-sandbox", image="ubuntu:latest")
 async with session:
     async for event in session.progress:
-        if event.event_type == "resolved":
+        if event.event_type is PullEventType.RESOLVED:
             print(f"{event.layer_count} layers, {event.total_download_bytes} bytes")
-        elif event.event_type == "layer_download_progress":
+        elif event.event_type is PullEventType.LAYER_DOWNLOAD_PROGRESS:
             print(f"layer {event.layer_index}: {event.downloaded_bytes}/{event.total_bytes}")
     sb = await session.result()
 ```
+
+### PullEventType
+
+Discriminator returned by [`PullEvent.event_type`](#pullevent).
+
+| Member | Value | Description |
+|--------|-------|-------------|
+| `PullEventType.RESOLVING` | `"resolving"` | Resolving the image reference |
+| `PullEventType.RESOLVED` | `"resolved"` | Manifest resolved |
+| `PullEventType.LAYER_DOWNLOAD_PROGRESS` | `"layer_download_progress"` | Layer download advanced |
+| `PullEventType.LAYER_DOWNLOAD_COMPLETE` | `"layer_download_complete"` | Layer download completed |
+| `PullEventType.LAYER_DOWNLOAD_VERIFYING` | `"layer_download_verifying"` | Layer digest is being verified |
+| `PullEventType.LAYER_MATERIALIZE_STARTED` | `"layer_materialize_started"` | Layer materialization started |
+| `PullEventType.LAYER_MATERIALIZE_PROGRESS` | `"layer_materialize_progress"` | Layer materialization advanced |
+| `PullEventType.LAYER_MATERIALIZE_WRITING` | `"layer_materialize_writing"` | Materialized layer is being written |
+| `PullEventType.LAYER_MATERIALIZE_COMPLETE` | `"layer_materialize_complete"` | Layer materialization completed |
+| `PullEventType.STITCH_MERGING_TREES` | `"stitch_merging_trees"` | Layer trees are being merged |
+| `PullEventType.STITCH_WRITING_FSMETA` | `"stitch_writing_fsmeta"` | Filesystem metadata is being written |
+| `PullEventType.STITCH_WRITING_VMDK` | `"stitch_writing_vmdk"` | VMDK image is being written |
+| `PullEventType.STITCH_COMPLETE` | `"stitch_complete"` | Image stitching completed |
+| `PullEventType.COMPLETE` | `"complete"` | Image pull completed |

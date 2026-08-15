@@ -154,6 +154,8 @@ struct InboundRelay {
     handle: SocketHandle,
     /// Send data from smoltcp socket to host relay task.
     to_host: mpsc::Sender<Bytes>,
+    /// Data removed from smoltcp while the host relay channel was full.
+    read_buf: Option<Bytes>,
     /// Receive data from host relay task to write to smoltcp socket.
     from_host: mpsc::Receiver<Bytes>,
     /// Partial data that couldn't be fully written to smoltcp socket.
@@ -299,6 +301,7 @@ impl PortPublisher {
             self.connections.push(InboundRelay {
                 handle,
                 to_host: to_host_tx,
+                read_buf: None,
                 from_host: from_host_rx,
                 write_buf: None,
                 close_attempts: 0,
@@ -329,16 +332,25 @@ impl PortPublisher {
                 continue;
             }
 
-            // smoltcp → host: read from socket, send via channel.
-            while socket.can_recv() {
-                match socket.recv_slice(&mut relay_buf) {
-                    Ok(n) if n > 0 => {
-                        let data = Bytes::copy_from_slice(&relay_buf[..n]);
-                        if relay.to_host.try_send(data).is_err() {
-                            break;
+            // smoltcp → host: flush read_buf first, then read from socket.
+            if let Some(pending) = relay.read_buf.take()
+                && let Err(unsent) = try_send_to_host_relay(&relay.to_host, pending)
+            {
+                relay.read_buf = Some(unsent);
+            }
+
+            if relay.read_buf.is_none() {
+                while socket.can_recv() {
+                    match socket.recv_slice(&mut relay_buf) {
+                        Ok(n) if n > 0 => {
+                            let data = Bytes::copy_from_slice(&relay_buf[..n]);
+                            if let Err(unsent) = try_send_to_host_relay(&relay.to_host, data) {
+                                relay.read_buf = Some(unsent);
+                                break;
+                            }
                         }
+                        _ => break,
                     }
-                    _ => break,
                 }
             }
 
@@ -796,6 +808,11 @@ fn inject_udp_datagram_to_guest(
     }
 }
 
+/// Try to queue guest data for the host relay, returning it when backpressured.
+fn try_send_to_host_relay(to_host: &mpsc::Sender<Bytes>, data: Bytes) -> Result<(), Bytes> {
+    to_host.try_send(data).map_err(|err| err.into_inner())
+}
+
 /// Relay task: bridges a host TcpStream to channels connected to smoltcp.
 async fn inbound_relay_task(
     stream: TcpStream,
@@ -955,6 +972,25 @@ mod tests {
         drop(to_host_tx);
         task.abort();
         let _ = task.await;
+    }
+
+    #[test]
+    fn full_host_channel_returns_guest_data_for_retry() {
+        let (to_host, mut to_host_rx) = mpsc::channel(1);
+
+        let occupied = Bytes::from_static(b"occupied");
+        to_host.try_send(occupied.clone()).unwrap();
+
+        let pending = Bytes::from_static(b"preserve me");
+        let unsent = try_send_to_host_relay(&to_host, pending.clone()).unwrap_err();
+        assert_eq!(unsent, pending);
+
+        assert_eq!(to_host_rx.try_recv().unwrap(), occupied);
+        try_send_to_host_relay(&to_host, unsent).unwrap();
+        assert_eq!(
+            to_host_rx.try_recv().unwrap(),
+            Bytes::from_static(b"preserve me")
+        );
     }
 
     #[test]

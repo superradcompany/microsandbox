@@ -33,6 +33,7 @@ anyhow = { workspace = true, optional = true }
 astral-tokio-tar.workspace = true
 async-compression = { workspace = true, features = ["tokio", "zstd", "gzip"] }
 base64.workspace = true
+blake3.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 ciborium.workspace = true
@@ -57,8 +58,10 @@ microsandbox-utils.workspace = true
 nix = { workspace = true, features = ["process", "signal", "term"] }
 notify.workspace = true
 rand.workspace = true
+rayon.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
+rustls-platform-verifier.workspace = true
 russh = { workspace = true, optional = true }
 russh-sftp = { workspace = true, optional = true }
 scopeguard.workspace = true
@@ -75,7 +78,6 @@ tracing.workspace = true
 typed-builder.workspace = true
 typed-path.workspace = true
 which.workspace = true
-webpki-roots.workspace = true
 zeroize.workspace = true
 
 [build-dependencies]

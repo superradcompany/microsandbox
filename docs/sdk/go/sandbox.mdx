@@ -3,34 +3,8 @@ title: Sandbox
 description: Go SDK - Sandbox API reference
 ---
 
-Create and control a microVM sandbox: boot it from an image, run commands, stream logs and metrics, then shut it down. See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management. Examples assume the package is imported as `m "github.com/superradcompany/microsandbox/sdk/go"`.
+Create and control a microVM sandbox: boot it from an image, run commands, stream logs and metrics, then shut it down. See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
 
-For local sandboxes, call [`EnsureInstalled`](#m-ensureinstalled) once at process startup. It installs the `msb` + `libkrunfw` runtime into `~/.microsandbox/` when needed, is idempotent, and surfaces runtime setup failures before the first sandbox operation. Use [`IsInstalled`](#m-isinstalled) when you only need to check whether the runtime is already present.
-
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```go
-import m "github.com/superradcompany/microsandbox/sdk/go"
-
-if err := m.EnsureInstalled(ctx); err != nil {      // 1. prepare local runtime
-    return err
-}
-
-sb, err := m.CreateSandbox(ctx, "api",              // 2. configure + boot
-    m.WithImage("python"),
-    m.WithMemory(1024),
-)
-if err != nil {
-    return err
-}
-defer sb.Close()                                    // 5. release handle
-
-out, err := sb.Exec(ctx, "python", []string{"-V"})  // 3. run
-if err != nil {
-    return err
-}
-fmt.Println(out.Stdout())                           // 4. read output
-```
 
 ## Functions
 
@@ -60,7 +34,7 @@ defer func() {
 
 </Accordion>
 
-Create and boot a new sandbox. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it is ready to accept commands. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes. The returned [`*Sandbox`](#methods) owns the VM process, call `Close` (or `Stop` + `Close`) when done. See [Options](#options) for all configuration knobs.
+Create and boot a new sandbox. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it is ready to accept commands. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes. The returned [`*Sandbox`](#methods) owns the VM process. Call `Close` (or `Stop` + `Close`) when done. See [Options](#options) for all configuration knobs.
 
 <p className="msb-label">Parameters</p>
 
@@ -284,7 +258,7 @@ err := m.RemoveSandbox(ctx, "api")
 
 </Accordion>
 
-Delete a stopped sandbox and all its persisted state from disk. Fails if the sandbox is still running, stop it first.
+Delete a stopped sandbox by name. See [Remove](/sandboxes/lifecycle#remove) for the exact local deletion scope and the external resources that are preserved. Fails if the sandbox is still running; stop it first.
 
 <p className="msb-label">Parameters</p>
 
@@ -296,6 +270,8 @@ Delete a stopped sandbox and all its persisted state from disk. Fails if the san
 </div>
 
 #### <span className="msb-recv">m.</span><span className="msb-hn">AllSandboxMetrics()</span>
+
+<Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func AllSandboxMetrics(ctx context.Context) (map[string]*Metrics, error)
@@ -323,91 +299,16 @@ Return a point-in-time [`Metrics`](#metrics) snapshot for every running sandbox,
   </div>
 </div>
 
-#### <span className="msb-recv">m.</span><span className="msb-hn">EnsureInstalled()</span>
+<span id="m-ensureinstalled"></span>
+<span id="m-isinstalled"></span>
+<span id="m-sdkversion"></span>
+<span id="m-runtimeversion"></span>
 
-```go
-func EnsureInstalled(ctx context.Context, opts ...SetupOption) error
-```
+Runtime installation and verification helpers are documented under [Runtime setup](/sdk/setup#install-and-verify). The Go-only version helpers are under [Inspect Go versions](/sdk/setup#inspect-go-versions).
 
-<Accordion title="Example">
+## Sandbox
 
-```go
-if err := m.EnsureInstalled(ctx); err != nil {
-    log.Fatalf("microsandbox setup: %v", err)
-}
-```
-
-</Accordion>
-
-Ensure `msb` + `libkrunfw` are present under `~/.microsandbox/` (`%USERPROFILE%\.microsandbox` on Windows), downloading them from the matching GitHub release if needed. Call this at process startup when the program will create local sandboxes so runtime download/setup failures surface before the first sandbox operation. The Go FFI library is embedded in the Go binary and loads automatically on first use; `EnsureInstalled` only governs the `msb` + `libkrunfw` runtime install. Idempotent; options apply only to the first call.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>ctx</code><span className="msb-type">context.Context</span></div>
-    <div className="msb-param-desc">Cancels an in-flight msb + libkrunfw download.</div>
-  </div>
-  <div className="msb-param">
-    <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#setupoption">...SetupOption</a></div>
-    <div className="msb-param-desc">Install knobs, e.g. <a href="#withskipdownload">WithSkipDownload()</a>.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">m.</span><span className="msb-hn">IsInstalled()</span>
-
-```go
-func IsInstalled() bool
-```
-
-Report whether `msb` + `libkrunfw` are present on disk at the SDK's pinned version. Use this when you only need to check whether the runtime is already available at the SDK install location. Does **not** dlopen the FFI library, which ships embedded.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">bool</span></div>
-    <div className="msb-param-desc"><code>true</code> if the runtime is present at the expected version.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">m.</span><span className="msb-hn">SDKVersion()</span>
-
-```go
-func SDKVersion() string
-```
-
-Return the microsandbox release version this SDK was compiled against.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Pinned release version for this SDK build.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">m.</span><span className="msb-hn">RuntimeVersion()</span>
-
-```go
-func RuntimeVersion() (string, error)
-```
-
-Return the version reported by the loaded FFI library. Auto-loads the library on first use; returns an error with `Kind == ErrLibraryNotLoaded` only if loading fails (e.g. unsupported platform or GLIBC mismatch).
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">FFI library version.</div>
-  </div>
-</div>
-
-## Methods
-
-The `*Sandbox` returned by [`CreateSandbox`](#m-createsandbox), [`StartSandbox`](#m-startsandbox), and [`SandboxHandle.Connect`](#sandboxhandle) carries the methods below. `*Sandbox` is **safe for concurrent use** from multiple goroutines. The command-execution methods, `Exec`, `ExecStream`, `Shell`, and `ShellStream`, live on the same value and are documented under [Execution](/sdk/go/execution).
+A live sandbox connection that is safe for concurrent use.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Name()</span>
 
@@ -478,6 +379,8 @@ Return an SSH accessor for opening a native in-process SSH client or preparing a
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Logs()</span>
 
+<Tooltip tip="Bounded log reads are not available on microsandbox cloud; follow live with log streaming and persist output externally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```go
 func (s *Sandbox) Logs(ctx context.Context, opts LogOptions) ([]LogEntry, error)
 ```
@@ -516,6 +419,8 @@ Read persisted output from the sandbox's `exec.log`. Backed by an on-disk file, 
 </div>
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">LogStream()</span>
+
+<Tooltip tip="On microsandbox cloud, log streaming is follow-only; set follow. Bounded, non-follow reads are not available."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (s *Sandbox) LogStream(ctx context.Context, opts LogStreamOptions) (*LogStreamHandle, error)
@@ -562,6 +467,8 @@ Start a streaming log subscription against a live sandbox. Pass `LogStreamOption
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Ping()</span>
 
+<Tooltip tip="Not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```go
 func (s *Sandbox) Ping(ctx context.Context) (*SandboxPingResult, error)
 ```
@@ -591,6 +498,8 @@ Check that the running sandbox's guest agent is reachable without refreshing idl
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Touch()</span>
 
+<Tooltip tip="Not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```go
 func (s *Sandbox) Touch(ctx context.Context) (*SandboxTouchResult, error)
 ```
@@ -619,6 +528,8 @@ Explicitly refresh the running sandbox's idle activity. This sends `core.touch`,
 </div>
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Modify()</span>
+
+<Tooltip tip="modify is not available on microsandbox cloud; recreate the sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (s *Sandbox) Modify(ctx context.Context, opts ModifyOptions) (*SandboxModificationPlan, error)
@@ -650,15 +561,36 @@ _, err = sb.Modify(ctx, m.ModifyOptions{
     Env:    map[string]string{"MODE": "prod"},
     Policy: m.ModificationPolicyRestart,
 })
+// Grow the managed OCI root disk offline and restart
+_, err = sb.Modify(ctx, m.ModifyOptions{
+    RootDiskSizeMiB: 8192,
+    Policy:          m.ModificationPolicyRestart,
+})
+
+// Add or rotate a host-environment secret; restart if it is newly added
+_, err = sb.Modify(ctx, m.ModifyOptions{
+    Secrets: map[string]m.SecretModifySpec{
+        "API_KEY": {
+            Env:          "API_KEY",
+            AllowedHosts: []string{"api.example.com"},
+        },
+    },
+    Policy: m.ModificationPolicyRestart,
+})
+
+// Remove an existing secret
+_, err = sb.Modify(ctx, m.ModifyOptions{
+    SecretsRemove: []string{"OLD_API_KEY"},
+})
 ```
 
 </Accordion>
 
 Plan or apply a configuration change. The returned plan labels each change `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`, and apply is all-or-nothing.
 
-`CPUs` and `MemoryMiB` resize live within the [`WithMaxCPUs`](#withmaxcpus) / [`WithMaxMemory`](#withmaxmemory) ceilings; raising a ceiling requires a restart. Env and workdir changes affect future execs only. On a stopped sandbox, changes are saved for the next boot.
+`CPUs` and `MemoryMiB` resize live within the [`WithMaxCPUs`](#withmaxcpus) / [`WithMaxMemory`](#withmaxmemory) ceilings; raising a ceiling requires a restart. `RootDiskSizeMiB` changes are offline: managed and flat OCI root disks grow only, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected. Env and workdir changes affect future execs only. On a stopped sandbox, changes are saved for the next boot.
 
-Secret changes are Rust-SDK and CLI only for now. The CLI equivalent is [`msb modify`](/cli/sandbox-commands#msb-modify).
+Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source—`Env`, `Value`, or `Store`—and may also set `Placeholder` and `AllowedHosts`; omitting a source updates only the other supplied fields. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `SecretsRemove`.
 
 A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and the returned plan's `ResizeStatus` reports when the sandbox has finished adjusting. See [`SandboxModificationPlan`](#sandboxmodificationplan).
 
@@ -681,6 +613,8 @@ A live CPU or memory resize can take a moment to settle. The new limits are enfo
 </div>
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Metrics()</span>
+
+<Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (s *Sandbox) Metrics(ctx context.Context) (*Metrics, error)
@@ -708,6 +642,8 @@ Get a point-in-time snapshot of the sandbox's resource usage: CPU, memory, disk 
 </div>
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">MetricsStream()</span>
+
+<Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (s *Sandbox) MetricsStream(ctx context.Context, interval time.Duration) (*MetricsStreamHandle, error)
@@ -782,6 +718,53 @@ Bridge the caller's terminal to a process inside the sandbox for a fully interac
   </div>
 </div>
 
+#### <span className="msb-recv">sb.</span><span className="msb-hn">AttachWith()</span>
+
+```go
+func (s *Sandbox) AttachWith(ctx context.Context, cmd string, args []string, opts ...AttachOption) (int, error)
+```
+
+<Accordion title="Example">
+
+```go
+exitCode, err := sb.AttachWith(ctx, "bash", []string{"-l"},
+    m.WithAttachUser("dev"),
+    m.WithAttachCwd("/app"),
+    m.WithAttachEnv(map[string]string{"DEBUG": "1"}),
+    m.WithAttachDetachKeys("ctrl-q"),
+)
+```
+
+</Accordion>
+
+Same as [`Attach`](#sb-attach), but takes [`AttachOption`](#attachoption) values so the session can run as a different guest user, in a different working directory, with extra environment variables, or with custom detach keys.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cmd</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Command to run.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>args</code><span className="msb-type">[]string</span></div>
+    <div className="msb-param-desc">Command arguments; may be <code>nil</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#attachoption">...AttachOption</a></div>
+    <div className="msb-param-desc">Attach options.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">int</span></div>
+    <div className="msb-param-desc">Exit code of the process.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">sb.</span><span className="msb-hn">AttachShell()</span>
 
 ```go
@@ -834,6 +817,8 @@ Request graceful shutdown and return once the request is sent, without waiting f
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Kill()</span>
 
+<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```go
 func (s *Sandbox) Kill(ctx context.Context, opts ...KillOption) error
 ```
@@ -859,6 +844,8 @@ Force-terminate the sandbox with SIGKILL and wait until stopped state is observe
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">RequestKill()</span>
 
+<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```go
 func (s *Sandbox) RequestKill(ctx context.Context) error
 ```
@@ -866,6 +853,8 @@ func (s *Sandbox) RequestKill(ctx context.Context) error
 Request force termination and return once the request is sent, without waiting for the sandbox to reach stopped state.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">RequestDrain()</span>
+
+<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (s *Sandbox) RequestDrain(ctx context.Context) error
@@ -917,6 +906,8 @@ Release the Rust-side handle **without** stopping the VM. Use on sandboxes creat
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Close()</span>
 
+<Tooltip tip="On microsandbox cloud this does not stop the sandbox; the cloud handle does not own the host process, so call stop() or remove() explicitly."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```go
 func (s *Sandbox) Close() error
 ```
@@ -929,9 +920,11 @@ defer sb.Close()
 
 </Accordion>
 
-Release the Rust-side handle. Safe to call multiple times; the second call returns an error with `Kind == ErrInvalidHandle`. For a sandbox created with [`WithDetached`](#withdetached), `Close` stops the VM, use [`Detach`](#sb-detach) instead to leave it running.
+Release the Rust-side handle. Safe to call multiple times; the second call returns an error with `Kind == ErrInvalidHandle`. For a sandbox created with [`WithDetached`](#withdetached), `Close` stops the VM. Use [`Detach`](#sb-detach) instead to leave it running.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">OwnsLifecycle()</span>
+
+<Tooltip tip="On microsandbox cloud this is false; the cloud worker owns the sandbox process, not your handle."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (s *Sandbox) OwnsLifecycle() (bool, error)
@@ -950,6 +943,8 @@ Report whether this handle owns the VM process. When `true`, closing or stopping
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">OwnsLifecycleOrFalse()</span>
 
+<Tooltip tip="On microsandbox cloud this is false; the cloud worker owns the sandbox process, not your handle."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```go
 func (s *Sandbox) OwnsLifecycleOrFalse() bool
 ```
@@ -967,9 +962,62 @@ Convenience wrapper around [`OwnsLifecycle`](#sb-ownslifecycle) that swallows th
 
 ## Options
 
-Functional options for [`CreateSandbox`](#m-createsandbox). Map and slice options merge across repeated calls; single-value setters like [`WithImage`](#withimage) replace. Simple setters are demonstrated by the [Typical flow](#typical-flow) above.
+Functional options for creating and listing sandboxes. Map and slice options merge across repeated calls; single-value setters like [`WithImage`](#withimage) replace.
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithListLimit()</span>
+
+```go
+func WithListLimit(limit uint32) SandboxListOption
+```
+
+Set the maximum number of sandboxes returned in a page. The limit must be between 1 and 100.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>limit</code><span className="msb-type">uint32</span></div>
+    <div className="msb-param-desc">Maximum number of sandboxes in the page.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithListCursor()</span>
+
+```go
+func WithListCursor(cursor string) SandboxListOption
+```
+
+Continue listing after a previous page's `NextCursor`. Keep the same label filters when requesting the next page.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cursor</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Opaque cursor returned by the previous page.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithListLabels()</span>
+
+```go
+func WithListLabels(labels map[string]string) SandboxListOption
+```
+
+Require every supplied label. Repeated selectors are AND-matched.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>labels</code><span className="msb-type">map[string]string</span></div>
+    <div className="msb-param-desc">Label key-value pairs that every result must match.</div>
+  </div>
+</div>
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithImage()</span>
+
+<Tooltip tip="On microsandbox cloud, only OCI image references are accepted; host-directory and disk-image root filesystems are local-only."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func WithImage(image string) SandboxOption
@@ -1004,6 +1052,8 @@ Set the writable overlay upper size for an OCI image, in MiB. Valid only with an
 </div>
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithImageDisk()</span>
+
+<Tooltip tip="Disk-image root filesystems are not available on microsandbox cloud; use an OCI image."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func WithImageDisk(path string, fstype string) SandboxOption
@@ -1063,6 +1113,8 @@ Set the guest memory limit in MiB. This is a limit, not an upfront reservation. 
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithMaxMemory()</span>
 
+<Tooltip tip="On microsandbox cloud these ceilings are not carried; the maximum is pinned to the initial value. Recreate the sandbox to resize."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```go
 func WithMaxMemory(mebibytes uint32) SandboxOption
 ```
@@ -1075,6 +1127,23 @@ Set the boot-time maximum hotpluggable guest memory in MiB. This reserves the en
   <div className="msb-param">
     <div className="msb-param-key"><code>mebibytes</code><span className="msb-type">uint32</span></div>
     <div className="msb-param-desc">Maximum memory in MiB.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithTHP()</span>
+
+```go
+func WithTHP(policy THPPolicy) SandboxOption
+```
+
+Select the guest transparent huge-page policy applied through the kernel command line at boot. Default: `THPMadvise`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>policy</code><span className="msb-type">THPPolicy</span></div>
+    <div className="msb-param-desc"><code>THPAlways</code>, <code>THPMadvise</code>, or <code>THPNever</code>.</div>
   </div>
 </div>
 
@@ -1096,6 +1165,8 @@ Set the number of virtual CPUs. This is a limit, not a reservation. Default: `1`
 </div>
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithMaxCPUs()</span>
+
+<Tooltip tip="On microsandbox cloud these ceilings are not carried; the maximum is pinned to the initial value. Recreate the sandbox to resize."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func WithMaxCPUs(cpus uint8) SandboxOption
@@ -1220,6 +1291,8 @@ Attach a single label. Shorthand for [`WithLabels`](#withlabels) with one entry.
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithHostname()</span>
 
+<Tooltip tip="On microsandbox cloud, the hostname is assigned by the platform; a value set here is ignored."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```go
 func WithHostname(hostname string) SandboxOption
 ```
@@ -1254,6 +1327,8 @@ Set the default guest user (UID or name) for all commands.
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithReplace()</span>
 
+<Tooltip tip="Replace-on-create is not available on microsandbox cloud; remove the existing sandbox first."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```go
 func WithReplace() SandboxOption
 ```
@@ -1262,11 +1337,13 @@ Replace any existing sandbox with the same name. Sends SIGTERM, waits up to 10s 
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithReplaceWithTimeout()</span>
 
+<Tooltip tip="Replace-on-create is not available on microsandbox cloud; remove the existing sandbox first."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```go
 func WithReplaceWithTimeout(timeout time.Duration) SandboxOption
 ```
 
-Like [`WithReplace`](#withreplace) but with a caller-specified timeout between SIGTERM and SIGKILL. Implies `WithReplace`, calling this alone is enough. A zero duration skips SIGTERM and SIGKILLs immediately.
+Like [`WithReplace`](#withreplace) but with a caller-specified timeout between SIGTERM and SIGKILL. Implies `WithReplace`; calling this alone is enough. A zero duration skips SIGTERM and SIGKILLs immediately.
 
 <p className="msb-label">Parameters</p>
 
@@ -1283,7 +1360,7 @@ Like [`WithReplace`](#withreplace) but with a caller-specified timeout between S
 func WithDetached() SandboxOption
 ```
 
-Create the sandbox in detached mode. The VM continues running after the Go process exits; reattach via [`GetSandbox`](#m-getsandbox). Note that [`Close`](#sb-close) stops a detached sandbox, use [`Detach`](#sb-detach) to leave it running.
+Create the sandbox in detached mode. The VM continues running after the Go process exits; reattach via [`GetSandbox`](#m-getsandbox). [`Close`](#sb-close) stops a detached sandbox; use [`Detach`](#sb-detach) to leave it running.
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithEphemeral()</span>
 
@@ -1308,7 +1385,7 @@ Mark whether the runtime should remove the sandbox's DB row, on-disk state, logs
 func WithEntrypoint(cmd ...string) SandboxOption
 ```
 
-Override the user-workload entrypoint baked into the image: the command the agent execs per request. This is the user workload, **not** the guest PID 1, for that, use [`WithInit`](#withinit) instead.
+Override the image ENTRYPOINT used by default-workload execution. Literal `Exec`, `Attach`, and `Shell` calls ignore it. This is the user workload, **not** the guest PID 1; for that, use [`WithInit`](#withinit) instead.
 
 <p className="msb-label">Parameters</p>
 
@@ -1318,6 +1395,21 @@ Override the user-workload entrypoint baked into the image: the command the agen
     <div className="msb-param-desc">Entrypoint command and arguments.</div>
   </div>
 </div>
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithCmd()</span>
+
+```go
+func WithCmd(cmd ...string) SandboxOption
+```
+
+Override the image CMD used by default-workload execution. Calling `WithCmd()` with no arguments explicitly clears the image CMD. This describes durable configuration and does not execute anything during `CreateSandbox`.
+
+```go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("example/worker:latest"),
+    m.WithCmd("worker.py", "--once"),
+)
+```
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithInit()</span>
 
@@ -1501,6 +1593,8 @@ Like [`WithRegistryCACerts`](#withregistrycacerts) but reads the PEM bundle from
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithPorts()</span>
 
+<Tooltip tip="Publishing host ports is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```go
 func WithPorts(ports map[uint16]uint16) SandboxOption
 ```
@@ -1518,6 +1612,8 @@ Publish guest TCP ports onto host ports (map key = host port, value = guest port
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithPortsUDP()</span>
 
+<Tooltip tip="Publishing host ports is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```go
 func WithPortsUDP(ports map[uint16]uint16) SandboxOption
 ```
@@ -1534,6 +1630,8 @@ Publish guest UDP ports onto host ports. The default host bind address is `127.0
 </div>
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithPortBindings()</span>
+
+<Tooltip tip="Publishing host ports is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func WithPortBindings(bindings ...PortBinding) SandboxOption
@@ -1663,7 +1761,7 @@ Add volume mount configurations keyed by guest path. Build values via the [`Moun
 func WithStopTimeout(timeout time.Duration) StopOption
 ```
 
-Set how long [`Stop`](#sb-stop) waits for graceful shutdown before force-killing. Default: 10 seconds. This is a `StopOption`, not a `SandboxOption`, pass it to [`Stop`](#sb-stop).
+Set how long [`Stop`](#sb-stop) waits for graceful shutdown before force-killing. Default: 10 seconds. This is a `StopOption`, not a `SandboxOption`. Pass it to [`Stop`](#sb-stop).
 
 <p className="msb-label">Parameters</p>
 
@@ -1691,17 +1789,85 @@ Set how long [`Kill`](#sb-kill) waits for stopped-state observation. Default: 5 
   </div>
 </div>
 
-#### <span className="msb-recv"></span><span className="msb-hn">WithSkipDownload()</span>
+<span id="withskipdownload"></span>
+
+The setup-only `WithSkipDownload()` option is documented under [Runtime setup](/sdk/setup#customize-installation).
+
+<p className="msb-member-group">Attach options</p>
+
+#### <span className="msb-hn">WithAttachCwd()</span>
 
 ```go
-func WithSkipDownload() SetupOption
+func WithAttachCwd(path string) AttachOption
 ```
 
-Prevent [`EnsureInstalled`](#m-ensureinstalled) from fetching the msb + libkrunfw bundle from GitHub. Use when the runtime is already on disk at the install path (e.g. air-gapped CI). The embedded FFI library is unaffected. This is a [`SetupOption`](#setupoption), pass it to `EnsureInstalled`.
+Set the working directory for the attached session. Defaults to the sandbox's workdir.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Absolute path inside the guest.</div>
+  </div>
+</div>
+
+#### <span className="msb-hn">WithAttachUser()</span>
+
+```go
+func WithAttachUser(user string) AttachOption
+```
+
+Run the attached session as the given guest user instead of the sandbox's default user (set via [`WithUser`](#withuser)).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>user</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Guest user as a UID or name, optionally <code>user:group</code>.</div>
+  </div>
+</div>
+
+#### <span className="msb-hn">WithAttachEnv()</span>
+
+```go
+func WithAttachEnv(env map[string]string) AttachOption
+```
+
+Add environment variables for the attached session, merged on top of the sandbox's env. Called repeatedly, maps merge; later keys overwrite earlier ones.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>env</code><span className="msb-type">map[string]string</span></div>
+    <div className="msb-param-desc">Environment variables to set.</div>
+  </div>
+</div>
+
+#### <span className="msb-hn">WithAttachDetachKeys()</span>
+
+```go
+func WithAttachDetachKeys(keys string) AttachOption
+```
+
+Set the key sequence that detaches from the session without stopping it. Uses Docker-style syntax: `ctrl-]` (the default), `ctrl-p,ctrl-q`, or a single character like `q`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>keys</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Detach key sequence.</div>
+  </div>
+</div>
 
 ## Patch
 
-Factory that constructs rootfs patches for [`WithPatches`](#withpatches). Access via the package-level `Patch` value. Each method returns a [`PatchConfig`](#patchconfig). `Mkdir` and `Remove` are idempotent; other operations error at boot when targeting a path already present in the image unless `Replace: true` is passed in [`PatchOptions`](#patchoptions). See [Patches](/sandboxes/bootstrap#patches) for conceptual context.
+<p className="msb-backref">Produces <a href="#patchconfig">PatchConfig</a> for <a href="#withpatches">WithPatches()</a></p>
+
+Factory for [`PatchConfig`](#patchconfig) values.
 
 #### <span className="msb-recv">Patch.</span><span className="msb-hn">Text()</span>
 
@@ -1750,6 +1916,8 @@ Append `content` to an existing file at `path`. If the file lives in a lower ima
 </div>
 
 #### <span className="msb-recv">Patch.</span><span className="msb-hn">Mkdir()</span>
+
+<Tooltip tip="On microsandbox cloud, host sources resolve against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (patchFactory) Mkdir(path string, opts PatchOptions) PatchConfig
@@ -1814,6 +1982,8 @@ Create a symlink at `link` pointing to `target`. Only `opts.Replace` is honored.
 
 #### <span className="msb-recv">Patch.</span><span className="msb-hn">CopyFile()</span>
 
+<Tooltip tip="On microsandbox cloud, host sources resolve against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```go
 func (patchFactory) CopyFile(src, dst string, opts PatchOptions) PatchConfig
 ```
@@ -1838,6 +2008,8 @@ Copy a single host file at `src` into the guest rootfs at `dst`.
 </div>
 
 #### <span className="msb-recv">Patch.</span><span className="msb-hn">CopyDir()</span>
+
+<Tooltip tip="On microsandbox cloud, host sources resolve against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (patchFactory) CopyDir(src, dst string, opts PatchOptions) PatchConfig
@@ -1864,7 +2036,9 @@ Recursively copy a host directory at `src` into the guest rootfs at `dst`. Only 
 
 ## Init
 
-Factory that constructs [`InitConfig`](#initconfig) values for [`WithInit`](#withinit), handing off PID 1 inside the guest after agentd setup. Access via the package-level `Init` value. See [Custom init system](/sandboxes/bootstrap#custom-init-system) for image picks and shutdown semantics.
+<p className="msb-backref">Produces <a href="#initconfig">InitConfig</a> for <a href="#withinit">WithInit()</a></p>
+
+Factory for [`InitConfig`](#initconfig) values.
 
 #### <span className="msb-recv">Init.</span><span className="msb-hn">Auto()</span>
 
@@ -1926,40 +2100,417 @@ Specify the init binary explicitly with optional argv and env. `cmd` must be an 
   </div>
 </div>
 
-## Types
+## SandboxHandle
 
-### SandboxHandle
 
 <p className="msb-backref">Returned by <a href="#m-getsandbox">GetSandbox()</a> · <a href="#m-listsandboxes">ListSandboxes()</a> · <a href="#m-listsandboxeswith">ListSandboxesWith()</a></p>
 
-A lightweight reference to a sandbox's persisted state. Carries metadata (name, status, config JSON, timestamps) and offers lifecycle methods that operate on the sandbox **without** an active guest-agent connection. You cannot `Exec` or `FS` on a handle, call `Connect` or `Start` to upgrade to a full [`*Sandbox`](#methods).
+A sandbox metadata and lifecycle handle that does not require an active guest-agent connection.
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `Name()` | `string` | Sandbox name, up to 128 UTF-8 bytes |
-| `Status()` | [`SandboxStatus`](#sandboxstatus) | Last-known lifecycle status |
-| `ConfigJSON()` | `string` | Raw JSON configuration |
-| `Config()` | `(*`[`SandboxConfig`](#sandboxconfig)`, error)` | Parsed configuration |
-| `CreatedAt()` | `time.Time` | Creation time, zero value if unknown |
-| `UpdatedAt()` | `time.Time` | Last-update time, zero value if unknown |
-| `Refresh(ctx)` | `(*SandboxHandle, error)` | Fresh handle for the same name |
-| `Ping(ctx)` | `(*`[`SandboxPingResult`](#sandboxpingresult)`, error)` | Check agent reachability without refreshing idle activity; does not start stopped sandboxes |
-| `Touch(ctx)` | `(*`[`SandboxTouchResult`](#sandboxtouchresult)`, error)` | Explicitly refresh idle activity; does not start stopped sandboxes |
-| `Modify(ctx, opts)` | `(*`[`SandboxModificationPlan`](#sandboxmodificationplan)`, error)` | Plan or apply a configuration change; same [`ModifyOptions`](#modifyoptions) as [`Modify()`](#sb-modify). Does not start stopped sandboxes; changes persist for the next boot |
-| `Metrics(ctx)` | `(*`[`Metrics`](#metrics)`, error)` | Point-in-time resource metrics |
-| `Logs(ctx, opts)` | `([]`[`LogEntry`](#logentry)`, error)` | Read captured `exec.log` (works without starting) |
-| `LogStream(ctx, opts)` | `(*`[`LogStreamHandle`](#logstreamhandle)`, error)` | Stream captured output |
-| `Connect(ctx)` | `(*`[`Sandbox`](#methods)`, error)` | Reattach to the running sandbox |
-| `Start(ctx)` | `(*`[`Sandbox`](#methods)`, error)` | Boot a stopped sandbox in attached mode |
-| `StartDetached(ctx)` | `(*`[`Sandbox`](#methods)`, error)` | Boot a stopped sandbox in detached mode |
-| `Stop(ctx, opts...)` | `error` | Graceful shutdown; accepts [`StopOption`](#withstoptimeout) |
-| `RequestStop(ctx)` | `error` | Async stop request |
-| `Kill(ctx, opts...)` | `error` | Force terminate; accepts [`KillOption`](#withkilltimeout) |
-| `RequestKill(ctx)` | `error` | Async kill request |
-| `RequestDrain(ctx)` | `error` | Async drain request |
-| `WaitUntilStopped(ctx)` | `(*`[`SandboxStopResult`](#sandboxstopresult)`, error)` | Block until terminal state |
-| `Remove(ctx)` | `error` | Delete sandbox and persisted state |
-| `Snapshot(ctx, name)` | `(*SnapshotArtifact, error)` | Snapshot a stopped sandbox under a bare name |
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Name()</span>
+
+```go
+Name()
+```
+
+Sandbox name, up to 128 UTF-8 bytes
+
+<p className="msb-label">Returns</p>
+
+`string`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Status()</span>
+
+```go
+Status()
+```
+
+Last-known lifecycle status
+
+<p className="msb-label">Returns</p>
+
+[`SandboxStatus`](#sandboxstatus)
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">ConfigJSON()</span>
+
+```go
+ConfigJSON()
+```
+
+Raw JSON configuration
+
+<p className="msb-label">Returns</p>
+
+`string`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Config()</span>
+
+```go
+Config()
+```
+
+Parsed configuration
+
+<p className="msb-label">Returns</p>
+
+`(*`[`SandboxConfig`](#sandboxconfig)`, error)`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">CreatedAt()</span>
+
+```go
+CreatedAt()
+```
+
+Creation time, zero value if unknown
+
+<p className="msb-label">Returns</p>
+
+`time.Time`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">UpdatedAt()</span>
+
+```go
+UpdatedAt()
+```
+
+Last-update time, zero value if unknown
+
+<p className="msb-label">Returns</p>
+
+`time.Time`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Refresh()</span>
+
+```go
+Refresh(ctx)
+```
+
+Fresh handle for the same name
+
+<p className="msb-label">Returns</p>
+
+`(*SandboxHandle, error)`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Ping()</span>
+
+```go
+Ping(ctx)
+```
+
+Check agent reachability without refreshing idle activity; does not start stopped sandboxes
+
+<p className="msb-label">Returns</p>
+
+`(*`[`SandboxPingResult`](#sandboxpingresult)`, error)`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Touch()</span>
+
+```go
+Touch(ctx)
+```
+
+Explicitly refresh idle activity; does not start stopped sandboxes
+
+<p className="msb-label">Returns</p>
+
+`(*`[`SandboxTouchResult`](#sandboxtouchresult)`, error)`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Modify()</span>
+
+```go
+Modify(ctx, opts)
+```
+
+Plan or apply a configuration change; same [`ModifyOptions`](#modifyoptions) as [`Modify()`](#sb-modify). Does not start stopped sandboxes; changes persist for the next boot
+
+<p className="msb-label">Returns</p>
+
+`(*`[`SandboxModificationPlan`](#sandboxmodificationplan)`, error)`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Metrics()</span>
+
+```go
+Metrics(ctx)
+```
+
+Point-in-time resource metrics
+
+<p className="msb-label">Returns</p>
+
+`(*`[`Metrics`](#metrics)`, error)`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Logs()</span>
+
+```go
+Logs(ctx, opts)
+```
+
+Read captured `exec.log` (works without starting)
+
+<p className="msb-label">Returns</p>
+
+`([]`[`LogEntry`](#logentry)`, error)`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">LogStream()</span>
+
+```go
+LogStream(ctx, opts)
+```
+
+Stream captured output
+
+<p className="msb-label">Returns</p>
+
+`(*`[`LogStreamHandle`](#logstreamhandle)`, error)`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Connect()</span>
+
+```go
+Connect(ctx)
+```
+
+Reattach to the running sandbox
+
+<p className="msb-label">Returns</p>
+
+`(*`[`Sandbox`](#methods)`, error)`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Start()</span>
+
+```go
+Start(ctx)
+```
+
+Boot a stopped sandbox in attached mode
+
+<p className="msb-label">Returns</p>
+
+`(*`[`Sandbox`](#methods)`, error)`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">StartDetached()</span>
+
+```go
+StartDetached(ctx)
+```
+
+Boot a stopped sandbox in detached mode
+
+<p className="msb-label">Returns</p>
+
+`(*`[`Sandbox`](#methods)`, error)`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Stop()</span>
+
+```go
+Stop(ctx, opts...)
+```
+
+Graceful shutdown; accepts [`StopOption`](#withstoptimeout)
+
+<p className="msb-label">Returns</p>
+
+`error`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">RequestStop()</span>
+
+```go
+RequestStop(ctx)
+```
+
+Async stop request
+
+<p className="msb-label">Returns</p>
+
+`error`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Kill()</span>
+
+```go
+Kill(ctx, opts...)
+```
+
+Force terminate; accepts [`KillOption`](#withkilltimeout)
+
+<p className="msb-label">Returns</p>
+
+`error`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">RequestKill()</span>
+
+```go
+RequestKill(ctx)
+```
+
+Async kill request
+
+<p className="msb-label">Returns</p>
+
+`error`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">RequestDrain()</span>
+
+```go
+RequestDrain(ctx)
+```
+
+Async drain request
+
+<p className="msb-label">Returns</p>
+
+`error`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">WaitUntilStopped()</span>
+
+```go
+WaitUntilStopped(ctx)
+```
+
+Block until terminal state
+
+<p className="msb-label">Returns</p>
+
+`(*`[`SandboxStopResult`](#sandboxstopresult)`, error)`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Remove()</span>
+
+```go
+Remove(ctx)
+```
+
+Delete sandbox and persisted state
+
+<p className="msb-label">Returns</p>
+
+`error`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Snapshot()</span>
+
+```go
+Snapshot(ctx, name)
+```
+
+Snapshot a stopped sandbox under a bare name
+
+<p className="msb-label">Returns</p>
+
+`(*SnapshotArtifact, error)`
+
+## MetricsStreamHandle
+
+
+<p className="msb-backref">Returned by <a href="#sb-metricsstream">MetricsStream()</a></p>
+
+Live metrics subscription. Call `Close` to release Rust-side resources.
+
+
+#### <span className="msb-recv">metricsStream.</span><span className="msb-hn">Recv()</span>
+
+```go
+Recv(ctx)
+```
+
+Block until the next snapshot arrives. Returns `(nil, nil)` when the stream ends (sandbox exited)
+
+<p className="msb-label">Returns</p>
+
+`(*`[`Metrics`](#metrics)`, error)`
+
+#### <span className="msb-recv">metricsStream.</span><span className="msb-hn">Close()</span>
+
+```go
+Close()
+```
+
+Stop the stream and release Rust-side resources
+
+<p className="msb-label">Returns</p>
+
+`error`
+
+## LogEntry
+
+
+<p className="msb-backref">Returned by <a href="#sb-logs">Logs()</a> · <a href="#sb-logstream">LogStream()</a></p>
+
+A single captured log entry.
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">Source</span>
+
+[`LogSource`](#logsource)
+
+Origin of the captured data
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">SessionID</span>
+
+`*uint64`
+
+Relay-monotonic session id; nil for system entries
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">Timestamp</span>
+
+`time.Time`
+
+Wall-clock capture time on the host
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">Data</span>
+
+`[]byte`
+
+The captured bytes
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">Cursor</span>
+
+`string`
+
+Opaque resume token; pass to [`LogStreamOptions.FromCursor`](#logstreamoptions)
+
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">Text()</span>
+
+```go
+Text()
+```
+
+Captured bytes as a string
+
+<p className="msb-label">Returns</p>
+
+`string`
+
+## LogStreamHandle
+
+
+<p className="msb-backref">Returned by <a href="#sb-logstream">LogStream()</a></p>
+
+Live log subscription. Call `Close` to release Rust-side resources.
+
+
+#### <span className="msb-recv">logStream.</span><span className="msb-hn">Recv()</span>
+
+```go
+Recv(ctx)
+```
+
+Block until the next entry arrives. Returns `(nil, nil)` when the stream ends
+
+<p className="msb-label">Returns</p>
+
+`(*`[`LogEntry`](#logentry)`, error)`
+
+#### <span className="msb-recv">logStream.</span><span className="msb-hn">Close()</span>
+
+```go
+Close()
+```
+
+Stop the stream and release Rust-side resources
+
+<p className="msb-label">Returns</p>
+
+`error`
+
+## Types
 
 ### SandboxPingResult
 
@@ -1987,7 +2538,7 @@ Explicit idle-refresh result.
 
 <p className="msb-backref">Used by <a href="#sb-modify">Modify()</a></p>
 
-A requested sandbox modification. Zero-valued fields are left unchanged (`0` is not a valid CPU or memory size). Secret changes are Rust-SDK and CLI only for now.
+A requested sandbox modification. Zero-valued fields are left unchanged (`0` is not a valid CPU, memory, or disk size).
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -1995,13 +2546,30 @@ A requested sandbox modification. Zero-valued fields are left unchanged (`0` is 
 | MaxCPUs | `uint8` | Boot-time maximum possible vCPUs (restart-backed) |
 | MemoryMiB | `uint32` | Desired effective guest memory in MiB. Live when within the booted `MaxMemoryMiB` |
 | MaxMemoryMiB | `uint32` | Boot-time maximum hotpluggable memory in MiB (restart-backed) |
+| RootDiskSizeMiB | `uint32` | Desired root disk size in MiB. Managed and flat OCI disks are grow-only; applies on restart or next start |
 | Env | `map[string]string` | Environment variables to set for future execs |
 | EnvRemove | `[]string` | Environment variable keys to remove |
 | Labels | `map[string]string` | Labels to set |
 | LabelsRemove | `[]string` | Label keys to remove |
 | Workdir | `string` | Working directory for future execs |
+| Secrets | `map[string]SecretModifySpec` | Desired secret specs keyed by stable secret name |
+| SecretsRemove | `[]string` | Secret names to remove explicitly |
 | Policy | `ModificationPolicy` | `ModificationPolicyNoRestart` (default) applies only changes that can complete without restarting; `ModificationPolicyNextStart` persists changes for the next start without mutating a running VM; `ModificationPolicyRestart` restarts if needed so restart-required changes become active now |
 | DryRun | `bool` | Compute the plan without applying anything |
+
+### SecretModifySpec
+
+<p className="msb-backref">Used by <a href="#sb-modify">Modify()</a></p>
+
+Desired state for one secret. `Env`, `Value`, and `Store` are mutually exclusive sources. Leave all three empty to update only the placeholder or allowed hosts.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Env | `string` | Host environment variable to resolve when applying the modification |
+| Value | `string` | Raw secret value. Stored in the durable sandbox config until replaced by a source reference |
+| Store | `string` | Reserved for a host-side secret store reference; currently unsupported |
+| Placeholder | `string` | Explicit guest-visible placeholder. New secrets default to `$MSB_<NAME>` |
+| AllowedHosts | `[]string` | Desired allowed host patterns. A new secret requires at least one; an empty slice leaves existing hosts unchanged |
 
 ### SandboxModificationPlan
 
@@ -2057,12 +2625,6 @@ One stable, newest-first page returned by [`ListSandboxes`](#m-listsandboxes) or
 
 Functional options accepted by [`ListSandboxesWith`](#m-listsandboxeswith).
 
-| Function | Description |
-|----------|-------------|
-| `WithListLimit(n)` | Set a page size from 1 through 100 |
-| `WithListCursor(cursor)` | Continue after a previous page's `NextCursor` |
-| `WithListLabels(labels)` | Require every supplied label; selectors are AND-matched |
-
 ### SandboxConfig
 
 <p className="msb-backref">Populated by <a href="#options">SandboxOption</a> · parsed by <a href="#sandboxhandle">SandboxHandle.Config()</a></p>
@@ -2091,7 +2653,8 @@ The full configuration of a sandbox. Most callers build a sandbox via `CreateSan
 | Labels | `map[string]string` | Labels for metrics attribution and filtering |
 | Detached | `bool` | If `true`, sandbox survives after the process exits |
 | Ephemeral | `bool` | If `true`, all state is removed on termination |
-| Entrypoint | `[]string` | Override image entrypoint |
+| Entrypoint | `[]string` | Override the image ENTRYPOINT used by default-workload execution |
+| Cmd | `[]string` | Override the image CMD used by default-workload execution; an empty non-nil slice clears CMD |
 | Init | [`*InitConfig`](#initconfig) | Hand PID 1 off to a guest init binary |
 | LogLevel | [`LogLevel`](#loglevel) | Sandbox log verbosity override |
 | QuietLogs | `bool` | Suppress sandbox-level log output |
@@ -2118,6 +2681,29 @@ type SandboxOption func(*SandboxConfig)
 
 A functional option for [`CreateSandbox`](#m-createsandbox). Every `WithX` helper in the [Options](#options) section returns one. The lifecycle setters [`WithStopTimeout`](#withstoptimeout) and [`WithKillTimeout`](#withkilltimeout) return distinct `StopOption` / `KillOption` types passed to [`Stop`](#sb-stop) and [`Kill`](#sb-kill) instead.
 
+### AttachConfig
+
+<p className="msb-backref">Populated by <a href="#attachoption">AttachOption</a></p>
+
+Configures a single [`AttachWith`](#sb-attachwith) call. Most callers set fields through the `WithAttach*` functional options; `AttachConfig` is exported for parity with the other SDKs' config types.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Cwd` | `string` | Working directory inside the guest; defaults to the sandbox workdir |
+| `User` | `string` | Guest user (UID or name, optionally `user:group`); defaults to the sandbox user |
+| `Env` | `map[string]string` | Environment variables merged on top of the sandbox env |
+| `DetachKeys` | `string` | Detach key sequence; defaults to `ctrl-]` |
+
+### AttachOption
+
+<p className="msb-backref">Accepted by <a href="#sb-attachwith">sb.AttachWith()</a></p>
+
+```go
+type AttachOption func(*AttachConfig)
+```
+
+A functional option that mutates an [`AttachConfig`](#attachconfig). Construct them with the `WithAttach*` functions below.
+
 ### Metrics
 
 <p className="msb-backref">Returned by <a href="#sb-metrics">Metrics()</a> · <a href="#sb-metricsstream">MetricsStream()</a> · <a href="#m-allsandboxmetrics">AllSandboxMetrics()</a></p>
@@ -2140,17 +2726,6 @@ Point-in-time resource usage snapshot.
 | UpperFreeBytes | `*uint64` | Guest-visible OCI upper filesystem free bytes when the protected reporter is available and fresh |
 | UpperHostAllocatedBytes | `*uint64` | Host-allocated bytes for the writable OCI upper image when available |
 | Uptime | `time.Duration` | Time since the sandbox was created |
-
-### MetricsStreamHandle
-
-<p className="msb-backref">Returned by <a href="#sb-metricsstream">MetricsStream()</a></p>
-
-Live metrics subscription. Call `Close` to release Rust-side resources.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `Recv(ctx)` | `(*`[`Metrics`](#metrics)`, error)` | Block until the next snapshot arrives. Returns `(nil, nil)` when the stream ends (sandbox exited) |
-| `Close()` | `error` | Stop the stream and release Rust-side resources |
 
 ### SandboxStopResult
 
@@ -2183,24 +2758,6 @@ type SandboxStatus string
 | `SandboxStatusDraining` | `"draining"` | Graceful shutdown in progress; existing commands finish, new ones rejected |
 | `SandboxStatusPaused` | `"paused"` | VM is paused |
 
-### LogEntry
-
-<p className="msb-backref">Returned by <a href="#sb-logs">Logs()</a> · <a href="#sb-logstream">LogStream()</a></p>
-
-A single captured log entry.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| Source | [`LogSource`](#logsource) | Origin of the captured data |
-| SessionID | `*uint64` | Relay-monotonic session id; nil for system entries |
-| Timestamp | `time.Time` | Wall-clock capture time on the host |
-| Data | `[]byte` | The captured bytes |
-| Cursor | `string` | Opaque resume token; pass to [`LogStreamOptions.FromCursor`](#logstreamoptions) |
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `Text()` | `string` | Captured bytes as a string |
-
 ### LogOptions
 
 <p className="msb-backref">Used by <a href="#sb-logs">Logs()</a></p>
@@ -2227,17 +2784,6 @@ Configures a live log stream. The zero value reads the default sources from the 
 | FromCursor | `string` | Resume strictly after the entry whose `Cursor` matches; mutually exclusive with `Since` |
 | Until | `time.Time` | Stop at the first entry with timestamp >= this |
 | Follow | `bool` | Keep the stream open past EOF and yield new entries as written |
-
-### LogStreamHandle
-
-<p className="msb-backref">Returned by <a href="#sb-logstream">LogStream()</a></p>
-
-Live log subscription. Call `Close` to release Rust-side resources.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `Recv(ctx)` | `(*`[`LogEntry`](#logentry)`, error)` | Block until the next entry arrives. Returns `(nil, nil)` when the stream ends |
-| `Close()` | `error` | Stop the stream and release Rust-side resources |
 
 ### LogSource
 
@@ -2339,17 +2885,6 @@ Tuning struct for [`Init.Cmd`](#init-cmd) beyond the required cmd.
 | Args | `[]string` | Supplemental argv |
 | Env | `map[string]string` | Extra env vars |
 
-### Init
-
-<p className="msb-backref">Produces <a href="#initconfig">InitConfig</a> for <a href="#withinit">WithInit()</a></p>
-
-Package-level factory namespace for [`InitConfig`](#initconfig) values. See the [Init](#init) section for its methods.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`Auto()`](#init-auto) | [`InitConfig`](#initconfig) | Auto-detect a guest init |
-| [`Cmd(cmd, opts)`](#init-cmd) | [`InitConfig`](#initconfig) | Explicit init binary with argv and env |
-
 ### PatchConfig
 
 <p className="msb-backref">Built by <a href="#patch">Patch</a> · used by <a href="#withpatches">WithPatches()</a></p>
@@ -2399,28 +2934,6 @@ Discriminator for [`PatchConfig`](#patchconfig). Prefer the [`Patch`](#patch) fa
 | `PatchKindCopyFile` | `"copy_file"` |
 | `PatchKindCopyDir` | `"copy_dir"` |
 
-### Patch
-
-<p className="msb-backref">Produces <a href="#patchconfig">PatchConfig</a> for <a href="#withpatches">WithPatches()</a></p>
-
-Package-level factory namespace for [`PatchConfig`](#patchconfig) values. See the [Patch](#patch) section for its methods.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`Text(path, content, opts)`](#patch-text) | [`PatchConfig`](#patchconfig) | Write UTF-8 text |
-| [`Append(path, content)`](#patch-append) | [`PatchConfig`](#patchconfig) | Append to an existing file |
-| [`Mkdir(path, opts)`](#patch-mkdir) | [`PatchConfig`](#patchconfig) | Create a directory (idempotent) |
-| [`Remove(path)`](#patch-remove) | [`PatchConfig`](#patchconfig) | Delete a file or directory (idempotent) |
-| [`Symlink(target, link, opts)`](#patch-symlink) | [`PatchConfig`](#patchconfig) | Create a symlink |
-| [`CopyFile(src, dst, opts)`](#patch-copyfile) | [`PatchConfig`](#patchconfig) | Copy a host file into the rootfs |
-| [`CopyDir(src, dst, opts)`](#patch-copydir) | [`PatchConfig`](#patchconfig) | Copy a host directory into the rootfs |
-
 ### SetupOption
 
-<p className="msb-backref">Consumed by <a href="#m-ensureinstalled">EnsureInstalled()</a></p>
-
-```go
-type SetupOption func(*setupConfig)
-```
-
-A functional option for [`EnsureInstalled`](#m-ensureinstalled). The only helper is [`WithSkipDownload`](#withskipdownload).
+The setup-only `SetupOption` type is documented under [Runtime setup](/sdk/setup#customize-installation).

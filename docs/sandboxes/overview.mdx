@@ -4,7 +4,7 @@ description: What sandboxes are and how to configure them
 icon: "circle-info"
 ---
 
-A sandbox is a local microVM with its own Linux kernel, filesystem, and network stack. Your application or the `msb` CLI starts it as a child process, then talks to the guest agent to run commands, move files, and control lifecycle.
+A sandbox is a microVM with its own Linux kernel, filesystem, and network stack. Your application or the `msb` CLI starts it as a child process on your machine or on [microsandbox cloud](/cloud/overview), then talks to the guest agent to run commands, move files, and control lifecycle.
 
 The security boundary is hardware virtualization, not Linux namespaces. That makes sandboxes a good fit for untrusted workloads: user-submitted code, AI agent actions, plugins, dependency installs, CI jobs, scrapers, and tools that should not inherit the host process's full privileges.
 
@@ -43,6 +43,8 @@ Sandbox names must be non-empty and no longer than 128 UTF-8 bytes.
 
 ## Common configuration
 
+<Tooltip tip="max_cpus and max_memory are not carried on microsandbox cloud; set the CPU and memory you need at creation and recreate the sandbox to resize."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 <CodeGroup>
 ```rust Rust
 let sb = Sandbox::builder("worker")
@@ -51,7 +53,7 @@ let sb = Sandbox::builder("worker")
     .cpus(2)
     .env("DEBUG", "true")
     .label("user.id", "alice")
-    .volume("/app/src", |v| v.bind("./src").readonly())
+    .volume("/tmp/scratch", |v| v.tmpfs().size(100))
     .create()
     .await?;
 ```
@@ -63,7 +65,7 @@ await using sb = await Sandbox.builder("worker")
     .cpus(2)
     .env("DEBUG", "true")
     .label("user.id", "alice")
-    .volume("/app/src", (m) => m.bind("./src").readonly())
+    .volume("/tmp/scratch", (m) => m.tmpfs().size(100))
     .create();
 ```
 
@@ -75,7 +77,7 @@ sb = await Sandbox.create(
     cpus=2,
     env={"DEBUG": "true"},
     labels={"user.id": "alice"},
-    volumes={"/app/src": Volume.bind("./src", readonly=True)},
+    volumes={"/tmp/scratch": Volume.tmpfs(size_mib=100)},
 )
 ```
 
@@ -87,7 +89,7 @@ sb, err := m.CreateSandbox(ctx, "worker",
     m.WithEnv(map[string]string{"DEBUG": "true"}),
     m.WithLabels(map[string]string{"user.id": "alice"}),
     m.WithMounts(map[string]m.MountConfig{
-        "/app/src": m.Mount.Bind("./src", m.MountOptions{Readonly: true}),
+        "/tmp/scratch": m.Mount.Tmpfs(m.TmpfsOptions{SizeMiB: 100}),
     }),
 )
 ```
@@ -98,7 +100,7 @@ msb create python --name worker \
   -m 1G \
   -e DEBUG=true \
   --label user.id=alice \
-  -v ./src:/app/src:ro
+  --tmpfs /tmp/scratch:100
 ```
 </CodeGroup>
 
@@ -109,6 +111,7 @@ msb create python --name worker \
 | `max_cpus` | same as `cpus` | Boot-time maximum possible virtual CPUs |
 | `memory` | `512` | Guest memory limit in MiB |
 | `max_memory` | same as `memory` | Boot-time maximum hotpluggable memory in MiB |
+| `thp` | `madvise` | Guest transparent huge-page policy selected at boot |
 | `workdir` | image default | Default working directory for commands |
 | `shell` | `/bin/sh` | Shell used by `shell()` calls |
 | `env` | empty | Environment variables |
@@ -133,6 +136,8 @@ actions, metric attribution, and OCI image labels.
 
 ## Image sources
 
+<Tooltip tip="microsandbox cloud supports OCI root filesystems only; host-directory and disk-image root filesystems are local-only."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 Most sandboxes start from an OCI image:
 
 ```bash
@@ -156,6 +161,8 @@ OCI images use a copy-on-write overlay so sandboxes can share cached base layers
 See [Images](/images/overview) and [Disk Images](/images/disk-images) for the full image model.
 
 ## Naming conflicts
+
+<Tooltip tip="Replace-on-create is not available on microsandbox cloud; remove the existing sandbox first, then create the replacement."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Creating a sandbox fails if another sandbox already has the same name. Use replace when you want a fresh sandbox with that name:
 

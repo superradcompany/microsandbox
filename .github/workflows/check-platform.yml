@@ -1,0 +1,282 @@
+name: Check Platform
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        description: Platform label used for caches and artifacts.
+        required: true
+        type: string
+      runner:
+        description: GitHub Actions runner label.
+        required: true
+        type: string
+      os:
+        description: Operating-system family (linux or darwin).
+        required: true
+        type: string
+      agentd_target:
+        description: Rust target for a native Linux agentd build.
+        required: false
+        default: ""
+        type: string
+      libkrunfw_file:
+        description: Runtime library filename staged into SDK bundles.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_TIMEOUT: "120"
+  CARGO_HTTP_MULTIPLEXING: "false"
+  LIBKRUNFW_VERSION: "5.6.1"
+  LIBKRUNFW_ABI: "5"
+
+jobs:
+  build-runtime:
+    name: Build runtime (${{ inputs.target }})
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+        with:
+          cache-bin: false
+          cache-targets: true
+
+      - name: Install build deps (Linux)
+        if: inputs.os == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
+
+      - name: Download agentd
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: agentd-aarch64-linux-musl
+          path: build/
+
+      - name: Cache libkrunfw
+        id: cache-libkrunfw
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build/libkrunfw*
+          # Include the reusable workflow because its inline build recipe and
+          # ABI/version environment also determine the cached output.
+          key: libkrunfw-${{ inputs.target }}-${{ hashFiles('vendor/libkrunfw/**', '.github/actions/cache-libkrunfw-kernel/action.yml', '.github/workflows/check-platform.yml') }}
+
+      - name: Prepare kernel source (Linux)
+        if: steps.cache-libkrunfw.outputs.cache-hit != 'true' && inputs.os == 'linux'
+        uses: ./.github/actions/cache-libkrunfw-kernel
+
+      - name: Build libkrunfw (Linux)
+        if: steps.cache-libkrunfw.outputs.cache-hit != 'true' && inputs.os == 'linux'
+        run: |
+          cd vendor/libkrunfw
+          make -j"$(nproc)"
+          cd ../..
+          mkdir -p build
+          cp vendor/libkrunfw/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} build/
+          cd build
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} libkrunfw.so
+
+      - name: Download kernel.c (macOS)
+        if: steps.cache-libkrunfw.outputs.cache-hit != 'true' && inputs.os == 'darwin'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: kernel-c-aarch64
+          path: vendor/libkrunfw/
+
+      - name: Build libkrunfw (macOS)
+        if: steps.cache-libkrunfw.outputs.cache-hit != 'true' && inputs.os == 'darwin'
+        run: |
+          cd vendor/libkrunfw
+          cc -fPIC -DABI_VERSION=${{ env.LIBKRUNFW_ABI }} -shared -o libkrunfw.${{ env.LIBKRUNFW_ABI }}.dylib kernel.c
+          cd ../..
+          mkdir -p build
+          cp vendor/libkrunfw/libkrunfw.${{ env.LIBKRUNFW_ABI }}.dylib build/
+          cd build
+          ln -sf libkrunfw.${{ env.LIBKRUNFW_ABI }}.dylib libkrunfw.dylib
+
+      - name: Set up mold (Linux host link)
+        if: inputs.os == 'linux'
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+
+      - name: Build msb
+        run: |
+          cargo build --profile ci --no-default-features --features net,ssh -p microsandbox-cli
+          cp target/ci/msb build/msb
+
+      - name: Codesign msb (macOS)
+        if: inputs.os == 'darwin'
+        run: codesign --entitlements msb-entitlements.plist --force -s - build/msb
+
+      - name: Upload runtime artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: msb-${{ inputs.target }}
+          path: build/
+
+  rust-check:
+    name: Rust check (${{ inputs.target }})
+    needs: build-runtime
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+        with:
+          cache-bin: false
+          cache-targets: true
+
+      - name: Install build deps (Linux)
+        if: inputs.os == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools libcap-ng-dev
+
+      - name: Download runtime artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: msb-${{ inputs.target }}
+          path: build/
+
+      - name: Check agentd (Linux)
+        if: inputs.os == 'linux'
+        run: |
+          rustup target add --toolchain stable ${{ inputs.agentd_target }}
+          cargo +stable clippy --manifest-path crates/agentd/Cargo.toml --target ${{ inputs.agentd_target }} -- -D warnings
+
+      - name: Set up mold (Linux host link)
+        if: inputs.os == 'linux'
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+
+      - name: Check workspace
+        run: cargo +stable check --workspace --exclude microsandbox-agentd
+
+  node-build:
+    name: Node build (${{ inputs.target }})
+    needs: build-runtime
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+        with:
+          cache-bin: false
+          cache-targets: true
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Install build deps (Linux)
+        if: inputs.os == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+      - name: Download runtime artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: msb-${{ inputs.target }}
+          path: build/
+      - name: Set up mold (Linux host link)
+        if: inputs.os == 'linux'
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+      - name: Build Node SDK
+        working-directory: sdk/node-ts
+        run: |
+          node scripts/prune-platform-optional-deps.mjs
+          npm install --package-lock=false
+          npm run build:ci
+
+  python-build:
+    name: Python build (${{ inputs.target }})
+    needs: build-runtime
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+        with:
+          cache-bin: false
+          cache-targets: true
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "sdk/python/uv.lock"
+      - name: Install build deps (Linux)
+        if: inputs.os == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+      - name: Download runtime artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: msb-${{ inputs.target }}
+          path: build/
+      - name: Set up mold (Linux host link)
+        if: inputs.os == 'linux'
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+      - name: Stage runtime bundle
+        run: |
+          mkdir -p sdk/python/microsandbox/_bundled/bin sdk/python/microsandbox/_bundled/lib
+          cp build/msb sdk/python/microsandbox/_bundled/bin/
+          cp build/${{ inputs.libkrunfw_file }} sdk/python/microsandbox/_bundled/lib/
+          cd sdk/python/microsandbox/_bundled/lib
+          if [ "${{ inputs.os }}" = "darwin" ]; then
+            ln -sf ${{ inputs.libkrunfw_file }} libkrunfw.dylib
+          else
+            ln -sf ${{ inputs.libkrunfw_file }} libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
+            ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} libkrunfw.so
+          fi
+      - name: Build and test Python SDK
+        working-directory: sdk/python
+        run: |
+          # `uv sync` otherwise builds the local extension before maturin does
+          # it again. Build one wheel, install it, and test that exact artifact.
+          uv sync --group dev --no-install-project
+          uv run --no-sync maturin build --profile ci --out dist
+          uv pip install --reinstall dist/*.whl
+          # Run outside sdk/python so the source tree cannot shadow the wheel.
+          cd ../..
+          uv run --project sdk/python --no-sync pytest sdk/python/tests
+
+  go-build:
+    name: Go build (${{ inputs.target }})
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: false
+      - name: Build Go SDK
+        working-directory: sdk/go
+        run: go build ./...
+
+  unit-test:
+    name: Test (${{ inputs.target }})
+    needs: build-runtime
+    uses: ./.github/workflows/test-platform.yml
+    with:
+      target: ${{ inputs.target }}
+      runner: ${{ inputs.runner }}
+      os: ${{ inputs.os }}
+      agentd_target: ${{ inputs.agentd_target }}

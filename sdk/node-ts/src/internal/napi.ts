@@ -39,6 +39,7 @@ export interface NativeBindings {
   ) => number;
   readonly popDefaultBackend?: (token: number) => void;
   readonly defaultBackendKind?: () => "local" | "cloud";
+  readonly defaultBackendInfo?: () => NapiBackendInfo;
   readonly Sandbox: NapiSandboxStatic;
   readonly SandboxBuilder: NapiSandboxBuilderCtor;
   readonly Volume: NapiVolumeStatic;
@@ -57,6 +58,8 @@ export interface NativeBindings {
   readonly RuleBuilder: NapiBuilderCtor<NapiRuleBuilder>;
   readonly RuleDestinationBuilder: NapiBuilderCtor<NapiRuleDestinationBuilder>;
   readonly InterfaceOverridesBuilder: NapiBuilderCtor<NapiInterfaceOverridesBuilder>;
+  readonly NetworkRateLimiterBuilder: NapiBuilderCtor<NapiNetworkRateLimiterBuilder>;
+  readonly RateLimiterBuilder: NapiBuilderCtor<NapiRateLimiterBuilder>;
   readonly PullProgressStream: { prototype: NapiPullProgressStream };
   readonly PullProgressCreate: { prototype: NapiPullProgressCreate };
   readonly MountBuilder: new (guestPath: string) => NapiMountBuilder;
@@ -83,6 +86,20 @@ export interface NativeBindings {
   readonly isInstalled: () => boolean;
   readonly allSandboxMetrics: () => Promise<Record<string, NapiSandboxMetrics>>;
   readonly AgentClient: NapiAgentClientStatic;
+}
+
+export interface NapiBackendInfo {
+  kind: "local" | "cloud";
+  apiUrl?: string;
+  source:
+    | "programmatic"
+    | "MSB_BACKEND"
+    | "MSB_API_KEY"
+    | "MSB_PROFILE"
+    | "profile"
+    | "active_profile"
+    | "default";
+  profile?: string;
 }
 
 export interface NapiAgentClientStatic {
@@ -163,8 +180,11 @@ export interface NapiSandboxBuilderSetters {
   rootDisk(configure: (d: NapiRootDiskBuilder) => NapiRootDiskBuilder): this;
   cpus(n: number): this;
   maxCpus(n: number): this;
+  cpuPlacement(policy: "inherit" | "auto" | "spread" | "compact"): this;
+  placementProfile(profile: string): this;
   memory(mib: number): this;
   maxMemory(mib: number): this;
+  thp(policy: "always" | "madvise" | "never"): this;
   logLevel(level: string): this;
   quietLogs(): this;
   detached(enabled: boolean): this;
@@ -174,6 +194,7 @@ export interface NapiSandboxBuilderSetters {
   workdir(path: string): this;
   shell(shell: string): this;
   security(profile: "default" | "restricted"): this;
+  deploymentProfile(profile: "single-tenant" | "multi-tenant"): this;
   /** @deprecated Use setRuntimeLibkrunfwPath(path) before creating local sandboxes. */
   libkrunfwPath(path: string): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -181,6 +202,7 @@ export interface NapiSandboxBuilderSetters {
   replace(): this;
   replaceWithTimeout(timeoutMs: number): this;
   entrypoint(cmd: string[]): this;
+  cmd(cmd: string[]): this;
   init(cmd: string, args?: string[]): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   initWith(cmd: string, configure: (b: any) => any): this;
@@ -194,6 +216,8 @@ export interface NapiSandboxBuilderSetters {
   portBind(bind: string, host: number, guest: number): this;
   portUdp(host: number, guest: number): this;
   portUdpBind(bind: string, host: number, guest: number): this;
+  vsock(hostPath: string, port: number): this;
+  vsockDgram(hostPath: string, port: number): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   secret(configure: (b: any) => any): this;
   secretEnv(envVar: string, value: string, allowedHost: string): this;
@@ -220,7 +244,12 @@ export interface NapiSandboxBuilder extends NapiSandboxBuilderSetters {
 }
 
 export interface NapiSandbox {
+  readonly backendKind: "local" | "cloud";
   configJson(): Promise<string>;
+  execDefault(): Promise<NapiExecOutput>;
+  execDefaultWithBuilder(builder: NapiExecOptionsBuilder): Promise<NapiExecOutput>;
+  execDefaultStream(): Promise<NapiExecHandle>;
+  execDefaultStreamWithBuilder(builder: NapiExecOptionsBuilder): Promise<NapiExecHandle>;
   exec(cmd: string, args?: string[]): Promise<NapiExecOutput>;
   execWithBuilder(cmd: string, builder: NapiExecOptionsBuilder): Promise<NapiExecOutput>;
   execStream(cmd: string, args?: string[]): Promise<NapiExecHandle>;
@@ -236,6 +265,8 @@ export interface NapiSandbox {
   touch(): Promise<NapiSandboxTouchResult>;
   modify(opts?: NapiSandboxModifyOptions): Promise<string>;
   attach(cmd: string, args?: string[]): Promise<number>;
+  attachDefault(): Promise<number>;
+  attachDefaultWithBuilder(builder: NapiAttachOptionsBuilder): Promise<number>;
   attachWithBuilder(cmd: string, builder: NapiAttachOptionsBuilder): Promise<number>;
   attachShell(): Promise<number>;
   stop(): Promise<void>;
@@ -254,6 +285,7 @@ export interface NapiSandbox {
 export interface NapiSandboxHandle {
   readonly name: string;
   readonly status: string;
+  readonly backendKind: "local" | "cloud";
   readonly configJson: string;
   readonly createdAt: number | null;
   readonly updatedAt: number | null;
@@ -305,6 +337,7 @@ export interface NapiSandboxModifyOptions {
   maxCpus?: number;
   memoryMib?: number;
   maxMemoryMib?: number;
+  rootDiskSizeMib?: number;
   env?: Record<string, string>;
   envRemove?: string[];
   labels?: Record<string, string>;
@@ -411,6 +444,7 @@ export interface NapiSshServer {
 
 export interface NapiVolumeStatic {
   get(name: string): Promise<NapiVolumeHandle>;
+  getDefault(): Promise<NapiVolumeHandle>;
   list(): Promise<NapiVolumeInfo[]>;
   remove(name: string): Promise<void>;
 }
@@ -448,6 +482,7 @@ export interface NapiVolumeConfig {
 
 export interface NapiVolumeHandle {
   readonly name: string;
+  readonly isDefault: boolean;
   readonly kind: string;
   readonly quotaMib: number | null | undefined;
   readonly usedBytes: number;
@@ -487,6 +522,7 @@ export interface NapiVolumeFsWriteSink {
 
 export interface NapiVolumeInfo {
   readonly name: string;
+  readonly isDefault: boolean;
   readonly kind: string;
   readonly quotaMib: number | null | undefined;
   readonly usedBytes: number;
@@ -539,6 +575,8 @@ export interface NapiSnapshot {
   readonly upperFile: string | null | undefined;
   readonly upperIntegrityAlgorithm: string | null | undefined;
   readonly upperIntegrityDigest: string | null | undefined;
+  readonly upperIntegrityLogicalSize: bigint | null | undefined;
+  readonly upperIntegrityLeafSize: number | null | undefined;
   readonly checkpointId: string | null | undefined;
   readonly checkpointManifestDigest: string | null | undefined;
   readonly parent: string | null | undefined;
@@ -602,7 +640,7 @@ export interface NapiSnapshotRemoveOptions {
 export interface NapiSnapshotVerifyReport {
   readonly digest: string;
   readonly path: string;
-  readonly upperKind: string; // "verified"
+  readonly upperKind: string; // "notRecorded" | "verified"
   readonly upperAlgorithm: string | null | undefined;
   readonly upperDigest: string | null | undefined;
 }
@@ -926,7 +964,22 @@ export interface NapiNetworkBuilder {
   ipv4Pool(pool: string): this;
   ipv6Pool(pool: string): this;
   trustHostCAs(enabled: boolean): this;
+  rateLimiter(
+    configure: (b: NapiNetworkRateLimiterBuilder) => NapiNetworkRateLimiterBuilder,
+  ): this;
   build(): NetworkConfig;
+}
+
+export interface NapiRateLimiterBuilder {
+  bandwidth(sizeBytes: number, refillTimeMs: number): this;
+  bandwidthBurst(sizeBytes: number): this;
+  ops(count: number, refillTimeMs: number): this;
+  opsBurst(count: number): this;
+}
+
+export interface NapiNetworkRateLimiterBuilder {
+  egress(configure: (b: NapiRateLimiterBuilder) => NapiRateLimiterBuilder): this;
+  ingress(configure: (b: NapiRateLimiterBuilder) => NapiRateLimiterBuilder): this;
 }
 
 export interface NapiInterfaceOverridesBuilder {
@@ -1138,14 +1191,18 @@ export interface NapiImageBuilder {
 }
 
 export interface NapiRootDiskBuilder {
-  /** Size in MiB (managed and tmpfs kinds only). */
+  /** Size in MiB (managed, tmpfs and flat kinds only). */
   size(mib: number): this;
   /** RAM-backed tmpfs upper: ephemeral, counts against guest memory. */
   tmpfs(): this;
+  /** Complete flat OCI rootfs mounted directly without guest OverlayFS. */
+  flat(): this;
   /** User-supplied disk image attached writable as the upper. */
   disk(path: string): this;
   /** Disk image format (`"raw" | "qcow2"`); only valid after `.disk()`. */
   format(format: "raw" | "qcow2"): this;
-  /** Inner filesystem type (e.g. `"ext4"`); only valid after `.disk()`. */
+  /** Inner filesystem type (e.g. `"ext4"`); valid after `.disk()` or `.flat()`. */
   fstype(fstype: string): this;
+  /** Private flat-root clone strategy. */
+  cloneStrategy(strategy: "auto" | "copy" | "reflink"): this;
 }

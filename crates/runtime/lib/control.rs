@@ -22,8 +22,8 @@ use serde::{Deserialize, Serialize};
 // Constants
 //--------------------------------------------------------------------------------------------------
 
-/// Extension of the per-sandbox control socket, derived from the agent
-/// socket path (`<sandbox>.sock` becomes `<sandbox>.control.sock`).
+/// Extension of legacy per-sandbox control sockets (`<sandbox>.sock` becomes
+/// `<sandbox>.control.sock`). Canonical sockets use sibling `control.sock`.
 pub const CONTROL_SOCKET_EXTENSION: &str = "control.sock";
 
 //--------------------------------------------------------------------------------------------------
@@ -216,7 +216,7 @@ impl std::fmt::Debug for SecretValue {
 
 /// The control socket path that belongs to the given agent socket path.
 pub fn control_socket_path_for(agent_sock: &std::path::Path) -> PathBuf {
-    agent_sock.with_extension(CONTROL_SOCKET_EXTENSION)
+    crate::ipc::control_socket_path_for(agent_sock)
 }
 
 /// Spawn the control listener thread. Non-fatal on failure by design: the

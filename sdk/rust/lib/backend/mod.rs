@@ -22,6 +22,7 @@
 
 mod cloud;
 mod local;
+mod misconfigured;
 mod profile;
 pub(crate) mod sandbox;
 pub(crate) mod volume;
@@ -48,6 +49,8 @@ use std::{
     time::Duration,
 };
 
+use serde::{Deserialize, Serialize};
+
 use crate::MicrosandboxResult;
 use crate::error::{Operation, UnsupportedReason};
 
@@ -57,12 +60,86 @@ use crate::error::{Operation, UnsupportedReason};
 
 /// Which backend variant a [`Backend`] implementation represents. Returned by
 /// [`Backend::kind`] for runtime introspection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum BackendKind {
     /// Local libkrun + agentd backend. Spawns microVMs on the calling host.
     Local,
     /// Remote backend talking to an msb-cloud control plane over HTTP.
     Cloud,
+}
+
+/// How the active backend was selected.
+///
+/// This describes the selector, never its credential value. Backend
+/// diagnostics therefore cannot expose `MSB_API_KEY`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BackendSelectionSource {
+    /// Installed directly through an SDK constructor or setter.
+    #[serde(rename = "programmatic")]
+    Programmatic,
+    /// Selected explicitly by `MSB_BACKEND`.
+    #[serde(rename = "MSB_BACKEND")]
+    MsbBackend,
+    /// Selected implicitly by a non-empty `MSB_API_KEY`.
+    #[serde(rename = "MSB_API_KEY")]
+    MsbApiKey,
+    /// Selected by the profile named in `MSB_PROFILE`.
+    #[serde(rename = "MSB_PROFILE")]
+    MsbProfile,
+    /// Selected by an explicit SDK profile constructor.
+    #[serde(rename = "profile")]
+    Profile,
+    /// Selected by `active_profile` in the SDK config file.
+    #[serde(rename = "active_profile")]
+    ActiveProfile,
+    /// Selected by the SDK's final local fallback.
+    #[serde(rename = "default")]
+    Default,
+}
+
+/// Secret-safe description of an SDK backend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackendInfo {
+    /// Local or cloud execution.
+    pub kind: BackendKind,
+    /// Effective cloud API endpoint. Absent for local backends.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_url: Option<String>,
+    /// Selector that chose this backend.
+    pub source: BackendSelectionSource,
+    /// Selected SDK profile, when profile-based selection was used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl BackendKind {
+    /// Stable lowercase name used by language bindings and diagnostics.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Cloud => "cloud",
+        }
+    }
+}
+
+impl BackendSelectionSource {
+    /// Stable public name for this selection source.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Programmatic => "programmatic",
+            Self::MsbBackend => "MSB_BACKEND",
+            Self::MsbApiKey => "MSB_API_KEY",
+            Self::MsbProfile => "MSB_PROFILE",
+            Self::Profile => "profile",
+            Self::ActiveProfile => "active_profile",
+            Self::Default => "default",
+        }
+    }
 }
 
 /// Top-level routing trait for SDK dispatch. Implementations route to
@@ -77,6 +154,16 @@ pub enum BackendKind {
 pub trait Backend: Send + Sync + 'static {
     /// Return the kind of backend this is (`Local` or `Cloud`).
     fn kind(&self) -> BackendKind;
+
+    /// Return a secret-safe description of this backend.
+    fn info(&self) -> BackendInfo {
+        BackendInfo {
+            kind: self.kind(),
+            api_url: None,
+            source: BackendSelectionSource::Programmatic,
+            profile: None,
+        }
+    }
 
     /// Return the sandbox lifecycle backend.
     fn sandboxes(&self) -> &dyn SandboxBackend;
@@ -165,6 +252,14 @@ pub fn default_backend() -> Arc<dyn Backend> {
         .clone()
 }
 
+/// Return a secret-safe description of the active default backend.
+///
+/// Like [`default_backend`], the first call freezes ambient environment and
+/// profile resolution for the process.
+pub fn default_backend_info() -> BackendInfo {
+    default_backend().info()
+}
+
 /// Run `future` with `backend` installed as the default for the duration of
 /// the future and any tasks it spawns. Useful for libraries that need to talk
 /// to a non-default backend (e.g. tests using a mock, or multi-backend tools)
@@ -181,17 +276,14 @@ where
 }
 
 /// Lazy-init the OnceLock by consulting the Q1 resolution ladder
-/// ([`resolve_default_backend`]). Falls back to `LocalBackend::lazy` if the
-/// resolver itself errors (e.g. malformed config file) — error gets logged
-/// rather than panicking, so `default_backend()` never fails.
+/// ([`resolve_default_backend`]). Resolver errors install a fail-closed backend
+/// that returns the configuration error from SDK operations. This prevents an
+/// explicit but incomplete Cloud selection from silently executing locally.
 fn default_cell() -> &'static RwLock<Arc<dyn Backend>> {
     DEFAULT.get_or_init(|| {
         let resolved = profile::resolve_default_backend().unwrap_or_else(|e| {
-            tracing::warn!(
-                error = %e,
-                "default backend resolution failed; falling back to LocalBackend"
-            );
-            Arc::new(LocalBackend::lazy())
+            tracing::error!(error = %e, "default backend resolution failed");
+            Arc::new(misconfigured::ConfigurationErrorBackend::new(e))
         });
         RwLock::new(resolved)
     })

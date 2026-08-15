@@ -1,0 +1,78 @@
+---
+title: "Week of July 24, 2026"
+sidebarTitle: "Week of the 24th"
+description: "Composable network profiles across CLI and SDKs, bidirectional snapshot migration with msb self downgrade, msb run -d that honors image CMD, TTY resize in every SDK, and Go SDK on Windows."
+icon: "bolt"
+---
+
+<Tip>
+  **Released this week:** [v0.6.7](https://github.com/superradcompany/microsandbox/releases/tag/v0.6.7)
+</Tip>
+
+## New features
+
+**Composable network profiles**
+
+Network policy is now built from named profiles instead of ad-hoc presets. Pass one or more of `public`, `private`, and `host` to `--net` on the CLI, or to `NetworkPolicy.from_profiles()` / `fromProfiles()` / `FromProfiles()` in the SDKs. `--net` is repeatable and accepts a comma-separated list, plus the terminal values `all` and `none`. Explicit `--net-rule` entries keep first-match precedence and now understand `allow@dns` / `deny@dns` targets, so DNS answers are policy-aware instead of implicitly allowed.
+
+The IPv4 and IPv6 unspecified addresses are excluded from `public`, closing a DNS-rebinding gap. This is a breaking change for pre-1.0 callers: the legacy `public_only` and `non_local` presets are removed. Migrate to `from_profiles("public")` or the CLI equivalent.
+
+```bash
+msb run --net public,private --net-rule 'allow@dns:api.example.com' python
+```
+
+```python
+from microsandbox import NetworkPolicy, Rule
+
+policy = NetworkPolicy.from_profiles("public", "private").with_rules(
+    Rule.allow_dns("api.example.com"),
+    Rule.deny_dns("telemetry.example.com"),
+)
+```
+
+```typescript
+const policy = NetworkPolicy.fromProfiles("public").withRules(
+  Rule.allowDns("api.example.com"),
+  Rule.denyDns("telemetry.example.com"),
+);
+```
+
+See the [networking overview](/networking/overview).
+
+**Bidirectional snapshot migration with `msb self downgrade`**
+
+Microsandbox now treats snapshots created on v0.6.6 and v0.6.7 as fully interchangeable. It migrates older `manifest.json` artifacts to the finalized `snapshot.json` descriptor on startup, explicit open, reindex, and archive load, enforces sparse payload integrity, and rejects duplicate keys. It also retains the original descriptor bytes so a downgrade produces the exact prior artifact.
+
+`msb self downgrade 0.6.6 --yes` performs a durable, journaled downgrade with SHA-256 verification and a database backup. If the process is interrupted, startup refuses to continue until recovery finishes, so you cannot end up with a half-migrated store.
+
+Each SDK also exposes the new projections, so tooling can tell the current snapshot state and any pending migration apart. In Rust these are `Snapshot::state_kind()` and `migration_state()`; in Python, `snapshot.state_kind` and `snapshot.migration_state`; in TypeScript, `.stateKind` and `.migrationState`; in Go, `.StateKind()` and `.MigrationState()`. Migration errors now surface as a dedicated `SnapshotMigration` error kind (Python `SnapshotMigrationError`).
+
+```bash
+msb self downgrade 0.6.6 --yes
+```
+
+See [Snapshots](/sandboxes/snapshots).
+
+**`msb run -d` honors the image CMD**
+
+Detached runs now resolve and launch the same OCI command as an attached `msb run`. If you omit the command, the image's CMD is used; if you pass a command after `--`, it replaces CMD while the image's entrypoint is preserved. Previously, `msb run -d` would boot the sandbox without executing the image's default process, which surprised users running images like `docker:dind`.
+
+For an idle sandbox you can `exec` into later, use `msb create` instead. Both flows are documented under [Sandbox commands](/cli/sandbox-commands).
+
+```bash
+msb run -d --script start='exec dockerd' --entrypoint start docker:dind
+
+msb create --name devbox python
+msb exec devbox -- python -c "print('hello')"
+```
+
+**Other features**
+
+- **TTY resize in the Python, TypeScript, and Go SDKs.** `ExecHandle.resize(rows, cols)` (Go: `Resize(ctx, rows, cols)`) is now available on every SDK, matching the existing Rust API. Signal, kill, and resize operations run through cloneable exec controls, so they work while a `recv()` is pending. This is what interactive proxies and remote-terminal integrations need. See the [Python execution guide](/sdk/python/execution).
+- **Go SDK on Windows.** The Go SDK now builds and runs on Windows amd64 and arm64. Installation downloads the Windows release bundle, uses `msb.exe` and `libkrunfw.dll`, and skips Unix-only symlinks. Home directories with non-ASCII characters are handled correctly. See the [Go SDK installation guide](/sdk/go/sandbox).
+- **`status_reason` on cloud sandbox responses.** While a cloud sandbox is `starting`, the response includes a machine-readable `status_reason` of `scheduling` or `insufficient_capacity`. Clients can now distinguish "waiting in the scheduler" from "no capacity" without parsing prose. The human-readable field is renamed from `last_error` to `last_failure_message` to make the split between machine enums (`*_reason`) and prose (`*_message`) consistent. Rust callers should rename `Sandbox::last_error()` to `Sandbox::last_failure_message()`, and `SandboxHandle::last_error_snapshot()` to `last_failure_message_snapshot()`.
+
+## Bug fixes
+
+- The install script now discovers the exact libkrunfw filename and ABI packaged in each release bundle instead of using hardcoded pins. This prevents the installer and the release artifact from drifting apart, and rejects bundles with missing or malformed versioned library names. The Windows installer is unchanged.
+- The Python SDK once again imports on Python 3.10. Typed enums that regressed 3.10 compatibility have been rewritten to work on the older runtime.

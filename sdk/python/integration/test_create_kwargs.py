@@ -8,7 +8,7 @@ from contextlib import suppress
 import pytest
 
 from integration.helpers import IMAGE, remove_sandbox, stop_and_remove_sandbox
-from microsandbox import Sandbox
+from microsandbox import LogLevel, PullPolicy, Sandbox
 
 
 def _config_env(config: dict) -> dict[str, str]:
@@ -66,6 +66,7 @@ async def test_create_kwargs_round_trip_through_config_json(sandbox_name):
         max_cpus=4,
         memory=512,
         max_memory=2048,
+        thp="always",
         hostname="py-sdk-config-host",
         workdir="/var",
         shell="/bin/sh",
@@ -77,8 +78,8 @@ async def test_create_kwargs_round_trip_through_config_json(sandbox_name):
         max_duration=7200.0,
         idle_timeout=1800.0,
         ephemeral=True,
-        pull_policy="if_missing",
-        log_level="info",
+        pull_policy=PullPolicy.IF_MISSING,
+        log_level=LogLevel.INFO,
         detached=True,
         replace=True,
     )
@@ -96,6 +97,7 @@ async def test_create_kwargs_round_trip_through_config_json(sandbox_name):
         assert config["resources"]["max_cpus"] == 4
         assert config["resources"]["memory_mib"] == 512
         assert config["resources"]["max_memory_mib"] == 2048
+        assert config["resources"]["thp"] == "always"
         assert config["runtime"]["hostname"] == "py-sdk-config-host"
         assert config["runtime"]["workdir"] == "/var"
         assert config["runtime"]["shell"] == "/bin/sh"
@@ -139,18 +141,25 @@ async def test_create_kwargs_round_trip_through_config_json(sandbox_name):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("kwargs", "message"),
+    ("kwargs", "error_type", "message"),
     [
-        ({"max_duration": -1.0}, "max_duration must be non-negative"),
-        ({"idle_timeout": -1.0}, "idle_timeout must be non-negative"),
-        ({"replace_with_timeout": -1.0}, "replace_with_timeout must be non-negative"),
-        ({"pull_policy": "sometimes"}, "invalid pull_policy"),
-        ({"log_level": "verbose"}, "invalid log_level"),
+        ({"max_duration": -1.0}, ValueError, "max_duration must be non-negative"),
+        ({"idle_timeout": -1.0}, ValueError, "idle_timeout must be non-negative"),
+        (
+            {"replace_with_timeout": -1.0},
+            ValueError,
+            "replace_with_timeout must be non-negative",
+        ),
+        ({"pull_policy": "sometimes"}, TypeError, "PullPolicy"),
+        ({"log_level": "verbose"}, TypeError, "LogLevel"),
+        ({"thp": "auto"}, ValueError, "unknown transparent huge-page policy"),
     ],
 )
-async def test_create_kwargs_validate_bad_values(sandbox_name, kwargs, message):
+async def test_create_kwargs_validate_bad_values(
+    sandbox_name, kwargs, error_type, message
+):
     name = sandbox_name("py-sdk-create-invalid")
     await remove_sandbox(name)
 
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(error_type, match=message):
         await Sandbox.create(name, image=IMAGE, **kwargs)

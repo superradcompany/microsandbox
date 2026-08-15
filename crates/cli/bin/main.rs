@@ -6,9 +6,9 @@ use clap::{CommandFactory, Parser, Subcommand};
 use console::style;
 use microsandbox_cli::{
     commands::{
-        completion, copy, create, exec, image, inspect, install, list, logs, metrics, modify, ping,
-        ps, pull, registry, remove, restart, run, self_cmd, snapshot, start, stop, touch,
-        uninstall, volume,
+        completion, context, copy, create, exec, image, inspect, install, list, logs, metrics,
+        modify, ping, ps, pull, registry, remove, restart, run, self_cmd, snapshot, start, stop,
+        touch, uninstall, volume,
     },
     log_args::{self, LogArgs},
     sandbox_cmd::{self, SandboxArgs},
@@ -83,10 +83,14 @@ enum Commands {
     #[command(name = "__schema-baseline", hide = true)]
     SchemaBaseline(self_cmd::SchemaBaselineArgs),
 
-    /// Complete a deferred Windows self-downgrade binary swap (internal).
+    /// Show the active backend and its selection source.
+    #[command(visible_alias = "ctx")]
+    Context(context::ContextArgs),
+
+    /// Complete a deferred Windows self-update or self-downgrade swap (internal).
     #[cfg(windows)]
-    #[command(name = "__windows-self-downgrade-swap", hide = true)]
-    WindowsSelfDowngradeSwap(self_cmd::WindowsSelfDowngradeSwapArgs),
+    #[command(name = "__windows-self-swap", hide = true)]
+    WindowsSelfSwap(self_cmd::WindowsSelfSwapArgs),
 
     /// Create a sandbox from an image and run a command in it.
     Run(run::RunArgs),
@@ -606,6 +610,13 @@ fn run_async_command_anyhow(
     command: Commands,
     log_level: Option<microsandbox::LogLevel>,
 ) -> anyhow::Result<()> {
+    // Internal maintenance commands do not execute sandbox operations and
+    // must remain usable while diagnosing an invalid backend configuration.
+    let command = match command {
+        Commands::SchemaBaseline(args) => return self_cmd::run_schema_baseline(args),
+        command => command,
+    };
+
     // Pull and create can overlap network I/O, decompression, and progress UI.
     // Use a small-but-not-tiny worker pool so foreground UI tasks still get
     // scheduled while multiple layers are downloading and materializing.
@@ -622,13 +633,25 @@ fn run_async_command_anyhow(
         // runtime processes (`msb sandbox`) now, not the CLI; see
         // `microsandbox_runtime::maintenance`. The CLI no longer spawns a
         // reaper here.
+        if !is_backend_independent_maintenance_command(&command) {
+            // Resolve once, fallibly, before backend-dependent dispatch. Unlike
+            // the SDK's ambient convenience fallback, the CLI must not run a
+            // sandbox operation locally after an invalid explicit cloud selection.
+            let backend = microsandbox::resolve_default_backend()?;
+            let backend_info = backend.info();
+            microsandbox::set_default_backend(backend);
+
+            if shows_backend_notice(&command) {
+                microsandbox_cli::ui::notice("Backend", &context::notice_text(&backend_info));
+            }
+        }
+
         match command {
             Commands::Sandbox(_) => unreachable!("handled before Tokio starts"),
-            Commands::SchemaBaseline(args) => self_cmd::run_schema_baseline(args),
+            Commands::SchemaBaseline(_) => unreachable!("handled before backend resolution"),
+            Commands::Context(args) => context::run(args),
             #[cfg(windows)]
-            Commands::WindowsSelfDowngradeSwap(args) => {
-                self_cmd::run_windows_self_downgrade_swap(args).await
-            }
+            Commands::WindowsSelfSwap(args) => self_cmd::run_windows_self_swap(args).await,
 
             Commands::Run(args) => run::run(args, log_level).await,
             Commands::Create(args) => create::run(args, log_level).await,
@@ -666,6 +689,113 @@ fn run_async_command_anyhow(
             Commands::Completion(args) => completion::run(args, Cli::command()),
         }
     })
+}
+
+/// Return whether a command manages the CLI installation rather than a backend.
+///
+/// These commands are deliberately available even when backend configuration is
+/// invalid so users can diagnose, repair, downgrade, or uninstall that setup.
+fn is_backend_independent_maintenance_command(command: &Commands) -> bool {
+    match command {
+        Commands::SchemaBaseline(_)
+        | Commands::Doctor(_)
+        | Commands::Update(_)
+        | Commands::Downgrade(_)
+        | Commands::Self_(_)
+        | Commands::Completion(_) => true,
+        #[cfg(windows)]
+        Commands::WindowsSelfSwap(_) => true,
+        _ => false,
+    }
+}
+
+/// Return whether a command benefits from an explicit execution-context notice.
+fn shows_backend_notice(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::Create(_) | Commands::Remove(_) | Commands::Exec(_)
+    ) || cfg!(feature = "ssh") && matches_ssh_command(command)
+}
+
+#[cfg(feature = "ssh")]
+fn matches_ssh_command(command: &Commands) -> bool {
+    match command {
+        Commands::Ssh(args) => !matches!(
+            args.subcommand.as_ref(),
+            Some(microsandbox_cli::commands::ssh::SshCommand::Authorize(_))
+        ),
+        _ => false,
+    }
+}
+
+#[cfg(not(feature = "ssh"))]
+fn matches_ssh_command(_command: &Commands) -> bool {
+    false
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+
+    #[test]
+    fn maintenance_commands_do_not_require_backend_resolution() {
+        let maintenance_commands = [
+            Cli::try_parse_from(["msb", "doctor"]).unwrap().command,
+            Cli::try_parse_from(["msb", "update"]).unwrap().command,
+            Cli::try_parse_from(["msb", "downgrade", "0.6.0"])
+                .unwrap()
+                .command,
+            Cli::try_parse_from(["msb", "self", "doctor"])
+                .unwrap()
+                .command,
+            Cli::try_parse_from(["msb", "completion", "bash"])
+                .unwrap()
+                .command,
+        ];
+
+        for command in &maintenance_commands {
+            assert!(is_backend_independent_maintenance_command(command));
+        }
+
+        let context = Cli::try_parse_from(["msb", "context"]).unwrap();
+        let create = Cli::try_parse_from(["msb", "create", "alpine:3.19"]).unwrap();
+        assert!(!is_backend_independent_maintenance_command(
+            &context.command
+        ));
+        assert!(!is_backend_independent_maintenance_command(&create.command));
+    }
+
+    #[test]
+    fn backend_notices_cover_requested_commands_only() {
+        let create = Cli::try_parse_from(["msb", "create", "alpine:3.19"]).unwrap();
+        let remove = Cli::try_parse_from(["msb", "remove", "demo"]).unwrap();
+        let exec = Cli::try_parse_from(["msb", "exec", "demo", "--", "true"]).unwrap();
+        let context = Cli::try_parse_from(["msb", "context"]).unwrap();
+        let context_alias = Cli::try_parse_from(["msb", "ctx"]).unwrap();
+
+        assert!(shows_backend_notice(&create.command));
+        assert!(shows_backend_notice(&remove.command));
+        assert!(shows_backend_notice(&exec.command));
+        assert!(!shows_backend_notice(&context.command));
+        assert!(matches!(context_alias.command, Commands::Context(_)));
+    }
+
+    #[cfg(feature = "ssh")]
+    #[test]
+    fn ssh_connect_has_notice_but_authorize_does_not() {
+        let connect = Cli::try_parse_from(["msb", "ssh", "demo"]).unwrap();
+        let authorize = Cli::try_parse_from([
+            "msb",
+            "ssh",
+            "authorize",
+            "--key",
+            "ssh-ed25519 AAAAexample",
+        ])
+        .unwrap();
+
+        assert!(shows_backend_notice(&connect.command));
+        assert!(!shows_backend_notice(&authorize.command));
+    }
 }
 
 #[cfg(all(test, windows))]

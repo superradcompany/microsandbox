@@ -17,26 +17,30 @@ type SandboxConfig struct {
 	Image       string
 	ImageFstype string
 	ImageBind   string
-	// RootDisk configures the writable rootfs layer for an OCI image.
+	// RootDisk configures root storage for an OCI image.
 	// Construct via the RootDisk factory and set with WithRootDisk.
 	RootDisk *RootDiskConfig
 	// OCIUpperSizeMiB is honored as a managed root disk of this size when
 	// RootDisk is nil.
 	//
 	// Deprecated: set RootDisk (via WithRootDisk / RootDisk.Managed) instead.
-	OCIUpperSizeMiB uint32
-	ociUpperSizeSet bool
-	Snapshot        string
-	MemoryMiB       uint32
-	CPUs            uint8
-	MaxMemoryMiB    uint32
-	MaxCPUs         uint8
-	Workdir         string
-	Shell           string
-	SecurityProfile SecurityProfile
-	Hostname        string
-	User            string
-	Replace         bool
+	OCIUpperSizeMiB   uint32
+	ociUpperSizeSet   bool
+	Snapshot          string
+	MemoryMiB         uint32
+	CPUs              uint8
+	MaxMemoryMiB      uint32
+	MaxCPUs           uint8
+	CPUPlacement      CPUPlacement
+	PlacementProfile  string
+	THP               THPPolicy
+	Workdir           string
+	Shell             string
+	SecurityProfile   SecurityProfile
+	DeploymentProfile DeploymentProfile
+	Hostname          string
+	User              string
+	Replace           bool
 	// ReplaceWithTimeout, if non-nil, sets a specific timeout between
 	// SIGTERM and SIGKILL when replacing an existing sandbox. nil means
 	// "use the runtime default" (10s when Replace is set). Setting this
@@ -48,6 +52,7 @@ type SandboxConfig struct {
 	Detached           bool
 	Ephemeral          bool
 	Entrypoint         []string
+	Cmd                []string
 	Init               *InitConfig
 	LogLevel           LogLevel
 	QuietLogs          bool
@@ -67,6 +72,7 @@ type SandboxConfig struct {
 	Ports               map[uint16]uint16 // host port → guest port (TCP)
 	PortsUDP            map[uint16]uint16 // host port → guest port (UDP)
 	PortBindings        []PortBinding     // explicit bind address host→guest ports
+	Vsock               []VsockRoute      // host local IPC → guest host-CID port
 	Network             *NetworkConfig
 	Secrets             []SecretEntry
 	Patches             []PatchConfig
@@ -76,31 +82,46 @@ type SandboxConfig struct {
 // SandboxOption is a functional option for configuring a sandbox.
 type SandboxOption func(*SandboxConfig)
 
+// CPUPlacement controls how sandbox vCPU threads are placed on host processors.
+type CPUPlacement string
+
+const (
+	CPUPlacementInherit CPUPlacement = "inherit"
+	CPUPlacementAuto    CPUPlacement = "auto"
+	CPUPlacementSpread  CPUPlacement = "spread"
+	CPUPlacementCompact CPUPlacement = "compact"
+)
+
 type persistedSandboxConfig struct {
-	Name            string               `json:"name"`
-	Image           json.RawMessage      `json:"image"`
-	ImageFstype     string               `json:"image_fstype"`
-	OCIUpperSizeMiB uint32               `json:"oci_upper_size_mib"`
-	MemoryMiB       uint32               `json:"memory_mib"`
-	CPUs            uint8                `json:"cpus"`
-	MaxMemoryMiB    uint32               `json:"max_memory_mib"`
-	MaxCPUs         uint8                `json:"max_cpus"`
-	Resources       *persistedResources  `json:"resources"`
-	Workdir         string               `json:"workdir"`
-	Shell           string               `json:"shell"`
-	SecurityProfile SecurityProfile      `json:"security_profile"`
-	Hostname        string               `json:"hostname"`
-	User            string               `json:"user"`
-	Replace         bool                 `json:"replace"`
-	Labels          map[string]string    `json:"labels"`
-	Detached        bool                 `json:"detached"`
-	Lifecycle       *persistedLifecycle  `json:"lifecycle"`
-	Entrypoint      []string             `json:"entrypoint"`
-	Init            *persistedInitConfig `json:"init"`
-	LogLevel        LogLevel             `json:"log_level"`
-	QuietLogs       bool                 `json:"quiet_logs"`
-	Scripts         map[string]string    `json:"scripts"`
-	PullPolicy      PullPolicy           `json:"pull_policy"`
+	Name              string               `json:"name"`
+	Image             json.RawMessage      `json:"image"`
+	ImageFstype       string               `json:"image_fstype"`
+	OCIUpperSizeMiB   uint32               `json:"oci_upper_size_mib"`
+	MemoryMiB         uint32               `json:"memory_mib"`
+	CPUs              uint8                `json:"cpus"`
+	MaxMemoryMiB      uint32               `json:"max_memory_mib"`
+	MaxCPUs           uint8                `json:"max_cpus"`
+	CPUPlacement      CPUPlacement         `json:"cpu_placement"`
+	PlacementProfile  string               `json:"placement_profile"`
+	Resources         *persistedResources  `json:"resources"`
+	Runtime           *persistedRuntime    `json:"runtime"`
+	Workdir           string               `json:"workdir"`
+	Shell             string               `json:"shell"`
+	SecurityProfile   SecurityProfile      `json:"security_profile"`
+	DeploymentProfile DeploymentProfile    `json:"deployment_profile"`
+	Hostname          string               `json:"hostname"`
+	User              string               `json:"user"`
+	Replace           bool                 `json:"replace"`
+	Labels            map[string]string    `json:"labels"`
+	Detached          bool                 `json:"detached"`
+	Lifecycle         *persistedLifecycle  `json:"lifecycle"`
+	Entrypoint        []string             `json:"entrypoint"`
+	Cmd               []string             `json:"cmd"`
+	Init              *persistedInitConfig `json:"init"`
+	LogLevel          LogLevel             `json:"log_level"`
+	QuietLogs         bool                 `json:"quiet_logs"`
+	Scripts           map[string]string    `json:"scripts"`
+	PullPolicy        PullPolicy           `json:"pull_policy"`
 }
 
 type persistedInitConfig struct {
@@ -110,10 +131,24 @@ type persistedInitConfig struct {
 }
 
 type persistedResources struct {
-	CPUs         uint8  `json:"cpus"`
-	MemoryMiB    uint32 `json:"memory_mib"`
-	MaxCPUs      uint8  `json:"max_cpus"`
-	MaxMemoryMiB uint32 `json:"max_memory_mib"`
+	CPUs             uint8        `json:"cpus"`
+	MemoryMiB        uint32       `json:"memory_mib"`
+	MaxCPUs          uint8        `json:"max_cpus"`
+	MaxMemoryMiB     uint32       `json:"max_memory_mib"`
+	CPUPlacement     CPUPlacement `json:"cpu_placement"`
+	PlacementProfile string       `json:"placement_profile"`
+	THP              THPPolicy    `json:"thp"`
+}
+
+type persistedRuntime struct {
+	Workdir    string            `json:"workdir"`
+	Shell      string            `json:"shell"`
+	Scripts    map[string]string `json:"scripts"`
+	Entrypoint []string          `json:"entrypoint"`
+	Cmd        []string          `json:"cmd"`
+	Hostname   string            `json:"hostname"`
+	User       string            `json:"user"`
+	LogLevel   LogLevel          `json:"log_level"`
 }
 
 type persistedLifecycle struct {
@@ -152,34 +187,53 @@ func (c *SandboxConfig) UnmarshalJSON(data []byte) error {
 		upperSizeSet = true
 	}
 
+	runtime := persistedRuntime{
+		Workdir:    raw.Workdir,
+		Shell:      raw.Shell,
+		Scripts:    raw.Scripts,
+		Entrypoint: raw.Entrypoint,
+		Cmd:        raw.Cmd,
+		Hostname:   raw.Hostname,
+		User:       raw.User,
+		LogLevel:   raw.LogLevel,
+	}
+	if raw.Runtime != nil {
+		runtime = *raw.Runtime
+	}
+
 	*c = SandboxConfig{
-		Name:            raw.Name,
-		Image:           image,
-		ImageFstype:     imageFstype,
-		RootDisk:        rootDisk,
-		OCIUpperSizeMiB: upperSizeMiB,
-		ociUpperSizeSet: upperSizeSet,
-		MemoryMiB:       raw.memoryMiB(),
-		CPUs:            raw.cpus(),
-		MaxMemoryMiB:    raw.maxMemoryMiB(),
-		MaxCPUs:         raw.maxCPUs(),
-		Workdir:         raw.Workdir,
-		Shell:           raw.Shell,
-		SecurityProfile: raw.SecurityProfile,
-		Hostname:        raw.Hostname,
-		User:            raw.User,
-		Replace:         raw.Replace,
-		Labels:          raw.Labels,
-		Detached:        raw.Detached,
-		Ephemeral:       raw.lifecycleEphemeral(),
-		Entrypoint:      raw.Entrypoint,
-		Init:            decodePersistedInit(raw.Init),
-		LogLevel:        raw.LogLevel,
-		QuietLogs:       raw.QuietLogs,
-		Scripts:         raw.Scripts,
-		PullPolicy:      raw.PullPolicy,
-		MaxDuration:     time.Duration(raw.lifecycleMaxDurationSecs()) * time.Second,
-		IdleTimeout:     time.Duration(raw.lifecycleIdleTimeoutSecs()) * time.Second,
+		Name:              raw.Name,
+		Image:             image,
+		ImageFstype:       imageFstype,
+		RootDisk:          rootDisk,
+		OCIUpperSizeMiB:   upperSizeMiB,
+		ociUpperSizeSet:   upperSizeSet,
+		MemoryMiB:         raw.memoryMiB(),
+		CPUs:              raw.cpus(),
+		MaxMemoryMiB:      raw.maxMemoryMiB(),
+		MaxCPUs:           raw.maxCPUs(),
+		CPUPlacement:      raw.cpuPlacement(),
+		PlacementProfile:  raw.placementProfile(),
+		THP:               raw.thp(),
+		Workdir:           runtime.Workdir,
+		Shell:             runtime.Shell,
+		SecurityProfile:   raw.SecurityProfile,
+		DeploymentProfile: normalizeDeploymentProfile(raw.DeploymentProfile),
+		Hostname:          runtime.Hostname,
+		User:              runtime.User,
+		Replace:           raw.Replace,
+		Labels:            raw.Labels,
+		Detached:          raw.Detached,
+		Ephemeral:         raw.lifecycleEphemeral(),
+		Entrypoint:        runtime.Entrypoint,
+		Cmd:               runtime.Cmd,
+		Init:              decodePersistedInit(raw.Init),
+		LogLevel:          runtime.LogLevel,
+		QuietLogs:         raw.QuietLogs,
+		Scripts:           runtime.Scripts,
+		PullPolicy:        raw.PullPolicy,
+		MaxDuration:       time.Duration(raw.lifecycleMaxDurationSecs()) * time.Second,
+		IdleTimeout:       time.Duration(raw.lifecycleIdleTimeoutSecs()) * time.Second,
 	}
 	return nil
 }
@@ -224,6 +278,30 @@ func (c persistedSandboxConfig) maxMemoryMiB() uint32 {
 	return c.MemoryMiB
 }
 
+func (c persistedSandboxConfig) cpuPlacement() CPUPlacement {
+	if c.Resources != nil && c.Resources.CPUPlacement != "" {
+		return c.Resources.CPUPlacement
+	}
+	if c.CPUPlacement != "" {
+		return c.CPUPlacement
+	}
+	return CPUPlacementInherit
+}
+
+func (c persistedSandboxConfig) placementProfile() string {
+	if c.Resources != nil && c.Resources.PlacementProfile != "" {
+		return c.Resources.PlacementProfile
+	}
+	return c.PlacementProfile
+}
+
+func (c persistedSandboxConfig) thp() THPPolicy {
+	if c.Resources != nil && c.Resources.THP != "" {
+		return c.Resources.THP
+	}
+	return THPMadvise
+}
+
 func (c persistedSandboxConfig) lifecycleEphemeral() bool {
 	return c.Lifecycle != nil && c.Lifecycle.Ephemeral
 }
@@ -240,6 +318,19 @@ func (c persistedSandboxConfig) lifecycleIdleTimeoutSecs() uint64 {
 		return 0
 	}
 	return c.Lifecycle.IdleTimeoutSecs
+}
+
+// normalizeDeploymentProfile translates the Rust spec's snake_case wire value
+// back to the idiomatic public Go spelling used by the functional option.
+func normalizeDeploymentProfile(profile DeploymentProfile) DeploymentProfile {
+	switch profile {
+	case "single_tenant":
+		return DeploymentProfileSingleTenant
+	case "multi_tenant":
+		return DeploymentProfileMultiTenant
+	default:
+		return profile
+	}
 }
 
 func decodePersistedInit(raw *persistedInitConfig) *InitConfig {
@@ -333,6 +424,7 @@ type persistedRootDisk struct {
 	Path    string  `json:"path"`
 	Format  string  `json:"format"`
 	Fstype  string  `json:"fstype"`
+	Clone   string  `json:"clone"`
 }
 
 func (p persistedRootDisk) toConfig() (*RootDiskConfig, error) {
@@ -347,6 +439,10 @@ func (p persistedRootDisk) toConfig() (*RootDiskConfig, error) {
 		cfg.Path = p.Path
 		cfg.Format = strings.ToLower(p.Format)
 		cfg.Fstype = p.Fstype
+	case "flat":
+		cfg.kind = RootDiskKindFlat
+		cfg.Fstype = p.Fstype
+		cfg.Clone = FlatClone(p.Clone)
 	default:
 		return nil, fmt.Errorf("unknown root disk kind: %q", p.Kind)
 	}
@@ -367,20 +463,42 @@ const (
 	SecurityProfileRestricted SecurityProfile = "restricted"
 )
 
+// DeploymentProfile selects the host-runtime isolation profile for local deployments.
+type DeploymentProfile string
+
+const (
+	// DeploymentProfileSingleTenant preserves the requested host-runtime configuration.
+	DeploymentProfileSingleTenant DeploymentProfile = "single-tenant"
+	// DeploymentProfileMultiTenant enables platform-owned isolation floors.
+	DeploymentProfileMultiTenant DeploymentProfile = "multi-tenant"
+)
+
+// THPPolicy selects the guest transparent huge-page policy at boot.
+type THPPolicy string
+
+const (
+	// THPAlways transparently uses huge pages for eligible anonymous mappings.
+	THPAlways THPPolicy = "always"
+	// THPMadvise uses huge pages only for mappings that explicitly request them.
+	THPMadvise THPPolicy = "madvise"
+	// THPNever disables transparent huge pages for anonymous mappings.
+	THPNever THPPolicy = "never"
+)
+
 // WithImage sets the container image to use (e.g. "python:3.12").
 func WithImage(image string) SandboxOption {
 	return func(o *SandboxConfig) { o.Image = image }
 }
 
-// RootDiskConfig describes the writable rootfs layer (root disk) of an OCI
-// image. Construct via the RootDisk factory:
+// RootDiskConfig describes root storage for an OCI image. Construct via the
+// RootDisk factory:
 //
 //	microsandbox.RootDisk.Managed(8192)
 //	microsandbox.RootDisk.Tmpfs(microsandbox.RootDiskTmpfsOptions{SizeMiB: 512})
 //	microsandbox.RootDisk.Disk("./scratch.img", microsandbox.RootDiskImageOptions{Fstype: "ext4"})
 //
 // Use the factory rather than constructing the struct directly: it enforces
-// the mutually-exclusive kinds (managed / tmpfs / disk-image).
+// the mutually-exclusive kinds (managed / tmpfs / disk-image / flat).
 type RootDiskConfig struct {
 	// kind is the discriminator. Exposed via Kind() for callers that need
 	// to introspect; setting fields below directly is discouraged.
@@ -398,9 +516,11 @@ type RootDiskConfig struct {
 	// Fstype is the inner filesystem type of a disk-image root disk
 	// (e.g. "ext4"). Empty means ext4.
 	Fstype string
+	// Clone controls private flat-root provisioning. Empty resolves to auto.
+	Clone FlatClone
 }
 
-// RootDiskKind discriminates between the three root disk flavours.
+// RootDiskKind discriminates between root disk flavours.
 type RootDiskKind uint8
 
 const (
@@ -413,6 +533,17 @@ const (
 	// RootDiskKindDiskImage is a user-supplied disk image attached
 	// writable as the upper. User-owned lifecycle.
 	RootDiskKindDiskImage
+	// RootDiskKindFlat is one complete OCI filesystem without guest OverlayFS.
+	RootDiskKindFlat
+)
+
+// FlatClone controls how a private sandbox disk is created from a cached flat base.
+type FlatClone string
+
+const (
+	FlatCloneAuto    FlatClone = "auto"
+	FlatCloneCopy    FlatClone = "copy"
+	FlatCloneReflink FlatClone = "reflink"
 )
 
 // Kind reports which flavour of root disk this is.
@@ -432,6 +563,16 @@ type RootDiskImageOptions struct {
 	Format string
 	// Fstype hint ("ext4", "xfs"). Optional; ext4 when empty.
 	Fstype string
+}
+
+// RootDiskFlatOptions tunes the RootDisk.Flat factory.
+type RootDiskFlatOptions struct {
+	// SizeMiB is the final guest capacity. Zero selects the runtime default.
+	SizeMiB uint32
+	// Fstype is reserved for generated filesystem selection; currently ext4.
+	Fstype string
+	// Clone selects auto, copy, or strict reflink provisioning.
+	Clone FlatClone
 }
 
 // rootDiskFactory is the factory namespace for constructing RootDiskConfig
@@ -474,7 +615,18 @@ func (rootDiskFactory) Disk(path string, opts RootDiskImageOptions) RootDiskConf
 	}
 }
 
-// WithRootDisk configures the writable rootfs layer for an OCI image.
+// Flat returns a complete microsandbox-owned OCI rootfs mounted without guest OverlayFS.
+func (rootDiskFactory) Flat(opts RootDiskFlatOptions) RootDiskConfig {
+	return RootDiskConfig{
+		kind:    RootDiskKindFlat,
+		SizeMiB: opts.SizeMiB,
+		sizeSet: opts.SizeMiB != 0,
+		Fstype:  opts.Fstype,
+		Clone:   opts.Clone,
+	}
+}
+
+// WithRootDisk configures root storage for an OCI image.
 // It is valid only with WithImage when the image resolves to an OCI reference.
 func WithRootDisk(disk RootDiskConfig) SandboxOption {
 	return func(o *SandboxConfig) { o.RootDisk = &disk }
@@ -531,6 +683,21 @@ func WithMaxCPUs(cpus uint8) SandboxOption {
 	return func(o *SandboxConfig) { o.MaxCPUs = cpus }
 }
 
+// WithCPUPlacement selects the host placement policy for sandbox vCPU threads.
+func WithCPUPlacement(policy CPUPlacement) SandboxOption {
+	return func(o *SandboxConfig) { o.CPUPlacement = policy }
+}
+
+// WithPlacementProfile selects a host-defined placement profile by name.
+func WithPlacementProfile(profile string) SandboxOption {
+	return func(o *SandboxConfig) { o.PlacementProfile = profile }
+}
+
+// WithTHP selects the guest transparent huge-page policy applied at boot.
+func WithTHP(policy THPPolicy) SandboxOption {
+	return func(o *SandboxConfig) { o.THP = policy }
+}
+
 // WithWorkdir sets the working directory inside the sandbox.
 func WithWorkdir(path string) SandboxOption {
 	return func(o *SandboxConfig) { o.Workdir = path }
@@ -545,6 +712,12 @@ func WithShell(shell string) SandboxOption {
 // WithSecurityProfile selects the in-guest security profile.
 func WithSecurityProfile(profile SecurityProfile) SandboxOption {
 	return func(o *SandboxConfig) { o.SecurityProfile = profile }
+}
+
+// WithDeploymentProfile selects the host-runtime isolation profile.
+// Managed backends may enforce their own profile.
+func WithDeploymentProfile(profile DeploymentProfile) SandboxOption {
+	return func(o *SandboxConfig) { o.DeploymentProfile = profile }
 }
 
 // WithEnv adds environment variables to the sandbox. Called repeatedly,
@@ -626,11 +799,17 @@ func WithEphemeral(ephemeral bool) SandboxOption {
 	return func(o *SandboxConfig) { o.Ephemeral = ephemeral }
 }
 
-// WithEntrypoint overrides the user-workload entrypoint baked into the image.
-// Note this is the user workload (what the agent execs per request), not the
-// guest PID 1 — for that, use WithInit.
+// WithEntrypoint overrides the image ENTRYPOINT used by default-workload execution.
+// Literal Exec, Attach, and Shell calls ignore it. This is the user workload,
+// not guest PID 1 — for that, use WithInit.
 func WithEntrypoint(cmd ...string) SandboxOption {
-	return func(o *SandboxConfig) { o.Entrypoint = append([]string(nil), cmd...) }
+	return func(o *SandboxConfig) { o.Entrypoint = append([]string{}, cmd...) }
+}
+
+// WithCmd overrides the image CMD used by default-workload execution.
+// Calling WithCmd with no arguments explicitly clears the image CMD.
+func WithCmd(cmd ...string) SandboxOption {
+	return func(o *SandboxConfig) { o.Cmd = append([]string{}, cmd...) }
 }
 
 // WithInit hands off PID 1 to a guest init binary.
@@ -772,6 +951,29 @@ func WithPortBindings(bindings ...PortBinding) SandboxOption {
 	}
 }
 
+// VsockRoute exposes a host Unix socket or local Windows named pipe through
+// virtio-vsock host CID 2. SocketType defaults to stream when empty.
+type VsockRoute struct {
+	HostSocket string
+	Port       uint32
+	SocketType VsockSocketType
+}
+
+// VsockSocketType identifies the message semantics of a vsock route.
+type VsockSocketType string
+
+const (
+	VsockSocketTypeStream VsockSocketType = "stream"
+	VsockSocketTypeDgram  VsockSocketType = "dgram"
+)
+
+// WithVsock appends guest-to-host vsock routes backed by local host IPC.
+func WithVsock(routes ...VsockRoute) SandboxOption {
+	return func(o *SandboxConfig) {
+		o.Vsock = append(o.Vsock, routes...)
+	}
+}
+
 // WithNetwork sets the network configuration for the sandbox.
 func WithNetwork(net *NetworkConfig) SandboxOption {
 	return func(o *SandboxConfig) { o.Network = net }
@@ -885,6 +1087,10 @@ type NetworkConfig struct {
 	// MaxConnections caps concurrent network connections from the sandbox.
 	MaxConnections *uint
 
+	// RateLimiter configures local egress and ingress traffic limits. Nil means
+	// unlimited in both directions.
+	RateLimiter *NetworkRateLimiterConfig
+
 	// OnSecretViolation is the sandbox-wide action when a secret is sent to
 	// a disallowed host. Per-secret overrides via SecretEntry.OnViolation.
 	OnSecretViolation ViolationAction
@@ -901,6 +1107,37 @@ type DNSConfig struct {
 	Nameservers []string
 	// QueryTimeoutMs caps DNS query latency.
 	QueryTimeoutMs *uint64
+}
+
+// RateLimiterConfig limits one traffic direction. A nil bucket leaves that
+// dimension unlimited.
+type RateLimiterConfig struct {
+	// Bandwidth caps throughput in bytes.
+	Bandwidth *TokenBucketConfig
+	// Ops caps packet rate in frames.
+	Ops *TokenBucketConfig
+}
+
+// NetworkRateLimiterConfig groups local network limits by traffic direction.
+type NetworkRateLimiterConfig struct {
+	// Egress throttles guest-to-runtime traffic. Nil means unlimited.
+	Egress *RateLimiterConfig
+	// Ingress throttles runtime-to-guest traffic. Nil means unlimited.
+	Ingress *RateLimiterConfig
+}
+
+// TokenBucketConfig describes a token bucket. The bucket starts full and
+// refills continuously: Size tokens every RefillTime.
+type TokenBucketConfig struct {
+	// Size is the bucket capacity in tokens: bytes for bandwidth buckets,
+	// frames for ops buckets.
+	Size uint64
+	// RefillTime is the time it takes to refill Size tokens. It must be at
+	// least one millisecond and a whole number of milliseconds.
+	RefillTime time.Duration
+	// OneTimeBurst grants extra tokens available at startup; the burst
+	// never refills. Optional.
+	OneTimeBurst uint64
 }
 
 // PolicyRule is a single firewall rule.
@@ -1272,6 +1509,52 @@ func WithExecEnv(env map[string]string) ExecOption {
 			o.Env[k] = v
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Attach options
+// ---------------------------------------------------------------------------
+
+// AttachConfig configures a single AttachWith call. Callers typically set
+// fields via the WithAttach* functional options; it is exported for parity
+// with the other SDKs' attach option types.
+type AttachConfig struct {
+	Cwd        string
+	User       string
+	Env        map[string]string
+	DetachKeys string
+}
+
+// AttachOption is a functional option for AttachWith.
+type AttachOption func(*AttachConfig)
+
+// WithAttachCwd sets the working directory for the attached session.
+func WithAttachCwd(path string) AttachOption {
+	return func(o *AttachConfig) { o.Cwd = path }
+}
+
+// WithAttachUser sets the user to run the attached session as (UID or name).
+func WithAttachUser(user string) AttachOption {
+	return func(o *AttachConfig) { o.User = user }
+}
+
+// WithAttachEnv adds environment variables for the attached session. Called
+// repeatedly, maps merge; later keys overwrite earlier ones.
+func WithAttachEnv(env map[string]string) AttachOption {
+	return func(o *AttachConfig) {
+		if o.Env == nil {
+			o.Env = make(map[string]string, len(env))
+		}
+		for k, v := range env {
+			o.Env[k] = v
+		}
+	}
+}
+
+// WithAttachDetachKeys sets the detach key sequence. Uses Docker-style syntax:
+// "ctrl-]" (the default), "ctrl-p,ctrl-q", or a single character like "q".
+func WithAttachDetachKeys(keys string) AttachOption {
+	return func(o *AttachConfig) { o.DetachKeys = keys }
 }
 
 // ---------------------------------------------------------------------------

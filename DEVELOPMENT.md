@@ -94,6 +94,22 @@ just build release && just install
 | `just uninstall` | Remove installed binaries |
 | `just clean` | Remove `build/` artifacts and clean libkrunfw |
 
+### Using a Prebuilt agentd Binary
+
+With the default `prebuilt` feature enabled, downstream consumers of
+`microsandbox-filesystem` can set `MSB_AGENTD_PATH` to an existing guest
+`agentd` binary.
+
+The repository-local `build/agentd` takes precedence. Otherwise, the supplied
+binary is copied into Cargo's `OUT_DIR` instead of downloading the release
+artifact. If no repository-local `build/agentd` exists and `MSB_AGENTD_PATH` is
+set, it must point to an existing file or the build fails.
+The variable is ignored when the `prebuilt` feature is disabled.
+
+```bash
+MSB_AGENTD_PATH=/path/to/agentd cargo build
+```
+
 ## Project Structure
 
 ### Workspace Crates
@@ -122,9 +138,9 @@ Internal (unpublished) workspace members:
 
 | Crate | Path | Description |
 | --- | --- | --- |
-| `test-utils` | `crates/test-utils` | Internal test helpers and the `#[msb_test]` attribute |
-| `test-macros` | `crates/test-macros` | Proc-macro behind `#[msb_test]` (re-exported by `test-utils`) |
-| `test-init` | `crates/test-init` | Tiny static guest init binary for handoff integration tests |
+| `test-utils` | `crates/testing/utils` | Internal test helpers and the `#[msb_test]` attribute |
+| `test-macros` | `crates/testing/macros` | Proc-macro behind `#[msb_test]` (re-exported by `test-utils`) |
+| `test-init` | `crates/testing/init` | Tiny static guest init binary for handoff integration tests |
 | `microsandbox-node` | `sdk/node-ts` | NAPI bindings behind the Node.js SDK |
 | `microsandbox-py` | `sdk/python` | PyO3 bindings behind the Python SDK |
 | `microsandbox-go` | `sdk/go/native` | C-ABI FFI layer behind the Go SDK |
@@ -236,12 +252,12 @@ git push origin v0.X.Y
 
 The release workflow (`.github/workflows/release.yml`) will:
 
-1. Build `msb`, `agentd`, `msb-metrics`, and `libkrunfw` for release platforms (linux-x86_64, linux-aarch64, darwin-aarch64, windows-x86_64, windows-aarch64)
+1. Build shared `agentd` and `libkrunfw` artifacts once, then build full-release `msb`, `msb-metrics`, Go FFI, Node, and Python artifacts in parallel for each release platform (linux-x86_64, linux-aarch64, darwin-aarch64, windows-x86_64, windows-aarch64)
 2. Create Unix platform bundles (`.tar.gz`) and Windows platform bundles (`.zip`) with SHA256 checksums
 3. Create a GitHub release with the bundles and installer scripts (`install.sh` and `install.ps1`)
 4. Publish the npm packages: `microsandbox` (+ platform sub-packages), `@microsandbox/agent-client`, and `@microsandbox/types`
 5. Publish the MCP server to npm (`microsandbox-mcp`, from the `mcp/` submodule)
-6. Publish Rust crates to crates.io (in dependency order, 15 crates)
+6. Discover and publish all 16 Rust crates to crates.io in dependency waves, waiting only for the sparse-index entries required by the next wave
 7. Publish the Python SDK to PyPI (`microsandbox`)
 8. Tag the Go SDK (`sdk/go/vX.Y.Z`)
 9. Build and publish Docker images to GHCR

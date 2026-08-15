@@ -1,0 +1,31 @@
+# frozen_string_literal: true
+
+require_relative "lib/microsandbox/version"
+require "rake/extensiontask"
+require "rake/testtask"
+
+Rake::ExtensionTask.new("microsandbox") do |extension|
+  extension.lib_dir = "lib/microsandbox"
+end
+
+desc "Verify Ruby gem and published Rust SDK versions remain in lockstep"
+task :version_check do
+  cargo = File.read("ext/microsandbox/Cargo.toml")
+  version = Microsandbox::VERSION
+  package_version = cargo[/^version = "([^"]+)"$/, 1]
+  core_requirement = cargo[/package = "microsandbox", version = "([^"]+)"/, 1]
+
+  abort "Ruby/Cargo package version mismatch" unless package_version == version
+  abort "Ruby/published Rust SDK must use an exact version pin" unless core_requirement&.start_with?("=")
+  abort "Ruby/published Rust SDK version mismatch" unless core_requirement.delete_prefix("=") == version
+end
+
+Rake::TestTask.new do |test|
+  test.libs << "lib"
+  test.pattern = "test/**/*_test.rb"
+  test.verbose = true
+  test.deps << :version_check
+  test.deps << :compile
+end
+
+task default: :test
