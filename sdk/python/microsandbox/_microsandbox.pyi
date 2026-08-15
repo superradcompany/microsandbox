@@ -34,6 +34,7 @@ from microsandbox.types import (
     SandboxModificationPlan,
     SandboxStatus,
     SecretEntry,
+    SecretSubstitution,
     SecretModifySpec,
     SecurityProfile,
     SnapshotFormat,
@@ -42,7 +43,6 @@ from microsandbox.types import (
     StatVirtualization,
     Stdin,
     ViolationAction,
-    ViolationPolicy,
     VolumeKind,
     VsockRoute,
 )
@@ -124,7 +124,7 @@ class Sandbox:
         vsock: Mapping[str, int] | Sequence[VsockRoute] | None = None,
         network: Network | None = None,
         secrets: Sequence[SecretEntry] | None = None,
-        on_secret_violation: ViolationAction | ViolationPolicy | None = None,
+        secret_violation_action: ViolationAction | None = None,
         detached: bool = False,
     ) -> Sandbox: ...
     @staticmethod
@@ -179,7 +179,7 @@ class Sandbox:
         vsock: Mapping[str, int] | Sequence[VsockRoute] | None = None,
         network: Network | None = None,
         secrets: Sequence[SecretEntry] | None = None,
-        on_secret_violation: ViolationAction | ViolationPolicy | None = None,
+        secret_violation_action: ViolationAction | None = None,
         detached: bool = False,
     ) -> PullSession: ...
     async def name(self) -> str: ...

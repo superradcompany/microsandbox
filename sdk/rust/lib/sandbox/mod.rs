@@ -141,7 +141,7 @@ pub use microsandbox_types::{
     TransparentHugePagePolicy, VsockRouteSpec, VsockSocketType, VsockSpec,
 };
 #[cfg(feature = "net")]
-pub use microsandbox_types::{HostPattern, SecretInjection};
+pub use microsandbox_types::{HostPattern, SecretSubstitution, SecretViolationAction};
 pub use modify::{
     ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,
     ModificationPolicy, ModificationWarning, PlannedChange, ResourceConvergenceState, ResourceKind,

@@ -2034,7 +2034,7 @@ let plan = sb.modify()
     .secret(|s| s
         .env("API_KEY")
         .source(SecretSource::Env { var: "API_KEY".into() })
-        .allow_host("api.example.com"))
+        .allow("api.example.com"))
     .apply()
     .await?;
 ```

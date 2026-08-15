@@ -120,6 +120,7 @@ struct SandboxPatch {
     patches: Option<Vec<PatchInput>>,
     network: Option<NetworkInput>,
     secrets: Option<BTreeMap<String, SecretInput>>,
+    secret_violation_action: Option<microsandbox_types::SecretViolationAction>,
     scripts: Option<BTreeMap<String, String>>,
     ports: Option<Vec<String>>,
 }
@@ -409,8 +410,11 @@ struct TlsInput {
 #[serde(default, deny_unknown_fields)]
 struct SecretInput {
     value: Option<SecretValueInput>,
+    placeholder: Option<String>,
     allow: Option<Vec<String>>,
-    inject: Option<Vec<SecretInjectionInput>>,
+    substitution: Option<SecretSubstitutionInput>,
+    passthrough: Option<Vec<String>>,
+    violation_action: Option<microsandbox_types::SecretViolationAction>,
     require_tls_identity: Option<bool>,
 }
 
@@ -425,12 +429,12 @@ enum SecretValueInput {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum SecretInjectionInput {
-    Headers,
-    BasicAuth,
-    QueryParams,
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct SecretSubstitutionInput {
+    headers: Option<bool>,
+    query: Option<bool>,
+    body: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -468,6 +472,10 @@ impl SandboxPatch {
         replace(&mut self.patches, higher.patches);
         merge_network(&mut self.network, higher.network);
         merge_secrets(&mut self.secrets, higher.secrets);
+        replace(
+            &mut self.secret_violation_action,
+            higher.secret_violation_action,
+        );
         merge_map(&mut self.scripts, higher.scripts);
         replace(&mut self.ports, higher.ports);
     }
@@ -1010,8 +1018,11 @@ fn merge_secrets(
         match base.get_mut(&name) {
             Some(current) => {
                 replace(&mut current.value, higher.value);
+                replace(&mut current.placeholder, higher.placeholder);
                 replace(&mut current.allow, higher.allow);
-                replace(&mut current.inject, higher.inject);
+                replace(&mut current.substitution, higher.substitution);
+                replace(&mut current.passthrough, higher.passthrough);
+                replace(&mut current.violation_action, higher.violation_action);
                 replace(
                     &mut current.require_tls_identity,
                     higher.require_tls_identity,
@@ -1317,12 +1328,22 @@ fn materialize_sandbox_patch(
         if let Some(network) = &patch.network {
             result = result.network(materialize_network_patch(network)?);
         }
-        if let Some(secrets) = &patch.secrets {
-            result = result.secrets(materialize_secret_patch(secrets)?);
+        if patch.secrets.is_some() || patch.secret_violation_action.is_some() {
+            let mut secrets = patch
+                .secrets
+                .as_ref()
+                .map(materialize_secret_patch)
+                .transpose()?
+                .unwrap_or_default();
+            if let Some(action) = &patch.secret_violation_action {
+                secrets = secrets.violation_action(action.clone());
+            }
+            result = result.secrets(secrets);
         }
     }
     #[cfg(not(feature = "net"))]
-    if patch.network.is_some() || patch.secrets.is_some() {
+    if patch.network.is_some() || patch.secrets.is_some() || patch.secret_violation_action.is_some()
+    {
         anyhow::bail!("network and secret config require an msb build with networking enabled");
     }
 
@@ -1782,7 +1803,7 @@ fn materialize_secret_patch(
     input: &BTreeMap<String, SecretInput>,
 ) -> anyhow::Result<SecretConfigPatch> {
     use microsandbox::sandbox::SecretSource;
-    use microsandbox_types::{HostPattern, SecretInjection};
+    use microsandbox_types::{HostPattern, SecretSubstitution};
 
     let mut patch = SecretConfigPatch::new();
     for (name, input) in input {
@@ -1798,31 +1819,36 @@ fn materialize_secret_patch(
                 entry = entry.source(SecretSource::Env { var: name.clone() });
             }
         }
+        if let Some(placeholder) = &input.placeholder {
+            entry = entry.placeholder(placeholder);
+        }
         entry = entry.allowed_hosts(
             input
                 .allow
                 .clone()
                 .unwrap_or_default()
                 .into_iter()
-                .map(|host| {
-                    if host.starts_with("*.") {
-                        HostPattern::Wildcard(host)
-                    } else {
-                        HostPattern::Exact(host)
-                    }
-                })
+                .map(|host| HostPattern::parse(&host))
                 .collect(),
         );
-        let injection = input
-            .inject
-            .clone()
-            .unwrap_or_else(|| vec![SecretInjectionInput::Headers]);
-        entry = entry.injection(SecretInjection {
-            headers: injection.contains(&SecretInjectionInput::Headers),
-            basic_auth: injection.contains(&SecretInjectionInput::BasicAuth),
-            query_params: injection.contains(&SecretInjectionInput::QueryParams),
-            body: false,
+        let substitution = input.substitution.clone().unwrap_or_default();
+        entry = entry.substitution(SecretSubstitution {
+            headers: substitution.headers.unwrap_or(true),
+            query: substitution.query.unwrap_or(false),
+            body: substitution.body.unwrap_or(false),
         });
+        entry = entry.passthrough_hosts(
+            input
+                .passthrough
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|host| HostPattern::parse(&host))
+                .collect(),
+        );
+        if let Some(action) = &input.violation_action {
+            entry = entry.violation_action(action.clone());
+        }
         if let Some(required) = input.require_tls_identity {
             entry = entry.require_tls_identity(required);
         }
@@ -2280,7 +2306,10 @@ secrets:
             r#"
 TOKEN:
   value: "${HOST_TOKEN}"
-  inject: [headers, basic_auth]
+  substitution:
+    headers: false
+    body: true
+  passthrough: [api.anthropic.com]
 "#,
         );
         let sources = SandboxConfigSources::default()
@@ -2294,15 +2323,12 @@ TOKEN:
             Some(["api.example.com".to_string()].as_slice())
         );
         assert_eq!(secret.require_tls_identity, Some(false));
+        let substitution = secret.substitution.as_ref().unwrap();
+        assert_eq!(substitution.headers, Some(false));
+        assert_eq!(substitution.body, Some(true));
         assert_eq!(
-            secret.inject.as_deref(),
-            Some(
-                [
-                    SecretInjectionInput::Headers,
-                    SecretInjectionInput::BasicAuth,
-                ]
-                .as_slice()
-            )
+            secret.passthrough.as_deref(),
+            Some(["api.anthropic.com".to_string()].as_slice())
         );
         assert!(matches!(
             secret.value,

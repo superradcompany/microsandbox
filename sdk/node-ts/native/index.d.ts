@@ -502,8 +502,8 @@ export declare class NetworkBuilder {
    * interface. The closure receives a fresh `InterfaceOverridesBuilder`.
    */
   interface(configure: (arg: InterfaceOverridesBuilder) => InterfaceOverridesBuilder): this
-  /** Configure the violation action for secrets. */
-  onSecretViolation(configure: (arg: JsViolationActionBuilder) => JsViolationActionBuilder): this
+  /** Configure the default blocking action for secret placeholders. */
+  secretViolationAction(action: string): this
   /** Set the maximum number of concurrent connections. */
   maxConnections(max: number): this
   /** Set the IPv4 pool used for per-sandbox /30 guest subnets. */
@@ -1400,10 +1400,8 @@ export declare class SecretBuilder {
   value(value: string): this
   /** Custom placeholder. Auto-generated as `$MSB_<env>` when unset. */
   placeholder(placeholder: string): this
-  /** Add an allowed exact-match host. */
-  allowHost(host: string): this
-  /** Add an allowed wildcard host pattern (e.g. `*.openai.com`). */
-  allowHostPattern(pattern: string): this
+  /** Add a host allowed to receive the substituted secret value. */
+  allow(host: string): this
   /**
    * Allow any host. **Dangerous** — secret can be exfiltrated.
    * Pass `true` to opt in.
@@ -1411,16 +1409,16 @@ export declare class SecretBuilder {
   allowAnyHostDangerous(iUnderstand: boolean): this
   /** Require verified TLS identity before substituting (default: true). */
   requireTlsIdentity(enabled: boolean): this
-  /** Configure header injection (default: true). */
-  injectHeaders(enabled: boolean): this
-  /** Configure Basic Auth injection (default: true). */
-  injectBasicAuth(enabled: boolean): this
-  /** Configure URL query parameter injection (default: false). */
-  injectQuery(enabled: boolean): this
-  /** Configure request body injection (default: false). */
-  injectBody(enabled: boolean): this
-  /** Configure violation behavior for this secret. */
-  onViolation(configure: (arg: JsViolationActionBuilder) => JsViolationActionBuilder): this
+  /** Allow a host to receive the unchanged placeholder. */
+  allowPassthroughFor(host: string): this
+  /** Configure header substitution (default: true). */
+  substituteInHeaders(enabled: boolean): this
+  /** Configure URL query parameter substitution (default: false). */
+  substituteInQuery(enabled: boolean): this
+  /** Configure request body substitution (default: false). */
+  substituteInBody(enabled: boolean): this
+  /** Configure the blocking action for this secret. */
+  violationAction(action: string): this
   /**
    * Materialize into a `SecretEntry`. Panics if required fields are not
    * set (matches the underlying Rust builder's contract; surface as a
@@ -1617,24 +1615,6 @@ export declare class TlsBuilder {
   build(): TlsConfig
 }
 export type JsTlsBuilder = TlsBuilder
-
-/** Fluent builder for secret violation behavior. */
-export declare class ViolationActionBuilder {
-  constructor()
-  /** Block the request silently. */
-  block(): this
-  /** Block the request and log a warning. */
-  blockAndLog(): this
-  /** Block the request and terminate the sandbox. */
-  blockAndTerminate(): this
-  /** Allow an exact host to receive placeholders unchanged. */
-  passthroughHost(host: string): this
-  /** Allow hosts matching a wildcard pattern to receive placeholders unchanged. */
-  passthroughHostPattern(pattern: string): this
-  /** Allow any host to receive placeholders unchanged. */
-  passthroughAllHosts(iUnderstand: boolean): this
-}
-export type JsViolationActionBuilder = ViolationActionBuilder
 
 export declare class Volume {
   static get(name: string): Promise<VolumeHandle>
@@ -2267,17 +2247,18 @@ export interface SecretEntry {
   allowedHostPatterns: Array<string>
   /** Allow any host. **Dangerous** — secret can be exfiltrated. */
   allowAnyHost: boolean
+  /** Hosts allowed to receive the placeholder unchanged. */
+  passthroughHosts: Array<string>
   /** Require verified TLS identity before substituting (default: true). */
   requireTlsIdentity: boolean
-  /** Where the secret may be injected into requests. */
-  injection: JsSecretInjection
+  /** Where the placeholder may be substituted. */
+  substitution: SecretSubstitution
 }
 
-/** Injection sites for a secret value. */
-export interface SecretInjection {
+/** Substitution sites for a secret value. */
+export interface SecretSubstitution {
   headers: boolean
-  basicAuth: boolean
-  queryParams: boolean
+  query: boolean
   body: boolean
 }
 

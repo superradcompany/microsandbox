@@ -17,9 +17,9 @@ use crate::domain::{
     CpuPlacement, DeploymentProfile, DiskImageFormat, EnvVar, HandoffInit, HostPattern,
     HostPermissions, MountOptions, NetworkPolicy, NetworkSpec, OciRootfsSource, Patch, PullPolicy,
     Rlimit, RlimitResource, RootDisk, RootfsSource, SandboxLogLevel, SandboxPolicy,
-    SandboxResources, SandboxRuntimeOptions, SandboxSpec, SecretEntry, SecretInjection,
-    SecretsConfig, SecurityProfile, StatVirtualization, TransparentHugePagePolicy, ViolationAction,
-    VolumeMount, VsockSpec, default_private, default_strict,
+    SandboxResources, SandboxRuntimeOptions, SandboxSpec, SecretEntry, SecretSubstitution,
+    SecretViolationAction, SecretsConfig, SecurityProfile, StatVirtualization,
+    TransparentHugePagePolicy, VolumeMount, VsockSpec, default_private, default_strict,
 };
 use crate::modify::SecretSource;
 use crate::{TypesError, TypesResult};
@@ -744,7 +744,7 @@ pub struct CloudNetworkSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub policy: Option<NetworkPolicy>,
 
-    /// Secret-injection config.
+    /// Secret-substitution config.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secrets: Option<CloudSecretsConfig>,
 
@@ -1145,7 +1145,7 @@ impl Default for CloudRootfsSource {
 // Types: Secrets
 //--------------------------------------------------------------------------------------------------
 
-/// Secret-injection config for the cloud API. Twin of domain [`SecretsConfig`].
+/// Secret-substitution config for the cloud API. Twin of domain [`SecretsConfig`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -1155,7 +1155,7 @@ pub struct CloudSecretsConfig {
     pub entries: Vec<CloudSecretEntry>,
     /// Default action when a placeholder leaks to a disallowed host.
     #[serde(default)]
-    pub on_violation: CloudViolationAction,
+    pub violation_action: CloudViolationAction,
 }
 
 /// A single cloud secret entry. Twin of domain [`SecretEntry`].
@@ -1178,10 +1178,13 @@ pub struct CloudSecretEntry {
     pub allowed_hosts: Vec<CloudHostPattern>,
     /// Where the secret may be injected.
     #[serde(default)]
-    pub injection: SecretInjection,
+    pub substitution: SecretSubstitution,
+    /// Hosts allowed to receive the placeholder unchanged.
+    #[serde(default)]
+    pub passthrough_hosts: Vec<CloudHostPattern>,
     /// Per-secret violation action overriding the config default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub on_violation: Option<CloudViolationAction>,
+    pub violation_action: Option<CloudViolationAction>,
     /// Require verified TLS identity before substituting (default: true).
     #[serde(default = "cloud_default_true")]
     pub require_tls_identity: bool,
@@ -1226,8 +1229,7 @@ pub enum CloudHostPattern {
     Any,
 }
 
-/// Action on a cloud secret violation. Twin of [`ViolationAction`], with
-/// `Passthrough`'s host list normalized to a `hosts` field.
+/// Action on a cloud secret violation. Twin of [`SecretViolationAction`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -1240,11 +1242,6 @@ pub enum CloudViolationAction {
     BlockAndLog,
     /// Block and terminate the sandbox.
     BlockAndTerminate,
-    /// Forward the request with the placeholder unchanged for matching hosts.
-    Passthrough {
-        /// Hosts for which the placeholder passes through unchanged.
-        hosts: Vec<CloudHostPattern>,
-    },
 }
 
 fn cloud_default_true() -> bool {
@@ -1275,28 +1272,22 @@ impl From<CloudHostPattern> for HostPattern {
     }
 }
 
-impl From<ViolationAction> for CloudViolationAction {
-    fn from(action: ViolationAction) -> Self {
+impl From<SecretViolationAction> for CloudViolationAction {
+    fn from(action: SecretViolationAction) -> Self {
         match action {
-            ViolationAction::Block => Self::Block,
-            ViolationAction::BlockAndLog => Self::BlockAndLog,
-            ViolationAction::BlockAndTerminate => Self::BlockAndTerminate,
-            ViolationAction::Passthrough(hosts) => Self::Passthrough {
-                hosts: hosts.into_iter().map(Into::into).collect(),
-            },
+            SecretViolationAction::Block => Self::Block,
+            SecretViolationAction::BlockAndLog => Self::BlockAndLog,
+            SecretViolationAction::BlockAndTerminate => Self::BlockAndTerminate,
         }
     }
 }
 
-impl From<CloudViolationAction> for ViolationAction {
+impl From<CloudViolationAction> for SecretViolationAction {
     fn from(action: CloudViolationAction) -> Self {
         match action {
             CloudViolationAction::Block => Self::Block,
             CloudViolationAction::BlockAndLog => Self::BlockAndLog,
             CloudViolationAction::BlockAndTerminate => Self::BlockAndTerminate,
-            CloudViolationAction::Passthrough { hosts } => {
-                Self::Passthrough(hosts.into_iter().map(Into::into).collect())
-            }
         }
     }
 }
@@ -1327,8 +1318,13 @@ impl From<SecretEntry> for CloudSecretEntry {
             source: entry.source.map(Into::into),
             placeholder: entry.placeholder,
             allowed_hosts: entry.allowed_hosts.into_iter().map(Into::into).collect(),
-            injection: entry.injection,
-            on_violation: entry.on_violation.map(Into::into),
+            substitution: entry.substitution,
+            passthrough_hosts: entry
+                .passthrough_hosts
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            violation_action: entry.violation_action.map(Into::into),
             require_tls_identity: entry.require_tls_identity,
         }
     }
@@ -1342,8 +1338,13 @@ impl From<CloudSecretEntry> for SecretEntry {
             source: entry.source.map(Into::into),
             placeholder: entry.placeholder,
             allowed_hosts: entry.allowed_hosts.into_iter().map(Into::into).collect(),
-            injection: entry.injection,
-            on_violation: entry.on_violation.map(Into::into),
+            substitution: entry.substitution,
+            passthrough_hosts: entry
+                .passthrough_hosts
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            violation_action: entry.violation_action.map(Into::into),
             require_tls_identity: entry.require_tls_identity,
         }
     }
@@ -1353,7 +1354,7 @@ impl From<SecretsConfig> for CloudSecretsConfig {
     fn from(config: SecretsConfig) -> Self {
         Self {
             entries: config.secrets.into_iter().map(Into::into).collect(),
-            on_violation: config.on_violation.into(),
+            violation_action: config.violation_action.into(),
         }
     }
 }
@@ -1362,7 +1363,7 @@ impl From<CloudSecretsConfig> for SecretsConfig {
     fn from(config: CloudSecretsConfig) -> Self {
         Self {
             secrets: config.entries.into_iter().map(Into::into).collect(),
-            on_violation: config.on_violation.into(),
+            violation_action: config.violation_action.into(),
         }
     }
 }
@@ -1456,11 +1457,8 @@ mod tests {
             serde_json::json!({"type": "env", "var": "OPENAI"})
         );
         assert_eq!(
-            serde_json::to_value(CloudViolationAction::Passthrough {
-                hosts: vec![CloudHostPattern::Any],
-            })
-            .unwrap(),
-            serde_json::json!({"type": "passthrough", "hosts": [{"type": "any"}]})
+            serde_json::to_value(CloudViolationAction::BlockAndLog).unwrap(),
+            serde_json::json!({"type": "block_and_log"})
         );
     }
 
@@ -1477,19 +1475,23 @@ mod tests {
                 allowed_hosts: vec![CloudHostPattern::Exact {
                     value: "api.openai.com".into(),
                 }],
-                injection: SecretInjection::default(),
-                on_violation: Some(CloudViolationAction::BlockAndTerminate),
+                passthrough_hosts: vec![CloudHostPattern::Exact {
+                    value: "api.anthropic.com".into(),
+                }],
+                substitution: SecretSubstitution::default(),
+                violation_action: Some(CloudViolationAction::BlockAndTerminate),
                 require_tls_identity: true,
             }],
-            on_violation: CloudViolationAction::BlockAndLog,
+            violation_action: CloudViolationAction::BlockAndLog,
         };
 
         let back: CloudSecretsConfig = SecretsConfig::from(cloud.clone()).into();
         assert_eq!(back.entries.len(), 1);
         assert_eq!(back.entries[0].value, "sk-x");
         assert_eq!(back.entries[0].allowed_hosts.len(), 1);
+        assert_eq!(back.entries[0].passthrough_hosts.len(), 1);
         assert!(matches!(
-            back.entries[0].on_violation,
+            back.entries[0].violation_action,
             Some(CloudViolationAction::BlockAndTerminate)
         ));
     }

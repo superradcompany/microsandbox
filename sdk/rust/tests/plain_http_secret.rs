@@ -219,7 +219,7 @@ async fn plain_http_invalid_host_blocks_host_bound_secret() {
         .secret(|s| {
             s.env("API_KEY")
                 .value(REAL_SECRET)
-                .allow_host("host.microsandbox.internal")
+                .allow("host.microsandbox.internal")
                 .require_tls_identity(false)
         })
         .network(|n| n.policy(NetworkPolicy::allow_all()))

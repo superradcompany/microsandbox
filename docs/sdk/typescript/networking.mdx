@@ -696,36 +696,13 @@ Enable or disable networking entirely. When `false`, no network interface is cre
   </div>
 </div>
 
-#### <span className="msb-recv">network.</span><span className="msb-hn">onSecretViolation()</span>
+#### <span className="msb-recv">network.</span><span className="msb-hn">secretViolationAction()</span>
 
 ```typescript
-onSecretViolation(configure: (b: ViolationActionBuilder) => ViolationActionBuilder): this
+secretViolationAction(action: "block" | "block-and-log" | "block-and-terminate"): this
 ```
 
-<Accordion title="Example">
-
-```typescript
-.network((n) =>
-  n.onSecretViolation((v) =>
-    v.blockAndLog().passthroughHost("api.anthropic.com"),
-  ),
-)
-```
-
-</Accordion>
-
-Configure the action taken when a secret reaches a disallowed host. See [`ViolationActionBuilder`](#violationactionbuilder).
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>configure</code><a className="msb-type" href="#violationactionbuilder">ViolationActionBuilder</a></div>
-    <div className="msb-param-desc">Configure the violation action.</div>
-  </div>
-</div>
-
-Passthrough hosts receive placeholders unchanged. They do **not** receive real secret values.
+Set the sandbox-wide blocking action. Passthrough hosts are configured per secret with `allowPassthroughFor()`.
 
 #### <span className="msb-recv" id="nb-secret">network.</span><span className="msb-hn">secret()</span>
 
@@ -733,16 +710,7 @@ Passthrough hosts receive placeholders unchanged. They do **not** receive real s
 secret(configure: (b: SecretBuilder) => SecretBuilder): this
 ```
 
-Add a secret with full configuration. See [`SecretBuilder`](/sdk/typescript/secrets#secretbuilder).
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>configure</code><a className="msb-type" href="/sdk/typescript/secrets#secretbuilder">SecretBuilder</a></div>
-    <div className="msb-param-desc">Configure the secret.</div>
-  </div>
-</div>
+Add a secret with full configuration. See [`SecretBuilder`](/sdk/typescript/secrets).
 
 #### <span className="msb-recv">network.</span><span className="msb-hn">secretEnv()</span>
 
@@ -1708,84 +1676,6 @@ upstreamCaCertFor(pattern: string, path: string): this
 
 Path to a PEM file with extra root CAs the proxy should trust only when the upstream SNI matches `pattern`. Pattern syntax matches [`bypass()`](#bypass): exact hosts and `*.suffix` wildcards are supported.
 
-## ViolationActionBuilder
-
-Configures the action taken when a secret would be sent to a disallowed host. Used in `NetworkBuilder.onSecretViolation(v => ...)`. Passthrough host calls accumulate; when passthrough hosts are configured, non-matching hosts use the default secret-violation action.
-
-#### <span className="msb-recv" id="va-block">violation.</span><span className="msb-hn">block()</span>
-
-```typescript
-block(): this
-```
-
-Block the request silently.
-
-#### <span className="msb-recv">violation.</span><span className="msb-hn">blockAndLog()</span>
-
-```typescript
-blockAndLog(): this
-```
-
-Block the request and emit a warning log.
-
-#### <span className="msb-recv">violation.</span><span className="msb-hn">blockAndTerminate()</span>
-
-```typescript
-blockAndTerminate(): this
-```
-
-Block the request and terminate the sandbox.
-
-#### <span className="msb-recv">violation.</span><span className="msb-hn">passthroughHost()</span>
-
-```typescript
-passthroughHost(host: string): this
-```
-
-Allow placeholders to pass through unchanged to an exact host. The host receives the placeholder, not the real secret value.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>host</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Exact host.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">violation.</span><span className="msb-hn">passthroughHostPattern()</span>
-
-```typescript
-passthroughHostPattern(pattern: string): this
-```
-
-Allow placeholders to pass through unchanged to matching wildcard hosts.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>pattern</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Wildcard host pattern.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">violation.</span><span className="msb-hn">passthroughAllHosts()</span>
-
-```typescript
-passthroughAllHosts(iUnderstand: boolean): this
-```
-
-Allow placeholders to pass through unchanged to any host. The explicit `iUnderstand` flag must be `true` to acknowledge the broad scope.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>iUnderstand</code><span className="msb-type">boolean</span></div>
-    <div className="msb-param-desc">Must be <code>true</code> to opt in.</div>
-  </div>
-</div>
 
 ## NetworkRateLimiterBuilder
 

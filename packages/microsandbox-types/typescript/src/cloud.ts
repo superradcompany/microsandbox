@@ -8,7 +8,7 @@ import type {
   NetworkPolicy,
   SandboxLogLevel,
   SandboxPolicy,
-  SecretInjection,
+  SecretSubstitution,
   SecurityProfile,
   StatVirtualization,
 } from "./domain.js";
@@ -407,7 +407,7 @@ export type CloudSecretsConfig = {
   /**
    * Default action when a placeholder leaks to a disallowed host.
    */
-  on_violation: CloudViolationAction;
+  violation_action: CloudViolationAction;
 };
 
 export type CloudSecretEntry = {
@@ -434,11 +434,13 @@ export type CloudSecretEntry = {
   /**
    * Where the secret may be injected.
    */
-  injection: SecretInjection;
+  substitution: SecretSubstitution;
+  /** Hosts allowed to receive the placeholder unchanged. */
+  passthrough_hosts: Array<CloudHostPattern>;
   /**
    * Per-secret violation action overriding the config default.
    */
-  on_violation?: CloudViolationAction | null;
+  violation_action?: CloudViolationAction | null;
   /**
    * Require verified TLS identity before substituting (default: true).
    */
@@ -476,14 +478,7 @@ export type CloudHostPattern = {
 export type CloudViolationAction =
   | { "type": "block" }
   | { "type": "block_and_log" }
-  | { "type": "block_and_terminate" }
-  | {
-    "type": "passthrough";
-    /**
-     * Hosts for which the placeholder passes through unchanged.
-     */
-    hosts: Array<CloudHostPattern>;
-  };
+  | { "type": "block_and_terminate" };
 
 export type CloudCreateSandboxResponse = {
   /**

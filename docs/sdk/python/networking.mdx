@@ -22,7 +22,7 @@ Network(
     ipv4_pool: str | None = None,
     ipv6_pool: str | None = None,
     max_connections: int | None = None,
-    on_secret_violation: ViolationAction | ViolationPolicy = ViolationAction.BLOCK_AND_LOG,
+    secret_violation_action: ViolationAction = ViolationAction.BLOCK_AND_LOG,
 )
 ```
 
@@ -88,9 +88,9 @@ Maximum concurrent connections
 
 Ingress and egress rate limits
 
-#### <span className="msb-recv">network.</span><span className="msb-hn">on_secret_violation</span>
+#### <span className="msb-recv">network.</span><span className="msb-hn">secret_violation_action</span>
 
-[`ViolationAction`](/sdk/python/secrets#violationaction)` \| `[`ViolationPolicy`](/sdk/python/secrets#violationpolicy) · Default: `BLOCK_AND_LOG`
+[`ViolationAction`](/sdk/python/secrets#violationaction) · Default: `BLOCK_AND_LOG`
 
 Sandbox-wide action when a secret placeholder reaches a disallowed host
 

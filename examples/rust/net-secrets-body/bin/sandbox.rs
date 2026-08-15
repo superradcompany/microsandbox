@@ -1,4 +1,4 @@
-//! Sandbox creation and secret injection demo logic.
+//! Sandbox creation and secret substitution demo logic.
 
 use microsandbox::{NetworkPolicy, Sandbox};
 use std::path::Path;
@@ -17,8 +17,8 @@ pub async fn create(
         .secret(|s| {
             s.env("API_KEY")
                 .value(secret)
-                .allow_host(hostname)
-                .inject_body(true)
+                .allow(hostname)
+                .substitute_in_body(true)
         })
         .network(|n| {
             n.policy(NetworkPolicy::allow_all()).tls(|t| {
