@@ -141,7 +141,23 @@ tar = "0.4"
 time = "0.3"
 tempfile = "3.15"
 thiserror = "2.0"
-tokio = { version = "1.52", features = ["full"] }
+# Keep Tokio's full capability set without its optional parking_lot backend.
+# A Ruby process may fork after the native runtime has started; inherited
+# parking_lot waiter state can reference worker threads that do not survive in
+# the child, causing the rebuilt runtime to segfault.
+tokio = { version = "1.52", features = [
+    "fs",
+    "io-util",
+    "io-std",
+    "macros",
+    "net",
+    "process",
+    "rt",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tracing = "0.1"
