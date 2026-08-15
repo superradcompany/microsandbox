@@ -135,7 +135,13 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: runtime-${{ inputs.target }}
-          path: build/
+          # upload-artifact dereferences symlinks. Listing only the canonical
+          # library prevents Linux SONAME aliases from becoming duplicate real
+          # files that downstream packaging could mistake for the release name.
+          path: |
+            build/agentd
+            build/msb
+            build/${{ inputs.libkrunfw_file }}
           compression-level: 0
 
   metrics:
