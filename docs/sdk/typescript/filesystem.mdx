@@ -3,12 +3,9 @@ title: Filesystem
 description: TypeScript SDK - Filesystem API reference
 ---
 
-Read and write files inside a running sandbox over the same host-guest channel as command execution: no SSH, no network. Obtain a handle with `sandbox.fs()`. See [Filesystem](/sandboxes/filesystem) for usage examples. For bulk transfers, consider a [bind-mounted volume](/sandboxes/volumes) instead.
-
+Read and write files inside a running sandbox. See [Filesystem](/sandboxes/filesystem) for usage examples.
 
 ## SandboxFsOps
-
-Filesystem handle for a running sandbox, obtained via [`sandbox.fs()`](/sdk/typescript/sandbox#sandbox-fs). Every method is async and returns a `Promise`. Paths are absolute inside the guest.
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read()</span>
 
@@ -478,6 +475,104 @@ Copy a file from the sandbox to the host machine.
   </div>
 </div>
 
+## FsReadStream
+
+
+<p className="msb-backref">Returned by <a href="#fs-readstream">readStream()</a></p>
+
+Async stream for reading a file in chunks. Implements `AsyncIterable<Uint8Array>` and `AsyncDisposable`, so it works with `for await...of` and `await using`.
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">recv()</span>
+
+```typescript
+recv()
+```
+
+Receive the next chunk. Returns `null` when the file has been fully read.
+
+<p className="msb-label">Returns</p>
+
+`Promise<Uint8Array \| null>`
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">collect()</span>
+
+```typescript
+collect()
+```
+
+Drain the stream into a single buffer
+
+<p className="msb-label">Returns</p>
+
+`Promise<Uint8Array>`
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">[Symbol.asyncIterator]()</span>
+
+```typescript
+[Symbol.asyncIterator]()
+```
+
+Iterate chunks with `for await...of`
+
+<p className="msb-label">Returns</p>
+
+`AsyncIterator<Uint8Array>`
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">[Symbol.asyncDispose]()</span>
+
+```typescript
+[Symbol.asyncDispose]()
+```
+
+Stop reading; runs on `await using` scope exit
+
+<p className="msb-label">Returns</p>
+
+`Promise<void>`
+
+## FsWriteSink
+
+
+<p className="msb-backref">Returned by <a href="#fs-writestream">writeStream()</a></p>
+
+Streaming writer for a file. Implements `AsyncDisposable`, so it can be paired with `await using`.
+
+#### <span className="msb-recv">sink.</span><span className="msb-hn">write()</span>
+
+```typescript
+write(data)
+```
+
+Append a chunk. Strings are encoded as UTF-8.
+
+<p className="msb-label">Returns</p>
+
+`Promise<void>`
+
+#### <span className="msb-recv">sink.</span><span className="msb-hn">close()</span>
+
+```typescript
+close()
+```
+
+Flush and close. Idempotent.
+
+<p className="msb-label">Returns</p>
+
+`Promise<void>`
+
+#### <span className="msb-recv">sink.</span><span className="msb-hn">[Symbol.asyncDispose]()</span>
+
+```typescript
+[Symbol.asyncDispose]()
+```
+
+Calls `close()` on `await using` scope exit
+
+<p className="msb-label">Returns</p>
+
+`Promise<void>`
+
 ## Types
 
 ### FsEntry
@@ -523,28 +618,3 @@ type FsEntryKind = "file" | "directory" | "symlink" | "other";
 | `"directory"` | Directory |
 | `"symlink"` | Symbolic link |
 | `"other"` | Other entry type |
-
-### FsReadStream
-
-<p className="msb-backref">Returned by <a href="#fs-readstream">readStream()</a></p>
-
-Async stream for reading a file in chunks. Implements `AsyncIterable<Uint8Array>` and `AsyncDisposable`, so it works with `for await...of` and `await using`.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `recv()` | `Promise<Uint8Array \| null>` | Receive the next chunk. Returns `null` when the file has been fully read. |
-| `collect()` | `Promise<Uint8Array>` | Drain the stream into a single buffer |
-| `[Symbol.asyncIterator]()` | `AsyncIterator<Uint8Array>` | Iterate chunks with `for await...of` |
-| `[Symbol.asyncDispose]()` | `Promise<void>` | Stop reading; runs on `await using` scope exit |
-
-### FsWriteSink
-
-<p className="msb-backref">Returned by <a href="#fs-writestream">writeStream()</a></p>
-
-Streaming writer for a file. Implements `AsyncDisposable`, so it can be paired with `await using`.
-
-| Method | Parameters | Returns | Description |
-|--------|-----------|---------|-------------|
-| `write(data)` | `Uint8Array \| string` | `Promise<void>` | Append a chunk. Strings are encoded as UTF-8. |
-| `close()` | - | `Promise<void>` | Flush and close. Idempotent. |
-| `[Symbol.asyncDispose]()` | - | `Promise<void>` | Calls `close()` on `await using` scope exit |

@@ -3,10 +3,7 @@ title: Agent client
 description: Python SDK - Low-level agentd client reference
 ---
 
-`AgentClient` is the low-level raw transport for talking to `agentd` through a running sandbox's relay socket. For most applications, use [`Sandbox`](/sdk/python/sandbox), [`exec`](/sdk/python/execution), and [`fs`](/sdk/python/filesystem) instead. Reach for this API when you are building protocol-level tools or higher-level SDK helpers.
-
-All request and response bodies are raw CBOR bytes. The SDK handles framing and correlation ids, but it does not encode or decode the CBOR message body for you. The raw body is the full CBOR-encoded protocol `Message` body (`v`, `t`, and `p`), not just the inner payload.
-
+Low-level raw CBOR transport for communicating with `agentd` through a sandbox relay.
 
 ## Constants
 
@@ -16,7 +13,7 @@ All request and response bodies are raw CBOR bytes. The SDK handles framing and 
 | `FLAG_SESSION_START` | `0b0000_0010` | First frame of a streaming session |
 | `FLAG_SHUTDOWN` | `0b0000_0100` | Shutdown frame |
 
-## Constructors
+## AgentClient
 
 #### <span className="msb-recv">AgentClient.</span><span className="msb-hn">connect_sandbox()</span>
 
@@ -138,7 +135,7 @@ Resolve a sandbox's `agentd` relay socket path **without connecting**. Returns t
   </div>
 </div>
 
-## Instance methods
+<p className="msb-member-group">Instance methods</p>
 
 #### <span className="msb-recv">client.</span><span className="msb-hn">request()</span>
 
@@ -297,6 +294,56 @@ await client.close()
 
 Close the client. Calling it more than once is safe.
 
+## AgentStream
+
+
+<p className="msb-backref">Returned by <a href="#client-stream">stream()</a></p>
+
+An async iterator of raw agent frames.
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">id</span>
+
+`int`
+
+Protocol correlation id; pass to [`send()`](#client-send) for follow-up frames
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">next()</span>
+
+```python
+next()
+```
+
+Read the next frame; returns `None` at EOF
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[`[`RawFrame`](#rawframe)` \| None]`
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">close()</span>
+
+```python
+close()
+```
+
+Release the stream handle early; safe to call more than once
+
+<p className="msb-label">Returns</p>
+
+`Awaitable[None]`
+
+<Accordion title="Example">
+
+```python
+from microsandbox import FLAG_SESSION_START, FLAG_TERMINAL
+
+async with await client.stream(FLAG_SESSION_START, body) as stream:
+    async for frame in stream:
+        if frame["flags"] & FLAG_TERMINAL:
+            break
+```
+
+</Accordion>
+
 ## Types
 
 ### RawFrame
@@ -317,30 +364,3 @@ class RawFrame(TypedDict):
 | id | `int` | Protocol correlation id |
 | flags | `int` | Frame flag byte (combination of `FLAG_*` constants) |
 | body | `bytes` | CBOR-encoded protocol message body |
-
-### AgentStream
-
-<p className="msb-backref">Returned by <a href="#client-stream">stream()</a></p>
-
-An open raw agent stream. Carries the protocol correlation id and is both an async context manager and an async iterator of [`RawFrame`](#rawframe). Iteration stops once a frame with `FLAG_TERMINAL` set is delivered or the stream reaches EOF.
-
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| id | `int` | Protocol correlation id; pass to [`send()`](#client-send) for follow-up frames |
-| next() | `Awaitable[`[`RawFrame`](#rawframe)` \| None]` | Read the next frame; returns `None` at EOF |
-| close() | `Awaitable[None]` | Release the stream handle early; safe to call more than once |
-| `async with` | [`AgentStream`](#agentstream) | Async context manager; closes the stream on exit |
-| `async for` | [`RawFrame`](#rawframe) | Async iterator over frames until terminal or EOF |
-
-<Accordion title="Example">
-
-```python
-from microsandbox import FLAG_SESSION_START, FLAG_TERMINAL
-
-async with await client.stream(FLAG_SESSION_START, body) as stream:
-    async for frame in stream:
-        if frame["flags"] & FLAG_TERMINAL:
-            break
-```
-
-</Accordion>

@@ -3,16 +3,11 @@ title: Images
 description: Python SDK - Image cache API reference
 ---
 
-`Image` is the static namespace for two related things: configuring an explicit rootfs source for a sandbox (`Image.oci`, `Image.bind`, `Image.disk`), and managing the local OCI image cache that sandbox creation pulls into (`get`, `list`, `inspect`, `remove`, `prune`, `load`, `save`). Cache operations require a local backend. See [Sandbox](/sdk/python/sandbox) for the `image=` and `pull_policy=` creation kwargs.
+Configure sandbox image sources and manage the local OCI image cache.
 
-```python
-from microsandbox import Image
-```
+## Image
 
-
-## Source factory
-
-These static methods return an [`ImageSource`](#imagesource) you can pass as the `image=` kwarg to [`Sandbox.create()`](/sdk/python/sandbox). A plain string also works (`image="python:3.12"`); use the factory when you need OCI-only options like the writable upper size, or to be explicit about a bind or disk source.
+Factory for sandbox image sources.
 
 #### <span className="msb-recv">Image.</span><span className="msb-hn">oci()</span>
 
@@ -144,7 +139,7 @@ Create a rootfs source backed by a disk image. The format is inferred from the f
   </div>
 </div>
 
-## Cache management
+<p className="msb-member-group">Cache management</p>
 
 These static methods inspect and prune images already pulled into the local OCI cache. They require a local backend; on a cloud backend they raise `UnsupportedError`.
 
@@ -413,6 +408,136 @@ await Image.save(["python:3.12", "app:local"], output_path="bundle.tar")
 
 </Accordion>
 
+## ImageHandle
+
+
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Returned by <a href="#image-get">get()</a> · <a href="#image-list">list()</a> · <a href="#image-load">load()</a></p>
+
+A lightweight handle to a cached OCI image, returned by [`Image.get()`](#image-get), [`Image.list()`](#image-list), and [`Image.load()`](#image-load). Properties are read-only attributes; the two methods are async.
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">reference</span>
+
+`str`
+
+Image reference
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">size_bytes</span>
+
+`int \| None`
+
+Total size in bytes, or `None` when unknown
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">manifest_digest</span>
+
+`str \| None`
+
+Content-addressable manifest digest
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">architecture</span>
+
+`str \| None`
+
+Resolved architecture
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">os</span>
+
+`str \| None`
+
+Resolved operating system
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">layer_count</span>
+
+`int`
+
+Number of layers
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">last_used_at</span>
+
+`float \| None`
+
+Last referenced time, milliseconds since epoch
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">created_at</span>
+
+`float \| None`
+
+First-pulled time, milliseconds since epoch
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">inspect()</span>
+
+```python
+await inspect()
+```
+
+Fetch full detail for this image
+
+<p className="msb-label">Returns</p>
+
+[`ImageDetail`](#imagedetail)
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">remove()</span>
+
+```python
+await remove(*, force=False)
+```
+
+Delete this image (raises [`ImageInUseError`](#errors) unless `force`)
+
+## RootDisk
+
+Factory for writable OCI root disk configurations.
+
+```python
+from microsandbox import DiskImageFormat, RootDisk
+
+managed = RootDisk.managed(8192)
+temporary = RootDisk.tmpfs(512)
+existing = RootDisk.disk(
+    "/data/upper.raw",
+    format=DiskImageFormat.RAW,
+    fstype="ext4",
+)
+```
+
+
+#### <span className="msb-recv">RootDisk.</span><span className="msb-hn">managed()</span>
+
+```python
+managed(size_mib=None)
+```
+
+Microsandbox-managed sparse ext4 disk
+
+<p className="msb-label">Returns</p>
+
+[`RootDiskConfig`](#rootdiskconfig)
+
+#### <span className="msb-recv">RootDisk.</span><span className="msb-hn">tmpfs()</span>
+
+```python
+tmpfs(size_mib=None)
+```
+
+Ephemeral RAM-backed upper layer
+
+<p className="msb-label">Returns</p>
+
+[`RootDiskConfig`](#rootdiskconfig)
+
+#### <span className="msb-recv">RootDisk.</span><span className="msb-hn">disk()</span>
+
+```python
+disk(path, *, format=None, fstype=None)
+```
+
+User-supplied writable disk image
+
+<p className="msb-label">Returns</p>
+
+[`RootDiskConfig`](#rootdiskconfig)
+
 ## Types
 
 ### ImageSource
@@ -430,28 +555,6 @@ Explicit rootfs image source. Build one with [`Image.oci()`](#image-oci), [`Imag
 | `_fstype` | `str \| None` | Filesystem type for `disk` sources |
 | `_format` | [`DiskImageFormat`](#diskimageformat)` \| None` | Disk image format (inferred from extension) |
 
-### RootDisk
-
-Factory for writable OCI root disk configurations.
-
-```python
-from microsandbox import DiskImageFormat, RootDisk
-
-managed = RootDisk.managed(8192)
-temporary = RootDisk.tmpfs(512)
-existing = RootDisk.disk(
-    "/data/upper.raw",
-    format=DiskImageFormat.RAW,
-    fstype="ext4",
-)
-```
-
-| Factory | Returns | Description |
-|---------|---------|-------------|
-| `managed(size_mib=None)` | [`RootDiskConfig`](#rootdiskconfig) | Microsandbox-managed sparse ext4 disk |
-| `tmpfs(size_mib=None)` | [`RootDiskConfig`](#rootdiskconfig) | Ephemeral RAM-backed upper layer |
-| `disk(path, *, format=None, fstype=None)` | [`RootDiskConfig`](#rootdiskconfig) | User-supplied writable disk image |
-
 ### RootDiskConfig
 
 Frozen root disk configuration produced by [`RootDisk`](#rootdisk).
@@ -463,27 +566,6 @@ Frozen root disk configuration produced by [`RootDisk`](#rootdisk).
 | `path` | `str \| None` | User-supplied disk image path |
 | `format` | [`DiskImageFormat`](#diskimageformat)` \| None` | Disk image format |
 | `fstype` | `str \| None` | Inner filesystem type |
-
-### ImageHandle
-
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
-
-<p className="msb-backref">Returned by <a href="#image-get">get()</a> · <a href="#image-list">list()</a> · <a href="#image-load">load()</a></p>
-
-A lightweight handle to a cached OCI image, returned by [`Image.get()`](#image-get), [`Image.list()`](#image-list), and [`Image.load()`](#image-load). Properties are read-only attributes; the two methods are async.
-
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| `reference` | `str` | Image reference |
-| `size_bytes` | `int \| None` | Total size in bytes, or `None` when unknown |
-| `manifest_digest` | `str \| None` | Content-addressable manifest digest |
-| `architecture` | `str \| None` | Resolved architecture |
-| `os` | `str \| None` | Resolved operating system |
-| `layer_count` | `int` | Number of layers |
-| `last_used_at` | `float \| None` | Last referenced time, milliseconds since epoch |
-| `created_at` | `float \| None` | First-pulled time, milliseconds since epoch |
-| `await inspect()` | [`ImageDetail`](#imagedetail) | Fetch full detail for this image |
-| `await remove(*, force=False)` | `None` | Delete this image (raises [`ImageInUseError`](#errors) unless `force`) |
 
 ### ImageDetail
 

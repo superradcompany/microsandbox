@@ -3,15 +3,9 @@ title: Images
 description: TypeScript SDK - Image cache API reference
 ---
 
-Inspect, remove, prune, and archive the local OCI image cache: the images that sandbox creation has already pulled. These APIs are exposed through the public `Image` class and require a local backend; cloud backends report `Unsupported`.
+Inspect and manage the local OCI image cache.
 
-```typescript
-import { Image, ImageHandle } from "microsandbox";
-import type { ImageDetail, ImagePruneReport } from "microsandbox";
-```
-
-
-## Static methods
+## Image
 
 #### <span className="msb-recv">Image.</span><span className="msb-hn">get()</span>
 
