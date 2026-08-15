@@ -328,6 +328,7 @@ The `msb` CLI provides a complete interface for managing sandboxes, images, and 
 > ```
 >
 > ```yaml
+> # sandbox.yaml
 > image: python:3.12
 > network:
 >   allow:
