@@ -3,6 +3,17 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - .github/workflows/release-platform.yml
+      - .github/workflows/release-windows.yml
+      - scripts/ci/publish-crates.py
+      - scripts/ci/validate-release-artifacts.py
+      - scripts/ci/wait-for-npm-packages.mjs
+  # Manual runs exercise the full release build and validation graph. Every
+  # irreversible job below is independently guarded to tag pushes only.
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -13,19 +24,262 @@ env:
   CARGO_NET_RETRY: "10"
   CARGO_HTTP_TIMEOUT: "120"
   CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_INCREMENTAL: "0"
   LIBKRUNFW_VERSION: "5.6.1"
   LIBKRUNFW_ABI: "5"
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 jobs:
+  # Build each firmware bundle once. Linux consumes the shared library directly;
+  # macOS and Windows consume the matching generated kernel.c.
+  firmware-aarch64:
+    name: Firmware (aarch64)
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Checkout libkrunfw sources
+        run: git submodule update --init --depth 1 vendor/libkrunfw
+
+      - name: Cache firmware
+        id: cache-firmware
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            vendor/libkrunfw/kernel.c
+            vendor/libkrunfw/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}
+          key: release-firmware-aarch64-${{ hashFiles('vendor/libkrunfw/**') }}
+
+      - name: Install firmware build dependencies
+        if: steps.cache-firmware.outputs.cache-hit != 'true'
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
+
+      - name: Build firmware
+        if: steps.cache-firmware.outputs.cache-hit != 'true'
+        working-directory: vendor/libkrunfw
+        run: make -j$(nproc)
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: firmware-aarch64
+          path: |
+            vendor/libkrunfw/kernel.c
+            vendor/libkrunfw/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}
+          compression-level: 0
+
+  firmware-x86_64:
+    name: Firmware (x86_64)
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Checkout libkrunfw sources
+        run: git submodule update --init --depth 1 vendor/libkrunfw
+
+      - name: Cache firmware
+        id: cache-firmware
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            vendor/libkrunfw/kernel.c
+            vendor/libkrunfw/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}
+          key: release-firmware-x86_64-${{ hashFiles('vendor/libkrunfw/**') }}
+
+      - name: Install firmware build dependencies
+        if: steps.cache-firmware.outputs.cache-hit != 'true'
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
+
+      - name: Build firmware
+        if: steps.cache-firmware.outputs.cache-hit != 'true'
+        working-directory: vendor/libkrunfw
+        run: make -j$(nproc)
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: firmware-x86_64
+          path: |
+            vendor/libkrunfw/kernel.c
+            vendor/libkrunfw/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}
+          compression-level: 0
+
+  # The guest daemon is independent from each host build, so compile it once
+  # per guest architecture and fan it out to every matching host platform.
+  agentd-aarch64:
+    name: Agentd (aarch64-linux-musl)
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: aarch64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+        with:
+          cache-bin: false
+          cache-targets: true
+          shared-key: release-agentd-aarch64
+
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build agentd
+        run: cargo build --release --manifest-path crates/agentd/Cargo.toml --target aarch64-unknown-linux-musl
+
+      - name: Upload agentd
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: agentd-aarch64-linux-musl
+          path: target/aarch64-unknown-linux-musl/release/agentd
+          compression-level: 0
+
+  agentd-x86_64:
+    name: Agentd (x86_64-linux-musl)
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+        with:
+          cache-bin: false
+          cache-targets: true
+          shared-key: release-agentd-x86_64
+
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build agentd
+        run: cargo build --release --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl
+
+      - name: Upload agentd
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: agentd-x86_64-linux-musl
+          path: target/x86_64-unknown-linux-musl/release/agentd
+          compression-level: 0
+
+  linux-x86_64:
+    name: Linux x86_64
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    needs: [firmware-x86_64, agentd-x86_64]
+    uses: ./.github/workflows/release-platform.yml
+    with:
+      target: linux-x86_64
+      runner: ubuntu-latest
+      os: linux
+      arch: x86_64
+      agentd_artifact: agentd-x86_64-linux-musl
+      firmware_artifact: firmware-x86_64
+      libkrunfw_file: libkrunfw.so.5.6.1
+      libkrunfw_asset: libkrunfw-linux-x86_64.so
+      napi_target: x86_64-unknown-linux-gnu
+      node_file: microsandbox.linux-x64-gnu.node
+      npm_dir: linux-x64-gnu
+      go_ffi_file: libmicrosandbox_go_ffi.so
+      go_bundle_name: libmicrosandbox_go_ffi-linux-amd64.so
+
+  linux-aarch64:
+    name: Linux aarch64
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    needs: [firmware-aarch64, agentd-aarch64]
+    uses: ./.github/workflows/release-platform.yml
+    with:
+      target: linux-aarch64
+      runner: ubuntu-24.04-arm
+      os: linux
+      arch: aarch64
+      agentd_artifact: agentd-aarch64-linux-musl
+      firmware_artifact: firmware-aarch64
+      libkrunfw_file: libkrunfw.so.5.6.1
+      libkrunfw_asset: libkrunfw-linux-aarch64.so
+      napi_target: aarch64-unknown-linux-gnu
+      node_file: microsandbox.linux-arm64-gnu.node
+      npm_dir: linux-arm64-gnu
+      go_ffi_file: libmicrosandbox_go_ffi.so
+      go_bundle_name: libmicrosandbox_go_ffi-linux-arm64.so
+
+  darwin-aarch64:
+    name: macOS aarch64
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    needs: [firmware-aarch64, agentd-aarch64]
+    uses: ./.github/workflows/release-platform.yml
+    with:
+      target: darwin-aarch64
+      runner: macos-14
+      os: darwin
+      arch: aarch64
+      agentd_artifact: agentd-aarch64-linux-musl
+      firmware_artifact: firmware-aarch64
+      libkrunfw_file: libkrunfw.5.dylib
+      libkrunfw_asset: libkrunfw-darwin-aarch64.dylib
+      napi_target: aarch64-apple-darwin
+      node_file: microsandbox.darwin-arm64.node
+      npm_dir: darwin-arm64
+      go_ffi_file: libmicrosandbox_go_ffi.dylib
+      go_bundle_name: libmicrosandbox_go_ffi-darwin-arm64.dylib
+
+  windows-x86_64:
+    name: Windows x86_64
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    needs: [firmware-x86_64, agentd-x86_64]
+    uses: ./.github/workflows/release-windows.yml
+    with:
+      target: windows-x86_64
+      runner: windows-latest
+      rust_target: x86_64-pc-windows-msvc
+      firmware_artifact: firmware-x86_64
+      agentd_artifact: agentd-x86_64-linux-musl
+      vs_arch: amd64
+      vs_host_arch: amd64
+      napi_target: x86_64-pc-windows-msvc
+      node_file: microsandbox.win32-x64-msvc.node
+      npm_dir: win32-x64-msvc
+      msb_asset: msb-windows-x86_64.exe
+      metrics_asset: msb-metrics-windows-x86_64.exe
+      libkrunfw_asset: libkrunfw-windows-x86_64.dll
+      go_bundle_name: libmicrosandbox_go_ffi-windows-amd64.dll
+
+  windows-aarch64:
+    name: Windows aarch64
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    needs: [firmware-aarch64, agentd-aarch64]
+    uses: ./.github/workflows/release-windows.yml
+    with:
+      target: windows-aarch64
+      runner: windows-11-arm
+      rust_target: aarch64-pc-windows-msvc
+      firmware_artifact: firmware-aarch64
+      agentd_artifact: agentd-aarch64-linux-musl
+      vs_arch: arm64
+      vs_host_arch: arm64
+      napi_target: aarch64-pc-windows-msvc
+      node_file: microsandbox.win32-arm64-msvc.node
+      npm_dir: win32-arm64-msvc
+      msb_asset: msb-windows-aarch64.exe
+      metrics_asset: msb-metrics-windows-aarch64.exe
+      libkrunfw_asset: libkrunfw-windows-aarch64.dll
+      go_bundle_name: libmicrosandbox_go_ffi-windows-arm64.dll
+
+  # ---------------------------------------------------------------------------
+  # Legacy tag-release graph. Keep it live while the PR/manual canary validates
+  # the optimized graph above, then switch publishers in a follow-up commit.
   # ---------------------------------------------------------------------------
   # Build kernel.c on Linux for macOS libkrunfw linking
-  # ---------------------------------------------------------------------------
   build-kernel:
     name: Build kernel.c (aarch64)
+    if: github.event_name == 'push'
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -57,6 +311,7 @@ jobs:
 
   build-kernel-x86_64:
     name: Build kernel.c (x86_64)
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -91,6 +346,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build-agentd-aarch64:
     name: Build agentd (aarch64-linux-musl)
+    if: github.event_name == 'push'
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -121,6 +377,7 @@ jobs:
 
   build-agentd-x86_64:
     name: Build agentd (x86_64-linux-musl)
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -155,7 +412,7 @@ jobs:
   build:
     name: Build (${{ matrix.target }})
     needs: [build-kernel, build-agentd-aarch64]
-    if: always()
+    if: github.event_name == 'push' && always()
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -402,6 +659,7 @@ jobs:
   build-windows:
     name: Build Windows (${{ matrix.target }})
     needs: [build-kernel, build-kernel-x86_64, build-agentd-aarch64, build-agentd-x86_64]
+    if: github.event_name == 'push'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -594,13 +852,78 @@ jobs:
           name: release-${{ matrix.target }}
           path: artifacts/
 
+  # Canary barrier: prove every platform and SDK payload is complete before a
+  # follow-up commit switches the live publishers to this graph.
+  release-ready:
+    name: Validate complete release
+    if: (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && always()
+    needs:
+      - linux-x86_64
+      - linux-aarch64
+      - darwin-aarch64
+      - windows-x86_64
+      - windows-aarch64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assert every platform build succeeded
+        run: |
+          test "${{ needs.linux-x86_64.result }}" = success
+          test "${{ needs.linux-aarch64.result }}" = success
+          test "${{ needs.darwin-aarch64.result }}" = success
+          test "${{ needs.windows-x86_64.result }}" = success
+          test "${{ needs.windows-aarch64.result }}" = success
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: release-artifacts
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Download Node SDK artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: node-artifacts
+          pattern: node-sdk-*
+
+      - name: Download Python SDK wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: python-artifacts
+          pattern: python-sdk-*
+          merge-multiple: true
+
+      - name: Validate artifact manifest
+        run: |
+          python3 scripts/ci/validate-release-artifacts.py \
+            --release-dir release-artifacts \
+            --node-dir node-artifacts \
+            --python-dir python-artifacts \
+            --manifest release-validation/manifest.json
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Validate crates.io publication graph and packages
+        run: python3 scripts/ci/publish-crates.py --package-only
+
+      - name: Upload validation manifest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-validation
+          path: release-validation/manifest.json
+
   # ---------------------------------------------------------------------------
   # Assemble: collect all artifacts, generate checksums, create GitHub release
   # ---------------------------------------------------------------------------
   assemble:
     name: Assemble Release
     needs: [build, build-windows]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -657,6 +980,7 @@ jobs:
   sync-mintlify:
     name: Sync mintlify branch
     needs: assemble
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -715,6 +1039,7 @@ jobs:
   update-homebrew:
     name: Update Homebrew Formula
     needs: assemble
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - name: Dispatch to homebrew tap
@@ -756,7 +1081,9 @@ jobs:
     name: Update winget package
     needs: assemble
     if: >-
-      vars.WINGET_RELEASE_ENABLED == 'true'
+      github.event_name == 'push'
+      && startsWith(github.ref, 'refs/tags/v')
+      && vars.WINGET_RELEASE_ENABLED == 'true'
       && !contains(github.ref_name, '-rc')
       && !contains(github.ref_name, '-alpha')
       && !contains(github.ref_name, '-beta')
@@ -782,6 +1109,7 @@ jobs:
   npm-publish:
     name: Publish npm packages
     needs: [build, build-windows]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -855,7 +1183,14 @@ jobs:
           done
 
       - name: Wait for npm to index platform packages
-        run: sleep 30
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          node scripts/ci/wait-for-npm-packages.mjs "$VERSION" \
+            @superradcompany/microsandbox-darwin-arm64 \
+            @superradcompany/microsandbox-linux-arm64-gnu \
+            @superradcompany/microsandbox-linux-x64-gnu \
+            @superradcompany/microsandbox-win32-arm64-msvc \
+            @superradcompany/microsandbox-win32-x64-msvc
 
       - name: Verify root package platform dependencies
         working-directory: sdk/node-ts
@@ -895,6 +1230,7 @@ jobs:
   refresh-lockfile:
     name: Refresh npm lockfile
     needs: npm-publish
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -909,7 +1245,14 @@ jobs:
           node-version: 22
 
       - name: Wait for npm to index platform packages
-        run: sleep 60
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          node scripts/ci/wait-for-npm-packages.mjs "$VERSION" \
+            @superradcompany/microsandbox-darwin-arm64 \
+            @superradcompany/microsandbox-linux-arm64-gnu \
+            @superradcompany/microsandbox-linux-x64-gnu \
+            @superradcompany/microsandbox-win32-arm64-msvc \
+            @superradcompany/microsandbox-win32-x64-msvc
 
       - name: Regenerate lockfile
         working-directory: sdk/node-ts
@@ -932,6 +1275,7 @@ jobs:
   mcp-publish:
     name: Publish MCP server
     needs: npm-publish
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -942,6 +1286,11 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+
+      - name: Wait for the root SDK package
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          node scripts/ci/wait-for-npm-packages.mjs "$VERSION" microsandbox
 
       - name: Build and publish MCP server
         env:
@@ -959,6 +1308,7 @@ jobs:
   crates-publish:
     name: Publish crates
     needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -998,8 +1348,10 @@ jobs:
   pypi-publish:
     name: Publish Python SDK
     needs: [build, build-windows]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       id-token: write
     environment:
       name: pypi
@@ -1039,6 +1391,7 @@ jobs:
   go-sdk-tag:
     name: Tag Go SDK module
     needs: assemble
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -1104,7 +1457,11 @@ jobs:
   docker-build:
     name: Docker (${{ matrix.arch }})
     needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
     strategy:
       matrix:
         include:
@@ -1168,7 +1525,10 @@ jobs:
   docker-manifest:
     name: Docker manifest
     needs: docker-build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      packages: write
     steps:
       - name: Download digests
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
