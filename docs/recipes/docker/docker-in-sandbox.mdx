@@ -36,6 +36,8 @@ This command does three things:
 
 ## Simpler local setup with a flat root disk
 
+<Tooltip tip="Flat root disks are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 For a simpler local setup, use a flat root disk instead of a separate named volume. A flat root mounts ext4 directly, so Docker's overlay storage is not nested on the default sandbox OverlayFS.
 
 ```sh
@@ -52,7 +54,7 @@ msb run --name docker-demo --replace \
   docker:dind
 ```
 
-This stores Docker's images, containers, and build cache on the sandbox's root disk. The data persists when the sandbox stops and starts, but unlike a named volume, it does not survive removing or replacing the sandbox. The `10G` capacity covers the entire root filesystem, including Docker's data. Flat root disks are available for local sandboxes only.
+This stores Docker's images, containers, and build cache on the sandbox's root disk. The data persists when the sandbox stops and starts, but unlike a named volume, it does not survive removing or replacing the sandbox. The `10G` capacity covers the entire root filesystem, including Docker's data.
 
 ## Run a container
 
