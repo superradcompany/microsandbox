@@ -71,6 +71,7 @@ nav[aria-label="Pages"] a > div:has(> img[src*="/pi.svg"]) { --msb-agent-icon: u
   --msb-code-control-surface-hover: rgba(240, 228, 255, 0.38);
   --msb-code-control-icon: rgba(95, 60, 175, 0.72);
   --msb-code-control-icon-hover: #5f3caf;
+  --msb-interactive-accent: rgba(109, 75, 196, 0.42);
   --msb-code-fade-10: rgba(255, 255, 255, 0.06);
   --msb-code-fade-25: rgba(255, 255, 255, 0.14);
   --msb-code-fade-35: rgba(255, 255, 255, 0.24);
@@ -88,6 +89,7 @@ nav[aria-label="Pages"] a > div:has(> img[src*="/pi.svg"]) { --msb-agent-icon: u
   --msb-code-control-surface-hover: rgba(42, 29, 64, 0.38);
   --msb-code-control-icon: rgba(216, 192, 255, 0.72);
   --msb-code-control-icon-hover: #d8c0ff;
+  --msb-interactive-accent: rgba(191, 132, 254, 0.52);
   --msb-code-fade-10: rgba(11, 12, 14, 0.06);
   --msb-code-fade-25: rgba(11, 12, 14, 0.14);
   --msb-code-fade-35: rgba(11, 12, 14, 0.24);
@@ -325,6 +327,53 @@ html.dark body .code-block-background[data-component-part="code-block-root"] {
 
 .code-group {
   background-color: var(--msb-code-surface-strong) !important;
+}
+
+/* Mintlify gives code-group tabs a neutral gray hover fill. Keep the same
+ * compact tab treatment, but make its hover and keyboard-focus states belong
+ * to the purple-tinted code surface around it. */
+.code-group [data-component-part="code-group-tab-bar"] [role="tab"] > div:first-child {
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.code-group [data-component-part="code-group-tab-bar"] [role="tab"]:hover > div:first-child,
+.code-group [data-component-part="code-group-tab-bar"] [role="tab"]:focus-visible > div:first-child {
+  background-color: var(--msb-code-header-hover) !important;
+  color: var(--msb-code-header-text) !important;
+}
+
+/* The regular Tabs component and the global section tabs use gray hover
+ * indicators by default. A restrained violet indicator keeps both tab systems
+ * consistent without turning every neutral navigation surface into a brand fill. */
+.tabs [data-component-part="tab-button"][data-active="false"]:hover {
+  border-color: var(--msb-interactive-accent) !important;
+  color: var(--msb-code-header-text) !important;
+}
+
+.tabs [data-component-part="tab-button"],
+.nav-tabs-item > div:last-child {
+  transition: border-color 120ms ease, background-color 120ms ease, color 120ms ease;
+}
+
+.nav-tabs-item:not([data-active="true"]):hover > div:last-child {
+  background-color: var(--msb-interactive-accent) !important;
+}
+
+/* Keep the remaining content chrome on the same quiet violet scale. These
+ * selectors use Mintlify's semantic hooks so unrelated shell controls (search,
+ * assistant, and resize handles) retain their intentionally neutral states. */
+.steps [data-component-part="step-number"] > div {
+  background-color: var(--msb-code-header) !important;
+  box-shadow: inset 0 0 0 1px var(--msb-code-border);
+  color: var(--msb-code-header-text) !important;
+}
+
+#pagination {
+  background-color: var(--msb-code-surface-strong) !important;
+}
+
+#pagination a:hover > div:first-child {
+  box-shadow: 0 0 0 1px var(--msb-interactive-accent) !important;
 }
 
 details.accordion:has(.code-block) {
