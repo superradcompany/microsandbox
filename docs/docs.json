@@ -336,7 +336,6 @@
             "icon": "docker",
             "pages": [
               "examples/docker/docker-in-sandbox",
-              "examples/docker/docker",
               "examples/docker/local-images"
             ]
           },
