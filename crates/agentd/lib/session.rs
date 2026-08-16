@@ -11,10 +11,11 @@ use std::{iter, mem, ptr};
 use nix::pty;
 use nix::sys::signal::Signal;
 use tokio::io::AsyncReadExt;
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 
 use microsandbox_protocol::bulk::BulkRecord;
 use microsandbox_protocol::exec::{ExecFailed, ExecFailureKind, ExecRequest};
+use microsandbox_protocol::transport::ClientIncarnation;
 
 use crate::config::SecurityProfile;
 use crate::error::{AgentdError, AgentdResult};
@@ -41,6 +42,12 @@ const SESSION_OUTPUT_BUDGET_GRANULE: usize = 4096;
 
 /// Maximum number of data or control events waiting for the serial writer.
 const SESSION_OUTPUT_ITEM_CAPACITY: usize = 1024;
+
+/// Maximum number of records waiting for the independently scheduled bulk writer.
+const SESSION_BULK_OUTPUT_ITEM_CAPACITY: usize = 256;
+
+/// Maximum lifecycle commands waiting for the dedicated bulk scheduler.
+const SESSION_BULK_COMMAND_CAPACITY: usize = 128;
 
 //--------------------------------------------------------------------------------------------------
 // Functions: classify
@@ -166,11 +173,35 @@ pub struct SessionOutputEnvelope {
     /// Correlation ID for the session event.
     pub id: u32,
 
+    /// Dual-port range owner captured when the session was created.
+    pub incarnation: Option<ClientIncarnation>,
+
     /// Event consumed by the main serial loop.
     pub output: SessionOutput,
 
     /// Capacity follows the allocation and is released only after serial output consumes it.
     _permit: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+/// Lifecycle commands processed ahead of queued dedicated-lane output.
+pub enum BulkOutputCommand {
+    /// Release queued records for one cancelled operation.
+    DropFlow {
+        /// Range owner that opened the operation.
+        incarnation: ClientIncarnation,
+        /// Correlation being cancelled.
+        id: u32,
+        /// Resolves after matching queued records and their permits are dropped.
+        completion: oneshot::Sender<()>,
+    },
+
+    /// Release every queued record owned by one disconnected SDK client.
+    DropIncarnation {
+        /// Range ownership period being removed.
+        incarnation: ClientIncarnation,
+        /// Resolves after matching queued records and their permits are dropped.
+        completion: oneshot::Sender<()>,
+    },
 }
 
 /// Capacity reserved before a producer reads or encodes a data-bearing event.
@@ -179,8 +210,12 @@ pub struct SessionOutputPermit(tokio::sync::OwnedSemaphorePermit);
 /// Cloneable producer for the byte-bounded session output queue.
 #[derive(Clone)]
 pub struct SessionOutputSender {
-    tx: mpsc::Sender<SessionOutputEnvelope>,
-    data_budget: Arc<Semaphore>,
+    control_tx: mpsc::Sender<SessionOutputEnvelope>,
+    bulk_tx: Option<mpsc::Sender<SessionOutputEnvelope>>,
+    bulk_command_tx: Option<mpsc::Sender<BulkOutputCommand>>,
+    control_budget: Arc<Semaphore>,
+    bulk_budget: Arc<Semaphore>,
+    incarnation: Option<ClientIncarnation>,
 }
 
 /// Pre-encoded session output plus the accounting metadata known by its producer.
@@ -222,6 +257,9 @@ pub struct RawActivity {
 pub enum RawSessionCompletion {
     /// A filesystem read stream completed.
     FsRead,
+
+    /// A filesystem write worker completed.
+    FsWrite,
 
     /// A TCP stream completed.
     Tcp,
@@ -324,19 +362,111 @@ impl SessionOutputSender {
     /// Create one ordered queue with a separate byte budget for data-bearing events.
     pub fn channel() -> (Self, mpsc::Receiver<SessionOutputEnvelope>) {
         let (tx, rx) = mpsc::channel(SESSION_OUTPUT_ITEM_CAPACITY);
+        let budget = Arc::new(Semaphore::new(SESSION_OUTPUT_BYTE_CAPACITY));
         (
             Self {
-                tx,
-                data_budget: Arc::new(Semaphore::new(SESSION_OUTPUT_BYTE_CAPACITY)),
+                control_tx: tx,
+                bulk_tx: None,
+                bulk_command_tx: None,
+                control_budget: Arc::clone(&budget),
+                bulk_budget: budget,
+                incarnation: None,
             },
             rx,
         )
     }
 
+    /// Create independently bounded control and raw-bulk producer queues.
+    pub fn split_channel() -> (
+        Self,
+        mpsc::Receiver<SessionOutputEnvelope>,
+        mpsc::Receiver<SessionOutputEnvelope>,
+        mpsc::Receiver<BulkOutputCommand>,
+    ) {
+        let (control_tx, control_rx) = mpsc::channel(SESSION_OUTPUT_ITEM_CAPACITY);
+        let (bulk_tx, bulk_rx) = mpsc::channel(SESSION_BULK_OUTPUT_ITEM_CAPACITY);
+        let (bulk_command_tx, bulk_command_rx) = mpsc::channel(SESSION_BULK_COMMAND_CAPACITY);
+        (
+            Self {
+                control_tx,
+                bulk_tx: Some(bulk_tx),
+                bulk_command_tx: Some(bulk_command_tx),
+                control_budget: Arc::new(Semaphore::new(SESSION_OUTPUT_BYTE_CAPACITY)),
+                bulk_budget: Arc::new(Semaphore::new(SESSION_OUTPUT_BYTE_CAPACITY)),
+                incarnation: None,
+            },
+            control_rx,
+            bulk_rx,
+            bulk_command_rx,
+        )
+    }
+
+    /// Scope future producer events to the client incarnation that opened their session.
+    pub fn with_incarnation(&self, incarnation: Option<ClientIncarnation>) -> Self {
+        Self {
+            control_tx: self.control_tx.clone(),
+            bulk_tx: self.bulk_tx.clone(),
+            bulk_command_tx: self.bulk_command_tx.clone(),
+            control_budget: Arc::clone(&self.control_budget),
+            bulk_budget: Arc::clone(&self.bulk_budget),
+            incarnation,
+        }
+    }
+
+    /// Restore one ordered producer queue after boot selected combined mode.
+    pub fn disable_bulk_scheduler(&mut self) {
+        // Combined mode has no cross-lane merger. Raw records, finish markers, and terminal output
+        // must therefore enter one FIFO before sharing the physical console stream.
+        self.bulk_tx = None;
+        self.bulk_command_tx = None;
+    }
+
+    /// Queue a high-priority purge for one operation without awaiting bulk-port progress.
+    pub fn drop_bulk_flow(&self, id: u32) -> Result<Option<oneshot::Receiver<()>>, &'static str> {
+        let Some(incarnation) = self.incarnation else {
+            return Ok(None);
+        };
+        let Some(commands) = self.bulk_command_tx.as_ref() else {
+            return Ok(None);
+        };
+        let (completion, completed) = oneshot::channel();
+        commands
+            .try_send(BulkOutputCommand::DropFlow {
+                incarnation,
+                id,
+                completion,
+            })
+            .map_err(|_| "dedicated bulk scheduler command queue is unavailable")?;
+        Ok(Some(completed))
+    }
+
+    /// Queue a high-priority purge for a disconnected range owner.
+    pub fn drop_bulk_incarnation(
+        &self,
+        incarnation: ClientIncarnation,
+    ) -> Result<Option<oneshot::Receiver<()>>, &'static str> {
+        let Some(commands) = self.bulk_command_tx.as_ref() else {
+            return Ok(None);
+        };
+        let (completion, completed) = oneshot::channel();
+        commands
+            .try_send(BulkOutputCommand::DropIncarnation {
+                incarnation,
+                completion,
+            })
+            .map_err(|_| "dedicated bulk scheduler command queue is unavailable")?;
+        Ok(Some(completed))
+    }
+
     /// Queue an event after its retained allocation has acquired aggregate capacity.
     pub async fn send(&self, id: u32, output: SessionOutput) -> bool {
         let budget_bytes = output.budget_bytes();
-        let Some(permit) = self.reserve(budget_bytes).await else {
+        let permit = if matches!(&output, SessionOutput::Bulk(_)) {
+            self.reserve_bulk(budget_bytes).await
+        } else {
+            self.reserve(budget_bytes).await
+        };
+        let Some(permit) = permit else {
             eprintln!("agentd session output {id} exceeds byte budget: {budget_bytes} bytes");
             return false;
         };
@@ -346,6 +476,19 @@ impl SessionOutputSender {
 
     /// Reserve capacity before reading or encoding up to `max_bytes` of output.
     pub async fn reserve(&self, max_bytes: usize) -> Option<SessionOutputPermit> {
+        self.reserve_from(&self.control_budget, max_bytes).await
+    }
+
+    /// Reserve capacity from the raw-bulk budget before allocating a record payload.
+    pub async fn reserve_bulk(&self, max_bytes: usize) -> Option<SessionOutputPermit> {
+        self.reserve_from(&self.bulk_budget, max_bytes).await
+    }
+
+    async fn reserve_from(
+        &self,
+        budget: &Arc<Semaphore>,
+        max_bytes: usize,
+    ) -> Option<SessionOutputPermit> {
         let budget_bytes = max_bytes.checked_add(SESSION_OUTPUT_BUDGET_GRANULE - 1)?
             / SESSION_OUTPUT_BUDGET_GRANULE
             * SESSION_OUTPUT_BUDGET_GRANULE;
@@ -353,7 +496,7 @@ impl SessionOutputSender {
             return None;
         }
         let permit_count = u32::try_from(budget_bytes).ok()?;
-        Arc::clone(&self.data_budget)
+        Arc::clone(budget)
             .acquire_many_owned(permit_count)
             .await
             .ok()
@@ -376,14 +519,19 @@ impl SessionOutputSender {
             return false;
         }
 
-        self.tx
-            .send(SessionOutputEnvelope {
-                id,
-                output,
-                _permit: (charged != 0).then_some(permit.0),
-            })
-            .await
-            .is_ok()
+        let tx = if matches!(&output, SessionOutput::Bulk(_)) {
+            self.bulk_tx.as_ref().unwrap_or(&self.control_tx)
+        } else {
+            &self.control_tx
+        };
+        tx.send(SessionOutputEnvelope {
+            id,
+            incarnation: self.incarnation,
+            output,
+            _permit: (charged != 0).then_some(permit.0),
+        })
+        .await
+        .is_ok()
     }
 }
 
@@ -1474,20 +1622,111 @@ mod tests {
         let (tx, mut rx) = SessionOutputSender::channel();
         assert!(tx.send(7, SessionOutput::Stdout(vec![0; 4096])).await);
         assert_eq!(
-            tx.data_budget.available_permits(),
+            tx.control_budget.available_permits(),
             SESSION_OUTPUT_BYTE_CAPACITY - 4096
         );
 
         let envelope = rx.recv().await.unwrap();
         assert_eq!(
-            tx.data_budget.available_permits(),
+            tx.control_budget.available_permits(),
             SESSION_OUTPUT_BYTE_CAPACITY - 4096
         );
         drop(envelope);
         assert_eq!(
-            tx.data_budget.available_permits(),
+            tx.control_budget.available_permits(),
             SESSION_OUTPUT_BYTE_CAPACITY
         );
+    }
+
+    #[tokio::test]
+    async fn scoped_output_sender_captures_client_incarnation() {
+        let incarnation = [0x44; 16];
+        let (tx, mut rx) = SessionOutputSender::channel();
+        let scoped = tx.with_incarnation(Some(incarnation));
+
+        assert!(scoped.send(7, SessionOutput::Exited(0)).await);
+        let envelope = rx.recv().await.unwrap();
+
+        assert_eq!(envelope.id, 7);
+        assert_eq!(envelope.incarnation, Some(incarnation));
+    }
+
+    #[tokio::test]
+    async fn split_output_queues_keep_bulk_lifecycle_commands_independent() {
+        let incarnation = [0x55; 16];
+        let (tx, mut control_rx, mut bulk_rx, mut command_rx) =
+            SessionOutputSender::split_channel();
+        let scoped = tx.with_incarnation(Some(incarnation));
+        let record = BulkRecord {
+            id: 9,
+            kind: microsandbox_protocol::bulk::BulkKind::Filesystem,
+            flow: microsandbox_protocol::bulk::BulkFlow::GuestToHost,
+            offset: 0,
+            payload: b"bulk".as_slice().into(),
+        };
+        assert!(
+            scoped
+                .send(
+                    9,
+                    SessionOutput::Bulk(BulkSessionOutput::new(record, RawActivity::fs_bytes(4),)),
+                )
+                .await
+        );
+        assert!(scoped.send(10, SessionOutput::Exited(0)).await);
+        let mut completed = scoped.drop_bulk_flow(9).unwrap().unwrap();
+
+        assert!(matches!(
+            bulk_rx.recv().await.unwrap().output,
+            SessionOutput::Bulk(_)
+        ));
+        assert!(matches!(
+            control_rx.recv().await.unwrap().output,
+            SessionOutput::Exited(0)
+        ));
+        let BulkOutputCommand::DropFlow {
+            incarnation: command_incarnation,
+            id,
+            completion,
+        } = command_rx.recv().await.unwrap()
+        else {
+            panic!("expected flow cleanup command");
+        };
+        assert_eq!(command_incarnation, incarnation);
+        assert_eq!(id, 9);
+        completion.send(()).unwrap();
+        assert_eq!(completed.try_recv(), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn combined_mode_restores_one_ordered_output_queue() {
+        let (mut tx, mut control_rx, mut bulk_rx, _command_rx) =
+            SessionOutputSender::split_channel();
+        tx.disable_bulk_scheduler();
+        let record = BulkRecord {
+            id: 9,
+            kind: microsandbox_protocol::bulk::BulkKind::Filesystem,
+            flow: microsandbox_protocol::bulk::BulkFlow::GuestToHost,
+            offset: 0,
+            payload: b"bulk".as_slice().into(),
+        };
+        assert!(
+            tx.send(
+                9,
+                SessionOutput::Bulk(BulkSessionOutput::new(record, RawActivity::fs_bytes(4),)),
+            )
+            .await
+        );
+        assert!(tx.send(9, SessionOutput::Exited(0)).await);
+
+        assert!(matches!(
+            control_rx.recv().await.unwrap().output,
+            SessionOutput::Bulk(_)
+        ));
+        assert!(matches!(
+            control_rx.recv().await.unwrap().output,
+            SessionOutput::Exited(0)
+        ));
+        assert!(bulk_rx.recv().await.is_none());
     }
 
     #[tokio::test]

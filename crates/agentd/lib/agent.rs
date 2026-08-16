@@ -1,6 +1,6 @@
 //! Main agent loop: serial I/O, session management, heartbeat.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd;
@@ -14,9 +14,11 @@ use tokio::io::unix::AsyncFd;
 use tokio::sync::watch;
 use tokio::time::{self, Duration};
 
+use microsandbox_protocol::AGENT_TRANSPORT_DUAL_PORT_CMDLINE;
 use microsandbox_protocol::HANDOFF_POWEROFF_TIMEOUT;
 use microsandbox_protocol::bulk::{
     BulkCancel, BulkCancelReason, BulkCredit, BulkFinish, BulkFlow, BulkKind, BulkRecord,
+    MAX_BULK_RECORD_PAYLOAD,
 };
 use microsandbox_protocol::codec::{self, DecodedFrame, MAX_FRAME_SIZE};
 use microsandbox_protocol::core::{
@@ -31,15 +33,24 @@ use microsandbox_protocol::fs::{FsData, FsRequest, FsResponse};
 use microsandbox_protocol::heartbeat::{ActivityCounters, Heartbeat};
 use microsandbox_protocol::message::{Message, MessageType};
 use microsandbox_protocol::tcp::{TcpClose, TcpConnect, TcpData, TcpEof, TcpFailed};
+use microsandbox_protocol::transport::{
+    BULK_BINDING_SIZE, BulkTransportReady, CLIENT_INCARNATION_SIZE, ClientIncarnation,
+    IncarnatedBulkFrame, RelayClientConnected, RelayClientDisconnectedAck, RelayLeaseReady,
+    decode_bulk_ack, encode_bulk_hello, encode_relay_client_disconnected_ack,
+    relay_client_id_range, relay_client_slot, try_decode_incarnated_bulk_from_bytes,
+    try_decode_relay_client_connected_from_bytes,
+    try_decode_relay_client_disconnected_ack_from_bytes,
+    validate_relay_client_range as canonical_relay_client_range,
+};
 
 use crate::config::AgentdConfig;
 use crate::error::{AgentdError, AgentdResult};
 use crate::fs::{FsReadSession, FsState, FsStreamSession, FsWriteSession};
 use crate::process::ProcessManager;
-use crate::serial::AGENT_PORT_NAME;
+use crate::serial::{AGENT_BULK_PORT_NAME, AGENT_PORT_NAME};
 use crate::session::{
-    ExecSession, RawActivity, RawSessionCompletion, SessionOutput, SessionOutputSender,
-    resolve_default_user,
+    BulkOutputCommand, ExecSession, RawActivity, RawSessionCompletion, RawSessionOutput,
+    SessionOutput, SessionOutputEnvelope, SessionOutputSender, resolve_default_user,
 };
 use crate::tcp::TcpSession;
 use crate::{clock, fs, handoff, heartbeat, serial};
@@ -60,8 +71,38 @@ const SERIAL_READ_BUF_SIZE: usize = 64 * 1024;
 /// Maximum allowed input buffer size (frame size limit + 4 bytes for length prefix).
 const MAX_INPUT_BUF_SIZE: usize = MAX_FRAME_SIZE as usize + 4;
 
+/// Dedicated records additionally carry the transport-level client incarnation.
+const MAX_BULK_INPUT_BUF_SIZE: usize = MAX_INPUT_BUF_SIZE + CLIENT_INCARNATION_SIZE;
+
 /// Maximum time to wait for the host to acknowledge the init context.
 const INIT_ACK_TIMEOUT_SECS: u64 = 60;
+
+/// Startup window shared by bulk-port discovery and binding.
+const BULK_BINDING_TIMEOUT_SECS: u64 = 60;
+
+/// Per-correlation quantum used by the dedicated guest-to-host scheduler.
+const BULK_SCHEDULER_QUANTUM: usize = 256 * 1024;
+
+/// Maximum bytes one correlation may emit in one scheduler round.
+const BULK_SCHEDULER_MAX_BURST: usize = 1024 * 1024;
+
+/// Maximum bytes queued for one correlation outside the console backend.
+const BULK_SCHEDULER_FLOW_CAPACITY: usize = 8 * 1024 * 1024;
+
+/// Maximum active bulk correlations owned by one relay client.
+const BULK_SCHEDULER_MAX_FLOWS_PER_CLIENT: usize = 64;
+
+/// Whole records processed before the bulk reader yields on a one-vCPU guest.
+const BULK_READER_MAX_RECORDS_PER_TURN: usize = 64;
+
+/// Payload bytes processed before the bulk reader yields on a one-vCPU guest.
+const BULK_READER_MAX_BYTES_PER_TURN: usize = 1024 * 1024;
+
+/// Records and finish markers buffered for one filesystem bulk-write worker.
+const FS_BULK_INPUT_ITEM_CAPACITY: usize = 32;
+
+/// Best-effort window for publishing typed cancellation before agentd terminates a failed lane.
+const BULK_FAILURE_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -69,11 +110,27 @@ const INIT_ACK_TIMEOUT_SECS: u64 = 60;
 
 #[derive(Default)]
 struct AgentState {
+    client_incarnations: HashMap<u32, ClientIncarnation>,
     sessions: HashMap<u32, ExecSession>,
     write_sessions: HashMap<u32, FsWriteSession>,
+    bulk_write_workers: HashMap<u32, FsBulkWriteWorker>,
     read_sessions: HashMap<u32, FsReadSession>,
     tcp_sessions: HashMap<u32, TcpSession>,
+    bulk_received_offsets: HashMap<u32, u64>,
+    pending_bulk_finishes: HashMap<u32, BulkFinish>,
     fs: FsState,
+}
+
+/// Bounded command path for one filesystem bulk write, isolated from the control loop.
+struct FsBulkWriteWorker {
+    commands: tokio::sync::mpsc::Sender<FsBulkWriteCommand>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+/// Ordered filesystem effects owned by one bulk-write worker.
+enum FsBulkWriteCommand {
+    Record(BulkRecord),
+    Finish(BulkFinish),
 }
 
 struct ActivityTracker {
@@ -88,6 +145,28 @@ struct HeartbeatSnapshot {
     active_fs_streams: u32,
     active_tcp_streams: u32,
     counters: ActivityCounters,
+}
+
+/// Successfully bound second console port and its per-boot identity.
+pub struct BoundBulkPort {
+    file: File,
+    connection_id: [u8; 16],
+}
+
+/// One correlation's pending records in the guest-to-host DRR scheduler.
+struct BulkWriteFlow {
+    queue: VecDeque<SessionOutputEnvelope>,
+    queued_bytes: usize,
+    deficit: usize,
+}
+
+/// Deferred acknowledgement after the scheduler has discarded already-queued producer output.
+enum BulkOutputCleanup {
+    Flow(tokio::sync::oneshot::Sender<()>),
+    Incarnation {
+        incarnation: ClientIncarnation,
+        completion: tokio::sync::oneshot::Sender<()>,
+    },
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -146,6 +225,7 @@ pub async fn run(
     init_time_ns: u64,
     config: &AgentdConfig,
     port_file: File,
+    bulk_port: Option<BoundBulkPort>,
 ) -> AgentdResult<()> {
     let process_manager = ProcessManager::get()?;
     let mut process_manager_failure = process_manager.subscribe_failure()?;
@@ -166,7 +246,8 @@ pub async fn run(
     let mut state = AgentState::default();
 
     // Channel for session output events.
-    let (session_tx, mut session_rx) = SessionOutputSender::channel();
+    let (mut session_tx, mut session_rx, bulk_session_rx, bulk_command_rx) =
+        SessionOutputSender::split_channel();
 
     // Heartbeat/activity state.
     let mut activity = ActivityTracker::new();
@@ -190,12 +271,30 @@ pub async fn run(
             init_time_ns,
             ready_time_ns,
             agent_version: env!("CARGO_PKG_VERSION").to_string(),
+            bulk_transport: bulk_port
+                .as_ref()
+                .map(|port| BulkTransportReady::dual_port_v1(port.connection_id)),
+            relay_lease: Some(RelayLeaseReady::range_lease_v1()),
         },
     )
     .map_err(|e| AgentdError::ExecSession(format!("encode ready: {e}")))?;
     codec::encode_to_buf(&ready_msg, &mut serial_out_buf)
         .map_err(|e| AgentdError::ExecSession(format!("encode ready frame: {e}")))?;
     flush_write_buf(&async_port, &mut serial_out_buf).await?;
+
+    let (mut combined_bulk_rx, mut bulk_input_rx, mut bulk_failure_rx, mut bulk_activity_rx) =
+        match bulk_port {
+            Some(port) => {
+                let (input_rx, failure_rx, activity_rx) =
+                    spawn_bulk_port_tasks(port, bulk_session_rx, bulk_command_rx)?;
+                (None, Some(input_rx), Some(failure_rx), Some(activity_rx))
+            }
+            None => {
+                session_tx.disable_bulk_scheduler();
+                (Some(bulk_session_rx), None, None, None)
+            }
+        };
+    let dual_port_active = bulk_input_rx.is_some();
 
     // Main loop.
     'agent: loop {
@@ -209,6 +308,70 @@ pub async fn run(
                     Err(error) => format!("process manager failure channel closed: {error}"),
                 };
                 return Err(AgentdError::ExecSession(error));
+            }
+
+            Some(error) = recv_optional(&mut bulk_failure_rx) => {
+                cancel_all_bulk_correlations(
+                    &mut state,
+                    &session_tx,
+                    &mut serial_out_buf,
+                    "dedicated bulk transport failed",
+                )?;
+                let _ = time::timeout(
+                    BULK_FAILURE_FLUSH_TIMEOUT,
+                    flush_write_buf(&async_port, &mut serial_out_buf),
+                ).await;
+                return Err(AgentdError::ExecSession(format!(
+                    "dedicated bulk transport failed: {error}"
+                )));
+            }
+
+            Some(output_activity) = recv_optional(&mut bulk_activity_rx) => {
+                apply_raw_activity(output_activity, &mut activity);
+                publish_heartbeat_snapshot(&heartbeat_tx, &state, &activity);
+            }
+
+            Some(envelope) = recv_optional(&mut combined_bulk_rx) => {
+                if envelope.incarnation.is_some()
+                    && client_incarnation_for_id(&state, envelope.id) != envelope.incarnation
+                {
+                    continue;
+                }
+                let SessionOutput::Bulk(output) = envelope.output else {
+                    return Err(AgentdError::ExecSession(
+                        "non-bulk event entered combined bulk queue".into(),
+                    ));
+                };
+                apply_raw_activity(output.activity, &mut activity);
+                if !serial_out_buf.is_empty() {
+                    flush_write_buf(&async_port, &mut serial_out_buf).await?;
+                }
+                write_bulk_record_async_fd(&async_port, &output.record).await?;
+                publish_heartbeat_snapshot(&heartbeat_tx, &state, &activity);
+            }
+
+            Some(frame) = recv_optional(&mut bulk_input_rx) => {
+                if !validate_bulk_client_incarnation(
+                    &state,
+                    frame.record.id,
+                    frame.incarnation,
+                )? {
+                    // The range has been disconnected or recycled since this record entered the
+                    // other physical lane. It must not produce an error on the new owner's ID.
+                    continue;
+                }
+                let bulk_session_tx = session_tx.with_incarnation(Some(frame.incarnation));
+                handle_bulk_record(
+                    frame.record,
+                    &mut state,
+                    &mut activity,
+                    &mut serial_out_buf,
+                    &bulk_session_tx,
+                ).await?;
+                publish_heartbeat_snapshot(&heartbeat_tx, &state, &activity);
+                if !serial_out_buf.is_empty() {
+                    flush_write_buf(&async_port, &mut serial_out_buf).await?;
+                }
             }
 
             // Read from serial port.
@@ -243,18 +406,40 @@ pub async fn run(
                             // message-level failures are reported on the same
                             // correlation ID with `core.error`; unrecoverable
                             // frame-level failures still close the agent loop.
-                            while let Some(frame) = codec::try_decode_frame_from_bytes(&mut serial_in_buf)
-                                .map_err(|e| AgentdError::ExecSession(format!("decode frame: {e}")))?
-                            {
+                            loop {
+                                if let Some(connected) =
+                                        try_decode_relay_client_connected_from_bytes(&mut serial_in_buf)
+                                            .map_err(|e| AgentdError::ExecSession(format!(
+                                                "decode relay client lease: {e}"
+                                            )))?
+                                {
+                                    establish_relay_client(&mut state, connected)?;
+                                    continue;
+                                }
+                                let Some(frame) = codec::try_decode_frame_from_bytes(&mut serial_in_buf)
+                                    .map_err(|e| AgentdError::ExecSession(format!("decode frame: {e}")))?
+                                else {
+                                    break;
+                                };
                                 let DecodedFrame::Control(msg) = frame else {
                                     let DecodedFrame::Bulk(record) = frame else {
                                         unreachable!();
                                     };
+                                    if dual_port_active {
+                                        return Err(AgentdError::ExecSession(
+                                            "raw bulk record arrived on the bound control port"
+                                                .into(),
+                                        ));
+                                    }
+                                    let bulk_session_tx = session_tx.with_incarnation(
+                                        client_incarnation_for_id(&state, record.id),
+                                    );
                                     handle_bulk_record(
                                         record,
                                         &mut state,
                                         &mut activity,
                                         &mut serial_out_buf,
+                                        &bulk_session_tx,
                                     ).await?;
                                     publish_heartbeat_snapshot(&heartbeat_tx, &state, &activity);
                                     continue;
@@ -325,6 +510,13 @@ pub async fn run(
 
             // Receive output events from session reader tasks.
             Some(envelope) = session_rx.recv() => {
+                if envelope.incarnation.is_some()
+                    && client_incarnation_for_id(&state, envelope.id) != envelope.incarnation
+                {
+                    // Background output carries the owner captured at session creation. Dropping
+                    // stale output here protects control frames as well as dedicated raw records.
+                    continue;
+                }
                 let id = envelope.id;
                 match envelope.output {
                     SessionOutput::Stdout(data) => {
@@ -355,19 +547,30 @@ pub async fn run(
                     }
                     SessionOutput::Raw(output) => {
                         apply_raw_activity(output.activity, &mut activity);
+                        let completion = output.completion;
                         complete_raw_session(
                             id,
-                            output.completion,
+                            completion,
                             &mut state.read_sessions,
                             &mut state.tcp_sessions,
                         );
+                        if matches!(completion, Some(RawSessionCompletion::FsWrite))
+                            && let Some(worker) = state.bulk_write_workers.remove(&id)
+                        {
+                            worker.task.abort();
+                        }
+                        if completion.is_some() {
+                            clear_bulk_receive_state(&mut state, id);
+                        }
                         // The producer already owns an encoded frame. Write from that allocation
                         // directly so multi-megabyte FS/TCP frames are not copied into a second
                         // serial staging buffer.
                         if !serial_out_buf.is_empty() {
                             flush_write_buf(&async_port, &mut serial_out_buf).await?;
                         }
-                        write_all_async_fd(&async_port, &output.frame).await?;
+                        if !output.frame.is_empty() {
+                            write_all_async_fd(&async_port, &output.frame).await?;
+                        }
                     }
                     SessionOutput::Bulk(output) => {
                         apply_raw_activity(output.activity, &mut activity);
@@ -390,6 +593,421 @@ pub async fn run(
     let _ = heartbeat_thread.join();
 
     Ok(())
+}
+
+/// Start independent full-duplex workers for the already-bound bulk port.
+fn spawn_bulk_port_tasks(
+    port: BoundBulkPort,
+    output_rx: tokio::sync::mpsc::Receiver<SessionOutputEnvelope>,
+    command_rx: tokio::sync::mpsc::Receiver<BulkOutputCommand>,
+) -> AgentdResult<(
+    tokio::sync::mpsc::Receiver<IncarnatedBulkFrame>,
+    tokio::sync::mpsc::Receiver<String>,
+    tokio::sync::mpsc::Receiver<RawActivity>,
+)> {
+    let reader_file = port.file.try_clone()?;
+    let writer_file = port.file;
+    let (input_tx, input_rx) = tokio::sync::mpsc::channel(32);
+    let (failure_tx, failure_rx) = tokio::sync::mpsc::channel(2);
+    let (activity_tx, activity_rx) = tokio::sync::mpsc::channel(128);
+
+    let reader_failure_tx = failure_tx.clone();
+    tokio::spawn(async move {
+        if let Err(error) = bulk_reader_task(reader_file, input_tx).await {
+            let _ = reader_failure_tx.send(error.to_string()).await;
+        }
+    });
+    tokio::spawn(async move {
+        if let Err(error) = bulk_writer_task(writer_file, output_rx, command_rx, activity_tx).await
+        {
+            let _ = failure_tx.send(error.to_string()).await;
+        }
+    });
+
+    Ok((input_rx, failure_rx, activity_rx))
+}
+
+/// Receive from an optional channel without making combined mode spin.
+async fn recv_optional<T>(receiver: &mut Option<tokio::sync::mpsc::Receiver<T>>) -> Option<T> {
+    let Some(active) = receiver.as_mut() else {
+        return std::future::pending().await;
+    };
+    match active.recv().await {
+        Some(value) => Some(value),
+        None => {
+            // Disable a closed optional branch. Returning `None` immediately on every select-loop
+            // iteration would turn a failed worker into a one-vCPU busy loop while its companion
+            // failure channel is still trying to report the real error.
+            *receiver = None;
+            std::future::pending().await
+        }
+    }
+}
+
+/// Decode only generation-7 raw records from the dedicated physical lane.
+async fn bulk_reader_task(
+    file: File,
+    input_tx: tokio::sync::mpsc::Sender<IncarnatedBulkFrame>,
+) -> AgentdResult<()> {
+    let async_port = AsyncFd::new(file)?;
+    let mut read_buf = vec![0u8; SERIAL_READ_BUF_SIZE];
+    let mut input = BytesMut::new();
+
+    loop {
+        let mut records = 0usize;
+        let mut payload_bytes = 0usize;
+        while records < BULK_READER_MAX_RECORDS_PER_TURN
+            && payload_bytes < BULK_READER_MAX_BYTES_PER_TURN
+        {
+            let Some(frame) = try_decode_incarnated_bulk_from_bytes(&mut input)
+                .map_err(|error| AgentdError::ExecSession(format!("decode agent-bulk: {error}")))?
+            else {
+                break;
+            };
+            payload_bytes = payload_bytes.saturating_add(frame.record.payload.len());
+            records += 1;
+            input_tx
+                .send(frame)
+                .await
+                .map_err(|_| AgentdError::ExecSession("bulk input consumer stopped".into()))?;
+        }
+        if records != 0 {
+            tokio::task::yield_now().await;
+            continue;
+        }
+
+        let mut guard = async_port.readable().await?;
+        match guard.try_io(|inner| read_from_fd(inner.get_ref().as_raw_fd(), &mut read_buf)) {
+            Ok(Ok(0)) => {
+                return Err(AgentdError::ExecSession(
+                    "dedicated bulk port closed".into(),
+                ));
+            }
+            Ok(Ok(read)) => {
+                input.extend_from_slice(&read_buf[..read]);
+                if input.len() > MAX_BULK_INPUT_BUF_SIZE {
+                    return Err(AgentdError::ExecSession(
+                        "dedicated bulk input exceeded maximum frame buffer".into(),
+                    ));
+                }
+            }
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Ok(Err(error)) => return Err(error.into()),
+            Err(_would_block) => {}
+        }
+    }
+}
+
+/// Schedule guest-to-host records fairly by correlation before writing the bulk port.
+async fn bulk_writer_task(
+    file: File,
+    mut output_rx: tokio::sync::mpsc::Receiver<SessionOutputEnvelope>,
+    mut command_rx: tokio::sync::mpsc::Receiver<BulkOutputCommand>,
+    activity_tx: tokio::sync::mpsc::Sender<RawActivity>,
+) -> AgentdResult<()> {
+    let async_port = AsyncFd::new(file)?;
+    let mut flows = HashMap::<(ClientIncarnation, u32), BulkWriteFlow>::new();
+    let mut active = VecDeque::<(ClientIncarnation, u32)>::new();
+    let mut retired = HashMap::<ClientIncarnation, Vec<u64>>::new();
+    let mut retiring_incarnations = HashSet::<ClientIncarnation>::new();
+
+    loop {
+        let mut cleanups = Vec::new();
+        tokio::select! {
+            biased;
+            Some(command) = command_rx.recv() => {
+                cleanups.push(apply_bulk_output_command(
+                    command,
+                    &mut flows,
+                    &mut active,
+                    &mut retired,
+                    &mut retiring_incarnations,
+                )?);
+            }
+            Some(envelope) = output_rx.recv() => {
+                enqueue_bulk_output(
+                    envelope,
+                    &mut flows,
+                    &mut active,
+                    &retired,
+                    &retiring_incarnations,
+                )?;
+            }
+            else => break,
+        }
+        while let Ok(command) = command_rx.try_recv() {
+            cleanups.push(apply_bulk_output_command(
+                command,
+                &mut flows,
+                &mut active,
+                &mut retired,
+                &mut retiring_incarnations,
+            )?);
+        }
+        while let Ok(envelope) = output_rx.try_recv() {
+            enqueue_bulk_output(
+                envelope,
+                &mut flows,
+                &mut active,
+                &retired,
+                &retiring_incarnations,
+            )?;
+        }
+        complete_bulk_output_cleanups(cleanups, &mut retired, &mut retiring_incarnations);
+
+        while !active.is_empty() {
+            let round_len = active.len();
+            for _ in 0..round_len {
+                let key = active.pop_front().expect("active flow exists");
+                if let Some(flow) = flows.get_mut(&key) {
+                    flow.deficit = flow
+                        .deficit
+                        .saturating_add(BULK_SCHEDULER_QUANTUM)
+                        .min(BULK_SCHEDULER_MAX_BURST);
+                }
+
+                let mut burst = 0usize;
+                loop {
+                    let next_len = flows
+                        .get(&key)
+                        .and_then(|flow| flow.queue.front())
+                        .map(bulk_envelope_payload_len)
+                        .transpose()?
+                        .unwrap_or(0);
+                    let can_send = flows.get(&key).is_some_and(|flow| {
+                        next_len != 0
+                            && next_len <= flow.deficit
+                            && burst.saturating_add(next_len) <= BULK_SCHEDULER_MAX_BURST
+                    });
+                    if !can_send {
+                        break;
+                    }
+
+                    let envelope = {
+                        let flow = flows.get_mut(&key).expect("scheduled flow exists");
+                        let envelope = flow.queue.pop_front().expect("scheduled record exists");
+                        flow.queued_bytes = flow.queued_bytes.saturating_sub(next_len);
+                        flow.deficit = flow.deficit.saturating_sub(next_len);
+                        envelope
+                    };
+                    let incarnation = envelope.incarnation.ok_or_else(|| {
+                        AgentdError::ExecSession(
+                            "dedicated bulk output is missing client incarnation".into(),
+                        )
+                    })?;
+                    let SessionOutput::Bulk(output) = envelope.output else {
+                        unreachable!("bulk scheduler accepted a non-bulk event");
+                    };
+                    let output_activity = output.activity;
+                    write_incarnated_bulk_record_async_fd(&async_port, incarnation, &output.record)
+                        .await?;
+                    activity_tx.send(output_activity).await.map_err(|_| {
+                        AgentdError::ExecSession("dedicated bulk activity consumer stopped".into())
+                    })?;
+                    burst = burst.saturating_add(next_len);
+                }
+
+                if flows.get(&key).is_some_and(|flow| flow.queue.is_empty()) {
+                    flows.remove(&key);
+                } else {
+                    active.push_back(key);
+                }
+            }
+
+            let mut cleanups = Vec::new();
+            while let Ok(command) = command_rx.try_recv() {
+                cleanups.push(apply_bulk_output_command(
+                    command,
+                    &mut flows,
+                    &mut active,
+                    &mut retired,
+                    &mut retiring_incarnations,
+                )?);
+            }
+            while let Ok(envelope) = output_rx.try_recv() {
+                enqueue_bulk_output(
+                    envelope,
+                    &mut flows,
+                    &mut active,
+                    &retired,
+                    &retiring_incarnations,
+                )?;
+            }
+            complete_bulk_output_cleanups(cleanups, &mut retired, &mut retiring_incarnations);
+            tokio::task::yield_now().await;
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_bulk_output_command(
+    command: BulkOutputCommand,
+    flows: &mut HashMap<(ClientIncarnation, u32), BulkWriteFlow>,
+    active: &mut VecDeque<(ClientIncarnation, u32)>,
+    retired: &mut HashMap<ClientIncarnation, Vec<u64>>,
+    retiring_incarnations: &mut HashSet<ClientIncarnation>,
+) -> AgentdResult<BulkOutputCleanup> {
+    match command {
+        BulkOutputCommand::DropFlow {
+            incarnation,
+            id,
+            completion,
+        } => {
+            let key = (incarnation, id);
+            flows.remove(&key);
+            active.retain(|active_key| *active_key != key);
+            retire_bulk_output(retired, incarnation, id)?;
+            Ok(BulkOutputCleanup::Flow(completion))
+        }
+        BulkOutputCommand::DropIncarnation {
+            incarnation,
+            completion,
+        } => {
+            flows.retain(|(owner, _), _| *owner != incarnation);
+            active.retain(|(owner, _)| *owner != incarnation);
+            retiring_incarnations.insert(incarnation);
+            Ok(BulkOutputCleanup::Incarnation {
+                incarnation,
+                completion,
+            })
+        }
+    }
+}
+
+/// Complete lifecycle cuts only after the data receiver has been drained through its tombstones.
+fn complete_bulk_output_cleanups(
+    cleanups: Vec<BulkOutputCleanup>,
+    retired: &mut HashMap<ClientIncarnation, Vec<u64>>,
+    retiring_incarnations: &mut HashSet<ClientIncarnation>,
+) {
+    for cleanup in cleanups {
+        match cleanup {
+            BulkOutputCleanup::Flow(completion) => {
+                let _ = completion.send(());
+            }
+            BulkOutputCleanup::Incarnation {
+                incarnation,
+                completion,
+            } => {
+                retired.remove(&incarnation);
+                retiring_incarnations.remove(&incarnation);
+                let _ = completion.send(());
+            }
+        }
+    }
+}
+
+fn enqueue_bulk_output(
+    envelope: SessionOutputEnvelope,
+    flows: &mut HashMap<(ClientIncarnation, u32), BulkWriteFlow>,
+    active: &mut VecDeque<(ClientIncarnation, u32)>,
+    retired: &HashMap<ClientIncarnation, Vec<u64>>,
+    retiring_incarnations: &HashSet<ClientIncarnation>,
+) -> AgentdResult<()> {
+    let id = envelope.id;
+    let incarnation = envelope.incarnation.ok_or_else(|| {
+        AgentdError::ExecSession("dedicated bulk output is missing client incarnation".into())
+    })?;
+    let payload_len = bulk_envelope_payload_len(&envelope)?;
+    if id == 0 {
+        return Err(AgentdError::ExecSession(
+            "bulk record cannot use correlation ID zero".into(),
+        ));
+    }
+    if payload_len == 0 || payload_len > MAX_BULK_RECORD_PAYLOAD as usize {
+        return Err(AgentdError::ExecSession(format!(
+            "bulk output payload {payload_len} exceeds schedulable maximum {MAX_BULK_RECORD_PAYLOAD}"
+        )));
+    }
+
+    let key = (incarnation, id);
+    if retiring_incarnations.contains(&incarnation)
+        || bulk_output_is_retired(retired, incarnation, id)
+    {
+        // A producer can race cancellation after the lifecycle command overtakes the data queue.
+        // Retaining the owner-scoped tombstone makes that late record release its permit here.
+        return Ok(());
+    }
+    if !flows.contains_key(&key) {
+        let client_flows = flows
+            .keys()
+            .filter(|(owner, _)| *owner == incarnation)
+            .count();
+        if client_flows >= BULK_SCHEDULER_MAX_FLOWS_PER_CLIENT {
+            return Err(AgentdError::ExecSession(format!(
+                "relay client exceeded active bulk-flow limit for correlation {id}"
+            )));
+        }
+        flows.insert(
+            key,
+            BulkWriteFlow {
+                queue: VecDeque::new(),
+                queued_bytes: 0,
+                deficit: 0,
+            },
+        );
+        active.push_back(key);
+    }
+
+    let flow = flows.get_mut(&key).expect("newly inserted flow exists");
+    let queued_bytes = flow
+        .queued_bytes
+        .checked_add(payload_len)
+        .ok_or_else(|| AgentdError::ExecSession("bulk flow byte budget overflow".into()))?;
+    if queued_bytes > BULK_SCHEDULER_FLOW_CAPACITY {
+        return Err(AgentdError::ExecSession(format!(
+            "bulk flow {id} exceeded queued byte budget"
+        )));
+    }
+    flow.queued_bytes = queued_bytes;
+    flow.queue.push_back(envelope);
+    Ok(())
+}
+
+fn bulk_envelope_payload_len(envelope: &SessionOutputEnvelope) -> AgentdResult<usize> {
+    match &envelope.output {
+        SessionOutput::Bulk(output) => Ok(output.record.payload.len()),
+        _ => Err(AgentdError::ExecSession(
+            "non-bulk event entered dedicated bulk scheduler".into(),
+        )),
+    }
+}
+
+/// Discover and bind the dedicated bulk port when the internal boot hint requests it.
+pub fn open_and_bind_bulk_port() -> AgentdResult<Option<BoundBulkPort>> {
+    let cmdline = std::fs::read_to_string("/proc/cmdline")?;
+    if !cmdline_requests_dual_port(&cmdline) {
+        return Ok(None);
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(BULK_BINDING_TIMEOUT_SECS);
+    let port_path = loop {
+        match serial::find_serial_port(AGENT_BULK_PORT_NAME) {
+            Ok(path) => break path,
+            Err(error) if Instant::now() < deadline => {
+                let _ = error;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    let file = OpenOptions::new().read(true).write(true).open(port_path)?;
+    let fd = file.as_raw_fd();
+    set_nonblocking(fd)?;
+
+    let connection_id = random_connection_id()?;
+    write_all_to_fd(fd, &encode_bulk_hello(connection_id), deadline)?;
+
+    let mut ack = [0u8; BULK_BINDING_SIZE];
+    read_exact_from_fd(fd, &mut ack, deadline, "bulk binding acknowledgement")?;
+    decode_bulk_ack(&ack, connection_id)
+        .map_err(|error| AgentdError::ExecSession(format!("bind agent-bulk: {error}")))?;
+
+    Ok(Some(BoundBulkPort {
+        file,
+        connection_id,
+    }))
 }
 
 /// Opens the agent virtio-serial port once for early boot handshakes and the agent loop.
@@ -429,14 +1047,119 @@ pub fn report_init_context(port_file: &File, default_user: Option<&str>) -> Agen
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
+fn ensure_fs_bulk_write_worker(
+    id: u32,
+    state: &mut AgentState,
+    session_tx: &SessionOutputSender,
+) -> Result<(), String> {
+    if state.bulk_write_workers.contains_key(&id) {
+        return Ok(());
+    }
+
+    let session = state
+        .write_sessions
+        .remove(&id)
+        .ok_or_else(|| format!("unknown filesystem write session: {id}"))?;
+    if !session.is_bulk() {
+        state.write_sessions.insert(id, session);
+        return Err("raw bulk record sent to a generation-6 filesystem write".into());
+    }
+
+    let (commands, command_rx) = tokio::sync::mpsc::channel(FS_BULK_INPUT_ITEM_CAPACITY);
+    let output = session_tx.clone();
+    let task = tokio::spawn(run_fs_bulk_write_worker(id, session, command_rx, output));
+    state
+        .bulk_write_workers
+        .insert(id, FsBulkWriteWorker { commands, task });
+    Ok(())
+}
+
+fn enqueue_fs_bulk_write(
+    id: u32,
+    command: FsBulkWriteCommand,
+    state: &mut AgentState,
+    session_tx: &SessionOutputSender,
+) -> Result<(), String> {
+    ensure_fs_bulk_write_worker(id, state, session_tx)?;
+    let result = state
+        .bulk_write_workers
+        .get(&id)
+        .expect("filesystem bulk worker was just established")
+        .commands
+        .try_send(command)
+        .map_err(|error| format!("filesystem bulk input queue is unavailable: {error}"));
+    if result.is_err()
+        && let Some(worker) = state.bulk_write_workers.remove(&id)
+    {
+        worker.task.abort();
+    }
+    result
+}
+
+async fn run_fs_bulk_write_worker(
+    id: u32,
+    mut session: FsWriteSession,
+    mut command_rx: tokio::sync::mpsc::Receiver<FsBulkWriteCommand>,
+    output_tx: SessionOutputSender,
+) {
+    while let Some(command) = command_rx.recv().await {
+        let mut frame = Vec::new();
+        let mut activity = RawActivity::default();
+        let completed = match command {
+            FsBulkWriteCommand::Record(record) => {
+                let payload_len = record.payload.len();
+                match fs::handle_fs_bulk_record(id, &record, &mut session, &mut frame).await {
+                    Ok(completed) => {
+                        if !completed {
+                            activity.fs_bytes = payload_len;
+                        }
+                        completed
+                    }
+                    Err(error) => {
+                        if encode_bulk_fs_failure(id, error, &mut frame).is_err() {
+                            return;
+                        }
+                        true
+                    }
+                }
+            }
+            FsBulkWriteCommand::Finish(finish) => {
+                match fs::handle_fs_bulk_finish(id, finish, &mut session, &mut frame).await {
+                    Ok(completed) => completed,
+                    Err(error) => {
+                        if encode_bulk_fs_failure(id, error, &mut frame).is_err() {
+                            return;
+                        }
+                        true
+                    }
+                }
+            }
+        };
+        activity.guest_message = !frame.is_empty();
+        let completion = completed.then_some(RawSessionCompletion::FsWrite);
+        let output = crate::session::RawSessionOutput::new(frame, activity, completion);
+        if !output_tx.send(id, SessionOutput::Raw(output)).await || completed {
+            return;
+        }
+    }
+}
+
 /// Handles a single incoming message from the host.
 async fn handle_bulk_record(
     record: BulkRecord,
     state: &mut AgentState,
     activity: &mut ActivityTracker,
     out_buf: &mut Vec<u8>,
+    session_tx: &SessionOutputSender,
 ) -> AgentdResult<()> {
     activity.record_host_message();
+    let id = record.id;
+    let record_end = record
+        .offset
+        .checked_add(record.payload.len() as u64)
+        .ok_or_else(|| AgentdError::ExecSession("bulk record offset overflow".into()))?;
+    let record_payload_len = record.payload.len();
+    let mut accepted = false;
     match record.kind {
         BulkKind::Filesystem => {
             if record.flow != BulkFlow::HostToGuest {
@@ -445,28 +1168,17 @@ async fn handle_bulk_record(
                     "host sent a filesystem record in the guest-to-host flow".into(),
                     out_buf,
                 )?;
-                if let Some(session) = state.read_sessions.remove(&record.id) {
-                    session.abort();
-                }
-                state.write_sessions.remove(&record.id);
+                cancel_bulk_correlation(record.id, BulkKind::Filesystem, state, session_tx);
                 return Ok(());
             }
 
-            let result = match state.write_sessions.get_mut(&record.id) {
-                Some(session) => {
-                    fs::handle_fs_bulk_record(record.id, &record, session, out_buf).await
-                }
-                None => Err(format!("unknown filesystem write session: {}", record.id)),
-            };
-            match result {
-                Ok(true) => {
-                    state.write_sessions.remove(&record.id);
-                }
-                Ok(false) => activity.add_fs_bytes(record.payload.len()),
-                Err(error) => {
-                    state.write_sessions.remove(&record.id);
-                    encode_bulk_fs_failure(record.id, error, out_buf)?;
-                }
+            if let Err(error) =
+                enqueue_fs_bulk_write(id, FsBulkWriteCommand::Record(record), state, session_tx)
+            {
+                encode_bulk_fs_failure(id, error, out_buf)?;
+                cancel_bulk_correlation(id, BulkKind::Filesystem, state, session_tx);
+            } else {
+                accepted = true;
             }
         }
         BulkKind::Tcp => {
@@ -476,26 +1188,337 @@ async fn handle_bulk_record(
                     "host sent a TCP record in the guest-to-host flow".into(),
                     out_buf,
                 )?;
-                if let Some(session) = state.tcp_sessions.remove(&record.id) {
-                    session.close();
-                }
+                cancel_bulk_correlation(record.id, BulkKind::Tcp, state, session_tx);
                 return Ok(());
             }
-            let result = match state.tcp_sessions.get(&record.id) {
-                Some(session) => session.write_bulk(record.clone()).await,
-                None => Err(format!("unknown TCP session: {}", record.id)),
+            let result = match state.tcp_sessions.get(&id) {
+                Some(session) => session.write_bulk(record).await,
+                None => Err(format!("unknown TCP session: {id}")),
             };
             if let Err(error) = result {
-                encode_bulk_tcp_failure(record.id, error, out_buf)?;
-                if let Some(session) = state.tcp_sessions.remove(&record.id) {
-                    session.close();
-                }
+                encode_bulk_tcp_failure(id, error, out_buf)?;
+                cancel_bulk_correlation(id, BulkKind::Tcp, state, session_tx);
             } else {
-                activity.add_tcp_bytes(record.payload.len());
+                accepted = true;
+                activity.add_tcp_bytes(record_payload_len);
             }
         }
     }
+    if accepted {
+        state.bulk_received_offsets.insert(id, record_end);
+        if state
+            .pending_bulk_finishes
+            .get(&id)
+            .is_some_and(|finish| finish.final_offset <= record_end)
+        {
+            let finish = state
+                .pending_bulk_finishes
+                .remove(&id)
+                .expect("checked pending finish exists");
+            dispatch_bulk_finish(id, finish, state, out_buf, session_tx).await?;
+        }
+    }
     Ok(())
+}
+
+/// Apply an exact host-to-guest end marker after all raw records through its offset arrived.
+async fn dispatch_bulk_finish(
+    id: u32,
+    finish: BulkFinish,
+    state: &mut AgentState,
+    out_buf: &mut Vec<u8>,
+    session_tx: &SessionOutputSender,
+) -> AgentdResult<()> {
+    match finish.kind {
+        BulkKind::Filesystem => {
+            if let Err(error) =
+                enqueue_fs_bulk_write(id, FsBulkWriteCommand::Finish(finish), state, session_tx)
+            {
+                encode_bulk_fs_failure(id, error, out_buf)?;
+                cancel_bulk_correlation(id, BulkKind::Filesystem, state, session_tx);
+            }
+        }
+        BulkKind::Tcp => {
+            let result = match state.tcp_sessions.get(&id) {
+                Some(session) => session.finish_bulk(finish).await,
+                None => Err(format!("unknown TCP session: {id}")),
+            };
+            if let Err(error) = result {
+                encode_bulk_tcp_failure(id, error, out_buf)?;
+                if let Some(session) = state.tcp_sessions.remove(&id) {
+                    session.close();
+                }
+            }
+        }
+    }
+    clear_bulk_receive_state(state, id);
+    Ok(())
+}
+
+/// Return whether the finish belongs to a live host-to-guest raw receiver.
+fn has_bulk_receive_session(state: &AgentState, id: u32, kind: BulkKind) -> bool {
+    match kind {
+        BulkKind::Filesystem => {
+            state
+                .write_sessions
+                .get(&id)
+                .is_some_and(FsWriteSession::is_bulk)
+                || state.bulk_write_workers.contains_key(&id)
+        }
+        BulkKind::Tcp => state.tcp_sessions.get(&id).is_some_and(TcpSession::is_bulk),
+    }
+}
+
+/// Remove offset/finish state after a correlation reaches any terminal path.
+fn clear_bulk_receive_state(state: &mut AgentState, id: u32) {
+    state.bulk_received_offsets.remove(&id);
+    state.pending_bulk_finishes.remove(&id);
+}
+
+/// Cancel every operation resource owned by one bulk correlation.
+fn cancel_bulk_correlation(
+    id: u32,
+    kind: BulkKind,
+    state: &mut AgentState,
+    session_tx: &SessionOutputSender,
+) {
+    let owner_tx = session_tx.with_incarnation(client_incarnation_for_id(state, id));
+    // Stop every producer before publishing the scheduler cut. Any send that completed before
+    // teardown is already bounded in the scheduler input queue; an in-progress send is cancelled
+    // with its producer task and cannot appear after the cleanup acknowledgement.
+    match kind {
+        BulkKind::Filesystem => {
+            state.write_sessions.remove(&id);
+            if let Some(worker) = state.bulk_write_workers.remove(&id) {
+                worker.task.abort();
+            }
+            if let Some(session) = state.read_sessions.remove(&id) {
+                session.abort();
+            }
+        }
+        BulkKind::Tcp => {
+            if let Some(session) = state.tcp_sessions.remove(&id) {
+                session.close();
+            }
+        }
+    }
+    clear_bulk_receive_state(state, id);
+    if let Err(error) = owner_tx.drop_bulk_flow(id) {
+        eprintln!("agentd: failed to purge cancelled bulk output id={id}: {error}");
+    }
+}
+
+fn cancel_all_bulk_correlations(
+    state: &mut AgentState,
+    session_tx: &SessionOutputSender,
+    out_buf: &mut Vec<u8>,
+    message: &str,
+) -> AgentdResult<()> {
+    let mut correlations = HashMap::<u32, BulkKind>::new();
+    correlations.extend(
+        state
+            .read_sessions
+            .iter()
+            .filter(|(_, session)| session.is_bulk())
+            .map(|(id, _)| (*id, BulkKind::Filesystem)),
+    );
+    correlations.extend(
+        state
+            .write_sessions
+            .iter()
+            .filter(|(_, session)| session.is_bulk())
+            .map(|(id, _)| (*id, BulkKind::Filesystem)),
+    );
+    correlations.extend(
+        state
+            .bulk_write_workers
+            .keys()
+            .map(|id| (*id, BulkKind::Filesystem)),
+    );
+    correlations.extend(
+        state
+            .tcp_sessions
+            .iter()
+            .filter(|(_, session)| session.is_bulk())
+            .map(|(id, _)| (*id, BulkKind::Tcp)),
+    );
+
+    for (id, kind) in correlations {
+        encode_bulk_cancel(
+            id,
+            kind,
+            BulkCancelReason::TransportFailure,
+            message.to_string(),
+            out_buf,
+        )?;
+        cancel_bulk_correlation(id, kind, state, session_tx);
+        encode_bulk_terminal_failure(id, kind, message.to_string(), out_buf)?;
+    }
+    Ok(())
+}
+
+/// Release reorder metadata when the relay recycles an SDK client's ID range.
+fn clear_bulk_receive_range(state: &mut AgentState, id_start: u32, id_end_exclusive: u32) {
+    state
+        .bulk_received_offsets
+        .retain(|id, _| *id < id_start || *id >= id_end_exclusive);
+    state
+        .pending_bulk_finishes
+        .retain(|id, _| *id < id_start || *id >= id_end_exclusive);
+}
+
+fn client_incarnation_for_id(state: &AgentState, id: u32) -> Option<ClientIncarnation> {
+    relay_client_slot(id).and_then(|slot| state.client_incarnations.get(&slot).copied())
+}
+
+fn bulk_output_retired_bit(id: u32) -> Option<(usize, u64)> {
+    let slot = relay_client_slot(id)?;
+    let (id_start, _) = relay_client_id_range(slot)?;
+    let local = usize::try_from(id.checked_sub(id_start)?).ok()?;
+    Some((
+        local / u64::BITS as usize,
+        1u64 << (local % u64::BITS as usize),
+    ))
+}
+
+fn bulk_output_is_retired(
+    retired: &HashMap<ClientIncarnation, Vec<u64>>,
+    incarnation: ClientIncarnation,
+    id: u32,
+) -> bool {
+    let Some((word, mask)) = bulk_output_retired_bit(id) else {
+        return false;
+    };
+    retired
+        .get(&incarnation)
+        .and_then(|bitmap| bitmap.get(word))
+        .is_some_and(|bits| bits & mask != 0)
+}
+
+fn retire_bulk_output(
+    retired: &mut HashMap<ClientIncarnation, Vec<u64>>,
+    incarnation: ClientIncarnation,
+    id: u32,
+) -> AgentdResult<()> {
+    let (word, mask) = bulk_output_retired_bit(id).ok_or_else(|| {
+        AgentdError::ExecSession(format!("cannot retire unassigned bulk correlation {id}"))
+    })?;
+    let bitmap = retired.entry(incarnation).or_default();
+    if bitmap.len() <= word {
+        bitmap.resize(word + 1, 0);
+    }
+    bitmap[word] |= mask;
+    Ok(())
+}
+
+/// Accept current ownership, silently reject stale ownership, and fail cross-client spoofing.
+fn validate_bulk_client_incarnation(
+    state: &AgentState,
+    id: u32,
+    claimed: ClientIncarnation,
+) -> AgentdResult<bool> {
+    if client_incarnation_for_id(state, id) == Some(claimed) {
+        return Ok(true);
+    }
+    if state
+        .client_incarnations
+        .values()
+        .any(|current| *current == claimed)
+    {
+        return Err(AgentdError::ExecSession(format!(
+            "dedicated bulk record correlation {id} lies outside its client incarnation range"
+        )));
+    }
+    Ok(false)
+}
+
+/// Validate that an internal lifecycle message names one complete relay-owned range.
+fn validate_relay_client_range(id_start: u32, id_end_exclusive: u32) -> AgentdResult<u32> {
+    canonical_relay_client_range(id_start, id_end_exclusive).ok_or_else(|| {
+        AgentdError::ExecSession(format!(
+            "invalid relay client range [{id_start}, {id_end_exclusive})"
+        ))
+    })
+}
+
+fn establish_relay_client(
+    state: &mut AgentState,
+    connected: RelayClientConnected,
+) -> AgentdResult<()> {
+    let slot = validate_relay_client_range(connected.id_start, connected.id_end_exclusive)?;
+    if connected.incarnation == [0; CLIENT_INCARNATION_SIZE] {
+        return Err(AgentdError::ExecSession(
+            "relay client incarnation cannot be zero".into(),
+        ));
+    }
+    if state
+        .client_incarnations
+        .get(&slot)
+        .is_some_and(|current| *current != connected.incarnation)
+    {
+        return Err(AgentdError::ExecSession(format!(
+            "relay client slot {slot} was replaced before acknowledged disconnect"
+        )));
+    }
+    state
+        .client_incarnations
+        .insert(slot, connected.incarnation);
+    Ok(())
+}
+
+/// Remove one current range owner; return false for a stale disconnect that was ignored.
+fn disconnect_relay_client(
+    state: &mut AgentState,
+    disconnected: RelayClientDisconnected,
+    session_tx: &SessionOutputSender,
+) -> AgentdResult<(bool, Option<tokio::sync::oneshot::Receiver<()>>)> {
+    let slot = validate_relay_client_range(disconnected.id_start, disconnected.id_end_exclusive)?;
+    if let Some(incarnation) = disconnected.incarnation {
+        if state.client_incarnations.get(&slot) != Some(&incarnation) {
+            return Ok((false, None));
+        }
+        state.client_incarnations.remove(&slot);
+    } else if state.client_incarnations.contains_key(&slot) {
+        return Err(AgentdError::ExecSession(
+            "bound dual-port range cleanup omitted its incarnation".into(),
+        ));
+    }
+    cleanup_relay_client_range(state, disconnected.id_start, disconnected.id_end_exclusive);
+    let scheduler_cleanup = match disconnected.incarnation {
+        Some(incarnation) => session_tx
+            .drop_bulk_incarnation(incarnation)
+            .map_err(|error| AgentdError::ExecSession(error.into()))?,
+        None => None,
+    };
+    Ok((true, scheduler_cleanup))
+}
+
+/// Tear down resources and reorder state belonging to one relay-owned correlation range.
+fn cleanup_relay_client_range(state: &mut AgentState, id_start: u32, id_end_exclusive: u32) {
+    state.sessions.retain(|id, session| {
+        let keep = *id < id_start || *id >= id_end_exclusive;
+        if !keep {
+            // The SDK owner disappeared, so no later stdin/signal request can terminate this tree.
+            // Kill the process group now and drop its PTY/stdin handles with the session entry.
+            let _ = session.send_signal(9);
+        }
+        keep
+    });
+    state.fs.close_owner_range(id_start, id_end_exclusive);
+    abort_read_sessions_in_owner_range(&mut state.read_sessions, id_start, id_end_exclusive);
+    state.write_sessions.retain(|_, session| {
+        let owner_id = session.owner_id();
+        owner_id < id_start || owner_id >= id_end_exclusive
+    });
+    state.bulk_write_workers.retain(|id, worker| {
+        let keep = *id < id_start || *id >= id_end_exclusive;
+        if !keep {
+            worker.task.abort();
+        }
+        keep
+    });
+    close_tcp_sessions_in_owner_range(&mut state.tcp_sessions, id_start, id_end_exclusive);
+    clear_bulk_receive_range(state, id_start, id_end_exclusive);
 }
 
 async fn handle_message(
@@ -506,6 +1529,9 @@ async fn handle_message(
     out_buf: &mut Vec<u8>,
     config: &AgentdConfig,
 ) -> AgentdResult<()> {
+    // Background producers retain the range owner that opened them. The main loop can then drop
+    // queued output after a disconnect instead of relabelling it with a recycled correlation ID.
+    let session_tx = session_tx.with_incarnation(client_incarnation_for_id(state, msg.id));
     match msg.t {
         MessageType::Ping => {
             let Some(_) = decode_payload_or_core_error::<Ping>(&msg, out_buf)? else {
@@ -629,7 +1655,7 @@ async fn handle_message(
             let Some(req) = decode_payload_or_core_error::<FsRequest>(&msg, out_buf)? else {
                 return Ok(());
             };
-            match fs::handle_fs_request(msg.id, msg.v, req, &mut state.fs, out_buf, session_tx)
+            match fs::handle_fs_request(msg.id, msg.v, req, &mut state.fs, out_buf, &session_tx)
                 .await
             {
                 Ok(Some(FsStreamSession::Read(rs))) => {
@@ -655,6 +1681,7 @@ async fn handle_message(
                     Ok(true) => {
                         // Session complete — remove it.
                         state.write_sessions.remove(&msg.id);
+                        clear_bulk_receive_state(state, msg.id);
                     }
                     Ok(false) => {
                         activity.add_fs_bytes(len);
@@ -662,6 +1689,7 @@ async fn handle_message(
                     Err(e) => {
                         eprintln!("fs data error for {}: {e}", msg.id);
                         state.write_sessions.remove(&msg.id);
+                        clear_bulk_receive_state(state, msg.id);
                     }
                 }
             } else {
@@ -690,10 +1718,8 @@ async fn handle_message(
                         .ok_or_else(|| format!("unknown filesystem read session: {}", msg.id))
                         .and_then(|session| session.apply_credit(credit));
                     if let Err(error) = result {
-                        if let Some(session) = state.read_sessions.remove(&msg.id) {
-                            session.abort();
-                        }
                         encode_bulk_fs_failure(msg.id, error, out_buf)?;
+                        cancel_bulk_correlation(msg.id, BulkKind::Filesystem, state, &session_tx);
                     }
                 }
                 BulkKind::Tcp => {
@@ -703,9 +1729,7 @@ async fn handle_message(
                     };
                     if let Err(error) = result {
                         encode_bulk_tcp_failure(msg.id, error, out_buf)?;
-                        if let Some(session) = state.tcp_sessions.remove(&msg.id) {
-                            session.close();
-                        }
+                        cancel_bulk_correlation(msg.id, BulkKind::Tcp, state, &session_tx);
                     }
                 }
             }
@@ -715,37 +1739,26 @@ async fn handle_message(
             let Some(finish) = decode_payload_or_core_error::<BulkFinish>(&msg, out_buf)? else {
                 return Ok(());
             };
-            match finish.kind {
-                BulkKind::Filesystem => {
-                    let result = match state.write_sessions.get_mut(&msg.id) {
-                        Some(session) => {
-                            fs::handle_fs_bulk_finish(msg.id, finish, session, out_buf).await
-                        }
-                        None => Err(format!("unknown filesystem write session: {}", msg.id)),
-                    };
-                    match result {
-                        Ok(true) => {
-                            state.write_sessions.remove(&msg.id);
-                        }
-                        Ok(false) => {}
-                        Err(error) => {
-                            state.write_sessions.remove(&msg.id);
-                            encode_bulk_fs_failure(msg.id, error, out_buf)?;
-                        }
-                    }
+            let received_offset = state
+                .bulk_received_offsets
+                .get(&msg.id)
+                .copied()
+                .unwrap_or(0);
+            if has_bulk_receive_session(state, msg.id, finish.kind)
+                && finish.final_offset > received_offset
+            {
+                if state.pending_bulk_finishes.insert(msg.id, finish).is_some() {
+                    encode_bulk_cancel(
+                        msg.id,
+                        finish.kind,
+                        BulkCancelReason::ProtocolState,
+                        "duplicate deferred bulk finish".into(),
+                        out_buf,
+                    )?;
+                    cancel_bulk_correlation(msg.id, finish.kind, state, &session_tx);
                 }
-                BulkKind::Tcp => {
-                    let result = match state.tcp_sessions.get(&msg.id) {
-                        Some(session) => session.finish_bulk(finish).await,
-                        None => Err(format!("unknown TCP session: {}", msg.id)),
-                    };
-                    if let Err(error) = result {
-                        encode_bulk_tcp_failure(msg.id, error, out_buf)?;
-                        if let Some(session) = state.tcp_sessions.remove(&msg.id) {
-                            session.close();
-                        }
-                    }
-                }
+            } else {
+                dispatch_bulk_finish(msg.id, finish, state, out_buf, &session_tx).await?;
             }
         }
 
@@ -753,22 +1766,10 @@ async fn handle_message(
             let Some(cancel) = decode_payload_or_core_error::<BulkCancel>(&msg, out_buf)? else {
                 return Ok(());
             };
-            match cancel.kind {
-                BulkKind::Filesystem => {
-                    state.write_sessions.remove(&msg.id);
-                    if let Some(session) = state.read_sessions.remove(&msg.id) {
-                        session.abort();
-                    }
-                }
-                BulkKind::Tcp => {
-                    if let Some(session) = state.tcp_sessions.remove(&msg.id) {
-                        session.close();
-                    }
-                }
-            }
+            cancel_bulk_correlation(msg.id, cancel.kind, state, &session_tx);
             // Cancellation owns the correlation through its ordinary terminal response. This
-            // gives SDK dispatch a precise point at which it may retire the route while any raw
-            // records admitted before cancellation are still being discarded.
+            // gives SDK dispatch a precise point at which it may retire the route while late raw
+            // records admitted under pre-cancel credit are still being discarded.
             encode_bulk_terminal_failure(msg.id, cancel.kind, cancel.message, out_buf)?;
         }
 
@@ -797,7 +1798,7 @@ async fn handle_message(
             }
             // The connect runs inside the session task; the agent loop never
             // blocks on it. Success or failure arrives later as a tcp frame.
-            let session = TcpSession::open(msg.id, req, session_tx);
+            let session = TcpSession::open(msg.id, req, &session_tx);
             state.tcp_sessions.insert(msg.id, session);
         }
 
@@ -809,6 +1810,7 @@ async fn handle_message(
             if let Some(session) = state.tcp_sessions.get(&msg.id) {
                 if let Err(e) = session.write_data(data.data).await {
                     state.tcp_sessions.remove(&msg.id);
+                    clear_bulk_receive_state(state, msg.id);
                     encode_tcp_failed(msg.id, e, out_buf)?;
                 } else {
                     activity.add_tcp_bytes(len);
@@ -826,6 +1828,7 @@ async fn handle_message(
                 && let Err(e) = session.close_write().await
             {
                 state.tcp_sessions.remove(&msg.id);
+                clear_bulk_receive_state(state, msg.id);
                 encode_tcp_failed(msg.id, e, out_buf)?;
             }
         }
@@ -837,6 +1840,7 @@ async fn handle_message(
             if let Some(session) = state.tcp_sessions.remove(&msg.id) {
                 session.close();
             }
+            clear_bulk_receive_state(state, msg.id);
         }
 
         MessageType::RelayClientDisconnected => {
@@ -845,23 +1849,46 @@ async fn handle_message(
             else {
                 return Ok(());
             };
-            state
-                .fs
-                .close_owner_range(disconnected.id_start, disconnected.id_end_exclusive);
-            abort_read_sessions_in_owner_range(
-                &mut state.read_sessions,
-                disconnected.id_start,
-                disconnected.id_end_exclusive,
-            );
-            state.write_sessions.retain(|_, session| {
-                let owner_id = session.owner_id();
-                owner_id < disconnected.id_start || owner_id >= disconnected.id_end_exclusive
-            });
-            close_tcp_sessions_in_owner_range(
-                &mut state.tcp_sessions,
-                disconnected.id_start,
-                disconnected.id_end_exclusive,
-            );
+            // A late cleanup for an old owner must never affect a recycled range.
+            let disconnect_ack =
+                disconnected
+                    .incarnation
+                    .map(|incarnation| RelayClientDisconnectedAck {
+                        id_start: disconnected.id_start,
+                        id_end_exclusive: disconnected.id_end_exclusive,
+                        incarnation,
+                    });
+            let (removed, scheduler_cleanup) =
+                disconnect_relay_client(state, disconnected, &session_tx)?;
+            if removed && let Some(disconnect_ack) = disconnect_ack {
+                if let Some(cleanup) = scheduler_cleanup {
+                    // Keep the single-vCPU control actor available while the bulk actor reaches
+                    // its cleanup cut. The acknowledgement is emitted through the ordinary
+                    // control queue only after matching queued records release their permits.
+                    let output_tx = session_tx.clone();
+                    tokio::spawn(async move {
+                        if cleanup.await.is_ok() {
+                            let frame =
+                                encode_relay_client_disconnected_ack(disconnect_ack).to_vec();
+                            let _ = output_tx
+                                .send(
+                                    0,
+                                    SessionOutput::Raw(RawSessionOutput::new(
+                                        frame,
+                                        RawActivity::default(),
+                                        None,
+                                    )),
+                                )
+                                .await;
+                        }
+                    });
+                } else {
+                    // Combined leased mode has no dedicated scheduler, so resource cleanup itself
+                    // is the acknowledgement cut.
+                    out_buf
+                        .extend_from_slice(&encode_relay_client_disconnected_ack(disconnect_ack));
+                }
+            }
         }
 
         MessageType::ClockSync => {
@@ -881,6 +1908,9 @@ async fn handle_message(
                 let _ = session.send_signal(15); // SIGTERM
             }
             state.write_sessions.clear();
+            for (_, worker) in state.bulk_write_workers.drain() {
+                worker.task.abort();
+            }
             for (_, session) in state.tcp_sessions.drain() {
                 session.close();
             }
@@ -999,7 +2029,8 @@ fn heartbeat_snapshot(state: &AgentState, activity: &ActivityTracker) -> Heartbe
         active_fs_streams: state
             .read_sessions
             .len()
-            .saturating_add(state.write_sessions.len()) as u32,
+            .saturating_add(state.write_sessions.len())
+            .saturating_add(state.bulk_write_workers.len()) as u32,
         active_tcp_streams: state.tcp_sessions.len() as u32,
         counters: activity.counters,
     }
@@ -1039,6 +2070,15 @@ fn encoded_guest_message_refreshes_idle_timer(
     offset: usize,
     frame_len: usize,
 ) -> bool {
+    let frame_end = offset.saturating_add(4).saturating_add(frame_len);
+    if frame_end <= out_buf.len() {
+        let mut frame = BytesMut::from(&out_buf[offset..frame_end]);
+        if try_decode_relay_client_disconnected_ack_from_bytes(&mut frame)
+            .is_ok_and(|ack| ack.is_some())
+        {
+            return false;
+        }
+    }
     if frame_len < microsandbox_protocol::message::FRAME_HEADER_SIZE {
         return true;
     }
@@ -1090,6 +2130,7 @@ fn complete_raw_session(
         Some(RawSessionCompletion::FsRead) => {
             read_sessions.remove(&id);
         }
+        Some(RawSessionCompletion::FsWrite) => {}
         Some(RawSessionCompletion::Tcp) => {
             tcp_sessions.remove(&id);
         }
@@ -1341,6 +2382,64 @@ fn set_nonblocking(fd: i32) -> AgentdResult<()> {
     Ok(())
 }
 
+fn cmdline_requests_dual_port(cmdline: &str) -> bool {
+    cmdline
+        .split_ascii_whitespace()
+        .any(|argument| argument == AGENT_TRANSPORT_DUAL_PORT_CMDLINE)
+}
+
+fn random_connection_id() -> AgentdResult<[u8; 16]> {
+    let mut id = [0u8; 16];
+    let mut filled = 0;
+    while filled < id.len() {
+        let result =
+            unsafe { libc::getrandom(id[filled..].as_mut_ptr().cast(), id.len() - filled, 0) };
+        if result > 0 {
+            filled += result as usize;
+            continue;
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        return Err(error.into());
+    }
+    Ok(id)
+}
+
+fn read_exact_from_fd(
+    fd: i32,
+    mut buf: &mut [u8],
+    deadline: Instant,
+    label: &str,
+) -> AgentdResult<()> {
+    while !buf.is_empty() {
+        if !poll_fd_until(fd, libc::POLLIN, deadline)? {
+            return Err(AgentdError::ExecSession(format!(
+                "timed out waiting for {label}"
+            )));
+        }
+        match read_from_fd(fd, buf) {
+            Ok(0) => {
+                return Err(AgentdError::ExecSession(format!(
+                    "serial port closed while waiting for {label}"
+                )));
+            }
+            Ok(read) => {
+                let (_, remainder) = std::mem::take(&mut buf).split_at_mut(read);
+                buf = remainder;
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                ) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
 fn init_ack_deadline() -> Instant {
     Instant::now() + std::time::Duration::from_secs(INIT_ACK_TIMEOUT_SECS)
 }
@@ -1492,16 +2591,38 @@ async fn write_bulk_record_async_fd(
 ) -> AgentdResult<()> {
     let header = codec::encode_bulk_header(record)
         .map_err(|error| AgentdError::ExecSession(format!("encode bulk header: {error}")))?;
+    write_bulk_parts_async_fd(fd, &header, &record.payload).await
+}
+
+/// Prefix a dedicated-lane record without copying its opaque payload.
+async fn write_incarnated_bulk_record_async_fd(
+    fd: &AsyncFd<std::fs::File>,
+    incarnation: ClientIncarnation,
+    record: &BulkRecord,
+) -> AgentdResult<()> {
+    let public_header = codec::encode_bulk_header(record)
+        .map_err(|error| AgentdError::ExecSession(format!("encode bulk header: {error}")))?;
+    let mut header = Vec::with_capacity(CLIENT_INCARNATION_SIZE + public_header.len());
+    header.extend_from_slice(&incarnation);
+    header.extend_from_slice(&public_header);
+    write_bulk_parts_async_fd(fd, &header, &record.payload).await
+}
+
+async fn write_bulk_parts_async_fd(
+    fd: &AsyncFd<std::fs::File>,
+    header: &[u8],
+    payload: &[u8],
+) -> AgentdResult<()> {
     let mut header_offset = 0;
     let mut payload_offset = 0;
 
-    while header_offset < header.len() || payload_offset < record.payload.len() {
+    while header_offset < header.len() || payload_offset < payload.len() {
         let mut guard = fd.writable().await?;
         let result = guard.try_io(|inner| {
             write_vectored_to_fd(
                 inner.get_ref().as_raw_fd(),
                 &header[header_offset..],
-                &record.payload[payload_offset..],
+                &payload[payload_offset..],
             )
         });
         let written = match result {
@@ -1603,6 +2724,228 @@ fn request_guest_poweroff() -> AgentdResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dual_port_cmdline_hint_requires_an_exact_argument() {
+        assert!(cmdline_requests_dual_port(
+            "console=hvc0 microsandbox.agent_transport=dual-port-v1 quiet"
+        ));
+        assert!(!cmdline_requests_dual_port(
+            "microsandbox.agent_transport=dual-port-v10"
+        ));
+        assert!(!cmdline_requests_dual_port(
+            "prefix=microsandbox.agent_transport=dual-port-v1"
+        ));
+    }
+
+    #[test]
+    fn disconnect_cleanup_keeps_other_clients_bulk_offsets() {
+        let mut state = AgentState::default();
+        for id in [1, 10, 20] {
+            state.bulk_received_offsets.insert(id, id as u64);
+            state.pending_bulk_finishes.insert(
+                id,
+                BulkFinish {
+                    kind: BulkKind::Filesystem,
+                    flow: BulkFlow::HostToGuest,
+                    final_offset: id as u64,
+                },
+            );
+        }
+
+        clear_bulk_receive_range(&mut state, 10, 20);
+
+        assert_eq!(state.bulk_received_offsets.len(), 2);
+        assert!(state.bulk_received_offsets.contains_key(&1));
+        assert!(state.bulk_received_offsets.contains_key(&20));
+        assert_eq!(state.pending_bulk_finishes.len(), 2);
+        assert!(state.pending_bulk_finishes.contains_key(&1));
+        assert!(state.pending_bulk_finishes.contains_key(&20));
+    }
+
+    #[test]
+    fn recycled_range_rejects_old_incarnation_and_stale_disconnect() {
+        let id_start = 1;
+        let id_end_exclusive = microsandbox_protocol::AGENT_RELAY_ID_RANGE_STEP;
+        let old = [0x11; CLIENT_INCARNATION_SIZE];
+        let new = [0x22; CLIENT_INCARNATION_SIZE];
+        let mut state = AgentState::default();
+
+        establish_relay_client(
+            &mut state,
+            RelayClientConnected {
+                id_start,
+                id_end_exclusive,
+                incarnation: old,
+            },
+        )
+        .unwrap();
+        state.bulk_received_offsets.insert(id_start, 4096);
+        let (session_tx, _session_rx) = SessionOutputSender::channel();
+        let (removed, cleanup) = disconnect_relay_client(
+            &mut state,
+            RelayClientDisconnected {
+                id_start,
+                id_end_exclusive,
+                incarnation: Some(old),
+            },
+            &session_tx,
+        )
+        .unwrap();
+        assert!(removed);
+        assert!(cleanup.is_none());
+        establish_relay_client(
+            &mut state,
+            RelayClientConnected {
+                id_start,
+                id_end_exclusive,
+                incarnation: new,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(client_incarnation_for_id(&state, id_start), Some(new));
+        assert!(validate_bulk_client_incarnation(&state, id_start, new).unwrap());
+        assert!(!validate_bulk_client_incarnation(&state, id_start, old).unwrap());
+
+        let other_start = microsandbox_protocol::AGENT_RELAY_ID_RANGE_STEP + 1;
+        let other_end = microsandbox_protocol::AGENT_RELAY_ID_RANGE_STEP * 2;
+        establish_relay_client(
+            &mut state,
+            RelayClientConnected {
+                id_start: other_start,
+                id_end_exclusive: other_end,
+                incarnation: [0x33; CLIENT_INCARNATION_SIZE],
+            },
+        )
+        .unwrap();
+        assert!(validate_bulk_client_incarnation(&state, other_start, new).is_err());
+        assert!(!state.bulk_received_offsets.contains_key(&id_start));
+        assert!(
+            !disconnect_relay_client(
+                &mut state,
+                RelayClientDisconnected {
+                    id_start,
+                    id_end_exclusive,
+                    incarnation: Some(old),
+                },
+                &session_tx,
+            )
+            .unwrap()
+            .0
+        );
+        assert_eq!(client_incarnation_for_id(&state, id_start), Some(new));
+    }
+
+    #[test]
+    fn disconnect_ack_does_not_refresh_idle_activity() {
+        let ack = encode_relay_client_disconnected_ack(RelayClientDisconnectedAck {
+            id_start: 1,
+            id_end_exclusive: microsandbox_protocol::AGENT_RELAY_ID_RANGE_STEP,
+            incarnation: [0x4a; CLIENT_INCARNATION_SIZE],
+        });
+        assert!(!encoded_guest_message_refreshes_idle_timer(
+            &ack,
+            0,
+            ack.len() - 4,
+        ));
+    }
+
+    #[tokio::test]
+    async fn closed_optional_receiver_disables_itself_without_spinning() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<u8>(1);
+        drop(tx);
+        let mut receiver = Some(rx);
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), recv_optional(&mut receiver))
+                .await
+                .is_err()
+        );
+        assert!(receiver.is_none());
+    }
+
+    #[tokio::test]
+    async fn bulk_output_tombstone_discards_late_producer_record() {
+        let incarnation = [0x5a; CLIENT_INCARNATION_SIZE];
+        let (session_tx, _control_rx, mut bulk_rx, _command_rx) =
+            SessionOutputSender::split_channel();
+        let owner_tx = session_tx.with_incarnation(Some(incarnation));
+        let record = || BulkRecord {
+            id: 17,
+            kind: BulkKind::Filesystem,
+            flow: BulkFlow::GuestToHost,
+            offset: 0,
+            payload: bytes::Bytes::from_static(b"late"),
+        };
+        assert!(
+            owner_tx
+                .send(
+                    17,
+                    SessionOutput::Bulk(crate::session::BulkSessionOutput::new(
+                        record(),
+                        RawActivity::default(),
+                    )),
+                )
+                .await
+        );
+
+        let mut flows = HashMap::new();
+        let mut active = VecDeque::new();
+        let mut retired = HashMap::new();
+        let mut retiring_incarnations = HashSet::new();
+        enqueue_bulk_output(
+            bulk_rx.recv().await.unwrap(),
+            &mut flows,
+            &mut active,
+            &retired,
+            &retiring_incarnations,
+        )
+        .unwrap();
+        let (completion, mut completed) = tokio::sync::oneshot::channel();
+        let cleanup = apply_bulk_output_command(
+            BulkOutputCommand::DropFlow {
+                incarnation,
+                id: 17,
+                completion,
+            },
+            &mut flows,
+            &mut active,
+            &mut retired,
+            &mut retiring_incarnations,
+        )
+        .unwrap();
+        assert!(matches!(
+            completed.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        complete_bulk_output_cleanups(vec![cleanup], &mut retired, &mut retiring_incarnations);
+        assert_eq!(completed.try_recv(), Ok(()));
+
+        assert!(
+            owner_tx
+                .send(
+                    17,
+                    SessionOutput::Bulk(crate::session::BulkSessionOutput::new(
+                        record(),
+                        RawActivity::default(),
+                    )),
+                )
+                .await
+        );
+        enqueue_bulk_output(
+            bulk_rx.recv().await.unwrap(),
+            &mut flows,
+            &mut active,
+            &retired,
+            &retiring_incarnations,
+        )
+        .unwrap();
+
+        assert!(flows.is_empty());
+        assert!(active.is_empty());
+        assert!(bulk_output_is_retired(&retired, incarnation, 17));
+    }
 
     #[test]
     fn record_encoded_guest_messages_counts_only_appended_frames() {

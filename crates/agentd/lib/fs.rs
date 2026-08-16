@@ -12,7 +12,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use microsandbox_protocol::AGENT_RELAY_ID_RANGE_STEP;
 use microsandbox_protocol::bulk::{
     BULK_FLOW_MASK_GUEST_TO_HOST, BULK_FLOW_MASK_HOST_TO_GUEST, BulkAccepted, BulkCredit,
     BulkFinish, BulkFlow, BulkKind, BulkOffer, BulkReceiveState, BulkRecord, BulkSendState,
@@ -24,6 +23,7 @@ use microsandbox_protocol::fs::{
     FsSetAttrs,
 };
 use microsandbox_protocol::message::{Message, MessageType};
+use microsandbox_protocol::transport::relay_client_slot;
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{Mutex, watch};
@@ -317,14 +317,6 @@ impl FsWriteSession {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
-
-fn relay_client_slot(id: u32) -> Option<u32> {
-    if id == 0 {
-        None
-    } else {
-        Some((id - 1) / AGENT_RELAY_ID_RANGE_STEP)
-    }
-}
 
 fn same_relay_client(left: u32, right: u32) -> bool {
     relay_client_slot(left).is_some_and(|left| Some(left) == relay_client_slot(right))
@@ -1018,7 +1010,7 @@ async fn handle_bulk_read_stream(
             .available_credit()
             .min(sender.max_record_payload() as u64)
             .min(remaining.unwrap_or(u64::MAX)) as usize;
-        let Some(permit) = tx.reserve(read_len).await else {
+        let Some(permit) = tx.reserve_bulk(read_len).await else {
             return;
         };
         let mut payload = vec![0u8; read_len];

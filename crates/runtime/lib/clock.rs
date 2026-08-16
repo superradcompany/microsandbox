@@ -9,6 +9,7 @@ use microsandbox_protocol::message::{Message, MessageType};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use crate::relay::ControlWrite;
 use crate::{RuntimeError, RuntimeResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -29,11 +30,11 @@ const CLOCK_SYNC_WAKE_THRESHOLD: Duration = Duration::from_secs(6);
 //--------------------------------------------------------------------------------------------------
 
 /// Spawns a background task that keeps the guest wall clock aligned with the host.
-pub(crate) fn spawn_clock_sync_task(agent_tx: mpsc::Sender<Bytes>) -> JoinHandle<()> {
+pub(crate) fn spawn_clock_sync_task(agent_tx: mpsc::Sender<ControlWrite>) -> JoinHandle<()> {
     tokio::spawn(clock_sync_task(agent_tx))
 }
 
-async fn clock_sync_task(agent_tx: mpsc::Sender<Bytes>) {
+async fn clock_sync_task(agent_tx: mpsc::Sender<ControlWrite>) {
     let mut last_wall = SystemTime::now();
     let mut last_sync = match send_clock_sync(&agent_tx).await {
         Ok(sent_at) => sent_at,
@@ -69,7 +70,7 @@ async fn clock_sync_task(agent_tx: mpsc::Sender<Bytes>) {
     }
 }
 
-async fn send_clock_sync(agent_tx: &mpsc::Sender<Bytes>) -> RuntimeResult<SystemTime> {
+async fn send_clock_sync(agent_tx: &mpsc::Sender<ControlWrite>) -> RuntimeResult<SystemTime> {
     let now = SystemTime::now();
     let elapsed = now
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -85,7 +86,7 @@ async fn send_clock_sync(agent_tx: &mpsc::Sender<Bytes>) -> RuntimeResult<System
     codec::encode_to_buf(&msg, &mut buf)
         .map_err(|e| RuntimeError::Custom(format!("encode clock sync frame: {e}")))?;
     agent_tx
-        .send(Bytes::from(buf))
+        .send(Bytes::from(buf).into())
         .await
         .map_err(|_| RuntimeError::Custom("agent relay ring writer channel closed".into()))?;
 

@@ -120,9 +120,8 @@ impl TcpSession {
             return Err("raw bulk record sent to a generation-6 TCP stream".into());
         }
         self.commands
-            .send(TcpCommand::BulkRecord(record))
-            .await
-            .map_err(|_| "TCP session is closed".to_string())
+            .try_send(TcpCommand::BulkRecord(record))
+            .map_err(|error| format!("TCP bulk input queue is unavailable: {error}"))
     }
 
     /// Deliver an absolute guest-to-host credit update.
@@ -131,9 +130,8 @@ impl TcpSession {
             return Err("bulk credit sent to a generation-6 TCP stream".into());
         }
         self.commands
-            .send(TcpCommand::BulkCredit(credit))
-            .await
-            .map_err(|_| "TCP session is closed".to_string())
+            .try_send(TcpCommand::BulkCredit(credit))
+            .map_err(|error| format!("TCP bulk control queue is unavailable: {error}"))
     }
 
     /// Queue the exact host-to-guest half-close marker.
@@ -142,9 +140,8 @@ impl TcpSession {
             return Err("bulk finish sent to a generation-6 TCP stream".into());
         }
         self.commands
-            .send(TcpCommand::BulkFinish(finish))
-            .await
-            .map_err(|_| "TCP session is closed".to_string())
+            .try_send(TcpCommand::BulkFinish(finish))
+            .map_err(|error| format!("TCP bulk control queue is unavailable: {error}"))
     }
 
     /// Whether this TCP session negotiated generation-7 raw bulk.
@@ -401,7 +398,7 @@ async fn relay_tcp_session(
                                     break;
                                 }
                             };
-                            let Some(permit) = tx.reserve(n).await else {
+                            let Some(permit) = tx.reserve_bulk(n).await else {
                                 break;
                             };
                             let record = BulkRecord {

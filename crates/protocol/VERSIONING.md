@@ -198,6 +198,8 @@ body = [ kind ][ flow ][ 0 ][ offset ][ opaque payload ]
 
 Filesystem reads/writes and TCP streams first negotiate this format through CBOR control messages. A host connected to a generation-6 or older runtime never offers raw bulk and continues using the generation-6 CBOR data messages. The relay validates the universal length and exclusive flag shape, routes on the unchanged correlation ID, and does not interpret bulk kind, flow, offsets, credits, or payload.
 
+The optional `dual-port-v1` transport profile is orthogonal to this schema. On the internal `agent-bulk` port only, each unchanged generation-7 frame is prefixed by a 128-bit client incarnation. The relay strips that prefix before forwarding the frame to an SDK. Fixed `MSBL` range-lifecycle records on the ordered control port establish the current incarnation and acknowledge its disconnect before control IDs are reused; they are decoded only after the host and guest bind `dual-port-v1`, are not `MessageType` values, and therefore do not alter the generation-7 schema. Once a transport profile ships, its framing is immutable even though it has a separate capability gate.
+
 - **`v`** is the generation, echoed onto each message. Same number negotiated at the handshake;
   not a per-message version. Don't gate behavior by reading it per message.
 - **`MessageType::min_protocol_version()`** (`lib/message.rs`) is the per-type label: the

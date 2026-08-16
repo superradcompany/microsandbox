@@ -18,7 +18,7 @@ use clap::Args;
 use microsandbox_runtime::{
     launch::LaunchConfig,
     logging::LogLevel,
-    vm::{Config, DiskMountSpec, UpperSpec, VmConfig, validate_disk_format},
+    vm::{AgentTransportProfile, Config, DiskMountSpec, UpperSpec, VmConfig, validate_disk_format},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -33,6 +33,15 @@ use microsandbox_runtime::{
 /// `--config-file` for manual invocation). See issue #997.
 #[derive(Debug, Args)]
 pub struct SandboxArgs {
+    /// Select an experimental internal host/guest agent transport.
+    #[arg(
+        long = "unstable-agent-transport",
+        hide = true,
+        default_value = "combined",
+        value_parser = parse_agent_transport_profile
+    )]
+    pub agent_transport: AgentTransportProfile,
+
     /// Name of the sandbox.
     #[arg(long = "name")]
     pub sandbox_name: String,
@@ -109,6 +118,17 @@ fn parse_log_level(s: &str) -> Result<LogLevel, String> {
         "trace" => Ok(LogLevel::Trace),
         _ => Err(format!(
             "invalid log level: {s} (expected: error, warn, info, debug, trace)"
+        )),
+    }
+}
+
+/// Parse the hidden experimental agent transport selector.
+fn parse_agent_transport_profile(s: &str) -> Result<AgentTransportProfile, String> {
+    match s {
+        "combined" => Ok(AgentTransportProfile::Combined),
+        "dual-port-v1" => Ok(AgentTransportProfile::DualPortV1),
+        _ => Err(format!(
+            "invalid agent transport: {s} (expected: combined, dual-port-v1)"
         )),
     }
 }
@@ -260,6 +280,7 @@ pub fn run(args: SandboxArgs) -> ! {
     };
 
     let config = Config {
+        agent_transport: args.agent_transport,
         sandbox_name: args.sandbox_name,
         sandbox_id: args.sandbox_id,
         log_level: args.log_level,
@@ -642,6 +663,7 @@ mod tests {
         let _ = config_fd;
 
         SandboxArgs {
+            agent_transport: AgentTransportProfile::Combined,
             sandbox_name: "test".to_string(),
             sandbox_id: 1,
             log_level: None,

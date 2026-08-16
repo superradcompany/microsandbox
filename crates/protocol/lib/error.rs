@@ -46,6 +46,10 @@ pub enum ProtocolError {
     #[error("invalid bulk frame: {0}")]
     InvalidBulkFrame(String),
 
+    /// The dedicated bulk-port binding handshake is malformed or mismatched.
+    #[error("invalid bulk transport binding: {0}")]
+    InvalidBulkBinding(String),
+
     /// Unexpected end of stream.
     #[error("unexpected end of stream")]
     UnexpectedEof,

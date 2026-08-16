@@ -67,6 +67,12 @@ const EXIT_REASON_STARTUP_COMMAND_FAILED: u8 = 7;
 /// Bounds how long an existing VMM can retain an obsolete fair share after membership changes.
 const WRITEBACK_PRESSURE_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 
+/// Virtqueue size retained for the latency-sensitive control port.
+const AGENT_CONTROL_QUEUE_SIZE: u16 = 32;
+
+/// Initial experimental virtqueue size for the dedicated bulk port.
+const AGENT_BULK_QUEUE_SIZE: u16 = 256;
+
 /// Fixed fd carrying the bulk `msb sandbox` config (argv overflow) as
 /// NUL-terminated argument records. Keeps the network-config blob and the
 /// repeated `--env` flags off the process argv — see issue #997.
@@ -89,12 +95,32 @@ pub const PARENT_WATCH_DETACH: u8 = 1;
 // Types
 //--------------------------------------------------------------------------------------------------
 
+/// Internal host/guest topology for the agent data plane.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum AgentTransportProfile {
+    /// Control messages and generation-7 raw records share the `agent` port.
+    #[default]
+    Combined,
+
+    /// Raw records use a separately bound `agent-bulk` port.
+    DualPortV1,
+}
+
+/// Host adapters for the physical ports selected by the agent transport profile.
+struct AgentConsoleBackends {
+    control: AgentConsoleBackend,
+    bulk: Option<AgentConsoleBackend>,
+}
+
 /// Full configuration for the sandbox process.
 ///
 /// Combines VM hardware settings with sandbox-level metadata (name, DB,
 /// agent relay, lifecycle policies). Passed to [`enter()`].
 #[derive(Debug)]
 pub struct Config {
+    /// Unstable per-boot agent transport selection.
+    pub agent_transport: AgentTransportProfile,
+
     /// Name of the sandbox.
     pub sandbox_name: String,
 
@@ -540,9 +566,16 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
 
     let shutdown_flush_timeout = guest_shutdown_flush_timeout(config.vm.init_path.is_some());
 
-    // Create console shared state (ring buffers + wake pipes).
+    // Each physical port gets an independent byte budget and wake domain.
     let shared = Arc::new(ConsoleSharedState::new());
-    let console_backend = AgentConsoleBackend::new(Arc::clone(&shared));
+    let bulk_shared = (config.agent_transport == AgentTransportProfile::DualPortV1)
+        .then(|| Arc::new(ConsoleSharedState::new()));
+    let console_backends = AgentConsoleBackends {
+        control: AgentConsoleBackend::new(Arc::clone(&shared)),
+        bulk: bulk_shared
+            .as_ref()
+            .map(|shared| AgentConsoleBackend::new(Arc::clone(shared))),
+    };
 
     // Build tokio runtime for relay, heartbeat, and timer tasks.
     let tokio_rt = tokio::runtime::Builder::new_multi_thread()
@@ -566,7 +599,11 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
 
     // Create the relay and persist the run record with a single runtime hop.
     let (mut relay, db, run_db_id) = tokio_rt.block_on(async {
-        let relay = AgentRelay::new(&config.agent_sock_path, Arc::clone(&shared));
+        let relay = AgentRelay::new_with_bulk(
+            &config.agent_sock_path,
+            Arc::clone(&shared),
+            bulk_shared.as_ref().map(Arc::clone),
+        );
         let db = connect_db(
             &config.sandbox_db_path,
             config.sandbox_db_connect_timeout_secs,
@@ -722,6 +759,18 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         tokio_rt.handle(),
     )
     .map_err(|e| RuntimeError::Custom(format!("agent console pipe bridge: {e}")))?;
+    #[cfg(windows)]
+    let _agent_bulk_console_pipe_bridge = match bulk_shared.as_ref() {
+        Some(bulk_shared) => Some(
+            AgentConsolePipeBridge::spawn(
+                agent_bulk_console_pipe_name(config.sandbox_id),
+                Arc::clone(bulk_shared),
+                tokio_rt.handle(),
+            )
+            .map_err(|e| RuntimeError::Custom(format!("agent bulk console pipe bridge: {e}")))?,
+        ),
+        None => None,
+    };
     let host_placement = HostPlacement {
         vcpu_targets: cpu_guard.vcpu_targets(),
         required: placement_required,
@@ -729,7 +778,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     };
     let build_result = build_vm(
         &config,
-        console_backend,
+        console_backends,
         move |exit_code: i32| {
             use microsandbox_db::entity::sandbox as sandbox_entity;
             use sea_orm::QueryFilter;
@@ -1105,6 +1154,11 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                 }
                 if let Err(e) = relay.run(relay_shutdown_rx, relay_drain_tx).await {
                     tracing::error!("agent relay error: {e}");
+                    relay_exit_reason.store(
+                        EXIT_REASON_AGENT_UNRESPONSIVE,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    relay_exit_handle.trigger();
                 }
             }
             Ok(Err(e)) => {
@@ -1327,6 +1381,14 @@ fn agent_console_pipe_name(sandbox_id: i32) -> String {
     )
 }
 
+#[cfg(windows)]
+fn agent_bulk_console_pipe_name(sandbox_id: i32) -> String {
+    format!(
+        r"\\.\pipe\msb-agent-bulk-console-{sandbox_id}-{}",
+        std::process::id()
+    )
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions: VM Builder
 //--------------------------------------------------------------------------------------------------
@@ -1392,13 +1454,17 @@ struct HostPlacement<'a> {
 
 fn build_vm(
     config: &Config,
-    console_backend: AgentConsoleBackend,
+    console_backends: AgentConsoleBackends,
     on_exit: impl Fn(i32) + Send + 'static,
     on_placement: impl FnOnce(&msb_krun::PlacementReport) + Send + 'static,
     tokio_handle: tokio::runtime::Handle,
     host_placement: HostPlacement<'_>,
     writeback_limit: Option<&msb_krun::WritebackLimit>,
 ) -> RuntimeResult<VmBuildOutput> {
+    let AgentConsoleBackends {
+        control: console_backend,
+        bulk: bulk_console_backend,
+    } = console_backends;
     let mut exec_env = config.vm.env.clone();
     let vm = &config.vm;
     let balloon_stats_interval = config
@@ -1409,6 +1475,7 @@ fn build_vm(
     #[cfg(windows)]
     let bind_identity_map = BindIdentityMapRegistration::new();
 
+    let kernel_cmdline = agent_kernel_cmdline(vm.thp, config.agent_transport);
     let mut builder = VmBuilder::new()
         .machine(|m| {
             let mut m = m
@@ -1445,8 +1512,7 @@ fn build_vm(
             // Apply the typed policy before PID 1 starts. Keeping the raw
             // kernel command line internal avoids exposing a general-purpose
             // boot-argument escape hatch to sandbox users.
-            let thp = thp_kernel_cmdline(vm.thp);
-            let k = k.krunfw_path(&vm.libkrunfw_path).cmdline(&thp);
+            let k = k.krunfw_path(&vm.libkrunfw_path).cmdline(&kernel_cmdline);
             if let Some(ref init_path) = vm.init_path {
                 k.init_path(init_path)
             } else {
@@ -1817,23 +1883,47 @@ fn build_vm(
     #[cfg(unix)]
     {
         builder = builder.console(|c| {
-            c.output(&kernel_log_path).custom(
+            let c = c.output(&kernel_log_path).custom_with_options(
                 microsandbox_protocol::AGENT_PORT_NAME,
                 Box::new(console_backend),
-            )
+                msb_krun::ConsolePortOptions::new().queue_size(AGENT_CONTROL_QUEUE_SIZE),
+            );
+            match bulk_console_backend {
+                Some(backend) => c.custom_with_options(
+                    microsandbox_protocol::AGENT_BULK_PORT_NAME,
+                    Box::new(backend),
+                    msb_krun::ConsolePortOptions::new().queue_size(AGENT_BULK_QUEUE_SIZE),
+                ),
+                None => c,
+            }
         });
     }
     #[cfg(windows)]
     {
-        let _ = console_backend;
+        let _ = (console_backend, bulk_console_backend);
         let agent_pipe = agent_console_pipe_name(config.sandbox_id);
+        let bulk_pipe = (config.agent_transport == AgentTransportProfile::DualPortV1)
+            .then(|| agent_bulk_console_pipe_name(config.sandbox_id));
         builder = builder.console(|c| {
             // Windows WHP/x64 currently uses virtio-console for reliable
             // guest logs; the implicit serial console is present but silent
             // on the dev hosts used for WHP testing.
-            c.disable_implicit()
+            let c = c
+                .disable_implicit()
                 .virtio_output(&kernel_log_path)
-                .named_pipe(microsandbox_protocol::AGENT_PORT_NAME, agent_pipe)
+                .named_pipe_with_options(
+                    microsandbox_protocol::AGENT_PORT_NAME,
+                    agent_pipe,
+                    msb_krun::ConsolePortOptions::new().queue_size(AGENT_CONTROL_QUEUE_SIZE),
+                );
+            match bulk_pipe {
+                Some(pipe) => c.named_pipe_with_options(
+                    microsandbox_protocol::AGENT_BULK_PORT_NAME,
+                    pipe,
+                    msb_krun::ConsolePortOptions::new().queue_size(AGENT_BULK_QUEUE_SIZE),
+                ),
+                None => c,
+            }
         });
     }
 
@@ -2622,6 +2712,18 @@ pub fn prepend_scripts_path(env: &mut Vec<String>) {
 /// Render the validated THP policy as the single Linux boot parameter the VMM appends.
 fn thp_kernel_cmdline(policy: microsandbox_types::TransparentHugePagePolicy) -> String {
     format!("transparent_hugepage={}", policy.as_str())
+}
+
+fn agent_kernel_cmdline(
+    thp: microsandbox_types::TransparentHugePagePolicy,
+    transport: AgentTransportProfile,
+) -> String {
+    let mut cmdline = thp_kernel_cmdline(thp);
+    if transport == AgentTransportProfile::DualPortV1 {
+        cmdline.push(' ');
+        cmdline.push_str(microsandbox_protocol::AGENT_TRANSPORT_DUAL_PORT_CMDLINE);
+    }
+    cmdline
 }
 
 //--------------------------------------------------------------------------------------------------
