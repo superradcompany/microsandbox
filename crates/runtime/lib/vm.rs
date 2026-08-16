@@ -1581,13 +1581,14 @@ fn build_vm(
             .map_err(|e| RuntimeError::Custom(format!("--mount {mount_spec:?}: {e}")))?;
 
         let tag = parsed.tag;
-        // Keep the host path so a mount failure can name the directory.
-        let host_path = parsed.host_path.clone();
+        // Keep the host path as a PathBuf so mount failures can format it
+        // without relying on the string-only mount spec field.
+        let host_path = PathBuf::from(&parsed.host_path);
         #[cfg(unix)]
         let mount_bind_identity_map =
             bind_identity_map_for_mount(&mut bind_identity_map, parsed.stat_virtualization);
         let cfg = PassthroughConfig {
-            root_dir: PathBuf::from(parsed.host_path),
+            root_dir: host_path.clone(),
             inject_init: false,
             stat_virtualization: parsed.stat_virtualization,
             host_permissions: parsed.host_permissions,
