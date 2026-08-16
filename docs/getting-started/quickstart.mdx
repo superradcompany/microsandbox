@@ -6,12 +6,24 @@ icon: "bolt"
 
 ## Choose where to run
 
-| Where | Requirement |
-|---|---|
-| <Icon icon="linux" size={16} /> **Linux** | A glibc-based distribution with KVM |
-| <Icon icon="apple" size={16} /> **macOS** | An Apple Silicon Mac |
-| <Icon icon="windows" size={16} /> **Windows** | Windows 11 with Windows Hypervisor Platform |
-| <Icon icon="cloud" size={16} /> **[Cloud](/cloud/overview)** | Any host; no local virtualization required |
+<div className="msb-platform-strip" role="list" aria-label="Supported platforms">
+  <div className="msb-platform-item" role="listitem">
+    <span className="msb-platform-icon"><Icon icon="linux" size={18} /></span>
+    <span className="msb-platform-copy"><strong>Linux</strong><span>glibc + KVM</span></span>
+  </div>
+  <div className="msb-platform-item" role="listitem">
+    <span className="msb-platform-icon"><Icon icon="apple" size={18} /></span>
+    <span className="msb-platform-copy"><strong>macOS</strong><span>Apple Silicon</span></span>
+  </div>
+  <div className="msb-platform-item" role="listitem">
+    <span className="msb-platform-icon"><Icon icon="windows" size={18} /></span>
+    <span className="msb-platform-copy"><strong>Windows</strong><span>Windows 11 + WHP</span></span>
+  </div>
+  <a className="msb-platform-item msb-platform-link" role="listitem" href="/cloud/overview">
+    <span className="msb-platform-icon"><Icon icon="cloud" size={18} /></span>
+    <span className="msb-platform-copy"><strong>Cloud</strong><span>No local virtualization</span></span>
+  </a>
+</div>
 
 <CodeGroup>
 ```bash npx
