@@ -30,16 +30,9 @@
             "pages": [
               "getting-started/introduction",
               "getting-started/quickstart",
+              "cloud/overview",
               "getting-started/backends",
               "getting-started/agents"
-            ]
-          },
-          {
-            "group": "Cloud",
-            "icon": "cloud",
-            "pages": [
-              "cloud/overview",
-              "cloud/compatibility"
             ]
           },
           {
@@ -513,6 +506,10 @@
     {
       "source": "/recipes/use-cases/ai-coding-agent",
       "destination": "/getting-started/agents"
+    },
+    {
+      "source": "/cloud/compatibility",
+      "destination": "/cloud/overview#compatibility"
     }
   ],
   "integrations": {

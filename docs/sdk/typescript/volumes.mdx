@@ -186,7 +186,7 @@ Delete a named volume and its contents. Fails if the volume is currently mounted
 
 #### <span className="msb-recv">volume.</span><span className="msb-hn">fs()</span>
 
-<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Available for cloud default and managed directory volumes."><span className="msb-badge-note">Available on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 fs(): VolumeFs
@@ -355,7 +355,7 @@ Host-side filesystem operations for a named volume.
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">read()</span>
 
-<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Available for cloud default and managed directory volumes."><span className="msb-badge-note">Available on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 read(path: string): Promise<Uint8Array>
@@ -391,7 +391,7 @@ Read a file's full contents as bytes.
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">readToString()</span>
 
-<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Available for cloud default and managed directory volumes."><span className="msb-badge-note">Available on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 readToString(path: string): Promise<string>
@@ -427,7 +427,7 @@ Read a file's full contents as a UTF-8 string.
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">readStream()</span>
 
-<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Available for cloud default and managed directory volumes."><span className="msb-badge-note">Available on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 readStream(path: string): Promise<VolumeFsReadStream>
@@ -466,7 +466,7 @@ Open a streaming reader for a file, for chunked reads of large files without loa
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">write()</span>
 
-<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Available for cloud default and managed directory volumes."><span className="msb-badge-note">Available on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 write(path: string, data: Uint8Array | string): Promise<void>
@@ -497,7 +497,7 @@ Write a file, replacing any existing contents. Strings are encoded as UTF-8.
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">writeStream()</span>
 
-<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Available for cloud default and managed directory volumes."><span className="msb-badge-note">Available on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 writeStream(path: string): Promise<VolumeFsWriteSink>

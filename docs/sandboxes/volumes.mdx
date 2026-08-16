@@ -238,11 +238,11 @@ msb create docker:dind --name docker-demo \
 
 ### Sharing and host-side access
 
-<Tooltip tip="Host-side access to an unmounted volume is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem instead."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Cloud volumes do not expose a caller-host path, but the volume filesystem API works without a running sandbox."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Mount the same directory-backed named volume into multiple sandboxes when they need to share files. Use `readonly` on consumers that should not write. Disk-backed named volumes are attached as block devices; use one writable sandbox at a time, or read-only mounts where sharing is intended.
 
-Directory-backed named volumes are also accessible from the host without a running sandbox, so you can pre-populate a cache or inspect output after the sandbox stops. Disk-backed named volumes store guest data inside `disk.raw`; host filesystem helpers operate on the managed volume directory, not the filesystem inside the disk image.
+Directory-backed named volumes are also accessible without a running sandbox, so you can pre-populate a cache or inspect output after the sandbox stops. Local volumes expose their host path directly; cloud default and managed directory volumes use the same volume filesystem API shown above. Disk-backed local volumes store guest data inside `disk.raw`; host filesystem helpers operate on the managed volume directory, not the filesystem inside the disk image.
 
 ### Manage volumes
 
