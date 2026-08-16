@@ -18,15 +18,13 @@ msb run -t --name goose-demo --replace \
   debian:bookworm-slim -- sh -lc '
     apt-get update &&
     apt-get install -y --no-install-recommends ca-certificates curl bzip2 git &&
-    export PATH="$HOME/.local/bin:$PATH" &&
     curl -fsSL https://github.com/aaif-goose/goose/releases/download/v1.44.0/download_cli.sh |
-      GOOSE_VERSION=v1.44.0 CONFIGURE=false bash &&
-    ln -s "$HOME/.local/bin/goose" /usr/local/bin/goose &&
+      GOOSE_BIN_DIR=/usr/local/bin GOOSE_VERSION=v1.44.0 CONFIGURE=false bash &&
     exec goose session
   '
 ```
 
-On first launch Goose asks whether to share anonymous usage data, then walks through provider configuration. The symlink puts `goose` on the sandbox's normal `PATH`, including later `msb exec` sessions. `GOOSE_PATH_ROOT` keeps its configuration, data, and session state in the `goose-data` volume.
+On first launch Goose asks whether to share anonymous usage data, then walks through provider configuration. `GOOSE_BIN_DIR` installs the executable on the sandbox's normal `PATH`, including later `msb exec` sessions. `GOOSE_PATH_ROOT` keeps its configuration, data, and session state in the `goose-data` volume.
 
 <Tip>
   To test Goose without copying a project, replace `--copy-dir ./my-project:/workspace` with `--mkdir /workspace`.
