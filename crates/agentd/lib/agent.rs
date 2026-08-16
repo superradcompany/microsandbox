@@ -766,6 +766,10 @@ async fn handle_message(
                     }
                 }
             }
+            // Cancellation owns the correlation through its ordinary terminal response. This
+            // gives SDK dispatch a precise point at which it may retire the route while any raw
+            // records admitted before cancellation are still being discarded.
+            encode_bulk_terminal_failure(msg.id, cancel.kind, cancel.message, out_buf)?;
         }
 
         MessageType::BulkAccepted => {
@@ -1166,6 +1170,37 @@ fn encode_bulk_tcp_failure(id: u32, error: String, out_buf: &mut Vec<u8>) -> Age
         out_buf,
     )?;
     encode_tcp_failed(id, error, out_buf)
+}
+
+/// Emit the operation family's existing terminal failure without recursively sending a cancel.
+fn encode_bulk_terminal_failure(
+    id: u32,
+    kind: BulkKind,
+    error: String,
+    out_buf: &mut Vec<u8>,
+) -> AgentdResult<()> {
+    match kind {
+        BulkKind::Filesystem => {
+            let response = Message::with_payload(
+                MessageType::FsResponse,
+                id,
+                &FsResponse {
+                    ok: false,
+                    error: Some(error),
+                    data: None,
+                },
+            )
+            .map_err(|error| {
+                AgentdError::ExecSession(format!("encode filesystem terminal failure: {error}"))
+            })?;
+            codec::encode_to_buf(&response, out_buf).map_err(|error| {
+                AgentdError::ExecSession(format!(
+                    "encode filesystem terminal failure frame: {error}"
+                ))
+            })
+        }
+        BulkKind::Tcp => encode_tcp_failed(id, error, out_buf),
+    }
 }
 
 fn encode_bulk_cancel(
@@ -1632,5 +1667,27 @@ mod tests {
 
         assert_eq!(activity.activity_seq, 0);
         assert_eq!(activity.counters.guest_messages, 0);
+    }
+
+    #[test]
+    fn bulk_cancellation_uses_each_operations_existing_terminal_type() {
+        for (kind, expected) in [
+            (BulkKind::Filesystem, MessageType::FsResponse),
+            (BulkKind::Tcp, MessageType::TcpFailed),
+        ] {
+            let mut encoded = Vec::new();
+            encode_bulk_terminal_failure(17, kind, "cancelled".into(), &mut encoded).unwrap();
+            let mut bytes = BytesMut::from(encoded.as_slice());
+            let frame = codec::try_decode_frame_from_bytes(&mut bytes)
+                .unwrap()
+                .expect("terminal frame");
+            let DecodedFrame::Control(message) = frame else {
+                panic!("cancellation terminal must be control");
+            };
+            assert_eq!(message.id, 17);
+            assert_eq!(message.t, expected);
+            assert_eq!(message.flags, microsandbox_protocol::message::FLAG_TERMINAL);
+            assert!(bytes.is_empty());
+        }
     }
 }

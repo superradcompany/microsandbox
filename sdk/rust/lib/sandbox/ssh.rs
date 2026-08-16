@@ -17,14 +17,15 @@ use bytes::Bytes;
 use microsandbox_agent_client::AgentFrame;
 use microsandbox_protocol::{
     bulk::{
-        BULK_FLOW_MASK_GUEST_TO_HOST, BULK_FLOW_MASK_HOST_TO_GUEST, BulkCancel, BulkCredit,
-        BulkFinish, BulkFlow, BulkKind, BulkOffer, BulkReceiveState, BulkRecord, BulkSendState,
+        BULK_FLOW_MASK_GUEST_TO_HOST, BULK_FLOW_MASK_HOST_TO_GUEST, BulkCancel, BulkCancelReason,
+        BulkCredit, BulkFinish, BulkFlow, BulkKind, BulkOffer, BulkReceiveState, BulkRecord,
+        BulkSendState,
     },
     fs::{
         FS_CHUNK_SIZE, FsEntryInfo, FsOp, FsOpenOptions, FsRequest, FsResponse, FsResponseData,
         FsSetAttrs,
     },
-    message::{Message, MessageType},
+    message::MessageType,
     tcp::{TcpClose, TcpClosed, TcpConnect, TcpConnected, TcpData, TcpEof, TcpFailed},
 };
 use microsandbox_types::EnvVar;
@@ -1630,11 +1631,27 @@ impl russh::server::Handler for SshSession {
     ) -> Result<(), Self::Error> {
         match self.channels.remove(&channel) {
             Some(ChannelState::Tcp {
-                id, client, relay, ..
+                id,
+                client,
+                bulk,
+                relay,
             }) => {
                 relay.abort();
-                let _ = client.send(id, MessageType::TcpClose, &TcpClose {}).await;
-                client.forget_stream(id).await;
+                if bulk.is_some() {
+                    let _ = client
+                        .cancel_bulk(
+                            id,
+                            &BulkCancel {
+                                kind: BulkKind::Tcp,
+                                reason: BulkCancelReason::CallerCancelled,
+                                message: "SSH direct-tcpip channel was closed".into(),
+                            },
+                        )
+                        .await;
+                } else {
+                    let _ = client.send(id, MessageType::TcpClose, &TcpClose {}).await;
+                    client.forget_stream(id).await;
+                }
             }
             Some(ChannelState::Exec { control, stdin }) => {
                 if let Some(stdin) = stdin {

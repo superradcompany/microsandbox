@@ -63,6 +63,30 @@ describe("AgentClient over a Unix socket relay", () => {
     await client.close();
   });
 
+  it("does not reuse a correlation id after its request completes", async () => {
+    const relay = await startRelay(async (socket) => {
+      await writeHandshake(socket, 1, 3);
+      for (const expectedId of [1, 2]) {
+        const request = await readFrame(socket);
+        expect(request.id).toBe(expectedId);
+        await writeFrame(socket, {
+          id: request.id,
+          flags: FLAG_TERMINAL,
+          body: encodeEnvelope("core.fs.response", { ok: true }),
+        });
+      }
+    });
+
+    const client = await connectUnix(relay.path);
+    const request = typedMessage("core.fs.request", { op: { ping: true } });
+    await expect(client.request(request)).resolves.toBeDefined();
+    await expect(client.request(request)).resolves.toBeDefined();
+    await expect(client.request(request)).rejects.toThrow(
+      "correlation id range exhausted",
+    );
+    await client.close();
+  });
+
   it("routes stream frames and allows follow-up sends", async () => {
     const relay = await startRelay(async (socket) => {
       await writeHandshake(socket, 10, 1024);
