@@ -1,59 +1,142 @@
 ---
-title: Sandbox in Docker
-description: Deploy microsandbox as a Docker container on Linux
+title: Run microsandbox in Docker
+sidebarTitle: Sandbox in Docker
+description: Run the microsandbox CLI from a Linux container with KVM access
 icon: "box"
 ---
 
-<Tooltip tip="This deploys the local microsandbox runtime and requires a Linux host with KVM; it is not a microsandbox cloud workflow."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="The container runs the local microsandbox backend and needs hardware virtualization from its Docker host. It is not a microsandbox cloud workflow."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-<Tip>
-  For production use, we recommend [installing microsandbox natively](/getting-started/quickstart).
-</Tip>
+The published image packages `msb` and `libkrunfw` in a Linux container. It does not replace the hypervisor: the Docker host must still expose `/dev/kvm` so microsandbox can start a microVM inside the container.
 
-microsandbox publishes multi-arch Docker images (amd64/arm64) to GitHub Container Registry. This is an interim solution for environments that require containerized deployment, pending microsandbox implementing the [OCI runtime spec](https://github.com/opencontainers/runtime-spec).
+```text
+host → Linux VM → microsandbox container → microVM
+```
 
-## Prerequisites
+For production hosts, [installing microsandbox directly](/getting-started/quickstart) avoids this extra virtualization layer. The container image is useful when an existing deployment system requires an OCI image.
 
-- A **Linux** host with KVM support (`/dev/kvm` must be available)
-- Docker installed
+## Requirements
 
-## Pull the image
+| Host | Requirement |
+| --- | --- |
+| <Icon icon="linux" size={16} /> **Linux** | KVM enabled with a readable and writable `/dev/kvm` device. |
+| <Icon icon="apple" size={16} /> **macOS** | A Linux container VM with nested virtualization enabled. The tested setup below uses Colima on M3-or-newer Apple Silicon. |
+| <Icon icon="windows" size={16} /> **Windows** | A Linux container VM that exposes nested virtualization and `/dev/kvm`. Docker Desktop and WSL configuration alone do not guarantee that device reaches containers. |
+
+The image supports `linux/amd64` and `linux/arm64`. Architecture compatibility does not imply virtualization support; `/dev/kvm` is the authoritative check.
+
+### macOS with Colima
+
+[Colima supports nested virtualization](https://github.com/abiosoft/colima/blob/main/embedded/defaults/colima.yaml) on M3-or-newer Apple Silicon when its VM type is `vz`. Stop the existing profile, enable the setting, and start it again:
+
+```bash
+colima stop
+colima start --nested-virtualization --save-config
+colima ssh -- ls -l /dev/kvm
+```
+
+`colima status` should report `macOS Virtualization.Framework`. If the profile uses another VM type, do not delete it casually: recreating a Colima profile removes the Docker images, containers, and volumes stored in that profile.
+
+Docker Desktop also runs Linux containers inside a [managed Linux VM](https://docs.docker.com/desktop/features/networking/), but its macOS settings do not provide the Colima setup shown above. Use the preflight below rather than assuming that selecting a particular Docker Desktop VMM exposes nested KVM.
+
+### Windows
+
+WSL 2 supports a [`nestedVirtualization` setting](https://learn.microsoft.com/en-us/windows/wsl/wsl-config#configuration-settings-for-wslconfig), but the Docker engine's Linux environment must also expose `/dev/kvm` to the container. Run the preflight below. If it fails, use the [native Windows installation](/getting-started/quickstart), which uses Windows Hypervisor Platform, or use microsandbox cloud.
+
+## Verify the Docker host
+
+Pull the image, then run `msb doctor` inside it before starting a sandbox:
 
 ```bash
 docker pull ghcr.io/superradcompany/microsandbox:latest
-```
 
-Or pin to a specific version:
-
-```bash
-docker pull ghcr.io/superradcompany/microsandbox:0.4.0
-```
-
-## Run a sandbox
-
-The container requires `--privileged` and `/dev/kvm` access to run microVMs:
-
-```bash
-docker run --privileged --device /dev/kvm \
+docker run --rm --device /dev/kvm \
   ghcr.io/superradcompany/microsandbox:latest \
-  run python --name my-sandbox --replace
+  doctor
 ```
 
-## Persistent data
+A compatible Docker host reports both checks as successful:
 
-By default, sandbox data (images, cache, databases) is stored inside the container and lost when it stops. Mount a volume to persist data across restarts:
+```text
+✓ KVM device   /dev/kvm
+✓ KVM access   read/write
+```
+
+If Docker rejects the device mapping or `msb doctor` reports that `/dev/kvm` is missing, nested virtualization is not reaching the container. Adding `--privileged` cannot create a KVM device that the Docker host does not have.
+
+## Open an interactive sandbox
+
+Run Alpine and attach your terminal to its shell:
 
 ```bash
-docker run --privileged --device /dev/kvm \
-  -v microsandbox_data:/root/.microsandbox \
+docker run --rm -it \
+  --device /dev/kvm \
   ghcr.io/superradcompany/microsandbox:latest \
-  run python --name my-sandbox --replace
+  run alpine --name my-sandbox --replace
 ```
 
-## Available tags
+- `--rm` removes the outer container when it exits.
+- `-it` carries your terminal through Docker and `msb` to the sandbox. Without it, the sandbox can be running with no usable prompt.
+- `--device /dev/kvm` grants the specific hardware interface microsandbox needs. The container does not require Docker's blanket `--privileged` mode.
+
+At the Alpine prompt, verify the guest and exit:
+
+```sh
+uname -a
+exit
+```
+
+## Run one command
+
+For automation, pass a command instead of allocating a terminal:
+
+```bash
+docker run --rm --device /dev/kvm \
+  ghcr.io/superradcompany/microsandbox:latest \
+  run alpine --name my-sandbox --replace -- \
+  echo "hello from a microVM"
+```
+
+The command's output and exit code pass through both layers to the host.
+
+## Persist images and sandboxes
+
+Without a volume, the outer container owns the microsandbox image cache and database. `--rm` deletes them with the container, so the next run downloads Alpine again. Mount a Docker volume when repeated runs should reuse that state:
+
+```bash
+docker volume create microsandbox-data
+
+docker run --rm -it \
+  --device /dev/kvm \
+  --volume microsandbox-data:/root/.microsandbox \
+  ghcr.io/superradcompany/microsandbox:latest \
+  run alpine --name my-sandbox --replace
+```
+
+The Docker volume preserves pulled images, stopped sandboxes, snapshots, and the microsandbox database. Remove it only when that state is no longer needed:
+
+```bash
+docker volume rm microsandbox-data
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="The process exits with SIGABRT before the agent starts">
+    Run the `msb doctor` preflight above. An early abort while entering the VM commonly means the outer Linux environment did not provide usable KVM access.
+  </Accordion>
+  <Accordion title="The command keeps running but shows no prompt">
+    Check that the Docker command includes `-it`. From another terminal, `docker ps` may show that the outer container is running even though its standard input and terminal were not attached.
+  </Accordion>
+  <Accordion title="The guest image downloads on every run">
+    Mount `microsandbox-data` at `/root/.microsandbox`. An ephemeral outer container otherwise starts with an empty microsandbox cache.
+  </Accordion>
+</AccordionGroup>
+
+## Image tags
 
 | Tag | Description |
-|-----|-------------|
-| `latest` | Latest release |
-| `x.y.z` (e.g. `0.4.0`) | Specific version |
-| `x.y` (e.g. `0.4`) | Latest patch of a minor version |
+| --- | --- |
+| `latest` | Latest microsandbox release. |
+| `x.y.z` | Exact release version. |
+| `x.y` | Latest patch release in a minor series. |
