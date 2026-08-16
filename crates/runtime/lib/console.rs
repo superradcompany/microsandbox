@@ -284,6 +284,7 @@ impl QueuedBytes {
     }
 
     /// Copy and release up to `out.len()` bytes from the front of the fragment.
+    #[cfg(unix)]
     fn copy_prefix_into(&mut self, out: &mut [u8]) -> usize {
         let len = self.len().min(out.len());
         out[..len].copy_from_slice(&self.bytes[..len]);
