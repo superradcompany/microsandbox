@@ -19,7 +19,9 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use bytes::{Buf, Bytes};
+#[cfg(unix)]
+use bytes::Buf;
+use bytes::Bytes;
 use crossbeam_queue::ArrayQueue;
 use microsandbox_utils::wake_pipe::WakePipe;
 #[cfg(unix)]
