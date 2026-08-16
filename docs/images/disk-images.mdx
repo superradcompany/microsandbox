@@ -4,6 +4,8 @@ description: Boot from QCOW2, Raw, or VMDK disk images
 icon: "compact-disc"
 ---
 
+<Tooltip tip="Booting from a disk image references a file on the caller host and is local-only. On microsandbox cloud, publish the filesystem as an OCI image instead."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 In addition to OCI container images, microsandbox can boot a sandbox directly from a disk image file. The guest gets raw block device access, and its kernel mounts the filesystem from the device directly.
 
 This is a fundamentally different path from OCI images. With OCI, microsandbox stacks image layers as a copy-on-write filesystem. With disk images, the guest owns the block device. No overlay, no copy-on-write between sandboxes.

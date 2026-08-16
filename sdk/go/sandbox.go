@@ -23,6 +23,9 @@ type Sandbox struct {
 	inner *ffi.Sandbox
 }
 
+// BackendKind returns the backend retained by this sandbox.
+func (s *Sandbox) BackendKind() BackendKind { return BackendKind(s.inner.BackendKind()) }
+
 // CreateSandbox creates and boots a new sandbox. The returned Sandbox owns the
 // VM process — call Close (or Stop + Close) when done.
 //
@@ -67,35 +70,47 @@ func resolveRegistryCACertPaths(o *SandboxConfig) error {
 // Extracted so tests can assert the JSON envelope without booting the runtime.
 func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 	ffiOpts := ffi.CreateOptions{
-		Image:            o.Image,
-		ImageFstype:      o.ImageFstype,
-		ImageBind:        o.ImageBind,
-		Snapshot:         o.Snapshot,
-		MemoryMiB:        o.MemoryMiB,
-		CPUs:             o.CPUs,
-		MaxMemoryMiB:     o.MaxMemoryMiB,
-		MaxCPUs:          o.MaxCPUs,
-		Workdir:          o.Workdir,
-		Shell:            o.Shell,
-		SecurityProfile:  string(o.SecurityProfile),
-		Hostname:         o.Hostname,
-		User:             o.User,
-		Replace:          o.Replace,
-		Env:              o.Env,
-		Labels:           o.Labels,
-		Detached:         o.Detached,
-		Ephemeral:        o.Ephemeral,
-		Entrypoint:       o.Entrypoint,
-		LogLevel:         string(o.LogLevel),
-		QuietLogs:        o.QuietLogs,
-		Scripts:          o.Scripts,
-		PullPolicy:       string(o.PullPolicy),
-		MaxDurationSecs:  durationSecsCeil(o.MaxDuration),
-		IdleTimeoutSecs:  durationSecsCeil(o.IdleTimeout),
-		Ports:            o.Ports,
-		PortsUDP:         o.PortsUDP,
-		PortBindings:     buildFFIPortBindings(o.PortBindings),
-		RegistryInsecure: o.RegistryInsecure,
+		Image:             o.Image,
+		ImageFstype:       o.ImageFstype,
+		ImageBind:         o.ImageBind,
+		Snapshot:          o.Snapshot,
+		MemoryMiB:         o.MemoryMiB,
+		CPUs:              o.CPUs,
+		MaxMemoryMiB:      o.MaxMemoryMiB,
+		MaxCPUs:           o.MaxCPUs,
+		CPUPlacement:      string(o.CPUPlacement),
+		PlacementProfile:  o.PlacementProfile,
+		THP:               string(o.THP),
+		Workdir:           o.Workdir,
+		Shell:             o.Shell,
+		SecurityProfile:   string(o.SecurityProfile),
+		DeploymentProfile: string(o.DeploymentProfile),
+		Hostname:          o.Hostname,
+		User:              o.User,
+		Replace:           o.Replace,
+		Env:               o.Env,
+		Labels:            o.Labels,
+		Detached:          o.Detached,
+		Ephemeral:         o.Ephemeral,
+		LogLevel:          string(o.LogLevel),
+		QuietLogs:         o.QuietLogs,
+		Scripts:           o.Scripts,
+		PullPolicy:        string(o.PullPolicy),
+		MaxDurationSecs:   durationSecsCeil(o.MaxDuration),
+		IdleTimeoutSecs:   durationSecsCeil(o.IdleTimeout),
+		Ports:             o.Ports,
+		PortsUDP:          o.PortsUDP,
+		PortBindings:      buildFFIPortBindings(o.PortBindings),
+		Vsock:             buildFFIVsockRoutes(o.Vsock),
+		RegistryInsecure:  o.RegistryInsecure,
+	}
+	if o.Entrypoint != nil {
+		entrypoint := append([]string{}, o.Entrypoint...)
+		ffiOpts.Entrypoint = &entrypoint
+	}
+	if o.Cmd != nil {
+		cmd := append([]string{}, o.Cmd...)
+		ffiOpts.Cmd = &cmd
 	}
 	if o.RootDisk != nil {
 		ffiOpts.RootDisk = buildFFIRootDisk(*o.RootDisk)
@@ -202,6 +217,10 @@ func buildFFIRootDisk(rd RootDiskConfig) *ffi.RootDiskSpec {
 		spec.Path = rd.Path
 		spec.Format = rd.Format
 		spec.Fstype = rd.Fstype
+	case RootDiskKindFlat:
+		spec.Kind = "flat"
+		spec.Fstype = rd.Fstype
+		spec.Clone = string(rd.Clone)
 	default:
 		// Managed, including zero-valued configs built without the factory.
 		spec.Kind = "managed"
@@ -290,6 +309,7 @@ func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 		IPv4Pool:            n.IPv4Pool,
 		IPv6Pool:            n.IPv6Pool,
 		MaxConnections:      n.MaxConnections,
+		RateLimiter:         buildFFINetworkRateLimiter(n.RateLimiter),
 		OnSecretViolation:   string(n.OnSecretViolation),
 		TrustHostCAs:        n.TrustHostCAs,
 	}
@@ -355,6 +375,44 @@ func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 	return out
 }
 
+func buildFFINetworkRateLimiter(l *NetworkRateLimiterConfig) *ffi.NetworkRateLimiterOptions {
+	if l == nil {
+		return nil
+	}
+	return &ffi.NetworkRateLimiterOptions{
+		Egress:  buildFFIRateLimiter(l.Egress),
+		Ingress: buildFFIRateLimiter(l.Ingress),
+	}
+}
+
+func buildFFIRateLimiter(l *RateLimiterConfig) *ffi.RateLimiterOptions {
+	if l == nil {
+		return nil
+	}
+	return &ffi.RateLimiterOptions{
+		Bandwidth: buildFFITokenBucket(l.Bandwidth),
+		Ops:       buildFFITokenBucket(l.Ops),
+	}
+}
+
+func buildFFITokenBucket(b *TokenBucketConfig) *ffi.TokenBucketOptions {
+	if b == nil {
+		return nil
+	}
+	// Keep invalid durations invalid on the wire so the Rust builder returns
+	// a configuration error. Casting a negative Milliseconds result directly
+	// to uint64 would otherwise turn it into an enormous valid interval.
+	var refillTimeMs uint64
+	if b.RefillTime >= time.Millisecond && b.RefillTime%time.Millisecond == 0 {
+		refillTimeMs = uint64(b.RefillTime / time.Millisecond)
+	}
+	return &ffi.TokenBucketOptions{
+		Size:         b.Size,
+		RefillTimeMs: refillTimeMs,
+		OneTimeBurst: b.OneTimeBurst,
+	}
+}
+
 func buildFFIPortBindings(bindings []PortBinding) []ffi.PortBindingOptions {
 	out := make([]ffi.PortBindingOptions, 0, len(bindings))
 	for _, b := range bindings {
@@ -363,6 +421,18 @@ func buildFFIPortBindings(bindings []PortBinding) []ffi.PortBindingOptions {
 			HostPort:  b.HostPort,
 			GuestPort: b.GuestPort,
 			Protocol:  string(b.Protocol),
+		})
+	}
+	return out
+}
+
+func buildFFIVsockRoutes(routes []VsockRoute) []ffi.VsockRouteOptions {
+	out := make([]ffi.VsockRouteOptions, 0, len(routes))
+	for _, route := range routes {
+		out = append(out, ffi.VsockRouteOptions{
+			HostSocket: route.HostSocket,
+			Port:       route.Port,
+			SocketType: string(route.SocketType),
 		})
 	}
 	return out
@@ -558,15 +628,21 @@ type SandboxHandle struct {
 	configJSON    string
 	createdAtUnix *int64
 	updatedAtUnix *int64
+	backendKind   BackendKind
 }
 
 func newSandboxHandle(info *ffi.SandboxHandleInfo) *SandboxHandle {
+	backendKind := BackendKind(info.BackendKind)
+	if backendKind == "" {
+		backendKind = BackendUnknown
+	}
 	return &SandboxHandle{
 		name:          info.Name,
 		status:        SandboxStatus(info.Status),
 		configJSON:    info.ConfigJSON,
 		createdAtUnix: info.CreatedAtUnix,
 		updatedAtUnix: info.UpdatedAtUnix,
+		backendKind:   backendKind,
 	}
 }
 
@@ -575,6 +651,9 @@ func (h *SandboxHandle) Name() string { return h.name }
 
 // Status returns the sandbox's last-known lifecycle status.
 func (h *SandboxHandle) Status() SandboxStatus { return h.status }
+
+// BackendKind returns the backend retained by this handle.
+func (h *SandboxHandle) BackendKind() BackendKind { return h.backendKind }
 
 // ConfigJSON returns the raw JSON configuration stored for this sandbox.
 func (h *SandboxHandle) ConfigJSON() string { return h.configJSON }
@@ -800,7 +879,40 @@ func (s *Sandbox) OwnsLifecycleOrFalse() bool {
 // The caller's terminal must be a real TTY; this is primarily useful for
 // CLI tools, not library code.
 func (s *Sandbox) Attach(ctx context.Context, cmd string, args ...string) (int, error) {
-	code, err := s.inner.Attach(ctx, cmd, args)
+	code, err := s.inner.Attach(ctx, cmd, ffi.AttachOptions{Args: args})
+	return code, wrapFFI(err)
+}
+
+// AttachDefault starts an interactive PTY session for the effective OCI entrypoint and CMD.
+func (s *Sandbox) AttachDefault(ctx context.Context, opts ...AttachOption) (int, error) {
+	o := AttachConfig{}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	code, err := s.inner.AttachDefault(ctx, ffi.AttachOptions{
+		Cwd:        o.Cwd,
+		User:       o.User,
+		Env:        o.Env,
+		DetachKeys: o.DetachKeys,
+	})
+	return code, wrapFFI(err)
+}
+
+// AttachWith starts an interactive PTY session running cmd with args, applying
+// the given options. Otherwise identical to Attach.
+func (s *Sandbox) AttachWith(ctx context.Context, cmd string, args []string, opts ...AttachOption) (int, error) {
+	o := AttachConfig{}
+	for _, opt := range opts {
+		opt(&o)
+	}
+
+	code, err := s.inner.Attach(ctx, cmd, ffi.AttachOptions{
+		Args:       args,
+		Cwd:        o.Cwd,
+		User:       o.User,
+		Env:        o.Env,
+		DetachKeys: o.DetachKeys,
+	})
 	return code, wrapFFI(err)
 }
 

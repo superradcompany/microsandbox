@@ -19,13 +19,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable branch tracks latest
         with:
           toolchain: nightly
 
-      - uses: taiki-e/install-action@ace6ebe54a6a0c86dfb5f7764b17f793b6925bc3 # v2
+      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2
         with:
           tool: cargo-fuzz
 
@@ -37,9 +37,9 @@ jobs:
       - name: Build agentd (musl)
         run: |
           rustup target add --toolchain stable x86_64-unknown-linux-musl
-          cargo +stable build --release --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl
+          cargo +stable build --profile ci --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl
           mkdir -p build
-          cp target/x86_64-unknown-linux-musl/release/agentd build/agentd
+          cp target/x86_64-unknown-linux-musl/ci/agentd build/agentd
 
       - name: Fuzz unpack_archive (10 min budget)
         working-directory: sdk/rust

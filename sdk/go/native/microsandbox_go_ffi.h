@@ -344,6 +344,15 @@ char *msb_sandbox_exec(uint64_t cancel_id,
                        unsigned char *buf,
                        uintptr_t buf_len);
 
+/**
+ * Execute the sandbox's effective OCI entrypoint and CMD with collected output.
+ */
+char *msb_sandbox_exec_default(uint64_t cancel_id,
+                               Handle handle,
+                               const char *exec_opts_json,
+                               unsigned char *buf,
+                               uintptr_t buf_len);
+
 char *msb_sandbox_metrics(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
 
 char *msb_fs_read(uint64_t cancel_id,
@@ -507,6 +516,15 @@ char *msb_sandbox_exec_stream(uint64_t cancel_id,
                               uintptr_t buf_len);
 
 /**
+ * Start a streaming exec of the sandbox's effective OCI entrypoint and CMD.
+ */
+char *msb_sandbox_exec_default_stream(uint64_t cancel_id,
+                                      Handle handle,
+                                      const char *exec_opts_json,
+                                      unsigned char *buf,
+                                      uintptr_t buf_len);
+
+/**
  * Receive the next event from a streaming exec session.
  * Blocks until an event is available or the stream ends.
  * Returns {"event":"done"} when all events have been consumed.
@@ -617,11 +635,31 @@ char *msb_sandbox_remove_persisted(uint64_t cancel_id,
 char *msb_volume_get(uint64_t cancel_id, const char *name, unsigned char *buf, uintptr_t buf_len);
 
 /**
+ * Return the cloud account's always-present default volume metadata.
+ */
+char *msb_volume_get_default(uint64_t cancel_id, unsigned char *buf, uintptr_t buf_len);
+
+/**
+ * Dispatch a buffered volume filesystem operation for the Go binding.
+ */
+char *msb_volume_fs_op(uint64_t cancel_id,
+                       const char *target,
+                       const char *op,
+                       const char *args_json,
+                       unsigned char *buf,
+                       uintptr_t buf_len);
+
+/**
  * Returns the upstream `microsandbox` crate version this FFI was built against.
  * Synchronous; no Rust-side state is touched. The Go SDK exposes this so callers
  * can verify the loaded library matches the expected runtime.
  */
 char *msb_version(unsigned char *buf, uintptr_t buf_len);
+
+/**
+ * Return secret-safe information about the active default backend.
+ */
+char *msb_default_backend_info(unsigned char *buf, uintptr_t buf_len);
 
 char *msb_image_get(uint64_t cancel_id,
                     const char *reference,
@@ -842,6 +880,15 @@ char *msb_sandbox_attach(uint64_t cancel_id,
                          const char *opts_json,
                          unsigned char *buf,
                          uintptr_t buf_len);
+
+/**
+ * Attach to the sandbox's effective OCI entrypoint and CMD.
+ */
+char *msb_sandbox_attach_default(uint64_t cancel_id,
+                                 Handle handle,
+                                 const char *opts_json,
+                                 unsigned char *buf,
+                                 uintptr_t buf_len);
 
 /**
  * Attach to the sandbox's default shell.

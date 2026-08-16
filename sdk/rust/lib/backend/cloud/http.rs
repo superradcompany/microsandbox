@@ -242,7 +242,7 @@ impl CloudBackend {
         opts: &LogStreamOptions,
     ) -> MicrosandboxResult<LogStream> {
         let mut query = Vec::new();
-        let cloud_sources = cloud_log_sources(&opts.sources)?;
+        let cloud_sources = cloud_log_sources(&opts.sources);
         if !cloud_sources.is_empty() {
             query.push(format!("sources={}", cloud_sources.join(",")));
         }
@@ -304,6 +304,18 @@ impl CloudBackend {
         decode_json(resp, "GET /v1/volumes").await
     }
 
+    /// `GET /v1/volumes/default`.
+    pub(in crate::backend) async fn get_default_volume(&self) -> MicrosandboxResult<CloudVolume> {
+        let url = format!("{}/v1/volumes/default", self.url);
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| cloud_io_error("GET /v1/volumes/default", e))?;
+        decode_json(resp, "GET /v1/volumes/default").await
+    }
+
     /// `POST /v1/volumes`.
     pub(in crate::backend) async fn create_volume(
         &self,
@@ -357,6 +369,39 @@ impl CloudBackend {
             .find(|volume| volume.name.as_deref() == Some(name))
             .ok_or_else(|| MicrosandboxError::VolumeNotFound(name.to_string()))
     }
+
+    /// Send a volume filesystem request and preserve the streaming response.
+    pub(in crate::backend) async fn volume_file_request(
+        &self,
+        method: reqwest::Method,
+        id: &str,
+        suffix: &str,
+        headers: &[(&str, String)],
+        json: Option<serde_json::Value>,
+        body: Option<reqwest::Body>,
+    ) -> MicrosandboxResult<Response> {
+        let url = format!(
+            "{}/v1/volumes/{}/files{}",
+            self.url,
+            urlencoding(id),
+            suffix
+        );
+        let mut request = self.http.request(method, &url);
+        for (name, value) in headers {
+            request = request.header(*name, value);
+        }
+        if let Some(json) = json {
+            request = request.json(&json);
+        }
+        if let Some(body) = body {
+            request = request.body(body);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|e| cloud_io_error("volume filesystem request", e))?;
+        ensure_success(response, "volume filesystem request").await
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -387,6 +432,21 @@ async fn decode_json<T: serde::de::DeserializeOwned>(
     ))
 }
 
+async fn ensure_success(resp: Response, op: &str) -> MicrosandboxResult<Response> {
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(resp);
+    }
+    let body_text = resp.text().await.unwrap_or_default();
+    let typed: Option<CloudErrorBody> = serde_json::from_str(&body_text).ok();
+    Err(cloud_http_error(
+        status.as_u16(),
+        typed.as_ref(),
+        &body_text,
+        op,
+    ))
+}
+
 fn cloud_io_error(op: &str, e: reqwest::Error) -> MicrosandboxError {
     tracing::debug!(operation = op, error = %e, "cloud backend transport error");
     MicrosandboxError::Http(e)
@@ -406,8 +466,10 @@ fn cloud_http_error(
 
     match code.as_deref() {
         Some("sandbox_not_found") => return MicrosandboxError::SandboxNotFound(message),
+        Some("volume_not_found") => return MicrosandboxError::VolumeNotFound(message),
+        Some("volume_file_not_found") => return MicrosandboxError::SandboxFsOps(message),
         Some("name_already_exists") => return MicrosandboxError::SandboxAlreadyExists(message),
-        Some("invalid_request") | Some("invalid_sandbox_config") => {
+        Some("invalid_request") | Some("invalid_sandbox_config") | Some("invalid_volume_path") => {
             return MicrosandboxError::InvalidConfig(message);
         }
         Some("orchestrator_unreachable") | Some("nomad_job_failed") => {
@@ -556,21 +618,17 @@ fn cloud_log_event_to_entry(
     }))
 }
 
-fn cloud_log_sources(requested: &[LogSource]) -> MicrosandboxResult<Vec<String>> {
-    if requested.is_empty() {
-        return Ok(Vec::new());
-    }
-
+fn cloud_log_sources(requested: &[LogSource]) -> Vec<String> {
     LogSource::effective(requested)
         .into_iter()
-        .map(|source| match source {
-            LogSource::Stdout => Ok("stdout".to_string()),
-            LogSource::Stderr => Ok("stderr".to_string()),
-            LogSource::System => Ok("system".to_string()),
-            LogSource::Output => Err(MicrosandboxError::unsupported(
-                Operation::SandboxLogStream,
-                UnsupportedReason::ConfigField("LogSource::Output"),
-            )),
+        .map(|source| {
+            match source {
+                LogSource::Stdout => "stdout",
+                LogSource::Stderr => "stderr",
+                LogSource::System => "system",
+                LogSource::Output => "output",
+            }
+            .to_string()
         })
         .collect()
 }
@@ -654,6 +712,27 @@ mod tests {
     }
 
     #[test]
+    fn cloud_http_error_distinguishes_volume_and_file_not_found() {
+        let volume: CloudErrorBody = serde_json::from_str(
+            r#"{"error":{"code":"volume_not_found","message":"volume missing"}}"#,
+        )
+        .unwrap();
+        let file: CloudErrorBody = serde_json::from_str(
+            r#"{"error":{"code":"volume_file_not_found","message":"path missing"}}"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            cloud_http_error(404, Some(&volume), "", "volume filesystem request"),
+            MicrosandboxError::VolumeNotFound(_)
+        ));
+        assert!(matches!(
+            cloud_http_error(404, Some(&file), "", "volume filesystem request"),
+            MicrosandboxError::SandboxFsOps(_)
+        ));
+    }
+
+    #[test]
     fn cloud_log_sse_event_maps_to_log_entry() {
         let cursor = LogCursor::empty().to_string();
         let block = format!(
@@ -689,9 +768,29 @@ mod tests {
     }
 
     #[test]
-    fn cloud_log_sources_rejects_output_until_cloud_supports_it() {
-        let err = cloud_log_sources(&[LogSource::Output]).unwrap_err();
+    fn cloud_log_sources_include_pty_output() {
+        let sources = cloud_log_sources(&[LogSource::Output]);
 
-        assert!(matches!(err, MicrosandboxError::Unsupported { .. }));
+        assert_eq!(sources, ["output"]);
+    }
+
+    #[test]
+    fn cloud_log_sources_use_the_cross_backend_default() {
+        let sources = cloud_log_sources(&[]);
+
+        assert_eq!(sources, ["stdout", "stderr", "output"]);
+    }
+
+    #[test]
+    fn cloud_log_sse_event_maps_pty_output_to_log_entry() {
+        let block = b"event: log\ndata: {\"source\":\"output\",\"ts\":\"2026-05-31T10:00:00Z\",\"text\":\"pty\"}";
+
+        let item = parse_cloud_sse_item(block, &LogStreamOptions::default()).unwrap();
+
+        let CloudSseItem::Entry(entry) = item else {
+            panic!("expected log entry");
+        };
+        assert_eq!(entry.source, LogSource::Output);
+        assert_eq!(entry.data, Bytes::from_static(b"pty"));
     }
 }

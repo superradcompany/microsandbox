@@ -368,6 +368,14 @@ pub fn warn(msg: &str) {
     eprintln!("{} {msg}", style("warn:").yellow().bold());
 }
 
+/// Print a concise informational notice to stderr.
+///
+/// This uses the same action-line geometry as progress and success output so
+/// diagnostics remain visually consistent without contaminating stdout.
+pub fn notice(label: &str, detail: &str) {
+    eprintln!("   {} {:<12} {}", style("•").cyan(), label, detail);
+}
+
 /// Print a warning message with `→`-prefixed context lines.
 ///
 /// Mirrors [`error_with_lines`] but with a yellow `warn:` label. As there, the
@@ -463,6 +471,32 @@ pub fn parse_size_mib(s: &str) -> Result<u32, String> {
     }
 }
 
+/// Parse a byte-precision size string: raw bytes plus binary `K`, `M`,
+/// and `G` suffixes (e.g. `1048576`, `512K`, `1M`, `2G`).
+///
+/// The whole-byte sibling of [`parse_size_mib`], for values (like network
+/// rate limit buckets) that need finer than MiB granularity.
+pub fn parse_size_bytes(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    let (digits, multiplier) = if let Some(n) = s.strip_suffix('K').or_else(|| s.strip_suffix('k'))
+    {
+        (n, 1024u64)
+    } else if let Some(n) = s.strip_suffix('M').or_else(|| s.strip_suffix('m')) {
+        (n, 1024 * 1024)
+    } else if let Some(n) = s.strip_suffix('G').or_else(|| s.strip_suffix('g')) {
+        (n, 1024 * 1024 * 1024)
+    } else {
+        (s, 1)
+    };
+    let value: u64 = digits
+        .trim()
+        .parse()
+        .map_err(|e| format!("invalid size `{s}` (expected raw bytes or K/M/G suffix): {e}"))?;
+    value
+        .checked_mul(multiplier)
+        .ok_or_else(|| format!("size `{s}` overflows u64 bytes"))
+}
+
 /// Parse an environment variable specification (KEY=value or KEY).
 pub fn parse_env(s: &str) -> Result<(String, String), String> {
     if let Some(eq_pos) = s.find('=') {
@@ -519,6 +553,25 @@ pub fn format_rfc3339_datetime(s: &str) -> Result<String, chrono::ParseError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn parse_size_bytes_accepts_raw_bytes_and_binary_suffixes() {
+        assert_eq!(super::parse_size_bytes("1048576").unwrap(), 1024 * 1024);
+        assert_eq!(super::parse_size_bytes("512K").unwrap(), 512 * 1024);
+        assert_eq!(super::parse_size_bytes("1M").unwrap(), 1024 * 1024);
+        assert_eq!(
+            super::parse_size_bytes("2G").unwrap(),
+            2 * 1024 * 1024 * 1024
+        );
+        assert_eq!(
+            super::parse_size_bytes("2g").unwrap(),
+            2 * 1024 * 1024 * 1024
+        );
+
+        assert!(super::parse_size_bytes("1.5M").is_err());
+        assert!(super::parse_size_bytes("abc").is_err());
+        assert!(super::parse_size_bytes(&format!("{}G", u64::MAX)).is_err());
+    }
+
     #[test]
     fn json_datetime_uses_rfc3339_utc() {
         let dt = chrono::DateTime::parse_from_rfc3339("2026-05-31T09:09:00Z")

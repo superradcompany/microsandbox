@@ -119,6 +119,7 @@ impl IcmpRelay {
         frame: &[u8],
         config: &PollLoopConfig,
         policy: &NetworkPolicy,
+        platform_policy: Option<&NetworkPolicy>,
     ) -> bool {
         let Ok(eth) = EthernetFrame::new_checked(frame) else {
             return false;
@@ -126,10 +127,10 @@ impl IcmpRelay {
 
         match eth.ethertype() {
             EthernetProtocol::Ipv4 if matches!(self.backend_v4, EchoBackend::Available) => {
-                self.try_relay_icmpv4(&eth, config, policy)
+                self.try_relay_icmpv4(&eth, config, policy, platform_policy)
             }
             EthernetProtocol::Ipv6 if matches!(self.backend_v6, EchoBackend::Available) => {
-                self.try_relay_icmpv6(&eth, config, policy)
+                self.try_relay_icmpv6(&eth, config, policy, platform_policy)
             }
             _ => false,
         }
@@ -143,6 +144,7 @@ impl IcmpRelay {
         eth: &EthernetFrame<&[u8]>,
         config: &PollLoopConfig,
         policy: &NetworkPolicy,
+        platform_policy: Option<&NetworkPolicy>,
     ) -> bool {
         let Ok(ipv4) = Ipv4Packet::new_checked(eth.payload()) else {
             return false;
@@ -170,7 +172,11 @@ impl IcmpRelay {
         };
 
         // Policy check.
-        if policy
+        if platform_policy.is_some_and(|platform| {
+            platform
+                .evaluate_egress_ip(IpAddr::V4(dst_ip), Protocol::Icmpv4, &self.shared)
+                .is_deny()
+        }) || policy
             .evaluate_egress_ip(IpAddr::V4(dst_ip), Protocol::Icmpv4, &self.shared)
             .is_deny()
         {
@@ -214,6 +220,7 @@ impl IcmpRelay {
         eth: &EthernetFrame<&[u8]>,
         config: &PollLoopConfig,
         policy: &NetworkPolicy,
+        platform_policy: Option<&NetworkPolicy>,
     ) -> bool {
         let Ok(ipv6) = Ipv6Packet::new_checked(eth.payload()) else {
             return false;
@@ -246,7 +253,11 @@ impl IcmpRelay {
         };
 
         // Policy check.
-        if policy
+        if platform_policy.is_some_and(|platform| {
+            platform
+                .evaluate_egress_ip(IpAddr::V6(dst_ip), Protocol::Icmpv6, &self.shared)
+                .is_deny()
+        }) || policy
             .evaluate_egress_ip(IpAddr::V6(dst_ip), Protocol::Icmpv6, &self.shared)
             .is_deny()
         {

@@ -56,6 +56,8 @@ import { SandboxSshOps } from "./ssh.js";
 // `Promise<NapiSandbox>`.
 export type SandboxConfig = NapiSandboxConfig;
 
+export type CpuPlacement = "inherit" | "auto" | "spread" | "compact";
+
 export interface SandboxBuilder extends NapiSandboxBuilderSetters {
   create(): Promise<Sandbox>;
   createWithPullProgress(): Promise<PullProgressCreate>;
@@ -164,12 +166,15 @@ export class Sandbox implements AsyncDisposable {
   /** Sandbox name. Names are limited to 128 UTF-8 bytes. */
   readonly name: string;
   readonly ownsLifecycle: boolean;
+  /** Backend retained by this sandbox. */
+  readonly backendKind: "local" | "cloud";
 
   /** @internal use `Sandbox.builder(name).create()` */
   constructor(inner: NapiSandbox, name: string, ownsLifecycle = true) {
     this.inner = inner;
     this.name = name;
     this.ownsLifecycle = ownsLifecycle;
+    this.backendKind = inner.backendKind;
   }
 
   // -- statics ------------------------------------------------------------
@@ -261,6 +266,36 @@ export class Sandbox implements AsyncDisposable {
 
   // -- exec ---------------------------------------------------------------
 
+  async execDefault(): Promise<ExecOutput> {
+    const raw = await withMappedErrors(() => this.inner.execDefault());
+    return new ExecOutput(raw);
+  }
+
+  async execDefaultWith(
+    configure: (b: NapiExecOptionsBuilder) => NapiExecOptionsBuilder,
+  ): Promise<ExecOutput> {
+    const builder = configure(new napi.ExecOptionsBuilder());
+    const raw = await withMappedErrors(() =>
+      this.inner.execDefaultWithBuilder(builder),
+    );
+    return new ExecOutput(raw);
+  }
+
+  async execDefaultStream(): Promise<ExecHandle> {
+    const raw = await withMappedErrors(() => this.inner.execDefaultStream());
+    return new ExecHandle(raw);
+  }
+
+  async execDefaultStreamWith(
+    configure: (b: NapiExecOptionsBuilder) => NapiExecOptionsBuilder,
+  ): Promise<ExecHandle> {
+    const builder = configure(new napi.ExecOptionsBuilder());
+    const raw = await withMappedErrors(() =>
+      this.inner.execDefaultStreamWithBuilder(builder),
+    );
+    return new ExecHandle(raw);
+  }
+
   async exec(cmd: string, args?: Iterable<string>): Promise<ExecOutput> {
     const argv = args ? Array.from(args) : undefined;
     const raw = await withMappedErrors(() => this.inner.exec(cmd, argv));
@@ -308,6 +343,19 @@ export class Sandbox implements AsyncDisposable {
   }
 
   // -- attach -------------------------------------------------------------
+
+  async attachDefault(): Promise<number> {
+    return await withMappedErrors(() => this.inner.attachDefault());
+  }
+
+  async attachDefaultWith(
+    configure: (b: NapiAttachOptionsBuilder) => NapiAttachOptionsBuilder,
+  ): Promise<number> {
+    const builder = configure(new napi.AttachOptionsBuilder());
+    return await withMappedErrors(() =>
+      this.inner.attachDefaultWithBuilder(builder),
+    );
+  }
 
   async attach(cmd: string, args?: Iterable<string>): Promise<number> {
     const argv = args ? Array.from(args) : undefined;

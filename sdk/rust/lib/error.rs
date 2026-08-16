@@ -41,6 +41,12 @@ pub enum MicrosandboxError {
     #[error("invalid config: {0}")]
     InvalidConfig(String),
 
+    /// The sandbox's effective entrypoint and CMD do not provide an executable default command.
+    #[error(
+        "sandbox has no default command; configure an entrypoint or cmd, or execute a literal command"
+    )]
+    NoDefaultCommand,
+
     /// The requested sandbox was not found.
     #[error("sandbox not found: {0}")]
     SandboxNotFound(String),
@@ -315,6 +321,8 @@ pub enum Operation {
     VolumeCreate,
     /// `Volume::get`.
     VolumeGet,
+    /// `Volume::get_default`.
+    VolumeGetDefault,
     /// `Volume::list`.
     VolumeList,
     /// `Volume::remove`.
@@ -440,6 +448,7 @@ impl Operation {
             Operation::SshServerServe => "SshServer::serve",
             Operation::VolumeCreate => "Volume::create",
             Operation::VolumeGet => "Volume::get",
+            Operation::VolumeGetDefault => "Volume::get_default",
             Operation::VolumeList => "Volume::list",
             Operation::VolumeRemove => "Volume::remove",
             Operation::VolumePath => "Volume::path",
@@ -514,6 +523,15 @@ impl From<microsandbox_types::TypesError> for MicrosandboxError {
     fn from(value: microsandbox_types::TypesError) -> Self {
         match value {
             microsandbox_types::TypesError::InvalidConfig(message) => Self::InvalidConfig(message),
+        }
+    }
+}
+
+impl From<microsandbox_types::CommandResolutionError> for MicrosandboxError {
+    fn from(value: microsandbox_types::CommandResolutionError) -> Self {
+        match value {
+            microsandbox_types::CommandResolutionError::NoDefaultCommand => Self::NoDefaultCommand,
+            error => Self::InvalidConfig(error.to_string()),
         }
     }
 }

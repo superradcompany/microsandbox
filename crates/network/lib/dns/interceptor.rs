@@ -97,6 +97,7 @@ impl DnsInterceptor {
         tokio_handle: &tokio::runtime::Handle,
         gateway_ips: Arc<HashSet<IpAddr>>,
         network_policy: Arc<NetworkPolicy>,
+        platform_policy: Option<Arc<NetworkPolicy>>,
         gateway: GatewayIps,
         gateway_mac: [u8; 6],
         guest_mac: [u8; 6],
@@ -137,6 +138,7 @@ impl DnsInterceptor {
             normalized,
             gateway_ips,
             network_policy,
+            platform_policy,
             shared.clone(),
             gateway,
         );

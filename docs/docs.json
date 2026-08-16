@@ -30,7 +30,16 @@
             "pages": [
               "getting-started/introduction",
               "getting-started/quickstart",
+              "getting-started/backends",
               "getting-started/agents"
+            ]
+          },
+          {
+            "group": "Cloud",
+            "icon": "cloud",
+            "pages": [
+              "cloud/overview",
+              "cloud/compatibility"
             ]
           },
           {
@@ -57,8 +66,17 @@
             "icon": "network-wired",
             "pages": [
               "networking/overview",
+              "networking/host-sockets",
               "networking/dns",
               "networking/tls"
+            ]
+          },
+          {
+            "group": "OCI Images",
+            "icon": "layer-group",
+            "pages": [
+              "images/overview",
+              "images/disk-images"
             ]
           },
           {
@@ -70,11 +88,11 @@
             ]
           },
           {
-            "group": "Images",
-            "icon": "layer-group",
+            "group": "Performance",
+            "icon": "bolt",
             "pages": [
-              "images/overview",
-              "images/disk-images"
+              "sandboxes/optimization",
+              "sandboxes/cpu-placement"
             ]
           },
           {
@@ -89,14 +107,16 @@
         ]
       },
       {
-        "tab": "References",
+        "tab": "SDKs & CLI",
         "groups": [
           {
             "group": "Getting Started",
             "icon": "flag",
             "pages": [
               "sdk/overview",
-              "sdk/errors"
+              "sdk/setup",
+              "sdk/errors",
+              "configuration"
             ]
           },
           {
@@ -178,17 +198,116 @@
             "icon": "terminal",
             "pages": [
               "cli/overview",
+              "cli/configuration",
               "cli/sandbox-commands",
               "cli/ssh-commands",
               "cli/volume-commands",
               "cli/image-commands"
             ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "icon": "book-open",
+            "pages": [
+              "api-reference/overview"
+            ]
           },
           {
-            "group": "Configuration",
-            "icon": "gear",
+            "group": "Sandboxes",
+            "icon": "cube",
+            "openapi": {
+              "source": "/api-reference/openapi.json",
+              "directory": "api-reference/endpoints"
+            },
             "pages": [
-              "configuration"
+              "POST /v1/sandboxes",
+              "GET /v1/sandboxes",
+              "GET /v1/sandboxes/{sandbox_id}",
+              "GET /v1/sandboxes/by-name/{name}",
+              "POST /v1/sandboxes/{sandbox_id}/start",
+              "POST /v1/sandboxes/by-name/{name}/start",
+              "POST /v1/sandboxes/{sandbox_id}/stop",
+              "POST /v1/sandboxes/by-name/{name}/stop",
+              "PATCH /v1/sandboxes/{sandbox_id}",
+              "DELETE /v1/sandboxes/{sandbox_id}",
+              "DELETE /v1/sandboxes/by-name/{name}"
+            ]
+          },
+          {
+            "group": "Volumes",
+            "icon": "hard-drive",
+            "openapi": {
+              "source": "/api-reference/openapi.json",
+              "directory": "api-reference/endpoints"
+            },
+            "pages": [
+              "POST /v1/volumes",
+              "GET /v1/volumes",
+              "PATCH /v1/volumes/{id}",
+              "DELETE /v1/volumes/{id}"
+            ]
+          },
+          {
+            "group": "Quotas",
+            "icon": "gauge-high",
+            "openapi": {
+              "source": "/api-reference/openapi.json",
+              "directory": "api-reference/endpoints"
+            },
+            "pages": [
+              "GET /v1/quotas"
+            ]
+          },
+          {
+            "group": "Usage",
+            "icon": "chart-line",
+            "openapi": {
+              "source": "/api-reference/openapi.json",
+              "directory": "api-reference/endpoints"
+            },
+            "pages": [
+              "GET /v1/billing/usage",
+              "GET /v1/billing/usage/sandbox",
+              "GET /v1/billing/usage/storage"
+            ]
+          },
+          {
+            "group": "Audit events",
+            "icon": "clipboard-list",
+            "openapi": {
+              "source": "/api-reference/openapi.json",
+              "directory": "api-reference/endpoints"
+            },
+            "pages": [
+              "GET /v1/events",
+              "GET /v1/events/{event_id}"
+            ]
+          },
+          {
+            "group": "Organization",
+            "icon": "building",
+            "openapi": {
+              "source": "/api-reference/openapi.json",
+              "directory": "api-reference/endpoints"
+            },
+            "pages": [
+              "GET /v1/me/org"
+            ]
+          },
+          {
+            "group": "Members",
+            "icon": "users",
+            "openapi": {
+              "source": "/api-reference/openapi.json",
+              "directory": "api-reference/endpoints"
+            },
+            "pages": [
+              "GET /v1/members"
             ]
           }
         ]
@@ -320,26 +439,79 @@
       },
       {
         "tab": "Changelog",
-        "pages": [
-          "changelog/2026-07-17",
-          "changelog/2026-07-10",
-          "changelog/2026-07-05",
-          "changelog/2026-06-26",
-          "changelog/2026-06-19",
-          "changelog/2026-06-12",
-          "changelog/2026-06-05",
-          "changelog/2026-05-29",
-          "changelog/2026-05-22",
-          "changelog/2026-05-15",
-          "changelog/2026-05-01",
-          "changelog/2026-04-24",
-          "changelog/2026-04-17",
-          "changelog/2026-04-10",
-          "changelog/2026-04-03"
+        "groups": [
+          {
+            "group": "Releases",
+            "icon": "clock-rotate-left",
+            "pages": [
+              {
+                "group": "August 2026",
+                "expanded": true,
+                "pages": [
+                  "changelog/2026-08-07"
+                ]
+              },
+              {
+                "group": "July 2026",
+                "expanded": false,
+                "pages": [
+                  "changelog/2026-07-31",
+                  "changelog/2026-07-24",
+                  "changelog/2026-07-17",
+                  "changelog/2026-07-10",
+                  "changelog/2026-07-05"
+                ]
+              },
+              {
+                "group": "June 2026",
+                "expanded": false,
+                "pages": [
+                  "changelog/2026-06-26",
+                  "changelog/2026-06-19",
+                  "changelog/2026-06-12",
+                  "changelog/2026-06-05"
+                ]
+              },
+              {
+                "group": "May 2026",
+                "expanded": false,
+                "pages": [
+                  "changelog/2026-05-29",
+                  "changelog/2026-05-22",
+                  "changelog/2026-05-15",
+                  "changelog/2026-05-01"
+                ]
+              },
+              {
+                "group": "April 2026",
+                "expanded": false,
+                "pages": [
+                  "changelog/2026-04-24",
+                  "changelog/2026-04-17",
+                  "changelog/2026-04-10",
+                  "changelog/2026-04-03"
+                ]
+              }
+            ]
+          }
         ]
       }
     ]
   },
+  "redirects": [
+    {
+      "source": "/optimization/overview",
+      "destination": "/sandboxes/optimization"
+    },
+    {
+      "source": "/networking/vsock",
+      "destination": "/networking/host-sockets"
+    },
+    {
+      "source": "/sandbox-config",
+      "destination": "/cli/configuration"
+    }
+  ],
   "integrations": {
     "posthog": {
       "apiKey": "phc_mMJPTEQbarHl4JMTdFBcgw5v612dmQrvKv5mcK3KJ3O",
@@ -349,7 +521,7 @@
   "appearance": {
     "default": "system"
   },
-  "description": "Easy, fast, local microVMs for untrusted workloads",
+  "description": "Easy, fast microVMs for untrusted workloads, on your machine or in the cloud",
   "footer": {
     "socials": {
       "github": "https://github.com/superradcompany/microsandbox",

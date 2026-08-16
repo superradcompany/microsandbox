@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 use std::io::Read;
 use std::path::Path;
-use std::{ffi::OsString, fs::File, io, path::PathBuf};
+use std::{fs::File, io, path::PathBuf};
 
 use super::format::{
     EROFS_BLKSIZ, EROFS_DIRENT_SIZE, EROFS_INODE_EXTENDED_SIZE, EROFS_INODE_FLAT_INLINE,
@@ -17,7 +17,7 @@ use super::format::{
     EROFS_XATTR_INDEX_SECURITY, EROFS_XATTR_INDEX_TRUSTED, EROFS_XATTR_INDEX_USER, S_IFBLK,
     S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK, erofs_xattr_align,
 };
-use crate::path_bytes::{os_str_bytes, os_string_from_vec};
+use crate::path_bytes::os_string_from_vec;
 use crate::tree::{InodeMetadata, Xattr};
 
 //--------------------------------------------------------------------------------------------------
@@ -159,7 +159,7 @@ impl ErofsReader {
         let root = self.read_inode(self.root_nid)?;
         let mut entries = Vec::new();
         let mut visited = HashSet::new();
-        self.walk_dir(&root, PathBuf::new(), &mut entries, &mut visited)?;
+        self.walk_dir(&root, Vec::new(), &mut entries, &mut visited)?;
         Ok(entries)
     }
 
@@ -169,9 +169,18 @@ impl ErofsReader {
         E: From<io::Error>,
         F: FnMut(&mut Self, ErofsTreeEntry) -> Result<(), E>,
     {
+        self.walk_entries_with_path_bytes(|reader, _path, entry| visit(reader, entry))
+    }
+
+    /// Walk all entries while retaining canonical guest path bytes for internal image pipelines.
+    pub(crate) fn walk_entries_with_path_bytes<E, F>(&mut self, mut visit: F) -> Result<(), E>
+    where
+        E: From<io::Error>,
+        F: FnMut(&mut Self, &[u8], ErofsTreeEntry) -> Result<(), E>,
+    {
         let root = self.read_inode(self.root_nid)?;
         let mut visited = HashSet::new();
-        self.walk_dir_entries(&root, PathBuf::new(), &mut visited, &mut visit)
+        self.walk_dir_entries(&root, Vec::new(), &mut visited, &mut visit)
     }
 
     /// Create a streaming reader for a regular file inode by NID.
@@ -190,6 +199,47 @@ impl ErofsReader {
             segment_index: 0,
             segment_offset: 0,
         })
+    }
+
+    /// Return the block mapping recorded for a regular file in an image produced by our writer.
+    ///
+    /// Regular files are deliberately emitted as `FLAT_PLAIN`, which lets fsmeta be rebuilt from
+    /// a cached EROFS layer without retaining or re-downloading its source tarball.
+    pub(crate) fn file_block_mapping(&mut self, nid: u32) -> io::Result<(u32, u64)> {
+        let inode = self.read_inode(nid)?;
+        if (inode.mode & S_IFMT) != S_IFREG {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "block mapping is available only for regular files",
+            ));
+        }
+        if inode.size == 0 {
+            return Ok((EROFS_NULL_ADDR, 0));
+        }
+        if inode.data_layout != EROFS_INODE_FLAT_PLAIN || inode.startblk_lo == EROFS_NULL_ADDR {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "regular file does not use the expected flat-plain EROFS layout",
+            ));
+        }
+        Ok((inode.startblk_lo, inode.size))
+    }
+
+    /// Return metadata and xattrs for the filesystem root directory.
+    pub(crate) fn root_directory_metadata(&mut self) -> io::Result<(InodeMetadata, Vec<Xattr>)> {
+        let inode = self.read_inode(self.root_nid)?;
+        if (inode.mode & S_IFMT) != S_IFDIR {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "EROFS root inode is not a directory",
+            ));
+        }
+        let xattrs = self
+            .read_inode_xattrs(&inode)?
+            .into_iter()
+            .map(|(name, value)| Xattr { name, value })
+            .collect();
+        Ok((inode.metadata(), xattrs))
     }
 
     /// Read a symlink target by NID.
@@ -353,7 +403,7 @@ impl ErofsReader {
     fn walk_dir(
         &mut self,
         dir_inode: &InodeInfo,
-        dir_path: PathBuf,
+        dir_path: Vec<u8>,
         entries: &mut Vec<ErofsTreeEntry>,
         visited: &mut HashSet<u32>,
     ) -> io::Result<()> {
@@ -365,11 +415,11 @@ impl ErofsReader {
         }
 
         self.visit_dir_entries::<io::Error, _>(dir_inode, &mut |reader, name, nid| {
-            if os_str_bytes(&name) == b"." || os_str_bytes(&name) == b".." {
+            if name == b"." || name == b".." {
                 return Ok(());
             }
 
-            let path = dir_path.join(&name);
+            let path = join_image_path(&dir_path, name)?;
             let inode = reader.read_inode(nid)?;
             let entry = reader.tree_entry(path.clone(), &inode)?;
             let is_dir = entry.kind == ErofsEntryKind::Directory;
@@ -387,13 +437,13 @@ impl ErofsReader {
     fn walk_dir_entries<E, F>(
         &mut self,
         dir_inode: &InodeInfo,
-        dir_path: PathBuf,
+        dir_path: Vec<u8>,
         visited: &mut HashSet<u32>,
         visit: &mut F,
     ) -> Result<(), E>
     where
         E: From<io::Error>,
-        F: FnMut(&mut Self, ErofsTreeEntry) -> Result<(), E>,
+        F: FnMut(&mut Self, &[u8], ErofsTreeEntry) -> Result<(), E>,
     {
         if !visited.insert(dir_inode.nid) {
             return Err(io::Error::new(
@@ -404,15 +454,15 @@ impl ErofsReader {
         }
 
         self.visit_dir_entries::<E, _>(dir_inode, &mut |reader, name, nid| {
-            if os_str_bytes(&name) == b"." || os_str_bytes(&name) == b".." {
+            if name == b"." || name == b".." {
                 return Ok(());
             }
 
-            let path = dir_path.join(&name);
+            let path = join_image_path(&dir_path, name)?;
             let inode = reader.read_inode(nid)?;
             let entry = reader.tree_entry(path.clone(), &inode)?;
             let is_dir = entry.kind == ErofsEntryKind::Directory;
-            visit(reader, entry)?;
+            visit(reader, &path, entry)?;
 
             if is_dir {
                 reader.walk_dir_entries(&inode, path, visited, visit)?;
@@ -426,7 +476,7 @@ impl ErofsReader {
     fn visit_dir_entries<E, F>(&mut self, dir_inode: &InodeInfo, visit: &mut F) -> Result<(), E>
     where
         E: From<io::Error>,
-        F: FnMut(&mut Self, OsString, u32) -> Result<(), E>,
+        F: FnMut(&mut Self, &[u8], u32) -> Result<(), E>,
     {
         if (dir_inode.mode & S_IFMT) != S_IFDIR {
             return Err(
@@ -448,18 +498,14 @@ impl ErofsReader {
                 if name.is_empty() {
                     continue;
                 }
-                visit(
-                    self,
-                    os_string_from_vec(name.to_vec())?,
-                    dirent_nid(&block, idx)?,
-                )?;
+                visit(self, name, dirent_nid(&block, idx)?)?;
             }
         }
 
         Ok(())
     }
 
-    fn tree_entry(&mut self, path: PathBuf, inode: &InodeInfo) -> io::Result<ErofsTreeEntry> {
+    fn tree_entry(&mut self, path: Vec<u8>, inode: &InodeInfo) -> io::Result<ErofsTreeEntry> {
         let kind = inode_kind(inode)?;
         let rdev = if matches!(
             kind,
@@ -471,7 +517,7 @@ impl ErofsReader {
         };
 
         Ok(ErofsTreeEntry {
-            path,
+            path: PathBuf::from(os_string_from_vec(path)?),
             nid: inode.nid,
             kind,
             metadata: inode.metadata(),
@@ -820,6 +866,27 @@ impl Read for ErofsFileDataReader {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Append one EROFS directory entry using the image's canonical separator.
+///
+/// Image paths belong to the Linux guest namespace, so host-native path joining
+/// must not turn `/` into `\` when materialization runs on Windows.
+fn join_image_path(parent: &[u8], name: &[u8]) -> io::Result<Vec<u8>> {
+    if name.is_empty() || name.contains(&b'/') || name.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "EROFS directory entry contains an invalid name",
+        ));
+    }
+
+    let mut path = Vec::with_capacity(parent.len() + usize::from(!parent.is_empty()) + name.len());
+    path.extend_from_slice(parent);
+    if !parent.is_empty() {
+        path.push(b'/');
+    }
+    path.extend_from_slice(name);
+    Ok(path)
+}
+
 fn read_exact_at(file: &File, offset: u64, mut buf: &mut [u8]) -> io::Result<()> {
     let mut current_offset = offset;
     while !buf.is_empty() {
@@ -1003,6 +1070,7 @@ mod tests {
     use super::ErofsReader;
     use crate::{
         erofs::write_erofs,
+        path_bytes::path_bytes,
         tree::{FileData, FileTree, InodeMetadata, RegularFileId, RegularFileNode, TreeNode},
     };
 
@@ -1047,6 +1115,39 @@ mod tests {
             .entry_info("/dir/file-9999.txt")
             .expect_err("missing entry should fail");
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn walk_uses_guest_separators_on_every_host() {
+        let mut tree = FileTree::new();
+        tree.insert(b"etc/passwd", make_regular_file(b"root:x:0:0"))
+            .expect("insert nested file");
+
+        let output_dir = tempdir().expect("tempdir");
+        let output = output_dir.path().join("nested.erofs");
+        write_erofs(&tree, &output).expect("write erofs");
+
+        let file = File::open(&output).expect("open erofs");
+        let mut reader = ErofsReader::new(file).expect("reader");
+        let paths = reader
+            .walk()
+            .expect("walk erofs")
+            .into_iter()
+            .map(|entry| path_bytes(&entry.path).to_vec())
+            .collect::<Vec<_>>();
+
+        assert!(paths.iter().any(|path| path == b"etc/passwd"));
+        assert!(!paths.iter().any(|path| path == b"etc\\passwd"));
+
+        let mut byte_paths = Vec::new();
+        reader
+            .walk_entries_with_path_bytes::<io::Error, _>(|_, path, _| {
+                byte_paths.push(path.to_vec());
+                Ok(())
+            })
+            .expect("walk erofs with canonical bytes");
+        assert!(byte_paths.iter().any(|path| path == b"etc/passwd"));
+        assert!(!byte_paths.iter().any(|path| path == b"etc\\passwd"));
     }
 
     #[test]

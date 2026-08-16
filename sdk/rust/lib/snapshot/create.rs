@@ -32,7 +32,7 @@ pub(super) async fn create_snapshot(
         source_sandbox,
         labels,
         force,
-        record_integrity: _,
+        record_integrity,
         resumable,
     } = config;
 
@@ -122,6 +122,7 @@ pub(super) async fn create_snapshot(
         image_reference,
         manifest_digest_str,
         &source_sandbox,
+        record_integrity,
     )
     .await;
     let (digest, manifest) = match built {
@@ -159,6 +160,7 @@ async fn build_artifact(
     image_reference: String,
     manifest_digest_str: String,
     source_sandbox: &str,
+    record_integrity: bool,
 ) -> MicrosandboxResult<(String, Manifest)> {
     // Copy the upper layer (sparse-aware, see microsandbox_utils::copy).
     let dst_upper = dir.join(DEFAULT_UPPER_FILE);
@@ -182,9 +184,14 @@ async fn build_artifact(
     .await
     .map_err(|e| MicrosandboxError::Custom(format!("snapshot upper fsync task: {e}")))??;
 
-    // File-state identity always binds the exact logical payload. This hash is
-    // mandatory in final schema 1, regardless of the legacy builder option.
-    let integrity = super::verify::compute_sparse_integrity(&dst_upper).await?;
+    // Persistent payload integrity is deliberately opt-in: large allocated
+    // uppers make any independent content pass observable. When requested,
+    // the sparse-aware Merkle construction skips known all-hole subtrees.
+    let integrity = if record_integrity {
+        Some(super::verify::compute_merkle_integrity(&dst_upper).await?)
+    } else {
+        None
+    };
 
     // Build the manifest.
     let mut label_map: BTreeMap<String, String> = BTreeMap::new();
@@ -260,6 +267,9 @@ fn ensure_snapshottable_root_disk(
         ))),
         Some(RootDisk::DiskImage { .. }) => Err(MicrosandboxError::InvalidConfig(format!(
             "sandbox '{source_sandbox}' uses a user-owned disk-image root disk, which microsandbox does not snapshot"
+        ))),
+        Some(RootDisk::Flat { .. }) => Err(MicrosandboxError::InvalidConfig(format!(
+            "sandbox '{source_sandbox}' uses a flat root disk, which is not yet supported by snapshots"
         ))),
         Some(RootDisk::Managed { .. }) | None => Ok(()),
     }
@@ -349,5 +359,61 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("disk-image"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn flat_root_disk_is_rejected_with_a_purposeful_error() {
+        let err = ensure_snapshottable_root_disk(
+            Some(&RootDisk::Flat {
+                size_mib: Some(8192),
+                fstype: None,
+                clone: microsandbox_types::FlatClone::Auto,
+            }),
+            "sb",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("flat"), "unexpected error: {err}");
+        assert!(err.contains("not yet supported"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn artifact_integrity_is_recorded_only_when_requested() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.ext4");
+        std::fs::write(&source, b"snapshot payload").unwrap();
+
+        let without_dir = temp.path().join("without");
+        std::fs::create_dir(&without_dir).unwrap();
+        let (_, without) = build_artifact(
+            &without_dir,
+            &source,
+            Vec::new(),
+            "docker.io/library/alpine:3.20".into(),
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            "box",
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(without.state.as_file().unwrap().upper.integrity, None);
+
+        let with_dir = temp.path().join("with");
+        std::fs::create_dir(&with_dir).unwrap();
+        let (_, with) = build_artifact(
+            &with_dir,
+            &source,
+            Vec::new(),
+            "docker.io/library/alpine:3.20".into(),
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            "box",
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            &with.state.as_file().unwrap().upper.integrity,
+            Some(microsandbox_image::snapshot::UpperIntegrity::FileMerkleBlake3V1 { .. })
+        ));
     }
 }

@@ -28,6 +28,7 @@ func TestErrorKindString(t *testing.T) {
 		{ErrMetricsUnavailable, "MetricsUnavailable"},
 		{ErrUnsupportedOperation, "UnsupportedOperation"},
 		{ErrInternal, "Internal"},
+		{ErrNoDefaultCommand, "NoDefaultCommand"},
 		{ErrorKind(9999), "Unknown"},
 	}
 	for _, c := range cases {
@@ -137,6 +138,7 @@ func TestKindFromFFIAllTags(t *testing.T) {
 		{ffi.KindVolumeNotFound, ErrVolumeNotFound},
 		{ffi.KindVolumeAlreadyExists, ErrVolumeAlreadyExists},
 		{ffi.KindExecTimeout, ErrExecTimeout},
+		{ffi.KindNoDefaultCommand, ErrNoDefaultCommand},
 		{ffi.KindInvalidConfig, ErrInvalidConfig},
 		{ffi.KindInvalidArgument, ErrInvalidArgument},
 		{ffi.KindInvalidHandle, ErrInvalidHandle},

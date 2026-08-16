@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from integration.helpers import IMAGE
-from microsandbox import Image, ImageHandle, ImageInUseError, ImageNotFoundError
+from microsandbox import Image, ImageHandle, ImageInUseError, ImageNotFoundError, PullPolicy
 
 
 async def test_image_list_returns_cached_handles() -> None:
@@ -30,7 +30,7 @@ async def test_image_save_missing_raises_typed_error(tmp_path) -> None:
 
 
 async def test_image_save_and_load_round_trips_archive(sandbox_factory, tmp_path) -> None:
-    await sandbox_factory("py-sdk-image-archive", pull_policy="if_missing")
+    await sandbox_factory("py-sdk-image-archive", pull_policy=PullPolicy.IF_MISSING)
 
     archive_path = tmp_path / "image.tar"
     await Image.save(IMAGE, output_path=str(archive_path))
@@ -52,7 +52,7 @@ async def test_image_save_and_load_round_trips_archive(sandbox_factory, tmp_path
 
 
 async def test_image_management_round_trips_pulled_sandbox_image(sandbox_factory) -> None:
-    await sandbox_factory("py-sdk-image-cache", pull_policy="if_missing")
+    await sandbox_factory("py-sdk-image-cache", pull_policy=PullPolicy.IF_MISSING)
 
     handle = await Image.get(IMAGE)
     assert isinstance(handle, ImageHandle)

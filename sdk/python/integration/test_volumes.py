@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from microsandbox import Volume
+from microsandbox import DiskImageFormat, Volume, VolumeKind
 
 
 @pytest.mark.asyncio
@@ -13,6 +13,8 @@ async def test_volume_lifecycle_metadata_and_host_fs(volume_factory):
     handle = await Volume.get(volume.name)
 
     assert handle.name == volume.name
+    assert handle.kind is VolumeKind.DIRECTORY
+    assert handle.disk_format is None
     assert handle.quota_mib == 64
     assert handle.labels["team"] == "python"
     assert handle.created_at is not None
@@ -30,6 +32,15 @@ async def test_volume_lifecycle_metadata_and_host_fs(volume_factory):
     assert any(entry.path.endswith("greeting.txt") for entry in entries)
     await fs.remove_file("nested/greeting.txt")
     assert await fs.exists("nested/greeting.txt") is False
+
+
+@pytest.mark.asyncio
+async def test_disk_volume_metadata_uses_enums(volume_factory):
+    volume = await volume_factory("py-sdk-disk-vol", kind=VolumeKind.DISK, size_mib=128)
+    handle = await Volume.get(volume.name)
+
+    assert handle.kind is VolumeKind.DISK
+    assert handle.disk_format is DiskImageFormat.RAW
 
 
 @pytest.mark.asyncio

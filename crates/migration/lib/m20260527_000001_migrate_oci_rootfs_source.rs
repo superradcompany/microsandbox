@@ -39,7 +39,7 @@ impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let conn = manager.get_connection();
         let rows = conn
-            .query_all(Statement::from_string(
+            .query_all_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "SELECT id, config FROM sandbox".to_owned(),
             ))
@@ -52,7 +52,7 @@ impl MigrationTrait for Migration {
                 continue;
             };
 
-            conn.execute(Statement::from_sql_and_values(
+            conn.execute_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Sqlite,
                 "UPDATE sandbox SET config = ? WHERE id = ?",
                 [updated.into(), id.into()],

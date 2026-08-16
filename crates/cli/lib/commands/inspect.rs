@@ -3,8 +3,8 @@
 use clap::Args;
 use console::style;
 use microsandbox::sandbox::{
-    HostPermissions, MountOptions, Sandbox, SandboxConfig, SandboxStatus, SecurityProfile,
-    StatVirtualization, VolumeMount,
+    DeploymentProfile, HostPermissions, MountOptions, Sandbox, SandboxConfig, SandboxStatus,
+    SecurityProfile, StatVirtualization, VolumeMount,
 };
 use serde::Serialize;
 
@@ -158,6 +158,21 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
                     ),
                 );
             }
+            Some(microsandbox::sandbox::RootDisk::Flat {
+                size_mib,
+                fstype,
+                clone,
+            }) => {
+                let size = size_mib.map_or("default".to_string(), |mib| format!("{mib} MiB"));
+                ui::detail_kv(
+                    "Root Disk",
+                    &format!(
+                        "{size} (flat, {}, clone={})",
+                        fstype.as_deref().unwrap_or("ext4"),
+                        clone.as_str()
+                    ),
+                );
+            }
             None => {}
         }
 
@@ -175,6 +190,10 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
             ),
         );
         ui::detail_kv_indent(
+            "CPU Placement",
+            &config.spec.resources.cpu_placement.to_string(),
+        );
+        ui::detail_kv_indent(
             "Memory",
             &resource_value(
                 &format!("{} MiB", config.spec.resources.memory_mib),
@@ -188,12 +207,19 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
                 change_for("max_memory"),
             ),
         );
+        ui::detail_kv_indent("THP", config.spec.resources.thp.as_str());
 
         let security = match config.spec.security_profile {
             SecurityProfile::Default => "default",
             SecurityProfile::Restricted => "restricted",
         };
         ui::detail_kv("Security", security);
+
+        let deployment_profile = match config.spec.deployment_profile {
+            DeploymentProfile::SingleTenant => "single-tenant",
+            DeploymentProfile::MultiTenant => "multi-tenant",
+        };
+        ui::detail_kv("Deployment Profile", deployment_profile);
 
         if let Some(ref workdir) = config.spec.runtime.workdir {
             ui::detail_kv("Workdir", workdir);

@@ -1,0 +1,106 @@
+---
+title: CPU placement
+description: Choose where sandbox vCPU threads run on the host
+icon: "microchip"
+---
+
+By default, sandbox vCPU threads follow the host scheduler. On Linux and Windows, Microsandbox can place those threads for you.
+
+## Choose a policy
+
+| Policy | What it does |
+| --- | --- |
+| `inherit` | Leaves placement to the host scheduler. This is the default. |
+| `auto` | Uses available physical cores first, then shares CPUs when needed. |
+| `spread` | Spreads work across physical cores. |
+| `compact` | Keeps work on fewer physical cores for better cache locality. |
+
+Start with `auto` on a dedicated host. Use `spread` for CPU-heavy throughput work. Use `compact` when cache locality or packing more sandboxes onto a host matters most.
+
+<CodeGroup>
+```bash CLI
+msb create python:3.12 --name worker --cpus 2 --cpu-placement spread
+```
+
+```rust Rust
+use microsandbox::sandbox::{CpuPlacement, Sandbox};
+
+let sb = Sandbox::builder("worker")
+    .image("python:3.12")
+    .cpus(2)
+    .cpu_placement(CpuPlacement::Spread)
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("worker")
+  .image("python:3.12")
+  .cpus(2)
+  .cpuPlacement("spread")
+  .create();
+```
+
+```python Python
+from microsandbox import CpuPlacement, Sandbox
+
+sb = await Sandbox.create(
+    "worker",
+    image="python:3.12",
+    cpus=2,
+    cpu_placement=CpuPlacement.SPREAD,
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python:3.12"),
+    m.WithCPUs(2),
+    m.WithCPUPlacement(m.CPUPlacementSpread),
+)
+```
+</CodeGroup>
+
+## Keep CPU and memory on one NUMA node
+
+Large hosts can have more than one NUMA node. A placement profile can keep a sandbox's CPU and memory on the same node.
+
+First, define a named profile in the [global config](/configuration):
+
+```json
+{
+  "runtime": {
+    "placement_profiles": {
+      "latency": {
+        "numa": { "mode": "prefer_single" },
+        "memory": { "mode": "follow_cpu" }
+      }
+    }
+  }
+}
+```
+
+Then select it when you create the sandbox:
+
+```bash
+msb create python:3.12 \
+  --name worker \
+  --cpus 2 \
+  --cpu-placement auto \
+  --placement-profile latency
+```
+
+`prefer_single` uses one node when enough CPU and memory are available. Otherwise, it falls back to normal placement. Use `strict_single` when the sandbox should fail instead of falling back.
+
+## What placement guarantees
+
+- Microsandbox coordinates only sandboxes that share the same `MSB_HOME`.
+- Placement considers the sandbox's maximum CPU count, not only the CPUs online at boot.
+- When exclusive CPU capacity runs out, normal policies may share logical CPUs.
+- Placement does not isolate unrelated host processes or reserve dedicated cores.
+- On macOS, managed policies fall back to `inherit` because hard CPU affinity is not available through a public API.
+- If placement cannot be applied, normal policies fall back to `inherit`. A `strict_single` profile fails instead.
+
+Use `msb inspect worker` to see the resolved policy and placement result.

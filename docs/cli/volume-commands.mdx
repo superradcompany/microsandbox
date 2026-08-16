@@ -9,6 +9,8 @@ Named volumes persist independently of sandboxes and are stored by default under
 
 ## msb volume create
 
+<Tooltip tip="On microsandbox cloud, create a named volume before mounting it; disk-kind volumes and size are not available, and quota must be a whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```bash
 msb volume create my-data
 msb volume create --name my-data
@@ -36,6 +38,8 @@ msb volume ls -q               # Names only
 | `-q`, `--quiet` | Show only volume names |
 
 ## msb volume inspect
+
+<Tooltip tip="Not yet available on microsandbox cloud; read volume metadata through the SDK."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```bash
 msb volume inspect my-data

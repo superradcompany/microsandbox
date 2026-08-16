@@ -1,0 +1,5343 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "microsandbox cloud API",
+    "description": "REST API for microsandbox cloud: sandbox and volume lifecycle, organization context, quotas, usage, and audit events, authenticated with an organization API key.",
+    "version": "0.1.0"
+  },
+  "servers": [
+    {
+      "url": "https://api.microsandbox.dev"
+    }
+  ],
+  "security": [
+    {
+      "api_key": []
+    }
+  ],
+  "paths": {
+    "/v1/sandboxes": {
+      "get": {
+        "tags": [
+          "Sandboxes"
+        ],
+        "summary": "List sandboxes",
+        "operationId": "list_sandboxes",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Pagination cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 20, max 100)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "labels",
+            "in": "query",
+            "description": "JSON object of labels to AND-match",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated list of sandboxes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedSandboxResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_api_key",
+                    "message": "unauthorized",
+                    "details": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "Sandboxes"
+        ],
+        "summary": "Create a sandbox",
+        "operationId": "create_sandbox",
+        "parameters": [
+          {
+            "name": "start",
+            "in": "query",
+            "description": "If `true`, durably queue the sandbox for immediate orchestrator dispatch.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "wait_for",
+            "in": "query",
+            "description": "Optional lifecycle state to wait for after durable start admission.",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/SandboxWaitFor"
+                }
+              ]
+            }
+          },
+          {
+            "name": "wait_timeout",
+            "in": "query",
+            "description": "Server-side wait budget in seconds; valid only with `wait_for`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSandboxRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Sandbox created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SandboxResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_request",
+                    "message": "invalid request",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_api_key",
+                    "message": "unauthorized",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Name already exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "name_already_exists",
+                    "message": "'name' already exists",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Readiness wait capacity exhausted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "rate_limited",
+                    "message": "too many requests",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Orchestrator unreachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "orchestrator_unreachable",
+                    "message": "orchestrator unreachable",
+                    "details": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/sandboxes/by-name/{name}": {
+      "get": {
+        "tags": [
+          "Sandboxes"
+        ],
+        "summary": "Get a sandbox by name",
+        "operationId": "get_by_name",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Sandbox name (unique within the org)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sandbox details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SandboxResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_api_key",
+                    "message": "unauthorized",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Sandbox not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "sandbox_not_found",
+                    "message": "resource not found",
+                    "details": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "Sandboxes"
+        ],
+        "summary": "Destroy a sandbox by name",
+        "operationId": "delete_by_name",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Sandbox name (unique within the org)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sandbox destroyed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_api_key",
+                    "message": "unauthorized",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Sandbox not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "sandbox_not_found",
+                    "message": "resource not found",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Orchestrator unreachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "orchestrator_unreachable",
+                    "message": "orchestrator unreachable",
+                    "details": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/sandboxes/by-name/{name}/start": {
+      "post": {
+        "tags": [
+          "Sandboxes"
+        ],
+        "summary": "Start a sandbox by name",
+        "operationId": "start_by_name",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Sandbox name (unique within the org)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "wait_for",
+            "in": "query",
+            "description": "Optional lifecycle state to wait for after durable start admission.",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/SandboxWaitFor"
+                }
+              ]
+            }
+          },
+          {
+            "name": "wait_timeout",
+            "in": "query",
+            "description": "Server-side wait budget in seconds; valid only with `wait_for`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sandbox start admitted or requested wait completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SandboxResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_api_key",
+                    "message": "unauthorized",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Sandbox not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "sandbox_not_found",
+                    "message": "resource not found",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Invalid state transition",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_state_transition",
+                    "message": "invalid state transition",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Readiness wait capacity exhausted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "rate_limited",
+                    "message": "too many requests",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Orchestrator unreachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "orchestrator_unreachable",
+                    "message": "orchestrator unreachable",
+                    "details": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/sandboxes/by-name/{name}/stop": {
+      "post": {
+        "tags": [
+          "Sandboxes"
+        ],
+        "summary": "Stop a sandbox by name",
+        "operationId": "stop_by_name",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Sandbox name (unique within the org)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sandbox stopping",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SandboxResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_api_key",
+                    "message": "unauthorized",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Sandbox not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "sandbox_not_found",
+                    "message": "resource not found",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Invalid state transition",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_state_transition",
+                    "message": "invalid state transition",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Orchestrator unreachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "orchestrator_unreachable",
+                    "message": "orchestrator unreachable",
+                    "details": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/sandboxes/{sandbox_id}": {
+      "get": {
+        "tags": [
+          "Sandboxes"
+        ],
+        "summary": "Get a sandbox",
+        "operationId": "get_sandbox",
+        "parameters": [
+          {
+            "name": "sandbox_id",
+            "in": "path",
+            "description": "Sandbox ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sandbox details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SandboxResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_api_key",
+                    "message": "unauthorized",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Sandbox not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "sandbox_not_found",
+                    "message": "resource not found",
+                    "details": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "Sandboxes"
+        ],
+        "summary": "Destroy a sandbox",
+        "operationId": "delete_sandbox",
+        "parameters": [
+          {
+            "name": "sandbox_id",
+            "in": "path",
+            "description": "Sandbox ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sandbox destroyed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_api_key",
+                    "message": "unauthorized",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Sandbox not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "sandbox_not_found",
+                    "message": "resource not found",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Sandbox orchestrator unreachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "orchestrator_unreachable",
+                    "message": "orchestrator unreachable",
+                    "details": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "Sandboxes"
+        ],
+        "summary": "Rename a sandbox",
+        "operationId": "update_sandbox",
+        "parameters": [
+          {
+            "name": "sandbox_id",
+            "in": "path",
+            "description": "Sandbox ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateSandboxRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated sandbox",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SandboxResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid name/slug",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_request",
+                    "message": "invalid request",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_api_key",
+                    "message": "unauthorized",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Sandbox not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "sandbox_not_found",
+                    "message": "resource not found",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Name or slug already taken",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "name_already_exists",
+                    "message": "'name' already exists",
+                    "details": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/sandboxes/{sandbox_id}/start": {
+      "post": {
+        "tags": [
+          "Sandboxes"
+        ],
+        "summary": "Start a sandbox",
+        "operationId": "start_sandbox",
+        "parameters": [
+          {
+            "name": "sandbox_id",
+            "in": "path",
+            "description": "Sandbox ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "wait_for",
+            "in": "query",
+            "description": "Optional lifecycle state to wait for after durable start admission.",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/SandboxWaitFor"
+                }
+              ]
+            }
+          },
+          {
+            "name": "wait_timeout",
+            "in": "query",
+            "description": "Server-side wait budget in seconds; valid only with `wait_for`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sandbox start admitted or requested wait completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SandboxResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_api_key",
+                    "message": "unauthorized",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Sandbox not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "sandbox_not_found",
+                    "message": "resource not found",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Invalid state transition",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_state_transition",
+                    "message": "invalid state transition",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Readiness wait capacity exhausted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "rate_limited",
+                    "message": "too many requests",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Orchestrator unreachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "orchestrator_unreachable",
+                    "message": "orchestrator unreachable",
+                    "details": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/sandboxes/{sandbox_id}/stop": {
+      "post": {
+        "tags": [
+          "Sandboxes"
+        ],
+        "summary": "Stop a sandbox",
+        "operationId": "stop_sandbox",
+        "parameters": [
+          {
+            "name": "sandbox_id",
+            "in": "path",
+            "description": "Sandbox ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sandbox stopping",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SandboxResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_api_key",
+                    "message": "unauthorized",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Sandbox not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "sandbox_not_found",
+                    "message": "resource not found",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Invalid state transition",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_state_transition",
+                    "message": "invalid state transition",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Sandbox orchestrator unreachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "orchestrator_unreachable",
+                    "message": "orchestrator unreachable",
+                    "details": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/volumes": {
+      "get": {
+        "tags": [
+          "Volumes"
+        ],
+        "summary": "List volumes",
+        "operationId": "list_volumes",
+        "responses": {
+          "200": {
+            "description": "The org's volumes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/VolumeResponse"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_api_key",
+                    "message": "unauthorized",
+                    "details": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "Volumes"
+        ],
+        "summary": "Create a named volume",
+        "operationId": "create_volume",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateVolumeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Volume created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VolumeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_request",
+                    "message": "invalid request",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_api_key",
+                    "message": "unauthorized",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Volume name already in use",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "name_already_exists",
+                    "message": "'name' already exists",
+                    "details": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/volumes/{id}": {
+      "delete": {
+        "tags": [
+          "Volumes"
+        ],
+        "summary": "Schedule a volume for deletion",
+        "operationId": "delete_volume",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Volume id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Volume scheduled for deletion",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_api_key",
+                    "message": "unauthorized",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Volume not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "sandbox_not_found",
+                    "message": "resource not found",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The default volume cannot be deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_request",
+                    "message": "the host volume cannot be deleted",
+                    "details": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "Volumes"
+        ],
+        "summary": "Set or clear a volume's storage cap",
+        "operationId": "update_volume",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Volume id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateVolumeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Volume updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VolumeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request (e.g. cap exceeds the org cap)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_request",
+                    "message": "invalid request",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_api_key",
+                    "message": "unauthorized",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Volume not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "sandbox_not_found",
+                    "message": "resource not found",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The host volume cannot be capped",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_request",
+                    "message": "the host volume cannot be capped",
+                    "details": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/quotas": {
+      "get": {
+        "tags": [
+          "Quotas"
+        ],
+        "summary": "Get quota usage",
+        "operationId": "get_quotas",
+        "responses": {
+          "200": {
+            "description": "Quota usage",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuotaUsage"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_api_key",
+                    "message": "unauthorized",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Org not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "org_not_found",
+                    "message": "org not found",
+                    "details": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/billing/usage": {
+      "get": {
+        "tags": [
+          "Usage"
+        ],
+        "summary": "Get a usage summary",
+        "operationId": "get_usage",
+        "responses": {
+          "200": {
+            "description": "Usage summary",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageSummary"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_api_key",
+                    "message": "unauthorized",
+                    "details": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/billing/usage/sandbox": {
+      "get": {
+        "tags": [
+          "Usage"
+        ],
+        "summary": "Get per-sandbox usage",
+        "operationId": "get_sandbox_breakdown",
+        "responses": {
+          "200": {
+            "description": "Per-sandbox / per-day usage",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageBreakdown"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_api_key",
+                    "message": "unauthorized",
+                    "details": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/billing/usage/storage": {
+      "get": {
+        "tags": [
+          "Usage"
+        ],
+        "summary": "Get per-volume storage usage",
+        "operationId": "get_storage_breakdown",
+        "responses": {
+          "200": {
+            "description": "Per-volume / per-day storage usage",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StorageBreakdown"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_api_key",
+                    "message": "unauthorized",
+                    "details": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/events": {
+      "get": {
+        "tags": [
+          "Audit events"
+        ],
+        "summary": "List audit events",
+        "operationId": "list_events",
+        "parameters": [
+          {
+            "name": "event_type",
+            "in": "query",
+            "description": "Filter by event type (e.g. \"api_key_created\").",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Only return events at or after this timestamp.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "description": "Only return events at or before this timestamp.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque cursor from a previous response.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Number of items to return (default: 20, max: 100).",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated list of audit events",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedEventResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_api_key",
+                    "message": "unauthorized",
+                    "details": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/events/{event_id}": {
+      "get": {
+        "tags": [
+          "Audit events"
+        ],
+        "summary": "Get an audit event",
+        "operationId": "get_event",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "description": "Event ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Event details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_api_key",
+                    "message": "unauthorized",
+                    "details": null
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Event not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "sandbox_not_found",
+                    "message": "resource not found",
+                    "details": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/me/org": {
+      "get": {
+        "tags": [
+          "Organization"
+        ],
+        "summary": "Get the current organization",
+        "description": "The slug-prefixed `GET /v1/orgs/:slug` returns the user's role; here the\nkey is treated as `Owner` (matches `OrgContext` semantics), so the\nreturned role is informational rather than a real per-user binding.",
+        "operationId": "get_org",
+        "responses": {
+          "200": {
+            "description": "Organization bound to this API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgWithRole"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_api_key",
+                    "message": "unauthorized",
+                    "details": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/members": {
+      "get": {
+        "tags": [
+          "Members"
+        ],
+        "summary": "List organization members",
+        "operationId": "list_members",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Pagination cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 20, max 100)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated list of members",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedMemberResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_api_key",
+                    "message": "unauthorized",
+                    "details": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Action": {
+        "type": "string",
+        "description": "Action to take on traffic matched by a [`Rule`] (or a policy default).",
+        "enum": [
+          "allow",
+          "deny"
+        ]
+      },
+      "CertCacheConfig": {
+        "type": "object",
+        "description": "Per-domain certificate cache configuration.",
+        "properties": {
+          "capacity": {
+            "type": "integer",
+            "description": "Maximum number of cached certificates. Default: 1000.",
+            "minimum": 0
+          },
+          "validity_hours": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Certificate validity duration in hours. Default: 24.",
+            "minimum": 0
+          }
+        }
+      },
+      "CloudCreateSandboxRequest": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CloudSandboxSpec",
+            "description": "The cloud sandbox specification, flattened onto the request body."
+          }
+        ],
+        "description": "Wire shape of a cloud sandbox create request body.\n\nFlattens [`CloudSandboxSpec`] onto the request body, so on the wire this is\nbyte-identical to `CloudSandboxSpec`. The generated bindings surface the\nflattened shape as `CloudSandboxSpec` directly."
+      },
+      "CloudDiskImageFormat": {
+        "type": "string",
+        "description": "Disk image format for cloud disk-image sources. Twin of [`DiskImageFormat`]\nwith a snake_case wire.",
+        "enum": [
+          "qcow2",
+          "raw",
+          "vmdk"
+        ]
+      },
+      "CloudHostPattern": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Exact hostname match.",
+            "required": [
+              "value",
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "exact"
+                ]
+              },
+              "value": {
+                "type": "string",
+                "description": "Hostname to match exactly."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Wildcard match (e.g. `*.openai.com`).",
+            "required": [
+              "value",
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "wildcard"
+                ]
+              },
+              "value": {
+                "type": "string",
+                "description": "Wildcard pattern."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Any host (dangerous - the secret can be exfiltrated).",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "any"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Host allowlist pattern for cloud secrets. Twin of [`HostPattern`], with the\ndomain's scalar variants normalized to `{ value }` for a uniform union."
+      },
+      "CloudNetworkSpec": {
+        "type": "object",
+        "description": "Cloud network specification: a subset of the domain [`NetworkSpec`].\nInterface overrides, host port mapping, DNS, TLS interception, and host-CA\ntrust are not part of this type. `deny_unknown_fields` - posting an omitted\nfield is an error, not a silent drop.",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether networking is enabled for this sandbox.",
+            "default": true
+          },
+          "max_connections": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Max concurrent guest connections.",
+            "default": null,
+            "minimum": 0
+          },
+          "policy": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NetworkPolicy",
+                "description": "Egress/ingress policy."
+              }
+            ],
+            "default": null
+          },
+          "secrets": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CloudSecretsConfig",
+                "description": "Secret-injection config."
+              }
+            ],
+            "default": null
+          }
+        },
+        "additionalProperties": false
+      },
+      "CloudPatch": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Write text content to a file.",
+            "required": [
+              "path",
+              "content",
+              "replace",
+              "type"
+            ],
+            "properties": {
+              "content": {
+                "type": "string",
+                "description": "Text content to write."
+              },
+              "mode": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "File permissions, such as `0o644`. `None` uses the default.",
+                "minimum": 0
+              },
+              "path": {
+                "type": "string",
+                "description": "Absolute guest path, such as `/etc/app.conf`."
+              },
+              "replace": {
+                "type": "boolean",
+                "description": "Allow replacing a file that already exists in the rootfs."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "text"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Write raw bytes to a file.",
+            "required": [
+              "path",
+              "content",
+              "replace",
+              "type"
+            ],
+            "properties": {
+              "content": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                },
+                "description": "Raw byte content to write."
+              },
+              "mode": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "File permissions, such as `0o644`. `None` uses the default.",
+                "minimum": 0
+              },
+              "path": {
+                "type": "string",
+                "description": "Absolute guest path."
+              },
+              "replace": {
+                "type": "boolean",
+                "description": "Allow replacing a file that already exists in the rootfs."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "file"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Copy a file from the host into the rootfs.",
+            "required": [
+              "src",
+              "dst",
+              "replace",
+              "type"
+            ],
+            "properties": {
+              "dst": {
+                "type": "string",
+                "description": "Absolute guest destination path."
+              },
+              "mode": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "File permissions. `None` preserves source permissions.",
+                "minimum": 0
+              },
+              "replace": {
+                "type": "boolean",
+                "description": "Allow replacing a file that already exists in the rootfs."
+              },
+              "src": {
+                "type": "string",
+                "description": "Host path to copy from."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "copy_file"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Copy a directory from the host into the rootfs.",
+            "required": [
+              "src",
+              "dst",
+              "replace",
+              "type"
+            ],
+            "properties": {
+              "dst": {
+                "type": "string",
+                "description": "Absolute guest destination path."
+              },
+              "replace": {
+                "type": "boolean",
+                "description": "Allow replacing files that already exist in the rootfs."
+              },
+              "src": {
+                "type": "string",
+                "description": "Host directory to copy from."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "copy_dir"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Create a symlink.",
+            "required": [
+              "target",
+              "link",
+              "replace",
+              "type"
+            ],
+            "properties": {
+              "link": {
+                "type": "string",
+                "description": "Absolute guest path where the symlink is created."
+              },
+              "replace": {
+                "type": "boolean",
+                "description": "Allow replacing a path that already exists in the rootfs."
+              },
+              "target": {
+                "type": "string",
+                "description": "Symlink target path."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "symlink"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Create a directory.",
+            "required": [
+              "path",
+              "type"
+            ],
+            "properties": {
+              "mode": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Directory permissions, such as `0o755`. `None` uses the default.",
+                "minimum": 0
+              },
+              "path": {
+                "type": "string",
+                "description": "Absolute guest path."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "mkdir"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Remove a file or directory.",
+            "required": [
+              "path",
+              "type"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Absolute guest path to remove."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "remove"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Append content to an existing file.",
+            "required": [
+              "path",
+              "content",
+              "type"
+            ],
+            "properties": {
+              "content": {
+                "type": "string",
+                "description": "Content to append."
+              },
+              "path": {
+                "type": "string",
+                "description": "Absolute guest path of the file to append to."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "append"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Rootfs patch applied before VM start. Twin of [`Patch`], internally tagged\nwith a snake_case `type` instead of the domain's external PascalCase tag."
+      },
+      "CloudPullPolicy": {
+        "type": "string",
+        "description": "Cloud pull policy. Twin of domain [`PullPolicy`] with a snake_case wire.",
+        "enum": [
+          "if_missing",
+          "always",
+          "never"
+        ]
+      },
+      "CloudRlimit": {
+        "type": "object",
+        "description": "A POSIX resource limit. Twin of [`Rlimit`] using [`CloudRlimitResource`].",
+        "required": [
+          "resource",
+          "soft",
+          "hard"
+        ],
+        "properties": {
+          "hard": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Hard limit (ceiling, requires privileges to raise).",
+            "minimum": 0
+          },
+          "resource": {
+            "$ref": "#/components/schemas/CloudRlimitResource",
+            "description": "Resource type."
+          },
+          "soft": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Soft limit (can be raised up to the hard limit by the process).",
+            "minimum": 0
+          }
+        }
+      },
+      "CloudRlimitResource": {
+        "type": "string",
+        "description": "POSIX resource-limit identifiers. Twin of [`RlimitResource`] with a\nsnake_case wire.",
+        "enum": [
+          "cpu",
+          "fsize",
+          "data",
+          "stack",
+          "core",
+          "rss",
+          "nproc",
+          "nofile",
+          "memlock",
+          "as",
+          "locks",
+          "sigpending",
+          "msgqueue",
+          "nice",
+          "rtprio",
+          "rttime"
+        ]
+      },
+      "CloudRootfsSource": {
+        "type": "object",
+        "description": "Root filesystem source. The hosted cloud accepts OCI images only.",
+        "required": [
+          "type",
+          "reference"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "oci"
+            ]
+          },
+          "reference": {
+            "type": "string",
+            "description": "OCI image reference, e.g. `python:3.12`."
+          }
+        }
+      },
+      "CloudSandboxResources": {
+        "type": "object",
+        "description": "Cloud resource request.",
+        "properties": {
+          "disk_size_mib": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Writable disk size in MiB. Applies only to OCI root filesystems.",
+            "default": null,
+            "minimum": 0
+          },
+          "memory_mib": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Guest memory in MiB.",
+            "default": 512,
+            "minimum": 0
+          },
+          "vcpus": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Number of virtual CPUs.",
+            "default": 1,
+            "minimum": 0
+          }
+        }
+      },
+      "CloudSandboxRuntimeOptions": {
+        "type": "object",
+        "description": "Cloud guest runtime options: a subset of [`SandboxRuntimeOptions`]. The\nhostname and the metrics-sampling knobs are not part of this type.\n`deny_unknown_fields`.",
+        "properties": {
+          "cmd": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Command override.",
+            "default": null
+          },
+          "entrypoint": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Entrypoint override.",
+            "default": null
+          },
+          "log_level": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SandboxLogLevel",
+                "description": "Runtime log level."
+              }
+            ],
+            "default": null
+          },
+          "scripts": {
+            "type": "object",
+            "description": "Named in-guest scripts.",
+            "default": {},
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "shell": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Default shell.",
+            "default": null
+          },
+          "user": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Guest user.",
+            "default": null
+          },
+          "workdir": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Working directory for guest commands.",
+            "default": null
+          }
+        },
+        "additionalProperties": false
+      },
+      "CloudSandboxSpec": {
+        "type": "object",
+        "description": "Cloud sandbox specification carried on create routes.",
+        "properties": {
+          "env": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EnvVar"
+            },
+            "description": "Environment variables visible to commands in the sandbox.",
+            "default": []
+          },
+          "image": {
+            "$ref": "#/components/schemas/CloudRootfsSource"
+          },
+          "init": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/HandoffInit",
+                "description": "Hand off PID 1 to a guest init binary after agentd setup."
+              }
+            ],
+            "default": null
+          },
+          "labels": {
+            "type": "object",
+            "description": "User-defined labels attached to the sandbox.",
+            "default": {},
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "lifecycle": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SandboxPolicy",
+                "description": "Sandbox lifecycle policy."
+              }
+            ],
+            "default": {
+              "ephemeral": false,
+              "idle_timeout_secs": null,
+              "max_duration_secs": null
+            }
+          },
+          "mounts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CloudVolumeMount"
+            },
+            "description": "Volume mounts.",
+            "default": []
+          },
+          "name": {
+            "type": "string",
+            "description": "Unique sandbox name.",
+            "default": ""
+          },
+          "network": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CloudNetworkSpec",
+                "description": "Network specification."
+              }
+            ],
+            "default": {
+              "enabled": true
+            }
+          },
+          "patches": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CloudPatch"
+            },
+            "description": "Rootfs patches applied before VM start.",
+            "default": []
+          },
+          "pull_policy": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CloudPullPolicy",
+                "description": "Pull policy for OCI images."
+              }
+            ],
+            "default": "if_missing"
+          },
+          "resources": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CloudSandboxResources",
+                "description": "CPU, memory, and user-facing disk resources."
+              }
+            ],
+            "default": {
+              "memory_mib": 512,
+              "vcpus": 1
+            }
+          },
+          "rlimits": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CloudRlimit"
+            },
+            "description": "Sandbox-wide resource limits inherited by guest processes.",
+            "default": []
+          },
+          "runtime": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CloudSandboxRuntimeOptions",
+                "description": "Guest runtime options."
+              }
+            ],
+            "default": {
+              "cmd": null,
+              "entrypoint": null,
+              "log_level": null,
+              "scripts": {},
+              "shell": null,
+              "user": null,
+              "workdir": null
+            }
+          },
+          "security_profile": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SecurityProfile",
+                "description": "In-guest security profile."
+              }
+            ],
+            "default": "default"
+          }
+        }
+      },
+      "CloudSecretEntry": {
+        "type": "object",
+        "description": "A single cloud secret entry. Twin of domain [`SecretEntry`].",
+        "required": [
+          "env_var",
+          "placeholder"
+        ],
+        "properties": {
+          "allowed_hosts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CloudHostPattern"
+            },
+            "description": "Hosts allowed to receive this secret."
+          },
+          "env_var": {
+            "type": "string",
+            "description": "Environment variable name exposed to the sandbox."
+          },
+          "injection": {
+            "$ref": "#/components/schemas/SecretInjection",
+            "description": "Where the secret may be injected."
+          },
+          "on_violation": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CloudViolationAction",
+                "description": "Per-secret violation action overriding the config default."
+              }
+            ]
+          },
+          "placeholder": {
+            "type": "string",
+            "description": "Placeholder the sandbox sees instead of the real value."
+          },
+          "require_tls_identity": {
+            "type": "boolean",
+            "description": "Require verified TLS identity before substituting (default: true)."
+          },
+          "source": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CloudSecretSource",
+                "description": "Host-side source resolved into `value` at spawn time."
+              }
+            ]
+          },
+          "value": {
+            "type": "string",
+            "description": "The secret value (empty when `source` carries a reference instead)."
+          }
+        }
+      },
+      "CloudSecretSource": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Read from a host environment variable at apply time.",
+            "required": [
+              "var",
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "env"
+                ]
+              },
+              "var": {
+                "type": "string",
+                "description": "Host environment variable name."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Read from a host-side secret store reference.",
+            "required": [
+              "reference",
+              "type"
+            ],
+            "properties": {
+              "reference": {
+                "type": "string",
+                "description": "Store-specific secret reference."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "store"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Host-side source for a cloud secret. Twin of [`SecretSource`]."
+      },
+      "CloudSecretsConfig": {
+        "type": "object",
+        "description": "Secret-injection config for the cloud API. Twin of domain [`SecretsConfig`].",
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CloudSecretEntry"
+            },
+            "description": "Secrets to inject."
+          },
+          "on_violation": {
+            "$ref": "#/components/schemas/CloudViolationAction",
+            "description": "Default action when a placeholder leaks to a disallowed host."
+          }
+        }
+      },
+      "CloudViolationAction": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Block the request silently.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "block"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Block and log (default).",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "block_and_log"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Block and terminate the sandbox.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "block_and_terminate"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Forward the request with the placeholder unchanged for matching hosts.",
+            "required": [
+              "hosts",
+              "type"
+            ],
+            "properties": {
+              "hosts": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/CloudHostPattern"
+                },
+                "description": "Hosts for which the placeholder passes through unchanged."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "passthrough"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Action on a cloud secret violation. Twin of [`ViolationAction`], with\n`Passthrough`'s host list normalized to a `hosts` field."
+      },
+      "CloudVolumeMount": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Bind mount a host directory into the guest.",
+            "required": [
+              "host",
+              "guest",
+              "type"
+            ],
+            "properties": {
+              "guest": {
+                "type": "string",
+                "description": "Guest path to mount at."
+              },
+              "host": {
+                "type": "string",
+                "description": "Host directory to bind into the guest."
+              },
+              "host_permissions": {
+                "$ref": "#/components/schemas/HostPermissions",
+                "description": "Host permission policy applied to the mount."
+              },
+              "options": {
+                "$ref": "#/components/schemas/MountOptions",
+                "description": "Mount options (read-only, no-exec, …)."
+              },
+              "quota_mib": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Optional guest-write quota in MiB.",
+                "minimum": 0
+              },
+              "stat_virtualization": {
+                "$ref": "#/components/schemas/StatVirtualization",
+                "description": "How guest `stat()` results are virtualized."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "bind"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Mount a named volume into the guest.",
+            "required": [
+              "name",
+              "guest",
+              "type"
+            ],
+            "properties": {
+              "guest": {
+                "type": "string",
+                "description": "Guest path to mount at."
+              },
+              "host_permissions": {
+                "$ref": "#/components/schemas/HostPermissions",
+                "description": "Host permission policy applied to the mount."
+              },
+              "name": {
+                "type": "string",
+                "description": "Named volume to mount."
+              },
+              "options": {
+                "$ref": "#/components/schemas/MountOptions",
+                "description": "Mount options (read-only, no-exec, …)."
+              },
+              "stat_virtualization": {
+                "$ref": "#/components/schemas/StatVirtualization",
+                "description": "How guest `stat()` results are virtualized."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "named"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Temporary filesystem backed by guest memory.",
+            "required": [
+              "guest",
+              "type"
+            ],
+            "properties": {
+              "guest": {
+                "type": "string",
+                "description": "Guest path to mount at."
+              },
+              "options": {
+                "$ref": "#/components/schemas/MountOptions",
+                "description": "Mount options (read-only, no-exec, …)."
+              },
+              "size_mib": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Optional size cap in MiB.",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "tmpfs"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Mount a disk image file as a virtio-blk device at a guest path.",
+            "required": [
+              "host",
+              "guest",
+              "format",
+              "type"
+            ],
+            "properties": {
+              "format": {
+                "$ref": "#/components/schemas/CloudDiskImageFormat",
+                "description": "Disk image format."
+              },
+              "fstype": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Inner filesystem type (auto-detected if absent)."
+              },
+              "guest": {
+                "type": "string",
+                "description": "Guest path to mount at."
+              },
+              "host": {
+                "type": "string",
+                "description": "Host path to the disk image file."
+              },
+              "options": {
+                "$ref": "#/components/schemas/MountOptions",
+                "description": "Mount options (read-only, no-exec, …)."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "disk_image"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Cloud volume mount. Internal-tagged mirror of the domain [`VolumeMount`];\nthe transient `create` field is not carried on the wire."
+      },
+      "CreateSandboxRequest": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CloudCreateSandboxRequest",
+            "description": "The microsandbox sandbox specification - image, resources, runtime, env,\nmounts, network, lifecycle - flattened onto the request body."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "registry": {
+                "$ref": "#/components/schemas/RegistrySelection",
+                "description": "Registry-credential selection for the image pull. Absent ⇒ `Auto`\n(infer the credential from the image's registry host). Credential-only:\nthis never changes *where* the image is pulled from - the image string\ncontrols that - only *which* stored credential, if any, is presented."
+              },
+              "slug": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Optional globally-unique slug - the SSH username token. Lowercase\nletters, digits, and single hyphens; 3-63 chars. Omitted ⇒ a dictionary\nslug is generated. Must be globally unique (409 on conflict)."
+              }
+            }
+          }
+        ],
+        "description": "What the user sends in `POST /v1/sandboxes`.\n\nThe body *is* a microsandbox [`CloudSandboxSpec`] - carried verbatim through the\nshared [`CloudCreateSandboxRequest`] envelope (flattened onto the wire) so it\ncan never drift from the cross-repo contract - plus the cloud-only fields\nthat have no place in the shared spec: the globally-unique SSH `slug` and the\nregistry-credential selection. (Writable-disk size now lives in the spec's\n`resources.disk_size_mib`.)"
+      },
+      "CreateVolumeRequest": {
+        "type": "object",
+        "description": "POST /v1/orgs/{slug}/volumes",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "capacity_gib": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Optional per-volume storage cap in GiB (#496). Omitted/`null` = no\nper-volume limit (the org's plan cap still governs). Must be `>= 1` and\n`<= the org's storage cap`.",
+            "minimum": 0
+          },
+          "labels": {
+            "type": "object",
+            "description": "User-defined labels (free-form string map). Omitted = none. Keys using a\nplatform-reserved prefix are rejected.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": "string",
+            "description": "Volume name, unique within the org. Lowercase alphanumeric with single\ninternal hyphens (e.g. `team-ml`). Creates a `managed` volume; the host\ndisk is system-provisioned and has no name."
+          },
+          "storage": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/VolumeType",
+                "description": "Physical backing for the volume. Omitted = `block` (the default and only\nvalue today)."
+              }
+            ]
+          }
+        }
+      },
+      "Destination": {
+        "oneOf": [
+          {
+            "type": "string",
+            "description": "Match any destination.",
+            "enum": [
+              "any"
+            ]
+          },
+          {
+            "type": "object",
+            "description": "IP address or CIDR block (e.g. `\"1.2.3.4\"`, `\"10.0.0.0/8\"`).",
+            "required": [
+              "cidr"
+            ],
+            "properties": {
+              "cidr": {
+                "type": "string",
+                "description": "IP address or CIDR block (e.g. `\"1.2.3.4\"`, `\"10.0.0.0/8\"`)."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Exact domain name (e.g. `\"example.com\"`).",
+            "required": [
+              "domain"
+            ],
+            "properties": {
+              "domain": {
+                "type": "string",
+                "description": "Exact domain name (e.g. `\"example.com\"`)."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Domain suffix - the apex and any subdomain of it.",
+            "required": [
+              "domain_suffix"
+            ],
+            "properties": {
+              "domain_suffix": {
+                "type": "string",
+                "description": "Domain suffix - the apex and any subdomain of it."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A pre-defined destination group.",
+            "required": [
+              "group"
+            ],
+            "properties": {
+              "group": {
+                "$ref": "#/components/schemas/DestinationGroup",
+                "description": "A pre-defined destination group."
+              }
+            }
+          }
+        ],
+        "description": "Traffic destination filter for a [`Rule`].\n\nThe `Cidr`, `Domain`, and `DomainSuffix` leaves carry their canonical\nstring form (e.g. `\"10.0.0.0/8\"`, `\"example.com\"`); the local network\nengine re-parses and validates them into its richer internal types at\nload time."
+      },
+      "DestinationGroup": {
+        "type": "string",
+        "description": "Pre-defined destination category for a [`Destination::Group`] match.",
+        "enum": [
+          "public",
+          "loopback",
+          "private",
+          "link_local",
+          "metadata",
+          "multicast",
+          "host"
+        ]
+      },
+      "Direction": {
+        "type": "string",
+        "description": "Direction a [`Rule`] applies to.",
+        "enum": [
+          "egress",
+          "ingress",
+          "any"
+        ]
+      },
+      "DiskImageFormat": {
+        "type": "string",
+        "description": "Disk image format for virtio-blk root filesystems and volume mounts.",
+        "enum": [
+          "Qcow2",
+          "Raw",
+          "Vmdk"
+        ]
+      },
+      "DnsConfig": {
+        "type": "object",
+        "description": "DNS interception and filtering settings. Carried in [`NetworkSpec::dns`].",
+        "properties": {
+          "nameservers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Upstream nameservers as `IP`, `IP:PORT`, `HOST`, or `HOST:PORT`\nstrings. Empty falls back to the host's `/etc/resolv.conf`.",
+            "default": []
+          },
+          "query_timeout_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Per-query timeout in milliseconds. Default: 5000.",
+            "default": 5000,
+            "minimum": 0
+          },
+          "rebind_protection": {
+            "type": "boolean",
+            "description": "Whether DNS-rebinding protection is enabled. Default: true.",
+            "default": true
+          }
+        }
+      },
+      "EnvVar": {
+        "type": "object",
+        "description": "Environment variable entry.",
+        "required": [
+          "key",
+          "value"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "Environment variable name."
+          },
+          "value": {
+            "type": "string",
+            "description": "Environment variable value."
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "description": "Error envelope returned by every non-2xx response.",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "description": "Stable machine-readable error code, e.g. `invalid_api_key`."
+              },
+              "message": {
+                "type": "string",
+                "description": "Human-readable description of the error."
+              },
+              "details": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "description": "Optional structured context for the error."
+              }
+            }
+          }
+        }
+      },
+      "EventActor": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "user_id",
+              "label",
+              "redacted_email",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "user"
+                ]
+              },
+              "label": {
+                "type": "string"
+              },
+              "redacted_email": {
+                "type": "string"
+              },
+              "user_id": {
+                "type": "string",
+                "format": "uuid"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "api_key_id",
+              "name",
+              "kind"
+            ],
+            "properties": {
+              "api_key_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "api_key"
+                ]
+              },
+              "name": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "code",
+              "label",
+              "kind"
+            ],
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "system"
+                ]
+              },
+              "label": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The authorized SSH key that authenticated a front-door session. The\nprincipal SSH actually proves at connect is the *key*, not a person -\nthe scope-only model (D8) doesn't bind a key to a user (a global key may\nbe shared), so the session is attributed to the key (label + fingerprint),\nwhile whoever registered it rides the event payload as `added_by`.",
+            "required": [
+              "key_id",
+              "fingerprint",
+              "kind"
+            ],
+            "properties": {
+              "fingerprint": {
+                "type": "string",
+                "description": "`SHA256:…` fingerprint."
+              },
+              "key_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "ssh_key"
+                ]
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Human label set at registration (e.g. `alice-laptop`), if any."
+              }
+            }
+          }
+        ],
+        "description": "Maximum total length, in characters, of the truncated `command` field in\nImmutable actor snapshot stored alongside an event."
+      },
+      "EventResponse": {
+        "type": "object",
+        "description": "A single audit/lifecycle event returned by the API.",
+        "required": [
+          "id",
+          "org_id",
+          "category",
+          "event_type",
+          "actor",
+          "payload",
+          "timestamp"
+        ],
+        "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/EventActor"
+          },
+          "category": {
+            "type": "string"
+          },
+          "event_type": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "payload": {},
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "HandoffInit": {
+        "type": "object",
+        "description": "Fully-assembled handoff-init specification.",
+        "required": [
+          "cmd"
+        ],
+        "properties": {
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Supplemental argv. `argv[0]` is implicitly `cmd`."
+          },
+          "cmd": {
+            "type": "string",
+            "description": "Init binary: absolute path inside the guest rootfs, or the literal `auto`.\n\nAlways a Linux-style `/`-separated path - never build it with host OS path APIs, whose semantics diverge on Windows (`\\` separators, `/sbin/init` treated as relative)."
+          },
+          "env": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": false,
+              "prefixItems": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Extra env vars merged on top of the inherited env."
+          }
+        }
+      },
+      "HostPermissions": {
+        "type": "string",
+        "description": "Host permission propagation policy for a virtiofs-backed volume mount.\n\nSerializes/deserializes as the lowercase variant name (`\"private\"`, `\"mirror\"`) to align with the CLI and NAPI spellings.",
+        "enum": [
+          "private",
+          "mirror"
+        ]
+      },
+      "InterceptCaConfig": {
+        "type": "object",
+        "description": "Certificate authority configuration for TLS interception.",
+        "properties": {
+          "cert_path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Path to an existing CA certificate PEM file. If `None`, a CA is\nauto-generated and persisted."
+          },
+          "key_path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Path to an existing CA private key PEM file. If `None`, a key is\nauto-generated and persisted."
+          }
+        }
+      },
+      "InterfaceOverrides": {
+        "type": "object",
+        "description": "Optional guest interface overrides. Unset fields are derived from the\nsandbox slot by the local network engine. Carried in\n[`NetworkSpec::interface`].",
+        "properties": {
+          "ipv4_address": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Guest IPv4 address (e.g. `172.16.0.2`). Default: derived from slot.",
+            "default": null
+          },
+          "ipv4_pool": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Guest IPv4 pool CIDR (e.g. `\"172.16.0.0/12\"`). Default: derived from slot.",
+            "default": null
+          },
+          "ipv6_address": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Guest IPv6 address. Default: derived from slot.",
+            "default": null
+          },
+          "ipv6_pool": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Guest IPv6 pool CIDR. Default: derived from slot.",
+            "default": null
+          },
+          "mac": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "Guest MAC address as six octets. Default: derived from slot.",
+            "default": null
+          },
+          "mtu": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Interface MTU. Default: 1500.",
+            "default": null,
+            "minimum": 0
+          }
+        }
+      },
+      "MessageResponse": {
+        "type": "object",
+        "description": "Simple message response for operations without a body.",
+        "required": [
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "MountOptions": {
+        "type": "object",
+        "description": "Guest mount behavior shared by every volume mount kind.",
+        "properties": {
+          "nodev": {
+            "type": "boolean",
+            "description": "Whether device files on the mount are ignored.",
+            "default": false
+          },
+          "noexec": {
+            "type": "boolean",
+            "description": "Whether direct execution from the mount is disabled.\n\nThis prevents `execve` of binaries or scripts located on the mount. Interpreters can still read files from the mount, for example `sh /mnt/script.sh`, because the interpreter itself executes from a different filesystem.",
+            "default": false
+          },
+          "nosuid": {
+            "type": "boolean",
+            "description": "Whether setuid and setgid privilege elevation from files on the mount is ignored.",
+            "default": false
+          },
+          "readonly": {
+            "type": "boolean",
+            "description": "Whether the mount is read-only.\n\nGuest writes fail with the kernel's read-only filesystem behavior. Virtiofs-backed mounts also reject writes on the host-side filesystem server as defense in depth.",
+            "default": false
+          }
+        }
+      },
+      "NetworkPolicy": {
+        "type": "object",
+        "description": "Egress/ingress network policy: an ordered [`Rule`] list plus a\nper-direction default [`Action`]. Carried in [`NetworkSpec::policy`].",
+        "properties": {
+          "default_egress": {
+            "$ref": "#/components/schemas/Action",
+            "description": "Default action for egress traffic matching no rule. Default: `Deny`."
+          },
+          "default_ingress": {
+            "$ref": "#/components/schemas/Action",
+            "description": "Default action for ingress traffic matching no rule. Default: `Deny`."
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Rule"
+            },
+            "description": "Ordered rules, evaluated first-match-wins per direction."
+          }
+        }
+      },
+      "OrgMemberResponse": {
+        "type": "object",
+        "description": "Member with joined user profile data - repository read view.",
+        "required": [
+          "id",
+          "user_id",
+          "email",
+          "role",
+          "joined_at"
+        ],
+        "properties": {
+          "avatar_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "email": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "joined_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "role": {
+            "$ref": "#/components/schemas/OrgRole"
+          },
+          "user_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "OrgRole": {
+        "type": "string",
+        "description": "Organization membership role.",
+        "enum": [
+          "owner",
+          "admin",
+          "member",
+          "viewer"
+        ]
+      },
+      "OrgWithRole": {
+        "type": "object",
+        "description": "Organization with the requesting user's role included.",
+        "required": [
+          "id",
+          "name",
+          "slug",
+          "mfa_required",
+          "role",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "mfa_required": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/OrgRole"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "PaginatedEventResponse": {
+        "type": "object",
+        "description": "Wrapper for paginated event responses (needed for OpenAPI schema generation).",
+        "required": [
+          "data",
+          "has_more"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EventResponse"
+            }
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "PaginatedMemberResponse": {
+        "type": "object",
+        "description": "Paginated list of organization members.",
+        "required": [
+          "data",
+          "has_more"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OrgMemberResponse"
+            }
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "PaginatedSandboxResponse": {
+        "type": "object",
+        "description": "Paginated list of sandboxes.",
+        "required": [
+          "data",
+          "has_more"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SandboxResponse"
+            }
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "PoolUsage": {
+        "type": "object",
+        "description": "An org's monthly pool usage against its hard-cap pools - the shared home of\nthe exhaustion predicates, whether read per-org (embedded in `QuotaUsage`)\nor in the quota monitor's batched sweep (`OrgPoolUsage`).",
+        "required": [
+          "hard_cap",
+          "vcpu_hours_used",
+          "memory_gib_hours_used"
+        ],
+        "properties": {
+          "hard_cap": {
+            "type": "boolean",
+            "description": "Whether the plan hard-stops at its included pools (no overflow).\nDERIVED (not a stored column): true iff the resolved plan is unpriced -\nan unpriced plan has no overage path, so its pools become walls."
+          },
+          "included_memory_gib_hours": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Included memory GiB-hours/month; `None` = unlimited."
+          },
+          "included_vcpu_hours": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Included vCPU-hours/month; `None` = unlimited. On `hard_cap` plans this\nis the compute wall; on priced plans, usage beyond it is metered overage."
+          },
+          "memory_gib_hours_used": {
+            "type": "number",
+            "format": "double",
+            "description": "Memory GiB-hours consumed this billing month (compute-on-read from `sandbox_runs`)."
+          },
+          "vcpu_hours_used": {
+            "type": "number",
+            "format": "double",
+            "description": "vCPU-hours consumed this billing month (compute-on-read from `sandbox_runs`)."
+          }
+        }
+      },
+      "PortProtocol": {
+        "type": "string",
+        "description": "Transport protocol for a published port.",
+        "enum": [
+          "tcp",
+          "udp"
+        ]
+      },
+      "PortRange": {
+        "type": "object",
+        "description": "Inclusive guest-side port range for a [`Rule`] match.",
+        "required": [
+          "start",
+          "end"
+        ],
+        "properties": {
+          "end": {
+            "type": "integer",
+            "format": "int32",
+            "description": "End port (inclusive).",
+            "minimum": 0
+          },
+          "start": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Start port (inclusive).",
+            "minimum": 0
+          }
+        }
+      },
+      "Protocol": {
+        "type": "string",
+        "description": "Protocol filter for a [`Rule`].",
+        "enum": [
+          "tcp",
+          "udp",
+          "icmpv4",
+          "icmpv6"
+        ]
+      },
+      "PublishedPortSpec": {
+        "type": "object",
+        "description": "A published port mapping between host and guest.",
+        "required": [
+          "host_port",
+          "guest_port",
+          "host_bind"
+        ],
+        "properties": {
+          "guest_port": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Guest-side port to forward to.",
+            "minimum": 0
+          },
+          "host_bind": {
+            "type": "string",
+            "description": "Host address to bind. Defaults to loopback."
+          },
+          "host_port": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Host-side port to bind.",
+            "minimum": 0
+          },
+          "protocol": {
+            "$ref": "#/components/schemas/PortProtocol",
+            "description": "Transport protocol."
+          }
+        }
+      },
+      "QuotaUsage": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/PoolUsage"
+          },
+          {
+            "type": "object",
+            "required": [
+              "pool_exhausted",
+              "total_sandboxes",
+              "concurrent_ephemeral_running",
+              "concurrent_persistent_running",
+              "is_suspended"
+            ],
+            "properties": {
+              "concurrent_ephemeral_running": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Currently running/starting ephemeral sandboxes."
+              },
+              "concurrent_persistent_running": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Currently running/starting persistent sandboxes."
+              },
+              "included_disk_gib_hours": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Included writable-disk GiB-hours/month (display/billing only - never a wall)."
+              },
+              "included_storage_gib": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Included durable-storage GiB/month."
+              },
+              "is_suspended": {
+                "type": "boolean",
+                "description": "Whether sandbox usage has been manually suspended for the organization."
+              },
+              "max_concurrent_ephemeral_running": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Maximum simultaneously-running ephemeral sandboxes."
+              },
+              "max_concurrent_persistent_running": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Maximum simultaneously-running persistent sandboxes."
+              },
+              "max_disk_size_mib_per_sandbox": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Maximum writable disk size (MiB) per sandbox."
+              },
+              "max_memory_mib_per_sandbox": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Maximum memory (MiB) per sandbox."
+              },
+              "max_sandboxes": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Maximum total sandboxes the org can have."
+              },
+              "max_total_storage_gib": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Per-org durable-storage hard cap (GiB)."
+              },
+              "max_uptime_minutes_per_sandbox": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Maximum uptime per sandbox (minutes), if set."
+              },
+              "max_vcpus_per_sandbox": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Maximum CPU cores per sandbox."
+              },
+              "pool_exhausted": {
+                "type": "boolean",
+                "description": "Snapshot of [`PoolUsage::pool_exhausted`] at read time, for API\nconsumers - true when this org's sandboxes are being stopped and starts\nrefused."
+              },
+              "total_sandboxes": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Total sandboxes (all states) for the org."
+              }
+            }
+          }
+        ],
+        "description": "Resolved quota limits and current usage for an organization.\n\nLimits are resolved via COALESCE: per-org override > plan. Every limit is\n`Option`: `None` = unlimited (counts/budgets) or the system/node max\n(per-sandbox vcpu/memory/disk). There is no magic 0."
+      },
+      "RegistrySelection": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Infer a stored credential from the image registry host.",
+            "required": [
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "auto"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Force an anonymous pull.",
+            "required": [
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "anonymous"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Use an already-stored organization credential.",
+            "required": [
+              "credential_id",
+              "mode"
+            ],
+            "properties": {
+              "credential_id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "Id of a configured `OrgRegistryCredential` belonging to the org."
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "specific"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Use plaintext credentials for this create-and-start operation only.",
+            "required": [
+              "username",
+              "password",
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "inline"
+                ]
+              },
+              "password": {
+                "type": "string",
+                "format": "password",
+                "description": "Registry password or access token. Always redacted from `Debug`."
+              },
+              "username": {
+                "type": "string",
+                "description": "Registry username."
+              }
+            }
+          }
+        ],
+        "description": "Registry credential selection accepted on sandbox-create requests.\n\n`Inline` is deliberately request-only: its plaintext fields must be vaulted\nbefore persistence and must never enter the sandbox row, a worker launch\ndefinition, a log, or an API response."
+      },
+      "Rlimit": {
+        "type": "object",
+        "description": "A POSIX resource limit.",
+        "required": [
+          "resource",
+          "soft",
+          "hard"
+        ],
+        "properties": {
+          "hard": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Hard limit (ceiling, requires privileges to raise).",
+            "minimum": 0
+          },
+          "resource": {
+            "$ref": "#/components/schemas/RlimitResource",
+            "description": "Resource type."
+          },
+          "soft": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Soft limit (can be raised up to hard limit by the process).",
+            "minimum": 0
+          }
+        }
+      },
+      "RlimitResource": {
+        "type": "string",
+        "description": "POSIX resource limit identifiers.",
+        "enum": [
+          "Cpu",
+          "Fsize",
+          "Data",
+          "Stack",
+          "Core",
+          "Rss",
+          "Nproc",
+          "Nofile",
+          "Memlock",
+          "As",
+          "Locks",
+          "Sigpending",
+          "Msgqueue",
+          "Nice",
+          "Rtprio",
+          "Rttime"
+        ]
+      },
+      "Rule": {
+        "type": "object",
+        "description": "A single egress/ingress policy rule. Evaluated first-match-wins per\ndirection.",
+        "required": [
+          "direction",
+          "destination",
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/Action",
+            "description": "Action to take on a match."
+          },
+          "destination": {
+            "$ref": "#/components/schemas/Destination",
+            "description": "Destination filter (direction-dependent interpretation)."
+          },
+          "direction": {
+            "$ref": "#/components/schemas/Direction",
+            "description": "Direction this rule applies to."
+          },
+          "ports": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PortRange"
+            },
+            "description": "Guest-side port-range set; empty matches any port."
+          },
+          "protocols": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Protocol"
+            },
+            "description": "Protocol set; empty matches any protocol."
+          }
+        }
+      },
+      "SandboxDailyUsage": {
+        "type": "object",
+        "description": "Compute usage for one sandbox on one UTC day, across both billed dimensions.\n\nComputed on read from `sandbox_runs` (not from the billing provider) - open runs accrue\nagainst `now()`, so a *running* sandbox shows live usage. Quantities are\nseconds-based (vCPU-seconds, MiB-seconds), the same units the metering events\ncarry; display converts to vCPU-hours / GiB-hours. Sum over days for a\nsandbox's period total; sum over sandboxes for the daily series.",
+        "required": [
+          "sandbox_id",
+          "day",
+          "vcpu_seconds",
+          "mem_mib_seconds",
+          "disk_mib_seconds"
+        ],
+        "properties": {
+          "day": {
+            "type": "string",
+            "format": "date-time",
+            "description": "UTC midnight of the day this usage falls in."
+          },
+          "disk_mib_seconds": {
+            "type": "number",
+            "format": "double",
+            "description": "Σ(overlap_secs × disk_mib) for this sandbox on this day - provisioned\nwritable disk billed on the same GiB-seconds basis while the sandbox runs."
+          },
+          "mem_mib_seconds": {
+            "type": "number",
+            "format": "double",
+            "description": "Σ(overlap_secs × mem_mib) for this sandbox on this day."
+          },
+          "sandbox_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "vcpu_seconds": {
+            "type": "number",
+            "format": "double",
+            "description": "Σ(overlap_secs × vcpus) for this sandbox on this day."
+          }
+        }
+      },
+      "SandboxIdentity": {
+        "type": "object",
+        "description": "Minimal sandbox display info - the directory that turns the `sandbox_id`s in\na [`UsageBreakdown`]'s rows into human labels without a second round-trip.",
+        "required": [
+          "id",
+          "name",
+          "slug"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          }
+        }
+      },
+      "SandboxLogLevel": {
+        "type": "string",
+        "description": "Runtime log verbosity for sandbox specs.",
+        "enum": [
+          "error",
+          "warn",
+          "info",
+          "debug",
+          "trace"
+        ]
+      },
+      "SandboxMountResponse": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Host-subpath bind mount.",
+            "required": [
+              "guest",
+              "options",
+              "stat_virtualization",
+              "host_permissions",
+              "type"
+            ],
+            "properties": {
+              "guest": {
+                "type": "string"
+              },
+              "host_permissions": {
+                "$ref": "#/components/schemas/HostPermissions"
+              },
+              "options": {
+                "$ref": "#/components/schemas/MountOptions"
+              },
+              "quota_mib": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "minimum": 0
+              },
+              "stat_virtualization": {
+                "$ref": "#/components/schemas/StatVirtualization"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "Bind"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Named-volume mount.",
+            "required": [
+              "guest",
+              "options",
+              "stat_virtualization",
+              "host_permissions",
+              "type"
+            ],
+            "properties": {
+              "guest": {
+                "type": "string"
+              },
+              "host_permissions": {
+                "$ref": "#/components/schemas/HostPermissions"
+              },
+              "options": {
+                "$ref": "#/components/schemas/MountOptions"
+              },
+              "stat_virtualization": {
+                "$ref": "#/components/schemas/StatVirtualization"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "Named"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Guest-memory tmpfs.",
+            "required": [
+              "guest",
+              "options",
+              "type"
+            ],
+            "properties": {
+              "guest": {
+                "type": "string"
+              },
+              "options": {
+                "$ref": "#/components/schemas/MountOptions"
+              },
+              "size_mib": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "Tmpfs"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Disk-image mount.",
+            "required": [
+              "guest",
+              "format",
+              "options",
+              "type"
+            ],
+            "properties": {
+              "format": {
+                "$ref": "#/components/schemas/DiskImageFormat"
+              },
+              "fstype": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "guest": {
+                "type": "string"
+              },
+              "options": {
+                "$ref": "#/components/schemas/MountOptions"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "DiskImage"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "A mount, projected for the user: guest path + options, never the resolved\nvolume id / source."
+      },
+      "SandboxNetworkResponse": {
+        "type": "object",
+        "description": "Network config, projected for the user. Secrets drop their vault path.",
+        "required": [
+          "enabled",
+          "ports",
+          "trust_host_cas"
+        ],
+        "properties": {
+          "dns": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DnsConfig"
+              }
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "interface": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/InterfaceOverrides"
+              }
+            ]
+          },
+          "max_connections": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "policy": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NetworkPolicy"
+              }
+            ]
+          },
+          "ports": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PublishedPortSpec"
+            }
+          },
+          "secrets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SandboxSecretResponse"
+            }
+          },
+          "tls": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TlsConfig"
+              }
+            ]
+          },
+          "trust_host_cas": {
+            "type": "boolean"
+          }
+        }
+      },
+      "SandboxPolicy": {
+        "type": "object",
+        "description": "Sandbox lifecycle policy.",
+        "properties": {
+          "ephemeral": {
+            "type": "boolean",
+            "description": "Whether the sandbox is ephemeral.\n\nEphemeral sandboxes are one-off: the host runtime that owns the\nprocess removes the persisted DB row and on-disk state when the VM\nreaches a terminal status, and other host runtimes opportunistically\nclean up ephemeral leftovers from runtimes that died before they\ncould self-clean. Defaults to `false` (persistent); named and created\nsandboxes stay inspectable and restartable after they stop."
+          },
+          "idle_timeout_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Idle timeout in seconds. `None` = no idle detection.",
+            "minimum": 0
+          },
+          "max_duration_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Hard cap on total sandbox lifetime in seconds. `None` = run forever.",
+            "minimum": 0
+          }
+        }
+      },
+      "SandboxResponse": {
+        "type": "object",
+        "description": "The API view of a [`Sandbox`]: an explicit allowlist of user-facing fields.\nInternal columns (registry selection, sync bookkeeping, resolved refs) never\nappear; the resolved spec surfaces only as the curated [`SandboxSpecResponse`].",
+        "required": [
+          "id",
+          "org_id",
+          "name",
+          "slug",
+          "status",
+          "ephemeral",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "ephemeral": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "last_failure_message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Human-readable reason for the last failure."
+          },
+          "name": {
+            "type": "string"
+          },
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "spec": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SandboxSpecResponse",
+                "description": "Curated projection of the resolved spec; absent until resolved."
+              }
+            ]
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Latest run's start time; `null` if the sandbox has never run."
+          },
+          "status": {
+            "$ref": "#/components/schemas/SandboxStatus"
+          },
+          "status_reason": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SandboxStatusReason",
+                "description": "Scheduler condition while `status` is `starting`."
+              }
+            ]
+          },
+          "stopped_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Latest run's stop time; `null` while open or never run."
+          }
+        }
+      },
+      "SandboxRuntimeOptions": {
+        "type": "object",
+        "description": "Guest runtime options for a sandbox.",
+        "properties": {
+          "cmd": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Image command override.",
+            "default": null
+          },
+          "disable_metrics_sample": {
+            "type": "boolean",
+            "description": "Force-disable metrics sampling regardless of `metrics_sample_interval_ms`.",
+            "default": false
+          },
+          "entrypoint": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Image entrypoint override.",
+            "default": null
+          },
+          "hostname": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Guest hostname override.",
+            "default": null
+          },
+          "log_level": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SandboxLogLevel",
+                "description": "Runtime log verbosity."
+              }
+            ],
+            "default": null
+          },
+          "metrics_sample_interval_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Metrics sampling interval in milliseconds. `None` disables sampling.",
+            "default": 1000,
+            "minimum": 0
+          },
+          "scripts": {
+            "type": "object",
+            "description": "Named scripts available inside the guest.",
+            "default": {},
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "shell": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Default shell for scripts and interactive sessions.",
+            "default": null
+          },
+          "user": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Guest user identity override.",
+            "default": null
+          },
+          "workdir": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Working directory inside the guest.",
+            "default": null
+          }
+        }
+      },
+      "SandboxSecretResponse": {
+        "type": "object",
+        "description": "A network secret, projected for the user: the env var, placeholder, and its\nallow-list / injection policy. The value isn't in the resolved spec at all,\nand the OpenBao vault path is never exposed.",
+        "required": [
+          "env_var",
+          "placeholder",
+          "allowed_hosts",
+          "injection"
+        ],
+        "properties": {
+          "allowed_hosts": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "env_var": {
+            "type": "string"
+          },
+          "injection": {
+            "type": "object"
+          },
+          "on_violation": {
+            "type": "object"
+          },
+          "placeholder": {
+            "type": "string"
+          }
+        }
+      },
+      "SandboxSpecResponse": {
+        "type": "object",
+        "description": "A curated, user-facing projection of a sandbox's resolved spec. Built from\n[`ResolvedSandboxSpec`]; omits every internal resolution (secret\nvalues/vault paths, volume ids).",
+        "required": [
+          "resources",
+          "runtime",
+          "env",
+          "labels",
+          "rlimits",
+          "lifecycle",
+          "mounts",
+          "network"
+        ],
+        "properties": {
+          "env": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EnvVar"
+            },
+            "description": "Environment variables."
+          },
+          "image": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OCI image reference the sandbox boots; `null` for a non-OCI rootfs."
+          },
+          "labels": {
+            "type": "object",
+            "description": "User-defined labels.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "lifecycle": {
+            "$ref": "#/components/schemas/SandboxPolicy",
+            "description": "Lifecycle policy."
+          },
+          "mounts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SandboxMountResponse"
+            },
+            "description": "Volume mounts - guest path + options only; volume ids omitted."
+          },
+          "network": {
+            "$ref": "#/components/schemas/SandboxNetworkResponse",
+            "description": "Network config - secret values/vault paths omitted."
+          },
+          "resources": {
+            "$ref": "#/components/schemas/CloudSandboxResources",
+            "description": "CPU, memory, and writable-disk sizing."
+          },
+          "rlimits": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Rlimit"
+            },
+            "description": "Resource limits."
+          },
+          "runtime": {
+            "$ref": "#/components/schemas/SandboxRuntimeOptions",
+            "description": "Guest runtime options."
+          }
+        }
+      },
+      "SandboxStatus": {
+        "type": "string",
+        "description": "Sandbox lifecycle status.",
+        "enum": [
+          "created",
+          "starting",
+          "running",
+          "stopping",
+          "stopped",
+          "failed"
+        ]
+      },
+      "SandboxStatusReason": {
+        "type": "string",
+        "description": "Why a submitted sandbox is still waiting for placement on a worker. Only\nmeaningful while `status` is `starting`.",
+        "enum": [
+          "scheduling",
+          "insufficient_capacity"
+        ]
+      },
+      "SandboxWaitFor": {
+        "type": "string",
+        "enum": [
+          "running"
+        ],
+        "description": "Lifecycle state an opt-in create request may wait to observe."
+      },
+      "ScopedUpstreamCaCert": {
+        "type": "object",
+        "description": "A CA certificate PEM file trusted only for matching upstream hosts.",
+        "required": [
+          "pattern",
+          "path"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Path to the CA certificate PEM file."
+          },
+          "pattern": {
+            "type": "string",
+            "description": "Host pattern this CA applies to. Supports exact hosts and `*.suffix` wildcards."
+          }
+        }
+      },
+      "ScopedVerifyUpstream": {
+        "type": "object",
+        "description": "An upstream certificate verification override for matching hosts.",
+        "required": [
+          "pattern",
+          "verify"
+        ],
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "description": "Host pattern this override applies to. Supports exact hosts and `*.suffix` wildcards."
+          },
+          "verify": {
+            "type": "boolean",
+            "description": "Whether to verify matching upstream server certificates."
+          }
+        }
+      },
+      "SecretInjection": {
+        "type": "object",
+        "description": "Where in the HTTP request a secret can be injected.",
+        "properties": {
+          "basic_auth": {
+            "type": "boolean",
+            "description": "Substitute in HTTP Basic Auth (default: true)."
+          },
+          "body": {
+            "type": "boolean",
+            "description": "Substitute in request body (default: false).\n\nFixed-length HTTP/1 bodies up to 16 MiB update `Content-Length`;\nlarger fixed-length bodies are blocked. Chunked HTTP/1 bodies are\ndecoded and re-encoded with fresh chunk sizes. Encoded bodies pass\nthrough unchanged. HTTP/2 DATA-frame body substitution is not\nsupported; matching body placeholders are blocked."
+          },
+          "headers": {
+            "type": "boolean",
+            "description": "Substitute in HTTP headers (default: true)."
+          },
+          "query_params": {
+            "type": "boolean",
+            "description": "Substitute in URL query parameters (default: false)."
+          }
+        }
+      },
+      "SecurityProfile": {
+        "type": "string",
+        "description": "Sandbox-level in-guest security profile.",
+        "enum": [
+          "default",
+          "restricted"
+        ]
+      },
+      "StatVirtualization": {
+        "type": "string",
+        "description": "Stat virtualization policy for a virtiofs-backed volume mount.\n\nSerializes/deserializes as the lowercase variant name (`\"strict\"`, `\"relaxed\"`, `\"off\"`) so persisted JSON aligns with the CLI grammar (`stat-virt=strict|relaxed|off`) and the NAPI string contract.",
+        "enum": [
+          "strict",
+          "relaxed",
+          "off"
+        ]
+      },
+      "StorageBreakdown": {
+        "type": "object",
+        "description": "Per-volume durable-storage usage breakdown for an org over a window:\nper-(volume, day) rows plus a directory of the volumes they reference. The\nstorage sibling of [`UsageBreakdown`](crate::UsageBreakdown). Deleted volumes'\naccruals persist, so `rows` may reference `volume_id`s absent from `volumes`;\nthe client labels those as deleted.",
+        "required": [
+          "rows",
+          "volumes"
+        ],
+        "properties": {
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StorageDailyUsage"
+            }
+          },
+          "volumes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VolumeIdentity"
+            }
+          }
+        }
+      },
+      "StorageDailyUsage": {
+        "type": "object",
+        "description": "Durable-storage usage for one volume on one UTC day, computed on read from\n`storage_accruals`. `mib_seconds` is Σ(used_mib × overlap_seconds) over the\nday; display converts to GiB-hours or an average GiB. Sum over days for a\nvolume's period total; sum over volumes for the daily series. The storage\nsibling of [`SandboxDailyUsage`](crate::SandboxDailyUsage).",
+        "required": [
+          "volume_id",
+          "day",
+          "mib_seconds"
+        ],
+        "properties": {
+          "day": {
+            "type": "string",
+            "format": "date-time",
+            "description": "UTC midnight of the day this usage falls in."
+          },
+          "mib_seconds": {
+            "type": "number",
+            "format": "double",
+            "description": "Σ(used_mib × overlap_seconds) for this volume on this day."
+          },
+          "volume_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "TlsConfig": {
+        "type": "object",
+        "description": "TLS interception configuration. Carried in [`NetworkSpec::tls`](NetworkSpec).\n\nThe local network engine terminates TCP at its in-process stack, so TLS MITM\nis handled by proxy tasks - these fields configure which ports/domains are\nintercepted and how the interception CA is sourced.",
+        "properties": {
+          "block_quic_on_intercept": {
+            "type": "boolean",
+            "description": "Drop UDP to intercepted ports when TLS interception is active, forcing\nQUIC traffic to fall back to TCP/TLS."
+          },
+          "bypass": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Domains to bypass (no MITM). Supports exact match and `*.suffix` wildcards."
+          },
+          "cache": {
+            "$ref": "#/components/schemas/CertCacheConfig",
+            "description": "Per-domain certificate cache configuration."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether TLS interception is enabled."
+          },
+          "intercept_ca": {
+            "$ref": "#/components/schemas/InterceptCaConfig",
+            "description": "Interception CA configuration. The TLS proxy uses this CA to sign\nper-domain certs it presents to the guest during interception."
+          },
+          "intercepted_ports": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "TCP ports subject to TLS interception (default: `[443]`)."
+          },
+          "scoped_upstream_ca_cert": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScopedUpstreamCaCert"
+            },
+            "description": "Host-scoped CA certificate PEM files to trust for upstream server verification."
+          },
+          "scoped_verify_upstream": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScopedVerifyUpstream"
+            },
+            "description": "Host-scoped upstream verification overrides."
+          },
+          "upstream_ca_cert": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "CA certificate PEM files to trust for upstream server verification."
+          },
+          "verify_upstream": {
+            "type": "boolean",
+            "description": "Whether to verify the upstream server's TLS certificate."
+          }
+        }
+      },
+      "UpdateSandboxRequest": {
+        "type": "object",
+        "description": "Request body for `PATCH /v1/orgs/:slug/sandboxes/:id` - rename a sandbox.\nEach field updates only when present; omit one to leave it unchanged.\n`name` is the per-org display label; `slug` is the globally-unique SSH\naddress handle (changing it breaks existing `ssh <old-slug>@msb.run`).",
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New per-org display name. Omit to leave unchanged."
+          },
+          "slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New globally-unique slug (the SSH username token). Omit to leave unchanged."
+          }
+        }
+      },
+      "UpdateVolumeRequest": {
+        "type": "object",
+        "description": "PATCH /v1/orgs/{slug}/volumes/{id} - update the cap and/or labels (#496).\n\nEvery field is independently optional: an **omitted** field is left unchanged.\n`capacity_gib` uses the double-`Option` distinction - omit to leave as-is,\nexplicit `null` to clear the cap, a number to set it.",
+        "properties": {
+          "capacity_gib": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "New per-volume storage cap in GiB. Omitted = unchanged; `null` = clear the\ncap (back to no per-volume limit); a value sets it. A set value must be\n`>= 1` and `<= the org's storage cap`.",
+            "minimum": 0
+          },
+          "labels": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Replacement label set. Omitted = unchanged; an object replaces the labels\nwholesale (an empty object clears them). Reserved-prefix keys are rejected.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "UsageBreakdown": {
+        "type": "object",
+        "description": "Compute-on-read usage breakdown for an org over a window: per-(sandbox, day)\nquantity rows plus a directory of the sandboxes they reference. The frontend\ngroups `rows` by sandbox (for the per-sandbox table) or by day (for the\nchart) and labels them via `sandboxes`.",
+        "required": [
+          "rows",
+          "sandboxes"
+        ],
+        "properties": {
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SandboxDailyUsage"
+            }
+          },
+          "sandboxes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SandboxIdentity"
+            }
+          }
+        }
+      },
+      "UsageDailyPoint": {
+        "type": "object",
+        "description": "One day's metered quantity for a single billable metric - the unit of a\nusage time-series chart. Cost is intentionally omitted: invoices are\nperiod-aggregated, so a per-day dollar figure would have to be derived.",
+        "required": [
+          "date",
+          "metric",
+          "quantity"
+        ],
+        "properties": {
+          "date": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Start of the day window (UTC)."
+          },
+          "metric": {
+            "type": "string",
+            "description": "Billable-metric name this quantity belongs to."
+          },
+          "quantity": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "UsageLineItem": {
+        "type": "object",
+        "description": "A single line item in a usage summary.",
+        "required": [
+          "name",
+          "quantity",
+          "unit",
+          "amount_cents"
+        ],
+        "properties": {
+          "amount_cents": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "number",
+            "format": "double"
+          },
+          "unit": {
+            "type": "string"
+          }
+        }
+      },
+      "UsageSummary": {
+        "type": "object",
+        "description": "Usage summary from the billing provider.",
+        "required": [
+          "period_start",
+          "period_end",
+          "line_items",
+          "total_cents"
+        ],
+        "properties": {
+          "daily": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageDailyPoint"
+            },
+            "description": "Per-day metered quantities for charting. One entry per (day, metric).\nEmpty when no daily series is available (e.g. provider error)."
+          },
+          "line_items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageLineItem"
+            },
+            "description": "Period-aggregated breakdown - one entry per billable metric / charge."
+          },
+          "period_end": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "period_start": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "projected_spend_cents": {
+            "type": "integer",
+            "format": "int64",
+            "description": "End-of-period spend projection: `total_cents` linearly extrapolated over\nthe billing period. Equals `total_cents` when the period can't be\nextrapolated (no future end, or zero elapsed). Never below `total_cents`."
+          },
+          "storage_gib": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Current durable-storage usage (GiB) for the org, from the latest hourly\nreading. `None` when storage hasn't been sampled (juicefs-ops disabled or\nno volumes). Drives the storage allowance bar; cost is in `line_items`."
+          },
+          "total_cents": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "VolumeIdentity": {
+        "type": "object",
+        "description": "Minimal volume display info - the directory that turns the `volume_id`s in a\n[`StorageBreakdown`](crate::StorageBreakdown)'s rows into human labels. A\ndeleted volume's accruals outlive its row, so a breakdown may reference ids\nabsent from this directory; the client labels those as deleted.",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`None` for the host volume (nameless)."
+          }
+        }
+      },
+      "VolumeKind": {
+        "type": "string",
+        "description": "What kind of volume this is - its storage source / role. The host volume is\nthe org's single shared \"host disk\"; managed volumes are user-created, named,\nplatform-provisioned (JuiceFS over our object store). (A future `External`\nvariant - bring-your-own S3/GCS - is intentionally out of scope for now.)",
+        "enum": [
+          "host",
+          "managed"
+        ]
+      },
+      "VolumeResponse": {
+        "type": "object",
+        "description": "Volume metadata returned in list/create responses. The GCS storage path is\nderived (not stored) and never exposed.",
+        "required": [
+          "id",
+          "kind",
+          "storage",
+          "status",
+          "labels",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "capacity_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The volume's configured per-volume storage cap in bytes, or `null` when\nno cap is set (#496). Derived from the stored `capacity_gib` (the user's\nconfigured intent) - the effective ceiling is `min(this, org cap)`.",
+            "minimum": 0
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/VolumeKind",
+            "description": "`host` - the org's shared host disk (not deletable); `managed` - a\nuser-created named volume."
+          },
+          "labels": {
+            "type": "object",
+            "description": "User-defined labels (empty object when none set).",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "User-facing name. `null` for the host volume (it has no name; it's\nidentified by `kind`)."
+          },
+          "status": {
+            "$ref": "#/components/schemas/VolumeStatus"
+          },
+          "storage": {
+            "$ref": "#/components/schemas/VolumeType",
+            "description": "How the volume is physically backed (`block` today)."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "used_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Bytes currently used under this volume's subtree. `null` when usage is\nunavailable - the usage service is disabled or unreachable (list degrades\ngracefully rather than failing) - or on create/delete, which don't sample\nit.",
+            "minimum": 0
+          }
+        }
+      },
+      "VolumeStatus": {
+        "type": "string",
+        "description": "Lifecycle status of a volume.",
+        "enum": [
+          "active",
+          "deleting"
+        ]
+      },
+      "VolumeType": {
+        "type": "string",
+        "description": "How a volume is physically backed - distinct from [`VolumeKind`] (ownership).\nEvery volume is `Block` today; the enum exists so future backings can be added\n(and reported to the SDK) without another schema change.",
+        "enum": [
+          "block"
+        ]
+      }
+    },
+    "securitySchemes": {
+      "api_key": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Organization API key (msb_…) - org-scoped programmatic access."
+      }
+    }
+  }
+}

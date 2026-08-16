@@ -11,6 +11,7 @@ const READ_ONLY_MSG =
 export class VolumeHandle {
   private readonly inner: NapiVolumeHandle | NapiVolumeInfo;
   readonly name: string;
+  readonly isDefault: boolean;
   readonly kind: string;
   readonly quotaMib: number | null;
   readonly usedBytes: number;
@@ -24,6 +25,7 @@ export class VolumeHandle {
   constructor(inner: NapiVolumeHandle | NapiVolumeInfo) {
     this.inner = inner;
     this.name = inner.name;
+    this.isDefault = inner.isDefault;
     this.kind = inner.kind;
     this.quotaMib =
       typeof inner.quotaMib === "number" ? inner.quotaMib : null;
@@ -46,7 +48,7 @@ export class VolumeHandle {
     await withMappedErrors(() => (this.inner as NapiVolumeHandle).remove());
   }
 
-  /** Host-side filesystem operations on this volume's directory. */
+  /** Direct filesystem operations through the volume's bound backend. */
   fs(): VolumeFs {
     if (typeof (this.inner as NapiVolumeHandle).fs !== "function") {
       throw new Error(READ_ONLY_MSG);

@@ -25,6 +25,7 @@ mod digest;
 pub mod erofs;
 mod error;
 pub mod ext4;
+mod flat;
 pub(crate) mod layer;
 pub(crate) mod path_bytes;
 mod platform;
@@ -45,12 +46,12 @@ pub use archive::{
     LoadedImage, load_archive, save_archive, save_docker_archive,
 };
 pub use auth::RegistryAuth;
-pub use cache::{CachedImageMetadata, CachedLayerMetadata, GlobalCache};
+pub use cache::{CachedImageMetadata, CachedLayerMetadata, FlatRootfsRef, GlobalCache};
 pub use config::ImageConfig;
 pub use digest::Digest;
 pub use error::{ImageError, ImageResult};
 pub use oci_client::Reference;
 pub use platform::{Arch, Os, Platform};
 pub use progress::{PullProgress, PullProgressHandle, PullProgressSender, progress_channel};
-pub use pull::{PullOptions, PullPolicy, PullResult};
+pub use pull::{PullOptions, PullPolicy, PullResult, RootfsMaterialization};
 pub use registry::{Registry, RegistryBuilder};

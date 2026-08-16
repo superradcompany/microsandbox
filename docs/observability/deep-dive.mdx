@@ -5,6 +5,8 @@ description: Flags, emitted metrics, attributes, and operational notes for msb-m
 icon: "magnifying-glass"
 ---
 
+<Tooltip tip="This page covers msb-metrics, which reads host-local shared memory and is local-only. It does not apply to microsandbox cloud sandboxes."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 Everything beyond the Quick start for the
 [`msb-metrics`](/observability/msb-metrics) sidecar: the complete flag
 set, what it emits, the attributes attached to each datapoint, and the
@@ -54,7 +56,7 @@ fully-qualified name is `microsandbox.<suffix>`.
 Cumulative byte fields are emitted as gauges carrying the absolute
 cumulative value. Use `rate()` (PromQL, OTel-flavored Prom) for
 throughput. The reason: each shm snapshot already carries an absolute
-value, and counter `add()` semantics would require us to track
+value, and counter `add()` semantics would require tracking
 per-sandbox deltas across runs.
 
 The collector also emits its own operational series; see
@@ -63,9 +65,9 @@ The collector also emits its own operational series; see
 ## Collector self-observability
 
 `msb-metrics otel` ships its own operational metrics through the same
-OTLP pipeline as the per-sandbox series, so a user can confirm the
-sidecar is actually flowing using the same Prometheus / Grafana / Datadog
-queries the rest of their telemetry runs through:
+OTLP pipeline as the per-sandbox series. You can confirm the sidecar is
+actually flowing using the same Prometheus, Grafana, or Datadog queries
+the rest of your telemetry runs through:
 
 | Suffix | Type | Notes |
 |---|---|---|

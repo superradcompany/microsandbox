@@ -3,11 +3,11 @@
 use std::sync::Arc;
 
 use microsandbox_types::{EnvVar, RootDisk, RootfsSource};
-use sea_orm::{ActiveModelTrait, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 
 use crate::MicrosandboxResult;
 use crate::backend::Backend;
-use crate::db::entity::sandbox as sandbox_entity;
+use crate::db::entity::{sandbox as sandbox_entity, sandbox_label as sandbox_label_entity};
 use crate::error::{Operation, UnsupportedReason};
 use crate::size::Mebibytes;
 
@@ -382,7 +382,7 @@ impl SandboxModificationBuilder {
         if let Some(target_mib) = root_disk_grow_target(&plan, &self.patch, &config)
             && (stopped_status(status) || restart_required)
         {
-            grow_upper_now(&self.backend, &self.name, target_mib).await?;
+            grow_root_disk_now(&self.backend, &self.name, &config, target_mib).await?;
         }
         if !plan.changes.is_empty() {
             apply_patch_to_config(&mut config, &self.patch);
@@ -430,9 +430,10 @@ impl SecretPatchBuilder {
         self
     }
 
-    /// Set the guest-visible placeholder. Placeholder changes cannot reach
-    /// already-running processes, so they classify as restart-required on a
-    /// running sandbox.
+    /// Set the guest-visible placeholder. New secrets default to
+    /// `$MSB_<env_var>`, matching create-time secret configuration.
+    /// Placeholder changes cannot reach already-running processes, so they
+    /// classify as restart-required on a running sandbox.
     pub fn placeholder(mut self, placeholder: impl Into<String>) -> Self {
         self.spec.placeholder = Some(placeholder.into());
         self
@@ -563,12 +564,11 @@ fn root_disk_grow_target(
     }
 }
 
-/// Grow the sandbox's canonical `upper.ext4` to `target_mib`. Callers only
-/// invoke this while the sandbox is stopped; the caller persists the new
-/// desired size after this succeeds.
-async fn grow_upper_now(
+/// Grow the sandbox-owned layered upper or flat root disk while it is stopped.
+async fn grow_root_disk_now(
     backend: &Arc<dyn Backend>,
     name: &str,
+    config: &SandboxConfig,
     target_mib: u32,
 ) -> MicrosandboxResult<()> {
     let local_backend = backend.as_local().ok_or_else(|| {
@@ -577,21 +577,53 @@ async fn grow_upper_now(
             UnsupportedReason::LocalOnly,
         )
     })?;
-    let upper_path = local_backend.sandboxes_dir().join(name).join("upper.ext4");
-    super::upper::grow_upper_to_mib(upper_path, target_mib).await
+    let sandbox_dir = local_backend.sandboxes_dir().join(name);
+    if matches!(
+        &config.spec.image,
+        RootfsSource::Oci(oci) if matches!(&oci.root_disk, Some(RootDisk::Flat { .. }))
+    ) {
+        return super::flat_rootfs::grow_private_flat_rootfs(
+            sandbox_dir.join(super::flat_rootfs::FLAT_ROOTFS_FILENAME),
+            target_mib,
+        )
+        .await;
+    }
+    super::upper::grow_upper_to_mib(sandbox_dir.join("upper.ext4"), target_mib).await
 }
 
 /// Path of the sandbox's host-side runtime control socket.
+#[cfg(windows)]
 fn control_socket_path(name: &str) -> MicrosandboxResult<std::path::PathBuf> {
     Ok(microsandbox_runtime::control::control_socket_path_for(
         &crate::runtime::agent_socket_path(name)?,
     ))
 }
 
+#[cfg(unix)]
+fn control_socket_path_candidates(name: &str) -> Vec<std::path::PathBuf> {
+    control_socket_paths(crate::runtime::sandbox_agent_socket_path_candidates(name))
+}
+
+#[cfg(unix)]
+fn control_socket_paths(
+    agent_candidates: impl IntoIterator<Item = std::path::PathBuf>,
+) -> Vec<std::path::PathBuf> {
+    agent_candidates
+        .into_iter()
+        .map(|path| microsandbox_runtime::control::control_socket_path_for(&path))
+        .collect()
+}
+
 /// Whether the running sandbox exposes the runtime control socket. Its absence
 /// means the runtime predates live control or the VM booted without any
 /// live-mutable capacity, so everything classifies as restart-required.
 fn control_socket_exists(name: &str) -> bool {
+    #[cfg(unix)]
+    return control_socket_path_candidates(name)
+        .into_iter()
+        .any(|path| path.exists());
+
+    #[cfg(not(unix))]
     control_socket_path(name).is_ok_and(|path| path.exists())
 }
 
@@ -658,18 +690,59 @@ async fn control_request(
     name: &str,
     request: String,
 ) -> MicrosandboxResult<microsandbox_runtime::control::ControlResponse> {
+    #[cfg(unix)]
+    {
+        let stream = connect_control_socket(control_socket_path_candidates(name))
+            .await
+            .map_err(|error| {
+                crate::MicrosandboxError::Runtime(format!(
+                    "failed to reach a runtime control socket for sandbox {name:?}: {error}"
+                ))
+            })?;
+        return control_request_over_stream(stream, &request).await;
+    }
+
+    #[cfg(windows)]
+    {
+        let path = control_socket_path(name)?;
+        let stream = connect_control_pipe(&path).await?;
+        control_request_over_stream(stream, &request).await
+    }
+}
+
+#[cfg(unix)]
+async fn connect_control_socket(
+    candidates: impl IntoIterator<Item = std::path::PathBuf>,
+) -> std::io::Result<tokio::net::UnixStream> {
+    let mut last_error = None;
+    for path in candidates {
+        if !path.exists() {
+            continue;
+        }
+        match tokio::net::UnixStream::connect(&path).await {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no runtime control endpoint exists",
+        )
+    }))
+}
+
+/// Send and receive one control exchange over an already-connected transport.
+async fn control_request_over_stream<S>(
+    mut stream: S,
+    request: &str,
+) -> MicrosandboxResult<microsandbox_runtime::control::ControlResponse>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    let path = control_socket_path(name)?;
-    #[cfg(unix)]
-    let mut stream = tokio::net::UnixStream::connect(&path).await.map_err(|e| {
-        crate::MicrosandboxError::Runtime(format!(
-            "failed to reach the runtime control socket at {}: {e}",
-            path.display()
-        ))
-    })?;
-    #[cfg(windows)]
-    let mut stream = connect_control_pipe(&path).await?;
     stream
         .write_all(request.as_bytes())
         .await
@@ -828,7 +901,9 @@ fn apply_patch_to_config(config: &mut SandboxConfig, patch: &SandboxModification
         && let RootfsSource::Oci(oci) = &mut config.spec.image
     {
         match &mut oci.root_disk {
-            Some(RootDisk::Managed { size_mib: s }) | Some(RootDisk::Tmpfs { size_mib: s }) => {
+            Some(RootDisk::Managed { size_mib: s })
+            | Some(RootDisk::Tmpfs { size_mib: s })
+            | Some(RootDisk::Flat { size_mib: s, .. }) => {
                 *s = Some(size_mib);
             }
             // The planner surfaces disk-image sizing as a conflict; never
@@ -994,7 +1069,7 @@ fn apply_secret_spec(
             placeholder: spec
                 .placeholder
                 .clone()
-                .unwrap_or_else(|| default_secret_ref(&spec.name)),
+                .unwrap_or_else(|| microsandbox_utils::secret::default_placeholder(&spec.name)),
             allowed_hosts: parse_host_patterns(&spec.allowed_hosts),
             injection: SecretInjection::default(),
             on_violation: None,
@@ -1136,16 +1211,43 @@ async fn persist_config(
         .ok_or_else(|| crate::MicrosandboxError::local_only(Operation::SandboxModify))?;
 
     let config_json = serde_json::to_string(config)?;
-    sandbox_entity::ActiveModel {
-        id: Set(local.db_id),
-        config: Set(config_json),
-        updated_at: Set(Some(chrono::Utc::now().naive_utc())),
-        ..Default::default()
-    }
-    .update(local_backend.db().await?.write())
-    .await?;
+    let labels = config.spec.labels.clone();
+    let write_db = local_backend.db().await?.write();
 
-    Ok(())
+    write_db
+        .transaction(|txn| {
+            let config_json = config_json.clone();
+            let labels = labels.clone();
+            async move {
+                sandbox_entity::ActiveModel {
+                    id: Set(local.db_id),
+                    config: Set(config_json),
+                    updated_at: Set(Some(chrono::Utc::now().naive_utc())),
+                    ..Default::default()
+                }
+                .update(&txn)
+                .await?;
+
+                sandbox_label_entity::Entity::delete_many()
+                    .filter(sandbox_label_entity::Column::SandboxId.eq(local.db_id))
+                    .exec(&txn)
+                    .await?;
+                if !labels.is_empty() {
+                    sandbox_label_entity::Entity::insert_many(labels.into_iter().map(
+                        |(key, value)| sandbox_label_entity::ActiveModel {
+                            sandbox_id: Set(local.db_id),
+                            key: Set(key),
+                            value: Set(value),
+                        },
+                    ))
+                    .exec(&txn)
+                    .await?;
+                }
+
+                Ok((txn, ()))
+            }
+        })
+        .await
 }
 
 async fn persist_active_config(
@@ -1190,7 +1292,7 @@ fn push_resource_changes(
     changes: &mut Vec<PlannedChange>,
     warnings: &mut Vec<ModificationWarning>,
 ) {
-    let resources = config.spec.resources;
+    let resources = &config.spec.resources;
     let desired = desired_resources(config, patch);
 
     if let Some(cpus) = patch.cpus
@@ -1432,6 +1534,9 @@ fn root_disk_size_state(config: &SandboxConfig) -> Option<RootDiskSizeState> {
         Some(RootDisk::Managed { size_mib }) => RootDiskSizeState::Managed {
             current_mib: size_mib.unwrap_or(super::config::DEFAULT_OCI_UPPER_SIZE_MIB),
         },
+        Some(RootDisk::Flat { size_mib, .. }) => RootDiskSizeState::Managed {
+            current_mib: size_mib.unwrap_or(super::config::DEFAULT_OCI_UPPER_SIZE_MIB),
+        },
         Some(RootDisk::Tmpfs { size_mib }) => RootDiskSizeState::Tmpfs {
             current_mib: *size_mib,
         },
@@ -1488,7 +1593,7 @@ fn push_secret_changes(
                 spec.placeholder
                     .clone()
                     .or_else(|| existing.as_ref().map(|secret| secret.placeholder.clone()))
-                    .unwrap_or_else(|| default_secret_ref(&spec.name)),
+                    .unwrap_or_else(|| microsandbox_utils::secret::default_placeholder(&spec.name)),
             ),
             disposition,
             allow_hosts: if spec.allowed_hosts.is_empty() {
@@ -1541,7 +1646,7 @@ fn push_secret_changes(
                 existing
                     .as_ref()
                     .map(|secret| secret.placeholder.clone())
-                    .unwrap_or_else(|| default_secret_ref(name)),
+                    .unwrap_or_else(|| microsandbox_utils::secret::default_placeholder(name)),
             ),
             after_ref: None,
             disposition,
@@ -1851,7 +1956,7 @@ fn push_resource_conflicts(
 }
 
 fn desired_resources(config: &SandboxConfig, patch: &SandboxModificationPatch) -> DesiredResources {
-    let resources = config.spec.resources;
+    let resources = &config.spec.resources;
     let cpus = patch.cpus.unwrap_or(resources.cpus);
     let memory_mib = patch.memory_mib.unwrap_or(resources.memory_mib);
     let max_cpus = patch.max_cpus.unwrap_or(resources.max_cpus).max(cpus);
@@ -2212,10 +2317,6 @@ fn status_name(status: SandboxStatus) -> &'static str {
     }
 }
 
-fn default_secret_ref(name: &str) -> String {
-    format!("${name}")
-}
-
 fn format_mib(mib: u32) -> String {
     if mib >= 1024 && mib.is_multiple_of(1024) {
         format!("{} GiB", mib / 1024)
@@ -2230,7 +2331,53 @@ fn format_mib(mib: u32) -> String {
 
 #[cfg(test)]
 mod tests {
+    use tempfile::tempdir;
+
     use super::*;
+    use crate::backend::LocalBackend;
+
+    #[test]
+    #[cfg(unix)]
+    fn new_control_client_selects_old_runtime_socket() {
+        let temp = tempfile::Builder::new()
+            .prefix("msb-control")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let run_dir = temp.path().join("run");
+        let paths = microsandbox_runtime::ipc::sandbox_socket_paths(&run_dir, "old-runtime");
+        std::fs::create_dir_all(paths.legacy_control.parent().unwrap()).unwrap();
+        let _listener = std::os::unix::net::UnixListener::bind(&paths.legacy_control).unwrap();
+
+        let selected = control_socket_paths(vec![paths.agent.clone(), paths.legacy_agent.clone()])
+            .into_iter()
+            .find(|path| path.exists())
+            .unwrap();
+
+        assert_eq!(selected, paths.legacy_control);
+        std::os::unix::net::UnixStream::connect(selected).unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn new_control_client_skips_stale_canonical_socket() {
+        let temp = tempfile::Builder::new()
+            .prefix("msb-control-fallback")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let run_dir = temp.path().join("run");
+        let paths = microsandbox_runtime::ipc::sandbox_socket_paths(&run_dir, "old-runtime");
+        std::fs::create_dir_all(&paths.canonical_dir).unwrap();
+        let stale = std::os::unix::net::UnixListener::bind(&paths.control).unwrap();
+        drop(stale);
+        std::fs::create_dir_all(paths.legacy_control.parent().unwrap()).unwrap();
+        let _live = tokio::net::UnixListener::bind(&paths.legacy_control).unwrap();
+
+        let stream = connect_control_socket(vec![paths.control, paths.legacy_control])
+            .await
+            .unwrap();
+
+        assert!(stream.peer_addr().is_ok());
+    }
 
     fn config(cpus: u8, memory_mib: u32) -> SandboxConfig {
         let mut config = SandboxConfig::default();
@@ -2240,6 +2387,101 @@ mod tests {
         config.spec.resources.max_cpus = cpus;
         config.spec.resources.max_memory_mib = memory_mib;
         config
+    }
+
+    #[tokio::test]
+    async fn persist_config_replaces_label_projection() {
+        let temp = tempdir().unwrap();
+        let backend: Arc<dyn Backend> = Arc::new(
+            LocalBackend::builder()
+                .home(temp.path())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let pools = backend.as_local().unwrap().db().await.unwrap();
+        let mut current = config(2, 1024);
+        current.spec.labels.insert("team".into(), "stale".into());
+        current.spec.labels.insert("removed".into(), "ghost".into());
+        let model = sandbox_entity::ActiveModel {
+            name: Set(current.spec.name.clone()),
+            config: Set(serde_json::to_string(&current).unwrap()),
+            active_config: Set(None),
+            status: Set(SandboxStatus::Stopped),
+            ephemeral: Set(false),
+            created_at: Set(None),
+            updated_at: Set(None),
+            ..Default::default()
+        }
+        .insert(pools.write())
+        .await
+        .unwrap();
+        let sandbox_id = model.id;
+        for (key, value) in [("team", "stale"), ("removed", "ghost")] {
+            sandbox_label_entity::ActiveModel {
+                sandbox_id: Set(sandbox_id),
+                key: Set(key.into()),
+                value: Set(value.into()),
+            }
+            .insert(pools.write())
+            .await
+            .unwrap();
+        }
+
+        let mut updated = current;
+        updated.spec.labels.remove("removed");
+        updated.spec.labels.insert("team".into(), "metrics".into());
+        updated.spec.labels.insert("tier".into(), "gold".into());
+        let handle = backend
+            .sandboxes()
+            .get(backend.clone(), &updated.spec.name)
+            .await
+            .unwrap();
+
+        persist_config(&backend, &handle, &updated).await.unwrap();
+
+        let mut rows = sandbox_label_entity::Entity::find()
+            .filter(sandbox_label_entity::Column::SandboxId.eq(sandbox_id))
+            .all(pools.read())
+            .await
+            .unwrap();
+        rows.sort_by(|left, right| left.key.cmp(&right.key));
+        assert_eq!(
+            rows.into_iter()
+                .map(|row| (row.key, row.value))
+                .collect::<Vec<_>>(),
+            vec![
+                ("team".into(), "metrics".into()),
+                ("tier".into(), "gold".into()),
+            ]
+        );
+        let stored = sandbox_entity::Entity::find_by_id(sandbox_id)
+            .one(pools.read())
+            .await
+            .unwrap()
+            .unwrap();
+        let stored: SandboxConfig = serde_json::from_str(&stored.config).unwrap();
+        assert_eq!(stored.spec.labels, updated.spec.labels);
+
+        let mut without_labels = updated;
+        without_labels.spec.labels.clear();
+        persist_config(&backend, &handle, &without_labels)
+            .await
+            .unwrap();
+
+        let rows = sandbox_label_entity::Entity::find()
+            .filter(sandbox_label_entity::Column::SandboxId.eq(sandbox_id))
+            .all(pools.read())
+            .await
+            .unwrap();
+        assert!(rows.is_empty());
+        let stored = sandbox_entity::Entity::find_by_id(sandbox_id)
+            .one(pools.read())
+            .await
+            .unwrap()
+            .unwrap();
+        let stored: SandboxConfig = serde_json::from_str(&stored.config).unwrap();
+        assert!(stored.spec.labels.is_empty());
     }
 
     #[test]
@@ -3161,7 +3403,7 @@ mod tests {
         );
         let json = serde_json::to_string(&plan).unwrap();
 
-        assert!(json.contains("$API_KEY"));
+        assert!(json.contains("$MSB_API_KEY"));
         assert!(json.contains("api.example.com"));
         assert!(!json.contains("real-secret-value"));
 
@@ -3611,7 +3853,7 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[test]
-    fn applying_new_source_spec_records_reference_not_value() {
+    fn applying_new_source_spec_uses_create_placeholder_default() {
         use microsandbox_network::secrets::config::HostPattern;
 
         let mut config = config(2, 1024);
@@ -3629,7 +3871,7 @@ mod tests {
                 var: "API_KEY".into()
             })
         );
-        assert_eq!(entry.placeholder, "$API_KEY");
+        assert_eq!(entry.placeholder, "$MSB_API_KEY");
         assert_eq!(
             entry.allowed_hosts,
             vec![HostPattern::Exact("api.example.com".into())]
@@ -3767,7 +4009,8 @@ mod tests {
         // The live control batch carries the value only for socket transport;
         // any Debug-logged form of the request shows [redacted] instead.
         let rotated_value = format!("{SECRET_SENTINEL}-rotated");
-        // SAFETY: unique variable name; no concurrent reader of this var.
+        let _env_guard = crate::test_support::lock_env();
+        // SAFETY: every environment-mutating SDK unit test holds the shared lock.
         unsafe { std::env::set_var("API_KEY_MODIFY_LEAK_TEST", &rotated_value) };
         let mut live_patch = patch.clone();
         live_patch.secrets[0].source = Some(SecretSource::Env {

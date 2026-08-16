@@ -22,11 +22,15 @@ use microsandbox_protocol::{
 use microsandbox_types::EnvVar;
 use russh::client::Msg as ClientMsg;
 use russh::keys::{Algorithm, PrivateKey, PrivateKeyWithHashAlg, PublicKeyBase64, load_secret_key};
-use russh::server::{Auth, Msg, Session};
-use russh::{Channel, ChannelId, ChannelMsg, Sig};
+use russh::server::{Auth, ChannelOpenHandle, Msg, Session};
+use russh::{Channel, ChannelId, ChannelMsg, ChannelOpenFailure, Sig};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use super::attach;
+#[cfg(windows)]
+use super::terminal::{
+    WindowsTerminalEvent, WindowsTerminalEventPump, WindowsTerminalGuard, current_terminal_size,
+};
 use crate::sandbox::exec::{ExecControl, ExecEvent, ExecOptions, ExecSink, StdinMode};
 use crate::{MicrosandboxError, MicrosandboxResult, Sandbox, agent::AgentClient, error::Operation};
 
@@ -582,7 +586,7 @@ impl SshClient {
                 Some(spec) => attach::DetachKeys::parse(spec)?,
                 None => attach::DetachKeys::default_keys(),
             };
-            let (cols, rows) = attach::agent::current_terminal_size().unwrap_or((80, 24));
+            let (cols, rows) = current_terminal_size().unwrap_or((80, 24));
             let mut channel = self
                 .handle
                 .channel_open_session()
@@ -607,9 +611,8 @@ impl SshClient {
                 .map_err(|e| ssh_error("request shell", e))?;
             wait_channel_success(&mut channel, "request shell").await?;
 
-            let terminal_guard = attach::agent::WindowsTerminalGuard::enter()?;
-            let mut terminal_events =
-                attach::agent::WindowsTerminalEventPump::spawn_for_guard(&terminal_guard)?;
+            let mut terminal_guard = WindowsTerminalGuard::enter()?;
+            let mut terminal_events = WindowsTerminalEventPump::spawn_for_guard(&terminal_guard)?;
             let detach_seq = detach_keys.sequence();
             let mut match_pos = 0usize;
             let mut exit_code = 0i32;
@@ -619,7 +622,7 @@ impl SshClient {
                 tokio::select! {
                     Some(event) = terminal_events.recv() => {
                         match event {
-                            attach::agent::WindowsTerminalEvent::Input(data) => {
+                            WindowsTerminalEvent::Input(data) => {
                                 if attach::input_contains_detach_sequence(
                                     &data,
                                     detach_seq,
@@ -633,12 +636,12 @@ impl SshClient {
                                     .await
                                     .map_err(|e| ssh_error("write channel data", e))?;
                             }
-                            attach::agent::WindowsTerminalEvent::Resize { cols, rows } => {
+                            WindowsTerminalEvent::Resize { cols, rows } => {
                                 let _ = channel_tx
                                     .window_change(u32::from(cols), u32::from(rows), 0, 0)
                                     .await;
                             }
-                            attach::agent::WindowsTerminalEvent::Error(error) => {
+                            WindowsTerminalEvent::Error(error) => {
                                 return Err(MicrosandboxError::Terminal(error));
                             }
                         }
@@ -663,6 +666,8 @@ impl SshClient {
                     }
                 }
             }
+
+            terminal_guard.finish_output()?;
 
             Ok(exit_code)
         }
@@ -1191,8 +1196,9 @@ impl russh::server::Handler for SshSession {
     async fn channel_open_session(
         &mut self,
         channel: Channel<Msg>,
+        reply: ChannelOpenHandle,
         _session: &mut Session,
-    ) -> Result<bool, Self::Error> {
+    ) -> Result<(), Self::Error> {
         self.channels.insert(
             channel.id(),
             ChannelState::Pending {
@@ -1201,7 +1207,8 @@ impl russh::server::Handler for SshSession {
                 env: Vec::new(),
             },
         );
-        Ok(true)
+        reply.accept().await;
+        Ok(())
     }
 
     async fn channel_open_direct_tcpip(
@@ -1211,17 +1218,27 @@ impl russh::server::Handler for SshSession {
         port_to_connect: u32,
         originator_address: &str,
         originator_port: u32,
+        reply: ChannelOpenHandle,
         session: &mut Session,
-    ) -> Result<bool, Self::Error> {
-        self.start_tcp_forward(
-            channel,
-            host_to_connect,
-            port_to_connect,
-            originator_address,
-            originator_port,
-            session,
-        )
-        .await
+    ) -> Result<(), Self::Error> {
+        let accepted = self
+            .start_tcp_forward(
+                channel,
+                host_to_connect,
+                port_to_connect,
+                originator_address,
+                originator_port,
+                session,
+            )
+            .await?;
+        if accepted {
+            reply.accept().await;
+        } else {
+            reply
+                .reject(ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
+        }
+        Ok(())
     }
 
     async fn env_request(

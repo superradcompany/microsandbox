@@ -12,11 +12,13 @@ export {
   type RawFrame,
 } from "./agent.js";
 export {
+  defaultBackendInfo,
   defaultBackendKind,
   setDefaultBackend,
   withDefaultBackend,
 } from "./runtime.js";
-export type { DefaultBackend } from "./runtime.js";
+export type { BackendInfo, DefaultBackend } from "./runtime.js";
+export type { DeploymentProfile } from "./deployment-profile.js";
 
 // Sandbox lifecycle and execution
 export { PullProgressCreate, Sandbox, SandboxListBuilder } from "./sandbox.js";
@@ -35,6 +37,7 @@ export const SandboxBuilder = function SandboxBuilder(
 } as unknown as new (name: string) => _SBT;
 export type SandboxBuilder = _SBT;
 export type {
+  CpuPlacement,
   SandboxConfig,
   SandboxPage,
   SandboxPingResult,
@@ -374,12 +377,18 @@ export const RuleDestinationBuilder = napi.RuleDestinationBuilder;
 export type RuleDestinationBuilder = NapiRuleDestinationBuilder;
 import type {
   NapiInterfaceOverridesBuilder,
+  NapiNetworkRateLimiterBuilder,
   NapiPullProgressEvent,
   NapiPullProgressStream,
+  NapiRateLimiterBuilder,
   NapiVolumeMount,
 } from "./internal/napi.js";
 export const InterfaceOverridesBuilder = napi.InterfaceOverridesBuilder;
 export type InterfaceOverridesBuilder = NapiInterfaceOverridesBuilder;
+export const NetworkRateLimiterBuilder = napi.NetworkRateLimiterBuilder;
+export type NetworkRateLimiterBuilder = NapiNetworkRateLimiterBuilder;
+export const RateLimiterBuilder = napi.RateLimiterBuilder;
+export type RateLimiterBuilder = NapiRateLimiterBuilder;
 export type PullProgressEvent = NapiPullProgressEvent;
 export type PullProgressStream = NapiPullProgressStream;
 
@@ -407,6 +416,7 @@ export {
   ImageInUseError,
   ImageNotFoundError,
   InvalidConfigError,
+  NoDefaultCommandError,
   IoError,
   JsonError,
   LibkrunfwNotFoundError,

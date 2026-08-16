@@ -4,7 +4,7 @@ description: Install the SDK and create your first sandbox
 icon: "play"
 ---
 
-The SDK embeds the microsandbox runtime directly into your application. Creating a sandbox spawns a local VM as a child process; there is no daemon to install and no server to connect to.
+The SDK embeds the microsandbox runtime directly into your application. Running locally, creating a sandbox spawns a VM as a child process; there is no daemon to install and no server to connect to. With an API key set, the same SDK runs sandboxes on [microsandbox cloud](/cloud/overview) instead.
 
 ## Installation
 
@@ -25,6 +25,8 @@ pip install microsandbox
 go get github.com/superradcompany/microsandbox/sdk/go
 ```
 </CodeGroup>
+
+For explicit runtime installation, verification, custom install locations, and environment overrides, see [Runtime setup](/sdk/setup).
 
 ## Small example
 

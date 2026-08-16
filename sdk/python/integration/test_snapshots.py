@@ -7,7 +7,13 @@ from contextlib import suppress
 import pytest
 
 from integration.helpers import IMAGE, remove_sandbox, remove_snapshot
-from microsandbox import Sandbox, Snapshot
+from microsandbox import (
+    Sandbox,
+    Snapshot,
+    SnapshotFormat,
+    SnapshotScope,
+    SnapshotStateKind,
+)
 
 
 @pytest.mark.asyncio
@@ -31,14 +37,21 @@ async def test_snapshot_create_open_list_and_boot(sandbox_name):
         assert snapshot.path
         assert snapshot.size_bytes > 0
         assert snapshot.source_sandbox == base_name
+        assert snapshot.state_kind is SnapshotStateKind.FILE
+        assert snapshot.format is SnapshotFormat.RAW
+        assert snapshot.scope is SnapshotScope.DISK
 
         verify_result = await snapshot.verify()
         assert isinstance(verify_result, dict)
 
         handle = await Snapshot.get(snapshot_name)
         assert handle.digest == snapshot.digest
+        assert handle.state_kind is SnapshotStateKind.FILE
+        assert handle.format is SnapshotFormat.RAW
+        assert handle.scope is SnapshotScope.DISK
         opened = await handle.open()
         assert opened.digest == snapshot.digest
+        assert opened.state_kind is SnapshotStateKind.FILE
 
         snapshots = await Snapshot.list()
         assert any(item.digest == snapshot.digest for item in snapshots)

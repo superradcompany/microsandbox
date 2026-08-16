@@ -1,0 +1,383 @@
+name: Release Windows
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        description: Release target label.
+        required: true
+        type: string
+      runner:
+        description: GitHub Actions runner label.
+        required: true
+        type: string
+      rust_target:
+        description: Rust target triple.
+        required: true
+        type: string
+      firmware_artifact:
+        description: Matching kernel bundle artifact.
+        required: true
+        type: string
+      agentd_artifact:
+        description: Matching musl agentd artifact.
+        required: true
+        type: string
+      vs_arch:
+        description: MSVC target architecture.
+        required: true
+        type: string
+      vs_host_arch:
+        description: MSVC host architecture.
+        required: true
+        type: string
+      napi_target:
+        description: napi-rs target triple.
+        required: true
+        type: string
+      node_file:
+        description: Platform Node native binding filename.
+        required: true
+        type: string
+      npm_dir:
+        description: Platform npm package directory.
+        required: true
+        type: string
+      msb_asset:
+        description: Public release asset name for msb.
+        required: true
+        type: string
+      metrics_asset:
+        description: Public release asset name for msb-metrics.
+        required: true
+        type: string
+      libkrunfw_asset:
+        description: Public release asset name for libkrunfw.
+        required: true
+        type: string
+      go_bundle_name:
+        description: Embedded Go SDK bundle filename.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_TIMEOUT: "120"
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_INCREMENTAL: "0"
+  LIBKRUNFW_ABI: "5"
+
+# These jobs produce shipped artifacts. Keep every Cargo and maturin build on
+# the workspace release profile (including its full LTO settings).
+jobs:
+  runtime:
+    name: Runtime (${{ inputs.target }})
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Only Windows needs libkrunfw's MSVC helpers. Avoid initializing the
+      # unrelated MCP and skills submodules in every release lane.
+      - name: Checkout libkrunfw sources
+        shell: pwsh
+        run: git submodule update --init --depth 1 vendor/libkrunfw
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ inputs.rust_target }}
+
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+        with:
+          cache-bin: false
+          cache-targets: true
+          shared-key: release-runtime-${{ inputs.target }}
+
+      - name: Download kernel bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.firmware_artifact }}
+          path: vendor/libkrunfw/
+
+      - name: Download agentd
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.agentd_artifact }}
+          path: build/
+
+      - name: Build libkrunfw.dll
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & .\vendor\libkrunfw\scripts\build-windows.ps1 `
+            -SkipKernelBundle `
+            -AbiVersion ${{ env.LIBKRUNFW_ABI }} `
+            -Architecture ${{ inputs.vs_arch }} `
+            -HostArchitecture ${{ inputs.vs_host_arch }} `
+            -Output libkrunfw.dll `
+            -ImportLibrary libkrunfw.lib
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          Copy-Item vendor\libkrunfw\libkrunfw.dll build\libkrunfw.dll -Force
+
+      - name: Build msb
+        shell: pwsh
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture ${{ inputs.vs_arch }} -HostArchitecture ${{ inputs.vs_host_arch }}
+          cargo build --release --no-default-features --features net,ssh -p microsandbox-cli --target ${{ inputs.rust_target }}
+          Copy-Item target\${{ inputs.rust_target }}\release\msb.exe build\msb.exe -Force
+          & build\msb.exe --version
+
+      - name: Upload runtime artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runtime-${{ inputs.target }}
+          path: |
+            build/agentd
+            build/libkrunfw.dll
+            build/msb.exe
+          compression-level: 0
+
+  metrics:
+    name: Metrics (${{ inputs.target }})
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Checkout libkrunfw build helpers
+        shell: pwsh
+        run: git submodule update --init --depth 1 vendor/libkrunfw
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ inputs.rust_target }}
+
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+        with:
+          cache-bin: false
+          cache-targets: true
+          shared-key: release-metrics-${{ inputs.target }}
+
+      - name: Build msb-metrics
+        shell: pwsh
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture ${{ inputs.vs_arch }} -HostArchitecture ${{ inputs.vs_host_arch }}
+          cargo build --release -p microsandbox-metrics-collector --target ${{ inputs.rust_target }}
+
+      - name: Upload metrics artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: metrics-${{ inputs.target }}
+          path: target/${{ inputs.rust_target }}/release/msb-metrics.exe
+          compression-level: 0
+
+  go-ffi:
+    name: Go FFI (${{ inputs.target }})
+    needs: runtime
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Checkout libkrunfw build helpers
+        shell: pwsh
+        run: git submodule update --init --depth 1 vendor/libkrunfw
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ inputs.rust_target }}
+
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+        with:
+          cache-bin: false
+          cache-targets: true
+          shared-key: release-go-${{ inputs.target }}
+
+      - name: Download runtime artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: runtime-${{ inputs.target }}
+          path: build/
+
+      - name: Build Go FFI
+        shell: pwsh
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture ${{ inputs.vs_arch }} -HostArchitecture ${{ inputs.vs_host_arch }}
+          cargo build --release -p microsandbox-go --target ${{ inputs.rust_target }}
+
+      - name: Upload Go FFI artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: go-ffi-${{ inputs.target }}
+          path: target/${{ inputs.rust_target }}/release/microsandbox_go_ffi.dll
+          compression-level: 0
+
+  node:
+    name: Node SDK (${{ inputs.target }})
+    needs: runtime
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Checkout libkrunfw build helpers
+        shell: pwsh
+        run: git submodule update --init --depth 1 vendor/libkrunfw
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ inputs.rust_target }}
+
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+        with:
+          cache-bin: false
+          cache-targets: true
+          shared-key: release-node-${{ inputs.target }}
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: sdk/node-ts/package-lock.json
+
+      - name: Download runtime artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: runtime-${{ inputs.target }}
+          path: build/
+
+      - name: Build Node native binding
+        shell: pwsh
+        working-directory: sdk/node-ts
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture ${{ inputs.vs_arch }} -HostArchitecture ${{ inputs.vs_host_arch }}
+          node scripts/prune-platform-optional-deps.mjs
+          npm install --package-lock=false
+          npm run build:native -- --target ${{ inputs.napi_target }}
+          node -e "require('./native/index.cjs')"
+
+      - name: Prepare Node platform package
+        shell: pwsh
+        working-directory: sdk/node-ts
+        run: node scripts/prepare-platform-package.mjs ${{ inputs.npm_dir }}
+
+      - name: Upload Node SDK artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: node-sdk-${{ inputs.npm_dir }}
+          path: |
+            sdk/node-ts/native/${{ inputs.node_file }}
+            sdk/node-ts/native/index.cjs
+            sdk/node-ts/native/index.d.ts
+            sdk/node-ts/npm/${{ inputs.npm_dir }}/${{ inputs.node_file }}
+            sdk/node-ts/npm/${{ inputs.npm_dir }}/bin/*
+            sdk/node-ts/npm/${{ inputs.npm_dir }}/lib/*
+          compression-level: 0
+
+  python:
+    name: Python SDK (${{ inputs.target }})
+    needs: runtime
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ inputs.rust_target }}
+
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+        with:
+          cache-bin: false
+          cache-targets: true
+          shared-key: release-python-${{ inputs.target }}
+
+      - name: Download runtime artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: runtime-${{ inputs.target }}
+          path: build/
+
+      - name: Stage runtime bundle
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path sdk\python\microsandbox\_bundled\bin | Out-Null
+          New-Item -ItemType Directory -Force -Path sdk\python\microsandbox\_bundled\lib | Out-Null
+          Copy-Item build\msb.exe sdk\python\microsandbox\_bundled\bin\msb.exe -Force
+          Copy-Item build\libkrunfw.dll sdk\python\microsandbox\_bundled\lib\libkrunfw.dll -Force
+
+      - name: Build Python wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
+        with:
+          working-directory: sdk/python
+          command: build
+          args: --release --out dist --target ${{ inputs.rust_target }}
+
+      - name: Upload Python SDK wheel
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: python-sdk-${{ inputs.target }}
+          path: sdk/python/dist/*.whl
+          compression-level: 0
+
+  assemble-platform:
+    name: Assemble (${{ inputs.target }})
+    needs: [runtime, metrics, go-ffi]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download runtime artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: runtime-${{ inputs.target }}
+          path: bundle/runtime/
+
+      - name: Download metrics artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: metrics-${{ inputs.target }}
+          path: bundle/metrics/
+
+      - name: Download Go FFI artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: go-ffi-${{ inputs.target }}
+          path: bundle/go/
+
+      - name: Stage platform artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts bundle/archive
+          cp bundle/runtime/msb.exe artifacts/${{ inputs.msb_asset }}
+          cp bundle/metrics/msb-metrics.exe artifacts/${{ inputs.metrics_asset }}
+          cp bundle/runtime/libkrunfw.dll artifacts/${{ inputs.libkrunfw_asset }}
+          cp bundle/runtime/msb.exe bundle/archive/msb.exe
+          cp bundle/runtime/libkrunfw.dll bundle/archive/libkrunfw.dll
+          (cd bundle/archive && zip -q ../../artifacts/microsandbox-${{ inputs.target }}.zip msb.exe libkrunfw.dll)
+          tar -czf artifacts/microsandbox-${{ inputs.target }}.tar.gz -C bundle/archive msb.exe libkrunfw.dll
+          cp bundle/go/microsandbox_go_ffi.dll artifacts/${{ inputs.go_bundle_name }}
+
+      - name: Upload platform artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ inputs.target }}
+          path: artifacts/
+          compression-level: 0

@@ -66,7 +66,7 @@ impl MigrationTrait for Migration {
         let conn = manager.get_connection();
         for column in ["config", "active_config"] {
             let rows = conn
-                .query_all(Statement::from_string(
+                .query_all_raw(Statement::from_string(
                     DatabaseBackend::Sqlite,
                     format!("SELECT id, {column} FROM sandbox WHERE {column} IS NOT NULL"),
                 ))
@@ -79,7 +79,7 @@ impl MigrationTrait for Migration {
                     continue;
                 };
 
-                conn.execute(Statement::from_sql_and_values(
+                conn.execute_raw(Statement::from_sql_and_values(
                     DatabaseBackend::Sqlite,
                     format!("UPDATE sandbox SET {column} = ? WHERE id = ?"),
                     [updated.into(), id.into()],
@@ -95,7 +95,7 @@ impl MigrationTrait for Migration {
         let conn = manager.get_connection();
         for column in ["config", "active_config"] {
             let rows = conn
-                .query_all(Statement::from_string(
+                .query_all_raw(Statement::from_string(
                     DatabaseBackend::Sqlite,
                     format!("SELECT id, {column} FROM sandbox WHERE {column} IS NOT NULL"),
                 ))
@@ -107,7 +107,7 @@ impl MigrationTrait for Migration {
                 let Some(updated) = downgrade_config(&config)? else {
                     continue;
                 };
-                conn.execute(Statement::from_sql_and_values(
+                conn.execute_raw(Statement::from_sql_and_values(
                     DatabaseBackend::Sqlite,
                     format!("UPDATE sandbox SET {column} = ? WHERE id = ?"),
                     [updated.into(), id.into()],
@@ -161,7 +161,10 @@ fn migrate_config(config: &str) -> Result<Option<String>, DbErr> {
         return Ok(None);
     };
 
-    if !size.is_null() {
+    // `serde_json::Value::is_null` spelled out: with the sea-query prelude in
+    // scope, `size.is_null()` resolves to `ExprTrait::is_null` (by-value self
+    // beats serde_json's by-ref inherent method) and builds SQL instead.
+    if !serde_json::Value::is_null(&size) {
         oci.insert(
             "root_disk".to_owned(),
             serde_json::json!({ "kind": "managed", "size_mib": size }),
@@ -190,7 +193,8 @@ fn downgrade_config(config: &str) -> Result<Option<String>, DbErr> {
     let Some(root_disk) = oci.remove("root_disk") else {
         return Ok(None);
     };
-    if root_disk.is_null() {
+    // UFCS to dodge sea-query's `ExprTrait::is_null` (see `migrate_config`).
+    if serde_json::Value::is_null(&root_disk) {
         return serde_json::to_string(&value)
             .map(Some)
             .map_err(|err| DbErr::Custom(format!("serialize sandbox config JSON: {err}")));
@@ -210,7 +214,7 @@ fn downgrade_config(config: &str) -> Result<Option<String>, DbErr> {
         .get("size_mib")
         .cloned()
         .unwrap_or(serde_json::Value::Null);
-    if !size.is_null() && !size.is_u64() {
+    if !serde_json::Value::is_null(&size) && !size.is_u64() {
         return Err(DbErr::Custom(
             "root_disk_downgrade_unrepresentable: managed size_mib is not an unsigned integer"
                 .into(),

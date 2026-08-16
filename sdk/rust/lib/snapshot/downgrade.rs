@@ -17,7 +17,7 @@ use chrono::Utc;
 use microsandbox_image::snapshot::migration::{
     V066_BACKUP_FILENAME, V066_DESCRIPTOR_FILENAME, inspect_v066_source, translate_v066_reverse,
 };
-use microsandbox_image::snapshot::{DESCRIPTOR_FILENAME, Manifest, SnapshotState};
+use microsandbox_image::snapshot::{DESCRIPTOR_FILENAME, Manifest, SnapshotState, UpperIntegrity};
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement, TransactionTrait};
 use serde::Serialize;
 
@@ -80,6 +80,7 @@ struct Candidate {
     target_bytes: Option<Vec<u8>>,
     target_digest: Option<String>,
     target_parent_digest: Option<String>,
+    target_integrity: Option<UpperIntegrity>,
     translation_source: TranslationSource,
     recovery_member: Option<String>,
     _lock: ArtifactLock,
@@ -229,7 +230,7 @@ async fn discover_paths(
     snapshots_dir: &Path,
 ) -> MicrosandboxResult<BTreeSet<PathBuf>> {
     let rows = db
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "SELECT artifact_path FROM snapshot_index",
         ))
@@ -273,7 +274,12 @@ async fn load_candidate(db: &DatabaseConnection, path: PathBuf) -> MicrosandboxR
                 detail: error.to_string(),
             }
         })?;
-        validate_payload(&path, &source)?;
+        let target_integrity = validate_payload(
+            &path,
+            &source,
+            !backup_path.exists() && !legacy_path.exists(),
+        )
+        .await?;
         let source_digest = source.digest()?;
         if let Some(indexed) = indexed_digest.as_deref()
             && indexed != source_digest
@@ -392,6 +398,7 @@ async fn load_candidate(db: &DatabaseConnection, path: PathBuf) -> MicrosandboxR
             target_bytes,
             target_digest,
             target_parent_digest,
+            target_integrity,
             translation_source,
             recovery_member,
             _lock: lock,
@@ -450,6 +457,7 @@ async fn load_candidate(db: &DatabaseConnection, path: PathBuf) -> MicrosandboxR
             target_bytes: Some(target_bytes),
             target_digest: Some(info.source_digest),
             target_parent_digest: info.parent_digest,
+            target_integrity: None,
             translation_source,
             recovery_member: None,
             _lock: lock,
@@ -568,15 +576,17 @@ fn visit_candidate(
     match candidates[index].translation_source {
         TranslationSource::Native => {
             if let Some(source) = candidates[index].source.as_ref() {
-                let translated =
-                    translate_v066_reverse(source, mapped_parent.clone()).map_err(|error| {
-                        MicrosandboxError::SnapshotMigration {
-                            code: "snapshot_downgrade_unrepresentable".into(),
-                            phase: "preflight".into(),
-                            artifact: candidates[index].path.display().to_string(),
-                            detail: error.to_string(),
-                        }
-                    })?;
+                let translated = translate_v066_reverse(
+                    source,
+                    mapped_parent.clone(),
+                    candidates[index].target_integrity.clone(),
+                )
+                .map_err(|error| MicrosandboxError::SnapshotMigration {
+                    code: "snapshot_downgrade_unrepresentable".into(),
+                    phase: "preflight".into(),
+                    artifact: candidates[index].path.display().to_string(),
+                    detail: error.to_string(),
+                })?;
                 candidates[index].target_bytes = Some(translated.target_bytes);
                 candidates[index].target_digest = Some(translated.target_digest);
                 candidates[index].target_parent_digest = mapped_parent;
@@ -618,7 +628,7 @@ async fn preflight_index(
         .map(|candidate| candidate.path.display().to_string())
         .collect();
     let rows = db
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "SELECT digest, artifact_path, state_kind, scope, format, fstype FROM snapshot_index",
         ))
@@ -657,7 +667,7 @@ async fn journal_plans(
 ) -> MicrosandboxResult<()> {
     let now = Utc::now().naive_utc();
     for candidate in candidates {
-        db.execute(Statement::from_sql_and_values(
+        db.execute_raw(Statement::from_sql_and_values(
             DatabaseBackend::Sqlite,
             "INSERT INTO snapshot_artifact_migration (kind, artifact_path, indexed_digest, source_digest, target_digest, source_parent_digest, target_parent_digest, phase, attempts, discovered_at, updated_at, recovery_member, translation_source) VALUES (?, ?, ?, ?, ?, ?, ?, 'reverse_planned', 1, ?, ?, ?, ?) ON CONFLICT(kind, artifact_path) DO UPDATE SET indexed_digest = excluded.indexed_digest, source_digest = COALESCE(snapshot_artifact_migration.source_digest, excluded.source_digest), target_digest = excluded.target_digest, source_parent_digest = COALESCE(snapshot_artifact_migration.source_parent_digest, excluded.source_parent_digest), target_parent_digest = excluded.target_parent_digest, attempts = snapshot_artifact_migration.attempts + 1, updated_at = excluded.updated_at, recovery_member = COALESCE(snapshot_artifact_migration.recovery_member, excluded.recovery_member), translation_source = COALESCE(snapshot_artifact_migration.translation_source, excluded.translation_source), error_code = NULL, error_detail = NULL",
             [
@@ -781,7 +791,7 @@ async fn publish_legacy_index(
                 .unwrap_or(&candidate.source_digest)
         );
         transaction
-            .execute(Statement::from_sql_and_values(
+            .execute_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Sqlite,
                 "UPDATE snapshot_index SET digest = ? WHERE artifact_path = ?",
                 [
@@ -796,7 +806,7 @@ async fn publish_legacy_index(
             continue;
         }
         transaction
-            .execute(Statement::from_sql_and_values(
+            .execute_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Sqlite,
                 "UPDATE snapshot_index SET digest = ?, parent_digest = ?, migration_state = 'reverse_complete', migration_error_code = NULL WHERE artifact_path = ?",
                 [
@@ -807,7 +817,7 @@ async fn publish_legacy_index(
             ))
             .await?;
         transaction
-            .execute(Statement::from_sql_and_values(
+            .execute_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Sqlite,
                 "UPDATE snapshot_artifact_migration SET phase = 'legacy_index_published', updated_at = ? WHERE kind = ? AND artifact_path = ?",
                 [
@@ -852,7 +862,7 @@ async fn indexed_digest(
     path: &Path,
 ) -> MicrosandboxResult<Option<String>> {
     let row = db
-        .query_one(Statement::from_sql_and_values(
+        .query_one_raw(Statement::from_sql_and_values(
             DatabaseBackend::Sqlite,
             "SELECT digest FROM snapshot_index WHERE artifact_path = ?",
             [path.display().to_string().into()],
@@ -867,7 +877,7 @@ async fn forward_journal(
     path: &Path,
 ) -> MicrosandboxResult<Option<ForwardJournal>> {
     let row = db
-        .query_one(Statement::from_sql_and_values(
+        .query_one_raw(Statement::from_sql_and_values(
             DatabaseBackend::Sqlite,
             "SELECT source_digest, target_digest, source_parent_digest, target_parent_digest, phase FROM snapshot_artifact_migration WHERE kind = ? AND artifact_path = ?",
             [FORWARD_KIND.into(), path.display().to_string().into()],
@@ -890,7 +900,7 @@ async fn reverse_journal(
     path: &Path,
 ) -> MicrosandboxResult<Option<ReverseJournal>> {
     let row = db
-        .query_one(Statement::from_sql_and_values(
+        .query_one_raw(Statement::from_sql_and_values(
             DatabaseBackend::Sqlite,
             "SELECT source_digest, target_digest, target_parent_digest, phase, translation_source FROM snapshot_artifact_migration WHERE kind = ? AND artifact_path = ?",
             [REVERSE_KIND.into(), path.display().to_string().into()],
@@ -913,7 +923,7 @@ async fn journal_phase(
     path: &Path,
     phase: &str,
 ) -> MicrosandboxResult<()> {
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         DatabaseBackend::Sqlite,
         "UPDATE snapshot_artifact_migration SET phase = ?, updated_at = ?, completed_at = CASE WHEN ? = 'reverse_complete' THEN ? ELSE completed_at END WHERE kind = ? AND artifact_path = ?",
         [
@@ -929,7 +939,11 @@ async fn journal_phase(
     Ok(())
 }
 
-fn validate_payload(path: &Path, manifest: &Manifest) -> MicrosandboxResult<()> {
+async fn validate_payload(
+    path: &Path,
+    manifest: &Manifest,
+    convert_current_integrity: bool,
+) -> MicrosandboxResult<Option<UpperIntegrity>> {
     let SnapshotState::File(file) = &manifest.state else {
         return downgrade_error(
             path,
@@ -960,29 +974,43 @@ fn validate_payload(path: &Path, manifest: &Manifest) -> MicrosandboxResult<()> 
             ),
         );
     }
-    let before_modified = metadata.modified().ok();
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    options.custom_flags(libc::O_NOFOLLOW);
-    let mut payload = options.open(&payload_path)?;
-    let identity = super::migration::hash_payload(&mut payload)?;
-    let after = payload.metadata()?;
-    if after.len() != metadata.len() || after.modified().ok() != before_modified {
+    let mut payload = super::verify::open_verification_source(&payload_path)?;
+    let before = super::verify::verification_source_identity(&payload.metadata()?);
+    let identity = super::migration::inspect_payload(&mut payload)?;
+    let target_integrity = match &file.upper.integrity {
+        Some(expected @ UpperIntegrity::FileMerkleBlake3V1 { .. }) if convert_current_integrity => {
+            let actual =
+                super::verify::compute_merkle_integrity_from_file(payload.try_clone()?).await?;
+            if actual != *expected {
+                return downgrade_error(
+                    path,
+                    "preflight",
+                    "payload does not match its recorded BLAKE3 integrity",
+                );
+            }
+            Some(
+                super::verify::compute_legacy_sparse_integrity_from_file(payload.try_clone()?)
+                    .await?,
+            )
+        }
+        integrity => integrity.clone(),
+    };
+    super::verify::ensure_verification_source_unchanged(&payload, &payload_path, &before).map_err(
+        |_| MicrosandboxError::SnapshotMigration {
+            code: "snapshot_downgrade_unrepresentable".into(),
+            phase: "preflight".into(),
+            artifact: path.display().to_string(),
+            detail: "payload changed during downgrade preflight".into(),
+        },
+    )?;
+    if identity.size_bytes != file.upper.size_bytes {
         return downgrade_error(
             path,
             "preflight",
-            "payload changed while verifying integrity",
+            "payload size changed during downgrade preflight",
         );
     }
-    if identity.sparse_integrity != file.upper.integrity {
-        return downgrade_error(
-            path,
-            "preflight",
-            "payload does not match its mandatory sparse integrity",
-        );
-    }
-    Ok(())
+    Ok(target_integrity)
 }
 
 fn read_regular_bounded(path: &Path, label: &str) -> MicrosandboxResult<Vec<u8>> {
@@ -1132,7 +1160,7 @@ mod tests {
         let row = pools
             .write()
             .inner()
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "SELECT digest, migration_state FROM snapshot_index",
             ))
@@ -1154,7 +1182,7 @@ mod tests {
         let count = pools
             .write()
             .inner()
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "SELECT COUNT(*) FROM snapshot_index",
             ))
@@ -1192,7 +1220,7 @@ mod tests {
         pools
             .write()
             .inner()
-            .execute(Statement::from_string(
+            .execute_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "DELETE FROM snapshot_artifact_migration",
             ))
@@ -1211,7 +1239,7 @@ mod tests {
         pools
             .write()
             .inner()
-            .execute(Statement::from_sql_and_values(
+            .execute_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Sqlite,
                 "UPDATE snapshot_index SET digest = ?, migration_state = 'canonical' WHERE artifact_path = ?",
                 [digest.into(), artifact.display().to_string().into()],
@@ -1234,7 +1262,7 @@ mod tests {
         let state = pools
             .write()
             .inner()
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "SELECT migration_state FROM snapshot_index",
             ))
@@ -1244,5 +1272,99 @@ mod tests {
             .try_get_by_index::<String>(0)
             .unwrap();
         assert_eq!(state, "canonical");
+    }
+
+    #[tokio::test]
+    async fn native_merkle_integrity_is_verified_and_projected_for_v066() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("msb.db");
+        let snapshots = temp.path().join("snapshots");
+        let artifact = snapshots.join("native");
+        std::fs::create_dir_all(&artifact).unwrap();
+        std::fs::write(artifact.join("upper.ext4"), b"hello").unwrap();
+        std::fs::write(artifact.join(V066_DESCRIPTOR_FILENAME), LEGACY).unwrap();
+
+        let pools = DbPools::open(&db_path, 2, Duration::from_secs(5), Duration::from_secs(5))
+            .await
+            .unwrap();
+        Migrator::up(pools.write().inner(), None).await.unwrap();
+        crate::snapshot::migration::reconcile_managed(&pools, &snapshots)
+            .await
+            .unwrap();
+
+        // Make this a native current artifact so downgrade must translate it
+        // instead of restoring the exact released descriptor backup.
+        std::fs::remove_file(artifact.join(V066_BACKUP_FILENAME)).unwrap();
+        pools
+            .write()
+            .inner()
+            .execute_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "DELETE FROM snapshot_artifact_migration",
+            ))
+            .await
+            .unwrap();
+        let descriptor_path = artifact.join(DESCRIPTOR_FILENAME);
+        let mut manifest = Manifest::from_bytes(&std::fs::read(&descriptor_path).unwrap()).unwrap();
+        let SnapshotState::File(file) = &mut manifest.state else {
+            panic!("fixture must contain file state");
+        };
+        file.upper.integrity = Some(
+            super::super::verify::compute_merkle_integrity(&artifact.join("upper.ext4"))
+                .await
+                .unwrap(),
+        );
+        let canonical = manifest.to_canonical_bytes().unwrap();
+        let digest = manifest.digest().unwrap();
+        std::fs::write(&descriptor_path, canonical).unwrap();
+        pools
+            .write()
+            .inner()
+            .execute_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                "UPDATE snapshot_index SET digest = ?, migration_state = 'canonical' WHERE artifact_path = ?",
+                [digest.into(), artifact.display().to_string().into()],
+            ))
+            .await
+            .unwrap();
+
+        let plan = preflight_managed_v066(pools.write().inner(), &snapshots)
+            .await
+            .unwrap();
+        let target: serde_json::Value = serde_json::from_slice(
+            plan.candidates[0]
+                .target_bytes
+                .as_ref()
+                .expect("preflight must render the legacy descriptor"),
+        )
+        .unwrap();
+        let expected = super::super::verify::compute_legacy_sparse_integrity_from_file(
+            std::fs::File::open(artifact.join("upper.ext4")).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            target["upper"]["integrity"]["algorithm"],
+            "msb-sparse-sha256-v1"
+        );
+        assert_eq!(target["upper"]["integrity"]["digest"], expected.value());
+        assert!(artifact.join(DESCRIPTOR_FILENAME).exists());
+        assert!(!artifact.join(V066_DESCRIPTOR_FILENAME).exists());
+
+        // Downgrade must not replace a mismatching current root with a freshly
+        // computed legacy digest, which would legitimize corrupted bytes.
+        let SnapshotState::File(file) = &mut manifest.state else {
+            unreachable!()
+        };
+        file.upper.integrity = Some(UpperIntegrity::FileMerkleBlake3V1 {
+            root: format!("blake3:{}", "b".repeat(64)),
+            logical_size: 5,
+            leaf_size: microsandbox_image::snapshot::FILE_MERKLE_BLAKE3_LEAF_SIZE,
+        });
+        let error = validate_payload(&artifact, &manifest, true)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("recorded BLAKE3 integrity"));
     }
 }

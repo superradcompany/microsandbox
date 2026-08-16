@@ -18,7 +18,7 @@
 mod sandbox;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     num::NonZero,
     path::{Path, PathBuf},
     sync::Arc,
@@ -32,10 +32,13 @@ use std::{
 
 use microsandbox_db::pool::DbPools;
 use microsandbox_migration::{Migrator, MigratorTrait, schema_metadata};
+use microsandbox_types::DeploymentProfile;
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, DbErr, Statement};
 use tokio::sync::OnceCell;
 
-use super::{Backend, BackendKind, SandboxBackend, VolumeBackend};
+use super::{
+    Backend, BackendInfo, BackendKind, BackendSelectionSource, SandboxBackend, VolumeBackend,
+};
 use crate::{MicrosandboxError, MicrosandboxResult};
 use crate::{
     SandboxConfig,
@@ -55,6 +58,9 @@ use crate::{
 pub struct LocalBackend {
     config: Arc<LocalConfig>,
     db: OnceCell<DbPools>,
+    deployment_profile: Option<DeploymentProfile>,
+    selection_source: BackendSelectionSource,
+    profile: Option<String>,
 }
 
 /// Fluent builder for [`LocalBackend`]. Construct via [`LocalBackend::builder`].
@@ -88,6 +94,7 @@ pub struct LocalBackendBuilder {
     ca_certs: Option<Option<PathBuf>>,
     registry_hosts: Option<HashMap<String, RegistryEntry>>,
     log_level: Option<microsandbox_runtime::logging::LogLevel>,
+    deployment_profile: Option<DeploymentProfile>,
 }
 
 struct MigrationLock {
@@ -113,10 +120,22 @@ impl LocalBackend {
     /// `LocalBackend` instance, so callers never end up with two backends
     /// racing on the same SQLite file.
     pub fn lazy() -> Self {
-        let config = Arc::new(load_persisted_config_or_default().unwrap_or_default());
+        Self::lazy_with_selection(BackendSelectionSource::Programmatic, None)
+    }
+
+    /// Construct a lazy local backend with resolver provenance attached.
+    pub(crate) fn lazy_with_selection(
+        selection_source: BackendSelectionSource,
+        profile: Option<String>,
+    ) -> Self {
+        let config = load_persisted_config_or_default().unwrap_or_default();
+        let deployment_profile = config.deployment_profile;
         Self {
-            config,
+            config: Arc::new(config),
             db: OnceCell::new(),
+            deployment_profile,
+            selection_source,
+            profile,
         }
     }
 
@@ -204,6 +223,42 @@ impl LocalBackend {
                 "SandboxBuilder::slug is only honored by cloud backends; ignoring"
             );
         }
+    }
+
+    /// Apply the operator-selected deployment profile before persistence and launch.
+    ///
+    /// The optional backend value is authoritative. Keeping this decision on
+    /// the backend means an embedding host can enforce its isolation model even
+    /// when the incoming sandbox specification requests a weaker profile.
+    pub(crate) fn apply_deployment_profile(&self, config: &mut SandboxConfig) {
+        let Some(profile) = self.deployment_profile else {
+            return;
+        };
+
+        if config.spec.deployment_profile != profile {
+            let requested = config.spec.deployment_profile;
+            if requested == DeploymentProfile::MultiTenant
+                && profile == DeploymentProfile::SingleTenant
+            {
+                tracing::warn!(
+                    sandbox = %config.spec.name,
+                    ?requested,
+                    enforced = ?profile,
+                    "host policy is weakening the requested deployment profile"
+                );
+            } else {
+                // Hosted create requests intentionally omit this field and
+                // therefore decode to SingleTenant. Enforcing MultiTenant is
+                // the normal managed path, not a tenant override attempt.
+                tracing::debug!(
+                    sandbox = %config.spec.name,
+                    ?requested,
+                    enforced = ?profile,
+                    "host policy strengthened the deployment profile"
+                );
+            }
+        }
+        config.spec.deployment_profile = profile;
     }
 }
 
@@ -327,6 +382,15 @@ impl LocalBackendBuilder {
         self
     }
 
+    /// Force the host-runtime deployment profile for every sandbox launched by this backend.
+    ///
+    /// This operator setting takes precedence over the profile requested on a
+    /// sandbox builder and is applied on both create and restart.
+    pub fn deployment_profile(mut self, profile: DeploymentProfile) -> Self {
+        self.deployment_profile = Some(profile);
+        self
+    }
+
     /// Build the `LocalBackend`. Opens the DB pool and applies migrations.
     ///
     /// Reads `~/.microsandbox/config.json` (or `MSB_CONFIG_PATH`) and
@@ -334,14 +398,28 @@ impl LocalBackendBuilder {
     /// anything the builder didn't set falls through to the persisted
     /// config (or the hard-coded defaults if no config file exists).
     pub async fn build(self) -> MicrosandboxResult<LocalBackend> {
-        let persisted = load_persisted_config_or_default().unwrap_or_default();
-        let config = self.merge_into(persisted);
-        let backend = LocalBackend {
-            config: Arc::new(config),
-            db: OnceCell::new(),
-        };
+        let backend = self.build_lazy();
         let _ = backend.db().await?;
         Ok(backend)
+    }
+
+    /// Build a `LocalBackend` whose database initializes on first use.
+    ///
+    /// This retains the programmatic overrides from the builder while avoiding
+    /// filesystem or migration work during construction. It is useful for
+    /// embedding runtimes that must finish a protocol handshake before touching
+    /// sandbox state.
+    pub fn build_lazy(self) -> LocalBackend {
+        let persisted = load_persisted_config_or_default().unwrap_or_default();
+        let config = self.merge_into(persisted);
+        let deployment_profile = config.deployment_profile;
+        LocalBackend {
+            config: Arc::new(config),
+            db: OnceCell::new(),
+            deployment_profile,
+            selection_source: BackendSelectionSource::Programmatic,
+            profile: None,
+        }
     }
 
     /// Overlay the builder's overrides on top of `base`. Builder values win;
@@ -367,6 +445,7 @@ impl LocalBackendBuilder {
             ca_certs,
             registry_hosts,
             log_level,
+            deployment_profile,
         } = self;
 
         if let Some(home) = home {
@@ -374,6 +453,9 @@ impl LocalBackendBuilder {
         }
         if let Some(level) = log_level {
             base.log_level = Some(level);
+        }
+        if let Some(profile) = deployment_profile {
+            base.deployment_profile = Some(profile);
         }
 
         if let Some(v) = max_connections {
@@ -472,6 +554,15 @@ impl MigrationLock {
 impl Backend for LocalBackend {
     fn kind(&self) -> BackendKind {
         BackendKind::Local
+    }
+
+    fn info(&self) -> BackendInfo {
+        BackendInfo {
+            kind: BackendKind::Local,
+            api_url: None,
+            source: self.selection_source,
+            profile: self.profile.clone(),
+        }
     }
 
     fn sandboxes(&self) -> &dyn SandboxBackend {
@@ -656,9 +747,9 @@ async fn acquire_migration_lock(db_dir: &Path) -> MicrosandboxResult<MigrationLo
 
 async fn refuse_schema_ahead(conn: &DatabaseConnection) -> MicrosandboxResult<()> {
     let rows = match conn
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
-            "SELECT version FROM seaql_migrations ORDER BY applied_at ASC, version ASC",
+            "SELECT version FROM seaql_migrations",
         ))
         .await
     {
@@ -671,14 +762,19 @@ async fn refuse_schema_ahead(conn: &DatabaseConnection) -> MicrosandboxResult<()
         .iter()
         .map(|row| row.try_get_by_index::<String>(0))
         .collect::<Result<_, _>>()?;
-    let known: Vec<&str> = schema_metadata::migration_ids().collect();
-
-    for (index, version) in applied.iter().enumerate() {
-        if known.get(index).copied() != Some(version.as_str()) {
-            return Err(MicrosandboxError::Runtime(format!(
-                "database schema is newer than this msb binary; applied migration {version:?} is not in this binary's migration prefix"
-            )));
-        }
+    if schema_metadata::canonical_applied_prefix(applied.iter().map(String::as_str)).is_none() {
+        let expected_prefix: HashSet<_> = schema_metadata::migration_ids()
+            .take(applied.len())
+            .collect();
+        let version = applied
+            .iter()
+            .find(|version| !expected_prefix.contains(version.as_str()))
+            .or_else(|| applied.first())
+            .map(String::as_str)
+            .unwrap_or("<missing migration>");
+        return Err(MicrosandboxError::Runtime(format!(
+            "database schema is newer than this msb binary; applied migration {version:?} is not in this binary's migration prefix"
+        )));
     }
 
     Ok(())
@@ -703,6 +799,47 @@ mod tests {
     use crate::backend::with_backend;
     use crate::volume::VolumeConfig;
 
+    #[test]
+    fn operator_deployment_profile_overrides_sandbox_request() {
+        let backend = LocalBackend {
+            config: Arc::new(LocalConfig::default()),
+            db: OnceCell::new(),
+            deployment_profile: Some(DeploymentProfile::MultiTenant),
+            selection_source: BackendSelectionSource::Programmatic,
+            profile: None,
+        };
+        let mut config = SandboxConfig::default();
+        config.spec.name = "profile-test".into();
+        config.spec.deployment_profile = DeploymentProfile::SingleTenant;
+
+        backend.apply_deployment_profile(&mut config);
+
+        assert_eq!(
+            config.spec.deployment_profile,
+            DeploymentProfile::MultiTenant
+        );
+    }
+
+    #[test]
+    fn sandbox_deployment_profile_is_preserved_without_operator_override() {
+        let backend = LocalBackend {
+            config: Arc::new(LocalConfig::default()),
+            db: OnceCell::new(),
+            deployment_profile: None,
+            selection_source: BackendSelectionSource::Programmatic,
+            profile: None,
+        };
+        let mut config = SandboxConfig::default();
+        config.spec.deployment_profile = DeploymentProfile::MultiTenant;
+
+        backend.apply_deployment_profile(&mut config);
+
+        assert_eq!(
+            config.spec.deployment_profile,
+            DeploymentProfile::MultiTenant
+        );
+    }
+
     #[tokio::test]
     async fn test_connect_and_migrate_creates_db_and_tables() {
         let tmp = tempfile::tempdir().unwrap();
@@ -719,7 +856,7 @@ mod tests {
 
         // All migrated tables should be present.
         let rows = conn
-            .query_all(Statement::from_string(
+            .query_all_raw(Statement::from_string(
                 sea_orm::DatabaseBackend::Sqlite,
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'seaql_%' AND name != 'sqlite_sequence' ORDER BY name",
             ))
@@ -733,11 +870,14 @@ mod tests {
 
         let expected = vec![
             "config",
+            "cpu_allocation",
+            "cpu_allocation_cpu",
             "image_ref",
             "layer",
             "maintenance_lease",
             "manifest",
             "manifest_layer",
+            "memory_allocation_node",
             "run",
             "sandbox",
             "sandbox_labels",
@@ -746,6 +886,7 @@ mod tests {
             "snapshot_index",
             "volume",
             "volume_attach",
+            "writeback_allocation",
         ];
 
         assert_eq!(table_names, expected);
@@ -805,7 +946,7 @@ mod tests {
 
         let count = pools
             .read()
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "SELECT COUNT(*) FROM snapshot_index",
             ))
@@ -830,7 +971,7 @@ mod tests {
         pools
             .write()
             .inner()
-            .execute(Statement::from_sql_and_values(
+            .execute_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Sqlite,
                 "INSERT OR REPLACE INTO maintenance_lease (name, holder_pid, lease_expires_at, last_completed_at) VALUES (?, ?, ?, NULL)",
                 [
@@ -861,7 +1002,7 @@ mod tests {
         pools
             .write()
             .inner()
-            .execute(Statement::from_sql_and_values(
+            .execute_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Sqlite,
                 "INSERT INTO seaql_migrations (version, applied_at) VALUES (?, ?)",
                 ["m20990101_000001_future".into(), 4_102_444_800_i64.into()],
@@ -874,6 +1015,33 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("database schema is newer"));
+    }
+
+    #[tokio::test]
+    async fn test_connect_and_migrate_accepts_equal_migration_timestamps() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_dir = tmp.path().join("db");
+        let database = DatabaseConfig::default();
+
+        let pools = connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
+            .await
+            .unwrap();
+        pools
+            .write()
+            .inner()
+            .execute_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "UPDATE seaql_migrations SET applied_at = 1",
+            ))
+            .await
+            .unwrap();
+        drop(pools);
+
+        // Reopening must use the canonical metadata order rather than sorting equal timestamps by
+        // their backdated migration names.
+        connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
+            .await
+            .unwrap();
     }
 
     #[test]
@@ -909,7 +1077,7 @@ mod tests {
 
         let conn = Database::connect(&db_url).await.unwrap();
 
-        conn.execute(Statement::from_string(
+        conn.execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "PRAGMA foreign_keys = ON;",
         ))
@@ -920,7 +1088,7 @@ mod tests {
         Migrator::up(&conn, Some(2)).await.unwrap();
 
         // Simulate a half-applied migration 3.
-        conn.execute(Statement::from_string(
+        conn.execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "CREATE TABLE IF NOT EXISTS volume (
                 id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
@@ -935,7 +1103,7 @@ mod tests {
         .await
         .unwrap();
 
-        conn.execute(Statement::from_string(
+        conn.execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "CREATE TABLE IF NOT EXISTS snapshot (
                 id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
@@ -950,7 +1118,7 @@ mod tests {
         .await
         .unwrap();
 
-        conn.execute(Statement::from_string(
+        conn.execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "CREATE UNIQUE INDEX idx_snapshots_name_sandbox_unique ON snapshot (name, sandbox_id)",
         ))
@@ -966,7 +1134,7 @@ mod tests {
 
         let migration_row_count = recovered
             .read()
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "SELECT COUNT(*) FROM seaql_migrations WHERE version = 'm20260305_000003_create_storage_tables'",
             ))
@@ -1070,6 +1238,7 @@ mod tests {
         // wrote to ~/.microsandbox/config.json.
         let base = LocalConfig {
             log_level: Some(microsandbox_runtime::logging::LogLevel::Debug),
+            deployment_profile: Some(DeploymentProfile::MultiTenant),
             database: DatabaseConfig {
                 url: None,
                 max_connections: 9,
@@ -1079,6 +1248,9 @@ mod tests {
             sandbox_defaults: crate::config::SandboxDefaults {
                 cpus: 4,
                 memory_mib: 2048,
+                cpu_placement: microsandbox_types::CpuPlacement::Spread,
+                placement_profile: None,
+                thp: microsandbox_types::TransparentHugePagePolicy::Always,
                 oci: crate::config::OciSandboxDefaults::default(),
                 shell: "/bin/zsh".into(),
                 workdir: Some("/work".into()),
@@ -1111,6 +1283,27 @@ mod tests {
         assert_eq!(
             merged.log_level,
             Some(microsandbox_runtime::logging::LogLevel::Debug)
+        );
+        assert_eq!(
+            merged.deployment_profile,
+            Some(DeploymentProfile::MultiTenant)
+        );
+    }
+
+    #[test]
+    fn builder_deployment_profile_overrides_persisted_policy() {
+        let base = LocalConfig {
+            deployment_profile: Some(DeploymentProfile::SingleTenant),
+            ..Default::default()
+        };
+
+        let merged = LocalBackend::builder()
+            .deployment_profile(DeploymentProfile::MultiTenant)
+            .merge_into(base);
+
+        assert_eq!(
+            merged.deployment_profile,
+            Some(DeploymentProfile::MultiTenant)
         );
     }
 }

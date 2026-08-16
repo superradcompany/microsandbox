@@ -1,11 +1,13 @@
 # microsandbox-image
 
-Pull OCI container images and cache ready-to-mount filesystem artifacts locally. This crate handles the full image lifecycle for [microsandbox](https://github.com/superradcompany/microsandbox) — from resolving a multi-platform manifest to producing per-layer EROFS images, fsmeta, and the VMDK descriptor used by the VM.
+Pull OCI container images and cache ready-to-mount filesystem artifacts locally. This crate handles the full image lifecycle for [microsandbox](https://github.com/superradcompany/microsandbox) — from resolving a multi-platform manifest to producing shared per-layer EROFS inputs, stitched layered roots, and flat ext4 roots.
 
 - **Multi-platform resolution** — automatically picks the right manifest for your OS and architecture
 - **Parallel materialization** — layers download, verify, ingest, and materialize concurrently
 - **Content-addressable caching** — duplicate layers across images are stored once, with cross-process safety via `flock()`
 - **Progress streaming** — real-time events for download, layer materialization, and fsmeta/VMDK stitching stages
+
+The target-aware layer reuse and publication contract is specified in [MATERIALIZATION.md](MATERIALIZATION.md).
 
 ## Quick Start
 
@@ -52,7 +54,7 @@ let registry = Registry::builder(platform, cache).auth(auth).build()?;
 Control when the crate contacts the registry vs. uses the local cache.
 
 ```rust
-use microsandbox_image::{PullOptions, PullPolicy};
+use microsandbox_image::{PullOptions, PullPolicy, RootfsMaterialization};
 
 // Use cache if available, download otherwise (default)
 let opts = PullOptions { pull_policy: PullPolicy::IfMissing, ..Default::default() };
@@ -62,6 +64,12 @@ let opts = PullOptions { pull_policy: PullPolicy::Always, ..Default::default() }
 
 // Cache-only — error if the image isn't already cached
 let opts = PullOptions { pull_policy: PullPolicy::Never, ..Default::default() };
+
+// Reuse shared EROFS layers, then produce flat ext4 without fsmeta/VMDK
+let opts = PullOptions {
+    materialization: RootfsMaterialization::Flat,
+    ..Default::default()
+};
 ```
 
 ## Progress Reporting

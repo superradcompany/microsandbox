@@ -6,6 +6,7 @@ use pyo3::types::PyBytes;
 use tokio::sync::Mutex;
 
 use crate::error::to_py_err;
+use crate::helpers::str_enum_member;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -30,6 +31,18 @@ pub struct PyExecHandle {
 #[pyclass(name = "ExecSink")]
 pub struct PyExecSink {
     inner: Arc<microsandbox::sandbox::exec::ExecSink>,
+}
+
+/// Exec event exposed to Python.
+#[pyclass(name = "ExecEvent")]
+pub struct PyExecEvent {
+    event_type: &'static str,
+    #[pyo3(get)]
+    pid: Option<u32>,
+    #[pyo3(get)]
+    data: Option<Vec<u8>>,
+    #[pyo3(get)]
+    code: Option<i32>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -224,10 +237,23 @@ impl PyExecSink {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Methods: ExecEvent
+//--------------------------------------------------------------------------------------------------
+
+#[pymethods]
+impl PyExecEvent {
+    /// Canonical kind of execution event.
+    #[getter]
+    fn event_type(&self, py: Python<'_>) -> PyResult<PyObject> {
+        str_enum_member(py, "ExecEventType", self.event_type)
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Convert a Rust ExecEvent into a Python dict.
+/// Convert a Rust execution event into its Python object.
 fn convert_exec_event(event: microsandbox::ExecEvent) -> PyExecEvent {
     match event {
         microsandbox::ExecEvent::Started { pid } => PyExecEvent {
@@ -272,17 +298,4 @@ fn convert_exec_event(event: microsandbox::ExecEvent) -> PyExecEvent {
             code: payload.errno,
         },
     }
-}
-
-/// Exec event exposed to Python.
-#[pyclass(name = "ExecEvent")]
-pub struct PyExecEvent {
-    #[pyo3(get)]
-    event_type: &'static str,
-    #[pyo3(get)]
-    pid: Option<u32>,
-    #[pyo3(get)]
-    data: Option<Vec<u8>>,
-    #[pyo3(get)]
-    code: Option<i32>,
 }

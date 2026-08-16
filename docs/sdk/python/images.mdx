@@ -3,81 +3,38 @@ title: Images
 description: Python SDK - Image cache API reference
 ---
 
-`Image` is the static namespace for two related things: configuring an explicit rootfs source for a sandbox (`Image.oci`, `Image.bind`, `Image.disk`), and managing the local OCI image cache that sandbox creation pulls into (`get`, `list`, `inspect`, `remove`, `prune`, `load`, `save`). Cache operations require a local backend. See [Sandbox](/sdk/python/sandbox) for the `image=` and `pull_policy=` creation kwargs.
+Configure sandbox image sources and manage the local OCI image cache.
 
-```python
-from microsandbox import Image
-```
+## Image
 
-<div className="msb-glance">
-
-  <p className="msb-gl"><span className="msb-dot static"></span>Source factory<span className="msb-ct">3</span></p>
-  <a className="msb-row" href="#image-oci"><span className="msb-rn">Image.oci()</span><span className="msb-rg">OCI image rootfs source</span></a>
-  <a className="msb-row" href="#image-bind"><span className="msb-rn">Image.bind()</span><span className="msb-rg">bind a host directory</span></a>
-  <a className="msb-row" href="#image-disk"><span className="msb-rn">Image.disk()</span><span className="msb-rg">boot from a disk image</span></a>
-
-  <p className="msb-gl"><span className="msb-dot static"></span>Cache management<span className="msb-ct">7</span></p>
-  <a className="msb-row" href="#image-get"><span className="msb-rn">Image.get()</span><span className="msb-rg">one cached image</span></a>
-  <a className="msb-row" href="#image-list"><span className="msb-rn">Image.list()</span><span className="msb-rg">all cached images</span></a>
-  <a className="msb-row" href="#image-inspect"><span className="msb-rn">Image.inspect()</span><span className="msb-rg">config + layer detail</span></a>
-  <a className="msb-row" href="#image-remove"><span className="msb-rn">Image.remove()</span><span className="msb-rg">delete a cached image</span></a>
-  <a className="msb-row" href="#image-prune"><span className="msb-rn">Image.prune()</span><span className="msb-rg">reclaim unused data</span></a>
-  <a className="msb-row" href="#image-load"><span className="msb-rn">Image.load()</span><span className="msb-rg">import from archive</span></a>
-  <a className="msb-row" href="#image-save"><span className="msb-rn">Image.save()</span><span className="msb-rg">export to archive</span></a>
-
-  <p className="msb-gl"><span className="msb-dot type"></span>Types</p>
-  <div className="msb-chiprow">
-    <a className="msb-typepill" href="#imagesource">ImageSource</a>
-    <a className="msb-typepill" href="#imagehandle">ImageHandle</a>
-    <a className="msb-typepill" href="#imagedetail">ImageDetail</a>
-    <a className="msb-typepill" href="#imageconfigdetail">ImageConfigDetail</a>
-    <a className="msb-typepill" href="#imagelayerdetail">ImageLayerDetail</a>
-    <a className="msb-typepill" href="#imageprunereport">ImagePruneReport</a>
-    <a className="msb-typepill" href="#diskimageformat">DiskImageFormat</a>
-  </div>
-
-</div>
-
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```python
-from microsandbox import Image, Sandbox
-
-# Pull happens implicitly on creation
-async with await Sandbox.create("api", image="python:3.12") as sb:
-    await sb.exec("python", ["-V"])
-
-# Later, inspect and prune the local cache
-for image in await Image.list():
-    print(image.reference, image.layer_count)
-
-report = await Image.prune()
-print(f"reclaimed {report.bytes_reclaimed} bytes")
-```
-
-## Source factory
-
-These static methods return an [`ImageSource`](#imagesource) you can pass as the `image=` kwarg to [`Sandbox.create()`](/sdk/python/sandbox). A plain string also works (`image="python:3.12"`); use the factory when you need OCI-only options like the writable upper size, or to be explicit about a bind or disk source.
+Factory for sandbox image sources.
 
 #### <span className="msb-recv">Image.</span><span className="msb-hn">oci()</span>
 
 ```python
 @staticmethod
-def oci(reference: str, *, upper_size_mib: int | None = None) -> ImageSource
+def oci(
+    reference: str,
+    *,
+    root_disk: RootDiskConfig | int | None = None,
+    upper_size_mib: int | None = None,
+) -> ImageSource
 ```
 
 <Accordion title="Example">
 
 ```python
+from microsandbox import Image, RootDisk, Sandbox
+
 sb = await Sandbox.create(
     "api",
-    image=Image.oci("python:3.12", upper_size_mib=8192),
+    image=Image.oci("python:3.12", root_disk=RootDisk.managed(8192)),
 )
 ```
 
 </Accordion>
 
-Create an OCI image rootfs source. Use `upper_size_mib` to size the writable overlay upper layer; otherwise the default applies.
+Create an OCI image rootfs source. Use `root_disk` to configure its writable layer with a [`RootDisk`](#rootdisk) factory result. An integer is shorthand for a managed disk of that size in MiB.
 
 <p className="msb-label">Parameters</p>
 
@@ -87,8 +44,12 @@ Create an OCI image rootfs source. Use `upper_size_mib` to size the writable ove
     <div className="msb-param-desc">OCI image reference, e.g. <code>"python:3.12"</code>.</div>
   </div>
   <div className="msb-param">
+    <div className="msb-param-key"><code>root_disk</code><span className="msb-type">RootDiskConfig | int | None</span></div>
+    <div className="msb-param-desc">Writable root disk configuration or managed-disk size in MiB.</div>
+  </div>
+  <div className="msb-param">
     <div className="msb-param-key"><code>upper_size_mib</code><span className="msb-type">int | None</span></div>
-    <div className="msb-param-desc">Writable overlay upper size in MiB. <code>None</code> keeps the default.</div>
+    <div className="msb-param-desc">Deprecated managed-disk size alias. Use <code>root_disk=RootDisk.managed(...)</code>.</div>
   </div>
 </div>
 
@@ -178,7 +139,7 @@ Create a rootfs source backed by a disk image. The format is inferred from the f
   </div>
 </div>
 
-## Cache management
+<p className="msb-member-group">Cache management</p>
 
 These static methods inspect and prune images already pulled into the local OCI cache. They require a local backend; on a cloud backend they raise `UnsupportedError`.
 
@@ -404,10 +365,15 @@ images = await Image.load(input_path="-")
 
 ```python
 @staticmethod
-async def save(reference: str | Sequence[str], *, output_path: str, format: str = "docker") -> None
+async def save(
+    reference: str | Sequence[str],
+    *,
+    output_path: str,
+    format: ImageArchiveFormat = ImageArchiveFormat.DOCKER,
+) -> None
 ```
 
-Export one or more cached images to an archive file. Raises [`ImageNotFoundError`](#errors) when any reference is not in the local cache, and `ValueError` for an unknown `format` or an empty reference list.
+Export one or more cached images to an archive file. Raises [`ImageNotFoundError`](#errors) when any reference is not in the local cache, and `ValueError` for an empty reference list.
 
 <p className="msb-label">Parameters</p>
 
@@ -421,20 +387,156 @@ Export one or more cached images to an archive file. Raises [`ImageNotFoundError
     <div className="msb-param-desc">File path to write the archive to.</div>
   </div>
   <div className="msb-param">
-    <div className="msb-param-key"><code>format</code><span className="msb-type">str</span></div>
-    <div className="msb-param-desc">Archive layout: <code>"docker"</code> (default, loadable with <code>docker load</code>) or <code>"oci"</code> (OCI Image Layout).</div>
+    <div className="msb-param-key"><code>format</code><a className="msb-type" href="#imagearchiveformat">ImageArchiveFormat</a></div>
+    <div className="msb-param-desc">Archive layout. Defaults to <code>DOCKER</code>.</div>
   </div>
 </div>
 
 <Accordion title="Example">
 
 ```python
+from microsandbox import ImageArchiveFormat
+
 await Image.save("python:3.12", output_path="python.tar")
-await Image.save("python:3.12", output_path="python-oci.tar", format="oci")
+await Image.save(
+    "python:3.12",
+    output_path="python-oci.tar",
+    format=ImageArchiveFormat.OCI,
+)
 await Image.save(["python:3.12", "app:local"], output_path="bundle.tar")
 ```
 
 </Accordion>
+
+## ImageHandle
+
+
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Returned by <a href="#image-get">get()</a> · <a href="#image-list">list()</a> · <a href="#image-load">load()</a></p>
+
+A lightweight handle to a cached OCI image, returned by [`Image.get()`](#image-get), [`Image.list()`](#image-list), and [`Image.load()`](#image-load). Properties are read-only attributes; the two methods are async.
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">reference</span>
+
+`str`
+
+Image reference
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">size_bytes</span>
+
+`int \| None`
+
+Total size in bytes, or `None` when unknown
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">manifest_digest</span>
+
+`str \| None`
+
+Content-addressable manifest digest
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">architecture</span>
+
+`str \| None`
+
+Resolved architecture
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">os</span>
+
+`str \| None`
+
+Resolved operating system
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">layer_count</span>
+
+`int`
+
+Number of layers
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">last_used_at</span>
+
+`float \| None`
+
+Last referenced time, milliseconds since epoch
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">created_at</span>
+
+`float \| None`
+
+First-pulled time, milliseconds since epoch
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">inspect()</span>
+
+```python
+await inspect()
+```
+
+Fetch full detail for this image
+
+<p className="msb-label">Returns</p>
+
+[`ImageDetail`](#imagedetail)
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">remove()</span>
+
+```python
+await remove(*, force=False)
+```
+
+Delete this image (raises [`ImageInUseError`](#errors) unless `force`)
+
+## RootDisk
+
+Factory for writable OCI root disk configurations.
+
+```python
+from microsandbox import DiskImageFormat, RootDisk
+
+managed = RootDisk.managed(8192)
+temporary = RootDisk.tmpfs(512)
+existing = RootDisk.disk(
+    "/data/upper.raw",
+    format=DiskImageFormat.RAW,
+    fstype="ext4",
+)
+```
+
+
+#### <span className="msb-recv">RootDisk.</span><span className="msb-hn">managed()</span>
+
+```python
+managed(size_mib=None)
+```
+
+Microsandbox-managed sparse ext4 disk
+
+<p className="msb-label">Returns</p>
+
+[`RootDiskConfig`](#rootdiskconfig)
+
+#### <span className="msb-recv">RootDisk.</span><span className="msb-hn">tmpfs()</span>
+
+```python
+tmpfs(size_mib=None)
+```
+
+Ephemeral RAM-backed upper layer
+
+<p className="msb-label">Returns</p>
+
+[`RootDiskConfig`](#rootdiskconfig)
+
+#### <span className="msb-recv">RootDisk.</span><span className="msb-hn">disk()</span>
+
+```python
+disk(path, *, format=None, fstype=None)
+```
+
+User-supplied writable disk image
+
+<p className="msb-label">Returns</p>
+
+[`RootDiskConfig`](#rootdiskconfig)
 
 ## Types
 
@@ -446,33 +548,24 @@ Explicit rootfs image source. Build one with [`Image.oci()`](#image-oci), [`Imag
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `_type` | `str` | Source kind: `"oci"`, `"bind"`, or `"disk"` |
+| `_type` | [`ImageSourceKind`](#imagesourcekind) | Source kind |
 | `_path` | `str \| None` | Host path for `bind` / `disk` sources |
 | `_reference` | `str \| None` | OCI reference for `oci` sources |
 | `_upper_size_mib` | `int \| None` | Writable overlay upper size in MiB (OCI only) |
 | `_fstype` | `str \| None` | Filesystem type for `disk` sources |
 | `_format` | [`DiskImageFormat`](#diskimageformat)` \| None` | Disk image format (inferred from extension) |
 
-### ImageHandle
+### RootDiskConfig
 
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+Frozen root disk configuration produced by [`RootDisk`](#rootdisk).
 
-<p className="msb-backref">Returned by <a href="#image-get">get()</a> · <a href="#image-list">list()</a> · <a href="#image-load">load()</a></p>
-
-A lightweight handle to a cached OCI image, returned by [`Image.get()`](#image-get), [`Image.list()`](#image-list), and [`Image.load()`](#image-load). Properties are read-only attributes; the two methods are async.
-
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| `reference` | `str` | Image reference |
-| `size_bytes` | `int \| None` | Total size in bytes, or `None` when unknown |
-| `manifest_digest` | `str \| None` | Content-addressable manifest digest |
-| `architecture` | `str \| None` | Resolved architecture |
-| `os` | `str \| None` | Resolved operating system |
-| `layer_count` | `int` | Number of layers |
-| `last_used_at` | `float \| None` | Last referenced time, milliseconds since epoch |
-| `created_at` | `float \| None` | First-pulled time, milliseconds since epoch |
-| `await inspect()` | [`ImageDetail`](#imagedetail) | Fetch full detail for this image |
-| `await remove(*, force=False)` | `None` | Delete this image (raises [`ImageInUseError`](#errors) unless `force`) |
+| Field | Type | Description |
+|-------|------|-------------|
+| `kind` | [`RootDiskKind`](#rootdiskkind) | Root disk implementation |
+| `size_mib` | `int \| None` | Managed disk or tmpfs size |
+| `path` | `str \| None` | User-supplied disk image path |
+| `format` | [`DiskImageFormat`](#diskimageformat)` \| None` | Disk image format |
+| `fstype` | `str \| None` | Inner filesystem type |
 
 ### ImageDetail
 
@@ -537,13 +630,48 @@ Summary of cached image data removed by [`Image.prune()`](#image-prune).
 
 <p className="msb-backref">Used by <a href="#imagesource">ImageSource._format</a></p>
 
-Disk image container format. A `StrEnum`, so the string values are accepted directly.
+Disk image container format.
 
-| Value | Description |
-|-------|-------------|
-| `"qcow2"` | QEMU copy-on-write v2 |
-| `"raw"` | Raw block image |
-| `"vmdk"` | VMware disk image |
+| Member | Value | Description |
+|--------|-------|-------------|
+| `DiskImageFormat.QCOW2` | `"qcow2"` | QEMU copy-on-write v2 |
+| `DiskImageFormat.RAW` | `"raw"` | Raw block image |
+| `DiskImageFormat.VMDK` | `"vmdk"` | VMware disk image |
+
+### ImageArchiveFormat
+
+<p className="msb-backref">Used by <a href="#image-save">Image.save(format=...)</a></p>
+
+Archive layout used when exporting cached images.
+
+| Member | Value | Description |
+|--------|-------|-------------|
+| `ImageArchiveFormat.DOCKER` | `"docker"` | Docker archive compatible with `docker load` |
+| `ImageArchiveFormat.OCI` | `"oci"` | OCI Image Layout archive |
+
+### ImageSourceKind
+
+<p className="msb-backref">Returned in <a href="#imagesource">ImageSource._type</a></p>
+
+Root filesystem source kind.
+
+| Member | Value | Description |
+|--------|-------|-------------|
+| `ImageSourceKind.OCI` | `"oci"` | OCI image reference |
+| `ImageSourceKind.BIND` | `"bind"` | Host directory bind source |
+| `ImageSourceKind.DISK` | `"disk"` | Host disk-image source |
+
+### RootDiskKind
+
+<p className="msb-backref">Returned in <a href="#rootdiskconfig">RootDiskConfig.kind</a></p>
+
+Writable OCI root disk implementation.
+
+| Member | Value | Description |
+|--------|-------|-------------|
+| `RootDiskKind.MANAGED` | `"managed"` | Microsandbox-managed sparse ext4 disk |
+| `RootDiskKind.TMPFS` | `"tmpfs"` | Ephemeral RAM-backed upper layer |
+| `RootDiskKind.DISK_IMAGE` | `"disk-image"` | User-supplied writable disk image |
 
 ### Errors
 

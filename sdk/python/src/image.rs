@@ -12,6 +12,7 @@ use microsandbox::image::{
 };
 
 use crate::error::to_py_err;
+use crate::helpers::{extract_str_enum, is_exact_sdk_type, str_enum_member};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -102,9 +103,9 @@ pub struct PyImagePruneReport {
 impl PyImage {
     /// Create an OCI rootfs image source.
     ///
-    /// `root_disk` accepts an int (MiB, managed sugar), a `RootDisk.*()`
-    /// config, or an equivalent dict. `upper_size_mib` is a deprecated
-    /// alias for a managed root disk of that size.
+    /// `root_disk` accepts an exact int (MiB, managed sugar) or a concrete
+    /// `RootDiskConfig`. `upper_size_mib` is a deprecated alias for a managed
+    /// root disk of that size.
     #[staticmethod]
     #[pyo3(signature = (reference, *, root_disk = None, upper_size_mib = None))]
     fn oci(
@@ -119,15 +120,25 @@ impl PyImage {
             ));
         }
         let kwargs = PyDict::new(py);
-        kwargs.set_item("_type", "oci")?;
+        kwargs.set_item("_type", str_enum_member(py, "ImageSourceKind", "oci")?)?;
         kwargs.set_item("_reference", reference)?;
         if let Some(root_disk) = root_disk {
+            let int_class = PyModule::import(py, "builtins")?.getattr("int")?;
+            let is_exact_int = root_disk.get_type().as_any().is(&int_class);
+            if !is_exact_int && !is_exact_sdk_type(&root_disk, "RootDiskConfig")? {
+                return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                    "root_disk must be RootDiskConfig, int, or None; got {}",
+                    root_disk.get_type().name()?
+                )));
+            }
             kwargs.set_item("_root_disk", root_disk)?;
         } else if let Some(upper_size_mib) = upper_size_mib {
-            // Deprecated alias: normalize to a managed root disk dict.
-            let managed = PyDict::new(py);
-            managed.set_item("kind", "managed")?;
-            managed.set_item("size_mib", upper_size_mib)?;
+            // Normalize the deprecated sugar to the same concrete config
+            // class required by the root_disk boundary.
+            let managed_kwargs = PyDict::new(py);
+            managed_kwargs.set_item("kind", str_enum_member(py, "RootDiskKind", "managed")?)?;
+            managed_kwargs.set_item("size_mib", upper_size_mib)?;
+            let managed = root_disk_config_class(py)?.call((), Some(&managed_kwargs))?;
             kwargs.set_item("_root_disk", managed)?;
             kwargs.set_item("_upper_size_mib", upper_size_mib)?;
         }
@@ -138,7 +149,7 @@ impl PyImage {
     #[staticmethod]
     fn bind(py: Python<'_>, path: String) -> PyResult<PyObject> {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("_type", "bind")?;
+        kwargs.set_item("_type", str_enum_member(py, "ImageSourceKind", "bind")?)?;
         kwargs.set_item("_path", path)?;
         Ok(image_source_class(py)?.call((), Some(&kwargs))?.unbind())
     }
@@ -148,7 +159,7 @@ impl PyImage {
     #[pyo3(signature = (path, *, fstype = None))]
     fn disk(py: Python<'_>, path: String, fstype: Option<String>) -> PyResult<PyObject> {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("_type", "disk")?;
+        kwargs.set_item("_type", str_enum_member(py, "ImageSourceKind", "disk")?)?;
         kwargs.set_item("_path", path)?;
         if let Some(fstype) = fstype {
             kwargs.set_item("_fstype", fstype)?;
@@ -259,17 +270,21 @@ impl PyImage {
     ///
     /// `reference` accepts a single reference string or a sequence of them;
     /// every referenced image is written into the same archive. `format`
-    /// selects the archive layout: `"docker"` (default, compatible with
-    /// `docker load`) or `"oci"` (OCI Image Layout).
+    /// selects the archive layout with `ImageArchiveFormat`.
     #[staticmethod]
     #[pyo3(signature = (reference, *, output_path, format = None))]
     fn save<'py>(
         py: Python<'py>,
         reference: ReferenceArg,
         output_path: String,
-        format: Option<String>,
+        format: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let format = match format.as_deref().unwrap_or("docker") {
+        let format = format
+            .as_ref()
+            .map(|value| extract_str_enum(value.bind(py), "ImageArchiveFormat"))
+            .transpose()?
+            .unwrap_or_else(|| "docker".to_string());
+        let format = match format.as_str() {
             "docker" => ImageArchiveFormat::Docker,
             "oci" => ImageArchiveFormat::Oci,
             other => {
@@ -602,6 +617,11 @@ impl PyImagePruneReport {
 fn image_source_class<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     let types = PyModule::import(py, "microsandbox.types")?;
     types.getattr("ImageSource")
+}
+
+fn root_disk_config_class<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    let types = PyModule::import(py, "microsandbox.types")?;
+    types.getattr("RootDiskConfig")
 }
 
 fn resolve_local(

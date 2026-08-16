@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from microsandbox import FilesystemError
+from microsandbox import FilesystemError, FsEntryKind
 
 
 @pytest.mark.asyncio
@@ -20,12 +20,12 @@ async def test_fs_file_directory_and_metadata_operations(sandbox_factory):
     assert await fs.exists("/tmp/py-sdk/missing.txt") is False
 
     metadata = await fs.stat("/tmp/py-sdk/a.txt")
-    assert metadata.kind == "file"
+    assert metadata.kind is FsEntryKind.FILE
     assert metadata.size == len(b"alpha\n")
     assert isinstance(metadata.readonly, bool)
 
     entries = await fs.list("/tmp/py-sdk")
-    assert any(entry.path.endswith("a.txt") and entry.kind == "file" for entry in entries)
+    assert any(entry.path.endswith("a.txt") and entry.kind is FsEntryKind.FILE for entry in entries)
 
     await fs.copy("/tmp/py-sdk/a.txt", "/tmp/py-sdk/b.txt")
     assert await fs.read_text("/tmp/py-sdk/b.txt") == "alpha\n"

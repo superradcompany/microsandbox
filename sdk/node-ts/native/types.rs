@@ -33,7 +33,7 @@ pub struct SandboxTouchResult {
 
 /// Options accepted by `Sandbox.modify()` / `SandboxHandle.modify()`.
 ///
-/// `memoryMib` / `maxMemoryMib` are in MiB. `policy` is `"no_restart"`
+/// `memoryMib` / `maxMemoryMib` / `rootDiskSizeMib` are in MiB. `policy` is `"no_restart"`
 /// (default), `"next_start"`, or `"restart"`. With `dryRun: true` the plan
 /// is computed without applying anything.
 #[napi(object)]
@@ -43,6 +43,7 @@ pub struct SandboxModifyOptions {
     pub max_cpus: Option<u32>,
     pub memory_mib: Option<u32>,
     pub max_memory_mib: Option<u32>,
+    pub root_disk_size_mib: Option<u32>,
     pub env: Option<HashMap<String, String>>,
     pub env_remove: Option<Vec<String>>,
     pub labels: Option<HashMap<String, String>>,
@@ -260,6 +261,7 @@ pub struct ExecEvent {
 #[napi(object)]
 pub struct VolumeInfo {
     pub name: String,
+    pub is_default: bool,
     pub kind: String,
     pub quota_mib: Option<u32>,
     pub used_bytes: f64,

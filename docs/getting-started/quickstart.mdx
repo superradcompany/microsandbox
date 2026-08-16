@@ -5,7 +5,7 @@ icon: "bolt"
 ---
 
 <Note>
-  microsandbox requires **glibc-based Linux with KVM**, **macOS with Apple Silicon** (M-series chip), or **Windows 11 with Windows Hypervisor Platform** enabled. All local backends use hardware virtualization.
+  Running locally requires **glibc-based Linux with KVM**, **macOS with Apple Silicon** (M-series chip), or **Windows 11 with Windows Hypervisor Platform** enabled. All local backends use hardware virtualization. [microsandbox cloud](/cloud/overview) has no hardware requirements.
 </Note>
 
 <Tip>
@@ -18,7 +18,7 @@ icon: "bolt"
 
 <Steps>
   <Step title="Install microsandbox">
-    Install the SDK for the language you are using, and install the `msb` CLI for terminal workflows such as managing images, volumes, and sandboxes. Both run microsandbox locally; there is no separate server or daemon to set up.
+    Install the SDK for the language you are using, and install the `msb` CLI for terminal workflows such as managing images, volumes, and sandboxes. Both run microsandbox locally by default; there is no separate server or daemon to set up. The same install also drives [microsandbox cloud](/cloud/overview) when an API key is set.
 
     <CodeGroup>
     ```bash Rust
@@ -39,6 +39,10 @@ icon: "bolt"
 
     ```bash CLI (Linux & macOS)
     curl -fsSL https://install.microsandbox.dev | sh
+    ```
+
+    ```bash Homebrew (macOS)
+    brew install superradcompany/tap/microsandbox
     ```
 
     ```powershell CLI (Windows)
@@ -150,8 +154,13 @@ The `exec` call uses the host-guest command channel, not SSH and not the sandbox
   Because exec doesn't go through the network, it works even when a sandbox has networking disabled via `.disable_network()` and no network interfaces at all.
 </Tip>
 
+<Tip>
+  Want the same sandbox on hosted infrastructure? Set `MSB_BACKEND=cloud` and export `MSB_API_KEY`; the code above then runs on [microsandbox cloud](/cloud/overview) unchanged.
+</Tip>
+
 ## Next steps
 
+- [Run on microsandbox cloud](/cloud/overview): the same code on hosted infrastructure
 - [Tune sandbox settings](/sandboxes/tuning): resize headroom, labels, secrets, and storage
 - [Troubleshoot Linux setup](/troubleshooting/linux): KVM, `/dev/kvm`, and permissions
 - [Troubleshoot macOS setup](/troubleshooting/macos): Apple Silicon and local runtime checks

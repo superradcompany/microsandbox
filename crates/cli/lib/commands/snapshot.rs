@@ -472,12 +472,16 @@ fn short_digest(d: &str) -> String {
     }
 }
 
-fn format_integrity(integrity: &microsandbox::UpperIntegrity) -> String {
-    format!("{} {}", integrity.algorithm, integrity.digest)
+fn format_integrity(integrity: &Option<microsandbox::UpperIntegrity>) -> String {
+    integrity
+        .as_ref()
+        .map(|integrity| format!("{} {}", integrity.algorithm(), integrity.value()))
+        .unwrap_or_else(|| "not recorded".into())
 }
 
 fn format_verify_status(status: &microsandbox::snapshot::UpperVerifyStatus) -> String {
     match status {
+        microsandbox::snapshot::UpperVerifyStatus::NotRecorded => "not recorded".into(),
         microsandbox::snapshot::UpperVerifyStatus::Verified { algorithm, digest } => {
             format!("verified ({algorithm} {digest})")
         }

@@ -4,10 +4,12 @@ use std::io::{IsTerminal, Write};
 use std::time::Duration;
 
 use clap::Args;
+use futures::{FutureExt, StreamExt};
+use microsandbox::logs::{LogSource, LogStreamOptions, LogStreamStart};
 use microsandbox::sandbox::{ExecOutput, RlimitResource, Sandbox};
 
-use super::common::{SandboxOpts, apply_sandbox_opts};
-use crate::ui;
+use super::common::{SandboxOpts, apply_sandbox_opts, apply_sandbox_opts_after_config};
+use crate::{sandbox_config, ui};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -18,11 +20,9 @@ use crate::ui;
 pub struct RunArgs {
     /// Image to use (e.g. alpine, python, ./rootfs, ./disk.qcow2).
     ///
-    /// Mutually exclusive with `--from-snapshot`; one of the two is required.
-    #[arg(
-        required_unless_present = "from_snapshot",
-        conflicts_with = "from_snapshot"
-    )]
+    /// Mutually exclusive with `--from-snapshot`. May be omitted when a config file supplies
+    /// `image`.
+    #[arg(conflicts_with = "from_snapshot")]
     pub image: Option<String>,
 
     /// Boot a fresh sandbox from a snapshot artifact (path or name).
@@ -170,20 +170,21 @@ async fn run_new(
     mut args: RunArgs,
     log_level: Option<microsandbox::LogLevel>,
 ) -> anyhow::Result<()> {
-    let mut builder = Sandbox::builder(&name);
-    if let Some(ref snap) = args.from_snapshot {
-        builder = builder.from_snapshot(snap.clone());
-    } else if let Some(ref image) = args.image {
-        builder = builder.image(image.as_str());
-    } else {
-        anyhow::bail!("either an image or --from-snapshot is required");
-    }
+    let launch_started_at = chrono::Utc::now();
+    let resolved = sandbox_config::resolve(&args.sandbox.config)?;
+    let image = resolved.image(args.image.as_deref(), args.from_snapshot.as_deref())?;
+    let builder = resolved.apply(Sandbox::builder(&name))?;
+    let builder = image.apply(builder)?;
     if args.sandbox.log_level.is_none()
         && let Some(log_level) = log_level
     {
         args.sandbox.log_level = Some(log_level.to_string());
     }
-    let mut builder = apply_sandbox_opts(builder, &args.sandbox)?;
+    let mut builder = if resolved.loaded() {
+        apply_sandbox_opts_after_config(builder, &args.sandbox)?
+    } else {
+        apply_sandbox_opts(builder, &args.sandbox)?
+    };
     if !is_named {
         // Unnamed `msb run` (including `--detach`) is a one-off: mark it
         // ephemeral so the host runtime removes its persisted state on exit.
@@ -205,11 +206,7 @@ async fn run_new(
         builder.create_with_pull_progress()?
     };
 
-    let display_label = args
-        .from_snapshot
-        .clone()
-        .or_else(|| args.image.clone())
-        .unwrap_or_else(|| name.clone());
+    let display_label = image.display();
     let mut display = if args.sandbox.quiet {
         ui::PullProgressDisplay::quiet(&display_label)
     } else {
@@ -236,6 +233,24 @@ async fn run_new(
     let interactive =
         super::common::use_interactive_tty(std::io::stdin().is_terminal(), args.no_tty);
 
+    if sandbox.config().init_owns_boot_workload() {
+        let observe = observe_init_owned_workload(&sandbox, launch_started_at);
+        let result = match exec_opts.timeout {
+            Some(duration) => match tokio::time::timeout(duration, observe).await {
+                Ok(result) => result,
+                Err(_) => Err(anyhow::anyhow!("command timed out after {duration:?}")),
+            },
+            None => observe.await,
+        };
+
+        if result.is_err()
+            && let Err(error) = sandbox.stop().await
+        {
+            ui::warn(&format!("failed to stop sandbox: {error}"));
+        }
+        return handle_exit(result?);
+    }
+
     let (cmd, cmd_args) =
         super::common::resolve_command(sandbox.config(), args.command, interactive)?;
     let (cmd, cmd_args) = match (cmd, cmd_args) {
@@ -257,6 +272,57 @@ async fn run_new(
     }
 
     handle_exit(result?)
+}
+
+/// Stream the VM console while an inherited image init owns the foreground workload.
+///
+/// Init-owned workloads are part of PID 1's argv, so issuing an agent exec would run them twice.
+/// Their stdio is captured in the system console log and their exit is the VM process exit.
+async fn observe_init_owned_workload(
+    sandbox: &Sandbox,
+    started_at: chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<i32> {
+    let options = LogStreamOptions {
+        sources: vec![LogSource::System],
+        start: LogStreamStart::Since(started_at),
+        until: None,
+        follow: true,
+    };
+    let mut logs = sandbox.log_stream(&options).await?;
+    let wait = sandbox.wait();
+    tokio::pin!(wait);
+
+    loop {
+        tokio::select! {
+            status = &mut wait => {
+                let status = status?;
+                // The runtime can exit while its final console entries are already readable but
+                // still queued behind the wait branch. Poll the stream to current EOF so attached
+                // runs do not lose their last output chunk.
+                loop {
+                    match logs.next().now_or_never() {
+                        Some(Some(Ok(entry))) => {
+                            std::io::stdout().write_all(&entry.data)?;
+                            std::io::stdout().flush()?;
+                        }
+                        Some(Some(Err(error))) => return Err(error.into()),
+                        Some(None) | None => break,
+                    }
+                }
+                return Ok(status.code().unwrap_or(1));
+            }
+            entry = logs.next() => {
+                match entry {
+                    Some(Ok(entry)) => {
+                        std::io::stdout().write_all(&entry.data)?;
+                        std::io::stdout().flush()?;
+                    }
+                    Some(Err(error)) => return Err(error.into()),
+                    None => return Ok(wait.await?.code().unwrap_or(1)),
+                }
+            }
+        }
+    }
 }
 
 /// Execute or attach to a command in a sandbox.
@@ -374,10 +440,13 @@ fn warn_detached_command_ignored(name: &str, args: &RunArgs) {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use clap::Parser;
     use clap::error::ErrorKind;
 
     use super::*;
+    use crate::commands::common::SandboxConfigKind;
 
     #[derive(Debug, Parser)]
     struct TestCli {
@@ -465,6 +534,62 @@ mod tests {
             let err = TestCli::try_parse_from(argv).unwrap_err();
             assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
         }
+    }
+
+    #[test]
+    fn config_can_supply_the_image_before_a_trailing_command() {
+        let args = parse_run_args(&[
+            "--conf",
+            "sandbox.yaml",
+            "--net-conf",
+            "network.yaml",
+            "--",
+            "python",
+            "app.py",
+        ]);
+
+        assert!(args.image.is_none());
+        assert_eq!(
+            args.sandbox
+                .config
+                .iter()
+                .map(|source| (source.kind, source.path.clone()))
+                .collect::<Vec<_>>(),
+            [
+                (SandboxConfigKind::Root, PathBuf::from("sandbox.yaml")),
+                (SandboxConfigKind::Network, PathBuf::from("network.yaml")),
+            ]
+        );
+        assert_eq!(args.command, ["python", "app.py"]);
+    }
+
+    #[test]
+    fn repeated_config_flags_preserve_cross_flag_command_line_order() {
+        let args = parse_run_args(&[
+            "python",
+            "--resource-conf",
+            "first.yaml",
+            "--conf",
+            "base.yaml",
+            "--resource-conf",
+            "second.yaml",
+            "--net-conf",
+            "network.yaml",
+        ]);
+
+        assert_eq!(
+            args.sandbox
+                .config
+                .iter()
+                .map(|source| (source.kind, source.path.clone()))
+                .collect::<Vec<_>>(),
+            [
+                (SandboxConfigKind::Resources, PathBuf::from("first.yaml")),
+                (SandboxConfigKind::Root, PathBuf::from("base.yaml")),
+                (SandboxConfigKind::Resources, PathBuf::from("second.yaml")),
+                (SandboxConfigKind::Network, PathBuf::from("network.yaml")),
+            ]
+        );
     }
 
     #[test]

@@ -17,8 +17,8 @@ pub mod migration;
 //--------------------------------------------------------------------------------------------------
 
 pub use manifest::{
-    CheckpointSnapshotState, DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, FileSnapshotState, ImageRef,
-    MAX_JSON_SAFE_INTEGER, Manifest, SCHEMA_VERSION, SNAPSHOT_ARTIFACT_KIND, SPARSE_SHA256_V1,
-    SUPPORTED_REQUIRES, SnapshotDescriptor, SnapshotFormat, SnapshotScope, SnapshotState,
-    UpperIntegrity, UpperLayer,
+    CheckpointSnapshotState, DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, FILE_MERKLE_BLAKE3_LEAF_SIZE,
+    FILE_MERKLE_BLAKE3_V1, FileSnapshotState, ImageRef, MAX_JSON_SAFE_INTEGER, Manifest,
+    SCHEMA_VERSION, SNAPSHOT_ARTIFACT_KIND, SPARSE_SHA256_V1, SUPPORTED_REQUIRES,
+    SnapshotDescriptor, SnapshotFormat, SnapshotScope, SnapshotState, UpperIntegrity, UpperLayer,
 };
