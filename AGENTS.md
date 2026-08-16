@@ -48,9 +48,10 @@ Repository layout:
 |   |-- network/
 |   |-- protocol/
 |   |-- runtime/
-|   |-- test-init/
-|   |-- test-macros/
-|   |-- test-utils/
+|   |-- testing/
+|   |   |-- init/
+|   |   |-- macros/
+|   |   `-- utils/
 |   `-- utils/
 |-- docs/
 |   |-- changelog/
