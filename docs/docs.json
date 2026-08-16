@@ -312,108 +312,108 @@
             "group": "Agents",
             "icon": "robot",
             "pages": [
-              "recipes/overview",
-              "recipes/agents/opencode",
-              "recipes/agents/openclaw",
-              "recipes/agents/goose",
-              "recipes/agents/gemini-cli",
-              "recipes/agents/hermes-agent",
-              "recipes/agents/pi"
+              "examples/overview",
+              "examples/agents/opencode",
+              "examples/agents/openclaw",
+              "examples/agents/goose",
+              "examples/agents/gemini-cli",
+              "examples/agents/hermes-agent",
+              "examples/agents/pi"
             ]
           },
           {
             "group": "CI/CD",
             "icon": "code-pull-request",
             "pages": [
-              "recipes/ci-cd/github-actions-runner",
-              "recipes/ci-cd/pr-checks",
-              "recipes/ci-cd/compose-tests",
-              "recipes/ci-cd/preview-deploys"
+              "examples/ci-cd/github-actions-runner",
+              "examples/ci-cd/pr-checks",
+              "examples/ci-cd/compose-tests",
+              "examples/ci-cd/preview-deploys"
             ]
           },
           {
             "group": "Docker",
             "icon": "docker",
             "pages": [
-              "recipes/docker/docker-in-sandbox",
-              "recipes/docker/docker",
-              "recipes/docker/local-images"
+              "examples/docker/docker-in-sandbox",
+              "examples/docker/docker",
+              "examples/docker/local-images"
             ]
           },
           {
             "group": "Guest Systems",
             "icon": "desktop",
             "pages": [
-              "recipes/development/vnc-desktop",
-              "recipes/guest/systemd-services"
+              "examples/development/vnc-desktop",
+              "examples/guest/systemd-services"
             ]
           },
           {
             "group": "Sandboxing",
             "icon": "shield-halved",
             "pages": [
-              "recipes/use-cases/run-untrusted-code",
-              "recipes/sandboxing/warm-workers"
+              "examples/use-cases/run-untrusted-code",
+              "examples/sandboxing/warm-workers"
             ]
           },
           {
             "group": "Automation",
             "icon": "gears",
             "pages": [
-              "recipes/automation/dependency-audits",
-              "recipes/automation/parallel-batch-jobs"
+              "examples/automation/dependency-audits",
+              "examples/automation/parallel-batch-jobs"
             ]
           },
           {
             "group": "Development",
             "icon": "code",
             "pages": [
-              "recipes/development/code-server",
-              "recipes/development/jupyterlab"
+              "examples/development/code-server",
+              "examples/development/jupyterlab"
             ]
           },
           {
             "group": "Tooling",
             "icon": "puzzle-piece",
             "pages": [
-              "recipes/plugins/terraform",
-              "recipes/plugins/eslint"
+              "examples/plugins/terraform",
+              "examples/plugins/eslint"
             ]
           },
           {
             "group": "Web Automation",
             "icon": "globe",
             "pages": [
-              "recipes/browser-automation/playwright",
-              "recipes/web-automation/scrapy"
+              "examples/browser-automation/playwright",
+              "examples/web-automation/scrapy"
             ]
           },
           {
             "group": "Data",
             "icon": "database",
             "pages": [
-              "recipes/data/postgresql",
-              "recipes/data/migration-rehearsal",
-              "recipes/data/redis"
+              "examples/data/postgresql",
+              "examples/data/migration-rehearsal",
+              "examples/data/redis"
             ]
           },
           {
             "group": "Files",
             "icon": "file",
             "pages": [
-              "recipes/file-processing/libreoffice-pdf",
-              "recipes/file-processing/ffmpeg"
+              "examples/file-processing/libreoffice-pdf",
+              "examples/file-processing/ffmpeg"
             ]
           },
           {
             "group": "Metrics",
             "icon": "paper-plane",
             "pages": [
-              "recipes/metrics-backends/grafana-cloud",
-              "recipes/metrics-backends/grafana-alloy",
-              "recipes/metrics-backends/otel-collector",
-              "recipes/metrics-backends/prometheus",
-              "recipes/metrics-backends/datadog"
+              "examples/metrics-backends/grafana-cloud",
+              "examples/metrics-backends/grafana-alloy",
+              "examples/metrics-backends/otel-collector",
+              "examples/metrics-backends/prometheus",
+              "examples/metrics-backends/datadog"
             ]
           }
         ]
@@ -506,6 +506,18 @@
     {
       "source": "/recipes/use-cases/ai-coding-agent",
       "destination": "/getting-started/agents"
+    },
+    {
+      "source": "/examples/use-cases/ai-coding-agent",
+      "destination": "/getting-started/agents"
+    },
+    {
+      "source": "/recipes",
+      "destination": "/examples/overview"
+    },
+    {
+      "source": "/recipes/:slug*",
+      "destination": "/examples/:slug*"
     },
     {
       "source": "/cloud/compatibility",

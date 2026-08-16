@@ -12,7 +12,7 @@ Create a repository-scoped, just-in-time (JIT) GitHub Actions runner inside a fr
 The baseline in this recipe supports shell steps and JavaScript actions such as `actions/checkout` and `actions/upload-artifact`. It intentionally has no Docker daemon.
 
 <Note>
-  This is the advanced CI recipe because it includes the GitHub-side authentication, registration, and cleanup needed for a hosted runner. If you only need to execute a checkout safely, start with [PR checks](/recipes/ci-cd/pr-checks).
+  This is the advanced CI recipe because it includes the GitHub-side authentication, registration, and cleanup needed for a hosted runner. If you only need to execute a checkout safely, start with [PR checks](/examples/ci-cd/pr-checks).
 </Note>
 
 ## Prepare the host
@@ -651,7 +651,7 @@ GitHub documents the [`workflow_job` webhook payload](https://docs.github.com/en
 
 GitHub container actions, job containers, and service containers require Docker on a Linux self-hosted runner. This snapshot deliberately supports only shell and JavaScript actions. Build a separate reviewed Docker-in-VM snapshot for those workflows, start the daemon inside that microVM, and keep its writable Docker state disposable or repository-specific.
 
-Never mount the host's `/var/run/docker.sock` into a runner. Possession of that socket is normally equivalent to control of the host Docker daemon and defeats the VM boundary. See [Docker inside a sandbox](/recipes/docker/docker-in-sandbox) and GitHub's [self-hosted runner requirements](https://docs.github.com/en/actions/reference/runners/self-hosted-runners#requirements-for-self-hosted-runner-machines).
+Never mount the host's `/var/run/docker.sock` into a runner. Possession of that socket is normally equivalent to control of the host Docker daemon and defeats the VM boundary. See [Docker inside a sandbox](/examples/docker/docker-in-sandbox) and GitHub's [self-hosted runner requirements](https://docs.github.com/en/actions/reference/runners/self-hosted-runners#requirements-for-self-hosted-runner-machines).
 
 ## Verified flow and references
 

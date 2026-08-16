@@ -45,7 +45,7 @@ msb exec --timeout 8m \
 
 Package lifecycle scripts and tests execute inside the microVM. Their exit code becomes the `msb exec` exit code, so the same command works in CI.
 
-If the project installs from another registry, add the smallest required network rule. For fully offline checks, install reviewed dependencies once, create a snapshot, and launch each worker with `--no-net`; see [Warm workers](/recipes/sandboxing/warm-workers).
+If the project installs from another registry, add the smallest required network rule. For fully offline checks, install reviewed dependencies once, create a snapshot, and launch each worker with `--no-net`; see [Warm workers](/examples/sandboxing/warm-workers).
 
 <Note>
   A hosted CI runner must expose KVM on Linux or run on Apple Silicon macOS. Many managed runners do not allow nested virtualization.

@@ -77,9 +77,9 @@ Prometheus's OTLP receiver translates OTel metric names per the
 ## Long-running deployments
 
 For production, put a stable layer between `msb-metrics` and Prometheus:
-either a local [otel-collector](/recipes/metrics-backends/otel-collector)
+either a local [otel-collector](/examples/metrics-backends/otel-collector)
 that handles batching and retries, or
-[Grafana Alloy](/recipes/metrics-backends/grafana-alloy). Direct
+[Grafana Alloy](/examples/metrics-backends/grafana-alloy). Direct
 shipping is fine for single-host setups and development; the buffer in
 `msb-metrics` is bounded by `--max-buffered` and is not a substitute
 for a real metrics relay.

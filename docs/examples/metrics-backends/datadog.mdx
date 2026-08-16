@@ -56,7 +56,7 @@ the agent. It expects delta temporality for metrics, while
 temporality conversion step.
 
 If you need direct intake, put an
-[otel-collector](/recipes/metrics-backends/otel-collector) with the
+[otel-collector](/examples/metrics-backends/otel-collector) with the
 `cumulativetodelta` processor between `msb-metrics` and Datadog.
 Otherwise, stick with the agent path above, which converts temporality
 for you.
