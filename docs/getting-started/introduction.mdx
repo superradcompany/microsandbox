@@ -10,13 +10,21 @@ Each sandbox is a lightweight VM with its own Linux kernel, filesystem, and netw
 
 It keeps the familiar workflow of OCI images and command execution, while moving risky work out of the host process.
 
-<Tip>
-  Boot a microVM in one command.
+<CodeGroup>
+```bash npx
+npx microsandbox run debian
+```
 
-  ```bash
-  npx microsandbox run debian
-  ```
-</Tip>
+```bash macOS & Linux
+curl -fsSL https://install.microsandbox.dev | sh
+msb run debian
+```
+
+```powershell Windows
+irm https://install.microsandbox.dev/windows | iex
+msb run debian
+```
+</CodeGroup>
 
 ## Why microsandbox
 
@@ -36,20 +44,6 @@ It keeps the familiar workflow of OCI images and command execution, while moving
 - **Dev environments.** Create disposable Linux machines without touching your laptop or host Docker daemon.
 - **Scrapers and automation.** Allow internet access while blocking private networks and metadata services.
 - **Secure tool execution.** Run CLIs and dependencies that should not see host secrets or ambient credentials.
-
-## What makes it different
-
-### Secrets stay on the host
-
-Instead of putting real credentials inside the VM, microsandbox injects placeholders and swaps them for real values only when traffic goes to an allowed host. Code inside the sandbox can run freely without ever receiving the secret value itself.
-
-### Network policy is host-controlled
-
-All sandbox traffic flows through a host-side network stack. You can allow public internet access, block private networks, publish ports, deny by default, pin DNS behavior, or inspect TLS traffic without relying on guest cooperation.
-
-### Storage is private by default
-
-For the normal OCI image workflow, each sandbox gets its own writable root filesystem on top of the image. Writes there do not change the cached image. Data reaches the host or another sandbox only when you choose a sharing mechanism, such as a bind mount, named volume, disk image, or snapshot.
 
 ## Minimal example
 
