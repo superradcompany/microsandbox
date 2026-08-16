@@ -28,6 +28,7 @@ use crate::shared::SharedState;
 
 use super::destination::{matches_cidr, matches_group};
 use super::name::{DomainName, DomainNameError};
+use super::observer::PolicyDenial;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -407,7 +408,33 @@ impl NetworkPolicy {
 
     /// Shared rule walk for the egress public methods. `port = None`
     /// is the ICMP path; rules with a port filter are skipped there.
+    ///
+    /// Every egress denial is reported to the installed
+    /// [`PolicyObserver`](super::PolicyObserver) here rather than at the
+    /// call sites, so a new caller of the egress API cannot omit it.
     fn egress_walk(
+        &self,
+        addr: IpAddr,
+        port: Option<u16>,
+        protocol: Protocol,
+        shared: &SharedState,
+        source: HostnameSource<'_>,
+    ) -> EgressEvaluation {
+        let evaluation = self.egress_walk_inner(addr, port, protocol, shared, source);
+
+        if evaluation == EgressEvaluation::Deny {
+            shared.report_policy_denial(|| {
+                PolicyDenial::to_address(Direction::Egress, protocol, addr, port)
+                    .with_hostname(denied_hostname(addr, shared, source))
+            });
+        }
+
+        evaluation
+    }
+
+    /// Rule walk proper. Split from [`Self::egress_walk`] so the denial
+    /// report has a single exit point to observe.
+    fn egress_walk_inner(
         &self,
         addr: IpAddr,
         port: Option<u16>,
@@ -454,6 +481,31 @@ impl NetworkPolicy {
     /// `ports` filter is matched against `guest_port`, not the peer's
     /// port.
     pub fn evaluate_ingress(
+        &self,
+        peer: SocketAddr,
+        guest_port: u16,
+        protocol: Protocol,
+        shared: &SharedState,
+    ) -> Action {
+        let action = self.ingress_walk(peer, guest_port, protocol, shared);
+
+        if action == Action::Deny {
+            shared.report_policy_denial(|| {
+                PolicyDenial::to_address(Direction::Ingress, protocol, peer.ip(), Some(guest_port))
+                    .with_hostname(denied_hostname(
+                        peer.ip(),
+                        shared,
+                        HostnameSource::CacheOnly,
+                    ))
+            });
+        }
+
+        action
+    }
+
+    /// Rule walk proper. Split from [`Self::evaluate_ingress`] so the
+    /// denial report has a single exit point to observe.
+    fn ingress_walk(
         &self,
         peer: SocketAddr,
         guest_port: u16,
@@ -780,6 +832,30 @@ impl PortRange {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Best-effort hostname for a denied peer address.
+///
+/// A TLS handshake supplies the name the decision was actually made
+/// against, so it wins. Otherwise the resolved-hostname index is consulted
+/// for a name the guest recently looked up for this address; a numeric
+/// destination has neither and yields `None`.
+fn denied_hostname(
+    addr: IpAddr,
+    shared: &SharedState,
+    source: HostnameSource<'_>,
+) -> Option<String> {
+    if let HostnameSource::Sni(name) = source {
+        return Some(name.to_owned());
+    }
+
+    let mut hostname = None;
+    shared.any_resolved_hostname(addr, |name| {
+        hostname = Some(name.to_owned());
+        true
+    });
+
+    hostname
+}
 
 fn rule_matches_protocol_and_port(rule: &Rule, protocol: Protocol, port: u16) -> bool {
     if !rule.protocols.is_empty() && !rule.protocols.contains(&protocol) {
