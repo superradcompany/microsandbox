@@ -48,6 +48,9 @@ pub(crate) const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 30;
 /// Default sandbox metrics sampling interval in milliseconds.
 pub const DEFAULT_METRICS_SAMPLE_INTERVAL_MS: u64 = 1000;
 
+/// Default SSH session inactivity timeout in seconds.
+pub const DEFAULT_SSH_INACTIVITY_TIMEOUT_SECS: u64 = 600;
+
 /// Default value for `metrics_sample_interval_ms` fields.
 pub fn default_metrics_sample_interval() -> Option<NonZero<u64>> {
     NonZero::new(DEFAULT_METRICS_SAMPLE_INTERVAL_MS)
@@ -172,8 +175,21 @@ pub struct LocalConfig {
     /// Registry authentication configuration.
     pub registries: RegistriesConfig,
 
+    /// SSH session defaults.
+    pub ssh: SshConfig,
+
     /// Live metrics registry configuration.
     pub metrics: MetricsConfig,
+}
+
+/// Default settings for host-side SSH sessions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SshConfig {
+    /// Disconnect an SSH session after this many seconds without SSH traffic.
+    ///
+    /// A value of `0` disables the inactivity timeout.
+    pub inactivity_timeout_secs: u64,
 }
 
 /// Live metrics registry configuration.
@@ -720,6 +736,14 @@ impl Default for DatabaseConfig {
             max_connections: DEFAULT_MAX_CONNECTIONS,
             connect_timeout_secs: DEFAULT_CONNECT_TIMEOUT_SECS,
             busy_timeout_secs: microsandbox_db::pool::DEFAULT_BUSY_TIMEOUT_SECS,
+        }
+    }
+}
+
+impl Default for SshConfig {
+    fn default() -> Self {
+        Self {
+            inactivity_timeout_secs: DEFAULT_SSH_INACTIVITY_TIMEOUT_SECS,
         }
     }
 }
@@ -1322,6 +1346,7 @@ mod tests {
         assert_eq!(cfg.database.max_connections, 5);
         assert_eq!(cfg.database.connect_timeout_secs, 30);
         assert_eq!(cfg.database.busy_timeout_secs, 5);
+        assert_eq!(cfg.ssh.inactivity_timeout_secs, 600);
         assert_eq!(
             cfg.runtime.block_writeback,
             BlockWritebackConfig::Auto { pool_mib: None }
@@ -1637,6 +1662,20 @@ mod tests {
         assert_eq!(cfg.database.max_connections, 9);
         assert_eq!(cfg.database.connect_timeout_secs, 7);
         assert_eq!(cfg.database.busy_timeout_secs, 12);
+    }
+
+    #[test]
+    fn test_deserialize_ssh_config() {
+        let json = r#"{"ssh": {"inactivity_timeout_secs": 1800}}"#;
+        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.ssh.inactivity_timeout_secs, 1800);
+    }
+
+    #[test]
+    fn test_deserialize_ssh_timeout_disabled() {
+        let json = r#"{"ssh": {"inactivity_timeout_secs": 0}}"#;
+        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.ssh.inactivity_timeout_secs, 0);
     }
 
     #[test]

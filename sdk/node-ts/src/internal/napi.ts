@@ -399,6 +399,7 @@ export interface NapiSshClientOptions {
   user?: string;
   term?: string;
   sftp?: boolean;
+  inactivityTimeoutSecs?: number;
 }
 
 export interface NapiSshExecOptions {
@@ -415,6 +416,7 @@ export interface NapiSshServerOptions {
   authorizedKeysPath?: string;
   user?: string;
   sftp?: boolean;
+  inactivityTimeoutSecs?: number;
 }
 
 export interface NapiSshClient {

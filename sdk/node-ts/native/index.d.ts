@@ -2382,6 +2382,7 @@ export interface SshClientOptions {
   user?: string
   term?: string
   sftp?: boolean
+  inactivityTimeoutSecs?: number
 }
 
 /** Options accepted by `SshClient.exec()`. */
@@ -2402,6 +2403,7 @@ export interface SshServerOptions {
   authorizedKeysPath?: string
   user?: string
   sftp?: boolean
+  inactivityTimeoutSecs?: number
 }
 
 /** Stdin mode for an exec. */

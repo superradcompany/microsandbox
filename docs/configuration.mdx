@@ -79,6 +79,9 @@ microsandbox reads its global configuration from `~/.microsandbox/config.json`. 
       }
     }
   },
+  "ssh": {
+    "inactivity_timeout_secs": 600
+  },
   "metrics": {
     "capacity": 4096
   },
@@ -108,6 +111,7 @@ microsandbox reads its global configuration from `~/.microsandbox/config.json`. 
 | `sandbox_defaults` | [reference](#sandbox_defaults) | Defaults applied to local sandboxes |
 | `runtime` | [reference](#runtime) | Host runtime performance policy |
 | `registries` | [reference](#registries) | Container registry authentication |
+| `ssh` | [reference](#ssh) | Host-side SSH session defaults |
 | `metrics` | [reference](#metrics) | Live metrics shared-memory registry settings |
 | `active_profile` | `null` | Default [backend profile](#profiles) name |
 | `profiles` | [reference](#profiles) | Named [backend profiles](/getting-started/backends) |
@@ -177,6 +181,16 @@ let msb = cfg.resolve_msb_path()?;
 ```
 
 `LocalBackend` has two plain constructors alongside the builder. `LocalBackend::lazy()` is synchronous and defers opening (and migrating) the local sandbox database until the first operation; it is what backend resolution uses when no backend is set explicitly. `LocalBackend::new().await?` opens the database up front, so startup fails fast if the database is unusable.
+
+## `ssh`
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `inactivity_timeout_secs` | `600` | Disconnect an SSH session after this many seconds without SSH traffic. Set to `0` to disable. |
+
+The timeout applies to host-side SSH sessions created by `msb ssh`, `msb ssh serve`, and the local SDK backend. SSH traffic resets the timer. This setting is separate from a sandbox lifecycle idle timeout: disconnecting SSH does not stop the sandbox, and sandbox activity policy does not change the SSH timeout.
+
+Explicit CLI or SDK options override this value. The setting is resolved when a client or server endpoint is prepared, so changing `config.json` does not alter existing connections. Programmatic local backends can override the persisted value with `LocalBackendBuilder::ssh_inactivity_timeout_secs()`.
 
 ## `sandbox_defaults`
 

@@ -175,6 +175,7 @@ pub struct SshClientOptions {
     pub user: Option<String>,
     pub term: Option<String>,
     pub sftp: Option<bool>,
+    pub inactivity_timeout_secs: Option<u32>,
 }
 
 /// Options accepted by `SshClient.exec()`.
@@ -197,6 +198,7 @@ pub struct SshServerOptions {
     pub authorized_keys_path: Option<String>,
     pub user: Option<String>,
     pub sftp: Option<bool>,
+    pub inactivity_timeout_secs: Option<u32>,
 }
 
 /// Filesystem entry metadata returned by `fs.list()`.

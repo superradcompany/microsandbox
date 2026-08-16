@@ -461,6 +461,7 @@ class SandboxSshOps:
         user: str = "root",
         term: str | None = None,
         sftp: bool = True,
+        inactivity_timeout: float | None = None,
     ) -> SshClient: ...
     async def prepare_server(
         self,
@@ -469,6 +470,7 @@ class SandboxSshOps:
         authorized_keys_path: str | os.PathLike[str] | None = None,
         user: str | None = None,
         sftp: bool = True,
+        inactivity_timeout: float | None = None,
     ) -> SshServer: ...
 
 class SshOutput:

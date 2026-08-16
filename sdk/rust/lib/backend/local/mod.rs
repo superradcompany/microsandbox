@@ -93,6 +93,7 @@ pub struct LocalBackendBuilder {
     disable_metrics_sample: Option<bool>,
     ca_certs: Option<Option<PathBuf>>,
     registry_hosts: Option<HashMap<String, RegistryEntry>>,
+    ssh_inactivity_timeout_secs: Option<u64>,
     log_level: Option<microsandbox_runtime::logging::LogLevel>,
     deployment_profile: Option<DeploymentProfile>,
 }
@@ -376,6 +377,14 @@ impl LocalBackendBuilder {
         self
     }
 
+    /// Override the default SSH inactivity timeout in seconds.
+    ///
+    /// Pass `0` to disable the timeout.
+    pub fn ssh_inactivity_timeout_secs(mut self, secs: u64) -> Self {
+        self.ssh_inactivity_timeout_secs = Some(secs);
+        self
+    }
+
     /// Override the runtime log level applied to SDK-spawned sandboxes.
     pub fn log_level(mut self, level: microsandbox_runtime::logging::LogLevel) -> Self {
         self.log_level = Some(level);
@@ -444,6 +453,7 @@ impl LocalBackendBuilder {
             disable_metrics_sample,
             ca_certs,
             registry_hosts,
+            ssh_inactivity_timeout_secs,
             log_level,
             deployment_profile,
         } = self;
@@ -511,6 +521,9 @@ impl LocalBackendBuilder {
         }
         if let Some(v) = registry_hosts {
             base.registries.hosts = v;
+        }
+        if let Some(secs) = ssh_inactivity_timeout_secs {
+            base.ssh.inactivity_timeout_secs = secs;
         }
 
         base
@@ -1305,5 +1318,21 @@ mod tests {
             merged.deployment_profile,
             Some(DeploymentProfile::MultiTenant)
         );
+    }
+
+    #[test]
+    fn builder_ssh_inactivity_timeout_overrides_persisted_default() {
+        let base = LocalConfig {
+            ssh: crate::config::SshConfig {
+                inactivity_timeout_secs: 1800,
+            },
+            ..Default::default()
+        };
+
+        let merged = LocalBackend::builder()
+            .ssh_inactivity_timeout_secs(0)
+            .merge_into(base);
+
+        assert_eq!(merged.ssh.inactivity_timeout_secs, 0);
     }
 }

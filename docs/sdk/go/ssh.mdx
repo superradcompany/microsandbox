@@ -73,7 +73,7 @@ Open a native in-process SSH client to this sandbox. Generates an ephemeral Ed25
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#sshclientoption">...SSHClientOption</a></div>
-    <div className="msb-param-desc">Login user, terminal name, and SFTP toggle.</div>
+    <div className="msb-param-desc">Login user, terminal name, SFTP toggle, and inactivity timeout.</div>
   </div>
 </div>
 
@@ -123,7 +123,7 @@ Prepare a reusable SSH server endpoint for this sandbox. Loads or creates the ho
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#sshserveroption">...SSHServerOption</a></div>
-    <div className="msb-param-desc">Host key, authorized keys, guest user, and SFTP toggle.</div>
+    <div className="msb-param-desc">Host key, authorized keys, guest user, SFTP toggle, and inactivity timeout.</div>
   </div>
 </div>
 
@@ -599,13 +599,14 @@ Close the session (consumes the handle)
 
 <p className="msb-backref">Used by <a href="#ssh-openclient">OpenClient()</a></p>
 
-Functional option for [`OpenClient()`](#ssh-openclient). Defaults: user `root`, terminal from `$TERM` (falling back to `xterm`), SFTP enabled.
+Functional option for [`OpenClient()`](#ssh-openclient). Defaults: user `root`, terminal from `$TERM` (falling back to `xterm`), SFTP enabled, and the global SSH inactivity timeout.
 
 | Option | Description |
 |--------|-------------|
 | WithSSHUser(user) | SSH login user. Default `root` |
 | WithSSHTerm(term) | Terminal name for interactive sessions |
 | WithSSHClientSFTP(enabled) | Enable or disable SFTP on the internal server. Default `true` |
+| WithSSHClientInactivityTimeout(timeout) | Override the internal server inactivity timeout. A zero duration disables it |
 
 ### SSHExecOption
 
@@ -632,7 +633,7 @@ Functional option for [`Attach()`](#c-attach). The default terminal comes from `
 
 <p className="msb-backref">Used by <a href="#ssh-prepareserver">PrepareServer()</a></p>
 
-Functional option for [`PrepareServer()`](#ssh-prepareserver). SFTP is enabled by default; when no authorized-keys path is provided, the default authorized-keys file is loaded.
+Functional option for [`PrepareServer()`](#ssh-prepareserver). SFTP is enabled by default, the inactivity timeout inherits the global SSH setting, and the default authorized-keys file is loaded when no path is provided.
 
 | Option | Description |
 |--------|-------------|
@@ -640,3 +641,4 @@ Functional option for [`PrepareServer()`](#ssh-prepareserver). SFTP is enabled b
 | WithSSHAuthorizedKeysPath(path) | Override the authorized-keys path |
 | WithSSHServerUser(user) | Override the guest user used for SSH exec requests |
 | WithSSHServerSFTP(enabled) | Enable or disable SFTP on the server endpoint. Default `true` |
+| WithSSHServerInactivityTimeout(timeout) | Override the SSH inactivity timeout. A zero duration disables it |

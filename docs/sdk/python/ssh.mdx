@@ -47,6 +47,7 @@ async def open_client(
     user: str = "root",
     term: str | None = None,
     sftp: bool = True,
+    inactivity_timeout: float | None = None,
 ) -> SshClient
 ```
 
@@ -76,6 +77,10 @@ Connect a native in-process SSH client to this sandbox. Generates an ephemeral c
     <div className="msb-param-key"><code>sftp</code><span className="msb-type">bool</span></div>
     <div className="msb-param-desc">Enable or disable SFTP on the internal server. Default <code>True</code>.</div>
   </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>inactivity_timeout</code><span className="msb-type">float | None</span></div>
+    <div className="msb-param-desc">Disconnect after this many seconds without SSH traffic. <code>0</code> disables the timeout; <code>None</code> inherits the global setting.</div>
+  </div>
 </div>
 
 <p className="msb-label">Returns</p>
@@ -98,6 +103,7 @@ async def prepare_server(
     authorized_keys_path: str | os.PathLike[str] | None = None,
     user: str | None = None,
     sftp: bool = True,
+    inactivity_timeout: float | None = None,
 ) -> SshServer
 ```
 
@@ -134,6 +140,10 @@ Prepare a reusable SSH server endpoint for this sandbox. Loads or creates the ho
   <div className="msb-param">
     <div className="msb-param-key"><code>sftp</code><span className="msb-type">bool</span></div>
     <div className="msb-param-desc">Enable or disable SFTP. Default <code>True</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>inactivity_timeout</code><span className="msb-type">float | None</span></div>
+    <div className="msb-param-desc">Disconnect after this many seconds without SSH traffic. <code>0</code> disables the timeout; <code>None</code> inherits the global setting.</div>
   </div>
 </div>
 

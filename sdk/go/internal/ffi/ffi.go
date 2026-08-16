@@ -2480,9 +2480,10 @@ func (s *Sandbox) ExecDefault(ctx context.Context, opts ExecOptions) (*ExecResul
 
 // SSHClientOptions is the FFI wire shape for a native SSH client connection.
 type SSHClientOptions struct {
-	User string `json:"user,omitempty"`
-	Term string `json:"term,omitempty"`
-	SFTP *bool  `json:"sftp,omitempty"`
+	User                  string  `json:"user,omitempty"`
+	Term                  string  `json:"term,omitempty"`
+	SFTP                  *bool   `json:"sftp,omitempty"`
+	InactivityTimeoutSecs *uint64 `json:"inactivity_timeout_secs,omitempty"`
 }
 
 // SSHExecOptions is the FFI wire shape for an SSH exec request.
@@ -2498,10 +2499,11 @@ type SSHAttachOptions struct {
 
 // SSHServerOptions is the FFI wire shape for preparing an SSH server endpoint.
 type SSHServerOptions struct {
-	HostKeyPath        string `json:"host_key_path,omitempty"`
-	AuthorizedKeysPath string `json:"authorized_keys_path,omitempty"`
-	User               string `json:"user,omitempty"`
-	SFTP               *bool  `json:"sftp,omitempty"`
+	HostKeyPath           string  `json:"host_key_path,omitempty"`
+	AuthorizedKeysPath    string  `json:"authorized_keys_path,omitempty"`
+	User                  string  `json:"user,omitempty"`
+	SFTP                  *bool   `json:"sftp,omitempty"`
+	InactivityTimeoutSecs *uint64 `json:"inactivity_timeout_secs,omitempty"`
 }
 
 // SSHOutput is the FFI-decoded output from an SSH exec request.
