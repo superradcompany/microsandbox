@@ -9,6 +9,10 @@ Create a repository-scoped, just-in-time (JIT) GitHub Actions runner inside a fr
 
 The baseline in this recipe supports shell steps and JavaScript actions such as `actions/checkout` and `actions/upload-artifact`. It intentionally has no Docker daemon.
 
+<Note>
+  This is the advanced CI recipe because it includes the GitHub-side authentication, registration, and cleanup needed for a hosted runner. If you only need to execute a checkout safely, start with [PR checks](/recipes/ci-cd/pr-checks).
+</Note>
+
 ## Prepare the host
 
 For an always-on controller, use a Linux bare-metal host with KVM or a cloud VM type that explicitly exposes nested virtualization. Merely seeing virtualization in a cloud product name is not enough; `/dev/kvm` must be available to the account that runs `msb`. The same scripts also work on an Apple Silicon Mac for local validation. Install `msb` and the GitHub CLI, then check the host before creating a runner:

@@ -2,10 +2,10 @@
 title: Recipes
 sidebarTitle: Overview
 description: Practical, tested microsandbox workflows for agents, CI, automation, tooling, browsers, data, and files
-icon: "beaker"
+icon: "flask"
 ---
 
-These recipes are complete workflows rather than isolated command fragments. Each one shows the boundary around the workload, how results cross back to the host, and how to clean up safely.
+These recipes start with the smallest useful microsandbox workflow. Short commands stay together; longer workflows are split into run, use, and cleanup steps so the important boundary is easy to see.
 
 ## Start with these
 
@@ -17,7 +17,7 @@ These recipes are complete workflows rather than isolated command fragments. Eac
     Bound CPU, memory, time, and network access around user-supplied code.
   </Card>
   <Card title="GitHub Actions runner" icon="github" href="/recipes/ci-cd/github-actions-runner">
-    Run one self-hosted job in a fresh microVM, then discard its workspace.
+    Operate one production-safe JIT runner in a fresh microVM.
   </Card>
   <Card title="Compose tests" icon="boxes-stacked" href="/recipes/ci-cd/compose-tests">
     Run a multi-container stack without exposing the host Docker socket.
@@ -39,7 +39,7 @@ These recipes are complete workflows rather than isolated command fragments. Eac
 ## Browse by workflow
 
 - **Agents**: OpenCode, OpenClaw, Goose, Gemini CLI, Hermes Agent, Pi, and a tool-agnostic coding-agent pattern.
-- **CI/CD**: Ephemeral GitHub Actions runners, hermetic PR checks, Docker Compose integration tests, and time-limited preview deploys.
+- **CI/CD**: Ephemeral GitHub Actions runners, isolated PR checks, Docker Compose integration tests, and time-limited preview deploys.
 - **Automation**: Scheduled dependency audits and parallel batch dispatch.
 - **Tool isolation**: Vet native Terraform providers and third-party ESLint plugins in constrained workers.
 - **Web Automation**: Playwright browser jobs and bounded Scrapy crawls.
