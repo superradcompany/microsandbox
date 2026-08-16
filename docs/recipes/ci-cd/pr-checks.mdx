@@ -5,6 +5,8 @@ description: Stream a commit into a bounded microVM and run its tests there
 icon: "check-double"
 ---
 
+<Tooltip tip="The PR-check workflow works on microsandbox cloud; omit replace-on-create from the example command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 Boot a clean worker, stream only committed files into it, and run the pull request's install and test commands inside the microVM. The host never executes code from the checkout.
 
 This example uses Node.js. The same `create → copy → exec` shape works for other toolchains.

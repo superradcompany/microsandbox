@@ -5,6 +5,8 @@ description: Serve a built site from a time-limited microVM
 icon: "window-maximize"
 ---
 
+<Tooltip tip="This workflow depends on publishing a guest service to a port on the computer running the CLI, which is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 Copy a static build into a microVM, expose it on host loopback, and let the sandbox expire automatically. The preview cannot modify the host build or make outbound network requests.
 
 ## Start the preview

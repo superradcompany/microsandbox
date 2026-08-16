@@ -5,6 +5,8 @@ description: Run a bounded crawler with a single-site network allowlist
 icon: "spider"
 ---
 
+<Tooltip tip="This workflow prepares and restores a local disk snapshot, which is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 Run a Scrapy spider in a disposable microVM and export only its JSON result. This example targets [Books to Scrape](https://books.toscrape.com/), a public practice site.
 
 Use [Playwright](/recipes/browser-automation/playwright) instead when content appears only after JavaScript runs.

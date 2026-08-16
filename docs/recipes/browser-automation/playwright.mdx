@@ -4,6 +4,8 @@ description: Capture pages or expose a remote browser server without a GPU
 icon: "globe"
 ---
 
+<Tooltip tip="Headless capture works on microsandbox cloud after omitting replace-on-create. Publishing the optional remote browser server to a client-host port is local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 Headless Chromium does not require GPU acceleration. This recipe uses Microsoft's Playwright image to capture a screenshot and optionally run a persistent browser server for a host-side test runner or agent.
 
 <Note>

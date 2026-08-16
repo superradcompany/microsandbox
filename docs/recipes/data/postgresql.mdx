@@ -4,6 +4,8 @@ description: Run a persistent PostgreSQL service with a localhost-only forwarded
 icon: "database"
 ---
 
+<Tooltip tip="This recipe depends on a disk-kind named volume and a published client-host port, which are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 This recipe runs PostgreSQL 17 in a microVM, stores the database on a disk-backed named volume, and publishes the service only to host loopback.
 
 <Note>

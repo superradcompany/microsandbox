@@ -7,6 +7,8 @@ icon: "cube"
 
 ## msb run
 
+<Tooltip tip="The core run workflow works on microsandbox cloud, but replace-on-create, published ports, custom DNS and interfaces, local rootfs forms, snapshots, and several host-integrated options are unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 Create a sandbox and run its resolved OCI command. A command after `--` replaces the image CMD while preserving its entrypoint; without one, microsandbox runs the image's default `ENTRYPOINT + CMD`. Without `--name`, the sandbox is ephemeral and removed when the command finishes. With `--name`, it persists for later use.
 
 ```bash
@@ -152,6 +154,8 @@ msb run alpine --net public --net-rule "deny@dns"
 
 ## msb create
 
+<Tooltip tip="The core create workflow works on microsandbox cloud, but replace-on-create, published ports, custom DNS and interfaces, local rootfs forms, snapshots, and several host-integrated options are unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 Create and boot a sandbox without running a command. Takes the same flags as `msb run` (except `--detach`).
 
 ```bash
@@ -178,6 +182,8 @@ msb start --label app=engine          # start every sandbox labelled app=engine
 | `-q`, `--quiet` | Suppress progress output |
 
 ## msb stop
+
+<Tooltip tip="Graceful stop works on microsandbox cloud; force mode and timeout escalation to force kill are unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```bash
 msb stop devbox                # Graceful shutdown (10s grace)
@@ -207,6 +213,8 @@ On cloud, `--force` is not yet available; stops are always graceful.
 | `-q`, `--quiet` | Suppress progress output |
 
 ## msb restart
+
+<Tooltip tip="Graceful restart works on microsandbox cloud; force mode and timeout escalation to force kill are unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Stop and start one or more sandboxes. Running, draining, and paused sandboxes are stopped first, then started from their persisted configuration. Stopped, crashed, and created sandboxes skip the stop phase and are started directly.
 

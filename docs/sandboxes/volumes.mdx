@@ -14,6 +14,8 @@ microsandbox supports four mount types on both backends: bind mounts, named volu
 
 ## Cloud default volume
 
+<Tooltip tip="Available only on microsandbox cloud; the local backend has no default volume."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 Every Cloud organization has an always-present default volume. You can read and write it directly without starting a sandbox:
 
 <CodeGroup>
@@ -42,7 +44,7 @@ The default volume is isolated to the authenticated Cloud organization and canno
 
 ## Bind mounts
 
-<Tooltip tip="The host path resolves against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, the host path resolves against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Mount a directory from the host directly into the sandbox. Changes inside the sandbox are reflected on the host, and vice versa.
 
@@ -238,8 +240,6 @@ msb create docker:dind --name docker-demo \
 
 ### Sharing and host-side access
 
-<Tooltip tip="Cloud volumes do not expose a caller-host path, but the volume filesystem API works without a running sandbox."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
-
 Mount the same directory-backed named volume into multiple sandboxes when they need to share files. Use `readonly` on consumers that should not write. Disk-backed named volumes are attached as block devices; use one writable sandbox at a time, or read-only mounts where sharing is intended.
 
 Directory-backed named volumes are also accessible without a running sandbox, so you can pre-populate a cache or inspect output after the sandbox stops. Local volumes expose their host path directly; cloud default and managed directory volumes use the same volume filesystem API shown above. Disk-backed local volumes store guest data inside `disk.raw`; host filesystem helpers operate on the managed volume directory, not the filesystem inside the disk image.
@@ -276,7 +276,7 @@ msb volume rm old-cache
 
 ## Disk-image volumes
 
-<Tooltip tip="The host path resolves against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, the host path resolves against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Disk-image volumes attach a host disk image as a virtio-blk device and mount its inner filesystem at a guest path. Use them when you want persistent state isolated from ordinary host filesystem metadata, or when distributing a prebuilt filesystem image. The disk format defaults from the file extension (`.qcow2`, `.raw`, `.vmdk`; otherwise raw), and the inner filesystem type is auto-detected unless you set `fstype`.
 

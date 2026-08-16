@@ -186,6 +186,8 @@ Open a streaming writer for large files. Write chunks incrementally, then call [
 
 <p className="msb-member-group">Handle operations</p>
 
+<Tooltip tip="Open-handle filesystem operations require a live local relay client. Use the path-based methods on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 Handle operations expose agentd-side file and directory handles. Use them when you need repeated reads/writes against the same open file, directory iteration state, or handle-based metadata updates. They require `Sandbox::fs()` on a live local sandbox because agentd scopes handles to the relay client; `SandboxFsOps::with_backend()` can run path-style methods but returns `Unsupported` for handle methods.
 
 <Accordion title="Example">

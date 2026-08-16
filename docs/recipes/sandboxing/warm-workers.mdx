@@ -5,6 +5,8 @@ description: Install a toolchain once and launch clean workers from the captured
 icon: "code-branch"
 ---
 
+<Tooltip tip="This workflow creates and restores local disk snapshots, which are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 Package installation often costs more than sandbox boot. This recipe installs OpenCode once, records the stopped sandbox as an integrity-checked snapshot, and launches fresh workers from that prepared filesystem.
 
 ## Prepare the baseline

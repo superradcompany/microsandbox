@@ -4,6 +4,8 @@ description: Open a disposable VS Code environment in the browser
 icon: "code"
 ---
 
+<Tooltip tip="This recipe publishes code-server to a port on the computer running the CLI, which is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 code-server provides VS Code in a browser. This recipe starts the official ARM64/AMD64 image, forwards it only to host loopback, and copies a project into the isolated guest filesystem.
 
 ## Start code-server

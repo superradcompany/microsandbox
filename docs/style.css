@@ -464,8 +464,8 @@ details.accordion:has(.code-block) { margin-top: 0.5rem !important; }
 }
 
 /* ----------------------------------------------------------------------------
- * Availability badges: small pills rendered inside headings to mark sections
- * whose feature is local-only (not yet on cloud).
+ * Availability badges: small pills for local-only, limited-on-cloud, and
+ * cloud-only features. Features that work everywhere do not need a badge.
  * -------------------------------------------------------------------------- */
 .msb-badge-local {
   display: inline-block;
@@ -564,37 +564,5 @@ span:has(> .msb-badge-limited) {
 }
 
 span:has(> .msb-badge-cloud) {
-  text-decoration: none !important;
-}
-
-/* Neutral cloud-note pill: behaves differently on cloud but fully works (not a limitation). */
-.msb-badge-note {
-  display: inline-block;
-  margin-top: -0.35rem;
-  padding: 0.1rem 0.5rem;
-  border-radius: 9999px;
-  font-size: 0.7rem;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: #475569;
-  background: #f1f5f9;
-  border: 1px solid rgba(71, 85, 105, 0.2);
-}
-
-.dark .msb-badge-note {
-  color: #94a3b8;
-  background: rgba(148, 163, 184, 0.1);
-  border-color: rgba(148, 163, 184, 0.24);
-}
-
-.msb-badge-note svg,
-.msb-badge-note [class*="mask"] {
-  display: inline-block;
-  vertical-align: -0.12em;
-  margin-left: 0.1rem;
-  background-color: currentColor !important;
-}
-
-span:has(> .msb-badge-note) {
   text-decoration: none !important;
 }

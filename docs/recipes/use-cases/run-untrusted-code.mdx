@@ -5,6 +5,8 @@ description: Execute submitted Python with bounded resources and no network acce
 icon: "code"
 ---
 
+<Tooltip tip="The isolation workflow works on microsandbox cloud, but omit replace-on-create and explicitly stop or remove SDK-created cloud sandboxes instead of relying on automatic disposal."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 Use this pattern for a code playground, grading service, plugin system, data-analysis app, or any feature that executes code you did not write. Each submission gets a fresh microVM, and the guest is stopped and removed when the run finishes.
 
 This example uses the TypeScript SDK and Python, but the same lifecycle works with any OCI image and command.

@@ -5,6 +5,8 @@ description: Download a provider once, then validate and plan without network ac
 icon: "cubes"
 ---
 
+<Tooltip tip="This workflow prepares and restores a local disk snapshot, which is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 Terraform providers are native executables. Prepare the provider in one microVM, snapshot it, then run validation and planning in a fresh networkless worker.
 
 The `random` provider makes the flow easy to test because planning it does not need cloud credentials.

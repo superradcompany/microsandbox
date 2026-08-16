@@ -8,6 +8,8 @@ Before a sandbox starts doing real work, you can choose its root storage and pre
 
 ## Flat OCI rootfs
 
+<Tooltip tip="Flat OCI root disks are not available on microsandbox cloud; use the managed layered root."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 OCI sandboxes use stitched EROFS lower layers with a writable ext4 upper and guest OverlayFS by default. A flat root disk is an explicit alternative: microsandbox merges the OCI layers into one deterministic ext4 base, caches it by content, creates a private clone for each sandbox, grows that clone to the requested capacity, and mounts it directly as the guest root. The immutable cached base is never attached writable.
 
 <CodeGroup>

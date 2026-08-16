@@ -5,6 +5,8 @@ description: Run one repository job in a fresh microVM, retain bounded host logs
 icon: "github"
 ---
 
+<Tooltip tip="This runner recipe builds and restores local disk snapshots and requires a host with hardware virtualization."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 Create a repository-scoped, just-in-time (JIT) GitHub Actions runner inside a fresh microsandbox worker. GitHub assigns at most one job to the runner and deregisters it after that job; the controller independently deletes any remaining registration, retains bounded host-side output, and destroys the worker.
 
 The baseline in this recipe supports shell steps and JavaScript actions such as `actions/checkout` and `actions/upload-artifact`. It intentionally has no Docker daemon.

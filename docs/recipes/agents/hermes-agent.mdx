@@ -4,6 +4,8 @@ description: Set up Hermes Agent from its official image and persist its state
 icon: "/images/recipes/agents/hermes-agent.svg"
 ---
 
+<Tooltip tip="On microsandbox cloud, create the named volume first and omit replace-on-create."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 Hermes Agent's source installer brings in a large Python, Node.js, browser, and media toolchain. Use the official image instead: it contains the complete application and stores mutable state under `/opt/data`.
 
 <Note>

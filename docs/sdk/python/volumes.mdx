@@ -19,6 +19,8 @@ Volume name.
 
 #### <span className="msb-recv">volume.</span><span className="msb-hn">path</span>
 
+<Tooltip tip="Only local volumes expose a path on the computer running the SDK."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```python
 path: str
 ```
@@ -28,6 +30,8 @@ Host path to the volume's directory.
 <p className="msb-member-group">Static methods</p>
 
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">get_default()</span>
+
+<Tooltip tip="Available only on microsandbox cloud; the local backend has no default volume."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def get_default() -> VolumeHandle
@@ -42,6 +46,8 @@ print(await volume.fs().read_to_string("customers/acme.json"))
 ```
 
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">create()</span>
+
+<Tooltip tip="Microsandbox cloud creates directory volumes only; size is unavailable and quota must be a nonzero whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def create(
@@ -193,6 +199,8 @@ Static factory methods on `Volume` that build a [`MountConfig`](#mountconfig). P
 
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">bind()</span>
 
+<Tooltip tip="On microsandbox cloud, the host path resolves against your organization's host volume, not the computer running the SDK."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```python
 def bind(
     path: str,
@@ -253,6 +261,8 @@ Mount a host directory into the sandbox. Changes in the guest are reflected on t
 </div>
 
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">named()</span>
+
+<Tooltip tip="On microsandbox cloud, create the named volume before mounting; create-on-mount, disk-kind, and size are unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 def named(
@@ -404,6 +414,8 @@ Use an in-memory filesystem. Contents are discarded when the sandbox stops.
 </div>
 
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">disk()</span>
+
+<Tooltip tip="On microsandbox cloud, the disk-image path resolves against your organization's host volume, not the computer running the SDK."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 def disk(
@@ -560,8 +572,6 @@ Host-side filesystem operations for a named volume.
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read()</span>
 
-<Tooltip tip="Available for cloud default and managed directory volumes."><span className="msb-badge-note">Available on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
-
 ```python
 async def read(path: str) -> bytes
 ```
@@ -597,8 +607,6 @@ Read the entire contents of a file as raw bytes.
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_text()</span>
 
-<Tooltip tip="Available for cloud default and managed directory volumes."><span className="msb-badge-note">Available on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
-
 ```python
 async def read_text(path: str) -> str
 ```
@@ -624,8 +632,6 @@ Read the entire contents of a file and decode it as UTF-8.
 </div>
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">write()</span>
-
-<Tooltip tip="Available for cloud default and managed directory volumes."><span className="msb-badge-note">Available on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def write(path: str, data: bytes) -> None

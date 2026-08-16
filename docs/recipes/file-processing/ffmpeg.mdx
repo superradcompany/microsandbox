@@ -5,6 +5,8 @@ description: Prepare FFmpeg once and process untrusted media in an offline worke
 icon: "film"
 ---
 
+<Tooltip tip="This workflow prepares and restores a local disk snapshot, which is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 Media parsers are a natural fit for disposable microVMs. This recipe snapshots a prepared FFmpeg toolchain, copies one input file into a networkless worker, and exports only the transcoded result.
 
 ## Prepare FFmpeg

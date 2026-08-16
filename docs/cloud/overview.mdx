@@ -102,21 +102,23 @@ Hardware virtualization support on your machine is not needed for cloud sandboxe
 
 The everyday workflow is shared across local and cloud: sandbox lifecycle, command execution, common guest-filesystem operations, network policy, secrets, SSH sessions, and managed storage. The differences below are the ones to plan for.
 
+Across the docs, no badge means a feature works everywhere. Exceptions use only three badges: **Local-only**, **Limited on cloud**, and **Cloud-only**.
+
 | Area | Cloud status | Difference or alternative |
 |---|---|---|
-| Sandbox lifecycle and execution | **Available** | Create, start, inspect, list, stop, remove, exec, shell, streaming, and interactive PTY workflows use the same SDK and CLI surface. |
-| Guest filesystem | **Available** | Common path operations and host-to-guest copies work. Low-level open-handle operations remain local-only. |
-| Managed volumes | **Available** | Default and named directory volumes support lifecycle and filesystem access. Create a named volume before mounting it. |
-| Volume and host paths | **Limited** | Disk-kind volumes and create-on-mount are unavailable. Bind and disk-image source paths resolve against the organization's host volume, not the machine running the client. |
-| Network policy and secrets | **Available** | Egress policies and hostname-scoped secret substitution carry across backends. |
-| Custom networking | **Local only** | Published ports, custom nameservers, interface overrides, rate limiters, TLS interception, and host-CA trust are not accepted by cloud create. |
-| Logs | **Limited** | SDK live-follow works. Bounded or historical reads and the `msb logs` command remain local-only; persist followed output externally when retention matters. |
-| SSH | **Limited** | Native SDK sessions and `msb ssh` work. `msb ssh serve` is local-only; reusable SDK servers require explicit key material. |
-| Images | **Limited** | OCI image references and registry credentials work. Local cache commands, host-directory or disk-image roots, plain-HTTP registries, and custom registry CAs are local-only. |
-| Reconfiguration | **Local only** | Recreate the sandbox with the new CPU, memory, mounts, or other settings instead of using `modify`. |
-| Snapshots | **Local only** | Use a named volume for state that must survive sandbox replacement. |
-| Resource metrics | **Local only** | Instrument the workload with an external monitoring system. |
-| Process controls | **Limited** | Graceful stop works. Force kill, drain, ping, touch, and full duration or idle policies are not available. |
+| Sandbox lifecycle and execution | **Works everywhere** | Create, start, inspect, list, stop, remove, exec, shell, streaming, and interactive PTY workflows use the same SDK and CLI surface. |
+| Guest filesystem | **Limited on cloud** | Common path operations and host-to-guest copies work. Low-level open-handle operations are local-only. |
+| Managed volumes | **Limited on cloud** | Default and named directory volumes support lifecycle and filesystem access. Create a named volume before mounting it; disk-kind volumes and create-on-mount are local-only. |
+| Volume and host paths | **Limited on cloud** | Bind and disk-image source paths resolve against the organization's host volume, not the machine running the client. |
+| Network policy and secrets | **Works everywhere** | Egress policies and hostname-scoped secret substitution carry across backends. |
+| Custom networking | **Local-only** | Published ports, custom nameservers, interface overrides, rate limiters, TLS interception, and host-CA trust are not accepted by cloud create. |
+| Logs | **Limited on cloud** | SDK live-follow works. Bounded or historical reads and the `msb logs` command are local-only; persist followed output externally when retention matters. |
+| SSH | **Limited on cloud** | Native SDK sessions and `msb ssh` work. `msb ssh serve` is local-only; reusable SDK servers require explicit key material. |
+| Images | **Limited on cloud** | OCI image references and registry credentials work. Local cache commands, host-directory or disk-image roots, plain-HTTP registries, and custom registry CAs are local-only. |
+| Reconfiguration | **Local-only** | Recreate the sandbox with the new CPU, memory, mounts, or other settings instead of using `modify`. |
+| Snapshots | **Local-only** | Use a named volume for state that must survive sandbox replacement. |
+| Resource metrics | **Local-only** | Instrument the workload with an external monitoring system. |
+| Process controls | **Limited on cloud** | Graceful stop plus maximum-duration and idle-timeout policies work. Force kill, drain, ping, and touch are local-only. |
 
 ## REST API
 

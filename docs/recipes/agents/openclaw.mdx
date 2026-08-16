@@ -4,6 +4,8 @@ description: Onboard OpenClaw and run its persistent gateway inside a microVM
 icon: "/images/recipes/agents/openclaw.svg"
 ---
 
+<Tooltip tip="On microsandbox cloud, create the named volume first and omit replace-on-create. Publishing the gateway to a client-host port is local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 OpenClaw combines an interactive agent with a long-running gateway. This recipe persists its state in a named volume and maps the gateway only to host loopback.
 
 ## Run onboarding

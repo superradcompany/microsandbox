@@ -5,6 +5,8 @@ description: Snapshot PostgreSQL, apply a risky migration, and restore the basel
 icon: "rotate-left"
 ---
 
+<Tooltip tip="This workflow creates and restores local disk snapshots, which are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 Use a snapshot to rehearse a schema migration against a realistic PostgreSQL data directory, inspect the result, and return to the exact pre-migration disk state. The disposable rehearsal does not require a down migration.
 
 <Warning>
