@@ -24,6 +24,14 @@ msb run -t --name pi-demo --replace \
 
 The tested install downloads 188 packages and takes about a minute on a warm Node image cache. Configure a provider from the TUI when prompted.
 
+## Start another session
+
+After leaving Pi, return to the same sandbox and workspace with:
+
+```sh
+msb exec -t pi-demo -- pi
+```
+
 ## Verify the installation
 
 Exit Pi and run:
