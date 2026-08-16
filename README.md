@@ -381,7 +381,6 @@ The `msb` CLI provides a complete interface for managing sandboxes, images, and 
 
 Practical ways to put microsandbox to work:
 
-- <img height="14" src="https://octicons-col.vercel.app/dependabot/A770EF"> **[AI Coding Agent](https://docs.microsandbox.dev/recipes/use-cases/ai-coding-agent)**: Edit and test copied repositories inside an isolated microVM.
 - <img height="14" src="https://octicons-col.vercel.app/shield-lock/A770EF"> **[Untrusted Code](https://docs.microsandbox.dev/recipes/use-cases/run-untrusted-code)**: Run user code with strict CPU, memory, time, and network limits.
 - <img height="14" src="https://octicons-col.vercel.app/workflow/A770EF"> **[GitHub Actions Runner](https://docs.microsandbox.dev/recipes/ci-cd/github-actions-runner)**: Run one self-hosted job in a fresh microVM, then discard its workspace.
 - <img height="14" src="https://octicons-col.vercel.app/checklist/A770EF"> **[PR Checks](https://docs.microsandbox.dev/recipes/ci-cd/pr-checks)**: Test untrusted commits offline from reviewed dependencies.

@@ -320,7 +320,6 @@
             "icon": "robot",
             "pages": [
               "recipes/overview",
-              "recipes/use-cases/ai-coding-agent",
               "recipes/agents/opencode",
               "recipes/agents/openclaw",
               "recipes/agents/goose",
@@ -510,6 +509,10 @@
     {
       "source": "/sandbox-config",
       "destination": "/cli/configuration"
+    },
+    {
+      "source": "/recipes/use-cases/ai-coding-agent",
+      "destination": "/getting-started/agents"
     }
   ],
   "integrations": {
