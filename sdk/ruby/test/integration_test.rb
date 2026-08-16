@@ -111,6 +111,17 @@ class MicrosandboxIntegrationTest < Test::Unit::TestCase
     sandbox&.stop
   end
 
+  def test_ssh_exec_accepts_inactivity_timeout
+    sandbox = create_sandbox("ssh-timeout")
+
+    output = sandbox.ssh_exec("printf ruby-ssh", inactivity_timeout: 0)
+
+    assert_equal "ruby-ssh", output.fetch("stdout")
+    assert_true output.fetch("success")
+  ensure
+    sandbox&.stop
+  end
+
   def test_assert_eventually_enforces_timeout
     started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 

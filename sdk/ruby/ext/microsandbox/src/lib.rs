@@ -1031,10 +1031,22 @@ impl RubySandbox {
         }
         Ok(array)
     }
-    fn ssh_exec(ruby: &Ruby, this: typed_data::Obj<Self>, command: String) -> Result<RHash, Error> {
+    fn ssh_exec(ruby: &Ruby, this: typed_data::Obj<Self>, args: &[Value]) -> Result<RHash, Error> {
+        let parsed = scan_args::<(String,), (), (), (), RHash, ()>(args)?;
+        reject_unknown_keywords(ruby, parsed.keywords, &["inactivity_timeout"])?;
+        let inactivity_timeout = keyword::<f64>(parsed.keywords, "inactivity_timeout")?
+            .map(|seconds| duration(ruby, seconds, "inactivity_timeout"))
+            .transpose()?;
+        let command = parsed.required.0;
         let sb = this.inner_clone()?;
         let output = run(ruby, async move {
-            let client = sb.ssh().connect().await?;
+            let client = sb
+                .ssh()
+                .connect_with(|builder| match inactivity_timeout {
+                    Some(timeout) => builder.inactivity_timeout(timeout),
+                    None => builder,
+                })
+                .await?;
             client.exec(command).await
         })?;
         let hash = current_ruby().hash_new();
@@ -2049,7 +2061,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     sandbox.define_method("touch", method!(RubySandbox::touch, 0))?;
     sandbox.define_method("metrics", method!(RubySandbox::metrics, 0))?;
     sandbox.define_method("logs", method!(RubySandbox::logs, -1))?;
-    sandbox.define_method("ssh_exec", method!(RubySandbox::ssh_exec, 1))?;
+    sandbox.define_method("ssh_exec", method!(RubySandbox::ssh_exec, -1))?;
     // filesystem
     sandbox.define_method("fs_read", method!(RubySandbox::fs_read, 1))?;
     sandbox.define_method("fs_write", method!(RubySandbox::fs_write, 2))?;

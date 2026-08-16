@@ -96,6 +96,14 @@ The gem supports sandbox lifecycle operations, collected exec and shell
 output, SSH exec, logs, metrics, guest filesystem operations, local image,
 volume, and snapshot management, and local or cloud backend selection.
 
+SSH exec inherits the global inactivity timeout by default. Override it for a
+single command in seconds, or use `0` to disable it:
+
+```ruby
+output = sandbox.ssh_exec("long-running-agent", inactivity_timeout: 1_800)
+persistent = sandbox.ssh_exec("long-running-agent", inactivity_timeout: 0)
+```
+
 Streaming exec, logs, metrics, and filesystem handles; interactive SSH/SFTP;
 live modification plans; and the complete Rust network and mount builders are
 not currently exposed. Use the Rust SDK when those APIs are required.
