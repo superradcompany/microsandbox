@@ -10,11 +10,16 @@
 use std::{path::Path, sync::Arc};
 
 use bytes::Bytes;
+use microsandbox_agent_client::AgentFrame;
 use microsandbox_protocol::{
-    fs::{FsData, FsEntryInfo, FsResponse},
+    bulk::{
+        BulkAccepted, BulkCancel, BulkCancelReason, BulkCredit, BulkFinish, BulkFlow, BulkKind,
+        BulkOffer, BulkReceiveState, BulkRecord, BulkSendState,
+    },
+    fs::{FS_CHUNK_SIZE, FsData, FsEntryInfo, FsResponse},
     message::{Message, MessageType},
 };
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 
 use crate::{
     MicrosandboxError, MicrosandboxResult,
@@ -120,7 +125,8 @@ pub struct FsMetadata {
 
 /// A streaming reader for file data from the sandbox.
 pub struct FsReadStream {
-    rx: mpsc::Receiver<Message>,
+    id: u32,
+    rx: mpsc::Receiver<AgentFrame>,
     // Holds the per-call agent client alive for the duration of the stream.
     // Without this the AgentClient's reader task would be dropped after
     // `fs_read_stream` returns and `rx` would receive nothing.
@@ -128,14 +134,28 @@ pub struct FsReadStream {
     close_handle: Option<FsHandle>,
     /// Set only after a terminal `FsResponse`; channel closure alone is an error.
     finished: bool,
+    bulk: Option<BulkReceiveState>,
+    bulk_finish_seen: bool,
 }
 
 /// A streaming writer for file data to the sandbox.
 pub struct FsWriteSink {
     id: u32,
     client: Arc<AgentClient>,
-    rx: mpsc::Receiver<Message>,
+    protocol: Mutex<Option<FsWriteProtocol>>,
     close_handle: Option<FsHandle>,
+    finished: bool,
+    bulk_active: bool,
+}
+
+enum FsWriteProtocol {
+    Legacy {
+        rx: mpsc::Receiver<AgentFrame>,
+    },
+    Bulk {
+        rx: mpsc::Receiver<AgentFrame>,
+        sender: BulkSendState,
+    },
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -529,15 +549,20 @@ impl<'a> SandboxFsOps<'a> {
 impl FsReadStream {
     /// Construct a read stream that closes an owned handle at EOF.
     pub(crate) fn with_client_and_close(
-        rx: mpsc::Receiver<Message>,
+        id: u32,
+        rx: mpsc::Receiver<AgentFrame>,
         client: Arc<AgentClient>,
         close_handle: Option<FsHandle>,
+        bulk: Option<BulkReceiveState>,
     ) -> Self {
         Self {
+            id,
             rx,
             client: Some(client),
             close_handle,
             finished: false,
+            bulk,
+            bulk_finish_seen: false,
         }
     }
 
@@ -550,27 +575,89 @@ impl FsReadStream {
             return Ok(None);
         }
 
-        while let Some(msg) = self.rx.recv().await {
-            match msg.t {
-                MessageType::FsData => {
-                    let chunk: FsData = msg.payload()?;
-                    if !chunk.data.is_empty() {
-                        return Ok(Some(Bytes::from(chunk.data)));
+        while let Some(frame) = self.rx.recv().await {
+            match frame {
+                AgentFrame::Bulk(record) => {
+                    let Some(receiver) = self.bulk.as_mut() else {
+                        return self
+                            .fail("raw bulk data arrived without filesystem negotiation")
+                            .await;
+                    };
+                    let end = receiver.accept_record(&record).map_err(|error| {
+                        MicrosandboxError::SandboxFsOps(format!(
+                            "invalid filesystem bulk record: {error}"
+                        ))
+                    })?;
+                    let payload = record.payload;
+                    if let Some(credit) = receiver.consume(end).map_err(|error| {
+                        MicrosandboxError::SandboxFsOps(format!(
+                            "advance filesystem bulk credit: {error}"
+                        ))
+                    })? {
+                        let client = self.client.as_ref().ok_or_else(|| {
+                            MicrosandboxError::SandboxFsOps(
+                                "filesystem stream client closed".into(),
+                            )
+                        })?;
+                        client
+                            .send(self.id, MessageType::BulkCredit, &credit)
+                            .await?;
                     }
+                    return Ok(Some(payload));
                 }
-                MessageType::FsResponse => {
-                    let resp: FsResponse = msg.payload()?;
-                    let close_result = self.close_owned_handle().await;
-                    self.finished = true;
-                    if !resp.ok {
-                        return Err(MicrosandboxError::SandboxFsOps(
-                            resp.error.unwrap_or_else(|| "unknown error".into()),
-                        ));
+                AgentFrame::Control(msg) => match msg.t {
+                    MessageType::FsData => {
+                        if self.bulk.is_some() {
+                            return self
+                                .fail("CBOR filesystem data arrived after raw bulk acceptance")
+                                .await;
+                        }
+                        let chunk: FsData = msg.payload()?;
+                        if !chunk.data.is_empty() {
+                            return Ok(Some(Bytes::from(chunk.data)));
+                        }
                     }
-                    close_result?;
-                    return Ok(None);
-                }
-                _ => {}
+                    MessageType::BulkFinish => {
+                        let finish: BulkFinish = msg.payload()?;
+                        let Some(receiver) = self.bulk.as_mut() else {
+                            return self.fail("bulk finish arrived without negotiation").await;
+                        };
+                        receiver.accept_finish(finish).map_err(|error| {
+                            MicrosandboxError::SandboxFsOps(format!(
+                                "invalid filesystem bulk finish: {error}"
+                            ))
+                        })?;
+                        self.bulk_finish_seen = true;
+                    }
+                    MessageType::BulkCancel => {
+                        let cancel: BulkCancel = msg.payload()?;
+                        return self
+                            .fail(&format!(
+                                "filesystem bulk transfer cancelled: {}",
+                                cancel.message
+                            ))
+                            .await;
+                    }
+                    MessageType::FsResponse => {
+                        let resp: FsResponse = msg.payload()?;
+                        let close_result = self.close_owned_handle().await;
+                        self.finished = true;
+                        if !resp.ok {
+                            return Err(MicrosandboxError::SandboxFsOps(
+                                resp.error.unwrap_or_else(|| "unknown error".into()),
+                            ));
+                        }
+                        if self.bulk.is_some() && !self.bulk_finish_seen {
+                            return Err(MicrosandboxError::SandboxFsOps(
+                                "filesystem bulk read completed without an exact finish marker"
+                                    .into(),
+                            ));
+                        }
+                        close_result?;
+                        return Ok(None);
+                    }
+                    _ => {}
+                },
             }
         }
         self.close_owned_handle().await?;
@@ -594,6 +681,12 @@ impl FsReadStream {
         }
         Ok(())
     }
+
+    async fn fail(&mut self, message: &str) -> MicrosandboxResult<Option<Bytes>> {
+        let _ = self.close_owned_handle().await;
+        self.finished = true;
+        Err(MicrosandboxError::SandboxFsOps(message.into()))
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -605,14 +698,22 @@ impl FsWriteSink {
     pub(crate) fn new(
         id: u32,
         client: Arc<AgentClient>,
-        rx: mpsc::Receiver<Message>,
+        rx: mpsc::Receiver<AgentFrame>,
         close_handle: Option<FsHandle>,
+        bulk: Option<BulkSendState>,
     ) -> Self {
+        let bulk_active = bulk.is_some();
+        let protocol = match bulk {
+            Some(sender) => FsWriteProtocol::Bulk { rx, sender },
+            None => FsWriteProtocol::Legacy { rx },
+        };
         Self {
             id,
             client,
-            rx,
+            protocol: Mutex::new(Some(protocol)),
             close_handle,
+            finished: false,
+            bulk_active,
         }
     }
 
@@ -623,11 +724,53 @@ impl FsWriteSink {
 
     /// Write an already-owned chunk without cloning it at the SDK stream boundary.
     async fn write_owned(&self, data: Vec<u8>) -> MicrosandboxResult<()> {
-        let fs_data = FsData { data };
-        self.client
-            .send(self.id, MessageType::FsData, &fs_data)
-            .await
-            .map_err(Into::into)
+        let mut protocol = self.protocol.lock().await;
+        let protocol = protocol.as_mut().ok_or_else(|| {
+            MicrosandboxError::SandboxFsOps("filesystem write stream is already closed".into())
+        })?;
+        match protocol {
+            FsWriteProtocol::Legacy { .. } => {
+                // Keep generation-6 writes below the bounded CBOR frame limit even when a
+                // streaming caller supplies a much larger chunk.
+                for chunk in data.chunks(FS_CHUNK_SIZE) {
+                    let fs_data = FsData {
+                        data: chunk.to_vec(),
+                    };
+                    self.client
+                        .send(self.id, MessageType::FsData, &fs_data)
+                        .await?;
+                }
+                Ok(())
+            }
+            FsWriteProtocol::Bulk { rx, sender } => {
+                let mut remaining = Bytes::from(data);
+                while !remaining.is_empty() {
+                    while sender.available_credit() == 0 {
+                        apply_next_fs_write_credit(rx, sender).await?;
+                    }
+                    let chunk_len = remaining
+                        .len()
+                        .min(sender.max_record_payload() as usize)
+                        .min(sender.available_credit() as usize);
+                    let payload = remaining.split_to(chunk_len);
+                    let offset = sender.admit(chunk_len).map_err(|error| {
+                        MicrosandboxError::SandboxFsOps(format!(
+                            "admit filesystem bulk write: {error}"
+                        ))
+                    })?;
+                    self.client
+                        .send_bulk(BulkRecord {
+                            id: self.id,
+                            kind: BulkKind::Filesystem,
+                            flow: BulkFlow::HostToGuest,
+                            offset,
+                            payload,
+                        })
+                        .await?;
+                }
+                Ok(())
+            }
+        }
     }
 
     /// Close the write stream (sends EOF) and wait for confirmation.
@@ -635,24 +778,85 @@ impl FsWriteSink {
     /// This must be called to finalize the write operation. Returns an
     /// error if the guest reports a write failure.
     pub async fn close(mut self) -> MicrosandboxResult<()> {
-        let eof = FsData { data: Vec::new() };
-        self.client.send(self.id, MessageType::FsData, &eof).await?;
-
-        // Wait for the terminal FsResponse from the guest.
-        let result = wait_for_ok_response(&mut self.rx).await;
+        let protocol = self.protocol.get_mut().take().ok_or_else(|| {
+            MicrosandboxError::SandboxFsOps("filesystem write stream is already closed".into())
+        })?;
+        let result = match protocol {
+            FsWriteProtocol::Legacy { mut rx } => {
+                let eof = FsData { data: Vec::new() };
+                self.client.send(self.id, MessageType::FsData, &eof).await?;
+                wait_for_ok_frame_response(&mut rx).await
+            }
+            FsWriteProtocol::Bulk { mut rx, mut sender } => {
+                let finish = sender.finish().map_err(|error| {
+                    MicrosandboxError::SandboxFsOps(format!(
+                        "finish filesystem bulk write: {error}"
+                    ))
+                })?;
+                self.client
+                    .send(self.id, MessageType::BulkFinish, &finish)
+                    .await?;
+                wait_for_ok_frame_response(&mut rx).await
+            }
+        };
         let close_result = if let Some(handle) = self.close_handle.take() {
             agent::close_handle(&self.client, handle).await
         } else {
             Ok(())
         };
+        self.finished = true;
+        self.bulk_active = false;
         result?;
         close_result
     }
 }
 
 //--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl Drop for FsReadStream {
+    fn drop(&mut self) {
+        if self.finished || self.bulk.is_none() {
+            return;
+        }
+        let Some(client) = self.client.take() else {
+            return;
+        };
+        spawn_fs_bulk_cancel(self.id, client, self.close_handle.take());
+    }
+}
+
+impl Drop for FsWriteSink {
+    fn drop(&mut self) {
+        if self.finished || !self.bulk_active {
+            return;
+        }
+        spawn_fs_bulk_cancel(self.id, Arc::clone(&self.client), self.close_handle.take());
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Best-effort cancellation keeps a dropped SDK stream from draining or retaining guest work.
+fn spawn_fs_bulk_cancel(id: u32, client: Arc<AgentClient>, close_handle: Option<FsHandle>) {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    runtime.spawn(async move {
+        let cancel = BulkCancel {
+            kind: BulkKind::Filesystem,
+            reason: BulkCancelReason::CallerCancelled,
+            message: "host filesystem stream was dropped".into(),
+        };
+        let _ = client.cancel_bulk(id, &cancel).await;
+        if let Some(handle) = close_handle {
+            let _ = agent::close_handle(&client, handle).await;
+        }
+    });
+}
 
 /// Parse a kind string from the wire protocol into an `FsEntryKind`.
 fn parse_kind(s: &str) -> FsEntryKind {
@@ -711,14 +915,113 @@ fn check_response(msg: Message) -> MicrosandboxResult<()> {
 }
 
 /// Wait for and check a terminal `FsResponse` from a subscription channel.
-async fn wait_for_ok_response(rx: &mut mpsc::Receiver<Message>) -> MicrosandboxResult<()> {
-    while let Some(msg) = rx.recv().await {
-        if msg.t == MessageType::FsResponse {
-            return check_response(msg);
+async fn wait_for_ok_frame_response(rx: &mut mpsc::Receiver<AgentFrame>) -> MicrosandboxResult<()> {
+    while let Some(frame) = rx.recv().await {
+        match frame {
+            AgentFrame::Control(message) if message.t == MessageType::FsResponse => {
+                return check_response(message);
+            }
+            AgentFrame::Control(message) if message.t == MessageType::BulkCancel => {
+                let cancel: BulkCancel = message.payload()?;
+                return Err(MicrosandboxError::SandboxFsOps(format!(
+                    "filesystem bulk transfer cancelled: {}",
+                    cancel.message
+                )));
+            }
+            AgentFrame::Control(_) => {}
+            AgentFrame::Bulk(_) => {
+                return Err(MicrosandboxError::SandboxFsOps(
+                    "unexpected raw bulk data on a filesystem write".into(),
+                ));
+            }
         }
     }
     Err(MicrosandboxError::SandboxFsOps(
         "channel closed before response".into(),
+    ))
+}
+
+async fn apply_next_fs_write_credit(
+    rx: &mut mpsc::Receiver<AgentFrame>,
+    sender: &mut BulkSendState,
+) -> MicrosandboxResult<()> {
+    while let Some(frame) = rx.recv().await {
+        match frame {
+            AgentFrame::Control(message) if message.t == MessageType::BulkCredit => {
+                let credit: BulkCredit = message.payload()?;
+                sender.apply_credit(credit).map_err(|error| {
+                    MicrosandboxError::SandboxFsOps(format!(
+                        "invalid filesystem bulk credit: {error}"
+                    ))
+                })?;
+                return Ok(());
+            }
+            AgentFrame::Control(message) if message.t == MessageType::BulkCancel => {
+                let cancel: BulkCancel = message.payload()?;
+                return Err(MicrosandboxError::SandboxFsOps(format!(
+                    "filesystem bulk transfer cancelled: {}",
+                    cancel.message
+                )));
+            }
+            AgentFrame::Control(message) if message.t == MessageType::FsResponse => {
+                check_response(message)?;
+                return Err(MicrosandboxError::SandboxFsOps(
+                    "filesystem write completed before its finish marker".into(),
+                ));
+            }
+            AgentFrame::Control(_) => {}
+            AgentFrame::Bulk(_) => {
+                return Err(MicrosandboxError::SandboxFsOps(
+                    "unexpected raw bulk data on a filesystem write".into(),
+                ));
+            }
+        }
+    }
+    Err(MicrosandboxError::SandboxFsOps(
+        "filesystem write closed while waiting for credit".into(),
+    ))
+}
+
+async fn receive_fs_bulk_acceptance(
+    rx: &mut mpsc::Receiver<AgentFrame>,
+    offer: BulkOffer,
+    flows: u8,
+) -> MicrosandboxResult<BulkAccepted> {
+    while let Some(frame) = rx.recv().await {
+        match frame {
+            AgentFrame::Control(message) if message.t == MessageType::BulkAccepted => {
+                let accepted: BulkAccepted = message.payload()?;
+                return accepted
+                    .validate_against(offer, BulkKind::Filesystem, flows)
+                    .map_err(|error| {
+                        MicrosandboxError::SandboxFsOps(format!(
+                            "invalid filesystem bulk acceptance: {error}"
+                        ))
+                    });
+            }
+            AgentFrame::Control(message) if message.t == MessageType::FsResponse => {
+                check_response(message)?;
+                return Err(MicrosandboxError::SandboxFsOps(
+                    "filesystem stream completed before bulk acceptance".into(),
+                ));
+            }
+            AgentFrame::Control(message) if message.t == MessageType::BulkCancel => {
+                let cancel: BulkCancel = message.payload()?;
+                return Err(MicrosandboxError::SandboxFsOps(format!(
+                    "filesystem bulk negotiation cancelled: {}",
+                    cancel.message
+                )));
+            }
+            AgentFrame::Control(_) => {}
+            AgentFrame::Bulk(_) => {
+                return Err(MicrosandboxError::SandboxFsOps(
+                    "filesystem bulk data arrived before acceptance".into(),
+                ));
+            }
+        }
+    }
+    Err(MicrosandboxError::SandboxFsOps(
+        "filesystem stream closed before bulk acceptance".into(),
     ))
 }
 
@@ -755,9 +1058,12 @@ pub(crate) mod agent {
 
     use bytes::Bytes;
     use microsandbox_protocol::{
+        bulk::{
+            BULK_FLOW_MASK_GUEST_TO_HOST, BULK_FLOW_MASK_HOST_TO_GUEST, BulkFlow, BulkKind,
+            BulkOffer, BulkReceiveState, BulkSendState,
+        },
         fs::{
-            FS_CHUNK_SIZE, FsData, FsOp, FsOpenOptions, FsRequest, FsResponse, FsResponseData,
-            FsSetAttrs,
+            FS_CHUNK_SIZE, FsOp, FsOpenOptions, FsRequest, FsResponse, FsResponseData, FsSetAttrs,
         },
         message::MessageType,
     };
@@ -767,7 +1073,7 @@ pub(crate) mod agent {
 
     use super::{
         FsEntry, FsHandle, FsMetadata, FsReadStream, FsWriteSink, check_response,
-        entry_info_to_fs_entry, entry_info_to_metadata, wait_for_ok_response,
+        entry_info_to_fs_entry, entry_info_to_metadata, receive_fs_bulk_acceptance,
     };
 
     /// Open a fresh agent connection for the named sandbox.
@@ -796,6 +1102,7 @@ pub(crate) mod agent {
                 path: path.to_string(),
                 options,
             },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
         let resp: FsResponse = resp_msg.payload()?;
@@ -817,6 +1124,7 @@ pub(crate) mod agent {
             op: FsOp::OpenDir {
                 path: path.to_string(),
             },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
         let resp: FsResponse = resp_msg.payload()?;
@@ -839,6 +1147,7 @@ pub(crate) mod agent {
     ) -> MicrosandboxResult<()> {
         let req = FsRequest {
             op: FsOp::CloseHandle { handle },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
         check_response(resp_msg)
@@ -869,15 +1178,42 @@ pub(crate) mod agent {
                 offset,
                 len,
             },
+            bulk: client
+                .supports(MessageType::BulkAccepted)
+                .then(BulkOffer::filesystem_read),
         };
-        let (_id, rx) = client.stream(MessageType::FsRequest, &req).await?;
+        let (id, mut rx) = client.stream_frames(MessageType::FsRequest, &req).await?;
+        let bulk = match req.bulk {
+            Some(offer) => {
+                let accepted =
+                    receive_fs_bulk_acceptance(&mut rx, offer, BULK_FLOW_MASK_GUEST_TO_HOST)
+                        .await?;
+                Some(
+                    BulkReceiveState::new(
+                        BulkKind::Filesystem,
+                        BulkFlow::GuestToHost,
+                        accepted.max_record_payload,
+                        accepted.guest_to_host_credit_limit,
+                        offer.guest_to_host_credit_limit,
+                    )
+                    .map_err(|error| {
+                        MicrosandboxError::SandboxFsOps(format!(
+                            "create filesystem bulk read state: {error}"
+                        ))
+                    })?,
+                )
+            }
+            None => None,
+        };
 
         // The stream must retain the same relay client while the handle is in
         // use; agentd rejects handle operations from a different client range.
         Ok(FsReadStream::with_client_and_close(
+            id,
             rx,
             client,
             close_handle,
+            bulk,
         ))
     }
 
@@ -908,9 +1244,33 @@ pub(crate) mod agent {
                 offset,
                 len,
             },
+            bulk: client
+                .supports(MessageType::BulkAccepted)
+                .then(BulkOffer::filesystem_write),
         };
-        let (id, rx) = client.stream(MessageType::FsRequest, &req).await?;
-        Ok(FsWriteSink::new(id, client, rx, close_handle))
+        let (id, mut rx) = client.stream_frames(MessageType::FsRequest, &req).await?;
+        let bulk = match req.bulk {
+            Some(offer) => {
+                let accepted =
+                    receive_fs_bulk_acceptance(&mut rx, offer, BULK_FLOW_MASK_HOST_TO_GUEST)
+                        .await?;
+                Some(
+                    BulkSendState::new(
+                        BulkKind::Filesystem,
+                        BulkFlow::HostToGuest,
+                        accepted.max_record_payload,
+                        accepted.host_to_guest_credit_limit,
+                    )
+                    .map_err(|error| {
+                        MicrosandboxError::SandboxFsOps(format!(
+                            "create filesystem bulk write state: {error}"
+                        ))
+                    })?,
+                )
+            }
+            None => None,
+        };
+        Ok(FsWriteSink::new(id, client, rx, close_handle, bulk))
     }
 
     pub(crate) async fn read_dir_handle(
@@ -920,6 +1280,7 @@ pub(crate) mod agent {
     ) -> MicrosandboxResult<Vec<FsEntry>> {
         let req = FsRequest {
             op: FsOp::ReadDir { handle, limit },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
         let resp: FsResponse = resp_msg.payload()?;
@@ -944,6 +1305,7 @@ pub(crate) mod agent {
     ) -> MicrosandboxResult<FsMetadata> {
         let req = FsRequest {
             op: FsOp::FStat { handle },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
         let resp: FsResponse = resp_msg.payload()?;
@@ -969,6 +1331,7 @@ pub(crate) mod agent {
     ) -> MicrosandboxResult<()> {
         let req = FsRequest {
             op: FsOp::FSetStat { handle, attrs },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
         check_response(resp_msg)
@@ -979,40 +1342,13 @@ pub(crate) mod agent {
         name: &str,
         path: &str,
     ) -> MicrosandboxResult<Bytes> {
-        let client = connect_agent(backend, name).await?;
+        let client = Arc::new(connect_agent(backend, name).await?);
         let handle = open_file(&client, path, super::read_only_open_options()).await?;
-
-        let req = FsRequest {
-            op: FsOp::Read {
-                handle,
-                offset: 0,
-                len: None,
-            },
-        };
-        let (_id, mut rx) = client.stream(MessageType::FsRequest, &req).await?;
-
+        let mut stream = read_handle_stream(client, handle, 0, None, Some(handle)).await?;
         let mut data = Vec::new();
-        while let Some(msg) = rx.recv().await {
-            match msg.t {
-                MessageType::FsData => {
-                    let chunk: FsData = msg.payload()?;
-                    data.extend_from_slice(&chunk.data);
-                }
-                MessageType::FsResponse => {
-                    let resp: FsResponse = msg.payload()?;
-                    if !resp.ok {
-                        return Err(MicrosandboxError::SandboxFsOps(
-                            resp.error.unwrap_or_else(|| "unknown error".into()),
-                        ));
-                    }
-                    break;
-                }
-                _ => {}
-            }
+        while let Some(chunk) = stream.recv().await? {
+            data.extend_from_slice(&chunk);
         }
-
-        let close_result = close_handle(&client, handle).await;
-        close_result?;
         Ok(Bytes::from(data))
     }
 
@@ -1024,22 +1360,7 @@ pub(crate) mod agent {
         let client = Arc::new(connect_agent(backend, name).await?);
         let handle = open_file(&client, path, super::read_only_open_options()).await?;
 
-        let req = FsRequest {
-            op: FsOp::Read {
-                handle,
-                offset: 0,
-                len: None,
-            },
-        };
-        let (_id, rx) = client.stream(MessageType::FsRequest, &req).await?;
-
-        // Pin the AgentClient alive inside the stream and close the
-        // auto-opened file handle once the guest sends the terminal response.
-        Ok(FsReadStream::with_client_and_close(
-            rx,
-            client,
-            Some(handle),
-        ))
+        read_handle_stream(client, handle, 0, None, Some(handle)).await
     }
 
     pub(crate) async fn write(
@@ -1048,31 +1369,14 @@ pub(crate) mod agent {
         path: &str,
         data: Vec<u8>,
     ) -> MicrosandboxResult<()> {
-        let client = connect_agent(backend, name).await?;
+        let client = Arc::new(connect_agent(backend, name).await?);
         let handle = open_file(&client, path, super::write_open_options()).await?;
-
-        let req = FsRequest {
-            op: FsOp::Write {
-                handle,
-                offset: 0,
-                len: Some(data.len() as u64),
-            },
-        };
-        let (id, mut rx) = client.stream(MessageType::FsRequest, &req).await?;
-
+        let sink =
+            write_handle_stream(client, handle, 0, Some(data.len() as u64), Some(handle)).await?;
         for chunk in data.chunks(FS_CHUNK_SIZE) {
-            let fs_data = FsData {
-                data: chunk.to_vec(),
-            };
-            client.send(id, MessageType::FsData, &fs_data).await?;
+            sink.write(chunk).await?;
         }
-
-        let eof = FsData { data: Vec::new() };
-        client.send(id, MessageType::FsData, &eof).await?;
-
-        let result = wait_for_ok_response(&mut rx).await;
-        let _ = close_handle(&client, handle).await;
-        result
+        sink.close().await
     }
 
     pub(crate) async fn write_stream(
@@ -1083,16 +1387,7 @@ pub(crate) mod agent {
         let client = Arc::new(connect_agent(backend, name).await?);
         let handle = open_file(&client, path, super::write_open_options()).await?;
 
-        let req = FsRequest {
-            op: FsOp::Write {
-                handle,
-                offset: 0,
-                len: None,
-            },
-        };
-        let (id, rx) = client.stream(MessageType::FsRequest, &req).await?;
-
-        Ok(FsWriteSink::new(id, client, rx, Some(handle)))
+        write_handle_stream(client, handle, 0, None, Some(handle)).await
     }
 
     pub(crate) async fn list(
@@ -1105,6 +1400,7 @@ pub(crate) mod agent {
             op: FsOp::List {
                 path: path.to_string(),
             },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
         let resp: FsResponse = resp_msg.payload()?;
@@ -1134,6 +1430,7 @@ pub(crate) mod agent {
                 path: path.to_string(),
                 mode: None,
             },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
         check_response(resp_msg)
@@ -1154,6 +1451,7 @@ pub(crate) mod agent {
             op: FsOp::Remove {
                 path: path.to_string(),
             },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
         check_response(resp_msg)
@@ -1171,6 +1469,7 @@ pub(crate) mod agent {
                 path: path.to_string(),
                 recursive,
             },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
         check_response(resp_msg)
@@ -1188,6 +1487,7 @@ pub(crate) mod agent {
                 src: from.to_string(),
                 dst: to.to_string(),
             },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
         check_response(resp_msg)
@@ -1205,6 +1505,7 @@ pub(crate) mod agent {
                 src: from.to_string(),
                 dst: to.to_string(),
             },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
         check_response(resp_msg)
@@ -1230,6 +1531,7 @@ pub(crate) mod agent {
                 path: path.to_string(),
                 follow_symlink,
             },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
         let resp: FsResponse = resp_msg.payload()?;
@@ -1262,6 +1564,7 @@ pub(crate) mod agent {
                 follow_symlink,
                 attrs,
             },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
         check_response(resp_msg)
@@ -1277,6 +1580,7 @@ pub(crate) mod agent {
             op: FsOp::ReadLink {
                 path: path.to_string(),
             },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
         let resp: FsResponse = resp_msg.payload()?;
@@ -1307,6 +1611,7 @@ pub(crate) mod agent {
                 target: target.to_string(),
                 link_path: link_path.to_string(),
             },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
         check_response(resp_msg)
@@ -1322,6 +1627,7 @@ pub(crate) mod agent {
             op: FsOp::RealPath {
                 path: path.to_string(),
             },
+            bulk: None,
         };
         let resp_msg = client.request(MessageType::FsRequest, &req).await?;
         let resp: FsResponse = resp_msg.payload()?;
@@ -1639,10 +1945,13 @@ mod tests {
         let (tx, rx) = mpsc::channel(1);
         drop(tx);
         let mut stream = FsReadStream {
+            id: 1,
             rx,
             client: None,
             close_handle: None,
             finished: false,
+            bulk: None,
+            bulk_finish_seen: false,
         };
 
         let error = stream.recv().await.unwrap_err();
@@ -1661,15 +1970,20 @@ mod tests {
             error: None,
             data: None,
         };
-        tx.send(Message::with_payload(MessageType::FsResponse, 1, &response).unwrap())
-            .await
-            .unwrap();
+        tx.send(AgentFrame::Control(
+            Message::with_payload(MessageType::FsResponse, 1, &response).unwrap(),
+        ))
+        .await
+        .unwrap();
         drop(tx);
         let mut stream = FsReadStream {
+            id: 1,
             rx,
             client: None,
             close_handle: None,
             finished: false,
+            bulk: None,
+            bulk_finish_seen: false,
         };
 
         assert!(stream.recv().await.unwrap().is_none());

@@ -1,18 +1,20 @@
 //! Length-prefixed frame codec for reading and writing protocol messages.
 //!
-//! Wire format: `[len: u32 BE][id: u32 BE][flags: u8][CBOR(v, t, p)]`
+//! Wire format: `[len: u32 BE][id: u32 BE][flags: u8][body]`.
+//! Control bodies are CBOR; generation-7 bulk bodies use a fixed raw header.
 //!
 //! The correlation ID and flags sit in a fixed-position binary header so that
 //! relay intermediaries can route frames without CBOR parsing.
 
 use std::io::IoSlice;
 
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{
+    bulk::{BULK_HEADER_SIZE, BulkFlow, BulkKind, BulkRecord, MAX_BULK_RECORD_PAYLOAD},
     error::{ProtocolError, ProtocolResult},
-    message::{FRAME_HEADER_SIZE, Message},
+    message::{FLAG_BULK, FRAME_HEADER_SIZE, Message},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -22,19 +24,18 @@ use crate::{
 /// Maximum allowed frame size (4 MiB).
 ///
 /// This covers everything after the 4-byte length prefix:
-/// `id (4) + flags (1) + CBOR payload`.
+/// `id (4) + flags (1) + control or raw body`.
 pub const MAX_FRAME_SIZE: u32 = 4 * 1024 * 1024;
 
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// A frame with the binary header parsed but the CBOR body left untouched.
+/// A frame with the binary header parsed but the body left untouched.
 ///
 /// Used by routers, relays, and FFI consumers that want to handle framing
-/// without paying for CBOR (de)serialization. The [`body`](Self::body) field
-/// contains the exact CBOR-encoded `Message` body bytes — `v`, `t`, `p` —
-/// the same bytes that follow the binary header on the wire.
+/// without interpreting the control or raw data body. The [`body`](Self::body)
+/// field contains the exact bytes that follow the binary header on the wire.
 #[derive(Debug, Clone)]
 pub struct RawFrame {
     /// Correlation ID. Same as [`Message::id`].
@@ -43,8 +44,18 @@ pub struct RawFrame {
     /// Frame flags. Same as [`Message::flags`].
     pub flags: u8,
 
-    /// Raw CBOR bytes of the message body (`v`, `t`, `p`). Not decoded.
+    /// Raw body bytes. `flags` determines whether these are CBOR control bytes or raw bulk bytes.
     pub body: Vec<u8>,
+}
+
+/// One fully validated control message or raw bulk record.
+#[derive(Debug, Clone)]
+pub enum DecodedFrame {
+    /// CBOR control-plane message.
+    Control(Message),
+
+    /// Generation-7 data-plane record.
+    Bulk(BulkRecord),
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -190,36 +201,71 @@ pub async fn write_raw_frame<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
+/// Writes a generation-7 raw bulk record without copying its payload.
+pub async fn write_bulk_record<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    record: &BulkRecord,
+) -> ProtocolResult<()> {
+    let header = encode_bulk_header(record)?;
+    write_vectored_all(writer, &header, &record.payload).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+/// Encodes a generation-7 raw bulk record into a contiguous byte buffer.
+pub fn encode_bulk_to_buf(record: &BulkRecord, buf: &mut Vec<u8>) -> ProtocolResult<()> {
+    let header = encode_bulk_header(record)?;
+    buf.reserve(header.len() + record.payload.len());
+    buf.extend_from_slice(&header);
+    buf.extend_from_slice(&record.payload);
+    Ok(())
+}
+
+/// Decodes and validates a raw frame as a generation-7 bulk record.
+pub fn raw_frame_to_bulk(frame: RawFrame, max_payload: u32) -> ProtocolResult<BulkRecord> {
+    if frame.flags != FLAG_BULK {
+        return Err(invalid_bulk("bulk flag must be set exclusively"));
+    }
+    decode_bulk_body(frame.id, Bytes::from(frame.body), max_payload)
+}
+
+/// Decodes one complete control or generation-7 bulk frame from a cursor-based buffer.
+pub fn try_decode_frame_from_bytes(buf: &mut BytesMut) -> ProtocolResult<Option<DecodedFrame>> {
+    let Some((frame_len, total)) = complete_frame_len(buf)? else {
+        return Ok(None);
+    };
+
+    let flags = buf[8];
+    if flags & FLAG_BULK == 0 {
+        let message = decode_message_frame(&buf[..total])?;
+        buf.advance(total);
+        return Ok(Some(DecodedFrame::Control(message)));
+    }
+    if flags != FLAG_BULK {
+        return Err(invalid_bulk(
+            "bulk flag cannot be combined with control flags",
+        ));
+    }
+    if frame_len < FRAME_HEADER_SIZE + BULK_HEADER_SIZE + 1 {
+        return Err(invalid_bulk("bulk record has no payload"));
+    }
+
+    let frame = buf.split_to(total).freeze();
+    let id = u32::from_be_bytes(frame[4..8].try_into().unwrap());
+    let body = frame.slice(4 + FRAME_HEADER_SIZE..);
+    let record = decode_bulk_body(id, body, MAX_BULK_RECORD_PAYLOAD)?;
+    Ok(Some(DecodedFrame::Bulk(record)))
+}
+
 /// Decode one complete typed frame from a cursor-based buffer without front-draining it.
 pub fn try_decode_from_bytes(buf: &mut BytesMut) -> ProtocolResult<Option<Message>> {
-    if buf.len() < 4 {
-        return Ok(None);
+    match try_decode_frame_from_bytes(buf)? {
+        Some(DecodedFrame::Control(message)) => Ok(Some(message)),
+        Some(DecodedFrame::Bulk(_)) => Err(invalid_bulk(
+            "raw bulk record passed to the control-message decoder",
+        )),
+        None => Ok(None),
     }
-
-    let frame_len = u32::from_be_bytes(buf[..4].try_into().unwrap());
-    if frame_len > MAX_FRAME_SIZE {
-        return Err(ProtocolError::FrameTooLarge {
-            size: frame_len,
-            max: MAX_FRAME_SIZE,
-        });
-    }
-
-    let frame_len = frame_len as usize;
-    if frame_len < FRAME_HEADER_SIZE {
-        return Err(ProtocolError::FrameTooShort {
-            size: frame_len as u32,
-            min: FRAME_HEADER_SIZE as u32,
-        });
-    }
-
-    let total = 4 + frame_len;
-    if buf.len() < total {
-        return Ok(None);
-    }
-
-    let message = decode_message_frame(&buf[..total])?;
-    buf.advance(total);
-    Ok(Some(message))
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -344,6 +390,113 @@ pub fn decode_message_frame(frame: &[u8]) -> ProtocolResult<Message> {
     msg.id = u32::from_be_bytes([frame[4], frame[5], frame[6], frame[7]]);
     msg.flags = frame[8];
     Ok(msg)
+}
+
+/// Encodes the fixed outer and generation-7 bulk headers, leaving the payload separate.
+pub fn encode_bulk_header(
+    record: &BulkRecord,
+) -> ProtocolResult<[u8; 4 + FRAME_HEADER_SIZE + BULK_HEADER_SIZE]> {
+    let payload_len = record.payload.len();
+    if payload_len == 0 || payload_len > MAX_BULK_RECORD_PAYLOAD as usize {
+        return Err(invalid_bulk(format!(
+            "payload length {payload_len} is outside 1..={MAX_BULK_RECORD_PAYLOAD}"
+        )));
+    }
+    record
+        .offset
+        .checked_add(payload_len as u64)
+        .ok_or_else(|| invalid_bulk("record end offset overflows u64"))?;
+
+    let frame_len = FRAME_HEADER_SIZE + BULK_HEADER_SIZE + payload_len;
+    let frame_len = u32::try_from(frame_len).map_err(|_| ProtocolError::FrameTooLarge {
+        size: u32::MAX,
+        max: MAX_FRAME_SIZE,
+    })?;
+    if frame_len > MAX_FRAME_SIZE {
+        return Err(ProtocolError::FrameTooLarge {
+            size: frame_len,
+            max: MAX_FRAME_SIZE,
+        });
+    }
+
+    let mut header = [0u8; 4 + FRAME_HEADER_SIZE + BULK_HEADER_SIZE];
+    header[..4].copy_from_slice(&frame_len.to_be_bytes());
+    header[4..8].copy_from_slice(&record.id.to_be_bytes());
+    header[8] = FLAG_BULK;
+    header[9] = record.kind as u8;
+    header[10] = record.flow as u8;
+    // Bytes 11..13 are reserved and deliberately remain zero.
+    header[13..21].copy_from_slice(&record.offset.to_be_bytes());
+    Ok(header)
+}
+
+fn decode_bulk_body(id: u32, body: Bytes, max_payload: u32) -> ProtocolResult<BulkRecord> {
+    if max_payload == 0 || max_payload > MAX_BULK_RECORD_PAYLOAD {
+        return Err(invalid_bulk(format!(
+            "invalid decoder payload limit {max_payload}"
+        )));
+    }
+    if body.len() < BULK_HEADER_SIZE + 1 {
+        return Err(invalid_bulk("bulk record has no payload"));
+    }
+    if body[2] != 0 || body[3] != 0 {
+        return Err(invalid_bulk("reserved bulk header bytes must be zero"));
+    }
+
+    let kind = BulkKind::from_wire(body[0])
+        .ok_or_else(|| invalid_bulk(format!("unknown bulk kind {}", body[0])))?;
+    let flow = BulkFlow::from_wire(body[1])
+        .ok_or_else(|| invalid_bulk(format!("unknown bulk flow {}", body[1])))?;
+    let offset = u64::from_be_bytes(body[4..12].try_into().unwrap());
+    let payload = body.slice(BULK_HEADER_SIZE..);
+    if payload.len() > max_payload as usize {
+        return Err(invalid_bulk(format!(
+            "payload length {} exceeds negotiated maximum {max_payload}",
+            payload.len()
+        )));
+    }
+    offset
+        .checked_add(payload.len() as u64)
+        .ok_or_else(|| invalid_bulk("record end offset overflows u64"))?;
+
+    Ok(BulkRecord {
+        id,
+        kind,
+        flow,
+        offset,
+        payload,
+    })
+}
+
+fn complete_frame_len(buf: &BytesMut) -> ProtocolResult<Option<(usize, usize)>> {
+    if buf.len() < 4 {
+        return Ok(None);
+    }
+
+    let frame_len = u32::from_be_bytes(buf[..4].try_into().unwrap());
+    if frame_len > MAX_FRAME_SIZE {
+        return Err(ProtocolError::FrameTooLarge {
+            size: frame_len,
+            max: MAX_FRAME_SIZE,
+        });
+    }
+    if frame_len < FRAME_HEADER_SIZE as u32 {
+        return Err(ProtocolError::FrameTooShort {
+            size: frame_len,
+            min: FRAME_HEADER_SIZE as u32,
+        });
+    }
+
+    let frame_len = frame_len as usize;
+    let total = 4 + frame_len;
+    if buf.len() < total {
+        return Ok(None);
+    }
+    Ok(Some((frame_len, total)))
+}
+
+fn invalid_bulk(message: impl Into<String>) -> ProtocolError {
+    ProtocolError::InvalidBulkFrame(message.into())
 }
 
 async fn write_vectored_all<W: AsyncWrite + Unpin>(
@@ -599,6 +752,149 @@ mod tests {
         assert_eq!(decoded.id, frame.id);
         assert_eq!(decoded.flags, frame.flags);
         assert_eq!(decoded.body, frame.body);
+    }
+
+    #[test]
+    fn smallest_bulk_record_has_exact_wire_layout() {
+        let record = BulkRecord {
+            id: 0x0102_0304,
+            kind: BulkKind::Filesystem,
+            flow: BulkFlow::HostToGuest,
+            offset: 0x0102_0304_0506_0708,
+            payload: Bytes::from_static(&[0xFF]),
+        };
+        let mut encoded = Vec::new();
+        encode_bulk_to_buf(&record, &mut encoded).unwrap();
+
+        assert_eq!(
+            encoded,
+            vec![
+                0x00, 0x00, 0x00, 0x12, // frame length: 5 + 12 + 1
+                0x01, 0x02, 0x03, 0x04, // correlation ID
+                0x08, // FLAG_BULK
+                0x01, // filesystem
+                0x01, // host to guest
+                0x00, 0x00, // reserved
+                0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // offset
+                0xFF, // opaque payload
+            ]
+        );
+    }
+
+    #[test]
+    fn largest_bulk_record_roundtrips_without_payload_copy() {
+        let record = BulkRecord {
+            id: 81,
+            kind: BulkKind::Tcp,
+            flow: BulkFlow::GuestToHost,
+            offset: 7,
+            payload: Bytes::from(vec![0xA5; MAX_BULK_RECORD_PAYLOAD as usize]),
+        };
+        let mut encoded = Vec::new();
+        encode_bulk_to_buf(&record, &mut encoded).unwrap();
+        let mut cursor = BytesMut::from(encoded.as_slice());
+
+        let Some(DecodedFrame::Bulk(decoded)) = try_decode_frame_from_bytes(&mut cursor).unwrap()
+        else {
+            panic!("expected bulk record");
+        };
+        assert_eq!(decoded, record);
+        assert!(cursor.is_empty());
+    }
+
+    #[test]
+    fn bulk_payload_is_opaque_even_when_it_looks_like_cbor() {
+        let payload = Bytes::from_static(&[0xA3, 0x61, b'v', 0x07, 0x61, b't', 0xF6]);
+        let record = BulkRecord {
+            id: 3,
+            kind: BulkKind::Filesystem,
+            flow: BulkFlow::GuestToHost,
+            offset: 0,
+            payload: payload.clone(),
+        };
+        let mut encoded = Vec::new();
+        encode_bulk_to_buf(&record, &mut encoded).unwrap();
+        let mut cursor = BytesMut::from(encoded.as_slice());
+
+        let Some(DecodedFrame::Bulk(decoded)) = try_decode_frame_from_bytes(&mut cursor).unwrap()
+        else {
+            panic!("expected bulk record");
+        };
+        assert_eq!(decoded.payload, payload);
+    }
+
+    #[test]
+    fn bulk_decoder_accepts_every_frame_fragment_boundary() {
+        let record = BulkRecord {
+            id: 34,
+            kind: BulkKind::Tcp,
+            flow: BulkFlow::HostToGuest,
+            offset: 99,
+            payload: Bytes::from(vec![0x73; 128]),
+        };
+        let mut encoded = Vec::new();
+        encode_bulk_to_buf(&record, &mut encoded).unwrap();
+
+        for split in 0..=encoded.len() {
+            let mut cursor = BytesMut::from(&encoded[..split]);
+            let first = try_decode_frame_from_bytes(&mut cursor).unwrap();
+            if split < encoded.len() {
+                assert!(first.is_none(), "decoded incomplete frame at split {split}");
+                cursor.extend_from_slice(&encoded[split..]);
+            }
+            let decoded = first
+                .or_else(|| try_decode_frame_from_bytes(&mut cursor).unwrap())
+                .unwrap();
+            assert!(matches!(decoded, DecodedFrame::Bulk(ref value) if value == &record));
+            assert!(cursor.is_empty());
+        }
+    }
+
+    #[test]
+    fn bulk_decoder_rejects_malformed_wire_shapes() {
+        let record = BulkRecord {
+            id: 5,
+            kind: BulkKind::Filesystem,
+            flow: BulkFlow::HostToGuest,
+            offset: 0,
+            payload: Bytes::from_static(b"x"),
+        };
+        let mut valid = Vec::new();
+        encode_bulk_to_buf(&record, &mut valid).unwrap();
+
+        for (index, value) in [(8, FLAG_BULK | FLAG_TERMINAL), (9, 0), (10, 3), (11, 1)] {
+            let mut malformed = valid.clone();
+            malformed[index] = value;
+            let error =
+                try_decode_frame_from_bytes(&mut BytesMut::from(malformed.as_slice())).unwrap_err();
+            assert!(matches!(error, ProtocolError::InvalidBulkFrame(_)));
+        }
+
+        let mut no_payload = valid;
+        no_payload.truncate(4 + FRAME_HEADER_SIZE + BULK_HEADER_SIZE);
+        no_payload[..4]
+            .copy_from_slice(&((FRAME_HEADER_SIZE + BULK_HEADER_SIZE) as u32).to_be_bytes());
+        let error =
+            try_decode_frame_from_bytes(&mut BytesMut::from(no_payload.as_slice())).unwrap_err();
+        assert!(matches!(error, ProtocolError::InvalidBulkFrame(_)));
+    }
+
+    #[tokio::test]
+    async fn bulk_vectored_writer_handles_one_byte_short_writes() {
+        let record = BulkRecord {
+            id: 91,
+            kind: BulkKind::Tcp,
+            flow: BulkFlow::GuestToHost,
+            offset: 42,
+            payload: Bytes::from(vec![0xCD; 257]),
+        };
+        let mut expected = Vec::new();
+        encode_bulk_to_buf(&record, &mut expected).unwrap();
+
+        let mut writer = OneByteWriter::default();
+        write_bulk_record(&mut writer, &record).await.unwrap();
+
+        assert_eq!(writer.bytes, expected);
     }
 
     #[test]

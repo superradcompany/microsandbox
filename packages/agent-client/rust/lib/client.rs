@@ -31,15 +31,17 @@ use std::sync::{Arc, atomic::AtomicU32};
 #[cfg(feature = "stream")]
 use std::time::Duration;
 
+use microsandbox_protocol::message::FLAG_BULK;
 #[cfg(feature = "stream")]
 use microsandbox_protocol::message::FLAG_TERMINAL;
-#[cfg(feature = "stream")]
-use microsandbox_protocol::{codec::MAX_FRAME_SIZE, message::FRAME_HEADER_SIZE};
 use microsandbox_protocol::{
+    bulk::{BULK_PROTOCOL_VERSION, BulkCancel, BulkRecord, MAX_BULK_RECORD_PAYLOAD},
     codec::{self, RawFrame},
     core::Ready,
     message::{Message, MessageType, PROTOCOL_VERSION},
 };
+#[cfg(feature = "stream")]
+use microsandbox_protocol::{codec::MAX_FRAME_SIZE, message::FRAME_HEADER_SIZE};
 use serde::Serialize;
 #[cfg(feature = "stream")]
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -95,6 +97,16 @@ pub enum AgentProtocol {
     LegacyV1,
 }
 
+/// One decoded frame from a generation-aware streaming correlation.
+#[derive(Debug, Clone)]
+pub enum AgentFrame {
+    /// CBOR control-plane message.
+    Control(Message),
+
+    /// Generation-7 raw bulk record.
+    Bulk(BulkRecord),
+}
+
 /// Client for communicating with agentd through the agent relay.
 ///
 /// See the module-level docs for an overview of the two API tiers.
@@ -103,7 +115,7 @@ pub struct AgentClient {
     writer: mpsc::Sender<WriterCommand>,
     /// Next correlation ID to allocate (starts at `id_min`).
     next_id: AtomicU32,
-    /// Lower bound (inclusive) of the assigned ID range, used for wrap-around.
+    /// Lower bound (inclusive) of the assigned ID range.
     id_min: u32,
     /// Upper bound (exclusive) of the assigned ID range.
     id_max: u32,
@@ -115,7 +127,7 @@ pub struct AgentClient {
     /// which selects the wire codec; see `VERSIONING.md`.
     negotiated_version: u8,
     /// Pending response channels keyed by correlation ID.
-    pending: Arc<Mutex<HashMap<u32, mpsc::Sender<RawFrame>>>>,
+    pending: Arc<Mutex<HashMap<u32, CorrelationRoute>>>,
     /// Background reader task handle.
     reader_handle: JoinHandle<()>,
     /// Background writer task handle.
@@ -138,8 +150,26 @@ struct AgentHandshake {
 
 #[cfg_attr(not(feature = "stream"), allow(dead_code))]
 struct WriterCommand {
-    frame: RawFrame,
+    frame: WriterFrame,
     ack: oneshot::Sender<AgentClientResult<()>>,
+}
+
+#[cfg_attr(not(feature = "stream"), allow(dead_code))]
+enum WriterFrame {
+    Control(RawFrame),
+    Bulk(BulkRecord),
+}
+
+/// Local dispatch state retained through the terminal result of a cancellation.
+struct CorrelationRoute {
+    tx: mpsc::Sender<RawFrame>,
+    state: CorrelationState,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CorrelationState {
+    Active,
+    Cancelling,
 }
 
 #[cfg(feature = "stream")]
@@ -265,7 +295,7 @@ impl AgentClient {
             );
         }
 
-        let pending: Arc<Mutex<HashMap<u32, mpsc::Sender<RawFrame>>>> =
+        let pending: Arc<Mutex<HashMap<u32, CorrelationRoute>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
         let (writer_tx, writer_rx) = mpsc::channel(WRITER_QUEUE_CAPACITY);
@@ -350,6 +380,11 @@ impl AgentClient {
     /// `ExecResize`, `FsData` chunks).
     pub async fn send_raw(&self, id: u32, flags: u8, body: &[u8]) -> AgentClientResult<()> {
         self.write_frame(id, flags, body).await
+    }
+
+    /// Remove a streaming correlation from local dispatch after its peer has been told to stop.
+    pub async fn forget_stream(&self, id: u32) {
+        self.pending.lock().await.remove(&id);
     }
 
     /// The cached `core.ready` handshake frame body bytes (CBOR-encoded).
@@ -449,6 +484,22 @@ impl AgentClient {
         Ok((id, rx))
     }
 
+    /// Opens a streaming typed session that can receive both control messages and raw bulk data.
+    pub async fn stream_frames<T: Serialize>(
+        &self,
+        t: MessageType,
+        payload: &T,
+    ) -> AgentClientResult<(u32, mpsc::Receiver<AgentFrame>)> {
+        self.ensure_version_compat(t)?;
+        let flags = t.flags();
+        let body = encode_message_body(self.protocol.version(), t, payload)?;
+        let (id, raw_rx) = self.stream_raw(flags, body).await?;
+
+        let (tx, rx) = mpsc::channel(STREAM_QUEUE_CAPACITY);
+        tokio::spawn(decode_frame_stream_task(raw_rx, tx));
+        Ok((id, rx))
+    }
+
     /// Send a follow-up typed message on an existing correlation id.
     pub async fn send<T: Serialize>(
         &self,
@@ -460,6 +511,35 @@ impl AgentClient {
         let flags = t.flags();
         let body = encode_message_body(self.protocol.version(), t, payload)?;
         self.write_frame_owned(id, flags, body).await
+    }
+
+    /// Sends one generation-7 raw bulk record on an existing correlation.
+    pub async fn send_bulk(&self, record: BulkRecord) -> AgentClientResult<()> {
+        if self.negotiated_version < BULK_PROTOCOL_VERSION {
+            return Err(AgentClientError::UnsupportedOperation {
+                msg_type: "raw bulk record",
+                needs: BULK_PROTOCOL_VERSION,
+                peer: self.negotiated_version,
+            });
+        }
+
+        let (ack, written) = oneshot::channel();
+        self.writer
+            .send(WriterCommand {
+                frame: WriterFrame::Bulk(record),
+                ack,
+            })
+            .await
+            .map_err(|_| AgentClientError::Closed)?;
+        written.await.map_err(|_| AgentClientError::Closed)?
+    }
+
+    /// Cancel an entire raw-bulk correlation and retain its route through terminal cleanup.
+    pub async fn cancel_bulk(&self, id: u32, cancel: &BulkCancel) -> AgentClientResult<()> {
+        if let Some(route) = self.pending.lock().await.get_mut(&id) {
+            route.state = CorrelationState::Cancelling;
+        }
+        self.send(id, MessageType::BulkCancel, cancel).await
     }
 
     /// Decode the cached handshake `core.ready` payload.
@@ -475,29 +555,33 @@ impl AgentClient {
 impl AgentClient {
     /// Reserve a unique correlation ID from the relay-assigned range.
     ///
-    /// Wraps around within the assigned range and skips IDs that still have an
-    /// active pending request or stream.
+    /// IDs are single-use for this connection. Exhaustion requires reconnecting for a fresh range
+    /// incarnation; wrap-around could relabel late raw records as a new operation.
     async fn reserve_id(&self, tx: mpsc::Sender<RawFrame>) -> AgentClientResult<u32> {
-        let mut pending = self.pending.lock().await;
-        let attempts = usable_id_count(self.id_min, self.id_max);
-        for _ in 0..attempts {
-            let id = self
-                .next_id
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if self.next_id.load(std::sync::atomic::Ordering::Relaxed) >= self.id_max {
-                self.next_id.store(
-                    first_request_id(self.id_min),
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-            }
-            if id == 0 || id < self.id_min || id >= self.id_max || pending.contains_key(&id) {
-                continue;
-            }
-            pending.insert(id, tx);
-            return Ok(id);
+        let id = self
+            .next_id
+            .fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |next| (next < self.id_max).then_some(next.saturating_add(1)),
+            )
+            .map_err(|_| AgentClientError::IdRangeExhausted)?;
+        if id == 0 || id < self.id_min {
+            return Err(AgentClientError::IdRangeExhausted);
         }
 
-        Err(AgentClientError::IdRangeExhausted)
+        let replaced = self.pending.lock().await.insert(
+            id,
+            CorrelationRoute {
+                tx,
+                state: CorrelationState::Active,
+            },
+        );
+        debug_assert!(
+            replaced.is_none(),
+            "single-use correlation was already routed"
+        );
+        Ok(id)
     }
 
     /// Write a single framed message to the socket.
@@ -510,7 +594,7 @@ impl AgentClient {
         let (ack, written) = oneshot::channel();
         self.writer
             .send(WriterCommand {
-                frame: RawFrame { id, flags, body },
+                frame: WriterFrame::Control(RawFrame { id, flags, body }),
                 ack,
             })
             .await
@@ -760,7 +844,11 @@ where
     W: tokio::io::AsyncWrite + Unpin,
 {
     while let Some(command) = rx.recv().await {
-        if let Err(e) = codec::write_raw_frame(&mut writer, &command.frame).await {
+        let result = match &command.frame {
+            WriterFrame::Control(frame) => codec::write_raw_frame(&mut writer, frame).await,
+            WriterFrame::Bulk(record) => codec::write_bulk_record(&mut writer, record).await,
+        };
+        if let Err(e) = result {
             tracing::debug!("agent client: stream writer error: {e}");
             let _ = command.ack.send(Err(AgentClientError::Protocol(e)));
             break;
@@ -772,7 +860,7 @@ where
 /// Background task that reads frames from the relay and dispatches them to
 /// pending channels by correlation ID. Operates on raw frames — no CBOR.
 #[cfg(feature = "stream")]
-async fn reader_loop<R>(mut reader: R, pending: Arc<Mutex<HashMap<u32, mpsc::Sender<RawFrame>>>>)
+async fn reader_loop<R>(mut reader: R, pending: Arc<Mutex<HashMap<u32, CorrelationRoute>>>)
 where
     R: tokio::io::AsyncRead + Unpin,
 {
@@ -794,19 +882,20 @@ where
 }
 
 #[cfg(feature = "stream")]
-async fn dispatch_frame(
-    frame: RawFrame,
-    pending: &Arc<Mutex<HashMap<u32, mpsc::Sender<RawFrame>>>>,
-) {
+async fn dispatch_frame(frame: RawFrame, pending: &Arc<Mutex<HashMap<u32, CorrelationRoute>>>) {
     let id = frame.id;
     let is_terminal = (frame.flags & FLAG_TERMINAL) != 0;
 
     let tx = {
         let mut map = pending.lock().await;
-        let Some(tx) = map.get(&id).cloned() else {
+        let Some(route) = map.get(&id) else {
             tracing::trace!("agent client: no pending handler for id={id}");
             return;
         };
+        if route.state == CorrelationState::Cancelling && frame.flags == FLAG_BULK {
+            return;
+        }
+        let tx = route.tx.clone();
         if is_terminal {
             map.remove(&id);
         }
@@ -821,6 +910,10 @@ async fn dispatch_frame(
 /// Translate a stream of raw frames into typed messages.
 async fn decode_stream_task(mut raw_rx: mpsc::Receiver<RawFrame>, tx: mpsc::Sender<Message>) {
     while let Some(frame) = raw_rx.recv().await {
+        if frame.flags & FLAG_BULK != 0 {
+            tracing::warn!("agent client: raw bulk record reached a control-only stream");
+            break;
+        }
         match codec::raw_frame_to_message(frame) {
             Ok(msg) => {
                 if tx.send(msg).await.is_err() {
@@ -830,6 +923,32 @@ async fn decode_stream_task(mut raw_rx: mpsc::Receiver<RawFrame>, tx: mpsc::Send
             Err(e) => {
                 tracing::warn!("agent client: failed to decode frame in stream: {e}");
                 // Continue — single malformed frame shouldn't kill the stream.
+            }
+        }
+    }
+}
+
+/// Translates raw relay frames into generation-aware control or bulk items.
+async fn decode_frame_stream_task(
+    mut raw_rx: mpsc::Receiver<RawFrame>,
+    tx: mpsc::Sender<AgentFrame>,
+) {
+    while let Some(frame) = raw_rx.recv().await {
+        let decoded = if frame.flags & FLAG_BULK != 0 {
+            codec::raw_frame_to_bulk(frame, MAX_BULK_RECORD_PAYLOAD).map(AgentFrame::Bulk)
+        } else {
+            codec::raw_frame_to_message(frame).map(AgentFrame::Control)
+        };
+
+        match decoded {
+            Ok(frame) => {
+                if tx.send(frame).await.is_err() {
+                    break;
+                }
+            }
+            Err(error) => {
+                tracing::warn!("agent client: failed to decode frame in bulk stream: {error}");
+                break;
             }
         }
     }
@@ -846,6 +965,17 @@ fn encode_message_body<T: Serialize>(
     let mut body = Vec::new();
     ciborium::into_writer(&msg, &mut body).map_err(microsandbox_protocol::ProtocolError::from)?;
     Ok(body)
+}
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl Drop for AgentClient {
+    fn drop(&mut self) {
+        self.reader_handle.abort();
+        self.writer_handle.abort();
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1255,15 +1385,282 @@ mod tests {
         let exit: ExecExited = second.payload().unwrap();
         assert_eq!(exit.code, 0);
     }
-}
 
-//--------------------------------------------------------------------------------------------------
-// Trait Implementations
-//--------------------------------------------------------------------------------------------------
+    #[cfg(feature = "stream")]
+    #[tokio::test]
+    async fn correlation_ids_are_single_use_until_reconnect() {
+        use microsandbox_protocol::core::{Ping, Pong};
+        use tokio::io::AsyncWriteExt;
 
-impl Drop for AgentClient {
-    fn drop(&mut self) {
-        self.reader_handle.abort();
-        self.writer_handle.abort();
+        let (client_io, mut server_io) = tokio::io::duplex(64 * 1024);
+        let ready_msg = Message::with_payload(MessageType::Ready, 0, &Ready::default()).unwrap();
+        let server = tokio::spawn(async move {
+            server_io.write_all(&1u32.to_be_bytes()).await.unwrap();
+            server_io.write_all(&3u32.to_be_bytes()).await.unwrap();
+            codec::write_message(&mut server_io, &ready_msg)
+                .await
+                .unwrap();
+            for expected_id in 1..3 {
+                let request = codec::read_raw_frame(&mut server_io).await.unwrap();
+                assert_eq!(request.id, expected_id);
+                let response =
+                    Message::with_payload(MessageType::Pong, request.id, &Pong {}).unwrap();
+                codec::write_message(&mut server_io, &response)
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let client = AgentClient::connect_stream(client_io).await.unwrap();
+        client.request(MessageType::Ping, &Ping {}).await.unwrap();
+        client.request(MessageType::Ping, &Ping {}).await.unwrap();
+        assert!(matches!(
+            client.request(MessageType::Ping, &Ping {}).await,
+            Err(AgentClientError::IdRangeExhausted)
+        ));
+        server.await.unwrap();
+    }
+
+    #[cfg(feature = "stream")]
+    #[tokio::test]
+    async fn connect_stream_carries_bidirectional_raw_bulk_records() {
+        use microsandbox_protocol::bulk::{
+            BULK_FLOW_MASK_GUEST_TO_HOST, BULK_FLOW_MASK_HOST_TO_GUEST, BulkAccepted, BulkFinish,
+            BulkFlow, BulkKind, BulkOffer, DEFAULT_BULK_RECORD_PAYLOAD, DEFAULT_BULK_WINDOW,
+        };
+        use microsandbox_protocol::tcp::{TcpClosed, TcpConnect, TcpConnected};
+        use tokio::io::AsyncWriteExt;
+
+        let (client_io, mut server_io) = tokio::io::duplex(1024 * 1024);
+        let ready = Ready {
+            agent_version: "bulk-stream-test".to_string(),
+            ..Default::default()
+        };
+        let ready_msg = Message::with_payload(MessageType::Ready, 0, &ready).unwrap();
+
+        let server = tokio::spawn(async move {
+            server_io.write_all(&1u32.to_be_bytes()).await.unwrap();
+            server_io.write_all(&1024u32.to_be_bytes()).await.unwrap();
+            codec::write_message(&mut server_io, &ready_msg)
+                .await
+                .unwrap();
+
+            let opening = codec::read_raw_frame(&mut server_io).await.unwrap();
+            let opening_id = opening.id;
+            let opening = codec::raw_frame_to_message(opening).unwrap();
+            assert_eq!(opening.t, MessageType::TcpConnect);
+            let connected =
+                Message::with_payload(MessageType::TcpConnected, opening_id, &TcpConnected {})
+                    .unwrap();
+            codec::write_message(&mut server_io, &connected)
+                .await
+                .unwrap();
+            let accepted = Message::with_payload(
+                MessageType::BulkAccepted,
+                opening_id,
+                &BulkAccepted {
+                    kind: BulkKind::Tcp,
+                    flows: BULK_FLOW_MASK_HOST_TO_GUEST | BULK_FLOW_MASK_GUEST_TO_HOST,
+                    format: 1,
+                    max_record_payload: DEFAULT_BULK_RECORD_PAYLOAD,
+                    host_to_guest_credit_limit: DEFAULT_BULK_WINDOW,
+                    guest_to_host_credit_limit: DEFAULT_BULK_WINDOW,
+                },
+            )
+            .unwrap();
+            codec::write_message(&mut server_io, &accepted)
+                .await
+                .unwrap();
+
+            let inbound = codec::read_raw_frame(&mut server_io).await.unwrap();
+            let inbound = codec::raw_frame_to_bulk(inbound, DEFAULT_BULK_RECORD_PAYLOAD).unwrap();
+            assert_eq!(inbound.id, opening_id);
+            assert_eq!(inbound.flow, BulkFlow::HostToGuest);
+            assert_eq!(inbound.payload.as_ref(), b"host-to-guest");
+
+            codec::write_bulk_record(
+                &mut server_io,
+                &BulkRecord {
+                    id: opening_id,
+                    kind: BulkKind::Tcp,
+                    flow: BulkFlow::GuestToHost,
+                    offset: 0,
+                    payload: b"guest-to-host".as_slice().into(),
+                },
+            )
+            .await
+            .unwrap();
+            let finish = Message::with_payload(
+                MessageType::BulkFinish,
+                opening_id,
+                &BulkFinish {
+                    kind: BulkKind::Tcp,
+                    flow: BulkFlow::GuestToHost,
+                    final_offset: 13,
+                },
+            )
+            .unwrap();
+            codec::write_message(&mut server_io, &finish).await.unwrap();
+            let closed =
+                Message::with_payload(MessageType::TcpClosed, opening_id, &TcpClosed {}).unwrap();
+            codec::write_message(&mut server_io, &closed).await.unwrap();
+        });
+
+        let client = AgentClient::connect_stream_with_deadline(
+            client_io,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        let offer = BulkOffer::tcp();
+        let (id, mut rx) = client
+            .stream_frames(
+                MessageType::TcpConnect,
+                &TcpConnect {
+                    host: "example.test".into(),
+                    port: 80,
+                    bulk: Some(offer),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(rx.recv().await, Some(AgentFrame::Control(message)) if message.t == MessageType::TcpConnected)
+        );
+        assert!(
+            matches!(rx.recv().await, Some(AgentFrame::Control(message)) if message.t == MessageType::BulkAccepted)
+        );
+
+        client
+            .send_bulk(BulkRecord {
+                id,
+                kind: BulkKind::Tcp,
+                flow: BulkFlow::HostToGuest,
+                offset: 0,
+                payload: b"host-to-guest".as_slice().into(),
+            })
+            .await
+            .unwrap();
+        let Some(AgentFrame::Bulk(record)) = rx.recv().await else {
+            panic!("expected raw bulk record");
+        };
+        assert_eq!(record.payload.as_ref(), b"guest-to-host");
+        assert!(
+            matches!(rx.recv().await, Some(AgentFrame::Control(message)) if message.t == MessageType::BulkFinish)
+        );
+        assert!(
+            matches!(rx.recv().await, Some(AgentFrame::Control(message)) if message.t == MessageType::TcpClosed)
+        );
+
+        server.await.unwrap();
+    }
+
+    #[cfg(feature = "stream")]
+    #[tokio::test]
+    async fn bulk_cancel_discards_late_raw_but_retains_terminal_route() {
+        use microsandbox_protocol::bulk::{
+            BULK_FLOW_MASK_GUEST_TO_HOST, BulkAccepted, BulkCancelReason, BulkFlow, BulkKind,
+            BulkOffer, DEFAULT_BULK_RECORD_PAYLOAD, DEFAULT_BULK_WINDOW,
+        };
+        use microsandbox_protocol::tcp::{TcpClosed, TcpConnect, TcpConnected};
+        use tokio::io::AsyncWriteExt;
+
+        let (client_io, mut server_io) = tokio::io::duplex(1024 * 1024);
+        let (late_sent, late_observed) = tokio::sync::oneshot::channel();
+        let (send_terminal, terminal_allowed) = tokio::sync::oneshot::channel();
+        let ready_msg = Message::with_payload(MessageType::Ready, 0, &Ready::default()).unwrap();
+        let server = tokio::spawn(async move {
+            server_io.write_all(&1u32.to_be_bytes()).await.unwrap();
+            server_io.write_all(&1024u32.to_be_bytes()).await.unwrap();
+            codec::write_message(&mut server_io, &ready_msg)
+                .await
+                .unwrap();
+
+            let opening = codec::read_raw_frame(&mut server_io).await.unwrap();
+            let id = opening.id;
+            let connected =
+                Message::with_payload(MessageType::TcpConnected, id, &TcpConnected {}).unwrap();
+            codec::write_message(&mut server_io, &connected)
+                .await
+                .unwrap();
+            let accepted = Message::with_payload(
+                MessageType::BulkAccepted,
+                id,
+                &BulkAccepted {
+                    kind: BulkKind::Tcp,
+                    flows: BULK_FLOW_MASK_GUEST_TO_HOST,
+                    format: 1,
+                    max_record_payload: DEFAULT_BULK_RECORD_PAYLOAD,
+                    host_to_guest_credit_limit: 0,
+                    guest_to_host_credit_limit: DEFAULT_BULK_WINDOW,
+                },
+            )
+            .unwrap();
+            codec::write_message(&mut server_io, &accepted)
+                .await
+                .unwrap();
+
+            let cancel = codec::read_raw_frame(&mut server_io).await.unwrap();
+            assert_eq!(cancel.id, id);
+            assert_eq!(
+                codec::raw_frame_to_message(cancel).unwrap().t,
+                MessageType::BulkCancel
+            );
+            codec::write_bulk_record(
+                &mut server_io,
+                &BulkRecord {
+                    id,
+                    kind: BulkKind::Tcp,
+                    flow: BulkFlow::GuestToHost,
+                    offset: 0,
+                    payload: b"late".as_slice().into(),
+                },
+            )
+            .await
+            .unwrap();
+            let _ = late_sent.send(());
+            let _ = terminal_allowed.await;
+            let closed = Message::with_payload(MessageType::TcpClosed, id, &TcpClosed {}).unwrap();
+            codec::write_message(&mut server_io, &closed).await.unwrap();
+        });
+
+        let client = AgentClient::connect_stream(client_io).await.unwrap();
+        let (id, mut frames) = client
+            .stream_frames(
+                MessageType::TcpConnect,
+                &TcpConnect {
+                    host: "example.test".into(),
+                    port: 80,
+                    bulk: Some(BulkOffer::tcp()),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(frames.recv().await, Some(AgentFrame::Control(message)) if message.t == MessageType::TcpConnected)
+        );
+        assert!(
+            matches!(frames.recv().await, Some(AgentFrame::Control(message)) if message.t == MessageType::BulkAccepted)
+        );
+
+        client
+            .cancel_bulk(
+                id,
+                &BulkCancel {
+                    kind: BulkKind::Tcp,
+                    reason: BulkCancelReason::CallerCancelled,
+                    message: "test cancellation".into(),
+                },
+            )
+            .await
+            .unwrap();
+        late_observed.await.unwrap();
+        assert!(client.pending.lock().await.contains_key(&id));
+        let _ = send_terminal.send(());
+        assert!(
+            matches!(frames.recv().await, Some(AgentFrame::Control(message)) if message.t == MessageType::TcpClosed)
+        );
+        assert!(!client.pending.lock().await.contains_key(&id));
+        server.await.unwrap();
     }
 }

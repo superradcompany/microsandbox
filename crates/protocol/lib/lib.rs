@@ -433,6 +433,7 @@ pub const GUEST_TLS_HOST_CAS_PATH: &str = "/.msb/tls/host-cas.pem";
 // Exports
 //--------------------------------------------------------------------------------------------------
 
+pub mod bulk;
 pub mod codec;
 pub mod core;
 pub mod exec;

@@ -148,11 +148,9 @@ mid-session.
 These are the promises that make all of the above hold together:
 
 1. **One version number** (the generation), agreed once at the handshake.
-2. **The message container never changes shape.** All evolution goes inside the message, not into
-   its framing.
+2. **The binary frame header never changes shape.** A negotiated generation may add a body format selected by an exclusive flag, but old peers are never sent that format.
 3. **New fields are always optional**, so old and new can ignore or default what they don't know.
-4. **New kinds of message are only ever added, never removed or redefined**, and each records the
-   generation it arrived in.
+4. **New kinds of message and body format are only ever added, never removed or redefined**, and each records the generation it arrived in.
 5. **The host checks the agreed version before sending** anything new, so unsupported features
    fail cleanly and alone.
 6. **The newer side speaks the older format.** The old runtime is never asked to learn anything.
@@ -182,13 +180,23 @@ whole protocol up front.
 
 ## Implementation details (for contributors changing the protocol)
 
-The wire layout, in two nested layers:
+The stable wire header and ordinary control body are:
 
 ```
-[ length ][ id ][ flags ]          <- fixed binary header, read first, never changes shape
-CBOR { v, t, p }                   <- the envelope: version, message type, payload bytes
-            p = CBOR { ...fields }  <- the payload for that message type (ExecRequest, etc.)
+[ length ][ id ][ flags ][ body ]  <- fixed binary header, read first, never changes shape
+body = CBOR { v, t, p }            <- ordinary control envelope
+              p = CBOR { ... }     <- payload for that message type
 ```
+
+Generation 7 adds one negotiated data-body alternative without changing the header:
+
+```
+flags = FLAG_BULK                  <- exclusive; no lifecycle flag may be combined with it
+body = [ kind ][ flow ][ 0 ][ offset ][ opaque payload ]
+       u8     u8     u16   u64 BE    1..negotiated maximum bytes
+```
+
+Filesystem reads/writes and TCP streams first negotiate this format through CBOR control messages. A host connected to a generation-6 or older runtime never offers raw bulk and continues using the generation-6 CBOR data messages. The relay validates the universal length and exclusive flag shape, routes on the unchanged correlation ID, and does not interpret bulk kind, flow, offsets, credits, or payload.
 
 - **`v`** is the generation, echoed onto each message. Same number negotiated at the handshake;
   not a per-message version. Don't gate behavior by reading it per message.
@@ -215,15 +223,10 @@ sandbox echoed in its ready frame)`. Every typed send checks `min_protocol_versi
 - **Codec vs. gate.** `AgentProtocol` (Current / LegacyV1) selects the wire _codec_ (the container
   format). `negotiated_version` drives the _capability gate_. These are the two consumers of the
   one generation number.
-- **The binary header** `[length][id][flags]` is immutable. The relay routes on `id`/`flags`
-  without parsing the CBOR, and it bridges a host and guest that may be different generations, so
-  changing the header would force the relay to translate. Keep all change inside the CBOR body.
-- **`flags`** is a 1-byte field (3 of 8 bits used) carrying lifecycle hints the relay needs without
-  decoding CBOR. New bits are append-only and must be safe for an old relay to ignore. Anything
-  that isn't safe to ignore belongs behind the capability gate, not a flag bit.
-- **A real format break** (kind 3) means forking the codec per `AgentProtocol` generation and
-  carrying the old one until a support horizon (see `TODO(upgrade-0.6)`), keeping the binary header
-  fixed so the relay stays format-agnostic.
+- **The binary header** `[length][id][flags]` is immutable. The relay routes on `id`/`flags` without parsing the body, and it bridges a host and guest that may be different generations, so changing the header would force the relay to translate.
+- **`flags`** is a 1-byte field (4 of 8 bits used) carrying either lifecycle hints or the exclusive generation-7 raw-body discriminator. New bits are append-only, must define whether combination is legal, and must be withheld from peers below their capability generation.
+- **Generation-7 raw bulk is an additive, gated body format.** `FLAG_BULK` is never combined with lifecycle flags; opening offers and acceptance messages establish the permitted operation kind, flow mask, record limit, and initial absolute credits before any raw record may appear.
+- **A real format break** (kind 3) now means changing the immutable header or changing an existing body's interpretation. That requires forking the codec per `AgentProtocol` generation and carrying the old one until a support horizon (see `TODO(upgrade-0.6)`).
 
 ### Tests that keep this honest
 

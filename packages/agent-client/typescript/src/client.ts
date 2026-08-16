@@ -250,19 +250,12 @@ export class AgentClient {
   }
 
   private reserveId(queue: Pending): number {
-    const attempts = usableIdCount(this.idMin, this.idMax);
-    for (let i = 0; i < attempts; i += 1) {
+    // Correlation IDs are single-use for one relay range ownership period. Wrapping could let a
+    // delayed raw record from an old operation enter a new operation with the same numeric ID.
+    if (this.nextId < this.idMax) {
       const id = this.nextId;
       this.nextId += 1;
-      if (this.nextId >= this.idMax) this.nextId = Math.max(1, this.idMin);
-      if (
-        id !== 0 &&
-        id >= this.idMin &&
-        id < this.idMax &&
-        !this.pending.has(id)
-      ) {
-        return id;
-      }
+      return id;
     }
     queue.close(new Error("agent correlation id range exhausted"));
     throw new Error("agent correlation id range exhausted");

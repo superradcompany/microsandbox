@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::bulk::BulkOffer;
+
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
@@ -229,6 +231,10 @@ pub struct FsOpenOptions {
 pub struct FsRequest {
     /// The operation to perform.
     pub op: FsOp,
+
+    /// Generation-7 raw-bulk offer for streaming reads and writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bulk: Option<BulkOffer>,
 }
 
 /// Metadata about a filesystem entry (wire format).
