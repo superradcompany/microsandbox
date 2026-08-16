@@ -763,8 +763,6 @@ pub(crate) mod agent {
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    #[cfg(windows)]
-    use crate::error::{Operation, UnsupportedReason};
     use crate::{MicrosandboxError, MicrosandboxResult, agent::AgentClient, backend::Backend};
 
     use super::{
@@ -1380,58 +1378,43 @@ pub(crate) mod agent {
         guest_path: &str,
         host_path: &Path,
     ) -> MicrosandboxResult<()> {
-        #[cfg(windows)]
-        {
-            let _ = (backend, name, guest_path, host_path);
-            return Err(MicrosandboxError::unsupported(
-                Operation::SandboxFs,
-                UnsupportedReason::RequiresUnixHost,
-            ));
-        }
+        let (std_file, temp_path) = prepare_host_copy_target(host_path).await?;
+        let mut file = tokio::fs::File::from_std(std_file);
+        let mut stream = read_stream(backend, name, guest_path).await?;
+        let mut received = 0u64;
 
-        #[cfg(unix)]
-        {
-            let (std_file, temp_path) = prepare_host_copy_target(host_path).await?;
-            let mut file = tokio::fs::File::from_std(std_file);
-            let mut stream = read_stream(backend, name, guest_path).await?;
-            let mut received = 0u64;
-
-            while let Some(chunk) = stream.recv().await? {
-                file.write_all(&chunk).await?;
-                received = received.checked_add(chunk.len() as u64).ok_or_else(|| {
-                    MicrosandboxError::SandboxFsOps(
-                        "copied file size exceeds the supported u64 range".into(),
-                    )
-                })?;
-            }
-
-            file.flush().await?;
-            let written = file.metadata().await?.len();
-            if written != received {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("host copy byte-count mismatch: received {received}, wrote {written}"),
+        while let Some(chunk) = stream.recv().await? {
+            file.write_all(&chunk).await?;
+            received = received.checked_add(chunk.len() as u64).ok_or_else(|| {
+                MicrosandboxError::SandboxFsOps(
+                    "copied file size exceeds the supported u64 range".into(),
                 )
-                .into());
-            }
-            file.sync_all().await?;
-            drop(file);
-
-            publish_host_copy_target(temp_path, host_path)?;
-            tracing::debug!(bytes = received, path = %host_path.display(), "copied guest file to host");
-            Ok(())
+            })?;
         }
+
+        file.flush().await?;
+        let written = file.metadata().await?.len();
+        if written != received {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("host copy byte-count mismatch: received {received}, wrote {written}"),
+            )
+            .into());
+        }
+        file.sync_all().await?;
+        drop(file);
+
+        publish_host_copy_target(temp_path, host_path)?;
+        tracing::debug!(bytes = received, path = %host_path.display(), "copied guest file to host");
+        Ok(())
     }
 
-    #[cfg(unix)]
     async fn prepare_host_copy_target(
         host_path: &Path,
     ) -> MicrosandboxResult<(std::fs::File, tempfile::TempPath)> {
-        use std::os::unix::fs::PermissionsExt;
-
         let host_path = host_path.to_path_buf();
         tokio::task::spawn_blocking(move || {
-            let existing_mode = match std::fs::symlink_metadata(&host_path) {
+            let existing_permissions = match std::fs::symlink_metadata(&host_path) {
                 Ok(metadata) if metadata.file_type().is_symlink() => {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
@@ -1447,7 +1430,7 @@ pub(crate) mod agent {
                         format!("copy destination is a directory: {}", host_path.display()),
                     ));
                 }
-                Ok(metadata) => Some(metadata.permissions().mode() & 0o7777),
+                Ok(metadata) => Some(metadata.permissions()),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
                 Err(error) => return Err(error),
             };
@@ -1466,16 +1449,19 @@ pub(crate) mod agent {
             let named = tempfile::Builder::new()
                 .prefix(&prefix)
                 .tempfile_in(parent)?;
-            if let Some(mode) = existing_mode {
-                named
-                    .as_file()
-                    .set_permissions(std::fs::Permissions::from_mode(mode))?;
+            if let Some(permissions) = existing_permissions {
+                named.as_file().set_permissions(permissions)?;
             } else {
                 // NamedTempFile is owner-only by default. Set the mode explicitly so this
                 // security property does not depend on a future tempfile implementation.
-                named
-                    .as_file()
-                    .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+
+                    named
+                        .as_file()
+                        .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+                }
             }
             let (file, path) = named.into_parts();
             Ok((file, path))
@@ -1485,7 +1471,6 @@ pub(crate) mod agent {
         .map_err(Into::into)
     }
 
-    #[cfg(unix)]
     fn publish_host_copy_target(
         temp_path: tempfile::TempPath,
         host_path: &Path,
@@ -1514,18 +1499,18 @@ pub(crate) mod agent {
         Ok(())
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     mod tests {
+        #[cfg(unix)]
         use std::os::unix::fs::{PermissionsExt, symlink};
 
         use super::*;
 
         #[tokio::test]
-        async fn host_copy_target_atomically_replaces_and_preserves_mode() {
+        async fn host_copy_target_atomically_replaces_existing_file() {
             let dir = tempfile::tempdir().unwrap();
             let destination = dir.path().join("artifact.bin");
             std::fs::write(&destination, b"old").unwrap();
-            std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o640)).unwrap();
 
             let (file, temp_path) = prepare_host_copy_target(&destination).await.unwrap();
             let mut file = tokio::fs::File::from_std(file);
@@ -1538,6 +1523,20 @@ pub(crate) mod agent {
                 std::fs::read(&destination).unwrap(),
                 b"complete replacement"
             );
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn host_copy_target_preserves_unix_mode() {
+            let dir = tempfile::tempdir().unwrap();
+            let destination = dir.path().join("artifact.bin");
+            std::fs::write(&destination, b"old").unwrap();
+            std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+            let (file, temp_path) = prepare_host_copy_target(&destination).await.unwrap();
+            drop(file);
+            publish_host_copy_target(temp_path, &destination).unwrap();
+
             assert_eq!(
                 std::fs::metadata(&destination)
                     .unwrap()
@@ -1563,6 +1562,7 @@ pub(crate) mod agent {
             assert_eq!(std::fs::read(&destination).unwrap(), b"original");
         }
 
+        #[cfg(unix)]
         #[tokio::test]
         async fn new_host_copy_target_is_owner_only() {
             let dir = tempfile::tempdir().unwrap();
@@ -1581,6 +1581,7 @@ pub(crate) mod agent {
             );
         }
 
+        #[cfg(unix)]
         #[tokio::test]
         async fn host_copy_rejects_symbolic_link_destination() {
             let dir = tempfile::tempdir().unwrap();
@@ -1598,6 +1599,7 @@ pub(crate) mod agent {
             assert_eq!(std::fs::read(&target).unwrap(), b"target");
         }
 
+        #[cfg(unix)]
         #[tokio::test]
         async fn host_copy_rechecks_symbolic_link_before_publish() {
             let dir = tempfile::tempdir().unwrap();
