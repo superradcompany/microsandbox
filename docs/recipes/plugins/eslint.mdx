@@ -19,7 +19,7 @@ msb run --name eslint-base --replace \
   --copy-file ./eslint.config.js:/workspace/eslint.config.js \
   --workdir /workspace \
   node:22.23.2-bookworm-slim -- sh -lc \
-    'npm ci --ignore-scripts && chown -R node:node /workspace'
+    'npm ci --ignore-scripts && chown -R node:node /workspace && install -d -o node -g node /workspace/src'
 
 msb snapshot create eslint-runtime \
   --from eslint-base --integrity --force
@@ -38,7 +38,7 @@ msb run --name eslint-check --replace \
   --cpus 1 --memory 384M --max-duration 1m \
   --no-net --security restricted \
   --rlimit nproc=64 --rlimit nofile=128 \
-  -- ./node_modules/.bin/eslint src
+  -- npx --offline eslint src
 ```
 
 The plugin can read the prepared configuration, dependencies, and mounted source, but it cannot modify `src` or reach the network. ESLint's exit code returns directly to the host.

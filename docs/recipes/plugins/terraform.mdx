@@ -33,7 +33,7 @@ msb run --name terraform-base --replace \
   --memory 768M --root-disk 2G --max-duration 5m \
   --copy-file ./main.tf:/workspace/main.tf \
   --workdir /workspace \
-  --entrypoint /bin/sh \
+  --entrypoint sh \
   hashicorp/terraform:1.13.5 -- -lc \
     'terraform init -backend=false -input=false && chown -R 65534:65534 /workspace'
 
@@ -55,7 +55,7 @@ msb run --name terraform-vet --replace \
   --env HOME=/tmp \
   --cpus 1 --memory 512M --max-duration 1m \
   --no-net --security restricted \
-  --entrypoint /bin/sh -- -lc \
+  --entrypoint sh -- -lc \
     'terraform fmt -check && terraform validate && terraform plan -refresh=false -input=false -lock=false'
 ```
 

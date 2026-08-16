@@ -12,7 +12,7 @@ code-server provides VS Code in a browser. This recipe starts the official ARM64
 msb run -d --name code-server-demo --replace \
   --cpus 2 --memory 2G --root-disk 4G \
   -p 127.0.0.1:8080:8080 \
-  --entrypoint /usr/bin/code-server \
+  --entrypoint code-server \
   codercom/code-server:4.130.0 -- \
     --bind-addr 0.0.0.0:8080 \
     --auth none \
