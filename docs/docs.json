@@ -335,6 +335,7 @@
             "group": "Docker",
             "icon": "docker",
             "pages": [
+              "examples/docker/docker",
               "examples/docker/docker-in-sandbox",
               "examples/docker/local-images"
             ]
