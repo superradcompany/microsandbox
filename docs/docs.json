@@ -341,74 +341,38 @@
             ]
           },
           {
-            "group": "Guest Systems",
-            "icon": "desktop",
-            "pages": [
-              "examples/development/vnc-desktop",
-              "examples/guest/systemd-services"
-            ]
-          },
-          {
-            "group": "Sandboxing",
+            "group": "Sandbox Workflows",
             "icon": "shield-halved",
             "pages": [
               "examples/use-cases/run-untrusted-code",
-              "examples/sandboxing/warm-workers"
-            ]
-          },
-          {
-            "group": "Automation",
-            "icon": "gears",
-            "pages": [
-              "examples/automation/dependency-audits",
-              "examples/automation/parallel-batch-jobs"
-            ]
-          },
-          {
-            "group": "Development",
-            "icon": "code",
-            "pages": [
+              "examples/sandboxing/warm-workers",
+              "examples/development/vnc-desktop",
+              "examples/guest/systemd-services",
               "examples/development/code-server",
               "examples/development/jupyterlab"
             ]
           },
           {
-            "group": "Tooling",
-            "icon": "puzzle-piece",
+            "group": "Automation & Tooling",
+            "icon": "gears",
             "pages": [
+              "examples/automation/dependency-audits",
+              "examples/automation/parallel-batch-jobs",
               "examples/plugins/terraform",
-              "examples/plugins/eslint"
-            ]
-          },
-          {
-            "group": "Web Automation",
-            "icon": "globe",
-            "pages": [
+              "examples/plugins/eslint",
               "examples/browser-automation/playwright",
-              "examples/web-automation/scrapy"
-            ]
-          },
-          {
-            "group": "Data",
-            "icon": "database",
-            "pages": [
-              "examples/data/postgresql",
-              "examples/data/migration-rehearsal",
-              "examples/data/redis"
-            ]
-          },
-          {
-            "group": "Files",
-            "icon": "file",
-            "pages": [
+              "examples/web-automation/scrapy",
               "examples/file-processing/libreoffice-pdf",
               "examples/file-processing/ffmpeg"
             ]
           },
           {
-            "group": "Metrics",
-            "icon": "paper-plane",
+            "group": "Data & Observability",
+            "icon": "database",
             "pages": [
+              "examples/data/postgresql",
+              "examples/data/migration-rehearsal",
+              "examples/data/redis",
               "examples/metrics-backends/grafana-cloud",
               "examples/metrics-backends/grafana-alloy",
               "examples/metrics-backends/otel-collector",
