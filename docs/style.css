@@ -198,13 +198,12 @@ nav[aria-label="Pages"] a > div:has(> img[src*="/pi.svg"]) { --msb-agent-icon: u
   background: linear-gradient(135deg, rgba(167, 112, 239, 0.09), rgba(167, 112, 239, 0.025) 62%, transparent);
   box-shadow: 0 1px 2px rgba(49, 31, 83, 0.04);
   text-decoration: none;
-  transition: border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+  transition: border-color 90ms ease-out, box-shadow 90ms ease-out;
 }
 
 .msb-examples-cta:hover {
   border-color: var(--msb-interactive-accent) !important;
-  box-shadow: 0 8px 24px rgba(78, 45, 132, 0.09);
-  transform: translateY(-1px);
+  box-shadow: 0 3px 10px rgba(78, 45, 132, 0.07);
 }
 
 .msb-examples-cta:focus-visible {
@@ -272,7 +271,7 @@ nav[aria-label="Pages"] a > div:has(> img[src*="/pi.svg"]) { --msb-agent-icon: u
 }
 
 .dark .msb-examples-cta:hover {
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.24);
 }
 
 .dark .msb-examples-cta-icon {
@@ -306,7 +305,6 @@ nav[aria-label="Pages"] a > div:has(> img[src*="/pi.svg"]) { --msb-agent-icon: u
 
 @media (prefers-reduced-motion: reduce) {
   .msb-examples-cta { transition: none; }
-  .msb-examples-cta:hover { transform: none; }
 }
 
 /* our links shouldn't get Mintlify's prose underline-border */
