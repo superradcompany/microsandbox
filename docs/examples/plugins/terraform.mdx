@@ -1,0 +1,98 @@
+---
+title: Vet a Terraform provider offline
+sidebarTitle: Terraform
+description: Download a provider once, then validate and plan without network access
+icon: "cubes"
+---
+
+<Tooltip tip="This workflow prepares and restores a local disk snapshot, which is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+Terraform providers are native executables. Prepare the provider in one microVM, snapshot it, then run validation and planning in a fresh networkless worker.
+
+The `random` provider makes the flow easy to test because planning it does not need cloud credentials.
+
+## Create a test configuration
+
+```hcl main.tf
+terraform {
+  required_providers {
+    random = {
+      source  = "hashicorp/random"
+      version = "3.7.2"
+    }
+  }
+}
+
+resource "random_pet" "example" {
+  prefix = "microsandbox"
+}
+```
+
+## Download and snapshot the provider
+
+```sh
+msb run --name terraform-base --replace \
+  --memory 768M --root-disk 2G --max-duration 5m \
+  --copy-file ./main.tf:/workspace/main.tf \
+  --workdir /workspace \
+  --entrypoint sh \
+  hashicorp/terraform:1.13.5 -- -lc \
+    'terraform init -backend=false -input=false && chown -R 65534:65534 /workspace'
+```
+
+Copy the generated dependency lock file to the host:
+
+```sh
+msb cp terraform-base:/workspace/.terraform.lock.hcl ./.terraform.lock.hcl
+```
+
+Capture the downloaded provider:
+
+```sh
+msb snapshot create terraform-runtime \
+  --from terraform-base --integrity --force
+```
+
+Verify the snapshot before using it:
+
+```sh
+msb snapshot verify terraform-runtime
+```
+
+`terraform init` downloads the provider and creates `.terraform.lock.hcl`. The copy on the host is ready to review and commit when adapting this to a real module.
+
+## Plan offline
+
+```sh
+msb run --name terraform-vet --replace \
+  --from-snapshot terraform-runtime \
+  --workdir /workspace --user 65534:65534 \
+  --env HOME=/tmp \
+  --cpus 1 --memory 512M --max-duration 1m \
+  --no-net --security restricted \
+  --entrypoint sh -- -lc \
+    'terraform fmt -check && terraform validate && terraform plan -refresh=false -input=false -lock=false'
+```
+
+The provider loads and creates a plan, but it cannot contact any remote API. Providers, data sources, or validation rules that require a service will fail offline; that failure is the point of this vetting mode.
+
+<Warning>
+  `-refresh=false` is not a network boundary. `--no-net` is. If you give a provider credentials and egress, changes it makes through an external API outlive the microVM.
+</Warning>
+
+## Cleanup
+
+```sh
+msb rm -f terraform-base terraform-vet
+```
+
+Remove the reusable snapshot:
+
+```sh
+msb snapshot remove terraform-runtime
+```
+
+## Reference
+
+- [How Terraform works with plugins](https://developer.hashicorp.com/terraform/plugin/how-terraform-works)
+- [Provider dependency lock file](https://developer.hashicorp.com/terraform/language/files/dependency-lock)

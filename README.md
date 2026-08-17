@@ -377,6 +377,23 @@ The `msb` CLI provides a complete interface for managing sandboxes, images, and 
 
 <br />
 
+## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/beaker/ffffff" alt="beaker-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/beaker/000000" alt="beaker"></a>&nbsp;&nbsp;Examples
+
+Practical ways to put microsandbox to work:
+
+- <img height="14" src="https://octicons-col.vercel.app/code/A770EF"> **[code-server](https://docs.microsandbox.dev/examples/development/code-server)**: Open an isolated VS Code workspace in the browser.
+- <img height="14" src="https://octicons-col.vercel.app/workflow/A770EF"> **[GitHub Actions Runner](https://docs.microsandbox.dev/examples/ci-cd/github-actions-runner)**: Run one self-hosted job in a fresh microVM, then discard its workspace.
+- <img height="14" src="https://octicons-col.vercel.app/checklist/A770EF"> **[PR Checks](https://docs.microsandbox.dev/examples/ci-cd/pr-checks)**: Test untrusted commits offline from reviewed dependencies.
+- <img height="14" src="https://octicons-col.vercel.app/container/A770EF"> **[Compose Tests](https://docs.microsandbox.dev/examples/ci-cd/compose-tests)**: Test a full Compose stack without exposing the host Docker socket.
+- <img height="14" src="https://octicons-col.vercel.app/cache/A770EF"> **[Warm Workers](https://docs.microsandbox.dev/examples/sandboxing/warm-workers)**: Snapshot a toolchain once, then launch clean, prepared workers.
+- <img height="14" src="https://octicons-col.vercel.app/globe/A770EF"> **[Web Crawling](https://docs.microsandbox.dev/examples/web-automation/scrapy)**: Crawl sites into bounded JSON with robots.txt and network controls.
+
+<br />
+
+<a href="https://docs.microsandbox.dev/examples/overview"><img src="https://img.shields.io/badge/Browse_Examples-%E2%86%92-A770EF?style=flat-square&labelColor=2b2b2b" alt="Browse Examples"></a>
+
+<br />
+
 ## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/dependabot/ffffff" alt="agents-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/dependabot/000000" alt="agents"></a>&nbsp;&nbsp;AI Agents
 
 #### <img height="14" src="https://octicons-col.vercel.app/book/A770EF">&nbsp;&nbsp;Agent Skills
@@ -395,6 +412,14 @@ The `msb` CLI provides a complete interface for managing sandboxes, images, and 
 > # Claude Code
 > claude mcp add --transport stdio microsandbox -- npx -y microsandbox-mcp
 > ```
+
+<br />
+
+## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/people/ffffff" alt="people-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/people/000000" alt="people"></a>&nbsp;&nbsp;Who Uses microsandbox
+
+- <img height="16" src="./assets/eve.svg" alt="Eve"> **[Eve by Vercel](https://eve.dev/docs/sandbox#microsandbox)** uses microsandbox as a local microVM backend for its AI agents, describing it as the closest local match to hosted Vercel Sandbox.
+
+Using microsandbox in your product? Tell us in [Discord](https://discord.gg/T95Y3XnEAK)—we would love to feature what you are building.
 
 <br />
 

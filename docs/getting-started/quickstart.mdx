@@ -4,21 +4,46 @@ description: Get a sandbox running in under 5 minutes
 icon: "bolt"
 ---
 
-<Note>
-  Running locally requires **glibc-based Linux with KVM**, **macOS with Apple Silicon** (M-series chip), or **Windows 11 with Windows Hypervisor Platform** enabled. All local backends use hardware virtualization. [microsandbox cloud](/cloud/overview) has no hardware requirements.
-</Note>
+## Choose where to run
 
-<Tip>
-  Boot a microVM in one command.
+<div className="msb-platform-strip" role="list" aria-label="Supported platforms">
+  <a className="msb-platform-item msb-platform-link" role="listitem" href="/troubleshooting/linux">
+    <span className="msb-platform-icon"><Icon icon="linux" size={18} /></span>
+    <span className="msb-platform-copy"><strong>Linux</strong><span>glibc + KVM</span></span>
+  </a>
+  <a className="msb-platform-item msb-platform-link" role="listitem" href="/troubleshooting/macos">
+    <span className="msb-platform-icon"><Icon icon="apple" size={18} /></span>
+    <span className="msb-platform-copy"><strong>macOS</strong><span>Apple Silicon</span></span>
+  </a>
+  <a className="msb-platform-item msb-platform-link" role="listitem" href="/troubleshooting/windows">
+    <span className="msb-platform-icon"><Icon icon="windows" size={18} /></span>
+    <span className="msb-platform-copy"><strong>Windows</strong><span>Windows 11 + WHP</span></span>
+  </a>
+  <a className="msb-platform-item msb-platform-link" role="listitem" href="/cloud/overview">
+    <span className="msb-platform-icon"><Icon icon="cloud" size={18} /></span>
+    <span className="msb-platform-copy"><strong>Cloud</strong><span>No hypervisor setup</span></span>
+  </a>
+</div>
 
-  ```bash
-  npx microsandbox run debian
-  ```
-</Tip>
+<CodeGroup>
+```bash npx
+npx microsandbox run debian
+```
+
+```bash macOS & Linux
+curl -fsSL https://install.microsandbox.dev | sh
+msb run debian
+```
+
+```powershell Windows
+irm https://install.microsandbox.dev/windows | iex
+msb run debian
+```
+</CodeGroup>
 
 <Steps>
   <Step title="Install microsandbox">
-    Install the SDK for the language you are using, and install the `msb` CLI for terminal workflows such as managing images, volumes, and sandboxes. Both run microsandbox locally by default; there is no separate server or daemon to set up. The same install also drives [microsandbox cloud](/cloud/overview) when an API key is set.
+    For application code, install the SDK for your language. For terminal workflows, use one of the CLI options above. Both run microsandbox locally by default; there is no separate server or daemon to set up. The same installation also drives [microsandbox cloud](/cloud/overview) when an API key is set.
 
     <CodeGroup>
     ```bash Rust
@@ -37,21 +62,9 @@ icon: "bolt"
     go get github.com/superradcompany/microsandbox/sdk/go
     ```
 
-    ```bash CLI (Linux & macOS)
-    curl -fsSL https://install.microsandbox.dev | sh
-    ```
-
-    ```bash Homebrew (macOS)
-    brew install superradcompany/tap/microsandbox
-    ```
-
-    ```powershell CLI (Windows)
-    irm https://install.microsandbox.dev/windows | iex
-    ```
-
     </CodeGroup>
 
-    microsandbox uses hardware virtualization: Linux needs KVM, macOS needs Apple Silicon, and Windows needs Windows Hypervisor Platform. Check your local setup with:
+    Check local virtualization support with:
 
     ```bash
     msb doctor
@@ -151,15 +164,12 @@ Here's what happened behind that `Sandbox.builder(...).create()` call:
 The `exec` call uses the host-guest command channel, not SSH and not the sandbox network.
 
 <Tip>
-  Because exec doesn't go through the network, it works even when a sandbox has networking disabled via `.disable_network()` and no network interfaces at all.
-</Tip>
-
-<Tip>
   Want the same sandbox on hosted infrastructure? Set `MSB_BACKEND=cloud` and export `MSB_API_KEY`; the code above then runs on [microsandbox cloud](/cloud/overview) unchanged.
 </Tip>
 
 ## Next steps
 
+- [Explore practical examples](/examples/overview): tested workflows for agents, CI/CD, Docker, automation, and more
 - [Run on microsandbox cloud](/cloud/overview): the same code on hosted infrastructure
 - [Tune sandbox settings](/sandboxes/tuning): resize headroom, labels, secrets, and storage
 - [Troubleshoot Linux setup](/troubleshooting/linux): KVM, `/dev/kvm`, and permissions

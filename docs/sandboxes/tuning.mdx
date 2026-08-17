@@ -4,7 +4,7 @@ description: Change sandbox settings without recreating it
 icon: "sliders"
 ---
 
-<Tooltip tip="modify and live resize are not yet available on microsandbox cloud; create a replacement sandbox with the new configuration."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="modify and live resize are not yet available on microsandbox cloud; create a replacement sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 A sandbox's configuration is the host-side record that says how to run it: image, CPU and memory, environment, labels, mounts, network policy, secrets, and lifecycle settings.
 
@@ -336,7 +336,7 @@ For the credential model and host allow lists, see [Secrets](/sandboxes/secrets)
 
 ## Storage
 
-The local backend can resize an OCI sandbox's root disk through `modify`:
+Resize an OCI sandbox's root disk through `modify`:
 
 <CodeGroup>
 ```rust Rust

@@ -13,14 +13,12 @@ For local runtime installation and verification, see [Runtime setup](/sdk/setup#
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">owns_lifecycle</span>
 
-<Tooltip tip="On microsandbox cloud this is false; the cloud worker owns the sandbox process, not your handle."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
-
 ```python
 @property
 async def owns_lifecycle(self) -> bool
 ```
 
-Whether this handle owns the sandbox lifecycle. A sandbox returned directly by [`create()`](#sandbox-create) or [`start()`](#sandbox-start) owns lifecycle, including when created with `detached=True`, until you call [`detach()`](#sb-detach). Handles upgraded via [`SandboxHandle.connect()`](#sandboxhandle) do not own lifecycle. This is an async property; use `await sb.owns_lifecycle`.
+Whether this handle owns the sandbox lifecycle. Local attached sandboxes returned by [`create()`](#sandbox-create) or [`start()`](#sandbox-start) own lifecycle. Local detached sandboxes, cloud sandboxes, and handles upgraded via [`SandboxHandle.connect()`](#sandboxhandle) return `False`. This is an async property; use `await sb.owns_lifecycle`.
 
 <p className="msb-label">Returns</p>
 
@@ -61,6 +59,8 @@ Get a filesystem handle for reading and writing files inside the running sandbox
 
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">create()</span>
 
+<Tooltip tip="Creation works on microsandbox cloud, but host-integrated configuration is rejected and leaving the async context does not clean up the sandbox. Call stop() or remove() explicitly."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```python
 @staticmethod
 async def create(name: str, **kwargs) -> Sandbox
@@ -72,14 +72,14 @@ async def create(name: str, **kwargs) -> Sandbox
 async with await Sandbox.create("my-sandbox", image="alpine") as sb:
     output = await sb.shell("echo hello")
     print(output.stdout_text)
-# sandbox is automatically killed and removed on exit
+# Local sandbox is automatically killed and removed on exit
 ```
 
 </Accordion>
 
 Create and boot a sandbox. Keyword arguments provide individual config fields; see [`SandboxConfig`](#sandboxconfig) for the full set. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it is ready to accept commands. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes.
 
-The returned `Sandbox` is an async context manager. Use `async with` to guarantee cleanup; on exit the sandbox is killed and its persisted state removed.
+The returned `Sandbox` is an async context manager. On the local backend, `async with` guarantees cleanup: exit kills the sandbox and removes its persisted state. Cloud handles do not own the host process, so stop or remove them explicitly before leaving the context.
 
 <p className="msb-label">Parameters</p>
 
@@ -104,6 +104,8 @@ The returned `Sandbox` is an async context manager. Use `async with` to guarante
 </div>
 
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">create_with_progress()</span>
+
+<Tooltip tip="Microsandbox cloud creates the sandbox without reporting per-layer image-pull progress. Host-integrated configuration fields are also unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 @staticmethod
@@ -868,6 +870,8 @@ Stream captured log entries as a [`LogStream`](#logstream). With `follow=True` t
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">stop()</span>
 
+<Tooltip tip="Graceful stop works on microsandbox cloud; timeout expiry cannot escalate to force kill."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```python
 async def stop(self, timeout: float | None = None) -> None
 ```
@@ -1115,8 +1119,6 @@ Append `content` to an existing file at `path`. If the file lives in a lower ima
 
 #### <span className="msb-recv">Patch.</span><span className="msb-hn">mkdir()</span>
 
-<Tooltip tip="On microsandbox cloud, host sources resolve against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
-
 ```python
 @staticmethod
 def mkdir(path: str, *, mode: int | None = None) -> PatchConfig
@@ -1157,7 +1159,7 @@ Delete a file or directory at `path`. Idempotent: a no-op if the path doesn't ex
 
 #### <span className="msb-recv">Patch.</span><span className="msb-hn">copy_file()</span>
 
-<Tooltip tip="On microsandbox cloud, host sources resolve against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, host sources resolve against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 @staticmethod
@@ -1189,7 +1191,7 @@ Copy a single host file at `src` into the guest rootfs at `dst`.
 
 #### <span className="msb-recv">Patch.</span><span className="msb-hn">copy_dir()</span>
 
-<Tooltip tip="On microsandbox cloud, host sources resolve against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, host sources resolve against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 @staticmethod
@@ -1280,6 +1282,8 @@ Last update timestamp (ms since epoch)
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">config()</span>
 
+<Tooltip tip="Parsed sandbox configuration is local-only; use raw cloud JSON inspection on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```python
 config()
 ```
@@ -1304,6 +1308,8 @@ Re-fetch status and metadata, returning a fresh handle
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">ping()</span>
 
+<Tooltip tip="Not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```python
 ping()
 ```
@@ -1316,6 +1322,8 @@ Check agent reachability without refreshing idle activity; does not start stoppe
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">touch()</span>
 
+<Tooltip tip="Not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```python
 touch()
 ```
@@ -1327,6 +1335,8 @@ Explicitly refresh idle activity; does not start stopped sandboxes
 `Awaitable[`[`SandboxTouchResult`](#sandboxtouchresult)`]`
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">modify()</span>
+
+<Tooltip tip="Modify is not available on microsandbox cloud; recreate the sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 modify(...)
@@ -1364,6 +1374,8 @@ Start in attached or detached mode
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">stop()</span>
 
+<Tooltip tip="Graceful stop works on microsandbox cloud; timeout expiry cannot escalate to force kill."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```python
 stop(timeout=None)
 ```
@@ -1388,6 +1400,8 @@ Request graceful shutdown without waiting
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">kill()</span>
 
+<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```python
 kill(timeout=None)
 ```
@@ -1400,6 +1414,8 @@ Force terminate and wait until stopped state is observed
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">request_kill()</span>
 
+<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```python
 request_kill()
 ```
@@ -1411,6 +1427,8 @@ Request force termination without waiting
 `Awaitable[None]`
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">request_drain()</span>
+
+<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 request_drain()
@@ -1448,6 +1466,8 @@ Delete sandbox and state
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">metrics()</span>
 
+<Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```python
 metrics()
 ```
@@ -1459,6 +1479,8 @@ Point-in-time resource metrics
 `Awaitable[`[`SandboxMetrics`](#sandboxmetrics)`]`
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">logs()</span>
+
+<Tooltip tip="Bounded log reads are not available on microsandbox cloud; follow live and persist output externally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 logs(...)
@@ -1483,6 +1505,8 @@ Stream captured log entries (works without starting)
 `Awaitable[`[`LogStream`](#logstream)`]`
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot()</span>
+
+<Tooltip tip="Snapshots use local disk artifacts and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 snapshot(name)
@@ -1645,6 +1669,8 @@ async with session:
 ### SandboxConfig
 
 <p className="msb-backref">Used by <a href="#sandbox-create">create()</a> · <a href="#sandbox-create_with_progress">create_with_progress()</a></p>
+
+<Tooltip tip="Microsandbox cloud accepts common OCI, resource, lifecycle, environment, policy, secret, script, and inline patch fields. Snapshots, replace, host ports, custom network infrastructure, local rootfs forms, hostname, resource ceilings, metrics sampling, and custom registry transport are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_with_progress()`](#sandbox-create_with_progress). There is no `SandboxConfig` object you construct directly; these are passed as `**kwargs`.
 

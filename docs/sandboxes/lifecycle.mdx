@@ -33,11 +33,13 @@ stateDiagram-v2
 
 ## Create a sandbox
 
+<Tooltip tip="Local attached SDK handles stop their sandbox when the client process exits. Cloud sandboxes are service-owned, so stop or remove them explicitly."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 Creating a sandbox boots the microVM, mounts the filesystem, initializes the guest agent, and waits until it's ready to accept commands. Names must be non-empty and no longer than 128 UTF-8 bytes.
 
 <CodeGroup>
 ```rust Rust
-// Attached: sandbox stops when your process exits
+// Local attached handle: sandbox stops when your process exits
 let sb = Sandbox::builder("worker").image("python").create().await?;
 
 // Detached: sandbox survives after your process exits
@@ -49,7 +51,7 @@ let sb = Sandbox::builder("worker")
 ```
 
 ```typescript TypeScript
-// Attached: sandbox stops when your process exits
+// Local attached handle: sandbox stops when your process exits
 await using sb = await Sandbox.builder("worker").image("python").create();
 
 // Detached: sandbox survives after your process exits
@@ -60,7 +62,7 @@ const detached = await Sandbox.builder("worker")
 ```
 
 ```python Python
-# Attached: sandbox stops when your process exits
+# Local attached handle: sandbox stops when your process exits
 sb = await Sandbox.create("worker", image="python")
 
 # Detached: sandbox survives after your process exits
@@ -69,7 +71,7 @@ await sb.detach()
 ```
 
 ```go Go
-// Attached: sandbox stops when your process exits
+// Local attached handle: sandbox stops when your process exits
 sb, err := m.CreateSandbox(ctx, "worker", m.WithImage("python"))
 
 // Detached: sandbox survives after your process exits
@@ -195,7 +197,7 @@ msb ping worker --touch
 
 <Tooltip tip="Not yet available on microsandbox cloud; use a graceful stop instead."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-If a sandbox is unresponsive (e.g., stuck in a tight loop or a panic), force-kill it. The sandbox is terminated immediately with no graceful shutdown. On cloud, use a graceful [stop](#stop-and-restart).
+If a sandbox is unresponsive (e.g., stuck in a tight loop or a panic), force-kill it. The sandbox is terminated immediately with no graceful shutdown.
 
 <CodeGroup>
 ```rust Rust
@@ -411,8 +413,6 @@ The sandbox process also handles:
 Use [`msb logs`](/cli/sandbox-commands#msb-logs) or the SDK `logs()` method to read captured output from running, stopped, or crashed sandboxes. For source semantics, boot errors, and diagnostic flows, see [Logs](/sandboxes/logs).
 
 ## Sandbox process policies
-
-<Tooltip tip="Duration and idle policies are limited on microsandbox cloud today; stop and remove sandboxes explicitly when your workload finishes."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 For production workloads, configure how the sandbox process handles shutdown, idle detection, and maximum lifetime.
 

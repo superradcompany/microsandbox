@@ -9,6 +9,8 @@ Create, manage, and mount named volumes. See [Volumes](/sandboxes/volumes) for u
 
 #### <span className="msb-recv">Volume::</span><span className="msb-hn">get_default()</span>
 
+<Tooltip tip="Available only on microsandbox cloud; the local backend has no default volume."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```rust
 async fn get_default() -> MicrosandboxResult<VolumeHandle>
 ```
@@ -56,6 +58,8 @@ Create a builder for configuring a new named volume. Directory-backed volumes ar
 </div>
 
 #### <span className="msb-recv">Volume::</span><span className="msb-hn">create()</span>
+
+<Tooltip tip="Microsandbox cloud creates directory volumes only; capacity is unavailable and quota must be a nonzero whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn create(config: VolumeConfig) -> MicrosandboxResult<Volume>
@@ -225,8 +229,6 @@ The storage kind: [`Directory`](#volumekind) or [`Disk`](#volumekind).
 
 #### <span className="msb-recv">vol.</span><span className="msb-hn">fs()</span>
 
-<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
 ```rust
 fn fs(&self) -> VolumeFs<'_>
 ```
@@ -252,6 +254,8 @@ Get a filesystem handle for reading and writing the volume's files directly, wit
 
 #### <span className="msb-recv">vol.</span><span className="msb-hn">path()</span>
 
+<Tooltip tip="Only local volumes expose a path on the computer running the SDK."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```rust
 fn path(&self) -> MicrosandboxResult<&Path>
 ```
@@ -264,7 +268,7 @@ println!("{}", vol.path()?.display());
 
 </Accordion>
 
-The host-side directory where this volume's data is stored (local backend only). Errors with `Unsupported` for cloud volumes, whose bytes live in the org's object storage rather than on the caller's host.
+The host-side directory where this volume's data is stored.
 
 <p className="msb-label">Returns</p>
 
@@ -362,11 +366,13 @@ Which backend variant this volume is bound to: `Local` or `Cloud`.
 
 #### <span className="msb-recv">vol.</span><span className="msb-hn">local()</span>
 
+<Tooltip tip="Returns state only for local-backed volumes; None on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```rust
 fn local(&self) -> Option<&VolumeLocalState>
 ```
 
-Local-only volume state. Returns `Some` for local-backed volumes, `None` for cloud-backed ones.
+Returns `Some` for local-backed volumes and `None` otherwise.
 
 <p className="msb-label">Returns</p>
 
@@ -385,7 +391,7 @@ Local-only volume state. Returns `Some` for local-backed volumes, `None` for clo
 fn cloud(&self) -> Option<&VolumeCloudState>
 ```
 
-Cloud-only volume state. Returns `Some` for cloud-backed volumes, `None` for local-backed ones.
+Returns `Some` for cloud-backed volumes and `None` otherwise.
 
 <p className="msb-label">Returns</p>
 
@@ -437,8 +443,6 @@ The storage kind: [`Directory`](#volumekind) or [`Disk`](#volumekind).
 </div>
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">fs()</span>
-
-<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 fn fs(&self) -> VolumeFs<'_>
@@ -635,11 +639,13 @@ Which backend variant this handle is bound to: `Local` or `Cloud`.
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">local()</span>
 
+<Tooltip tip="Returns state only for local-backed volume handles; None on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```rust
 fn local(&self) -> Option<&VolumeHandleLocalState>
 ```
 
-Local-only handle state. Returns `Some` for local-backed handles, `None` for cloud-backed ones.
+Returns `Some` for local-backed handles and `None` otherwise.
 
 <p className="msb-label">Returns</p>
 
@@ -658,7 +664,7 @@ Local-only handle state. Returns `Some` for local-backed handles, `None` for clo
 fn cloud(&self) -> Option<&VolumeHandleCloudState>
 ```
 
-Cloud-only handle state. Returns `Some` for cloud-backed handles, `None` for local-backed ones.
+Returns `Some` for cloud-backed handles and `None` otherwise.
 
 <p className="msb-label">Returns</p>
 
@@ -676,8 +682,6 @@ Cloud-only handle state. Returns `Some` for cloud-backed handles, `None` for loc
 Host-side filesystem operations for a named volume.
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read()</span>
-
-<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn read(&self, path: &str) -> MicrosandboxResult<Bytes>
@@ -713,8 +717,6 @@ Read an entire file into memory as raw bytes.
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_to_string()</span>
 
-<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
 ```rust
 async fn read_to_string(&self, path: &str) -> MicrosandboxResult<String>
 ```
@@ -748,8 +750,6 @@ Read an entire file into memory as a UTF-8 string.
 </div>
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_stream()</span>
-
-<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn read_stream(&self, path: &str) -> MicrosandboxResult<VolumeFsReadStream>
@@ -788,8 +788,6 @@ Open a file for streaming reads. Returns a [`VolumeFsReadStream`](#volumefsreads
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">write()</span>
 
-<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
 ```rust
 async fn write(&self, path: &str, data: impl AsRef<[u8]>) -> MicrosandboxResult<()>
 ```
@@ -818,8 +816,6 @@ Write data to a file, creating parent directories as needed. Overwrites if the f
 </div>
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">write_stream()</span>
-
-<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn write_stream(&self, path: &str) -> MicrosandboxResult<VolumeFsWriteSink>
@@ -1154,7 +1150,7 @@ Set the disk volume's capacity. Required for disk volumes; rejected for director
 
 #### <span className="msb-recv">volume_builder.</span><span className="msb-hn">quota()</span>
 
-<Tooltip tip="On microsandbox cloud, quota sets a storage cap and must be a whole number of GiB."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, quota must be a nonzero whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 fn quota(self, size: impl Into<Mebibytes>) -> Self
@@ -1250,6 +1246,8 @@ Builder for configuring a sandbox volume mount.
 
 #### <span className="msb-recv">mount.</span><span className="msb-hn">bind()</span>
 
+<Tooltip tip="On microsandbox cloud, the host path resolves against your organization's host volume, not the computer running the SDK."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```rust
 fn bind(self, host: impl Into<PathBuf>) -> Self
 ```
@@ -1336,7 +1334,7 @@ Use an in-memory filesystem. Contents are discarded when the sandbox stops. Good
 
 #### <span className="msb-recv">mount.</span><span className="msb-hn">disk()</span>
 
-<Tooltip tip="On microsandbox cloud, the disk-image path resolves against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, the disk-image path resolves against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 <a id="mb-disk"></a>
 
@@ -1596,7 +1594,7 @@ Set disk capacity for a created disk volume. Accepts a bare `u32` (MiB) or a `Si
 
 #### <span className="msb-recv">named.</span><span className="msb-hn">quota()</span>
 
-<Tooltip tip="On microsandbox cloud, quota sets a storage cap and must be a whole number of GiB."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, quota must be a nonzero whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 <a id="nv-quota"></a>
 

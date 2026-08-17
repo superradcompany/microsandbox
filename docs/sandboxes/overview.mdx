@@ -136,13 +136,13 @@ actions, metric attribution, and OCI image labels.
 
 ## Image sources
 
-<Tooltip tip="microsandbox cloud supports OCI root filesystems only; host-directory and disk-image root filesystems are local-only."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
 Most sandboxes start from an OCI image:
 
 ```bash
 msb create python --name worker
 ```
+
+<Tooltip tip="Host-directory and disk-image root filesystems are local-only; microsandbox cloud supports OCI root filesystems."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 You can also use a host directory as the root filesystem:
 

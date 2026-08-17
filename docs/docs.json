@@ -30,16 +30,9 @@
             "pages": [
               "getting-started/introduction",
               "getting-started/quickstart",
+              "cloud/overview",
               "getting-started/backends",
               "getting-started/agents"
-            ]
-          },
-          {
-            "group": "Cloud",
-            "icon": "cloud",
-            "pages": [
-              "cloud/overview",
-              "cloud/compatibility"
             ]
           },
           {
@@ -54,6 +47,8 @@
               "sandboxes/tuning",
               "sandboxes/ssh",
               "sandboxes/volumes",
+              "images/overview",
+              "images/disk-images",
               "sandboxes/snapshots",
               "sandboxes/labels",
               "sandboxes/logs",
@@ -72,25 +67,11 @@
             ]
           },
           {
-            "group": "OCI Images",
-            "icon": "layer-group",
-            "pages": [
-              "images/overview",
-              "images/disk-images"
-            ]
-          },
-          {
-            "group": "Observability",
+            "group": "Operations",
             "icon": "gauge",
             "pages": [
               "observability/msb-metrics",
-              "observability/deep-dive"
-            ]
-          },
-          {
-            "group": "Performance",
-            "icon": "bolt",
-            "pages": [
+              "observability/deep-dive",
               "sandboxes/optimization",
               "sandboxes/cpu-placement"
             ]
@@ -313,33 +294,76 @@
         ]
       },
       {
-        "tab": "Recipes",
+        "tab": "Examples",
         "groups": [
+          {
+            "group": "Agents",
+            "icon": "robot",
+            "pages": [
+              "examples/overview",
+              "examples/agents/opencode",
+              "examples/agents/openclaw",
+              "examples/agents/goose",
+              "examples/agents/gemini-cli",
+              "examples/agents/hermes-agent",
+              "examples/agents/pi"
+            ]
+          },
+          {
+            "group": "CI/CD",
+            "icon": "code-pull-request",
+            "pages": [
+              "examples/ci-cd/github-actions-runner",
+              "examples/ci-cd/pr-checks",
+              "examples/ci-cd/compose-tests",
+              "examples/ci-cd/preview-deploys"
+            ]
+          },
           {
             "group": "Docker",
             "icon": "docker",
             "pages": [
-              "recipes/docker/docker-in-sandbox",
-              "recipes/docker/docker",
-              "recipes/docker/local-images"
+              "examples/docker/docker-in-sandbox",
+              "examples/docker/docker",
+              "examples/docker/local-images"
             ]
           },
           {
-            "group": "Guest",
-            "icon": "server",
+            "group": "Sandbox Workflows",
+            "icon": "shield-halved",
             "pages": [
-              "recipes/guest/systemd-services"
+              "examples/sandboxing/warm-workers",
+              "examples/development/vnc-desktop",
+              "examples/guest/systemd-services",
+              "examples/development/code-server",
+              "examples/development/jupyterlab"
             ]
           },
           {
-            "group": "Metrics backends",
-            "icon": "paper-plane",
+            "group": "Automation & Tooling",
+            "icon": "gears",
             "pages": [
-              "recipes/metrics-backends/grafana-cloud",
-              "recipes/metrics-backends/grafana-alloy",
-              "recipes/metrics-backends/otel-collector",
-              "recipes/metrics-backends/prometheus",
-              "recipes/metrics-backends/datadog"
+              "examples/automation/dependency-audits",
+              "examples/automation/parallel-batch-jobs",
+              "examples/plugins/terraform",
+              "examples/browser-automation/playwright",
+              "examples/web-automation/scrapy",
+              "examples/file-processing/libreoffice-pdf",
+              "examples/file-processing/ffmpeg"
+            ]
+          },
+          {
+            "group": "Data & Observability",
+            "icon": "database",
+            "pages": [
+              "examples/data/postgresql",
+              "examples/data/migration-rehearsal",
+              "examples/data/redis",
+              "examples/metrics-backends/grafana-cloud",
+              "examples/metrics-backends/grafana-alloy",
+              "examples/metrics-backends/otel-collector",
+              "examples/metrics-backends/prometheus",
+              "examples/metrics-backends/datadog"
             ]
           }
         ]
@@ -428,6 +452,26 @@
     {
       "source": "/sandbox-config",
       "destination": "/cli/configuration"
+    },
+    {
+      "source": "/recipes/use-cases/ai-coding-agent",
+      "destination": "/getting-started/agents"
+    },
+    {
+      "source": "/examples/use-cases/ai-coding-agent",
+      "destination": "/getting-started/agents"
+    },
+    {
+      "source": "/recipes",
+      "destination": "/examples/overview"
+    },
+    {
+      "source": "/recipes/:slug*",
+      "destination": "/examples/:slug*"
+    },
+    {
+      "source": "/cloud/compatibility",
+      "destination": "/cloud/overview#compatibility"
     }
   ],
   "integrations": {

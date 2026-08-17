@@ -1,5 +1,5 @@
 ---
-title: "Overview"
+title: "Cloud"
 description: "Run the same sandboxes on hosted infrastructure with an API key"
 icon: "cloud"
 ---
@@ -9,6 +9,8 @@ icon: "cloud"
 </Note>
 
 microsandbox cloud runs your sandboxes on hosted infrastructure. The SDKs and the `msb` CLI are the same ones you use locally: the same builders, the same commands, the same code. Select the cloud backend and provide an API key; there is no daemon or separate client.
+
+## Connect
 
 ```bash
 export MSB_BACKEND=cloud
@@ -79,25 +81,59 @@ msb run python -- python3 -c "print('Hello from the cloud!')"
 
 Hardware virtualization support on your machine is not needed for cloud sandboxes; `msb doctor` checks apply to the local runtime only.
 
+## What works on cloud
+
+<CardGroup cols={2}>
+  <Card title="Sandbox lifecycle" icon="box">
+    Create, inspect, list, reconnect, start, stop, and remove sandboxes.
+  </Card>
+  <Card title="Commands and files" icon="terminal">
+    Run buffered, streaming, and interactive commands, then move files in or out.
+  </Card>
+  <Card title="Persistent storage" icon="hard-drive">
+    Create managed volumes and access their files without starting a sandbox.
+  </Card>
+  <Card title="Network controls" icon="shield-halved">
+    Apply egress policy and hostname-scoped secrets from the same SDK surface.
+  </Card>
+</CardGroup>
+
+## Compatibility
+
+The everyday workflow is shared across local and cloud: sandbox lifecycle, command execution, common guest-filesystem operations, network policy, secrets, SSH sessions, and managed storage. The differences below are the ones to plan for.
+
+Across the docs, no badge means a feature works everywhere. Exceptions use only three badges: **Local-only**, **Limited on cloud**, and **Cloud-only**.
+
+| Area | Cloud status | Difference or alternative |
+|---|---|---|
+| Sandbox lifecycle and execution | **Works everywhere** | Create, start, inspect, list, stop, remove, exec, shell, streaming, and interactive PTY workflows use the same SDK and CLI surface. |
+| Guest filesystem | **Limited on cloud** | Common path operations and host-to-guest copies work. Low-level open-handle operations are local-only. |
+| Managed volumes | **Limited on cloud** | Default and named directory volumes support lifecycle and filesystem access. Create a named volume before mounting it; disk-kind volumes and create-on-mount are local-only. |
+| Volume and host paths | **Limited on cloud** | Bind and disk-image source paths resolve against the organization's host volume, not the machine running the client. |
+| Network policy and secrets | **Works everywhere** | Egress policies and hostname-scoped secret substitution carry across backends. |
+| Custom networking | **Local-only** | Published ports, custom nameservers, interface overrides, rate limiters, TLS interception, and host-CA trust are not accepted by cloud create. |
+| Logs | **Limited on cloud** | SDK live-follow works. Bounded or historical reads and the `msb logs` command are local-only; persist followed output externally when retention matters. |
+| SSH | **Limited on cloud** | Native SDK sessions and `msb ssh` work. `msb ssh serve` is local-only; reusable SDK servers require explicit key material. |
+| Images | **Limited on cloud** | OCI image references and registry credentials work. Local cache commands, host-directory or disk-image roots, plain-HTTP registries, and custom registry CAs are local-only. |
+| Reconfiguration | **Local-only** | Recreate the sandbox with the new CPU, memory, mounts, or other settings instead of using `modify`. |
+| Snapshots | **Local-only** | Use a named volume for state that must survive sandbox replacement. |
+| Resource metrics | **Local-only** | Instrument the workload with an external monitoring system. |
+| Process controls | **Limited on cloud** | Graceful stop plus maximum-duration and idle-timeout policies work. Force kill, drain, ping, and touch are local-only. |
+
 ## REST API
 
 The same key also authenticates the [REST API](/api-reference/overview) directly, so you can manage sandboxes, volumes, and usage over plain HTTPS without an SDK. Command execution, file transfer, and SSH ride the sandbox command channel, which the SDKs and CLI handle for you.
 
 ## What to know
 
-- **Backend selection.** The API key alone selects the cloud. For explicit control (forcing local, choosing in code, per-project profiles), see [Backends](/getting-started/backends).
-- **Compatibility.** Almost the entire SDK and CLI surface behaves identically. The exceptions and their alternatives are listed on the [compatibility page](/cloud/compatibility).
-- **Networking.** Cloud sandboxes get a cloud-assigned hostname. SSH works through the same `msb ssh` and SDK SSH clients you use locally.
-- **Images.** Specify any OCI image on create; the cloud resolves and pulls it for you. Local image-cache commands don't apply.
+- **Backend selection.** Cloud is explicit: set `MSB_BACKEND=cloud`, select a cloud profile, or choose it in code. See [Backends](/getting-started/backends).
+- **Networking.** Cloud sandboxes get a platform-assigned hostname. SSH works through the same `msb ssh` and SDK SSH clients you use locally.
+- **Images.** Specify an OCI image when you create the sandbox; the cloud pulls it for you.
 - **Keys and billing.** API keys, usage, and invoices live in the [dashboard](https://dashboard.microsandbox.dev).
 
 ## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Cloud compatibility" icon="table-list" href="/cloud/compatibility">
-    What works today, what's limited, and what to use instead.
-  </Card>
-
   <Card title="API reference" icon="brackets-curly" href="/api-reference/overview">
     The REST API behind the SDKs, authenticated with your API key.
   </Card>

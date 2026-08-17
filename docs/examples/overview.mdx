@@ -1,0 +1,46 @@
+---
+title: Examples
+sidebarTitle: Overview
+description: Practical, tested microsandbox workflows for agents, CI, automation, tooling, browsers, data, and files
+icon: "flask"
+---
+
+These examples start with the smallest useful microsandbox workflow. Short commands stay together; longer workflows are split into run, use, and cleanup steps so the important boundary is easy to see.
+
+## Start with these
+
+<CardGroup cols={2}>
+  <Card title="OpenCode" icon="terminal" href="/examples/agents/opencode">
+    Run a terminal coding agent against an isolated copy of your project.
+  </Card>
+  <Card title="code-server" icon="code" href="/examples/development/code-server">
+    Open an isolated VS Code workspace in the browser.
+  </Card>
+  <Card title="GitHub Actions runner" icon="github" href="/examples/ci-cd/github-actions-runner">
+    Operate one production-safe JIT runner in a fresh microVM.
+  </Card>
+  <Card title="Compose tests" icon="boxes-stacked" href="/examples/ci-cd/compose-tests">
+    Run a multi-container stack without exposing the host Docker socket.
+  </Card>
+  <Card title="Warm workers" icon="bolt" href="/examples/sandboxing/warm-workers">
+    Snapshot a toolchain once, then launch clean, prepared workers.
+  </Card>
+  <Card title="Parallel batch jobs" icon="layer-group" href="/examples/automation/parallel-batch-jobs">
+    Fan out bounded jobs and collect checked artifacts independently.
+  </Card>
+  <Card title="Scrapy crawler" icon="spider" href="/examples/web-automation/scrapy">
+    Crawl into bounded JSON with robots.txt and network controls.
+  </Card>
+  <Card title="Media processing" icon="film" href="/examples/file-processing/ffmpeg">
+    Convert untrusted media without mounting the host directory writable.
+  </Card>
+</CardGroup>
+
+## Browse by workflow
+
+- **Agents**: OpenCode, OpenClaw, Goose, Gemini CLI, Hermes Agent, and Pi.
+- **CI/CD**: Ephemeral GitHub Actions runners, isolated PR checks, Docker Compose integration tests, and time-limited preview deploys.
+- **Automation**: Scheduled dependency audits and parallel batch dispatch.
+- **Tool isolation**: Vet native Terraform providers in constrained workers.
+- **Web Automation**: Playwright browser jobs and bounded Scrapy crawls.
+- **Systems and data**: Docker, systemd, VNC, PostgreSQL, Redis, migrations, metrics backends, and file processing.

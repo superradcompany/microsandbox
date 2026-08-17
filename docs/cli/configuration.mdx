@@ -4,6 +4,8 @@ description: Configure sandboxes created by the CLI with root or scoped YAML fil
 icon: "file-code"
 ---
 
+<Tooltip tip="Common image, resource, lifecycle, environment, policy, secret, script, and patch fields work everywhere. Host-integrated networking, local rootfs forms, snapshots, replace behavior, and several runtime fields are unavailable on microsandbox cloud."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 Sandbox configuration is a reusable, sparse definition for one sandbox. Load it with `msb run`, `msb create`, or `msb install`; explicit CLI arguments are applied on top. The file may have any name when passed with `--conf`.
 
 ```yaml

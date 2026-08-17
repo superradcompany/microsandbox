@@ -7,7 +7,7 @@ icon: "chart-line"
 <Tooltip tip="This page covers msb-metrics, which reads host-local shared memory and is local-only. It does not apply to microsandbox cloud sandboxes."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 <Note>
-This recipe ships data emitted by [`msb-metrics`](/observability/msb-metrics).
+This example ships data emitted by [`msb-metrics`](/observability/msb-metrics).
 See the msb-metrics page for the flag reference, metric names, and
 deployment constraints.
 </Note>
@@ -56,7 +56,7 @@ the agent. It expects delta temporality for metrics, while
 temporality conversion step.
 
 If you need direct intake, put an
-[otel-collector](/recipes/metrics-backends/otel-collector) with the
+[otel-collector](/examples/metrics-backends/otel-collector) with the
 `cumulativetodelta` processor between `msb-metrics` and Datadog.
 Otherwise, stick with the agent path above, which converts temporality
 for you.

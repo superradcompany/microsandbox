@@ -1,0 +1,58 @@
+---
+title: Run isolated PR checks
+sidebarTitle: PR checks
+description: Stream a commit into a bounded microVM and run its tests there
+icon: "check-double"
+---
+
+Boot a clean worker, stream only committed files into it, and run the pull request's install and test commands inside the microVM. The host never executes code from the checkout.
+
+This example uses Node.js. The same `create → copy → exec` shape works for other toolchains.
+
+## Create the worker
+
+<Tooltip tip="This worker works on microsandbox cloud after omitting replace-on-create from the command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```sh
+msb run -d --name pr-check --replace \
+  --cpus 2 --memory 1G --root-disk 3G --max-duration 10m \
+  --net-default deny \
+  --net-rule 'allow@registry.npmjs.org:tcp:443' \
+  --security restricted \
+  node:24.18.1-bookworm-slim -- sh -lc \
+    'install -d -o node -g node /workspace; exec sleep 600'
+```
+
+Only the npm registry is reachable. Do not pass CI secrets or mount the host checkout into this worker.
+
+## Copy the commit
+
+```sh
+git archive HEAD | \
+  msb exec --stream --user node pr-check -- tar -x -C /workspace
+```
+
+`git archive` excludes `.git`, checkout credentials, and uncommitted host files. In CI, make sure `HEAD` is the exact pull-request commit you intend to test.
+
+## Install and test
+
+```sh
+msb exec --timeout 8m \
+  --user node --workdir /workspace \
+  --rlimit nproc=256 --rlimit nofile=1024 \
+  pr-check -- sh -lc 'npm ci && npm test'
+```
+
+Package lifecycle scripts and tests execute inside the microVM. Their exit code becomes the `msb exec` exit code, so the same command works in CI.
+
+If the project installs from another registry, add the smallest required network rule. For fully offline checks, install reviewed dependencies once, create a snapshot, and launch each worker with `--no-net`; see [Warm workers](/examples/sandboxing/warm-workers).
+
+<Note>
+  A hosted CI runner must expose KVM on Linux or run on Apple Silicon macOS. Many managed runners do not allow nested virtualization.
+</Note>
+
+## Cleanup
+
+```sh
+msb rm -f pr-check
+```

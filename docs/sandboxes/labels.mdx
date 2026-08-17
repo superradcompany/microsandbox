@@ -119,6 +119,8 @@ page, err := m.ListSandboxesWith(ctx,
 ```
 </CodeGroup>
 
+<Tooltip tip="Label selection works on microsandbox cloud except with ping and touch, which are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 On the CLI, `--label` also drives the fleet commands directly, so you act on the whole group in one call instead of listing and looping:
 
 ```bash
@@ -127,7 +129,7 @@ msb restart --label app=engine     # restart every match
 msb rm --force --label app=engine  # remove every match
 ```
 
-It works the same on `ps`, `ls`, `start`, `stop`, `restart`, `ping`, `touch`, and `rm`. On cloud, `ping` and `touch` are not yet available.
+It works the same on `ps`, `ls`, `start`, `stop`, `restart`, `ping`, `touch`, and `rm`.
 
 ## Attribute metrics
 

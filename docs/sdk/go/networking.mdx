@@ -398,7 +398,7 @@ The full network stack configuration passed via [`WithNetwork`](#m-withnetwork).
 | IPv4Pool | `string` | Pool used to derive per-sandbox `/30` guest subnets. Defaults to `172.16.0.0/12` |
 | IPv6Pool | `string` | Pool used to derive per-sandbox `/64` guest prefixes. Defaults to `fd42:6d73:62::/48` |
 | MaxConnections | `*uint` | Cap on concurrent network connections from the sandbox |
-| RateLimiter | [`*NetworkRateLimiterConfig`](#networkratelimiterconfig) | Local rate limits grouped by direction. `nil` means unlimited. Cloud network configuration does not expose this field |
+| RateLimiter | [`*NetworkRateLimiterConfig`](#networkratelimiterconfig) | Rate limits grouped by direction. `nil` means unlimited |
 | OnSecretViolation | [`ViolationAction`](/sdk/go/secrets#violationaction) | Sandbox-wide action when a secret is sent to a disallowed host. Per-secret overrides via `SecretEntry.OnViolation` |
 | TrustHostCAs | `*bool` | Ship the host's extra CA bundles into the guest. Opt-in for corporate MITM proxies whose gateway CA is unknown to the guest's stock bundle |
 
@@ -538,6 +538,8 @@ Host-scoped upstream certificate verification override.
 
 <p className="msb-backref">Used by <a href="#networkconfig">NetworkConfig.RateLimiter</a></p>
 
+<Tooltip tip="Host-side network rate limiting is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```go
 type NetworkRateLimiterConfig struct {
     Egress  *RateLimiterConfig
@@ -563,7 +565,7 @@ sb, err := m.CreateSandbox(ctx, "throttled",
 
 </Accordion>
 
-Local network rate limits grouped by direction. An omitted direction is unlimited. Cloud network configuration does not expose rate limits.
+Network rate limits grouped by direction. An omitted direction is unlimited.
 
 | Field | Type | Description |
 |-------|------|-------------|

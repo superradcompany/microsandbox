@@ -8,6 +8,8 @@ Before a sandbox starts doing real work, you can choose its root storage and pre
 
 ## Flat OCI rootfs
 
+<Tooltip tip="Flat OCI root disks are not available on microsandbox cloud; use the managed layered root."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 OCI sandboxes use stitched EROFS lower layers with a writable ext4 upper and guest OverlayFS by default. A flat root disk is an explicit alternative: microsandbox merges the OCI layers into one deterministic ext4 base, caches it by content, creates a private clone for each sandbox, grows that clone to the requested capacity, and mounts it directly as the guest root. The immutable cached base is never attached writable.
 
 <CodeGroup>
@@ -56,7 +58,7 @@ sb, err := m.CreateSandbox(ctx, "worker",
 
 `auto` first asks the host filesystem for a native copy-on-write clone and falls back to an independent sparse copy when cloning is unsupported. Use `copy` when independence from the base's physical extents matters more than provisioning latency, or `reflink` when clone support is an operational requirement and failure is preferable to fallback. Linux uses `FICLONE`, macOS uses `clonefile`, and Windows uses block cloning only on volumes that advertise block refcounting.
 
-The normal layered root remains the default and retains layer-level deduplication. Flat v1 is local-only, ext4-only, and incompatible with rootfs patches and snapshots; unsupported combinations fail explicitly.
+The normal layered root remains the default and retains layer-level deduplication. Flat v1 uses ext4 and is incompatible with rootfs patches and snapshots; unsupported combinations fail explicitly.
 
 See [Optimization](/sandboxes/optimization#storage-layout-layered-or-flat) for workload tradeoffs, host filesystem expectations, and how to verify the clone strategy actually used.
 

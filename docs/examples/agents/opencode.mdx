@@ -1,0 +1,98 @@
+---
+title: OpenCode
+description: Run the OpenCode terminal agent against an isolated copy of a project
+icon: "/images/recipes/agents/opencode.svg"
+---
+
+This example installs OpenCode in a microVM and opens its terminal UI in an isolated workspace. Project files are copied into the sandbox rather than bind-mounted, so commands and edits cannot directly change the host checkout.
+
+## Start OpenCode
+
+<Tooltip tip="On microsandbox cloud, create the named volumes first and omit replace-on-create from this command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+Replace `./my-project` with the project directory you want OpenCode to work on:
+
+```sh
+msb run -t --name opencode-demo --replace \
+  --cpus 2 --memory 2G --root-disk 4G \
+  --copy-dir ./my-project:/workspace \
+  --workdir /workspace \
+  --mount-named opencode-config:/root/.config/opencode \
+  --mount-named opencode-data:/root/.local/share/opencode \
+  node:24-bookworm-slim -- sh -lc '
+    apt-get update &&
+    apt-get install -y --no-install-recommends ca-certificates git &&
+    npm install -g opencode-ai@1.18.4 &&
+    exec opencode
+  '
+```
+
+The first run downloads the package and may take a couple of minutes. OpenCode should render its prompt and offer `/connect` for provider setup. The two named volumes retain its normal XDG configuration and data directories if you recreate the sandbox.
+
+<Tip>
+  To try the TUI without a project, replace `--copy-dir ./my-project:/workspace` with `--mkdir /workspace`.
+</Tip>
+
+## Start another session
+
+After leaving OpenCode, return to the same sandbox and workspace with:
+
+```sh
+msb exec -t opencode-demo -- opencode
+```
+
+## Verify the installation
+
+Exit the TUI, then run:
+
+```sh
+msb exec opencode-demo -- opencode --version
+```
+
+The pinned example prints `1.18.4`.
+
+## Export changes
+
+Review the diff inside the sandbox before copying anything back:
+
+```sh
+msb exec opencode-demo -- sh -lc 'cd /workspace && git status --short && git diff --stat && git diff'
+```
+
+For a Git repository, export a patch instead of replacing your host checkout:
+
+```sh
+msb exec opencode-demo -- sh -lc 'cd /workspace && git add -N . && git diff --binary > /tmp/opencode.patch'
+```
+
+Copy the patch to the host:
+
+```sh
+msb cp opencode-demo:/tmp/opencode.patch ./opencode.patch
+```
+
+Check that it applies cleanly before applying it:
+
+```sh
+git apply --check ./opencode.patch
+```
+
+## Cleanup
+
+Remove the sandbox:
+
+```sh
+msb rm -f opencode-demo
+```
+
+Remove persisted configuration and data only when you no longer need them:
+
+```sh
+msb volume rm opencode-config opencode-data
+```
+
+Keep the volumes if you want to retain provider connections, sessions, and OpenCode configuration. Never copy an agent's entire home directory back to the host.
+
+## Reference
+
+- [OpenCode installation](https://opencode.ai/docs/)

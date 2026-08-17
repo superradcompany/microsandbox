@@ -6,17 +6,25 @@ icon: "house"
 
 microsandbox is a local-first microVM runtime for untrusted workloads: AI agents, user code, plugins, package installs, CI jobs, dev environments, scrapers, and automation.
 
-Each sandbox is a lightweight VM with its own Linux kernel, filesystem, and network boundary. Your app or the `msb` CLI starts it on your machine or on [microsandbox cloud](/cloud/overview) with an API key, talks to it through a host-guest command channel, and controls what it can access.
+Each sandbox is a lightweight VM with its own Linux kernel, filesystem, and network boundary. Start one locally with the `msb` CLI or an SDK, or run it on [microsandbox cloud](/cloud/overview) with an API key. From there, what you do inside the sandbox is up to you.
 
 It keeps the familiar workflow of OCI images and command execution, while moving risky work out of the host process.
 
-<Tip>
-  Boot a microVM in one command.
+<CodeGroup>
+```bash npx
+npx microsandbox run debian
+```
 
-  ```bash
-  npx microsandbox run debian
-  ```
-</Tip>
+```bash macOS & Linux
+curl -fsSL https://install.microsandbox.dev | sh
+msb run debian
+```
+
+```powershell Windows
+irm https://install.microsandbox.dev/windows | iex
+msb run debian
+```
+</CodeGroup>
 
 ## Why microsandbox
 
@@ -37,19 +45,15 @@ It keeps the familiar workflow of OCI images and command execution, while moving
 - **Scrapers and automation.** Allow internet access while blocking private networks and metadata services.
 - **Secure tool execution.** Run CLIs and dependencies that should not see host secrets or ambient credentials.
 
-## What makes it different
-
-### Secrets stay on the host
-
-Instead of putting real credentials inside the VM, microsandbox injects placeholders and swaps them for real values only when traffic goes to an allowed host. Code inside the sandbox can run freely without ever receiving the secret value itself.
-
-### Network policy is host-controlled
-
-All sandbox traffic flows through a host-side network stack. You can allow public internet access, block private networks, publish ports, deny by default, pin DNS behavior, or inspect TLS traffic without relying on guest cooperation.
-
-### Storage is private by default
-
-For the normal OCI image workflow, each sandbox gets its own writable root filesystem on top of the image. Writes there do not change the cached image. Data reaches the host or another sandbox only when you choose a sharing mechanism, such as a bind mount, named volume, disk image, or snapshot.
+<a className="msb-examples-cta" href="/examples/overview">
+  <span className="msb-examples-cta-icon"><Icon icon="book-open" size={18} /></span>
+  <span className="msb-examples-cta-copy">
+    <span className="msb-examples-cta-label">Examples</span>
+    <span className="msb-examples-cta-title">See microsandbox in practice</span>
+    <span>Tested workflows for agents, CI/CD, Docker, automation, and more.</span>
+  </span>
+  <span className="msb-examples-cta-action">Browse all <Icon icon="arrow-right" size={12} /></span>
+</a>
 
 ## Minimal example
 

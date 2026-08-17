@@ -11,6 +11,8 @@ Factory for sandbox image sources.
 
 #### <span className="msb-recv">Image.</span><span className="msb-hn">oci()</span>
 
+<Tooltip tip="OCI images work everywhere; microsandbox cloud accepts managed root disks only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```python
 @staticmethod
 def oci(
@@ -64,6 +66,8 @@ Create an OCI image rootfs source. Use `root_disk` to configure its writable lay
 
 #### <span className="msb-recv">Image.</span><span className="msb-hn">bind()</span>
 
+<Tooltip tip="Host-directory root filesystems are not available on microsandbox cloud; use an OCI image."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```python
 @staticmethod
 def bind(path: str) -> ImageSource
@@ -98,6 +102,8 @@ Create a rootfs source that binds a host directory as the guest root filesystem.
 </div>
 
 #### <span className="msb-recv">Image.</span><span className="msb-hn">disk()</span>
+
+<Tooltip tip="Disk-image root filesystems are not available on microsandbox cloud; use an OCI image."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 @staticmethod
@@ -141,7 +147,11 @@ Create a rootfs source backed by a disk image. The format is inferred from the f
 
 <p className="msb-member-group">Cache management</p>
 
-These static methods inspect and prune images already pulled into the local OCI cache. They require a local backend; on a cloud backend they raise `UnsupportedError`.
+These static methods inspect and prune images already pulled into the local OCI cache.
+
+## Local image cache
+
+<Tooltip tip="These methods manage the local image cache. On microsandbox cloud, specify an OCI image when creating the sandbox and it is pulled for you."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 #### <span className="msb-recv">Image.</span><span className="msb-hn">get()</span>
 
@@ -516,6 +526,8 @@ Microsandbox-managed sparse ext4 disk
 
 #### <span className="msb-recv">RootDisk.</span><span className="msb-hn">tmpfs()</span>
 
+<Tooltip tip="Tmpfs root disks are not available on microsandbox cloud; use a managed root disk."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```python
 tmpfs(size_mib=None)
 ```
@@ -527,6 +539,8 @@ Ephemeral RAM-backed upper layer
 [`RootDiskConfig`](#rootdiskconfig)
 
 #### <span className="msb-recv">RootDisk.</span><span className="msb-hn">disk()</span>
+
+<Tooltip tip="Caller-supplied root disk images are not available on microsandbox cloud; use a managed root disk."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 disk(path, *, format=None, fstype=None)

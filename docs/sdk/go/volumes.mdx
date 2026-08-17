@@ -9,6 +9,8 @@ Create, manage, and mount named volumes. See [Volumes](/sandboxes/volumes) for u
 
 #### <span className="msb-recv"></span><span className="msb-hn">GetDefaultVolume()</span>
 
+<Tooltip tip="Available only on microsandbox cloud; the local backend has no default volume."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```go
 func GetDefaultVolume(ctx context.Context) (*VolumeHandle, error)
 ```
@@ -22,6 +24,8 @@ contents, err := volume.FS().ReadString(ctx, "customers/acme.json")
 ```
 
 #### <span className="msb-recv"></span><span className="msb-hn">CreateVolume()</span>
+
+<Tooltip tip="Microsandbox cloud creates directory volumes only; size is unavailable and quota must be a nonzero whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func CreateVolume(ctx context.Context, name string, opts ...VolumeOption) (*Volume, error)
@@ -187,6 +191,8 @@ Return the volume's name.
 
 #### <span className="msb-recv">v.</span><span className="msb-hn">Path()</span>
 
+<Tooltip tip="Only local volumes expose a path on the computer running the SDK."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```go
 func (v *Volume) Path() string
 ```
@@ -194,8 +200,6 @@ func (v *Volume) Path() string
 Return the host filesystem path of the volume's data directory.
 
 #### <span className="msb-recv">v.</span><span className="msb-hn">FS()</span>
-
-<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (v *Volume) FS() *VolumeFs
@@ -255,6 +259,8 @@ func (h *VolumeHandle) Name() string
 Return the volume name.
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">Path()</span>
+
+<Tooltip tip="Only local volume handles expose a path on the computer running the SDK."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (h *VolumeHandle) Path() string
@@ -337,8 +343,6 @@ Return the creation timestamp, or the zero `time.Time` value if unknown.
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">FS()</span>
 
-<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
 ```go
 func (h *VolumeHandle) FS() *VolumeFs
 ```
@@ -378,8 +382,6 @@ Return the absolute host path of the volume's data directory.
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">Read()</span>
 
-<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
 ```go
 func (fs *VolumeFs) Read(ctx context.Context, relPath string) ([]byte, error)
 ```
@@ -406,8 +408,6 @@ Read the contents of a file relative to the volume root.
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">ReadString()</span>
 
-<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
 ```go
 func (fs *VolumeFs) ReadString(ctx context.Context, relPath string) (string, error)
 ```
@@ -415,8 +415,6 @@ func (fs *VolumeFs) ReadString(ctx context.Context, relPath string) (string, err
 Read a file and return its contents as a UTF-8 string.
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">Write()</span>
-
-<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (fs *VolumeFs) Write(ctx context.Context, relPath string, data []byte) error
@@ -438,8 +436,6 @@ Write data to a file, creating or truncating it. Created files use mode `0o644`.
 </div>
 
 #### <span className="msb-recv">vfs.</span><span className="msb-hn">WriteString()</span>
-
-<Tooltip tip="Unmounted-volume filesystem access is not available on microsandbox cloud; mount the volume into a sandbox and use the sandbox filesystem."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (fs *VolumeFs) WriteString(ctx context.Context, relPath, content string) error
@@ -532,6 +528,8 @@ Set disk volume capacity in MiB. Required when the kind is [`VolumeKindDisk`](#v
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithVolumeQuota()</span>
 
+<Tooltip tip="On microsandbox cloud, quota must be a nonzero whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```go
 func WithVolumeQuota(mebibytes uint32) VolumeOption
 ```
@@ -567,6 +565,8 @@ Attach key-value labels to the volume. When called repeatedly, the maps merge; l
 ## Mount
 
 #### <span className="msb-recv">Mount.</span><span className="msb-hn">Bind()</span>
+
+<Tooltip tip="On microsandbox cloud, the host path resolves against your organization's host volume, not the computer running the SDK."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (mountFactory) Bind(hostPath string, opts MountOptions) MountConfig
@@ -628,6 +628,8 @@ Mount an existing named persistent volume. The volume must already exist (create
 </div>
 
 #### <span className="msb-recv">Mount.</span><span className="msb-hn">NamedWith()</span>
+
+<Tooltip tip="On microsandbox cloud, create the named volume before mounting; create-on-mount, disk-kind, and size are unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (mountFactory) NamedWith(name string, opts MountOptions, namedOpts NamedVolumeOptions) MountConfig
@@ -699,7 +701,7 @@ Mount an ephemeral in-memory filesystem. Contents are discarded when the sandbox
 
 #### <span className="msb-recv">Mount.</span><span className="msb-hn">Disk()</span>
 
-<Tooltip tip="On microsandbox cloud, the disk-image path resolves against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, the disk-image path resolves against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (mountFactory) Disk(hostPath string, opts DiskOptions) MountConfig

@@ -3,6 +3,44 @@ body {
 }
 
 /* ----------------------------------------------------------------------------
+ * Agent example sidebar icons: Mintlify renders custom page icons as images,
+ * which bypasses the gray idle / violet selected colors used by built-in icon
+ * masks. Reuse each official brand mark as a mask so it follows the same
+ * interaction states as the rest of the sidebar.
+ * -------------------------------------------------------------------------- */
+nav[aria-label="Pages"] a > div:has(> img[src*="/images/recipes/agents/"]) {
+  width: 1rem;
+  background-color: #9ca3af;
+  -webkit-mask-image: var(--msb-agent-icon);
+  -webkit-mask-position: center;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-size: 1rem 1rem;
+  mask-image: var(--msb-agent-icon);
+  mask-position: center;
+  mask-repeat: no-repeat;
+  mask-size: 1rem 1rem;
+}
+
+.dark nav[aria-label="Pages"] a > div:has(> img[src*="/images/recipes/agents/"]) {
+  background-color: #6b7280;
+}
+
+nav[aria-label="Pages"] a[aria-current="page"] > div:has(> img[src*="/images/recipes/agents/"]) {
+  background-color: #bf84fe;
+}
+
+nav[aria-label="Pages"] img[src*="/images/recipes/agents/"] {
+  display: none;
+}
+
+nav[aria-label="Pages"] a > div:has(> img[src*="/opencode.svg"]) { --msb-agent-icon: url("/images/recipes/agents/opencode.svg"); }
+nav[aria-label="Pages"] a > div:has(> img[src*="/openclaw.svg"]) { --msb-agent-icon: url("/images/recipes/agents/openclaw.svg"); }
+nav[aria-label="Pages"] a > div:has(> img[src*="/goose.svg"]) { --msb-agent-icon: url("/images/recipes/agents/goose.svg"); }
+nav[aria-label="Pages"] a > div:has(> img[src*="/gemini-cli.svg"]) { --msb-agent-icon: url("/images/recipes/agents/gemini-cli.svg"); }
+nav[aria-label="Pages"] a > div:has(> img[src*="/hermes-agent.svg"]) { --msb-agent-icon: url("/images/recipes/agents/hermes-agent.svg"); }
+nav[aria-label="Pages"] a > div:has(> img[src*="/pi.svg"]) { --msb-agent-icon: url("/images/recipes/agents/pi.svg"); }
+
+/* ----------------------------------------------------------------------------
  * Content width: Mintlify caps #content-area at max-w-xl (36rem) and sets its
  * width to `calc(100% - 28rem)`, centered with mx-auto, so on wide screens the
  * content is a narrow column with large dead zones. The TOC column to its right
@@ -33,6 +71,7 @@ body {
   --msb-code-control-surface-hover: rgba(240, 228, 255, 0.38);
   --msb-code-control-icon: rgba(95, 60, 175, 0.72);
   --msb-code-control-icon-hover: #5f3caf;
+  --msb-interactive-accent: rgba(109, 75, 196, 0.42);
   --msb-code-fade-10: rgba(255, 255, 255, 0.06);
   --msb-code-fade-25: rgba(255, 255, 255, 0.14);
   --msb-code-fade-35: rgba(255, 255, 255, 0.24);
@@ -50,10 +89,222 @@ body {
   --msb-code-control-surface-hover: rgba(42, 29, 64, 0.38);
   --msb-code-control-icon: rgba(216, 192, 255, 0.72);
   --msb-code-control-icon-hover: #d8c0ff;
+  --msb-interactive-accent: rgba(191, 132, 254, 0.52);
   --msb-code-fade-10: rgba(11, 12, 14, 0.06);
   --msb-code-fade-25: rgba(11, 12, 14, 0.14);
   --msb-code-fade-35: rgba(11, 12, 14, 0.24);
   --msb-code-fade-45: rgba(11, 12, 14, 0.34);
+}
+
+/* Compact platform preflight: one grouped strip keeps host requirements
+ * visible without giving four short facts the visual weight of full cards or
+ * a page-width comparison table. */
+.msb-platform-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  margin: 0.75rem 0 1.5rem;
+  border: 1px solid rgba(109, 75, 196, 0.16);
+  border-radius: 0.75rem;
+  background: rgba(109, 75, 196, 0.16);
+}
+
+.msb-platform-item {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.625rem;
+  padding: 0.7rem 0.8rem;
+  color: inherit;
+  background: #fff;
+  text-decoration: none;
+}
+
+.msb-platform-icon {
+  display: grid;
+  flex: 0 0 1.25rem;
+  width: 1.25rem;
+  place-items: center;
+  color: #a770ef;
+}
+
+.msb-platform-copy {
+  display: grid;
+  min-width: 0;
+  line-height: 1.2;
+}
+
+.msb-platform-copy strong {
+  font-size: 0.84rem;
+  font-weight: 650;
+}
+
+.msb-platform-copy > span {
+  overflow: hidden;
+  margin-top: 0.18rem;
+  font-size: 0.72rem;
+  opacity: 0.65;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.msb-platform-link:hover {
+  background: #faf5ff;
+}
+
+.msb-platform-link {
+  border-bottom: 0 !important;
+}
+
+.msb-platform-link:focus-visible {
+  outline: 2px solid #a770ef;
+  outline-offset: -2px;
+}
+
+.dark .msb-platform-strip {
+  border-color: rgba(191, 132, 254, 0.2);
+  background: rgba(191, 132, 254, 0.2);
+}
+
+.dark .msb-platform-item {
+  background: #111014;
+}
+
+.dark .msb-platform-link:hover {
+  background: #1b1428;
+}
+
+@media (max-width: 760px) {
+  .msb-platform-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 420px) {
+  .msb-platform-strip { grid-template-columns: 1fr; }
+}
+
+/* Introduction handoff: a compact editorial link gives Examples enough
+ * presence to be discovered without the oversized chrome of a generic card. */
+.msb-examples-cta {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.9rem;
+  margin: 1.25rem 0 2rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--msb-code-border) !important;
+  border-radius: 0.9rem;
+  color: inherit;
+  background: linear-gradient(135deg, rgba(167, 112, 239, 0.09), rgba(167, 112, 239, 0.025) 62%, transparent);
+  box-shadow: 0 1px 2px rgba(49, 31, 83, 0.04);
+  text-decoration: none;
+  transition: border-color 90ms ease-out, box-shadow 90ms ease-out;
+}
+
+.msb-examples-cta:hover {
+  border-color: var(--msb-interactive-accent) !important;
+  box-shadow: 0 3px 10px rgba(78, 45, 132, 0.07);
+}
+
+.msb-examples-cta:focus-visible {
+  outline: 2px solid #a770ef;
+  outline-offset: 3px;
+}
+
+.msb-examples-cta-icon {
+  display: grid;
+  width: 2.35rem;
+  height: 2.35rem;
+  place-items: center;
+  border: 1px solid rgba(109, 75, 196, 0.18);
+  border-radius: 0.7rem;
+  color: #8f5cda;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.msb-examples-cta-copy {
+  display: grid;
+  min-width: 0;
+  line-height: 1.25;
+}
+
+.msb-examples-cta-label {
+  margin-bottom: 0.15rem;
+  color: #8f5cda;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.msb-examples-cta-title {
+  font-size: 0.93rem;
+  font-weight: 650;
+}
+
+.msb-examples-cta-copy > span:last-child {
+  overflow: hidden;
+  margin-top: 0.2rem;
+  font-size: 0.78rem;
+  opacity: 0.68;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.msb-examples-cta-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: #7b4bc2;
+  font-size: 0.78rem;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.msb-examples-cta:hover .msb-examples-cta-action {
+  color: #62349f;
+}
+
+.dark .msb-examples-cta {
+  background: linear-gradient(135deg, rgba(191, 132, 254, 0.12), rgba(191, 132, 254, 0.035) 62%, transparent);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.22);
+}
+
+.dark .msb-examples-cta:hover {
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.24);
+}
+
+.dark .msb-examples-cta-icon {
+  border-color: rgba(191, 132, 254, 0.24);
+  color: #c9a4ff;
+  background: rgba(27, 20, 40, 0.82);
+}
+
+.dark .msb-examples-cta-label,
+.dark .msb-examples-cta-action {
+  color: #c9a4ff;
+}
+
+.dark .msb-examples-cta:hover .msb-examples-cta-action {
+  color: #dfc9ff;
+}
+
+@media (max-width: 640px) {
+  .msb-examples-cta {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .msb-examples-cta-copy > span:last-child {
+    white-space: normal;
+  }
+
+  .msb-examples-cta-action {
+    grid-column: 2;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .msb-examples-cta { transition: none; }
 }
 
 /* our links shouldn't get Mintlify's prose underline-border */
@@ -185,8 +436,9 @@ table th code, table td code { white-space: nowrap; }
 /* ----------------------------------------------------------------------------
  * Code surfaces: Mintlify's default dark code background is nearly neutral and
  * can read greenish against the microsandbox palette. Tint standalone code
- * blocks, code groups, and SDK example accordions toward the purple brand color
- * while keeping the contrast restrained in both themes.
+ * blocks, code groups, and standalone SDK example accordions toward the purple
+ * brand color while keeping the contrast restrained in both themes. Accordions
+ * inside a group retain Mintlify's neutral, connected-row treatment.
  * -------------------------------------------------------------------------- */
 .code-block, .code-group {
   border-color: var(--msb-code-border) !important;
@@ -201,17 +453,64 @@ html.dark body .code-block-background[data-component-part="code-block-root"] {
   background-color: var(--msb-code-surface-strong) !important;
 }
 
-details.accordion:has(.code-block) {
+/* Mintlify gives code-group tabs a neutral gray hover fill. Keep the same
+ * compact tab treatment, but make its hover and keyboard-focus states belong
+ * to the purple-tinted code surface around it. */
+.code-group [data-component-part="code-group-tab-bar"] [role="tab"] > div:first-child {
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.code-group [data-component-part="code-group-tab-bar"] [role="tab"]:hover > div:first-child,
+.code-group [data-component-part="code-group-tab-bar"] [role="tab"]:focus-visible > div:first-child {
+  background-color: var(--msb-code-header-hover) !important;
+  color: var(--msb-code-header-text) !important;
+}
+
+/* The regular Tabs component and the global section tabs use gray hover
+ * indicators by default. A restrained violet indicator keeps both tab systems
+ * consistent without turning every neutral navigation surface into a brand fill. */
+.tabs [data-component-part="tab-button"][data-active="false"]:hover {
+  border-color: var(--msb-interactive-accent) !important;
+  color: var(--msb-code-header-text) !important;
+}
+
+.tabs [data-component-part="tab-button"],
+.nav-tabs-item > div:last-child {
+  transition: border-color 120ms ease, background-color 120ms ease, color 120ms ease;
+}
+
+.nav-tabs-item:not([data-active="true"]):hover > div:last-child {
+  background-color: var(--msb-interactive-accent) !important;
+}
+
+/* Keep the remaining content chrome on the same quiet violet scale. These
+ * selectors use Mintlify's semantic hooks so unrelated shell controls (search,
+ * assistant, and resize handles) retain their intentionally neutral states. */
+.steps [data-component-part="step-number"] > div {
+  background-color: var(--msb-code-header) !important;
+  box-shadow: inset 0 0 0 1px var(--msb-code-border);
+  color: var(--msb-code-header-text) !important;
+}
+
+#pagination {
+  background-color: var(--msb-code-surface-strong) !important;
+}
+
+#pagination a:hover > div:first-child {
+  box-shadow: 0 0 0 1px var(--msb-interactive-accent) !important;
+}
+
+details.accordion:has(.code-block):not(.msb-accordion-group *) {
   background-color: var(--msb-code-surface) !important;
   border-color: var(--msb-code-border) !important;
 }
 
-details.accordion:has(.code-block) > summary {
+details.accordion:has(.code-block):not(.msb-accordion-group *) > summary {
   background-color: var(--msb-code-header) !important;
   color: var(--msb-code-header-text) !important;
 }
 
-details.accordion:has(.code-block) > summary:hover {
+details.accordion:has(.code-block):not(.msb-accordion-group *) > summary:hover {
   background-color: var(--msb-code-header-hover) !important;
 }
 
@@ -270,18 +569,18 @@ details.accordion:has(.code-block) > summary:hover {
  * Example collapsibles: Mintlify wraps the code block in prose margins
  * (content wrapper mt-2/mb-4/mx-6 plus the code-block's own mt-5/mb-8), which
  * leaves a lot of dead space inside the accordion. Trim it to a balanced, tight
- * inset. Scoped to accordions that hold a code block so prose accordions are
- * left alone.
+ * inset. Scoped to standalone accordions that hold a code block so prose and
+ * grouped accordions are left alone.
  * -------------------------------------------------------------------------- */
-details.accordion:has(.code-block) > *:not(summary) { margin: 0.75rem !important; }
-details.accordion:has(.code-block) .code-block { margin: 0 !important; }
+details.accordion:has(.code-block):not(.msb-accordion-group *) > *:not(summary) { margin: 0.75rem !important; }
+details.accordion:has(.code-block):not(.msb-accordion-group *) .code-block { margin: 0 !important; }
 
 /* The example now sits directly under the signature. The signature code
  * block's 2rem bottom margin and the accordion's top margin stacked into a
  * wide gap; collapse them to one even, tight inset so the example reads as
  * attached to the signature it documents. */
-.code-block:has(+ details.accordion) { margin-bottom: 0 !important; }
-details.accordion:has(.code-block) { margin-top: 0.5rem !important; }
+.code-block:has(+ details.accordion:not(.msb-accordion-group *)) { margin-bottom: 0 !important; }
+details.accordion:has(.code-block):not(.msb-accordion-group *) { margin-top: 0.5rem !important; }
 
 @media (max-width: 640px) {
   .msb-params { grid-template-columns: 1fr; }
@@ -289,8 +588,8 @@ details.accordion:has(.code-block) { margin-top: 0.5rem !important; }
 }
 
 /* ----------------------------------------------------------------------------
- * Availability badges: small pills rendered inside headings to mark sections
- * whose feature is local-only (not yet on cloud).
+ * Availability badges: small pills for local-only, limited-on-cloud, and
+ * cloud-only features. Features that work everywhere do not need a badge.
  * -------------------------------------------------------------------------- */
 .msb-badge-local {
   display: inline-block;
@@ -389,37 +688,5 @@ span:has(> .msb-badge-limited) {
 }
 
 span:has(> .msb-badge-cloud) {
-  text-decoration: none !important;
-}
-
-/* Neutral cloud-note pill: behaves differently on cloud but fully works (not a limitation). */
-.msb-badge-note {
-  display: inline-block;
-  margin-top: -0.35rem;
-  padding: 0.1rem 0.5rem;
-  border-radius: 9999px;
-  font-size: 0.7rem;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: #475569;
-  background: #f1f5f9;
-  border: 1px solid rgba(71, 85, 105, 0.2);
-}
-
-.dark .msb-badge-note {
-  color: #94a3b8;
-  background: rgba(148, 163, 184, 0.1);
-  border-color: rgba(148, 163, 184, 0.24);
-}
-
-.msb-badge-note svg,
-.msb-badge-note [class*="mask"] {
-  display: inline-block;
-  vertical-align: -0.12em;
-  margin-left: 0.1rem;
-  background-color: currentColor !important;
-}
-
-span:has(> .msb-badge-note) {
   text-decoration: none !important;
 }

@@ -174,7 +174,7 @@ let sb = Sandbox::start("api").await?;
 
 </Accordion>
 
-Restart a previously stopped sandbox. The VM reboots using the persisted configuration. The sandbox enters attached mode - it stops when your process exits.
+Restart a previously stopped sandbox. The VM reboots using the persisted configuration. Local handles enter attached mode and stop the sandbox when the client process exits; cloud handles do not own the service-managed VM.
 
 <p className="msb-label">Parameters</p>
 
@@ -610,24 +610,24 @@ Get the sandbox name.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">owns_lifecycle()</span>
 
-<Tooltip tip="On microsandbox cloud this is false; the cloud worker owns the sandbox process, not your handle."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
-
 ```rust
 fn owns_lifecycle(&self) -> bool
 ```
 
-Whether this handle owns the sandbox lifecycle. `true` in attached mode (sandbox stops when your process exits), `false` in detached mode.
+Whether this handle owns the sandbox lifecycle. Local attached handles return `true`; local detached handles and all cloud handles return `false`, because the cloud worker owns the sandbox process.
 
 <p className="msb-label">Returns</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><span className="msb-type">bool</span></div>
-    <div className="msb-param-desc"><code>true</code> if attached.</div>
+    <div className="msb-param-desc"><code>true</code> for a local attached handle.</div>
   </div>
 </div>
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">remove_persisted()</span>
+
+<Tooltip tip="Local-only persisted state removal; use remove() for microsandbox cloud sandboxes."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn remove_persisted(&self) -> MicrosandboxResult<()>
@@ -642,7 +642,7 @@ sb.remove_persisted().await?;
 
 </Accordion>
 
-Delete this stopped sandbox's local persisted state. This is the receiver-based form to use when you still hold the `Sandbox` instance; it is local-only and has exactly the same local deletion scope as [`Sandbox::remove(name)`](#remove). It does **not** perform additional cleanup. See [Remove](/sandboxes/lifecycle#remove) for what is deleted and which external resources are preserved.
+Delete this stopped sandbox's persisted state. This receiver-based form is useful when you still hold the `Sandbox` instance; it has exactly the same deletion scope as [`Sandbox::remove(name)`](#remove). It does **not** perform additional cleanup. See [Remove](/sandboxes/lifecycle#remove) for what is deleted and which external resources are preserved.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">request_stop()</span>
 
@@ -653,6 +653,8 @@ async fn request_stop(&self) -> MicrosandboxResult<()>
 Request graceful shutdown and return once the request is sent, without waiting for stopped-state observation. Pair with [`wait_until_stopped()`](#sb-wait_until_stopped) when the caller needs the terminal state.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">stop()</span>
+
+<Tooltip tip="Graceful stop works on microsandbox cloud; timeout expiry cannot escalate to force kill."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn stop(&self) -> MicrosandboxResult<()>
@@ -670,6 +672,8 @@ Gracefully shut down the sandbox. Lets the sandbox finish writing any pending da
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">stop_with_timeout()</span>
 
+<Tooltip tip="Graceful stop works on microsandbox cloud; timeout expiry cannot escalate to force kill."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```rust
 async fn stop_with_timeout(&self, timeout: Duration) -> MicrosandboxResult<()>
 ```
@@ -677,6 +681,8 @@ async fn stop_with_timeout(&self, timeout: Duration) -> MicrosandboxResult<()>
 Gracefully shut down the sandbox with an explicit timeout before escalation. `Duration::ZERO` skips graceful shutdown and force-kills immediately.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">stop_and_wait()</span>
+
+<Tooltip tip="Waiting for the host VM process is local-only; use stop() and wait_until_stopped() on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn stop_and_wait(&self) -> MicrosandboxResult<ExitStatus>
@@ -703,6 +709,8 @@ Stop the sandbox and wait for the exit status. This is a local-backend compatibi
 </div>
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">wait()</span>
+
+<Tooltip tip="Waiting for the host VM process is local-only; use wait_until_stopped() on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn wait(&self) -> MicrosandboxResult<ExitStatus>
@@ -745,6 +753,25 @@ Block until the sandbox is observed in a terminal non-running state. Owned local
 
 Builder for configuring a sandbox before creation. Obtained via [`Sandbox::builder(name)`](#sandboxbuilder). Every setter returns `Self`, so calls chain. Examples are shown on the methods where usage is non-obvious.
 
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">slug()</span>
+
+<Tooltip tip="Globally unique sandbox slugs are assigned by microsandbox cloud; the local backend ignores this setting."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```rust
+fn slug(self, slug: impl Into<String>) -> Self
+```
+
+Request a globally unique cloud slug. When omitted, microsandbox cloud assigns one; creation fails if the requested slug is already taken.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>slug</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Requested cloud slug.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">build()</span>
 
 ```rust
@@ -781,7 +808,7 @@ Set the number of virtual CPUs. This is a limit, not a reservation. Default: `1`
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">max_cpus()</span>
 
-<Tooltip tip="On microsandbox cloud these ceilings are not carried; the maximum is pinned to the initial value. Recreate the sandbox to resize."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not accepted on microsandbox cloud; set the initial CPU or memory value and recreate the sandbox to resize."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 fn max_cpus(self, count: u8) -> Self
@@ -804,7 +831,7 @@ Set the boot-time maximum possible virtual CPU capacity. This reserves the envel
 async fn create(self) -> MicrosandboxResult<Sandbox>
 ```
 
-Boot the sandbox in attached mode. The sandbox stops when your process exits.
+Boot the sandbox. Local handles use attached mode and stop the sandbox when the client process exits; cloud handles do not own the service-managed VM, so stop or remove cloud sandboxes explicitly.
 
 <p className="msb-label">Returns</p>
 
@@ -922,7 +949,7 @@ Set an environment variable visible to all commands. Can be called multiple time
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">hostname()</span>
 
-<Tooltip tip="On microsandbox cloud, the hostname is assigned by the platform; a value set here is ignored."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not accepted on microsandbox cloud; the platform assigns the hostname."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 fn hostname(self, hostname: impl Into<String>) -> Self
@@ -1044,7 +1071,7 @@ Like [`init`](#init), but with a closure-builder for argv and env vars. Mirrors 
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">image()</span>
 
-<Tooltip tip="On microsandbox cloud, only OCI image references are accepted; host-directory and disk-image root filesystems are local-only."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Microsandbox cloud accepts OCI root filesystems only; host-directory and disk-image roots are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 fn image(self, image: impl IntoImage) -> Self
@@ -1063,7 +1090,7 @@ Set the root filesystem source. Accepts OCI image names, local directory paths, 
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">image_with()</span>
 
-<Tooltip tip="On microsandbox cloud, only OCI image references are accepted; host-directory and disk-image root filesystems are local-only."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Microsandbox cloud accepts OCI root filesystems only; host-directory and disk-image roots are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 fn image_with(self, f: impl FnOnce(ImageBuilder) -> ImageBuilder) -> Self
@@ -1146,7 +1173,7 @@ Set the guest memory size. Physical pages are only allocated as the guest touche
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">max_memory()</span>
 
-<Tooltip tip="On microsandbox cloud these ceilings are not carried; the maximum is pinned to the initial value. Recreate the sandbox to resize."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not accepted on microsandbox cloud; set the initial CPU or memory value and recreate the sandbox to resize."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 fn max_memory(self, size: impl Into<Mebibytes>) -> Self
@@ -1543,7 +1570,7 @@ Append `content` to an existing file at `path`. If the file lives in a lower ima
 
 #### <span className="msb-recv">patch.</span><span className="msb-hn">copy_dir()</span>
 
-<Tooltip tip="On microsandbox cloud, host sources resolve against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, host sources resolve against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 fn copy_dir(self, src: impl Into<PathBuf>, dst: impl Into<String>, replace: bool) -> Self
@@ -1570,7 +1597,7 @@ Recursively copy a host directory at `src` into the guest rootfs at `dst`.
 
 #### <span className="msb-recv">patch.</span><span className="msb-hn">copy_file()</span>
 
-<Tooltip tip="On microsandbox cloud, host sources resolve against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, host sources resolve against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 fn copy_file(
@@ -1641,8 +1668,6 @@ Write raw bytes at `path`.
 </div>
 
 #### <span className="msb-recv">patch.</span><span className="msb-hn">mkdir()</span>
-
-<Tooltip tip="On microsandbox cloud, host sources resolve against your organization's host volume, not the computer running the SDK or CLI."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 fn mkdir(self, path: impl Into<String>, mode: Option<u32>) -> Self
@@ -1782,7 +1807,7 @@ Set the desired effective vCPU count. Applies live to a running sandbox when the
 
 #### <span className="msb-recv">modification.</span><span className="msb-hn">max_cpus()</span>
 
-<Tooltip tip="On microsandbox cloud these ceilings are not carried; the maximum is pinned to the initial value. Recreate the sandbox to resize."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not accepted on microsandbox cloud; set the initial CPU or memory value and recreate the sandbox to resize."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 fn max_cpus(self, max_cpus: u8) -> Self
@@ -1942,7 +1967,7 @@ Set the desired effective guest memory in MiB. Same as [`memory()`](#memory-2) w
 
 #### <span className="msb-recv">modification.</span><span className="msb-hn">max_memory()</span>
 
-<Tooltip tip="On microsandbox cloud these ceilings are not carried; the maximum is pinned to the initial value. Recreate the sandbox to resize."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not accepted on microsandbox cloud; set the initial CPU or memory value and recreate the sandbox to resize."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 fn max_memory(self, size: impl Into<Mebibytes>) -> Self
@@ -1961,7 +1986,7 @@ Set the desired boot-time maximum hotpluggable memory. Capacity is fixed at boot
 
 #### <span className="msb-recv">modification.</span><span className="msb-hn">max_memory_mib()</span>
 
-<Tooltip tip="On microsandbox cloud these ceilings are not carried; the maximum is pinned to the initial value. Recreate the sandbox to resize."><span className="msb-badge-note">On cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not accepted on microsandbox cloud; set the initial CPU or memory value and recreate the sandbox to resize."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 fn max_memory_mib(self, max_memory_mib: u32) -> Self
@@ -2141,6 +2166,8 @@ A sandbox metadata and lifecycle handle that does not require an active guest-ag
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">config()</span>
 
+<Tooltip tip="Parsed SandboxConfig is local-only; use config_json() for the raw cloud specification."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```rust
 config()
 ```
@@ -2201,6 +2228,8 @@ Creation timestamp
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">kill()</span>
 
+<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```rust
 kill()
 ```
@@ -2212,6 +2241,8 @@ Force terminate and wait until stopped state is observed
 `Result<()>`
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">kill_with_timeout()</span>
+
+<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 kill_with_timeout(timeout)
@@ -2225,6 +2256,8 @@ Same as `kill()` with an explicit observation timeout
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">logs()</span>
 
+<Tooltip tip="Bounded log reads are not available on microsandbox cloud; follow live and persist output externally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```rust
 logs()
 ```
@@ -2237,6 +2270,8 @@ Read captured `exec.log` (works without starting)
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">metrics()</span>
 
+<Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```rust
 metrics()
 ```
@@ -2248,6 +2283,8 @@ Point-in-time resource metrics
 `Result<`[`SandboxMetrics`](#sandboxmetrics)`>`
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">modify()</span>
+
+<Tooltip tip="Modify is not available on microsandbox cloud; recreate the sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 modify()
@@ -2273,6 +2310,8 @@ Sandbox name, up to 128 UTF-8 bytes
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">ping()</span>
 
+<Tooltip tip="Not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```rust
 ping()
 ```
@@ -2297,6 +2336,8 @@ Delete sandbox and state
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">request_drain()</span>
 
+<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```rust
 request_drain()
 ```
@@ -2308,6 +2349,8 @@ Request graceful drain without waiting
 `Result<()>`
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">request_kill()</span>
+
+<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 request_kill()
@@ -2337,7 +2380,7 @@ Request graceful shutdown without waiting
 start()
 ```
 
-Start in attached mode
+Start the sandbox. The returned local handle is attached; a cloud handle does not own the service-managed VM.
 
 <p className="msb-label">Returns</p>
 
@@ -2369,6 +2412,8 @@ Current status
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">stop()</span>
 
+<Tooltip tip="Graceful stop works on microsandbox cloud; timeout expiry cannot escalate to force kill."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```rust
 stop()
 ```
@@ -2381,6 +2426,8 @@ Gracefully shut down. Waits up to ten seconds for pending writes to flush, then 
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">stop_with_timeout()</span>
 
+<Tooltip tip="Graceful stop works on microsandbox cloud; timeout expiry cannot escalate to force kill."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```rust
 stop_with_timeout(timeout)
 ```
@@ -2392,6 +2439,8 @@ Same as `stop()` with an explicit timeout; `Duration::ZERO` force-kills immediat
 `Result<()>`
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">touch()</span>
+
+<Tooltip tip="Not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 touch()

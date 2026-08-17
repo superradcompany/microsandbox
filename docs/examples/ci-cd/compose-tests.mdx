@@ -1,0 +1,73 @@
+---
+title: Run Docker Compose integration tests
+sidebarTitle: Compose tests
+description: Run a Compose stack without exposing the host Docker socket
+icon: "boxes-stacked"
+---
+
+Run Docker Compose inside a microVM when a test needs several containers. The inner daemon gets its own disk and never receives the host's `/var/run/docker.sock`.
+
+This example assumes the current directory contains `compose.yaml` and a test service named `test`.
+
+## Start Docker
+
+<Tooltip tip="On microsandbox cloud, create a directory-backed Docker volume first and omit disk-kind, size, and replace-on-create options from this command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```sh
+msb run -d --name compose-ci --replace \
+  --memory 2G --root-disk 4G --max-duration 10m \
+  --mount-named compose-ci-cache:/var/lib/docker:kind=disk,size=6G \
+  --copy-dir .:/workspace --workdir /workspace \
+  docker:27.5.1-dind
+```
+
+The official `dind` image starts `dockerd`. Wait for it before sending Compose commands:
+
+```sh
+for attempt in $(seq 1 60); do
+  msb exec compose-ci -- docker info >/dev/null 2>&1 && break
+  sleep 1
+done
+msb exec compose-ci -- docker info >/dev/null
+```
+
+## Run the tests
+
+```sh
+msb exec --timeout 5m --workdir /workspace compose-ci -- \
+  docker compose up --build \
+    --abort-on-container-exit \
+    --exit-code-from test
+```
+
+Replace `test` with the service whose exit code should decide the CI result. `msb exec` returns that code to the host.
+
+<Note>
+  `--copy-dir` makes a guest copy. Run the command from a clean project directory, or replace it with narrower `--copy-file` and `--copy-dir` flags when the checkout contains credentials or unrelated files.
+</Note>
+
+## Cleanup
+
+Stop the Compose stack inside the sandbox:
+
+```sh
+msb exec --workdir /workspace compose-ci -- docker compose down --volumes
+```
+
+Remove the sandbox:
+
+```sh
+msb rm -f compose-ci
+```
+
+Delete the cache only when you no longer need it:
+
+```sh
+msb volume remove compose-ci-cache
+```
+
+Keep the named volume if you want a repository-specific image cache between trusted runs. Do not share a writable cache across repositories or trust boundaries.
+
+<Warning>
+  Never mount the host Docker socket into the sandbox. Control of that socket is normally control of the host Docker daemon and defeats the microVM boundary.
+</Warning>

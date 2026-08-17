@@ -7,7 +7,7 @@ icon: "cloud-arrow-up"
 <Tooltip tip="This page covers msb-metrics, which reads host-local shared memory and is local-only. It does not apply to microsandbox cloud sandboxes."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 <Note>
-This recipe ships data emitted by [`msb-metrics`](/observability/msb-metrics).
+This example ships data emitted by [`msb-metrics`](/observability/msb-metrics).
 See the msb-metrics page for the flag reference, metric names, and
 deployment constraints.
 </Note>
@@ -63,7 +63,7 @@ to it using HTTP/Protobuf and Basic auth.
 ## Production: prefer Grafana Alloy
 
 For long-running deployments, point `msb-metrics` at a local
-[Grafana Alloy](/recipes/metrics-backends/grafana-alloy)
+[Grafana Alloy](/examples/metrics-backends/grafana-alloy)
 instance instead of the OTLP gateway directly. Alloy handles
 batching, retries, credential rotation, and buffering through Grafana
 Cloud hiccups without touching `msb-metrics`.

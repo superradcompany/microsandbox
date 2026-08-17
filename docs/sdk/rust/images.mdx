@@ -3,11 +3,13 @@ title: Images
 description: Rust SDK - Image cache API reference
 ---
 
+<Tooltip tip="The image-cache API manages the local cache and is local-only. On microsandbox cloud, specify an OCI image when creating the sandbox and it is pulled for you."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 Inspect and manage the local OCI image cache.
 
 ## Image
 
-These methods resolve the active backend with `microsandbox::backend::default_backend()`. They are convenient for normal local programs and fail with `Unsupported` when the active backend is cloud.
+These methods resolve the active backend with `microsandbox::backend::default_backend()`.
 
 #### <span className="msb-recv">Image::</span><span className="msb-hn">get()</span>
 
