@@ -40,6 +40,15 @@
             "icon": "box",
             "pages": [
               "sandboxes/overview",
+              {
+                "group": "Images",
+                "icon": "layer-group",
+                "expanded": false,
+                "pages": [
+                  "images/overview",
+                  "images/disk-images"
+                ]
+              },
               "sandboxes/lifecycle",
               "sandboxes/commands",
               "sandboxes/filesystem",
@@ -65,27 +74,27 @@
             ]
           },
           {
-            "group": "OCI Images",
-            "icon": "layer-group",
-            "pages": [
-              "images/overview",
-              "images/disk-images"
-            ]
-          },
-          {
-            "group": "Observability",
+            "group": "Operations",
             "icon": "gauge",
             "pages": [
-              "observability/msb-metrics",
-              "observability/deep-dive"
-            ]
-          },
-          {
-            "group": "Performance",
-            "icon": "bolt",
-            "pages": [
-              "sandboxes/optimization",
-              "sandboxes/cpu-placement"
+              {
+                "group": "Observability",
+                "icon": "chart-line",
+                "expanded": false,
+                "pages": [
+                  "observability/msb-metrics",
+                  "observability/deep-dive"
+                ]
+              },
+              {
+                "group": "Performance",
+                "icon": "bolt",
+                "expanded": false,
+                "pages": [
+                  "sandboxes/optimization",
+                  "sandboxes/cpu-placement"
+                ]
+              }
             ]
           },
           {
