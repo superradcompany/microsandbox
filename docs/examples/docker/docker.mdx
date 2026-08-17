@@ -119,17 +119,19 @@ docker volume rm microsandbox-data
 
 ## Troubleshooting
 
-<AccordionGroup>
-  <Accordion title="The process exits with SIGABRT before the agent starts">
-    Run the `msb doctor` preflight above. An early abort while entering the VM commonly means the outer Linux environment did not provide usable KVM access.
-  </Accordion>
-  <Accordion title="The command keeps running but shows no prompt">
-    Check that the Docker command includes `-it`. From another terminal, `docker ps` may show that the outer container is running even though its standard input and terminal were not attached.
-  </Accordion>
-  <Accordion title="The guest image downloads on every run">
-    Mount `microsandbox-data` at `/root/.microsandbox`. An ephemeral outer container otherwise starts with an empty microsandbox cache.
-  </Accordion>
-</AccordionGroup>
+<div className="msb-accordion-group">
+  <AccordionGroup>
+    <Accordion title="The process exits with SIGABRT before the agent starts">
+      Run the `msb doctor` preflight above. An early abort while entering the VM commonly means the outer Linux environment did not provide usable KVM access.
+    </Accordion>
+    <Accordion title="The command keeps running but shows no prompt">
+      Check that the Docker command includes `-it`. From another terminal, `docker ps` may show that the outer container is running even though its standard input and terminal were not attached.
+    </Accordion>
+    <Accordion title="The guest image downloads on every run">
+      Mount `microsandbox-data` at `/root/.microsandbox`. An ephemeral outer container otherwise starts with an empty microsandbox cache.
+    </Accordion>
+  </AccordionGroup>
+</div>
 
 ## Image tags
 

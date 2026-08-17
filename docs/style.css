@@ -437,8 +437,9 @@ table th code, table td code { white-space: nowrap; }
 /* ----------------------------------------------------------------------------
  * Code surfaces: Mintlify's default dark code background is nearly neutral and
  * can read greenish against the microsandbox palette. Tint standalone code
- * blocks, code groups, and SDK example accordions toward the purple brand color
- * while keeping the contrast restrained in both themes.
+ * blocks, code groups, and standalone SDK example accordions toward the purple
+ * brand color while keeping the contrast restrained in both themes. Accordions
+ * inside a group retain Mintlify's neutral, connected-row treatment.
  * -------------------------------------------------------------------------- */
 .code-block, .code-group {
   border-color: var(--msb-code-border) !important;
@@ -500,17 +501,17 @@ html.dark body .code-block-background[data-component-part="code-block-root"] {
   box-shadow: 0 0 0 1px var(--msb-interactive-accent) !important;
 }
 
-details.accordion:has(.code-block) {
+details.accordion:has(.code-block):not(.msb-accordion-group *) {
   background-color: var(--msb-code-surface) !important;
   border-color: var(--msb-code-border) !important;
 }
 
-details.accordion:has(.code-block) > summary {
+details.accordion:has(.code-block):not(.msb-accordion-group *) > summary {
   background-color: var(--msb-code-header) !important;
   color: var(--msb-code-header-text) !important;
 }
 
-details.accordion:has(.code-block) > summary:hover {
+details.accordion:has(.code-block):not(.msb-accordion-group *) > summary:hover {
   background-color: var(--msb-code-header-hover) !important;
 }
 
@@ -569,18 +570,18 @@ details.accordion:has(.code-block) > summary:hover {
  * Example collapsibles: Mintlify wraps the code block in prose margins
  * (content wrapper mt-2/mb-4/mx-6 plus the code-block's own mt-5/mb-8), which
  * leaves a lot of dead space inside the accordion. Trim it to a balanced, tight
- * inset. Scoped to accordions that hold a code block so prose accordions are
- * left alone.
+ * inset. Scoped to standalone accordions that hold a code block so prose and
+ * grouped accordions are left alone.
  * -------------------------------------------------------------------------- */
-details.accordion:has(.code-block) > *:not(summary) { margin: 0.75rem !important; }
-details.accordion:has(.code-block) .code-block { margin: 0 !important; }
+details.accordion:has(.code-block):not(.msb-accordion-group *) > *:not(summary) { margin: 0.75rem !important; }
+details.accordion:has(.code-block):not(.msb-accordion-group *) .code-block { margin: 0 !important; }
 
 /* The example now sits directly under the signature. The signature code
  * block's 2rem bottom margin and the accordion's top margin stacked into a
  * wide gap; collapse them to one even, tight inset so the example reads as
  * attached to the signature it documents. */
-.code-block:has(+ details.accordion) { margin-bottom: 0 !important; }
-details.accordion:has(.code-block) { margin-top: 0.5rem !important; }
+.code-block:has(+ details.accordion:not(.msb-accordion-group *)) { margin-bottom: 0 !important; }
+details.accordion:has(.code-block):not(.msb-accordion-group *) { margin-top: 0.5rem !important; }
 
 @media (max-width: 640px) {
   .msb-params { grid-template-columns: 1fr; }
