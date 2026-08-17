@@ -381,12 +381,12 @@ The `msb` CLI provides a complete interface for managing sandboxes, images, and 
 
 Practical ways to put microsandbox to work:
 
-- <img height="14" src="https://octicons-col.vercel.app/code/A770EF"> **[code-server](https://docs.microsandbox.dev/examples/development/code-server)**: Open an isolated VS Code workspace in the browser.
-- <img height="14" src="https://octicons-col.vercel.app/workflow/A770EF"> **[GitHub Actions Runner](https://docs.microsandbox.dev/examples/ci-cd/github-actions-runner)**: Run one self-hosted job in a fresh microVM, then discard its workspace.
-- <img height="14" src="https://octicons-col.vercel.app/checklist/A770EF"> **[PR Checks](https://docs.microsandbox.dev/examples/ci-cd/pr-checks)**: Test untrusted commits offline from reviewed dependencies.
-- <img height="14" src="https://octicons-col.vercel.app/container/A770EF"> **[Compose Tests](https://docs.microsandbox.dev/examples/ci-cd/compose-tests)**: Test a full Compose stack without exposing the host Docker socket.
-- <img height="14" src="https://octicons-col.vercel.app/cache/A770EF"> **[Warm Workers](https://docs.microsandbox.dev/examples/sandboxing/warm-workers)**: Snapshot a toolchain once, then launch clean, prepared workers.
-- <img height="14" src="https://octicons-col.vercel.app/globe/A770EF"> **[Web Crawling](https://docs.microsandbox.dev/examples/web-automation/scrapy)**: Crawl sites into bounded JSON with robots.txt and network controls.
+- <img height="14" src="https://octicons-col.vercel.app/container/A770EF"> **[Docker in a Sandbox](https://docs.microsandbox.dev/examples/docker/docker-in-sandbox)**: Run Docker without touching the host daemon.
+- <img height="14" src="https://octicons-col.vercel.app/code/A770EF"> **[OpenCode](https://docs.microsandbox.dev/examples/agents/opencode)**: Give a coding agent an isolated project workspace.
+- <img height="14" src="https://octicons-col.vercel.app/globe/A770EF"> **[Playwright](https://docs.microsandbox.dev/examples/browser-automation/playwright)**: Run headless browser jobs inside a microVM.
+- <img height="14" src="https://octicons-col.vercel.app/cache/A770EF"> **[Warm Workers](https://docs.microsandbox.dev/examples/sandboxing/warm-workers)**: Snapshot a toolchain and launch clean workers.
+- <img height="14" src="https://octicons-col.vercel.app/database/A770EF"> **[Migration Rehearsal](https://docs.microsandbox.dev/examples/data/migration-rehearsal)**: Test a database migration, then restore the baseline.
+- <img height="14" src="https://octicons-col.vercel.app/workflow/A770EF"> **[GitHub Actions Runner](https://docs.microsandbox.dev/examples/ci-cd/github-actions-runner)**: Run each self-hosted job in a disposable microVM.
 
 <br />
 
