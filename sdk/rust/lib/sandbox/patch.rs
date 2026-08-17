@@ -1,12 +1,16 @@
 //! Patch application logic for rootfs modification before VM start.
 
 use std::collections::VecDeque;
+#[cfg(unix)]
+use std::ffi::CString;
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
 use cap_std::ambient_authority;
@@ -256,9 +260,13 @@ impl RootedPatchFs {
         guest_path: &str,
         content: &[u8],
         replace: bool,
+        mode: Option<u32>,
     ) -> MicrosandboxResult<()> {
         let mut file = self.open_file_for_write(path, guest_path, replace)?;
         file.write_all(content)?;
+        if let Some(mode) = mode {
+            set_file_mode(&file, mode)?;
+        }
         Ok(())
     }
 
@@ -268,12 +276,17 @@ impl RootedPatchFs {
         dst: &Path,
         guest_path: &str,
         replace: bool,
+        mode: Option<u32>,
     ) -> MicrosandboxResult<()> {
         let mut source = std::fs::File::open(src)?;
         let permissions = source.metadata()?.permissions();
         let mut destination = self.open_file_for_write(dst, guest_path, replace)?;
         std::io::copy(&mut source, &mut destination)?;
-        destination.set_permissions(Permissions::from_std(permissions))?;
+        if let Some(mode) = mode {
+            set_file_mode(&destination, mode)?;
+        } else {
+            destination.set_permissions(Permissions::from_std(permissions))?;
+        }
         Ok(())
     }
 
@@ -306,10 +319,84 @@ impl RootedPatchFs {
             if entry.file_type()?.is_dir() {
                 self.copy_dir(&src_path, &resolved_dst, &child_guest_path, replace)?;
             } else {
-                self.copy_file(&src_path, &resolved_dst, &child_guest_path, replace)?;
+                self.copy_file(&src_path, &resolved_dst, &child_guest_path, replace, None)?;
             }
         }
         Ok(())
+    }
+
+    fn create_dir(&self, path: &Path, mode: Option<u32>) -> MicrosandboxResult<()> {
+        let Some(mode) = mode else {
+            self.root.create_dir_all(path)?;
+            return Ok(());
+        };
+
+        #[cfg(unix)]
+        {
+            self.ensure_parent(path)?;
+            let parent_path = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            let name = path.file_name().ok_or_else(|| {
+                crate::MicrosandboxError::PatchFailed(format!(
+                    "patch directory has no final component: {}",
+                    path.display()
+                ))
+            })?;
+            let parent = self.root.open_dir(parent_path)?;
+
+            // Prepare and chmod a private directory before publishing it. The
+            // no-replace rename prevents a concurrent destination from being
+            // overwritten or receiving the requested mode.
+            for _ in 0..128 {
+                let temporary = OsString::from(format!(
+                    ".microsandbox-patch-{}-{:016x}",
+                    std::process::id(),
+                    rand::random::<u64>()
+                ));
+                match parent.create_dir(&temporary) {
+                    Ok(()) => {}
+                    Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(err) => return Err(err.into()),
+                }
+
+                let temporary_dir = parent.open_dir(&temporary)?;
+                if let Err(err) = set_dir_mode(&temporary_dir, mode) {
+                    drop(temporary_dir);
+                    let _ = parent.remove_dir(&temporary);
+                    return Err(err);
+                }
+
+                match rename_noreplace(&parent, Path::new(&temporary), Path::new(name)) {
+                    Ok(()) => return Ok(()),
+                    Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                        drop(temporary_dir);
+                        parent.remove_dir(&temporary)?;
+                        let existing = parent.open_dir(name)?;
+                        return set_dir_mode(&existing, mode);
+                    }
+                    Err(err) => {
+                        drop(temporary_dir);
+                        let _ = parent.remove_dir(&temporary);
+                        return Err(err.into());
+                    }
+                }
+            }
+
+            Err(crate::MicrosandboxError::PatchFailed(format!(
+                "failed to reserve a temporary directory for {}",
+                path.display()
+            )))
+        }
+
+        #[cfg(windows)]
+        {
+            let _ = (path, mode);
+            Err(crate::MicrosandboxError::InvalidConfig(
+                "POSIX patch modes are not supported for Windows host bind roots".into(),
+            ))
+        }
     }
 
     fn remove_entry(&self, path: &Path) -> MicrosandboxResult<()> {
@@ -324,25 +411,6 @@ impl RootedPatchFs {
             Err(err) => return Err(err.into()),
         }
         Ok(())
-    }
-
-    fn set_permissions(&self, path: &Path, mode: u32) -> MicrosandboxResult<()> {
-        #[cfg(unix)]
-        {
-            self.root.set_permissions(
-                path,
-                Permissions::from_std(std::fs::Permissions::from_mode(mode)),
-            )?;
-            Ok(())
-        }
-
-        #[cfg(windows)]
-        {
-            let _ = (path, mode);
-            Err(crate::MicrosandboxError::InvalidConfig(
-                "POSIX patch modes are not supported for Windows host bind roots".into(),
-            ))
-        }
     }
 }
 
@@ -619,10 +687,7 @@ fn apply_one_to_bind(root: &RootedPatchFs, patch: &Patch) -> MicrosandboxResult<
             replace,
         } => {
             let dest = root.resolve(path, *replace)?;
-            root.write_file(&dest, path, content.as_bytes(), *replace)?;
-            if let Some(mode) = mode {
-                root.set_permissions(&dest, *mode)?;
-            }
+            root.write_file(&dest, path, content.as_bytes(), *replace, *mode)?;
         }
         Patch::File {
             path,
@@ -631,10 +696,7 @@ fn apply_one_to_bind(root: &RootedPatchFs, patch: &Patch) -> MicrosandboxResult<
             replace,
         } => {
             let dest = root.resolve(path, *replace)?;
-            root.write_file(&dest, path, content, *replace)?;
-            if let Some(mode) = mode {
-                root.set_permissions(&dest, *mode)?;
-            }
+            root.write_file(&dest, path, content, *replace, *mode)?;
         }
         Patch::CopyFile {
             src,
@@ -643,10 +705,7 @@ fn apply_one_to_bind(root: &RootedPatchFs, patch: &Patch) -> MicrosandboxResult<
             replace,
         } => {
             let dest = root.resolve(dst, *replace)?;
-            root.copy_file(src, &dest, dst, *replace)?;
-            if let Some(mode) = mode {
-                root.set_permissions(&dest, *mode)?;
-            }
+            root.copy_file(src, &dest, dst, *replace, *mode)?;
         }
         Patch::CopyDir { src, dst, replace } => {
             let dest = root.resolve(dst, *replace)?;
@@ -682,10 +741,7 @@ fn apply_one_to_bind(root: &RootedPatchFs, patch: &Patch) -> MicrosandboxResult<
         }
         Patch::Mkdir { path, mode } => {
             let dest = root.resolve(path, true)?;
-            root.root.create_dir_all(&dest)?;
-            if let Some(mode) = mode {
-                root.set_permissions(&dest, *mode)?;
-            }
+            root.create_dir(&dest, *mode)?;
         }
         Patch::Remove { path } => {
             let dest = root.resolve(path, false)?;
@@ -1138,6 +1194,118 @@ fn os_str_bytes(value: &OsStr) -> Vec<u8> {
     }
 }
 
+/// Apply a requested mode through the pinned file handle.
+///
+/// Using the handle prevents a concurrent rename from redirecting the
+/// permission change to a different file installed at the destination path.
+fn set_file_mode(file: &File, mode: u32) -> MicrosandboxResult<()> {
+    #[cfg(unix)]
+    {
+        file.set_permissions(Permissions::from_std(std::fs::Permissions::from_mode(mode)))?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    {
+        let _ = (file, mode);
+        Err(crate::MicrosandboxError::InvalidConfig(
+            "POSIX patch modes are not supported for Windows host bind roots".into(),
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn set_dir_mode(dir: &Dir, mode: u32) -> MicrosandboxResult<()> {
+    dir.set_permissions(
+        Path::new("."),
+        Permissions::from_std(std::fs::Permissions::from_mode(mode)),
+    )?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn rename_noreplace(dir: &Dir, from: &Path, to: &Path) -> std::io::Result<()> {
+    let from = CString::new(from.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let to = CString::new(to.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+
+    #[cfg(target_os = "linux")]
+    let result = unsafe {
+        libc::renameat2(
+            dir.as_raw_fd(),
+            from.as_ptr(),
+            dir.as_raw_fd(),
+            to.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+
+    #[cfg(target_os = "macos")]
+    let result = unsafe {
+        libc::renameatx_np(
+            dir.as_raw_fd(),
+            from.as_ptr(),
+            dir.as_raw_fd(),
+            to.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let result = {
+        let _ = (dir, from, to);
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "atomic no-replace directory rename is unsupported on this platform",
+        ));
+    };
+
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+fn is_windows_reserved_name(name: &str) -> bool {
+    let stem = name.split_once('.').map_or(name, |(stem, _)| stem);
+    matches!(
+        stem.trim_end().to_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM0"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "COM\u{b9}"
+            | "COM\u{b2}"
+            | "COM\u{b3}"
+            | "LPT0"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+            | "LPT\u{b9}"
+            | "LPT\u{b2}"
+            | "LPT\u{b3}"
+    )
+}
+
 /// Parse a guest path with Unix semantics on every host platform.
 fn guest_path_components(guest_path: &str) -> MicrosandboxResult<VecDeque<PendingComponent>> {
     use typed_path::{Utf8UnixComponent, Utf8UnixPath};
@@ -1153,9 +1321,9 @@ fn guest_path_components(guest_path: &str) -> MicrosandboxResult<VecDeque<Pendin
         match component {
             Utf8UnixComponent::RootDir | Utf8UnixComponent::CurDir => {}
             Utf8UnixComponent::ParentDir => {
-                components.push_back(PendingComponent::Parent {
-                    clamp_at_root: false,
-                });
+                return Err(crate::MicrosandboxError::PatchFailed(format!(
+                    "patch path must not contain '..': '{guest_path}'"
+                )));
             }
             Utf8UnixComponent::Normal(c) => {
                 if c.contains('\0') {
@@ -1164,9 +1332,19 @@ fn guest_path_components(guest_path: &str) -> MicrosandboxResult<VecDeque<Pendin
                     )));
                 }
                 #[cfg(windows)]
-                if c.contains(['\\', ':']) {
+                if c.chars().any(|character| {
+                    character <= '\u{1f}'
+                        || matches!(character, '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*')
+                }) || c.ends_with([' ', '.'])
+                {
                     return Err(crate::MicrosandboxError::PatchFailed(format!(
                         "patch path uses syntax that cannot represent a Linux guest name on a Windows host: '{guest_path}'"
+                    )));
+                }
+                #[cfg(windows)]
+                if is_windows_reserved_name(c) {
+                    return Err(crate::MicrosandboxError::PatchFailed(format!(
+                        "patch path uses a reserved Windows device name: '{guest_path}'"
                     )));
                 }
                 components.push_back(PendingComponent::Normal(OsString::from(c)));
@@ -1643,7 +1821,7 @@ mod tests {
             let barrier = Arc::clone(&barrier);
             workers.push(std::thread::spawn(move || {
                 barrier.wait();
-                root.write_file(Path::new("winner.txt"), "/winner.txt", content, false)
+                root.write_file(Path::new("winner.txt"), "/winner.txt", content, false, None)
             }));
         }
 
@@ -1657,6 +1835,144 @@ mod tests {
 
         let content = std::fs::read(temp.path().join("winner.txt")).unwrap();
         assert!(content == b"alpha" || content == b"beta");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bind_patch_file_mode_follows_open_handle_across_rename() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = RootedPatchFs::open(temp.path(), true).unwrap();
+        let mut opened = root
+            .open_file_for_write(Path::new("destination.txt"), "/destination.txt", false)
+            .unwrap();
+        opened.write_all(b"created").unwrap();
+
+        std::fs::rename(
+            temp.path().join("destination.txt"),
+            temp.path().join("renamed.txt"),
+        )
+        .unwrap();
+        std::fs::write(temp.path().join("destination.txt"), "replacement").unwrap();
+        std::fs::set_permissions(
+            temp.path().join("destination.txt"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+
+        set_file_mode(&opened, 0o600).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(temp.path().join("renamed.txt"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(temp.path().join("destination.txt"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bind_patch_directory_mode_follows_open_handle_across_rename() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = RootedPatchFs::open(temp.path(), true).unwrap();
+        std::fs::create_dir(temp.path().join("destination")).unwrap();
+        let opened = root.root.open_dir("destination").unwrap();
+
+        std::fs::rename(temp.path().join("destination"), temp.path().join("renamed")).unwrap();
+        std::fs::create_dir(temp.path().join("destination")).unwrap();
+        std::fs::set_permissions(
+            temp.path().join("destination"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+
+        set_dir_mode(&opened, 0o700).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(temp.path().join("renamed"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(temp.path().join("destination"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_patch_applies_requested_file_modes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let source = temp.path().join("source.txt");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&source, "copied").unwrap();
+
+        apply_patches(
+            &bind_root(root.clone(), true),
+            &[
+                Patch::Text {
+                    path: "/text.txt".into(),
+                    content: "text".into(),
+                    mode: Some(0o600),
+                    replace: false,
+                },
+                Patch::File {
+                    path: "/file.bin".into(),
+                    content: b"file".to_vec(),
+                    mode: Some(0o640),
+                    replace: false,
+                },
+                Patch::CopyFile {
+                    src: source,
+                    dst: "/copied.txt".into(),
+                    mode: Some(0o644),
+                    replace: false,
+                },
+                Patch::Mkdir {
+                    path: "/mode-dir".into(),
+                    mode: Some(0o700),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+        for (name, expected) in [
+            ("text.txt", 0o600),
+            ("file.bin", 0o640),
+            ("copied.txt", 0o644),
+            ("mode-dir", 0o700),
+        ] {
+            let actual = std::fs::metadata(root.join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(actual, expected, "unexpected mode for {name}");
+        }
     }
 
     #[tokio::test]
@@ -1676,6 +1992,102 @@ mod tests {
 
         assert!(error.to_string().contains("must be absolute"));
         assert!(!root.join("first.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn bind_patch_preflights_parent_escape_before_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+
+        let error = apply_patches(
+            &bind_root(root.clone(), true),
+            &[
+                text_patch("/first.txt", "must-not-write"),
+                text_patch("/../escaped.txt", "invalid"),
+            ],
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("must not contain '..'"));
+        assert!(!root.join("first.txt").exists());
+        assert!(!temp.path().join("escaped.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_patch_rejects_parent_components_before_symlink_resolution() {
+        use std::os::unix::fs::symlink;
+
+        for (target, destination) in [("/", "/link/../file"), ("/a/b", "/link/../../file")] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().to_path_buf();
+            symlink(target, root.join("link")).unwrap();
+
+            let error = apply_patches(
+                &bind_root(root.clone(), true),
+                &[
+                    text_patch("/first.txt", "must-not-write"),
+                    text_patch(destination, "invalid"),
+                ],
+            )
+            .await
+            .unwrap_err();
+
+            assert!(error.to_string().contains("must not contain '..'"));
+            assert!(!root.join("first.txt").exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn bind_patch_copy_dir_no_replace_preserves_existing_destination() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let source = temp.path().join("source");
+        std::fs::create_dir_all(root.join("destination")).unwrap();
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(root.join("destination/sentinel.txt"), "keep").unwrap();
+        std::fs::write(source.join("payload.txt"), "copy").unwrap();
+
+        let error = apply_patches(
+            &bind_root(root.clone(), true),
+            &[Patch::CopyDir {
+                src: source,
+                dst: "/destination".into(),
+                replace: false,
+            }],
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("set replace to allow"));
+        assert_eq!(
+            std::fs::read_to_string(root.join("destination/sentinel.txt")).unwrap(),
+            "keep"
+        );
+        assert!(!root.join("destination/payload.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_patch_symlink_no_replace_preserves_existing_destination() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        std::fs::write(root.join("link"), "keep").unwrap();
+
+        let error = apply_patches(
+            &bind_root(root.clone(), true),
+            &[Patch::Symlink {
+                target: "/target".into(),
+                link: "/link".into(),
+                replace: false,
+            }],
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("set replace to allow"));
+        assert_eq!(std::fs::read_to_string(root.join("link")).unwrap(), "keep");
     }
 
     #[cfg(windows)]
@@ -1716,29 +2128,51 @@ mod tests {
     async fn bind_patch_windows_rejects_modes_before_mutation() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().to_path_buf();
+        let source = temp.path().join("source.txt");
+        std::fs::write(&source, "source").unwrap();
         std::fs::write(root.join("victim.txt"), "keep").unwrap();
 
-        let error = apply_patches(
-            &bind_root(root.clone(), true),
-            &[Patch::Text {
+        let patches = [
+            Patch::Text {
                 path: "/victim.txt".into(),
                 content: "overwrite".into(),
                 mode: Some(0o600),
                 replace: true,
-            }],
-        )
-        .await
-        .unwrap_err();
+            },
+            Patch::File {
+                path: "/victim.txt".into(),
+                content: b"overwrite".to_vec(),
+                mode: Some(0o600),
+                replace: true,
+            },
+            Patch::CopyFile {
+                src: source,
+                dst: "/victim.txt".into(),
+                mode: Some(0o600),
+                replace: true,
+            },
+            Patch::Mkdir {
+                path: "/new-directory".into(),
+                mode: Some(0o700),
+            },
+        ];
 
-        assert!(
-            error
-                .to_string()
-                .contains("POSIX patch modes are not supported")
-        );
+        for patch in patches {
+            let error = apply_patches(&bind_root(root.clone(), true), &[patch])
+                .await
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("POSIX patch modes are not supported")
+            );
+        }
+
         assert_eq!(
             std::fs::read_to_string(root.join("victim.txt")).unwrap(),
             "keep"
         );
+        assert!(!root.join("new-directory").exists());
     }
 
     #[cfg(windows)]
@@ -1757,6 +2191,26 @@ mod tests {
         assert!(error.to_string().contains("Windows host"));
         assert!(!root.join("escaped.txt").exists());
         assert!(!root.join("safe").exists());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn bind_patch_windows_preflights_reserved_name_before_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+
+        let error = apply_patches(
+            &bind_root(root.clone(), true),
+            &[
+                text_patch("/first.txt", "must-not-write"),
+                text_patch("/NUL.txt", "invalid"),
+            ],
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("reserved Windows device name"));
+        assert!(!root.join("first.txt").exists());
     }
 
     #[cfg(windows)]

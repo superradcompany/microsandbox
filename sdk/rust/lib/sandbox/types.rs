@@ -1042,7 +1042,8 @@ impl ImageBuilder {
     /// [`disk`](Self::disk). Pre-boot patches modify this host directory in
     /// place. Nested mounts and pre-existing hard links are part of the chosen
     /// filesystem tree, so bind roots that receive patches must not contain
-    /// host-sensitive aliases.
+    /// host-sensitive aliases. Patch destinations must be absolute, canonical
+    /// guest paths without explicit `..` components.
     ///
     /// ```ignore
     /// .image_with(|i| i.bind("/srv/rootfs"))

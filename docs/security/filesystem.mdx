@@ -31,7 +31,7 @@ Writes never modify the cached image and are never visible to another sandbox. T
 
 ### Bind rootfs patches
 
-A bind rootfs is different from an OCI root: it is a host directory that microsandbox modifies in place when applying pre-boot patches. Patch destinations are resolved through a directory capability pinned to the selected root. Existing absolute symlinks use guest semantics and restart at the guest root, relative parent traversal clamps there, and no-replace file creation is atomic.
+A bind rootfs is different from an OCI root: it is a host directory that microsandbox modifies in place when applying pre-boot patches. Patch destinations must be absolute, canonical guest paths without explicit `..` components and are resolved through a directory capability pinned to the selected root. Existing absolute symlinks use guest semantics and restart at the guest root, parent traversal inside symlink targets clamps there, and no-replace creation and mode application avoid pathname races.
 
 The boundary is the filesystem objects selected by that directory, not a promise that every inode has only one host pathname. A nested filesystem mounted beneath the bind root is intentionally part of the selected tree, and a pre-existing hard link aliases the same inode wherever its other names live. Do not place host-sensitive nested mounts or externally linked files inside a bind root that receives patches. Use an OCI rootfs when the source tree itself is untrusted.
 
