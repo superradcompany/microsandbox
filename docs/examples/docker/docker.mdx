@@ -5,28 +5,11 @@ description: Run the microsandbox CLI from a Linux container with KVM access
 icon: "box"
 ---
 
-<Tooltip tip="The container runs the local microsandbox backend and needs hardware virtualization from its Docker host. It is not a microsandbox cloud workflow."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="The container runs the local microsandbox backend and needs hardware virtualization from the environment running Docker. It is not a microsandbox cloud workflow."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-The published image packages `msb` and `libkrunfw` in a Linux container. It does not replace the hypervisor: Docker must still expose `/dev/kvm` so microsandbox can start a microVM inside the container.
+This example runs the `msb` CLI inside Docker and starts an Alpine microVM from the container. It works in any Docker environment that can pass a usable `/dev/kvm` device into the container.
 
-```text
-Linux          host → Docker container → microVM
-macOS/Windows  host → Docker Desktop VM → container → microVM
-```
-
-For production hosts, [installing microsandbox directly](/getting-started/quickstart) avoids this extra virtualization layer. The container image is useful when an existing deployment system requires an OCI image.
-
-## Requirements
-
-| Docker host | Requirement |
-| --- | --- |
-| <Icon icon="linux" size={16} /> **Linux** | Docker Engine with a readable and writable `/dev/kvm` device. |
-| <Icon icon="apple" size={16} /> **macOS** | Docker Desktop with nested virtualization and `/dev/kvm` exposed through its Linux VM. |
-| <Icon icon="windows" size={16} /> **Windows** | Docker Desktop with nested virtualization and `/dev/kvm` exposed through its WSL 2 or Hyper-V Linux environment. |
-
-The image supports `linux/amd64` and `linux/arm64`. Architecture compatibility does not imply virtualization support; `/dev/kvm` is the authoritative check. Docker Desktop runs Linux containers through an intermediate Linux environment on macOS and Windows. Installing Docker Desktop does not guarantee that nested KVM reaches containers, so run the preflight below before continuing.
-
-## Verify the Docker host
+## Check Docker support
 
 Pull the image, then run `msb doctor` inside it before starting a sandbox:
 
@@ -42,21 +25,22 @@ docker run --rm --device /dev/kvm \
   doctor
 ```
 
-A compatible Docker host reports both checks as successful:
+A compatible Docker environment reports both checks as successful:
 
 ```text
 ✓ KVM device   /dev/kvm
 ✓ KVM access   read/write
 ```
 
-If Docker rejects the device mapping or `msb doctor` reports that `/dev/kvm` is missing, fix the layer that runs Docker before continuing:
+If both checks pass, continue with the example. If either fails, the Docker environment does not currently expose the virtualization support microsandbox needs. `/dev/kvm` is the authoritative compatibility check: Docker Engine can pass it through directly, while Docker Desktop depends on whether its Linux VM makes nested virtualization available.
+
+If Docker rejects the device mapping or `msb doctor` reports that `/dev/kvm` is missing, consult the relevant setup guide:
 
 - **Linux Docker Engine:** Follow the [`/dev/kvm` setup and permission checks](/troubleshooting/linux#missing-devkvm).
-- **Docker Desktop on macOS:** Check the [selected virtual machine manager](https://docs.docker.com/desktop/features/vmm/) and its nested-virtualization support.
-- **Docker Desktop on Windows:** Check the [WSL 2 or Hyper-V backend requirements](https://docs.docker.com/desktop/setup/install/windows-install/).
+- **Docker Desktop:** Review the [Mac virtual machine manager](https://docs.docker.com/desktop/features/vmm/) or [Windows backend](https://docs.docker.com/desktop/setup/install/windows-install/) documentation. Hardware virtualization on the physical machine does not by itself make `/dev/kvm` available to containers.
 - **Docker Desktop inside another VM or VDI:** Follow Docker's [nested-virtualization guide](https://docs.docker.com/desktop/setup/vm-vdi/).
 
-After changing the Docker or hypervisor configuration, rerun the preflight. Adding `--privileged` cannot create a KVM device that the Docker host does not have.
+After changing the Docker or hypervisor configuration, rerun the preflight. Adding `--privileged` cannot create a KVM device that the Docker environment does not have.
 
 ## Open an interactive sandbox
 
