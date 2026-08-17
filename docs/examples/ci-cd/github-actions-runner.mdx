@@ -62,21 +62,25 @@ jobs:
     ```
   </Step>
 
-  <Step title="Connect it to GitHub">
-    Ask GitHub for a one-job JIT configuration, then pipe it directly into the runner. The command stays attached until the job finishes.
+  <Step title="Register and start the runner">
+    First, ask GitHub to register this VM as a runner for one job. GitHub returns a single-use configuration containing the repository address, runner identity, labels, and temporary credentials.
 
     ```sh
-    jit=$(gh api --method POST --hostname github.com "repos/$repo/actions/runners/generate-jitconfig" \
+    runner_config=$(gh api --method POST --hostname github.com "repos/$repo/actions/runners/generate-jitconfig" \
       -f name="$runner" -F runner_group_id=1 -f 'labels[]=self-hosted' \
       -f 'labels[]=msb-ephemeral' -f work_folder=_work --jq .encoded_jit_config)
     ```
 
+    Next, pass that configuration through standard input to GitHub's runner process inside the microVM:
+
     ```sh
-    printf '%s\n' "$jit" | msb exec --stream --user runner \
+    printf '%s\n' "$runner_config" | msb exec --stream --user runner \
       --workdir /home/runner "$runner" -- \
-      bash -lc 'read -r jit; exec ./run.sh --jitconfig "$jit"'
-    unset jit
+      bash -lc 'read -r config; exec ./run.sh --jitconfig "$config"'
+    unset runner_config
     ```
+
+    The runner now opens an outbound HTTPS long poll to GitHub and waits. No inbound port or public IP is required. GitHub returns the queued job through that request, and the command exits when the job finishes.
   </Step>
 
   <Step title="Remove the VM">
