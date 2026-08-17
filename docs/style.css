@@ -101,13 +101,12 @@ h2 + .msb-member-group { margin-top: 1.5rem; }
  * keeping each root type directly navigable. */
 #table-of-contents-content li:has(> .msb-toc-toggle) {
   position: relative;
-  padding-left: 1.35rem;
 }
 #table-of-contents-content .msb-toc-toggle {
   position: absolute;
   z-index: 1;
   top: 0.2rem;
-  left: 0;
+  left: -1.35rem;
   display: grid;
   width: 1.25rem;
   height: 1.25rem;
