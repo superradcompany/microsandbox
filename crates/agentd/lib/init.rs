@@ -145,6 +145,10 @@ mod linux {
                 Self::Tmpfs(spec) => &spec.path,
             }
         }
+
+        fn is_file(&self) -> bool {
+            matches!(self, Self::File(_))
+        }
     }
 
     /// Mounts essential Linux filesystems.
@@ -562,6 +566,22 @@ mod linux {
                 return Err(AgentdError::Init(format!(
                     "multiple volumes cannot mount the same guest path: {}",
                     pair[0].canonical_path
+                )));
+            }
+        }
+
+        // A file can be a mount leaf, but it cannot contain another mount.
+        // Reject the complete plan before executing its first mount so this
+        // configuration cannot fail later with ENOTDIR after partial setup.
+        for file in plan.iter().filter(|planned| planned.mount.is_file()) {
+            let file_path = Utf8UnixPath::new(&file.canonical_path);
+            if let Some(descendant) = plan.iter().find(|candidate| {
+                candidate.depth > file.depth
+                    && Utf8UnixPath::new(&candidate.canonical_path).starts_with(file_path)
+            }) {
+                return Err(AgentdError::Init(format!(
+                    "file mount cannot contain another mount: {} is an ancestor of {}",
+                    file.canonical_path, descendant.canonical_path
                 )));
             }
         }
@@ -1114,5 +1134,30 @@ mod tests {
                 ("tmpfs", "/workspace/persist/cache".into()),
             ]
         );
+    }
+
+    #[test]
+    fn test_user_mount_plan_rejects_file_mount_as_parent() {
+        let dirs = vec![DirMountSpec {
+            tag: "persist".into(),
+            guest_path: "/workspace/persist".into(),
+            readonly: false,
+            noexec: false,
+            nosuid: false,
+            nodev: false,
+        }];
+        let files = vec![FileMountSpec {
+            tag: "workspace".into(),
+            filename: "workspace".into(),
+            guest_path: "/workspace".into(),
+            readonly: true,
+            noexec: false,
+            nosuid: false,
+            nodev: false,
+        }];
+
+        let error = linux::planned_user_mounts_for_test(&dirs, &files, &[], &[]).unwrap_err();
+
+        assert!(error.to_string().contains("file mount cannot contain"));
     }
 }

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use microsandbox_image::{ImageConfig, RegistryAuth};
 use microsandbox_protocol::{HANDOFF_INIT_AUTO, HANDOFF_INIT_IMAGE_ENTRYPOINT_CANDIDATES};
+use typed_path::Utf8UnixPath;
 
 use super::types::{MountOptions, RootDisk, RootfsSource, VolumeMount};
 
@@ -553,14 +554,9 @@ fn guest_mount_is(mount: &VolumeMount, path: &str) -> bool {
         | VolumeMount::Named { guest, .. }
         | VolumeMount::Tmpfs { guest, .. }
         | VolumeMount::DiskImage { guest, .. } => {
-            normalized_guest_path(guest) == normalized_guest_path(path)
+            Utf8UnixPath::new(guest).normalize() == Utf8UnixPath::new(path).normalize()
         }
     }
-}
-
-fn normalized_guest_path(path: &str) -> &str {
-    let trimmed = path.trim_end_matches('/');
-    if trimmed.is_empty() { "/" } else { trimmed }
 }
 
 pub(crate) fn sandbox_log_level_from_runtime(level: LogLevel) -> SandboxLogLevel {
@@ -1671,6 +1667,31 @@ mod tests {
             VolumeMount::Bind { guest, .. } => assert_eq!(guest, "/tmp/"),
             mount => panic!("expected bind mount, got {mount:?}"),
         }
+    }
+
+    #[test]
+    fn test_apply_runtime_defaults_preserves_canonical_tmp_alias() {
+        let mut config = SandboxConfig {
+            spec: SandboxSpec {
+                image: RootfsSource::oci("python:3.12"),
+                mounts: vec![VolumeMount::Bind {
+                    host: "/host/tmp".into(),
+                    guest: "/tmp/.".into(),
+                    options: MountOptions::default(),
+                    stat_virtualization: crate::sandbox::StatVirtualization::Strict,
+                    host_permissions: crate::sandbox::HostPermissions::Private,
+                    follow_root_symlinks: false,
+                    quota_mib: None,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        config.apply_runtime_defaults();
+
+        assert_eq!(config.spec.mounts.len(), 1);
+        assert_eq!(config.spec.mounts[0].guest(), "/tmp/.");
     }
 
     #[test]

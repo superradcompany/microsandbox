@@ -2,6 +2,7 @@
 //!
 //! These types are referenced by [`SandboxConfig`](super::SandboxConfig).
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::size::Mebibytes;
@@ -1090,11 +1091,23 @@ impl ImageBuilder {
 //--------------------------------------------------------------------------------------------------
 
 pub(crate) fn validate_volume_mounts(mounts: &mut [VolumeMount]) -> crate::MicrosandboxResult<()> {
-    microsandbox_types::canonicalize_volume_mounts(mounts)?;
+    let mut guests = HashSet::new();
 
-    for mount in mounts {
+    // Normalize and validate in caller order so the first invalid mount still
+    // produces the first error. Sorting only after validation keeps the wire
+    // deterministic without obscuring a more relevant earlier failure.
+    for mount in mounts.iter_mut() {
+        microsandbox_types::canonicalize_volume_mounts(std::slice::from_mut(mount))?;
         validate_volume_mount(mount)?;
+        if !guests.insert(mount.guest().to_owned()) {
+            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                "multiple volumes cannot mount the same guest path: {}",
+                mount.guest()
+            )));
+        }
     }
+
+    microsandbox_types::canonicalize_volume_mounts(mounts)?;
     Ok(())
 }
 
@@ -1490,6 +1503,28 @@ mod tests {
         };
 
         let err = validate_volume_mounts(std::slice::from_mut(&mut mount)).unwrap_err();
+        assert!(err.to_string().contains("disk image host path"));
+    }
+
+    #[test]
+    fn test_validate_volume_mounts_preserves_caller_error_order() {
+        let mut mounts = vec![
+            VolumeMount::DiskImage {
+                host: PathBuf::from("/host/data:ro.raw"),
+                guest: "/data".to_string(),
+                format: DiskImageFormat::Raw,
+                fstype: None,
+                options: MountOptions::default(),
+            },
+            VolumeMount::Tmpfs {
+                guest: "relative".to_string(),
+                size_mib: None,
+                options: MountOptions::default(),
+            },
+        ];
+
+        let err = validate_volume_mounts(&mut mounts).unwrap_err();
+
         assert!(err.to_string().contains("disk image host path"));
     }
 

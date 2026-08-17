@@ -78,7 +78,7 @@ impl SandboxBackend for CloudBackend {
         start: bool,
     ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
         Box::pin(async move {
-            let req = CloudCreateBody::try_from(config.clone())?;
+            let (req, config) = cloud_create_body_and_config(config)?;
             let cloud = CloudBackend::create_sandbox(self, &req, start).await?;
             if start {
                 ensure_cloud_sandbox_ready(&cloud)?;
@@ -95,7 +95,7 @@ impl SandboxBackend for CloudBackend {
         // Cloud has no notion of "detached" — the sandbox lifecycle is owned
         // by msb-cloud, not by this process. Reuse the eager-start path.
         Box::pin(async move {
-            let req = CloudCreateBody::try_from(config.clone())?;
+            let (req, config) = cloud_create_body_and_config(config)?;
             let cloud = CloudBackend::create_sandbox(self, &req, true).await?;
             ensure_cloud_sandbox_ready(&cloud)?;
             Ok(Sandbox::from_cloud(backend, cloud, config))
@@ -358,6 +358,17 @@ impl TryFrom<SandboxConfig> for CloudCreateBody {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+fn cloud_create_body_and_config(
+    mut config: SandboxConfig,
+) -> MicrosandboxResult<(CloudCreateBody, SandboxConfig)> {
+    // Build the request first to preserve cloud-specific error precedence,
+    // then apply the same successful canonicalization to the config retained
+    // by Sandbox::config().
+    let request = CloudCreateBody::try_from(config.clone())?;
+    crate::sandbox::validate_volume_mounts(&mut config.spec.mounts)?;
+    Ok((request, config))
+}
+
 /// Reject SDK configuration whose meaning is absent from the current cloud
 /// wire shape. Failing at the backend boundary prevents a successful create
 /// from quietly producing a sandbox different from the one requested.
@@ -619,6 +630,46 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["/workspace", "/workspace/persist"]
         );
+    }
+
+    #[test]
+    fn cloud_create_retains_canonical_mount_config() {
+        let mut config = base_cloud_config();
+        config.spec.mounts = vec![
+            VolumeMount::Tmpfs {
+                guest: "/workspace/persist/.".into(),
+                size_mib: None,
+                options: MountOptions::default(),
+            },
+            VolumeMount::Tmpfs {
+                guest: "/workspace/".into(),
+                size_mib: None,
+                options: MountOptions::default(),
+            },
+        ];
+
+        let (request, config) = cloud_create_body_and_config(config).unwrap();
+        let retained = config
+            .spec
+            .mounts
+            .iter()
+            .map(VolumeMount::guest)
+            .collect::<Vec<_>>();
+        let sent = request
+            .envelope
+            .spec
+            .mounts
+            .iter()
+            .map(|mount| match mount {
+                microsandbox_types::CloudVolumeMount::Bind { guest, .. }
+                | microsandbox_types::CloudVolumeMount::Named { guest, .. }
+                | microsandbox_types::CloudVolumeMount::Tmpfs { guest, .. }
+                | microsandbox_types::CloudVolumeMount::DiskImage { guest, .. } => guest.as_str(),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(retained, vec!["/workspace", "/workspace/persist"]);
+        assert_eq!(retained, sent);
     }
 
     #[test]
