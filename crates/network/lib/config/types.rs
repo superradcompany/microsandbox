@@ -6,13 +6,12 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use ipnetwork::{Ipv4Network, Ipv6Network};
+use microsandbox_types::{NetworkRateLimiterConfig, TlsConfig};
 use serde::{Deserialize, Serialize};
 
 use crate::dns::Nameserver;
-
 use crate::policy::NetworkPolicy;
 use crate::secrets::config::SecretsConfig;
-use microsandbox_types::{NetworkRateLimiterConfig, TlsConfig};
 
 //--------------------------------------------------------------------------------------------------
 // Constants

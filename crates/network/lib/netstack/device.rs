@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use smoltcp::phy::{self, DeviceCapabilities, Medium};
 use smoltcp::time::Instant;
 
-use crate::shared::SharedState;
+use super::shared::SharedState;
 
 //--------------------------------------------------------------------------------------------------
 // Types

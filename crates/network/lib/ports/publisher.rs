@@ -23,27 +23,9 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 
 use crate::config::{PortProtocol, PublishedPort};
+use crate::netstack::shared::SharedState;
 use crate::policy::{NetworkPolicy, Protocol};
-use crate::shared::SharedState;
-use crate::udp_relay::{construct_udp_response, extract_udp_payload};
-
-//--------------------------------------------------------------------------------------------------
-// Helpers
-//--------------------------------------------------------------------------------------------------
-
-/// Set zero-linger on a stream so the kernel sends a TCP RST instead of
-/// the default FIN close when the stream drops. Used for deliberate
-/// rejection paths (policy deny, max-inbound exhaustion,
-/// smoltcp-connect failure) so the peer sees `ECONNRESET` rather than
-/// a graceful close that looks like the server simply went away.
-///
-/// Goes through `socket2` rather than tokio's deprecated
-/// `TcpStream::set_linger` so the call site doesn't trip
-/// `#[deny(deprecated)]` in clippy. The cast to `SockRef` is
-/// zero-cost — it borrows the underlying fd.
-fn reject_with_rst(stream: &TcpStream) {
-    let _ = socket2::SockRef::from(stream).set_linger(Some(Duration::ZERO));
-}
+use crate::udp::relay::{construct_udp_response, extract_udp_payload};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -550,6 +532,20 @@ impl PortPublisher {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Set zero-linger on a stream so the kernel sends a TCP RST instead of
+/// the default FIN close when the stream drops. Used for deliberate
+/// rejection paths (policy deny, max-inbound exhaustion,
+/// smoltcp-connect failure) so the peer sees `ECONNRESET` rather than
+/// a graceful close that looks like the server simply went away.
+///
+/// Goes through `socket2` rather than tokio's deprecated
+/// `TcpStream::set_linger` so the call site doesn't trip
+/// `#[deny(deprecated)]` in clippy. The cast to `SockRef` is
+/// zero-cost — it borrows the underlying fd.
+fn reject_with_rst(stream: &TcpStream) {
+    let _ = socket2::SockRef::from(stream).set_linger(Some(Duration::ZERO));
+}
 
 /// Listener task: accepts TCP connections on the host, runs each
 /// through the network policy's ingress evaluator, and queues

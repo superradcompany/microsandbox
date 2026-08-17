@@ -1,6 +1,21 @@
 # frozen_string_literal: true
 
-require "microsandbox/microsandbox"
+require_relative "microsandbox/version"
+
+# Platform gems stage the binary under lib/microsandbox/<major.minor>/ (one per
+# Ruby ABI); source builds produce the flat path. Try the ABI dir first. When
+# both misses are plain "no such file", either message will do; but a binary
+# that exists and fails to load (e.g. missing libcap-ng.so.0) must win over a
+# file miss on the other path, whichever order the two failures arrive in.
+begin
+  require "microsandbox/#{RUBY_VERSION[/\d+\.\d+/]}/microsandbox"
+rescue LoadError => abi_error
+  begin
+    require "microsandbox/microsandbox"
+  rescue LoadError => flat_error
+    raise flat_error.message.start_with?("cannot load such file") ? abi_error : flat_error
+  end
+end
 
 module Microsandbox
   class SandboxBuilder

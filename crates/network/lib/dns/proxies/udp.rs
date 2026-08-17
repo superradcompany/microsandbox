@@ -19,8 +19,8 @@ use tokio::sync::mpsc;
 use super::super::common::transport::Transport;
 use super::super::forwarder::{DnsForwarder, DnsForwarderHandle};
 use super::super::interceptor::DnsQuery;
-use crate::shared::SharedState;
-use crate::udp_relay::construct_udp_response;
+use crate::netstack::shared::SharedState;
+use crate::udp::relay::construct_udp_response;
 
 //--------------------------------------------------------------------------------------------------
 // Constants

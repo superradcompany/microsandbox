@@ -27,7 +27,7 @@ use tokio::time::timeout;
 use super::super::common::transport::Transport;
 use super::super::forwarder::{DnsForwarder, DnsForwarderHandle};
 use super::framing::{take_message, write_framed};
-use crate::shared::SharedState;
+use crate::netstack::shared::SharedState;
 
 //--------------------------------------------------------------------------------------------------
 // Constants

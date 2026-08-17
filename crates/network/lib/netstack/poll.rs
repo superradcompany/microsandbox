@@ -22,25 +22,24 @@ use smoltcp::wire::{
 };
 
 use crate::config::{DnsConfig, PublishedPort};
-use crate::conn::ConnectionTracker;
-use crate::device::SmoltcpDevice;
 use crate::dns::common::ports::DnsPortType;
 use crate::dns::{
     interceptor::DnsInterceptor,
     proxies::{dot::DotProxy, tcp::DnsTcpProxy},
 };
-use crate::icmp_relay::IcmpRelay;
+use crate::icmp::relay::IcmpRelay;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
-use crate::proxy;
-use crate::publisher::PortPublisher;
+use crate::ports::PortPublisher;
 use crate::secrets::handle::SecretsHandle;
-use crate::shared::SharedState;
+use crate::tcp::{connection::ConnectionTracker, proxy, upstream::UpstreamTcpTarget};
 use crate::tls::{proxy as tls_proxy, state::TlsState};
-use crate::udp_fragments::{
+use crate::udp::fragments::{
     Ipv4UdpFragmentReassembler, Ipv6UdpFragmentReassembler, ReassembledUdpDatagram,
     is_ipv4_udp_fragment, is_ipv6_fragment, is_ipv6_udp_fragment,
 };
-use crate::udp_relay::UdpRelay;
+use crate::udp::relay::UdpRelay;
+
+use super::{device::SmoltcpDevice, shared::SharedState};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -523,11 +522,11 @@ pub fn smoltcp_poll_loop(
                     .contains(&conn.dst.port())
             {
                 // TLS-intercepted port — spawn TLS MITM proxy.
-                let connect_dst = resolve_host_dst(conn.dst, config.gateway);
+                let connect_target = resolve_tcp_host_target(conn.dst, config.gateway);
                 tls_proxy::spawn_tls_proxy(
                     &tokio_handle,
                     conn.dst,
-                    connect_dst,
+                    connect_target,
                     conn.from_smoltcp,
                     conn.to_smoltcp,
                     shared.clone(),
@@ -588,11 +587,11 @@ pub fn smoltcp_poll_loop(
                 continue;
             }
             // Plain TCP proxy.
-            let connect_dst = resolve_host_dst(conn.dst, config.gateway);
-            proxy::spawn_tcp_proxy(
+            let connect_target = resolve_tcp_host_target(conn.dst, config.gateway);
+            proxy::spawn_tcp_proxy_with_target(
                 &tokio_handle,
                 conn.dst,
-                connect_dst,
+                connect_target,
                 conn.from_smoltcp,
                 conn.to_smoltcp,
                 shared.clone(),
@@ -796,10 +795,30 @@ fn handle_reassembled_udp_datagram(
     device.drop_staged_frame();
 }
 
-/// Map a guest-wire destination to its host-socket equivalent.
+/// Resolve host-side TCP destination candidates for a guest connection.
+///
+/// A guest connection to either gateway family first dials the matching host
+/// loopback address, then may fall back to the other loopback family. Regular
+/// outbound destinations have no fallback.
+fn resolve_tcp_host_target(dst: SocketAddr, gateway: GatewayIps) -> UpstreamTcpTarget {
+    let port = dst.port();
+    match dst.ip() {
+        IpAddr::V4(v4) if gateway.ipv4 == Some(v4) => UpstreamTcpTarget::with_fallback(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port),
+        ),
+        IpAddr::V6(v6) if gateway.ipv6 == Some(v6) => UpstreamTcpTarget::with_fallback(
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+        ),
+        _ => UpstreamTcpTarget::direct(dst),
+    }
+}
+
+/// Map a guest-wire UDP destination to its host-socket equivalent.
 ///
 /// Gateway IPs rewrite to loopback (`127.0.0.1` / `::1`); everything else
-/// passes through. Shared by the TCP proxy dispatch and the UDP relay.
+/// passes through.
 ///
 /// # Arguments
 ///
@@ -1097,8 +1116,8 @@ mod tests {
         ArpOperation, ArpPacket, ArpRepr, EthernetRepr, Icmpv4Packet, Icmpv4Repr, Ipv4Repr,
     };
 
-    use crate::device::SmoltcpDevice;
-    use crate::shared::SharedState;
+    use super::super::{device::SmoltcpDevice, shared::SharedState};
+    use crate::tcp::connection::NewConnection;
 
     /// Build a minimal Ethernet + IPv4 + TCP SYN frame.
     fn build_tcp_syn_frame(
@@ -1543,6 +1562,44 @@ mod tests {
     }
 
     #[test]
+    fn resolve_tcp_host_target_ipv4_can_fall_back_to_ipv6() {
+        let gw = test_gateway();
+        let dst = SocketAddr::new(IpAddr::V4(gw.ipv4.unwrap()), 8080);
+
+        assert_eq!(
+            resolve_tcp_host_target(dst, gw),
+            UpstreamTcpTarget::with_fallback(
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+                SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 8080),
+            )
+        );
+    }
+
+    #[test]
+    fn resolve_tcp_host_target_ipv6_can_fall_back_to_ipv4() {
+        let gw = test_gateway();
+        let dst = SocketAddr::new(IpAddr::V6(gw.ipv6.unwrap()), 8080);
+
+        assert_eq!(
+            resolve_tcp_host_target(dst, gw),
+            UpstreamTcpTarget::with_fallback(
+                SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 8080),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+            )
+        );
+    }
+
+    #[test]
+    fn resolve_tcp_host_target_external_has_no_fallback() {
+        let dst = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 443);
+
+        assert_eq!(
+            resolve_tcp_host_target(dst, test_gateway()),
+            UpstreamTcpTarget::direct(dst)
+        );
+    }
+
+    #[test]
     fn resolve_host_dst_matches_ipv4() {
         let gw = test_gateway();
         let dst = SocketAddr::new(IpAddr::V4(gw.ipv4.unwrap()), 8080);
@@ -1907,7 +1964,7 @@ mod tests {
         shared: &Arc<SharedState>,
         now: Instant,
         guest_port: u16,
-    ) -> (i32, i32, Vec<crate::conn::NewConnection>) {
+    ) -> (i32, i32, Vec<NewConnection>) {
         let (server_isn, guest_seq) =
             handshake(tracker, device, iface, sockets, shared, now, guest_port);
 

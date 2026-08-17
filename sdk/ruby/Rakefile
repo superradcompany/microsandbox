@@ -1,12 +1,30 @@
 # frozen_string_literal: true
 
 require_relative "lib/microsandbox/version"
+require "digest"
+require "rake/clean"
 require "rake/extensiontask"
 require "rake/testtask"
+require "rubygems/package"
+
+# Ruby ABIs a precompiled platform gem must carry, and the gem platforms we
+# publish. Adding a Ruby release means adding it here (and to the CI matrix);
+# `required_ruby_version` on the platform spec is derived from this list.
+RUBY_ABIS = %w[3.1 3.2 3.3 3.4 4.0].freeze
+# The Linux platforms carry an explicit -gnu suffix: a bare x86_64-linux gem
+# platform acts as a libc wildcard and would also match musl hosts, which these
+# glibc-linked binaries cannot serve. musl stays on the source gem. Windows is
+# x64-mingw-ucrt only: RubyInstaller 3.1+ builds are all ucrt, and no arm64
+# RubyInstaller exists for the Ruby range these gems cover.
+GEM_PLATFORMS = %w[x86_64-linux-gnu aarch64-linux-gnu arm64-darwin x64-mingw-ucrt].freeze
 
 Rake::ExtensionTask.new("microsandbox") do |extension|
   extension.lib_dir = "lib/microsandbox"
 end
+
+# Per-ABI staging directories and packaged gems are build outputs, never sources.
+CLEAN.include("lib/microsandbox/[0-9].[0-9]")
+CLOBBER.include("pkg")
 
 desc "Verify Ruby gem and published Rust SDK versions remain in lockstep"
 task :version_check do
@@ -25,7 +43,196 @@ Rake::TestTask.new do |test|
   test.pattern = "test/**/*_test.rb"
   test.verbose = true
   test.deps << :version_check
+  # A staged ABI binary left over from a platform-gem build would shadow the
+  # freshly compiled flat one in the loader, silently testing stale native code.
+  test.deps << "gem:unstage"
   test.deps << :compile
+end
+
+# Sentinel recording that cargo:patch_workspace owns the current generated
+# config/lock state; its presence is what distinguishes a repeat run (safe to
+# regenerate) from a first run (back up what is there).
+PATCH_STATE = ".cargo/.patch_workspace_applied"
+PATCH_CONFIG = ".cargo/config.toml"
+
+def patch_config_digest
+  File.file?(PATCH_CONFIG) ? Digest::SHA256.file(PATCH_CONFIG).hexdigest : "missing"
+end
+
+def assert_patch_config_unchanged
+  return if File.read(PATCH_STATE).strip == patch_config_digest
+
+  abort "#{PATCH_CONFIG} changed after cargo:patch_workspace applied; refusing to overwrite it. " \
+        "Copy those edits aside, restore the task-owned config, then retry cleanup."
+end
+
+namespace :cargo do
+  desc "Point the extension at the in-tree Rust SDK (precompiled platform gems only)"
+  task :patch_workspace do
+    # Used only by the platform-gem build, where the binary must be built from
+    # this commit's Rust SDK. Cargo silently ignores a `[patch.crates-io]` entry
+    # whose version does not satisfy the dependency requirement, so
+    # version_check plus the cargo-tree assertion in CI guard the swap.
+    first_run = !File.exist?(PATCH_STATE)
+    if first_run
+      # Backups this task did not create are not ours to adopt or overwrite.
+      %w[ext/microsandbox/Cargo.lock.orig .cargo/config.toml.orig].each do |stray|
+        next unless File.exist?(stray)
+        abort "#{stray} exists but was not created by this task; move it away first"
+      end
+    end
+    if File.exist?(".cargo/config")
+      # Cargo prefers the extensionless legacy file over config.toml, which
+      # would silently override the patch written below. Checked before any
+      # mutation, so this abort leaves the workspace untouched.
+      abort ".cargo/config (legacy, extensionless) exists and would take " \
+            "precedence; rename it to config.toml first"
+    end
+    assert_patch_config_unchanged unless first_run
+
+    # The committed Cargo.lock resolves the *published* crate graph; the in-tree
+    # SDK routinely drifts ahead of it, and cargo cannot reconcile the patched
+    # path dependency against the stale lock. Move it aside (preserving any
+    # local edits) so the patched build re-resolves from scratch;
+    # `rake cargo:unpatch_workspace` moves it back. This runs before the config
+    # handling below so the manual flow its abort prescribes starts from a
+    # workspace where the lock is already staged for re-resolution.
+    if first_run
+      mv "ext/microsandbox/Cargo.lock", "ext/microsandbox/Cargo.lock.orig" if File.exist?("ext/microsandbox/Cargo.lock")
+    else
+      # Repeat run: the current lock is generated output, not user work.
+      rm_f "ext/microsandbox/Cargo.lock"
+    end
+
+    mkdir_p ".cargo"
+    # A contributor may keep local linker/target settings here; save the
+    # original and append the patch stanza to a copy of it, so those settings
+    # stay active during the patched build and survive the round trip. On a
+    # repeat run the current config.toml is our own generated file, so only a
+    # first run may back it up.
+    if first_run && File.exist?(".cargo/config.toml")
+      cp ".cargo/config.toml", ".cargo/config.toml.orig"
+    end
+    base = File.exist?(".cargo/config.toml.orig") ? File.read(".cargo/config.toml.orig") : ""
+    if base.match?(/^\s*\[patch\.(?:crates-io|"crates-io"|'crates-io')\]/)
+      # Appending would produce a duplicate table, which cargo rejects; merging
+      # into a hand-maintained table is too much magic for a rake task.
+      File.write(PATCH_STATE, patch_config_digest)
+      abort ".cargo/config.toml already carries a [patch.crates-io] table; " \
+            "add `microsandbox = { path = \"../rust\" }` to it by hand. The " \
+            "lockfile is already moved aside; `rake cargo:unpatch_workspace` " \
+            "undoes everything."
+    end
+    base << "\n" unless base.empty? || base.end_with?("\n")
+    File.write(PATCH_CONFIG, base + <<~TOML)
+      [patch.crates-io]
+      microsandbox = { path = "../rust" }
+    TOML
+    File.write(PATCH_STATE, patch_config_digest)
+  end
+
+  desc "Undo cargo:patch_workspace: drop the patch config, restore the lockfile"
+  task :unpatch_workspace do
+    # Leaving the patch applied would keep every later local build silently
+    # resolving against the in-tree SDK instead of the published pin the
+    # source gem actually ships with. The state sentinel gates the whole
+    # undo: without it nothing here is ours, so touching .orig files or the
+    # config would destroy contributor work, not clean up after this task.
+    unless File.exist?(PATCH_STATE)
+      puts "cargo:unpatch_workspace: nothing to undo (cargo:patch_workspace has not been applied)"
+      next
+    end
+    assert_patch_config_unchanged
+    if File.exist?(".cargo/config.toml.orig")
+      mv ".cargo/config.toml.orig", ".cargo/config.toml"
+    else
+      rm_f ".cargo/config.toml"
+    end
+    if File.exist?("ext/microsandbox/Cargo.lock.orig")
+      mv "ext/microsandbox/Cargo.lock.orig", "ext/microsandbox/Cargo.lock"
+    end
+    rm_f PATCH_STATE
+  end
+end
+
+namespace :gem do
+  desc "Remove staged per-ABI binaries"
+  task :unstage do
+    rm_rf Dir["lib/microsandbox/[0-9].[0-9]"]
+  end
+
+  desc "Stage the compiled extension under lib/microsandbox/<ruby ABI>/"
+  task stage: :compile do
+    abi = RUBY_VERSION[/\d+\.\d+/]
+    binary = "lib/microsandbox/microsandbox.#{RbConfig::CONFIG["DLEXT"]}"
+
+    mkdir_p "lib/microsandbox/#{abi}"
+    cp binary, "lib/microsandbox/#{abi}/"
+  end
+
+  desc "Package a precompiled platform gem (requires GEM_PLATFORM)"
+  task :platform do
+    platform = ENV.fetch("GEM_PLATFORM", nil)
+    unless GEM_PLATFORMS.include?(platform)
+      abort "GEM_PLATFORM must be one of: #{GEM_PLATFORMS.join(", ")} (got: #{platform.inspect})"
+    end
+
+    # The staged binaries are native to the machine that compiled them, so a
+    # label naming another platform would package binaries that install but
+    # cannot load (e.g. the README's arm64-darwin example copied onto Linux).
+    host = Gem::Platform.local
+    requested = Gem::Platform.new(platform)
+    # The version component carries the libc/runtime flavor (gnu vs musl,
+    # ucrt); a musl host must not package a -gnu labeled gem. Compared only
+    # when both sides report one: a versionless label (arm64-darwin) accepts
+    # any darwin host, and a host that reports no flavor stays permissive.
+    mismatch = host.os != requested.os || host.cpu != requested.cpu ||
+               (requested.version && host.version && host.version != requested.version)
+    if mismatch
+      abort "GEM_PLATFORM #{platform} does not match this host (#{host}); " \
+            "platform gems must be packaged on their native platform"
+    end
+
+    staged = Dir["lib/microsandbox/*/microsandbox.{so,bundle}"]
+    staged_abis = staged.map { |path| File.basename(File.dirname(path)) }.sort
+    # Dev-only escape hatch for packaging against a single locally installed
+    # Ruby. CI never sets it, so CI always demands the full ABI set.
+    expected_abis = ENV["RUBY_ABIS"]&.split(/[\s,]+/)&.reject(&:empty?) || RUBY_ABIS
+    unless staged_abis == expected_abis.sort
+      abort "Staged ABIs #{staged_abis.inspect} do not match expected #{expected_abis.sort.inspect}; " \
+            "run `rake gem:stage` under each Ruby first"
+    end
+
+    spec = Gem::Specification.load("microsandbox.gemspec")
+    spec.platform = Gem::Platform.new(platform)
+    spec.extensions = []
+    # With extensions cleared, the Rust sources under ext/ serve no purpose in a
+    # platform gem (and the lockfile there is mutated by the patched build), so
+    # ship only the Ruby surface plus the staged binaries. The source gemspec
+    # globs only lib/**/*.rb, so a flat compiled artifact can never leak into a
+    # gem; binaries ship solely through this explicit list. The msb runtime is
+    # never bundled here — it ships in a separate per-platform binaries gem
+    # (#1305); exe/ stays reserved for wrapper shims and never holds binaries.
+    spec.files = spec.files.reject { |path| path.start_with?("ext/") } +
+                 staged
+    # Derived from the ABIs actually packaged, so a single-ABI dev gem (via the
+    # RUBY_ABIS override) cannot claim Rubies it has no binary for. In CI this
+    # is always the full list.
+    abis = expected_abis.sort_by { |a| Gem::Version.new(a) }
+    last_major, last_minor = Gem::Version.new(abis.last).segments.first(2)
+    spec.required_ruby_version = Gem::Requirement.new([">= #{abis.first}", "< #{last_major}.#{last_minor + 1}.dev"])
+    # RubyGems only matches -gnu suffixed platform gems on glibc hosts from
+    # 3.3.11 onwards; older releases would fall back to the source gem anyway,
+    # this just makes the boundary explicit.
+    spec.required_rubygems_version = Gem::Requirement.new(">= 3.3.11")
+    # rb_sys exists purely to compile the source gem; a precompiled gem must not
+    # drag a build dependency into the install.
+    spec.dependencies.delete_if { |dependency| dependency.name == "rb_sys" && dependency.type == :runtime }
+
+    package = Gem::Package.build(spec)
+    mkdir_p "pkg"
+    mv package, "pkg/#{package}"
+  end
 end
 
 task default: :test

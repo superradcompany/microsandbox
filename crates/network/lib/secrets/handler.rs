@@ -15,7 +15,7 @@ use percent_encoding::percent_decode;
 use super::config::{
     HostPattern, MAX_SECRET_PLACEHOLDER_BYTES, SecretEntry, SecretsConfig, ViolationAction,
 };
-use crate::shared::SharedState;
+use crate::netstack::shared::SharedState;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -3057,8 +3057,8 @@ impl SecretViolationReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::netstack::shared::{ResolvedHostnameFamily, SharedState};
     use crate::secrets::config::*;
-    use crate::shared::{ResolvedHostnameFamily, SharedState};
 
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::Duration;

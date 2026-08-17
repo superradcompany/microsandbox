@@ -7,7 +7,7 @@ use ipnetwork::IpNetwork;
 
 use super::DestinationGroup;
 use crate::addr::normalize_ip_addr;
-use crate::shared::SharedState;
+use crate::netstack::shared::SharedState;
 
 //--------------------------------------------------------------------------------------------------
 // Functions

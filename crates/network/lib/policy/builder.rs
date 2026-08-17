@@ -46,8 +46,8 @@ use super::{
 //--------------------------------------------------------------------------------------------------
 
 /// Errors surfaced by [`NetworkPolicyBuilder::build`] and the related
-/// nested builders ([`crate::builder::DnsBuilder::build`],
-/// [`crate::builder::NetworkBuilder::build`]).
+/// nested builders ([`crate::config::DnsBuilder::build`],
+/// [`crate::config::NetworkBuilder::build`]).
 ///
 /// All these builders accumulate errors lazily — string inputs are
 /// stored raw and only parsed at `.build()` time, where the first

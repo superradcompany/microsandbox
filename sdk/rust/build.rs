@@ -18,29 +18,32 @@ use microsandbox_utils::LIBKRUNFW_ABI;
 use microsandbox_utils::http_client;
 #[cfg(all(feature = "prebuilt", not(windows)))]
 use microsandbox_utils::{PREBUILT_VERSION, bundle_download_url};
+#[cfg(feature = "prebuilt")]
 use microsandbox_utils::{
     libkrunfw_filename as utils_libkrunfw_filename,
     msb_binary_filename as utils_msb_binary_filename, resolve_home,
 };
 
 fn main() {
-    // Re-run if MSB_HOME changes - it determines where binaries are placed.
-    println!("cargo:rerun-if-env-changed=MSB_HOME");
-    println!("cargo:rerun-if-env-changed=HOME");
-
-    let base_dir = resolve_home();
-    // Re-run if the binaries are deleted so we can re-download.
-    println!(
-        "cargo:rerun-if-changed={}",
-        base_dir.join("bin").join(msb_binary_filename()).display()
-    );
-    println!(
-        "cargo:rerun-if-changed={}",
-        base_dir.join("lib").join(libkrunfw_filename()).display()
-    );
-
     #[cfg(feature = "prebuilt")]
-    install_prebuilt(base_dir);
+    {
+        // Re-run if MSB_HOME changes - it determines where binaries are placed.
+        println!("cargo:rerun-if-env-changed=MSB_HOME");
+        println!("cargo:rerun-if-env-changed=HOME");
+
+        let base_dir = resolve_home();
+        // Re-run if the binaries are deleted so we can re-download.
+        println!(
+            "cargo:rerun-if-changed={}",
+            base_dir.join("bin").join(msb_binary_filename()).display()
+        );
+        println!(
+            "cargo:rerun-if-changed={}",
+            base_dir.join("lib").join(libkrunfw_filename()).display()
+        );
+
+        install_prebuilt(base_dir);
+    }
 }
 
 #[cfg(all(feature = "prebuilt", windows))]
@@ -95,10 +98,12 @@ fn install_prebuilt(base_dir: PathBuf) {
     );
 }
 
+#[cfg(feature = "prebuilt")]
 fn libkrunfw_filename() -> String {
     utils_libkrunfw_filename(std::env::consts::OS)
 }
 
+#[cfg(feature = "prebuilt")]
 fn msb_binary_filename() -> String {
     utils_msb_binary_filename(std::env::consts::OS)
 }

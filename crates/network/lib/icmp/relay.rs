@@ -17,9 +17,8 @@ use smoltcp::wire::{
     Icmpv6Packet, Icmpv6Repr, IpProtocol, Ipv4Packet, Ipv4Repr, Ipv6Packet, Ipv6Repr,
 };
 
+use crate::netstack::{poll::PollLoopConfig, shared::SharedState};
 use crate::policy::{NetworkPolicy, Protocol};
-use crate::shared::SharedState;
-use crate::stack::PollLoopConfig;
 
 //--------------------------------------------------------------------------------------------------
 // Constants

@@ -16,12 +16,14 @@ use microsandbox_types::{
 };
 use msb_krun::backends::net::NetBackend;
 
-use crate::backend::SmoltcpBackend;
 use crate::config::{MAX_NETWORK_CONNECTIONS, NetworkConfig};
+use crate::netstack::{
+    backend::SmoltcpBackend,
+    poll::{self, GatewayIps, PollLoopConfig},
+    shared::{DEFAULT_QUEUE_CAPACITY, SharedState},
+};
 use crate::policy::{NetworkPolicy, NetworkProfile};
 use crate::secrets::handle::SecretsHandle;
-use crate::shared::{DEFAULT_QUEUE_CAPACITY, SharedState};
-use crate::stack::{self, GatewayIps, PollLoopConfig};
 use crate::tls::state::{TlsState, TlsStateError};
 
 //--------------------------------------------------------------------------------------------------
@@ -340,7 +342,7 @@ impl SmoltcpNetwork {
             std::thread::Builder::new()
                 .name("smoltcp-poll".into())
                 .spawn(move || {
-                    stack::smoltcp_poll_loop(
+                    poll::smoltcp_poll_loop(
                         shared,
                         poll_config,
                         network_policy,
