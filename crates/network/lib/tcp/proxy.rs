@@ -152,25 +152,8 @@ impl TcpProxy {
         }
     }
 
-    /// Spawn this proxy on the networking runtime.
-    pub(crate) fn spawn(self, handle: &tokio::runtime::Handle) {
-        let guest_dst = self.guest_dst;
-        let connect_target = self.connect_target;
-
-        handle.spawn(async move {
-            if let Err(error) = self.run().await {
-                tracing::debug!(
-                    dst = %connect_target.primary(),
-                    %guest_dst,
-                    %error,
-                    "TCP proxy task ended",
-                );
-            }
-        });
-    }
-
     /// Drive the TCP proxy to completion.
-    async fn run(self) -> io::Result<()> {
+    pub(crate) async fn run(self) -> io::Result<()> {
         let Self {
             guest_dst,
             connect_target,
@@ -481,7 +464,7 @@ pub fn spawn_tcp_proxy(
     tls_state: Option<Arc<TlsState>>,
     proxy_connect: Arc<ProxyConnectState>,
 ) {
-    TcpProxy::new(
+    let proxy = TcpProxy::new(
         guest_dst,
         UpstreamTcpTarget::direct(connect_dst),
         from_smoltcp,
@@ -491,8 +474,13 @@ pub fn spawn_tcp_proxy(
         secrets,
         tls_state,
         proxy_connect,
-    )
-    .spawn(handle);
+    );
+
+    handle.spawn(async move {
+        if let Err(error) = proxy.run().await {
+            tracing::debug!(dst = %connect_dst, %guest_dst, %error, "TCP proxy task ended");
+        }
+    });
 }
 
 /// Forward an HTTP CONNECT tunnel: dial the proxy, splice the handshake,

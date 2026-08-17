@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use super::super::common::transport::Transport;
-use super::super::forwarder::{DnsForwarder, DnsForwarderHandle};
+use super::super::forwarder::DnsForwarder;
 use super::framing::{take_message, write_framed};
 use crate::netstack::shared::SharedState;
 
@@ -67,35 +67,13 @@ pub(crate) struct DnsTcpProxy {
 //--------------------------------------------------------------------------------------------------
 
 impl DnsTcpProxy {
-    /// Spawn a DNS-over-TCP proxy task for a newly established TCP/53
-    /// connection. Waits for the forwarder, constructs a [`TcpProxy`],
-    /// and drives it to completion.
+    /// Build a DNS-over-TCP proxy from a freshly accepted TCP/53 connection.
     ///
     /// `dst` is the (resolver-IP, 53) the guest aimed at — passed to
     /// the forwarder so the per-query upstream selector can route to
     /// the right place (configured upstream if `dst.ip()` is a gateway
     /// IP, direct forward otherwise).
-    pub(crate) fn spawn(
-        handle: &tokio::runtime::Handle,
-        dst: SocketAddr,
-        from_smoltcp: mpsc::Receiver<Bytes>,
-        to_smoltcp: mpsc::Sender<Bytes>,
-        forwarder: DnsForwarderHandle,
-        shared: Arc<SharedState>,
-    ) {
-        handle.spawn(async move {
-            let Some(forwarder) = DnsForwarder::wait(forwarder).await else {
-                tracing::debug!(%dst, "dns/tcp: upstream forwarder unavailable; closing connection");
-                return;
-            };
-            Self::new(dst, from_smoltcp, to_smoltcp, forwarder, shared)
-                .run()
-                .await;
-        });
-    }
-
-    /// Build a TCP proxy from a freshly accepted TCP/53 connection.
-    fn new(
+    pub(crate) fn new(
         dst: SocketAddr,
         from_smoltcp: mpsc::Receiver<Bytes>,
         to_smoltcp: mpsc::Sender<Bytes>,
@@ -114,7 +92,7 @@ impl DnsTcpProxy {
 
     /// Drive the proxy to completion. Consumes `self`: the framing
     /// buffer and channels are owned by this task for its lifetime.
-    async fn run(mut self) {
+    pub(crate) async fn run(mut self) {
         let original_dst = Some(self.dst.ip());
         loop {
             let next = match timeout(IDLE_TIMEOUT, self.from_smoltcp.recv()).await {

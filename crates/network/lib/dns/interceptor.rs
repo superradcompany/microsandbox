@@ -125,13 +125,8 @@ impl DnsInterceptor {
 
         let normalized = Arc::new(NormalizedDnsConfig::from_config(dns_config));
 
-        // Two spawns from the same construction site:
-        //   1. DnsForwarder::spawn — connects to the configured
-        //      upstream and publishes the shared handle.
-        //   2. UdpProxy::spawn — drains UDP queries from this
-        //      interceptor's channel and routes them through the
-        //      forwarder, mirroring how `tcp.rs` handles per-connection
-        //      TCP/53 traffic.
+        // Start the forwarder initializer, then schedule the UDP proxy
+        // that waits for its shared handle and drains intercepted queries.
         let forwarder_handle = DnsForwarder::spawn(
             tokio_handle,
             normalized,
@@ -141,14 +136,18 @@ impl DnsInterceptor {
             shared.clone(),
             gateway,
         );
-        UdpProxy::spawn(
-            tokio_handle,
-            query_rx,
-            forwarder_handle.clone(),
-            shared,
-            gateway_mac,
-            guest_mac,
-        );
+        let udp_forwarder_handle = forwarder_handle.clone();
+        tokio_handle.spawn(async move {
+            let Some(forwarder) = DnsForwarder::wait(udp_forwarder_handle).await else {
+                tracing::debug!(
+                    "dns/udp: upstream forwarder unavailable; UDP queries will be dropped"
+                );
+                return;
+            };
+            UdpProxy::new(query_rx, forwarder, shared, gateway_mac, guest_mac)
+                .run()
+                .await;
+        });
 
         (
             Self {

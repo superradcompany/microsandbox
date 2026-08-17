@@ -109,27 +109,10 @@ impl TlsProxy {
         self
     }
 
-    /// Spawn this proxy on the networking runtime.
+    /// Drive the TLS proxy to completion.
     ///
     /// See [`crate::tcp::proxy::spawn_tcp_proxy`] for the `proxy_connect`
     /// contract.
-    pub(crate) fn spawn(self, handle: &tokio::runtime::Handle) {
-        let guest_dst = self.guest_dst;
-        let connect_target = self.connect_target;
-
-        handle.spawn(async move {
-            if let Err(error) = self.run().await {
-                tracing::debug!(
-                    dst = %connect_target.primary(),
-                    %guest_dst,
-                    %error,
-                    "TLS proxy task ended",
-                );
-            }
-        });
-    }
-
-    /// Drive the TLS proxy to completion.
     pub(crate) async fn run(self) -> io::Result<()> {
         let Self {
             guest_dst,
