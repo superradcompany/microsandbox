@@ -1,5 +1,6 @@
 ---
 title: "Week of August 14, 2026"
+sidebarTitle: "Week of the 14th"
 description: "Per-sandbox network rate limits, NUMA-aware placement profiles, sparse configuration patches with reusable config files, guest-to-host vsock routes, deployment profile from config.json, and reliability fixes across Windows attach, cloud request shapes, image archives, and DNS rules."
 icon: "bolt"
 ---
@@ -17,14 +18,16 @@ Sandboxes can now cap outbound and inbound network traffic independently. Each d
 Limits are set at create time and take effect on the next start. Omitted limits stay unlimited, and rate limits are rejected on cloud sandboxes until the hosted backend supports them. The option is available in the CLI and in the Rust, Python, TypeScript, and Go SDKs.
 
 ```python
-from microsandbox import Sandbox, Network, NetworkRateLimiter, RateBucket
+from microsandbox import Network, NetworkRateLimiter, RateLimiter, Sandbox, TokenBucket
 
 sb = await Sandbox.create(
     "worker",
     image="alpine:3.19",
     network=Network(
         rate_limiter=NetworkRateLimiter(
-            egress=RateBucket(bandwidth_bps=10_000_000),
+            egress=RateLimiter(
+                bandwidth=TokenBucket(size=10_000_000, refill_time_ms=1_000),
+            ),
         ),
     ),
 )
