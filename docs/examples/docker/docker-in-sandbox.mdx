@@ -74,9 +74,21 @@ docker run --rm hello-world
 
 ## Cleanup
 
+Exit the sandbox shell:
+
 ```sh
 exit
+```
+
+Back on the host, remove the sandbox:
+
+```sh
 msb rm -f docker-demo
+```
+
+Remove the Docker data only when you no longer need it:
+
+```sh
 msb volume rm docker-data
 ```
 

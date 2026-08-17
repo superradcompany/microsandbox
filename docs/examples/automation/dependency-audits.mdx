@@ -31,6 +31,11 @@ msb run --name dependency-audit --replace \
 ```sh
 mkdir -p .artifacts
 msb cp dependency-audit:/var/tmp/npm-audit.json .artifacts/npm-audit.json
+```
+
+Inspect the vulnerability summary:
+
+```sh
 jq '.metadata.vulnerabilities' .artifacts/npm-audit.json
 ```
 

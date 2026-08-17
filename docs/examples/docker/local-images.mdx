@@ -7,11 +7,21 @@ icon: "boxes-stacked"
 
 <Tooltip tip="This example uses the local image cache. On microsandbox cloud, specify an OCI image when creating the sandbox and it is pulled for you."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-microsandbox cannot read Docker's private local image store directly. If you build an image locally with `docker build`, export it with `docker save` and load it into microsandbox:
+microsandbox cannot read Docker's private local image store directly. First, build the image with Docker:
 
 ```bash
 docker build -t my-image:latest .
+```
+
+Stream the image into microsandbox's local image store:
+
+```bash
 docker save my-image:latest | msb load
+```
+
+You can now run it like any other image:
+
+```bash
 msb run my-image:latest
 ```
 
@@ -26,6 +36,11 @@ If the archive has no useful tag, or you want a different local alias, pass one:
 
 ```bash
 docker save my-image:latest | msb load --tag app:local
+```
+
+Run it by its new local name:
+
+```bash
 msb run app:local
 ```
 

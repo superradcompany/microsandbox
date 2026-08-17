@@ -73,8 +73,15 @@ Open [http://127.0.0.1:6080/vnc.html?autoconnect=1&resize=scale](http://127.0.0.
 
 ## Verify the services
 
+Check the browser endpoint from the host:
+
 ```sh
 curl -sS http://127.0.0.1:6080/vnc.html | head
+```
+
+Then inspect the VNC server log inside the guest:
+
+```sh
 msb exec vnc-desktop -- sh -lc 'grep -E "Listening|created VNC server" /tmp/xvnc.log'
 ```
 

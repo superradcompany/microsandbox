@@ -50,9 +50,21 @@ The pinned example prints `0.52.0`.
 
 ## Export changes
 
+Create a patch inside the sandbox:
+
 ```sh
 msb exec gemini-demo -- sh -lc 'cd /workspace && git add -N . && git diff --binary > /tmp/gemini.patch'
+```
+
+Copy the patch to the host:
+
+```sh
 msb cp gemini-demo:/tmp/gemini.patch ./gemini.patch
+```
+
+Check that it applies cleanly before applying it:
+
+```sh
 git apply --check ./gemini.patch
 ```
 

@@ -69,12 +69,17 @@ Connect a matching Playwright client to `ws://127.0.0.1:3000/`. Keep the client 
 
 ## Cleanup
 
+Remove the sandboxes:
+
 ```sh
 msb rm -f playwright-shot playwright-server
-rm ./example.png
 ```
 
-The final `rm` deletes the copied screenshot from the host; omit it if you want to keep the artifact.
+Delete the copied screenshot only if you no longer need it:
+
+```sh
+rm ./example.png
+```
 
 ## Reference
 

@@ -21,10 +21,15 @@ msb run -d --name code-server-demo --replace \
     /home/coder/project
 ```
 
-Copy a project into the running sandbox and give the image's `coder` user ownership:
+Copy a project into the running sandbox:
 
 ```sh
 msb cp ./my-project/. code-server-demo:/home/coder/project
+```
+
+Give the image's `coder` user ownership:
+
+```sh
 msb exec -u root code-server-demo -- chown -R coder:coder /home/coder/project
 ```
 
@@ -34,6 +39,11 @@ Open [http://127.0.0.1:8080](http://127.0.0.1:8080). The editor, integrated term
 
 ```sh
 curl -I http://127.0.0.1:8080/
+```
+
+Then inspect the recent server output:
+
+```sh
 msb logs --tail 20 code-server-demo
 ```
 
@@ -49,7 +59,17 @@ Review the project and export a patch:
 
 ```sh
 msb exec code-server-demo -- sh -lc 'cd /home/coder/project && git add -N . && git diff --binary > /tmp/code-server.patch'
+```
+
+Copy the patch to the host:
+
+```sh
 msb cp code-server-demo:/tmp/code-server.patch ./code-server.patch
+```
+
+Check that it applies cleanly before applying it:
+
+```sh
 git apply --check ./code-server.patch
 ```
 

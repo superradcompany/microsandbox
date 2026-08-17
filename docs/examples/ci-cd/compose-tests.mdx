@@ -48,9 +48,21 @@ Replace `test` with the service whose exit code should decide the CI result. `ms
 
 ## Cleanup
 
+Stop the Compose stack inside the sandbox:
+
 ```sh
 msb exec --workdir /workspace compose-ci -- docker compose down --volumes
+```
+
+Remove the sandbox:
+
+```sh
 msb rm -f compose-ci
+```
+
+Delete the cache only when you no longer need it:
+
+```sh
 msb volume remove compose-ci-cache
 ```
 

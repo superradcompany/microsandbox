@@ -26,13 +26,23 @@ msb run -d --name redis-demo --replace \
 
 ## Verify reads and writes
 
+Write a test value:
+
 ```sh
 msb exec redis-demo -- \
   redis-cli -a "$REDIS_PASSWORD" --no-auth-warning SET example ready
+```
 
+Read it back:
+
+```sh
 msb exec redis-demo -- \
   redis-cli -a "$REDIS_PASSWORD" --no-auth-warning GET example
+```
 
+Finally, check that the server responds:
+
+```sh
 msb exec redis-demo -- \
   redis-cli -a "$REDIS_PASSWORD" --no-auth-warning PING
 ```

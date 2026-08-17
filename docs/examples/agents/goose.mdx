@@ -56,7 +56,17 @@ Use the same review boundary as other coding-agent examples:
 
 ```sh
 msb exec goose-demo -- sh -lc 'cd /workspace && git add -N . && git diff --binary > /tmp/goose.patch'
+```
+
+Copy the patch to the host:
+
+```sh
 msb cp goose-demo:/tmp/goose.patch ./goose.patch
+```
+
+Check that it applies cleanly before applying it:
+
+```sh
 git apply --check ./goose.patch
 ```
 

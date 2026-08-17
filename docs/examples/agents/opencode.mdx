@@ -63,7 +63,17 @@ For a Git repository, export a patch instead of replacing your host checkout:
 
 ```sh
 msb exec opencode-demo -- sh -lc 'cd /workspace && git add -N . && git diff --binary > /tmp/opencode.patch'
+```
+
+Copy the patch to the host:
+
+```sh
 msb cp opencode-demo:/tmp/opencode.patch ./opencode.patch
+```
+
+Check that it applies cleanly before applying it:
+
+```sh
 git apply --check ./opencode.patch
 ```
 

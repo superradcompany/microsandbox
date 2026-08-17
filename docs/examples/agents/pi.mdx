@@ -46,9 +46,21 @@ The pinned example prints `0.73.1`.
 
 ## Export changes
 
+Create a patch inside the sandbox:
+
 ```sh
 msb exec pi-demo -- sh -lc 'cd /workspace && git add -N . && git diff --binary > /tmp/pi.patch'
+```
+
+Copy the patch to the host:
+
+```sh
 msb cp pi-demo:/tmp/pi.patch ./pi.patch
+```
+
+Check that it applies cleanly before applying it:
+
+```sh
 git apply --check ./pi.patch
 ```
 
