@@ -39,7 +39,7 @@ the upstream connection, and the buffering through hiccups.
   </Step>
 
   <Step title="Configure an OTLP receiver and Grafana Cloud exporter">
-    Save as `/etc/alloy/config.alloy`:
+    Save as `config.alloy`:
 
     ```alloy
     otelcol.receiver.otlp "ingest" {
@@ -74,9 +74,17 @@ the upstream connection, and the buffering through hiccups.
   </Step>
 
   <Step title="Start Alloy">
-    ```sh
-    GC_INSTANCE_ID=...  GC_API_TOKEN=...  alloy run /etc/alloy/config.alloy
+    <CodeGroup>
+    ```sh macOS & Linux
+    GC_INSTANCE_ID=... GC_API_TOKEN=... alloy run ./config.alloy
     ```
+
+    ```powershell Windows
+    $env:GC_INSTANCE_ID = '...'
+    $env:GC_API_TOKEN = '...'
+    alloy run ./config.alloy
+    ```
+    </CodeGroup>
   </Step>
 
   <Step title="Point msb-metrics at Alloy">

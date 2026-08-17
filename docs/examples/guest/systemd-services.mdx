@@ -14,12 +14,21 @@ By default the microsandbox agent is PID 1. That's enough for one-shot processes
 <Steps>
 <Step title="Boot">
 
-```bash
+<CodeGroup>
+```bash macOS & Linux
 msb run ghcr.io/superradcompany/debian-systemd:12 \
   --memory 1G --cpus 2 \
   --init auto \
   -- bash
 ```
+
+```powershell Windows
+msb run ghcr.io/superradcompany/debian-systemd:12 `
+  --memory 1G --cpus 2 `
+  --init auto `
+  -- bash
+```
+</CodeGroup>
 
 `debian-systemd` is one of the optional bases we maintain in [guest-images](https://github.com/superradcompany/guest-images) for cases like this. `--init auto` uses a known init from the image ENTRYPOINT when one is declared, then falls back to probing common distro paths. Image-declared `/init` wrappers keep their OCI launch contract for attached `msb run`; bare systemd images still run your trailing command through agentd after boot. See [Custom init system](/sandboxes/bootstrap#custom-init-system) for the exact behavior and for pinning to an explicit path.
 

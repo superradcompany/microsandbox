@@ -15,21 +15,74 @@ Media parsers are a natural fit for disposable microVMs. This example snapshots 
 
 <Step title="Prepare FFmpeg">
 
-```sh
+Create one script to prepare the reusable toolchain:
+
+```sh prepare-ffmpeg.sh
+#!/bin/sh
+set -eu
+
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ffmpeg
+rm -rf /var/lib/apt/lists/*
+useradd --system --create-home --shell /usr/sbin/nologin media
+mkdir -p /input /out
+chown media:media /out
+chmod 0555 /input
+chmod 0700 /out
+ffmpeg -version | head -1
+```
+
+Create the workload script that each worker will run:
+
+```sh transcode-video.sh
+#!/bin/sh
+set -eu
+
+test "$(id -u)" -ne 0
+
+if (printf x >> /input/input.mov) 2>/dev/null; then
+  echo "input unexpectedly writable" >&2
+  exit 1
+fi
+
+if getent ahosts example.com >/dev/null 2>&1; then
+  echo "network unexpectedly reachable" >&2
+  exit 1
+fi
+
+echo "input read-only; network blocked"
+ffmpeg -nostdin -hide_banner -y \
+  -i /input/input.mov \
+  -c:v libx264 -preset medium -crf 23 \
+  -c:a aac -b:a 128k \
+  /out/output.mp4
+ffprobe -v error \
+  -show_entries format=duration,size \
+  -of default=noprint_wrappers=1 \
+  /out/output.mp4
+```
+
+Install both scripts in the guest, then run the preparation script as the entrypoint:
+
+<CodeGroup>
+```sh macOS & Linux
 msb run --name ffmpeg-base --replace \
   --cpus 2 --memory 2G --root-disk 4G \
-  debian:bookworm-slim -- sh -lc '
-    apt-get update &&
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ffmpeg &&
-    rm -rf /var/lib/apt/lists/* &&
-    useradd --system --create-home --shell /usr/sbin/nologin media &&
-    mkdir -p /input /out &&
-    chown media:media /out &&
-    chmod 0555 /input &&
-    chmod 0700 /out &&
-    ffmpeg -version | head -1
-  '
+  --script-path prepare-ffmpeg:./prepare-ffmpeg.sh \
+  --script-path transcode-video:./transcode-video.sh \
+  --entrypoint prepare-ffmpeg \
+  debian:bookworm-slim
 ```
+
+```powershell Windows
+msb run --name ffmpeg-base --replace `
+  --cpus 2 --memory 2G --root-disk 4G `
+  --script-path prepare-ffmpeg:./prepare-ffmpeg.sh `
+  --script-path transcode-video:./transcode-video.sh `
+  --entrypoint prepare-ffmpeg `
+  debian:bookworm-slim
+```
+</CodeGroup>
 
 Capture the prepared toolchain:
 
@@ -47,7 +100,8 @@ msb snapshot verify ffmpeg-tools
 
 <Step title="Start an offline worker">
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb run -d --name ffmpeg-worker --replace \
   --from-snapshot ffmpeg-tools \
   --cpus 2 --memory 2G \
@@ -55,6 +109,16 @@ msb run -d --name ffmpeg-worker --replace \
   --no-net --max-duration 10m \
   -- sh -lc 'exec sleep 10m'
 ```
+
+```powershell Windows
+msb run -d --name ffmpeg-worker --replace `
+  --from-snapshot ffmpeg-tools `
+  --cpus 2 --memory 2G `
+  --user media --security restricted `
+  --no-net --max-duration 10m `
+  -- sh -lc 'exec sleep 10m'
+```
+</CodeGroup>
 
 Copy the input into the running worker:
 
@@ -74,34 +138,19 @@ msb exec --user root ffmpeg-worker -- chmod 0444 /input/input.mov
 
 Run the bounded transcode as the unprivileged `media` user:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb exec --user media --timeout 9m \
   --rlimit nproc=64 --rlimit nofile=256 --rlimit fsize=1073741824 \
-  ffmpeg-worker -- sh -lc '
-    test "$(id -u)" -ne 0
-
-    if (printf x >> /input/input.mov) 2>/dev/null; then
-      echo "input unexpectedly writable" >&2
-      exit 1
-    fi
-
-    if getent ahosts example.com >/dev/null 2>&1; then
-      echo "network unexpectedly reachable" >&2
-      exit 1
-    fi
-
-    echo "input read-only; network blocked"
-    ffmpeg -nostdin -hide_banner -y \
-      -i /input/input.mov \
-      -c:v libx264 -preset medium -crf 23 \
-      -c:a aac -b:a 128k \
-      /out/output.mp4 &&
-    ffprobe -v error \
-      -show_entries format=duration,size \
-      -of default=noprint_wrappers=1 \
-      /out/output.mp4
-  '
+  ffmpeg-worker -- transcode-video
 ```
+
+```powershell Windows
+msb exec --user media --timeout 9m `
+  --rlimit nproc=64 --rlimit nofile=256 --rlimit fsize=1073741824 `
+  ffmpeg-worker -- transcode-video
+```
+</CodeGroup>
 
 The worker boots before the input is copied because rootfs patches cannot be combined with `--from-snapshot`. The root-owned input directory prevents the unprivileged media process from replacing the copied file, while `/out` is the only workload-owned data directory. The untrusted transcode command sets its own process, file-descriptor, and per-file limits.
 
@@ -109,9 +158,10 @@ The worker boots before the input is copied because rootfs patches cannot be com
 
 <Step title="Export the result">
 
-Prepare a fresh private artifact directory on the host:
+Prepare a fresh artifact directory on the host:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 export FFMPEG_ARTIFACT_DIR="${FFMPEG_ARTIFACT_DIR:-$PWD/.ffmpeg-artifacts}"
 
 if [ -e "$FFMPEG_ARTIFACT_DIR" ] || [ -L "$FFMPEG_ARTIFACT_DIR" ]; then
@@ -122,6 +172,19 @@ fi
 mkdir -m 700 "$FFMPEG_ARTIFACT_DIR"
 ```
 
+```powershell Windows
+if (-not $env:FFMPEG_ARTIFACT_DIR) {
+  $env:FFMPEG_ARTIFACT_DIR = Join-Path $PWD '.ffmpeg-artifacts'
+}
+
+if (Test-Path -LiteralPath $env:FFMPEG_ARTIFACT_DIR) {
+  throw "artifact path already exists: $env:FFMPEG_ARTIFACT_DIR"
+}
+
+New-Item -ItemType Directory -Path $env:FFMPEG_ARTIFACT_DIR | Out-Null
+```
+</CodeGroup>
+
 Stop the worker before exporting its output:
 
 ```sh
@@ -130,18 +193,35 @@ msb stop ffmpeg-worker
 
 Copy the result to the host:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb cp ffmpeg-worker:/out/output.mp4 "$FFMPEG_ARTIFACT_DIR/output.mp4"
 ```
 
+```powershell Windows
+$outputPath = Join-Path $env:FFMPEG_ARTIFACT_DIR 'output.mp4'
+msb cp ffmpeg-worker:/out/output.mp4 $outputPath
+```
+</CodeGroup>
+
 Validate the exported file:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 test ! -L "$FFMPEG_ARTIFACT_DIR/output.mp4" &&
   test -f "$FFMPEG_ARTIFACT_DIR/output.mp4" &&
   test -s "$FFMPEG_ARTIFACT_DIR/output.mp4" &&
   test "$(wc -c < "$FFMPEG_ARTIFACT_DIR/output.mp4")" -le 1073741824
 ```
+
+```powershell Windows
+$output = Get-Item -LiteralPath $outputPath
+$isLink = ($output.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+if ($output.PSIsContainer -or $isLink -or $output.Length -eq 0 -or $output.Length -gt 1GB) {
+  throw 'output.mp4 failed artifact validation'
+}
+```
+</CodeGroup>
 
 Stopping the worker before export removes any process that could race the artifact path. The fresh private directory, regular-file check, and 1 GiB host-side size check keep the exported file within the transcode command's per-file limit.
 
@@ -153,9 +233,17 @@ The laboratory smoke test generated a two-second H.264 video and `ffprobe` verif
 
 Remove the prepared sandbox and worker:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb rm -f ffmpeg-base ffmpeg-worker
+rm -f prepare-ffmpeg.sh transcode-video.sh
 ```
+
+```powershell Windows
+msb rm -f ffmpeg-base ffmpeg-worker
+Remove-Item prepare-ffmpeg.sh, transcode-video.sh
+```
+</CodeGroup>
 
 Remove the reusable toolchain snapshot:
 
@@ -163,7 +251,7 @@ Remove the reusable toolchain snapshot:
 msb snapshot rm ffmpeg-tools
 ```
 
-The checked output remains under `${FFMPEG_ARTIFACT_DIR:-$PWD/.ffmpeg-artifacts}` until you remove it.
+The checked output remains in the artifact directory configured above until you remove it.
 
 </Step>
 

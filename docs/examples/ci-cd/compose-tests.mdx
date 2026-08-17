@@ -16,7 +16,8 @@ This example assumes the current directory contains `compose.yaml` and a test se
 
 <Tooltip tip="On microsandbox cloud, create a directory-backed Docker volume first and omit disk-kind, size, and replace-on-create options from this command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb run -d --name compose-ci --replace \
   --memory 2G --root-disk 4G --max-duration 10m \
   --mount-named compose-ci-cache:/var/lib/docker:kind=disk,size=6G \
@@ -24,9 +25,19 @@ msb run -d --name compose-ci --replace \
   docker:27.5.1-dind
 ```
 
+```powershell Windows
+msb run -d --name compose-ci --replace `
+  --memory 2G --root-disk 4G --max-duration 10m `
+  --mount-named compose-ci-cache:/var/lib/docker:kind=disk,size=6G `
+  --copy-dir .:/workspace --workdir /workspace `
+  docker:27.5.1-dind
+```
+</CodeGroup>
+
 The official `dind` image starts `dockerd`. Wait for it before sending Compose commands:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 for attempt in $(seq 1 60); do
   msb exec compose-ci -- docker info >/dev/null 2>&1 && break
   sleep 1
@@ -34,16 +45,36 @@ done
 msb exec compose-ci -- docker info >/dev/null
 ```
 
+```powershell Windows
+for ($attempt = 1; $attempt -le 60; $attempt++) {
+  msb exec compose-ci -- docker info *> $null
+  if ($LASTEXITCODE -eq 0) { break }
+  Start-Sleep -Seconds 1
+}
+msb exec compose-ci -- docker info *> $null
+if ($LASTEXITCODE -ne 0) { throw 'Docker did not become ready' }
+```
+</CodeGroup>
+
 </Step>
 
 <Step title="Run the tests">
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb exec --timeout 5m --workdir /workspace compose-ci -- \
   docker compose up --build \
     --abort-on-container-exit \
     --exit-code-from test
 ```
+
+```powershell Windows
+msb exec --timeout 5m --workdir /workspace compose-ci -- `
+  docker compose up --build `
+    --abort-on-container-exit `
+    --exit-code-from test
+```
+</CodeGroup>
 
 Replace `test` with the service whose exit code should decide the CI result. `msb exec` returns that code to the host.
 

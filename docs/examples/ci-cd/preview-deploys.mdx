@@ -16,7 +16,8 @@ Copy a static build into a microVM, expose it on host loopback, and let the sand
 
 Run this after producing `dist`:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb run -d --name preview --replace \
   --memory 256M --max-duration 30m --copy-dir ./dist:/site \
   -p 127.0.0.1:4173:8080 \
@@ -26,17 +27,43 @@ msb run -d --name preview --replace \
     --bind 0.0.0.0 --directory /site
 ```
 
+```powershell Windows
+msb run -d --name preview --replace `
+  --memory 256M --max-duration 30m --copy-dir ./dist:/site `
+  -p 127.0.0.1:4173:8080 `
+  --net-default-egress deny --net-default-ingress allow `
+  --security restricted --user 65534:65534 `
+  python:3.13.14-alpine3.23 -- python -m http.server 8080 `
+    --bind 0.0.0.0 --directory /site
+```
+</CodeGroup>
+
 Detached runs return before the server is ready. Wait for it, then open the preview:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 until curl -fsS http://127.0.0.1:4173/ >/dev/null 2>&1; do sleep 1; done
 ```
 
+```powershell Windows
+do {
+  curl.exe -fsS http://127.0.0.1:4173/ *> $null
+  if ($LASTEXITCODE -ne 0) { Start-Sleep -Seconds 1 }
+} until ($LASTEXITCODE -eq 0)
+```
+</CodeGroup>
+
 Open the preview after the readiness check succeeds:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 open http://127.0.0.1:4173
 ```
+
+```powershell Windows
+Start-Process http://127.0.0.1:4173
+```
+</CodeGroup>
 
 On Linux, replace `open` with `xdg-open`, or visit the URL manually.
 

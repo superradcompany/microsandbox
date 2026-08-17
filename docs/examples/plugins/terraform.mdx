@@ -36,7 +36,8 @@ resource "random_pet" "example" {
 
 <Step title="Download and snapshot the provider">
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb run --name terraform-base --replace \
   --memory 768M --root-disk 2G --max-duration 5m \
   --copy-file ./main.tf:/workspace/main.tf \
@@ -46,6 +47,17 @@ msb run --name terraform-base --replace \
     'terraform init -backend=false -input=false && chown -R 65534:65534 /workspace'
 ```
 
+```powershell Windows
+msb run --name terraform-base --replace `
+  --memory 768M --root-disk 2G --max-duration 5m `
+  --copy-file ./main.tf:/workspace/main.tf `
+  --workdir /workspace `
+  --entrypoint sh `
+  hashicorp/terraform:1.13.5 -- -lc `
+    'terraform init -backend=false -input=false && chown -R 65534:65534 /workspace'
+```
+</CodeGroup>
+
 Copy the generated dependency lock file to the host:
 
 ```sh
@@ -54,10 +66,17 @@ msb cp terraform-base:/workspace/.terraform.lock.hcl ./.terraform.lock.hcl
 
 Capture the downloaded provider:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb snapshot create terraform-runtime \
   --from terraform-base --integrity --force
 ```
+
+```powershell Windows
+msb snapshot create terraform-runtime `
+  --from terraform-base --integrity --force
+```
+</CodeGroup>
 
 Verify the snapshot before using it:
 
@@ -71,7 +90,8 @@ msb snapshot verify terraform-runtime
 
 <Step title="Plan offline">
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb run --name terraform-vet --replace \
   --from-snapshot terraform-runtime \
   --workdir /workspace --user 65534:65534 \
@@ -81,6 +101,18 @@ msb run --name terraform-vet --replace \
   --entrypoint sh -- -lc \
     'terraform fmt -check && terraform validate && terraform plan -refresh=false -input=false -lock=false'
 ```
+
+```powershell Windows
+msb run --name terraform-vet --replace `
+  --from-snapshot terraform-runtime `
+  --workdir /workspace --user 65534:65534 `
+  --env HOME=/tmp `
+  --cpus 1 --memory 512M --max-duration 1m `
+  --no-net --security restricted `
+  --entrypoint sh -- -lc `
+    'terraform fmt -check && terraform validate && terraform plan -refresh=false -input=false -lock=false'
+```
+</CodeGroup>
 
 The provider loads and creates a plan, but it cannot contact any remote API. Providers, data sources, or validation rules that require a service will fail offline; that failure is the point of this vetting mode.
 

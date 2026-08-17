@@ -15,13 +15,24 @@ This example starts Redis 7 with password authentication, a persistent named vol
 
 Set a temporary password in the host shell:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 export REDIS_PASSWORD="$(openssl rand -hex 24)"
 ```
 
+```powershell Windows
+$bytes = New-Object byte[] 24
+$rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+$rng.GetBytes($bytes)
+$rng.Dispose()
+$env:REDIS_PASSWORD = -join ($bytes | ForEach-Object { $_.ToString('x2') })
+```
+</CodeGroup>
+
 Start Redis:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb run -d --name redis-demo --replace \
   --cpus 1 --memory 512M --root-disk 1G \
   -p 127.0.0.1:56379:6379 \
@@ -33,30 +44,64 @@ msb run -d --name redis-demo --replace \
     --requirepass "$REDIS_PASSWORD"
 ```
 
+```powershell Windows
+msb run -d --name redis-demo --replace `
+  --cpus 1 --memory 512M --root-disk 1G `
+  -p 127.0.0.1:56379:6379 `
+  --mount-named redis-data:/data `
+  redis:7-alpine -- redis-server `
+    --bind 0.0.0.0 `
+    --protected-mode yes `
+    --appendonly yes `
+    --requirepass $env:REDIS_PASSWORD
+```
+</CodeGroup>
+
 </Step>
 
 <Step title="Verify reads and writes">
 
 Write a test value:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb exec redis-demo -- \
   redis-cli -a "$REDIS_PASSWORD" --no-auth-warning SET example ready
 ```
 
+```powershell Windows
+msb exec redis-demo -- `
+  redis-cli -a $env:REDIS_PASSWORD --no-auth-warning SET example ready
+```
+</CodeGroup>
+
 Read it back:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb exec redis-demo -- \
   redis-cli -a "$REDIS_PASSWORD" --no-auth-warning GET example
 ```
 
+```powershell Windows
+msb exec redis-demo -- `
+  redis-cli -a $env:REDIS_PASSWORD --no-auth-warning GET example
+```
+</CodeGroup>
+
 Finally, check that the server responds:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb exec redis-demo -- \
   redis-cli -a "$REDIS_PASSWORD" --no-auth-warning PING
 ```
+
+```powershell Windows
+msb exec redis-demo -- `
+  redis-cli -a $env:REDIS_PASSWORD --no-auth-warning PING
+```
+</CodeGroup>
 
 The three commands should return `OK`, `ready`, and `PONG`. Host applications connect to `127.0.0.1:56379`.
 
@@ -82,9 +127,15 @@ msb volume rm redis-data
 
 Clear the password from the host shell:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 unset REDIS_PASSWORD
 ```
+
+```powershell Windows
+Remove-Item Env:REDIS_PASSWORD
+```
+</CodeGroup>
 
 </Step>
 </Steps>

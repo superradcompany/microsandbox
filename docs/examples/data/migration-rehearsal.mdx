@@ -20,13 +20,24 @@ Use a snapshot to rehearse a schema migration against a realistic PostgreSQL dat
 
 Set a temporary password in the host shell:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 export POSTGRES_PASSWORD="$(openssl rand -hex 24)"
 ```
 
+```powershell Windows
+$bytes = New-Object byte[] 24
+$rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+$rng.GetBytes($bytes)
+$rng.Dispose()
+$env:POSTGRES_PASSWORD = -join ($bytes | ForEach-Object { $_.ToString('x2') })
+```
+</CodeGroup>
+
 Start the baseline database:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb run -d --name migration-base --replace \
   --cpus 1 --memory 1G --root-disk 4G \
   -e POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
@@ -34,6 +45,16 @@ msb run -d --name migration-base --replace \
   -e DOCKER_PG_LLVM_DEPS= \
   postgres:17-alpine
 ```
+
+```powershell Windows
+msb run -d --name migration-base --replace `
+  --cpus 1 --memory 1G --root-disk 4G `
+  -e "POSTGRES_PASSWORD=$env:POSTGRES_PASSWORD" `
+  -e POSTGRES_DB=examples `
+  -e DOCKER_PG_LLVM_DEPS= `
+  postgres:17-alpine
+```
+</CodeGroup>
 
 Wait for initialization, then stop the database cleanly:
 
@@ -53,11 +74,19 @@ msb stop migration-base
 
 <Step title="Snapshot the baseline">
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb snapshot create postgres-before-migration \
   --from migration-base \
   --integrity
 ```
+
+```powershell Windows
+msb snapshot create postgres-before-migration `
+  --from migration-base `
+  --integrity
+```
+</CodeGroup>
 
 Verify the captured snapshot:
 
@@ -71,7 +100,8 @@ msb snapshot verify postgres-before-migration
 
 Boot a fresh database from the snapshot:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb run -d --name migration-test --replace \
   --from-snapshot postgres-before-migration \
   --memory 1G \
@@ -80,6 +110,17 @@ msb run -d --name migration-test --replace \
   -e POSTGRES_DB=examples \
   -e DOCKER_PG_LLVM_DEPS=
 ```
+
+```powershell Windows
+msb run -d --name migration-test --replace `
+  --from-snapshot postgres-before-migration `
+  --memory 1G `
+  -p 127.0.0.1:55432:5432 `
+  -e "POSTGRES_PASSWORD=$env:POSTGRES_PASSWORD" `
+  -e POSTGRES_DB=examples `
+  -e DOCKER_PG_LLVM_DEPS=
+```
+</CodeGroup>
 
 Wait for the restored database to become ready:
 
@@ -91,13 +132,23 @@ msb exec migration-test -- sh -lc '
 
 Apply a sample destructive change and verify it:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb exec -e PGPASSWORD="$POSTGRES_PASSWORD" migration-test -- \
   psql -h 127.0.0.1 -U postgres -d examples -v ON_ERROR_STOP=1 \
   -c 'create table dangerous_migration(id integer);' \
   -c 'insert into dangerous_migration values (42);' \
   -c 'select * from dangerous_migration;'
 ```
+
+```powershell Windows
+msb exec -e "PGPASSWORD=$env:POSTGRES_PASSWORD" migration-test -- `
+  psql -h 127.0.0.1 -U postgres -d examples -v ON_ERROR_STOP=1 `
+  -c 'create table dangerous_migration(id integer);' `
+  -c 'insert into dangerous_migration values (42);' `
+  -c 'select * from dangerous_migration;'
+```
+</CodeGroup>
 
 Replace those statements with your real migration command and validation suite.
 
@@ -113,7 +164,8 @@ msb stop migration-test
 
 Replace it with a fresh sandbox from the snapshot:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb run -d --name migration-test --replace \
   --from-snapshot postgres-before-migration \
   --memory 1G \
@@ -122,6 +174,17 @@ msb run -d --name migration-test --replace \
   -e POSTGRES_DB=examples \
   -e DOCKER_PG_LLVM_DEPS=
 ```
+
+```powershell Windows
+msb run -d --name migration-test --replace `
+  --from-snapshot postgres-before-migration `
+  --memory 1G `
+  -p 127.0.0.1:55432:5432 `
+  -e "POSTGRES_PASSWORD=$env:POSTGRES_PASSWORD" `
+  -e POSTGRES_DB=examples `
+  -e DOCKER_PG_LLVM_DEPS=
+```
+</CodeGroup>
 
 Wait for the clean database to become ready:
 
@@ -133,11 +196,19 @@ msb exec migration-test -- sh -lc '
 
 Confirm the sample table is absent:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb exec -e PGPASSWORD="$POSTGRES_PASSWORD" migration-test -- \
   psql -h 127.0.0.1 -U postgres -d examples -Atc \
   "select coalesce(to_regclass('public.dangerous_migration')::text, 'rolled-back');"
 ```
+
+```powershell Windows
+msb exec -e "PGPASSWORD=$env:POSTGRES_PASSWORD" migration-test -- `
+  psql -h 127.0.0.1 -U postgres -d examples -Atc `
+  "select coalesce(to_regclass('public.dangerous_migration')::text, 'rolled-back');"
+```
+</CodeGroup>
 
 The result should be `rolled-back`.
 
@@ -159,9 +230,15 @@ msb snapshot rm postgres-before-migration
 
 Clear the password from the host shell:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 unset POSTGRES_PASSWORD
 ```
+
+```powershell Windows
+Remove-Item Env:POSTGRES_PASSWORD
+```
+</CodeGroup>
 
 </Step>
 </Steps>

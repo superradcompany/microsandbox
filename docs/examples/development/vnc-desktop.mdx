@@ -13,51 +13,80 @@ This example runs the lightweight LXQt desktop with Breeze styling and opens QTe
 ## Run the desktop
 
 <Steps>
+<Step title="Create the startup script">
+
+Save the desktop setup and service lifecycle in a host-side script:
+
+```sh start-desktop.sh
+#!/bin/sh
+set -eu
+
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+  breeze-icon-theme ca-certificates dbus-x11 lxqt-core novnc openbox \
+  qterminal tigervnc-standalone-server websockify
+rm -rf /var/lib/apt/lists/*
+
+mkdir -p /root/.config/lxqt /root/.config/openbox /tmp/runtime-root
+chmod 700 /tmp/runtime-root
+sed -e "s/,quicklaunch//" -e "/^\[quicklaunch\]/,/^$/d" \
+  /usr/share/lxqt/panel.conf > /root/.config/lxqt/panel.conf
+sed "s#<name>Clearlooks</name>#<name>Breeze-ob</name>#" \
+  /etc/xdg/openbox/rc.xml > /root/.config/openbox/rc.xml
+
+Xtigervnc :1 -SecurityTypes None -geometry 1440x900 -depth 24 >/tmp/xvnc.log 2>&1 &
+vnc_pid=$!
+sleep 2
+if ! kill -0 "$vnc_pid"; then
+  cat /tmp/xvnc.log >&2
+  exit 1
+fi
+cat /tmp/xvnc.log
+
+DISPLAY=:1 XDG_RUNTIME_DIR=/tmp/runtime-root \
+  dbus-launch --exit-with-session sh -c "
+    startlxqt &
+    session_pid=\$!
+    sleep 4
+    kill -0 \"\$session_pid\"
+    qterminal &
+    wait \"\$session_pid\"
+  " >/tmp/lxqt.log 2>&1 &
+desktop_pid=$!
+sleep 5
+if ! kill -0 "$desktop_pid"; then
+  cat /tmp/lxqt.log >&2
+  exit 1
+fi
+
+exec websockify --web=/usr/share/novnc 0.0.0.0:6080 localhost:5901
+```
+
+`--script-path` installs this file as the executable `start-desktop` command inside the guest.
+
+</Step>
+
 <Step title="Start the desktop">
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb run -d --name vnc-desktop --replace \
   --cpus 2 --memory 2G --root-disk 5G \
   -p 127.0.0.1:6080:6080 \
-  --script start-desktop='set -eu
-    apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      breeze-icon-theme ca-certificates dbus-x11 lxqt-core novnc openbox \
-      qterminal tigervnc-standalone-server websockify
-    rm -rf /var/lib/apt/lists/*
-    mkdir -p /root/.config/lxqt /root/.config/openbox /tmp/runtime-root
-    chmod 700 /tmp/runtime-root
-    sed -e "s/,quicklaunch//" -e "/^\[quicklaunch\]/,/^$/d" \
-      /usr/share/lxqt/panel.conf > /root/.config/lxqt/panel.conf
-    sed "s#<name>Clearlooks</name>#<name>Breeze-ob</name>#" \
-      /etc/xdg/openbox/rc.xml > /root/.config/openbox/rc.xml
-    Xtigervnc :1 -SecurityTypes None -geometry 1440x900 -depth 24 >/tmp/xvnc.log 2>&1 &
-    vnc_pid=$!
-    sleep 2
-    if ! kill -0 "$vnc_pid"; then
-      cat /tmp/xvnc.log >&2
-      exit 1
-    fi
-    cat /tmp/xvnc.log
-    DISPLAY=:1 XDG_RUNTIME_DIR=/tmp/runtime-root \
-      dbus-launch --exit-with-session sh -c "
-        startlxqt &
-        session_pid=\$!
-        sleep 4
-        kill -0 \"\$session_pid\"
-        qterminal &
-        wait \"\$session_pid\"
-      " >/tmp/lxqt.log 2>&1 &
-    desktop_pid=$!
-    sleep 5
-    if ! kill -0 "$desktop_pid"; then
-      cat /tmp/lxqt.log >&2
-      exit 1
-    fi
-    exec websockify --web=/usr/share/novnc 0.0.0.0:6080 localhost:5901' \
+  --script-path start-desktop:./start-desktop.sh \
   --entrypoint start-desktop \
   debian:bookworm-slim
 ```
+
+```powershell Windows
+msb run -d --name vnc-desktop --replace `
+  --cpus 2 --memory 2G --root-disk 5G `
+  -p 127.0.0.1:6080:6080 `
+  --script-path start-desktop:./start-desktop.sh `
+  --entrypoint start-desktop `
+  debian:bookworm-slim
+```
+</CodeGroup>
 
 Detached mode returns as soon as the VM starts, before the desktop packages are ready. The first install downloads about 183 MB, uses roughly 734 MB of guest disk, and can take a few minutes. Follow the installation, TigerVNC startup, and websockify output:
 
@@ -67,10 +96,18 @@ msb logs -f vnc-desktop
 
 When websockify reports that it is listening, press `Ctrl-C` to stop following the log. The sandbox keeps running. Confirm that noVNC is serving HTTP:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 curl -fsS http://127.0.0.1:6080/vnc.html >/dev/null &&
   echo "noVNC is ready"
 ```
+
+```powershell Windows
+curl.exe -fsS http://127.0.0.1:6080/vnc.html *> $null
+if ($LASTEXITCODE -ne 0) { throw 'noVNC is not ready' }
+'noVNC is ready'
+```
+</CodeGroup>
 
 Open [http://127.0.0.1:6080/vnc.html?autoconnect=1&resize=scale](http://127.0.0.1:6080/vnc.html?autoconnect=1&resize=scale). You should see an LXQt desktop with QTerminal open.
 
@@ -80,9 +117,15 @@ Open [http://127.0.0.1:6080/vnc.html?autoconnect=1&resize=scale](http://127.0.0.
 
 Check the browser endpoint from the host:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 curl -sS http://127.0.0.1:6080/vnc.html | head
 ```
+
+```powershell Windows
+curl.exe -sS http://127.0.0.1:6080/vnc.html | Select-Object -First 10
+```
+</CodeGroup>
 
 Then inspect the VNC server log inside the guest:
 
@@ -98,9 +141,17 @@ msb exec vnc-desktop -- sh -lc 'grep -E "Listening|created VNC server" /tmp/xvnc
 
 <Step title="Clean up">
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb rm -f vnc-desktop
+rm -f start-desktop.sh
 ```
+
+```powershell Windows
+msb rm -f vnc-desktop
+Remove-Item start-desktop.sh
+```
+</CodeGroup>
 
 For repeated launches, stop the prepared sandbox, create a snapshot, and boot desktops from that snapshot instead of reinstalling the packages.
 

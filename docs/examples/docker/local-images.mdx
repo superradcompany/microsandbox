@@ -15,9 +15,17 @@ docker build -t my-image:latest .
 
 Stream the image into microsandbox's local image store:
 
-```bash
+<CodeGroup>
+```bash macOS & Linux
 docker save my-image:latest | msb load
 ```
+
+```powershell Windows
+docker save -o my-image.tar my-image:latest
+msb load --input my-image.tar
+Remove-Item my-image.tar
+```
+</CodeGroup>
 
 You can now run it like any other image:
 
@@ -39,9 +47,17 @@ msb load --input my-image.tar
 
 If the archive has no useful tag, or you want a different local alias, pass one:
 
-```bash
+<CodeGroup>
+```bash macOS & Linux
 docker save my-image:latest | msb load --tag app:local
 ```
+
+```powershell Windows
+docker save -o my-image.tar my-image:latest
+msb load --input my-image.tar --tag app:local
+Remove-Item my-image.tar
+```
+</CodeGroup>
 
 Run it by its new local name:
 

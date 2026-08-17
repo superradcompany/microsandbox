@@ -48,19 +48,35 @@ class BooksSpider(scrapy.Spider):
 
 <Step title="Prepare Scrapy">
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb run --name scrapy-base --replace \
   --memory 1G --root-disk 3G --max-duration 5m \
   python:3.13.14-alpine3.23 -- sh -lc \
     'mkdir -p /work && pip install --no-cache-dir scrapy==2.17.0'
 ```
 
+```powershell Windows
+msb run --name scrapy-base --replace `
+  --memory 1G --root-disk 3G --max-duration 5m `
+  python:3.13.14-alpine3.23 -- sh -lc `
+    'mkdir -p /work && pip install --no-cache-dir scrapy==2.17.0'
+```
+</CodeGroup>
+
 Capture the prepared environment:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb snapshot create scrapy-runtime \
   --from scrapy-base --integrity --force
 ```
+
+```powershell Windows
+msb snapshot create scrapy-runtime `
+  --from scrapy-base --integrity --force
+```
+</CodeGroup>
 
 Verify the snapshot before using it:
 
@@ -74,7 +90,8 @@ The snapshot avoids reinstalling Scrapy for every crawl.
 
 <Step title="Crawl the site">
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb run --name scrapy-books --replace \
   --from-snapshot scrapy-runtime \
   --mount-file ./books_spider.py:/work/books_spider.py:ro \
@@ -88,16 +105,38 @@ msb run --name scrapy-books --replace \
     --loglevel WARNING -O /var/tmp/books.json
 ```
 
+```powershell Windows
+msb run --name scrapy-books --replace `
+  --from-snapshot scrapy-runtime `
+  --mount-file ./books_spider.py:/work/books_spider.py:ro `
+  --workdir /work --user 65534:65534 --env HOME=/tmp `
+  --memory 1G --max-duration 2m `
+  --net-default deny `
+  --net-rule 'allow@books.toscrape.com:tcp:443' `
+  --max-connections 8 --security restricted `
+  --rlimit fsize=8388608 `
+  -- scrapy runspider books_spider.py `
+    --loglevel WARNING -O /var/tmp/books.json
+```
+</CodeGroup>
+
 The crawler and the microVM policy both constrain navigation to the target host. Change the spider, start URL, and network rule together when adapting the example, and respect the site's terms and robots policy.
 
 </Step>
 
 <Step title="Copy out the result">
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 mkdir -p .artifacts
 msb cp scrapy-books:/var/tmp/books.json .artifacts/books.json
 ```
+
+```powershell Windows
+New-Item -ItemType Directory -Force .artifacts | Out-Null
+msb cp scrapy-books:/var/tmp/books.json .artifacts/books.json
+```
+</CodeGroup>
 
 Inspect the number of collected records:
 

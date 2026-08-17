@@ -15,9 +15,27 @@ Package installation often costs more than sandbox boot. This example installs O
 
 <Step title="Prepare the baseline">
 
-```sh
+Create the worker verification script that the snapshot will carry into every worker:
+
+```sh verify-worker.sh
+#!/bin/sh
+set -eu
+
+test "$(id -u)" -ne 0
+git init -q
+git add .
+git -c user.name=microsandbox \
+  -c user.email=worker@microsandbox.local \
+  commit -qm "sandbox baseline"
+test -z "$(git remote)"
+opencode --version
+```
+
+<CodeGroup>
+```sh macOS & Linux
 msb run --name agent-base --replace \
   --cpus 2 --memory 2G --root-disk 4G \
+  --script-path verify-worker:./verify-worker.sh \
   node:24-bookworm-slim -- sh -lc '
     apt-get update &&
     apt-get install -y --no-install-recommends ca-certificates git &&
@@ -29,18 +47,43 @@ msb run --name agent-base --replace \
   '
 ```
 
+```powershell Windows
+msb run --name agent-base --replace `
+  --cpus 2 --memory 2G --root-disk 4G `
+  --script-path verify-worker:./verify-worker.sh `
+  node:24-bookworm-slim -- sh -lc '
+    apt-get update &&
+    apt-get install -y --no-install-recommends ca-certificates git &&
+    rm -rf /var/lib/apt/lists/* &&
+    npm install -g opencode-ai@1.18.4 &&
+    mkdir -p /workspace/project &&
+    chown -R node:node /workspace &&
+    opencode --version
+  '
+```
+</CodeGroup>
+
 When the command exits, `agent-base` is stopped and ready to snapshot.
 
 </Step>
 
 <Step title="Create and verify the snapshot">
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb snapshot create coding-agent-base \
   --from agent-base \
   --integrity \
   --force
 ```
+
+```powershell Windows
+msb snapshot create coding-agent-base `
+  --from agent-base `
+  --integrity `
+  --force
+```
+</CodeGroup>
 
 Verify the captured snapshot before using it:
 
@@ -58,7 +101,8 @@ The snapshot captures the writable disk changes and pins the source image. It do
 
 <Step title="Launch a clean worker">
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb run -d --name coding-worker-1 --replace \
   --from-snapshot coding-agent-base \
   --cpus 2 --memory 2G \
@@ -68,42 +112,70 @@ msb run -d --name coding-worker-1 --replace \
   -- sh -lc 'exec sleep 1h'
 ```
 
-Stream the committed project tree into the worker:
+```powershell Windows
+msb run -d --name coding-worker-1 --replace `
+  --from-snapshot coding-agent-base `
+  --cpus 2 --memory 2G `
+  --user node --security restricted `
+  --max-duration 1h `
+  --workdir /workspace/project `
+  -- sh -lc 'exec sleep 1h'
+```
+</CodeGroup>
 
-```sh
+Transfer the committed project tree into the worker:
+
+<CodeGroup>
+```sh macOS & Linux
 git -C ./my-project archive --format=tar HEAD | \
   msb exec --stream --user node \
     --rlimit nproc=256 --rlimit nofile=1024 --rlimit fsize=268435456 \
     coding-worker-1 -- tar -x -C /workspace/project
 ```
 
+```powershell Windows
+git -C ./my-project archive --format=tar --output=project.tar HEAD
+msb cp ./project.tar coding-worker-1:/tmp/project.tar
+msb exec --user node `
+  --rlimit nproc=256 --rlimit nofile=1024 --rlimit fsize=268435456 `
+  coding-worker-1 -- tar -x -f /tmp/project.tar -C /workspace/project
+Remove-Item ./project.tar
+```
+</CodeGroup>
+
 Create a credential-free Git baseline and verify the worker boundary:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb exec --user node --workdir /workspace/project \
   --rlimit nproc=256 --rlimit nofile=1024 --rlimit fsize=268435456 \
-  coding-worker-1 -- sh -lc '
-  set -eu
-  test "$(id -u)" -ne 0
-  git init -q
-  git add .
-  git -c user.name=microsandbox \
-    -c user.email=worker@microsandbox.local \
-    commit -qm "sandbox baseline"
-  test -z "$(git remote)"
-  opencode --version
-'
+  coding-worker-1 -- verify-worker
 ```
+
+```powershell Windows
+msb exec --user node --workdir /workspace/project `
+  --rlimit nproc=256 --rlimit nofile=1024 --rlimit fsize=268435456 `
+  coding-worker-1 -- verify-worker
+```
+</CodeGroup>
 
 Start OpenCode after those checks pass:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb exec -t --user node --workdir /workspace/project \
   --rlimit nproc=256 --rlimit nofile=1024 --rlimit fsize=268435456 \
   coding-worker-1 -- opencode
 ```
 
-Rootfs patches such as `--copy-dir` cannot be combined with `--from-snapshot`, so the worker boots first and receives the committed tree through a stream. `git archive` excludes `.git`, checkout credentials, and untracked files such as a local `.env`; review the committed tree for secrets before sending it. Initializing a new repository inside the worker preserves useful diff workflows without copying host remotes or credentials. Each streamed or interactive workload sets its own process, file-descriptor, and per-file limits.
+```powershell Windows
+msb exec -t --user node --workdir /workspace/project `
+  --rlimit nproc=256 --rlimit nofile=1024 --rlimit fsize=268435456 `
+  coding-worker-1 -- opencode
+```
+</CodeGroup>
+
+Rootfs patches such as `--copy-dir` cannot be combined with `--from-snapshot`, so the worker boots first and receives the committed tree afterward. `git archive` excludes `.git`, checkout credentials, and untracked files such as a local `.env`; review the committed tree for secrets before sending it. Initializing a new repository inside the worker preserves useful diff workflows without copying host remotes or credentials. Each transferred or interactive workload sets its own process, file-descriptor, and per-file limits.
 
 Each launch receives its own writable layer. Changes made by one worker do not modify the snapshot, the host project, or another worker.
 
@@ -113,7 +185,8 @@ Each launch receives its own writable layer. Changes made by one worker do not m
 
 Create more workers by changing the sandbox name:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb run --name coding-worker-2 --replace \
   --from-snapshot coding-agent-base \
   --user node --security restricted \
@@ -122,15 +195,33 @@ msb run --name coding-worker-2 --replace \
   -- opencode --version
 ```
 
+```powershell Windows
+msb run --name coding-worker-2 --replace `
+  --from-snapshot coding-agent-base `
+  --user node --security restricted `
+  --rlimit nproc=256 --rlimit nofile=1024 --rlimit fsize=268435456 `
+  --max-duration 1m `
+  -- opencode --version
+```
+</CodeGroup>
+
 </Step>
 
 <Step title="Clean up">
 
 Remove the prepared sandbox and workers:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb rm -f agent-base coding-worker-1 coding-worker-2
+rm -f verify-worker.sh
 ```
+
+```powershell Windows
+msb rm -f agent-base coding-worker-1 coding-worker-2
+Remove-Item verify-worker.sh
+```
+</CodeGroup>
 
 Remove the reusable snapshot only when you no longer need it:
 

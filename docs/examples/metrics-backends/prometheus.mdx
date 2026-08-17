@@ -25,11 +25,19 @@ the OTLP endpoint at Prometheus's `/api/v1/otlp/v1/metrics` path and the
     treats it as a release-gated feature in some versions; recent
     releases have it on by default):
 
-    ```sh
+    <CodeGroup>
+    ```sh macOS & Linux
     prometheus \
       --config.file=prometheus.yml \
       --web.enable-otlp-receiver
     ```
+
+    ```powershell Windows
+    prometheus `
+      --config.file=prometheus.yml `
+      --web.enable-otlp-receiver
+    ```
+    </CodeGroup>
 
     The receiver listens at `/api/v1/otlp/v1/metrics` on the same port
     as the rest of the HTTP API (default `:9090`).
@@ -39,11 +47,19 @@ the OTLP endpoint at Prometheus's `/api/v1/otlp/v1/metrics` path and the
     `msb-metrics`'s OTLP HTTP transport speaks the protobuf wire format
     Prometheus expects:
 
-    ```sh
+    <CodeGroup>
+    ```sh macOS & Linux
     msb-metrics otel \
       --endpoint=http://localhost:9090/api/v1/otlp/v1/metrics \
       --protocol=http
     ```
+
+    ```powershell Windows
+    msb-metrics otel `
+      --endpoint=http://localhost:9090/api/v1/otlp/v1/metrics `
+      --protocol=http
+    ```
+    </CodeGroup>
 
     Pass the full receiver path. `msb-metrics` uses HTTP endpoints
     exactly as provided.
@@ -52,9 +68,15 @@ the OTLP endpoint at Prometheus's `/api/v1/otlp/v1/metrics` path and the
   <Step title="Verify">
     Boot a sandbox and query Prometheus directly:
 
-    ```sh
+    <CodeGroup>
+    ```sh macOS & Linux
     curl -s 'http://localhost:9090/api/v1/query?query=microsandbox_memory_usage_bytes' | jq
     ```
+
+    ```powershell Windows
+    curl.exe -s 'http://localhost:9090/api/v1/query?query=microsandbox_memory_usage_bytes' | jq
+    ```
+    </CodeGroup>
 
     Open the Prometheus UI at `http://localhost:9090/graph` and run
     queries like `microsandbox_cpu_utilization_ratio` or

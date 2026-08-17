@@ -13,9 +13,15 @@ Authenticate the [GitHub CLI](https://cli.github.com/) for the target repository
 
 Set the repository once for the commands below:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 repo=OWNER/REPOSITORY
 ```
+
+```powershell Windows
+$repo = 'OWNER/REPOSITORY'
+```
+</CodeGroup>
 
 ## Add the workflow
 
@@ -55,30 +61,55 @@ jobs:
   <Step title="Create the runner VM">
     Give this runner a unique name so multiple jobs can run independently.
 
-    ```sh
+    <CodeGroup>
+    ```sh macOS & Linux
     runner="msb-gh-$(date +%s)"
     msb create ghcr.io/actions/actions-runner:2.336.0 \
       --name "$runner" --cpus 2 --memory 4G --max-duration 1h
     ```
+
+    ```powershell Windows
+    $runner = "msb-gh-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+    msb create ghcr.io/actions/actions-runner:2.336.0 `
+      --name $runner --cpus 2 --memory 4G --max-duration 1h
+    ```
+    </CodeGroup>
   </Step>
 
   <Step title="Register and start the runner">
     First, ask GitHub to register this VM as a runner for one job. GitHub returns a single-use configuration containing the repository address, runner identity, labels, and temporary credentials.
 
-    ```sh
+    <CodeGroup>
+    ```sh macOS & Linux
     runner_config=$(gh api --method POST --hostname github.com "repos/$repo/actions/runners/generate-jitconfig" \
       -f name="$runner" -F runner_group_id=1 -f 'labels[]=self-hosted' \
       -f 'labels[]=msb-ephemeral' -f work_folder=_work --jq .encoded_jit_config)
     ```
 
+    ```powershell Windows
+    $runnerConfig = gh api --method POST --hostname github.com "repos/$repo/actions/runners/generate-jitconfig" `
+      -f "name=$runner" -F runner_group_id=1 -f 'labels[]=self-hosted' `
+      -f 'labels[]=msb-ephemeral' -f work_folder=_work --jq .encoded_jit_config
+    ```
+    </CodeGroup>
+
     Next, pass that configuration through standard input to GitHub's runner process inside the microVM:
 
-    ```sh
+    <CodeGroup>
+    ```sh macOS & Linux
     printf '%s\n' "$runner_config" | msb exec --stream --user runner \
       --workdir /home/runner "$runner" -- \
       bash -lc 'read -r config; exec ./run.sh --jitconfig "$config"'
     unset runner_config
     ```
+
+    ```powershell Windows
+    $runnerConfig | msb exec --stream --user runner `
+      --workdir /home/runner $runner -- `
+      bash -lc 'read -r config; exec ./run.sh --jitconfig "$config"'
+    Remove-Variable runnerConfig
+    ```
+    </CodeGroup>
 
     The runner now opens an outbound HTTPS long poll to GitHub and waits. No inbound port or public IP is required. GitHub returns the queued job through that request, and the command exits when the job finishes.
   </Step>
@@ -86,10 +117,17 @@ jobs:
   <Step title="Remove the VM">
     After the job completes, stop and delete the sandbox.
 
-    ```sh
+    <CodeGroup>
+    ```sh macOS & Linux
     msb stop "$runner"
     msb rm "$runner"
     ```
+
+    ```powershell Windows
+    msb stop $runner
+    msb rm $runner
+    ```
+    </CodeGroup>
   </Step>
 </Steps>
 

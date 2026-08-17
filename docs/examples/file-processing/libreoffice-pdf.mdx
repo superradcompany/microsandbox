@@ -15,23 +15,72 @@ Document parsers process complex, attacker-controlled file formats. This example
 
 <Step title="Prepare the converter">
 
-```sh
+Create one script to prepare the reusable toolchain:
+
+```sh prepare-office.sh
+#!/bin/sh
+set -eu
+
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+  libreoffice-writer poppler-utils
+rm -rf /var/lib/apt/lists/*
+useradd --system --create-home --shell /usr/sbin/nologin converter
+mkdir -p /input /out
+chown converter:converter /out
+chmod 0555 /input
+chmod 0700 /out
+libreoffice --version
+pdftoppm -v
+```
+
+Create the workload script that each worker will run:
+
+```sh convert-document.sh
+#!/bin/sh
+set -eu
+
+test "$(id -u)" -ne 0
+
+if (printf x >> /input/input.docx) 2>/dev/null; then
+  echo "input unexpectedly writable" >&2
+  exit 1
+fi
+
+if getent ahosts example.com >/dev/null 2>&1; then
+  echo "network unexpectedly reachable" >&2
+  exit 1
+fi
+
+echo "input read-only; network blocked"
+libreoffice --headless --convert-to pdf --outdir /out /input/input.docx
+pdftoppm -png -singlefile -r 96 /out/input.pdf /out/preview
+test -s /out/input.pdf
+test -s /out/preview.png
+stat -c "%n: %s bytes" /out/input.pdf /out/preview.png
+```
+
+Install both scripts in the guest, then run the preparation script as the entrypoint:
+
+<CodeGroup>
+```sh macOS & Linux
 msb run --name office-base --replace \
   --cpus 2 --memory 2G --root-disk 5G \
-  debian:bookworm-slim -- sh -lc '
-    apt-get update &&
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      libreoffice-writer poppler-utils &&
-    rm -rf /var/lib/apt/lists/* &&
-    useradd --system --create-home --shell /usr/sbin/nologin converter &&
-    mkdir -p /input /out &&
-    chown converter:converter /out &&
-    chmod 0555 /input &&
-    chmod 0700 /out &&
-    libreoffice --version &&
-    pdftoppm -v
-  '
+  --script-path prepare-office:./prepare-office.sh \
+  --script-path convert-document:./convert-document.sh \
+  --entrypoint prepare-office \
+  debian:bookworm-slim
 ```
+
+```powershell Windows
+msb run --name office-base --replace `
+  --cpus 2 --memory 2G --root-disk 5G `
+  --script-path prepare-office:./prepare-office.sh `
+  --script-path convert-document:./convert-document.sh `
+  --entrypoint prepare-office `
+  debian:bookworm-slim
+```
+</CodeGroup>
 
 Capture the prepared toolchain:
 
@@ -53,7 +102,8 @@ Bookworm currently downloads roughly 130 MB and adds about 440 MB to the guest f
 
 The example accepts a Word document named `input.docx`:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb run -d --name document-worker --replace \
   --from-snapshot office-tools \
   --cpus 2 --memory 2G \
@@ -61,6 +111,16 @@ msb run -d --name document-worker --replace \
   --no-net --max-duration 2m \
   -- sh -lc 'exec sleep 2m'
 ```
+
+```powershell Windows
+msb run -d --name document-worker --replace `
+  --from-snapshot office-tools `
+  --cpus 2 --memory 2G `
+  --user converter --security restricted `
+  --no-net --max-duration 2m `
+  -- sh -lc 'exec sleep 2m'
+```
+</CodeGroup>
 
 Copy the document into the running worker:
 
@@ -80,30 +140,19 @@ msb exec --user root document-worker -- chmod 0444 /input/input.docx
 
 Run the bounded conversion as the unprivileged `converter` user:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb exec --user converter --timeout 90s \
   --rlimit nproc=128 --rlimit nofile=512 --rlimit fsize=536870912 \
-  document-worker -- sh -lc '
-    test "$(id -u)" -ne 0
-
-    if (printf x >> /input/input.docx) 2>/dev/null; then
-      echo "input unexpectedly writable" >&2
-      exit 1
-    fi
-
-    if getent ahosts example.com >/dev/null 2>&1; then
-      echo "network unexpectedly reachable" >&2
-      exit 1
-    fi
-
-    echo "input read-only; network blocked"
-    libreoffice --headless --convert-to pdf --outdir /out /input/input.docx &&
-    pdftoppm -png -singlefile -r 96 /out/input.pdf /out/preview &&
-    test -s /out/input.pdf &&
-    test -s /out/preview.png &&
-    stat -c "%n: %s bytes" /out/input.pdf /out/preview.png
-  '
+  document-worker -- convert-document
 ```
+
+```powershell Windows
+msb exec --user converter --timeout 90s `
+  --rlimit nproc=128 --rlimit nofile=512 --rlimit fsize=536870912 `
+  document-worker -- convert-document
+```
+</CodeGroup>
 
 The worker boots before the document is copied because rootfs patches cannot be combined with `--from-snapshot`. The root-owned input directory prevents the unprivileged converter from replacing the document, while its home directory and `/out` hold the only workload-writable state. The untrusted conversion command sets its own process, file-descriptor, and per-file limits.
 
@@ -111,9 +160,10 @@ The worker boots before the document is copied because rootfs patches cannot be 
 
 <Step title="Export the PDF">
 
-Prepare a fresh private artifact directory on the host:
+Prepare a fresh artifact directory on the host:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 export OFFICE_ARTIFACT_DIR="${OFFICE_ARTIFACT_DIR:-$PWD/.office-artifacts}"
 
 if [ -e "$OFFICE_ARTIFACT_DIR" ] || [ -L "$OFFICE_ARTIFACT_DIR" ]; then
@@ -124,6 +174,19 @@ fi
 mkdir -m 700 "$OFFICE_ARTIFACT_DIR"
 ```
 
+```powershell Windows
+if (-not $env:OFFICE_ARTIFACT_DIR) {
+  $env:OFFICE_ARTIFACT_DIR = Join-Path $PWD '.office-artifacts'
+}
+
+if (Test-Path -LiteralPath $env:OFFICE_ARTIFACT_DIR) {
+  throw "artifact path already exists: $env:OFFICE_ARTIFACT_DIR"
+}
+
+New-Item -ItemType Directory -Path $env:OFFICE_ARTIFACT_DIR | Out-Null
+```
+</CodeGroup>
+
 Stop the worker before exporting its output:
 
 ```sh
@@ -132,14 +195,24 @@ msb stop document-worker
 
 Copy out only the generated artifacts:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb cp document-worker:/out/input.pdf "$OFFICE_ARTIFACT_DIR/output.pdf"
 msb cp document-worker:/out/preview.png "$OFFICE_ARTIFACT_DIR/preview.png"
 ```
 
+```powershell Windows
+$pdfPath = Join-Path $env:OFFICE_ARTIFACT_DIR 'output.pdf'
+$previewPath = Join-Path $env:OFFICE_ARTIFACT_DIR 'preview.png'
+msb cp document-worker:/out/input.pdf $pdfPath
+msb cp document-worker:/out/preview.png $previewPath
+```
+</CodeGroup>
+
 Validate both exported files:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 for artifact in output.pdf preview.png; do
   test ! -L "$OFFICE_ARTIFACT_DIR/$artifact" &&
     test -f "$OFFICE_ARTIFACT_DIR/$artifact" &&
@@ -147,6 +220,17 @@ for artifact in output.pdf preview.png; do
     test "$(wc -c < "$OFFICE_ARTIFACT_DIR/$artifact")" -le 536870912
 done
 ```
+
+```powershell Windows
+foreach ($artifactPath in $pdfPath, $previewPath) {
+  $artifact = Get-Item -LiteralPath $artifactPath
+  $isLink = ($artifact.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+  if ($artifact.PSIsContainer -or $isLink -or $artifact.Length -eq 0 -or $artifact.Length -gt 512MB) {
+    throw "$artifactPath failed artifact validation"
+  }
+}
+```
+</CodeGroup>
 
 Stopping the worker prevents artifact races. The fresh private directory and checks require two nonempty regular files no larger than the conversion command's 512 MiB per-file limit.
 
@@ -156,9 +240,17 @@ Stopping the worker prevents artifact races. The fresh private directory and che
 
 Remove the prepared sandbox and worker:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb rm -f office-base document-worker
+rm -f prepare-office.sh convert-document.sh
 ```
+
+```powershell Windows
+msb rm -f office-base document-worker
+Remove-Item prepare-office.sh, convert-document.sh
+```
+</CodeGroup>
 
 Remove the reusable toolchain snapshot:
 
@@ -166,7 +258,7 @@ Remove the reusable toolchain snapshot:
 msb snapshot rm office-tools
 ```
 
-The checked `output.pdf` and `preview.png` remain under `${OFFICE_ARTIFACT_DIR:-$PWD/.office-artifacts}` on the host.
+The checked `output.pdf` and `preview.png` remain in the artifact directory configured above.
 
 </Step>
 

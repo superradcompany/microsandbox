@@ -19,13 +19,24 @@ This example runs PostgreSQL 17 in a microVM, stores the database on a disk-back
 
 Set a demo password in the host shell:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 export POSTGRES_PASSWORD="$(openssl rand -hex 24)"
 ```
 
+```powershell Windows
+$bytes = New-Object byte[] 24
+$rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+$rng.GetBytes($bytes)
+$rng.Dispose()
+$env:POSTGRES_PASSWORD = -join ($bytes | ForEach-Object { $_.ToString('x2') })
+```
+</CodeGroup>
+
 Start the database:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb run -d --name postgres-demo --replace \
   --cpus 1 --memory 1G --root-disk 2G \
   -p 127.0.0.1:55432:5432 \
@@ -35,6 +46,18 @@ msb run -d --name postgres-demo --replace \
   --mount-named postgres-data:/var/lib/postgresql/data:kind=disk,size=5G \
   postgres:17-alpine
 ```
+
+```powershell Windows
+msb run -d --name postgres-demo --replace `
+  --cpus 1 --memory 1G --root-disk 2G `
+  -p 127.0.0.1:55432:5432 `
+  -e "POSTGRES_PASSWORD=$env:POSTGRES_PASSWORD" `
+  -e POSTGRES_DB=examples `
+  -e DOCKER_PG_LLVM_DEPS= `
+  --mount-named postgres-data:/var/lib/postgresql/data:kind=disk,size=5G `
+  postgres:17-alpine
+```
+</CodeGroup>
 
 With no command after the image, microsandbox runs the image's declared `docker-entrypoint.sh postgres` command in the background.
 
@@ -52,11 +75,19 @@ msb exec postgres-demo -- sh -lc '
 
 <Step title="Run a query">
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb exec -e PGPASSWORD="$POSTGRES_PASSWORD" postgres-demo -- \
   psql -h 127.0.0.1 -U postgres -d examples \
   -c "select current_database(), current_setting('server_version');"
 ```
+
+```powershell Windows
+msb exec -e "PGPASSWORD=$env:POSTGRES_PASSWORD" postgres-demo -- `
+  psql -h 127.0.0.1 -U postgres -d examples `
+  -c "select current_database(), current_setting('server_version');"
+```
+</CodeGroup>
 
 The tested image returned database `examples` and PostgreSQL `17.10`.
 
@@ -84,9 +115,15 @@ msb volume rm postgres-data
 
 Clear the password from the host shell:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 unset POSTGRES_PASSWORD
 ```
+
+```powershell Windows
+Remove-Item Env:POSTGRES_PASSWORD
+```
+</CodeGroup>
 
 </Step>
 </Steps>

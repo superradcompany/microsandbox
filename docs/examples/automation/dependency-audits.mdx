@@ -16,7 +16,8 @@ Keep the scheduler on the host and make each audit a fresh microVM. The sandbox 
 
 Run this beside `package.json` and `package-lock.json`:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb run --name dependency-audit --replace \
   --memory 512M --max-duration 2m \
   --net-default deny --net-rule 'allow@registry.npmjs.org:tcp:443' \
@@ -27,16 +28,35 @@ msb run --name dependency-audit --replace \
     'npm audit --json > /var/tmp/npm-audit.json'
 ```
 
+```powershell Windows
+msb run --name dependency-audit --replace `
+  --memory 512M --max-duration 2m `
+  --net-default deny --net-rule 'allow@registry.npmjs.org:tcp:443' `
+  --copy-file ./package.json:/workspace/package.json `
+  --copy-file ./package-lock.json:/workspace/package-lock.json `
+  --workdir /workspace --user node --security restricted --rlimit fsize=8388608 `
+  node:24.18.1-alpine3.23 -- sh -lc `
+    'npm audit --json > /var/tmp/npm-audit.json'
+```
+</CodeGroup>
+
 `npm audit` exits nonzero when it finds vulnerabilities. That is expected; the stopped sandbox still contains the JSON report.
 
 </Step>
 
 <Step title="Copy out the report">
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 mkdir -p .artifacts
 msb cp dependency-audit:/var/tmp/npm-audit.json .artifacts/npm-audit.json
 ```
+
+```powershell Windows
+New-Item -ItemType Directory -Force .artifacts | Out-Null
+msb cp dependency-audit:/var/tmp/npm-audit.json .artifacts/npm-audit.json
+```
+</CodeGroup>
 
 Inspect the vulnerability summary:
 

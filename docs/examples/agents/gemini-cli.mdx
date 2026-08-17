@@ -13,7 +13,8 @@ This example runs the official scoped Gemini CLI package inside a disposable Nod
 
 <Tooltip tip="On microsandbox cloud, create the named volume first and omit replace-on-create from this command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb run -t --name gemini-demo --replace \
   --cpus 2 --memory 2G --root-disk 4G \
   --copy-dir ./my-project:/workspace \
@@ -26,6 +27,21 @@ msb run -t --name gemini-demo --replace \
     exec gemini
   '
 ```
+
+```powershell Windows
+msb run -t --name gemini-demo --replace `
+  --cpus 2 --memory 2G --root-disk 4G `
+  --copy-dir ./my-project:/workspace `
+  --workdir /workspace `
+  --mount-named gemini-data:/root/.gemini `
+  node:24-bookworm-slim -- sh -lc '
+    apt-get update &&
+    apt-get install -y --no-install-recommends ca-certificates git &&
+    npm install -g @google/gemini-cli@0.52.0 &&
+    exec gemini
+  '
+```
+</CodeGroup>
 
 Gemini CLI first asks whether you trust the workspace. Review the copied files, then continue to authentication. The sandbox cannot directly modify the original host directory.
 

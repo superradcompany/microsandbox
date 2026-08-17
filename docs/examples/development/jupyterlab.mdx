@@ -15,13 +15,24 @@ This example installs JupyterLab into a Python microVM, stores notebooks in a na
 
 Set a temporary token in the host shell:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 export JUPYTER_TOKEN="$(openssl rand -hex 24)"
 ```
 
+```powershell Windows
+$bytes = New-Object byte[] 24
+$rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+$rng.GetBytes($bytes)
+$rng.Dispose()
+$env:JUPYTER_TOKEN = -join ($bytes | ForEach-Object { $_.ToString('x2') })
+```
+</CodeGroup>
+
 Start the server:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb run -d --name jupyter-demo --replace \
   --cpus 2 --memory 2G --root-disk 4G \
   -p 127.0.0.1:8888:8888 \
@@ -39,7 +50,26 @@ msb run -d --name jupyter-demo --replace \
   '
 ```
 
-Open `http://127.0.0.1:8888/lab?token=$JUPYTER_TOKEN` in your browser, substituting the shell variable's value if the browser does not expand it.
+```powershell Windows
+msb run -d --name jupyter-demo --replace `
+  --cpus 2 --memory 2G --root-disk 4G `
+  -p 127.0.0.1:8888:8888 `
+  -e "JUPYTER_TOKEN=$env:JUPYTER_TOKEN" `
+  --mount-named jupyter-notebooks:/workspace `
+  --workdir /workspace `
+  python:3.13-slim -- sh -lc '
+    pip install --no-cache-dir jupyterlab==4.6.2 &&
+    exec jupyter lab \
+      --ip=0.0.0.0 \
+      --port=8888 \
+      --no-browser \
+      --allow-root \
+      --IdentityProvider.token="$JUPYTER_TOKEN"
+  '
+```
+</CodeGroup>
+
+Open `http://127.0.0.1:8888/lab?token=<token>` in your browser and replace `<token>` with the value generated above.
 
 </Step>
 
@@ -47,9 +77,15 @@ Open `http://127.0.0.1:8888/lab?token=$JUPYTER_TOKEN` in your browser, substitut
 
 Check the authenticated API from the host:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 curl -sS "http://127.0.0.1:8888/api?token=$JUPYTER_TOKEN" | head
 ```
+
+```powershell Windows
+curl.exe -sS "http://127.0.0.1:8888/api?token=$env:JUPYTER_TOKEN" | Select-Object -First 10
+```
+</CodeGroup>
 
 Then inspect the recent server output:
 
@@ -81,9 +117,15 @@ msb volume rm jupyter-notebooks
 
 Clear the token from the host shell:
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 unset JUPYTER_TOKEN
 ```
+
+```powershell Windows
+Remove-Item Env:JUPYTER_TOKEN
+```
+</CodeGroup>
 
 Keep `jupyter-notebooks` if you want to retain the notebooks.
 

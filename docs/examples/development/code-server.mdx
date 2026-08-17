@@ -13,7 +13,8 @@ Run VS Code in a disposable microVM when you want an editable Linux workspace wi
 <Steps>
 <Step title="Start the editor">
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb run -d --name code-server-demo --replace \
   --cpus 2 --memory 2G --root-disk 4G \
   -p 127.0.0.1:8080:8080 \
@@ -23,6 +24,18 @@ msb run -d --name code-server-demo --replace \
     --auth none \
     /home/coder/project
 ```
+
+```powershell Windows
+msb run -d --name code-server-demo --replace `
+  --cpus 2 --memory 2G --root-disk 4G `
+  -p 127.0.0.1:8080:8080 `
+  --entrypoint code-server `
+  codercom/code-server:4.130.0 -- `
+    --bind-addr 0.0.0.0:8080 `
+    --auth none `
+    /home/coder/project
+```
+</CodeGroup>
 
 The host port is bound to `127.0.0.1`, so the unauthenticated editor is reachable only from the local machine.
 
@@ -47,9 +60,15 @@ Open [http://127.0.0.1:8080](http://127.0.0.1:8080). The editor, terminal, exten
 
 <Step title="Check the service">
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 curl -fsSI http://127.0.0.1:8080/ | head -n 1
 ```
+
+```powershell Windows
+curl.exe -fsSI http://127.0.0.1:8080/ | Select-Object -First 1
+```
+</CodeGroup>
 
 A healthy server responds with an HTTP status line, usually a redirect into the workspace.
 

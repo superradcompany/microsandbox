@@ -23,11 +23,19 @@ docker pull ghcr.io/superradcompany/microsandbox:latest
 
 Run the preflight inside the container:
 
-```bash
+<CodeGroup>
+```bash macOS & Linux
 docker run --rm --device /dev/kvm \
   ghcr.io/superradcompany/microsandbox:latest \
   doctor
 ```
+
+```powershell Windows
+docker run --rm --device /dev/kvm `
+  ghcr.io/superradcompany/microsandbox:latest `
+  doctor
+```
+</CodeGroup>
 
 A compatible Docker environment reports both checks as successful:
 
@@ -52,12 +60,21 @@ After changing the Docker or hypervisor configuration, rerun the preflight. Addi
 
 Run Alpine and attach your terminal to its shell:
 
-```bash
+<CodeGroup>
+```bash macOS & Linux
 docker run --rm -it \
   --device /dev/kvm \
   ghcr.io/superradcompany/microsandbox:latest \
   run alpine --name my-sandbox --replace
 ```
+
+```powershell Windows
+docker run --rm -it `
+  --device /dev/kvm `
+  ghcr.io/superradcompany/microsandbox:latest `
+  run alpine --name my-sandbox --replace
+```
+</CodeGroup>
 
 - `--rm` removes the outer container when it exits.
 - `-it` carries your terminal through Docker and `msb` to the sandbox. Without it, the sandbox can be running with no usable prompt.
@@ -76,12 +93,21 @@ exit
 
 For automation, pass a command instead of allocating a terminal:
 
-```bash
+<CodeGroup>
+```bash macOS & Linux
 docker run --rm --device /dev/kvm \
   ghcr.io/superradcompany/microsandbox:latest \
   run alpine --name my-sandbox --replace -- \
   echo "hello from a microVM"
 ```
+
+```powershell Windows
+docker run --rm --device /dev/kvm `
+  ghcr.io/superradcompany/microsandbox:latest `
+  run alpine --name my-sandbox --replace -- `
+  echo "hello from a microVM"
+```
+</CodeGroup>
 
 The command's output and exit code pass through both layers to the host.
 
@@ -97,13 +123,23 @@ docker volume create microsandbox-data
 
 Mount it at microsandbox's data directory:
 
-```bash
+<CodeGroup>
+```bash macOS & Linux
 docker run --rm -it \
   --device /dev/kvm \
   --volume microsandbox-data:/root/.microsandbox \
   ghcr.io/superradcompany/microsandbox:latest \
   run alpine --name my-sandbox --replace
 ```
+
+```powershell Windows
+docker run --rm -it `
+  --device /dev/kvm `
+  --volume microsandbox-data:/root/.microsandbox `
+  ghcr.io/superradcompany/microsandbox:latest `
+  run alpine --name my-sandbox --replace
+```
+</CodeGroup>
 
 The Docker volume preserves pulled images, stopped sandboxes, snapshots, and the microsandbox database. Remove it only when that state is no longer needed:
 

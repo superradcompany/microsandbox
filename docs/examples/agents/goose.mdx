@@ -13,7 +13,8 @@ Goose publishes native Linux binaries for both `aarch64` and `x86_64`. Its insta
 
 <Tooltip tip="On microsandbox cloud, create the named volume first and omit replace-on-create from this command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb run -t --name goose-demo --replace \
   --cpus 2 --memory 2G --root-disk 3G \
   --copy-dir ./my-project:/workspace \
@@ -28,6 +29,23 @@ msb run -t --name goose-demo --replace \
     exec goose session
   '
 ```
+
+```powershell Windows
+msb run -t --name goose-demo --replace `
+  --cpus 2 --memory 2G --root-disk 3G `
+  --copy-dir ./my-project:/workspace `
+  --workdir /workspace `
+  --mount-named goose-data:/data/goose `
+  -e GOOSE_PATH_ROOT=/data/goose `
+  debian:bookworm-slim -- sh -lc '
+    apt-get update &&
+    apt-get install -y --no-install-recommends ca-certificates curl bzip2 git &&
+    curl -fsSL https://github.com/aaif-goose/goose/releases/download/v1.44.0/download_cli.sh |
+      GOOSE_BIN_DIR=/usr/local/bin GOOSE_VERSION=v1.44.0 CONFIGURE=false bash &&
+    exec goose session
+  '
+```
+</CodeGroup>
 
 On first launch Goose asks whether to share anonymous usage data, then walks through provider configuration. `GOOSE_BIN_DIR` installs the executable on the sandbox's normal `PATH`, including later `msb exec` sessions. `GOOSE_PATH_ROOT` keeps its configuration, data, and session state in the `goose-data` volume.
 

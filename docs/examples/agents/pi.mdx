@@ -14,7 +14,8 @@ Pi is a terminal coding agent distributed as a Node.js package. This example pin
 
 <Tooltip tip="This agent works on microsandbox cloud after omitting replace-on-create from the command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-```sh
+<CodeGroup>
+```sh macOS & Linux
 msb run -t --name pi-demo --replace \
   --cpus 2 --memory 2G --root-disk 4G \
   --copy-dir ./my-project:/workspace \
@@ -26,6 +27,20 @@ msb run -t --name pi-demo --replace \
     exec pi
   '
 ```
+
+```powershell Windows
+msb run -t --name pi-demo --replace `
+  --cpus 2 --memory 2G --root-disk 4G `
+  --copy-dir ./my-project:/workspace `
+  --workdir /workspace `
+  node:24-bookworm-slim -- sh -lc '
+    apt-get update &&
+    apt-get install -y --no-install-recommends ca-certificates git &&
+    npm install -g @mariozechner/pi-coding-agent@0.73.1 &&
+    exec pi
+  '
+```
+</CodeGroup>
 
 The tested install downloads 188 packages and takes about a minute on a warm Node image cache. Configure a provider from the TUI when prompted.
 
