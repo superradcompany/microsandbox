@@ -13,9 +13,7 @@ There are two ways to connect:
 - **Native sessions** use the built-in microsandbox SSH client. No host `ssh` binary, TCP listener, or authorized key is required, which makes it the quickest path for a shell from `msb` or SSH semantics from the SDK.
 - **External clients** serve the sandbox as an SSH server so standard tools such as `ssh`, `sftp`, and `ProxyCommand` can connect.
 
-<Note>
-  SSH sessions disconnect after 10 minutes without SSH traffic by default. To change or disable the timeout, see [Configure the inactivity timeout](#configure-the-inactivity-timeout).
-</Note>
+SSH sessions disconnect after 10 minutes without traffic by default. [Change or disable the inactivity timeout](#inactivity-timeout).
 
 ## Native sessions
 
@@ -244,7 +242,7 @@ rsync -av ./src/ devbox.msb:/app/
 
 Editors that build on OpenSSH, such as VS Code Remote-SSH, connect to the `devbox.msb` host the same way.
 
-## Configure the inactivity timeout
+## Inactivity timeout
 
 SSH sessions disconnect after 10 minutes without SSH traffic by default. Any SSH input or output resets the timer. This transport timeout is independent of the sandbox lifecycle idle timeout: an SSH disconnect does not stop the sandbox.
 
