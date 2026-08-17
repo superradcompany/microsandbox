@@ -657,6 +657,10 @@ impl PatchBuilder {
     }
 
     /// Create a directory (idempotent).
+    ///
+    /// For bind roots, the host process umask may narrow the requested mode
+    /// when a new directory is created. Existing directories receive the exact
+    /// mode through a pinned handle.
     pub fn mkdir(mut self, path: impl Into<String>, mode: Option<u32>) -> Self {
         self.patches.push(Patch::Mkdir {
             path: path.into(),

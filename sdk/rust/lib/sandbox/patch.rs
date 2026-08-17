@@ -1,20 +1,18 @@
 //! Patch application logic for rootfs modification before VM start.
 
 use std::collections::VecDeque;
-#[cfg(unix)]
-use std::ffi::CString;
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-#[cfg(unix)]
-use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
 use cap_std::ambient_authority;
-use cap_std::fs::{Dir, File, OpenOptions, Permissions};
+#[cfg(unix)]
+use cap_std::fs::DirBuilderExt;
+use cap_std::fs::{Dir, DirBuilder, File, OpenOptions, Permissions};
 use microsandbox_image::erofs::{ErofsEntryInfo, ErofsEntryKind, ErofsReader};
 use microsandbox_image::tree::{
     DeviceNode, DirectoryNode, FileData, FileTree, FileTreeError, InodeMetadata, RegularFileId,
@@ -333,61 +331,17 @@ impl RootedPatchFs {
 
         #[cfg(unix)]
         {
-            self.ensure_parent(path)?;
-            let parent_path = path
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-                .unwrap_or_else(|| Path::new("."));
-            let name = path.file_name().ok_or_else(|| {
-                crate::MicrosandboxError::PatchFailed(format!(
-                    "patch directory has no final component: {}",
-                    path.display()
-                ))
-            })?;
-            let parent = self.root.open_dir(parent_path)?;
-
-            // Prepare and chmod a private directory before publishing it. The
-            // no-replace rename prevents a concurrent destination from being
-            // overwritten or receiving the requested mode.
-            for _ in 0..128 {
-                let temporary = OsString::from(format!(
-                    ".microsandbox-patch-{}-{:016x}",
-                    std::process::id(),
-                    rand::random::<u64>()
-                ));
-                match parent.create_dir(&temporary) {
-                    Ok(()) => {}
-                    Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                    Err(err) => return Err(err.into()),
-                }
-
-                let temporary_dir = parent.open_dir(&temporary)?;
-                if let Err(err) = set_dir_mode(&temporary_dir, mode) {
-                    drop(temporary_dir);
-                    let _ = parent.remove_dir(&temporary);
-                    return Err(err);
-                }
-
-                match rename_noreplace(&parent, Path::new(&temporary), Path::new(name)) {
-                    Ok(()) => return Ok(()),
-                    Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                        drop(temporary_dir);
-                        parent.remove_dir(&temporary)?;
-                        let existing = parent.open_dir(name)?;
-                        return set_dir_mode(&existing, mode);
-                    }
-                    Err(err) => {
-                        drop(temporary_dir);
-                        let _ = parent.remove_dir(&temporary);
-                        return Err(err.into());
-                    }
-                }
+            match self.root.open_dir(path) {
+                Ok(existing) => return set_dir_mode(&existing, mode),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err.into()),
             }
 
-            Err(crate::MicrosandboxError::PatchFailed(format!(
-                "failed to reserve a temporary directory for {}",
-                path.display()
-            )))
+            self.ensure_parent(path)?;
+            let mut builder = DirBuilder::new();
+            builder.mode(mode);
+            self.root.create_dir_with(path, &builder)?;
+            Ok(())
         }
 
         #[cfg(windows)]
@@ -1223,51 +1177,6 @@ fn set_dir_mode(dir: &Dir, mode: u32) -> MicrosandboxResult<()> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn rename_noreplace(dir: &Dir, from: &Path, to: &Path) -> std::io::Result<()> {
-    let from = CString::new(from.as_os_str().as_bytes())
-        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
-    let to = CString::new(to.as_os_str().as_bytes())
-        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
-
-    #[cfg(target_os = "linux")]
-    let result = unsafe {
-        libc::renameat2(
-            dir.as_raw_fd(),
-            from.as_ptr(),
-            dir.as_raw_fd(),
-            to.as_ptr(),
-            libc::RENAME_NOREPLACE,
-        )
-    };
-
-    #[cfg(target_os = "macos")]
-    let result = unsafe {
-        libc::renameatx_np(
-            dir.as_raw_fd(),
-            from.as_ptr(),
-            dir.as_raw_fd(),
-            to.as_ptr(),
-            libc::RENAME_EXCL,
-        )
-    };
-
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    let result = {
-        let _ = (dir, from, to);
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "atomic no-replace directory rename is unsupported on this platform",
-        ));
-    };
-
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
 #[cfg(windows)]
 fn is_windows_reserved_name(name: &str) -> bool {
     let stem = name.split_once('.').map_or(name, |(stem, _)| stem);
@@ -1916,6 +1825,37 @@ mod tests {
                 .mode()
                 & 0o777,
             0o755
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_patch_modes_existing_directory_without_parent_write_access() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir_all(root.join("existing")).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let result = apply_patches(
+            &bind_root(root.clone(), true),
+            &[Patch::Mkdir {
+                path: "/existing".into(),
+                mode: Some(0o700),
+            }],
+        )
+        .await;
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        result.unwrap();
+
+        assert_eq!(
+            std::fs::metadata(root.join("existing"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
         );
     }
 
