@@ -17,10 +17,10 @@ use tokio::sync::mpsc;
 
 use super::sni;
 use super::state::TlsState;
+use crate::netstack::shared::SharedState;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::secrets::config::ViolationAction;
 use crate::secrets::handler::SecretsHandler;
-use crate::shared::SharedState;
 use crate::tcp::{connection::ProxyConnectState, upstream::UpstreamTcpTarget};
 
 //--------------------------------------------------------------------------------------------------

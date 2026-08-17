@@ -24,7 +24,7 @@ use std::net::{IpAddr, SocketAddr};
 use ipnetwork::IpNetwork;
 use serde::{Deserialize, Serialize};
 
-use crate::shared::SharedState;
+use crate::netstack::shared::SharedState;
 
 use super::destination::{matches_cidr, matches_group};
 use super::name::{DomainName, DomainNameError};
@@ -944,7 +944,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::shared::ResolvedHostnameFamily;
+    use crate::netstack::shared::ResolvedHostnameFamily;
 
     const PYPI_V4: &str = "151.101.0.223";
     const FILES_V4: &str = "151.101.64.223";

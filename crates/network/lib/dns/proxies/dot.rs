@@ -39,7 +39,7 @@ use tokio::time::timeout;
 use super::super::common::transport::Transport;
 use super::super::forwarder::{DnsForwarder, DnsForwarderHandle};
 use super::framing::{frame, take_message};
-use crate::shared::SharedState;
+use crate::netstack::shared::SharedState;
 use crate::tls::state::TlsState;
 
 //--------------------------------------------------------------------------------------------------
@@ -423,7 +423,7 @@ mod tests {
 
     use super::*;
     use crate::dns::forwarder::DnsForwarder;
-    use crate::stack::GatewayIps;
+    use crate::netstack::poll::GatewayIps;
     use crate::tls::ca::CertAuthority;
     use crate::tls::certgen::generate_domain_cert;
 

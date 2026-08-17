@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use tokio::net::TcpStream;
 
 use super::connection::ProxyConnectState;
-use crate::shared::SharedState;
+use crate::netstack::shared::SharedState;
 
 //--------------------------------------------------------------------------------------------------
 // Types

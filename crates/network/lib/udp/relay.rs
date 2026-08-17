@@ -25,7 +25,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
 use crate::icmp::error::{construct_packet_too_big, ethernet_ip_payload};
-use crate::shared::SharedState;
+use crate::netstack::shared::SharedState;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -377,7 +377,7 @@ impl UdpSession {
 /// * `guest_dst` - Destination the guest wrote on the datagram. Stamped as the source IP on
 ///   reply frames so the guest sees replies from the same address it dialed.
 /// * `host_dst` - Address the host socket connects to. Equal to `guest_dst` for external
-///   destinations; rewritten to loopback by [`crate::stack::resolve_host_dst`] when the guest
+///   destinations; rewritten to loopback by [`crate::netstack::poll::resolve_host_dst`] when the guest
 ///   addressed the gateway.
 /// * `shared` - Shared state; reply frames go into `rx_ring` and wake the poll thread.
 /// * `gateway_mac` - Source MAC on reply frames (guest sees replies from the gateway's MAC).

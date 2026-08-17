@@ -22,7 +22,6 @@ use smoltcp::wire::{
 };
 
 use crate::config::{DnsConfig, PublishedPort};
-use crate::device::SmoltcpDevice;
 use crate::dns::common::ports::DnsPortType;
 use crate::dns::{
     interceptor::DnsInterceptor,
@@ -30,9 +29,8 @@ use crate::dns::{
 };
 use crate::icmp::relay::IcmpRelay;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
-use crate::publisher::PortPublisher;
+use crate::ports::PortPublisher;
 use crate::secrets::handle::SecretsHandle;
-use crate::shared::SharedState;
 use crate::tcp::{connection::ConnectionTracker, proxy, upstream::UpstreamTcpTarget};
 use crate::tls::{proxy as tls_proxy, state::TlsState};
 use crate::udp::fragments::{
@@ -40,6 +38,8 @@ use crate::udp::fragments::{
     is_ipv4_udp_fragment, is_ipv6_fragment, is_ipv6_udp_fragment,
 };
 use crate::udp::relay::UdpRelay;
+
+use super::{device::SmoltcpDevice, shared::SharedState};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -1116,8 +1116,7 @@ mod tests {
         ArpOperation, ArpPacket, ArpRepr, EthernetRepr, Icmpv4Packet, Icmpv4Repr, Ipv4Repr,
     };
 
-    use crate::device::SmoltcpDevice;
-    use crate::shared::SharedState;
+    use super::super::{device::SmoltcpDevice, shared::SharedState};
     use crate::tcp::connection::NewConnection;
 
     /// Build a minimal Ethernet + IPv4 + TCP SYN frame.

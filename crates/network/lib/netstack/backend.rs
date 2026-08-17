@@ -4,7 +4,7 @@
 //! The NetWorker calls [`write_frame()`](NetBackend::write_frame) when the
 //! guest sends a frame and [`read_frame()`](NetBackend::read_frame) to deliver
 //! frames back to the guest. Frames flow through [`SharedState`]'s
-//! `tx_ring`/`rx_ring` queues with [`WakePipe`](crate::shared::WakePipe)
+//! `tx_ring`/`rx_ring` queues with [`WakePipe`](super::shared::WakePipe)
 //! notifications. Unix libkrun registers [`raw_socket_fd`](NetBackend::raw_socket_fd)
 //! in edge-triggered mode, while Windows libkrun waits on an event source. Reads
 //! must drain the wake primitive before returning.
@@ -17,7 +17,7 @@ use msb_krun::backends::net::{NetBackend, ReadError, WriteError};
 #[cfg(windows)]
 use msb_krun_utils::event::{EventSource, EventToken};
 
-use crate::shared::SharedState;
+use super::shared::SharedState;
 
 //--------------------------------------------------------------------------------------------------
 // Constants

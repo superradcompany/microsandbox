@@ -13,18 +13,14 @@
 
 mod addr;
 
-pub mod backend;
-pub mod builder;
 pub mod config;
-pub mod device;
 pub mod dns;
 pub mod icmp;
+pub mod netstack;
 pub mod network;
 pub mod policy;
-pub mod publisher;
+pub mod ports;
 pub mod secrets;
-pub mod shared;
-pub mod stack;
 pub mod tcp;
 pub mod tls;
 pub mod udp;
@@ -43,6 +39,9 @@ pub(crate) const HOST_ALIAS: &str = "host.microsandbox.internal";
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
+pub use config::builder;
 pub use icmp::{error as icmp_error, relay as icmp_relay};
+pub use netstack::{backend, device, poll as stack, shared};
+pub use ports::publisher;
 pub use tcp::{connection as conn, proxy};
 pub use udp::{fragments as udp_fragments, relay as udp_relay};

@@ -43,9 +43,11 @@ use super::common::config::NormalizedDnsConfig;
 use super::common::filter::{is_private_ipv4, is_private_ipv6};
 use super::common::transport::Transport;
 use super::nameserver::{read_host_dns_servers, resolve_nameservers};
+use crate::netstack::{
+    poll::GatewayIps,
+    shared::{ResolvedHostnameFamily, SharedState},
+};
 use crate::policy::{Action, DomainName, NetworkPolicy};
-use crate::shared::{ResolvedHostnameFamily, SharedState};
-use crate::stack::GatewayIps;
 
 //--------------------------------------------------------------------------------------------------
 // Constants

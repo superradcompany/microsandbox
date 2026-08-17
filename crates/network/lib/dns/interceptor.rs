@@ -26,9 +26,8 @@ use super::common::config::NormalizedDnsConfig;
 use super::forwarder::{DnsForwarder, DnsForwarderHandle};
 use super::proxies::udp::UdpProxy;
 use crate::config::DnsConfig;
+use crate::netstack::{poll::GatewayIps, shared::SharedState};
 use crate::policy::NetworkPolicy;
-use crate::shared::SharedState;
-use crate::stack::GatewayIps;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -199,7 +198,7 @@ mod tests {
     use smoltcp::time::Instant;
     use smoltcp::wire::{HardwareAddress, IpCidr, Ipv4Address, Ipv6Address};
 
-    use crate::device::SmoltcpDevice;
+    use crate::netstack::device::SmoltcpDevice;
 
     /// IPv6 capture smoke test (#3): a UDP socket bound to
     /// `addr: None, port: 53` must accept packets destined to *any*
