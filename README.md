@@ -416,7 +416,7 @@ Practical ways to put microsandbox to work:
 
 <br />
 
-## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/people/ffffff" alt="people-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/people/000000" alt="people"></a>&nbsp;&nbsp;Built with microsandbox
+## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/people/ffffff" alt="people-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/people/000000" alt="people"></a>&nbsp;&nbsp;Projects using microsandbox
 
 > ⏵ **[Eve by Vercel](https://eve.dev/docs/sandbox#microsandbox)**<br />
 > ⏵ **[GSA TTS Agentic Coding Quickstart](https://github.com/GSA-TTS/agentic-coding-quickstart)**<br />
