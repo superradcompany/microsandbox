@@ -1,14 +1,14 @@
 ---
 title: code-server
-description: Open a disposable VS Code environment in the browser
+description: Open an isolated VS Code workspace in the browser
 icon: "code"
 ---
 
+Run VS Code in a disposable microVM when you want an editable Linux workspace without installing its tools or extensions on the host. The project is copied into the sandbox, so edits stay isolated until you explicitly copy them back.
+
 <Tooltip tip="This example publishes code-server to a port on the computer running the CLI, which is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-code-server provides VS Code in a browser. This example starts the official ARM64/AMD64 image, forwards it only to host loopback, and copies a project into the isolated guest filesystem.
-
-## Start code-server
+## Start the editor
 
 ```sh
 msb run -d --name code-server-demo --replace \
@@ -21,57 +21,40 @@ msb run -d --name code-server-demo --replace \
     /home/coder/project
 ```
 
-Copy a project into the running sandbox:
+The host port is bound to `127.0.0.1`, so the unauthenticated editor is reachable only from the local machine.
+
+## Add a project
+
+Replace `./my-project` with the directory you want to edit:
 
 ```sh
 msb cp ./my-project/. code-server-demo:/home/coder/project
-```
-
-Give the image's `coder` user ownership:
-
-```sh
 msb exec -u root code-server-demo -- chown -R coder:coder /home/coder/project
 ```
 
-Open [http://127.0.0.1:8080](http://127.0.0.1:8080). The editor, integrated terminal, extension host, and project processes all run inside the microVM.
-
-## Verify the service
-
-```sh
-curl -I http://127.0.0.1:8080/
-```
-
-Then inspect the recent server output:
-
-```sh
-msb logs --tail 20 code-server-demo
-```
-
-The root endpoint redirects to the project workspace, and the logs show the HTTP server listening on `0.0.0.0:8080` inside the guest.
+Open [http://127.0.0.1:8080](http://127.0.0.1:8080). The editor, terminal, extensions, and project commands all run inside the microVM.
 
 <Warning>
-  `--auth none` is acceptable here only because the host port is bound to `127.0.0.1`. Never expose an unauthenticated code-server instance to a LAN or the internet; its integrated terminal gives users command execution inside the VM.
+  Keep the host bind on `127.0.0.1`. Do not expose an editor with `--auth none` to a LAN or public interface.
 </Warning>
 
-## Export changes
-
-Review the project and export a patch:
+## Check the service
 
 ```sh
-msb exec code-server-demo -- sh -lc 'cd /home/coder/project && git add -N . && git diff --binary > /tmp/code-server.patch'
+curl -fsSI http://127.0.0.1:8080/ | head -n 1
 ```
 
-Copy the patch to the host:
+A healthy server responds with an HTTP status line, usually a redirect into the workspace.
+
+## Copy changes back
+
+Export the edited project into a new host directory:
 
 ```sh
-msb cp code-server-demo:/tmp/code-server.patch ./code-server.patch
+msb cp code-server-demo:/home/coder/project ./code-server-output
 ```
 
-Check that it applies cleanly before applying it:
-
-```sh
-git apply --check ./code-server.patch
-```
+Review `code-server-output` before merging its changes into the original checkout.
 
 ## Cleanup
 
@@ -81,5 +64,4 @@ msb rm -f code-server-demo
 
 ## Reference
 
-- [code-server installation](https://github.com/coder/code-server/blob/main/docs/install.md)
-- [Safely exposing code-server](https://github.com/coder/code-server/blob/main/docs/guide.md)
+- [code-server documentation](https://coder.com/docs/code-server)

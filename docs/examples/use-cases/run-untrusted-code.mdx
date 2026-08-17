@@ -1,139 +1,66 @@
 ---
-title: Run untrusted user code
+title: Run untrusted code
 sidebarTitle: Untrusted code
-description: Execute submitted Python with bounded resources and no network access
+description: Execute a submitted Python file in a bounded, networkless microVM
 icon: "code"
 ---
 
-Use this pattern for a code playground, grading service, plugin system, data-analysis app, or any feature that executes code you did not write. Each submission gets a fresh microVM, and the guest is stopped and removed when the run finishes.
+Run each submission in a fresh microVM instead of the host process. This example copies one Python file into an isolated worker, disables its network, applies resource limits, and returns the program's output.
 
-This example uses the TypeScript SDK and Python, but the same lifecycle works with any OCI image and command.
+## Create a submission
 
-## Quick CLI smoke test
+Save this as `submission.py`:
 
-<Tooltip tip="This smoke test works on microsandbox cloud after omitting replace-on-create from the command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-Before building a service, verify the core isolation controls from the terminal:
-
-```sh
-msb run --name restricted-python --replace \
-  --cpus 1 --memory 256M \
-  --no-net --security restricted \
-  --rlimit nproc=64 --rlimit nofile=128 \
-  --max-duration 30s \
-  python:3.13-slim -- python -c '
+```python submission.py
 import socket
-from pathlib import Path
 
-Path("/tmp/worked").write_text("sandboxed")
+print("answer:", sum(range(10)))
+
 try:
-    socket.create_connection(("example.com", 443), timeout=2)
-    raise SystemExit("network unexpectedly reachable")
-except OSError as error:
-    print("network blocked:", type(error).__name__)
-
-print("filesystem ok:", Path("/tmp/worked").read_text())
-  '
+    socket.create_connection(("example.com", 443), timeout=1)
+except OSError:
+    print("network: blocked")
 ```
 
-The command should print `network blocked: gaierror` followed by `filesystem ok: sandboxed`, then stop. Remove its persisted record with:
+## Run it
+
+<Tooltip tip="This example works on microsandbox cloud after omitting replace-on-create from the command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```sh
-msb rm restricted-python
+msb run --name untrusted-python --replace \
+  --cpus 1 --memory 256M --max-duration 30s \
+  --no-net --security restricted \
+  --rlimit nproc=64 --rlimit nofile=128 --rlimit fsize=10485760 \
+  --copy-file ./submission.py:/workspace/submission.py \
+  --workdir /workspace \
+  python:3.13-slim -- python -I submission.py
 ```
 
-## Install the SDK
+The command prints:
 
-```bash
-npm install microsandbox
+```text
+answer: 45
+network: blocked
 ```
 
-## Create a bounded runner
+The sandbox stops when the program exits. Its filesystem remains available for logs or output inspection until cleanup.
 
-<Tooltip tip="Cloud sandboxes require explicit stop or removal; SDK automatic disposal applies only to local sandboxes."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+## What this isolates
 
-```typescript run-python.ts
-import { randomUUID } from "node:crypto";
-import { MiB, Sandbox } from "microsandbox";
-
-const MAX_SOURCE_BYTES = 64 * 1024;
-
-export type RunResult = {
-  exitCode: number;
-  stdout: string;
-  stderr: string;
-};
-
-export async function runPython(source: string): Promise<RunResult> {
-  if (Buffer.byteLength(source, "utf8") > MAX_SOURCE_BYTES) {
-    throw new Error("source exceeds the 64 KiB limit");
-  }
-
-  const name = `submission-${randomUUID()}`;
-  const sandbox = await Sandbox.builder(name)
-    .image("python")
-    .cpus(1)
-    .memory(MiB(512))
-    .disableNetwork()
-    .patch((patch) => patch.mkdir("/workspace", { mode: 0o755 }))
-    .workdir("/workspace")
-    .create();
-
-  try {
-    await sandbox.fs().write("/workspace/main.py", source);
-
-    const output = await sandbox.execWith("python", (exec) =>
-      exec
-        .args(["-I", "main.py"])
-        .timeout(5_000)
-        .rlimit("cpu", 5)
-        .rlimit("nproc", 64)
-        .rlimit("nofile", 128)
-        .rlimit("fsize", 10 * 1024 * 1024),
-    );
-
-    return {
-      exitCode: output.code,
-      stdout: output.stdout(),
-      stderr: output.stderr(),
-    };
-  } finally {
-    await sandbox.stop();
-    await Sandbox.remove(name);
-  }
-}
-```
-
-Call it from an API handler or worker:
-
-```typescript
-const result = await runPython("print(sum(range(10)))");
-console.log(result);
-// { exitCode: 0, stdout: "45\n", stderr: "" }
-```
-
-## What the limits do
-
-| Control | Protection |
-|---|---|
-| Fresh microVM | Keeps guest processes and the guest filesystem outside the host process |
-| `cpus(1)` and `memory(MiB(512))` | Bounds the VM's compute and memory allocation |
-| `disableNetwork()` | Blocks guest network access, so submitted code cannot make network requests |
-| `timeout(5_000)` and `rlimit("cpu", 5)` | Stops wall-clock hangs and CPU-bound loops |
-| `nproc`, `nofile`, and `fsize` | Limits process creation, open file descriptors, and file size |
-| `finally` cleanup | Stops the VM and removes its persisted sandbox record after every run |
+- **Fresh microVM.** The submission gets its own kernel and filesystem instead of running in the host process.
+- **No network.** `--no-net` removes guest network access.
+- **Bounded resources.** CPU, memory, lifetime, process count, open files, and file size are capped.
+- **Restricted profile.** The guest process cannot elevate with setuid binaries or administer guest mounts.
+- **Narrow input.** Only `submission.py` is copied into the guest.
 
 <Warning>
-  `execWith()` collects stdout and stderr in host memory. Enforce an application-level output limit, or use [`execStreamWith()`](/sdk/typescript/execution#sandbox-execstreamwith) and stop reading after your cap, before accepting arbitrary public submissions.
+  File-size limits do not cap stdout or stderr. A public execution service should also limit concurrent sandboxes and bound streamed output before retaining or returning it.
 </Warning>
 
-## Production checklist
+## Cleanup
 
-- Put a concurrency limit in front of the runner so submissions cannot exhaust host CPU, memory, or disk by creating too many VMs at once.
-- Validate source and request sizes before booting a sandbox.
-- Use a purpose-built image with only the runtime and packages submissions need.
-- Keep networking disabled unless the workload requires it. If it does, use a deny-by-default [network policy](/networking/overview).
-- Do not bind-mount host directories or pass host credentials into a sandbox that runs untrusted code.
-- Record exit status, duration, and resource metrics for abuse detection, but avoid logging submitted source when it may contain private data.
+```sh
+msb rm -f untrusted-python
+```
 
-For longer-running or interactive workloads, see [Command execution](/sandboxes/commands). For controlled API credentials that never enter the VM, see [Secrets](/sandboxes/secrets).
+To build this flow into an application, use the same create, copy, execute, and remove lifecycle from the [SDK for your language](/sdk/overview).
