@@ -13,6 +13,13 @@ repository = "https://github.com/superradcompany/microsandbox"
 name = "microsandbox"
 crate-type = ["cdylib"]
 
+[profile.ci]
+inherits = "release"
+opt-level = 1
+codegen-units = 16
+lto = false
+strip = false
+
 [dependencies]
 magnus = "0.8.2"
 microsandbox_core = { package = "microsandbox", version = "=0.6.9", default-features = false, features = ["net", "ssh"] }
