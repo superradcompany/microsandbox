@@ -410,7 +410,7 @@ jobs:
       agentd_target: x86_64-unknown-linux-musl
 
   # ---------------------------------------------------------------------------
-  # Windows build/check only.
+  # Windows build/check and host-filesystem unit tests.
   #
   # These jobs verify the WHP host targets compile on both Windows architectures.
   # VM smoke and integration coverage intentionally stays Linux/KVM-only below.
@@ -511,6 +511,14 @@ jobs:
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
           cargo +stable test --no-default-features --features net -p microsandbox-runtime --lib --target ${{ matrix.rust_target }} test_bind_rootfs_backend_exposes_host_file_and_init
+
+      - name: Test bind rootfs patches
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
+          cargo +stable test --no-default-features --features net -p microsandbox --lib --target ${{ matrix.rust_target }} sandbox::patch::tests::bind_patch_
 
   windows-build:
     name: Build Windows ${{ matrix.component }} (${{ matrix.target }})

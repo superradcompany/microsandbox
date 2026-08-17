@@ -1039,7 +1039,10 @@ impl ImageBuilder {
     ///
     /// The directory's contents become the guest root filesystem as-is — no
     /// OCI pull and no overlay. Mutually exclusive with [`oci`](Self::oci) and
-    /// [`disk`](Self::disk).
+    /// [`disk`](Self::disk). Pre-boot patches modify this host directory in
+    /// place. Nested mounts and pre-existing hard links are part of the chosen
+    /// filesystem tree, so bind roots that receive patches must not contain
+    /// host-sensitive aliases.
     ///
     /// ```ignore
     /// .image_with(|i| i.bind("/srv/rootfs"))

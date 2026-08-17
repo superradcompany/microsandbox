@@ -10,7 +10,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use cap_std::ambient_authority;
-use cap_std::fs::{Dir, OpenOptions, Permissions};
+use cap_std::fs::{Dir, File, OpenOptions, Permissions};
 use microsandbox_image::erofs::{ErofsEntryInfo, ErofsEntryKind, ErofsReader};
 use microsandbox_image::tree::{
     DeviceNode, DirectoryNode, FileData, FileTree, FileTreeError, InodeMetadata, RegularFileId,
@@ -125,7 +125,40 @@ impl RootedPatchFs {
     /// operation repeats containment during use, which closes rename races
     /// between this semantic resolution and the mutation itself.
     fn resolve(&self, guest_path: &str, follow_final: bool) -> MicrosandboxResult<PathBuf> {
-        let mut remaining = guest_path_components(guest_path)?;
+        self.resolve_components(guest_path_components(guest_path)?, follow_final, guest_path)
+    }
+
+    /// Resolve an already-normalized capability-relative path.
+    ///
+    /// `CopyDir` uses this for source names, which may not be valid UTF-8 on
+    /// Unix and therefore cannot be round-tripped through a guest path string.
+    fn resolve_relative(&self, path: &Path, follow_final: bool) -> MicrosandboxResult<PathBuf> {
+        let mut remaining = VecDeque::new();
+        for component in path.components() {
+            match component {
+                std::path::Component::CurDir => {}
+                std::path::Component::Normal(name) => {
+                    remaining.push_back(PendingComponent::Normal(name.to_os_string()));
+                }
+                _ => {
+                    return Err(crate::MicrosandboxError::PatchFailed(format!(
+                        "internal patch path is not root-relative: {}",
+                        path.display()
+                    )));
+                }
+            }
+        }
+
+        let display = format!("/{}", path.display());
+        self.resolve_components(remaining, follow_final, &display)
+    }
+
+    fn resolve_components(
+        &self,
+        mut remaining: VecDeque<PendingComponent>,
+        follow_final: bool,
+        guest_path: &str,
+    ) -> MicrosandboxResult<PathBuf> {
         let mut resolved = Vec::<OsString>::new();
         let mut followed = 0usize;
 
@@ -189,48 +222,91 @@ impl RootedPatchFs {
         Ok(())
     }
 
-    fn check_replace(
+    /// Open a patch destination with mutation-level replacement semantics.
+    ///
+    /// `create_new` makes `replace = false` atomic: a concurrent creator wins
+    /// or loses the same filesystem operation instead of racing a prior stat.
+    fn open_file_for_write(
         &self,
         path: &Path,
         guest_path: &str,
         replace: bool,
-    ) -> MicrosandboxResult<()> {
-        if !replace && self.root.try_exists(path)? {
-            return Err(crate::MicrosandboxError::PatchFailed(format!(
-                "path already exists in rootfs: '{guest_path}' (set replace to allow)"
-            )));
-        }
-        Ok(())
-    }
-
-    fn write_file(&self, path: &Path, content: &[u8]) -> MicrosandboxResult<()> {
+    ) -> MicrosandboxResult<File> {
         self.ensure_parent(path)?;
-        self.root.write(path, content)?;
+        let mut options = OpenOptions::new();
+        options.write(true);
+        if replace {
+            options.create(true).truncate(true);
+        } else {
+            options.create_new(true);
+        }
+
+        self.root.open_with(path, &options).map_err(|err| {
+            if !replace && err.kind() == std::io::ErrorKind::AlreadyExists {
+                path_exists_error(guest_path)
+            } else {
+                err.into()
+            }
+        })
+    }
+
+    fn write_file(
+        &self,
+        path: &Path,
+        guest_path: &str,
+        content: &[u8],
+        replace: bool,
+    ) -> MicrosandboxResult<()> {
+        let mut file = self.open_file_for_write(path, guest_path, replace)?;
+        file.write_all(content)?;
         Ok(())
     }
 
-    fn copy_file(&self, src: &Path, dst: &Path) -> MicrosandboxResult<()> {
-        self.ensure_parent(dst)?;
+    fn copy_file(
+        &self,
+        src: &Path,
+        dst: &Path,
+        guest_path: &str,
+        replace: bool,
+    ) -> MicrosandboxResult<()> {
         let mut source = std::fs::File::open(src)?;
         let permissions = source.metadata()?.permissions();
-        let mut options = OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        let mut destination = self.root.open_with(dst, &options)?;
+        let mut destination = self.open_file_for_write(dst, guest_path, replace)?;
         std::io::copy(&mut source, &mut destination)?;
         destination.set_permissions(Permissions::from_std(permissions))?;
         Ok(())
     }
 
-    fn copy_dir(&self, src: &Path, dst: &Path) -> MicrosandboxResult<()> {
-        self.root.create_dir_all(dst)?;
+    fn copy_dir(
+        &self,
+        src: &Path,
+        dst: &Path,
+        guest_path: &str,
+        replace: bool,
+    ) -> MicrosandboxResult<()> {
+        self.ensure_parent(dst)?;
+        if replace {
+            self.root.create_dir_all(dst)?;
+        } else {
+            self.root.create_dir(dst).map_err(|err| {
+                if err.kind() == std::io::ErrorKind::AlreadyExists {
+                    path_exists_error(guest_path)
+                } else {
+                    err.into()
+                }
+            })?;
+        }
+
         for entry in std::fs::read_dir(src)? {
             let entry = entry?;
             let src_path = entry.path();
-            let dst_path = dst.join(entry.file_name());
+            let unresolved_dst = dst.join(entry.file_name());
+            let resolved_dst = self.resolve_relative(&unresolved_dst, replace)?;
+            let child_guest_path = format!("/{}", unresolved_dst.display());
             if entry.file_type()?.is_dir() {
-                self.copy_dir(&src_path, &dst_path)?;
+                self.copy_dir(&src_path, &resolved_dst, &child_guest_path, replace)?;
             } else {
-                self.copy_file(&src_path, &dst_path)?;
+                self.copy_file(&src_path, &resolved_dst, &child_guest_path, replace)?;
             }
         }
         Ok(())
@@ -302,6 +378,11 @@ pub(crate) async fn apply_patches(
             ));
         }
     };
+
+    // Validate the complete batch before touching a bind root. This matters on
+    // Windows, where POSIX modes and symlink patches are predictably
+    // unsupported and must not fail after earlier patches have been applied.
+    validate_bind_patches(patches)?;
 
     let patches = patches.to_vec();
     tokio::task::spawn_blocking(move || -> MicrosandboxResult<()> {
@@ -537,9 +618,8 @@ fn apply_one_to_bind(root: &RootedPatchFs, patch: &Patch) -> MicrosandboxResult<
             mode,
             replace,
         } => {
-            let dest = root.resolve(path, true)?;
-            root.check_replace(&dest, path, *replace)?;
-            root.write_file(&dest, content.as_bytes())?;
+            let dest = root.resolve(path, *replace)?;
+            root.write_file(&dest, path, content.as_bytes(), *replace)?;
             if let Some(mode) = mode {
                 root.set_permissions(&dest, *mode)?;
             }
@@ -550,9 +630,8 @@ fn apply_one_to_bind(root: &RootedPatchFs, patch: &Patch) -> MicrosandboxResult<
             mode,
             replace,
         } => {
-            let dest = root.resolve(path, true)?;
-            root.check_replace(&dest, path, *replace)?;
-            root.write_file(&dest, content)?;
+            let dest = root.resolve(path, *replace)?;
+            root.write_file(&dest, path, content, *replace)?;
             if let Some(mode) = mode {
                 root.set_permissions(&dest, *mode)?;
             }
@@ -563,17 +642,15 @@ fn apply_one_to_bind(root: &RootedPatchFs, patch: &Patch) -> MicrosandboxResult<
             mode,
             replace,
         } => {
-            let dest = root.resolve(dst, true)?;
-            root.check_replace(&dest, dst, *replace)?;
-            root.copy_file(src, &dest)?;
+            let dest = root.resolve(dst, *replace)?;
+            root.copy_file(src, &dest, dst, *replace)?;
             if let Some(mode) = mode {
                 root.set_permissions(&dest, *mode)?;
             }
         }
         Patch::CopyDir { src, dst, replace } => {
-            let dest = root.resolve(dst, true)?;
-            root.check_replace(&dest, dst, *replace)?;
-            root.copy_dir(src, &dest)?;
+            let dest = root.resolve(dst, *replace)?;
+            root.copy_dir(src, &dest, dst, *replace)?;
         }
         Patch::Symlink {
             target,
@@ -581,13 +658,20 @@ fn apply_one_to_bind(root: &RootedPatchFs, patch: &Patch) -> MicrosandboxResult<
             replace,
         } => {
             let link_path = root.resolve(link, false)?;
-            root.check_replace(&link_path, link, *replace)?;
             root.ensure_parent(&link_path)?;
             if *replace {
                 root.remove_entry(&link_path)?;
             }
             #[cfg(unix)]
-            root.root.symlink_contents(target, &link_path)?;
+            root.root
+                .symlink_contents(target, &link_path)
+                .map_err(|err| {
+                    if !replace && err.kind() == std::io::ErrorKind::AlreadyExists {
+                        path_exists_error(link)
+                    } else {
+                        err.into()
+                    }
+                })?;
             #[cfg(windows)]
             {
                 let _ = target;
@@ -1079,6 +1163,12 @@ fn guest_path_components(guest_path: &str) -> MicrosandboxResult<VecDeque<Pendin
                         "patch path contains null byte: '{guest_path}'"
                     )));
                 }
+                #[cfg(windows)]
+                if c.contains(['\\', ':']) {
+                    return Err(crate::MicrosandboxError::PatchFailed(format!(
+                        "patch path uses syntax that cannot represent a Linux guest name on a Windows host: '{guest_path}'"
+                    )));
+                }
                 components.push_back(PendingComponent::Normal(OsString::from(c)));
             }
         }
@@ -1090,6 +1180,49 @@ fn guest_path_components(guest_path: &str) -> MicrosandboxResult<VecDeque<Pendin
         ));
     }
     Ok(components)
+}
+
+fn validate_bind_patches(patches: &[Patch]) -> MicrosandboxResult<()> {
+    for patch in patches {
+        guest_path_components(patch_destination(patch))?;
+
+        #[cfg(windows)]
+        match patch {
+            Patch::Text { mode: Some(_), .. }
+            | Patch::File { mode: Some(_), .. }
+            | Patch::CopyFile { mode: Some(_), .. }
+            | Patch::Mkdir { mode: Some(_), .. } => {
+                return Err(crate::MicrosandboxError::InvalidConfig(
+                    "POSIX patch modes are not supported for Windows host bind roots".into(),
+                ));
+            }
+            Patch::Symlink { .. } => {
+                return Err(crate::MicrosandboxError::InvalidConfig(
+                    "symlink patches are not supported for Windows host bind roots".into(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn patch_destination(patch: &Patch) -> &str {
+    match patch {
+        Patch::Text { path, .. }
+        | Patch::File { path, .. }
+        | Patch::Mkdir { path, .. }
+        | Patch::Remove { path }
+        | Patch::Append { path, .. } => path,
+        Patch::CopyFile { dst, .. } | Patch::CopyDir { dst, .. } => dst,
+        Patch::Symlink { link, .. } => link,
+    }
+}
+
+fn path_exists_error(guest_path: &str) -> crate::MicrosandboxError {
+    crate::MicrosandboxError::PatchFailed(format!(
+        "path already exists in rootfs: '{guest_path}' (set replace to allow)"
+    ))
 }
 
 /// Expand a host symlink target using Linux guest-root semantics.
@@ -1234,6 +1367,21 @@ mod tests {
             mode: None,
             replace: false,
         }
+    }
+
+    #[cfg(windows)]
+    fn create_windows_junction(link: &Path, target: &Path) {
+        let output = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "failed to create junction: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     fn make_regular_file(data: &[u8]) -> TreeNode {
@@ -1385,6 +1533,352 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(root.join("target.txt")).unwrap(),
             "keep"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_patch_copy_dir_confines_nested_host_absolute_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(temp.path()).unwrap();
+        let root = base.join("root");
+        let outside = base.join("outside");
+        let source = base.join("source");
+        std::fs::create_dir_all(root.join("dest")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(source.join("nested")).unwrap();
+        std::fs::write(outside.join("sentinel.txt"), "outside").unwrap();
+        std::fs::write(source.join("nested/payload.txt"), "contained").unwrap();
+        symlink(&outside, root.join("dest/nested")).unwrap();
+
+        apply_patches(
+            &bind_root(root.clone(), false),
+            &[Patch::CopyDir {
+                src: source,
+                dst: "/dest".into(),
+                replace: true,
+            }],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(outside.join("sentinel.txt")).unwrap(),
+            "outside"
+        );
+        assert!(!outside.join("payload.txt").exists());
+        let confined = root
+            .join(outside.strip_prefix(Path::new("/")).unwrap())
+            .join("payload.txt");
+        assert_eq!(std::fs::read_to_string(confined).unwrap(), "contained");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_patch_no_replace_rejects_existing_final_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        std::fs::write(root.join("target.txt"), "keep").unwrap();
+        symlink("target.txt", root.join("link.txt")).unwrap();
+
+        let error = apply_patches(
+            &bind_root(root.clone(), false),
+            &[text_patch("/link.txt", "overwrite")],
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("set replace to allow"));
+        assert_eq!(
+            std::fs::read_to_string(root.join("target.txt")).unwrap(),
+            "keep"
+        );
+        assert!(
+            std::fs::symlink_metadata(root.join("link.txt"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_patch_no_replace_preserves_dangling_final_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        symlink("missing.txt", root.join("link.txt")).unwrap();
+
+        let error = apply_patches(
+            &bind_root(root.clone(), false),
+            &[text_patch("/link.txt", "must-not-write")],
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("set replace to allow"));
+        assert_eq!(
+            std::fs::read_link(root.join("link.txt")).unwrap(),
+            Path::new("missing.txt")
+        );
+        assert!(!root.join("missing.txt").exists());
+    }
+
+    #[test]
+    fn bind_patch_no_replace_allows_exactly_one_concurrent_writer() {
+        use std::sync::{Arc, Barrier};
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = Arc::new(RootedPatchFs::open(temp.path(), true).unwrap());
+        let barrier = Arc::new(Barrier::new(3));
+        let mut workers = Vec::new();
+
+        for content in [b"alpha".as_slice(), b"beta".as_slice()] {
+            let root = Arc::clone(&root);
+            let barrier = Arc::clone(&barrier);
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                root.write_file(Path::new("winner.txt"), "/winner.txt", content, false)
+            }));
+        }
+
+        barrier.wait();
+        let results: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+
+        let content = std::fs::read(temp.path().join("winner.txt")).unwrap();
+        assert!(content == b"alpha" || content == b"beta");
+    }
+
+    #[tokio::test]
+    async fn bind_patch_preflights_all_destinations_before_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+
+        let error = apply_patches(
+            &bind_root(root.clone(), true),
+            &[
+                text_patch("/first.txt", "must-not-write"),
+                text_patch("relative.txt", "invalid"),
+            ],
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("must be absolute"));
+        assert!(!root.join("first.txt").exists());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn bind_patch_windows_preflights_complete_batch() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        std::fs::write(root.join("link.txt"), "keep").unwrap();
+
+        let error = apply_patches(
+            &bind_root(root.clone(), true),
+            &[
+                text_patch("/first.txt", "must-not-write"),
+                Patch::Symlink {
+                    target: "/target.txt".into(),
+                    link: "/link.txt".into(),
+                    replace: true,
+                },
+            ],
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("symlink patches are not supported")
+        );
+        assert!(!root.join("first.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("link.txt")).unwrap(),
+            "keep"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn bind_patch_windows_rejects_modes_before_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        std::fs::write(root.join("victim.txt"), "keep").unwrap();
+
+        let error = apply_patches(
+            &bind_root(root.clone(), true),
+            &[Patch::Text {
+                path: "/victim.txt".into(),
+                content: "overwrite".into(),
+                mode: Some(0o600),
+                replace: true,
+            }],
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("POSIX patch modes are not supported")
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("victim.txt")).unwrap(),
+            "keep"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn bind_patch_windows_rejects_host_path_syntax() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+
+        let error = apply_patches(
+            &bind_root(root.clone(), true),
+            &[text_patch("/safe\\..\\escaped.txt", "must-not-write")],
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("Windows host"));
+        assert!(!root.join("escaped.txt").exists());
+        assert!(!root.join("safe").exists());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn bind_patch_windows_applies_supported_operations() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let source = temp.path().join("source.txt");
+        let source_dir = temp.path().join("source-dir");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(&source, "copied").unwrap();
+        std::fs::write(source_dir.join("nested.txt"), "nested").unwrap();
+        std::fs::write(root.join("append.txt"), "before").unwrap();
+        std::fs::write(root.join("remove.txt"), "remove").unwrap();
+
+        apply_patches(
+            &bind_root(root.clone(), true),
+            &[
+                text_patch("/text.txt", "text"),
+                Patch::File {
+                    path: "/file.bin".into(),
+                    content: b"file".to_vec(),
+                    mode: None,
+                    replace: false,
+                },
+                Patch::CopyFile {
+                    src: source,
+                    dst: "/copied.txt".into(),
+                    mode: None,
+                    replace: false,
+                },
+                Patch::CopyDir {
+                    src: source_dir,
+                    dst: "/copied-dir".into(),
+                    replace: false,
+                },
+                Patch::Mkdir {
+                    path: "/new-dir".into(),
+                    mode: None,
+                },
+                Patch::Append {
+                    path: "/append.txt".into(),
+                    content: "-after".into(),
+                },
+                Patch::Remove {
+                    path: "/remove.txt".into(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("text.txt")).unwrap(),
+            "text"
+        );
+        assert_eq!(std::fs::read(root.join("file.bin")).unwrap(), b"file");
+        assert_eq!(
+            std::fs::read_to_string(root.join("copied.txt")).unwrap(),
+            "copied"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("copied-dir/nested.txt")).unwrap(),
+            "nested"
+        );
+        assert!(root.join("new-dir").is_dir());
+        assert_eq!(
+            std::fs::read_to_string(root.join("append.txt")).unwrap(),
+            "before-after"
+        );
+        assert!(!root.join("remove.txt").exists());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn bind_patch_windows_rejects_descendant_junction_escape() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("sentinel.txt"), "keep").unwrap();
+        create_windows_junction(&root.join("escape"), &outside);
+
+        let error = apply_patches(
+            &bind_root(root.clone(), true),
+            &[text_patch("/escape/pwned.txt", "must-not-write")],
+        )
+        .await
+        .unwrap_err();
+
+        assert!(!error.to_string().is_empty());
+        assert_eq!(
+            std::fs::read_to_string(outside.join("sentinel.txt")).unwrap(),
+            "keep"
+        );
+        assert!(!outside.join("pwned.txt").exists());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn bind_patch_windows_honors_junction_root_policy() {
+        let temp = tempfile::tempdir().unwrap();
+        let actual_root = temp.path().join("actual-root");
+        let linked_root = temp.path().join("linked-root");
+        std::fs::create_dir_all(&actual_root).unwrap();
+        create_windows_junction(&linked_root, &actual_root);
+        let patch = text_patch("/allowed.txt", "hello");
+
+        let error = apply_patches(&bind_root(linked_root.clone(), false), &[patch.clone()])
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("follow_root_symlinks"));
+        assert!(!actual_root.join("allowed.txt").exists());
+
+        apply_patches(&bind_root(linked_root, true), &[patch])
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(actual_root.join("allowed.txt")).unwrap(),
+            "hello"
         );
     }
 
