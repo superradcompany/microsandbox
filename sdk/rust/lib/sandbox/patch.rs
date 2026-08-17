@@ -1,12 +1,16 @@
 //! Patch application logic for rootfs modification before VM start.
 
-use std::ffi::OsStr;
+use std::collections::VecDeque;
+use std::ffi::{OsStr, OsString};
+use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use cap_std::ambient_authority;
+use cap_std::fs::{Dir, OpenOptions, Permissions};
 use microsandbox_image::erofs::{ErofsEntryInfo, ErofsEntryKind, ErofsReader};
 use microsandbox_image::tree::{
     DeviceNode, DirectoryNode, FileData, FileTree, FileTreeError, InodeMetadata, RegularFileId,
@@ -27,6 +31,21 @@ use crate::MicrosandboxResult;
 /// `.erofs` file on every path lookup during patch resolution.
 struct LowerLayers {
     readers: Vec<ErofsReader>,
+}
+
+/// Capability-scoped view of a host-directory rootfs.
+///
+/// Every patch destination is resolved relative to `root`, so a symlink or
+/// concurrent rename cannot redirect host filesystem operations outside the
+/// configured bind root.
+struct RootedPatchFs {
+    root: Dir,
+}
+
+/// One unresolved component while applying guest-root symlink semantics.
+enum PendingComponent {
+    Parent { clamp_at_root: bool },
+    Normal(OsString),
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -83,6 +102,174 @@ impl LowerLayers {
     }
 }
 
+impl RootedPatchFs {
+    /// Open and pin the bind root before any patch destination is resolved.
+    fn open(path: &Path, follow_root_symlinks: bool) -> MicrosandboxResult<Self> {
+        let root = if follow_root_symlinks {
+            Dir::open_ambient_dir(path, ambient_authority()).map_err(|err| {
+                crate::MicrosandboxError::PatchFailed(format!(
+                    "failed to open bind root {}: {err}",
+                    path.display()
+                ))
+            })?
+        } else {
+            open_root_without_links(path)?
+        };
+        Ok(Self { root })
+    }
+
+    /// Resolve a guest path beneath the pinned root.
+    ///
+    /// Existing symlinks are expanded explicitly so absolute targets restart
+    /// at the guest root instead of the host root. The final capability-based
+    /// operation repeats containment during use, which closes rename races
+    /// between this semantic resolution and the mutation itself.
+    fn resolve(&self, guest_path: &str, follow_final: bool) -> MicrosandboxResult<PathBuf> {
+        let mut remaining = guest_path_components(guest_path)?;
+        let mut resolved = Vec::<OsString>::new();
+        let mut followed = 0usize;
+
+        while let Some(component) = remaining.pop_front() {
+            match component {
+                PendingComponent::Parent { clamp_at_root } => {
+                    if resolved.pop().is_none() && !clamp_at_root {
+                        return Err(crate::MicrosandboxError::PatchFailed(format!(
+                            "patch path escapes rootfs: '{guest_path}'"
+                        )));
+                    }
+                }
+                PendingComponent::Normal(name) => {
+                    let is_final = remaining.is_empty();
+                    if is_final && !follow_final {
+                        resolved.push(name);
+                        continue;
+                    }
+
+                    let candidate = join_components(&resolved, Some(&name));
+                    match self.root.symlink_metadata(&candidate) {
+                        Ok(metadata) if metadata.file_type().is_symlink() => {
+                            followed += 1;
+                            if followed > 40 {
+                                return Err(crate::MicrosandboxError::PatchFailed(format!(
+                                    "too many symlinks while resolving patch path: '{guest_path}'"
+                                )));
+                            }
+                            let target = self.root.read_link_contents(&candidate)?;
+                            prepend_link_target(
+                                &target,
+                                &mut resolved,
+                                &mut remaining,
+                                guest_path,
+                            )?;
+                        }
+                        Ok(_) => resolved.push(name),
+                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                            resolved.push(name);
+                        }
+                        Err(err) => return Err(err.into()),
+                    }
+                }
+            }
+        }
+
+        if resolved.is_empty() {
+            return Err(crate::MicrosandboxError::PatchFailed(
+                "patch path must not be '/'".into(),
+            ));
+        }
+        Ok(join_components(&resolved, None))
+    }
+
+    fn ensure_parent(&self, path: &Path) -> MicrosandboxResult<()> {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            self.root.create_dir_all(parent)?;
+        }
+        Ok(())
+    }
+
+    fn check_replace(
+        &self,
+        path: &Path,
+        guest_path: &str,
+        replace: bool,
+    ) -> MicrosandboxResult<()> {
+        if !replace && self.root.try_exists(path)? {
+            return Err(crate::MicrosandboxError::PatchFailed(format!(
+                "path already exists in rootfs: '{guest_path}' (set replace to allow)"
+            )));
+        }
+        Ok(())
+    }
+
+    fn write_file(&self, path: &Path, content: &[u8]) -> MicrosandboxResult<()> {
+        self.ensure_parent(path)?;
+        self.root.write(path, content)?;
+        Ok(())
+    }
+
+    fn copy_file(&self, src: &Path, dst: &Path) -> MicrosandboxResult<()> {
+        self.ensure_parent(dst)?;
+        let mut source = std::fs::File::open(src)?;
+        let permissions = source.metadata()?.permissions();
+        let mut options = OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        let mut destination = self.root.open_with(dst, &options)?;
+        std::io::copy(&mut source, &mut destination)?;
+        destination.set_permissions(Permissions::from_std(permissions))?;
+        Ok(())
+    }
+
+    fn copy_dir(&self, src: &Path, dst: &Path) -> MicrosandboxResult<()> {
+        self.root.create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let src_path = entry.path();
+            let dst_path = dst.join(entry.file_name());
+            if entry.file_type()?.is_dir() {
+                self.copy_dir(&src_path, &dst_path)?;
+            } else {
+                self.copy_file(&src_path, &dst_path)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_entry(&self, path: &Path) -> MicrosandboxResult<()> {
+        match self.root.symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_dir() => {
+                self.root.remove_dir_all(path)?;
+            }
+            Ok(_) => {
+                self.root.remove_file(path)?;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
+        Ok(())
+    }
+
+    fn set_permissions(&self, path: &Path, mode: u32) -> MicrosandboxResult<()> {
+        #[cfg(unix)]
+        {
+            self.root.set_permissions(
+                path,
+                Permissions::from_std(std::fs::Permissions::from_mode(mode)),
+            )?;
+            Ok(())
+        }
+
+        #[cfg(windows)]
+        {
+            let _ = (path, mode);
+            Err(crate::MicrosandboxError::InvalidConfig(
+                "POSIX patch modes are not supported for Windows host bind roots".into(),
+            ))
+        }
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -99,8 +286,11 @@ pub(crate) async fn apply_patches(
         return Ok(());
     }
 
-    let target_dir = match image {
-        RootfsSource::Bind { path, .. } => path.clone(),
+    let (target_dir, follow_root_symlinks) = match image {
+        RootfsSource::Bind {
+            path,
+            follow_root_symlinks,
+        } => (path.clone(), *follow_root_symlinks),
         RootfsSource::Oci(_) => {
             return Err(crate::MicrosandboxError::InvalidConfig(
                 "OCI patches are baked into upper.ext4 before VM start".into(),
@@ -113,11 +303,18 @@ pub(crate) async fn apply_patches(
         }
     };
 
-    for patch in patches {
-        apply_one(&target_dir, &[], patch).await?;
-    }
-
-    Ok(())
+    let patches = patches.to_vec();
+    tokio::task::spawn_blocking(move || -> MicrosandboxResult<()> {
+        let root = RootedPatchFs::open(&target_dir, follow_root_symlinks)?;
+        for patch in &patches {
+            apply_one_to_bind(&root, patch)?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|err| {
+        crate::MicrosandboxError::PatchFailed(format!("bind-root patch task failed: {err}"))
+    })?
 }
 
 pub(crate) async fn build_upper_tree(
@@ -331,12 +528,8 @@ async fn apply_one_to_tree(
     Ok(())
 }
 
-/// Apply a single patch operation.
-async fn apply_one(
-    target_dir: &Path,
-    lower_layers: &[PathBuf],
-    patch: &Patch,
-) -> MicrosandboxResult<()> {
+/// Apply one patch through a capability-scoped bind-root handle.
+fn apply_one_to_bind(root: &RootedPatchFs, patch: &Patch) -> MicrosandboxResult<()> {
     match patch {
         Patch::Text {
             path,
@@ -344,12 +537,11 @@ async fn apply_one(
             mode,
             replace,
         } => {
-            let dest = resolve_guest_path(target_dir, path)?;
-            check_replace(&dest, lower_layers, path, *replace)?;
-            ensure_parent(&dest).await?;
-            fs::write(&dest, content.as_bytes()).await?;
+            let dest = root.resolve(path, true)?;
+            root.check_replace(&dest, path, *replace)?;
+            root.write_file(&dest, content.as_bytes())?;
             if let Some(mode) = mode {
-                set_permissions(&dest, *mode).await?;
+                root.set_permissions(&dest, *mode)?;
             }
         }
         Patch::File {
@@ -358,12 +550,11 @@ async fn apply_one(
             mode,
             replace,
         } => {
-            let dest = resolve_guest_path(target_dir, path)?;
-            check_replace(&dest, lower_layers, path, *replace)?;
-            ensure_parent(&dest).await?;
-            fs::write(&dest, content).await?;
+            let dest = root.resolve(path, true)?;
+            root.check_replace(&dest, path, *replace)?;
+            root.write_file(&dest, content)?;
             if let Some(mode) = mode {
-                set_permissions(&dest, *mode).await?;
+                root.set_permissions(&dest, *mode)?;
             }
         }
         Patch::CopyFile {
@@ -372,33 +563,31 @@ async fn apply_one(
             mode,
             replace,
         } => {
-            let dest = resolve_guest_path(target_dir, dst)?;
-            check_replace(&dest, lower_layers, dst, *replace)?;
-            ensure_parent(&dest).await?;
-            fs::copy(src, &dest).await?;
+            let dest = root.resolve(dst, true)?;
+            root.check_replace(&dest, dst, *replace)?;
+            root.copy_file(src, &dest)?;
             if let Some(mode) = mode {
-                set_permissions(&dest, *mode).await?;
+                root.set_permissions(&dest, *mode)?;
             }
         }
         Patch::CopyDir { src, dst, replace } => {
-            let dest = resolve_guest_path(target_dir, dst)?;
-            check_replace(&dest, lower_layers, dst, *replace)?;
-            copy_dir_recursive(src, &dest).await?;
+            let dest = root.resolve(dst, true)?;
+            root.check_replace(&dest, dst, *replace)?;
+            root.copy_dir(src, &dest)?;
         }
         Patch::Symlink {
             target,
             link,
             replace,
         } => {
-            let link_path = resolve_guest_path(target_dir, link)?;
-            check_replace(&link_path, lower_layers, link, *replace)?;
-            ensure_parent(&link_path).await?;
-            // Remove existing if replace was allowed and something exists.
-            if link_path.exists() {
-                fs::remove_file(&link_path).await.ok();
+            let link_path = root.resolve(link, false)?;
+            root.check_replace(&link_path, link, *replace)?;
+            root.ensure_parent(&link_path)?;
+            if *replace {
+                root.remove_entry(&link_path)?;
             }
             #[cfg(unix)]
-            tokio::fs::symlink(target, &link_path).await?;
+            root.root.symlink_contents(target, &link_path)?;
             #[cfg(windows)]
             {
                 let _ = target;
@@ -408,33 +597,23 @@ async fn apply_one(
             }
         }
         Patch::Mkdir { path, mode } => {
-            let dest = resolve_guest_path(target_dir, path)?;
-            fs::create_dir_all(&dest).await?;
+            let dest = root.resolve(path, true)?;
+            root.root.create_dir_all(&dest)?;
             if let Some(mode) = mode {
-                set_permissions(&dest, *mode).await?;
+                root.set_permissions(&dest, *mode)?;
             }
         }
         Patch::Remove { path } => {
-            let dest = resolve_guest_path(target_dir, path)?;
-            if dest.is_dir() {
-                fs::remove_dir_all(&dest).await.ok();
-            } else {
-                fs::remove_file(&dest).await.ok();
-            }
+            let dest = root.resolve(path, false)?;
+            root.remove_entry(&dest)?;
         }
         Patch::Append { path, content } => {
-            let dest = resolve_guest_path(target_dir, path)?;
-            // If the file doesn't exist in the target dir, try to copy up from lower layers.
-            if !dest.exists()
-                && let Some(source) = find_in_layers(lower_layers, path)
-            {
-                ensure_parent(&dest).await?;
-                fs::copy(&source, &dest).await?;
-            }
-            if dest.exists() {
-                use tokio::io::AsyncWriteExt;
-                let mut file = fs::OpenOptions::new().append(true).open(&dest).await?;
-                file.write_all(content.as_bytes()).await?;
+            let dest = root.resolve(path, true)?;
+            if root.root.try_exists(&dest)? {
+                let mut options = OpenOptions::new();
+                options.append(true);
+                let mut file = root.root.open_with(&dest, &options)?;
+                file.write_all(content.as_bytes())?;
             } else {
                 return Err(crate::MicrosandboxError::PatchFailed(format!(
                     "cannot append to '{path}': file not found in rootfs"
@@ -875,11 +1054,8 @@ fn os_str_bytes(value: &OsStr) -> Vec<u8> {
     }
 }
 
-/// Resolve a guest absolute path to a host path within the target directory.
-///
-/// Collapses `..` components lexically before checking containment, so that
-/// paths like `/etc/foo/../../bar` are caught even without filesystem access.
-fn resolve_guest_path(target_dir: &Path, guest_path: &str) -> MicrosandboxResult<PathBuf> {
+/// Parse a guest path with Unix semantics on every host platform.
+fn guest_path_components(guest_path: &str) -> MicrosandboxResult<VecDeque<PendingComponent>> {
     use typed_path::{Utf8UnixComponent, Utf8UnixPath};
 
     if !guest_path.starts_with('/') {
@@ -888,19 +1064,14 @@ fn resolve_guest_path(target_dir: &Path, guest_path: &str) -> MicrosandboxResult
         )));
     }
 
-    // Build a normalized relative path by collapsing `.` and `..` lexically.
-    // Parsed with Unix semantics regardless of host — `std::path` would treat
-    // `\` as a separator on Windows and mis-split guest components.
-    let mut normalized = PathBuf::new();
+    let mut components = VecDeque::new();
     for component in Utf8UnixPath::new(guest_path).components() {
         match component {
             Utf8UnixComponent::RootDir | Utf8UnixComponent::CurDir => {}
             Utf8UnixComponent::ParentDir => {
-                if !normalized.pop() {
-                    return Err(crate::MicrosandboxError::PatchFailed(format!(
-                        "patch path escapes rootfs: '{guest_path}'"
-                    )));
-                }
+                components.push_back(PendingComponent::Parent {
+                    clamp_at_root: false,
+                });
             }
             Utf8UnixComponent::Normal(c) => {
                 if c.contains('\0') {
@@ -908,103 +1079,134 @@ fn resolve_guest_path(target_dir: &Path, guest_path: &str) -> MicrosandboxResult
                         "patch path contains null byte: '{guest_path}'"
                     )));
                 }
-                normalized.push(c);
+                components.push_back(PendingComponent::Normal(OsString::from(c)));
             }
         }
     }
 
-    let resolved = target_dir.join(&normalized);
-
-    if !resolved.starts_with(target_dir) {
-        return Err(crate::MicrosandboxError::PatchFailed(format!(
-            "patch path escapes rootfs: '{guest_path}'"
-        )));
+    if components.is_empty() {
+        return Err(crate::MicrosandboxError::PatchFailed(
+            "patch path must not be '/'".into(),
+        ));
     }
-
-    Ok(resolved)
+    Ok(components)
 }
 
-/// Check if a path already exists in the target dir or lower layers.
-/// Returns an error if it exists and `replace` is false.
-fn check_replace(
-    dest: &Path,
-    lower_layers: &[PathBuf],
+/// Expand a host symlink target using Linux guest-root semantics.
+fn prepend_link_target(
+    target: &Path,
+    resolved: &mut Vec<OsString>,
+    remaining: &mut VecDeque<PendingComponent>,
     guest_path: &str,
-    replace: bool,
 ) -> MicrosandboxResult<()> {
-    if replace {
-        return Ok(());
-    }
+    let mut target_components = Vec::new();
 
-    // Check the target directory (rw layer for OCI, host dir for bind).
-    if dest.exists() {
-        return Err(crate::MicrosandboxError::PatchFailed(format!(
-            "path already exists in rootfs: '{guest_path}' (set replace to allow)"
-        )));
-    }
-
-    // Check lower layers (OCI image layers).
-    if find_in_layers(lower_layers, guest_path).is_some() {
-        return Err(crate::MicrosandboxError::PatchFailed(format!(
-            "path exists in image layer: '{guest_path}' (set replace to allow)"
-        )));
-    }
-
-    Ok(())
-}
-
-/// Search lower layers (bottom-to-top) for a guest path. Returns the first match.
-fn find_in_layers(layers: &[PathBuf], guest_path: &str) -> Option<PathBuf> {
-    let relative = guest_path.strip_prefix('/').unwrap_or(guest_path);
-    // Search top-to-bottom (last layer = topmost).
-    for layer in layers.iter().rev() {
-        let candidate = layer.join(relative);
-        if candidate.exists() {
-            return Some(candidate);
+    for component in target.components() {
+        match component {
+            std::path::Component::Prefix(_) => {
+                return Err(crate::MicrosandboxError::PatchFailed(format!(
+                    "unsupported symlink target while resolving patch path '{guest_path}': {}",
+                    target.display()
+                )));
+            }
+            std::path::Component::RootDir => resolved.clear(),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                // Linux clamps `..` at `/` while following a symlink target.
+                target_components.push(PendingComponent::Parent {
+                    clamp_at_root: true,
+                });
+            }
+            std::path::Component::Normal(name) => {
+                target_components.push(PendingComponent::Normal(name.to_os_string()));
+            }
         }
     }
-    None
-}
 
-/// Ensure parent directories exist.
-async fn ensure_parent(path: &Path) -> MicrosandboxResult<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).await?;
+    for component in target_components.into_iter().rev() {
+        remaining.push_front(component);
     }
     Ok(())
 }
 
-/// Set Unix file permissions.
-#[cfg(unix)]
-async fn set_permissions(path: &Path, mode: u32) -> MicrosandboxResult<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let perms = std::fs::Permissions::from_mode(mode);
-    fs::set_permissions(path, perms).await?;
-    Ok(())
+fn join_components(components: &[OsString], final_name: Option<&OsStr>) -> PathBuf {
+    let mut path = PathBuf::new();
+    for component in components {
+        path.push(component);
+    }
+    if let Some(final_name) = final_name {
+        path.push(final_name);
+    }
+    path
 }
 
-/// Set Unix file permissions.
-#[cfg(windows)]
-async fn set_permissions(_path: &Path, _mode: u32) -> MicrosandboxResult<()> {
-    Err(crate::MicrosandboxError::InvalidConfig(
-        "POSIX patch modes are not supported for Windows host bind roots".into(),
+/// Open a configured bind root without trusting any path component.
+///
+/// Each directory is opened relative to the previous directory handle and is
+/// held open while the next component is resolved. This both rejects links and
+/// prevents a component from being renamed out from under the root walk.
+fn open_root_without_links(path: &Path) -> MicrosandboxResult<Dir> {
+    #[cfg(windows)]
+    if path
+        .as_os_str()
+        .to_string_lossy()
+        .split(['\\', '/'])
+        .any(|segment| segment == "..")
+    {
+        return Err(root_open_error(path, "contains '..'"));
+    }
+
+    let mut base = if path.is_absolute() {
+        PathBuf::new()
+    } else {
+        std::env::current_dir()?
+    };
+    let mut names = Vec::new();
+
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => {
+                if !base.as_os_str().is_empty() {
+                    return Err(root_open_error(path, "uses a drive-relative prefix"));
+                }
+                base.push(prefix.as_os_str());
+            }
+            std::path::Component::RootDir => base.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                return Err(root_open_error(path, "contains '..'"));
+            }
+            std::path::Component::Normal(name) => names.push(name.to_os_string()),
+        }
+    }
+
+    let mut current = Dir::open_ambient_dir(&base, ambient_authority())
+        .map_err(|err| root_open_error(path, &format!("could not open base: {err}")))?
+        .into_std_file();
+    for name in names {
+        let next = cap_primitives::fs::open_dir_nofollow(&current, Path::new(&name))
+            .map_err(|err| root_open_error(path, &format!("contains a linked component: {err}")))?;
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+
+            const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+            if next.metadata()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(root_open_error(path, "contains a reparse point"));
+            }
+        }
+
+        current = next;
+    }
+    Ok(Dir::from_std_file(current))
+}
+
+fn root_open_error(path: &Path, reason: &str) -> crate::MicrosandboxError {
+    crate::MicrosandboxError::PatchFailed(format!(
+        "bind root {} {reason}; set follow_root_symlinks to allow linked root components",
+        path.display()
     ))
-}
-
-/// Recursively copy a directory.
-async fn copy_dir_recursive(src: &Path, dst: &Path) -> MicrosandboxResult<()> {
-    fs::create_dir_all(dst).await?;
-    let mut entries = fs::read_dir(src).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-        if entry.file_type().await?.is_dir() {
-            Box::pin(copy_dir_recursive(&src_path, &dst_path)).await?;
-        } else {
-            fs::copy(&src_path, &dst_path).await?;
-        }
-    }
-    Ok(())
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1017,6 +1219,22 @@ mod tests {
 
     use microsandbox_image::erofs::write_erofs;
     use microsandbox_image::tree::Xattr;
+
+    fn bind_root(path: PathBuf, follow_root_symlinks: bool) -> RootfsSource {
+        RootfsSource::Bind {
+            path,
+            follow_root_symlinks,
+        }
+    }
+
+    fn text_patch(path: &str, content: &str) -> Patch {
+        Patch::Text {
+            path: path.into(),
+            content: content.into(),
+            mode: None,
+            replace: false,
+        }
+    }
 
     fn make_regular_file(data: &[u8]) -> TreeNode {
         TreeNode::RegularFile(RegularFileNode {
@@ -1037,6 +1255,137 @@ mod tests {
             }],
             entries: Default::default(),
         })
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_patch_confines_host_absolute_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(temp.path()).unwrap();
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, root.join("escape")).unwrap();
+
+        apply_patches(
+            &bind_root(root.clone(), false),
+            &[text_patch("/escape/pwned.txt", "contained")],
+        )
+        .await
+        .unwrap();
+
+        assert!(!outside.join("pwned.txt").exists());
+        let confined = root
+            .join(outside.strip_prefix(Path::new("/")).unwrap())
+            .join("pwned.txt");
+        assert_eq!(std::fs::read_to_string(confined).unwrap(), "contained");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_patch_clamps_parent_symlink_at_guest_root() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(temp.path()).unwrap();
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        symlink("../outside", root.join("escape")).unwrap();
+
+        apply_patches(
+            &bind_root(root.clone(), false),
+            &[text_patch("/escape/pwned.txt", "contained")],
+        )
+        .await
+        .unwrap();
+
+        assert!(!outside.join("pwned.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("outside/pwned.txt")).unwrap(),
+            "contained"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_patch_follows_internal_absolute_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        std::fs::create_dir_all(root.join("usr/bin")).unwrap();
+        symlink("/usr/bin", root.join("bin")).unwrap();
+
+        apply_patches(
+            &bind_root(root.clone(), false),
+            &[text_patch("/bin/tool", "hello")],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("usr/bin/tool")).unwrap(),
+            "hello"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_patch_honors_follow_root_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(temp.path()).unwrap();
+        let actual_root = base.join("actual-root");
+        let linked_root = base.join("linked-root");
+        std::fs::create_dir_all(&actual_root).unwrap();
+        symlink(&actual_root, &linked_root).unwrap();
+        let patch = text_patch("/allowed.txt", "hello");
+
+        let error = apply_patches(&bind_root(linked_root.clone(), false), &[patch.clone()])
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("follow_root_symlinks"));
+        assert!(!actual_root.join("allowed.txt").exists());
+
+        apply_patches(&bind_root(linked_root, true), &[patch])
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(actual_root.join("allowed.txt")).unwrap(),
+            "hello"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_patch_remove_unlinks_final_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        std::fs::write(root.join("target.txt"), "keep").unwrap();
+        symlink("target.txt", root.join("link.txt")).unwrap();
+
+        apply_patches(
+            &bind_root(root.clone(), false),
+            &[Patch::Remove {
+                path: "/link.txt".into(),
+            }],
+        )
+        .await
+        .unwrap();
+
+        assert!(std::fs::symlink_metadata(root.join("link.txt")).is_err());
+        assert_eq!(
+            std::fs::read_to_string(root.join("target.txt")).unwrap(),
+            "keep"
+        );
     }
 
     #[tokio::test]

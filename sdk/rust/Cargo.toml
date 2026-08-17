@@ -35,6 +35,8 @@ async-compression = { workspace = true, features = ["tokio", "zstd", "gzip"] }
 base64.workspace = true
 blake3.workspace = true
 bytes.workspace = true
+cap-primitives.workspace = true
+cap-std.workspace = true
 chrono.workspace = true
 ciborium.workspace = true
 crossterm.workspace = true

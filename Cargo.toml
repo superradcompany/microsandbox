@@ -100,6 +100,8 @@ base64 = "0.23"
 async-compression = "0.4"
 blake3 = "1.8"
 bytes = "1.9"
+cap-primitives = "4.0.2"
+cap-std = "4.0.2"
 chrono = { version = "0.4", features = ["serde"] }
 ciborium = "0.2"
 clap = { version = "4.6", features = ["color", "derive"] }
