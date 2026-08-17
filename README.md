@@ -418,16 +418,16 @@ The `msb` CLI provides a complete interface for managing sandboxes, images, and 
 
 ## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/people/ffffff" alt="people-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/people/000000" alt="people"></a>&nbsp;&nbsp;Built with microsandbox
 
-> - **[Eve by Vercel](https://eve.dev/docs/sandbox#microsandbox)** uses microsandbox as its built-in local microVM backend for agent sessions.
-> - **[GSA TTS Agentic Coding Quickstart](https://github.com/GSA-TTS/agentic-coding-quickstart)** ships `msb` as its preferred local sandbox for AI coding agents.
-> - **[agent-compose by Chaitin](https://github.com/chaitin/agent-compose)** includes a maintained microsandbox driver for isolated coding-agent workloads.
-> - **[Condukt](https://github.com/tuist/condukt) and [Once](https://github.com/tuist/once) by Tuist** use microsandbox for agent workflows and isolated remote execution.
-> - **[h5i](https://github.com/h5i-dev/h5i)** uses microsandbox for its strongest hardware-isolated execution tier.
-> - **[Smithers](https://github.com/smithersai/smithers)** provides a first-class microsandbox backend for observable coding-agent workflows.
-> - **[sandboxed-lit by LlamaIndex](https://github.com/run-llama/sandboxed-lit)** runs document-processing agents inside a hardware-isolated microsandbox workspace.
-> - **[Agentic Usability by PSPDFKit Labs](https://github.com/PSPDFKit-labs/agentic-usability)** isolates its benchmark solver and judge agents with microsandbox.
-> - **[Agent VM by Wiren Board](https://github.com/wirenboard/agent-vm)** runs Claude Code, Codex, and OpenCode inside microsandbox-based VMs.
-> - **[Devsy](https://github.com/devsy-org/devsy)** deploys complete devcontainers and workspaces through a tested microsandbox provider.
+> - **[Eve by Vercel](https://eve.dev/docs/sandbox#microsandbox)**
+> - **[GSA TTS Agentic Coding Quickstart](https://github.com/GSA-TTS/agentic-coding-quickstart)**
+> - **[agent-compose by Chaitin](https://github.com/chaitin/agent-compose)**
+> - **[Condukt](https://github.com/tuist/condukt) and [Once](https://github.com/tuist/once) by Tuist**
+> - **[h5i](https://github.com/h5i-dev/h5i)**
+> - **[Smithers](https://github.com/smithersai/smithers)**
+> - **[sandboxed-lit by LlamaIndex](https://github.com/run-llama/sandboxed-lit)**
+> - **[Agentic Usability by PSPDFKit Labs](https://github.com/PSPDFKit-labs/agentic-usability)**
+> - **[Agent VM by Wiren Board](https://github.com/wirenboard/agent-vm)**
+> - **[Devsy](https://github.com/devsy-org/devsy)**
 >
 > Built something with microsandbox? [Share it with us on Discord](https://discord.gg/T95Y3XnEAK)—we’d love to feature it here.
 
