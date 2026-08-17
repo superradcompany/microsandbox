@@ -5,13 +5,13 @@ description: Run a Compose stack without exposing the host Docker socket
 icon: "boxes-stacked"
 ---
 
-<Tooltip tip="On microsandbox cloud, create a directory-backed Docker volume first and omit disk-kind, size, and replace-on-create options."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
-
 Run Docker Compose inside a microVM when a test needs several containers. The inner daemon gets its own disk and never receives the host's `/var/run/docker.sock`.
 
 This recipe assumes the current directory contains `compose.yaml` and a test service named `test`.
 
 ## Start Docker
+
+<Tooltip tip="On microsandbox cloud, create a directory-backed Docker volume first and omit disk-kind, size, and replace-on-create options from this command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```sh
 msb run -d --name compose-ci --replace \

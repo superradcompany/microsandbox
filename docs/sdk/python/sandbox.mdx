@@ -59,6 +59,8 @@ Get a filesystem handle for reading and writing files inside the running sandbox
 
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">create()</span>
 
+<Tooltip tip="Creation works on microsandbox cloud, but host-integrated configuration is rejected and leaving the async context does not clean up the sandbox. Call stop() or remove() explicitly."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```python
 @staticmethod
 async def create(name: str, **kwargs) -> Sandbox
@@ -76,8 +78,6 @@ async with await Sandbox.create("my-sandbox", image="alpine") as sb:
 </Accordion>
 
 Create and boot a sandbox. Keyword arguments provide individual config fields; see [`SandboxConfig`](#sandboxconfig) for the full set. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it is ready to accept commands. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes.
-
-<Tooltip tip="Creation works on microsandbox cloud, but host-integrated configuration is rejected and leaving the async context does not clean up the sandbox. Call stop() or remove() explicitly."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 The returned `Sandbox` is an async context manager. On the local backend, `async with` guarantees cleanup: exit kills the sandbox and removes its persisted state. Cloud handles do not own the host process, so stop or remove them explicitly before leaving the context.
 

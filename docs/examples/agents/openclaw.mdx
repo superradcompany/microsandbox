@@ -4,11 +4,11 @@ description: Onboard OpenClaw and run its persistent gateway inside a microVM
 icon: "/images/recipes/agents/openclaw.svg"
 ---
 
-<Tooltip tip="On microsandbox cloud, create the named volume first and omit replace-on-create. Publishing the gateway to a client-host port is local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
-
 OpenClaw combines an interactive agent with a long-running gateway. This recipe persists its state in a named volume and maps the gateway only to host loopback.
 
 ## Run onboarding
+
+<Tooltip tip="On microsandbox cloud, create the named volume first and omit replace-on-create from this command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```sh
 msb run -t --name openclaw-setup --replace \
@@ -33,6 +33,8 @@ msb exec openclaw-setup -- openclaw --version
 The pinned package reports `OpenClaw 2026.7.1-2`.
 
 ## Run the gateway
+
+<Tooltip tip="Publishing the gateway to a port on the computer running the client is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Generate a token in the host shell and start a fresh gateway sandbox using the persisted state:
 

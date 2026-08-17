@@ -5,11 +5,11 @@ description: Run npm audit in a short-lived sandbox and copy out the report
 icon: "clock-rotate-left"
 ---
 
-<Tooltip tip="The audit workflow works on microsandbox cloud; omit replace-on-create from the example command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
-
 Keep the scheduler on the host and make each audit a fresh microVM. The sandbox receives only the package manifests, can reach only the npm registry, and stops after two minutes.
 
 ## Run the audit
+
+<Tooltip tip="This audit works on microsandbox cloud after omitting replace-on-create from the command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Run this beside `package.json` and `package-lock.json`:
 

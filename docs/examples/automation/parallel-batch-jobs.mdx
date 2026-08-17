@@ -5,8 +5,6 @@ description: Run independent inputs in parallel microVMs and collect their outpu
 icon: "layer-group"
 ---
 
-<Tooltip tip="The batch workflow works on microsandbox cloud; omit replace-on-create from the example command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
-
 Use one sandbox per independent input when a parser, converter, or other worker should not share a filesystem with its siblings. The host only needs a small loop; the workload stays inside each microVM.
 
 ## Create a few inputs
@@ -19,6 +17,8 @@ printf '%s\n' '{"id":"gamma","values":[100,200]}' > jobs/gamma.json
 ```
 
 ## Run them in parallel
+
+<Tooltip tip="These jobs work on microsandbox cloud after omitting replace-on-create from the command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```bash
 pids=()

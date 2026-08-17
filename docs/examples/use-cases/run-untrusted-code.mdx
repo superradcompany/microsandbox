@@ -5,13 +5,13 @@ description: Execute submitted Python with bounded resources and no network acce
 icon: "code"
 ---
 
-<Tooltip tip="The isolation workflow works on microsandbox cloud, but omit replace-on-create and explicitly stop or remove SDK-created cloud sandboxes instead of relying on automatic disposal."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
-
 Use this pattern for a code playground, grading service, plugin system, data-analysis app, or any feature that executes code you did not write. Each submission gets a fresh microVM, and the guest is stopped and removed when the run finishes.
 
 This example uses the TypeScript SDK and Python, but the same lifecycle works with any OCI image and command.
 
 ## Quick CLI smoke test
+
+<Tooltip tip="This smoke test works on microsandbox cloud after omitting replace-on-create from the command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Before building a service, verify the core isolation controls from the terminal:
 
@@ -49,6 +49,8 @@ npm install microsandbox
 ```
 
 ## Create a bounded runner
+
+<Tooltip tip="Cloud sandboxes require explicit stop or removal; SDK automatic disposal applies only to local sandboxes."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript run-python.ts
 import { randomUUID } from "node:crypto";

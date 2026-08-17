@@ -4,11 +4,11 @@ description: Run the native Goose coding agent in an isolated project copy
 icon: "/images/recipes/agents/goose.svg"
 ---
 
-<Tooltip tip="On microsandbox cloud, create the named volume first and omit replace-on-create."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
-
 Goose publishes native Linux binaries for both `aarch64` and `x86_64`. Its installer detects the guest architecture, which makes it a relatively small agent setup compared with a large Python environment.
 
 ## Start Goose
+
+<Tooltip tip="On microsandbox cloud, create the named volume first and omit replace-on-create from this command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```sh
 msb run -t --name goose-demo --replace \

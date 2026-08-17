@@ -4,11 +4,11 @@ description: Run Google's Gemini CLI against a copied project in a microVM
 icon: "/images/recipes/agents/gemini-cli.svg"
 ---
 
-<Tooltip tip="On microsandbox cloud, create the named volume first and omit replace-on-create."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
-
 This recipe runs the official scoped Gemini CLI package inside a disposable Node.js microVM. The project is copied into the guest, while Gemini authentication and settings live in a named volume.
 
 ## Start Gemini CLI
+
+<Tooltip tip="On microsandbox cloud, create the named volume first and omit replace-on-create from this command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```sh
 msb run -t --name gemini-demo --replace \
