@@ -4,7 +4,7 @@ description: Run the OpenCode terminal agent against an isolated copy of a proje
 icon: "/images/recipes/agents/opencode.svg"
 ---
 
-This recipe installs OpenCode in a microVM and opens its terminal UI in an isolated workspace. Project files are copied into the sandbox rather than bind-mounted, so commands and edits cannot directly change the host checkout.
+This example installs OpenCode in a microVM and opens its terminal UI in an isolated workspace. Project files are copied into the sandbox rather than bind-mounted, so commands and edits cannot directly change the host checkout.
 
 ## Start OpenCode
 
@@ -49,7 +49,7 @@ Exit the TUI, then run:
 msb exec opencode-demo -- opencode --version
 ```
 
-The pinned recipe prints `1.18.4`.
+The pinned example prints `1.18.4`.
 
 ## Export changes
 

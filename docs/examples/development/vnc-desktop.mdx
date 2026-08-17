@@ -4,11 +4,11 @@ description: Open a CPU-only Linux desktop in the browser with TigerVNC and noVN
 icon: "desktop"
 ---
 
-<Tooltip tip="This recipe publishes noVNC to a port on the computer running the CLI, which is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="This example publishes noVNC to a port on the computer running the CLI, which is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 VNC does not require a physical display or GPU. TigerVNC's X server draws into a virtual framebuffer in guest memory, encodes changed regions, and sends them to the client. noVNC provides the browser client over WebSockets.
 
-This recipe installs a minimal Openbox desktop rather than a full XFCE environment. It is useful for GUI-only utilities, observing browser sessions, and testing desktop applications—not for graphics-performance workloads.
+This example installs a minimal Openbox desktop rather than a full XFCE environment. It is useful for GUI-only utilities, observing browser sessions, and testing desktop applications—not for graphics-performance workloads.
 
 ## Start the desktop
 

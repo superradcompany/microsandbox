@@ -4,9 +4,9 @@ description: Run a persistent PostgreSQL service with a localhost-only forwarded
 icon: "database"
 ---
 
-<Tooltip tip="This recipe depends on a disk-kind named volume and a published client-host port, which are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="This example depends on a disk-kind named volume and a published client-host port, which are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-This recipe runs PostgreSQL 17 in a microVM, stores the database on a disk-backed named volume, and publishes the service only to host loopback.
+This example runs PostgreSQL 17 in a microVM, stores the database on a disk-backed named volume, and publishes the service only to host loopback.
 
 <Note>
   The current `postgres:17-alpine` image contains tab characters in `DOCKER_PG_LLVM_DEPS`. Passing `-e DOCKER_PG_LLVM_DEPS=` is a temporary compatibility workaround for microsandbox's guest environment validation.
@@ -27,7 +27,7 @@ msb run -d --name postgres-demo --replace \
   --cpus 1 --memory 1G --root-disk 2G \
   -p 127.0.0.1:55432:5432 \
   -e POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
-  -e POSTGRES_DB=recipes \
+  -e POSTGRES_DB=examples \
   -e DOCKER_PG_LLVM_DEPS= \
   --mount-named postgres-data:/var/lib/postgresql/data:kind=disk,size=5G \
   postgres:17-alpine
@@ -39,7 +39,7 @@ With no command after the image, microsandbox runs the image's declared `docker-
 
 ```sh
 msb exec postgres-demo -- sh -lc '
-  until pg_isready -h 127.0.0.1 -d recipes -U postgres; do sleep 1; done
+  until pg_isready -h 127.0.0.1 -d examples -U postgres; do sleep 1; done
 '
 ```
 
@@ -47,11 +47,11 @@ msb exec postgres-demo -- sh -lc '
 
 ```sh
 msb exec -e PGPASSWORD="$POSTGRES_PASSWORD" postgres-demo -- \
-  psql -h 127.0.0.1 -U postgres -d recipes \
+  psql -h 127.0.0.1 -U postgres -d examples \
   -c "select current_database(), current_setting('server_version');"
 ```
 
-The tested image returned database `recipes` and PostgreSQL `17.10`.
+The tested image returned database `examples` and PostgreSQL `17.10`.
 
 Applications on the host can connect to `127.0.0.1:55432` with the same database, user, and password.
 

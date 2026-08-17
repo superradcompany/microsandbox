@@ -5,14 +5,14 @@ description: Run one repository job in a fresh microVM, retain bounded host logs
 icon: "github"
 ---
 
-<Tooltip tip="This runner recipe builds and restores local disk snapshots and requires a host with hardware virtualization."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="This runner example builds and restores local disk snapshots and requires a host with hardware virtualization."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Create a repository-scoped, just-in-time (JIT) GitHub Actions runner inside a fresh microsandbox worker. GitHub assigns at most one job to the runner and deregisters it after that job; the controller independently deletes any remaining registration, retains bounded host-side output, and destroys the worker.
 
-The baseline in this recipe supports shell steps and JavaScript actions such as `actions/checkout` and `actions/upload-artifact`. It intentionally has no Docker daemon.
+The baseline in this example supports shell steps and JavaScript actions such as `actions/checkout` and `actions/upload-artifact`. It intentionally has no Docker daemon.
 
 <Note>
-  This is the advanced CI recipe because it includes the GitHub-side authentication, registration, and cleanup needed for a hosted runner. If you only need to execute a checkout safely, start with [PR checks](/examples/ci-cd/pr-checks).
+  This is the advanced CI example because it includes the GitHub-side authentication, registration, and cleanup needed for a hosted runner. If you only need to execute a checkout safely, start with [PR checks](/examples/ci-cd/pr-checks).
 </Note>
 
 ## Prepare the host
@@ -539,7 +539,7 @@ msb run --detach --name "$sandbox_name" \
   --max-duration 2h \
   --net public \
   --security default \
-  --label recipe=github-actions-jit \
+  --label example=github-actions-jit \
   --env HOME=/home/runner \
   --user runner \
   --workdir /opt/actions-runner \
@@ -618,7 +618,7 @@ The stdout capture fully drains `msb exec` without rendering attacker-controlled
 The controller deliberately does not copy `_diag` after the job. Passwordless guest `sudo` means untrusted workflow code can replace diagnostic files, guest archive tools, and archive paths, while a host size check after `msb cp` cannot prevent an oversized transfer. The bounded stream is enforced outside the guest and is therefore the safer audit artifact.
 
 <Warning>
-  Do not add the `fsize` limits used by simpler recipes to this runner exec. In testing, the .NET runner crashed under explicit `RLIMIT_FSIZE` values of both 1 GiB and 4 GiB. This controller instead limits process count and open file descriptors, while the snapshot disk size, bounded host capture, job timeout, and sandbox lifetime bound the other relevant resources.
+  Do not add the `fsize` limits used by simpler examples to this runner exec. In testing, the .NET runner crashed under explicit `RLIMIT_FSIZE` values of both 1 GiB and 4 GiB. This controller instead limits process count and open file descriptors, while the snapshot disk size, bounded host capture, job timeout, and sandbox lifetime bound the other relevant resources.
 </Warning>
 
 Queue the workflow, then run the controller with the workflow's exact custom label:

@@ -4,7 +4,7 @@ description: Run Google's Gemini CLI against a copied project in a microVM
 icon: "/images/recipes/agents/gemini-cli.svg"
 ---
 
-This recipe runs the official scoped Gemini CLI package inside a disposable Node.js microVM. The project is copied into the guest, while Gemini authentication and settings live in a named volume.
+This example runs the official scoped Gemini CLI package inside a disposable Node.js microVM. The project is copied into the guest, while Gemini authentication and settings live in a named volume.
 
 ## Start Gemini CLI
 
@@ -46,7 +46,7 @@ Exit the TUI and run:
 msb exec gemini-demo -- gemini --version
 ```
 
-The pinned recipe prints `0.52.0`.
+The pinned example prints `0.52.0`.
 
 ## Export changes
 

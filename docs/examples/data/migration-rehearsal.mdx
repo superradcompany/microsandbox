@@ -10,7 +10,7 @@ icon: "rotate-left"
 Use a snapshot to rehearse a schema migration against a realistic PostgreSQL data directory, inspect the result, and return to the exact pre-migration disk state. The disposable rehearsal does not require a down migration.
 
 <Warning>
-  Keep `PGDATA` in the sandbox root filesystem for this recipe. Snapshots capture the sandbox's writable layer, but they do not capture external named or bind-mounted volumes.
+  Keep `PGDATA` in the sandbox root filesystem for this example. Snapshots capture the sandbox's writable layer, but they do not capture external named or bind-mounted volumes.
 </Warning>
 
 ## Create an initialized baseline
@@ -21,7 +21,7 @@ export POSTGRES_PASSWORD="$(openssl rand -hex 24)"
 msb run -d --name migration-base --replace \
   --cpus 1 --memory 1G --root-disk 4G \
   -e POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
-  -e POSTGRES_DB=recipes \
+  -e POSTGRES_DB=examples \
   -e DOCKER_PG_LLVM_DEPS= \
   postgres:17-alpine
 ```
@@ -30,7 +30,7 @@ Wait for initialization, then stop the database cleanly:
 
 ```sh
 msb exec migration-base -- sh -lc '
-  until pg_isready -h 127.0.0.1 -d recipes -U postgres; do sleep 1; done
+  until pg_isready -h 127.0.0.1 -d examples -U postgres; do sleep 1; done
 '
 msb stop migration-base
 ```
@@ -54,11 +54,11 @@ msb run -d --name migration-test --replace \
   --memory 1G \
   -p 127.0.0.1:55432:5432 \
   -e POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
-  -e POSTGRES_DB=recipes \
+  -e POSTGRES_DB=examples \
   -e DOCKER_PG_LLVM_DEPS=
 
 msb exec migration-test -- sh -lc '
-  until pg_isready -h 127.0.0.1 -d recipes -U postgres; do sleep 1; done
+  until pg_isready -h 127.0.0.1 -d examples -U postgres; do sleep 1; done
 '
 ```
 
@@ -66,7 +66,7 @@ Apply a sample destructive change and verify it:
 
 ```sh
 msb exec -e PGPASSWORD="$POSTGRES_PASSWORD" migration-test -- \
-  psql -h 127.0.0.1 -U postgres -d recipes -v ON_ERROR_STOP=1 \
+  psql -h 127.0.0.1 -U postgres -d examples -v ON_ERROR_STOP=1 \
   -c 'create table dangerous_migration(id integer);' \
   -c 'insert into dangerous_migration values (42);' \
   -c 'select * from dangerous_migration;'
@@ -86,11 +86,11 @@ msb run -d --name migration-test --replace \
   --memory 1G \
   -p 127.0.0.1:55432:5432 \
   -e POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
-  -e POSTGRES_DB=recipes \
+  -e POSTGRES_DB=examples \
   -e DOCKER_PG_LLVM_DEPS=
 
 msb exec migration-test -- sh -lc '
-  until pg_isready -h 127.0.0.1 -d recipes -U postgres; do sleep 1; done
+  until pg_isready -h 127.0.0.1 -d examples -U postgres; do sleep 1; done
 '
 ```
 
@@ -98,7 +98,7 @@ Confirm the sample table is absent:
 
 ```sh
 msb exec -e PGPASSWORD="$POSTGRES_PASSWORD" migration-test -- \
-  psql -h 127.0.0.1 -U postgres -d recipes -Atc \
+  psql -h 127.0.0.1 -U postgres -d examples -Atc \
   "select coalesce(to_regclass('public.dangerous_migration')::text, 'rolled-back');"
 ```
 

@@ -4,7 +4,7 @@ description: Start dockerd inside a microsandbox VM and run containers from an i
 icon: "docker"
 ---
 
-This recipe starts a complete Docker environment inside a microsandbox VM. It is useful for sandboxed builds, agent workflows that need their own Docker daemon, or experiments you do not want leaking onto the dev machine. The host's Docker setup, if any, is left untouched.
+This example starts a complete Docker environment inside a microsandbox VM. It is useful for sandboxed builds, agent workflows that need their own Docker daemon, or experiments you do not want leaking onto the dev machine. The host's Docker setup, if any, is left untouched.
 
 The command below boots the `docker:dind` image, starts Docker inside the sandbox, waits for it to be ready, and then opens an interactive shell. From there, Docker commands run against the daemon inside the sandbox, not your host.
 
@@ -90,5 +90,5 @@ The disk-backed named mount gives Docker its own ext4 filesystem at `/var/lib/do
 
 ## Notes
 
-- **Memory.** The recipe uses `--memory 2G`. Increase it for larger builds or memory-hungry containers.
-- **Not the same as [Sandbox in Docker](/examples/docker/docker).** That recipe covers the opposite direction.
+- **Memory.** The example uses `--memory 2G`. Increase it for larger builds or memory-hungry containers.
+- **Not the same as [Sandbox in Docker](/examples/docker/docker).** That example covers the opposite direction.

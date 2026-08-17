@@ -3,7 +3,7 @@ body {
 }
 
 /* ----------------------------------------------------------------------------
- * Agent recipe sidebar icons: Mintlify renders custom page icons as images,
+ * Agent example sidebar icons: Mintlify renders custom page icons as images,
  * which bypasses the gray idle / violet selected colors used by built-in icon
  * masks. Reuse each official brand mark as a mask so it follows the same
  * interaction states as the rest of the sidebar.
@@ -181,6 +181,132 @@ nav[aria-label="Pages"] a > div:has(> img[src*="/pi.svg"]) { --msb-agent-icon: u
 
 @media (max-width: 420px) {
   .msb-platform-strip { grid-template-columns: 1fr; }
+}
+
+/* Introduction handoff: a compact editorial link gives Examples enough
+ * presence to be discovered without the oversized chrome of a generic card. */
+.msb-examples-cta {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.9rem;
+  margin: 1.25rem 0 2rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--msb-code-border) !important;
+  border-radius: 0.9rem;
+  color: inherit;
+  background: linear-gradient(135deg, rgba(167, 112, 239, 0.09), rgba(167, 112, 239, 0.025) 62%, transparent);
+  box-shadow: 0 1px 2px rgba(49, 31, 83, 0.04);
+  text-decoration: none;
+  transition: border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+}
+
+.msb-examples-cta:hover {
+  border-color: var(--msb-interactive-accent) !important;
+  box-shadow: 0 8px 24px rgba(78, 45, 132, 0.09);
+  transform: translateY(-1px);
+}
+
+.msb-examples-cta:focus-visible {
+  outline: 2px solid #a770ef;
+  outline-offset: 3px;
+}
+
+.msb-examples-cta-icon {
+  display: grid;
+  width: 2.35rem;
+  height: 2.35rem;
+  place-items: center;
+  border: 1px solid rgba(109, 75, 196, 0.18);
+  border-radius: 0.7rem;
+  color: #8f5cda;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.msb-examples-cta-copy {
+  display: grid;
+  min-width: 0;
+  line-height: 1.25;
+}
+
+.msb-examples-cta-label {
+  margin-bottom: 0.15rem;
+  color: #8f5cda;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.msb-examples-cta-title {
+  font-size: 0.93rem;
+  font-weight: 650;
+}
+
+.msb-examples-cta-copy > span:last-child {
+  overflow: hidden;
+  margin-top: 0.2rem;
+  font-size: 0.78rem;
+  opacity: 0.68;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.msb-examples-cta-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: #7b4bc2;
+  font-size: 0.78rem;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.msb-examples-cta:hover .msb-examples-cta-action {
+  color: #62349f;
+}
+
+.dark .msb-examples-cta {
+  background: linear-gradient(135deg, rgba(191, 132, 254, 0.12), rgba(191, 132, 254, 0.035) 62%, transparent);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.22);
+}
+
+.dark .msb-examples-cta:hover {
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+}
+
+.dark .msb-examples-cta-icon {
+  border-color: rgba(191, 132, 254, 0.24);
+  color: #c9a4ff;
+  background: rgba(27, 20, 40, 0.82);
+}
+
+.dark .msb-examples-cta-label,
+.dark .msb-examples-cta-action {
+  color: #c9a4ff;
+}
+
+.dark .msb-examples-cta:hover .msb-examples-cta-action {
+  color: #dfc9ff;
+}
+
+@media (max-width: 640px) {
+  .msb-examples-cta {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .msb-examples-cta-copy > span:last-child {
+    white-space: normal;
+  }
+
+  .msb-examples-cta-action {
+    grid-column: 2;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .msb-examples-cta { transition: none; }
+  .msb-examples-cta:hover { transform: none; }
 }
 
 /* our links shouldn't get Mintlify's prose underline-border */

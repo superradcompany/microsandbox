@@ -4,9 +4,9 @@ description: Run an authenticated Redis service with persistent data
 icon: "database"
 ---
 
-<Tooltip tip="This recipe publishes Redis to a port on the computer running the CLI, which is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="This example publishes Redis to a port on the computer running the CLI, which is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-This recipe starts Redis 7 with password authentication, a persistent named volume, and a localhost-only forwarded port.
+This example starts Redis 7 with password authentication, a persistent named volume, and a localhost-only forwarded port.
 
 ## Start Redis
 
@@ -28,10 +28,10 @@ msb run -d --name redis-demo --replace \
 
 ```sh
 msb exec redis-demo -- \
-  redis-cli -a "$REDIS_PASSWORD" --no-auth-warning SET recipe ready
+  redis-cli -a "$REDIS_PASSWORD" --no-auth-warning SET example ready
 
 msb exec redis-demo -- \
-  redis-cli -a "$REDIS_PASSWORD" --no-auth-warning GET recipe
+  redis-cli -a "$REDIS_PASSWORD" --no-auth-warning GET example
 
 msb exec redis-demo -- \
   redis-cli -a "$REDIS_PASSWORD" --no-auth-warning PING

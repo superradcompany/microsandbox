@@ -4,7 +4,7 @@ description: Capture pages or expose a remote browser server without a GPU
 icon: "globe"
 ---
 
-Headless Chromium does not require GPU acceleration. This recipe uses Microsoft's Playwright image to capture a screenshot and optionally run a persistent browser server for a host-side test runner or agent.
+Headless Chromium does not require GPU acceleration. This example uses Microsoft's Playwright image to capture a screenshot and optionally run a persistent browser server for a host-side test runner or agent.
 
 <Note>
   The Playwright image is large. Its first pull can take several minutes, while cached browser launches are much faster. Consider turning a prepared browser sandbox into a [snapshot](/examples/sandboxing/warm-workers) for repeated jobs.
@@ -32,7 +32,7 @@ Copy the artifact out of the stopped sandbox:
 msb cp playwright-shot:/root/example.png ./example.png
 ```
 
-The smoke test used for this recipe produced a valid 15,909-byte PNG. Rendering can vary slightly between releases and hosts, so verify the file rather than asserting an exact byte count.
+The smoke test used for this example produced a valid 15,909-byte PNG. Rendering can vary slightly between releases and hosts, so verify the file rather than asserting an exact byte count.
 
 ## Run a remote Playwright server
 
@@ -64,7 +64,7 @@ msb logs playwright-server
 Connect a matching Playwright client to `ws://127.0.0.1:3000/`. Keep the client and server versions aligned.
 
 <Warning>
-  The remote server has no application-level authentication. This recipe binds the host side to loopback intentionally. Do not publish it on `0.0.0.0` or an internet-facing interface without an authenticated proxy.
+  The remote server has no application-level authentication. This example binds the host side to loopback intentionally. Do not publish it on `0.0.0.0` or an internet-facing interface without an authenticated proxy.
 </Warning>
 
 ## Cleanup
