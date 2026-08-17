@@ -7,7 +7,10 @@ icon: "layer-group"
 
 Use one sandbox per independent input when a parser, converter, or other worker should not share a filesystem with its siblings. The host only needs a small loop; the workload stays inside each microVM.
 
-## Create a few inputs
+## Run a batch
+
+<Steps>
+<Step title="Create a few inputs">
 
 ```sh
 mkdir -p jobs results
@@ -16,7 +19,9 @@ printf '%s\n' '{"id":"beta","values":[7,8,9]}' > jobs/beta.json
 printf '%s\n' '{"id":"gamma","values":[100,200]}' > jobs/gamma.json
 ```
 
-## Run them in parallel
+</Step>
+
+<Step title="Run them in parallel">
 
 <Tooltip tip="These jobs work on microsandbox cloud after omitting replace-on-create from the command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -53,7 +58,9 @@ jq . results/*.json
 
 Replace the short Python expression with your worker command. For larger outputs, write to `/var/tmp` in the guest and use `msb cp` after the sandbox stops instead of capturing stdout.
 
-## Cleanup
+</Step>
+
+<Step title="Clean up">
 
 ```sh
 for input in jobs/*.json; do
@@ -62,3 +69,6 @@ done
 ```
 
 This loop limits one batch only. Put a queue or global concurrency limit in front of it when several batches can run on the same host.
+
+</Step>
+</Steps>

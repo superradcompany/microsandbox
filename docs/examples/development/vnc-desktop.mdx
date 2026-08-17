@@ -10,7 +10,10 @@ VNC does not require a physical display or GPU. TigerVNC's X server draws into a
 
 This example runs the lightweight LXQt desktop with Breeze styling and opens QTerminal. It is useful for GUI-only utilities, observing browser sessions, and testing desktop applications—not for graphics-performance workloads.
 
-## Start the desktop
+## Run the desktop
+
+<Steps>
+<Step title="Start the desktop">
 
 ```sh
 msb run -d --name vnc-desktop --replace \
@@ -71,7 +74,9 @@ curl -fsS http://127.0.0.1:6080/vnc.html >/dev/null &&
 
 Open [http://127.0.0.1:6080/vnc.html?autoconnect=1&resize=scale](http://127.0.0.1:6080/vnc.html?autoconnect=1&resize=scale). You should see an LXQt desktop with QTerminal open.
 
-## Verify the services
+</Step>
+
+<Step title="Verify the services">
 
 Check the browser endpoint from the host:
 
@@ -89,10 +94,15 @@ msb exec vnc-desktop -- sh -lc 'grep -E "Listening|created VNC server" /tmp/xvnc
   VNC authentication is disabled inside this VM. The host listener is therefore intentionally restricted to `127.0.0.1`. Do not publish port 6080 on a LAN or public interface without VNC authentication, TLS, and an authenticated reverse proxy.
 </Warning>
 
-## Cleanup
+</Step>
+
+<Step title="Clean up">
 
 ```sh
 msb rm -f vnc-desktop
 ```
 
 For repeated launches, stop the prepared sandbox, create a snapshot, and boot desktops from that snapshot instead of reinstalling the packages.
+
+</Step>
+</Steps>

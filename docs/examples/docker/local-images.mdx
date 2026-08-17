@@ -57,7 +57,8 @@ msb run app:local
 
 Use a local registry when you want registry-like push/pull behavior, or when multiple machines should pull the same locally built image.
 
-## Step 1: Start a local registry
+<Steps>
+<Step title="Start a local registry">
 
 Run a local OCI registry on port 5050:
 
@@ -69,7 +70,9 @@ docker run -d -p 5050:5000 --name registry registry:2
   Port 5000 is used by AirPlay on macOS. This guide uses port 5050 to avoid conflicts.
 </Tip>
 
-## Step 2: Build, tag, and push your image
+</Step>
+
+<Step title="Build, tag, and push your image">
 
 Build your Docker image and tag it for the local registry:
 
@@ -89,7 +92,9 @@ Push to the local registry:
 docker push localhost:5050/my-image:latest
 ```
 
-## Step 3: Pull with microsandbox
+</Step>
+
+<Step title="Pull with microsandbox">
 
 Since the local registry runs over plain HTTP, use the `--insecure` flag:
 
@@ -97,7 +102,9 @@ Since the local registry runs over plain HTTP, use the `--insecure` flag:
 msb pull localhost:5050/my-image:latest --insecure
 ```
 
-## Step 4: Use it in microsandbox
+</Step>
+
+<Step title="Use it in microsandbox">
 
 <CodeGroup>
 ```rust Rust
@@ -121,3 +128,6 @@ await using sb = await Sandbox.builder("worker")
 <Tip>
   For persistent configuration that applies to all CLI and SDK operations, add the registry to `~/.microsandbox/config.json` instead. See [Registry TLS](/images/overview#registry-tls).
 </Tip>
+
+</Step>
+</Steps>

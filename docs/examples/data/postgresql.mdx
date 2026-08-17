@@ -12,7 +12,10 @@ This example runs PostgreSQL 17 in a microVM, stores the database on a disk-back
   The current `postgres:17-alpine` image contains tab characters in `DOCKER_PG_LLVM_DEPS`. Passing `-e DOCKER_PG_LLVM_DEPS=` is a temporary compatibility workaround for microsandbox's guest environment validation.
 </Note>
 
-## Start PostgreSQL
+## Run PostgreSQL
+
+<Steps>
+<Step title="Start PostgreSQL">
 
 Set a demo password in the host shell:
 
@@ -35,7 +38,9 @@ msb run -d --name postgres-demo --replace \
 
 With no command after the image, microsandbox runs the image's declared `docker-entrypoint.sh postgres` command in the background.
 
-## Wait for readiness
+</Step>
+
+<Step title="Wait for readiness">
 
 ```sh
 msb exec postgres-demo -- sh -lc '
@@ -43,7 +48,9 @@ msb exec postgres-demo -- sh -lc '
 '
 ```
 
-## Run a query
+</Step>
+
+<Step title="Run a query">
 
 ```sh
 msb exec -e PGPASSWORD="$POSTGRES_PASSWORD" postgres-demo -- \
@@ -59,7 +66,9 @@ Applications on the host can connect to `127.0.0.1:55432` with the same database
   Environment variables and command arguments are appropriate for this local demo, not for production secrets. Use [secret injection](/sandboxes/secrets), retain the loopback bind, and configure PostgreSQL access controls before allowing remote clients.
 </Warning>
 
-## Persistence and cleanup
+</Step>
+
+<Step title="Clean up or keep the data">
 
 Remove the VM while keeping its database:
 
@@ -78,3 +87,6 @@ Clear the password from the host shell:
 ```sh
 unset POSTGRES_PASSWORD
 ```
+
+</Step>
+</Steps>

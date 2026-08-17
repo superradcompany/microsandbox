@@ -6,7 +6,10 @@ icon: "/images/recipes/agents/openclaw.svg"
 
 OpenClaw combines an interactive agent with a long-running gateway. This example persists its state in a named volume and maps the gateway only to host loopback.
 
-## Run onboarding
+## Set up OpenClaw
+
+<Steps>
+<Step title="Run onboarding">
 
 <Tooltip tip="On microsandbox cloud, create the named volume first and omit replace-on-create from this command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -32,7 +35,9 @@ msb exec openclaw-setup -- openclaw --version
 
 The pinned package reports `OpenClaw 2026.7.1-2`.
 
-## Run the gateway
+</Step>
+
+<Step title="Run the gateway">
 
 <Tooltip tip="Publishing the gateway to a port on the computer running the client is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -68,7 +73,9 @@ msb logs -f openclaw-gateway
   `OPENCLAW_GATEWAY_TOKEN` is visible to the guest and to processes that can inspect the host command environment. Use the microsandbox [secrets workflow](/sandboxes/secrets) for production credentials. Do not change the host bind address to `0.0.0.0` without adding transport security and understanding the exposure.
 </Warning>
 
-## Cleanup
+</Step>
+
+<Step title="Clean up">
 
 Remove the setup and gateway sandboxes:
 
@@ -89,6 +96,9 @@ unset OPENCLAW_GATEWAY_TOKEN
 ```
 
 Keep `openclaw-data` if you want the configured agent to survive sandbox replacement.
+
+</Step>
+</Steps>
 
 ## Reference
 

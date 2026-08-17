@@ -6,7 +6,10 @@ icon: "/images/recipes/agents/goose.svg"
 
 Goose publishes native Linux binaries for both `aarch64` and `x86_64`. Its installer detects the guest architecture, which makes it a relatively small agent setup compared with a large Python environment.
 
-## Start Goose
+## Run Goose
+
+<Steps>
+<Step title="Start Goose">
 
 <Tooltip tip="On microsandbox cloud, create the named volume first and omit replace-on-create from this command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -32,7 +35,9 @@ On first launch Goose asks whether to share anonymous usage data, then walks thr
   To test Goose without copying a project, replace `--copy-dir ./my-project:/workspace` with `--mkdir /workspace`.
 </Tip>
 
-## Start another session
+</Step>
+
+<Step title="Start another session">
 
 After leaving Goose, return to the same sandbox and workspace with:
 
@@ -40,7 +45,9 @@ After leaving Goose, return to the same sandbox and workspace with:
 msb exec -t goose-demo -- goose session
 ```
 
-## Verify the installation
+</Step>
+
+<Step title="Verify the installation">
 
 Exit the session and run:
 
@@ -50,7 +57,9 @@ msb exec goose-demo -- goose --version
 
 The pinned installer reports `1.44.0`.
 
-## Export changes
+</Step>
+
+<Step title="Export changes">
 
 Use the same review boundary as other coding-agent examples:
 
@@ -70,7 +79,9 @@ Check that it applies cleanly before applying it:
 git apply --check ./goose.patch
 ```
 
-## Cleanup
+</Step>
+
+<Step title="Clean up">
 
 Remove the sandbox:
 
@@ -83,6 +94,9 @@ Remove persisted Goose data only when you no longer need it:
 ```sh
 msb volume rm goose-data
 ```
+
+</Step>
+</Steps>
 
 ## Reference
 

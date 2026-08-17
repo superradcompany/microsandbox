@@ -13,7 +13,10 @@ Use a snapshot to rehearse a schema migration against a realistic PostgreSQL dat
   Keep `PGDATA` in the sandbox root filesystem for this example. Snapshots capture the sandbox's writable layer, but they do not capture external named or bind-mounted volumes.
 </Warning>
 
-## Create an initialized baseline
+## Rehearse a migration
+
+<Steps>
+<Step title="Create an initialized baseline">
 
 Set a temporary password in the host shell:
 
@@ -46,7 +49,9 @@ Stop it cleanly before taking the snapshot:
 msb stop migration-base
 ```
 
-## Snapshot the baseline
+</Step>
+
+<Step title="Snapshot the baseline">
 
 ```sh
 msb snapshot create postgres-before-migration \
@@ -60,7 +65,9 @@ Verify the captured snapshot:
 msb snapshot verify postgres-before-migration
 ```
 
-## Apply the migration
+</Step>
+
+<Step title="Apply the migration">
 
 Boot a fresh database from the snapshot:
 
@@ -94,7 +101,9 @@ msb exec -e PGPASSWORD="$POSTGRES_PASSWORD" migration-test -- \
 
 Replace those statements with your real migration command and validation suite.
 
-## Roll back by replacing the sandbox
+</Step>
+
+<Step title="Roll back by replacing the sandbox">
 
 Stop the mutated database and boot another clean copy of the baseline under the same name:
 
@@ -132,7 +141,9 @@ msb exec -e PGPASSWORD="$POSTGRES_PASSWORD" migration-test -- \
 
 The result should be `rolled-back`.
 
-## Cleanup
+</Step>
+
+<Step title="Clean up">
 
 Remove the database sandboxes:
 
@@ -151,3 +162,6 @@ Clear the password from the host shell:
 ```sh
 unset POSTGRES_PASSWORD
 ```
+
+</Step>
+</Steps>

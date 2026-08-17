@@ -9,7 +9,10 @@ icon: "window-maximize"
 
 Copy a static build into a microVM, expose it on host loopback, and let the sandbox expire automatically. The preview cannot modify the host build or make outbound network requests.
 
-## Start the preview
+## Run the preview
+
+<Steps>
+<Step title="Start the preview">
 
 Run this after producing `dist`:
 
@@ -43,10 +46,15 @@ On Linux, replace `open` with `xdg-open`, or visit the URL manually.
   Loopback is not authentication: other processes on the host can reach the preview. Browser JavaScript is also outside the guest network policy, so review untrusted builds with a disposable browser profile.
 </Warning>
 
-## Cleanup
+</Step>
+
+<Step title="Clean up">
 
 ```sh
 msb rm -f preview
 ```
 
 `--max-duration 30m` still removes an abandoned preview when explicit cleanup does not run.
+
+</Step>
+</Steps>

@@ -7,7 +7,10 @@ icon: "clock-rotate-left"
 
 Keep the scheduler on the host and make each audit a fresh microVM. The sandbox receives only the package manifests, can reach only the npm registry, and stops after two minutes.
 
-## Run the audit
+## Run an audit
+
+<Steps>
+<Step title="Run the audit">
 
 <Tooltip tip="This audit works on microsandbox cloud after omitting replace-on-create from the command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -26,7 +29,9 @@ msb run --name dependency-audit --replace \
 
 `npm audit` exits nonzero when it finds vulnerabilities. That is expected; the stopped sandbox still contains the JSON report.
 
-## Copy out the report
+</Step>
+
+<Step title="Copy out the report">
 
 ```sh
 mkdir -p .artifacts
@@ -41,7 +46,9 @@ jq '.metadata.vulnerabilities' .artifacts/npm-audit.json
 
 The `fsize` limit bounds the guest report to 8 MiB. Treat the report as sensitive for private projects because it contains package names and versions.
 
-## Schedule and clean up
+</Step>
+
+<Step title="Schedule and clean up">
 
 Put the two blocks in a checked-in script, run it once manually, then call it from cron, a systemd timer, or your CI scheduler. The scheduler belongs outside the sandbox; the audit is the disposable part.
 
@@ -50,3 +57,6 @@ msb rm -f dependency-audit
 ```
 
 Use a unique sandbox name instead of `--replace` when audit jobs may overlap.
+
+</Step>
+</Steps>

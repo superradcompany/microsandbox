@@ -8,7 +8,10 @@ icon: "database"
 
 This example starts Redis 7 with password authentication, a persistent named volume, and a localhost-only forwarded port.
 
-## Start Redis
+## Run Redis
+
+<Steps>
+<Step title="Start Redis">
 
 Set a temporary password in the host shell:
 
@@ -30,7 +33,9 @@ msb run -d --name redis-demo --replace \
     --requirepass "$REDIS_PASSWORD"
 ```
 
-## Verify reads and writes
+</Step>
+
+<Step title="Verify reads and writes">
 
 Write a test value:
 
@@ -59,7 +64,9 @@ The three commands should return `OK`, `ready`, and `PONG`. Host applications co
   `--requirepass` places the demo password in the guest process arguments. For production, use an ACL file delivered through the [secrets workflow](/sandboxes/secrets) and do not expose the forwarded port beyond loopback.
 </Warning>
 
-## Persistence and cleanup
+</Step>
+
+<Step title="Clean up or keep the data">
 
 Remove the sandbox while retaining the append-only database:
 
@@ -78,3 +85,6 @@ Clear the password from the host shell:
 ```sh
 unset REDIS_PASSWORD
 ```
+
+</Step>
+</Steps>

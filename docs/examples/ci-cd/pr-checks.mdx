@@ -9,7 +9,10 @@ Boot a clean worker, stream only committed files into it, and run the pull reque
 
 This example uses Node.js. The same `create → copy → exec` shape works for other toolchains.
 
-## Create the worker
+## Run the checks
+
+<Steps>
+<Step title="Create the worker">
 
 <Tooltip tip="This worker works on microsandbox cloud after omitting replace-on-create from the command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -25,7 +28,9 @@ msb run -d --name pr-check --replace \
 
 Only the npm registry is reachable. Do not pass CI secrets or mount the host checkout into this worker.
 
-## Copy the commit
+</Step>
+
+<Step title="Copy the commit">
 
 ```sh
 git archive HEAD | \
@@ -34,7 +39,9 @@ git archive HEAD | \
 
 `git archive` excludes `.git`, checkout credentials, and uncommitted host files. In CI, make sure `HEAD` is the exact pull-request commit you intend to test.
 
-## Install and test
+</Step>
+
+<Step title="Install and test">
 
 ```sh
 msb exec --timeout 8m \
@@ -51,8 +58,13 @@ If the project installs from another registry, add the smallest required network
   A hosted CI runner must expose KVM on Linux or run on Apple Silicon macOS. Many managed runners do not allow nested virtualization.
 </Note>
 
-## Cleanup
+</Step>
+
+<Step title="Clean up">
 
 ```sh
 msb rm -f pr-check
 ```
+
+</Step>
+</Steps>

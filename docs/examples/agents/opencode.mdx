@@ -6,7 +6,10 @@ icon: "/images/recipes/agents/opencode.svg"
 
 This example installs OpenCode in a microVM and opens its terminal UI in an isolated workspace. Project files are copied into the sandbox rather than bind-mounted, so commands and edits cannot directly change the host checkout.
 
-## Start OpenCode
+## Run OpenCode
+
+<Steps>
+<Step title="Start OpenCode">
 
 <Tooltip tip="On microsandbox cloud, create the named volumes first and omit replace-on-create from this command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -33,7 +36,9 @@ The first run downloads the package and may take a couple of minutes. OpenCode s
   To try the TUI without a project, replace `--copy-dir ./my-project:/workspace` with `--mkdir /workspace`.
 </Tip>
 
-## Start another session
+</Step>
+
+<Step title="Start another session">
 
 After leaving OpenCode, return to the same sandbox and workspace with:
 
@@ -41,7 +46,9 @@ After leaving OpenCode, return to the same sandbox and workspace with:
 msb exec -t opencode-demo -- opencode
 ```
 
-## Verify the installation
+</Step>
+
+<Step title="Verify the installation">
 
 Exit the TUI, then run:
 
@@ -51,7 +58,9 @@ msb exec opencode-demo -- opencode --version
 
 The pinned example prints `1.18.4`.
 
-## Export changes
+</Step>
+
+<Step title="Export changes">
 
 Review the diff inside the sandbox before copying anything back:
 
@@ -77,7 +86,9 @@ Check that it applies cleanly before applying it:
 git apply --check ./opencode.patch
 ```
 
-## Cleanup
+</Step>
+
+<Step title="Clean up">
 
 Remove the sandbox:
 
@@ -92,6 +103,9 @@ msb volume rm opencode-config opencode-data
 ```
 
 Keep the volumes if you want to retain provider connections, sessions, and OpenCode configuration. Never copy an agent's entire home directory back to the host.
+
+</Step>
+</Steps>
 
 ## Reference
 

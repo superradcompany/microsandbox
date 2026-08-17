@@ -17,6 +17,8 @@ so `msb-metrics` can ship to it without an intermediate collector. Point
 the OTLP endpoint at Prometheus's `/api/v1/otlp/v1/metrics` path and the
 `microsandbox.*` series land directly in the local TSDB.
 
+## Connect Prometheus
+
 <Steps>
   <Step title="Enable the OTLP receiver on Prometheus">
     Start Prometheus with the OTLP receiver feature flag (Prometheus

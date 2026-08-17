@@ -9,7 +9,11 @@ icon: "code-branch"
 
 Package installation often costs more than sandbox boot. This example installs OpenCode once, records the stopped sandbox as an integrity-checked snapshot, and launches fresh workers from that prepared filesystem.
 
-## Prepare the baseline
+## Start a warm worker
+
+<Steps>
+
+<Step title="Prepare the baseline">
 
 ```sh
 msb run --name agent-base --replace \
@@ -27,7 +31,9 @@ msb run --name agent-base --replace \
 
 When the command exits, `agent-base` is stopped and ready to snapshot.
 
-## Create and verify the snapshot
+</Step>
+
+<Step title="Create and verify the snapshot">
 
 ```sh
 msb snapshot create coding-agent-base \
@@ -48,7 +54,9 @@ The snapshot captures the writable disk changes and pins the source image. It do
   Snapshots preserve every file written to the guest disk, including shell history, tool configuration, and cached credentials. Build the baseline in a trusted workflow, and never authenticate OpenCode or place registry tokens, source code, or API keys in `agent-base`.
 </Warning>
 
-## Launch a clean worker
+</Step>
+
+<Step title="Launch a clean worker">
 
 ```sh
 msb run -d --name coding-worker-1 --replace \
@@ -114,15 +122,9 @@ msb run --name coding-worker-2 --replace \
   -- opencode --version
 ```
 
-## Refresh the baseline
+</Step>
 
-Snapshots are immutable. To update packages, recreate `agent-base`, then overwrite the named snapshot intentionally:
-
-```sh
-msb snapshot create coding-agent-base --from agent-base --integrity --force
-```
-
-## Cleanup
+<Step title="Clean up">
 
 Remove the prepared sandbox and workers:
 
@@ -134,6 +136,18 @@ Remove the reusable snapshot only when you no longer need it:
 
 ```sh
 msb snapshot rm coding-agent-base
+```
+
+</Step>
+
+</Steps>
+
+## Refresh the baseline
+
+Snapshots are immutable. To update packages, recreate `agent-base`, then overwrite the named snapshot intentionally:
+
+```sh
+msb snapshot create coding-agent-base --from agent-base --integrity --force
 ```
 
 See [Snapshots](/sandboxes/snapshots) for archive, integrity, and portability details.

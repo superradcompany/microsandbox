@@ -8,7 +8,10 @@ Run VS Code in a disposable microVM when you want an editable Linux workspace wi
 
 <Tooltip tip="This example publishes code-server to a port on the computer running the CLI, which is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-## Start the editor
+## Use the editor
+
+<Steps>
+<Step title="Start the editor">
 
 ```sh
 msb run -d --name code-server-demo --replace \
@@ -23,7 +26,9 @@ msb run -d --name code-server-demo --replace \
 
 The host port is bound to `127.0.0.1`, so the unauthenticated editor is reachable only from the local machine.
 
-## Add a project
+</Step>
+
+<Step title="Add a project">
 
 Replace `./my-project` with the directory you want to edit:
 
@@ -38,7 +43,9 @@ Open [http://127.0.0.1:8080](http://127.0.0.1:8080). The editor, terminal, exten
   Keep the host bind on `127.0.0.1`. Do not expose an editor with `--auth none` to a LAN or public interface.
 </Warning>
 
-## Check the service
+</Step>
+
+<Step title="Check the service">
 
 ```sh
 curl -fsSI http://127.0.0.1:8080/ | head -n 1
@@ -46,7 +53,9 @@ curl -fsSI http://127.0.0.1:8080/ | head -n 1
 
 A healthy server responds with an HTTP status line, usually a redirect into the workspace.
 
-## Copy changes back
+</Step>
+
+<Step title="Copy changes back">
 
 Export the edited project into a new host directory:
 
@@ -56,11 +65,16 @@ msb cp code-server-demo:/home/coder/project ./code-server-output
 
 Review `code-server-output` before merging its changes into the original checkout.
 
-## Cleanup
+</Step>
+
+<Step title="Clean up">
 
 ```sh
 msb rm -f code-server-demo
 ```
+
+</Step>
+</Steps>
 
 ## Reference
 

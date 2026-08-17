@@ -7,7 +7,10 @@ icon: "/images/recipes/agents/pi.svg"
 
 Pi is a terminal coding agent distributed as a Node.js package. This example pins the tested package version and gives it a copied workspace inside the microVM.
 
-## Start Pi
+## Run Pi
+
+<Steps>
+<Step title="Start Pi">
 
 <Tooltip tip="This agent works on microsandbox cloud after omitting replace-on-create from the command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -26,7 +29,9 @@ msb run -t --name pi-demo --replace \
 
 The tested install downloads 188 packages and takes about a minute on a warm Node image cache. Configure a provider from the TUI when prompted.
 
-## Start another session
+</Step>
+
+<Step title="Start another session">
 
 After leaving Pi, return to the same sandbox and workspace with:
 
@@ -34,7 +39,9 @@ After leaving Pi, return to the same sandbox and workspace with:
 msb exec -t pi-demo -- pi
 ```
 
-## Verify the installation
+</Step>
+
+<Step title="Verify the installation">
 
 Exit Pi and run:
 
@@ -44,7 +51,9 @@ msb exec pi-demo -- pi --version
 
 The pinned example prints `0.73.1`.
 
-## Export changes
+</Step>
+
+<Step title="Export changes">
 
 Create a patch inside the sandbox:
 
@@ -64,11 +73,16 @@ Check that it applies cleanly before applying it:
 git apply --check ./pi.patch
 ```
 
-## Cleanup
+</Step>
+
+<Step title="Clean up">
 
 ```sh
 msb rm -f pi-demo
 ```
+
+</Step>
+</Steps>
 
 ## Reference
 

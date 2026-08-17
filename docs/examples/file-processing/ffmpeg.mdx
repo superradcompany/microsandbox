@@ -9,7 +9,11 @@ icon: "film"
 
 Media parsers are a natural fit for disposable microVMs. This example snapshots a prepared FFmpeg toolchain, copies one input file into a networkless worker, and exports only the transcoded result.
 
-## Prepare FFmpeg
+## Transcode media
+
+<Steps>
+
+<Step title="Prepare FFmpeg">
 
 ```sh
 msb run --name ffmpeg-base --replace \
@@ -39,7 +43,9 @@ Verify the snapshot before using it:
 msb snapshot verify ffmpeg-tools
 ```
 
-## Transcode offline
+</Step>
+
+<Step title="Start an offline worker">
 
 ```sh
 msb run -d --name ffmpeg-worker --replace \
@@ -61,6 +67,10 @@ Make the copied input read-only:
 ```sh
 msb exec --user root ffmpeg-worker -- chmod 0444 /input/input.mov
 ```
+
+</Step>
+
+<Step title="Transcode the file">
 
 Run the bounded transcode as the unprivileged `media` user:
 
@@ -94,6 +104,10 @@ msb exec --user media --timeout 9m \
 ```
 
 The worker boots before the input is copied because rootfs patches cannot be combined with `--from-snapshot`. The root-owned input directory prevents the unprivileged media process from replacing the copied file, while `/out` is the only workload-owned data directory. The untrusted transcode command sets its own process, file-descriptor, and per-file limits.
+
+</Step>
+
+<Step title="Export the result">
 
 Prepare a fresh private artifact directory on the host:
 
@@ -133,15 +147,9 @@ Stopping the worker before export removes any process that could race the artifa
 
 The laboratory smoke test generated a two-second H.264 video and `ffprobe` verified its duration and size.
 
-## Bound the workload
+</Step>
 
-- Validate the input size before creating the sandbox.
-- Set `--max-duration` according to the longest media you accept.
-- Limit concurrent workers at the application layer so users cannot exhaust host CPU.
-- Keep `--no-net` unless the worker must retrieve remote media; copy or stream validated input through a controlled host service instead.
-- Export only checked regular files from a stopped worker rather than the worker's entire filesystem.
-
-## Cleanup
+<Step title="Clean up">
 
 Remove the prepared sandbox and worker:
 
@@ -156,3 +164,15 @@ msb snapshot rm ffmpeg-tools
 ```
 
 The checked output remains under `${FFMPEG_ARTIFACT_DIR:-$PWD/.ffmpeg-artifacts}` until you remove it.
+
+</Step>
+
+</Steps>
+
+## Bound the workload
+
+- Validate the input size before creating the sandbox.
+- Set `--max-duration` according to the longest media you accept.
+- Limit concurrent workers at the application layer so users cannot exhaust host CPU.
+- Keep `--no-net` unless the worker must retrieve remote media; copy or stream validated input through a controlled host service instead.
+- Export only checked regular files from a stopped worker rather than the worker's entire filesystem.

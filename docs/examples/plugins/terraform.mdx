@@ -11,7 +11,11 @@ Terraform providers are native executables. Prepare the provider in one microVM,
 
 The `random` provider makes the flow easy to test because planning it does not need cloud credentials.
 
-## Create a test configuration
+## Run an offline plan
+
+<Steps>
+
+<Step title="Create a test configuration">
 
 ```hcl main.tf
 terraform {
@@ -28,7 +32,9 @@ resource "random_pet" "example" {
 }
 ```
 
-## Download and snapshot the provider
+</Step>
+
+<Step title="Download and snapshot the provider">
 
 ```sh
 msb run --name terraform-base --replace \
@@ -61,7 +67,9 @@ msb snapshot verify terraform-runtime
 
 `terraform init` downloads the provider and creates `.terraform.lock.hcl`. The copy on the host is ready to review and commit when adapting this to a real module.
 
-## Plan offline
+</Step>
+
+<Step title="Plan offline">
 
 ```sh
 msb run --name terraform-vet --replace \
@@ -80,7 +88,9 @@ The provider loads and creates a plan, but it cannot contact any remote API. Pro
   `-refresh=false` is not a network boundary. `--no-net` is. If you give a provider credentials and egress, changes it makes through an external API outlive the microVM.
 </Warning>
 
-## Cleanup
+</Step>
+
+<Step title="Clean up">
 
 ```sh
 msb rm -f terraform-base terraform-vet
@@ -91,6 +101,10 @@ Remove the reusable snapshot:
 ```sh
 msb snapshot remove terraform-runtime
 ```
+
+</Step>
+
+</Steps>
 
 ## Reference
 

@@ -9,7 +9,11 @@ icon: "file-pdf"
 
 Document parsers process complex, attacker-controlled file formats. This example installs LibreOffice and Poppler once, snapshots the toolchain, and performs each conversion in a fresh worker with networking disabled.
 
-## Prepare the converter
+## Convert a document
+
+<Steps>
+
+<Step title="Prepare the converter">
 
 ```sh
 msb run --name office-base --replace \
@@ -43,7 +47,9 @@ msb snapshot verify office-tools
 
 Bookworm currently downloads roughly 130 MB and adds about 440 MB to the guest for this toolchain; package updates can change those numbers. The snapshot lets later workers skip that installation.
 
-## Convert a document offline
+</Step>
+
+<Step title="Start an offline worker">
 
 The example accepts a Word document named `input.docx`:
 
@@ -67,6 +73,10 @@ Make the copied input read-only:
 ```sh
 msb exec --user root document-worker -- chmod 0444 /input/input.docx
 ```
+
+</Step>
+
+<Step title="Convert the document">
 
 Run the bounded conversion as the unprivileged `converter` user:
 
@@ -96,6 +106,10 @@ msb exec --user converter --timeout 90s \
 ```
 
 The worker boots before the document is copied because rootfs patches cannot be combined with `--from-snapshot`. The root-owned input directory prevents the unprivileged converter from replacing the document, while its home directory and `/out` hold the only workload-writable state. The untrusted conversion command sets its own process, file-descriptor, and per-file limits.
+
+</Step>
+
+<Step title="Export the PDF">
 
 Prepare a fresh private artifact directory on the host:
 
@@ -136,11 +150,9 @@ done
 
 Stopping the worker prevents artifact races. The fresh private directory and checks require two nonempty regular files no larger than the conversion command's 512 MiB per-file limit.
 
-<Warning>
-  A VM boundary reduces host exposure but does not make every document safe to publish or trust. Enforce input and output size limits before boot, cap concurrent conversions, reject unexpected file types, and scan retained artifacts according to your threat model.
-</Warning>
+</Step>
 
-## Cleanup
+<Step title="Clean up">
 
 Remove the prepared sandbox and worker:
 
@@ -155,3 +167,11 @@ msb snapshot rm office-tools
 ```
 
 The checked `output.pdf` and `preview.png` remain under `${OFFICE_ARTIFACT_DIR:-$PWD/.office-artifacts}` on the host.
+
+</Step>
+
+</Steps>
+
+<Warning>
+  A VM boundary reduces host exposure but does not make every document safe to publish or trust. Enforce input and output size limits before boot, cap concurrent conversions, reject unexpected file types, and scan retained artifacts according to your threat model.
+</Warning>

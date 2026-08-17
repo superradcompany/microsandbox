@@ -10,7 +10,10 @@ Hermes Agent's source installer brings in a large Python, Node.js, browser, and 
   The official image uses s6-overlay. `--init auto` is required so its `/init` entrypoint becomes guest PID 1 rather than running as an ordinary child process. The image is approximately 900 MB compressed and can require several gigabytes of temporary free space during its first pull.
 </Note>
 
-## Run setup
+## Set up Hermes Agent
+
+<Steps>
+<Step title="Run setup">
 
 <Tooltip tip="On microsandbox cloud, create the named volume first and omit replace-on-create from this command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -24,7 +27,9 @@ msb run -t --name hermes-setup --replace \
 
 Follow the setup wizard to configure a model provider and any messaging integrations. Everything written to `/opt/data` survives sandbox replacement in the `hermes-data` volume.
 
-## Verify the installation
+</Step>
+
+<Step title="Verify the installation">
 
 <Tooltip tip="This check works on microsandbox cloud after omitting replace-on-create from the command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -38,7 +43,9 @@ msb run --name hermes-version --replace \
 
 The tested image reports Hermes Agent `v0.19.0 (2026.7.20)`.
 
-## Run the gateway API
+</Step>
+
+<Step title="Run the gateway API">
 
 <Tooltip tip="Publishing the gateway API to a port on the computer running the client is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -72,7 +79,9 @@ msb logs -f hermes-gateway
   Do not expose the API or dashboard on a public interface without a supported authentication provider and TLS. Hermes refuses several unsafe configurations, but host-level port exposure is still your responsibility.
 </Warning>
 
-## Cleanup
+</Step>
+
+<Step title="Clean up">
 
 Remove the setup, version-check, and gateway sandboxes:
 
@@ -93,6 +102,9 @@ unset HERMES_API_KEY
 ```
 
 Keep `hermes-data` to preserve configuration, sessions, memories, skills, and credentials.
+
+</Step>
+</Steps>
 
 ## Reference
 

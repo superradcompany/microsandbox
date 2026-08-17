@@ -6,7 +6,10 @@ icon: "/images/recipes/agents/gemini-cli.svg"
 
 This example runs the official scoped Gemini CLI package inside a disposable Node.js microVM. The project is copied into the guest, while Gemini authentication and settings live in a named volume.
 
-## Start Gemini CLI
+## Run Gemini CLI
+
+<Steps>
+<Step title="Start Gemini CLI">
 
 <Tooltip tip="On microsandbox cloud, create the named volume first and omit replace-on-create from this command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -30,7 +33,9 @@ Gemini CLI first asks whether you trust the workspace. Review the copied files, 
   Install the scoped package exactly as shown: `@google/gemini-cli`. Do not substitute similarly named unscoped packages.
 </Warning>
 
-## Start another session
+</Step>
+
+<Step title="Start another session">
 
 After leaving Gemini CLI, return to the same sandbox and workspace with:
 
@@ -38,7 +43,9 @@ After leaving Gemini CLI, return to the same sandbox and workspace with:
 msb exec -t gemini-demo -- gemini
 ```
 
-## Verify the installation
+</Step>
+
+<Step title="Verify the installation">
 
 Exit the TUI and run:
 
@@ -48,7 +55,9 @@ msb exec gemini-demo -- gemini --version
 
 The pinned example prints `0.52.0`.
 
-## Export changes
+</Step>
+
+<Step title="Export changes">
 
 Create a patch inside the sandbox:
 
@@ -68,7 +77,9 @@ Check that it applies cleanly before applying it:
 git apply --check ./gemini.patch
 ```
 
-## Cleanup
+</Step>
+
+<Step title="Clean up">
 
 Remove the sandbox:
 
@@ -81,6 +92,9 @@ Remove persisted Gemini data only when you no longer need it:
 ```sh
 msb volume rm gemini-data
 ```
+
+</Step>
+</Steps>
 
 ## Reference
 

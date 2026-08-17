@@ -9,7 +9,10 @@ Run Docker Compose inside a microVM when a test needs several containers. The in
 
 This example assumes the current directory contains `compose.yaml` and a test service named `test`.
 
-## Start Docker
+## Run the integration tests
+
+<Steps>
+<Step title="Start Docker">
 
 <Tooltip tip="On microsandbox cloud, create a directory-backed Docker volume first and omit disk-kind, size, and replace-on-create options from this command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -31,7 +34,9 @@ done
 msb exec compose-ci -- docker info >/dev/null
 ```
 
-## Run the tests
+</Step>
+
+<Step title="Run the tests">
 
 ```sh
 msb exec --timeout 5m --workdir /workspace compose-ci -- \
@@ -46,7 +51,9 @@ Replace `test` with the service whose exit code should decide the CI result. `ms
   `--copy-dir` makes a guest copy. Run the command from a clean project directory, or replace it with narrower `--copy-file` and `--copy-dir` flags when the checkout contains credentials or unrelated files.
 </Note>
 
-## Cleanup
+</Step>
+
+<Step title="Clean up">
 
 Stop the Compose stack inside the sandbox:
 
@@ -67,6 +74,9 @@ msb volume remove compose-ci-cache
 ```
 
 Keep the named volume if you want a repository-specific image cache between trusted runs. Do not share a writable cache across repositories or trust boundaries.
+
+</Step>
+</Steps>
 
 <Warning>
   Never mount the host Docker socket into the sandbox. Control of that socket is normally control of the host Docker daemon and defeats the microVM boundary.

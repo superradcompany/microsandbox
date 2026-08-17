@@ -11,7 +11,11 @@ Run a Scrapy spider in a disposable microVM and export only its JSON result. Thi
 
 Use [Playwright](/examples/browser-automation/playwright) instead when content appears only after JavaScript runs.
 
-## Create the spider
+## Crawl a site
+
+<Steps>
+
+<Step title="Create the spider">
 
 ```python books_spider.py
 import scrapy
@@ -40,7 +44,9 @@ class BooksSpider(scrapy.Spider):
             yield response.follow(next_page, self.parse)
 ```
 
-## Prepare Scrapy
+</Step>
+
+<Step title="Prepare Scrapy">
 
 ```sh
 msb run --name scrapy-base --replace \
@@ -64,7 +70,9 @@ msb snapshot verify scrapy-runtime
 
 The snapshot avoids reinstalling Scrapy for every crawl.
 
-## Crawl the site
+</Step>
+
+<Step title="Crawl the site">
 
 ```sh
 msb run --name scrapy-books --replace \
@@ -82,7 +90,9 @@ msb run --name scrapy-books --replace \
 
 The crawler and the microVM policy both constrain navigation to the target host. Change the spider, start URL, and network rule together when adapting the example, and respect the site's terms and robots policy.
 
-## Copy out the result
+</Step>
+
+<Step title="Copy out the result">
 
 ```sh
 mkdir -p .artifacts
@@ -97,7 +107,9 @@ jq 'length' .artifacts/books.json
 
 Treat scraped values as untrusted data when rendering HTML, building shell commands, or exporting spreadsheets.
 
-## Cleanup
+</Step>
+
+<Step title="Clean up">
 
 ```sh
 msb rm -f scrapy-base scrapy-books
@@ -108,6 +120,10 @@ Remove the reusable snapshot:
 ```sh
 msb snapshot remove scrapy-runtime
 ```
+
+</Step>
+
+</Steps>
 
 ## Reference
 
