@@ -10,7 +10,11 @@ Headless Chromium does not require GPU acceleration. This example uses Microsoft
   The Playwright image is large. Its first pull can take several minutes, while cached browser launches are much faster. Consider turning a prepared browser sandbox into a [snapshot](/examples/sandboxing/warm-workers) for repeated jobs.
 </Note>
 
-## Capture a screenshot
+## Use Playwright
+
+<Steps>
+
+<Step title="Capture a screenshot">
 
 <Tooltip tip="Headless capture works on microsandbox cloud after omitting replace-on-create from this command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -34,7 +38,9 @@ msb cp playwright-shot:/root/example.png ./example.png
 
 The smoke test used for this example produced a valid 15,909-byte PNG. Rendering can vary slightly between releases and hosts, so verify the file rather than asserting an exact byte count.
 
-## Run a remote Playwright server
+</Step>
+
+<Step title="Optional: run a remote server">
 
 <Tooltip tip="Publishing the browser server to a port on the computer running the client is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -67,7 +73,9 @@ Connect a matching Playwright client to `ws://127.0.0.1:3000/`. Keep the client 
   The remote server has no application-level authentication. This example binds the host side to loopback intentionally. Do not publish it on `0.0.0.0` or an internet-facing interface without an authenticated proxy.
 </Warning>
 
-## Cleanup
+</Step>
+
+<Step title="Clean up">
 
 Remove the sandboxes:
 
@@ -80,6 +88,10 @@ Delete the copied screenshot only if you no longer need it:
 ```sh
 rm ./example.png
 ```
+
+</Step>
+
+</Steps>
 
 ## Reference
 

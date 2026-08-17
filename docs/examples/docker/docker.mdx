@@ -9,7 +9,11 @@ icon: "box"
 
 This example runs the `msb` CLI inside Docker and starts an Alpine microVM from the container. It works in any Docker environment that can pass a usable `/dev/kvm` device into the container.
 
-## Check Docker support
+## Run microsandbox in Docker
+
+<Steps>
+
+<Step title="Check Docker support">
 
 Pull the image, then run `msb doctor` inside it before starting a sandbox:
 
@@ -42,7 +46,9 @@ If Docker rejects the device mapping or `msb doctor` reports that `/dev/kvm` is 
 
 After changing the Docker or hypervisor configuration, rerun the preflight. Adding `--privileged` cannot create a KVM device that the Docker environment does not have.
 
-## Open an interactive sandbox
+</Step>
+
+<Step title="Open an interactive sandbox">
 
 Run Alpine and attach your terminal to its shell:
 
@@ -64,7 +70,9 @@ uname -a
 exit
 ```
 
-## Run one command
+</Step>
+
+<Step title="Run one command">
 
 For automation, pass a command instead of allocating a terminal:
 
@@ -77,7 +85,9 @@ docker run --rm --device /dev/kvm \
 
 The command's output and exit code pass through both layers to the host.
 
-## Persist images and sandboxes
+</Step>
+
+<Step title="Persist images and sandboxes">
 
 Without a volume, the outer container owns the microsandbox image cache and database. `--rm` deletes them with the container, so the next run downloads Alpine again. Mount a Docker volume when repeated runs should reuse that state:
 
@@ -100,6 +110,10 @@ The Docker volume preserves pulled images, stopped sandboxes, snapshots, and the
 ```bash
 docker volume rm microsandbox-data
 ```
+
+</Step>
+
+</Steps>
 
 ## Troubleshooting
 

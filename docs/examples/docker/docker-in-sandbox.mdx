@@ -8,7 +8,11 @@ This example starts a complete Docker environment inside a microsandbox VM. It i
 
 The command below boots the `docker:dind` image, starts Docker inside the sandbox, waits for it to be ready, and then opens an interactive shell. From there, Docker commands run against the daemon inside the sandbox, not your host.
 
-## Start Docker in a sandbox
+## Run Docker in a sandbox
+
+<Steps>
+
+<Step title="Start Docker">
 
 <Tooltip tip="On microsandbox cloud, create the named volume separately without disk-kind or size options, then omit replace-on-create from this command."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -34,7 +38,9 @@ This command does three things:
 
 `--mount-named docker-data:/var/lib/docker:kind=disk,size=10G` is idempotent. If `docker-data` does not exist, the CLI creates it before starting the sandbox. If it already exists with compatible disk settings, the same command reuses it, so pulled images and created containers can survive `msb rm docker-demo`.
 
-## Simpler local setup with a flat root disk
+</Step>
+
+<Step title="Optional: use a flat root disk">
 
 <Tooltip tip="Flat root disks are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
@@ -56,7 +62,9 @@ msb run --name docker-demo --replace \
 
 This stores Docker's images, containers, and build cache on the sandbox's root disk. The data persists when the sandbox stops and starts, but unlike a named volume, it does not survive removing or replacing the sandbox. The `10G` capacity covers the entire root filesystem, including Docker's data.
 
-## Run a container
+</Step>
+
+<Step title="Run a container">
 
 From the sandbox shell, run a nested Ubuntu container:
 
@@ -72,7 +80,9 @@ You can also verify the daemon with a short non-interactive command:
 docker run --rm hello-world
 ```
 
-## Cleanup
+</Step>
+
+<Step title="Clean up">
 
 Exit the sandbox shell:
 
@@ -95,6 +105,10 @@ msb volume rm docker-data
 Remove `docker-data` only when you no longer need the images, containers, and build cache stored by the nested daemon.
 
 If you used the flat-root alternative, skip `msb volume rm docker-data`; removing the sandbox also removes its Docker data.
+
+</Step>
+
+</Steps>
 
 ## Details
 
