@@ -387,6 +387,7 @@ Practical ways to put microsandbox to work:
 - <img height="14" src="https://octicons-col.vercel.app/cache/A770EF"> **[Warm Workers](https://docs.microsandbox.dev/examples/sandboxing/warm-workers)**: Snapshot a toolchain and launch clean workers.
 - <img height="14" src="https://octicons-col.vercel.app/database/A770EF"> **[Migration Rehearsal](https://docs.microsandbox.dev/examples/data/migration-rehearsal)**: Test a database migration, then restore the baseline.
 - <img height="14" src="https://octicons-col.vercel.app/workflow/A770EF"> **[GitHub Actions Runner](https://docs.microsandbox.dev/examples/ci-cd/github-actions-runner)**: Run each self-hosted job in a disposable microVM.
+- <img height="14" src="https://octicons-col.vercel.app/file/A770EF"> **[Documents to PDF](https://docs.microsandbox.dev/examples/file-processing/libreoffice-pdf)**: Convert untrusted documents in a fresh offline worker.
 
 <br />
 
