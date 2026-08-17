@@ -523,19 +523,17 @@ pub fn smoltcp_poll_loop(
             {
                 // TLS-intercepted port — spawn TLS MITM proxy.
                 let connect_target = resolve_tcp_host_target(conn.dst, config.gateway);
-                std::mem::drop(
-                    TlsProxy::new(
-                        conn.dst,
-                        connect_target,
-                        conn.from_smoltcp,
-                        conn.to_smoltcp,
-                        shared.clone(),
-                        tls_state.clone(),
-                        network_policy.clone(),
-                        conn.proxy_connect,
-                    )
-                    .spawn(&tokio_handle),
-                );
+                TlsProxy::new(
+                    conn.dst,
+                    connect_target,
+                    conn.from_smoltcp,
+                    conn.to_smoltcp,
+                    shared.clone(),
+                    tls_state.clone(),
+                    network_policy.clone(),
+                    conn.proxy_connect,
+                )
+                .spawn(&tokio_handle);
                 continue;
             }
             if conn.dst.port() == 53 {
@@ -590,22 +588,20 @@ pub fn smoltcp_poll_loop(
             }
             // Plain TCP proxy.
             let connect_target = resolve_tcp_host_target(conn.dst, config.gateway);
-            std::mem::drop(
-                TcpProxy::new(
-                    conn.dst,
-                    connect_target,
-                    conn.from_smoltcp,
-                    conn.to_smoltcp,
-                    shared.clone(),
-                    network_policy.clone(),
-                    // Load the current snapshot per connection so live secret
-                    // updates apply to traffic the guest starts afterwards.
-                    secrets.load(),
-                    tls_state.clone(),
-                    conn.proxy_connect,
-                )
-                .spawn(&tokio_handle),
-            );
+            TcpProxy::new(
+                conn.dst,
+                connect_target,
+                conn.from_smoltcp,
+                conn.to_smoltcp,
+                shared.clone(),
+                network_policy.clone(),
+                // Load the current snapshot per connection so live secret
+                // updates apply to traffic the guest starts afterwards.
+                secrets.load(),
+                tls_state.clone(),
+                conn.proxy_connect,
+            )
+            .spawn(&tokio_handle);
         }
 
         // Rate-limited cleanup: TIME_WAIT is 60s, session timeout is 60s,

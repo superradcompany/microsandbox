@@ -15,7 +15,6 @@ use bytes::Bytes;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 
 use super::connection::ProxyConnectState;
 use super::upstream::UpstreamTcpTarget;
@@ -154,7 +153,7 @@ impl TcpProxy {
     }
 
     /// Spawn this proxy on the networking runtime.
-    pub(crate) fn spawn(self, handle: &tokio::runtime::Handle) -> JoinHandle<()> {
+    pub(crate) fn spawn(self, handle: &tokio::runtime::Handle) {
         let guest_dst = self.guest_dst;
         let connect_target = self.connect_target;
 
@@ -167,7 +166,7 @@ impl TcpProxy {
                     "TCP proxy task ended",
                 );
             }
-        })
+        });
     }
 
     /// Drive the TCP proxy to completion.
@@ -482,20 +481,18 @@ pub fn spawn_tcp_proxy(
     tls_state: Option<Arc<TlsState>>,
     proxy_connect: Arc<ProxyConnectState>,
 ) {
-    std::mem::drop(
-        TcpProxy::new(
-            guest_dst,
-            UpstreamTcpTarget::direct(connect_dst),
-            from_smoltcp,
-            to_smoltcp,
-            shared,
-            network_policy,
-            secrets,
-            tls_state,
-            proxy_connect,
-        )
-        .spawn(handle),
-    );
+    TcpProxy::new(
+        guest_dst,
+        UpstreamTcpTarget::direct(connect_dst),
+        from_smoltcp,
+        to_smoltcp,
+        shared,
+        network_policy,
+        secrets,
+        tls_state,
+        proxy_connect,
+    )
+    .spawn(handle);
 }
 
 /// Forward an HTTP CONNECT tunnel: dial the proxy, splice the handshake,

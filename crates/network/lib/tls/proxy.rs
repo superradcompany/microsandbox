@@ -14,7 +14,6 @@ use rustls::pki_types::ServerName;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 
 use super::sni;
 use super::state::TlsState;
@@ -114,7 +113,7 @@ impl TlsProxy {
     ///
     /// See [`crate::tcp::proxy::spawn_tcp_proxy`] for the `proxy_connect`
     /// contract.
-    pub(crate) fn spawn(self, handle: &tokio::runtime::Handle) -> JoinHandle<()> {
+    pub(crate) fn spawn(self, handle: &tokio::runtime::Handle) {
         let guest_dst = self.guest_dst;
         let connect_target = self.connect_target;
 
@@ -127,7 +126,7 @@ impl TlsProxy {
                     "TLS proxy task ended",
                 );
             }
-        })
+        });
     }
 
     /// Drive the TLS proxy to completion.
