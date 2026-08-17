@@ -40,8 +40,6 @@
             "icon": "box",
             "pages": [
               "sandboxes/overview",
-              "images/overview",
-              "images/disk-images",
               "sandboxes/lifecycle",
               "sandboxes/commands",
               "sandboxes/filesystem",
@@ -49,6 +47,8 @@
               "sandboxes/tuning",
               "sandboxes/ssh",
               "sandboxes/volumes",
+              "images/overview",
+              "images/disk-images",
               "sandboxes/snapshots",
               "sandboxes/labels",
               "sandboxes/logs",
