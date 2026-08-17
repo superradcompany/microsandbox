@@ -344,7 +344,6 @@
             "group": "Sandbox Workflows",
             "icon": "shield-halved",
             "pages": [
-              "examples/use-cases/run-untrusted-code",
               "examples/sandboxing/warm-workers",
               "examples/development/vnc-desktop",
               "examples/guest/systemd-services",

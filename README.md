@@ -381,7 +381,7 @@ The `msb` CLI provides a complete interface for managing sandboxes, images, and 
 
 Practical ways to put microsandbox to work:
 
-- <img height="14" src="https://octicons-col.vercel.app/shield-lock/A770EF"> **[Untrusted Code](https://docs.microsandbox.dev/examples/use-cases/run-untrusted-code)**: Run user code with strict CPU, memory, time, and network limits.
+- <img height="14" src="https://octicons-col.vercel.app/code/A770EF"> **[code-server](https://docs.microsandbox.dev/examples/development/code-server)**: Open an isolated VS Code workspace in the browser.
 - <img height="14" src="https://octicons-col.vercel.app/workflow/A770EF"> **[GitHub Actions Runner](https://docs.microsandbox.dev/examples/ci-cd/github-actions-runner)**: Run one self-hosted job in a fresh microVM, then discard its workspace.
 - <img height="14" src="https://octicons-col.vercel.app/checklist/A770EF"> **[PR Checks](https://docs.microsandbox.dev/examples/ci-cd/pr-checks)**: Test untrusted commits offline from reviewed dependencies.
 - <img height="14" src="https://octicons-col.vercel.app/container/A770EF"> **[Compose Tests](https://docs.microsandbox.dev/examples/ci-cd/compose-tests)**: Test a full Compose stack without exposing the host Docker socket.
