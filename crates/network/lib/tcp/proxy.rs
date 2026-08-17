@@ -15,6 +15,7 @@ use bytes::Bytes;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use super::connection::ProxyConnectState;
 use super::upstream::UpstreamTcpTarget;
@@ -24,7 +25,7 @@ use crate::secrets::config::{SecretsConfig, SecretsConfigExt, ViolationAction};
 use crate::secrets::handler::{
     SecretsHandler, first_line_is_not_http_request, looks_like_http_request_prefix,
 };
-use crate::tls::proxy::{TlsProxyContext, tls_proxy_task};
+use crate::tls::proxy::TlsProxy;
 use crate::tls::sni;
 use crate::tls::state::TlsState;
 
@@ -61,6 +62,19 @@ struct ConnectTarget {
     host: String,
     port: u16,
     expected_sni: Option<String>,
+}
+
+/// Per-connection TCP proxy task and the state it owns.
+pub(crate) struct TcpProxy {
+    guest_dst: SocketAddr,
+    connect_target: UpstreamTcpTarget,
+    from_smoltcp: mpsc::Receiver<Bytes>,
+    to_smoltcp: mpsc::Sender<Bytes>,
+    shared: Arc<SharedState>,
+    network_policy: Arc<NetworkPolicy>,
+    secrets: Arc<SecretsConfig>,
+    tls_state: Option<Arc<TlsState>>,
+    proxy_connect: Arc<ProxyConnectState>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -112,6 +126,337 @@ impl ConnectTarget {
     }
 }
 
+impl TcpProxy {
+    /// Build a proxy for a newly established guest TCP connection.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        guest_dst: SocketAddr,
+        connect_target: UpstreamTcpTarget,
+        from_smoltcp: mpsc::Receiver<Bytes>,
+        to_smoltcp: mpsc::Sender<Bytes>,
+        shared: Arc<SharedState>,
+        network_policy: Arc<NetworkPolicy>,
+        secrets: Arc<SecretsConfig>,
+        tls_state: Option<Arc<TlsState>>,
+        proxy_connect: Arc<ProxyConnectState>,
+    ) -> Self {
+        Self {
+            guest_dst,
+            connect_target,
+            from_smoltcp,
+            to_smoltcp,
+            shared,
+            network_policy,
+            secrets,
+            tls_state,
+            proxy_connect,
+        }
+    }
+
+    /// Spawn this proxy on the networking runtime.
+    pub(crate) fn spawn(self, handle: &tokio::runtime::Handle) -> JoinHandle<()> {
+        let guest_dst = self.guest_dst;
+        let connect_target = self.connect_target;
+
+        handle.spawn(async move {
+            if let Err(error) = self.run().await {
+                tracing::debug!(
+                    dst = %connect_target.primary(),
+                    %guest_dst,
+                    %error,
+                    "TCP proxy task ended",
+                );
+            }
+        })
+    }
+
+    /// Drive the TCP proxy to completion.
+    async fn run(self) -> io::Result<()> {
+        let Self {
+            guest_dst,
+            connect_target,
+            mut from_smoltcp,
+            to_smoltcp,
+            shared,
+            network_policy,
+            secrets,
+            tls_state,
+            proxy_connect,
+        } = self;
+
+        // Pre-connect peek is only for domain policy: the hostname has to be known
+        // before we dial upstream so a Deny never opens a connection. Secrets do
+        // *not* gate the connect, so they no longer force a peek here — that work is
+        // deferred to `classify_first_flight` after the socket is open, where it can
+        // run without stalling server-first protocols (see below).
+        let (mut initial_buf, sni) = if network_policy.has_domain_rules() {
+            peek_for_sni(&mut from_smoltcp, PEEK_BUF_SIZE, PEEK_BUDGET).await
+        } else {
+            (Vec::new(), None)
+        };
+
+        // Re-evaluate egress against the *guest* dst — the address the
+        // guest dialed, not the post-rewrite host-side address. SNI
+        // refines over-allow when the cache matched a shared CDN IP;
+        // CacheOnly is the non-TLS fallback path so Domain rules still
+        // gate plain HTTP / SSH / etc.
+        if network_policy.has_domain_rules() {
+            let source = match sni.as_deref() {
+                Some(name) => HostnameSource::Sni(name),
+                None => HostnameSource::CacheOnly,
+            };
+            match network_policy.evaluate_egress_with_source(
+                guest_dst,
+                Protocol::Tcp,
+                &shared,
+                source,
+            ) {
+                EgressEvaluation::Allow => {}
+                EgressEvaluation::Deny => {
+                    tracing::debug!(
+                        dst = %guest_dst,
+                        source = source.label(),
+                        "TCP egress denied by domain policy",
+                    );
+                    proxy_connect.mark_policy_denied();
+                    shared.proxy_wake.wake();
+                    return Ok(());
+                }
+                EgressEvaluation::DeferUntilHostname => {
+                    debug_assert!(false, "DeferUntilHostname leaked into TCP proxy task");
+                    proxy_connect.mark_policy_denied();
+                    shared.proxy_wake.wake();
+                    return Ok(());
+                }
+            }
+        }
+
+        // Peek for HTTP CONNECT before dialing upstream; hand off if detected.
+        if let Some(tls_state) = tls_state.clone() {
+            if initial_buf.is_empty() {
+                let (peeked, _) = peek_for_sni(&mut from_smoltcp, PEEK_BUF_SIZE, PEEK_BUDGET).await;
+                initial_buf = peeked;
+            }
+            if could_be_connect_request(&initial_buf) {
+                return handle_connect_tunnel(
+                    guest_dst,
+                    connect_target,
+                    initial_buf,
+                    from_smoltcp,
+                    to_smoltcp,
+                    shared,
+                    network_policy,
+                    tls_state,
+                    proxy_connect,
+                    None,
+                )
+                .await;
+            }
+        }
+
+        // Connect upstream *before* finishing the secrets-side classification. A
+        // server-first protocol (SSH, SMTP, a database) sends nothing until it has
+        // seen the server's banner; with the socket already open we can relay that
+        // banner while we wait, instead of burning the peek budget pre-connect.
+        let stream = connect_target.connect(&proxy_connect, &shared).await?;
+        let connect_dst = stream.peer_addr().unwrap_or(connect_target.primary());
+        let (mut server_rx, mut server_tx) = stream.into_split();
+
+        // Finish classifying the first flight (TLS vs plain HTTP) and, for
+        // plain-HTTP candidates, gather a full header block — without blocking the
+        // server→guest direction. When domain rules already peeked, `initial_buf`
+        // is reused and this is cheap; with no secrets it is skipped entirely
+        // (`is_tls` only matters for deciding whether to build the handler).
+        let want_headers = secrets.has_plain_http_candidates() || secrets.has_host_scoped_secrets();
+        let (initial_buf, is_tls) = if !secrets.secrets.is_empty() {
+            classify_first_flight(
+                initial_buf,
+                &mut from_smoltcp,
+                &mut server_rx,
+                &to_smoltcp,
+                &shared,
+                want_headers,
+                PEEK_BUF_SIZE,
+                PEEK_BUDGET,
+            )
+            .await?
+        } else {
+            (initial_buf, false)
+        };
+
+        if let Some(tls_state) = tls_state.clone()
+            && could_be_connect_request(&initial_buf)
+        {
+            // The pre-connect CONNECT peek can miss a client whose first bytes arrive
+            // after we dial upstream. Once classify_first_flight has captured that
+            // request, rejoin the already-open proxy socket and use the CONNECT path
+            // so intercepted tunnels still get TLS substitution and policy checks.
+            let proxy_stream = server_rx
+                .reunite(server_tx)
+                .map_err(|_| io::Error::other("failed to reunite proxy stream halves"))?;
+            return handle_connect_tunnel(
+                guest_dst,
+                connect_target,
+                initial_buf,
+                from_smoltcp,
+                to_smoltcp,
+                shared,
+                network_policy,
+                tls_state,
+                proxy_connect,
+                Some(proxy_stream),
+            )
+            .await;
+        }
+
+        let mut late_connect_state = tls_state;
+        let mut secrets_handler: Option<SecretsHandler> = if !secrets.secrets.is_empty() && !is_tls
+        {
+            Some(match extract_http_host(&initial_buf) {
+                Some(host) => {
+                    SecretsHandler::new_plain_http(&secrets, &host, guest_dst.ip(), &shared)
+                }
+                None => SecretsHandler::new_plain_http_invalid_host(&secrets),
+            })
+        } else {
+            None
+        };
+
+        // Replay the buffered first flight — run through secrets handler first.
+        if !initial_buf.is_empty() {
+            let out: Cow<[u8]> = match secrets_handler.as_mut() {
+                Some(h) => match h.substitute(&initial_buf) {
+                    // Borrow the input when nothing was substituted; only a chunk
+                    // that actually carries a placeholder is reallocated.
+                    Ok(cow) => cow,
+                    Err(action) => {
+                        tracing::warn!(dst = %connect_dst, violation = ?action, "secret violation in first flight");
+                        if matches!(action, ViolationAction::BlockAndTerminate) {
+                            shared.trigger_termination();
+                        }
+                        return Ok(());
+                    }
+                },
+                None => Cow::Borrowed(&initial_buf),
+            };
+            if !out.is_empty() {
+                if let Err(e) = server_tx.write_all(&out).await {
+                    tracing::debug!(dst = %connect_dst, error = %e, "replay of buffered first flight failed");
+                    return Ok(());
+                }
+                if let Err(e) = server_tx.flush().await {
+                    tracing::debug!(dst = %connect_dst, error = %e, "flush after first flight failed");
+                    return Ok(());
+                }
+            }
+        }
+
+        let mut server_buf = vec![0u8; SERVER_READ_BUF_SIZE];
+
+        // Bidirectional relay using tokio::select!.
+        //
+        // guest → server: receive from channel, write to server socket.
+        // server → guest: read from server socket, send via channel + wake poll.
+        let mut guest_eof = false;
+        loop {
+            tokio::select! {
+                // Guest → server: substitute placeholders before forwarding.
+                data = from_smoltcp.recv(), if !guest_eof => {
+                    match data {
+                        Some(bytes) => {
+                            if let Some(tls_state) = late_connect_state.take()
+                                && could_be_connect_request(&bytes)
+                            {
+                                // The first guest bytes can arrive after both peek
+                                // windows have completed. Nothing has been written
+                                // to the proxy socket yet, so this is still a valid
+                                // point to switch into CONNECT tunnel handling.
+                                let proxy_stream = server_rx
+                                    .reunite(server_tx)
+                                    .map_err(|_| io::Error::other("failed to reunite proxy stream halves"))?;
+                                return handle_connect_tunnel(
+                                    guest_dst,
+                                    connect_target,
+                                    bytes.to_vec(),
+                                    from_smoltcp,
+                                    to_smoltcp,
+                                    shared,
+                                    network_policy,
+                                    tls_state,
+                                    proxy_connect,
+                                    Some(proxy_stream),
+                                )
+                                .await;
+                            }
+                            // No handler (no secrets / TLS) is the common path: forward
+                            // the chunk borrowed, with no per-chunk allocation or copy.
+                            let out: Cow<[u8]> = match secrets_handler.as_mut() {
+                                Some(h) => match h.substitute(&bytes) {
+                                    Ok(cow) => cow,
+                                    Err(action) => {
+                                        tracing::warn!(dst = %connect_dst, violation = ?action, "secret violation");
+                                        if matches!(action, ViolationAction::BlockAndTerminate) {
+                                            shared.trigger_termination();
+                                        }
+                                        break;
+                                    }
+                                },
+                                None => Cow::Borrowed(&bytes),
+                            };
+                            if !out.is_empty() {
+                                if let Err(e) = server_tx.write_all(&out).await {
+                                    tracing::debug!(dst = %connect_dst, error = %e, "write to server failed");
+                                    break;
+                                }
+                                if let Err(e) = server_tx.flush().await {
+                                    tracing::debug!(dst = %connect_dst, error = %e, "flush to server failed");
+                                    break;
+                                }
+                            }
+                        }
+                        // Channel closed — the guest half-closed (FIN) or the
+                        // connection was torn down. Propagate the half-close:
+                        // stop sending upstream but keep relaying server →
+                        // guest until the server closes.
+                        None => {
+                            guest_eof = true;
+                            if server_tx.shutdown().await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Server → guest: no substitution — server never sends placeholders.
+                result = server_rx.read(&mut server_buf) => {
+                    match result {
+                        Ok(0) => break, // Server closed connection.
+                        Ok(n) => {
+                            // A server-first byte means this is not an HTTP CONNECT
+                            // tunnel to a proxy. Keep relaying normally afterward.
+                            late_connect_state = None;
+                            let data = Bytes::copy_from_slice(&server_buf[..n]);
+                            if to_smoltcp.send(data).await.is_err() {
+                                // Channel closed — poll loop dropped the receiver.
+                                break;
+                            }
+                            // Wake the poll thread so it writes data to the
+                            // smoltcp socket.
+                            shared.proxy_wake.wake();
+                        }
+                        Err(e) => {
+                            tracing::debug!(dst = %connect_dst, error = %e, "read from server failed");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -137,38 +482,10 @@ pub fn spawn_tcp_proxy(
     tls_state: Option<Arc<TlsState>>,
     proxy_connect: Arc<ProxyConnectState>,
 ) {
-    spawn_tcp_proxy_with_target(
-        handle,
-        guest_dst,
-        UpstreamTcpTarget::direct(connect_dst),
-        from_smoltcp,
-        to_smoltcp,
-        shared,
-        network_policy,
-        secrets,
-        tls_state,
-        proxy_connect,
-    );
-}
-
-/// Spawn a TCP proxy with an optional alternate host-loopback destination.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn spawn_tcp_proxy_with_target(
-    handle: &tokio::runtime::Handle,
-    guest_dst: SocketAddr,
-    connect_target: UpstreamTcpTarget,
-    from_smoltcp: mpsc::Receiver<Bytes>,
-    to_smoltcp: mpsc::Sender<Bytes>,
-    shared: Arc<SharedState>,
-    network_policy: Arc<NetworkPolicy>,
-    secrets: Arc<SecretsConfig>,
-    tls_state: Option<Arc<TlsState>>,
-    proxy_connect: Arc<ProxyConnectState>,
-) {
-    handle.spawn(async move {
-        if let Err(e) = tcp_proxy_task(
+    std::mem::drop(
+        TcpProxy::new(
             guest_dst,
-            connect_target,
+            UpstreamTcpTarget::direct(connect_dst),
             from_smoltcp,
             to_smoltcp,
             shared,
@@ -177,294 +494,12 @@ pub(crate) fn spawn_tcp_proxy_with_target(
             tls_state,
             proxy_connect,
         )
-        .await
-        {
-            tracing::debug!(dst = %connect_target.primary(), error = %e, "TCP proxy task ended");
-        }
-    });
-}
-
-/// Core TCP proxy: peek for SNI, evaluate egress policy, then either
-/// connect and relay or drop the channels.
-#[allow(clippy::too_many_arguments)]
-async fn tcp_proxy_task(
-    guest_dst: SocketAddr,
-    connect_target: UpstreamTcpTarget,
-    mut from_smoltcp: mpsc::Receiver<Bytes>,
-    to_smoltcp: mpsc::Sender<Bytes>,
-    shared: Arc<SharedState>,
-    network_policy: Arc<NetworkPolicy>,
-    secrets: Arc<SecretsConfig>,
-    tls_state: Option<Arc<TlsState>>,
-    proxy_connect: Arc<ProxyConnectState>,
-) -> io::Result<()> {
-    // Pre-connect peek is only for domain policy: the hostname has to be known
-    // before we dial upstream so a Deny never opens a connection. Secrets do
-    // *not* gate the connect, so they no longer force a peek here — that work is
-    // deferred to `classify_first_flight` after the socket is open, where it can
-    // run without stalling server-first protocols (see below).
-    let (mut initial_buf, sni) = if network_policy.has_domain_rules() {
-        peek_for_sni(&mut from_smoltcp, PEEK_BUF_SIZE, PEEK_BUDGET).await
-    } else {
-        (Vec::new(), None)
-    };
-
-    // Re-evaluate egress against the *guest* dst — the address the
-    // guest dialed, not the post-rewrite host-side address. SNI
-    // refines over-allow when the cache matched a shared CDN IP;
-    // CacheOnly is the non-TLS fallback path so Domain rules still
-    // gate plain HTTP / SSH / etc.
-    if network_policy.has_domain_rules() {
-        let source = match sni.as_deref() {
-            Some(name) => HostnameSource::Sni(name),
-            None => HostnameSource::CacheOnly,
-        };
-        match network_policy.evaluate_egress_with_source(guest_dst, Protocol::Tcp, &shared, source)
-        {
-            EgressEvaluation::Allow => {}
-            EgressEvaluation::Deny => {
-                tracing::debug!(
-                    dst = %guest_dst,
-                    source = source.label(),
-                    "TCP egress denied by domain policy",
-                );
-                proxy_connect.mark_policy_denied();
-                shared.proxy_wake.wake();
-                return Ok(());
-            }
-            EgressEvaluation::DeferUntilHostname => {
-                debug_assert!(false, "DeferUntilHostname leaked into TCP proxy task");
-                proxy_connect.mark_policy_denied();
-                shared.proxy_wake.wake();
-                return Ok(());
-            }
-        }
-    }
-
-    // Peek for HTTP CONNECT before dialing upstream; hand off if detected.
-    if let Some(tls_state) = tls_state.clone() {
-        if initial_buf.is_empty() {
-            let (peeked, _) = peek_for_sni(&mut from_smoltcp, PEEK_BUF_SIZE, PEEK_BUDGET).await;
-            initial_buf = peeked;
-        }
-        if could_be_connect_request(&initial_buf) {
-            return handle_connect_tunnel(
-                guest_dst,
-                connect_target,
-                initial_buf,
-                from_smoltcp,
-                to_smoltcp,
-                shared,
-                network_policy,
-                tls_state,
-                proxy_connect,
-                None,
-            )
-            .await;
-        }
-    }
-
-    // Connect upstream *before* finishing the secrets-side classification. A
-    // server-first protocol (SSH, SMTP, a database) sends nothing until it has
-    // seen the server's banner; with the socket already open we can relay that
-    // banner while we wait, instead of burning the peek budget pre-connect.
-    let stream = connect_target.connect(&proxy_connect, &shared).await?;
-    let connect_dst = stream.peer_addr().unwrap_or(connect_target.primary());
-    let (mut server_rx, mut server_tx) = stream.into_split();
-
-    // Finish classifying the first flight (TLS vs plain HTTP) and, for
-    // plain-HTTP candidates, gather a full header block — without blocking the
-    // server→guest direction. When domain rules already peeked, `initial_buf`
-    // is reused and this is cheap; with no secrets it is skipped entirely
-    // (`is_tls` only matters for deciding whether to build the handler).
-    let want_headers = secrets.has_plain_http_candidates() || secrets.has_host_scoped_secrets();
-    let (initial_buf, is_tls) = if !secrets.secrets.is_empty() {
-        classify_first_flight(
-            initial_buf,
-            &mut from_smoltcp,
-            &mut server_rx,
-            &to_smoltcp,
-            &shared,
-            want_headers,
-            PEEK_BUF_SIZE,
-            PEEK_BUDGET,
-        )
-        .await?
-    } else {
-        (initial_buf, false)
-    };
-
-    if let Some(tls_state) = tls_state.clone()
-        && could_be_connect_request(&initial_buf)
-    {
-        // The pre-connect CONNECT peek can miss a client whose first bytes arrive
-        // after we dial upstream. Once classify_first_flight has captured that
-        // request, rejoin the already-open proxy socket and use the CONNECT path
-        // so intercepted tunnels still get TLS substitution and policy checks.
-        let proxy_stream = server_rx
-            .reunite(server_tx)
-            .map_err(|_| io::Error::other("failed to reunite proxy stream halves"))?;
-        return handle_connect_tunnel(
-            guest_dst,
-            connect_target,
-            initial_buf,
-            from_smoltcp,
-            to_smoltcp,
-            shared,
-            network_policy,
-            tls_state,
-            proxy_connect,
-            Some(proxy_stream),
-        )
-        .await;
-    }
-
-    let mut late_connect_state = tls_state;
-    let mut secrets_handler: Option<SecretsHandler> = if !secrets.secrets.is_empty() && !is_tls {
-        Some(match extract_http_host(&initial_buf) {
-            Some(host) => SecretsHandler::new_plain_http(&secrets, &host, guest_dst.ip(), &shared),
-            None => SecretsHandler::new_plain_http_invalid_host(&secrets),
-        })
-    } else {
-        None
-    };
-
-    // Replay the buffered first flight — run through secrets handler first.
-    if !initial_buf.is_empty() {
-        let out: Cow<[u8]> = match secrets_handler.as_mut() {
-            Some(h) => match h.substitute(&initial_buf) {
-                // Borrow the input when nothing was substituted; only a chunk
-                // that actually carries a placeholder is reallocated.
-                Ok(cow) => cow,
-                Err(action) => {
-                    tracing::warn!(dst = %connect_dst, violation = ?action, "secret violation in first flight");
-                    if matches!(action, ViolationAction::BlockAndTerminate) {
-                        shared.trigger_termination();
-                    }
-                    return Ok(());
-                }
-            },
-            None => Cow::Borrowed(&initial_buf),
-        };
-        if !out.is_empty() {
-            if let Err(e) = server_tx.write_all(&out).await {
-                tracing::debug!(dst = %connect_dst, error = %e, "replay of buffered first flight failed");
-                return Ok(());
-            }
-            if let Err(e) = server_tx.flush().await {
-                tracing::debug!(dst = %connect_dst, error = %e, "flush after first flight failed");
-                return Ok(());
-            }
-        }
-    }
-
-    let mut server_buf = vec![0u8; SERVER_READ_BUF_SIZE];
-
-    // Bidirectional relay using tokio::select!.
-    //
-    // guest → server: receive from channel, write to server socket.
-    // server → guest: read from server socket, send via channel + wake poll.
-    let mut guest_eof = false;
-    loop {
-        tokio::select! {
-            // Guest → server: substitute placeholders before forwarding.
-            data = from_smoltcp.recv(), if !guest_eof => {
-                match data {
-                    Some(bytes) => {
-                        if let Some(tls_state) = late_connect_state.take()
-                            && could_be_connect_request(&bytes)
-                        {
-                            // The first guest bytes can arrive after both peek
-                            // windows have completed. Nothing has been written
-                            // to the proxy socket yet, so this is still a valid
-                            // point to switch into CONNECT tunnel handling.
-                            let proxy_stream = server_rx
-                                .reunite(server_tx)
-                                .map_err(|_| io::Error::other("failed to reunite proxy stream halves"))?;
-                            return handle_connect_tunnel(
-                                guest_dst,
-                                connect_target,
-                                bytes.to_vec(),
-                                from_smoltcp,
-                                to_smoltcp,
-                                shared,
-                                network_policy,
-                                tls_state,
-                                proxy_connect,
-                                Some(proxy_stream),
-                            )
-                            .await;
-                        }
-                        // No handler (no secrets / TLS) is the common path: forward
-                        // the chunk borrowed, with no per-chunk allocation or copy.
-                        let out: Cow<[u8]> = match secrets_handler.as_mut() {
-                            Some(h) => match h.substitute(&bytes) {
-                                Ok(cow) => cow,
-                                Err(action) => {
-                                    tracing::warn!(dst = %connect_dst, violation = ?action, "secret violation");
-                                    if matches!(action, ViolationAction::BlockAndTerminate) {
-                                        shared.trigger_termination();
-                                    }
-                                    break;
-                                }
-                            },
-                            None => Cow::Borrowed(&bytes),
-                        };
-                        if !out.is_empty() {
-                            if let Err(e) = server_tx.write_all(&out).await {
-                                tracing::debug!(dst = %connect_dst, error = %e, "write to server failed");
-                                break;
-                            }
-                            if let Err(e) = server_tx.flush().await {
-                                tracing::debug!(dst = %connect_dst, error = %e, "flush to server failed");
-                                break;
-                            }
-                        }
-                    }
-                    // Channel closed — the guest half-closed (FIN) or the
-                    // connection was torn down. Propagate the half-close:
-                    // stop sending upstream but keep relaying server →
-                    // guest until the server closes.
-                    None => {
-                        guest_eof = true;
-                        if server_tx.shutdown().await.is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-
-            // Server → guest: no substitution — server never sends placeholders.
-            result = server_rx.read(&mut server_buf) => {
-                match result {
-                    Ok(0) => break, // Server closed connection.
-                    Ok(n) => {
-                        // A server-first byte means this is not an HTTP CONNECT
-                        // tunnel to a proxy. Keep relaying normally afterward.
-                        late_connect_state = None;
-                        let data = Bytes::copy_from_slice(&server_buf[..n]);
-                        if to_smoltcp.send(data).await.is_err() {
-                            // Channel closed — poll loop dropped the receiver.
-                            break;
-                        }
-                        // Wake the poll thread so it writes data to the
-                        // smoltcp socket.
-                        shared.proxy_wake.wake();
-                    }
-                    Err(e) => {
-                        tracing::debug!(dst = %connect_dst, error = %e, "read from server failed");
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(())
+        .spawn(handle),
+    );
 }
 
 /// Forward an HTTP CONNECT tunnel: dial the proxy, splice the handshake,
-/// then hand the established stream to `tls_proxy_task` for TLS MITM.
+/// then hand the established stream to [`TlsProxy`] for TLS MITM.
 ///
 /// `guest_dst` is what the guest dialed; `proxy_target` contains the rewritten
 /// loopback address the gateway actually connects to and its optional fallback.
@@ -570,22 +605,20 @@ async fn handle_connect_tunnel(
     let tls_guest_dst = connect_req.target.guest_dst(guest_dst, &shared);
     let expected_sni = connect_req.target.expected_sni.clone();
 
-    tls_proxy_task(
-        TlsProxyContext {
-            guest_dst: tls_guest_dst,
-            connect_target: proxy_target,
-            shared,
-            tls_state,
-            network_policy,
-            proxy_connect,
-            upstream_stream: Some(proxy_stream),
-            via_connect: expected_sni.is_some(),
-            expected_sni,
-        },
+    TlsProxy::new(
+        tls_guest_dst,
+        proxy_target,
         from_smoltcp,
         to_smoltcp,
-        tls_seed,
+        shared,
+        tls_state,
+        network_policy,
+        proxy_connect,
     )
+    .with_upstream(proxy_stream)
+    .with_expected_sni(expected_sni)
+    .with_initial_buf(tls_seed)
+    .run()
     .await
 }
 
@@ -1657,7 +1690,7 @@ mod tests {
         from_tx.send(Bytes::from(request)).await.unwrap();
         drop(from_tx);
 
-        tcp_proxy_task(
+        TcpProxy::new(
             server_addr,
             UpstreamTcpTarget::direct(server_addr),
             from_rx,
@@ -1668,6 +1701,7 @@ mod tests {
             None,
             proxy_connect,
         )
+        .run()
         .await
         .unwrap();
 
@@ -1697,7 +1731,7 @@ mod tests {
             .unwrap();
         drop(from_tx);
 
-        tcp_proxy_task(
+        TcpProxy::new(
             addr,
             UpstreamTcpTarget::direct(addr),
             from_rx,
@@ -1708,6 +1742,7 @@ mod tests {
             None,
             proxy_connect,
         )
+        .run()
         .await
         .unwrap();
 
@@ -1767,7 +1802,7 @@ mod tests {
             .unwrap();
         drop(from_tx);
 
-        tcp_proxy_task(
+        TcpProxy::new(
             addr,
             UpstreamTcpTarget::direct(addr),
             from_rx,
@@ -1778,6 +1813,7 @@ mod tests {
             None,
             proxy_connect,
         )
+        .run()
         .await
         .unwrap();
 
@@ -1867,7 +1903,7 @@ mod tests {
             .unwrap();
         drop(from_tx);
 
-        tcp_proxy_task(
+        TcpProxy::new(
             addr,
             UpstreamTcpTarget::direct(addr),
             from_rx,
@@ -1878,6 +1914,7 @@ mod tests {
             None,
             proxy_connect,
         )
+        .run()
         .await
         .unwrap();
 

@@ -31,8 +31,8 @@ use crate::icmp::relay::IcmpRelay;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::ports::PortPublisher;
 use crate::secrets::handle::SecretsHandle;
-use crate::tcp::{connection::ConnectionTracker, proxy, upstream::UpstreamTcpTarget};
-use crate::tls::{proxy as tls_proxy, state::TlsState};
+use crate::tcp::{connection::ConnectionTracker, proxy::TcpProxy, upstream::UpstreamTcpTarget};
+use crate::tls::{proxy::TlsProxy, state::TlsState};
 use crate::udp::fragments::{
     Ipv4UdpFragmentReassembler, Ipv6UdpFragmentReassembler, ReassembledUdpDatagram,
     is_ipv4_udp_fragment, is_ipv6_fragment, is_ipv6_udp_fragment,
@@ -523,16 +523,18 @@ pub fn smoltcp_poll_loop(
             {
                 // TLS-intercepted port — spawn TLS MITM proxy.
                 let connect_target = resolve_tcp_host_target(conn.dst, config.gateway);
-                tls_proxy::spawn_tls_proxy(
-                    &tokio_handle,
-                    conn.dst,
-                    connect_target,
-                    conn.from_smoltcp,
-                    conn.to_smoltcp,
-                    shared.clone(),
-                    tls_state.clone(),
-                    network_policy.clone(),
-                    conn.proxy_connect,
+                std::mem::drop(
+                    TlsProxy::new(
+                        conn.dst,
+                        connect_target,
+                        conn.from_smoltcp,
+                        conn.to_smoltcp,
+                        shared.clone(),
+                        tls_state.clone(),
+                        network_policy.clone(),
+                        conn.proxy_connect,
+                    )
+                    .spawn(&tokio_handle),
                 );
                 continue;
             }
@@ -588,19 +590,21 @@ pub fn smoltcp_poll_loop(
             }
             // Plain TCP proxy.
             let connect_target = resolve_tcp_host_target(conn.dst, config.gateway);
-            proxy::spawn_tcp_proxy_with_target(
-                &tokio_handle,
-                conn.dst,
-                connect_target,
-                conn.from_smoltcp,
-                conn.to_smoltcp,
-                shared.clone(),
-                network_policy.clone(),
-                // Load the current snapshot per connection so live secret
-                // updates apply to traffic the guest starts afterwards.
-                secrets.load(),
-                tls_state.clone(),
-                conn.proxy_connect,
+            std::mem::drop(
+                TcpProxy::new(
+                    conn.dst,
+                    connect_target,
+                    conn.from_smoltcp,
+                    conn.to_smoltcp,
+                    shared.clone(),
+                    network_policy.clone(),
+                    // Load the current snapshot per connection so live secret
+                    // updates apply to traffic the guest starts afterwards.
+                    secrets.load(),
+                    tls_state.clone(),
+                    conn.proxy_connect,
+                )
+                .spawn(&tokio_handle),
             );
         }
 
