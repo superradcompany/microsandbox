@@ -1,14 +1,14 @@
-//! Secret injection configuration types.
+//! Secret substitution configuration types.
 //!
 //! The data types ([`SecretsConfig`], [`SecretEntry`], [`HostPattern`],
-//! [`SecretInjection`], [`ViolationAction`]) and their validation live in the
+//! [`SecretSubstitution`], [`SecretViolationAction`]) and their validation live in the
 //! shared `microsandbox-types` crate so the cloud control plane, the SDKs, and
 //! this engine all speak one contract. This module re-exports them and adds the
 //! engine-internal query helpers used by the proxy.
 
 pub use microsandbox_types::{
-    HostPattern, MAX_SECRET_PLACEHOLDER_BYTES, SecretConfigError, SecretEntry, SecretInjection,
-    SecretSource, SecretsConfig, ViolationAction,
+    HostPattern, MAX_SECRET_PLACEHOLDER_BYTES, SecretConfigError, SecretEntry, SecretSource,
+    SecretSubstitution, SecretViolationAction, SecretsConfig,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -21,7 +21,7 @@ pub(crate) trait SecretsConfigExt {
     /// Whether any secret can be substituted over plain HTTP.
     ///
     /// True only when at least one secret has opted out of TLS identity
-    /// (`require_tls_identity == false`) and has an enabled injection scope.
+    /// (`require_tls_identity == false`) and has an enabled substitution scope.
     fn has_plain_http_candidates(&self) -> bool;
 
     /// Whether any secret restricts itself to specific hosts (a non-`Any` host
@@ -36,17 +36,20 @@ impl SecretsConfigExt for SecretsConfig {
     fn has_plain_http_candidates(&self) -> bool {
         self.secrets.iter().any(|secret| {
             !secret.require_tls_identity
-                && (secret.injection.headers
-                    || secret.injection.basic_auth
-                    || secret.injection.query_params
-                    || secret.injection.body)
+                && (secret.substitution.headers
+                    || secret.substitution.query
+                    || secret.substitution.body)
         })
     }
 
     fn has_host_scoped_secrets(&self) -> bool {
-        self.secrets
-            .iter()
-            .any(|secret| secret.allowed_hosts.iter().any(|h| *h != HostPattern::Any))
+        self.secrets.iter().any(|secret| {
+            secret.allowed_hosts.iter().any(|h| *h != HostPattern::Any)
+                || secret
+                    .passthrough_hosts
+                    .iter()
+                    .any(|h| *h != HostPattern::Any)
+        })
     }
 }
 
@@ -65,8 +68,9 @@ mod tests {
             source: None,
             placeholder: "$MSB_API_KEY".into(),
             allowed_hosts: hosts,
-            injection: SecretInjection::default(),
-            on_violation: None,
+            substitution: SecretSubstitution::default(),
+            passthrough_hosts: Vec::new(),
+            violation_action: None,
             require_tls_identity,
         }
     }
@@ -75,13 +79,13 @@ mod tests {
     fn plain_http_candidates_require_tls_opt_out() {
         let tls_only = SecretsConfig {
             secrets: vec![secret(true, vec![HostPattern::Any])],
-            on_violation: ViolationAction::default(),
+            violation_action: SecretViolationAction::default(),
         };
         assert!(!tls_only.has_plain_http_candidates());
 
         let plain = SecretsConfig {
             secrets: vec![secret(false, vec![HostPattern::Any])],
-            on_violation: ViolationAction::default(),
+            violation_action: SecretViolationAction::default(),
         };
         assert!(plain.has_plain_http_candidates());
     }
@@ -90,7 +94,7 @@ mod tests {
     fn host_scoped_detects_non_any_pattern() {
         let any = SecretsConfig {
             secrets: vec![secret(true, vec![HostPattern::Any])],
-            on_violation: ViolationAction::default(),
+            violation_action: SecretViolationAction::default(),
         };
         assert!(!any.has_host_scoped_secrets());
 
@@ -99,7 +103,7 @@ mod tests {
                 true,
                 vec![HostPattern::Exact("api.example.com".into())],
             )],
-            on_violation: ViolationAction::default(),
+            violation_action: SecretViolationAction::default(),
         };
         assert!(scoped.has_host_scoped_secrets());
     }

@@ -51,8 +51,8 @@ impl HostHttp {
                 }
                 if trimmed.to_ascii_lowercase().starts_with("authorization:") {
                     auth = trimmed
-                        .splitn(2, ':')
-                        .nth(1)
+                        .split_once(':')
+                        .map(|(_, value)| value)
                         .unwrap_or_default()
                         .trim()
                         .to_string();
@@ -159,7 +159,7 @@ async fn plain_http_substitutes_secret_in_authorization_header() {
 }
 
 #[msb_test]
-async fn plain_http_does_not_substitute_secret_without_opt_in() {
+async fn plain_http_blocks_placeholder_without_substitution_or_passthrough_opt_in() {
     let mut server = HostHttp::start().await.expect("http fixture");
     let port = server.port();
     let name = "plain-http-secret-no-opt-in";
@@ -185,14 +185,58 @@ async fn plain_http_does_not_substitute_secret_without_opt_in() {
     .await
     .expect("wget");
 
+    // The proxy may establish the upstream TCP connection before it sees the
+    // request headers, but it must stop relaying as soon as it detects the
+    // protected placeholder. An accepted connection with an empty header is
+    // therefore still a blocked request, not a passthrough.
+    let auth = server
+        .try_received_auth(std::time::Duration::from_secs(5))
+        .await
+        .unwrap_or_default();
+    assert!(
+        !auth.contains(PLACEHOLDER) && !auth.contains(REAL_SECRET),
+        "neither the placeholder nor the real secret may reach the server without explicit substitution or passthrough permission; got: {auth:?}"
+    );
+
+    teardown(sb, name).await;
+}
+
+#[msb_test]
+async fn plain_http_forwards_placeholder_with_explicit_passthrough() {
+    let mut server = HostHttp::start().await.expect("http fixture");
+    let port = server.port();
+    let name = "plain-http-secret-explicit-passthrough";
+
+    let sb = Sandbox::builder(name)
+        .image(ALPINE_IMAGE)
+        .cpus(1)
+        .memory(256)
+        .replace()
+        .secret(|s| {
+            s.env("API_KEY")
+                .value(REAL_SECRET)
+                .allow_any_host_dangerous(true)
+                .allow_passthrough_for("host.microsandbox.internal")
+        })
+        .network(|n| n.policy(NetworkPolicy::allow_all()))
+        .create()
+        .await
+        .expect("create sandbox");
+
+    sb.shell(format!(
+        r#"wget -O - --header="Authorization: Bearer $API_KEY" http://host.microsandbox.internal:{port}/ 2>/dev/null"#
+    ))
+    .await
+    .expect("wget");
+
     let auth = server.received_auth().await.expect("read fixture auth");
     assert!(
         auth.contains(PLACEHOLDER),
-        "placeholder must be forwarded unchanged when require_tls_identity is not opted out; got: {auth:?}"
+        "explicit passthrough permission must forward the placeholder unchanged; got: {auth:?}"
     );
     assert!(
         !auth.contains(REAL_SECRET),
-        "real secret must not reach server over plain HTTP without require_tls_identity(false); got: {auth:?}"
+        "passthrough permission must not substitute the real secret; got: {auth:?}"
     );
 
     teardown(sb, name).await;
@@ -219,7 +263,7 @@ async fn plain_http_invalid_host_blocks_host_bound_secret() {
         .secret(|s| {
             s.env("API_KEY")
                 .value(REAL_SECRET)
-                .allow_host("host.microsandbox.internal")
+                .allow("host.microsandbox.internal")
                 .require_tls_identity(false)
         })
         .network(|n| n.policy(NetworkPolicy::allow_all()))

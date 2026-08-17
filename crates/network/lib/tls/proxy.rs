@@ -20,7 +20,7 @@ use super::state::TlsState;
 use crate::conn::ProxyConnectState;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::proxy::connect_upstream;
-use crate::secrets::config::ViolationAction;
+use crate::secrets::config::SecretViolationAction;
 use crate::secrets::handler::SecretsHandler;
 use crate::shared::SharedState;
 
@@ -475,7 +475,7 @@ async fn forward_plaintext(
             }
             Err(action) => {
                 // Violation: placeholder going to disallowed host. Drop the connection.
-                if matches!(action, ViolationAction::BlockAndTerminate) {
+                if matches!(action, SecretViolationAction::BlockAndTerminate) {
                     shared.trigger_termination();
                 }
                 return Err(io::Error::new(

@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 
 use crate::conn::ProxyConnectState;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
-use crate::secrets::config::{SecretsConfig, SecretsConfigExt, ViolationAction};
+use crate::secrets::config::{SecretViolationAction, SecretsConfig, SecretsConfigExt};
 use crate::secrets::handler::{
     SecretsHandler, first_line_is_not_http_request, looks_like_http_request_prefix,
 };
@@ -329,7 +329,7 @@ async fn tcp_proxy_task(
                 Ok(cow) => cow,
                 Err(action) => {
                     tracing::warn!(dst = %connect_dst, violation = ?action, "secret violation in first flight");
-                    if matches!(action, ViolationAction::BlockAndTerminate) {
+                    if matches!(action, SecretViolationAction::BlockAndTerminate) {
                         shared.trigger_termination();
                     }
                     return Ok(());
@@ -393,7 +393,7 @@ async fn tcp_proxy_task(
                                 Ok(cow) => cow,
                                 Err(action) => {
                                     tracing::warn!(dst = %connect_dst, violation = ?action, "secret violation");
-                                    if matches!(action, ViolationAction::BlockAndTerminate) {
+                                    if matches!(action, SecretViolationAction::BlockAndTerminate) {
                                         shared.trigger_termination();
                                     }
                                     break;
@@ -482,7 +482,7 @@ async fn handle_connect_tunnel(
         Ok(headers) => headers,
         Err(action) => {
             tracing::warn!(dst = %proxy_dst, violation = ?action, "secret violation in CONNECT headers");
-            if matches!(action, ViolationAction::BlockAndTerminate) {
+            if matches!(action, SecretViolationAction::BlockAndTerminate) {
                 shared.trigger_termination();
             }
             return Ok(());
@@ -720,7 +720,7 @@ async fn read_connect_response_headers(stream: &mut TcpStream) -> io::Result<(Ve
 fn sanitize_connect_headers<'a>(
     header_bytes: &'a [u8],
     secrets: &SecretsConfig,
-) -> Result<Cow<'a, [u8]>, ViolationAction> {
+) -> Result<Cow<'a, [u8]>, SecretViolationAction> {
     if secrets.secrets.is_empty() {
         return Ok(Cow::Borrowed(header_bytes));
     }
@@ -1521,7 +1521,7 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
 
-    use crate::secrets::config::{HostPattern, SecretEntry, SecretInjection, SecretsConfig};
+    use crate::secrets::config::{HostPattern, SecretEntry, SecretSubstitution, SecretsConfig};
 
     fn make_plain_http_secret(placeholder: &str, value: &str, require_tls: bool) -> SecretsConfig {
         SecretsConfig {
@@ -1531,13 +1531,13 @@ mod tests {
                 source: None,
                 placeholder: placeholder.into(),
                 allowed_hosts: vec![HostPattern::Any],
-                injection: SecretInjection {
+                substitution: SecretSubstitution {
                     headers: true,
-                    basic_auth: false,
-                    query_params: false,
+                    query: false,
                     body: false,
                 },
-                on_violation: None,
+                passthrough_hosts: Vec::new(),
+                violation_action: None,
                 require_tls_identity: require_tls,
             }],
             ..Default::default()
@@ -1552,8 +1552,9 @@ mod tests {
                 source: None,
                 placeholder: placeholder.into(),
                 allowed_hosts: vec![HostPattern::Exact(host.into())],
-                injection: SecretInjection::default(),
-                on_violation: None,
+                substitution: SecretSubstitution::default(),
+                passthrough_hosts: Vec::new(),
+                violation_action: None,
                 require_tls_identity: true,
             }],
             ..Default::default()
@@ -1567,26 +1568,26 @@ mod tests {
 
         assert_eq!(
             sanitize_connect_headers(headers, &secrets),
-            Err(ViolationAction::BlockAndLog)
+            Err(SecretViolationAction::BlockAndLog)
         );
     }
 
     #[test]
     fn sanitize_connect_headers_respects_block_and_terminate() {
         let mut secrets = make_host_bound_secret("$MSB_KEY", "real-secret-value", "example.com");
-        secrets.on_violation = ViolationAction::BlockAndTerminate;
+        secrets.violation_action = SecretViolationAction::BlockAndTerminate;
         let headers = b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\nProxy-Authorization: Bearer $MSB_KEY\r\n\r\n";
 
         assert_eq!(
             sanitize_connect_headers(headers, &secrets),
-            Err(ViolationAction::BlockAndTerminate)
+            Err(SecretViolationAction::BlockAndTerminate)
         );
     }
 
     #[test]
     fn sanitize_connect_headers_respects_explicit_passthrough() {
         let mut secrets = make_host_bound_secret("$MSB_KEY", "real-secret-value", "example.com");
-        secrets.on_violation = ViolationAction::Passthrough(vec![HostPattern::Any]);
+        secrets.secrets[0].passthrough_hosts = vec![HostPattern::Any];
         let headers = b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\nProxy-Authorization: Bearer $MSB_KEY\r\n\r\n";
 
         let sanitized = sanitize_connect_headers(headers, &secrets).unwrap();
@@ -1616,7 +1617,7 @@ mod tests {
 
         assert_eq!(
             sanitize_connect_headers(headers, &secrets),
-            Err(ViolationAction::BlockAndLog)
+            Err(SecretViolationAction::BlockAndLog)
         );
     }
 
@@ -1714,11 +1715,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plain_http_forwards_placeholder_to_allowed_host_with_split_headers() {
-        // A default (require_tls_identity = true) host-bound secret is never
-        // substituted over plain HTTP, but a request to its allowed host must
-        // have the placeholder forwarded unchanged — not blocked as a violation
-        // — even when the Host arrives in a later segment than the request line.
+    async fn plain_http_passthrough_handles_a_host_in_split_headers() {
+        // A TLS-bound secret is never substituted over plain HTTP. Explicit
+        // passthrough still permits its placeholder to cross that connection,
+        // including when Host arrives after the request line.
         let (addr, sink) = spawn_sink().await;
 
         let shared = SharedState::new(4);
@@ -1736,13 +1736,13 @@ mod tests {
                 source: None,
                 placeholder: "$MSB_KEY".into(),
                 allowed_hosts: vec![HostPattern::Exact("example.com".into())],
-                injection: SecretInjection {
+                substitution: SecretSubstitution {
                     headers: true,
-                    basic_auth: false,
-                    query_params: false,
+                    query: false,
                     body: false,
                 },
-                on_violation: None,
+                passthrough_hosts: vec![HostPattern::Exact("example.com".into())],
+                violation_action: None,
                 require_tls_identity: true,
             }],
             ..Default::default()
@@ -1785,7 +1785,7 @@ mod tests {
         );
         assert!(
             wire.contains("$MSB_KEY"),
-            "placeholder must be forwarded unchanged for a require_tls_identity secret, got: {wire:?}"
+            "placeholder must be forwarded unchanged by explicit passthrough, got: {wire:?}"
         );
         assert!(
             !wire.contains("real-secret-value"),
@@ -1821,7 +1821,8 @@ mod tests {
         let request =
             b"GET /api HTTP/1.1\r\nHost: example.com\r\nAuthorization: Bearer $MSB_KEY\r\n\r\n"
                 .to_vec();
-        let secrets = make_plain_http_secret("$MSB_KEY", "real-secret-value", true);
+        let mut secrets = make_plain_http_secret("$MSB_KEY", "real-secret-value", true);
+        secrets.secrets[0].passthrough_hosts = vec![HostPattern::Any];
 
         let wire =
             String::from_utf8_lossy(&relay_through_proxy(request, secrets, sink, addr).await)

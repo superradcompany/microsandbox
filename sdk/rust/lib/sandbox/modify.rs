@@ -11,6 +11,9 @@ use crate::db::entity::{sandbox as sandbox_entity, sandbox_label as sandbox_labe
 use crate::error::{Operation, UnsupportedReason};
 use crate::size::Mebibytes;
 
+#[cfg(feature = "net")]
+use microsandbox_types::{SecretSubstitution, SecretViolationAction};
+
 use super::{SandboxConfig, SandboxStatus};
 
 pub use microsandbox_types::modify::{
@@ -70,7 +73,7 @@ pub struct SandboxModificationBuilder {
 /// It shares the create-time [`SecretBuilder`](crate::sandbox::SecretBuilder)
 /// vocabulary: [`env`](Self::env) names the secret, [`source`](Self::source)
 /// or [`value`](Self::value) provides material (mutually exclusive),
-/// [`placeholder`](Self::placeholder) and [`allow_host`](Self::allow_host)
+/// [`placeholder`](Self::placeholder) and [`allow`](Self::allow)
 /// state the guest-visible reference and the host allow-list.
 #[derive(Default)]
 pub struct SecretPatchBuilder {
@@ -220,7 +223,7 @@ impl SandboxModificationBuilder {
     ///
     /// The spec mirrors the create-time secret vocabulary: name the secret
     /// with `.env(..)`, provide material with `.source(..)` or `.value(..)`,
-    /// and optionally set `.placeholder(..)` and `.allow_host(..)`. The
+    /// and optionally set `.placeholder(..)` and `.allow(..)`. The
     /// planner diffs the spec against the existing config to infer the
     /// change: a secret that does not exist yet is added, material on an
     /// existing secret rotates it, and host or placeholder differences
@@ -231,7 +234,7 @@ impl SandboxModificationBuilder {
     ///     .secret(|s| s
     ///         .env("API_KEY")
     ///         .source(SecretSource::Env { var: "API_KEY".into() })
-    ///         .allow_host("api.example.com"))
+    ///         .allow("api.example.com"))
     ///     .apply()
     ///     .await?;
     /// ```
@@ -442,8 +445,32 @@ impl SecretPatchBuilder {
     /// Add an allowed host pattern (`api.example.com`, `*.example.org`, or
     /// `*`). A non-empty list replaces the secret's current allow-list; an
     /// empty list leaves it unchanged.
-    pub fn allow_host(mut self, host: impl Into<String>) -> Self {
+    pub fn allow(mut self, host: impl Into<String>) -> Self {
         self.spec.allowed_hosts.push(host.into());
+        self
+    }
+
+    /// Replace the request locations where substitution is enabled.
+    pub fn substitution(mut self, value: SecretSubstitution) -> Self {
+        self.spec.substitution = Some(value);
+        self
+    }
+
+    /// Add a host allowed to receive the placeholder unchanged.
+    pub fn allow_passthrough_for(mut self, host: impl Into<String>) -> Self {
+        self.spec.passthrough_hosts.push(host.into());
+        self
+    }
+
+    /// Set the per-secret blocking action.
+    pub fn violation_action(mut self, value: SecretViolationAction) -> Self {
+        self.spec.violation_action = Some(value);
+        self
+    }
+
+    /// Set whether substitution requires verified TLS identity.
+    pub fn require_tls_identity(mut self, value: bool) -> Self {
+        self.spec.require_tls_identity = Some(value);
         self
     }
 
@@ -1024,7 +1051,7 @@ fn apply_secret_spec(
     secrets: &mut microsandbox_network::secrets::config::SecretsConfig,
     spec: &SecretModificationPatch,
 ) -> MicrosandboxResult<()> {
-    use microsandbox_network::secrets::config::{SecretEntry, SecretInjection};
+    use microsandbox_network::secrets::config::SecretEntry;
 
     let material = secret_material(spec)?;
     if let Some(entry) = secrets
@@ -1049,6 +1076,18 @@ fn apply_secret_spec(
         if !spec.allowed_hosts.is_empty() {
             entry.allowed_hosts = parse_host_patterns(&spec.allowed_hosts);
         }
+        if let Some(substitution) = &spec.substitution {
+            entry.substitution = substitution.clone();
+        }
+        if !spec.passthrough_hosts.is_empty() {
+            entry.passthrough_hosts = parse_host_patterns(&spec.passthrough_hosts);
+        }
+        if let Some(action) = &spec.violation_action {
+            entry.violation_action = Some(action.clone());
+        }
+        if let Some(required) = spec.require_tls_identity {
+            entry.require_tls_identity = required;
+        }
     } else {
         let (value, source) = match material {
             Some(SecretMaterial::Value(value)) => (value, None),
@@ -1071,9 +1110,10 @@ fn apply_secret_spec(
                 .clone()
                 .unwrap_or_else(|| microsandbox_utils::secret::default_placeholder(&spec.name)),
             allowed_hosts: parse_host_patterns(&spec.allowed_hosts),
-            injection: SecretInjection::default(),
-            on_violation: None,
-            require_tls_identity: true,
+            substitution: spec.substitution.clone().unwrap_or_default(),
+            passthrough_hosts: parse_host_patterns(&spec.passthrough_hosts),
+            violation_action: spec.violation_action.clone(),
+            require_tls_identity: spec.require_tls_identity.unwrap_or(true),
         });
     }
     Ok(())
@@ -3388,6 +3428,7 @@ mod tests {
                 value: zeroize::Zeroizing::new(String::new()),
                 placeholder: None,
                 allowed_hosts: vec!["api.example.com".to_string()],
+                ..SecretModificationPatch::default()
             }],
             ..SandboxModificationPatch::default()
         };
@@ -3424,7 +3465,7 @@ mod tests {
 
     #[cfg(feature = "net")]
     fn config_with_secret(name: &str, value: &str) -> SandboxConfig {
-        use microsandbox_network::secrets::config::{HostPattern, SecretEntry, SecretInjection};
+        use microsandbox_network::secrets::config::{HostPattern, SecretEntry, SecretSubstitution};
 
         let mut config = config(2, 1024);
         let mut network = config.local_network_config().unwrap();
@@ -3434,8 +3475,9 @@ mod tests {
             source: None,
             placeholder: format!("$MSB_{name}"),
             allowed_hosts: vec![HostPattern::Exact("api.example.com".into())],
-            injection: SecretInjection::default(),
-            on_violation: None,
+            substitution: SecretSubstitution::default(),
+            passthrough_hosts: Vec::new(),
+            violation_action: None,
             require_tls_identity: true,
         });
         config.set_local_network_config(network).unwrap();
@@ -4164,8 +4206,8 @@ mod tests {
                 var: "HOST_API_KEY".to_string(),
             })
             .placeholder("$REF")
-            .allow_host("api.example.com")
-            .allow_host("*.example.org")
+            .allow("api.example.com")
+            .allow("*.example.org")
             .build();
 
         assert_eq!(spec.name, "API_KEY");

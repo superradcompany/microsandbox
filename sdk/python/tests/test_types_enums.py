@@ -43,10 +43,10 @@ from microsandbox import (
     Sandbox,
     Secret,
     SecretChangeKind,
+    SecretEntry,
     SecurityProfile,
     Stdin,
     StdinMode,
-    ViolationPolicy,
     Volume,
     default_backend_kind,
     set_default_backend,
@@ -100,7 +100,12 @@ def test_native_methods_reject_raw_enum_strings() -> None:
         lambda: NetworkDestination(kind="any")._to_dict(),
         lambda: PortBinding(8000, 8000, protocol="tcp")._to_dict(),
         lambda: Rlimit(resource="cpu", soft=1, hard=1)._to_dict(),
-        lambda: ViolationPolicy(fallback="block")._to_dict(),
+        lambda: SecretEntry(
+            env_var="API_KEY",
+            value="secret",
+            allow=("example.com",),
+            violation_action="block",  # type: ignore[arg-type]
+        )._to_dict(),
     ],
 )
 def test_python_config_types_reject_raw_enum_strings(operation: Callable[[], object]) -> None:
@@ -153,7 +158,7 @@ def test_new_enum_domains_have_canonical_values() -> None:
                     {
                         "env_var": "API_KEY",
                         "value": "secret",
-                        "allow_hosts": ["example.com"],
+                        "allow": ["example.com"],
                     }
                 ]
             },
@@ -208,7 +213,7 @@ def test_native_config_boundaries_accept_concrete_types() -> None:
                 Secret.env(
                     "API_KEY",
                     value="secret",
-                    allow_hosts=("example.com",),
+                    allow=("example.com",),
                 )
             ],
         )
@@ -236,7 +241,7 @@ def test_sandbox_create_accepts_documented_container_protocols() -> None:
                 Secret.env(
                     "API_KEY",
                     value="secret",
-                    allow_hosts=("example.com",),
+                    allow=("example.com",),
                 ),
             ),
         )

@@ -1037,6 +1037,7 @@ fn secret_patch_from_spec(
         value: spec.value.unwrap_or_default().into(),
         placeholder: spec.placeholder,
         allowed_hosts: spec.allowed_hosts.unwrap_or_default(),
+        ..SecretModificationPatch::default()
     })
 }
 

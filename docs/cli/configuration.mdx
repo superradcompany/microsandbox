@@ -19,9 +19,15 @@ mounts:
 network:
   allow: ["api.openai.com"]
   ports: ["8000:8000"]
+secret_violation_action: block-and-log
 secrets:
   OPENAI_API_KEY:
     allow: ["api.openai.com"]
+    substitution:
+      headers: true
+      query: false
+      body: false
+    passthrough: ["telemetry.example.com"]
 scripts:
   start: "python app.py"
 ```
@@ -291,11 +297,16 @@ secrets:
   DATABASE_URL:
     value: "${DB_DSN}"
     allow: ["db.internal"]
-    inject: [headers]
+    substitution:
+      headers: false
+      query: false
+      body: true
+    passthrough: ["audit.internal"]
+    violation_action: block-and-terminate
     require_tls_identity: true
 ```
 
-`inject` accepts `headers`, `basic_auth`, and `query_params`; it defaults to `headers`. Declaring a secret enables TLS interception and DNS-rebind protection.
+`substitution` controls headers, query parameters, and request bodies independently; it defaults to headers only, and Basic authentication follows the header setting. Disabled locations still block the placeholder unless the destination appears in `passthrough`. `secret_violation_action` sets the sandbox-wide blocking action, while a per-secret `violation_action` overrides it. Declaring a secret enables TLS interception and DNS-rebind protection.
 
 ### Scripts
 

@@ -65,7 +65,8 @@ Common flags:
 | `--deployment-profile` | Select `single-tenant` or `multi-tenant` host-runtime isolation; managed backends may override it |
 | `--net` | Add a high-level network profile (`public`, `private`, `host`, `all`, or `none`) |
 | `--net-rule` | Add a network policy rule |
-| `--secret` | Inject a host-held secret for an allowed destination |
+| `--secret` | Configure `NAME[:OPTIONS]@HOST[,HOST...]`; options control substitution and placeholder passthrough |
+| `--secret-violation-action` | Set `block`, `block-and-log`, or `block-and-terminate` for blocked placeholders |
 | `--tmpfs` | Mount an in-memory filesystem |
 | `--copy`, `--copy-file`, `--copy-dir`, `--mkdir`, `--rm` | Patch the rootfs before boot |
 | `--conf` | Load a sparse [sandbox configuration](/cli/configuration). Repeatable |
@@ -294,7 +295,7 @@ Live resize is not necessarily instant. When an accepted resize has not fully se
 
 Env and workdir changes on a running sandbox apply to future execs only; running processes keep their current environment. The plan reports this as a warning.
 
-`--secret NAME@HOST[,HOST...]` adds or rotates a secret from the same-named host environment variable, recording a source reference; the value itself never rides in the command. The inline `NAME=VALUE@HOST` form is rejected, same as on `msb create`: shell history and process listings would leak the value, so providing a raw value is SDK-only.
+`--secret NAME[:OPTIONS]@HOST[,HOST...]` adds or rotates a secret from the same-named host environment variable, recording a source reference; the value itself never rides in the command. Options include `body`, `no-headers`, `no-query`, `no-body`, `passthrough=HOST`, and `passthrough=[HOST,...]`. Repeated passthrough options and repeated declarations for the same name are merged. The inline `NAME=VALUE@HOST` form is rejected, same as on `msb create`: shell history and process listings would leak the value, so providing a raw value is SDK-only.
 
 | Flag | Description |
 |------|-------------|
@@ -305,7 +306,8 @@ Env and workdir changes on a running sandbox apply to future execs only; running
 | `--env`, `--env-rm` | Set (`KEY=VALUE`) or remove an environment variable for future execs |
 | `--label`, `--label-rm` | Set (`KEY=VALUE`) or remove a label |
 | `--workdir` | Working directory for future execs |
-| `--secret`, `--secret-rm` | Add or rotate a secret from a host environment variable (`NAME@HOST[,HOST...]`), or remove one |
+| `--secret`, `--secret-rm` | Add or rotate a secret (`NAME[:OPTIONS]@HOST[,HOST...]`), or remove one |
+| `--secret-violation-action` | Set the sandbox-wide blocking action for placeholder violations |
 | `--dry-run` | Show the plan without applying anything |
 | `--next-start` | Save changes for the next start without mutating a running VM |
 | `--restart` | Restart if needed so restart-required changes become active now |

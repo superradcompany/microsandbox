@@ -62,7 +62,7 @@ use microsandbox::{
     snapshot::{SaveOpts, SnapshotFormat, SnapshotScope},
     volume::{Volume, VolumeBuilder, VolumeFs, VolumeHandle, VolumeKind},
 };
-use microsandbox_network::{builder::ViolationActionBuilder, secrets::config::ViolationAction};
+use microsandbox_network::secrets::config::SecretViolationAction;
 use tokio::io::AsyncWriteExt;
 use tokio::runtime::Runtime;
 use tokio_stream::StreamExt as _;
@@ -923,7 +923,7 @@ struct NetworkOpts {
     rate_limiter: Option<NetworkRateLimiterOpts>,
     /// Sandbox-wide secret violation action: "block", "block-and-log",
     /// "block-and-terminate".
-    on_secret_violation: Option<String>,
+    secret_violation_action: Option<String>,
     /// Trust the host's extra CA certificates inside the guest.
     trust_host_cas: Option<bool>,
 }
@@ -933,16 +933,23 @@ struct SecretOpts {
     env_var: String,
     value: String,
     #[serde(default)]
-    allow_hosts: Vec<String>,
+    allow: Vec<String>,
     #[serde(default)]
-    allow_host_patterns: Vec<String>,
+    passthrough: Vec<String>,
     placeholder: Option<String>,
-    require_tls: Option<bool>,
-    /// Per-network (sandbox-wide) violation action override. The Node/Python
-    /// SDKs accept this as a per-secret field on `SecretEntry`; it ends up
-    /// applied at the network builder level. We honour it the same way:
-    /// the last seen non-null value wins.
-    on_violation: Option<String>,
+    require_tls_identity: Option<bool>,
+    #[serde(default)]
+    substitution: SecretSubstitutionOpts,
+    violation_action: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct SecretSubstitutionOpts {
+    headers: Option<bool>,
+    #[serde(default)]
+    query: bool,
+    #[serde(default)]
+    body: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -1407,11 +1414,9 @@ fn apply_network(
     }
 
     // Sandbox-wide secret violation action.
-    if let Some(ref violation) = net.on_secret_violation {
+    if let Some(ref violation) = net.secret_violation_action {
         let action = parse_violation_action(violation)?;
-        builder = builder.network(move |n| {
-            n.on_secret_violation(move |_| ViolationActionBuilder::from_action(action))
-        });
+        builder = builder.network(move |n| n.secret_violation_action(action));
     }
 
     // Ports nested inside network object.
@@ -1593,11 +1598,13 @@ fn parse_port_string(s: &str) -> Result<microsandbox_network::policy::PortRange,
     }
 }
 
-fn parse_violation_action(s: &str) -> Result<ViolationAction, FfiError> {
+fn parse_violation_action(s: &str) -> Result<SecretViolationAction, FfiError> {
     match s {
-        "block" => Ok(ViolationAction::Block),
-        "block-and-log" | "block_and_log" => Ok(ViolationAction::BlockAndLog),
-        "block-and-terminate" | "block_and_terminate" => Ok(ViolationAction::BlockAndTerminate),
+        "block" => Ok(SecretViolationAction::Block),
+        "block-and-log" | "block_and_log" => Ok(SecretViolationAction::BlockAndLog),
+        "block-and-terminate" | "block_and_terminate" => {
+            Ok(SecretViolationAction::BlockAndTerminate)
+        }
         other => Err(FfiError::invalid_argument(format!(
             "unknown violation action: {other}"
         ))),
@@ -1748,28 +1755,31 @@ fn apply_secret(
 ) -> Result<microsandbox::sandbox::SandboxBuilder, FfiError> {
     let env_var = s.env_var.clone();
     let value = s.value.clone();
-    let allow_hosts = s.allow_hosts.clone();
-    let allow_host_patterns = s.allow_host_patterns.clone();
-    if allow_hosts.is_empty() && allow_host_patterns.is_empty() {
+    let allow = s.allow.clone();
+    if allow.is_empty() {
         return Err(FfiError::invalid_argument(
             "secret requires at least one allowed host or allowed host pattern",
         ));
     }
     let placeholder = s.placeholder.clone();
-    let require_tls = s.require_tls;
-    let on_violation = s
-        .on_violation
+    let require_tls = s.require_tls_identity;
+    let violation_action = s
+        .violation_action
         .as_ref()
         .map(|violation| parse_violation_action(violation))
         .transpose()?;
 
     builder = builder.secret(move |mut sb| {
         sb = sb.env(&env_var).value(value.clone());
-        for h in &allow_hosts {
-            sb = sb.allow_host(h);
+        for host in &allow {
+            sb = if host == "*" {
+                sb.allow_any_host_dangerous(true)
+            } else {
+                sb.allow(host)
+            };
         }
-        for p in &allow_host_patterns {
-            sb = sb.allow_host_pattern(p);
+        for host in &s.passthrough {
+            sb = sb.allow_passthrough_for(host);
         }
         if let Some(ref ph) = placeholder {
             sb = sb.placeholder(ph);
@@ -1777,8 +1787,14 @@ fn apply_secret(
         if let Some(req) = require_tls {
             sb = sb.require_tls_identity(req);
         }
-        if let Some(action) = on_violation {
-            sb = sb.on_violation(move |_| ViolationActionBuilder::from_action(action));
+        if let Some(headers) = s.substitution.headers {
+            sb = sb.substitute_in_headers(headers);
+        }
+        sb = sb
+            .substitute_in_query(s.substitution.query)
+            .substitute_in_body(s.substitution.body);
+        if let Some(action) = violation_action {
+            sb = sb.violation_action(action);
         }
         sb
     });

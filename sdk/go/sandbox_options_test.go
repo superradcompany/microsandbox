@@ -648,9 +648,9 @@ func TestFFIWireShape_Secrets(t *testing.T) {
 	got := marshalCreateOptions(t,
 		WithImage("alpine"),
 		WithSecrets(Secret.Env("OPENAI_API_KEY", "sk-xxx", SecretEnvOptions{
-			AllowHosts:        []string{"api.openai.com"},
-			AllowHostPatterns: []string{"*.openai.com"},
-			OnViolation:       ViolationActionBlockAndTerminate,
+			Allow:           []string{"api.openai.com", "*.openai.com"},
+			Passthrough:     []string{"api.anthropic.com"},
+			ViolationAction: ViolationActionBlockAndTerminate,
 		})),
 	)
 	secs := mustField(t, got, "secrets").([]any)
@@ -661,12 +661,12 @@ func TestFFIWireShape_Secrets(t *testing.T) {
 	if s["env_var"] != "OPENAI_API_KEY" || s["value"] != "sk-xxx" {
 		t.Fatalf("secret = %v", s)
 	}
-	if s["on_violation"] != "block-and-terminate" {
-		t.Fatalf("on_violation = %v", s["on_violation"])
+	if s["violation_action"] != "block-and-terminate" {
+		t.Fatalf("violation_action = %v", s["violation_action"])
 	}
-	hosts := s["allow_hosts"].([]any)
-	if len(hosts) != 1 || hosts[0] != "api.openai.com" {
-		t.Fatalf("allow_hosts = %v", hosts)
+	hosts := s["allow"].([]any)
+	if len(hosts) != 2 || hosts[0] != "api.openai.com" || hosts[1] != "*.openai.com" {
+		t.Fatalf("allow = %v", hosts)
 	}
 }
 
@@ -899,7 +899,7 @@ func TestFFIWireShape_KitchenSinkDoesNotPanic(t *testing.T) {
 			TLS: &TLSConfig{Bypass: []string{"*.googleapis.com"}},
 		}),
 		WithSecrets(Secret.Env("K", "v", SecretEnvOptions{
-			AllowHosts: []string{"h"},
+			Allow: []string{"h"},
 		})),
 		WithPatches(Patch.Mkdir("/app", PatchOptions{})),
 		WithPorts(map[uint16]uint16{8080: 80}),

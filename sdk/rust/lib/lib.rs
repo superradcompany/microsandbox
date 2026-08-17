@@ -73,7 +73,7 @@ pub use sandbox::{
 pub use sandbox::{
     DnsConfigPatch, HostPattern, Nameserver, NetworkAction, NetworkConfigPatch, NetworkPolicy,
     NetworkPolicyConfigPatch, NetworkProfile, NetworkRule, PublishedPort, SecretConfigPatch,
-    SecretEntryConfigPatch, SecretInjection, TlsConfigPatch,
+    SecretEntryConfigPatch, SecretSubstitution, SecretViolationAction, TlsConfigPatch,
 };
 pub use snapshot::{
     CheckpointSnapshotState, FileSnapshotState, SaveOpts, Snapshot, SnapshotBuilder,

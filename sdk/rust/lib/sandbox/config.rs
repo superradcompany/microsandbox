@@ -1728,7 +1728,7 @@ mod tests {
     #[cfg(feature = "net")]
     fn config_with_source_secret(source_var: Option<&str>) -> SandboxConfig {
         use microsandbox_network::secrets::config::{
-            HostPattern, SecretEntry, SecretInjection, SecretSource,
+            HostPattern, SecretEntry, SecretSource, SecretSubstitution,
         };
 
         let mut config = SandboxConfig::default();
@@ -1746,8 +1746,9 @@ mod tests {
             }),
             placeholder: "$MSB_API_KEY".into(),
             allowed_hosts: vec![HostPattern::Exact("api.example.com".into())],
-            injection: SecretInjection::default(),
-            on_violation: None,
+            substitution: SecretSubstitution::default(),
+            passthrough_hosts: Vec::new(),
+            violation_action: None,
             require_tls_identity: true,
         });
         config.set_local_network_config(network).unwrap();
