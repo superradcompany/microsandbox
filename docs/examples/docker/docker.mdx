@@ -24,7 +24,7 @@ For production hosts, [installing microsandbox directly](/getting-started/quicks
 | <Icon icon="apple" size={16} /> **macOS** | Docker Desktop with nested virtualization and `/dev/kvm` exposed through its Linux VM. |
 | <Icon icon="windows" size={16} /> **Windows** | Docker Desktop with nested virtualization and `/dev/kvm` exposed through its WSL 2 or Hyper-V Linux environment. |
 
-The image supports `linux/amd64` and `linux/arm64`. Architecture compatibility does not imply virtualization support; `/dev/kvm` is the authoritative check. Docker Desktop runs Linux containers in a VM on [macOS](https://docs.docker.com/desktop/features/vmm/) and through a Linux environment such as [WSL 2 on Windows](https://docs.docker.com/desktop/features/wsl/). Installing Docker Desktop does not guarantee that nested KVM reaches containers, so use the preflight below. If it fails, use the [native installation](/getting-started/quickstart) or microsandbox cloud.
+The image supports `linux/amd64` and `linux/arm64`. Architecture compatibility does not imply virtualization support; `/dev/kvm` is the authoritative check. Docker Desktop runs Linux containers through an intermediate Linux environment on macOS and Windows. Installing Docker Desktop does not guarantee that nested KVM reaches containers, so run the preflight below before continuing.
 
 ## Verify the Docker host
 
@@ -45,7 +45,14 @@ A compatible Docker host reports both checks as successful:
 ✓ KVM access   read/write
 ```
 
-If Docker rejects the device mapping or `msb doctor` reports that `/dev/kvm` is missing, nested virtualization is not reaching the container. Adding `--privileged` cannot create a KVM device that the Docker host does not have.
+If Docker rejects the device mapping or `msb doctor` reports that `/dev/kvm` is missing, fix the layer that runs Docker before continuing:
+
+- **Linux Docker Engine:** Follow the [`/dev/kvm` setup and permission checks](/troubleshooting/linux#missing-devkvm).
+- **Docker Desktop on macOS:** Check the [selected virtual machine manager](https://docs.docker.com/desktop/features/vmm/) and its nested-virtualization support.
+- **Docker Desktop on Windows:** Check the [WSL 2 or Hyper-V backend requirements](https://docs.docker.com/desktop/setup/install/windows-install/).
+- **Docker Desktop inside another VM or VDI:** Follow Docker's [nested-virtualization guide](https://docs.docker.com/desktop/setup/vm-vdi/).
+
+After changing the Docker or hypervisor configuration, rerun the preflight. Adding `--privileged` cannot create a KVM device that the Docker host does not have.
 
 ## Open an interactive sandbox
 
