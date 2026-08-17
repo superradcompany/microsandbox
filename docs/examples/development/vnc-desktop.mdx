@@ -24,7 +24,11 @@ msb run -d --name vnc-desktop --replace \
     Xtigervnc :1 -SecurityTypes None -geometry 1280x800 -depth 24 >/tmp/xvnc.log 2>&1 &
     vnc_pid=$!
     sleep 2
-    kill -0 "$vnc_pid"
+    if ! kill -0 "$vnc_pid"; then
+      cat /tmp/xvnc.log >&2
+      exit 1
+    fi
+    cat /tmp/xvnc.log
     DISPLAY=:1 openbox >/tmp/openbox.log 2>&1 &
     DISPLAY=:1 xterm -geometry 100x30+40+40 >/tmp/xterm.log 2>&1 &
     exec websockify --web=/usr/share/novnc 0.0.0.0:6080 localhost:5901' \
@@ -32,13 +36,17 @@ msb run -d --name vnc-desktop --replace \
   debian:bookworm-slim
 ```
 
-Detached mode returns as soon as the VM starts, before the desktop packages are ready. The first install downloads approximately 128 MB, uses roughly 560 MB of guest disk, and can take a few minutes. Wait for noVNC to respond:
+Detached mode returns as soon as the VM starts, before the desktop packages are ready. The first install downloads approximately 128 MB, uses roughly 560 MB of guest disk, and can take a few minutes. Follow the installation, TigerVNC startup, and websockify output:
 
 ```sh
-until curl -fsS http://127.0.0.1:6080/vnc.html >/dev/null; do
-  echo "Waiting for noVNC..."
-  sleep 5
-done
+msb logs -f vnc-desktop
+```
+
+When websockify reports that it is listening, press `Ctrl-C` to stop following the log. The sandbox keeps running. Confirm that noVNC is serving HTTP:
+
+```sh
+curl -fsS http://127.0.0.1:6080/vnc.html >/dev/null &&
+  echo "noVNC is ready"
 ```
 
 Open [http://127.0.0.1:6080/vnc.html?autoconnect=1&resize=scale](http://127.0.0.1:6080/vnc.html?autoconnect=1&resize=scale). You should see an Openbox desktop with an xterm window.
