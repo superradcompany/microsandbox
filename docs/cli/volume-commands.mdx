@@ -24,13 +24,15 @@ msb volume create docker-data --kind disk --size 10G
 | `--size` | Disk capacity for `--kind disk` (e.g. `100M`, `1G`, `10G`) |
 | `-q`, `--quiet` | Suppress output (only print the volume name) |
 
-## msb volume ls
+## msb volumes
 
 ```bash
-msb volume ls
-msb volume ls --format json
-msb volume ls -q               # Names only
+msb volumes
+msb volumes --format json
+msb volumes -q               # Names only
 ```
+
+Expanded form: `msb volume ls`. The shorter plural alias `msb vols` is also available.
 
 | Flag | Description |
 |------|-------------|

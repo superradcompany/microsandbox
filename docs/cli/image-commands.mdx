@@ -149,7 +149,7 @@ Manage registry authentication.
 msb registry login ghcr.io --username octocat
 printf '%s\n' "$GHCR_TOKEN" | msb registry login ghcr.io --username octocat --password-stdin
 msb registry logout ghcr.io
-msb registry ls
+msb registries                 # Also: msb regs, msb registry ls
 ```
 
 | Subcommand | Description |

@@ -164,6 +164,18 @@ enum Commands {
     #[command(hide = true)]
     Images(image::ImageListArgs),
 
+    /// List named volumes (alias for `volume ls`).
+    #[command(alias = "vols", hide = true)]
+    Volumes(volume::VolumeListArgs),
+
+    /// List disk snapshots (alias for `snapshot ls`).
+    #[command(alias = "snaps", hide = true)]
+    Snapshots(snapshot::SnapshotListArgs),
+
+    /// List configured registries (alias for `registry ls`).
+    #[command(alias = "regs", hide = true)]
+    Registries(registry::RegistryListArgs),
+
     /// Remove a cached image (alias for `image rm`).
     #[command(hide = true)]
     Rmi(image::ImageRemoveArgs),
@@ -676,6 +688,24 @@ fn run_async_command_anyhow(
             #[cfg(feature = "ssh")]
             Commands::Ssh(args) => microsandbox_cli::commands::ssh::run(args).await,
             Commands::Images(args) => image::run_list(args).await,
+            Commands::Volumes(args) => {
+                volume::run(volume::VolumeArgs {
+                    command: volume::VolumeCommands::List(args),
+                })
+                .await
+            }
+            Commands::Snapshots(args) => {
+                snapshot::run(snapshot::SnapshotArgs {
+                    command: snapshot::SnapshotCommands::List(args),
+                })
+                .await
+            }
+            Commands::Registries(args) => {
+                registry::run(registry::RegistryArgs {
+                    command: registry::RegistryCommands::List(args),
+                })
+                .await
+            }
             Commands::Rmi(args) => image::run_remove(args).await,
             Commands::Inspect(args) => inspect::run(args).await,
             Commands::Volume(args) => volume::run(args).await,
@@ -778,6 +808,27 @@ mod command_tests {
         assert!(shows_backend_notice(&exec.command));
         assert!(!shows_backend_notice(&context.command));
         assert!(matches!(context_alias.command, Commands::Context(_)));
+    }
+
+    #[test]
+    fn plural_resource_commands_route_to_list_actions() {
+        let cli = Cli::try_parse_from(["msb", "images"]).unwrap();
+        assert!(matches!(cli.command, Commands::Images(_)));
+
+        for command in ["volumes", "vols"] {
+            let cli = Cli::try_parse_from(["msb", command]).unwrap();
+            assert!(matches!(cli.command, Commands::Volumes(_)));
+        }
+
+        for command in ["snapshots", "snaps"] {
+            let cli = Cli::try_parse_from(["msb", command]).unwrap();
+            assert!(matches!(cli.command, Commands::Snapshots(_)));
+        }
+
+        for command in ["registries", "regs"] {
+            let cli = Cli::try_parse_from(["msb", command]).unwrap();
+            assert!(matches!(cli.command, Commands::Registries(_)));
+        }
     }
 
     #[cfg(feature = "ssh")]
