@@ -22,9 +22,18 @@ msb run --name eslint-base --replace \
   --workdir /workspace \
   node:22.23.2-bookworm-slim -- sh -lc \
     'npm ci --ignore-scripts && chown -R node:node /workspace && install -d -o node -g node /workspace/src'
+```
 
+Capture the prepared dependency tree:
+
+```sh
 msb snapshot create eslint-runtime \
   --from eslint-base --integrity --force
+```
+
+Verify the snapshot before using it:
+
+```sh
 msb snapshot verify eslint-runtime
 ```
 
@@ -55,6 +64,11 @@ Mount only the files the linter needs. For example, add a read-only `tsconfig.js
 
 ```sh
 msb rm -f eslint-base eslint-check
+```
+
+Remove the reusable snapshot:
+
+```sh
 msb snapshot remove eslint-runtime
 ```
 

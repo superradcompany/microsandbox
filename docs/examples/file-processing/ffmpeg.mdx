@@ -25,8 +25,17 @@ msb run --name ffmpeg-base --replace \
     chmod 0700 /out &&
     ffmpeg -version | head -1
   '
+```
 
+Capture the prepared toolchain:
+
+```sh
 msb snapshot create ffmpeg-tools --from ffmpeg-base --integrity --force
+```
+
+Verify the snapshot before using it:
+
+```sh
 msb snapshot verify ffmpeg-tools
 ```
 
@@ -39,10 +48,23 @@ msb run -d --name ffmpeg-worker --replace \
   --user media --security restricted \
   --no-net --max-duration 10m \
   -- sh -lc 'exec sleep 10m'
+```
 
+Copy the input into the running worker:
+
+```sh
 msb cp ./input.mov ffmpeg-worker:/input/input.mov
-msb exec --user root ffmpeg-worker -- chmod 0444 /input/input.mov
+```
 
+Make the copied input read-only:
+
+```sh
+msb exec --user root ffmpeg-worker -- chmod 0444 /input/input.mov
+```
+
+Run the bounded transcode as the unprivileged `media` user:
+
+```sh
 msb exec --user media --timeout 9m \
   --rlimit nproc=64 --rlimit nofile=256 --rlimit fsize=1073741824 \
   ffmpeg-worker -- sh -lc '
@@ -73,7 +95,7 @@ msb exec --user media --timeout 9m \
 
 The worker boots before the input is copied because rootfs patches cannot be combined with `--from-snapshot`. The root-owned input directory prevents the unprivileged media process from replacing the copied file, while `/out` is the only workload-owned data directory. The untrusted transcode command sets its own process, file-descriptor, and per-file limits.
 
-Copy the result to the host:
+Prepare a fresh private artifact directory on the host:
 
 ```sh
 export FFMPEG_ARTIFACT_DIR="${FFMPEG_ARTIFACT_DIR:-$PWD/.ffmpeg-artifacts}"
@@ -84,8 +106,23 @@ if [ -e "$FFMPEG_ARTIFACT_DIR" ] || [ -L "$FFMPEG_ARTIFACT_DIR" ]; then
 fi
 
 mkdir -m 700 "$FFMPEG_ARTIFACT_DIR"
+```
+
+Stop the worker before exporting its output:
+
+```sh
 msb stop ffmpeg-worker
+```
+
+Copy the result to the host:
+
+```sh
 msb cp ffmpeg-worker:/out/output.mp4 "$FFMPEG_ARTIFACT_DIR/output.mp4"
+```
+
+Validate the exported file:
+
+```sh
 test ! -L "$FFMPEG_ARTIFACT_DIR/output.mp4" &&
   test -f "$FFMPEG_ARTIFACT_DIR/output.mp4" &&
   test -s "$FFMPEG_ARTIFACT_DIR/output.mp4" &&
@@ -106,8 +143,15 @@ The laboratory smoke test generated a two-second H.264 video and `ffprobe` verif
 
 ## Cleanup
 
+Remove the prepared sandbox and worker:
+
 ```sh
 msb rm -f ffmpeg-base ffmpeg-worker
+```
+
+Remove the reusable toolchain snapshot:
+
+```sh
 msb snapshot rm ffmpeg-tools
 ```
 

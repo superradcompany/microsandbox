@@ -27,6 +27,11 @@ Detached runs return before the server is ready. Wait for it, then open the prev
 
 ```sh
 until curl -fsS http://127.0.0.1:4173/ >/dev/null 2>&1; do sleep 1; done
+```
+
+Open the preview after the readiness check succeeds:
+
+```sh
 open http://127.0.0.1:4173
 ```
 

@@ -72,8 +72,15 @@ git apply --check ./goose.patch
 
 ## Cleanup
 
+Remove the sandbox:
+
 ```sh
 msb rm -f goose-demo
+```
+
+Remove persisted Goose data only when you no longer need it:
+
+```sh
 msb volume rm goose-data
 ```
 

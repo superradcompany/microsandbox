@@ -42,11 +42,15 @@ The tested image reports Hermes Agent `v0.19.0 (2026.7.20)`.
 
 <Tooltip tip="Publishing the gateway API to a port on the computer running the client is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Generate an API key, then recreate Hermes as a detached, supervised gateway:
+Generate an API key in the host shell:
 
 ```sh
 export HERMES_API_KEY="$(openssl rand -hex 32)"
+```
 
+Recreate Hermes as a detached, supervised gateway:
+
+```sh
 msb run -d --name hermes-gateway --replace \
   --cpus 2 --memory 4G --root-disk 2G \
   -p 127.0.0.1:8642:8642 \
@@ -70,9 +74,21 @@ msb logs -f hermes-gateway
 
 ## Cleanup
 
+Remove the setup, version-check, and gateway sandboxes:
+
 ```sh
 msb rm -f hermes-setup hermes-version hermes-gateway
+```
+
+Remove persisted Hermes state only when you no longer need it:
+
+```sh
 msb volume rm hermes-data
+```
+
+Clear the API key from the host shell:
+
+```sh
 unset HERMES_API_KEY
 ```
 

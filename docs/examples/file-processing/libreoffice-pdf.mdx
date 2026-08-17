@@ -27,8 +27,17 @@ msb run --name office-base --replace \
     libreoffice --version &&
     pdftoppm -v
   '
+```
 
+Capture the prepared toolchain:
+
+```sh
 msb snapshot create office-tools --from office-base --integrity --force
+```
+
+Verify the snapshot before using it:
+
+```sh
 msb snapshot verify office-tools
 ```
 
@@ -45,10 +54,23 @@ msb run -d --name document-worker --replace \
   --user converter --security restricted \
   --no-net --max-duration 2m \
   -- sh -lc 'exec sleep 2m'
+```
 
+Copy the document into the running worker:
+
+```sh
 msb cp ./input.docx document-worker:/input/input.docx
-msb exec --user root document-worker -- chmod 0444 /input/input.docx
+```
 
+Make the copied input read-only:
+
+```sh
+msb exec --user root document-worker -- chmod 0444 /input/input.docx
+```
+
+Run the bounded conversion as the unprivileged `converter` user:
+
+```sh
 msb exec --user converter --timeout 90s \
   --rlimit nproc=128 --rlimit nofile=512 --rlimit fsize=536870912 \
   document-worker -- sh -lc '
@@ -75,7 +97,7 @@ msb exec --user converter --timeout 90s \
 
 The worker boots before the document is copied because rootfs patches cannot be combined with `--from-snapshot`. The root-owned input directory prevents the unprivileged converter from replacing the document, while its home directory and `/out` hold the only workload-writable state. The untrusted conversion command sets its own process, file-descriptor, and per-file limits.
 
-Copy out only the generated artifacts:
+Prepare a fresh private artifact directory on the host:
 
 ```sh
 export OFFICE_ARTIFACT_DIR="${OFFICE_ARTIFACT_DIR:-$PWD/.office-artifacts}"
@@ -86,10 +108,24 @@ if [ -e "$OFFICE_ARTIFACT_DIR" ] || [ -L "$OFFICE_ARTIFACT_DIR" ]; then
 fi
 
 mkdir -m 700 "$OFFICE_ARTIFACT_DIR"
+```
+
+Stop the worker before exporting its output:
+
+```sh
 msb stop document-worker
+```
+
+Copy out only the generated artifacts:
+
+```sh
 msb cp document-worker:/out/input.pdf "$OFFICE_ARTIFACT_DIR/output.pdf"
 msb cp document-worker:/out/preview.png "$OFFICE_ARTIFACT_DIR/preview.png"
+```
 
+Validate both exported files:
+
+```sh
 for artifact in output.pdf preview.png; do
   test ! -L "$OFFICE_ARTIFACT_DIR/$artifact" &&
     test -f "$OFFICE_ARTIFACT_DIR/$artifact" &&
@@ -106,8 +142,15 @@ Stopping the worker prevents artifact races. The fresh private directory and che
 
 ## Cleanup
 
+Remove the prepared sandbox and worker:
+
 ```sh
 msb rm -f office-base document-worker
+```
+
+Remove the reusable toolchain snapshot:
+
+```sh
 msb snapshot rm office-tools
 ```
 

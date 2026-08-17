@@ -10,9 +10,15 @@ This example starts Redis 7 with password authentication, a persistent named vol
 
 ## Start Redis
 
+Set a temporary password in the host shell:
+
 ```sh
 export REDIS_PASSWORD="$(openssl rand -hex 24)"
+```
 
+Start Redis:
+
+```sh
 msb run -d --name redis-demo --replace \
   --cpus 1 --memory 512M --root-disk 1G \
   -p 127.0.0.1:56379:6379 \
@@ -65,5 +71,10 @@ Delete all persisted Redis data:
 
 ```sh
 msb volume rm redis-data
+```
+
+Clear the password from the host shell:
+
+```sh
 unset REDIS_PASSWORD
 ```

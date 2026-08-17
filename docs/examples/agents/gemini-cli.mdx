@@ -70,8 +70,15 @@ git apply --check ./gemini.patch
 
 ## Cleanup
 
+Remove the sandbox:
+
 ```sh
 msb rm -f gemini-demo
+```
+
+Remove persisted Gemini data only when you no longer need it:
+
+```sh
 msb volume rm gemini-data
 ```
 

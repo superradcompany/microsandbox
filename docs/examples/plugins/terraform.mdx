@@ -38,11 +38,24 @@ msb run --name terraform-base --replace \
   --entrypoint sh \
   hashicorp/terraform:1.13.5 -- -lc \
     'terraform init -backend=false -input=false && chown -R 65534:65534 /workspace'
+```
 
+Copy the generated dependency lock file to the host:
+
+```sh
 msb cp terraform-base:/workspace/.terraform.lock.hcl ./.terraform.lock.hcl
+```
 
+Capture the downloaded provider:
+
+```sh
 msb snapshot create terraform-runtime \
   --from terraform-base --integrity --force
+```
+
+Verify the snapshot before using it:
+
+```sh
 msb snapshot verify terraform-runtime
 ```
 
@@ -71,6 +84,11 @@ The provider loads and creates a plan, but it cannot contact any remote API. Pro
 
 ```sh
 msb rm -f terraform-base terraform-vet
+```
+
+Remove the reusable snapshot:
+
+```sh
 msb snapshot remove terraform-runtime
 ```
 

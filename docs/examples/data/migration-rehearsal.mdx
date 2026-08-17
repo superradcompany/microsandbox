@@ -15,9 +15,15 @@ Use a snapshot to rehearse a schema migration against a realistic PostgreSQL dat
 
 ## Create an initialized baseline
 
+Set a temporary password in the host shell:
+
 ```sh
 export POSTGRES_PASSWORD="$(openssl rand -hex 24)"
+```
 
+Start the baseline database:
+
+```sh
 msb run -d --name migration-base --replace \
   --cpus 1 --memory 1G --root-disk 4G \
   -e POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
@@ -32,6 +38,11 @@ Wait for initialization, then stop the database cleanly:
 msb exec migration-base -- sh -lc '
   until pg_isready -h 127.0.0.1 -d examples -U postgres; do sleep 1; done
 '
+```
+
+Stop it cleanly before taking the snapshot:
+
+```sh
 msb stop migration-base
 ```
 
@@ -41,6 +52,11 @@ msb stop migration-base
 msb snapshot create postgres-before-migration \
   --from migration-base \
   --integrity
+```
+
+Verify the captured snapshot:
+
+```sh
 msb snapshot verify postgres-before-migration
 ```
 
@@ -56,7 +72,11 @@ msb run -d --name migration-test --replace \
   -e POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
   -e POSTGRES_DB=examples \
   -e DOCKER_PG_LLVM_DEPS=
+```
 
+Wait for the restored database to become ready:
+
+```sh
 msb exec migration-test -- sh -lc '
   until pg_isready -h 127.0.0.1 -d examples -U postgres; do sleep 1; done
 '
@@ -80,7 +100,11 @@ Stop the mutated database and boot another clean copy of the baseline under the 
 
 ```sh
 msb stop migration-test
+```
 
+Replace it with a fresh sandbox from the snapshot:
+
+```sh
 msb run -d --name migration-test --replace \
   --from-snapshot postgres-before-migration \
   --memory 1G \
@@ -88,7 +112,11 @@ msb run -d --name migration-test --replace \
   -e POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
   -e POSTGRES_DB=examples \
   -e DOCKER_PG_LLVM_DEPS=
+```
 
+Wait for the clean database to become ready:
+
+```sh
 msb exec migration-test -- sh -lc '
   until pg_isready -h 127.0.0.1 -d examples -U postgres; do sleep 1; done
 '
@@ -106,8 +134,20 @@ The result should be `rolled-back`.
 
 ## Cleanup
 
+Remove the database sandboxes:
+
 ```sh
 msb rm -f migration-base migration-test
+```
+
+Remove the snapshot:
+
+```sh
 msb snapshot rm postgres-before-migration
+```
+
+Clear the password from the host shell:
+
+```sh
 unset POSTGRES_PASSWORD
 ```

@@ -32,7 +32,11 @@ Pull the image, then run `msb doctor` inside it before starting a sandbox:
 
 ```bash
 docker pull ghcr.io/superradcompany/microsandbox:latest
+```
 
+Run the preflight inside the container:
+
+```bash
 docker run --rm --device /dev/kvm \
   ghcr.io/superradcompany/microsandbox:latest \
   doctor
@@ -95,7 +99,11 @@ Without a volume, the outer container owns the microsandbox image cache and data
 
 ```bash
 docker volume create microsandbox-data
+```
 
+Mount it at microsandbox's data directory:
+
+```bash
 docker run --rm -it \
   --device /dev/kvm \
   --volume microsandbox-data:/root/.microsandbox \

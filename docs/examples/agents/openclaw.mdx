@@ -36,11 +36,15 @@ The pinned package reports `OpenClaw 2026.7.1-2`.
 
 <Tooltip tip="Publishing the gateway to a port on the computer running the client is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Generate a token in the host shell and start a fresh gateway sandbox using the persisted state:
+Generate a token in the host shell:
 
 ```sh
 export OPENCLAW_GATEWAY_TOKEN="$(openssl rand -hex 32)"
+```
 
+Start a fresh gateway sandbox using the persisted state:
+
+```sh
 msb run -d --name openclaw-gateway --replace \
   --cpus 2 --memory 2G --root-disk 4G \
   -p 127.0.0.1:18789:18789 \
@@ -66,9 +70,21 @@ msb logs -f openclaw-gateway
 
 ## Cleanup
 
+Remove the setup and gateway sandboxes:
+
 ```sh
 msb rm -f openclaw-setup openclaw-gateway
+```
+
+Remove persisted OpenClaw state only when you no longer need it:
+
+```sh
 msb volume rm openclaw-data
+```
+
+Clear the token from the host shell:
+
+```sh
 unset OPENCLAW_GATEWAY_TOKEN
 ```
 

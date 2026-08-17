@@ -71,5 +71,10 @@ Remove the database volume only when you no longer need its contents:
 
 ```sh
 msb volume rm postgres-data
+```
+
+Clear the password from the host shell:
+
+```sh
 unset POSTGRES_PASSWORD
 ```

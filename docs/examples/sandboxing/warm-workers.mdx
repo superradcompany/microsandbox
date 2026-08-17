@@ -34,7 +34,11 @@ msb snapshot create coding-agent-base \
   --from agent-base \
   --integrity \
   --force
+```
 
+Verify the captured snapshot before using it:
+
+```sh
 msb snapshot verify coding-agent-base
 ```
 
@@ -54,12 +58,20 @@ msb run -d --name coding-worker-1 --replace \
   --max-duration 1h \
   --workdir /workspace/project \
   -- sh -lc 'exec sleep 1h'
+```
 
+Stream the committed project tree into the worker:
+
+```sh
 git -C ./my-project archive --format=tar HEAD | \
   msb exec --stream --user node \
     --rlimit nproc=256 --rlimit nofile=1024 --rlimit fsize=268435456 \
     coding-worker-1 -- tar -x -C /workspace/project
+```
 
+Create a credential-free Git baseline and verify the worker boundary:
+
+```sh
 msb exec --user node --workdir /workspace/project \
   --rlimit nproc=256 --rlimit nofile=1024 --rlimit fsize=268435456 \
   coding-worker-1 -- sh -lc '
@@ -73,7 +85,11 @@ msb exec --user node --workdir /workspace/project \
   test -z "$(git remote)"
   opencode --version
 '
+```
 
+Start OpenCode after those checks pass:
+
+```sh
 msb exec -t --user node --workdir /workspace/project \
   --rlimit nproc=256 --rlimit nofile=1024 --rlimit fsize=268435456 \
   coding-worker-1 -- opencode
@@ -108,8 +124,15 @@ msb snapshot create coding-agent-base --from agent-base --integrity --force
 
 ## Cleanup
 
+Remove the prepared sandbox and workers:
+
 ```sh
 msb rm -f agent-base coding-worker-1 coding-worker-2
+```
+
+Remove the reusable snapshot only when you no longer need it:
+
+```sh
 msb snapshot rm coding-agent-base
 ```
 

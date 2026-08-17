@@ -40,8 +40,15 @@ Open `http://127.0.0.1:8888/lab?token=$JUPYTER_TOKEN` in your browser, substitut
 
 ## Verify the service
 
+Check the authenticated API from the host:
+
 ```sh
 curl -sS "http://127.0.0.1:8888/api?token=$JUPYTER_TOKEN" | head
+```
+
+Then inspect the recent server output:
+
+```sh
 msb logs --tail 20 jupyter-demo
 ```
 
@@ -53,9 +60,21 @@ The logs show Jupyter Server listening on guest port 8888. Notebooks saved under
 
 ## Cleanup
 
+Remove the sandbox:
+
 ```sh
 msb rm -f jupyter-demo
+```
+
+Remove persisted notebooks only when you no longer need them:
+
+```sh
 msb volume rm jupyter-notebooks
+```
+
+Clear the token from the host shell:
+
+```sh
 unset JUPYTER_TOKEN
 ```
 

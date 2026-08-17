@@ -47,9 +47,18 @@ msb run --name scrapy-base --replace \
   --memory 1G --root-disk 3G --max-duration 5m \
   python:3.13.14-alpine3.23 -- sh -lc \
     'mkdir -p /work && pip install --no-cache-dir scrapy==2.17.0'
+```
 
+Capture the prepared environment:
+
+```sh
 msb snapshot create scrapy-runtime \
   --from scrapy-base --integrity --force
+```
+
+Verify the snapshot before using it:
+
+```sh
 msb snapshot verify scrapy-runtime
 ```
 
@@ -78,6 +87,11 @@ The crawler and the microVM policy both constrain navigation to the target host.
 ```sh
 mkdir -p .artifacts
 msb cp scrapy-books:/var/tmp/books.json .artifacts/books.json
+```
+
+Inspect the number of collected records:
+
+```sh
 jq 'length' .artifacts/books.json
 ```
 
@@ -87,6 +101,11 @@ Treat scraped values as untrusted data when rendering HTML, building shell comma
 
 ```sh
 msb rm -f scrapy-base scrapy-books
+```
+
+Remove the reusable snapshot:
+
+```sh
 msb snapshot remove scrapy-runtime
 ```
 

@@ -79,8 +79,15 @@ git apply --check ./opencode.patch
 
 ## Cleanup
 
+Remove the sandbox:
+
 ```sh
 msb rm -f opencode-demo
+```
+
+Remove persisted configuration and data only when you no longer need them:
+
+```sh
 msb volume rm opencode-config opencode-data
 ```
 
