@@ -77,6 +77,8 @@ Sandbox configuration is never auto-discovered. Pass every root or scoped config
 
 ### Flat OCI rootfs
 
+<Tooltip tip="Flat OCI roots use host-local image artifacts and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 A flat root disk merges the OCI layers into one reusable ext4 base, clones that base into the sandbox as `rootfs.raw`, grows the private clone to the requested capacity, and attaches it directly through virtio-blk. The guest mounts ext4 as its root without OverlayFS.
 
 ```bash
@@ -86,15 +88,19 @@ msb run --root-disk flat:8G,clone=auto python -- python -c "print('hello')"
 
 The pre-pull is optional: creating the first flat sandbox lazily materializes a missing flat artifact from the normal OCI layer cache. `clone=auto` prefers a native copy-on-write clone and falls back to a sparse copy, `clone=copy` forces an independent portable copy, and `clone=reflink` requires native clone support and fails clearly if the destination filesystem cannot provide it. Native cloning uses `FICLONE` on Linux, `clonefile` on macOS, and block cloning on Windows volumes that advertise block refcounting, including supported ReFS and Dev Drive configurations.
 
-Flat v1 supports local OCI sandboxes with ext4. Rootfs patches, snapshots, and cloud execution are rejected instead of silently changing their semantics. The normal layered root remains the built-in default, and `sandbox_defaults.oci.root_disk` can select flat for future local sandboxes without repeating the flag.
+Flat v1 uses ext4 and rejects rootfs patches and snapshots instead of silently changing their semantics. The normal layered root remains the built-in default, and `sandbox_defaults.oci.root_disk` can select flat for future sandboxes without repeating the flag.
 
-Published ports bind to `127.0.0.1` by default. Use an explicit bind address only when the sandbox service should be reachable beyond localhost. On Windows, opening a published port can trigger a Windows Defender Firewall prompt for `msb.exe`. Keep the bind on `127.0.0.1` for local-only development, and allow private/public network access only when you intentionally bind beyond loopback.
+### Published ports
 
-On microsandbox cloud, publishing host ports is not available; expose the service through a cloud-reachable endpoint instead.
+<Tooltip tip="Published ports bind on the computer running the local backend and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+Published ports bind to `127.0.0.1` by default. Use an explicit bind address only when the sandbox service should be reachable beyond localhost. On Windows, opening a published port can trigger a Windows Defender Firewall prompt for `msb.exe`. For development, keep the bind on `127.0.0.1`, and allow private/public network access only when you intentionally bind beyond loopback.
 
 ### Network profiles
 
-`--net` is repeatable and accepts comma-separated profiles. `public`, `private`, and `host` compose; DNS through the sandbox gateway is enabled automatically and only once. `all` and `none` are terminal policies and cannot be mixed with the three positive profiles. On microsandbox cloud, the `host` profile does not refer to the machine running the CLI; use a network endpoint reachable from the cloud worker.
+<Tooltip tip="On microsandbox cloud, the host profile targets endpoints reachable from the cloud worker, not the machine running the CLI."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+`--net` is repeatable and accepts comma-separated profiles. `public`, `private`, and `host` compose; DNS through the sandbox gateway is enabled automatically and only once. `all` and `none` are terminal policies and cannot be mixed with the three positive profiles.
 
 ```bash
 msb run alpine --net public
@@ -165,8 +171,6 @@ msb create --replace-with-timeout 30s python --name worker  # Give the old one 3
 msb create --replace-with-timeout 0 python --name worker    # SIGKILL immediately
 ```
 
-On microsandbox cloud, `--replace` and `--replace-with-timeout` are not available; remove the existing sandbox first, then create the replacement.
-
 ## msb start
 
 Resume a stopped sandbox. Name one or more sandboxes, or select them by label.
@@ -202,8 +206,6 @@ writes that the workload hasn't `fsync`'d at that point may be lost, with the
 same durability semantics as a sudden power loss on a physical
 machine. For durable writes, workloads should `fsync` important data
 themselves.
-
-On cloud, `--force` is not yet available; stops are always graceful.
 
 | Flag | Description |
 |------|-------------|
@@ -286,7 +288,7 @@ msb modify api --max-memory 16G --next-start # raise the ceiling on next start
 msb modify api --cpus 8 --dry-run           # show the plan, apply nothing
 ```
 
-`max_cpus` and `max_memory` are boot-time reservations chosen at create time. They default to the effective `cpus`/`memory`, which leaves no headroom; live growth beyond them is impossible without a restart. Reserving capacity costs almost nothing (parked vCPUs and lazily-backed memory), so set them above the initial values at create time if the sandbox may need to grow. On microsandbox cloud, these ceilings are not carried; recreate the sandbox to resize beyond its initial values.
+`max_cpus` and `max_memory` are boot-time reservations chosen at create time. They default to the effective `cpus`/`memory`, which leaves no headroom; live growth beyond them is impossible without a restart. Reserving capacity costs almost nothing (parked vCPUs and lazily-backed memory), so set them above the initial values at create time if the sandbox may need to grow.
 
 Live resize is not necessarily instant. When an accepted resize has not fully settled, the apply output includes a convergence table with a `STATE` column. The values are: `applied` (requested, actual, and enforced values match), `converging` (the guest is still onlining CPUs or plugging memory), `guest-refused` (the guest would not cooperate; the host enforces the new limit anyway), and `failed`. JSON output (`--format json`) carries the same states in `resize_status`.
 

@@ -593,6 +593,8 @@ Limit the maximum number of concurrent network connections from the sandbox.
 
 #### <span className="msb-recv">network.</span><span className="msb-hn">rateLimiter()</span>
 
+<Tooltip tip="Host-side network rate limiting is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```typescript
 rateLimiter(configure: (r: NetworkRateLimiterBuilder) => NetworkRateLimiterBuilder): this
 ```
@@ -610,7 +612,7 @@ rateLimiter(configure: (r: NetworkRateLimiterBuilder) => NetworkRateLimiterBuild
 
 </Accordion>
 
-Configure local network rate limits. Egress and ingress are independently optional; an omitted direction is unlimited. The limit applies on the next sandbox start. Cloud network configuration does not expose rate limits.
+Configure network rate limits. Egress and ingress are independently optional; an omitted direction is unlimited. The limit applies on the next sandbox start.
 
 #### <span className="msb-recv">network.</span><span className="msb-hn">ipv4Pool()</span>
 
@@ -2047,6 +2049,8 @@ TLS interception configuration.
 ### NetworkRateLimiterConfig
 
 <p className="msb-backref">Used by <a href="#networkconfig">NetworkConfig.rateLimiter</a></p>
+
+<Tooltip tip="Host-side network rate limiting is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 interface NetworkRateLimiterConfig {

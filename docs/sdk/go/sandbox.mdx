@@ -1551,19 +1551,23 @@ Set credentials for pulling from a private OCI registry. See [`RegistryAuth`](#r
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithRegistryInsecure()</span>
 
+<Tooltip tip="Plain-HTTP registry pulls are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```go
 func WithRegistryInsecure() SandboxOption
 ```
 
-Use plain HTTP for the registry instead of HTTPS, for local or self-hosted registries served without TLS such as `localhost:5050/my-app:latest`. The cloud backend rejects this override.
+Use plain HTTP for the registry instead of HTTPS, for local or self-hosted registries served without TLS such as `localhost:5050/my-app:latest`.
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithRegistryCACerts()</span>
+
+<Tooltip tip="Custom registry CA certificates are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func WithRegistryCACerts(pem []byte) SandboxOption
 ```
 
-Trust additional PEM-encoded CA certificates when pulling, for registries served with a private certificate authority. Called repeatedly, the bundles accumulate. The cloud backend rejects this override.
+Trust additional PEM-encoded CA certificates when pulling, for registries served with a private certificate authority. Called repeatedly, the bundles accumulate.
 
 <p className="msb-label">Parameters</p>
 
@@ -1576,11 +1580,13 @@ Trust additional PEM-encoded CA certificates when pulling, for registries served
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithRegistryCACertsPath()</span>
 
+<Tooltip tip="Custom registry CA certificates are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```go
 func WithRegistryCACertsPath(path string) SandboxOption
 ```
 
-Like [`WithRegistryCACerts`](#withregistrycacerts) but reads the PEM bundle from a file. The file is read when [`CreateSandbox`](#m-createsandbox) runs, which fails if it is unreadable. Called repeatedly, the bundles accumulate. The cloud backend rejects this override.
+Like [`WithRegistryCACerts`](#withregistrycacerts) but reads the PEM bundle from a file. The file is read when [`CreateSandbox`](#m-createsandbox) runs, which fails if it is unreadable. Called repeatedly, the bundles accumulate.
 
 <p className="msb-label">Parameters</p>
 

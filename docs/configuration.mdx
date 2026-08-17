@@ -126,7 +126,7 @@ Set `deployment_profile` when the local host must enforce one deployment policy 
 
 `single-tenant` preserves the network configuration requested by each sandbox. `multi-tenant` applies the host-runtime isolation floor for shared infrastructure. The configured value is authoritative on create and restart, so a per-sandbox CLI or SDK option cannot weaken or replace it. A programmatic `LocalBackendBuilder::deployment_profile()` override takes precedence over the file. When the field is absent or `null`, each sandbox selects its own profile and defaults to `single-tenant`.
 
-The parser also accepts the internal wire spellings `single_tenant` and `multi_tenant` for compatibility, but the kebab-case values above are canonical in this human-edited file. Managed cloud backends ignore this local setting because the hosting platform chooses their effective deployment profile.
+The parser also accepts the internal wire spellings `single_tenant` and `multi_tenant` for compatibility, but the kebab-case values above are canonical in this human-edited file.
 
 ## `database`
 
@@ -160,7 +160,7 @@ On Windows, the default `home` is `%USERPROFILE%\.microsandbox`. JSON strings ca
 
 ### Rust SDK path helpers
 
-Rust callers can inspect the active local config and resolve runtime paths with the same precedence used by sandbox startup. `microsandbox::config::config()` uses the active default backend and returns `Unsupported` when that backend is cloud.
+Rust callers can inspect the active config and resolve runtime paths with the same precedence used by sandbox startup:
 
 ```rust
 let cfg = microsandbox::config::config()?;
@@ -188,7 +188,7 @@ let msb = cfg.resolve_msb_path()?;
 
 <Tooltip tip="These defaults are resolved by the local runtime; microsandbox cloud keeps its service-side defaults."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Defaults applied to local sandboxes unless overridden per-sandbox. Cloud backends retain their service-side default policy.
+Defaults applied to sandboxes unless overridden per-sandbox.
 
 Explicit CLI or SDK options win over `config.json`, and `config.json` wins over built-in defaults. Microsandbox resolves the effective values once when it creates a local sandbox and persists that resolved sandbox configuration; changing the global file affects future creations, not existing sandboxes.
 

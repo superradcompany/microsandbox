@@ -642,7 +642,7 @@ sb.remove_persisted().await?;
 
 </Accordion>
 
-Delete this stopped sandbox's local persisted state. This is the receiver-based form to use when you still hold the `Sandbox` instance; it is local-only and has exactly the same local deletion scope as [`Sandbox::remove(name)`](#remove). It does **not** perform additional cleanup. See [Remove](/sandboxes/lifecycle#remove) for what is deleted and which external resources are preserved.
+Delete this stopped sandbox's persisted state. This receiver-based form is useful when you still hold the `Sandbox` instance; it has exactly the same deletion scope as [`Sandbox::remove(name)`](#remove). It does **not** perform additional cleanup. See [Remove](/sandboxes/lifecycle#remove) for what is deleted and which external resources are preserved.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">request_stop()</span>
 

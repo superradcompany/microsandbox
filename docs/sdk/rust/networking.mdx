@@ -863,6 +863,8 @@ Limit the maximum number of concurrent network connections from the sandbox. Def
 
 #### <span className="msb-recv">network.</span><span className="msb-hn">rate_limiter()</span>
 
+<Tooltip tip="Host-side network rate limiting is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```rust
 fn rate_limiter(self, f: impl FnOnce(NetworkRateLimiterBuilder) -> NetworkRateLimiterBuilder) -> Self
 ```
@@ -883,7 +885,7 @@ use microsandbox::size::SizeExt;
 
 </Accordion>
 
-Configure local network rate limits. Egress and ingress are independently optional; an omitted direction is unlimited. The limit applies on the next sandbox start. Cloud network configuration does not expose rate limits.
+Configure network rate limits. Egress and ingress are independently optional; an omitted direction is unlimited. The limit applies on the next sandbox start.
 
 #### <span className="msb-recv">network.</span><span className="msb-hn">ipv4_pool()</span>
 
@@ -1542,7 +1544,9 @@ Per-sandbox guest interface overrides. Every field is optional; an omitted field
 
 <p className="msb-backref">Built by <a href="#networkratelimiterbuilder">NetworkRateLimiterBuilder</a> · used by <a href="#rate_limiter">rate_limiter()</a></p>
 
-Local network rate limits grouped by direction. An omitted direction is unlimited.
+<Tooltip tip="Host-side network rate limiting is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+Network rate limits grouped by direction. An omitted direction is unlimited.
 
 | Field | Type | Description |
 |-------|------|-------------|

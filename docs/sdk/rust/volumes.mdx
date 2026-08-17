@@ -268,7 +268,7 @@ println!("{}", vol.path()?.display());
 
 </Accordion>
 
-The host-side directory where this volume's data is stored (local backend only). Errors with `Unsupported` for cloud volumes, whose bytes live in the org's object storage rather than on the caller's host.
+The host-side directory where this volume's data is stored.
 
 <p className="msb-label">Returns</p>
 
@@ -372,7 +372,7 @@ Which backend variant this volume is bound to: `Local` or `Cloud`.
 fn local(&self) -> Option<&VolumeLocalState>
 ```
 
-Local-only volume state. Returns `Some` for local-backed volumes, `None` for cloud-backed ones.
+Returns `Some` for local-backed volumes and `None` otherwise.
 
 <p className="msb-label">Returns</p>
 
@@ -391,7 +391,7 @@ Local-only volume state. Returns `Some` for local-backed volumes, `None` for clo
 fn cloud(&self) -> Option<&VolumeCloudState>
 ```
 
-Cloud-only volume state. Returns `Some` for cloud-backed volumes, `None` for local-backed ones.
+Returns `Some` for cloud-backed volumes and `None` otherwise.
 
 <p className="msb-label">Returns</p>
 
@@ -645,7 +645,7 @@ Which backend variant this handle is bound to: `Local` or `Cloud`.
 fn local(&self) -> Option<&VolumeHandleLocalState>
 ```
 
-Local-only handle state. Returns `Some` for local-backed handles, `None` for cloud-backed ones.
+Returns `Some` for local-backed handles and `None` otherwise.
 
 <p className="msb-label">Returns</p>
 
@@ -664,7 +664,7 @@ Local-only handle state. Returns `Some` for local-backed handles, `None` for clo
 fn cloud(&self) -> Option<&VolumeHandleCloudState>
 ```
 
-Cloud-only handle state. Returns `Some` for cloud-backed handles, `None` for local-backed ones.
+Returns `Some` for cloud-backed handles and `None` otherwise.
 
 <p className="msb-label">Returns</p>
 
