@@ -5,6 +5,8 @@
 //! channel pair (connected to the smoltcp socket in the poll loop) and the
 //! real server.
 
+pub(crate) mod upstream;
+
 use std::borrow::Cow;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
@@ -16,6 +18,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
+use self::upstream::UpstreamTcpTarget;
 use crate::conn::ProxyConnectState;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::secrets::config::{SecretsConfig, SecretsConfigExt, ViolationAction};
@@ -115,31 +118,10 @@ impl ConnectTarget {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Dial `dst` and update proxy state; wakes the poll thread on failure.
-pub(crate) async fn connect_upstream(
-    dst: SocketAddr,
-    proxy_connect: &ProxyConnectState,
-    shared: &SharedState,
-) -> io::Result<TcpStream> {
-    match TcpStream::connect(dst).await {
-        Ok(s) => {
-            proxy_connect.mark_connected();
-            Ok(s)
-        }
-        Err(e) => {
-            proxy_connect.mark_upstream_connect_failed();
-            shared.proxy_wake.wake();
-            Err(e)
-        }
-    }
-}
-
 /// Spawn a TCP proxy task for a newly established connection.
 ///
-/// `guest_dst` is what the guest dialed — the address policy rules
-/// match against. `connect_dst` is the host-side address tokio actually
-/// dials; for host-alias connections it's loopback (gateway rewritten).
-/// For everything else the two are identical.
+/// `guest_dst` is what the guest dialed — the address policy rules match
+/// against. `connect_dst` is the host-side address tokio actually dials.
 ///
 /// `proxy_connect` is updated before the task exits so the connection
 /// tracker can decide between FIN (clean close) and RST (upstream
@@ -157,10 +139,38 @@ pub fn spawn_tcp_proxy(
     tls_state: Option<Arc<TlsState>>,
     proxy_connect: Arc<ProxyConnectState>,
 ) {
+    spawn_tcp_proxy_with_target(
+        handle,
+        guest_dst,
+        UpstreamTcpTarget::direct(connect_dst),
+        from_smoltcp,
+        to_smoltcp,
+        shared,
+        network_policy,
+        secrets,
+        tls_state,
+        proxy_connect,
+    );
+}
+
+/// Spawn a TCP proxy with an optional alternate host-loopback destination.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_tcp_proxy_with_target(
+    handle: &tokio::runtime::Handle,
+    guest_dst: SocketAddr,
+    connect_target: UpstreamTcpTarget,
+    from_smoltcp: mpsc::Receiver<Bytes>,
+    to_smoltcp: mpsc::Sender<Bytes>,
+    shared: Arc<SharedState>,
+    network_policy: Arc<NetworkPolicy>,
+    secrets: Arc<SecretsConfig>,
+    tls_state: Option<Arc<TlsState>>,
+    proxy_connect: Arc<ProxyConnectState>,
+) {
     handle.spawn(async move {
         if let Err(e) = tcp_proxy_task(
             guest_dst,
-            connect_dst,
+            connect_target,
             from_smoltcp,
             to_smoltcp,
             shared,
@@ -171,7 +181,7 @@ pub fn spawn_tcp_proxy(
         )
         .await
         {
-            tracing::debug!(dst = %connect_dst, error = %e, "TCP proxy task ended");
+            tracing::debug!(dst = %connect_target.primary(), error = %e, "TCP proxy task ended");
         }
     });
 }
@@ -181,7 +191,7 @@ pub fn spawn_tcp_proxy(
 #[allow(clippy::too_many_arguments)]
 async fn tcp_proxy_task(
     guest_dst: SocketAddr,
-    connect_dst: SocketAddr,
+    connect_target: UpstreamTcpTarget,
     mut from_smoltcp: mpsc::Receiver<Bytes>,
     to_smoltcp: mpsc::Sender<Bytes>,
     shared: Arc<SharedState>,
@@ -242,7 +252,7 @@ async fn tcp_proxy_task(
         if could_be_connect_request(&initial_buf) {
             return handle_connect_tunnel(
                 guest_dst,
-                connect_dst,
+                connect_target,
                 initial_buf,
                 from_smoltcp,
                 to_smoltcp,
@@ -260,7 +270,8 @@ async fn tcp_proxy_task(
     // server-first protocol (SSH, SMTP, a database) sends nothing until it has
     // seen the server's banner; with the socket already open we can relay that
     // banner while we wait, instead of burning the peek budget pre-connect.
-    let stream = connect_upstream(connect_dst, &proxy_connect, &shared).await?;
+    let stream = connect_target.connect(&proxy_connect, &shared).await?;
+    let connect_dst = stream.peer_addr().unwrap_or(connect_target.primary());
     let (mut server_rx, mut server_tx) = stream.into_split();
 
     // Finish classifying the first flight (TLS vs plain HTTP) and, for
@@ -297,7 +308,7 @@ async fn tcp_proxy_task(
             .map_err(|_| io::Error::other("failed to reunite proxy stream halves"))?;
         return handle_connect_tunnel(
             guest_dst,
-            connect_dst,
+            connect_target,
             initial_buf,
             from_smoltcp,
             to_smoltcp,
@@ -374,7 +385,7 @@ async fn tcp_proxy_task(
                                 .map_err(|_| io::Error::other("failed to reunite proxy stream halves"))?;
                             return handle_connect_tunnel(
                                 guest_dst,
-                                connect_dst,
+                                connect_target,
                                 bytes.to_vec(),
                                 from_smoltcp,
                                 to_smoltcp,
@@ -457,12 +468,12 @@ async fn tcp_proxy_task(
 /// Forward an HTTP CONNECT tunnel: dial the proxy, splice the handshake,
 /// then hand the established stream to `tls_proxy_task` for TLS MITM.
 ///
-/// `guest_dst` is what the guest dialed; `proxy_dst` is the rewritten
-/// loopback address the gateway actually connects to.
+/// `guest_dst` is what the guest dialed; `proxy_target` contains the rewritten
+/// loopback address the gateway actually connects to and its optional fallback.
 #[allow(clippy::too_many_arguments)]
 async fn handle_connect_tunnel(
     guest_dst: SocketAddr,
-    proxy_dst: SocketAddr,
+    proxy_target: UpstreamTcpTarget,
     initial_buf: Vec<u8>,
     mut from_smoltcp: mpsc::Receiver<Bytes>,
     to_smoltcp: mpsc::Sender<Bytes>,
@@ -472,6 +483,7 @@ async fn handle_connect_tunnel(
     proxy_connect: Arc<ProxyConnectState>,
     preconnected_proxy: Option<TcpStream>,
 ) -> io::Result<()> {
+    let proxy_dst = proxy_target.primary();
     let connect_req =
         parse_connect_request(buffer_connect_request(initial_buf, &mut from_smoltcp).await?)?;
 
@@ -492,14 +504,7 @@ async fn handle_connect_tunnel(
     // Dial the proxy and forward the CONNECT request so it opens the tunnel.
     let mut proxy_stream = match preconnected_proxy {
         Some(stream) => stream,
-        None => match TcpStream::connect(proxy_dst).await {
-            Ok(s) => s,
-            Err(e) => {
-                proxy_connect.mark_upstream_connect_failed();
-                shared.proxy_wake.wake();
-                return Err(e);
-            }
-        },
+        None => proxy_target.connect(&proxy_connect, &shared).await?,
     };
 
     if !connect_req.target.is_intercepted(&tls_state) {
@@ -570,7 +575,7 @@ async fn handle_connect_tunnel(
     tls_proxy_task(
         TlsProxyContext {
             guest_dst: tls_guest_dst,
-            connect_dst: proxy_dst,
+            connect_target: proxy_target,
             shared,
             tls_state,
             network_policy,
@@ -1656,7 +1661,7 @@ mod tests {
 
         tcp_proxy_task(
             server_addr,
-            server_addr,
+            UpstreamTcpTarget::direct(server_addr),
             from_rx,
             to_tx,
             Arc::new(shared),
@@ -1696,7 +1701,7 @@ mod tests {
 
         tcp_proxy_task(
             addr,
-            addr,
+            UpstreamTcpTarget::direct(addr),
             from_rx,
             to_tx,
             Arc::new(SharedState::new(4)),
@@ -1766,7 +1771,7 @@ mod tests {
 
         tcp_proxy_task(
             addr,
-            addr,
+            UpstreamTcpTarget::direct(addr),
             from_rx,
             to_tx,
             Arc::new(shared),
@@ -1866,7 +1871,7 @@ mod tests {
 
         tcp_proxy_task(
             addr,
-            addr,
+            UpstreamTcpTarget::direct(addr),
             from_rx,
             to_tx,
             Arc::new(SharedState::new(4)),
