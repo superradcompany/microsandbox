@@ -429,7 +429,7 @@ Practical ways to put microsandbox to work:
 > ⏵ **[Agent VM by Wiren Board](https://github.com/wirenboard/agent-vm)**<br />
 > ⏵ **[Devsy](https://github.com/devsy-org/devsy)**
 
-> Built something with microsandbox? [Share it with us on Discord](https://discord.gg/T95Y3XnEAK)—we’d love to feature it here.
+> Built something with microsandbox? [Share it with us on Discord](https://discord.gg/T95Y3XnEAK). We’d love to feature it here.
 
 <br />
 
