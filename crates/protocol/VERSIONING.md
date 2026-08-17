@@ -63,6 +63,12 @@ numbers but aren't:
 
 One number, agreed once. Hold onto that.
 
+## The boot-time bootstrap exception
+
+`core.bootstrap` is a one-shot startup frame sent before the normal `core.ready` handshake. It configures a VM that is being launched with the `agentd` binary bundled by the same microsandbox build, so it is not part of reconnecting a newer SDK or CLI to an already-running older sandbox. The guest requires at least the generation that introduced the message and accepts newer generations because bootstrap fields follow the same optional-field rule as the rest of the protocol.
+
+After startup, the ordinary handshake and lower-generation negotiation described in this document apply unchanged. A stopped sandbox started after an upgrade receives the newly bundled agent and bootstrap together; an already-running sandbox never receives this frame.
+
 ## How the protocol changes without breaking older runtimes
 
 There are three kinds of change, from easiest to hardest. Almost everything we ever do is the

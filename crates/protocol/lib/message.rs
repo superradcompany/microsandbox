@@ -9,7 +9,7 @@ use crate::error::ProtocolResult;
 //--------------------------------------------------------------------------------------------------
 
 /// Current protocol version.
-pub const PROTOCOL_VERSION: u8 = 6;
+pub const PROTOCOL_VERSION: u8 = 7;
 
 /// Frame flag: this is the last message for the given correlation ID.
 ///
@@ -222,6 +222,10 @@ pub enum MessageType {
     /// Guest reports that a TCP session failed. Terminal.
     #[strum(serialize = "core.tcp.failed")]
     TcpFailed,
+
+    /// Host supplies one-shot guest bootstrap configuration.
+    #[strum(serialize = "core.bootstrap")]
+    Bootstrap,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -324,6 +328,7 @@ impl MessageType {
             Self::FsRequest | Self::FsResponse | Self::FsData => 2,
             Self::CoreError => 5,
             Self::Ping | Self::Pong | Self::Touch | Self::Touched => 6,
+            Self::Bootstrap => 7,
             Self::TcpConnect
             | Self::TcpConnected
             | Self::TcpData
@@ -396,6 +401,7 @@ mod tests {
     #[test]
     fn test_message_type_roundtrip() {
         let types = [
+            (MessageType::Bootstrap, "core.bootstrap"),
             (MessageType::Ready, "core.ready"),
             (MessageType::InitResolved, "core.init.resolved"),
             (MessageType::InitAck, "core.init.ack"),
@@ -441,6 +447,7 @@ mod tests {
     #[test]
     fn test_message_type_serde_roundtrip() {
         let types = [
+            MessageType::Bootstrap,
             MessageType::Ready,
             MessageType::InitResolved,
             MessageType::InitAck,
@@ -515,6 +522,7 @@ mod tests {
         assert_eq!(MessageType::FsRequest.flags(), FLAG_SESSION_START);
         assert_eq!(MessageType::TcpConnect.flags(), FLAG_SESSION_START);
         assert_eq!(MessageType::Ready.flags(), 0);
+        assert_eq!(MessageType::Bootstrap.flags(), 0);
         assert_eq!(MessageType::InitResolved.flags(), 0);
         assert_eq!(MessageType::InitAck.flags(), 0);
         assert_eq!(MessageType::Shutdown.flags(), FLAG_SHUTDOWN);
@@ -583,6 +591,9 @@ mod tests {
         assert!(!MessageType::Ping.is_available_at(5));
         assert!(MessageType::Ping.is_available_at(6));
         assert!(MessageType::Ping.is_available_at(PROTOCOL_VERSION));
+        // Bootstrap is internal to generation-7 host/agent boot.
+        assert!(!MessageType::Bootstrap.is_available_at(6));
+        assert!(MessageType::Bootstrap.is_available_at(PROTOCOL_VERSION));
     }
 
     #[test]
@@ -629,6 +640,8 @@ mod tests {
         ] {
             assert_eq!(mt.min_protocol_version(), 6, "{mt:?} should require gen 6");
         }
+
+        assert_eq!(MessageType::Bootstrap.min_protocol_version(), 7);
 
         // Every current type must be sendable to a current peer.
         assert!(MessageType::FsRequest.min_protocol_version() <= PROTOCOL_VERSION);

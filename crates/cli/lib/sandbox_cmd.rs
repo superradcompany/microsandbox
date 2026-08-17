@@ -247,8 +247,7 @@ pub fn run(args: SandboxArgs) -> ! {
         #[cfg(unix)]
         backends: vec![],
         init_path: launch.init_path,
-        env: launch.env,
-        workdir: launch.workdir,
+        bootstrap: launch.bootstrap,
         exec_path: launch.exec_path,
         exec_args: launch.exec_args,
         #[cfg(feature = "net")]
@@ -438,12 +437,12 @@ fn validate_open_fd(fd: i32, expected_fd: i32, arg_name: &str) -> Result<(), Str
 
 /// Parse `--disk id:host_path:format[:ro]` entries into typed specs.
 ///
-/// `guest` and `fstype` are not in this arg — they travel in the
-/// `MSB_DISK_MOUNTS` env var and are consumed by agentd, so the runtime
-/// only needs what `DiskBuilder` will set.
+/// `guest` and `fstype` are not in this arg. They travel in the typed guest
+/// bootstrap consumed by agentd, so the runtime only needs what `DiskBuilder`
+/// will set.
 ///
-/// Malformed entries are hard errors so the host-side `MSB_DISK_MOUNTS`
-/// handoff cannot mention a disk that the runtime silently failed to attach.
+/// Malformed entries are hard errors so bootstrap cannot mention a disk that
+/// the runtime silently failed to attach.
 fn parse_disk_args(entries: &[String]) -> Result<Vec<DiskMountSpec>, String> {
     entries
         .iter()
@@ -666,11 +665,18 @@ mod tests {
 
     #[test]
     fn test_load_launch_config_from_file() {
+        use microsandbox_protocol::bootstrap::{BootstrapEnvVar, GuestBootstrap};
         use std::io::Write;
 
         let launch = LaunchConfig {
             db_path: PathBuf::from("/tmp/x.db"),
-            env: vec!["TOKEN=secret".to_string()],
+            bootstrap: GuestBootstrap {
+                default_env: vec![BootstrapEnvVar {
+                    key: "TOKEN".to_string(),
+                    value: "secret".to_string(),
+                }],
+                ..GuestBootstrap::default()
+            },
             block_writeback_limit_bytes: Some(512 * 1024 * 1024),
             block_writeback_pool_bytes: Some(4 * 1024 * 1024 * 1024),
             writeback_lease_dir: PathBuf::from("/tmp/writeback-leases"),
@@ -684,7 +690,13 @@ mod tests {
         let loaded = load_launch_config(&args).unwrap();
 
         assert_eq!(loaded.db_path, PathBuf::from("/tmp/x.db"));
-        assert_eq!(loaded.env, vec!["TOKEN=secret".to_string()]);
+        assert_eq!(
+            loaded.bootstrap.default_env,
+            vec![BootstrapEnvVar {
+                key: "TOKEN".to_string(),
+                value: "secret".to_string(),
+            }]
+        );
         assert_eq!(loaded.block_writeback_limit_bytes, Some(512 * 1024 * 1024));
         assert_eq!(
             loaded.block_writeback_pool_bytes,
@@ -736,7 +748,10 @@ mod tests {
         use std::os::fd::IntoRawFd;
 
         let launch = LaunchConfig {
-            workdir: Some(PathBuf::from("/srv")),
+            bootstrap: microsandbox_protocol::bootstrap::GuestBootstrap {
+                default_cwd: Some("/srv".to_string()),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let mut file = tempfile::tempfile().unwrap();
@@ -748,7 +763,7 @@ mod tests {
         let args = args_with(Some(fd), None);
         let loaded = load_launch_config(&args).unwrap();
 
-        assert_eq!(loaded.workdir, Some(PathBuf::from("/srv")));
+        assert_eq!(loaded.bootstrap.default_cwd.as_deref(), Some("/srv"));
     }
 
     #[test]

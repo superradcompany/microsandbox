@@ -14,6 +14,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::{self, Duration};
 
 use microsandbox_protocol::HANDOFF_POWEROFF_TIMEOUT;
+use microsandbox_protocol::bootstrap::GuestBootstrap;
 use microsandbox_protocol::codec::{self, MAX_FRAME_SIZE};
 use microsandbox_protocol::core::{
     ClockSync, CoreError, CoreErrorKind, InitAck, InitResolved, Ping, Pong, Ready,
@@ -28,7 +29,7 @@ use microsandbox_protocol::heartbeat::{ActivityCounters, Heartbeat};
 use microsandbox_protocol::message::{Message, MessageType};
 use microsandbox_protocol::tcp::{TcpClose, TcpConnect, TcpData, TcpEof, TcpFailed};
 
-use crate::config::AgentdConfig;
+use crate::config::{AgentdConfig, scripts_path};
 use crate::error::{AgentdError, AgentdResult};
 use crate::fs::{FsReadSession, FsState, FsStreamSession, FsWriteSession};
 use crate::process::ProcessManager;
@@ -74,6 +75,15 @@ struct AgentState {
 struct ActivityTracker {
     activity_seq: u64,
     counters: ActivityCounters,
+}
+
+/// Buffered console input retained across the bootstrap and init handshakes.
+///
+/// A single device read may contain multiple frames, so boot phases must share
+/// this buffer instead of dropping bytes after decoding their expected frame.
+#[derive(Default)]
+pub struct BootConsoleState {
+    input: Vec<u8>,
 }
 
 #[derive(Clone)]
@@ -141,6 +151,7 @@ pub async fn run(
     init_time_ns: u64,
     config: &AgentdConfig,
     port_file: File,
+    boot_console: BootConsoleState,
 ) -> AgentdResult<()> {
     let process_manager = ProcessManager::get()?;
     let mut process_manager_failure = process_manager.subscribe_failure()?;
@@ -155,7 +166,7 @@ pub async fn run(
 
     // Buffer for serial reads.
     let mut read_buf = vec![0u8; SERIAL_READ_BUF_SIZE];
-    let mut serial_in_buf = Vec::new();
+    let mut serial_in_buf = boot_console.input;
     let mut serial_out_buf = Vec::new();
 
     let mut state = AgentState::default();
@@ -381,8 +392,48 @@ pub fn open_serial_port() -> AgentdResult<File> {
     Ok(OpenOptions::new().read(true).write(true).open(&port_path)?)
 }
 
+/// Receive and validate the first host-to-guest bootstrap frame.
+pub fn receive_bootstrap(port_file: &File) -> AgentdResult<(GuestBootstrap, BootConsoleState)> {
+    let fd = port_file.as_raw_fd();
+    set_nonblocking(fd)?;
+    let deadline = init_ack_deadline();
+    let mut state = BootConsoleState::default();
+    let msg = read_boot_message(fd, &mut state, deadline, "guest bootstrap")?;
+    let bootstrap = decode_bootstrap_message(msg)?;
+    Ok((bootstrap, state))
+}
+
+fn decode_bootstrap_message(msg: Message) -> AgentdResult<GuestBootstrap> {
+    if msg.id != 0 || msg.flags != 0 {
+        return Err(AgentdError::Config(format!(
+            "guest bootstrap requires id=0 and flags=0, got id={} flags={}",
+            msg.id, msg.flags
+        )));
+    }
+    if msg.t != MessageType::Bootstrap {
+        return Err(AgentdError::Config(format!(
+            "expected core.bootstrap as first console frame, got {}",
+            msg.t.as_str()
+        )));
+    }
+    let min_version = MessageType::Bootstrap.min_protocol_version();
+    if msg.v < min_version {
+        return Err(AgentdError::Config(format!(
+            "guest bootstrap requires protocol generation {min_version} or newer, got {}",
+            msg.v
+        )));
+    }
+
+    msg.payload::<GuestBootstrap>()
+        .map_err(|e| AgentdError::Config(format!("decode guest bootstrap payload: {e}")))
+}
+
 /// Reports init-time guest context to the host and waits for an acknowledgement.
-pub fn report_init_context(port_file: &File, default_user: Option<&str>) -> AgentdResult<()> {
+pub fn report_init_context(
+    port_file: &File,
+    boot_console: &mut BootConsoleState,
+    default_user: Option<&str>,
+) -> AgentdResult<()> {
     let (uid, gid) = resolve_default_user(default_user)?;
     let deadline = init_ack_deadline();
     let fd = port_file.as_raw_fd();
@@ -401,7 +452,7 @@ pub fn report_init_context(port_file: &File, default_user: Option<&str>) -> Agen
     codec::encode_to_buf(&msg, &mut out)
         .map_err(|e| AgentdError::ExecSession(format!("encode init context frame: {e}")))?;
     write_all_to_fd(fd, &out, deadline)?;
-    wait_for_init_ack(fd, deadline)
+    wait_for_init_ack(fd, boot_console, deadline)
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -449,6 +500,9 @@ async fn handle_message(
             let Some(mut req) = decode_payload_or_core_error::<ExecRequest>(&msg, out_buf)? else {
                 return Ok(());
             };
+            if req.cwd.is_none() {
+                req.cwd = config.default_cwd().map(str::to_string);
+            }
             prepend_scripts_to_path(&mut req);
             match ExecSession::spawn(
                 msg.id,
@@ -698,9 +752,6 @@ async fn handle_message(
 ///
 /// If the request already has a PATH entry, prepends to it. Otherwise
 /// inherits from agentd's environment and prepends.
-/// Default PATH for the guest when no PATH is inherited.
-const DEFAULT_GUEST_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
-
 /// Returns whether a host message should refresh the sandbox idle timer.
 ///
 /// Maintenance traffic such as clock synchronization and reachability checks
@@ -1025,17 +1076,14 @@ fn errno_name(code: i32) -> Option<String> {
 }
 
 fn prepend_scripts_to_path(req: &mut microsandbox_protocol::exec::ExecRequest) {
-    let scripts = microsandbox_protocol::SCRIPTS_PATH;
-
     // Check if the request already specifies PATH.
     if let Some(entry) = req.env.iter_mut().find(|e| e.starts_with("PATH=")) {
         let existing = &entry["PATH=".len()..];
-        *entry = format!("PATH={scripts}:{existing}");
+        *entry = format!("PATH={}", scripts_path(Some(existing)));
     } else {
-        // Inherit from agentd's process environment, falling back to a
-        // sensible default since PID 1 in a minimal guest may not have PATH.
-        let inherited = env::var("PATH").unwrap_or_else(|_| DEFAULT_GUEST_PATH.to_string());
-        req.env.push(format!("PATH={scripts}:{inherited}"));
+        let inherited = env::var("PATH").ok();
+        req.env
+            .push(format!("PATH={}", scripts_path(inherited.as_deref())));
     }
 }
 
@@ -1060,55 +1108,68 @@ fn init_ack_timeout() -> AgentdError {
     AgentdError::ExecSession("timed out waiting for init ack".into())
 }
 
-fn wait_for_init_ack(fd: i32, deadline: Instant) -> AgentdResult<()> {
-    let mut serial_in_buf = Vec::new();
+fn wait_for_init_ack(
+    fd: i32,
+    boot_console: &mut BootConsoleState,
+    deadline: Instant,
+) -> AgentdResult<()> {
+    let msg = read_boot_message(fd, boot_console, deadline, "init ack")?;
+    if msg.t == MessageType::InitAck {
+        let _: InitAck = msg
+            .payload()
+            .map_err(|e| AgentdError::ExecSession(format!("decode init ack payload: {e}")))?;
+        return Ok(());
+    }
+
+    Err(AgentdError::ExecSession(format!(
+        "expected core.init.ack, got {}",
+        msg.t.as_str()
+    )))
+}
+
+fn read_boot_message(
+    fd: i32,
+    state: &mut BootConsoleState,
+    deadline: Instant,
+    context: &str,
+) -> AgentdResult<Message> {
     let mut read_buf = [0u8; 4096];
-
     loop {
-        if let Some(msg) = codec::try_decode_from_buf(&mut serial_in_buf)
-            .map_err(|e| AgentdError::ExecSession(format!("decode init ack: {e}")))?
+        if let Some(msg) = codec::try_decode_from_buf(&mut state.input)
+            .map_err(|e| AgentdError::ExecSession(format!("decode {context}: {e}")))?
         {
-            if msg.t == MessageType::InitAck {
-                let _: InitAck = msg.payload().map_err(|e| {
-                    AgentdError::ExecSession(format!("decode init ack payload: {e}"))
-                })?;
-                return Ok(());
-            }
-
+            return Ok(msg);
+        }
+        if state.input.len() > MAX_INPUT_BUF_SIZE {
             return Err(AgentdError::ExecSession(format!(
-                "expected core.init.ack, got {}",
-                msg.t.as_str()
+                "serial input buffer exceeded maximum size while waiting for {context}"
             )));
         }
-
-        if serial_in_buf.len() > MAX_INPUT_BUF_SIZE {
-            return Err(AgentdError::ExecSession(
-                "serial input buffer exceeded maximum size while waiting for init ack".into(),
-            ));
-        }
-
         if !poll_fd_until(fd, libc::POLLIN, deadline)? {
-            return Err(init_ack_timeout());
+            return Err(if context == "init ack" {
+                init_ack_timeout()
+            } else {
+                AgentdError::ExecSession(format!("timed out waiting for {context}"))
+            });
         }
-
         let n = match read_from_fd(fd, &mut read_buf) {
             Ok(n) => n,
-            Err(e)
+            Err(error)
                 if matches!(
-                    e.kind(),
+                    error.kind(),
                     std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
                 ) =>
             {
                 continue;
             }
-            Err(e) => return Err(e.into()),
+            Err(error) => return Err(error.into()),
         };
         if n == 0 {
-            return Err(AgentdError::ExecSession(
-                "serial port closed while waiting for init ack".into(),
-            ));
+            return Err(AgentdError::ExecSession(format!(
+                "serial port closed while waiting for {context}"
+            )));
         }
-        serial_in_buf.extend_from_slice(&read_buf[..n]);
+        state.input.extend_from_slice(&read_buf[..n]);
     }
 }
 
@@ -1238,6 +1299,87 @@ fn request_guest_poweroff() -> AgentdResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use microsandbox_protocol::message::PROTOCOL_VERSION;
+
+    #[test]
+    fn coalesced_bootstrap_and_init_ack_retain_the_second_frame() {
+        let bootstrap = GuestBootstrap::default();
+        let bootstrap_message =
+            Message::with_payload(MessageType::Bootstrap, 0, &bootstrap).unwrap();
+        let ack_message = Message::with_payload(MessageType::InitAck, 0, &InitAck {}).unwrap();
+        let mut state = BootConsoleState::default();
+        codec::encode_to_buf(&bootstrap_message, &mut state.input).unwrap();
+        codec::encode_to_buf(&ack_message, &mut state.input).unwrap();
+
+        let decoded = read_boot_message(
+            -1,
+            &mut state,
+            Instant::now() + std::time::Duration::from_secs(1),
+            "guest bootstrap",
+        )
+        .unwrap();
+        assert_eq!(decode_bootstrap_message(decoded).unwrap(), bootstrap);
+        assert!(
+            !state.input.is_empty(),
+            "init ack frame should remain buffered"
+        );
+
+        wait_for_init_ack(
+            -1,
+            &mut state,
+            Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(state.input.is_empty());
+    }
+
+    #[test]
+    fn bootstrap_rejects_non_control_correlation_fields() {
+        let mut message =
+            Message::with_payload(MessageType::Bootstrap, 1, &GuestBootstrap::default()).unwrap();
+        message.flags = 1;
+
+        let error = decode_bootstrap_message(message).unwrap_err();
+        assert!(error.to_string().contains("requires id=0 and flags=0"));
+    }
+
+    #[test]
+    fn bootstrap_rejects_wrong_first_message_type() {
+        let message = Message::with_payload(MessageType::Ping, 0, &Ping {}).unwrap();
+
+        let error = decode_bootstrap_message(message).unwrap_err();
+        assert!(error.to_string().contains("expected core.bootstrap"));
+    }
+
+    #[test]
+    fn bootstrap_rejects_older_protocol_generation() {
+        let mut message =
+            Message::with_payload(MessageType::Bootstrap, 0, &GuestBootstrap::default()).unwrap();
+        message.v = PROTOCOL_VERSION - 1;
+
+        let error = decode_bootstrap_message(message).unwrap_err();
+        assert!(error.to_string().contains("or newer"));
+    }
+
+    #[test]
+    fn bootstrap_accepts_newer_additive_protocol_generation() {
+        let mut message =
+            Message::with_payload(MessageType::Bootstrap, 0, &GuestBootstrap::default()).unwrap();
+        message.v = PROTOCOL_VERSION + 1;
+
+        assert_eq!(
+            decode_bootstrap_message(message).unwrap(),
+            GuestBootstrap::default()
+        );
+    }
+
+    #[test]
+    fn bootstrap_rejects_malformed_payload() {
+        let message = Message::new(MessageType::Bootstrap, 0, vec![0xff]);
+
+        let error = decode_bootstrap_message(message).unwrap_err();
+        assert!(error.to_string().contains("decode guest bootstrap payload"));
+    }
 
     #[test]
     fn record_encoded_guest_messages_counts_only_appended_frames() {

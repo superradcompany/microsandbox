@@ -6,7 +6,7 @@
 use std::process;
 
 #[cfg(target_os = "linux")]
-use microsandbox_agentd::{AgentdConfig, AgentdError, BootParams, agent, clock, handoff, init};
+use microsandbox_agentd::{AgentdError, BootParams, agent, clock, handoff, init};
 
 //--------------------------------------------------------------------------------------------------
 // Functions: main
@@ -23,23 +23,34 @@ fn main() {
     // Capture CLOCK_BOOTTIME immediately — this represents kernel boot duration.
     let boot_time_ns = clock::boottime_ns();
 
-    // Read all MSB_* environment variables once at startup. `BootParams`
-    // carries the one-shot init data; `AgentdConfig` carries the runtime
-    // config that outlives init.
-    let mut boot = match BootParams::from_env() {
-        Ok(b) => b,
+    // Mount only what console discovery needs, then receive the typed
+    // bootstrap frame that the host queued before entering the VM.
+    if let Err(e) = init::prepare_bootstrap_console() {
+        eprintln!("agentd: early init failed: {e}");
+        process::exit(1);
+    }
+    let port = match agent::open_serial_port() {
+        Ok(port) => port,
         Err(e) => {
-            eprintln!("agentd: config parse failed: {e}");
+            eprintln!("agentd: console open failed: {e}");
             process::exit(1);
         }
     };
-    let config = match AgentdConfig::from_env() {
-        Ok(c) => c,
+    let (bootstrap, mut boot_console) = match agent::receive_bootstrap(&port) {
+        Ok(result) => result,
         Err(e) => {
-            eprintln!("agentd: config parse failed: {e}");
+            eprintln!("agentd: bootstrap receive failed: {e}");
             process::exit(1);
         }
     };
+    let (mut boot, config) = match BootParams::from_bootstrap(bootstrap) {
+        Ok(result) => result,
+        Err(e) => {
+            eprintln!("agentd: bootstrap validation failed: {e}");
+            process::exit(1);
+        }
+    };
+    config.install_default_env();
 
     // Extract handoff spec (if any) before `init::init` consumes
     // `BootParams` by value. The handoff itself fires after init so
@@ -47,13 +58,9 @@ fn main() {
     let handoff_spec = boot.take_handoff_init();
 
     // Phase 1: Synchronous init (mount filesystems, prepare runtime directories).
-    let mut port_file = None;
     let init_start = clock::boottime_ns();
     if let Err(e) = init::init(boot, || {
-        let port = agent::open_serial_port()?;
-        agent::report_init_context(&port, config.user())?;
-        port_file = Some(port);
-        Ok(())
+        agent::report_init_context(&port, &mut boot_console, config.user())
     }) {
         eprintln!("agentd: init failed: {e}");
         process::exit(1);
@@ -76,14 +83,7 @@ fn main() {
         .expect("agentd: failed to build tokio runtime");
 
     rt.block_on(async {
-        match agent::run(
-            boot_time_ns,
-            init_time_ns,
-            &config,
-            port_file.expect("serial port opened during init"),
-        )
-        .await
-        {
+        match agent::run(boot_time_ns, init_time_ns, &config, port, boot_console).await {
             Ok(()) => {}
             Err(AgentdError::Shutdown) => {}
             Err(e) => {

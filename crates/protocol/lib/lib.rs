@@ -298,11 +298,9 @@ pub const ENV_HOSTNAME: &str = "MSB_HOSTNAME";
 /// Environment variable carrying the DNS name the guest uses to reach
 /// the sandbox host (Docker's `host.docker.internal` equivalent).
 ///
-/// The host-side network stack emits this value via its
-/// `guest_env_vars()` method; agentd reads it into
-/// [`crate::exec`]-adjacent boot params and writes the mapping into
-/// `/etc/hosts`. The value the network stack emits is a fixed
-/// protocol constant — today always `host.microsandbox.internal`.
+/// Legacy environment spelling for the host alias now carried in the typed
+/// guest bootstrap. Agentd writes the mapping into `/etc/hosts`. The value the
+/// network stack emits is fixed at `host.microsandbox.internal`.
 pub const ENV_HOST_ALIAS: &str = "MSB_HOST_ALIAS";
 
 /// Environment variable carrying sandbox-wide resource limits.
@@ -433,6 +431,7 @@ pub const GUEST_TLS_HOST_CAS_PATH: &str = "/.msb/tls/host-cas.pem";
 // Exports
 //--------------------------------------------------------------------------------------------------
 
+pub mod bootstrap;
 pub mod codec;
 pub mod core;
 pub mod exec;

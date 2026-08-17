@@ -1,15 +1,14 @@
-//! Agentd configuration, read once from environment variables at startup.
+//! Agentd configuration, received once over the guest console at startup.
 //!
 //! Split into two structs with different lifetimes:
 //!
-//! - [`BootParams`] — one-shot MSB_* env vars consumed by [`init::init`] and
+//! - [`BootParams`] - one-shot bootstrap values consumed by [`init::init`] and
 //!   dropped once init completes.
 //! - [`AgentdConfig`] — runtime config that outlives init (currently just
 //!   the default guest user), passed by reference to the agent loop.
 //!
-//! Each struct owns its own [`from_env`](BootParams::from_env) constructor
-//! so reading is centralised and validation failures abort boot with a
-//! single clean error before any side effects begin.
+//! The typed bootstrap is validated before full guest initialization. Legacy
+//! environment parsers remain local to this module for compatibility tests.
 //!
 //! [`init::init`]: crate::init::init
 
@@ -23,7 +22,12 @@ use microsandbox_protocol::{
     ENV_BLOCK_ROOT, ENV_DIR_MOUNTS, ENV_DISK_MOUNTS, ENV_FILE_MOUNTS, ENV_HANDOFF_INIT,
     ENV_HANDOFF_INIT_ARGS, ENV_HANDOFF_INIT_CWD, ENV_HANDOFF_INIT_ENV, ENV_HOST_ALIAS,
     ENV_HOSTNAME, ENV_NET, ENV_NET_IPV4, ENV_NET_IPV6, ENV_RLIMITS, ENV_SECURITY_PROFILE,
-    ENV_TMPFS, ENV_USER, HANDOFF_INIT_AUTO, exec::ExecRlimit,
+    ENV_TMPFS, ENV_USER, HANDOFF_INIT_AUTO,
+    bootstrap::{
+        BootstrapBlockRoot, BootstrapBlockRootUpper, BootstrapEnvVar, BootstrapHandoffInit,
+        BootstrapSecurityProfile, GuestBootstrap,
+    },
+    exec::ExecRlimit,
 };
 use serde::de::DeserializeOwned;
 
@@ -34,7 +38,7 @@ use crate::rlimit;
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// One-shot MSB_* env vars consumed by [`init::init`] and dropped afterward.
+/// One-shot bootstrap values consumed by [`init::init`] and dropped afterward.
 ///
 /// Moved by value into init; owning the data (rather than borrowing) makes
 /// the "consumed once" lifetime explicit in the signature and prevents
@@ -43,48 +47,46 @@ use crate::rlimit;
 /// [`init::init`]: crate::init::init
 #[derive(Debug)]
 pub struct BootParams {
-    /// Parsed `MSB_BLOCK_ROOT` — block device for rootfs switch.
+    /// Block device configuration for a rootfs switch.
     pub(crate) block_root: Option<BlockRootSpec>,
 
-    /// Parsed `MSB_DIR_MOUNTS` — virtiofs directory mount specs (empty when unset).
+    /// Virtiofs directory mount specs (empty when unset).
     pub(crate) dir_mounts: Vec<DirMountSpec>,
 
-    /// Parsed `MSB_FILE_MOUNTS` — virtiofs file mount specs (empty when unset).
+    /// Virtiofs file mount specs (empty when unset).
     pub(crate) file_mounts: Vec<FileMountSpec>,
 
-    /// Parsed `MSB_DISK_MOUNTS` — disk-image mount specs (empty when unset).
+    /// Disk-image mount specs (empty when unset).
     pub(crate) disk_mounts: Vec<DiskMountSpec>,
 
-    /// Parsed `MSB_TMPFS` — tmpfs mount specs (empty when unset).
+    /// Tmpfs mount specs (empty when unset).
     pub(crate) tmpfs: Vec<TmpfsSpec>,
 
-    /// Parsed `MSB_SECURITY_PROFILE` — in-guest security profile.
+    /// In-guest security profile.
     pub(crate) security_profile: SecurityProfile,
 
-    /// `MSB_HOSTNAME` — guest hostname.
+    /// Guest hostname.
     pub(crate) hostname: Option<String>,
 
-    /// `MSB_HOST_ALIAS` — DNS name (e.g. `host.microsandbox.internal`)
-    /// the guest uses to reach the sandbox host. Written into
-    /// `/etc/hosts` pointing at the gateway IPs.
+    /// DNS name (for example `host.microsandbox.internal`) the guest uses to
+    /// reach the sandbox host. Written into `/etc/hosts` at the gateway IPs.
     pub(crate) host_alias: Option<String>,
 
-    /// Parsed `MSB_NET` — network interface config.
+    /// Network interface configuration.
     pub(crate) net: Option<NetSpec>,
 
-    /// Parsed `MSB_NET_IPV4` — IPv4 config.
+    /// IPv4 configuration.
     pub(crate) net_ipv4: Option<NetIpv4Spec>,
 
-    /// Parsed `MSB_NET_IPV6` — IPv6 config.
+    /// IPv6 configuration.
     pub(crate) net_ipv6: Option<NetIpv6Spec>,
 
-    /// Parsed `MSB_RLIMITS` — sandbox-wide resource limits applied to PID 1
-    /// so every guest process inherits the raised baseline (empty when unset).
+    /// Sandbox-wide resource limits applied to PID 1 so every guest process
+    /// inherits the raised baseline (empty when unset).
     pub(crate) rlimits: Vec<ExecRlimit>,
 
-    /// Parsed `MSB_HANDOFF_INIT[_ARGS|_ENV]` — guest init binary to which
-    /// agentd hands off PID 1 after `init::init()`. `None` means agentd
-    /// remains PID 1 (the default).
+    /// Guest init binary to which agentd hands off PID 1 after `init::init()`.
+    /// `None` means agentd remains PID 1 (the default).
     pub(crate) handoff_init: Option<HandoffInit>,
 }
 
@@ -117,13 +119,17 @@ pub struct HandoffInit {
 /// and security profile for exec sessions.
 #[derive(Debug)]
 pub struct AgentdConfig {
-    /// `MSB_USER` — default guest user for exec sessions.
-    ///
-    /// Captured at startup; changes to `MSB_USER` afterward are not observed.
+    /// Default guest user for exec sessions, captured at startup.
     pub(crate) user: Option<String>,
 
     /// In-guest security profile for exec sessions.
     pub(crate) security_profile: SecurityProfile,
+
+    /// Default working directory for requests that omit one.
+    pub(crate) default_cwd: Option<String>,
+
+    /// Baseline image/user environment plus host-generated placeholders.
+    pub(crate) default_env: Vec<BootstrapEnvVar>,
 }
 
 /// In-guest security profile.
@@ -279,6 +285,157 @@ pub(crate) struct NetConfig<'a> {
 //--------------------------------------------------------------------------------------------------
 
 impl BootParams {
+    /// Validate and convert the typed console bootstrap into agentd's init and
+    /// long-lived runtime configuration.
+    pub fn from_bootstrap(bootstrap: GuestBootstrap) -> AgentdResult<(Self, AgentdConfig)> {
+        validate_guest_bootstrap(&bootstrap)?;
+
+        let GuestBootstrap {
+            block_root,
+            dir_mounts,
+            file_mounts,
+            disk_mounts,
+            tmpfs_mounts,
+            hostname,
+            host_alias,
+            network,
+            rlimits,
+            user,
+            default_cwd,
+            default_env,
+            security_profile,
+            handoff_init,
+        } = bootstrap;
+
+        let security_profile = match security_profile {
+            BootstrapSecurityProfile::Default => SecurityProfile::Default,
+            BootstrapSecurityProfile::Restricted => SecurityProfile::Restricted,
+        };
+        let block_root = block_root.map(|root| match root {
+            BootstrapBlockRoot::DiskImage { device, fstype } => {
+                BlockRootSpec::DiskImage { device, fstype }
+            }
+            BootstrapBlockRoot::OciErofs { lower, upper } => BlockRootSpec::OciErofs {
+                lower,
+                upper: match upper {
+                    BootstrapBlockRootUpper::Device { device, fstype } => {
+                        BlockRootUpper::Device { device, fstype }
+                    }
+                    BootstrapBlockRootUpper::Tmpfs { size_mib } => {
+                        BlockRootUpper::Tmpfs { size_mib }
+                    }
+                },
+            },
+        });
+        let dir_mounts = dir_mounts
+            .into_iter()
+            .map(|mount| {
+                let flags = mount.flags;
+                DirMountSpec {
+                    tag: mount.tag,
+                    guest_path: mount.guest_path,
+                    readonly: flags.readonly,
+                    noexec: flags.noexec,
+                    nosuid: flags.nosuid,
+                    nodev: flags.nodev,
+                }
+            })
+            .collect();
+        let file_mounts = file_mounts
+            .into_iter()
+            .map(|mount| {
+                let flags = mount.flags;
+                FileMountSpec {
+                    tag: mount.tag,
+                    filename: mount.filename,
+                    guest_path: mount.guest_path,
+                    readonly: flags.readonly,
+                    noexec: flags.noexec,
+                    nosuid: flags.nosuid,
+                    nodev: flags.nodev,
+                }
+            })
+            .collect();
+        let disk_mounts = disk_mounts
+            .into_iter()
+            .map(|mount| {
+                let flags = mount.flags;
+                DiskMountSpec {
+                    id: mount.id,
+                    guest_path: mount.guest_path,
+                    fstype: mount.fstype,
+                    readonly: flags.readonly,
+                    noexec: flags.noexec,
+                    nosuid: flags.nosuid,
+                    nodev: flags.nodev,
+                }
+            })
+            .collect();
+        let tmpfs = tmpfs_mounts
+            .into_iter()
+            .map(|mount| {
+                let flags = mount.flags;
+                TmpfsSpec {
+                    path: mount.path,
+                    size_mib: mount.size_mib,
+                    mode: mount.mode,
+                    noexec: flags.noexec,
+                    nosuid: flags.nosuid,
+                    nodev: flags.nodev,
+                    readonly: flags.readonly,
+                }
+            })
+            .collect();
+        let (net, net_ipv4, net_ipv6) = match network {
+            Some(network) => {
+                let net = NetSpec {
+                    iface: network.interface,
+                    mac: network.mac,
+                    mtu: network.mtu,
+                };
+                let ipv4 = network.ipv4.map(|ipv4| NetIpv4Spec {
+                    address: ipv4.address,
+                    prefix_len: ipv4.prefix_len,
+                    gateway: ipv4.gateway,
+                    dns: ipv4.dns,
+                });
+                let ipv6 = network.ipv6.map(|ipv6| NetIpv6Spec {
+                    address: ipv6.address,
+                    prefix_len: ipv6.prefix_len,
+                    gateway: ipv6.gateway,
+                    dns: ipv6.dns,
+                });
+                (Some(net), ipv4, ipv6)
+            }
+            None => (None, None, None),
+        };
+        let handoff_init = handoff_init.map(convert_bootstrap_handoff).transpose()?;
+
+        Ok((
+            Self {
+                block_root,
+                dir_mounts,
+                file_mounts,
+                disk_mounts,
+                tmpfs,
+                security_profile,
+                hostname,
+                host_alias,
+                net,
+                net_ipv4,
+                net_ipv6,
+                rlimits,
+                handoff_init,
+            },
+            AgentdConfig {
+                user,
+                security_profile,
+                default_cwd,
+                default_env,
+            },
+        ))
+    }
+
     /// Reads and parses the boot-time `MSB_*` environment variables.
     ///
     /// Empty or whitespace-only values are treated as absent (`None`).
@@ -349,6 +506,33 @@ impl AgentdConfig {
         self.user.as_deref()
     }
 
+    /// Return the sandbox working directory used when an exec request omits one.
+    pub fn default_cwd(&self) -> Option<&str> {
+        self.default_cwd.as_deref()
+    }
+
+    /// Install the baseline workload environment before any guest child is created.
+    pub fn install_default_env(&self) {
+        for variable in &self.default_env {
+            // SAFETY: agentd is still single-threaded during bootstrap, and
+            // `validate_guest_bootstrap` rejected NUL bytes in both fields.
+            unsafe { env::set_var(&variable.key, &variable.value) };
+        }
+
+        // The former libkrun environment transport always installed this
+        // prefix for both agent execs and PID 1 handoff. Preserve that
+        // inheritance without relying on agentd's ambient boot environment.
+        let configured_path = self
+            .default_env
+            .iter()
+            .rev()
+            .find(|variable| variable.key == "PATH")
+            .map(|variable| variable.value.as_str());
+        // SAFETY: `scripts_path` constructs a NUL-free key and value while
+        // agentd is still single-threaded during bootstrap.
+        unsafe { env::set_var("PATH", scripts_path(configured_path)) };
+    }
+
     /// Reads the runtime-config `MSB_*` environment variables.
     ///
     /// Empty or whitespace-only values are treated as absent (`None`).
@@ -359,7 +543,28 @@ impl AgentdConfig {
                 .map(|v| parse_security_profile(&v))
                 .transpose()?
                 .unwrap_or_default(),
+            default_cwd: None,
+            default_env: Vec::new(),
         })
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Runtime Environment
+//--------------------------------------------------------------------------------------------------
+
+/// Return a guest PATH with the runtime scripts directory present exactly once.
+pub(crate) fn scripts_path(existing: Option<&str>) -> String {
+    const DEFAULT_GUEST_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+    let existing = existing.unwrap_or(DEFAULT_GUEST_PATH);
+    if existing
+        .split(':')
+        .any(|segment| segment == microsandbox_protocol::SCRIPTS_PATH)
+    {
+        existing.to_string()
+    } else {
+        format!("{}:{existing}", microsandbox_protocol::SCRIPTS_PATH)
     }
 }
 
@@ -1102,6 +1307,194 @@ fn parse_handoff_env_pair(key: String, value: String) -> AgentdResult<(OsString,
 // Helper Functions
 //--------------------------------------------------------------------------------------------------
 
+fn validate_guest_bootstrap(bootstrap: &GuestBootstrap) -> AgentdResult<()> {
+    if let Some(root) = &bootstrap.block_root {
+        match root {
+            BootstrapBlockRoot::DiskImage { device, fstype } => {
+                validate_absolute_guest_path("bootstrap block-root device", device)?;
+                if let Some(fstype) = fstype {
+                    validate_nonempty_bootstrap_string("bootstrap block-root fstype", fstype)?;
+                }
+            }
+            BootstrapBlockRoot::OciErofs { lower, upper } => {
+                validate_absolute_guest_path("bootstrap EROFS lower device", lower)?;
+                match upper {
+                    BootstrapBlockRootUpper::Device { device, fstype } => {
+                        validate_absolute_guest_path("bootstrap upper device", device)?;
+                        validate_nonempty_bootstrap_string("bootstrap upper fstype", fstype)?;
+                    }
+                    BootstrapBlockRootUpper::Tmpfs { .. } => {}
+                }
+            }
+        }
+    }
+
+    for mount in &bootstrap.dir_mounts {
+        validate_nonempty_bootstrap_string("bootstrap directory mount tag", &mount.tag)?;
+        validate_absolute_guest_path("bootstrap directory mount path", &mount.guest_path)?;
+    }
+    for mount in &bootstrap.file_mounts {
+        validate_nonempty_bootstrap_string("bootstrap file mount tag", &mount.tag)?;
+        validate_nonempty_bootstrap_string("bootstrap file mount filename", &mount.filename)?;
+        validate_absolute_guest_path("bootstrap file mount path", &mount.guest_path)?;
+    }
+    for mount in &bootstrap.disk_mounts {
+        validate_nonempty_bootstrap_string("bootstrap disk mount id", &mount.id)?;
+        validate_absolute_guest_path("bootstrap disk mount path", &mount.guest_path)?;
+        if let Some(fstype) = &mount.fstype {
+            validate_nonempty_bootstrap_string("bootstrap disk mount fstype", fstype)?;
+        }
+    }
+    for mount in &bootstrap.tmpfs_mounts {
+        validate_absolute_guest_path("bootstrap tmpfs path", &mount.path)?;
+    }
+
+    if let Some(hostname) = &bootstrap.hostname {
+        validate_nonempty_bootstrap_string("bootstrap hostname", hostname)?;
+    }
+    if let Some(host_alias) = &bootstrap.host_alias {
+        validate_nonempty_bootstrap_string("bootstrap host alias", host_alias)?;
+    }
+    if let Some(network) = &bootstrap.network {
+        validate_nonempty_bootstrap_string("bootstrap network interface", &network.interface)?;
+        if let Some(ipv4) = network.ipv4
+            && ipv4.prefix_len > 32
+        {
+            return Err(AgentdError::Config(format!(
+                "bootstrap IPv4 prefix length out of range: {}",
+                ipv4.prefix_len
+            )));
+        }
+        if let Some(ipv6) = network.ipv6
+            && ipv6.prefix_len > 128
+        {
+            return Err(AgentdError::Config(format!(
+                "bootstrap IPv6 prefix length out of range: {}",
+                ipv6.prefix_len
+            )));
+        }
+    }
+
+    let mut seen_rlimits = Vec::new();
+    for rlimit in &bootstrap.rlimits {
+        if rlimit::parse_rlimit_resource(&rlimit.resource).is_none() {
+            return Err(AgentdError::Config(format!(
+                "bootstrap rlimits contains unknown resource: {}",
+                rlimit.resource
+            )));
+        }
+        if rlimit.soft > rlimit.hard {
+            return Err(AgentdError::Config(format!(
+                "bootstrap rlimit {} has soft limit above hard limit",
+                rlimit.resource
+            )));
+        }
+        if seen_rlimits.iter().any(|name| name == &rlimit.resource) {
+            return Err(AgentdError::Config(format!(
+                "bootstrap rlimits contains duplicate resource: {}",
+                rlimit.resource
+            )));
+        }
+        seen_rlimits.push(rlimit.resource.clone());
+    }
+
+    if let Some(user) = &bootstrap.user {
+        validate_nonempty_bootstrap_string("bootstrap user", user)?;
+    }
+    if let Some(cwd) = &bootstrap.default_cwd {
+        validate_nonempty_bootstrap_string("bootstrap default cwd", cwd)?;
+    }
+    for variable in &bootstrap.default_env {
+        validate_bootstrap_env("bootstrap default env", variable)?;
+    }
+    if let Some(handoff) = &bootstrap.handoff_init {
+        validate_bootstrap_handoff(handoff)?;
+    }
+
+    Ok(())
+}
+
+fn validate_bootstrap_handoff(handoff: &BootstrapHandoffInit) -> AgentdResult<()> {
+    if handoff.cmd.contains('\0') {
+        return Err(AgentdError::Config(
+            "bootstrap handoff command must not contain NUL".into(),
+        ));
+    }
+    if handoff.cmd != HANDOFF_INIT_AUTO && !handoff.cmd.starts_with('/') {
+        return Err(AgentdError::Config(format!(
+            "bootstrap handoff command must be absolute or `auto`: {}",
+            handoff.cmd
+        )));
+    }
+    for (index, arg) in handoff.args.iter().enumerate() {
+        if arg.contains('\0') {
+            return Err(AgentdError::Config(format!(
+                "bootstrap handoff argument #{index} must not contain NUL"
+            )));
+        }
+    }
+    if let Some(cwd) = &handoff.cwd {
+        validate_absolute_guest_path("bootstrap handoff cwd", cwd)?;
+    }
+    for variable in &handoff.env {
+        validate_bootstrap_env("bootstrap handoff env", variable)?;
+    }
+    Ok(())
+}
+
+fn validate_bootstrap_env(label: &str, variable: &BootstrapEnvVar) -> AgentdResult<()> {
+    if variable.key.is_empty() {
+        return Err(AgentdError::Config(format!(
+            "{label} contains an empty key"
+        )));
+    }
+    if variable.key.contains('=') || variable.key.contains('\0') {
+        return Err(AgentdError::Config(format!(
+            "{label} key {:?} must not contain '=' or NUL",
+            variable.key
+        )));
+    }
+    if variable.value.contains('\0') {
+        return Err(AgentdError::Config(format!(
+            "{label} value for {:?} must not contain NUL",
+            variable.key
+        )));
+    }
+    Ok(())
+}
+
+fn validate_absolute_guest_path(label: &str, value: &str) -> AgentdResult<()> {
+    validate_nonempty_bootstrap_string(label, value)?;
+    if !value.starts_with('/') {
+        return Err(AgentdError::Config(format!(
+            "{label} must be an absolute Linux path: {value}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_nonempty_bootstrap_string(label: &str, value: &str) -> AgentdResult<()> {
+    if value.is_empty() || value.contains('\0') {
+        return Err(AgentdError::Config(format!(
+            "{label} must be non-empty and must not contain NUL"
+        )));
+    }
+    Ok(())
+}
+
+fn convert_bootstrap_handoff(handoff: BootstrapHandoffInit) -> AgentdResult<HandoffInit> {
+    Ok(HandoffInit {
+        cmd: PathBuf::from(handoff.cmd),
+        argv: handoff.args.into_iter().map(OsString::from).collect(),
+        cwd: handoff.cwd.map(PathBuf::from),
+        env: handoff
+            .env
+            .into_iter()
+            .map(|variable| (OsString::from(variable.key), OsString::from(variable.value)))
+            .collect(),
+    })
+}
+
 /// Reads a single environment variable, returning `None` for missing or empty values.
 fn read_env(key: &str) -> Option<String> {
     env::var(key)
@@ -1125,6 +1518,130 @@ fn read_env_raw(key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------------------------------------------------------------------------------------------
+    // Typed Bootstrap
+    // ---------------------------------------------------------------------------------------------
+
+    #[test]
+    fn test_scripts_path_uses_stable_default_and_avoids_duplicates() {
+        assert_eq!(
+            scripts_path(None),
+            "/.msb/scripts:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        );
+        assert_eq!(
+            scripts_path(Some("/custom/bin:/bin")),
+            "/.msb/scripts:/custom/bin:/bin"
+        );
+        assert_eq!(
+            scripts_path(Some("/bin:/.msb/scripts:/usr/bin")),
+            "/bin:/.msb/scripts:/usr/bin"
+        );
+    }
+
+    #[test]
+    fn test_bootstrap_preserves_structured_environment_and_handoff_values() {
+        let bootstrap = GuestBootstrap {
+            hostname: Some("quoted-host".to_string()),
+            network: Some(microsandbox_protocol::bootstrap::BootstrapNetwork {
+                interface: "eth0".to_string(),
+                mac: [0x02, 0x5a, 0x7b, 0x13, 0x01, 0x02],
+                mtu: 1500,
+                ipv4: None,
+                ipv6: None,
+            }),
+            rlimits: vec![ExecRlimit {
+                resource: "nofile".to_string(),
+                soft: 4096,
+                hard: 65_535,
+            }],
+            user: Some("1000:1000".to_string()),
+            default_cwd: Some("/workspace".to_string()),
+            default_env: vec![BootstrapEnvVar {
+                key: "APP_CONFIG".to_string(),
+                value: "{\"message\":\"hello\",\"unicode\":\"lambda λ\"}\nnext\tline=a=b"
+                    .to_string(),
+            }],
+            security_profile: BootstrapSecurityProfile::Restricted,
+            handoff_init: Some(BootstrapHandoffInit {
+                cmd: "/sbin/init".to_string(),
+                args: vec!["--label=\"hello world\"".to_string()],
+                cwd: Some("/workspace".to_string()),
+                env: vec![BootstrapEnvVar {
+                    key: "INIT_CONFIG".to_string(),
+                    value: "{\"enabled\":true}".to_string(),
+                }],
+            }),
+            ..GuestBootstrap::default()
+        };
+
+        let (boot, config) = BootParams::from_bootstrap(bootstrap).unwrap();
+
+        assert_eq!(boot.hostname.as_deref(), Some("quoted-host"));
+        assert_eq!(boot.rlimits[0].hard, 65_535);
+        assert!(matches!(boot.security_profile, SecurityProfile::Restricted));
+        assert_eq!(config.user.as_deref(), Some("1000:1000"));
+        assert_eq!(config.default_cwd.as_deref(), Some("/workspace"));
+        assert_eq!(
+            config.default_env[0].value,
+            "{\"message\":\"hello\",\"unicode\":\"lambda λ\"}\nnext\tline=a=b"
+        );
+
+        let handoff = boot.handoff_init.expect("handoff bootstrap");
+        assert_eq!(
+            handoff.argv,
+            vec![OsString::from("--label=\"hello world\"")]
+        );
+        assert_eq!(
+            handoff.env,
+            vec![(
+                OsString::from("INIT_CONFIG"),
+                OsString::from("{\"enabled\":true}")
+            )]
+        );
+    }
+
+    #[test]
+    fn test_bootstrap_accepts_relative_default_cwd() {
+        let bootstrap = GuestBootstrap {
+            default_cwd: Some("workspace".to_string()),
+            ..GuestBootstrap::default()
+        };
+
+        let (_, config) = BootParams::from_bootstrap(bootstrap).unwrap();
+
+        assert_eq!(config.default_cwd.as_deref(), Some("workspace"));
+    }
+
+    #[test]
+    fn test_bootstrap_rejects_duplicate_rlimits() {
+        let rlimit = ExecRlimit {
+            resource: "nofile".to_string(),
+            soft: 1024,
+            hard: 1024,
+        };
+        let bootstrap = GuestBootstrap {
+            rlimits: vec![rlimit.clone(), rlimit],
+            ..GuestBootstrap::default()
+        };
+
+        let error = BootParams::from_bootstrap(bootstrap).unwrap_err();
+        assert!(error.to_string().contains("duplicate resource"));
+    }
+
+    #[test]
+    fn test_bootstrap_rejects_invalid_environment_key() {
+        let bootstrap = GuestBootstrap {
+            default_env: vec![BootstrapEnvVar {
+                key: "BAD=KEY".to_string(),
+                value: "value".to_string(),
+            }],
+            ..GuestBootstrap::default()
+        };
+
+        let error = BootParams::from_bootstrap(bootstrap).unwrap_err();
+        assert!(error.to_string().contains("must not contain '=' or NUL"));
+    }
 
     // ── Block Root ────────────────────────────────────────────────────
 

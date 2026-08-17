@@ -28,12 +28,11 @@ use std::{
     process::Stdio,
 };
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 #[cfg(windows)]
 use rand::Rng;
 use rand::RngExt;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sha2::{Digest as Sha2Digest, Sha256};
 use tempfile::TempDir;
 #[cfg(windows)]
@@ -60,9 +59,12 @@ use windows_sys::Win32::System::Threading::{
 use microsandbox_image::{Digest, GlobalCache};
 use microsandbox_metrics::{MetricsRegistry, ReserveSlot, SlotReservation};
 use microsandbox_protocol::{
-    ENV_BLOCK_ROOT, ENV_DIR_MOUNTS, ENV_DISK_MOUNTS, ENV_FILE_MOUNTS, ENV_HANDOFF_INIT,
-    ENV_HANDOFF_INIT_ARGS, ENV_HANDOFF_INIT_CWD, ENV_HANDOFF_INIT_ENV, ENV_HOSTNAME,
-    ENV_SECURITY_PROFILE, ENV_TMPFS, ENV_USER,
+    bootstrap::{
+        BootstrapBlockRoot, BootstrapBlockRootUpper, BootstrapDirMount, BootstrapDiskMount,
+        BootstrapEnvVar, BootstrapFileMount, BootstrapHandoffInit, BootstrapMountFlags,
+        BootstrapSecurityProfile, BootstrapTmpfsMount, GuestBootstrap,
+    },
+    exec::ExecRlimit,
 };
 use microsandbox_runtime::launch::{LaunchConfig, Lifecycle};
 use microsandbox_runtime::vm::{MetricsSlotHandoff, StartupCommand};
@@ -81,7 +83,7 @@ use crate::{
     db::entity::volume as volume_entity,
     runtime::handle::MetricsReservationCleanup,
     sandbox::{
-        DiskImageFormat, HostPermissions, MountOptions, NamedVolumeMode, Rlimit, RootfsSource,
+        DiskImageFormat, HostPermissions, MountOptions, NamedVolumeMode, RootfsSource,
         SandboxConfig, StatVirtualization, VolumeMount, validate_named_disk_mount_options,
     },
     volume::{
@@ -2174,13 +2176,6 @@ async fn stage_file_mounts(
             ))
         })?;
 
-        // The MSB_FILE_MOUNTS protocol uses `:` and `;` as delimiters.
-        if filename.contains(':') || filename.contains(';') {
-            return Err(crate::MicrosandboxError::InvalidConfig(format!(
-                "file mount filename must not contain ':' or ';': {filename}"
-            )));
-        }
-
         let target = file_mount_dir.join(filename);
 
         // Hard-link preserves the same inode — writes in the guest propagate
@@ -2271,18 +2266,6 @@ fn push_dir_mount_arg(
     mounts.push(arg);
 }
 
-/// Append a `tag:guest_path[:ro]` entry to the `MSB_DIR_MOUNTS` env var value.
-fn push_dir_mounts_spec(dir_mounts_val: &mut String, guest: &str, options: MountOptions) {
-    if !dir_mounts_val.is_empty() {
-        dir_mounts_val.push(';');
-    }
-    let tag = guest_mount_tag(guest);
-    dir_mounts_val.push_str(&tag);
-    dir_mounts_val.push(':');
-    dir_mounts_val.push_str(guest);
-    append_option_block(dir_mounts_val, mount_option_tokens(options));
-}
-
 /// Collect a `fm_tag:file_mount_dir[:ro]` mount entry.
 fn push_file_mount_arg(
     mounts: &mut Vec<String>,
@@ -2316,46 +2299,6 @@ fn push_disk_mount_arg(
     disks.push(arg);
 }
 
-/// Append a `id:guest_path[:opts]` entry to the `MSB_DISK_MOUNTS` env var value.
-fn push_disk_mounts_spec(
-    disk_mounts_val: &mut String,
-    id: &str,
-    guest: &str,
-    fstype: Option<&str>,
-    options: MountOptions,
-) {
-    if !disk_mounts_val.is_empty() {
-        disk_mounts_val.push(';');
-    }
-    disk_mounts_val.push_str(id);
-    disk_mounts_val.push(':');
-    disk_mounts_val.push_str(guest);
-    let mut opts = mount_option_tokens(options);
-    if let Some(fs) = fstype {
-        opts.push(format!("fstype={fs}"));
-    }
-    append_option_block(disk_mounts_val, opts);
-}
-
-/// Append a `tag:filename:guest_path[:ro]` entry to the `MSB_FILE_MOUNTS` env var value.
-fn push_file_mounts_spec(
-    file_mounts_val: &mut String,
-    tag: &str,
-    filename: &str,
-    guest: &str,
-    options: MountOptions,
-) {
-    if !file_mounts_val.is_empty() {
-        file_mounts_val.push(';');
-    }
-    file_mounts_val.push_str(tag);
-    file_mounts_val.push(':');
-    file_mounts_val.push_str(filename);
-    file_mounts_val.push(':');
-    file_mounts_val.push_str(guest);
-    append_option_block(file_mounts_val, mount_option_tokens(options));
-}
-
 fn mount_option_tokens(options: MountOptions) -> Vec<String> {
     let mut tokens = Vec::new();
     if options.readonly {
@@ -2371,6 +2314,15 @@ fn mount_option_tokens(options: MountOptions) -> Vec<String> {
         tokens.push("nodev".to_string());
     }
     tokens
+}
+
+fn bootstrap_mount_flags(options: MountOptions) -> BootstrapMountFlags {
+    BootstrapMountFlags {
+        readonly: options.readonly,
+        noexec: options.noexec,
+        nosuid: options.nosuid,
+        nodev: options.nodev,
+    }
 }
 
 fn append_policy_options(
@@ -2401,33 +2353,6 @@ fn append_option_block(spec: &mut String, opts: Vec<String>) {
     }
     spec.push(':');
     spec.push_str(&opts.join(","));
-}
-
-/// Encodes sandbox-wide rlimits for the guest init environment.
-fn encode_rlimits(rlimits: &[Rlimit]) -> String {
-    use std::fmt::Write;
-
-    let mut out = String::with_capacity(rlimits.len() * 32);
-    for (i, rlimit) in rlimits.iter().enumerate() {
-        if i > 0 {
-            out.push(';');
-        }
-        write!(
-            out,
-            "{}={}:{}",
-            rlimit.resource.as_str(),
-            rlimit.soft,
-            rlimit.hard
-        )
-        .expect("writing to String cannot fail");
-    }
-    out
-}
-
-/// Encodes a handoff-init argv/env payload into printable env-var text.
-fn encode_handoff_json<T: Serialize>(value: &T) -> String {
-    let json = serde_json::to_vec(value).expect("handoff init payload is JSON-serializable");
-    URL_SAFE_NO_PAD.encode(json)
 }
 
 /// Derive a stable, collision-resistant identifier from a guest mount path.
@@ -2559,7 +2484,52 @@ fn sandbox_cli_args(
         vsock: config.spec.vsock.routes.clone(),
         #[cfg(feature = "net")]
         deployment_profile: config.spec.deployment_profile,
-        workdir: config.spec.runtime.workdir.as_ref().map(PathBuf::from),
+        bootstrap: GuestBootstrap {
+            hostname: Some(
+                config.spec.runtime.hostname.clone().unwrap_or_else(|| {
+                    crate::sandbox::hostname_from_sandbox_name(&config.spec.name)
+                }),
+            ),
+            rlimits: config
+                .spec
+                .rlimits
+                .iter()
+                .map(|rlimit| ExecRlimit {
+                    resource: rlimit.resource.as_str().to_string(),
+                    soft: rlimit.soft,
+                    hard: rlimit.hard,
+                })
+                .collect(),
+            user: config.spec.runtime.user.clone(),
+            default_cwd: config.spec.runtime.workdir.clone(),
+            default_env: config
+                .spec
+                .env
+                .iter()
+                .map(|var| BootstrapEnvVar {
+                    key: var.key.clone(),
+                    value: var.value.clone(),
+                })
+                .collect(),
+            security_profile: match config.spec.security_profile {
+                crate::sandbox::SecurityProfile::Default => BootstrapSecurityProfile::Default,
+                crate::sandbox::SecurityProfile::Restricted => BootstrapSecurityProfile::Restricted,
+            },
+            handoff_init: config.spec.init.as_ref().map(|init| BootstrapHandoffInit {
+                cmd: init.cmd.clone(),
+                args: init.args.clone(),
+                cwd: config.spec.runtime.workdir.clone(),
+                env: init
+                    .env
+                    .iter()
+                    .map(|(key, value)| BootstrapEnvVar {
+                        key: key.clone(),
+                        value: value.clone(),
+                    })
+                    .collect(),
+            }),
+            ..GuestBootstrap::default()
+        },
         ..Default::default()
     };
 
@@ -2589,11 +2559,10 @@ fn sandbox_cli_args(
                 launch.rootfs.disk =
                     Some(sandbox_dir.join(crate::sandbox::flat_rootfs::FLAT_ROOTFS_FILENAME));
                 launch.rootfs.disk_format = Some("raw".to_string());
-                launch.env.push(format!(
-                    "{}=kind=disk-image,device=/dev/vda,fstype={}",
-                    ENV_BLOCK_ROOT,
-                    fstype.as_deref().unwrap_or("ext4")
-                ));
+                launch.bootstrap.block_root = Some(BootstrapBlockRoot::DiskImage {
+                    device: "/dev/vda".to_string(),
+                    fstype: Some(fstype.as_deref().unwrap_or("ext4").to_string()),
+                });
             // Derive VMDK + upper paths from the stored manifest digest.
             } else if let Some(ref digest_str) = config.manifest_digest {
                 let cache_dir = local.cache_dir();
@@ -2613,13 +2582,19 @@ fn sandbox_cli_args(
                     None | Some(RootDisk::Managed { .. }) => {
                         let sandbox_dir = local.sandboxes_dir().join(&config.spec.name);
                         launch.rootfs.upper = Some(sandbox_dir.join("upper.ext4"));
-                        "kind=oci-erofs,lower=/dev/vda,upper=/dev/vdb,upper_fstype=ext4".to_string()
+                        BootstrapBlockRoot::OciErofs {
+                            lower: "/dev/vda".to_string(),
+                            upper: BootstrapBlockRootUpper::Device {
+                                device: "/dev/vdb".to_string(),
+                                fstype: "ext4".to_string(),
+                            },
+                        }
                     }
-                    Some(RootDisk::Tmpfs { size_mib }) => match size_mib {
-                        Some(mib) => format!(
-                            "kind=oci-erofs,lower=/dev/vda,upper=tmpfs,upper_size_mib={mib}"
-                        ),
-                        None => "kind=oci-erofs,lower=/dev/vda,upper=tmpfs".to_string(),
+                    Some(RootDisk::Tmpfs { size_mib }) => BootstrapBlockRoot::OciErofs {
+                        lower: "/dev/vda".to_string(),
+                        upper: BootstrapBlockRootUpper::Tmpfs {
+                            size_mib: *size_mib,
+                        },
                     },
                     Some(RootDisk::DiskImage {
                         path,
@@ -2628,16 +2603,19 @@ fn sandbox_cli_args(
                     }) => {
                         launch.rootfs.upper = Some(path.clone());
                         launch.rootfs.upper_format = Some(format.as_str().to_string());
-                        format!(
-                            "kind=oci-erofs,lower=/dev/vda,upper=/dev/vdb,upper_fstype={}",
-                            fstype.as_deref().unwrap_or("ext4")
-                        )
+                        BootstrapBlockRoot::OciErofs {
+                            lower: "/dev/vda".to_string(),
+                            upper: BootstrapBlockRootUpper::Device {
+                                device: "/dev/vdb".to_string(),
+                                fstype: fstype.as_deref().unwrap_or("ext4").to_string(),
+                            },
+                        }
                     }
                     Some(RootDisk::Flat { .. }) => {
                         unreachable!("flat root disks are handled before layered root assembly")
                     }
                 };
-                launch.env.push(format!("{}={block_root}", ENV_BLOCK_ROOT));
+                launch.bootstrap.block_root = Some(block_root);
             }
         }
         RootfsSource::DiskImage {
@@ -2648,24 +2626,15 @@ fn sandbox_cli_args(
             launch.rootfs.disk = Some(path.clone());
             launch.rootfs.disk_format = Some(format.as_str().to_string());
 
-            // Build MSB_BLOCK_ROOT env var value.
-            let mut block_root_val = String::from("kind=disk-image,device=/dev/vda");
-            if let Some(ft) = fstype {
-                block_root_val.push_str(&format!(",fstype={ft}"));
-            }
-            launch
-                .env
-                .push(format!("{}={block_root_val}", ENV_BLOCK_ROOT));
+            launch.bootstrap.block_root = Some(BootstrapBlockRoot::DiskImage {
+                device: "/dev/vda".to_string(),
+                fstype: fstype.clone(),
+            });
         }
     }
 
-    // Process mounts: emit --mount args for virtiofs mounts, --disk args
-    // for disk-image mounts, and collect guest-side mount specs as env
-    // vars for agentd.
-    let mut tmpfs_val = String::new();
-    let mut dir_mounts_val = String::new();
-    let mut file_mounts_val = String::new();
-    let mut disk_mounts_val = String::new();
+    // Process mounts: emit host-side device args and collect the matching
+    // typed guest-side mount instructions for agentd.
     for mount in &config.spec.mounts {
         match mount {
             VolumeMount::Bind {
@@ -2686,7 +2655,12 @@ fn sandbox_cli_args(
                         *stat_virtualization,
                         *host_permissions,
                     );
-                    push_file_mounts_spec(&mut file_mounts_val, tag, filename, guest, *options);
+                    launch.bootstrap.file_mounts.push(BootstrapFileMount {
+                        tag: tag.clone(),
+                        filename: filename.clone(),
+                        guest_path: guest.clone(),
+                        flags: bootstrap_mount_flags(*options),
+                    });
                 } else {
                     // A directory bind mount gets a protective guest-write
                     // quota: the caller's override, or the default.
@@ -2701,7 +2675,11 @@ fn sandbox_cli_args(
                         *follow_root_symlinks,
                         Some(quota),
                     );
-                    push_dir_mounts_spec(&mut dir_mounts_val, guest, *options);
+                    launch.bootstrap.dir_mounts.push(BootstrapDirMount {
+                        tag: guest_mount_tag(guest),
+                        guest_path: guest.clone(),
+                        flags: bootstrap_mount_flags(*options),
+                    });
                 }
             }
             VolumeMount::Named {
@@ -2735,13 +2713,12 @@ fn sandbox_cli_args(
                             format,
                             *options,
                         );
-                        push_disk_mounts_spec(
-                            &mut disk_mounts_val,
-                            &id,
-                            guest,
-                            fstype.as_deref(),
-                            *options,
-                        );
+                        launch.bootstrap.disk_mounts.push(BootstrapDiskMount {
+                            id,
+                            guest_path: guest.clone(),
+                            fstype: fstype.clone(),
+                            flags: bootstrap_mount_flags(*options),
+                        });
                     }
                     ResolvedNamedVolume {
                         path, quota_mib, ..
@@ -2756,7 +2733,11 @@ fn sandbox_cli_args(
                             *follow_root_symlinks,
                             *quota_mib,
                         );
-                        push_dir_mounts_spec(&mut dir_mounts_val, guest, *options);
+                        launch.bootstrap.dir_mounts.push(BootstrapDirMount {
+                            tag: guest_mount_tag(guest),
+                            guest_path: guest.clone(),
+                            flags: bootstrap_mount_flags(*options),
+                        });
                     }
                 }
             }
@@ -2765,16 +2746,12 @@ fn sandbox_cli_args(
                 size_mib,
                 options,
             } => {
-                if !tmpfs_val.is_empty() {
-                    tmpfs_val.push(';');
-                }
-                tmpfs_val.push_str(guest);
-                let mut opts = Vec::new();
-                if let Some(s) = size_mib {
-                    opts.push(format!("size={s}"));
-                }
-                opts.extend(mount_option_tokens(*options));
-                append_option_block(&mut tmpfs_val, opts);
+                launch.bootstrap.tmpfs_mounts.push(BootstrapTmpfsMount {
+                    path: guest.clone(),
+                    size_mib: *size_mib,
+                    mode: None,
+                    flags: bootstrap_mount_flags(*options),
+                });
             }
             VolumeMount::DiskImage {
                 host,
@@ -2785,42 +2762,14 @@ fn sandbox_cli_args(
             } => {
                 let id = guest_mount_tag(guest);
                 push_disk_mount_arg(&mut launch.disks, &id, &host.display(), format, *options);
-                push_disk_mounts_spec(
-                    &mut disk_mounts_val,
-                    &id,
-                    guest,
-                    fstype.as_deref(),
-                    *options,
-                );
+                launch.bootstrap.disk_mounts.push(BootstrapDiskMount {
+                    id,
+                    guest_path: guest.clone(),
+                    fstype: fstype.clone(),
+                    flags: bootstrap_mount_flags(*options),
+                });
             }
         }
-    }
-
-    if !tmpfs_val.is_empty() {
-        launch.env.push(format!("{}={tmpfs_val}", ENV_TMPFS));
-    }
-    if !dir_mounts_val.is_empty() {
-        launch
-            .env
-            .push(format!("{}={dir_mounts_val}", ENV_DIR_MOUNTS));
-    }
-    if !file_mounts_val.is_empty() {
-        launch
-            .env
-            .push(format!("{}={file_mounts_val}", ENV_FILE_MOUNTS));
-    }
-    if !disk_mounts_val.is_empty() {
-        launch
-            .env
-            .push(format!("{}={disk_mounts_val}", ENV_DISK_MOUNTS));
-    }
-
-    if !config.spec.rlimits.is_empty() {
-        launch.env.push(format!(
-            "{}={}",
-            microsandbox_protocol::ENV_RLIMITS,
-            encode_rlimits(&config.spec.rlimits)
-        ));
     }
 
     // Network configuration travels as a typed value inside the JSON payload.
@@ -2832,57 +2781,6 @@ fn sandbox_cli_args(
                 .expect("sandbox network spec should decode to local network config"),
         );
         launch.sandbox_slot = sandbox_id as u64;
-    }
-
-    for var in &config.spec.env {
-        launch.env.push(format!("{}={}", var.key, var.value));
-    }
-
-    if let Some(ref user) = config.spec.runtime.user {
-        launch.env.push(format!("{}={user}", ENV_USER));
-    }
-
-    launch.env.push(format!(
-        "{}={}",
-        ENV_SECURITY_PROFILE,
-        match config.spec.security_profile {
-            crate::sandbox::SecurityProfile::Default => "default",
-            crate::sandbox::SecurityProfile::Restricted => "restricted",
-        }
-    ));
-
-    // Hostname: explicit value or fall back to a sandbox-name-derived form
-    // that fits within the Linux UTS limit.
-    {
-        let hostname = match config.spec.runtime.hostname.as_deref() {
-            Some(h) => h.to_string(),
-            None => crate::sandbox::hostname_from_sandbox_name(&config.spec.name),
-        };
-        launch.env.push(format!("{}={hostname}", ENV_HOSTNAME));
-    }
-
-    // Handoff-init: PID 1 hand-off to a user-supplied init binary.
-    // The builder's `validate()` rejects cmd paths containing NUL or `\`,
-    // args/env containing NUL, and env keys containing `=`, so the JSON
-    // payloads below can't produce a corrupted execve wire format.
-    if let Some(ref init) = config.spec.init {
-        launch.env.push(format!("{ENV_HANDOFF_INIT}={}", init.cmd));
-
-        if !init.args.is_empty() {
-            let argv_val = encode_handoff_json(&init.args);
-            launch
-                .env
-                .push(format!("{ENV_HANDOFF_INIT_ARGS}={argv_val}"));
-        }
-
-        if let Some(ref workdir) = config.spec.runtime.workdir {
-            launch.env.push(format!("{ENV_HANDOFF_INIT_CWD}={workdir}"));
-        }
-
-        if !init.env.is_empty() {
-            let env_val = encode_handoff_json(&init.env);
-            launch.env.push(format!("{ENV_HANDOFF_INIT_ENV}={env_val}"));
-        }
     }
 
     (visible, launch)
@@ -2945,10 +2843,12 @@ mod tests {
     use std::num::NonZero;
     use std::path::{Path, PathBuf};
 
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use microsandbox_protocol::{
+        bootstrap::{BootstrapBlockRoot, BootstrapEnvVar, BootstrapMountFlags},
+        exec::ExecRlimit,
+    };
     use microsandbox_types::HandoffInit;
     use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
-    use serde::de::DeserializeOwned;
     use tempfile::tempdir;
 
     use microsandbox_runtime::launch::LaunchConfig;
@@ -2964,9 +2864,8 @@ mod tests {
         backend::LocalBackend,
         config::{BlockWritebackConfig, RuntimeConfig},
         sandbox::{
-            DiskImageFormat, HostPermissions, MountOptions, OciRootfsSource, Rlimit,
-            RlimitResource, RootfsSource, SandboxBuilder, SandboxConfig, StatVirtualization,
-            VolumeMount,
+            DiskImageFormat, HostPermissions, MountOptions, OciRootfsSource, RlimitResource,
+            RootfsSource, SandboxBuilder, SandboxConfig, StatVirtualization, VolumeMount,
         },
         volume::VolumeKind,
     };
@@ -3036,6 +2935,29 @@ mod tests {
     /// touches.
     fn test_local_backend() -> LocalBackend {
         LocalBackend::lazy()
+    }
+
+    /// Return the typed launch payload generated for a sandbox configuration.
+    fn render_launch(config: &SandboxConfig) -> LaunchConfig {
+        let local = test_local_backend();
+        let (_, launch) = sandbox_cli_args(
+            &local,
+            config,
+            42,
+            Path::new("/tmp/msb.db"),
+            30,
+            Path::new("/tmp/logs"),
+            Path::new("/tmp/runtime"),
+            Path::new("/tmp/agent.sock"),
+            Path::new("/tmp/libkrunfw.dylib"),
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            None,
+            None,
+            None,
+        );
+        launch
     }
 
     /// Re-expand a [`LaunchConfig`] into the historical `--flag value` token
@@ -3119,8 +3041,121 @@ mod tests {
         for d in &launch.disks {
             pair(&mut out, "--disk", d.clone());
         }
-        for e in &launch.env {
-            pair(&mut out, "--env", e.clone());
+
+        // Project typed bootstrap mount data into the former environment
+        // spelling so long-standing rendering tests can keep checking the
+        // exact mount semantics. This is a test-only view, not launch argv.
+        fn mount_flags(flags: BootstrapMountFlags) -> Vec<&'static str> {
+            let mut values = Vec::new();
+            if flags.readonly {
+                values.push("ro");
+            }
+            if flags.noexec {
+                values.push("noexec");
+            }
+            if flags.nosuid {
+                values.push("nosuid");
+            }
+            if flags.nodev {
+                values.push("nodev");
+            }
+            values
+        }
+        fn with_options(mut base: String, options: Vec<String>) -> String {
+            if !options.is_empty() {
+                base.push(':');
+                base.push_str(&options.join(","));
+            }
+            base
+        }
+
+        if let Some(BootstrapBlockRoot::DiskImage { device, fstype }) = &launch.bootstrap.block_root
+        {
+            let mut value = format!("kind=disk-image,device={device}");
+            if let Some(fstype) = fstype {
+                value.push_str(&format!(",fstype={fstype}"));
+            }
+            pair(&mut out, "--env", format!("MSB_BLOCK_ROOT={value}"));
+        }
+        if !launch.bootstrap.dir_mounts.is_empty() {
+            let value = launch
+                .bootstrap
+                .dir_mounts
+                .iter()
+                .map(|mount| {
+                    with_options(
+                        format!("{}:{}", mount.tag, mount.guest_path),
+                        mount_flags(mount.flags)
+                            .into_iter()
+                            .map(str::to_string)
+                            .collect(),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(";");
+            pair(&mut out, "--env", format!("MSB_DIR_MOUNTS={value}"));
+        }
+        if !launch.bootstrap.file_mounts.is_empty() {
+            let value = launch
+                .bootstrap
+                .file_mounts
+                .iter()
+                .map(|mount| {
+                    with_options(
+                        format!("{}:{}:{}", mount.tag, mount.filename, mount.guest_path),
+                        mount_flags(mount.flags)
+                            .into_iter()
+                            .map(str::to_string)
+                            .collect(),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(";");
+            pair(&mut out, "--env", format!("MSB_FILE_MOUNTS={value}"));
+        }
+        if !launch.bootstrap.disk_mounts.is_empty() {
+            let value = launch
+                .bootstrap
+                .disk_mounts
+                .iter()
+                .map(|mount| {
+                    let mut options = Vec::new();
+                    if let Some(fstype) = &mount.fstype {
+                        options.push(format!("fstype={fstype}"));
+                    }
+                    options.extend(mount_flags(mount.flags).into_iter().map(str::to_string));
+                    with_options(format!("{}:{}", mount.id, mount.guest_path), options)
+                })
+                .collect::<Vec<_>>()
+                .join(";");
+            pair(&mut out, "--env", format!("MSB_DISK_MOUNTS={value}"));
+        }
+        if !launch.bootstrap.tmpfs_mounts.is_empty() {
+            let value = launch
+                .bootstrap
+                .tmpfs_mounts
+                .iter()
+                .map(|mount| {
+                    let mut options = Vec::new();
+                    if let Some(size_mib) = mount.size_mib {
+                        options.push(format!("size={size_mib}"));
+                    }
+                    if let Some(mode) = mount.mode {
+                        options.push(format!("mode={mode:o}"));
+                    }
+                    options.extend(mount_flags(mount.flags).into_iter().map(str::to_string));
+                    with_options(mount.path.clone(), options)
+                })
+                .collect::<Vec<_>>()
+                .join(";");
+            pair(&mut out, "--env", format!("MSB_TMPFS={value}"));
+        }
+        for variable in &launch.bootstrap.default_env {
+            pair(
+                &mut out,
+                "--env",
+                format!("{}={}", variable.key, variable.value),
+            );
         }
         #[cfg(feature = "net")]
         if let Some(net) = &launch.network {
@@ -3131,8 +3166,8 @@ mod tests {
             );
             pair(&mut out, "--sandbox-slot", launch.sandbox_slot.to_string());
         }
-        if let Some(w) = &launch.workdir {
-            pair(&mut out, "--workdir", path(w));
+        if let Some(cwd) = &launch.bootstrap.default_cwd {
+            pair(&mut out, "--workdir", cwd.clone());
         }
         out
     }
@@ -3258,11 +3293,6 @@ mod tests {
             .into_iter()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect()
-    }
-
-    fn decode_handoff_json<T: DeserializeOwned>(value: &str) -> T {
-        let json = URL_SAFE_NO_PAD.decode(value).expect("base64url payload");
-        serde_json::from_slice(&json).expect("handoff JSON payload")
     }
 
     fn render_args_with_file_mounts(
@@ -3472,28 +3502,20 @@ mod tests {
         });
         config.clear_launch_intent();
 
-        let rendered = render_args(&config);
+        let launch = render_launch(&config);
+        let handoff = launch.bootstrap.handoff_init.expect("handoff bootstrap");
 
+        assert_eq!(handoff.cmd, "/init");
         assert_eq!(
-            find_env(&rendered, "MSB_HANDOFF_INIT").as_deref(),
-            Some("/init")
-        );
-        let argv = find_env(&rendered, "MSB_HANDOFF_INIT_ARGS").expect("argv env present");
-        let decoded: Vec<String> = decode_handoff_json(&argv);
-        assert_eq!(
-            decoded,
+            handoff.args,
             vec![
                 "/opt/hermes/docker/main-wrapper.sh".to_string(),
                 "gateway".to_string(),
                 "run".to_string(),
             ]
         );
-        assert_eq!(
-            find_env(&rendered, "MSB_HANDOFF_INIT_CWD").as_deref(),
-            Some("/opt/hermes")
-        );
-        assert!(!rendered.iter().any(|arg| arg.starts_with("--startup-cmd")));
-        assert!(!rendered.iter().any(|arg| arg.starts_with("--startup-arg")));
+        assert_eq!(handoff.cwd.as_deref(), Some("/opt/hermes"));
+        assert!(launch.startup.is_none());
     }
 
     #[tokio::test]
@@ -3588,7 +3610,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sandbox_cli_args_include_rlimits_env() {
+    async fn test_sandbox_bootstrap_includes_rlimits() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .rlimit(RlimitResource::Nofile, 65_535)
@@ -3596,12 +3618,16 @@ mod tests {
             .await
             .unwrap();
 
-        let rendered = render_args(&config);
+        let launch = render_launch(&config);
 
-        assert!(rendered.windows(2).any(|pair| {
-            pair[0] == "--env"
-                && pair[1] == format!("{}=nofile=65535:65535", microsandbox_protocol::ENV_RLIMITS)
-        }));
+        assert_eq!(
+            launch.bootstrap.rlimits,
+            vec![ExecRlimit {
+                resource: "nofile".to_string(),
+                soft: 65_535,
+                hard: 65_535,
+            }]
+        );
     }
 
     #[tokio::test]
@@ -3637,35 +3663,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_encode_rlimits_round_trips_through_protocol_parser() {
-        use microsandbox_protocol::exec::ExecRlimit;
+    async fn test_bootstrap_preserves_quoted_environment_without_visible_argv_exposure() {
+        let value = "{\"message\":\"hello\",\"unicode\":\"lambda λ\"}\nnext\tline=a=b";
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .env("APP_CONFIG", value)
+            .build()
+            .await
+            .unwrap();
 
-        let rlimits = vec![
-            Rlimit {
-                resource: RlimitResource::Nofile,
-                soft: 4096,
-                hard: 65_535,
-            },
-            Rlimit {
-                resource: RlimitResource::Nproc,
-                soft: 1024,
-                hard: 1024,
-            },
-        ];
+        let launch = render_launch(&config);
+        let visible = render_visible_args(&config);
 
-        let encoded = super::encode_rlimits(&rlimits);
-        let parsed: Vec<ExecRlimit> = encoded
-            .split(';')
-            .map(|entry| entry.parse::<ExecRlimit>().unwrap())
-            .collect();
+        assert_eq!(
+            launch.bootstrap.default_env,
+            vec![BootstrapEnvVar {
+                key: "APP_CONFIG".to_string(),
+                value: value.to_string(),
+            }]
+        );
+        assert!(
+            visible
+                .iter()
+                .all(|arg| !arg.contains("APP_CONFIG") && !arg.contains(value)),
+            "guest environment leaked into visible argv: {visible:?}"
+        );
+    }
 
-        assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0].resource, "nofile");
-        assert_eq!(parsed[0].soft, 4096);
-        assert_eq!(parsed[0].hard, 65_535);
-        assert_eq!(parsed[1].resource, "nproc");
-        assert_eq!(parsed[1].soft, 1024);
-        assert_eq!(parsed[1].hard, 1024);
+    #[tokio::test]
+    async fn test_sandbox_bootstrap_preserves_multiple_rlimits() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .rlimit_range(RlimitResource::Nofile, 4096, 65_535)
+            .rlimit(RlimitResource::Nproc, 1024)
+            .build()
+            .await
+            .unwrap();
+
+        let launch = render_launch(&config);
+
+        assert_eq!(launch.bootstrap.rlimits.len(), 2);
+        assert_eq!(launch.bootstrap.rlimits[0].resource, "nofile");
+        assert_eq!(launch.bootstrap.rlimits[0].soft, 4096);
+        assert_eq!(launch.bootstrap.rlimits[0].hard, 65_535);
+        assert_eq!(launch.bootstrap.rlimits[1].resource, "nproc");
+        assert_eq!(launch.bootstrap.rlimits[1].soft, 1024);
+        assert_eq!(launch.bootstrap.rlimits[1].hard, 1024);
     }
 
     #[tokio::test]
@@ -4665,23 +4708,11 @@ mod tests {
     }
 
     //----------------------------------------------------------------------------------------------
-    // Tests: Handoff init env-var construction
+    // Tests: Handoff init bootstrap construction
     //----------------------------------------------------------------------------------------------
 
-    /// Helper to grep the rendered args for an `--env KEY=...` entry.
-    fn find_env(args: &[String], key: &str) -> Option<String> {
-        let prefix = format!("{key}=");
-        args.windows(2).find_map(|pair| {
-            if pair[0] == "--env" && pair[1].starts_with(&prefix) {
-                Some(pair[1][prefix.len()..].to_string())
-            } else {
-                None
-            }
-        })
-    }
-
     #[tokio::test]
-    async fn test_handoff_init_emits_only_cmd_when_args_and_env_empty() {
+    async fn test_handoff_init_bootstrap_contains_only_cmd_when_args_and_env_empty() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .init("/lib/systemd/systemd")
@@ -4689,19 +4720,17 @@ mod tests {
             .await
             .unwrap();
 
-        let args = render_args(&config);
+        let launch = render_launch(&config);
+        let handoff = launch.bootstrap.handoff_init.expect("handoff bootstrap");
 
-        assert_eq!(
-            find_env(&args, "MSB_HANDOFF_INIT").as_deref(),
-            Some("/lib/systemd/systemd")
-        );
-        assert!(find_env(&args, "MSB_HANDOFF_INIT_ARGS").is_none());
-        assert!(find_env(&args, "MSB_HANDOFF_INIT_CWD").is_none());
-        assert!(find_env(&args, "MSB_HANDOFF_INIT_ENV").is_none());
+        assert_eq!(handoff.cmd, "/lib/systemd/systemd");
+        assert!(handoff.args.is_empty());
+        assert!(handoff.cwd.is_none());
+        assert!(handoff.env.is_empty());
     }
 
     #[tokio::test]
-    async fn test_handoff_init_emits_cwd_when_workdir_set() {
+    async fn test_handoff_init_bootstrap_contains_cwd_when_workdir_set() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .init("/init")
@@ -4710,16 +4739,14 @@ mod tests {
             .await
             .unwrap();
 
-        let args = render_args(&config);
+        let launch = render_launch(&config);
+        let handoff = launch.bootstrap.handoff_init.expect("handoff bootstrap");
 
-        assert_eq!(
-            find_env(&args, "MSB_HANDOFF_INIT_CWD").as_deref(),
-            Some("/opt/hermes")
-        );
+        assert_eq!(handoff.cwd.as_deref(), Some("/opt/hermes"));
     }
 
     #[tokio::test]
-    async fn test_handoff_init_encodes_argv_as_base64url_json() {
+    async fn test_handoff_init_bootstrap_preserves_argv() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .init_with("/lib/systemd/systemd", |i| {
@@ -4733,12 +4760,11 @@ mod tests {
             .await
             .unwrap();
 
-        let args = render_args(&config);
-        let argv = find_env(&args, "MSB_HANDOFF_INIT_ARGS").expect("argv env present");
-        let decoded: Vec<String> = decode_handoff_json(&argv);
+        let launch = render_launch(&config);
+        let handoff = launch.bootstrap.handoff_init.expect("handoff bootstrap");
 
         assert_eq!(
-            decoded,
+            handoff.args,
             vec![
                 "--unit=multi-user.target",
                 "--log-level=warning",
@@ -4748,7 +4774,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handoff_init_encodes_env_pairs_as_base64url_json() {
+    async fn test_handoff_init_bootstrap_preserves_environment() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .init_with("/sbin/init", |i| {
@@ -4760,16 +4786,24 @@ mod tests {
             .await
             .unwrap();
 
-        let args = render_args(&config);
-        let env_val = find_env(&args, "MSB_HANDOFF_INIT_ENV").expect("env present");
-        let decoded: Vec<(String, String)> = decode_handoff_json(&env_val);
+        let launch = render_launch(&config);
+        let handoff = launch.bootstrap.handoff_init.expect("handoff bootstrap");
 
         assert_eq!(
-            decoded,
+            handoff.env,
             vec![
-                ("container".to_string(), "microsandbox".to_string()),
-                ("LANG".to_string(), "C.UTF-8".to_string()),
-                ("TOKEN".to_string(), "a=b;c\x1fd".to_string())
+                BootstrapEnvVar {
+                    key: "container".to_string(),
+                    value: "microsandbox".to_string(),
+                },
+                BootstrapEnvVar {
+                    key: "LANG".to_string(),
+                    value: "C.UTF-8".to_string(),
+                },
+                BootstrapEnvVar {
+                    key: "TOKEN".to_string(),
+                    value: "a=b;c\x1fd".to_string(),
+                },
             ]
         );
     }
@@ -4782,11 +4816,9 @@ mod tests {
             .await
             .unwrap();
 
-        let args = render_args(&config);
+        let launch = render_launch(&config);
 
-        assert!(find_env(&args, "MSB_HANDOFF_INIT").is_none());
-        assert!(find_env(&args, "MSB_HANDOFF_INIT_ARGS").is_none());
-        assert!(find_env(&args, "MSB_HANDOFF_INIT_ENV").is_none());
+        assert!(launch.bootstrap.handoff_init.is_none());
     }
 
     #[tokio::test]
@@ -4797,11 +4829,10 @@ mod tests {
             .build()
             .await
             .unwrap();
-        let args = render_args(&config);
-        let argv = find_env(&args, "MSB_HANDOFF_INIT_ARGS").expect("argv env present");
-        let decoded: Vec<String> = decode_handoff_json(&argv);
+        let launch = render_launch(&config);
+        let handoff = launch.bootstrap.handoff_init.expect("handoff bootstrap");
 
-        assert_eq!(decoded, vec!["foo\x1fbar"]);
+        assert_eq!(handoff.args, vec!["foo\x1fbar"]);
     }
 
     #[tokio::test]

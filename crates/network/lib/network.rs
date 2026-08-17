@@ -10,6 +10,9 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use ipnetwork::{Ipv4Network, Ipv6Network};
+use microsandbox_protocol::bootstrap::{
+    BootstrapEnvVar, BootstrapIpv4, BootstrapIpv6, BootstrapNetwork,
+};
 use microsandbox_protocol::{ENV_HOST_ALIAS, ENV_NET, ENV_NET_IPV4, ENV_NET_IPV6};
 use microsandbox_types::{
     DeploymentProfile, NetworkRateLimitDirection, RateLimitConfigError, RateLimiterConfig,
@@ -50,7 +53,7 @@ const MULTI_TENANT_MAX_CONNECTIONS: usize = 256;
 ///
 /// Owns the smoltcp poll thread and provides:
 /// - [`take_backend()`](Self::take_backend) — the `NetBackend` for `VmBuilder::net()`
-/// - [`guest_env_vars()`](Self::guest_env_vars) — `MSB_NET*` env vars for the guest
+/// - [`guest_bootstrap_network()`](Self::guest_bootstrap_network) — typed guest network setup
 /// - [`ca_cert_pem()`](Self::ca_cert_pem) — CA certificate for TLS interception
 pub struct SmoltcpNetwork {
     config: NetworkConfig,
@@ -406,6 +409,54 @@ impl SmoltcpNetwork {
         }
 
         vars
+    }
+
+    /// Build the typed network payload consumed by agentd during bootstrap.
+    pub fn guest_bootstrap_network(&self) -> BootstrapNetwork {
+        BootstrapNetwork {
+            interface: "eth0".to_string(),
+            mac: self.guest_mac,
+            mtu: self.mtu,
+            ipv4: self
+                .guest_ipv4
+                .zip(self.gateway_ipv4)
+                .map(|(address, gateway)| BootstrapIpv4 {
+                    address,
+                    prefix_len: 30,
+                    gateway,
+                    dns: Some(gateway),
+                }),
+            ipv6: self
+                .guest_ipv6
+                .zip(self.gateway_ipv6)
+                .map(|(address, gateway)| BootstrapIpv6 {
+                    address,
+                    prefix_len: 64,
+                    gateway,
+                    dns: Some(gateway),
+                }),
+        }
+    }
+
+    /// Return the stable hostname used by guests to address the host gateway.
+    pub fn guest_host_alias(&self) -> &'static str {
+        crate::HOST_ALIAS
+    }
+
+    /// Return guest-visible secret placeholders for the baseline environment.
+    ///
+    /// Real secret values stay in the host-side network handler and never
+    /// enter this payload.
+    pub fn guest_secret_env(&self) -> Vec<BootstrapEnvVar> {
+        self.config
+            .secrets
+            .secrets
+            .iter()
+            .map(|secret| BootstrapEnvVar {
+                key: secret.env_var.clone(),
+                value: secret.placeholder.clone(),
+            })
+            .collect()
     }
 
     /// CA certificate PEM bytes if TLS interception is enabled.
@@ -833,6 +884,31 @@ mod tests {
         assert_eq!(vars.len(), 2);
         assert_eq!(vars[0].0, ENV_NET);
         assert_eq!(vars[1].0, ENV_HOST_ALIAS);
+    }
+
+    #[test]
+    fn guest_bootstrap_network_preserves_active_address_families() {
+        let net = SmoltcpNetwork::new_with_routes(NetworkConfig::default(), 7, true, true).unwrap();
+
+        let bootstrap = net.guest_bootstrap_network();
+
+        assert_eq!(bootstrap.interface, "eth0");
+        assert_eq!(bootstrap.mac, net.guest_mac());
+        assert_eq!(bootstrap.mtu, 1500);
+        assert_eq!(bootstrap.ipv4.unwrap().prefix_len, 30);
+        assert_eq!(bootstrap.ipv6.unwrap().prefix_len, 64);
+        assert_eq!(net.guest_host_alias(), crate::HOST_ALIAS);
+    }
+
+    #[test]
+    fn guest_bootstrap_network_allows_no_active_address_family() {
+        let net =
+            SmoltcpNetwork::new_with_routes(NetworkConfig::default(), 0, false, false).unwrap();
+
+        let bootstrap = net.guest_bootstrap_network();
+
+        assert!(bootstrap.ipv4.is_none());
+        assert!(bootstrap.ipv6.is_none());
     }
 
     #[test]

@@ -24,6 +24,7 @@ use microsandbox_filesystem::{
 };
 use microsandbox_metrics::{ActivateSlot, MetricsRegistry, ReleaseMode};
 use microsandbox_protocol::{
+    bootstrap::{BootstrapBlockRoot, GuestBootstrap},
     codec,
     message::{Message, MessageType},
 };
@@ -227,7 +228,7 @@ enum ParentWatchdogSignal {
 /// `backing`); a user-supplied disk-image root disk carries its own path
 /// and format. A tmpfs root disk attaches no upper device at all — the
 /// caller leaves both `rootfs_upper` and `rootfs_upper_spec` unset and
-/// signals tmpfs through `MSB_BLOCK_ROOT`. The shape stays
+/// selects tmpfs in the typed guest bootstrap. The shape stays
 /// forward-compatible with qcow2 backing chains: when chains land,
 /// `backing` lists ancestor files that the runtime attaches read-only
 /// ahead of the head file.
@@ -247,7 +248,7 @@ pub struct UpperSpec {
 /// Specification for a disk-image volume mount attached to the guest.
 ///
 /// Each entry becomes one extra virtio-blk device. Agentd consumes the
-/// companion `MSB_DISK_MOUNTS` env var to know which device to mount where.
+/// companion typed bootstrap entry to know which device to mount where.
 #[derive(Debug, Clone)]
 pub struct DiskMountSpec {
     /// Stable block id. Surfaced in the guest as the virtio-blk `serial`
@@ -258,7 +259,7 @@ pub struct DiskMountSpec {
     pub host: PathBuf,
 
     /// Guest mount path. Not needed by the VMM, but carried here for
-    /// logging/validation; agentd reads the canonical value from the env.
+    /// logging/validation; agentd reads the canonical value from bootstrap.
     pub guest: String,
 
     /// Disk image format.
@@ -357,11 +358,8 @@ pub struct VmConfig {
     /// Path to the init binary in the guest.
     pub init_path: Option<PathBuf>,
 
-    /// Environment variables as `KEY=VALUE` pairs.
-    pub env: Vec<String>,
-
-    /// Working directory inside the guest.
-    pub workdir: Option<PathBuf>,
+    /// Typed one-shot configuration delivered to agentd over its console.
+    pub bootstrap: GuestBootstrap,
 
     /// Path to the executable to run in the guest.
     pub exec_path: Option<PathBuf>,
@@ -425,6 +423,7 @@ type VmBuildOutput = (
     Option<NetworkTerminationHandle>,
     Option<NetworkMetricsHandle>,
     Option<NetworkSecretsHandle>,
+    Vec<u8>,
     BindIdentityMapRegistration,
 );
 
@@ -475,8 +474,7 @@ impl std::fmt::Debug for VmConfig {
         debug.field("backends", &format!("[{} backend(s)]", self.backends.len()));
         debug
             .field("init_path", &self.init_path)
-            .field("env", &self.env)
-            .field("workdir", &self.workdir)
+            .field("bootstrap", &self.bootstrap)
             .field("exec_path", &self.exec_path)
             .field("exec_args", &self.exec_args)
             .finish()
@@ -875,6 +873,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         _network_termination_handle,
         network_metrics_handle,
         _network_secrets_handle,
+        bootstrap_frame,
         bind_identity_map,
     ) = match build_result {
         Ok(vm) => vm,
@@ -901,6 +900,12 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
             return Err(e);
         }
     };
+
+    // This must be the first host-to-guest frame. It is queued before the
+    // watchdog and relay tasks can produce shutdown or init-ack messages, and
+    // remains buffered until agentd opens the console during early boot.
+    relay::push_guest_frame_blocking(&shared, bootstrap_frame)?;
+
     #[cfg(unix)]
     {
         relay =
@@ -1399,8 +1404,8 @@ fn build_vm(
     host_placement: HostPlacement<'_>,
     writeback_limit: Option<&msb_krun::WritebackLimit>,
 ) -> RuntimeResult<VmBuildOutput> {
-    let mut exec_env = config.vm.env.clone();
     let vm = &config.vm;
+    let mut bootstrap = vm.bootstrap.clone();
     let balloon_stats_interval = config
         .metrics_sample_interval_ms
         .map(|interval_ms| Duration::from_millis(interval_ms.get()));
@@ -1518,8 +1523,6 @@ fn build_vm(
                 apply_block_writeback_limit(d, format, false, writeback_limit.as_ref())
             });
         }
-
-        // MSB_BLOCK_ROOT env var is set by the caller (spawn_sandbox).
     } else if let Some(ref disk_path) = vm.rootfs_disk {
         #[cfg(unix)]
         {
@@ -1551,7 +1554,12 @@ fn build_vm(
             let d = d.path(&disk_path).format(format).read_only(readonly);
             apply_block_writeback_limit(d, format, readonly, writeback_limit.as_ref())
         });
-        append_block_root_env(&mut exec_env);
+        if bootstrap.block_root.is_none() {
+            bootstrap.block_root = Some(BootstrapBlockRoot::DiskImage {
+                device: "/dev/vda".to_string(),
+                fstype: None,
+            });
+        }
     }
 
     // Runtime directory mount — agentd mounts this at /.msb for scripts
@@ -1788,9 +1796,9 @@ fn build_vm(
             }
         }
 
-        for (key, value) in network.guest_env_vars() {
-            exec_env.push(format!("{key}={value}"));
-        }
+        bootstrap.network = Some(network.guest_bootstrap_network());
+        bootstrap.host_alias = Some(network.guest_host_alias().to_string());
+        bootstrap.default_env.extend(network.guest_secret_env());
 
         builder = builder.net(move |mut n| {
             n = n.mac(guest_mac);
@@ -1804,22 +1812,14 @@ fn build_vm(
         });
     }
 
-    // Execution configuration.
-    prepend_scripts_path(&mut exec_env);
+    // The kernel command line only selects agentd. Workload environment and
+    // cwd now travel through the typed bootstrap and exec protocols.
     builder = builder.exec(|mut e| {
         if let Some(ref path) = vm.exec_path {
             e = e.path(path);
         }
         if !vm.exec_args.is_empty() {
             e = e.args(&vm.exec_args);
-        }
-        for env_str in &exec_env {
-            if let Some((key, value)) = env_str.split_once('=') {
-                e = e.env(key, value);
-            }
-        }
-        if let Some(ref workdir) = vm.workdir {
-            e = e.workdir(workdir);
         }
         e
     });
@@ -1857,13 +1857,25 @@ fn build_vm(
         .build()
         .map_err(|e| RuntimeError::Custom(format!("build VM: {e}")))?;
 
+    let bootstrap_frame = encode_bootstrap_frame(&bootstrap)?;
+
     Ok((
         vm,
         network_termination_handle,
         network_metrics_handle,
         network_secrets_handle,
+        bootstrap_frame,
         bind_identity_map,
     ))
+}
+
+fn encode_bootstrap_frame(bootstrap: &GuestBootstrap) -> RuntimeResult<Vec<u8>> {
+    let message = Message::with_payload(MessageType::Bootstrap, 0, bootstrap)
+        .map_err(|e| RuntimeError::Custom(format!("encode guest bootstrap: {e}")))?;
+    let mut frame = Vec::new();
+    codec::encode_to_buf(&message, &mut frame)
+        .map_err(|e| RuntimeError::Custom(format!("encode guest bootstrap frame: {e}")))?;
+    Ok(frame)
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -2606,7 +2618,10 @@ pub fn validate_disk_format(format: Option<&str>) -> msb_krun::Result<msb_krun::
     }
 }
 
-/// Append the default block root env var if not already set.
+/// Append the legacy default block-root environment value if not already set.
+///
+/// Retained for downstream source compatibility. VM launch now carries this
+/// value in [`GuestBootstrap`] and does not call this helper.
 pub fn append_block_root_env(env: &mut Vec<String>) {
     let prefix = format!("{}=", microsandbox_protocol::ENV_BLOCK_ROOT);
     if env.iter().any(|entry| entry.starts_with(&prefix)) {
@@ -2615,7 +2630,10 @@ pub fn append_block_root_env(env: &mut Vec<String>) {
     env.push(format!("{prefix}/dev/vda"));
 }
 
-/// Prepend `/.msb/scripts` to PATH for the initial guest command.
+/// Prepend `/.msb/scripts` to a legacy initial-command environment.
+///
+/// Retained for downstream source compatibility. Agentd now prepares PATH for
+/// each exec request after receiving the typed bootstrap.
 pub fn prepend_scripts_path(env: &mut Vec<String>) {
     let scripts = microsandbox_protocol::SCRIPTS_PATH;
     let prefix = "PATH=";
@@ -2652,14 +2670,14 @@ mod tests {
     };
     use super::{
         ConsoleSharedState, HostPermissions, StatVirtualization, append_block_root_env,
-        bind_rootfs_backend, guest_shutdown_flush_timeout,
+        bind_rootfs_backend, encode_bootstrap_frame, guest_shutdown_flush_timeout,
         guest_shutdown_flush_timeout_with_override, parse_mount_spec, prepend_scripts_path,
         request_guest_shutdown, request_guest_shutdown_with_timeout, thp_kernel_cmdline,
         validate_disk_format,
     };
 
     use microsandbox_filesystem::{Context, DynFileSystem, FsOptions};
-    use microsandbox_protocol::{codec, message::MessageType};
+    use microsandbox_protocol::{bootstrap::GuestBootstrap, codec, message::MessageType};
     #[cfg(unix)]
     use std::io::Write;
     #[cfg(unix)]
@@ -2948,6 +2966,27 @@ mod tests {
         let msg = codec::try_decode_from_buf(&mut frame).unwrap().unwrap();
         assert_eq!(msg.t, MessageType::Shutdown);
         assert_eq!(msg.id, 0);
+    }
+
+    #[test]
+    fn test_bootstrap_frame_is_a_generation_seven_control_message() {
+        let bootstrap = GuestBootstrap {
+            default_env: vec![microsandbox_protocol::bootstrap::BootstrapEnvVar {
+                key: "APP_CONFIG".to_string(),
+                value: "{\"message\":\"hello\"}".to_string(),
+            }],
+            ..GuestBootstrap::default()
+        };
+
+        let mut frame = encode_bootstrap_frame(&bootstrap).unwrap();
+        let message = codec::try_decode_from_buf(&mut frame).unwrap().unwrap();
+
+        assert_eq!(message.t, MessageType::Bootstrap);
+        assert_eq!(message.id, 0);
+        assert_eq!(message.flags, 0);
+        assert_eq!(message.v, microsandbox_protocol::message::PROTOCOL_VERSION);
+        assert_eq!(message.payload::<GuestBootstrap>().unwrap(), bootstrap);
+        assert!(frame.is_empty());
     }
 
     #[test]

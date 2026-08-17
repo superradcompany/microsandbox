@@ -8,6 +8,14 @@ use crate::{network, rlimit, tls};
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Mount only the filesystems needed to discover and open the agent console.
+///
+/// The console descriptor remains valid when a block-backed root later pivots
+/// and remounts the essential filesystems inside the final guest root.
+pub fn prepare_bootstrap_console() -> AgentdResult<()> {
+    linux::mount_bootstrap_filesystems()
+}
+
 /// Performs synchronous PID 1 initialization.
 ///
 /// Applies sandbox-wide resource limits first so every later guest process
@@ -151,17 +159,16 @@ mod linux {
         }
     }
 
+    /// Mount the minimum filesystems needed for virtio-console discovery.
+    pub fn mount_bootstrap_filesystems() -> AgentdResult<()> {
+        mount_dev()?;
+        mount_sys()?;
+        Ok(())
+    }
+
     /// Mounts essential Linux filesystems.
     pub fn mount_filesystems() -> AgentdResult<()> {
-        // /dev — devtmpfs
-        mkdir_ignore_exists("/dev")?;
-        mount_ignore_busy(
-            Some("devtmpfs"),
-            "/dev",
-            Some("devtmpfs"),
-            MsFlags::MS_RELATIME,
-            None::<&str>,
-        )?;
+        mount_dev()?;
 
         // /proc — proc
         let nodev_noexec_nosuid =
@@ -176,15 +183,7 @@ mod linux {
             None::<&str>,
         )?;
 
-        // /sys — sysfs
-        mkdir_ignore_exists("/sys")?;
-        mount_ignore_busy(
-            Some("sysfs"),
-            "/sys",
-            Some("sysfs"),
-            nodev_noexec_nosuid,
-            None::<&str>,
-        )?;
+        mount_sys()?;
 
         // /sys/fs/cgroup — cgroup2
         mkdir_ignore_exists("/sys/fs/cgroup")?;
@@ -225,6 +224,24 @@ mod linux {
         }
 
         Ok(())
+    }
+
+    fn mount_dev() -> AgentdResult<()> {
+        mkdir_ignore_exists("/dev")?;
+        mount_ignore_busy(
+            Some("devtmpfs"),
+            "/dev",
+            Some("devtmpfs"),
+            MsFlags::MS_RELATIME,
+            None::<&str>,
+        )
+    }
+
+    fn mount_sys() -> AgentdResult<()> {
+        let flags =
+            MsFlags::MS_NODEV | MsFlags::MS_NOEXEC | MsFlags::MS_NOSUID | MsFlags::MS_RELATIME;
+        mkdir_ignore_exists("/sys")?;
+        mount_ignore_busy(Some("sysfs"), "/sys", Some("sysfs"), flags, None::<&str>)
     }
 
     /// Mounts the virtiofs runtime filesystem at the canonical mount point.

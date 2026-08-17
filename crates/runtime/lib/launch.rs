@@ -10,6 +10,7 @@
 
 use std::path::PathBuf;
 
+use microsandbox_protocol::bootstrap::GuestBootstrap;
 use microsandbox_types::{CpuPlacement, DeploymentProfile, PlacementProfile, VsockRouteSpec};
 use serde::{Deserialize, Serialize};
 
@@ -102,11 +103,8 @@ pub struct LaunchConfig {
     /// Path to the init binary in the guest.
     pub init_path: Option<PathBuf>,
 
-    /// Environment variables as `KEY=VALUE` (guest env plus `MSB_*` specs).
-    pub env: Vec<String>,
-
-    /// Working directory inside the guest.
-    pub workdir: Option<PathBuf>,
+    /// Typed one-shot configuration delivered to agentd over its console.
+    pub bootstrap: GuestBootstrap,
 
     /// Path to the executable to run in the guest.
     pub exec_path: Option<PathBuf>,

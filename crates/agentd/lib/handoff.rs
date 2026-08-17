@@ -9,9 +9,9 @@
 //! - **Child** continues as a normal grandchild process and runs the
 //!   agent loop, serving host requests over virtio-serial.
 //!
-//! The handoff happens before any tokio runtime is built and before
-//! virtio-serial is opened, keeping the fork single-threaded and
-//! free of duplicated runtime state.
+//! The handoff happens before any tokio runtime is built. The already-open
+//! virtio-console descriptor is close-on-exec, so the new PID 1 does not
+//! inherit it while the agent child keeps serving the host connection.
 //!
 //! [`init::init`]: crate::init::init
 //!
@@ -77,10 +77,9 @@ pub fn do_handoff(spec: HandoffInit) -> AgentdResult<()> {
     let envp = build_envp(&spec.env);
     let cmd_c = path_to_cstring(&cmd)?;
 
-    // SAFETY: `fork()` in a single-threaded process with no opened
-    // serial fds and no async runtime. The agent loop has not started
-    // yet; tls/init writes are complete; only stdin/stdout/stderr are
-    // inherited from the kernel.
+    // SAFETY: `fork()` runs while agentd is still single-threaded and before
+    // any async runtime exists. The console fd is close-on-exec in the parent
+    // and intentionally retained by the child for the agent loop.
     match unsafe { fork() }? {
         ForkResult::Parent { .. } => {
             // We are now the new PID 1's pre-image. Restore default
@@ -231,18 +230,6 @@ fn build_envp(extras: &[(OsString, OsString)]) -> Vec<CString> {
     use std::collections::HashMap;
 
     let mut env: HashMap<OsString, OsString> = std::env::vars_os().collect();
-
-    // Strip our own boot params from the inherited env so the new
-    // init doesn't see stale MSB_* values that referred to agentd's
-    // boot, not its own runtime.
-    for var in [
-        microsandbox_protocol::ENV_HANDOFF_INIT,
-        microsandbox_protocol::ENV_HANDOFF_INIT_ARGS,
-        microsandbox_protocol::ENV_HANDOFF_INIT_CWD,
-        microsandbox_protocol::ENV_HANDOFF_INIT_ENV,
-    ] {
-        env.remove(&OsString::from(var));
-    }
 
     for (k, v) in extras {
         env.insert(k.clone(), v.clone());
