@@ -1,42 +1,19 @@
 ---
-title: Run an ephemeral GitHub Actions runner
+title: Run GitHub Actions in a microVM
 sidebarTitle: GitHub runner
-description: Run one repository job in a fresh microVM, retain bounded host logs, and destroy it
+description: Give each self-hosted job a disposable runner
 icon: "github"
 ---
 
-<Tooltip tip="This runner example builds and restores local disk snapshots and requires a host with hardware virtualization."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="This workflow creates and restores local disk snapshots, which are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Run one GitHub Actions job inside a fresh microsandbox VM. A controller on your host registers a repository-scoped, just-in-time (JIT) runner, starts it in the VM, and removes the VM and any remaining runner registration when the job finishes.
+The included controller registers a fresh runner for one repository job, then removes the runner and VM.
 
-The baseline in this example supports shell steps and JavaScript actions such as `actions/checkout` and `actions/upload-artifact`. It intentionally has no Docker daemon.
-
-<Note>
-  This is the advanced CI example because a self-hosted runner also needs GitHub authentication, registration, and cleanup. If you only need to execute a checkout safely, start with [PR checks](/examples/ci-cd/pr-checks).
-</Note>
-
-## What runs where
-
-The `gh` CLI and its repository administration token stay on the host. The VM receives only a short-lived JIT runner configuration, then the runner inside it connects outbound to GitHub and claims the queued job with the matching label.
-
-```text
-GitHub repository
-    │ queues one job for a unique label
-    ▼
-Host controller (msb + authenticated gh)
-    │ registers the runner and starts a VM
-    ▼
-Disposable VM (GitHub Actions runner)
-    │ connects outbound and runs one job
-    ▼
-Runner deregisters → controller deletes the VM
-```
-
-You will prepare the runner snapshot once, add a small workflow to the repository, and install the controller once. Each run then takes two commands: queue the workflow and start a fresh worker.
+This runner supports shell steps and JavaScript actions such as `actions/checkout` and `actions/upload-artifact`. For a simpler checkout-and-test workflow, see [PR checks](/examples/ci-cd/pr-checks).
 
 ## Prepare the host
 
-For an always-on controller, use a Linux bare-metal host with KVM or a cloud VM type that explicitly exposes nested virtualization. Merely seeing virtualization in a cloud product name is not enough; `/dev/kvm` must be available to the account that runs `msb`. The same scripts also work on an Apple Silicon Mac for local validation. Install `msb` and the GitHub CLI, then check the host before creating a runner:
+Install `msb` and the GitHub CLI on a Linux host with KVM or an Apple Silicon Mac. A hosted Linux machine must expose nested virtualization and make `/dev/kvm` available to the account running `msb`.
 
 ```sh
 case "$(uname -s)" in
@@ -48,7 +25,7 @@ msb doctor
 gh auth status --hostname github.com
 ```
 
-The controller needs repository **Administration: write** access for GitHub's JIT configuration and runner deletion endpoints. For a one-off run, authenticate `gh` with a fine-grained token that remains valid beyond the controller's two-hour lifetime. For a hosted service, set `MSB_GITHUB_TOKEN_COMMAND` to an administrator-owned executable that accepts `OWNER/REPO` and prints a fresh GitHub App installation token; the controller invokes it separately for every API operation, so cleanup never depends on an expired one-hour token. Keep either credential on the host. It is not the workflow's `GITHUB_TOKEN` and must never enter the guest.
+Authenticate `gh` with a fine-grained token limited to the target repository, with **Administration: write**, and valid for at least two hours. The controller keeps this host token out of the VM.
 
 Choose the repository and a custom label. Keep these values in the same terminal for the rest of the walkthrough:
 
@@ -57,11 +34,11 @@ repo=acme/widget
 label=msb-jit-acme-widget-7d6e
 ```
 
-Use a label unique to this repository and deployment. It is the rendezvous point between the queued workflow and the temporary runner; it is not the generated runner name.
+Use a unique label so only this temporary runner claims the job.
 
 ## Build the runner snapshot
 
-Save the script below as `/usr/local/sbin/build-msb-github-runner`, outside every repository checkout, and make it executable. It selects GitHub's `x64` or `arm64` archive from the host architecture, verifies the release archive before extraction, and records the native architecture in the snapshot name.
+Save the builder as `/usr/local/sbin/build-msb-github-runner`. It installs and verifies the matching GitHub runner once, then creates an integrity-checked snapshot for later jobs.
 
 <Accordion title="Snapshot builder source">
 
@@ -157,15 +134,11 @@ sudo chmod 0755 /usr/local/sbin/build-msb-github-runner
 /usr/local/sbin/build-msb-github-runner
 ```
 
-The runner process and every workflow step start as the unprivileged `runner` user. Passwordless `sudo` is available only inside the guest, so jobs that expect the usual Ubuntu runner privilege model still work. The worker uses the default in-guest security profile because `--security restricted` deliberately blocks `sudo`; the microVM remains the host boundary.
-
-Rebuild the snapshot when changing the base image, runner version, packages, or architecture. The integrity record detects later snapshot-disk changes, but it does not prove who built the snapshot. Build it only from reviewed inputs, and never put repository credentials, workflow secrets, or source checkouts in it.
+The snapshot contains the runner and its tools, but no repository checkout or credentials. Jobs run as the unprivileged `runner` user with `sudo` available only inside the VM.
 
 ## Add a narrowly scoped workflow
 
-Add the following file to the repository's default branch. GitHub only accepts `workflow_dispatch` events when the workflow file exists on that branch. The label is supplied when you queue each run, so the workflow and controller cannot drift apart.
-
-This job also proves that it is non-root, no host Docker socket appeared, passwordless guest `sudo` works, checkout produced `README.md`, and JavaScript artifact actions can run:
+Add this workflow to the repository's default branch. GitHub only accepts `workflow_dispatch` when the workflow file exists there.
 
 ```yaml .github/workflows/microsandbox-jit.yml
 name: Microsandbox JIT runner
@@ -207,11 +180,11 @@ jobs:
           retention-days: 1
 ```
 
-Specifying any `permissions` entries sets all omitted `GITHUB_TOKEN` permissions to `none`. `persist-credentials: false` prevents checkout from leaving that token in the guest Git configuration, although workflow code can still access the job token while the job is running. Pin third-party actions to reviewed commit SHAs if your policy requires immutable action code.
+The workflow grants only read access and prevents checkout from leaving its token in Git configuration.
 
 ## Install the JIT controller
 
-Save the controller below as `/usr/local/sbin/msb-github-jit`, owned by the host administrator and outside all repository checkouts, then make it executable. It accepts exactly one `OWNER/REPO` and one custom label, derives collision-resistant runner and sandbox names, verifies the matching native snapshot, and creates no host mounts.
+Save the controller as `/usr/local/sbin/msb-github-jit`, owned by the host administrator and outside repository checkouts. It creates one JIT runner and one VM per invocation.
 
 <Accordion title="Hardened JIT controller source">
 
@@ -703,46 +676,16 @@ sudo chmod 0755 /usr/local/sbin/msb-github-jit
   </Step>
 </Steps>
 
-Use one controller invocation per desired worker. If the workflow is not queued first, the runner waits for a job with that unique label until the controller timeout ends. The JIT registration and random runner and sandbox names prevent one invocation from replacing another.
+Use one controller invocation per worker. The runner accepts one matching job, then the controller deletes the VM and any remaining GitHub registration.
 
-## Controller safeguards
+## Security
 
-The two-line API projection sends the numeric runner ID to a mode-`0600` host file and pipes only `encoded_jit_config` into `msb exec --stream`. The host-side controller neither intentionally logs nor persists that blob, and `github_api` disables GitHub CLI debug output because `GH_DEBUG=api` would log the raw response before `--jq`. Inside the VM, however, `Runner.Listener` receives the encoded value in its process arguments, decodes it, and writes active configuration and credential files. Workflow code runs as the same user and has `sudo`, so it can read those credentials. Treat the JIT configuration as job-accessible and the entire VM as credential-bearing until deletion. The narrower guarantee is that the host administration token never enters the VM. Do not add shell tracing, capture the API response in a variable, redirect it to a file, pass the host token with `--env`, or use microsandbox `--secret`. Avoiding `--secret` keeps both the host token and secret-injection TLS interception out of this runner.
+The default controller creates no host mounts, exposes no host Docker socket, keeps the repository administration token on the host, bounds retained logs, and cleans up on success, failure, or interruption. The job still controls everything inside its VM and has public internet access, so give untrusted workflows no repository or cloud secrets beyond the minimum job permissions they need. See GitHub's [secure use guidance](https://docs.github.com/en/actions/reference/security/secure-use#hardening-for-self-hosted-runners).
 
-The stdout capture fully drains `msb exec` without rendering attacker-controlled terminal sequences. It retains only the first 32 MiB and last 32 MiB as private host logs, so a noisy job cannot create an unbounded controller artifact; follow live progress in the GitHub Actions UI instead. The retained files still contain untrusted bytes, so inspect them with tooling that escapes control characters rather than sending them directly to an administrator's terminal. The controller copies `PIPESTATUS` immediately and returns the first failure from the API request, ID extraction, runner, or capture stage. The exit trap deletes the VM without reading any post-job guest path, retries transient deletion failures, treats only HTTP `404` as already absent, and reconciles an ambiguous create response by the unique runner name. The private artifact directory is intentionally retained for incident review.
+## Run it continuously
 
-The controller deliberately does not copy `_diag` after the job. Passwordless guest `sudo` means untrusted workflow code can replace diagnostic files, guest archive tools, and archive paths, while a host size check after `msb cp` cannot prevent an oversized transfer. The bounded stream is enforced outside the guest and is therefore the safer audit artifact.
+On a hosted Linux machine with KVM, invoke one controller for each validated `workflow_job` event whose action is `queued`. Set `MSB_GITHUB_TOKEN_COMMAND` to an administrator-owned executable that mints a fresh GitHub App installation token for each API call. At fleet scale, use GitHub's [runner scale-set client or Actions Runner Controller](https://docs.github.com/en/actions/reference/runners/self-hosted-runners#autoscaling).
 
-<Warning>
-  Do not add the `fsize` limits used by simpler examples to this runner exec. In testing, the .NET runner crashed under explicit `RLIMIT_FSIZE` values of both 1 GiB and 4 GiB. This controller instead limits process count and open file descriptors, while the snapshot disk size, bounded host capture, job timeout, and sandbox lifetime bound the other relevant resources.
-</Warning>
+## Verified
 
-## Understand the security boundary
-
-`--net public` is intentionally broad: the job can reach any public internet destination needed by GitHub, actions, package registries, or test dependencies. microsandbox still blocks the host, private networks, link-local addresses, and cloud metadata under the `public` profile, but it cannot stop a malicious job from exfiltrating data to a public endpoint.
-
-The fresh snapshot, lack of host mounts, absent host Docker socket, microVM boundary, and unconditional deletion protect host state and prevent one completed job from persisting into the next worker. They do not make credentials safe from code running inside the job. A malicious workflow can use or leak its `GITHUB_TOKEN`, OIDC token, cloud credentials, repository secrets, environment secrets, checked-out private source, and any other data intentionally provided to it.
-
-For untrusted pull requests, provide no secrets or cloud credentials, do not grant `id-token: write`, keep the `GITHUB_TOKEN` at the minimum permissions, require approval where appropriate, and follow GitHub's [secure use guidance for self-hosted runners](https://docs.github.com/en/actions/reference/security/secure-use#hardening-for-self-hosted-runners). Repository scope limits this JIT runner to one repository; organization and enterprise deployments should additionally use [runner groups restricted to selected repositories and workflows](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/manage-access).
-
-Passwordless `sudo` means hostile code can become root inside the guest and change in-guest limits. CPU, memory, disk, maximum duration, the hypervisor boundary, and network policy remain host-enforced, but guest root should still be treated as fully compromised until deletion. Review the bounded host logs as sensitive operational data and set a retention policy for their directory.
-
-## Operate it as a hosted service
-
-For an always-on service, keep the controller on a long-lived, virtualization-capable Linux host and enqueue one fresh VM for each validated `workflow_job` event whose action is `queued`. Validate the webhook signature, deduplicate both delivery IDs and workflow job IDs, authorize the repository and requested labels again, persist the installation ID and request—not an installation token—to a queue, and return `2xx` promptly; worker creation must be idempotent. Configure `MSB_GITHUB_TOKEN_COMMAND` as trusted service configuration, never webhook input, and use it to mint a fresh installation token from host-protected GitHub App credentials for every create, reconcile, and delete request.
-
-Set `MSB_GITHUB_STATE_DIR` or `RUNNER_TEMP` to an administrator-owned mode-`0700` directory on persistent storage. The controller records the repository, runner name, sandbox name, and then the GitHub runner ID there before the listener starts. A host crash cannot run an `EXIT` trap, so a hosted service must reconcile retained records and runners with this name prefix on startup, retry remote deletion until confirmed, and apply an explicit retention policy to the bounded logs. Do not rely only on GitHub's eventual cleanup of unused JIT registrations.
-
-GitHub documents the [`workflow_job` webhook payload](https://docs.github.com/en/webhooks/webhook-events-and-payloads#workflow_job), [webhook signature validation](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries), and [installation-token generation](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-an-installation-access-token-for-a-github-app). At larger scale, use GitHub's [runner scale-set client or Actions Runner Controller](https://docs.github.com/en/actions/reference/runners/self-hosted-runners#autoscaling) instead of inventing queue and retry semantics.
-
-## Add container actions separately
-
-GitHub container actions, job containers, and service containers require Docker on a Linux self-hosted runner. This snapshot deliberately supports only shell and JavaScript actions. Build a separate reviewed Docker-in-VM snapshot for those workflows, start the daemon inside that microVM, and keep its writable Docker state disposable or repository-specific.
-
-Never mount the host's `/var/run/docker.sock` into a runner. Possession of that socket is normally equivalent to control of the host Docker daemon and defeats the VM boundary. See [Docker inside a sandbox](/examples/docker/docker-in-sandbox) and GitHub's [self-hosted runner requirements](https://docs.github.com/en/actions/reference/runners/self-hosted-runners#requirements-for-self-hosted-runner-machines).
-
-## Verified flow and references
-
-The exact snapshot builder and controller above were exercised from an Apple Silicon Mac against the `superradcompany/microsandbox` repository. A workflow job was queued for a unique label, then the host controller registered a matching runner inside an ARM64 Ubuntu 24.04 microsandbox. GitHub assigned it [run 30624020450, attempt 5](https://github.com/superradcompany/microsandbox/actions/runs/30624020450); the runner checked out the repository, passed the non-root, Docker-socket, `sudo`, and `README.md` assertions, and uploaded an artifact. It then exited after one job, deregistered, retained bounded mode-`0600` host logs, and removed its sandbox. Separate startup-failure and interrupt probes also removed both the local VM and remote runner registration.
-
-The authoritative GitHub references are the [repository JIT configuration REST endpoint](https://docs.github.com/en/rest/actions/self-hosted-runners#create-configuration-for-a-just-in-time-runner-for-a-repository), [self-hosted runner reference](https://docs.github.com/en/actions/reference/runners/self-hosted-runners), [secure use reference](https://docs.github.com/en/actions/reference/security/secure-use), [workflow permissions reference](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#permissions), and [Actions Runner v2.336.0 release](https://github.com/actions/runner/releases/tag/v2.336.0).
+This exact builder and controller ran [GitHub Actions job 91178286410](https://github.com/superradcompany/microsandbox/actions/runs/30624020450/job/91178286410) inside an ARM64 Ubuntu 24.04 microVM, uploaded its artifact, deregistered the runner, and removed the VM. Startup-failure and interruption checks also cleaned up both sides.
