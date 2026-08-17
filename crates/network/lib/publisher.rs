@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 use crate::config::{PortProtocol, PublishedPort};
 use crate::policy::{NetworkPolicy, Protocol};
 use crate::shared::SharedState;
-use crate::udp_relay::{construct_udp_response, extract_udp_payload};
+use crate::udp::relay::{construct_udp_response, extract_udp_payload};
 
 //--------------------------------------------------------------------------------------------------
 // Helpers

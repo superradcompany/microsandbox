@@ -5,8 +5,6 @@
 //! channel pair (connected to the smoltcp socket in the poll loop) and the
 //! real server.
 
-pub(crate) mod upstream;
-
 use std::borrow::Cow;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
@@ -18,8 +16,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
-use self::upstream::UpstreamTcpTarget;
-use crate::conn::ProxyConnectState;
+use super::connection::ProxyConnectState;
+use super::upstream::UpstreamTcpTarget;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::secrets::config::{SecretsConfig, SecretsConfigExt, ViolationAction};
 use crate::secrets::handler::{

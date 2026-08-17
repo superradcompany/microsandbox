@@ -17,12 +17,11 @@ use tokio::sync::mpsc;
 
 use super::sni;
 use super::state::TlsState;
-use crate::conn::ProxyConnectState;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
-use crate::proxy::upstream::UpstreamTcpTarget;
 use crate::secrets::config::ViolationAction;
 use crate::secrets::handler::SecretsHandler;
 use crate::shared::SharedState;
+use crate::tcp::{connection::ProxyConnectState, upstream::UpstreamTcpTarget};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -59,7 +58,7 @@ pub(crate) struct TlsProxyContext {
 
 /// Spawn a TLS proxy task for a connection to an intercepted port.
 ///
-/// See [`crate::proxy::spawn_tcp_proxy`] for the `proxy_connect`
+/// See [`crate::tcp::proxy::spawn_tcp_proxy`] for the `proxy_connect`
 /// contract.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_tls_proxy(

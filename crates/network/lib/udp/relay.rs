@@ -24,7 +24,7 @@ use tokio::io::Interest;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
-use crate::icmp_error::{construct_packet_too_big, ethernet_ip_payload};
+use crate::icmp::error::{construct_packet_too_big, ethernet_ip_payload};
 use crate::shared::SharedState;
 
 //--------------------------------------------------------------------------------------------------

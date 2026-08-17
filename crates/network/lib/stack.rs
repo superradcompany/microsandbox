@@ -22,25 +22,24 @@ use smoltcp::wire::{
 };
 
 use crate::config::{DnsConfig, PublishedPort};
-use crate::conn::ConnectionTracker;
 use crate::device::SmoltcpDevice;
 use crate::dns::common::ports::DnsPortType;
 use crate::dns::{
     interceptor::DnsInterceptor,
     proxies::{dot::DotProxy, tcp::DnsTcpProxy},
 };
-use crate::icmp_relay::IcmpRelay;
+use crate::icmp::relay::IcmpRelay;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
-use crate::proxy::{self, upstream::UpstreamTcpTarget};
 use crate::publisher::PortPublisher;
 use crate::secrets::handle::SecretsHandle;
 use crate::shared::SharedState;
+use crate::tcp::{connection::ConnectionTracker, proxy, upstream::UpstreamTcpTarget};
 use crate::tls::{proxy as tls_proxy, state::TlsState};
-use crate::udp_fragments::{
+use crate::udp::fragments::{
     Ipv4UdpFragmentReassembler, Ipv6UdpFragmentReassembler, ReassembledUdpDatagram,
     is_ipv4_udp_fragment, is_ipv6_fragment, is_ipv6_udp_fragment,
 };
-use crate::udp_relay::UdpRelay;
+use crate::udp::relay::UdpRelay;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -1119,6 +1118,7 @@ mod tests {
 
     use crate::device::SmoltcpDevice;
     use crate::shared::SharedState;
+    use crate::tcp::connection::NewConnection;
 
     /// Build a minimal Ethernet + IPv4 + TCP SYN frame.
     fn build_tcp_syn_frame(
@@ -1965,7 +1965,7 @@ mod tests {
         shared: &Arc<SharedState>,
         now: Instant,
         guest_port: u16,
-    ) -> (i32, i32, Vec<crate::conn::NewConnection>) {
+    ) -> (i32, i32, Vec<NewConnection>) {
         let (server_isn, guest_seq) =
             handshake(tracker, device, iface, sockets, shared, now, guest_port);
 
