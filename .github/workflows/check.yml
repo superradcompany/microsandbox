@@ -32,6 +32,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.filter.outputs.code }}
+      ruby: ${{ steps.filter.outputs.ruby }}
+      ruby_package: ${{ steps.filter.outputs.ruby_package }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
@@ -40,6 +42,27 @@ jobs:
           filters: |
             code:
               - '!docs/**'
+            ruby:
+              - '.github/workflows/check.yml'
+              - 'Cargo.lock'
+              - 'Cargo.toml'
+              - 'crates/**'
+              - 'packages/**'
+              - 'scripts/ci/ruby-sdk-checkout.sh'
+              - 'sdk/ruby/**'
+              - 'sdk/rust/**'
+            ruby_package:
+              - '.github/workflows/check.yml'
+              - 'Cargo.lock'
+              - 'Cargo.toml'
+              - 'scripts/ci/ruby-sdk-checkout.sh'
+              - 'sdk/ruby/Rakefile'
+              - 'sdk/ruby/ext/microsandbox/Cargo.lock'
+              - 'sdk/ruby/ext/microsandbox/Cargo.toml'
+              - 'sdk/ruby/ext/microsandbox/extconf.rb'
+              - 'sdk/ruby/lib/microsandbox/version.rb'
+              - 'sdk/ruby/microsandbox.gemspec'
+              - 'sdk/rust/Cargo.toml'
 
   # ---------------------------------------------------------------------------
   # Build kernel.c on Linux for macOS libkrunfw linking
@@ -876,6 +899,129 @@ jobs:
           uv run --project sdk/python --no-sync pytest sdk/python/tests
           uv run --project sdk/python --no-sync ruff check sdk/python
 
+  ruby-sdk:
+    name: Ruby ${{ matrix.ruby }} / Linux x86_64
+    needs: [build-agentd-x86_64, changes]
+    if: needs.changes.outputs.ruby == 'true'
+    runs-on: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby: ["3.3", "3.4", "4.0"]
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ruby-${{ matrix.ruby }}
+      RB_SYS_CARGO_PROFILE: ci
+      RB_SYS_CARGO_TARGET_DIR: ${{ github.workspace }}/target/ruby-${{ matrix.ruby }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Use checkout Rust SDK
+        run: scripts/ci/ruby-sdk-checkout.sh prepare
+
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+        with:
+          workspaces: . -> target/ruby-${{ matrix.ruby }}
+          key: ruby-${{ matrix.ruby }}-ci
+          cache-bin: false
+          cache-targets: true
+
+      - name: Set up mold
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+
+      - name: Download agentd
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: agentd-x86_64-linux-musl
+          path: build/
+
+      - name: Install Ruby build dependencies
+        run: gem install rake rake-compiler test-unit rb_sys --no-document
+
+      - name: Check Rust extension
+        if: matrix.ruby == '4.0'
+        working-directory: sdk/ruby/ext/microsandbox
+        run: |
+          cargo fmt -- --check
+          cargo clippy --profile ci -- -D warnings
+
+      - name: Compile and test source tree
+        working-directory: sdk/ruby
+        run: mold -run rake test
+
+      - name: Restore standalone Ruby lockfile
+        if: always()
+        run: scripts/ci/ruby-sdk-checkout.sh restore
+
+  ruby-source-gem:
+    name: Ruby source gem / 4.0
+    needs: [build-agentd-x86_64, changes]
+    if: needs.changes.outputs.ruby == 'true' && (github.event_name == 'push' || needs.changes.outputs.ruby_package == 'true')
+    runs-on: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ruby-source-gem-4.0
+      RB_SYS_CARGO_TARGET_DIR: ${{ github.workspace }}/target/ruby-source-gem-4.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        with:
+          ruby-version: "4.0"
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Use checkout Rust SDK
+        run: scripts/ci/ruby-sdk-checkout.sh prepare
+
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+        with:
+          workspaces: . -> target/ruby-source-gem-4.0
+          key: ruby-4.0-source-gem
+          cache-bin: false
+          cache-targets: true
+
+      - name: Set up mold
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+
+      - name: Download agentd
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: agentd-x86_64-linux-musl
+          path: build/
+
+      - name: Install Ruby build dependencies
+        run: gem install rb_sys --no-document
+
+      # The temporary Cargo patch is outside the gem, so the artifact keeps its
+      # exact crates.io pin while this installation uses the matching local API.
+      - name: Build and install source gem against checkout
+        working-directory: sdk/ruby
+        run: |
+          gem build microsandbox.gemspec
+          mold -run gem install --local microsandbox-*.gem --no-document
+          ruby --disable-gems -e 'require "rubygems"; require "microsandbox"; abort unless Microsandbox.version == "0.6.9"'
+
+      - name: Restore standalone Ruby lockfile
+        if: always()
+        run: scripts/ci/ruby-sdk-checkout.sh restore
+
   go-quality:
     name: Go Quality
     needs: [build-linux-x86_64, go-ffi-build, changes]
@@ -1465,6 +1611,8 @@ jobs:
       - node-sdk-build
       - python-wheel-build
       - python-quality
+      - ruby-sdk
+      - ruby-source-gem
       - go-quality
       - cli-smoke-test
       - integration-test

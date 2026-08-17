@@ -1,6 +1,6 @@
 # Ruby SDK
 
-The microsandbox Ruby SDK provides Ruby 3.1+ bindings for creating and
+The microsandbox Ruby SDK provides Ruby 3.3+ bindings for creating and
 controlling local or cloud sandboxes.
 
 ## Installation
