@@ -40,15 +40,8 @@
             "icon": "box",
             "pages": [
               "sandboxes/overview",
-              {
-                "group": "Images",
-                "icon": "layer-group",
-                "expanded": false,
-                "pages": [
-                  "images/overview",
-                  "images/disk-images"
-                ]
-              },
+              "images/overview",
+              "images/disk-images",
               "sandboxes/lifecycle",
               "sandboxes/commands",
               "sandboxes/filesystem",
@@ -77,24 +70,10 @@
             "group": "Operations",
             "icon": "gauge",
             "pages": [
-              {
-                "group": "Observability",
-                "icon": "chart-line",
-                "expanded": false,
-                "pages": [
-                  "observability/msb-metrics",
-                  "observability/deep-dive"
-                ]
-              },
-              {
-                "group": "Performance",
-                "icon": "bolt",
-                "expanded": false,
-                "pages": [
-                  "sandboxes/optimization",
-                  "sandboxes/cpu-placement"
-                ]
-              }
+              "observability/msb-metrics",
+              "observability/deep-dive",
+              "sandboxes/optimization",
+              "sandboxes/cpu-placement"
             ]
           },
           {
