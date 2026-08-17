@@ -19,10 +19,12 @@ use microsandbox_protocol::fs::{
 };
 use microsandbox_protocol::message::{Message, MessageType};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
-use crate::session::{RawActivity, RawSessionCompletion, RawSessionOutput, SessionOutput};
+use crate::session::{
+    RawActivity, RawSessionCompletion, RawSessionOutput, SessionOutput, SessionOutputSender,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -302,7 +304,7 @@ pub async fn handle_fs_request(
     req: FsRequest,
     state: &mut FsState,
     out_buf: &mut Vec<u8>,
-    session_tx: &mpsc::UnboundedSender<(u32, SessionOutput)>,
+    session_tx: &SessionOutputSender,
 ) -> Result<Option<FsStreamSession>, String> {
     match req.op {
         FsOp::RealPath { path } => {
@@ -749,11 +751,11 @@ async fn handle_read_stream(
     file: Arc<Mutex<tokio::fs::File>>,
     offset: u64,
     len: Option<u64>,
-    tx: &mpsc::UnboundedSender<(u32, SessionOutput)>,
+    tx: &SessionOutputSender,
 ) {
     let mut file = file.lock().await;
     if let Err(e) = file.seek(std::io::SeekFrom::Start(offset)).await {
-        send_raw_response(id, false, Some(format!("seek: {e}")), None, tx);
+        send_raw_response(id, false, Some(format!("seek: {e}")), None, tx).await;
         return;
     }
 
@@ -762,6 +764,11 @@ async fn handle_read_stream(
     let mut buf = Vec::new();
 
     loop {
+        // Reserve before the file read and CBOR materialization so concurrent streams cannot
+        // each create an uncharged maximum-sized frame while aggregate output is saturated.
+        let Some(permit) = tx.reserve(codec::MAX_FRAME_SIZE as usize + 4).await else {
+            return;
+        };
         let read_len = match remaining {
             Some(0) => break,
             Some(n) => chunk.len().min(n as usize),
@@ -780,7 +787,8 @@ async fn handle_read_stream(
                 let msg = match Message::with_payload(MessageType::FsData, id, &data) {
                     Ok(msg) => msg,
                     Err(e) => {
-                        send_raw_response(id, false, Some(format!("encode chunk: {e}")), None, tx);
+                        send_raw_response(id, false, Some(format!("encode chunk: {e}")), None, tx)
+                            .await;
                         return;
                     }
                 };
@@ -792,22 +800,27 @@ async fn handle_read_stream(
                         Some(format!("encode chunk frame: {e}")),
                         None,
                         tx,
-                    );
+                    )
+                    .await;
                     return;
                 }
-                let output = RawSessionOutput::new(buf.clone(), RawActivity::fs_bytes(n), None);
-                if tx.send((id, SessionOutput::Raw(output))).is_err() {
+                let output =
+                    RawSessionOutput::new(std::mem::take(&mut buf), RawActivity::fs_bytes(n), None);
+                if !tx
+                    .send_reserved(id, SessionOutput::Raw(output), permit)
+                    .await
+                {
                     return;
                 }
             }
             Err(e) => {
-                send_raw_response(id, false, Some(format!("read: {e}")), None, tx);
+                send_raw_response(id, false, Some(format!("read: {e}")), None, tx).await;
                 return;
             }
         }
     }
 
-    send_raw_response(id, true, None, None, tx);
+    send_raw_response(id, true, None, None, tx).await;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -978,12 +991,12 @@ fn encode_response(id: u32, resp: FsResponse, out_buf: &mut Vec<u8>) -> Result<(
     Ok(())
 }
 
-fn send_raw_response(
+async fn send_raw_response(
     id: u32,
     ok: bool,
     error: Option<String>,
     data: Option<FsResponseData>,
-    tx: &mpsc::UnboundedSender<(u32, SessionOutput)>,
+    tx: &SessionOutputSender,
 ) {
     let resp = FsResponse { ok, error, data };
     match Message::with_payload(MessageType::FsResponse, id, &resp) {
@@ -996,7 +1009,7 @@ fn send_raw_response(
                         RawActivity::guest_message(),
                         Some(RawSessionCompletion::FsRead),
                     );
-                    let _ = tx.send((id, SessionOutput::Raw(output)));
+                    let _ = tx.send(id, SessionOutput::Raw(output)).await;
                 }
                 Err(e) => {
                     eprintln!("failed to encode fs response frame for {id}: {e}");

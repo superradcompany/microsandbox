@@ -5,6 +5,9 @@
 //! The correlation ID and flags sit in a fixed-position binary header so that
 //! relay intermediaries can route frames without CBOR parsing.
 
+use std::io::IoSlice;
+
+use bytes::{Buf, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{
@@ -66,6 +69,7 @@ pub fn encode_raw_to_buf(frame: &RawFrame, buf: &mut Vec<u8>) -> ProtocolResult<
         });
     }
 
+    buf.reserve(4 + frame_len as usize);
     buf.extend_from_slice(&frame_len.to_be_bytes());
     buf.extend_from_slice(&frame.id.to_be_bytes());
     buf.push(frame.flags);
@@ -146,12 +150,13 @@ pub async fn read_raw_frame<R: AsyncRead + Unpin>(reader: &mut R) -> ProtocolRes
         });
     }
 
-    let mut payload = vec![0u8; frame_len];
-    reader.read_exact(&mut payload).await?;
-
-    let id = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
-    let flags = payload[4];
-    let body = payload[FRAME_HEADER_SIZE..].to_vec();
+    // Read the fixed header separately so the body is allocated exactly once.
+    let mut header = [0u8; FRAME_HEADER_SIZE];
+    reader.read_exact(&mut header).await?;
+    let id = u32::from_be_bytes(header[..4].try_into().unwrap());
+    let flags = header[4];
+    let mut body = vec![0u8; frame_len - FRAME_HEADER_SIZE];
+    reader.read_exact(&mut body).await?;
 
     Ok(RawFrame { id, flags, body })
 }
@@ -163,11 +168,58 @@ pub async fn write_raw_frame<W: AsyncWrite + Unpin>(
     writer: &mut W,
     frame: &RawFrame,
 ) -> ProtocolResult<()> {
-    let mut buf = Vec::new();
-    encode_raw_to_buf(frame, &mut buf)?;
-    writer.write_all(&buf).await?;
+    let frame_len = u32::try_from(FRAME_HEADER_SIZE + frame.body.len()).map_err(|_| {
+        ProtocolError::FrameTooLarge {
+            size: u32::MAX,
+            max: MAX_FRAME_SIZE,
+        }
+    })?;
+    if frame_len > MAX_FRAME_SIZE {
+        return Err(ProtocolError::FrameTooLarge {
+            size: frame_len,
+            max: MAX_FRAME_SIZE,
+        });
+    }
+
+    let mut header = [0u8; 4 + FRAME_HEADER_SIZE];
+    header[..4].copy_from_slice(&frame_len.to_be_bytes());
+    header[4..8].copy_from_slice(&frame.id.to_be_bytes());
+    header[8] = frame.flags;
+    write_vectored_all(writer, &header, &frame.body).await?;
     writer.flush().await?;
     Ok(())
+}
+
+/// Decode one complete typed frame from a cursor-based buffer without front-draining it.
+pub fn try_decode_from_bytes(buf: &mut BytesMut) -> ProtocolResult<Option<Message>> {
+    if buf.len() < 4 {
+        return Ok(None);
+    }
+
+    let frame_len = u32::from_be_bytes(buf[..4].try_into().unwrap());
+    if frame_len > MAX_FRAME_SIZE {
+        return Err(ProtocolError::FrameTooLarge {
+            size: frame_len,
+            max: MAX_FRAME_SIZE,
+        });
+    }
+
+    let frame_len = frame_len as usize;
+    if frame_len < FRAME_HEADER_SIZE {
+        return Err(ProtocolError::FrameTooShort {
+            size: frame_len as u32,
+            min: FRAME_HEADER_SIZE as u32,
+        });
+    }
+
+    let total = 4 + frame_len;
+    if buf.len() < total {
+        return Ok(None);
+    }
+
+    let message = decode_message_frame(&buf[..total])?;
+    buf.advance(total);
+    Ok(Some(message))
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -237,11 +289,17 @@ pub async fn write_message<W: AsyncWrite + Unpin>(
     writer: &mut W,
     message: &Message,
 ) -> ProtocolResult<()> {
-    let mut buf = Vec::new();
-    encode_to_buf(message, &mut buf)?;
-    writer.write_all(&buf).await?;
-    writer.flush().await?;
-    Ok(())
+    let mut body = Vec::new();
+    ciborium::into_writer(message, &mut body)?;
+    write_raw_frame(
+        writer,
+        &RawFrame {
+            id: message.id,
+            flags: message.flags,
+            body,
+        },
+    )
+    .await
 }
 
 /// Decodes a [`RawFrame`] into a typed [`Message`] by CBOR-deserializing the body.
@@ -288,12 +346,52 @@ pub fn decode_message_frame(frame: &[u8]) -> ProtocolResult<Message> {
     Ok(msg)
 }
 
+async fn write_vectored_all<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    header: &[u8],
+    body: &[u8],
+) -> std::io::Result<()> {
+    let mut header_offset = 0;
+    let mut body_offset = 0;
+
+    while header_offset < header.len() || body_offset < body.len() {
+        let written = if header_offset < header.len() {
+            let slices = [
+                IoSlice::new(&header[header_offset..]),
+                IoSlice::new(&body[body_offset..]),
+            ];
+            let slice_count = if body_offset < body.len() { 2 } else { 1 };
+            writer.write_vectored(&slices[..slice_count]).await?
+        } else {
+            // Some AsyncWrite implementations stop at an empty first IoSlice, so never leave the
+            // exhausted header in front of a non-empty body.
+            writer.write(&body[body_offset..]).await?
+        };
+        if written == 0 {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+
+        let header_remaining = header.len() - header_offset;
+        if written < header_remaining {
+            header_offset += written;
+        } else {
+            header_offset = header.len();
+            body_offset += written - header_remaining;
+        }
+    }
+
+    Ok(())
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
     use super::*;
     use crate::message::{FLAG_SESSION_START, FLAG_TERMINAL, MessageType, PROTOCOL_VERSION};
 
@@ -504,6 +602,46 @@ mod tests {
     }
 
     #[test]
+    fn cursor_decoder_accepts_every_frame_fragment_boundary() {
+        let msg = Message::new(MessageType::Ready, 77, vec![0xAB; 1024]);
+        let mut encoded = Vec::new();
+        encode_to_buf(&msg, &mut encoded).unwrap();
+
+        for split in 0..=encoded.len() {
+            let mut buf = BytesMut::new();
+            buf.extend_from_slice(&encoded[..split]);
+            let first = try_decode_from_bytes(&mut buf).unwrap();
+            if split < encoded.len() {
+                assert!(first.is_none(), "decoded incomplete frame at split {split}");
+                buf.extend_from_slice(&encoded[split..]);
+            }
+
+            let decoded = first
+                .or_else(|| try_decode_from_bytes(&mut buf).unwrap())
+                .unwrap();
+            assert_eq!(decoded.id, msg.id);
+            assert_eq!(decoded.t, msg.t);
+            assert!(buf.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn vectored_writer_handles_one_byte_short_writes() {
+        let frame = RawFrame {
+            id: 91,
+            flags: FLAG_TERMINAL,
+            body: vec![0xCD; 257],
+        };
+        let mut expected = Vec::new();
+        encode_raw_to_buf(&frame, &mut expected).unwrap();
+
+        let mut writer = OneByteWriter::default();
+        write_raw_frame(&mut writer, &frame).await.unwrap();
+
+        assert_eq!(writer.bytes, expected);
+    }
+
+    #[test]
     fn test_raw_frame_sync_roundtrip() {
         let frame = RawFrame {
             id: 42,
@@ -538,5 +676,50 @@ mod tests {
         assert_eq!(decoded.t, MessageType::ExecExited);
         let payload: ExecExited = decoded.payload().unwrap();
         assert_eq!(payload.code, 7);
+    }
+
+    #[derive(Default)]
+    struct OneByteWriter {
+        bytes: Vec<u8>,
+    }
+
+    impl AsyncWrite for OneByteWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            if let Some(byte) = buf.first() {
+                self.bytes.push(*byte);
+                Poll::Ready(Ok(1))
+            } else {
+                Poll::Ready(Ok(0))
+            }
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn is_write_vectored(&self) -> bool {
+            true
+        }
+
+        fn poll_write_vectored(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            bufs: &[IoSlice<'_>],
+        ) -> Poll<std::io::Result<usize>> {
+            if let Some(byte) = bufs.iter().find_map(|buf| buf.first()) {
+                self.bytes.push(*byte);
+                Poll::Ready(Ok(1))
+            } else {
+                Poll::Ready(Ok(0))
+            }
+        }
     }
 }

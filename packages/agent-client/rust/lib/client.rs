@@ -66,9 +66,11 @@ const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const WINDOWS_PIPE_CONNECT_RETRY: Duration = Duration::from_millis(10);
 
 #[cfg(feature = "stream")]
-const WRITER_QUEUE_CAPACITY: usize = 1024;
+/// Eight maximum-sized generation-6 frames bound queued writes at 32 MiB.
+const WRITER_QUEUE_CAPACITY: usize = 8;
 const REQUEST_QUEUE_CAPACITY: usize = 1;
-const STREAM_QUEUE_CAPACITY: usize = 1024;
+/// Two maximum-sized frames keep each correlation stream at or below 8 MiB.
+const STREAM_QUEUE_CAPACITY: usize = 2;
 
 const LEGACY_PROTOCOL_VERSION: u8 = 1;
 // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox

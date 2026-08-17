@@ -88,8 +88,9 @@ microsandbox-protocol = { version = "=0.6.9", path = "crates/protocol" }
 microsandbox-runtime = { version = "=0.6.9", path = "crates/runtime", default-features = false }
 microsandbox-utils = { version = "=0.6.9", path = "crates/utils" }
 microsandbox-vsock = { version = "=0.6.9", path = "crates/vsock" }
-msb_krun = "=0.1.31"
-msb_krun_utils = "=0.1.31"
+# Keep CI on the exact prerequisite revision until its console API is released to crates.io.
+msb_krun = { git = "https://github.com/superradcompany/libkrun", rev = "ff087a1a0add4006f7ad4d753316cde1015a28b2" }
+msb_krun_utils = { git = "https://github.com/superradcompany/libkrun", rev = "ff087a1a0add4006f7ad4d753316cde1015a28b2" }
 test-macros = { path = "crates/testing/macros" }
 test-utils = { path = "crates/testing/utils" }
 
