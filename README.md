@@ -381,13 +381,13 @@ The `msb` CLI provides a complete interface for managing sandboxes, images, and 
 
 Practical ways to put microsandbox to work:
 
-> ● <img height="14" src="https://octicons-col.vercel.app/container/A770EF"> **[Docker in a Sandbox](https://docs.microsandbox.dev/examples/docker/docker-in-sandbox)**: Run Docker without touching the host daemon.<br />
-> ● <img height="14" src="https://octicons-col.vercel.app/code/A770EF"> **[OpenCode](https://docs.microsandbox.dev/examples/agents/opencode)**: Give a coding agent an isolated project workspace.<br />
-> ● <img height="14" src="https://octicons-col.vercel.app/globe/A770EF"> **[Playwright](https://docs.microsandbox.dev/examples/browser-automation/playwright)**: Run headless browser jobs inside a microVM.<br />
-> ● <img height="14" src="https://octicons-col.vercel.app/cache/A770EF"> **[Warm Workers](https://docs.microsandbox.dev/examples/sandboxing/warm-workers)**: Snapshot a toolchain and launch clean workers.<br />
-> ● <img height="14" src="https://octicons-col.vercel.app/database/A770EF"> **[Migration Rehearsal](https://docs.microsandbox.dev/examples/data/migration-rehearsal)**: Test a database migration, then restore the baseline.<br />
-> ● <img height="14" src="https://octicons-col.vercel.app/workflow/A770EF"> **[GitHub Actions Runner](https://docs.microsandbox.dev/examples/ci-cd/github-actions-runner)**: Run each self-hosted job in a disposable microVM.<br />
-> ● <img height="14" src="https://octicons-col.vercel.app/file/A770EF"> **[Documents to PDF](https://docs.microsandbox.dev/examples/file-processing/libreoffice-pdf)**: Convert untrusted documents in a fresh offline worker.
+> • <img height="14" src="https://octicons-col.vercel.app/container/A770EF"> **[Docker in a Sandbox](https://docs.microsandbox.dev/examples/docker/docker-in-sandbox)**: Run Docker without touching the host daemon.<br />
+> • <img height="14" src="https://octicons-col.vercel.app/code/A770EF"> **[OpenCode](https://docs.microsandbox.dev/examples/agents/opencode)**: Give a coding agent an isolated project workspace.<br />
+> • <img height="14" src="https://octicons-col.vercel.app/globe/A770EF"> **[Playwright](https://docs.microsandbox.dev/examples/browser-automation/playwright)**: Run headless browser jobs inside a microVM.<br />
+> • <img height="14" src="https://octicons-col.vercel.app/cache/A770EF"> **[Warm Workers](https://docs.microsandbox.dev/examples/sandboxing/warm-workers)**: Snapshot a toolchain and launch clean workers.<br />
+> • <img height="14" src="https://octicons-col.vercel.app/database/A770EF"> **[Migration Rehearsal](https://docs.microsandbox.dev/examples/data/migration-rehearsal)**: Test a database migration, then restore the baseline.<br />
+> • <img height="14" src="https://octicons-col.vercel.app/workflow/A770EF"> **[GitHub Actions Runner](https://docs.microsandbox.dev/examples/ci-cd/github-actions-runner)**: Run each self-hosted job in a disposable microVM.<br />
+> • <img height="14" src="https://octicons-col.vercel.app/file/A770EF"> **[Documents to PDF](https://docs.microsandbox.dev/examples/file-processing/libreoffice-pdf)**: Convert untrusted documents in a fresh offline worker.
 
 <br />
 
