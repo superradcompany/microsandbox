@@ -7,41 +7,24 @@ icon: "box"
 
 <Tooltip tip="The container runs the local microsandbox backend and needs hardware virtualization from its Docker host. It is not a microsandbox cloud workflow."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-The published image packages `msb` and `libkrunfw` in a Linux container. It does not replace the hypervisor: the Docker host must still expose `/dev/kvm` so microsandbox can start a microVM inside the container.
+The published image packages `msb` and `libkrunfw` in a Linux container. It does not replace the hypervisor: Docker must still expose `/dev/kvm` so microsandbox can start a microVM inside the container.
 
 ```text
-host → Linux VM → microsandbox container → microVM
+Linux          host → Docker container → microVM
+macOS/Windows  host → Docker Desktop VM → container → microVM
 ```
 
 For production hosts, [installing microsandbox directly](/getting-started/quickstart) avoids this extra virtualization layer. The container image is useful when an existing deployment system requires an OCI image.
 
 ## Requirements
 
-| Host | Requirement |
+| Docker host | Requirement |
 | --- | --- |
-| <Icon icon="linux" size={16} /> **Linux** | KVM enabled with a readable and writable `/dev/kvm` device. |
-| <Icon icon="apple" size={16} /> **macOS** | A Linux container VM with nested virtualization enabled. The tested setup below uses Colima on M3-or-newer Apple Silicon. |
-| <Icon icon="windows" size={16} /> **Windows** | A Linux container VM that exposes nested virtualization and `/dev/kvm`. Docker Desktop and WSL configuration alone do not guarantee that device reaches containers. |
+| <Icon icon="linux" size={16} /> **Linux** | Docker Engine with a readable and writable `/dev/kvm` device. |
+| <Icon icon="apple" size={16} /> **macOS** | Docker Desktop with nested virtualization and `/dev/kvm` exposed through its Linux VM. |
+| <Icon icon="windows" size={16} /> **Windows** | Docker Desktop with nested virtualization and `/dev/kvm` exposed through its WSL 2 or Hyper-V Linux environment. |
 
-The image supports `linux/amd64` and `linux/arm64`. Architecture compatibility does not imply virtualization support; `/dev/kvm` is the authoritative check.
-
-### macOS with Colima
-
-[Colima supports nested virtualization](https://github.com/abiosoft/colima/blob/main/embedded/defaults/colima.yaml) on M3-or-newer Apple Silicon when its VM type is `vz`. Stop the existing profile, enable the setting, and start it again:
-
-```bash
-colima stop
-colima start --nested-virtualization --save-config
-colima ssh -- ls -l /dev/kvm
-```
-
-`colima status` should report `macOS Virtualization.Framework`. If the profile uses another VM type, do not delete it casually: recreating a Colima profile removes the Docker images, containers, and volumes stored in that profile.
-
-Docker Desktop also runs Linux containers inside a [managed Linux VM](https://docs.docker.com/desktop/features/networking/), but its macOS settings do not provide the Colima setup shown above. Use the preflight below rather than assuming that selecting a particular Docker Desktop VMM exposes nested KVM.
-
-### Windows
-
-WSL 2 supports a [`nestedVirtualization` setting](https://learn.microsoft.com/en-us/windows/wsl/wsl-config#configuration-settings-for-wslconfig), but the Docker engine's Linux environment must also expose `/dev/kvm` to the container. Run the preflight below. If it fails, use the [native Windows installation](/getting-started/quickstart), which uses Windows Hypervisor Platform, or use microsandbox cloud.
+The image supports `linux/amd64` and `linux/arm64`. Architecture compatibility does not imply virtualization support; `/dev/kvm` is the authoritative check. Docker Desktop runs Linux containers in a VM on [macOS](https://docs.docker.com/desktop/features/vmm/) and through a Linux environment such as [WSL 2 on Windows](https://docs.docker.com/desktop/features/wsl/). Installing Docker Desktop does not guarantee that nested KVM reaches containers, so use the preflight below. If it fails, use the [native installation](/getting-started/quickstart) or microsandbox cloud.
 
 ## Verify the Docker host
 
