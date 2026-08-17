@@ -379,15 +379,15 @@ The `msb` CLI provides a complete interface for managing sandboxes, images, and 
 
 ## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/beaker/ffffff" alt="beaker-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/beaker/000000" alt="beaker"></a>&nbsp;&nbsp;Examples
 
-Practical ways to put microsandbox to work:
-
-- <img height="14" src="https://octicons-col.vercel.app/container/A770EF"> **[Docker in a Sandbox](https://docs.microsandbox.dev/examples/docker/docker-in-sandbox)**: Run Docker without touching the host daemon.
-- <img height="14" src="https://octicons-col.vercel.app/code/A770EF"> **[OpenCode](https://docs.microsandbox.dev/examples/agents/opencode)**: Give a coding agent an isolated project workspace.
-- <img height="14" src="https://octicons-col.vercel.app/globe/A770EF"> **[Playwright](https://docs.microsandbox.dev/examples/browser-automation/playwright)**: Run headless browser jobs inside a microVM.
-- <img height="14" src="https://octicons-col.vercel.app/cache/A770EF"> **[Warm Workers](https://docs.microsandbox.dev/examples/sandboxing/warm-workers)**: Snapshot a toolchain and launch clean workers.
-- <img height="14" src="https://octicons-col.vercel.app/database/A770EF"> **[Migration Rehearsal](https://docs.microsandbox.dev/examples/data/migration-rehearsal)**: Test a database migration, then restore the baseline.
-- <img height="14" src="https://octicons-col.vercel.app/workflow/A770EF"> **[GitHub Actions Runner](https://docs.microsandbox.dev/examples/ci-cd/github-actions-runner)**: Run each self-hosted job in a disposable microVM.
-- <img height="14" src="https://octicons-col.vercel.app/file/A770EF"> **[Documents to PDF](https://docs.microsandbox.dev/examples/file-processing/libreoffice-pdf)**: Convert untrusted documents in a fresh offline worker.
+> Practical ways to put microsandbox to work:
+>
+> - <img height="14" src="https://octicons-col.vercel.app/container/A770EF"> **[Docker in a Sandbox](https://docs.microsandbox.dev/examples/docker/docker-in-sandbox)**: Run Docker without touching the host daemon.
+> - <img height="14" src="https://octicons-col.vercel.app/code/A770EF"> **[OpenCode](https://docs.microsandbox.dev/examples/agents/opencode)**: Give a coding agent an isolated project workspace.
+> - <img height="14" src="https://octicons-col.vercel.app/globe/A770EF"> **[Playwright](https://docs.microsandbox.dev/examples/browser-automation/playwright)**: Run headless browser jobs inside a microVM.
+> - <img height="14" src="https://octicons-col.vercel.app/cache/A770EF"> **[Warm Workers](https://docs.microsandbox.dev/examples/sandboxing/warm-workers)**: Snapshot a toolchain and launch clean workers.
+> - <img height="14" src="https://octicons-col.vercel.app/database/A770EF"> **[Migration Rehearsal](https://docs.microsandbox.dev/examples/data/migration-rehearsal)**: Test a database migration, then restore the baseline.
+> - <img height="14" src="https://octicons-col.vercel.app/workflow/A770EF"> **[GitHub Actions Runner](https://docs.microsandbox.dev/examples/ci-cd/github-actions-runner)**: Run each self-hosted job in a disposable microVM.
+> - <img height="14" src="https://octicons-col.vercel.app/file/A770EF"> **[Documents to PDF](https://docs.microsandbox.dev/examples/file-processing/libreoffice-pdf)**: Convert untrusted documents in a fresh offline worker.
 
 <br />
 
@@ -418,17 +418,17 @@ Practical ways to put microsandbox to work:
 
 ## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/people/ffffff" alt="people-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/people/000000" alt="people"></a>&nbsp;&nbsp;Built with microsandbox
 
-- **[Eve by Vercel](https://eve.dev/docs/sandbox#microsandbox)** uses microsandbox as its built-in local microVM backend for agent sessions.
-- **[GSA TTS Agentic Coding Quickstart](https://github.com/GSA-TTS/agentic-coding-quickstart)** ships `msb` as its preferred local sandbox for AI coding agents.
-- **[agent-compose by Chaitin](https://github.com/chaitin/agent-compose)** includes a maintained microsandbox driver for isolated coding-agent workloads.
-- **[Condukt](https://github.com/tuist/condukt) and [Once](https://github.com/tuist/once) by Tuist** use microsandbox for agent workflows and isolated remote execution.
-- **[h5i](https://github.com/h5i-dev/h5i)** uses microsandbox for its strongest hardware-isolated execution tier.
-- **[Smithers](https://github.com/smithersai/smithers)** provides a first-class microsandbox backend for observable coding-agent workflows.
-- **[sandboxed-lit by LlamaIndex](https://github.com/run-llama/sandboxed-lit)** runs document-processing agents inside a hardware-isolated microsandbox workspace.
-- **[Agentic Usability by PSPDFKit Labs](https://github.com/PSPDFKit-labs/agentic-usability)** isolates its benchmark solver and judge agents with microsandbox.
-- **[Agent VM by Wiren Board](https://github.com/wirenboard/agent-vm)** runs Claude Code, Codex, and OpenCode inside microsandbox-based VMs.
-- **[Devsy](https://github.com/devsy-org/devsy)** deploys complete devcontainers and workspaces through a tested microsandbox provider.
-
+> - **[Eve by Vercel](https://eve.dev/docs/sandbox#microsandbox)** uses microsandbox as its built-in local microVM backend for agent sessions.
+> - **[GSA TTS Agentic Coding Quickstart](https://github.com/GSA-TTS/agentic-coding-quickstart)** ships `msb` as its preferred local sandbox for AI coding agents.
+> - **[agent-compose by Chaitin](https://github.com/chaitin/agent-compose)** includes a maintained microsandbox driver for isolated coding-agent workloads.
+> - **[Condukt](https://github.com/tuist/condukt) and [Once](https://github.com/tuist/once) by Tuist** use microsandbox for agent workflows and isolated remote execution.
+> - **[h5i](https://github.com/h5i-dev/h5i)** uses microsandbox for its strongest hardware-isolated execution tier.
+> - **[Smithers](https://github.com/smithersai/smithers)** provides a first-class microsandbox backend for observable coding-agent workflows.
+> - **[sandboxed-lit by LlamaIndex](https://github.com/run-llama/sandboxed-lit)** runs document-processing agents inside a hardware-isolated microsandbox workspace.
+> - **[Agentic Usability by PSPDFKit Labs](https://github.com/PSPDFKit-labs/agentic-usability)** isolates its benchmark solver and judge agents with microsandbox.
+> - **[Agent VM by Wiren Board](https://github.com/wirenboard/agent-vm)** runs Claude Code, Codex, and OpenCode inside microsandbox-based VMs.
+> - **[Devsy](https://github.com/devsy-org/devsy)** deploys complete devcontainers and workspaces through a tested microsandbox provider.
+>
 > Built something with microsandbox? [Share it with us on Discord](https://discord.gg/T95Y3XnEAK)—we’d love to feature it here.
 
 <br />
