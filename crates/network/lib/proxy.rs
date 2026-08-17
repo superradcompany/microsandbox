@@ -200,8 +200,6 @@ async fn tcp_proxy_task(
     tls_state: Option<Arc<TlsState>>,
     proxy_connect: Arc<ProxyConnectState>,
 ) -> io::Result<()> {
-    let connect_dst = connect_target.primary();
-
     // Pre-connect peek is only for domain policy: the hostname has to be known
     // before we dial upstream so a Deny never opens a connection. Secrets do
     // *not* gate the connect, so they no longer force a peek here — that work is
@@ -273,6 +271,7 @@ async fn tcp_proxy_task(
     // seen the server's banner; with the socket already open we can relay that
     // banner while we wait, instead of burning the peek budget pre-connect.
     let stream = connect_target.connect(&proxy_connect, &shared).await?;
+    let connect_dst = stream.peer_addr().unwrap_or(connect_target.primary());
     let (mut server_rx, mut server_tx) = stream.into_split();
 
     // Finish classifying the first flight (TLS vs plain HTTP) and, for
