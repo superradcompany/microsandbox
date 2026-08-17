@@ -3819,6 +3819,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "typed-path",
 ]
 
 [[package]]
@@ -4123,6 +4124,7 @@ dependencies = [
  "sha2 0.11.0",
  "thiserror",
  "ts-rs",
+ "typed-path",
  "utoipa",
  "zeroize",
 ]

@@ -1453,7 +1453,7 @@ impl SandboxBuilder {
             }
         }
 
-        super::types::validate_volume_mounts(&self.config.spec.mounts)?;
+        super::types::validate_volume_mounts(&mut self.config.spec.mounts)?;
         super::validate_env(&self.config.spec.env)?;
         super::validate_labels(&self.config.spec.labels)?;
         self.validate_vsock_routes()?;
@@ -1743,7 +1743,7 @@ mod tests {
     #[cfg(feature = "net")]
     use microsandbox_types::PortProtocol;
     use microsandbox_types::{
-        CpuPlacement, DeploymentProfile, SandboxLogLevel, TransparentHugePagePolicy,
+        CpuPlacement, DeploymentProfile, SandboxLogLevel, TransparentHugePagePolicy, VolumeMount,
         VsockSocketType,
     };
     #[cfg(feature = "net")]
@@ -2733,5 +2733,26 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("alphanumeric"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn builder_orders_nested_mounts_parent_first() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .volume("/workspace/persist", |mount| mount.tmpfs())
+            .volume("/workspace", |mount| mount.tmpfs())
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            config
+                .spec
+                .mounts
+                .iter()
+                .map(VolumeMount::guest)
+                .collect::<Vec<_>>(),
+            vec!["/workspace", "/workspace/persist"]
+        );
     }
 }

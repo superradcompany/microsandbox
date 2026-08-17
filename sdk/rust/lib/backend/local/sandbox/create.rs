@@ -103,7 +103,7 @@ impl LocalBackend {
         Self::validate_rootfs_source(&config.spec.image)?;
         validate_env(&config.spec.env)?;
         validate_labels(&config.spec.labels)?;
-        validate_volume_mounts(&config.spec.mounts)?;
+        validate_volume_mounts(&mut config.spec.mounts)?;
         if let Some(init) = &config.spec.init {
             crate::sandbox::init::validate(init)?;
         }

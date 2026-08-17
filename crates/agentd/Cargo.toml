@@ -42,3 +42,4 @@ tokio = { workspace = true, features = [
     "sync",
     "time",
 ] }
+typed-path.workspace = true

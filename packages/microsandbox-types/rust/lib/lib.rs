@@ -40,6 +40,7 @@ pub use domain::{
     SecretConfigError, SecretEntry, SecretInjection, SecretsConfig, SecurityProfile, SnapshotSpec,
     StatVirtualization, TlsConfig, TokenBucketConfig, TransparentHugePagePolicy, ViolationAction,
     VolumeKind, VolumeMount, VolumeSpec, VsockRouteSpec, VsockSocketType, VsockSpec,
+    canonicalize_volume_mounts,
 };
 pub use error::{TypesError, TypesResult};
 pub use modify::{

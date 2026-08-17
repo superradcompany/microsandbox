@@ -144,7 +144,7 @@ impl LocalBackend {
         Self::validate_rootfs_source(&config.spec.image)?;
         validate_env(&config.spec.env)?;
         validate_labels(&config.spec.labels)?;
-        validate_volume_mounts(&config.spec.mounts)?;
+        validate_volume_mounts(&mut config.spec.mounts)?;
         self.validate_start_state(&config, &self.sandboxes_dir().join(name))?;
         Self::update_sandbox_status(write_db, model.id, SandboxStatus::Running).await?;
 

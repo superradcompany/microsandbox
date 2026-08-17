@@ -8,9 +8,11 @@ use std::str::FromStr;
 
 use ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
 use serde::{Deserialize, Serialize};
+use typed_path::{Utf8Component, Utf8UnixComponent, Utf8UnixPath};
 use zeroize::Zeroizing;
 
 use crate::modify::SecretSource;
+use crate::{TypesError, TypesResult};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -1314,6 +1316,15 @@ impl VolumeMount {
         }
     }
 
+    fn guest_mut(&mut self) -> &mut String {
+        match self {
+            Self::Bind { guest, .. }
+            | Self::Named { guest, .. }
+            | Self::Tmpfs { guest, .. }
+            | Self::DiskImage { guest, .. } => guest,
+        }
+    }
+
     /// Return named-volume creation metadata when this mount provisions a named volume.
     pub fn named_create(&self) -> Option<&NamedVolumeCreate> {
         match self {
@@ -1321,6 +1332,79 @@ impl VolumeMount {
             _ => None,
         }
     }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Volume Mounts
+//--------------------------------------------------------------------------------------------------
+
+/// Canonicalizes guest paths and orders mounts from parent to child.
+///
+/// All SDKs and runtimes share this ordering contract so an enclosing mount
+/// can never hide a nested mount merely because the caller used an unordered
+/// collection. Paths at the same depth are ordered lexicographically to keep
+/// serialized configurations deterministic.
+pub fn canonicalize_volume_mounts(mounts: &mut [VolumeMount]) -> TypesResult<()> {
+    for mount in mounts.iter_mut() {
+        let canonical = canonical_guest_mount_path(mount.guest())?;
+        *mount.guest_mut() = canonical;
+    }
+
+    mounts.sort_by_cached_key(|mount| guest_mount_order_key(mount.guest()));
+
+    for pair in mounts.windows(2) {
+        if pair[0].guest() == pair[1].guest() {
+            return Err(TypesError::invalid_config(format!(
+                "multiple volumes cannot mount the same guest path: {}",
+                pair[0].guest()
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn canonical_guest_mount_path(guest: &str) -> TypesResult<String> {
+    let path = Utf8UnixPath::new(guest);
+
+    if !path.is_valid() {
+        return Err(TypesError::invalid_config(format!(
+            "guest mount path must be a valid Unix path: {guest}"
+        )));
+    }
+    if !path.is_absolute() {
+        return Err(TypesError::invalid_config(format!(
+            "guest mount path must be absolute: {guest}"
+        )));
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Utf8UnixComponent::ParentDir))
+    {
+        return Err(TypesError::invalid_config(format!(
+            "guest mount path must not contain '..': {guest}"
+        )));
+    }
+    if guest.contains(':') || guest.contains(';') || guest.contains(',') {
+        return Err(TypesError::invalid_config(format!(
+            "guest mount path must not contain ':', ';', or ',': {guest}"
+        )));
+    }
+
+    let canonical = path.normalize().to_string();
+    if canonical == "/" {
+        return Err(TypesError::invalid_config(
+            "cannot mount a volume at guest root /",
+        ));
+    }
+
+    Ok(canonical)
+}
+
+fn guest_mount_order_key(guest: &str) -> (usize, String) {
+    let path = Utf8UnixPath::new(guest);
+    let depth = path.components().filter(Utf8Component::is_normal).count();
+    (depth, guest.to_owned())
 }
 
 impl RlimitResource {
@@ -2762,6 +2846,48 @@ impl fmt::Display for NetworkRateLimitDirection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tmpfs_mount(guest: &str) -> VolumeMount {
+        VolumeMount::Tmpfs {
+            guest: guest.to_owned(),
+            size_mib: None,
+            options: MountOptions::default(),
+        }
+    }
+
+    #[test]
+    fn volume_mounts_are_canonicalized_and_ordered_parent_first() {
+        let mut mounts = vec![
+            tmpfs_mount("/workspace//persist/./logs/"),
+            tmpfs_mount("/alpha/z"),
+            tmpfs_mount("/workspace"),
+        ];
+
+        canonicalize_volume_mounts(&mut mounts).unwrap();
+
+        assert_eq!(
+            mounts.iter().map(VolumeMount::guest).collect::<Vec<_>>(),
+            vec!["/workspace", "/alpha/z", "/workspace/persist/logs"]
+        );
+    }
+
+    #[test]
+    fn volume_mounts_reject_duplicate_canonical_paths() {
+        let mut mounts = vec![tmpfs_mount("/data/cache"), tmpfs_mount("/data//./cache/")];
+
+        let error = canonicalize_volume_mounts(&mut mounts).unwrap_err();
+
+        assert!(error.to_string().contains("same guest path: /data/cache"));
+    }
+
+    #[test]
+    fn volume_mounts_reject_parent_components_before_normalizing() {
+        let mut mounts = vec![tmpfs_mount("/workspace/../secrets")];
+
+        let error = canonicalize_volume_mounts(&mut mounts).unwrap_err();
+
+        assert!(error.to_string().contains("must not contain '..'"));
+    }
 
     #[test]
     fn disk_image_format_from_extension() {

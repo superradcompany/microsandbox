@@ -97,6 +97,8 @@ msb create python --name dev \
 
 </CodeGroup>
 
+Nested destinations are supported. microsandbox canonicalizes guest paths and always applies enclosing mounts before their children, so SDKs that accept unordered maps—such as Go—produce the same result regardless of map iteration order.
+
 Use `--mount-file` when you want to bind one host file instead of an entire directory.
 
 ```bash
