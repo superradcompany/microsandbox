@@ -27,6 +27,11 @@ use microsandbox_protocol::{
     codec,
     message::{Message, MessageType},
 };
+use microsandbox_types::CpuPlacement;
+#[cfg(windows)]
+use microsandbox_vsock::WindowsNamedPipePortBackend;
+#[cfg(unix)]
+use microsandbox_vsock::{UnixDatagramPortBackend, UnixStreamPortBackend};
 use msb_krun::VmBuilder;
 use sea_orm::{ColumnTrait, EntityTrait, Set};
 use serde::{Deserialize, Serialize};
@@ -59,6 +64,9 @@ const EXIT_REASON_AGENT_UNRESPONSIVE: u8 = 5;
 const EXIT_REASON_SHUTDOWN_REQUESTED: u8 = 6;
 const EXIT_REASON_STARTUP_COMMAND_FAILED: u8 = 7;
 
+/// Bounds how long an existing VMM can retain an obsolete fair share after membership changes.
+const WRITEBACK_PRESSURE_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
+
 /// Fixed fd carrying the bulk `msb sandbox` config (argv overflow) as
 /// NUL-terminated argument records. Keeps the network-config blob and the
 /// repeated `--env` flags off the process argv — see issue #997.
@@ -69,6 +77,10 @@ pub const PARENT_WATCH_FD: i32 = 97;
 
 /// Fixed fd used to pass startup JSON from `msb sandbox` to its launcher.
 pub const STARTUP_FD: i32 = 98;
+
+/// Fixed fd holding the inherited per-sandbox lifecycle ownership lock.
+#[cfg(unix)]
+pub const LIFECYCLE_LOCK_FD: i32 = 99;
 
 /// Control byte sent by the owner to stop parent-watch monitoring without stopping the sandbox.
 pub const PARENT_WATCH_DETACH: u8 = 1;
@@ -109,6 +121,21 @@ pub struct Config {
     /// lifecycle maintenance can remove ephemeral sandbox directories without
     /// inferring the path from `log_dir`.
     pub sandboxes_dir: PathBuf,
+
+    /// Root directory holding ephemeral host-runtime artifacts.
+    pub run_dir: PathBuf,
+
+    /// Process-lifetime ownership of this sandbox's runtime artifacts.
+    pub lifecycle_guard: crate::ipc::SandboxLifecycleGuard,
+
+    /// Internal directory containing process-held CPU allocation leases.
+    pub cpu_lease_dir: PathBuf,
+
+    /// Internal directory containing process-held writeback pressure leases.
+    pub writeback_lease_dir: PathBuf,
+
+    /// Host-global dirty-credit pool shared fairly by live writable disks.
+    pub block_writeback_pool_bytes: Option<u64>,
 
     /// Path to the Unix domain socket for the agent relay.
     pub agent_sock_path: PathBuf,
@@ -249,6 +276,9 @@ pub struct VmConfig {
     /// Path to the libkrunfw shared library.
     pub libkrunfw_path: PathBuf,
 
+    /// Guest transparent huge-page policy selected at boot.
+    pub thp: microsandbox_types::TransparentHugePagePolicy,
+
     /// Number of virtual CPUs online at boot.
     pub vcpus: u8,
 
@@ -260,6 +290,18 @@ pub struct VmConfig {
 
     /// Maximum guest memory in MiB reserved for future hotplug (virtio-mem).
     pub max_memory_mib: u32,
+
+    /// Requested host CPU placement policy.
+    pub cpu_placement: CpuPlacement,
+
+    /// Selected host profile name, retained for diagnostics.
+    pub placement_profile_name: Option<String>,
+
+    /// Host-resolved placement behavior.
+    pub placement_profile: Option<microsandbox_types::PlacementProfile>,
+
+    /// Per-writable-raw-disk hard budget for buffered host dirty data.
+    pub block_writeback_limit_bytes: Option<u64>,
 
     /// Root filesystem path for direct passthrough mounts.
     pub rootfs_path: Option<PathBuf>,
@@ -305,6 +347,9 @@ pub struct VmConfig {
     /// Disk-image volume mounts attached as extra virtio-blk devices.
     pub disks: Vec<DiskMountSpec>,
 
+    /// Host Unix sockets exposed through virtio-vsock.
+    pub vsock: Vec<microsandbox_types::VsockRouteSpec>,
+
     /// Pre-built filesystem backends as `(tag, backend)` pairs.
     #[cfg(unix)]
     pub backends: Vec<(String, Box<dyn DynFileSystem + Send + Sync>)>,
@@ -349,6 +394,12 @@ struct BindIdentityMapRegistration {
     handle: Option<BindIdentityMapHandle>,
     #[cfg(unix)]
     mount_count: usize,
+}
+
+#[cfg(feature = "net")]
+struct KrunNetworkRateLimiters {
+    rx: Option<msb_krun::RateLimiterConfig>,
+    tx: Option<msb_krun::RateLimiterConfig>,
 }
 
 #[cfg(feature = "net")]
@@ -401,10 +452,16 @@ impl std::fmt::Debug for VmConfig {
         let mut debug = f.debug_struct("VmConfig");
         debug
             .field("libkrunfw_path", &self.libkrunfw_path)
+            .field("thp", &self.thp)
             .field("vcpus", &self.vcpus)
             .field("memory_mib", &self.memory_mib)
             .field("max_cpus", &self.max_cpus)
             .field("max_memory_mib", &self.max_memory_mib)
+            .field("placement_profile_name", &self.placement_profile_name)
+            .field(
+                "block_writeback_limit_bytes",
+                &self.block_writeback_limit_bytes,
+            )
             .field("rootfs_path", &self.rootfs_path)
             .field("rootfs_vmdk", &self.rootfs_vmdk)
             .field("rootfs_upper", &self.rootfs_upper)
@@ -500,6 +557,13 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     // Heartbeats are per boot, while the runtime directory persists across starts.
     heartbeat::clear_stale(&config.runtime_dir)?;
 
+    #[cfg(unix)]
+    crate::ipc::prepare_canonical_socket_dir(
+        &config.run_dir,
+        &config.sandbox_name,
+        &config.agent_sock_path,
+    )?;
+
     // Create the relay and persist the run record with a single runtime hop.
     let (mut relay, db, run_db_id) = tokio_rt.block_on(async {
         let relay = AgentRelay::new(&config.agent_sock_path, Arc::clone(&shared));
@@ -511,6 +575,80 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         let run_db_id = insert_run(&db, config.sandbox_id, pid).await?;
         Ok::<_, RuntimeError>((relay, db, run_db_id))
     })?;
+
+    let writeback_disk_paths = match writeback_limited_disk_paths(&config.vm) {
+        Ok(disk_paths) => disk_paths,
+        Err(error) => {
+            let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+            return Err(error);
+        }
+    };
+
+    let cpu_guard = match tokio_rt.block_on(crate::cpu::acquire(
+        &db,
+        run_db_id,
+        &config.cpu_lease_dir,
+        crate::cpu::PlacementRequest {
+            policy: config.vm.cpu_placement,
+            max_vcpus: config.vm.max_cpus.max(config.vm.vcpus),
+            boot_memory_mib: config.vm.memory_mib,
+            max_memory_mib: config.vm.max_memory_mib.max(config.vm.memory_mib),
+            profile: config.vm.placement_profile,
+        },
+    )) {
+        Ok(guard) => Arc::new(guard),
+        Err(error) => {
+            let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+            return Err(error);
+        }
+    };
+
+    let writeback_guard = match tokio_rt.block_on(crate::writeback::acquire(
+        &db,
+        run_db_id,
+        &config.writeback_lease_dir,
+        config.block_writeback_pool_bytes,
+        config.vm.block_writeback_limit_bytes,
+        &writeback_disk_paths,
+    )) {
+        Ok(guard) => guard,
+        Err(error) => {
+            if let Err(release_error) = tokio_rt.block_on(cpu_guard.release(&db)) {
+                tracing::warn!(%release_error, "release CPU placement after writeback pressure setup failure");
+            }
+            let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+            return Err(error);
+        }
+    };
+    let writeback_guard = Arc::new(writeback_guard);
+    let writeback_limit = writeback_guard.limit();
+    if writeback_guard.is_managed() {
+        let pressure_guard = Arc::clone(&writeback_guard);
+        let pressure_db = db.clone();
+        tokio_rt.spawn(async move {
+            monitor_writeback_pressure(pressure_guard, pressure_db).await;
+        });
+    }
+
+    #[cfg(unix)]
+    if let Err(error) = crate::ipc::publish_legacy_agent_link(
+        &config.run_dir,
+        &config.sandbox_name,
+        &config.agent_sock_path,
+    ) {
+        if let Err(release_error) = tokio_rt.block_on(writeback_guard.release(&db)) {
+            tracing::warn!(%release_error, "release writeback admission after legacy endpoint publication failure");
+        }
+        if let Err(release_error) = tokio_rt.block_on(cpu_guard.release(&db)) {
+            tracing::warn!(%release_error, "release CPU placement after legacy endpoint publication failure");
+        }
+        let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+        // Publication is no-replace. If it collided with another legacy
+        // endpoint, clean only this runtime's canonical namespace.
+        let _ =
+            crate::ipc::remove_canonical_socket_artifacts(&config.run_dir, &config.sandbox_name);
+        return Err(error.into());
+    }
 
     // Attach the exec.log writer so the ring reader can capture the
     // primary session's stdout/stderr. Failure to open the file is
@@ -562,12 +700,21 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     let exit_run_id = run_db_id;
     let exit_reason_for_observer = Arc::clone(&exit_reason);
     let exit_sock_path = config.agent_sock_path.clone();
+    let exit_run_dir = config.run_dir.clone();
+    let exit_sandbox_name = config.sandbox_name.clone();
     let exit_sandboxes_dir = config.sandboxes_dir.clone();
     let exit_log_writer = exec_log_writer.clone();
     // Capture the activated writer so the exit observer can release the slot
     // without re-opening the registry (saving two mmap syscalls and a
     // potential `wait_for_ready` round-trip on the VMM's exit path).
     let exit_metrics_writer = metrics_writer.clone();
+    let exit_cpu_guard = Arc::clone(&cpu_guard);
+    let exit_writeback_guard = Arc::clone(&writeback_guard);
+    let placement_rt_handle = tokio_rt.handle().clone();
+    let placement_db = db.clone();
+    let placement_cpu_guard = Arc::clone(&cpu_guard);
+    let resolved_numa_topology = cpu_guard.numa_topology();
+    let placement_required = cpu_guard.placement_required();
     #[cfg(windows)]
     let _agent_console_pipe_bridge = AgentConsolePipeBridge::spawn(
         agent_console_pipe_name(config.sandbox_id),
@@ -575,6 +722,11 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         tokio_rt.handle(),
     )
     .map_err(|e| RuntimeError::Custom(format!("agent console pipe bridge: {e}")))?;
+    let host_placement = HostPlacement {
+        vcpu_targets: cpu_guard.vcpu_targets(),
+        required: placement_required,
+        numa_topology: resolved_numa_topology,
+    };
     let build_result = build_vm(
         &config,
         console_backend,
@@ -599,6 +751,29 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
 
             rt_handle.block_on(async {
                 let now = chrono::Utc::now().naive_utc();
+
+                if let Err(error) = exit_writeback_guard.release(&exit_db).await {
+                    tracing::warn!(%error, "release writeback pressure membership at VM exit");
+                }
+                if let Err(error) = exit_cpu_guard.release(&exit_db).await {
+                    tracing::warn!(%error, "release CPU placement at VM exit");
+                }
+
+                // Runtime ownership remains live until this observer returns.
+                // Remove its deterministic endpoints before publishing a
+                // restartable terminal state; on failure, leave the active row
+                // for dead-PID maintenance to retry after the process exits.
+                let bound_result = crate::ipc::remove_socket_pair(&exit_sock_path);
+                let owned_result =
+                    crate::ipc::remove_sandbox_socket_artifacts(&exit_run_dir, &exit_sandbox_name);
+                if let Err(error) = bound_result.and(owned_result) {
+                    tracing::warn!(
+                        sandbox = %exit_sandbox_name,
+                        error = %error,
+                        "runtime exit socket cleanup failed; leaving lifecycle active for reaping"
+                    );
+                    return;
+                }
 
                 // Mark run as terminated with exit code and reason.
                 let _ = run_entity::Entity::update_many()
@@ -634,9 +809,10 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                 // discrete flags, not the full policy) and no-ops for
                 // persistent sandboxes. Best-effort; recovery sweeps from
                 // other runtimes cover any failure here.
-                match crate::maintenance::cleanup_terminal_ephemeral_sandbox(
+                match crate::maintenance::cleanup_terminal_ephemeral_sandbox_owned(
                     &exit_db,
                     &exit_sandboxes_dir,
+                    &exit_run_dir,
                     exit_sandbox_id,
                 )
                 .await
@@ -668,12 +844,31 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
             {
                 tracing::debug!(error = %err, slot = writer.slot(), "metrics slot release at exit");
             }
-
-            // Clean up agent.sock — the relay's async cleanup won't run because
-            // _exit() is called immediately after this observer returns.
-            let _ = std::fs::remove_file(&exit_sock_path);
+        },
+        move |report: &msb_krun::PlacementReport| {
+            let pinned = report
+                .vcpus
+                .iter()
+                .filter(|result| matches!(result, msb_krun::VcpuPlacementResult::Pinned { .. }))
+                .count();
+            if let Err(error) =
+                placement_rt_handle.block_on(placement_cpu_guard.reconcile(&placement_db, report))
+            {
+                // Placement is already effective at the OS boundary. A catalog failure must not
+                // turn an ordinary best-effort policy into a sandbox-creation failure; the
+                // process-held lease remains conservative until exit or stale-lease recovery.
+                tracing::warn!(%error, "record effective host placement");
+            }
+            tracing::info!(
+                pinned_vcpus = pinned,
+                inherited_vcpus = report.vcpus.len().saturating_sub(pinned),
+                memory = ?report.memory,
+                "host placement acknowledged before guest execution"
+            );
         },
         tokio_rt.handle().clone(),
+        host_placement,
+        writeback_limit.as_ref(),
     );
     let (
         vm,
@@ -684,6 +879,12 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     ) = match build_result {
         Ok(vm) => vm,
         Err(e) => {
+            if let Err(error) = tokio_rt.block_on(writeback_guard.release(&db)) {
+                tracing::warn!(%error, "release writeback pressure membership after VM build failure");
+            }
+            if let Err(error) = tokio_rt.block_on(cpu_guard.release(&db)) {
+                tracing::warn!(%error, "release CPU placement after VM build failure");
+            }
             let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
             // Free the slot: build_vm never started the sampler, so no live
             // sample is worth preserving. Prefer the writer (already holds
@@ -694,6 +895,9 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
             } else {
                 release_reserved_metrics_slot(config.metrics_slot.as_ref());
             }
+            let _ = crate::ipc::remove_socket_pair(&config.agent_sock_path);
+            let _ =
+                crate::ipc::remove_sandbox_socket_artifacts(&config.run_dir, &config.sandbox_name);
             return Err(e);
         }
     };
@@ -729,13 +933,37 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                 #[cfg(feature = "net")]
                 secrets,
             };
-            if let Err(e) =
-                crate::control::spawn_control_listener(control_sock_path.clone(), context)
-            {
-                tracing::warn!(
-                    "failed to start runtime control listener at {}: {e}",
-                    control_sock_path.display()
-                );
+            match crate::control::spawn_control_listener(control_sock_path.clone(), context) {
+                Ok(()) => {
+                    #[cfg(unix)]
+                    if let Err(error) = crate::ipc::publish_legacy_control_link(
+                        &config.run_dir,
+                        &config.sandbox_name,
+                        &control_sock_path,
+                    ) {
+                        if error.kind() == std::io::ErrorKind::InvalidInput {
+                            tracing::warn!(
+                                "legacy runtime control endpoint is unavailable for {}: {error}",
+                                config.sandbox_name
+                            );
+                        } else {
+                            let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+                            // Preserve the colliding compatibility entry. It
+                            // may belong to a still-live older runtime.
+                            let _ = crate::ipc::remove_canonical_socket_artifacts(
+                                &config.run_dir,
+                                &config.sandbox_name,
+                            );
+                            return Err(error.into());
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "failed to start runtime control listener at {}: {e}",
+                        control_sock_path.display()
+                    );
+                }
             }
         }
     }
@@ -758,7 +986,9 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
             } else {
                 release_reserved_metrics_slot(config.metrics_slot.as_ref());
             }
-            let _ = std::fs::remove_file(&config.agent_sock_path);
+            let _ = crate::ipc::remove_socket_pair(&config.agent_sock_path);
+            let _ =
+                crate::ipc::remove_sandbox_socket_artifacts(&config.run_dir, &config.sandbox_name);
             return Err(e);
         }
     }
@@ -823,8 +1053,14 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     {
         let maintenance_db = db.clone();
         let maintenance_dir = config.sandboxes_dir.clone();
+        let maintenance_run_dir = config.run_dir.clone();
         tokio_rt.spawn(async move {
-            crate::maintenance::run_startup_maintenance(&maintenance_db, &maintenance_dir).await;
+            crate::maintenance::run_startup_maintenance(
+                &maintenance_db,
+                &maintenance_dir,
+                &maintenance_run_dir,
+            )
+            .await;
         });
     }
 
@@ -1052,6 +1288,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     }
 
     // Forget the tokio runtime (keep background tasks alive).
+    let cleanup_rt_handle = tokio_rt.handle().clone();
     std::mem::forget(tokio_rt);
 
     // Enter the VM (never returns).
@@ -1059,6 +1296,12 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     match vm.enter() {
         Ok(infallible) => Ok(infallible),
         Err(e) => {
+            if let Err(error) = cleanup_rt_handle.block_on(writeback_guard.release(&db)) {
+                tracing::warn!(%error, "release writeback pressure membership after VM enter failure");
+            }
+            if let Err(error) = cleanup_rt_handle.block_on(cpu_guard.release(&db)) {
+                tracing::warn!(%error, "release CPU placement after VM enter failure");
+            }
             if let Some(writer) = metrics_writer {
                 let _ = writer.release(ReleaseMode::Free);
             }
@@ -1088,12 +1331,73 @@ fn agent_console_pipe_name(sandbox_id: i32) -> String {
 // Functions: VM Builder
 //--------------------------------------------------------------------------------------------------
 
+fn apply_block_writeback_limit(
+    mut disk: msb_krun::DiskBuilder,
+    format: msb_krun::DiskImageFormat,
+    read_only: bool,
+    limit: Option<&msb_krun::WritebackLimit>,
+) -> msb_krun::DiskBuilder {
+    if !read_only
+        && matches!(format, msb_krun::DiskImageFormat::Raw)
+        && let Some(limit) = limit
+    {
+        disk = disk.writeback_limit(limit.clone());
+    }
+    disk
+}
+
+fn writeback_limited_disk_paths(vm: &VmConfig) -> RuntimeResult<Vec<PathBuf>> {
+    if vm.block_writeback_limit_bytes.is_none() {
+        return Ok(Vec::new());
+    }
+
+    let mut paths = Vec::new();
+    if vm.rootfs_path.is_some() {
+        // Direct root filesystems do not attach a virtio-blk device.
+    } else if vm.rootfs_vmdk.is_some() {
+        if let Some(spec) = &vm.rootfs_upper_spec {
+            if is_writeback_limited_disk(spec.format, spec.read_only) {
+                paths.push(spec.primary.clone());
+            }
+        } else if let Some(upper) = &vm.rootfs_upper {
+            paths.push(upper.clone());
+        }
+    } else if let Some(rootfs_disk) = &vm.rootfs_disk {
+        let format = validate_disk_format(vm.rootfs_disk_format.as_deref())
+            .map_err(|error| RuntimeError::Custom(format!("disk format: {error}")))?;
+        if is_writeback_limited_disk(format, vm.rootfs_disk_readonly) {
+            paths.push(rootfs_disk.clone());
+        }
+    }
+
+    paths.extend(
+        vm.disks
+            .iter()
+            .filter(|disk| is_writeback_limited_disk(disk.format, disk.readonly))
+            .map(|disk| disk.host.clone()),
+    );
+    Ok(paths)
+}
+
+fn is_writeback_limited_disk(format: msb_krun::DiskImageFormat, read_only: bool) -> bool {
+    !read_only && matches!(format, msb_krun::DiskImageFormat::Raw)
+}
+
 /// Build the `Vm` from config with an exit observer for cleanup.
+struct HostPlacement<'a> {
+    vcpu_targets: Option<&'a [crate::cpu::LogicalCpuId]>,
+    required: bool,
+    numa_topology: Option<msb_krun::NumaTopology>,
+}
+
 fn build_vm(
     config: &Config,
     console_backend: AgentConsoleBackend,
     on_exit: impl Fn(i32) + Send + 'static,
+    on_placement: impl FnOnce(&msb_krun::PlacementReport) + Send + 'static,
     tokio_handle: tokio::runtime::Handle,
+    host_placement: HostPlacement<'_>,
+    writeback_limit: Option<&msb_krun::WritebackLimit>,
 ) -> RuntimeResult<VmBuildOutput> {
     let mut exec_env = config.vm.env.clone();
     let vm = &config.vm;
@@ -1107,12 +1411,27 @@ fn build_vm(
 
     let mut builder = VmBuilder::new()
         .machine(|m| {
-            let m = m
+            let mut m = m
                 .vcpus(vm.vcpus)
                 .memory_mib(vm.memory_mib as usize)
                 .max_vcpus(vm.max_cpus.max(vm.vcpus))
                 .max_memory_mib((vm.max_memory_mib.max(vm.memory_mib)) as usize)
                 .balloon_stats_interval(balloon_stats_interval);
+            if let Some(targets) = host_placement.vcpu_targets {
+                let affinity = targets
+                    .iter()
+                    .copied()
+                    .map(|cpu| msb_krun::HostCpuId::in_group(cpu.group, cpu.index))
+                    .collect();
+                m = if host_placement.required {
+                    m.vcpu_affinity(affinity)
+                } else {
+                    m.try_vcpu_affinity(affinity)
+                };
+            }
+            if let Some(topology) = host_placement.numa_topology {
+                m = m.numa_topology(topology);
+            }
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             {
                 m.split_irqchip(true)
@@ -1123,7 +1442,11 @@ fn build_vm(
             }
         })
         .kernel(|k| {
-            let k = k.krunfw_path(&vm.libkrunfw_path);
+            // Apply the typed policy before PID 1 starts. Keeping the raw
+            // kernel command line internal avoids exposing a general-purpose
+            // boot-argument escape hatch to sandbox users.
+            let thp = thp_kernel_cmdline(vm.thp);
+            let k = k.krunfw_path(&vm.libkrunfw_path).cmdline(&thp);
             if let Some(ref init_path) = vm.init_path {
                 k.init_path(init_path)
             } else {
@@ -1181,13 +1504,18 @@ fn build_vm(
             let primary = spec.primary.clone();
             let format = spec.format;
             let read_only = spec.read_only;
-            builder = builder.disk(move |d| d.path(&primary).format(format).read_only(read_only));
+            let writeback_limit = writeback_limit.cloned();
+            builder = builder.disk(move |d| {
+                let d = d.path(&primary).format(format).read_only(read_only);
+                apply_block_writeback_limit(d, format, read_only, writeback_limit.as_ref())
+            });
         } else if let Some(ref upper) = vm.rootfs_upper {
             let upper = upper.clone();
+            let format = msb_krun::DiskImageFormat::Raw;
+            let writeback_limit = writeback_limit.cloned();
             builder = builder.disk(move |d| {
-                d.path(&upper)
-                    .format(msb_krun::DiskImageFormat::Raw)
-                    .read_only(false)
+                let d = d.path(&upper).format(format).read_only(false);
+                apply_block_writeback_limit(d, format, false, writeback_limit.as_ref())
             });
         }
 
@@ -1218,7 +1546,11 @@ fn build_vm(
             .map_err(|e| RuntimeError::Custom(format!("disk format: {e}")))?;
         let disk_path = disk_path.clone();
         let readonly = vm.rootfs_disk_readonly;
-        builder = builder.disk(move |d| d.path(&disk_path).format(format).read_only(readonly));
+        let writeback_limit = writeback_limit.cloned();
+        builder = builder.disk(move |d| {
+            let d = d.path(&disk_path).format(format).read_only(readonly);
+            apply_block_writeback_limit(d, format, readonly, writeback_limit.as_ref())
+        });
         append_block_root_env(&mut exec_env);
     }
 
@@ -1249,6 +1581,8 @@ fn build_vm(
             .map_err(|e| RuntimeError::Custom(format!("--mount {mount_spec:?}: {e}")))?;
 
         let tag = parsed.tag;
+        // Keep the host path so a mount failure can name the directory.
+        let host_path = parsed.host_path.clone();
         #[cfg(unix)]
         let mount_bind_identity_map =
             bind_identity_map_for_mount(&mut bind_identity_map, parsed.stat_virtualization);
@@ -1266,8 +1600,17 @@ fn build_vm(
             quota_bytes: parsed.quota_bytes,
             ..Default::default()
         };
-        let backend = PassthroughFs::new(cfg)
-            .map_err(|e| RuntimeError::Custom(format!("mount {tag}: {e}")))?;
+        let backend = PassthroughFs::new(cfg).map_err(|e| {
+            // Name the folder on a permission error, usually an OS access restriction.
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                RuntimeError::Custom(format!(
+                    "mount {tag}: permission denied reading host folder {host_path} ({e}). \
+                     On macOS, grant access in System Settings > Privacy & Security."
+                ))
+            } else {
+                RuntimeError::Custom(format!("mount {tag}: {e}"))
+            }
+        })?;
         builder = builder.fs(move |fs| fs.tag(&tag).custom(Box::new(backend)));
     }
 
@@ -1294,6 +1637,7 @@ fn build_vm(
         let host = disk.host.clone();
         let format = disk.format;
         let readonly = disk.readonly;
+        let writeback_limit = writeback_limit.cloned();
         builder = builder.disk(move |d| {
             let mut d = d.id(&id).path(&host).format(format).read_only(readonly);
             if readonly {
@@ -1302,13 +1646,104 @@ fn build_vm(
                     .cache(msb_krun::CacheMode::Unsafe)
                     .sync(msb_krun::SyncMode::None);
             }
-            d
+            apply_block_writeback_limit(d, format, readonly, writeback_limit.as_ref())
         });
     }
 
     let mut network_termination_handle = None;
     let mut network_metrics_handle = None;
     let mut network_secrets_handle = None;
+
+    // Vsock routes are independent of virtio-net. Microsandbox owns the host
+    // local IPC endpoints while libkrun retains framing, queues and credits.
+    #[cfg(unix)]
+    if !vm.vsock.is_empty() {
+        #[cfg(feature = "net")]
+        if vm.deployment_profile == microsandbox_types::DeploymentProfile::MultiTenant {
+            return Err(RuntimeError::Custom(
+                "host vsock routes are disabled for multi-tenant deployments".to_string(),
+            ));
+        }
+
+        let mut streams: Vec<(u32, Arc<dyn msb_krun::backends::vsock::VsockPortBackend>)> =
+            Vec::new();
+        let mut datagrams: Vec<(
+            u32,
+            Arc<dyn msb_krun::backends::vsock::VsockDatagramPortBackend>,
+        )> = Vec::new();
+
+        for route in &vm.vsock {
+            match route.socket_type {
+                microsandbox_types::VsockSocketType::Stream => {
+                    let backend =
+                        UnixStreamPortBackend::new(&route.host_socket).map_err(|err| {
+                            RuntimeError::Custom(format!(
+                                "initialize stream vsock route {}:{}: {err}",
+                                route.host_socket.display(),
+                                route.port
+                            ))
+                        })?;
+                    streams.push((route.port, Arc::new(backend)));
+                }
+                microsandbox_types::VsockSocketType::Dgram => {
+                    let backend =
+                        UnixDatagramPortBackend::new(&route.host_socket).map_err(|err| {
+                            RuntimeError::Custom(format!(
+                                "initialize datagram vsock route {}:{}: {err}",
+                                route.host_socket.display(),
+                                route.port
+                            ))
+                        })?;
+                    datagrams.push((route.port, Arc::new(backend)));
+                }
+            }
+        }
+
+        builder = builder.vsock(move |mut vsock| {
+            for (port, backend) in streams {
+                vsock = vsock.custom(port, backend);
+            }
+            for (port, backend) in datagrams {
+                vsock = vsock.custom_dgram(port, backend);
+            }
+            vsock
+        });
+    }
+
+    #[cfg(windows)]
+    if !vm.vsock.is_empty() {
+        #[cfg(feature = "net")]
+        if vm.deployment_profile == microsandbox_types::DeploymentProfile::MultiTenant {
+            return Err(RuntimeError::Custom(
+                "host vsock routes are disabled for multi-tenant deployments".to_string(),
+            ));
+        }
+
+        let mut streams: Vec<(u32, Arc<dyn msb_krun::backends::vsock::VsockPortBackend>)> =
+            Vec::new();
+        for route in &vm.vsock {
+            if route.socket_type == microsandbox_types::VsockSocketType::Dgram {
+                return Err(RuntimeError::Custom(
+                    "vsock datagram routes are not supported on Windows".to_string(),
+                ));
+            }
+            let backend = WindowsNamedPipePortBackend::new(&route.host_socket).map_err(|err| {
+                RuntimeError::Custom(format!(
+                    "initialize stream vsock route {}:{}: {err}",
+                    route.host_socket.display(),
+                    route.port
+                ))
+            })?;
+            streams.push((route.port, Arc::new(backend)));
+        }
+
+        builder = builder.vsock(move |mut vsock| {
+            for (port, backend) in streams {
+                vsock = vsock.custom(port, backend);
+            }
+            vsock
+        });
+    }
 
     // Network.
     #[cfg(feature = "net")]
@@ -1318,6 +1753,7 @@ fn build_vm(
             .secrets
             .validate()
             .map_err(|err| RuntimeError::Custom(format!("invalid network secrets: {err}")))?;
+        let rate_limiters = to_krun_network_rate_limiters(&vm.network);
 
         let mut network = microsandbox_network::network::SmoltcpNetwork::new_with_profile(
             vm.network.clone(),
@@ -1354,7 +1790,16 @@ fn build_vm(
             exec_env.push(format!("{key}={value}"));
         }
 
-        builder = builder.net(move |n| n.mac(guest_mac).custom(net_backend));
+        builder = builder.net(move |mut n| {
+            n = n.mac(guest_mac);
+            if let Some(config) = rate_limiters.rx {
+                n = n.rx_rate_limiter(config);
+            }
+            if let Some(config) = rate_limiters.tx {
+                n = n.tx_rate_limiter(config);
+            }
+            n.custom(net_backend)
+        });
     }
 
     // Execution configuration.
@@ -1404,7 +1849,7 @@ fn build_vm(
     }
 
     // Exit observer — runs synchronously before _exit() for DB cleanup.
-    builder = builder.on_exit(on_exit);
+    builder = builder.on_placement(on_placement).on_exit(on_exit);
 
     let vm = builder
         .build()
@@ -1422,6 +1867,70 @@ fn build_vm(
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+#[cfg(feature = "net")]
+fn to_krun_network_rate_limiters(
+    config: &microsandbox_network::config::NetworkConfig,
+) -> KrunNetworkRateLimiters {
+    let rate_limiter = config.rate_limiter.as_ref();
+    KrunNetworkRateLimiters {
+        rx: rate_limiter
+            .and_then(|rate_limiter| rate_limiter.ingress.as_ref())
+            .map(to_krun_rate_limiter),
+        tx: rate_limiter
+            .and_then(|rate_limiter| rate_limiter.egress.as_ref())
+            .map(to_krun_rate_limiter),
+    }
+}
+
+#[cfg(feature = "net")]
+fn to_krun_rate_limiter(
+    config: &microsandbox_types::RateLimiterConfig,
+) -> msb_krun::RateLimiterConfig {
+    fn bucket(config: &microsandbox_types::TokenBucketConfig) -> msb_krun::TokenBucketConfig {
+        msb_krun::TokenBucketConfig {
+            size: config.size,
+            refill_time: Duration::from_millis(config.refill_time_ms),
+            one_time_burst: config.one_time_burst,
+        }
+    }
+
+    msb_krun::RateLimiterConfig {
+        bandwidth: config.bandwidth.as_ref().map(bucket),
+        ops: config.ops.as_ref().map(bucket),
+    }
+}
+
+async fn monitor_writeback_pressure(
+    guard: Arc<crate::writeback::WritebackPressureGuard>,
+    db: DbWriteConnection,
+) {
+    let mut interval = tokio::time::interval(WRITEBACK_PRESSURE_REFRESH_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Acquisition already installed the initial target, so avoid an unnecessary immediate query.
+    interval.tick().await;
+    let mut coordination_failed = false;
+
+    loop {
+        interval.tick().await;
+        match guard.refresh(&db).await {
+            Ok(()) if coordination_failed => {
+                tracing::info!("writeback pressure coordination recovered");
+                coordination_failed = false;
+            }
+            Ok(()) => {}
+            Err(error) => {
+                // Losing the coordinator must reduce throughput, never silently restore the full
+                // per-disk window while the active host membership is unknown.
+                guard.fail_closed();
+                if !coordination_failed {
+                    tracing::warn!(%error, "writeback pressure coordination failed closed");
+                    coordination_failed = true;
+                }
+            }
+        }
+    }
+}
 
 /// Raise `RLIMIT_NOFILE` to the hard limit, capped at 1M (the reference virtiofsd default). On macOS the soft limit is additionally clamped to
 /// `kern.maxfilesperproc`, which `setrlimit` enforces even when the hard limit is unlimited.
@@ -2121,12 +2630,19 @@ pub fn prepend_scripts_path(env: &mut Vec<String>) {
     }
 }
 
+/// Render the validated THP policy as the single Linux boot parameter the VMM appends.
+fn thp_kernel_cmdline(policy: microsandbox_types::TransparentHugePagePolicy) -> String {
+    format!("transparent_hugepage={}", policy.as_str())
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "net")]
+    use super::to_krun_network_rate_limiters;
     #[cfg(unix)]
     use super::{
         BindIdentityMapRegistration, PARENT_WATCH_DETACH, ParentWatchdogSignal,
@@ -2136,7 +2652,8 @@ mod tests {
         ConsoleSharedState, HostPermissions, StatVirtualization, append_block_root_env,
         bind_rootfs_backend, guest_shutdown_flush_timeout,
         guest_shutdown_flush_timeout_with_override, parse_mount_spec, prepend_scripts_path,
-        request_guest_shutdown, request_guest_shutdown_with_timeout, validate_disk_format,
+        request_guest_shutdown, request_guest_shutdown_with_timeout, thp_kernel_cmdline,
+        validate_disk_format,
     };
 
     use microsandbox_filesystem::{Context, DynFileSystem, FsOptions};
@@ -2153,6 +2670,83 @@ mod tests {
             gid: 0,
             pid: 1,
         }
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn network_rate_limiters_map_directions_without_losing_precision() {
+        let egress = microsandbox_types::RateLimiterConfig {
+            bandwidth: Some(microsandbox_types::TokenBucketConfig {
+                size: 1_048_576,
+                refill_time_ms: 1_234,
+                one_time_burst: 524_288,
+            }),
+            ops: Some(microsandbox_types::TokenBucketConfig {
+                size: 1_000,
+                refill_time_ms: 7,
+                one_time_burst: 12,
+            }),
+        };
+        let ingress = microsandbox_types::RateLimiterConfig {
+            bandwidth: Some(microsandbox_types::TokenBucketConfig {
+                size: 2_048,
+                refill_time_ms: 99,
+                one_time_burst: 256,
+            }),
+            ops: None,
+        };
+        let config = microsandbox_network::config::NetworkConfig {
+            rate_limiter: Some(microsandbox_types::NetworkRateLimiterConfig {
+                egress: Some(egress),
+                ingress: Some(ingress),
+            }),
+            ..Default::default()
+        };
+
+        let mapped = to_krun_network_rate_limiters(&config);
+
+        assert_eq!(
+            mapped.tx.as_ref().unwrap().bandwidth.as_ref().unwrap(),
+            &msb_krun::TokenBucketConfig {
+                size: 1_048_576,
+                refill_time: Duration::from_millis(1_234),
+                one_time_burst: 524_288,
+            }
+        );
+        assert_eq!(
+            mapped.tx.unwrap().ops.unwrap(),
+            msb_krun::TokenBucketConfig {
+                size: 1_000,
+                refill_time: Duration::from_millis(7),
+                one_time_burst: 12,
+            }
+        );
+        assert_eq!(
+            mapped.rx.unwrap().bandwidth.unwrap(),
+            msb_krun::TokenBucketConfig {
+                size: 2_048,
+                refill_time: Duration::from_millis(99),
+                one_time_burst: 256,
+            }
+        );
+    }
+
+    #[test]
+    fn transparent_huge_page_policy_maps_to_kernel_boot_parameter() {
+        use microsandbox_types::TransparentHugePagePolicy;
+
+        assert_eq!(
+            thp_kernel_cmdline(TransparentHugePagePolicy::Always),
+            "transparent_hugepage=always"
+        );
+        assert_eq!(
+            thp_kernel_cmdline(TransparentHugePagePolicy::Madvise),
+            "transparent_hugepage=madvise"
+        );
+        assert_eq!(
+            thp_kernel_cmdline(TransparentHugePagePolicy::Never),
+            "transparent_hugepage=never"
+        );
     }
 
     #[test]

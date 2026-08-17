@@ -1,14 +1,17 @@
 //! Fluent builder for [`SandboxConfig`].
 
+use std::collections::{BTreeMap, HashSet};
 #[cfg(feature = "net")]
 use std::net::{IpAddr, Ipv4Addr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use microsandbox_image::{PullProgressHandle, RegistryAuth};
 #[cfg(feature = "net")]
 use microsandbox_network::builder::{NetworkBuilder, SecretBuilder};
-use microsandbox_types::{EnvVar, PullPolicy};
+#[cfg(feature = "net")]
+use microsandbox_network::policy::{NetworkPolicy, Rule};
+use microsandbox_types::{CpuPlacement, EnvVar, PullPolicy, VsockRouteSpec, VsockSocketType};
 #[cfg(feature = "net")]
 use microsandbox_types::{PortProtocol, PublishedPortSpec};
 
@@ -23,7 +26,8 @@ use super::{
     },
 };
 use crate::{
-    LogLevel, MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason, size::Mebibytes,
+    LogLevel, MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason,
+    config::LocalConfig, size::Mebibytes,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -35,9 +39,19 @@ pub struct SandboxBuilder {
     config: SandboxConfig,
     detached: bool,
     build_error: Option<crate::MicrosandboxError>,
+    max_cpus_explicit: bool,
+    max_memory_explicit: bool,
+    /// Raw script snippets supplied through construction patches. They are materialized only when
+    /// building so later shell overrides determine their shebang.
+    config_scripts: BTreeMap<String, String>,
+    #[cfg(feature = "net")]
+    configured_network_rules: Vec<Rule>,
     /// Pending snapshot reference (path or bare name) supplied via
     /// [`from_snapshot`]. Resolved during async `create()`.
     pending_snapshot: Option<String>,
+    /// Distinguishes a sparse-patch snapshot, which later builder calls may override, from an
+    /// explicit `from_snapshot` call that retains the established mutual-exclusion validation.
+    pending_snapshot_from_config: bool,
 }
 
 /// Sub-builder for registry connection settings.
@@ -77,6 +91,8 @@ impl SandboxBuilder {
     ///
     /// The name must be unique among existing sandboxes (unless
     /// [`replace`](Self::replace) is set) and no longer than 128 UTF-8 bytes.
+    /// This low-level constructor starts from built-in defaults; prefer
+    /// [`Sandbox::builder`](super::Sandbox::builder) when backend-owned global defaults should apply.
     pub fn new(name: impl Into<String>) -> Self {
         let mut config = SandboxConfig::default();
         config.spec.name = name.into();
@@ -85,8 +101,43 @@ impl SandboxBuilder {
             config,
             detached: false,
             build_error: None,
+            max_cpus_explicit: false,
+            max_memory_explicit: false,
+            config_scripts: BTreeMap::new(),
+            #[cfg(feature = "net")]
+            configured_network_rules: Vec::new(),
             pending_snapshot: None,
+            pending_snapshot_from_config: false,
         }
+    }
+
+    /// Apply defaults owned by the selected local backend.
+    ///
+    /// This runs before caller-supplied builder methods, so explicit SDK and CLI options retain
+    /// ordinary last-write-wins behavior. Root-disk defaults remain unresolved until local create,
+    /// where the runtime knows the rootfs is OCI-backed and can persist the effective disk shape.
+    pub(crate) fn with_local_defaults(mut self, local: &LocalConfig) -> Self {
+        if let Err(error) = local.validate_sandbox_defaults() {
+            self.build_error = Some(error);
+            return self;
+        }
+
+        let defaults = &local.sandbox_defaults;
+        self.config.spec.resources.cpus = defaults.cpus;
+        self.config.spec.resources.max_cpus = defaults.cpus;
+        self.config.spec.resources.memory_mib = defaults.memory_mib;
+        self.config.spec.resources.max_memory_mib = defaults.memory_mib;
+        self.config.spec.resources.cpu_placement = defaults.cpu_placement;
+        self.config.spec.resources.placement_profile = defaults.placement_profile.clone();
+        self.config.spec.resources.thp = defaults.thp;
+        self.config.spec.runtime.shell = Some(defaults.shell.clone());
+        self.config.spec.runtime.workdir = defaults.workdir.clone();
+        self.config.spec.runtime.metrics_sample_interval_ms = defaults
+            .metrics_sample_interval_ms
+            .map(std::num::NonZero::get);
+        self.config.spec.runtime.disable_metrics_sample = defaults.disable_metrics_sample;
+        self.config.spec.runtime.log_level = local.log_level.map(sandbox_log_level_from_runtime);
+        self
     }
 
     /// Seed a builder from a full [`SandboxSpec`] JSON.
@@ -115,6 +166,10 @@ impl SandboxBuilder {
     /// .image("./ubuntu.qcow2")   // disk image (auto-detect fs)
     /// ```
     pub fn image(mut self, image: impl IntoImage) -> Self {
+        if self.pending_snapshot_from_config {
+            self.pending_snapshot = None;
+            self.pending_snapshot_from_config = false;
+        }
         match image.into_rootfs_source() {
             Ok(rootfs) => self.config.spec.image = rootfs,
             Err(e) => {
@@ -133,6 +188,10 @@ impl SandboxBuilder {
     /// .image_with(|i| i.disk("./ubuntu.qcow2").fstype("ext4"))
     /// ```
     pub fn image_with(mut self, f: impl FnOnce(ImageBuilder) -> ImageBuilder) -> Self {
+        if self.pending_snapshot_from_config {
+            self.pending_snapshot = None;
+            self.pending_snapshot_from_config = false;
+        }
         match f(ImageBuilder::new()).build() {
             Ok(rootfs) => self.config.spec.image = rootfs,
             Err(e) => {
@@ -141,6 +200,41 @@ impl SandboxBuilder {
                 }
             }
         }
+        self
+    }
+
+    /// Apply a CLI-selected image after discarding a lower-precedence configured snapshot.
+    #[doc(hidden)]
+    pub fn override_image(mut self, image: impl IntoImage) -> Self {
+        self.pending_snapshot = None;
+        self.pending_snapshot_from_config = false;
+        self.image(image)
+    }
+
+    /// Apply a CLI-selected image builder after discarding a configured snapshot.
+    #[doc(hidden)]
+    pub fn override_image_with(
+        mut self,
+        configure: impl FnOnce(ImageBuilder) -> ImageBuilder,
+    ) -> Self {
+        self.pending_snapshot = None;
+        self.pending_snapshot_from_config = false;
+        self.image_with(configure)
+    }
+
+    /// Apply a CLI-selected snapshot after discarding a lower-precedence configured image.
+    #[doc(hidden)]
+    pub fn override_snapshot(mut self, snapshot: impl Into<String>) -> Self {
+        self.config.spec.image = RootfsSource::oci("");
+        self.pending_snapshot = Some(snapshot.into());
+        self.pending_snapshot_from_config = false;
+        self
+    }
+
+    pub(super) fn config_snapshot(mut self, snapshot: impl Into<String>) -> Self {
+        self.config.spec.image = RootfsSource::oci("");
+        self.pending_snapshot = Some(snapshot.into());
+        self.pending_snapshot_from_config = true;
         self
     }
 
@@ -208,7 +302,7 @@ impl SandboxBuilder {
     /// Allocate virtual CPUs for this sandbox (default: 1).
     pub fn cpus(mut self, count: u8) -> Self {
         self.config.spec.resources.cpus = count;
-        if self.config.spec.resources.max_cpus < count {
+        if !self.max_cpus_explicit || self.config.spec.resources.max_cpus < count {
             self.config.spec.resources.max_cpus = count;
         }
         self
@@ -221,6 +315,19 @@ impl SandboxBuilder {
     /// itself; use [`cpus`](Self::cpus) for the initial effective count.
     pub fn max_cpus(mut self, count: u8) -> Self {
         self.config.spec.resources.max_cpus = count;
+        self.max_cpus_explicit = true;
+        self
+    }
+
+    /// Select how vCPU threads are placed on host processors.
+    pub fn cpu_placement(mut self, policy: CpuPlacement) -> Self {
+        self.config.spec.resources.cpu_placement = policy;
+        self
+    }
+
+    /// Select a host-defined placement profile by name.
+    pub fn placement_profile(mut self, profile: impl Into<String>) -> Self {
+        self.config.spec.resources.placement_profile = Some(profile.into());
         self
     }
 
@@ -235,7 +342,7 @@ impl SandboxBuilder {
     pub fn memory(mut self, size: impl Into<Mebibytes>) -> Self {
         let memory_mib = size.into().as_u32();
         self.config.spec.resources.memory_mib = memory_mib;
-        if self.config.spec.resources.max_memory_mib < memory_mib {
+        if !self.max_memory_explicit || self.config.spec.resources.max_memory_mib < memory_mib {
             self.config.spec.resources.max_memory_mib = memory_mib;
         }
         self
@@ -248,6 +355,17 @@ impl SandboxBuilder {
     /// [`memory`](Self::memory) for the initial effective memory.
     pub fn max_memory(mut self, size: impl Into<Mebibytes>) -> Self {
         self.config.spec.resources.max_memory_mib = size.into().as_u32();
+        self.max_memory_explicit = true;
+        self
+    }
+
+    /// Select the guest transparent huge-page policy applied at boot.
+    ///
+    /// `Madvise` is the default and uses huge pages only for mappings that
+    /// request them. `Always` can improve large anonymous-memory workloads at
+    /// the cost of coarser memory allocation, while `Never` disables THP.
+    pub fn thp(mut self, policy: super::TransparentHugePagePolicy) -> Self {
+        self.config.spec.resources.thp = policy;
         self
     }
 
@@ -388,6 +506,15 @@ impl SandboxBuilder {
     /// Override the OCI image entrypoint.
     pub fn entrypoint(mut self, cmd: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.config.spec.runtime.entrypoint = Some(cmd.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Override the OCI image command used by default-workload execution.
+    ///
+    /// An empty array clears the image CMD. This describes durable configuration and does not
+    /// execute the command during sandbox creation.
+    pub fn cmd(mut self, cmd: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.config.spec.runtime.cmd = Some(cmd.into_iter().map(Into::into).collect());
         self
     }
 
@@ -558,6 +685,49 @@ impl SandboxBuilder {
         self
     }
 
+    /// Prepend explicit rules while preserving a configured policy's defaults and existing rules.
+    #[cfg(feature = "net")]
+    #[doc(hidden)]
+    pub fn prepend_network_policy_rules(mut self, mut rules: Vec<Rule>) -> Self {
+        match self.config.local_network_config() {
+            Ok(mut network) => {
+                rules.append(&mut network.policy.rules);
+                network.policy.rules = rules;
+                if let Err(error) = self.config.set_local_network_config(network)
+                    && self.build_error.is_none()
+                {
+                    self.build_error = Some(error);
+                }
+            }
+            Err(error) if self.build_error.is_none() => self.build_error = Some(error),
+            Err(_) => {}
+        }
+        self
+    }
+
+    /// Replace policy defaults/profile rules while retaining rules supplied by a config patch.
+    #[cfg(feature = "net")]
+    #[doc(hidden)]
+    pub fn replace_network_policy_preserving_config_rules(
+        mut self,
+        mut policy: NetworkPolicy,
+    ) -> Self {
+        policy.rules.extend(self.configured_network_rules.clone());
+        match self.config.local_network_config() {
+            Ok(mut network) => {
+                network.policy = policy;
+                if let Err(error) = self.config.set_local_network_config(network)
+                    && self.build_error.is_none()
+                {
+                    self.build_error = Some(error);
+                }
+            }
+            Err(error) if self.build_error.is_none() => self.build_error = Some(error),
+            Err(_) => {}
+        }
+        self
+    }
+
     /// Publish a TCP port directly on the sandbox builder.
     ///
     /// Repeatable: call multiple times to expose multiple ports.
@@ -627,6 +797,39 @@ impl SandboxBuilder {
     #[cfg(feature = "net")]
     pub fn port_udp_bind(mut self, host_bind: IpAddr, host_port: u16, guest_port: u16) -> Self {
         self.push_port(host_bind, host_port, guest_port, PortProtocol::Udp);
+        self
+    }
+
+    /// Expose a host Unix stream socket or local Windows named pipe on a guest-to-host vsock port.
+    ///
+    /// Guest applications connect directly to host CID 2 and `port`. No
+    /// in-guest proxy or agentd integration is required.
+    pub fn vsock(mut self, host_path: impl AsRef<Path>, port: u32) -> Self {
+        self.config.spec.vsock.routes.push(VsockRouteSpec {
+            host_socket: host_path.as_ref().to_path_buf(),
+            port,
+            socket_type: VsockSocketType::Stream,
+        });
+        self
+    }
+
+    /// Expose a host Unix datagram socket on a guest-to-host vsock port.
+    ///
+    /// Datagram boundaries are preserved end to end. Delivery remains
+    /// best-effort, matching Unix and vsock datagram semantics. Windows does
+    /// not support datagram routes.
+    pub fn vsock_dgram(mut self, host_path: impl AsRef<Path>, port: u32) -> Self {
+        self.config.spec.vsock.routes.push(VsockRouteSpec {
+            host_socket: host_path.as_ref().to_path_buf(),
+            port,
+            socket_type: VsockSocketType::Dgram,
+        });
+        self
+    }
+
+    /// Add a fully specified guest-to-host vsock route.
+    pub fn vsock_route(mut self, route: VsockRouteSpec) -> Self {
+        self.config.spec.vsock.routes.push(route);
         self
     }
 
@@ -781,11 +984,13 @@ impl SandboxBuilder {
     /// the guest. Scripts are added to `PATH` so they can be invoked by name
     /// via [`exec`](super::Sandbox::exec).
     pub fn script(mut self, name: impl Into<String>, content: impl Into<String>) -> Self {
+        let name = name.into();
+        self.config_scripts.remove(&name);
         self.config
             .spec
             .runtime
             .scripts
-            .insert(name.into(), content.into());
+            .insert(name, content.into());
         self
     }
 
@@ -795,11 +1000,13 @@ impl SandboxBuilder {
         scripts: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
     ) -> Self {
         for (name, content) in scripts {
+            let name = name.into();
+            self.config_scripts.remove(&name);
             self.config
                 .spec
                 .runtime
                 .scripts
-                .insert(name.into(), content.into());
+                .insert(name, content.into());
         }
         self
     }
@@ -899,18 +1106,26 @@ impl SandboxBuilder {
         self
     }
 
+    /// Add one already-materialized volume mount.
+    #[doc(hidden)]
+    pub fn add_volume_mount(mut self, mount: VolumeMount) -> Self {
+        self.config.spec.mounts.push(mount);
+        self
+    }
+
     /// Boot a fresh sandbox from a snapshot artifact.
     ///
     /// The snapshot already pins the image reference and digest, so
     /// this method is mutually exclusive with [`image`](Self::image)
-    /// and [`image_with`](Self::image_with). The snapshot is opened
-    /// (and its integrity verified) at `create()` time, not here.
+    /// and [`image_with`](Self::image_with). The snapshot is structurally
+    /// opened at `create()` time; content verification stays explicit.
     ///
     /// `path_or_name` accepts either a path to a snapshot artifact
     /// directory (or a bare name resolved under the default snapshots
     /// directory).
     pub fn from_snapshot(mut self, path_or_name: impl Into<String>) -> Self {
         self.pending_snapshot = Some(path_or_name.into());
+        self.pending_snapshot_from_config = false;
         self
     }
 
@@ -937,11 +1152,47 @@ impl SandboxBuilder {
     /// If [`from_snapshot`](Self::from_snapshot) was called, the snapshot
     /// manifest is opened here and its pinned image reference, manifest
     /// digest, and upper-layer source path are populated onto the config.
-    /// Backend-owned defaults are applied when the config is created, not here.
+    /// Backend-owned defaults were seeded before explicit builder methods were applied.
     pub async fn build(mut self) -> MicrosandboxResult<SandboxConfig> {
+        self.materialize_config_scripts();
         self.resolve_pending().await?;
         self.validate()?;
         Ok(self.config)
+    }
+
+    pub(super) fn config_scripts(mut self, scripts: BTreeMap<String, String>) -> Self {
+        self.config_scripts.extend(scripts);
+        self
+    }
+
+    #[cfg(feature = "net")]
+    pub(super) fn config_network_rules(mut self, rules: Vec<Rule>) -> Self {
+        self.configured_network_rules = rules;
+        self
+    }
+
+    pub(super) fn config_error(mut self, message: impl Into<String>) -> Self {
+        if self.build_error.is_none() {
+            self.build_error = Some(MicrosandboxError::InvalidConfig(message.into()));
+        }
+        self
+    }
+
+    fn materialize_config_scripts(&mut self) {
+        let shell = self.config.spec.runtime.shell.as_deref();
+        for (name, body) in std::mem::take(&mut self.config_scripts) {
+            if let Err(message) = validate_config_script_name(&name) {
+                if self.build_error.is_none() {
+                    self.build_error = Some(MicrosandboxError::InvalidConfig(message));
+                }
+                continue;
+            }
+            self.config
+                .spec
+                .runtime
+                .scripts
+                .insert(name, wrap_config_script(shell, &body));
+        }
     }
 
     /// Open the deferred snapshot artifact and copy its pinned image
@@ -951,6 +1202,7 @@ impl SandboxBuilder {
         let Some(snapshot_ref) = self.pending_snapshot.take() else {
             return Ok(());
         };
+        self.pending_snapshot_from_config = false;
 
         if self.has_explicit_rootfs_source() {
             return Err(crate::MicrosandboxError::InvalidConfig(
@@ -1204,6 +1456,18 @@ impl SandboxBuilder {
         super::types::validate_volume_mounts(&self.config.spec.mounts)?;
         super::validate_env(&self.config.spec.env)?;
         super::validate_labels(&self.config.spec.labels)?;
+        self.validate_vsock_routes()?;
+
+        if let Err(error) = microsandbox_types::resolve_default_command(
+            self.config.spec.runtime.entrypoint.as_deref(),
+            self.config.spec.runtime.cmd.as_deref(),
+            None,
+        ) && !matches!(
+            error,
+            microsandbox_types::CommandResolutionError::NoDefaultCommand
+        ) {
+            return Err(error.into());
+        }
 
         if let Some(spec) = &self.config.spec.init {
             super::init::validate(spec)?;
@@ -1242,6 +1506,77 @@ impl SandboxBuilder {
                     )));
                 }
                 seen.push(canonical);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validate the stable route key and the host resources it references.
+    fn validate_vsock_routes(&self) -> MicrosandboxResult<()> {
+        if self.config.spec.deployment_profile == DeploymentProfile::MultiTenant
+            && !self.config.spec.vsock.is_empty()
+        {
+            return Err(MicrosandboxError::InvalidConfig(
+                "host vsock routes are disabled for multi-tenant deployments".into(),
+            ));
+        }
+
+        let mut routes = HashSet::new();
+
+        for route in &self.config.spec.vsock.routes {
+            #[cfg(unix)]
+            if !route.host_socket.is_absolute() {
+                return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    "vsock host path must be absolute: {}",
+                    route.host_socket.display()
+                )));
+            }
+            #[cfg(windows)]
+            {
+                let path = route.host_socket.as_os_str().to_string_lossy();
+                let prefix = r"\\.\pipe\";
+                let local = path
+                    .get(..prefix.len())
+                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix));
+                let name = path.get(prefix.len()..).unwrap_or_default();
+                if !local
+                    || name.is_empty()
+                    || name
+                        .split(['\\', '/'])
+                        .any(|part| part.is_empty() || part == "." || part == "..")
+                {
+                    return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                        "vsock host path must be a local Windows named pipe such as \\\\.\\pipe\\api: {}",
+                        route.host_socket.display()
+                    )));
+                }
+                if route.socket_type == VsockSocketType::Dgram {
+                    return Err(MicrosandboxError::unsupported(
+                        Operation::SandboxCreate,
+                        UnsupportedReason::RequiresUnixHost,
+                    ));
+                }
+            }
+            if route.port == 0 || route.port == u32::MAX {
+                return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    "vsock port {} must be between 1 and {}",
+                    route.port,
+                    u32::MAX - 1
+                )));
+            }
+            // libkrun uses datagram port 123 for host-to-guest clock updates
+            // on macOS. Reserving it everywhere keeps configurations portable.
+            if route.socket_type == VsockSocketType::Dgram && route.port == 123 {
+                return Err(crate::MicrosandboxError::InvalidConfig(
+                    "vsock datagram port 123 is reserved for guest clock synchronization".into(),
+                ));
+            }
+            if !routes.insert((route.socket_type, route.port)) {
+                return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    "duplicate vsock {:?} route for port {}",
+                    route.socket_type, route.port
+                )));
             }
         }
 
@@ -1339,6 +1674,41 @@ impl SandboxBuilder {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+fn validate_config_script_name(name: &str) -> Result<(), String> {
+    let path = std::path::Path::new(name);
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.as_bytes().contains(&0)
+        || name.contains(['/', '\\'])
+        || path.file_name().and_then(|part| part.to_str()) != Some(name)
+    {
+        return Err(format!(
+            "script name {name:?} must be a single non-empty filename"
+        ));
+    }
+    Ok(())
+}
+
+fn wrap_config_script(shell: Option<&str>, body: &str) -> String {
+    let shell = shell.unwrap_or("/bin/sh");
+    let mut script = if shell.contains('/') {
+        format!("#!{shell}")
+    } else {
+        format!("#!/usr/bin/env {shell}")
+    };
+    script.push('\n');
+    script.push_str(body);
+    if !script.ends_with('\n') {
+        script.push('\n');
+    }
+    script
+}
+
+//--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
@@ -1348,7 +1718,13 @@ impl From<SandboxConfig> for SandboxBuilder {
             config,
             detached: false,
             build_error: None,
+            max_cpus_explicit: true,
+            max_memory_explicit: true,
+            config_scripts: BTreeMap::new(),
+            #[cfg(feature = "net")]
+            configured_network_rules: Vec::new(),
             pending_snapshot: None,
+            pending_snapshot_from_config: false,
         }
     }
 }
@@ -1366,7 +1742,10 @@ mod tests {
     use microsandbox_network::secrets::config::{HostPattern, SecretEntry, SecretInjection};
     #[cfg(feature = "net")]
     use microsandbox_types::PortProtocol;
-    use microsandbox_types::{DeploymentProfile, SandboxLogLevel};
+    use microsandbox_types::{
+        CpuPlacement, DeploymentProfile, SandboxLogLevel, TransparentHugePagePolicy,
+        VsockSocketType,
+    };
     #[cfg(feature = "net")]
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -1399,8 +1778,10 @@ mod tests {
             .image("alpine")
             .cpus(2)
             .max_cpus(4)
+            .cpu_placement(CpuPlacement::Spread)
             .memory(1024)
             .max_memory(4096)
+            .thp(TransparentHugePagePolicy::Always)
             .log_level(LogLevel::Info)
             .env("A", "B")
             .script("setup", "echo hi")
@@ -1412,8 +1793,10 @@ mod tests {
         assert_eq!(config.spec.name, "test");
         assert_eq!(config.spec.resources.cpus, 2);
         assert_eq!(config.spec.resources.max_cpus, 4);
+        assert_eq!(config.spec.resources.cpu_placement, CpuPlacement::Spread);
         assert_eq!(config.spec.resources.memory_mib, 1024);
         assert_eq!(config.spec.resources.max_memory_mib, 4096);
+        assert_eq!(config.spec.resources.thp, TransparentHugePagePolicy::Always);
         assert_eq!(config.spec.runtime.log_level, Some(SandboxLogLevel::Info));
         assert_eq!(config.spec.env.len(), 1);
         assert_eq!(
@@ -1421,6 +1804,30 @@ mod tests {
             Some(&"echo hi".into())
         );
         assert_eq!(config.spec.lifecycle.max_duration_secs, Some(60));
+    }
+
+    #[tokio::test]
+    async fn test_builder_preserves_cmd_override_and_explicit_clears() {
+        let configured = SandboxBuilder::new("test")
+            .image("alpine")
+            .cmd(["worker.py", "--once"])
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(
+            configured.spec.runtime.cmd,
+            Some(vec!["worker.py".to_string(), "--once".to_string()])
+        );
+
+        let cleared = SandboxBuilder::new("test")
+            .image("alpine")
+            .entrypoint(Vec::<String>::new())
+            .cmd(Vec::<String>::new())
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(cleared.spec.runtime.entrypoint, Some(Vec::new()));
+        assert_eq!(cleared.spec.runtime.cmd, Some(Vec::new()));
     }
 
     #[tokio::test]
@@ -1578,6 +1985,39 @@ mod tests {
             .unwrap();
 
         assert!(config.spec.image.oci_root_disk().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_local_defaults_are_seeded_before_explicit_builder_options() {
+        let mut local = crate::config::LocalConfig::default();
+        local.sandbox_defaults.cpus = 4;
+        local.sandbox_defaults.memory_mib = 2048;
+        local.sandbox_defaults.cpu_placement = CpuPlacement::Spread;
+        local.sandbox_defaults.thp = TransparentHugePagePolicy::Always;
+        local.sandbox_defaults.shell = "/bin/bash".into();
+        local.sandbox_defaults.workdir = Some("/workspace".into());
+        local.log_level = Some(microsandbox_runtime::logging::LogLevel::Info);
+
+        let config = SandboxBuilder::new("test")
+            .with_local_defaults(&local)
+            .image("alpine")
+            .cpus(2)
+            .thp(TransparentHugePagePolicy::Never)
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(config.spec.resources.cpus, 2);
+        assert_eq!(config.spec.resources.max_cpus, 2);
+        assert_eq!(config.spec.resources.memory_mib, 2048);
+        assert_eq!(config.spec.resources.cpu_placement, CpuPlacement::Spread);
+        assert_eq!(config.spec.resources.thp, TransparentHugePagePolicy::Never);
+        assert_eq!(config.spec.runtime.shell.as_deref(), Some("/bin/bash"));
+        assert_eq!(config.spec.runtime.workdir.as_deref(), Some("/workspace"));
+        assert_eq!(
+            config.spec.runtime.log_level,
+            Some(microsandbox_types::SandboxLogLevel::Info)
+        );
     }
 
     #[tokio::test]
@@ -1884,6 +2324,106 @@ mod tests {
         assert_eq!(config.spec.network.ports[4].protocol, PortProtocol::Udp);
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_builder_vsock_routes_preserve_socket_type() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .vsock("/run/host-api.sock", 5000)
+            // Stream and datagram namespaces are independent.
+            .vsock_dgram("/run/events.sock", 5000)
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(config.spec.vsock.routes.len(), 2);
+        assert_eq!(
+            config.spec.vsock.routes[0].socket_type,
+            VsockSocketType::Stream
+        );
+        assert_eq!(
+            config.spec.vsock.routes[1].socket_type,
+            VsockSocketType::Dgram
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_builder_rejects_duplicate_vsock_route_key() {
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .vsock("/run/one.sock", 5000)
+            .vsock("/run/two.sock", 5000)
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("duplicate vsock Stream route"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_builder_rejects_reserved_timesync_datagram_port() {
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .vsock_dgram("/run/events.sock", 123)
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("reserved for guest clock"));
+    }
+
+    #[tokio::test]
+    async fn test_builder_rejects_vsock_for_multi_tenant_deployments() {
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .deployment_profile(DeploymentProfile::MultiTenant)
+            .vsock("/run/host-api.sock", 5000)
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("multi-tenant"));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn test_builder_accepts_local_named_pipe_stream_route() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .vsock(r"\\.\pipe\host-api", 5000)
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(config.spec.vsock.routes.len(), 1);
+        assert_eq!(
+            config.spec.vsock.routes[0].socket_type,
+            VsockSocketType::Stream
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn test_builder_rejects_remote_named_pipe_and_datagram() {
+        let remote = SandboxBuilder::new("test")
+            .image("alpine")
+            .vsock(r"\\server\pipe\host-api", 5000)
+            .build()
+            .await
+            .unwrap_err();
+        assert!(remote.to_string().contains("local Windows named pipe"));
+
+        let datagram = SandboxBuilder::new("test")
+            .image("alpine")
+            .vsock_dgram(r"\\.\pipe\events", 5001)
+            .build()
+            .await
+            .unwrap_err();
+        assert!(datagram.to_string().contains("Unix host"));
+    }
+
     #[cfg(feature = "net")]
     #[tokio::test]
     async fn test_builder_disable_network_denies_all() {
@@ -1924,6 +2464,64 @@ mod tests {
         let network = config.local_network_config().unwrap();
         assert_eq!(network.secrets.secrets.len(), 1);
         assert_eq!(network.max_connections, Some(128));
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn test_builder_network_rate_limiters_land_in_the_spec() {
+        use std::time::Duration;
+
+        use microsandbox_utils::size::SizeExt;
+
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .network(|n| {
+                n.rate_limiter(|r| {
+                    r.egress(|r| {
+                        r.bandwidth(1.mib(), Duration::from_secs(1))
+                            .bandwidth_burst(512.kib())
+                            .ops(1_000, Duration::from_secs(1))
+                            .ops_burst(500)
+                    })
+                })
+            })
+            .build()
+            .await
+            .unwrap();
+
+        let rate_limiter = config
+            .spec
+            .network
+            .rate_limiter
+            .as_ref()
+            .expect("network rate limiter persisted");
+        let egress = rate_limiter
+            .egress
+            .as_ref()
+            .expect("egress limiter persisted");
+        let bandwidth = egress.bandwidth.as_ref().unwrap();
+        assert_eq!(bandwidth.size, 1024 * 1024);
+        assert_eq!(bandwidth.refill_time_ms, 1000);
+        assert_eq!(bandwidth.one_time_burst, 512 * 1024);
+        assert_eq!(egress.ops.as_ref().unwrap().one_time_burst, 500);
+        assert!(rate_limiter.ingress.is_none());
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn test_builder_rejects_invalid_rate_limiter() {
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .network(|n| n.rate_limiter(|r| r.ingress(|r| r)))
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("rate limiter must configure at least one of bandwidth or ops"),
+            "unexpected error: {err}"
+        );
     }
 
     #[cfg(feature = "net")]

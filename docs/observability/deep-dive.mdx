@@ -5,6 +5,8 @@ description: Flags, emitted metrics, attributes, and operational notes for msb-m
 icon: "magnifying-glass"
 ---
 
+<Tooltip tip="This page covers msb-metrics, which reads host-local shared memory and is local-only. It does not apply to microsandbox cloud sandboxes."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 Everything beyond the Quick start for the
 [`msb-metrics`](/observability/msb-metrics) sidecar: the complete flag
 set, what it emits, the attributes attached to each datapoint, and the
@@ -54,7 +56,7 @@ fully-qualified name is `microsandbox.<suffix>`.
 Cumulative byte fields are emitted as gauges carrying the absolute
 cumulative value. Use `rate()` (PromQL, OTel-flavored Prom) for
 throughput. The reason: each shm snapshot already carries an absolute
-value, and counter `add()` semantics would require us to track
+value, and counter `add()` semantics would require tracking
 per-sandbox deltas across runs.
 
 The collector also emits its own operational series; see
@@ -63,9 +65,9 @@ The collector also emits its own operational series; see
 ## Collector self-observability
 
 `msb-metrics otel` ships its own operational metrics through the same
-OTLP pipeline as the per-sandbox series, so a user can confirm the
-sidecar is actually flowing using the same Prometheus / Grafana / Datadog
-queries the rest of their telemetry runs through:
+OTLP pipeline as the per-sandbox series. You can confirm the sidecar is
+actually flowing using the same Prometheus, Grafana, or Datadog queries
+the rest of your telemetry runs through:
 
 | Suffix | Type | Notes |
 |---|---|---|
@@ -81,37 +83,39 @@ metrics, so they show up under
 
 A few queries you'll want to wire up:
 
-<AccordionGroup>
-  <Accordion title="Are exports flowing?">
-    Non-zero rate means yes.
+<div className="msb-accordion-group">
+  <AccordionGroup>
+    <Accordion title="Are exports flowing?">
+      Non-zero rate means yes.
 
-    ```bash
-    rate(microsandbox_collector_exports_success_total[1m])
-    ```
-  </Accordion>
-  <Accordion title="Failure ratio over the last 5 minutes">
-    `clamp_min` keeps the denominator at 1 so an idle window doesn't
-    divide by zero.
+      ```bash
+      rate(microsandbox_collector_exports_success_total[1m])
+      ```
+    </Accordion>
+    <Accordion title="Failure ratio over the last 5 minutes">
+      `clamp_min` keeps the denominator at 1 so an idle window doesn't
+      divide by zero.
 
-    ```bash
-    rate(microsandbox_collector_exports_failure_total[5m])
-      /
-    clamp_min(
-      rate(microsandbox_collector_exports_success_total[5m]) +
-      rate(microsandbox_collector_exports_failure_total[5m]),
-      1
-    )
-    ```
-  </Accordion>
-  <Accordion title="Staleness alert: no successful export in 5 minutes">
-    Wire this to your alerting backend; the `> 300` threshold is in
-    seconds.
+      ```bash
+      rate(microsandbox_collector_exports_failure_total[5m])
+        /
+      clamp_min(
+        rate(microsandbox_collector_exports_success_total[5m]) +
+        rate(microsandbox_collector_exports_failure_total[5m]),
+        1
+      )
+      ```
+    </Accordion>
+    <Accordion title="Staleness alert: no successful export in 5 minutes">
+      Wire this to your alerting backend; the `> 300` threshold is in
+      seconds.
 
-    ```bash
-    time() - microsandbox_collector_last_success_timestamp_seconds > 300
-    ```
-  </Accordion>
-</AccordionGroup>
+      ```bash
+      time() - microsandbox_collector_last_success_timestamp_seconds > 300
+      ```
+    </Accordion>
+  </AccordionGroup>
+</div>
 
 ## Attributes
 
@@ -308,36 +312,38 @@ lands. This is normal counter-reset behavior, not a bug.
 
 ## Troubleshooting
 
-<AccordionGroup>
-  <Accordion title="EACCES opening the shm region">
-    You're running `msb-metrics` as a different Unix user from the one
-    that owns the registry. Switch users or use `sudo -u <msb-user>`.
-  </Accordion>
+<div className="msb-accordion-group">
+  <AccordionGroup>
+    <Accordion title="EACCES opening the shm region">
+      You're running `msb-metrics` as a different Unix user from the one
+      that owns the registry. Switch users or use `sudo -u <msb-user>`.
+    </Accordion>
 
-  <Accordion title="Empty metrics, no sandboxes show up">
-    Either no sandboxes are running, or `msb-metrics` is reading a
-    different registry than `msb` writes. Check `--msb-home` matches
-    the runtime's `$MSB_HOME`. Use `--log-level=debug` to see the
-    registry name and collect cadence.
-  </Accordion>
+    <Accordion title="Empty metrics, no sandboxes show up">
+      Either no sandboxes are running, or `msb-metrics` is reading a
+      different registry than `msb` writes. Check `--msb-home` matches
+      the runtime's `$MSB_HOME`. Use `--log-level=debug` to see the
+      registry name and collect cadence.
+    </Accordion>
 
-  <Accordion title="OTLP backend rejects the request (HTTP 401/403/422)">
-    Auth or schema mismatch. Verify the `--header` value (especially
-    `Authorization` base64 encoding) and that the endpoint URL matches
-    the protocol. gRPC endpoints typically end at `4317`; HTTP/Protobuf
-    endpoints should be the full metrics URL expected by that backend
-    (often `/v1/metrics`, but deployments can route it differently).
-  </Accordion>
+    <Accordion title="OTLP backend rejects the request (HTTP 401/403/422)">
+      Auth or schema mismatch. Verify the `--header` value (especially
+      `Authorization` base64 encoding) and that the endpoint URL matches
+      the protocol. gRPC endpoints typically end at `4317`; HTTP/Protobuf
+      endpoints should be the full metrics URL expected by that backend
+      (often `/v1/metrics`, but deployments can route it differently).
+    </Accordion>
 
-  <Accordion title="Sandbox restarts produce fresh time series">
-    Expected if `--emit-run-id` or `--emit-pid` is on. Drop them if you
-    want a single series per sandbox name across restarts.
-  </Accordion>
-</AccordionGroup>
+    <Accordion title="Sandbox restarts produce fresh time series">
+      Expected if `--emit-run-id` or `--emit-pid` is on. Drop them if you
+      want a single series per sandbox name across restarts.
+    </Accordion>
+  </AccordionGroup>
+</div>
 
 ## See also
 
 - [Metrics collector](/observability/msb-metrics): overview and quick
   start for `msb-metrics`.
-- [Metrics backends](/recipes/metrics-backends/grafana-cloud):
-  end-to-end recipes per provider.
+- [Metrics backends](/examples/metrics-backends/grafana-cloud):
+  end-to-end examples per provider.

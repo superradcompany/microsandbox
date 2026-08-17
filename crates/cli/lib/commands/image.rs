@@ -153,6 +153,13 @@ pub struct ImagePruneArgs {
     pub quiet: bool,
 }
 
+/// Optional settings supplied by callers that need more than the normal pull defaults.
+#[derive(Default)]
+struct PullOverrides {
+    materialization: Option<pull::PullMaterialization>,
+    explicit_auth: Option<microsandbox_image::RegistryAuth>,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -168,7 +175,10 @@ pub async fn run(args: ImageArgs) -> anyhow::Result<()> {
                 args.insecure,
                 args.ca_certs,
                 microsandbox_image::PullPolicy::IfMissing,
-                args.materialize,
+                PullOverrides {
+                    materialization: args.materialize,
+                    ..PullOverrides::default()
+                },
             )
             .await
         }
@@ -190,7 +200,10 @@ pub async fn run_pull(args: pull::PullArgs) -> anyhow::Result<()> {
         args.insecure,
         args.ca_certs,
         microsandbox_image::PullPolicy::IfMissing,
-        args.materialize,
+        PullOverrides {
+            materialization: args.materialize,
+            ..PullOverrides::default()
+        },
     )
     .await
 }
@@ -203,13 +216,19 @@ async fn run_pull_inner(
     insecure: bool,
     cli_ca_certs: Option<String>,
     pull_policy: microsandbox_image::PullPolicy,
-    materialization: pull::PullMaterialization,
+    pull_overrides: PullOverrides,
 ) -> anyhow::Result<()> {
     let start = Instant::now();
+    let PullOverrides {
+        materialization,
+        explicit_auth,
+    } = pull_overrides;
 
     let backend = crate::commands::common::resolve_local_backend()?;
     let local = crate::commands::common::local_backend_ref(&backend)?;
     let global = local.config();
+    let oci_defaults = &global.sandbox_defaults.oci;
+    let materialization = resolve_pull_materialization(materialization, oci_defaults)?;
     let cache = microsandbox_image::GlobalCache::new(&local.cache_dir())?;
     let platform = microsandbox_image::Platform::host_linux();
     let image_ref: microsandbox_image::Reference = reference
@@ -270,7 +289,10 @@ async fn run_pull_inner(
 
     let _ = display_ready_rx.recv();
 
-    let auth = global.resolve_registry_auth(image_ref.registry())?;
+    let auth = match explicit_auth {
+        Some(auth) => auth,
+        None => global.resolve_registry_auth(image_ref.registry())?,
+    };
     let mut ca_certs = global.resolve_ca_certs().await?;
     if let Some(path) = &cli_ca_certs {
         let data = tokio::fs::read(path)
@@ -367,6 +389,16 @@ pub(crate) async fn pull_if_missing(
     quiet: bool,
     materialization: pull::PullMaterialization,
 ) -> anyhow::Result<()> {
+    pull_if_missing_with_auth(reference, quiet, materialization, None).await
+}
+
+/// Pull an image if missing, honoring an explicit per-sandbox registry credential.
+pub(crate) async fn pull_if_missing_with_auth(
+    reference: &str,
+    quiet: bool,
+    materialization: pull::PullMaterialization,
+    explicit_auth: Option<microsandbox_image::RegistryAuth>,
+) -> anyhow::Result<()> {
     // Local paths (directories, disk images) are not pullable.
     if reference.starts_with('.') || reference.starts_with('/') {
         return Ok(());
@@ -400,7 +432,10 @@ pub(crate) async fn pull_if_missing(
         false,
         None,
         microsandbox_image::PullPolicy::IfMissing,
-        materialization,
+        PullOverrides {
+            materialization: Some(materialization),
+            explicit_auth,
+        },
     )
     .await
 }
@@ -833,11 +868,72 @@ fn pull_failure_line(quiet: bool, reference: &str) {
     }
 }
 
+fn resolve_pull_materialization(
+    requested: Option<pull::PullMaterialization>,
+    defaults: &microsandbox::config::OciSandboxDefaults,
+) -> anyhow::Result<pull::PullMaterialization> {
+    if defaults.upper_size_mib.is_some() && defaults.root_disk.is_some() {
+        anyhow::bail!(
+            "sandbox_defaults.oci.root_disk and deprecated sandbox_defaults.oci.upper_size_mib are mutually exclusive"
+        );
+    }
+    if matches!(
+        defaults.root_disk,
+        Some(microsandbox::sandbox::RootDisk::DiskImage { .. })
+    ) {
+        anyhow::bail!(
+            "sandbox_defaults.oci.root_disk cannot be a shared disk-image; specify user-owned disk images per sandbox"
+        );
+    }
+
+    Ok(requested.unwrap_or({
+        if matches!(
+            defaults.root_disk,
+            Some(microsandbox::sandbox::RootDisk::Flat { .. })
+        ) {
+            pull::PullMaterialization::Flat
+        } else {
+            pull::PullMaterialization::Layered
+        }
+    }))
+}
+
 /// Truncate a digest to a short form (first 12 hex chars after algorithm prefix).
 fn truncate_digest(digest: &str) -> String {
     if let Some(hex) = digest.strip_prefix("sha256:") {
         format!("sha256:{}", &hex[..hex.len().min(12)])
     } else {
         digest.chars().take(19).collect()
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pull_materialization_inherits_flat_only_when_not_explicit() {
+        let defaults = microsandbox::config::OciSandboxDefaults {
+            upper_size_mib: None,
+            root_disk: Some(microsandbox::sandbox::RootDisk::Flat {
+                size_mib: Some(8192),
+                fstype: None,
+                clone: microsandbox::sandbox::FlatClone::Auto,
+            }),
+        };
+
+        assert_eq!(
+            resolve_pull_materialization(None, &defaults).unwrap(),
+            pull::PullMaterialization::Flat
+        );
+        assert_eq!(
+            resolve_pull_materialization(Some(pull::PullMaterialization::Layered), &defaults)
+                .unwrap(),
+            pull::PullMaterialization::Layered
+        );
     }
 }

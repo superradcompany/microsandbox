@@ -1,41 +1,31 @@
 ---
 title: DNS
-description: How the sandbox resolves DNS queries
+description: Control how sandboxes resolve domain names
 icon: "magnifying-glass"
 ---
 
-DNS queries from the sandbox are intercepted on the host. Rather than letting the guest talk to a resolver directly, microsandbox proxies each query, which lets you:
-
-- block lookups by domain or suffix,
-- pin which upstream resolvers get used,
-- tune the query timeout,
-- power domain-based policy rules (by mapping responses back to IPs).
-
-The knobs below cover the day-to-day controls. For the rebinding and TOCTOU protections that also ride on the interceptor, see [network defenses](/security/network).
+Microsandbox handles DNS queries on the host instead of letting the guest contact a resolver directly. This makes domain rules and DNS rebinding protection possible.
 
 ## DNS as egress
 
-A DNS query is itself an egress action that the policy evaluates before the forwarder will answer. The walk runs once per query, against the transport the guest used to send it (UDP/53, TCP/53, or DoT TCP/853), and returns the action of the first matching rule (or `default_egress` if nothing matches):
+Every DNS query must pass the sandbox's egress policy.
 
-- **Name-based rules** (`Domain`, `DomainSuffix`) match the query name directly and ignore their protocol/port filter, so a `Domain` allow rule grants the lookup regardless of which port the rule was scoped to.
-- **`Any` rules** match the DNS transport's actual protocol and port. An `Any udp/53 allow` is the standard way to grant plain DNS broadly.
-- **IP-based rules** mostly can't match (a query has no resolved IP yet), with one exception: `Group::Host` matches because it names the gateway forwarder the query is delivered to. A `Group::Host udp/53 + tcp/53 allow` rule is the narrow way to open DNS while still denying the guest from aiming queries at arbitrary resolver IPs.
+| Rule | How it applies to DNS |
+| --- | --- |
+| Domain or domain suffix | Matches the requested name directly. Protocol and port filters do not apply. |
+| `Any` | Matches the protocol and port used for the query |
+| `Group::Host` | Matches the gateway that handles the query |
+| IP or CIDR | Does not match because the name has not been resolved yet |
 
-Under a deny-by-default policy whose rules are all IP-based (`Cidr` / non-`Host` `Group`), nothing matches at DNS-decision time and every query is denied. Policies built from the `public`, `private`, or `host` profiles include an explicit `Group::Host udp/53 + tcp/53 allow` rule (`Rule::allow_dns()` in Rust, `Rule.allowDns()` in TypeScript, `Rule.allow_dns()` in Python) so DNS works automatically; custom deny-by-default policies need an equivalent allow. In the CLI, `allow@dns` and `deny@dns` are semantic shortcuts for that gateway DNS rule.
+The `public`, `private`, and `host` profiles already allow DNS through the gateway. With a custom deny-by-default policy, add the equivalent of `allow_dns()` or use `allow@dns` in the CLI. Otherwise, every lookup will be denied.
 
-DoT (TCP/853) is a separate port; `allow_dns()` does not include it. Pair an `Any tcp/853 allow` (or `Group::Host tcp/853 allow`) with [TLS interception](/networking/tls) if you need DoT.
+DNS over TLS uses TCP port `853` and needs its own allow rule. It also requires [TLS interception](/networking/tls).
 
-DNS rebinding protection remains enabled independently of DNS query access. Private/reserved answers are rejected unless an explicit address-only egress rule, such as the generated `private` profile rule, permits the returned address. Ordered denies still win, port-scoped rules do not qualify before a connection port is known, and an `allow_all` default alone does not silently disable rebinding protection. Use the explicit rebind-protection setting only when you intend to disable that check globally.
+DNS rebinding protection is separate from query access. Private or reserved answers are rejected unless an explicit address rule allows them. An allow-by-default policy does not disable this protection. See [Network defenses](/security/network) for the full policy behavior.
 
 ## Blocking domains
 
-Domain blocking lives in the network policy as `deny Domain(...)` / `deny DomainSuffix(...)` rules. The interceptor enforces them at three layers:
-
-1. **DNS resolution**: denied names get a local `NXDOMAIN` response (a synthetic negative, so stub resolvers fail fast instead of hanging); the upstream resolver never sees them.
-2. **TLS first-flight**: when a guest hardcodes an IP and opens a TLS connection, the SNI is checked against the same rules.
-3. **TCP egress (cache fallback)**: for non-TLS traffic, the resolved-hostname cache disambiguates by IP.
-
-The bulk-deny shortcuts in each SDK are convenience for `deny Domain` / `deny DomainSuffix` rules; they prepend onto whatever policy is set so the deny takes precedence over later allow rules.
+Denied domains receive a local `NXDOMAIN` response and are never sent to the upstream resolver. The same rules also protect connections that use TLS SNI or a recently resolved IP address.
 
 <CodeGroup>
 ```rust Rust
@@ -57,12 +47,12 @@ let sb = Sandbox::builder("safe-agent")
 import { Sandbox } from "microsandbox";
 
 await using sb = await Sandbox.builder("safe-agent")
-    .image("python")
-    .network({
-        denyDomains: ["malware.example.com"],
-        denyDomainSuffixes: [".tracking.com"],
-    })
-    .create();
+  .image("python")
+  .network({
+    denyDomains: ["malware.example.com"],
+    denyDomainSuffixes: [".tracking.com"],
+  })
+  .create();
 ```
 
 ```python Python
@@ -92,22 +82,17 @@ sb, err := m.CreateSandbox(ctx, "safe-agent",
 msb create python --name safe-agent --net-default allow \
   --net-rule "deny@malware.example.com,deny@*.tracking.com"
 ```
-
 </CodeGroup>
-
 
 ## Pinning nameservers
 
-By default the sandbox picks up the host's resolver list automatically:
+<Tooltip tip="Custom nameservers are not available on Microsandbox Cloud. Cloud sandboxes use platform-managed DNS."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-- **macOS**: reads `State:/Network/Global/DNS` from the system configuration store, with `/etc/resolv.conf` as a fallback when the store isn't available.
-- **Linux**: reads `/etc/resolv.conf` directly.
+By default, Microsandbox uses the host's resolver list. Set `nameservers` when you need specific resolvers.
 
-You can override this by setting `nameservers` to pin the exact resolvers you want (e.g. `1.1.1.1`, `dns.google`), which is useful when auto-discovery picks the wrong ones.
+Nameservers can be IP addresses, hostnames, or either form with a port. Hostnames are resolved once when the sandbox starts.
 
-Values can be plain IPs, `IP:PORT`, hostnames, or `HOST:PORT`. Hostnames are resolved once at sandbox startup using the host's OS resolver.
-
-Order matters. Resolvers are tried in the order listed, and the sandbox moves on to the next one when a query times out or the transport fails, so put your preferred resolver first. A resolver that answers is used as-is, including when it answers `SERVFAIL` or `REFUSED` — those are answers, not failures, so they do not trigger a retry against the next resolver. The same ordering applies to resolvers discovered from the host. Note that each unreachable resolver costs up to `query_timeout_ms` before the next is tried.
+Resolvers are tried in order. A timeout or connection failure moves to the next resolver. DNS responses such as `SERVFAIL` and `REFUSED` do not. Each unreachable resolver can delay the query by up to `query_timeout_ms`.
 
 <CodeGroup>
 ```rust Rust
@@ -115,30 +100,32 @@ use microsandbox_network::dns::Nameserver;
 
 let sb = Sandbox::builder("safe-agent")
     .image("python")
-    .network(|n| n
-        .dns(|d| d
-            .nameservers([
-                "1.1.1.1".parse::<Nameserver>()?,
-                "1.0.0.1".parse::<Nameserver>()?,
-            ])
-            .query_timeout_ms(3000)
-        )
-    )
+    .network(|n| n.dns(|d| d
+        .nameservers([
+            "1.1.1.1".parse::<Nameserver>()?,
+            "1.0.0.1".parse::<Nameserver>()?,
+        ])
+        .query_timeout_ms(3000)
+    ))
     .create()
     .await?;
 ```
 
 ```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
 await using sb = await Sandbox.builder("safe-agent")
-    .image("python")
-    .network((n) => n.dns((d) =>
-        d.nameservers(["1.1.1.1", "1.0.0.1"])
-            .queryTimeoutMs(3000),
-    ))
-    .create();
+  .image("python")
+  .network((n) => n.dns((d) =>
+    d.nameservers(["1.1.1.1", "1.0.0.1"])
+      .queryTimeoutMs(3000),
+  ))
+  .create();
 ```
 
 ```python Python
+from microsandbox import DnsConfig, Network, Sandbox
+
 sb = await Sandbox.create(
     "safe-agent",
     image="python",
@@ -170,38 +157,28 @@ msb create python --name safe-agent \
   --dns-nameserver 1.0.0.1 \
   --dns-query-timeout-ms 3000
 ```
-
 </CodeGroup>
 
-If the guest aims a query at a specific resolver (`dig @1.1.1.1`, an `/etc/resolv.conf` entry inside the guest, or a library call that takes a resolver IP), the interceptor forwards it to that resolver directly. The pinned defaults aren't used in this case. The network policy still applies: the query only goes through if the destination IP is allowed.
+An application can request a specific resolver, such as with `dig @1.1.1.1`. That request skips the configured default list, but it still has to pass the network policy.
 
 ## DNS over alternative transports
 
-The block list and rebind protection only apply to queries the gateway can see. A guest that routes DNS through an encrypted or non-DNS protocol bypasses both unless the gateway intercepts or refuses it.
+| Transport | Behavior |
+| --- | --- |
+| UDP or TCP on port `53` | Intercepted |
+| DNS over TLS on TCP port `853` | Intercepted when TLS interception is enabled |
+| DNS over QUIC, mDNS, LLMNR, and NetBIOS-NS | Refused so the guest can fall back to regular DNS |
+| DNS over HTTPS | Treated as normal HTTPS traffic |
 
-**Intercepted** (block list and rebind protection apply):
-- DNS over UDP (UDP/53)
-- DNS over TCP (TCP/53)
-- DNS over TLS (DoT, TCP/853): requires [TLS interception](/networking/tls)
-
-**Refused** (guest's stub falls back to plain DNS):
-- DNS over QUIC (DoQ, UDP/853)
-- mDNS (UDP/5353), LLMNR (UDP/5355), NetBIOS-NS (UDP/137)
-
-**Not distinguishable from regular traffic** (you must filter via network policy):
-- DNS over HTTPS (DoH, TCP/443)
-
-For strict DNS integrity, combine DoT interception with a network policy denying egress `UDP/53`, `TCP/53`, and `TCP/853` to anything except the gateway.
+Domain blocking and rebinding protection apply only to DNS traffic that Microsandbox can identify. Use network rules to control DNS over HTTPS or to restrict which resolvers the guest can reach.
 
 ## Domain-based policy rules
 
-Network policy rules can match a destination by exact domain or by suffix. The interceptor watches DNS responses as they flow back to the guest and keeps track of which IP addresses belong to which domain.
+Microsandbox records the IP addresses returned for each domain. A domain rule matches a later connection only when that sandbox resolved the domain to that IP.
 
-A connection to `93.184.216.34` is only allowed by a rule targeting `example.com` if that IP actually came back as an answer to a lookup for `example.com` from this sandbox.
-
-Because of that, domain rules only take effect on connections that are preceded by a DNS lookup from inside the sandbox. An application that connects to a hard-coded IP it didn't resolve through the interceptor won't match any domain rule.
+An application that connects directly to a hard-coded IP does not match a domain rule. Use an IP or CIDR rule for that traffic.
 
 ## See also
 
-- [Network defenses](/security/network): rebinding protection and DNS-to-IP binding (TOCTOU defense)
-- [TLS interception](/networking/tls): domains that get intercepted also go through TLS inspection
+- [Network defenses](/security/network) explains rebinding protection and DNS-to-IP binding.
+- [TLS interception](/networking/tls) explains inspection for HTTPS and DNS over TLS.

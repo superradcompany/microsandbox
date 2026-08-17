@@ -5,6 +5,8 @@ description: Pull and manage OCI images from the CLI
 icon: "layer-group"
 ---
 
+<Tooltip tip="Image commands manage the local cache. On microsandbox cloud, specify an OCI image when creating the sandbox and it is pulled for you."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ## msb pull
 
 Pre-pull an image to the local cache. Layers are fetched in parallel with per-layer progress bars. Once cached, layers are content-addressable and deduplicated, so shared layers across images are only stored once.
@@ -25,9 +27,11 @@ Expanded form: `msb image pull`.
 | `-q`, `--quiet` | Suppress progress output |
 | `--insecure` | Connect over plain HTTP instead of HTTPS |
 | `--ca-certs <PATH>` | Path to a PEM file with additional CA root certificates |
-| `--materialize <MODE>` | Prepare `layered` (default), `flat`, or `all` rootfs artifacts |
+| `--materialize <MODE>` | Explicitly prepare `layered`, `flat`, or `all` rootfs artifacts |
 
 `flat` creates a reusable, validated raw ext4 base with no guest OverlayFS in the final rootfs. Shared layers are downloaded and verified once, cached as EROFS by their uncompressed OCI `diff_id`, and reused across image manifests. Flat mode merges those EROFS inputs into ext4 without producing layered-only fsmeta or VMDK artifacts. `all` runs the shared layer stage once and prepares both representations.
+
+When `--materialize` is omitted, `msb pull` follows `sandbox_defaults.oci.root_disk`: a flat default prepares the flat artifact, while the built-in managed default prepares the layered representation. An explicit flag always wins.
 
 Flat artifacts live under the configured cache directory. `flat/refs/<manifest>.json` records the requested manifest and verified result, `flat/blobs/<artifact>.raw` stores immutable content-addressed ext4 bytes, and `flat/locks/<derivation>.lock` coordinates concurrent materialization. A ref whose blob is missing or has the wrong logical size is treated as a cache miss.
 

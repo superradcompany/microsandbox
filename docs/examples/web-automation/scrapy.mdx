@@ -1,0 +1,115 @@
+---
+title: Crawl a site with Scrapy
+sidebarTitle: Scrapy
+description: Run a bounded crawler with a single-site network allowlist
+icon: "spider"
+---
+
+<Tooltip tip="This workflow prepares and restores a local disk snapshot, which is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+Run a Scrapy spider in a disposable microVM and export only its JSON result. This example targets [Books to Scrape](https://books.toscrape.com/), a public practice site.
+
+Use [Playwright](/examples/browser-automation/playwright) instead when content appears only after JavaScript runs.
+
+## Create the spider
+
+```python books_spider.py
+import scrapy
+
+
+class BooksSpider(scrapy.Spider):
+    name = "books"
+    start_urls = ["https://books.toscrape.com/"]
+    allowed_domains = ["books.toscrape.com"]
+    custom_settings = {
+        "ROBOTSTXT_OBEY": True,
+        "CONCURRENT_REQUESTS_PER_DOMAIN": 2,
+        "DOWNLOAD_DELAY": 0.25,
+        "CLOSESPIDER_PAGECOUNT": 10,
+    }
+
+    def parse(self, response):
+        for book in response.css("article.product_pod"):
+            yield {
+                "title": book.css("h3 a::attr(title)").get(),
+                "price": book.css(".price_color::text").get(),
+            }
+
+        next_page = response.css("li.next a::attr(href)").get()
+        if next_page:
+            yield response.follow(next_page, self.parse)
+```
+
+## Prepare Scrapy
+
+```sh
+msb run --name scrapy-base --replace \
+  --memory 1G --root-disk 3G --max-duration 5m \
+  python:3.13.14-alpine3.23 -- sh -lc \
+    'mkdir -p /work && pip install --no-cache-dir scrapy==2.17.0'
+```
+
+Capture the prepared environment:
+
+```sh
+msb snapshot create scrapy-runtime \
+  --from scrapy-base --integrity --force
+```
+
+Verify the snapshot before using it:
+
+```sh
+msb snapshot verify scrapy-runtime
+```
+
+The snapshot avoids reinstalling Scrapy for every crawl.
+
+## Crawl the site
+
+```sh
+msb run --name scrapy-books --replace \
+  --from-snapshot scrapy-runtime \
+  --mount-file ./books_spider.py:/work/books_spider.py:ro \
+  --workdir /work --user 65534:65534 --env HOME=/tmp \
+  --memory 1G --max-duration 2m \
+  --net-default deny \
+  --net-rule 'allow@books.toscrape.com:tcp:443' \
+  --max-connections 8 --security restricted \
+  --rlimit fsize=8388608 \
+  -- scrapy runspider books_spider.py \
+    --loglevel WARNING -O /var/tmp/books.json
+```
+
+The crawler and the microVM policy both constrain navigation to the target host. Change the spider, start URL, and network rule together when adapting the example, and respect the site's terms and robots policy.
+
+## Copy out the result
+
+```sh
+mkdir -p .artifacts
+msb cp scrapy-books:/var/tmp/books.json .artifacts/books.json
+```
+
+Inspect the number of collected records:
+
+```sh
+jq 'length' .artifacts/books.json
+```
+
+Treat scraped values as untrusted data when rendering HTML, building shell commands, or exporting spreadsheets.
+
+## Cleanup
+
+```sh
+msb rm -f scrapy-base scrapy-books
+```
+
+Remove the reusable snapshot:
+
+```sh
+msb snapshot remove scrapy-runtime
+```
+
+## Reference
+
+- [Scrapy spiders](https://docs.scrapy.org/en/latest/topics/spiders.html)
+- [Feed exports](https://docs.scrapy.org/en/latest/topics/feed-exports.html)

@@ -155,6 +155,12 @@ pub struct ExecSink {
 //--------------------------------------------------------------------------------------------------
 
 impl ExecOptionsBuilder {
+    /// Prepend arguments resolved by a higher-level execution helper.
+    pub(crate) fn prepend_args(mut self, args: impl IntoIterator<Item = String>) -> Self {
+        self.options.args.splice(0..0, args);
+        self
+    }
+
     /// Append a command-line argument (e.g., `"-la"` or `"/tmp"`).
     pub fn arg(mut self, arg: impl Into<String>) -> Self {
         self.options.args.push(arg.into());

@@ -18,7 +18,7 @@
 mod sandbox;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     num::NonZero,
     path::{Path, PathBuf},
     sync::Arc,
@@ -93,6 +93,7 @@ pub struct LocalBackendBuilder {
     disable_metrics_sample: Option<bool>,
     ca_certs: Option<Option<PathBuf>>,
     registry_hosts: Option<HashMap<String, RegistryEntry>>,
+    ssh_inactivity_timeout_secs: Option<u64>,
     log_level: Option<microsandbox_runtime::logging::LogLevel>,
     deployment_profile: Option<DeploymentProfile>,
 }
@@ -128,11 +129,12 @@ impl LocalBackend {
         selection_source: BackendSelectionSource,
         profile: Option<String>,
     ) -> Self {
-        let config = Arc::new(load_persisted_config_or_default().unwrap_or_default());
+        let config = load_persisted_config_or_default().unwrap_or_default();
+        let deployment_profile = config.deployment_profile;
         Self {
-            config,
+            config: Arc::new(config),
             db: OnceCell::new(),
-            deployment_profile: None,
+            deployment_profile,
             selection_source,
             profile,
         }
@@ -375,6 +377,14 @@ impl LocalBackendBuilder {
         self
     }
 
+    /// Override the default SSH inactivity timeout in seconds.
+    ///
+    /// Pass `0` to disable the timeout.
+    pub fn ssh_inactivity_timeout_secs(mut self, secs: u64) -> Self {
+        self.ssh_inactivity_timeout_secs = Some(secs);
+        self
+    }
+
     /// Override the runtime log level applied to SDK-spawned sandboxes.
     pub fn log_level(mut self, level: microsandbox_runtime::logging::LogLevel) -> Self {
         self.log_level = Some(level);
@@ -410,8 +420,8 @@ impl LocalBackendBuilder {
     /// sandbox state.
     pub fn build_lazy(self) -> LocalBackend {
         let persisted = load_persisted_config_or_default().unwrap_or_default();
-        let deployment_profile = self.deployment_profile;
         let config = self.merge_into(persisted);
+        let deployment_profile = config.deployment_profile;
         LocalBackend {
             config: Arc::new(config),
             db: OnceCell::new(),
@@ -443,8 +453,9 @@ impl LocalBackendBuilder {
             disable_metrics_sample,
             ca_certs,
             registry_hosts,
+            ssh_inactivity_timeout_secs,
             log_level,
-            deployment_profile: _,
+            deployment_profile,
         } = self;
 
         if let Some(home) = home {
@@ -452,6 +463,9 @@ impl LocalBackendBuilder {
         }
         if let Some(level) = log_level {
             base.log_level = Some(level);
+        }
+        if let Some(profile) = deployment_profile {
+            base.deployment_profile = Some(profile);
         }
 
         if let Some(v) = max_connections {
@@ -507,6 +521,9 @@ impl LocalBackendBuilder {
         }
         if let Some(v) = registry_hosts {
             base.registries.hosts = v;
+        }
+        if let Some(secs) = ssh_inactivity_timeout_secs {
+            base.ssh.inactivity_timeout_secs = secs;
         }
 
         base
@@ -745,7 +762,7 @@ async fn refuse_schema_ahead(conn: &DatabaseConnection) -> MicrosandboxResult<()
     let rows = match conn
         .query_all_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
-            "SELECT version FROM seaql_migrations ORDER BY applied_at ASC, version ASC",
+            "SELECT version FROM seaql_migrations",
         ))
         .await
     {
@@ -758,14 +775,19 @@ async fn refuse_schema_ahead(conn: &DatabaseConnection) -> MicrosandboxResult<()
         .iter()
         .map(|row| row.try_get_by_index::<String>(0))
         .collect::<Result<_, _>>()?;
-    let known: Vec<&str> = schema_metadata::migration_ids().collect();
-
-    for (index, version) in applied.iter().enumerate() {
-        if known.get(index).copied() != Some(version.as_str()) {
-            return Err(MicrosandboxError::Runtime(format!(
-                "database schema is newer than this msb binary; applied migration {version:?} is not in this binary's migration prefix"
-            )));
-        }
+    if schema_metadata::canonical_applied_prefix(applied.iter().map(String::as_str)).is_none() {
+        let expected_prefix: HashSet<_> = schema_metadata::migration_ids()
+            .take(applied.len())
+            .collect();
+        let version = applied
+            .iter()
+            .find(|version| !expected_prefix.contains(version.as_str()))
+            .or_else(|| applied.first())
+            .map(String::as_str)
+            .unwrap_or("<missing migration>");
+        return Err(MicrosandboxError::Runtime(format!(
+            "database schema is newer than this msb binary; applied migration {version:?} is not in this binary's migration prefix"
+        )));
     }
 
     Ok(())
@@ -861,11 +883,14 @@ mod tests {
 
         let expected = vec![
             "config",
+            "cpu_allocation",
+            "cpu_allocation_cpu",
             "image_ref",
             "layer",
             "maintenance_lease",
             "manifest",
             "manifest_layer",
+            "memory_allocation_node",
             "run",
             "sandbox",
             "sandbox_labels",
@@ -874,6 +899,7 @@ mod tests {
             "snapshot_index",
             "volume",
             "volume_attach",
+            "writeback_allocation",
         ];
 
         assert_eq!(table_names, expected);
@@ -1002,6 +1028,33 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("database schema is newer"));
+    }
+
+    #[tokio::test]
+    async fn test_connect_and_migrate_accepts_equal_migration_timestamps() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_dir = tmp.path().join("db");
+        let database = DatabaseConfig::default();
+
+        let pools = connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
+            .await
+            .unwrap();
+        pools
+            .write()
+            .inner()
+            .execute_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "UPDATE seaql_migrations SET applied_at = 1",
+            ))
+            .await
+            .unwrap();
+        drop(pools);
+
+        // Reopening must use the canonical metadata order rather than sorting equal timestamps by
+        // their backdated migration names.
+        connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
+            .await
+            .unwrap();
     }
 
     #[test]
@@ -1198,6 +1251,7 @@ mod tests {
         // wrote to ~/.microsandbox/config.json.
         let base = LocalConfig {
             log_level: Some(microsandbox_runtime::logging::LogLevel::Debug),
+            deployment_profile: Some(DeploymentProfile::MultiTenant),
             database: DatabaseConfig {
                 url: None,
                 max_connections: 9,
@@ -1207,6 +1261,9 @@ mod tests {
             sandbox_defaults: crate::config::SandboxDefaults {
                 cpus: 4,
                 memory_mib: 2048,
+                cpu_placement: microsandbox_types::CpuPlacement::Spread,
+                placement_profile: None,
+                thp: microsandbox_types::TransparentHugePagePolicy::Always,
                 oci: crate::config::OciSandboxDefaults::default(),
                 shell: "/bin/zsh".into(),
                 workdir: Some("/work".into()),
@@ -1240,5 +1297,42 @@ mod tests {
             merged.log_level,
             Some(microsandbox_runtime::logging::LogLevel::Debug)
         );
+        assert_eq!(
+            merged.deployment_profile,
+            Some(DeploymentProfile::MultiTenant)
+        );
+    }
+
+    #[test]
+    fn builder_deployment_profile_overrides_persisted_policy() {
+        let base = LocalConfig {
+            deployment_profile: Some(DeploymentProfile::SingleTenant),
+            ..Default::default()
+        };
+
+        let merged = LocalBackend::builder()
+            .deployment_profile(DeploymentProfile::MultiTenant)
+            .merge_into(base);
+
+        assert_eq!(
+            merged.deployment_profile,
+            Some(DeploymentProfile::MultiTenant)
+        );
+    }
+
+    #[test]
+    fn builder_ssh_inactivity_timeout_overrides_persisted_default() {
+        let base = LocalConfig {
+            ssh: crate::config::SshConfig {
+                inactivity_timeout_secs: 1800,
+            },
+            ..Default::default()
+        };
+
+        let merged = LocalBackend::builder()
+            .ssh_inactivity_timeout_secs(0)
+            .merge_into(base);
+
+        assert_eq!(merged.ssh.inactivity_timeout_secs, 0);
     }
 }

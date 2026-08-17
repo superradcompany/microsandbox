@@ -13,6 +13,8 @@ There are two ways to connect:
 - **Native sessions** use the built-in microsandbox SSH client. No host `ssh` binary, TCP listener, or authorized key is required, which makes it the quickest path for a shell from `msb` or SSH semantics from the SDK.
 - **External clients** serve the sandbox as an SSH server so standard tools such as `ssh`, `sftp`, and `ProxyCommand` can connect.
 
+SSH sessions disconnect after 10 minutes without traffic by default. [Change or disable the inactivity timeout](#inactivity-timeout).
+
 ## Native sessions
 
 Native sessions keep the SSH protocol boundary but do not expose a listener.
@@ -167,6 +169,8 @@ data, err := sftp.Read(ctx, "/tmp/hello.txt")
 
 ## External clients
 
+<Tooltip tip="msb ssh serve is not available on microsandbox cloud. The SDK reusable server works when you supply explicit host-key and authorized-key material; native sessions work unchanged."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 External client mode exposes a sandbox as an SSH server for tools that already speak SSH. This is the closest match for normal SSH usage: authorize a public key, serve the sandbox, then connect with `ssh` or `sftp`.
 
 ### Authorize a key
@@ -237,5 +241,50 @@ rsync -av ./src/ devbox.msb:/app/
 ```
 
 Editors that build on OpenSSH, such as VS Code Remote-SSH, connect to the `devbox.msb` host the same way.
+
+## Inactivity timeout
+
+SSH sessions disconnect after 10 minutes without SSH traffic by default. Any SSH input or output resets the timer. This transport timeout is independent of the sandbox lifecycle idle timeout: an SSH disconnect does not stop the sandbox.
+
+Set a global default in `~/.microsandbox/config.json`. Use `0` to disable the timeout:
+
+```json
+{
+  "ssh": {
+    "inactivity_timeout_secs": 0
+  }
+}
+```
+
+Override the global value for one CLI session with `--inactivity-timeout 30m`, or disable it with `--no-inactivity-timeout`. The same overrides are available when opening native clients or preparing server endpoints through an SDK:
+
+<CodeGroup>
+```rust Rust
+use std::time::Duration;
+
+let ssh = sb.ssh()
+    .connect_with(|opts| opts.inactivity_timeout(Duration::from_secs(1800)))
+    .await?;
+
+let persistent = sb.ssh()
+    .connect_with(|opts| opts.disable_inactivity_timeout())
+    .await?;
+```
+
+```typescript TypeScript
+const ssh = await sb.ssh().openClient({ inactivityTimeoutSecs: 1800 });
+const persistent = await sb.ssh().openClient({ inactivityTimeoutSecs: 0 });
+```
+
+```python Python
+ssh = await sb.ssh().open_client(inactivity_timeout=1800)
+persistent = await sb.ssh().open_client(inactivity_timeout=0)
+```
+
+```go Go
+ssh, err := sb.SSH().OpenClient(ctx, m.WithSSHClientInactivityTimeout(30*time.Minute))
+persistent, err := sb.SSH().OpenClient(ctx, m.WithSSHClientInactivityTimeout(0))
+```
+</CodeGroup>
 
 For exact SDK signatures, see the SSH reference for [Rust](/sdk/rust/ssh), [TypeScript](/sdk/typescript/ssh), [Python](/sdk/python/ssh), or [Go](/sdk/go/ssh).

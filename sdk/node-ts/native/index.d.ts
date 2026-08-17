@@ -508,6 +508,18 @@ export declare class NetworkBuilder {
   /** Trust the host's root CAs inside the guest. Default: false. */
   trustHostCAs(enabled: boolean): this
   /**
+   * Configure local egress and ingress rate limits. Applies on the next
+   * sandbox start.
+   *
+   * ```js
+   * .rateLimiter((r) => r
+   *   .egress((r) => r
+   *     .bandwidth(1_048_576, 1_000)
+   *     .ops(1_000, 1_000)))
+   * ```
+   */
+  rateLimiter(configure: (arg: JsNetworkRateLimiterBuilder) => JsNetworkRateLimiterBuilder): this
+  /**
    * Snapshot the accumulated configuration as a JSON string. The TS
    * layer parses + key-remaps to camelCase before returning to the
    * caller.
@@ -558,6 +570,16 @@ export declare class NetworkPolicyBuilder {
   build(): NetworkPolicy
 }
 export type JsNetworkPolicyBuilder = NetworkPolicyBuilder
+
+/** Fluent builder grouping egress and ingress rate limits. */
+export declare class NetworkRateLimiterBuilder {
+  constructor()
+  /** Configure guest-to-runtime traffic limits. */
+  egress(configure: (arg: RateLimiterBuilder) => RateLimiterBuilder): this
+  /** Configure runtime-to-guest traffic limits. */
+  ingress(configure: (arg: RateLimiterBuilder) => RateLimiterBuilder): this
+}
+export type JsNetworkRateLimiterBuilder = NetworkRateLimiterBuilder
 
 /** Fluent builder for an ordered list of pre-boot rootfs patches. */
 export declare class PatchBuilder {
@@ -629,6 +651,29 @@ export declare class PullProgressStream {
   [Symbol.asyncIterator](): AsyncGenerator<PullProgressEvent, void, undefined>
 }
 export type JsPullProgressStream = PullProgressStream
+
+/**
+ * Fluent builder for one direction's network rate limiter. Chainable
+ * setters accumulate bucket values for `NetworkRateLimiterBuilder`.
+ */
+export declare class RateLimiterBuilder {
+  constructor()
+  /** Cap bandwidth at `sizeBytes` bytes per `refillTimeMs` milliseconds. */
+  bandwidth(sizeBytes: number, refillTimeMs: number): this
+  /**
+   * Grant a one-time startup burst of `sizeBytes` bytes on top of the
+   * bandwidth bucket. Requires `bandwidth()`.
+   */
+  bandwidthBurst(sizeBytes: number): this
+  /** Cap packet rate at `count` frames per `refillTimeMs` milliseconds. */
+  ops(count: number, refillTimeMs: number): this
+  /**
+   * Grant a one-time startup burst of `count` frames on top of the ops
+   * bucket. Requires `ops()`.
+   */
+  opsBurst(count: number): this
+}
+export type JsRateLimiterBuilder = RateLimiterBuilder
 
 /** Fluent builder for OCI registry connection settings. */
 export declare class RegistryConfigBuilder {
@@ -866,6 +911,14 @@ export declare class Sandbox {
    * The TS layer parses + camelCase-remaps this into a plain object.
    */
   configJson(): Promise<string>
+  /** Execute the sandbox's effective OCI entrypoint and CMD. */
+  execDefault(): Promise<ExecOutput>
+  /** Execute the sandbox's effective OCI entrypoint and CMD using a populated options builder. */
+  execDefaultWithBuilder(builder: ExecOptionsBuilder): Promise<ExecOutput>
+  /** Execute the sandbox's effective OCI entrypoint and CMD with streaming I/O. */
+  execDefaultStream(): Promise<ExecHandle>
+  /** Stream the sandbox's effective OCI entrypoint and CMD using a populated options builder. */
+  execDefaultStreamWithBuilder(builder: ExecOptionsBuilder): Promise<ExecHandle>
   /** Execute a command and wait for completion. */
   exec(cmd: string, args?: Array<string> | undefined | null): Promise<ExecOutput>
   /**
@@ -905,6 +958,10 @@ export declare class Sandbox {
   modify(options?: SandboxModifyOptions | undefined | null): Promise<string>
   /** Stream metrics snapshots at the requested interval (in milliseconds). */
   metricsStream(intervalMs: number): Promise<MetricsStream>
+  /** Attach to the sandbox's effective OCI entrypoint and CMD. */
+  attachDefault(): Promise<number>
+  /** Attach to the sandbox's effective OCI entrypoint and CMD using a populated options builder. */
+  attachDefaultWithBuilder(builder: AttachOptionsBuilder): Promise<number>
   /**
    * Attach to an interactive PTY session inside the sandbox.
    *
@@ -1008,10 +1065,16 @@ export declare class SandboxBuilder {
   cpus(count: number): this
   /** Boot-time maximum possible virtual CPUs. */
   maxCpus(count: number): this
+  /** Host CPU placement policy. */
+  cpuPlacement(policy: string): this
+  /** Host-defined placement profile name. */
+  placementProfile(profile: string): this
   /** Guest memory in MiB. */
   memory(mib: number): this
   /** Boot-time maximum hotpluggable guest memory in MiB. */
   maxMemory(mib: number): this
+  /** Guest transparent huge-page policy selected at boot. */
+  thp(policy: 'always' | 'madvise' | 'never'): this
   /** Override log verbosity: `"trace" | "debug" | "info" | "warn" | "error"`. */
   logLevel(level: string): this
   /** Suppress sandbox logs. */
@@ -1065,6 +1128,8 @@ export declare class SandboxBuilder {
   replaceWithTimeout(timeoutMs: number): this
   /** Override the image entrypoint. */
   entrypoint(cmd: Array<string>): this
+  /** Override the image CMD used by default-workload execution. */
+  cmd(cmd: Array<string>): this
   /**
    * Hand off PID 1 to a guest init binary after agentd's setup.
    *
@@ -1108,6 +1173,10 @@ export declare class SandboxBuilder {
   portUdp(hostPort: number, guestPort: number): this
   /** Publish a UDP port from host -> guest on a specific host bind address. */
   portUdpBind(bind: string, hostPort: number, guestPort: number): this
+  /** Expose a host Unix stream socket or local Windows named pipe on a guest-to-host vsock port. */
+  vsock(hostPath: string, port: number): this
+  /** Expose a host Unix datagram socket on a guest-to-host vsock port. */
+  vsockDgram(hostPath: string, port: number): this
   /** Add a secret via a callback. */
   secret(configure: (arg: JsSecretBuilder) => JsSecretBuilder): this
   /**
@@ -1424,6 +1493,8 @@ export declare class Snapshot {
   get upperFile(): string | null
   get upperIntegrityAlgorithm(): string | null
   get upperIntegrityDigest(): string | null
+  get upperIntegrityLogicalSize(): bigint | null
+  get upperIntegrityLeafSize(): number | null
   get checkpointId(): string | null
   get checkpointManifestDigest(): string | null
   get parent(): string | null
@@ -1567,7 +1638,7 @@ export declare class Volume {
   static remove(name: string): Promise<void>
   get name(): string
   get path(): string
-  /** Host-side filesystem operations on this volume's directory. */
+  /** Direct filesystem operations through this volume's bound backend. */
   fs(): VolumeFs
 }
 export type JsVolume = Volume
@@ -1646,7 +1717,7 @@ export declare class VolumeHandle {
   get labels(): Record<string, string>
   get createdAt(): number | null
   remove(): Promise<void>
-  /** Host-side filesystem operations on this volume's directory. */
+  /** Direct filesystem operations through this volume's bound backend. */
   fs(): VolumeFs
 }
 export type JsVolumeHandle = VolumeHandle
@@ -2289,8 +2360,8 @@ export interface SnapshotRemoveOptions {
 /**
  * Result of `Snapshot.verify()`.
  *
- * `upperKind` is `"verified"` when the mandatory file-state integrity
- * matched. `upperAlgorithm` and `upperDigest` carry the verified binding.
+ * `upperKind` is `"notRecorded"` when integrity is absent or `"verified"`
+ * when the recorded value matched. The other fields carry that binding.
  */
 export interface SnapshotVerifyReport {
   digest: string
@@ -2311,6 +2382,7 @@ export interface SshClientOptions {
   user?: string
   term?: string
   sftp?: boolean
+  inactivityTimeoutSecs?: number
 }
 
 /** Options accepted by `SshClient.exec()`. */
@@ -2331,6 +2403,7 @@ export interface SshServerOptions {
   authorizedKeysPath?: string
   user?: string
   sftp?: boolean
+  inactivityTimeoutSecs?: number
 }
 
 /** Stdin mode for an exec. */

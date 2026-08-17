@@ -1,0 +1,89 @@
+---
+title: Host sockets
+sidebarTitle: "Host sockets"
+description: Connect a sandbox to a Unix socket or Windows named pipe
+icon: "arrows-left-right"
+---
+
+<Tooltip tip="Host sockets connect to IPC on the machine running the local backend and are rejected by microsandbox cloud and multi-tenant deployments."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+Host sockets let a process inside a sandbox talk to a service on the host. The host service can listen on a Unix socket or a Windows named pipe. Microsandbox connects it to the guest over virtio-vsock, so you do not need to open a TCP port.
+
+## Connect a socket
+
+Pass the host path and the port that the guest will use:
+
+```bash
+msb run --vsock /run/host-api.sock:5000 alpine
+```
+
+Inside the sandbox, connect to host CID `2` on port `5000` with an `AF_VSOCK` socket.
+
+On Windows, pass a local named pipe instead:
+
+```powershell
+msb run --vsock '\\.\pipe\host-api:5000' alpine
+```
+
+Stream sockets are the default. On macOS and Linux, add `/dgram` when you need datagram semantics:
+
+```bash
+msb run --vsock /run/events.sock:5001/dgram alpine
+```
+
+Datagrams are best effort and limited to 64 KiB. They require the kernel bundled with Microsandbox and are not available on Windows.
+
+## SDKs
+
+<CodeGroup>
+```rust Rust
+let sandbox = Sandbox::builder("worker")
+    .image("alpine")
+    .vsock("/run/host-api.sock", 5000)
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+const sandbox = await Sandbox.builder("worker")
+  .image("alpine")
+  .vsock("/run/host-api.sock", 5000)
+  .create();
+```
+
+```python Python
+from microsandbox import Sandbox
+
+sandbox = await Sandbox.create(
+    "worker",
+    image="alpine",
+    vsock={"/run/host-api.sock": 5000},
+)
+```
+
+```go Go
+sandbox, err := microsandbox.CreateSandbox(ctx, "worker",
+    microsandbox.WithImage("alpine"),
+    microsandbox.WithVsock(
+        microsandbox.VsockRoute{HostSocket: "/run/host-api.sock", Port: 5000},
+    ),
+)
+```
+
+```ruby Ruby
+sandbox = Microsandbox::Sandbox.builder("worker")
+  .image("alpine")
+  .vsock("/run/host-api.sock", 5000)
+  .create
+```
+</CodeGroup>
+
+Use `vsock_dgram`, `vsockDgram`, or a datagram `VsockRoute` when you need datagrams.
+
+## Limits and security
+
+- Unix socket paths must be absolute. Windows paths must point to a local named pipe.
+- Each route supports up to 256 active stream connections or datagram peers.
+- Port `123` is reserved. Port `0` and `u32::MAX` are not valid.
+
+A route gives sandbox processes access to whatever the host service allows. Avoid exposing powerful services such as the Docker socket or an SSH agent unless the service has its own authentication and narrow permissions.

@@ -58,6 +58,8 @@ export interface NativeBindings {
   readonly RuleBuilder: NapiBuilderCtor<NapiRuleBuilder>;
   readonly RuleDestinationBuilder: NapiBuilderCtor<NapiRuleDestinationBuilder>;
   readonly InterfaceOverridesBuilder: NapiBuilderCtor<NapiInterfaceOverridesBuilder>;
+  readonly NetworkRateLimiterBuilder: NapiBuilderCtor<NapiNetworkRateLimiterBuilder>;
+  readonly RateLimiterBuilder: NapiBuilderCtor<NapiRateLimiterBuilder>;
   readonly PullProgressStream: { prototype: NapiPullProgressStream };
   readonly PullProgressCreate: { prototype: NapiPullProgressCreate };
   readonly MountBuilder: new (guestPath: string) => NapiMountBuilder;
@@ -178,8 +180,11 @@ export interface NapiSandboxBuilderSetters {
   rootDisk(configure: (d: NapiRootDiskBuilder) => NapiRootDiskBuilder): this;
   cpus(n: number): this;
   maxCpus(n: number): this;
+  cpuPlacement(policy: "inherit" | "auto" | "spread" | "compact"): this;
+  placementProfile(profile: string): this;
   memory(mib: number): this;
   maxMemory(mib: number): this;
+  thp(policy: "always" | "madvise" | "never"): this;
   logLevel(level: string): this;
   quietLogs(): this;
   detached(enabled: boolean): this;
@@ -197,6 +202,7 @@ export interface NapiSandboxBuilderSetters {
   replace(): this;
   replaceWithTimeout(timeoutMs: number): this;
   entrypoint(cmd: string[]): this;
+  cmd(cmd: string[]): this;
   init(cmd: string, args?: string[]): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   initWith(cmd: string, configure: (b: any) => any): this;
@@ -210,6 +216,8 @@ export interface NapiSandboxBuilderSetters {
   portBind(bind: string, host: number, guest: number): this;
   portUdp(host: number, guest: number): this;
   portUdpBind(bind: string, host: number, guest: number): this;
+  vsock(hostPath: string, port: number): this;
+  vsockDgram(hostPath: string, port: number): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   secret(configure: (b: any) => any): this;
   secretEnv(envVar: string, value: string, allowedHost: string): this;
@@ -238,6 +246,10 @@ export interface NapiSandboxBuilder extends NapiSandboxBuilderSetters {
 export interface NapiSandbox {
   readonly backendKind: "local" | "cloud";
   configJson(): Promise<string>;
+  execDefault(): Promise<NapiExecOutput>;
+  execDefaultWithBuilder(builder: NapiExecOptionsBuilder): Promise<NapiExecOutput>;
+  execDefaultStream(): Promise<NapiExecHandle>;
+  execDefaultStreamWithBuilder(builder: NapiExecOptionsBuilder): Promise<NapiExecHandle>;
   exec(cmd: string, args?: string[]): Promise<NapiExecOutput>;
   execWithBuilder(cmd: string, builder: NapiExecOptionsBuilder): Promise<NapiExecOutput>;
   execStream(cmd: string, args?: string[]): Promise<NapiExecHandle>;
@@ -253,6 +265,8 @@ export interface NapiSandbox {
   touch(): Promise<NapiSandboxTouchResult>;
   modify(opts?: NapiSandboxModifyOptions): Promise<string>;
   attach(cmd: string, args?: string[]): Promise<number>;
+  attachDefault(): Promise<number>;
+  attachDefaultWithBuilder(builder: NapiAttachOptionsBuilder): Promise<number>;
   attachWithBuilder(cmd: string, builder: NapiAttachOptionsBuilder): Promise<number>;
   attachShell(): Promise<number>;
   stop(): Promise<void>;
@@ -385,6 +399,7 @@ export interface NapiSshClientOptions {
   user?: string;
   term?: string;
   sftp?: boolean;
+  inactivityTimeoutSecs?: number;
 }
 
 export interface NapiSshExecOptions {
@@ -401,6 +416,7 @@ export interface NapiSshServerOptions {
   authorizedKeysPath?: string;
   user?: string;
   sftp?: boolean;
+  inactivityTimeoutSecs?: number;
 }
 
 export interface NapiSshClient {
@@ -561,6 +577,8 @@ export interface NapiSnapshot {
   readonly upperFile: string | null | undefined;
   readonly upperIntegrityAlgorithm: string | null | undefined;
   readonly upperIntegrityDigest: string | null | undefined;
+  readonly upperIntegrityLogicalSize: bigint | null | undefined;
+  readonly upperIntegrityLeafSize: number | null | undefined;
   readonly checkpointId: string | null | undefined;
   readonly checkpointManifestDigest: string | null | undefined;
   readonly parent: string | null | undefined;
@@ -624,7 +642,7 @@ export interface NapiSnapshotRemoveOptions {
 export interface NapiSnapshotVerifyReport {
   readonly digest: string;
   readonly path: string;
-  readonly upperKind: string; // "verified"
+  readonly upperKind: string; // "notRecorded" | "verified"
   readonly upperAlgorithm: string | null | undefined;
   readonly upperDigest: string | null | undefined;
 }
@@ -948,7 +966,22 @@ export interface NapiNetworkBuilder {
   ipv4Pool(pool: string): this;
   ipv6Pool(pool: string): this;
   trustHostCAs(enabled: boolean): this;
+  rateLimiter(
+    configure: (b: NapiNetworkRateLimiterBuilder) => NapiNetworkRateLimiterBuilder,
+  ): this;
   build(): NetworkConfig;
+}
+
+export interface NapiRateLimiterBuilder {
+  bandwidth(sizeBytes: number, refillTimeMs: number): this;
+  bandwidthBurst(sizeBytes: number): this;
+  ops(count: number, refillTimeMs: number): this;
+  opsBurst(count: number): this;
+}
+
+export interface NapiNetworkRateLimiterBuilder {
+  egress(configure: (b: NapiRateLimiterBuilder) => NapiRateLimiterBuilder): this;
+  ingress(configure: (b: NapiRateLimiterBuilder) => NapiRateLimiterBuilder): this;
 }
 
 export interface NapiInterfaceOverridesBuilder {

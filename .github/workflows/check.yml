@@ -32,14 +32,49 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.filter.outputs.code }}
+      ruby: ${{ steps.filter.outputs.ruby }}
+      ruby_package: ${{ steps.filter.outputs.ruby_package }}
+      ruby_platform: ${{ steps.filter.outputs.ruby_platform }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
         with:
           filters: |
             code:
               - '!docs/**'
+            ruby:
+              - '.github/workflows/check.yml'
+              - 'Cargo.lock'
+              - 'Cargo.toml'
+              - 'crates/**'
+              - 'packages/**'
+              - 'scripts/ci/ruby-sdk-checkout.sh'
+              - 'sdk/ruby/**'
+              - 'sdk/rust/**'
+            ruby_package:
+              - '.github/workflows/check.yml'
+              - 'Cargo.lock'
+              - 'Cargo.toml'
+              - 'scripts/ci/ruby-sdk-checkout.sh'
+              - 'sdk/ruby/Rakefile'
+              - 'sdk/ruby/ext/microsandbox/Cargo.lock'
+              - 'sdk/ruby/ext/microsandbox/Cargo.toml'
+              - 'sdk/ruby/ext/microsandbox/extconf.rb'
+              - 'sdk/ruby/lib/microsandbox.rb'
+              - 'sdk/ruby/lib/microsandbox/version.rb'
+              - 'sdk/ruby/microsandbox.gemspec'
+              - 'sdk/rust/Cargo.toml'
+            ruby_platform:
+              - '.github/workflows/check.yml'
+              - 'Cargo.lock'
+              - 'Cargo.toml'
+              - 'sdk/ruby/Rakefile'
+              - 'sdk/ruby/ext/**'
+              - 'sdk/ruby/lib/microsandbox.rb'
+              - 'sdk/ruby/lib/microsandbox/version.rb'
+              - 'sdk/ruby/microsandbox.gemspec'
+              - 'sdk/rust/**'
 
   # ---------------------------------------------------------------------------
   # Build kernel.c on Linux for macOS libkrunfw linking
@@ -51,15 +86,22 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          submodules: true
+
+      - name: Check out libkrunfw
+        run: git submodule update --init --depth 1 vendor/libkrunfw
 
       - name: Cache kernel.c
         id: cache-kernel
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: vendor/libkrunfw/kernel.c
-          key: kernel-c-aarch64-${{ hashFiles('vendor/libkrunfw/**') }}
+          # The build recipe is inline below, so hash this workflow along with
+          # the source to prevent reusing output built with stale flags.
+          key: kernel-c-aarch64-${{ hashFiles('vendor/libkrunfw/**', '.github/actions/cache-libkrunfw-kernel/action.yml', '.github/workflows/check.yml') }}
+
+      - name: Prepare kernel source
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
+        uses: ./.github/actions/cache-libkrunfw-kernel
 
       - name: Install kernel build deps
         if: steps.cache-kernel.outputs.cache-hit != 'true'
@@ -84,15 +126,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          submodules: true
+
+      - name: Check out libkrunfw
+        run: git submodule update --init --depth 1 vendor/libkrunfw
 
       - name: Cache kernel.c
         id: cache-kernel
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: vendor/libkrunfw/kernel.c
-          key: kernel-c-x86_64-${{ hashFiles('vendor/libkrunfw/**') }}
+          # The build recipe is inline below, so hash this workflow along with
+          # the source to prevent reusing output built with stale flags.
+          key: kernel-c-x86_64-${{ hashFiles('vendor/libkrunfw/**', '.github/actions/cache-libkrunfw-kernel/action.yml', '.github/workflows/check.yml') }}
+
+      - name: Prepare kernel source
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
+        uses: ./.github/actions/cache-libkrunfw-kernel
 
       - name: Install kernel build deps
         if: steps.cache-kernel.outputs.cache-hit != 'true'
@@ -118,16 +167,17 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04-arm
+    env:
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          submodules: true
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
         with:
           cache-bin: false
+          cache-targets: true
 
       - name: Install agentd build deps
         run: sudo apt-get update && sudo apt-get install -y musl-tools
@@ -135,9 +185,9 @@ jobs:
       - name: Build agentd
         run: |
           rustup target add --toolchain stable aarch64-unknown-linux-musl
-          cargo +stable build --release --manifest-path crates/agentd/Cargo.toml --target aarch64-unknown-linux-musl
+          cargo +stable build --profile ci --manifest-path crates/agentd/Cargo.toml --target aarch64-unknown-linux-musl
           mkdir -p build
-          cp target/aarch64-unknown-linux-musl/release/agentd build/agentd
+          cp target/aarch64-unknown-linux-musl/ci/agentd build/agentd
 
       - name: Upload agentd
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -149,17 +199,18 @@ jobs:
     name: Build agentd (x86_64-linux-musl)
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest' }}
+    env:
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          submodules: true
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
         with:
           cache-bin: false
+          cache-targets: true
 
       - name: Install agentd build deps
         run: sudo apt-get update && sudo apt-get install -y musl-tools
@@ -167,9 +218,9 @@ jobs:
       - name: Build agentd
         run: |
           rustup target add --toolchain stable x86_64-unknown-linux-musl
-          cargo +stable build --release --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl
+          cargo +stable build --profile ci --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl
           mkdir -p build
-          cp target/x86_64-unknown-linux-musl/release/agentd build/agentd
+          cp target/x86_64-unknown-linux-musl/ci/agentd build/agentd
 
       - name: Upload agentd
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -180,86 +231,60 @@ jobs:
   # ---------------------------------------------------------------------------
   # Check
   # ---------------------------------------------------------------------------
-  check:
-    name: Check (${{ matrix.target }})
-    needs: [build-kernel, build-agentd-aarch64, changes]
-    if: always() && needs.changes.outputs.code == 'true'
-    runs-on: ${{ matrix.runner }}
-    # A green darwin-aarch64 run takes ~35m, and GitHub-hosted macos-14
-    # runner speed varies enough that slow runners blew a 45m budget
-    # mid-build (main and a PR, both on 2026-07-10). 60m restores
-    # headroom while still bounding a genuinely wedged run.
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: linux-x86_64
-            runner: ubuntu-latest
-            arch: x86_64
-            os: linux
-            agentd_target: x86_64-unknown-linux-musl
-            libkrunfw_file: libkrunfw.so.5.6.1
-          - target: linux-aarch64
-            runner: ubuntu-24.04-arm
-            arch: aarch64
-            os: linux
-            agentd_target: aarch64-unknown-linux-musl
-            libkrunfw_file: libkrunfw.so.5.6.1
-          - target: darwin-aarch64
-            runner: macos-14
-            arch: aarch64
-            os: darwin
-            libkrunfw_file: libkrunfw.5.dylib
-
+  build-linux-x86_64:
+    name: Build runtime (linux-x86_64)
+    needs: [build-agentd-x86_64, changes]
+    if: needs.changes.outputs.code == 'true'
+    # CI_LINUX_X86_RUNNER can point at an organization larger-runner label.
+    # Default to a standard hosted runner so unconfigured repositories do not queue indefinitely.
+    runs-on: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          submodules: true
+
+      # This build only links libkrunfw. Fetching every example image, MCP,
+      # and skills submodule has made checkout the dominant x86 critical path.
+      - name: Check out libkrunfw
+        run: git submodule update --init --depth 1 vendor/libkrunfw
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          components: clippy, rustfmt
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # Cache dependency artifacts as one archive instead of uploading every
+      # compiler result separately through the GitHub Actions cache API.
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
         with:
           cache-bin: false
+          cache-targets: true
 
-      # -- Linux build deps --
-      - name: Install build deps (Linux)
-        if: matrix.os == 'linux'
-        run: sudo apt-get update && sudo apt-get install -y musl-tools libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
 
-      # -- agentd (Linux: native musl) --
-      - name: Build agentd (musl)
-        if: matrix.os == 'linux'
-        run: |
-          rustup target add --toolchain stable ${{ matrix.agentd_target }}
-          cargo +stable build --release --manifest-path crates/agentd/Cargo.toml --target ${{ matrix.agentd_target }}
-          mkdir -p build
-          cp target/${{ matrix.agentd_target }}/release/agentd build/agentd
-
-      # -- agentd (macOS: download prebuilt Linux artifact) --
-      - name: Download agentd (macOS)
-        if: matrix.os == 'darwin'
+      - name: Download agentd
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: agentd-aarch64-linux-musl
+          name: agentd-x86_64-linux-musl
           path: build/
 
-      # -- libkrunfw (cached) --
       - name: Cache libkrunfw
         id: cache-libkrunfw
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: build/libkrunfw*
-          key: libkrunfw-${{ matrix.target }}-${{ hashFiles('vendor/libkrunfw/**') }}
+          # Include the inline build recipe and ABI/version environment in the
+          # key as well as the libkrunfw source.
+          key: libkrunfw-linux-x86_64-${{ hashFiles('vendor/libkrunfw/**', '.github/actions/cache-libkrunfw-kernel/action.yml', '.github/workflows/check.yml') }}
 
-      - name: Build libkrunfw (Linux)
-        if: steps.cache-libkrunfw.outputs.cache-hit != 'true' && matrix.os == 'linux'
+      - name: Prepare kernel source
+        if: steps.cache-libkrunfw.outputs.cache-hit != 'true'
+        uses: ./.github/actions/cache-libkrunfw-kernel
+
+      - name: Build libkrunfw
+        if: steps.cache-libkrunfw.outputs.cache-hit != 'true'
         run: |
           cd vendor/libkrunfw
-          make -j$(nproc)
+          make -j"$(nproc)"
           cd ../..
           mkdir -p build
           cp vendor/libkrunfw/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} build/
@@ -267,209 +292,174 @@ jobs:
           ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
           ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} libkrunfw.so
 
-      - name: Download kernel.c (macOS)
-        if: steps.cache-libkrunfw.outputs.cache-hit != 'true' && matrix.os == 'darwin'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: kernel-c-aarch64
-          path: vendor/libkrunfw/
-
-      - name: Build libkrunfw (macOS)
-        if: steps.cache-libkrunfw.outputs.cache-hit != 'true' && matrix.os == 'darwin'
-        run: |
-          cd vendor/libkrunfw
-          cc -fPIC -DABI_VERSION=${{ env.LIBKRUNFW_ABI }} -shared -o libkrunfw.${{ env.LIBKRUNFW_ABI }}.dylib kernel.c
-          cd ../..
-          mkdir -p build
-          cp vendor/libkrunfw/libkrunfw.${{ env.LIBKRUNFW_ABI }}.dylib build/
-          cd build
-          ln -sf libkrunfw.${{ env.LIBKRUNFW_ABI }}.dylib libkrunfw.dylib
+      # mold keeps uncached workspace links fast.
+      - name: Set up mold
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
 
       - name: Build msb
         run: |
-          cargo build --release --no-default-features --features net,ssh -p microsandbox-cli
-          mkdir -p build
-          cp target/release/msb build/msb
+          cargo build --profile ci --no-default-features --features net,ssh -p microsandbox-cli
+          cp target/ci/msb build/msb
 
-      - name: Codesign msb (macOS)
-        if: matrix.os == 'darwin'
-        run: codesign --entitlements msb-entitlements.plist --force -s - build/msb
-
-      # -- Checks (workspace) --
-      - name: Format
-        run: cargo +stable fmt --all -- --check
-
-      - name: Clippy
-        run: cargo +stable clippy --workspace --exclude microsandbox-agentd -- -D warnings
-
-      - name: Docs
-        env:
-          RUSTDOCFLAGS: "-D warnings"
-        run: cargo +stable doc --workspace --exclude microsandbox-agentd --no-deps
-
-      - name: Check generated microsandbox types
-        run: cargo +stable run -p microsandbox-types --features ts --bin microsandbox-types-generate -- --check
-
-      # -- Checks (agentd — Linux-only) --
-      - name: Format agentd
-        if: matrix.os == 'linux'
-        run: cargo +stable fmt --manifest-path crates/agentd/Cargo.toml -- --check
-
-      - name: Clippy agentd
-        if: matrix.os == 'linux'
-        run: cargo +stable clippy --manifest-path crates/agentd/Cargo.toml --target ${{ matrix.agentd_target }} -- -D warnings
-
-      # -- Checks (Node SDK) --
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22
-
-      - name: Build agent client package
-        working-directory: packages/agent-client/typescript
-        run: npm ci && npm run build && npm run typecheck && npm test
-
-      - name: Build microsandbox types package
-        working-directory: packages/microsandbox-types/typescript
-        run: npm ci && npm run build && npm run typecheck
-
-      - name: Build Node SDK
-        working-directory: sdk/node-ts
-        run: |
-          node scripts/prune-platform-optional-deps.mjs
-          npm install --package-lock=false
-          npm run build
-
-      # -- Checks (Python SDK) --
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-        with:
-          enable-cache: true
-          cache-dependency-glob: "sdk/python/uv.lock"
-
-      - name: Sync Python dev environment
-        working-directory: sdk/python
-        run: uv sync --group dev
-
-      - name: Stage runtime bundle (Python SDK)
-        run: |
-          mkdir -p sdk/python/microsandbox/_bundled/bin
-          mkdir -p sdk/python/microsandbox/_bundled/lib
-          cp build/msb sdk/python/microsandbox/_bundled/bin/
-          cp build/${{ matrix.libkrunfw_file }} sdk/python/microsandbox/_bundled/lib/
-          cd sdk/python/microsandbox/_bundled/lib
-          if [ "${{ matrix.os }}" = "darwin" ]; then
-            ln -sf ${{ matrix.libkrunfw_file }} libkrunfw.dylib
-          else
-            ln -sf ${{ matrix.libkrunfw_file }} libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
-            ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} libkrunfw.so
-          fi
-
-      - name: Build Python SDK (editable)
-        working-directory: sdk/python
-        run: uv run maturin develop --release
-
-      - name: Test Python SDK
-        working-directory: sdk/python
-        run: uv run pytest
-
-      - name: Lint Python SDK (ruff)
-        working-directory: sdk/python
-        run: uv run ruff check .
-
-      - name: Sanity wheel build (Python SDK)
-        working-directory: sdk/python
-        run: uv build --wheel
-
-      # -- Checks (Go SDK) --
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: stable
-          # No cache-dependency-path: sdk/go has zero external deps,
-          # nothing to cache.
-          cache: false
-
-      - name: Build Go SDK
-        working-directory: sdk/go
-        run: go build ./...
-
-      - name: Vet Go SDK
-        working-directory: sdk/go
-        run: go vet ./...
-
-      - name: Unit-test Go SDK
-        working-directory: sdk/go
-        # Unit tests don't dlopen the FFI lib, so no MICROSANDBOX_FFI_PATH
-        # needed. Integration tests live under ./integration with the
-        # `integration` build tag and run in the go-sdk-test job below.
-        run: go test -count=1 .
-
-      # -- Build Go FFI cdylib (linux-x86_64 only, for the integration job) --
-      - name: Build microsandbox-go cdylib
-        if: matrix.target == 'linux-x86_64'
-        run: |
-          cargo build -p microsandbox-go
-          mkdir -p build
-          cp target/debug/libmicrosandbox_go_ffi.so build/
-
-      # -- Smoke-test the FFI boundary (no KVM needed) --
-      # Released SDK builds embed the FFI library; here we use the
-      # microsandbox_ffi_path build tag to swap the embed for the
-      # freshly-built local .so.
-      - name: Smoke-test Go SDK FFI
-        if: matrix.target == 'linux-x86_64'
-        working-directory: sdk/go
-        env:
-          MICROSANDBOX_FFI_PATH: ${{ github.workspace }}/build/libmicrosandbox_go_ffi.so
-        run: go test -tags "smoke microsandbox_ffi_path" -count=1 -timeout 2m .
-
-      # -- Upload artifacts (linux-x86_64 only, for SDK smoke tests) --
-      - name: Upload build artifacts
-        if: matrix.target == 'linux-x86_64'
+      # Upload immediately. All KVM lanes can begin while independent quality
+      # and cross-platform checks continue in parallel.
+      - name: Upload runtime artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: msb-linux-x86_64
           path: build/
 
-      - name: Upload Node SDK artifacts
-        if: matrix.target == 'linux-x86_64'
+  go-ffi-build:
+    name: Build Go FFI (linux-x86_64)
+    needs: [build-linux-x86_64, changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+        with:
+          cache-bin: false
+          cache-targets: true
+
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+
+      - name: Download runtime artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: msb-linux-x86_64
+          path: build/
+
+      - name: Set up mold
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+
+      - name: Build Go FFI
+        run: cargo build --profile ci -p microsandbox-go
+
+      - name: Upload Go FFI artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: node-sdk-linux-x86_64
-          path: |
-            sdk/node-ts/native/index.cjs
-            sdk/node-ts/native/index.d.ts
-            sdk/node-ts/native/microsandbox.*.node
-            sdk/node-ts/dist/
-            sdk/node-ts/package.json
-            sdk/node-ts/package-lock.json
-            sdk/node-ts/scripts/prune-platform-optional-deps.mjs
-            sdk/node-ts/tests/
-            sdk/node-ts/tsconfig.json
-            sdk/node-ts/vitest.config.ts
+          name: go-ffi-linux-x86_64
+          path: target/ci/libmicrosandbox_go_ffi.so
 
-      # -- Checks (MCP server) --
-      - name: Build MCP server
-        working-directory: mcp
+  rust-integration-build:
+    name: Build Rust integration tests
+    needs: [build-agentd-x86_64, changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
+      # Keep the archive small while preserving file:line backtraces.
+      CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+      CARGO_PROFILE_TEST_DEBUG: "line-tables-only"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+        with:
+          cache-bin: false
+          cache-targets: true
+
+      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2
+        with:
+          tool: cargo-nextest@0.9.143
+
+      - name: Set up mold
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+
+      - name: Download agentd
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: agentd-x86_64-linux-musl
+          path: build/
+
+      - name: Build nextest archive
         run: |
-          node -e "
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-            pkg.dependencies.microsandbox = 'file:../sdk/node-ts';
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
-          "
-          npm install --no-package-lock --ignore-scripts
-          npm run build
+          chmod +x build/agentd
+          mkdir -p artifacts
+          # The target KVM job installs the freshly built runtime separately.
+          # Omitting `prebuilt` here avoids waiting for that artifact solely to
+          # satisfy SDK build scripts; the downloaded current agentd is embedded.
+          mold -run cargo nextest archive -p microsandbox --tests \
+            --no-default-features --features keyring,net \
+            --archive-file artifacts/rust-integration-tests.tar.zst
+
+      - name: Upload nextest archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rust-integration-tests-linux-x86_64
+          path: artifacts/rust-integration-tests.tar.zst
+          compression-level: 0
+
+  check:
+    name: Check (${{ matrix.target }})
+    needs: [build-kernel, build-agentd-aarch64, changes]
+    if: always() && needs.changes.outputs.code == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-aarch64
+            runner: ubuntu-24.04-arm
+            os: linux
+            agentd_target: aarch64-unknown-linux-musl
+            libkrunfw_file: libkrunfw.so.5.6.1
+          - target: darwin-aarch64
+            runner: macos-14
+            os: darwin
+            agentd_target: ""
+            libkrunfw_file: libkrunfw.5.dylib
+    uses: ./.github/workflows/check-platform.yml
+    with:
+      target: ${{ matrix.target }}
+      runner: ${{ matrix.runner }}
+      os: ${{ matrix.os }}
+      agentd_target: ${{ matrix.agentd_target }}
+      libkrunfw_file: ${{ matrix.libkrunfw_file }}
+
+  # ---------------------------------------------------------------------------
+  # Unit tests reuse the runtime artifacts produced above. Keeping them in the
+  # same workflow removes the second release/LTO build formerly done by Test.
+  # ---------------------------------------------------------------------------
+  test-linux-x86_64:
+    name: Test (linux-x86_64)
+    needs: [build-linux-x86_64, changes]
+    if: needs.changes.outputs.code == 'true'
+    uses: ./.github/workflows/test-platform.yml
+    with:
+      target: linux-x86_64
+      runner: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest' }}
+      os: linux
+      agentd_target: x86_64-unknown-linux-musl
 
   # ---------------------------------------------------------------------------
   # Windows build/check only.
   #
   # These jobs verify the WHP host targets compile on both Windows architectures.
   # VM smoke and integration coverage intentionally stays Linux/KVM-only below.
+  # Quality and linked release builds use separate runners so dev/test compilation
+  # does not serialize the expensive release and Go FFI links.
   # ---------------------------------------------------------------------------
-  windows-check:
-    name: Check Windows (${{ matrix.target }})
+  windows-quality:
+    name: Windows Quality (${{ matrix.target }})
     needs: [build-kernel, build-kernel-x86_64, build-agentd-aarch64, build-agentd-x86_64, changes]
-    if: always() && needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
     strategy:
       fail-fast: false
       matrix:
@@ -477,8 +467,6 @@ jobs:
           - target: windows-aarch64
             runner: windows-11-arm
             rust_target: aarch64-pc-windows-msvc
-            go_arch: arm64
-            go_cc: clang
             kernel_artifact: kernel-c-aarch64
             agentd_artifact: agentd-aarch64-linux-musl
             vs_arch: arm64
@@ -486,8 +474,6 @@ jobs:
           - target: windows-x86_64
             runner: windows-latest
             rust_target: x86_64-pc-windows-msvc
-            go_arch: amd64
-            go_cc: clang -fuse-ld=lld
             kernel_artifact: kernel-c-x86_64
             agentd_artifact: agentd-x86_64-linux-musl
             vs_arch: amd64
@@ -495,17 +481,21 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          submodules: true
+
+      - name: Check out libkrunfw
+        run: git submodule update --init --depth 1 vendor/libkrunfw
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
-          components: clippy, rustfmt
+          components: clippy
           targets: ${{ matrix.rust_target }}
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
         with:
           cache-bin: false
+          # Preserve Cargo fingerprints and linked outputs across quality runs.
+          cache-targets: true
+          shared-key: windows-quality-${{ matrix.target }}
 
       - name: Download kernel.c
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -533,10 +523,6 @@ jobs:
           New-Item -ItemType Directory -Force -Path build | Out-Null
           Copy-Item vendor\libkrunfw\libkrunfw.dll build\libkrunfw.dll -Force
 
-      - name: Format
-        shell: pwsh
-        run: cargo +stable fmt --all -- --check
-
       - name: Check msb
         shell: pwsh
         run: |
@@ -561,7 +547,100 @@ jobs:
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
           cargo +stable test --no-default-features --features net -p microsandbox-runtime --lib --target ${{ matrix.rust_target }} test_bind_rootfs_backend_exposes_host_file_and_init
 
+  windows-build:
+    name: Build Windows ${{ matrix.component }} (${{ matrix.target }})
+    needs: [build-kernel, build-kernel-x86_64, build-agentd-aarch64, build-agentd-x86_64, changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows-aarch64
+            component: CLI
+            runner: windows-11-arm
+            rust_target: aarch64-pc-windows-msvc
+            kernel_artifact: kernel-c-aarch64
+            agentd_artifact: agentd-aarch64-linux-musl
+            vs_arch: arm64
+            vs_host_arch: arm64
+          - target: windows-x86_64
+            component: CLI
+            runner: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+            kernel_artifact: kernel-c-x86_64
+            agentd_artifact: agentd-x86_64-linux-musl
+            vs_arch: amd64
+            vs_host_arch: amd64
+          - target: windows-aarch64
+            component: Go
+            runner: windows-11-arm
+            rust_target: aarch64-pc-windows-msvc
+            go_arch: arm64
+            go_cc: clang
+            kernel_artifact: kernel-c-aarch64
+            agentd_artifact: agentd-aarch64-linux-musl
+            vs_arch: arm64
+            vs_host_arch: arm64
+          - target: windows-x86_64
+            component: Go
+            runner: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+            go_arch: amd64
+            go_cc: clang -fuse-ld=lld
+            kernel_artifact: kernel-c-x86_64
+            agentd_artifact: agentd-x86_64-linux-musl
+            vs_arch: amd64
+            vs_host_arch: amd64
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check out libkrunfw
+        run: git submodule update --init --depth 1 vendor/libkrunfw
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+        with:
+          cache-bin: false
+          # Retain exact Cargo outputs, including release links.
+          cache-targets: true
+          shared-key: windows-build-${{ matrix.target }}-${{ matrix.component }}
+
+      - name: Download kernel.c
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ matrix.kernel_artifact }}
+          path: vendor/libkrunfw/
+
+      - name: Download agentd
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ matrix.agentd_artifact }}
+          path: build/
+
+      - name: Build libkrunfw.dll
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & .\vendor\libkrunfw\scripts\build-windows.ps1 `
+            -SkipKernelBundle `
+            -AbiVersion ${{ env.LIBKRUNFW_ABI }} `
+            -Architecture ${{ matrix.vs_arch }} `
+            -HostArchitecture ${{ matrix.vs_host_arch }} `
+            -Output libkrunfw.dll `
+            -ImportLibrary libkrunfw.lib
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          Copy-Item vendor\libkrunfw\libkrunfw.dll build\libkrunfw.dll -Force
+
       - name: Build msb
+        if: matrix.component == 'CLI'
         shell: pwsh
         env:
           RUSTFLAGS: -C target-feature=+crt-static
@@ -569,9 +648,10 @@ jobs:
           $ErrorActionPreference = "Stop"
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
-          cargo +stable build --release --no-default-features --features net,ssh -p microsandbox-cli --target ${{ matrix.rust_target }}
+          cargo +stable build --profile ci --no-default-features --features net,ssh -p microsandbox-cli --target ${{ matrix.rust_target }}
 
       - name: Build Go FFI cdylib
+        if: matrix.component == 'Go'
         shell: pwsh
         env:
           RUSTFLAGS: -C target-feature=+crt-static
@@ -579,14 +659,16 @@ jobs:
           $ErrorActionPreference = "Stop"
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
-          cargo +stable build --release -p microsandbox-go --target ${{ matrix.rust_target }}
+          cargo +stable build --profile ci -p microsandbox-go --target ${{ matrix.rust_target }}
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: matrix.component == 'Go'
         with:
           go-version: stable
           cache: false
 
       - name: Build and test Go SDK
+        if: matrix.component == 'Go'
         shell: pwsh
         working-directory: sdk/go
         env:
@@ -602,26 +684,669 @@ jobs:
           go test -count=1 .
 
   # ---------------------------------------------------------------------------
+  # Platform-independent quality lanes. These run once on Linux instead of
+  # serially repeating on Linux arm64 and macOS.
+  # ---------------------------------------------------------------------------
+  rust-quality:
+    name: Rust Quality
+    needs: [build-linux-x86_64, changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy, rustfmt
+          targets: x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+        with:
+          cache-bin: false
+          cache-targets: true
+
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y musl-tools libcap-ng-dev
+
+      - name: Download runtime artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: msb-linux-x86_64
+          path: build/
+
+      - name: Format
+        run: cargo +stable fmt --all -- --check
+
+      - name: Check agentd
+        run: |
+          cargo +stable fmt --manifest-path crates/agentd/Cargo.toml -- --check
+          cargo +stable clippy --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl -- -D warnings
+
+      - name: Set up mold
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+
+      - name: Clippy
+        run: cargo +stable clippy --workspace --exclude microsandbox-agentd -- -D warnings
+
+      - name: Docs
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo +stable doc --workspace --exclude microsandbox-agentd --no-deps
+
+      - name: Check generated microsandbox types
+        run: cargo +stable run -p microsandbox-types --features ts --bin microsandbox-types-generate -- --check
+
+  node-sdk-build:
+    name: TypeScript and Node Quality
+    needs: [build-linux-x86_64, changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check out MCP server
+        run: git submodule update --init --depth 1 mcp
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+        with:
+          cache-bin: false
+          cache-targets: true
+
+      - name: Set up mold
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+
+      - name: Download runtime artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: msb-linux-x86_64
+          path: build/
+
+      - name: Check agent client package
+        working-directory: packages/agent-client/typescript
+        run: npm ci && npm run build && npm run typecheck && npm test
+
+      - name: Check microsandbox types package
+        working-directory: packages/microsandbox-types/typescript
+        run: npm ci && npm run build && npm run typecheck
+
+      - name: Build Node SDK
+        working-directory: sdk/node-ts
+        run: |
+          node scripts/prune-platform-optional-deps.mjs
+          npm install --package-lock=false
+          npm run build:ci
+
+      - name: Build MCP server
+        working-directory: mcp
+        run: |
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.dependencies.microsandbox = 'file:../sdk/node-ts';
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
+          "
+          npm install --no-package-lock --ignore-scripts
+          npm run build
+
+      - name: Upload Node SDK artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: node-sdk-linux-x86_64
+          path: |
+            sdk/node-ts/native/index.cjs
+            sdk/node-ts/native/index.d.ts
+            sdk/node-ts/native/microsandbox.*.node
+            sdk/node-ts/dist/
+            sdk/node-ts/package.json
+            sdk/node-ts/package-lock.json
+            sdk/node-ts/scripts/prune-platform-optional-deps.mjs
+            sdk/node-ts/tests/
+            sdk/node-ts/tsconfig.json
+            sdk/node-ts/vitest.config.ts
+
+  python-wheel-build:
+    name: Build Python wheel (linux-x86_64)
+    needs: [build-linux-x86_64, changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+        with:
+          cache-bin: false
+          cache-targets: true
+
+      - name: Set up mold
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "sdk/python/uv.lock"
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+
+      - name: Download runtime artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: msb-linux-x86_64
+          path: build/
+
+      - name: Stage runtime bundle
+        run: |
+          mkdir -p sdk/python/microsandbox/_bundled/bin sdk/python/microsandbox/_bundled/lib
+          cp build/msb sdk/python/microsandbox/_bundled/bin/
+          cp build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} sdk/python/microsandbox/_bundled/lib/
+          cd sdk/python/microsandbox/_bundled/lib
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} libkrunfw.so
+
+      - name: Build Python wheel
+        working-directory: sdk/python
+        run: |
+          # Avoid uv's implicit editable build; every x86 Python lane consumes
+          # the exact same cp310-abi3 wheel produced here.
+          uv sync --group dev --no-install-project
+          mold -run uv run --no-sync maturin build --profile ci --out dist
+
+      - name: Upload Python wheel
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: python-wheel-linux-x86_64
+          path: sdk/python/dist/*.whl
+          compression-level: 0
+
+  python-quality:
+    name: Python Quality
+    needs: [python-wheel-build, changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "sdk/python/uv.lock"
+
+      - name: Download Python wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: python-wheel-linux-x86_64
+          path: sdk/python/dist/
+
+      - name: Install Python development environment
+        working-directory: sdk/python
+        run: |
+          uv sync --group dev --no-install-project
+          uv pip install --reinstall dist/*.whl
+
+      - name: Test and lint Python SDK
+        run: |
+          # Running from the repository root ensures imports come from the
+          # installed wheel instead of the adjacent Python source tree.
+          uv run --project sdk/python --no-sync pytest sdk/python/tests
+          uv run --project sdk/python --no-sync ruff check sdk/python
+
+  ruby-sdk:
+    name: Ruby ${{ matrix.ruby }} / Linux x86_64
+    needs: [build-agentd-x86_64, changes]
+    if: needs.changes.outputs.ruby == 'true'
+    runs-on: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby: ["3.3", "3.4", "4.0"]
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ruby-${{ matrix.ruby }}
+      RB_SYS_CARGO_PROFILE: ci
+      RB_SYS_CARGO_TARGET_DIR: ${{ github.workspace }}/target/ruby-${{ matrix.ruby }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Use checkout Rust SDK
+        run: scripts/ci/ruby-sdk-checkout.sh prepare
+
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+        with:
+          workspaces: . -> target/ruby-${{ matrix.ruby }}
+          key: ruby-${{ matrix.ruby }}-ci
+          cache-bin: false
+          cache-targets: true
+
+      - name: Set up mold
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+
+      - name: Download agentd
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: agentd-x86_64-linux-musl
+          path: build/
+
+      - name: Install Ruby build dependencies
+        run: gem install rake rake-compiler test-unit rb_sys --no-document
+
+      - name: Check Rust extension
+        if: matrix.ruby == '4.0'
+        working-directory: sdk/ruby/ext/microsandbox
+        run: |
+          cargo fmt -- --check
+          cargo clippy --profile ci -- -D warnings
+
+      - name: Compile and test source tree
+        working-directory: sdk/ruby
+        run: mold -run rake test
+
+      - name: Restore standalone Ruby lockfile
+        if: always()
+        run: scripts/ci/ruby-sdk-checkout.sh restore
+
+  ruby-source-gem:
+    name: Ruby source gem / 4.0
+    needs: [build-agentd-x86_64, changes]
+    if: needs.changes.outputs.ruby == 'true' && (github.event_name == 'push' || needs.changes.outputs.ruby_package == 'true')
+    runs-on: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ruby-source-gem-4.0
+      RB_SYS_CARGO_TARGET_DIR: ${{ github.workspace }}/target/ruby-source-gem-4.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        with:
+          ruby-version: "4.0"
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Use checkout Rust SDK
+        run: scripts/ci/ruby-sdk-checkout.sh prepare
+
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+        with:
+          workspaces: . -> target/ruby-source-gem-4.0
+          key: ruby-4.0-source-gem
+          cache-bin: false
+          cache-targets: true
+
+      - name: Set up mold
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+
+      - name: Download agentd
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: agentd-x86_64-linux-musl
+          path: build/
+
+      - name: Install Ruby build dependencies
+        run: gem install rb_sys --no-document
+
+      # The temporary Cargo patch is outside the gem, so the artifact keeps its
+      # exact crates.io pin while this installation uses the matching local API.
+      - name: Build and install source gem against checkout
+        working-directory: sdk/ruby
+        run: |
+          gem build microsandbox.gemspec
+          mold -run gem install --local microsandbox-*.gem --no-document
+          ruby --disable-gems -e 'require "rubygems"; require "microsandbox"; abort unless Microsandbox.version == "0.6.9"'
+
+      - name: Restore standalone Ruby lockfile
+        if: always()
+        run: scripts/ci/ruby-sdk-checkout.sh restore
+
+  ruby-platform-gem:
+    name: Build Ruby platform gem / ${{ matrix.platform }}
+    needs: [build-agentd-aarch64, build-agentd-x86_64, changes]
+    if: needs.changes.outputs.ruby_platform == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The platform label carries no glibc version, so the build host is
+          # the compatibility floor. Keep the audit below in sync with these
+          # runners when upgrading them.
+          - platform: x86_64-linux-gnu
+            runner: ubuntu-22.04
+            agentd: x86_64
+          - platform: aarch64-linux-gnu
+            runner: ubuntu-22.04-arm
+            agentd: aarch64
+          - platform: arm64-darwin
+            runner: macos-14
+            agentd: aarch64
+          # RubyInstaller uses MinGW-ucrt, so this needs the windows-gnu Rust
+          # target rather than the MSVC target used by the rest of Windows CI.
+          - platform: x64-mingw-ucrt
+            runner: windows-latest
+            agentd: x86_64
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ruby-platform-${{ matrix.platform }}
+      RB_SYS_CARGO_TARGET_DIR: ${{ github.workspace }}/target/ruby-platform-${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+        with:
+          workspaces: . -> target/ruby-platform-${{ matrix.platform }}
+          key: ruby-platform-${{ matrix.platform }}
+          cache-bin: false
+          cache-targets: true
+
+      - name: Install system dependencies
+        if: contains(matrix.platform, 'linux')
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+
+      - name: Add the windows-gnu Rust target
+        if: contains(matrix.platform, 'mingw')
+        run: rustup target add x86_64-pc-windows-gnu
+
+      - name: Download agentd
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: agentd-${{ matrix.agentd }}-linux-musl
+          path: build/
+
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        if: "!contains(matrix.platform, 'mingw')"
+        with:
+          ruby-version: "3.1"
+
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@e5f9a49a7812a078584072f6e3f657ad247c8771 # v1.4.4
+        if: contains(matrix.platform, 'mingw')
+        with:
+          ruby-version: "3.1"
+          cargo-cache: false
+
+      - name: Build for Ruby 3.1
+        working-directory: sdk/ruby
+        run: |
+          gem install rake rake-compiler rb_sys --no-document
+          rake version_check cargo:patch_workspace gem:stage
+
+      - name: Assert the extension uses the checkout Rust SDK
+        working-directory: sdk/ruby
+        run: cargo tree --manifest-path ext/microsandbox/Cargo.toml --depth 1 | grep "sdk.rust)"
+
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        if: "!contains(matrix.platform, 'mingw')"
+        with:
+          ruby-version: "3.2"
+
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@e5f9a49a7812a078584072f6e3f657ad247c8771 # v1.4.4
+        if: contains(matrix.platform, 'mingw')
+        with:
+          ruby-version: "3.2"
+          cargo-cache: false
+
+      - name: Build for Ruby 3.2
+        working-directory: sdk/ruby
+        run: |
+          gem install rake rake-compiler rb_sys --no-document
+          rake gem:stage
+
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        if: "!contains(matrix.platform, 'mingw')"
+        with:
+          ruby-version: "3.3"
+
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@e5f9a49a7812a078584072f6e3f657ad247c8771 # v1.4.4
+        if: contains(matrix.platform, 'mingw')
+        with:
+          ruby-version: "3.3"
+          cargo-cache: false
+
+      - name: Build for Ruby 3.3
+        working-directory: sdk/ruby
+        run: |
+          gem install rake rake-compiler rb_sys --no-document
+          rake gem:stage
+
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        if: "!contains(matrix.platform, 'mingw')"
+        with:
+          ruby-version: "3.4"
+
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@e5f9a49a7812a078584072f6e3f657ad247c8771 # v1.4.4
+        if: contains(matrix.platform, 'mingw')
+        with:
+          ruby-version: "3.4"
+          cargo-cache: false
+
+      - name: Build for Ruby 3.4
+        working-directory: sdk/ruby
+        run: |
+          gem install rake rake-compiler rb_sys --no-document
+          rake gem:stage
+
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        if: "!contains(matrix.platform, 'mingw')"
+        with:
+          ruby-version: "4.0"
+
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@e5f9a49a7812a078584072f6e3f657ad247c8771 # v1.4.4
+        if: contains(matrix.platform, 'mingw')
+        with:
+          ruby-version: "4.0"
+          cargo-cache: false
+
+      - name: Build for Ruby 4.0
+        working-directory: sdk/ruby
+        run: |
+          gem install rake rake-compiler rb_sys --no-document
+          rake gem:stage
+
+      - name: Audit the glibc symbol floor
+        if: contains(matrix.platform, 'linux')
+        working-directory: sdk/ruby
+        run: |
+          for so in lib/microsandbox/*/microsandbox.so; do
+            max=$(objdump -T "$so" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -uV | tail -n1)
+            echo "$so requires $max"
+            if [ "$(printf '%s\nGLIBC_2.35\n' "$max" | sort -V | tail -n1)" != "GLIBC_2.35" ]; then
+              echo "::error::$so requires $max, above the documented glibc 2.35 floor"
+              exit 1
+            fi
+          done
+
+      - name: Package the platform gem
+        working-directory: sdk/ruby
+        env:
+          GEM_PLATFORM: ${{ matrix.platform }}
+        run: rake gem:platform
+
+      - name: Assert the packaged gem spec
+        working-directory: sdk/ruby
+        env:
+          GEM_PLATFORM: ${{ matrix.platform }}
+        run: |
+          ruby -e 'require "rubygems/package"
+
+            path = Dir["pkg/*.gem"].first
+            abort "no platform gem in pkg/" unless path
+            spec = Gem::Package.new(path).spec
+
+            abort "platform mismatch: #{spec.platform}" unless spec.platform.to_s == ENV.fetch("GEM_PLATFORM")
+            abort "platform gem must not declare extensions: #{spec.extensions.inspect}" unless spec.extensions.empty?
+            abort "required_ruby_version: #{spec.required_ruby_version}" unless spec.required_ruby_version == Gem::Requirement.new([">= 3.1", "< 4.1.dev"])
+            abort "required_rubygems_version: #{spec.required_rubygems_version}" unless spec.required_rubygems_version == Gem::Requirement.new(">= 3.3.11")
+            abort "rb_sys must not be a runtime dependency" if spec.dependencies.any? { |d| d.name == "rb_sys" && d.type == :runtime }
+
+            %w[3.1 3.2 3.3 3.4 4.0].each do |abi|
+              expected = ["lib/microsandbox/#{abi}/microsandbox.so", "lib/microsandbox/#{abi}/microsandbox.bundle"]
+              abort "missing binary for Ruby #{abi}: #{spec.files.inspect}" if (spec.files & expected).empty?
+            end
+
+            puts "platform gem spec OK: #{File.basename(path)}"'
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ruby-sdk-${{ matrix.platform }}
+          path: sdk/ruby/pkg/*.gem
+
+      - name: Restore standalone Ruby lockfile
+        if: always()
+        working-directory: sdk/ruby
+        run: rake cargo:unpatch_workspace
+
+  ruby-platform-smoke:
+    name: Smoke Ruby platform gem / ${{ matrix.platform }} / Ruby ${{ matrix.ruby }}
+    needs: [changes, ruby-platform-gem]
+    if: needs.changes.outputs.ruby_platform == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [x86_64-linux-gnu, aarch64-linux-gnu, arm64-darwin, x64-mingw-ucrt]
+        ruby: ["3.1", "3.2", "3.3", "3.4", "4.0"]
+        include:
+          - platform: x86_64-linux-gnu
+            runner: ubuntu-22.04
+          - platform: aarch64-linux-gnu
+            runner: ubuntu-22.04-arm
+          - platform: arm64-darwin
+            runner: macos-14
+          - platform: x64-mingw-ucrt
+            runner: windows-latest
+    steps:
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ruby-sdk-${{ matrix.platform }}
+
+      - name: Install the platform gem
+        run: gem install --local ./microsandbox-*.gem --no-document
+
+      - name: Assert the precompiled binary is what loads
+        run: |
+          # shellcheck disable=SC2016
+          ruby -e 'require "microsandbox"
+            loaded = $LOADED_FEATURES.grep(%r{microsandbox/\d+\.\d+/microsandbox\.(so|bundle)$})
+            abort "precompiled ABI binary not used: #{$LOADED_FEATURES.grep(/microsandbox/).inspect}" if loaded.empty?
+            abort "native/ruby version mismatch" unless Microsandbox.version == Microsandbox::VERSION'
+
+  ruby-platform-smoke-clean:
+    name: Smoke Ruby platform gem / x86_64-linux-gnu / clean container
+    needs: [changes, ruby-platform-gem]
+    if: needs.changes.outputs.ruby_platform == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ruby-sdk-x86_64-linux-gnu
+
+      - name: Install and load the gem in a stock Ruby image
+        run: |
+          docker run --rm -v "$PWD:/gems" ruby:3.4-slim bash -ec 'gem install --local /gems/microsandbox-*.gem --no-document && ruby -e "require \"microsandbox\"
+          loaded = \$LOADED_FEATURES.grep(%r{microsandbox/\d+\.\d+/microsandbox\.(so|bundle)\$})
+          abort \"precompiled ABI binary not used: #{\$LOADED_FEATURES.grep(/microsandbox/).inspect}\" if loaded.empty?
+          abort \"native/ruby version mismatch\" unless Microsandbox.version == Microsandbox::VERSION"'
+
+  go-quality:
+    name: Go Quality
+    needs: [build-linux-x86_64, go-ffi-build, changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Download runtime artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: msb-linux-x86_64
+          path: build/
+
+      - name: Download Go FFI artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: go-ffi-linux-x86_64
+          path: build/
+
+      - name: Build, vet, and test Go SDK
+        working-directory: sdk/go
+        env:
+          MICROSANDBOX_FFI_PATH: ${{ github.workspace }}/build/libmicrosandbox_go_ffi.so
+        run: |
+          go build ./...
+          go vet ./...
+          go test -count=1 .
+          go test -tags "smoke microsandbox_ffi_path" -count=1 -timeout 2m .
+
+  # ---------------------------------------------------------------------------
   # CLI smoke tests (requires KVM)
   #
   # Runs black-box CLI user flows against the freshly-built msb artifact.
-  # Keep these below the SDK layer so runtime/libkrun regressions fail with a
-  # direct signal before SDK packaging enters the picture.
+  # It runs alongside the integration lanes so failures retain a direct signal
+  # without delaying SDK coverage.
   # ---------------------------------------------------------------------------
   cli-smoke-test:
     name: CLI Smoke Tests
-    needs: [check, changes]
+    needs: [build-linux-x86_64, changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: self-hosted-ubuntu-2404-x64
     # Bound a wedged run so it can't squat a shared runner for the 6h default.
     timeout-minutes: 45
-    # The self-hosted box has 32 cores shared by several runners. Uncapped cargo
-    # (-j defaults to ncpu) lets concurrent jobs oversubscribe the CPU ~4x and
-    # starve microVM boots past the 180s agent-relay deadline (flaky
-    # "timed out waiting for agent relay"). Cap per-job build parallelism so
-    # several jobs can build at once without crushing VM boot latency.
-    env:
-      CARGO_BUILD_JOBS: "12"
     steps:
       - name: Clean workspace
         run: |
@@ -642,6 +1367,8 @@ jobs:
       - name: Run CLI smoke tests
         run: |
           chmod +x build/msb
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} build/libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} build/libkrunfw.so
           scripts/smoke/cli/image-archive.sh
           scripts/smoke/cli/split-irqchip-bind-net.sh
 
@@ -654,24 +1381,11 @@ jobs:
   # ---------------------------------------------------------------------------
   integration-test:
     name: Integration Tests
-    needs: [check, changes, cli-smoke-test]
-    if: needs.changes.outputs.code == 'true'
+    needs: [build-linux-x86_64, rust-integration-build, changes]
+    if: always() && needs.changes.outputs.code == 'true' && needs.build-linux-x86_64.result == 'success' && needs.rust-integration-build.result == 'success'
     runs-on: self-hosted-ubuntu-2404-x64
     # Bound a wedged run so it can't squat a shared runner for the 6h default.
     timeout-minutes: 45
-    # The self-hosted box has 32 cores shared by several runners. Uncapped cargo
-    # (-j defaults to ncpu) lets concurrent jobs oversubscribe the CPU ~4x and
-    # starve microVM boots past the 180s agent-relay deadline (flaky
-    # "timed out waiting for agent relay"). Cap per-job build parallelism so
-    # several jobs can build at once without crushing VM boot latency.
-    env:
-      CARGO_BUILD_JOBS: "12"
-      # Full debuginfo for the dozen-plus integration-test binaries is
-      # ~14 GiB of target/ and has filled the shared runner disk mid-link,
-      # killing rust-lld with SIGBUS (#1162). line-tables-only keeps
-      # file:line in backtraces — all CI needs — at a fraction of the size.
-      CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
-      CARGO_PROFILE_TEST_DEBUG: "line-tables-only"
     steps:
       - name: Clean workspace
         run: |
@@ -685,21 +1399,21 @@ jobs:
       - name: Clean runner disk
         run: scripts/ci/clean-runner-disk.sh
 
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2
         with:
-          cache-bin: false
-
-      - uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60 # v2
-        with:
-          tool: cargo-nextest
+          tool: cargo-nextest@0.9.143
 
       # -- Download pre-built artifacts --
       - name: Download build artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: msb-linux-x86_64
+          path: build/
+
+      - name: Download nextest archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rust-integration-tests-linux-x86_64
           path: build/
 
       # -- Install msb + libkrunfw --
@@ -712,29 +1426,35 @@ jobs:
           ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} ~/.microsandbox/lib/libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
           ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} ~/.microsandbox/lib/libkrunfw.so
 
-      # -- Build deps (mirrors the Linux install in the check job) --
-      - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y musl-tools libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
-
-      - name: Build agentd
-        run: |
-          rustup target add x86_64-unknown-linux-musl
-          cargo build --release --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl
-          cp target/x86_64-unknown-linux-musl/release/agentd build/agentd
+      - name: Prepare pre-built agentd
+        # upload-artifact normalizes executable bits. The runtime build already
+        # produced agentd; restore its mode instead of compiling it again here.
+        run: chmod +x build/agentd
 
       # -- Run integration tests --
       # MSB_TEST_ISOLATE_HOME=1 turns on per-test ~/.microsandbox isolation
       # (see crates/test-utils), so tests avoid sqlite/image-cache contention.
-      # Run the VM integration suite serially on the shared self-hosted KVM
-      # runner; overlapping microVM boots and stdin-heavy exec tests can
-      # intermittently lose relay/session readiness under CI load.
+      # Per-test home isolation makes bounded nextest parallelism safe. Keep
+      # this at two: stdin-heavy tests and overlapping microVM boots have lost
+      # relay/session readiness when the shared KVM host is oversubscribed.
       - name: Run integration tests
         env:
           MSB_TEST_ISOLATE_HOME: "1"
         run: |
           export PATH="$HOME/.microsandbox/bin:$PATH"
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
-          cargo nextest run -p microsandbox --tests --run-ignored=only --test-threads 1
+          # Functional VM tests deliberately create multiple writable-root sandboxes. Give this
+          # dedicated runner a stable admission pool so unrelated tests do not depend on its
+          # momentary MemAvailable-derived pool; Auto still exercises the shipping 1536 MiB
+          # per-disk controller and the normal host-global admission path.
+          integration_config="$RUNNER_TEMP/msb-integration-config.json"
+          printf '%s\n' '{"runtime":{"block_writeback":{"mode":"auto","pool_mib":4096}}}' > "$integration_config"
+          export MSB_CONFIG_PATH="$integration_config"
+          cargo-nextest nextest run \
+            --archive-file build/rust-integration-tests.tar.zst \
+            --workspace-remap "${{ github.workspace }}" \
+            --run-ignored=only \
+            --test-threads 2
 
       - name: Disk usage
         if: always()
@@ -743,9 +1463,9 @@ jobs:
   # ---------------------------------------------------------------------------
   # Node.js SDK smoke tests (requires KVM)
   #
-  # Runs the smoke suite under both Node and Bun. The two are sequential
-  # in one job so they don't fight over the workspace on the self-hosted
-  # runner.
+  # Runs the smoke suite under both Node and Bun as separate matrix cells.
+  # With twelve runner services available these start as soon as the runtime and
+  # native Node artifact are ready; host capacity is the concurrency bound.
   #
   # No `~/.microsandbox` install: the SDK uses its bundled platform-pkg
   # binaries. We patch in the freshly-built msb + libkrunfw so the test
@@ -754,19 +1474,17 @@ jobs:
   # pre-fix, sandbox creation fails clean instead of being silently masked.
   # ---------------------------------------------------------------------------
   node-sdk-test:
-    name: Node.js SDK Tests
-    needs: [check, changes, integration-test]
-    if: needs.changes.outputs.code == 'true'
+    name: Node.js SDK Tests (${{ matrix.runtime }})
+    needs: [build-linux-x86_64, node-sdk-build, changes]
+    if: always() && needs.changes.outputs.code == 'true' && needs.build-linux-x86_64.result == 'success' && needs.node-sdk-build.result == 'success'
     runs-on: self-hosted-ubuntu-2404-x64
     # Bound a wedged run so it can't squat a shared runner for the 6h default.
     timeout-minutes: 45
-    # The self-hosted box has 32 cores shared by several runners. Uncapped cargo
-    # (-j defaults to ncpu) lets concurrent jobs oversubscribe the CPU ~4x and
-    # starve microVM boots past the 180s agent-relay deadline (flaky
-    # "timed out waiting for agent relay"). Cap per-job build parallelism so
-    # several jobs can build at once without crushing VM boot latency.
-    env:
-      CARGO_BUILD_JOBS: "12"
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        runtime: [node, bun]
     steps:
       - name: Clean workspace
         run: |
@@ -845,9 +1563,13 @@ jobs:
           chmod +x ${{ github.workspace }}/build/msb
           install -m755 ${{ github.workspace }}/build/msb "$PKG/bin/msb"
           rm -f "$PKG"/lib/libkrunfw*
-          cp -P ${{ github.workspace }}/build/libkrunfw.so* "$PKG/lib/"
+          cp ${{ github.workspace }}/build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} "$PKG/lib/"
+          cd "$PKG/lib"
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} libkrunfw.so
 
       - name: Run SDK tests (Node)
+        if: matrix.runtime == 'node'
         working-directory: sdk/node-ts
         # Linux unix-socket paths are 108 bytes — anchor MSB_HOME under
         # /tmp with a cleanup-friendly prefix so sandboxes/<long-name>/runtime/agent.sock fits.
@@ -857,27 +1579,21 @@ jobs:
           export MSB_HOME
           npm test
 
-      # setup-bun downloads a zipped release; unzip isn't preinstalled on
-      # the self-hosted runner.
-      - name: Install unzip
+      # setup-bun downloads a zipped release. The host provisioner installs
+      # unzip so pull-request jobs never need sudo access.
+      - name: Verify unzip is available
+        if: matrix.runtime == 'bun'
         run: |
-          if command -v unzip >/dev/null 2>&1; then
-            exit 0
+          if ! command -v unzip >/dev/null 2>&1; then
+            echo "::error::unzip is missing; rerun scripts/ci/provision-runners.sh on the host"
+            exit 1
           fi
 
-          for attempt in {1..10}; do
-            if sudo apt-get update && sudo apt-get install -y unzip; then
-              exit 0
-            fi
-            echo "apt-get install unzip failed on attempt ${attempt}; retrying..."
-            sleep 10
-          done
-
-          exit 1
-
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - if: matrix.runtime == 'bun'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
 
       - name: Run SDK tests (Bun)
+        if: matrix.runtime == 'bun'
         working-directory: sdk/node-ts
         # Linux unix-socket paths are 108 bytes — anchor MSB_HOME under
         # /tmp with a cleanup-friendly prefix so sandboxes/<long-name>/runtime/agent.sock fits.
@@ -896,40 +1612,26 @@ jobs:
   # ---------------------------------------------------------------------------
   # Python SDK integration tests (requires KVM)
   #
-  # Downloads the pre-built msb + libkrunfw from the `check` job, then builds
-  # the Python extension locally and runs the integration suite against those
-  # fresh runtime binaries.
+  # Downloads the pre-built msb + libkrunfw and the ABI3 wheel, then runs the
+  # integration suite against those exact artifacts without compiling on KVM.
   # ---------------------------------------------------------------------------
   python-sdk-test:
     name: Python SDK Tests
-    needs: [check, changes, node-sdk-test]
-    if: needs.changes.outputs.code == 'true'
+    needs: [build-linux-x86_64, python-wheel-build, changes]
+    if: always() && needs.changes.outputs.code == 'true' && needs.build-linux-x86_64.result == 'success' && needs.python-wheel-build.result == 'success'
     runs-on: self-hosted-ubuntu-2404-x64
     # Bound a wedged run so it can't squat a shared runner for the 6h default.
     timeout-minutes: 45
-    # The self-hosted box has 32 cores shared by several runners. Uncapped cargo
-    # (-j defaults to ncpu) lets concurrent jobs oversubscribe the CPU ~4x and
-    # starve microVM boots past the 180s agent-relay deadline (flaky
-    # "timed out waiting for agent relay"). Cap per-job build parallelism so
-    # several jobs can build at once without crushing VM boot latency.
-    env:
-      CARGO_BUILD_JOBS: "12"
     steps:
       - name: Clean workspace
         run: |
-          rm -rf "${{ github.workspace }}"/{build}
+          rm -rf "${{ github.workspace }}/build" "${{ github.workspace }}/sdk/python/.venv"
           rm -rf ~/.microsandbox
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Clean runner disk
         run: scripts/ci/clean-runner-disk.sh
-
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          cache-bin: false
 
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
@@ -942,35 +1644,28 @@ jobs:
           name: msb-linux-x86_64
           path: build/
 
-      - name: Stage runtime bundle
+      - name: Download Python wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: python-wheel-linux-x86_64
+          path: sdk/python/dist/
+
+      - name: Install Python development environment
+        working-directory: sdk/python
         run: |
-          chmod +x build/msb
-          mkdir -p sdk/python/microsandbox/_bundled/bin
-          mkdir -p sdk/python/microsandbox/_bundled/lib
-          cp build/msb sdk/python/microsandbox/_bundled/bin/
-          cp build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} sdk/python/microsandbox/_bundled/lib/
-          cd sdk/python/microsandbox/_bundled/lib
-          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
-          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} libkrunfw.so
-
-      - name: Sync Python dev environment
-        working-directory: sdk/python
-        run: uv sync --group dev
-
-      - name: Build Python SDK (editable)
-        working-directory: sdk/python
-        run: uv run maturin develop --release
+          uv sync --group dev --no-install-project
+          uv pip install --reinstall dist/*.whl
 
       - name: Run Python integration tests
-        working-directory: sdk/python
         env:
           MSB_PATH: ${{ github.workspace }}/build/msb
-          LD_LIBRARY_PATH: ${{ github.workspace }}/build:${{ github.workspace }}/sdk/python/microsandbox/_bundled/lib
+          LD_LIBRARY_PATH: ${{ github.workspace }}/build
         run: |
+          chmod +x "${MSB_PATH}"
           MSB_HOME=$(mktemp -d -p /tmp msb-python-XXXXXX)
-          trap "rm -rf '$MSB_HOME'" EXIT
+          trap 'rm -rf "$MSB_HOME"' EXIT
           export MSB_HOME
-          uv run pytest integration
+          uv run --project sdk/python --no-sync pytest --import-mode=importlib -n 2 --dist loadscope sdk/python/integration
 
       - name: Disk usage
         if: always()
@@ -982,23 +1677,18 @@ jobs:
   # Every other Python job runs uv unpinned, so it always resolves a modern
   # interpreter and never exercises the declared floor in pyproject.toml
   # (requires-python = ">=3.10"). That let 3.11-only code ship unimportable
-  # on 3.10 (#1153). This job pins uv to 3.10 and runs the unit tests, so
-  # the support claim stays tested until the floor is raised.
+  # on 3.10 (#1153). This job installs the shared cp310-abi3 wheel under a
+  # pinned 3.10 interpreter, so the support claim stays tested without a
+  # redundant native build.
   # ---------------------------------------------------------------------------
   python-sdk-lower-bound:
     name: Python SDK (3.10 lower bound)
-    needs: [check, changes]
+    needs: [python-wheel-build, changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          cache-bin: false
 
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
@@ -1006,65 +1696,51 @@ jobs:
           cache-dependency-glob: "sdk/python/uv.lock"
           python-version: "3.10"
 
-      # The sdk/rust build script provisions msb + libkrunfw during the
-      # maturin build. Between a libkrunfw version bump and the next
-      # release its fallback (downloading the released PREBUILT_VERSION
-      # bundle) ships the older libkrunfw and fails on Linux, so feed
-      # its CI escape hatch the locally built bundle from `check`, like
-      # the other SDK jobs do.
-      - name: Download build artifacts
+      - name: Download Python wheel
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: msb-linux-x86_64
-          path: build/
-
-      # microsandbox-runtime links against libcap-ng; GitHub-hosted
-      # runners don't ship the dev package.
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+          name: python-wheel-linux-x86_64
+          path: sdk/python/dist/
 
       - name: Sync Python dev environment
         working-directory: sdk/python
-        run: uv sync --group dev
+        run: |
+          uv sync --group dev --no-install-project
+          uv pip install --reinstall dist/*.whl
 
       # Guard against the pin silently not applying — an unpinned resolve
       # is exactly the failure mode this job exists to prevent.
       - name: Verify interpreter is 3.10
-        working-directory: sdk/python
-        run: uv run python -c "import sys; assert sys.version_info[:2] == (3, 10), sys.version"
+        run: uv run --project sdk/python --no-sync python -c "import sys; assert sys.version_info[:2] == (3, 10), sys.version"
 
-      - name: Build Python SDK (editable)
-        working-directory: sdk/python
-        run: uv run maturin develop --release
-
-      # No runtime bundle is staged here; test_runtime_binary skips without
-      # it. Bundle-dependent behavior is covered by `check` on a modern
-      # interpreter — this job only guards the interpreter floor.
       - name: Test Python SDK
-        working-directory: sdk/python
-        run: uv run pytest
+        run: uv run --project sdk/python --no-sync pytest sdk/python/tests
 
   # ---------------------------------------------------------------------------
   # Go SDK integration tests (requires KVM)
   #
   # Downloads the pre-built msb + libkrunfw + libmicrosandbox_go_ffi.so from
-  # the `check` job, then runs `go test -tags integration ./integration/...`.
+  # the runtime job, then runs `go test -tags integration ./integration/...`.
   # Mirrors the node-sdk-test pattern.
   # ---------------------------------------------------------------------------
   go-sdk-test:
-    name: Go SDK Tests
-    needs: [check, changes, python-sdk-test]
+    name: Go SDK Tests (shard ${{ matrix.label }})
+    needs: [build-linux-x86_64, go-ffi-build, changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: self-hosted-ubuntu-2404-x64
     # Bound a wedged run so it can't squat a shared runner for the 6h default.
     timeout-minutes: 45
-    # The self-hosted box has 32 cores shared by several runners. Uncapped cargo
-    # (-j defaults to ncpu) lets concurrent jobs oversubscribe the CPU ~4x and
-    # starve microVM boots past the 180s agent-relay deadline (flaky
-    # "timed out waiting for agent relay"). Cap per-job build parallelism so
-    # several jobs can build at once without crushing VM boot latency.
-    env:
-      CARGO_BUILD_JOBS: "12"
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - shard: 0
+            total: 2
+            label: 1/2
+          - shard: 1
+            total: 2
+            label: 2/2
     steps:
       - name: Clean workspace
         run: |
@@ -1088,6 +1764,12 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: msb-linux-x86_64
+          path: build/
+
+      - name: Download Go FFI artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: go-ffi-linux-x86_64
           path: build/
 
       # -- Install msb + libkrunfw --
@@ -1114,13 +1796,34 @@ jobs:
         # Linux unix-socket paths are 108 bytes — anchor MSB_HOME under
         # /tmp with a cleanup-friendly prefix so sandboxes/<long-name>/runtime/agent.sock fits.
         run: |
-          MSB_HOME=$(mktemp -d -p /tmp msb-go-XXXXXX)
+          set -euo pipefail
+
+          MSB_HOME=$(mktemp -d -p /tmp msb-go-${{ matrix.shard }}-XXXXXX)
           trap "rm -rf '$MSB_HOME'" EXIT
           export MSB_HOME
           export PATH="$HOME/.microsandbox/bin:$PATH"
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
+
+          mapfile -t all_tests < <(
+            go test -tags "integration microsandbox_ffi_path" -list '^Test' ./integration \
+              | sed -n '/^Test/p'
+          )
+          selected_tests=()
+          for index in "${!all_tests[@]}"; do
+            if (( index % ${{ matrix.total }} == ${{ matrix.shard }} )); then
+              selected_tests+=("${all_tests[$index]}")
+            fi
+          done
+          if (( ${#selected_tests[@]} == 0 )); then
+            echo "no Go integration tests selected for shard ${{ matrix.label }}" >&2
+            exit 1
+          fi
+
+          test_pattern=$(IFS='|'; echo "${selected_tests[*]}")
+          echo "running ${#selected_tests[@]} Go integration tests in shard ${{ matrix.label }}"
           status=0
-          go test -tags "integration microsandbox_ffi_path" -count=1 -timeout 45m ./integration/... || status=$?
+          go test -v -tags "integration microsandbox_ffi_path" -count=1 -timeout 45m \
+            -run "^(${test_pattern})$" ./integration || status=$?
 
           if [ "$status" -ne 0 ]; then
             echo "::group::Go sandbox runtime logs without core.ready"
@@ -1145,6 +1848,25 @@ jobs:
   # whether the matrix jobs ran. Branch protection requires only this job,
   # so docs-only PRs (where the matrix is skipped) still satisfy the gate.
   # ---------------------------------------------------------------------------
+  test-summary:
+    name: Test Summary
+    if: always()
+    needs:
+      - changes
+      - test-linux-x86_64
+      - check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Aggregate results
+        run: |
+          results='${{ toJson(needs.*.result) }}'
+          echo "needs results: $results"
+          if echo "$results" | grep -qE '"failure"|"cancelled"'; then
+            echo "::error::A required test job failed or was cancelled"
+            exit 1
+          fi
+          echo "All required test jobs passed or were skipped"
+
   summary:
     name: Check Summary
     if: always()
@@ -1154,14 +1876,29 @@ jobs:
       - build-kernel-x86_64
       - build-agentd-aarch64
       - build-agentd-x86_64
+      - build-linux-x86_64
+      - go-ffi-build
+      - rust-integration-build
       - check
-      - windows-check
+      - windows-quality
+      - windows-build
+      - rust-quality
+      - node-sdk-build
+      - python-wheel-build
+      - python-quality
+      - ruby-sdk
+      - ruby-source-gem
+      - ruby-platform-gem
+      - ruby-platform-smoke
+      - ruby-platform-smoke-clean
+      - go-quality
       - cli-smoke-test
       - integration-test
       - node-sdk-test
       - python-sdk-test
       - python-sdk-lower-bound
       - go-sdk-test
+      - test-summary
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate results

@@ -1,5 +1,6 @@
 use microsandbox::sandbox::{
-    DeploymentProfile, NetworkPolicy, Patch, PullPolicy, SandboxBuilder, SecurityProfile,
+    CpuPlacement, DeploymentProfile, NetworkPolicy, Patch, PullPolicy, SandboxBuilder,
+    SecurityProfile, TransparentHugePagePolicy,
 };
 use microsandbox::{LogLevel, RegistryAuth};
 use microsandbox_network::dns::Nameserver;
@@ -19,6 +20,9 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
     "cpus",
     "max_memory",
     "max_cpus",
+    "cpu_placement",
+    "placement_profile",
+    "thp",
     "workdir",
     "shell",
     "security",
@@ -26,6 +30,7 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
     "hostname",
     "user",
     "entrypoint",
+    "cmd",
     "init",
     "replace",
     "replace_with_timeout",
@@ -43,6 +48,7 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
     "volumes",
     "patches",
     "ports",
+    "vsock",
     "network",
     "secrets",
     "on_secret_violation",
@@ -325,6 +331,21 @@ pub fn sandbox_builder_from_args(
     if let Some(max_cpus) = extract_opt::<u8>(kwargs, "max_cpus")? {
         builder = builder.max_cpus(max_cpus);
     }
+    if let Some(cpu_placement) = extract_opt::<String>(kwargs, "cpu_placement")? {
+        let policy = cpu_placement
+            .parse::<CpuPlacement>()
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        builder = builder.cpu_placement(policy);
+    }
+    if let Some(placement_profile) = extract_opt::<String>(kwargs, "placement_profile")? {
+        builder = builder.placement_profile(placement_profile);
+    }
+    if let Some(thp) = extract_opt::<String>(kwargs, "thp")? {
+        let policy = thp
+            .parse::<TransparentHugePagePolicy>()
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        builder = builder.thp(policy);
+    }
     if let Some(workdir) = extract_opt::<String>(kwargs, "workdir")? {
         builder = builder.workdir(workdir);
     }
@@ -371,6 +392,9 @@ pub fn sandbox_builder_from_args(
     }
     if let Some(entrypoint) = extract_opt::<Vec<String>>(kwargs, "entrypoint")? {
         builder = builder.entrypoint(entrypoint);
+    }
+    if let Some(cmd) = extract_opt::<Vec<String>>(kwargs, "cmd")? {
+        builder = builder.cmd(cmd);
     }
     if let Some(init_obj) = kwargs.get_item("init")?
         && !init_obj.is_none()
@@ -531,6 +555,11 @@ pub fn sandbox_builder_from_args(
     // Ports.
     if let Some(ports) = kwargs.get_item("ports")?.filter(|v| !v.is_none()) {
         builder = apply_ports(builder, &ports, PortBindingSource::PublicConfig)?;
+    }
+
+    // Guest-to-host vsock routes are independent of IP networking.
+    if let Some(vsock) = kwargs.get_item("vsock")?.filter(|v| !v.is_none()) {
+        builder = apply_vsock_routes(builder, &vsock)?;
     }
 
     // Network.
@@ -1231,6 +1260,26 @@ fn apply_network(
         builder = builder.network(|n| n.max_connections(max));
     }
 
+    // Rate limiters (egress = guest -> runtime, ingress = runtime -> guest).
+    if let Some(rate_limiter) = net.get_item("rate_limiter")?
+        && !rate_limiter.is_none()
+    {
+        let rate_limiter: Bound<'_, PyDict> = rate_limiter.downcast::<PyDict>()?.clone();
+        let egress = parse_rate_limiter(&rate_limiter, "egress")?;
+        let ingress = parse_rate_limiter(&rate_limiter, "ingress")?;
+        builder = builder.network(move |n| {
+            n.rate_limiter(|mut r| {
+                if let Some(limiter) = &egress {
+                    r = r.egress(|direction| apply_rate_limiter(direction, limiter));
+                }
+                if let Some(limiter) = &ingress {
+                    r = r.ingress(|direction| apply_rate_limiter(direction, limiter));
+                }
+                r
+            })
+        });
+    }
+
     // Guest IPv4 pool.
     if let Some(raw) = extract_opt::<String>(net, "ipv4_pool")? {
         let pool: ipnetwork::Ipv4Network = raw.parse().map_err(|e| {
@@ -1369,6 +1418,113 @@ fn apply_ports(
             other => {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
                     "invalid port protocol: {other}"
+                )));
+            }
+        };
+    }
+
+    Ok(builder)
+}
+
+/// Token bucket values from a Python `TokenBucket` dict.
+struct TokenBucketOpts {
+    size: u64,
+    refill_time_ms: u64,
+    one_time_burst: u64,
+}
+
+/// Rate limiter values from a Python `RateLimiter` dict.
+struct RateLimiterOpts {
+    bandwidth: Option<TokenBucketOpts>,
+    ops: Option<TokenBucketOpts>,
+}
+
+fn parse_rate_limiter(net: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<RateLimiterOpts>> {
+    let Some(obj) = net.get_item(key)? else {
+        return Ok(None);
+    };
+    if obj.is_none() {
+        return Ok(None);
+    }
+    let limiter: Bound<'_, PyDict> = obj.downcast::<PyDict>()?.clone();
+    Ok(Some(RateLimiterOpts {
+        bandwidth: parse_token_bucket(&limiter, "bandwidth")?,
+        ops: parse_token_bucket(&limiter, "ops")?,
+    }))
+}
+
+fn parse_token_bucket(limiter: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<TokenBucketOpts>> {
+    let Some(obj) = limiter.get_item(key)? else {
+        return Ok(None);
+    };
+    if obj.is_none() {
+        return Ok(None);
+    }
+    let bucket: Bound<'_, PyDict> = obj.downcast::<PyDict>()?.clone();
+    Ok(Some(TokenBucketOpts {
+        size: extract_required(&bucket, "size")?,
+        refill_time_ms: extract_required(&bucket, "refill_time_ms")?,
+        one_time_burst: extract_opt(&bucket, "one_time_burst")?.unwrap_or(0),
+    }))
+}
+
+/// Apply parsed rate limiter values to the Rust builder. Validation
+/// happens in `NetworkBuilder::build`.
+fn apply_rate_limiter(
+    mut r: microsandbox_network::builder::RateLimiterBuilder,
+    opts: &RateLimiterOpts,
+) -> microsandbox_network::builder::RateLimiterBuilder {
+    if let Some(bandwidth) = &opts.bandwidth {
+        r = r.bandwidth(
+            bandwidth.size,
+            std::time::Duration::from_millis(bandwidth.refill_time_ms),
+        );
+        if bandwidth.one_time_burst > 0 {
+            r = r.bandwidth_burst(bandwidth.one_time_burst);
+        }
+    }
+    if let Some(ops) = &opts.ops {
+        r = r.ops(
+            ops.size,
+            std::time::Duration::from_millis(ops.refill_time_ms),
+        );
+        if ops.one_time_burst > 0 {
+            r = r.ops_burst(ops.one_time_burst);
+        }
+    }
+    r
+}
+
+/// Apply the compact `{host_socket: port}` stream shorthand or a sequence of
+/// typed `VsockRoute` values for stream/datagram routes.
+fn apply_vsock_routes(
+    mut builder: microsandbox::sandbox::SandboxBuilder,
+    routes: &Bound<'_, PyAny>,
+) -> PyResult<microsandbox::sandbox::SandboxBuilder> {
+    if let Some(routes_dict) = mapping_to_dict(routes)? {
+        for (host_socket, port) in routes_dict.iter() {
+            builder = builder.vsock(host_socket.extract::<String>()?, port.extract::<u32>()?);
+        }
+        return Ok(builder);
+    }
+
+    let iter = routes.try_iter().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err(
+            "vsock must be a mapping of host_socket to port or a sequence of VsockRoute values",
+        )
+    })?;
+    for route in iter {
+        let route = config_dict(&route?, "VsockRoute")?;
+        let host_socket: String = extract_required(&route, "host_socket")?;
+        let port: u32 = extract_required(&route, "port")?;
+        let socket_type: String =
+            extract_opt(&route, "socket_type")?.unwrap_or_else(|| "stream".to_string());
+        builder = match socket_type.as_str() {
+            "stream" => builder.vsock(host_socket, port),
+            "dgram" => builder.vsock_dgram(host_socket, port),
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "invalid vsock socket type: {other}"
                 )));
             }
         };

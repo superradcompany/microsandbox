@@ -3,31 +3,13 @@ title: Images
 description: Rust SDK - Image cache API reference
 ---
 
-Inspect, remove, prune, and import/export the local OCI image cache: the images that sandbox creation has already pulled. The ambient `Image::*` methods use the active default backend and return `Unsupported` when that backend is cloud. The `*_local` variants take an explicit `LocalBackend` and never consult ambient backend state.
+<Tooltip tip="The image-cache API manages the local cache and is local-only. On microsandbox cloud, specify an OCI image when creating the sandbox and it is pulled for you."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-```rust
-use microsandbox::{Image, ImagePruneReport};
-```
+Inspect and manage the local OCI image cache.
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
+## Image
 
-```rust
-use microsandbox::Image;
-
-for image in Image::list().await? {
-    println!("{} ({} layers)", image.reference(), image.layer_count());
-}
-
-let detail = Image::inspect("python:3.12").await?;
-println!("{:?}", detail.config.as_ref().and_then(|c| c.working_dir.as_deref()));
-
-let report = Image::prune().await?;
-println!("removed {} refs", report.image_refs_removed);
-```
-
-## Ambient cache methods
-
-These methods resolve the active backend with `microsandbox::backend::default_backend()`. They are convenient for normal local programs and fail with `Unsupported` when the active backend is cloud.
+These methods resolve the active backend with `microsandbox::backend::default_backend()`.
 
 #### <span className="msb-recv">Image::</span><span className="msb-hn">get()</span>
 
@@ -159,7 +141,7 @@ Image::save(&references, Path::new("python.tar"), ImageArchiveFormat::Docker).aw
 
 </Accordion>
 
-## Explicit local variants
+<p className="msb-member-group">Explicit local variants</p>
 
 Use these when your program owns a specific `LocalBackend` and should not depend on the process default backend.
 
@@ -178,34 +160,153 @@ Image::remove_local(&backend, detail.handle.reference(), false).await?;
 let report = Image::prune_local(&backend).await?;
 ```
 
-| Method | Signature |
-|--------|-----------|
-| `get_local` | `async fn get_local(local: &LocalBackend, reference: &str) -> MicrosandboxResult<ImageHandle>` |
-| `list_local` | `async fn list_local(local: &LocalBackend) -> MicrosandboxResult<Vec<ImageHandle>>` |
-| `inspect_local` | `async fn inspect_local(local: &LocalBackend, reference: &str) -> MicrosandboxResult<ImageDetail>` |
-| `remove_local` | `async fn remove_local(local: &LocalBackend, reference: &str, force: bool) -> MicrosandboxResult<()>` |
-| `prune_local` | `async fn prune_local(local: &LocalBackend) -> MicrosandboxResult<ImagePruneReport>` |
-| `load_local` | `async fn load_local(local: &LocalBackend, input: &Path, tags: Vec<String>) -> MicrosandboxResult<Vec<ImageHandle>>` |
-| `save_local` | `async fn save_local(local: &LocalBackend, references: &[String], output: &Path, format: ImageArchiveFormat) -> MicrosandboxResult<()>` |
+#### <span className="msb-recv">Image::</span><span className="msb-hn">get_local()</span>
 
-## Types
+```rust
+async fn get_local(local: &LocalBackend, reference: &str) -> MicrosandboxResult<ImageHandle>
+```
 
-### ImageHandle
+#### <span className="msb-recv">Image::</span><span className="msb-hn">list_local()</span>
+
+```rust
+async fn list_local(local: &LocalBackend) -> MicrosandboxResult<Vec<ImageHandle>>
+```
+
+#### <span className="msb-recv">Image::</span><span className="msb-hn">inspect_local()</span>
+
+```rust
+async fn inspect_local(local: &LocalBackend, reference: &str) -> MicrosandboxResult<ImageDetail>
+```
+
+#### <span className="msb-recv">Image::</span><span className="msb-hn">remove_local()</span>
+
+```rust
+async fn remove_local(local: &LocalBackend, reference: &str, force: bool) -> MicrosandboxResult<()>
+```
+
+#### <span className="msb-recv">Image::</span><span className="msb-hn">prune_local()</span>
+
+```rust
+async fn prune_local(local: &LocalBackend) -> MicrosandboxResult<ImagePruneReport>
+```
+
+#### <span className="msb-recv">Image::</span><span className="msb-hn">load_local()</span>
+
+```rust
+async fn load_local(local: &LocalBackend, input: &Path, tags: Vec<String>) -> MicrosandboxResult<Vec<ImageHandle>>
+```
+
+#### <span className="msb-recv">Image::</span><span className="msb-hn">save_local()</span>
+
+```rust
+async fn save_local(local: &LocalBackend, references: &[String], output: &Path, format: ImageArchiveFormat) -> MicrosandboxResult<()>
+```
+
+## ImageHandle
+
 
 <p className="msb-backref">Returned by <a href="#image-get">get()</a> · <a href="#image-list">list()</a></p>
 
 A lightweight metadata handle for a cached OCI image.
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `reference()` | `&str` | Image reference |
-| `size_bytes()` | `Option<i64>` | Total image size in bytes, when known |
-| `manifest_digest()` | `Option<&str>` | Content-addressable manifest digest |
-| `architecture()` | `Option<&str>` | Resolved architecture |
-| `os()` | `Option<&str>` | Resolved operating system |
-| `layer_count()` | `usize` | Number of layers |
-| `last_used_at()` | `Option<DateTime<Utc>>` | Last referenced time |
-| `created_at()` | `Option<DateTime<Utc>>` | First-pulled time |
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">reference()</span>
+
+```rust
+reference()
+```
+
+Image reference
+
+<p className="msb-label">Returns</p>
+
+`&str`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">size_bytes()</span>
+
+```rust
+size_bytes()
+```
+
+Total image size in bytes, when known
+
+<p className="msb-label">Returns</p>
+
+`Option<i64>`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">manifest_digest()</span>
+
+```rust
+manifest_digest()
+```
+
+Content-addressable manifest digest
+
+<p className="msb-label">Returns</p>
+
+`Option<&str>`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">architecture()</span>
+
+```rust
+architecture()
+```
+
+Resolved architecture
+
+<p className="msb-label">Returns</p>
+
+`Option<&str>`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">os()</span>
+
+```rust
+os()
+```
+
+Resolved operating system
+
+<p className="msb-label">Returns</p>
+
+`Option<&str>`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">layer_count()</span>
+
+```rust
+layer_count()
+```
+
+Number of layers
+
+<p className="msb-label">Returns</p>
+
+`usize`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">last_used_at()</span>
+
+```rust
+last_used_at()
+```
+
+Last referenced time
+
+<p className="msb-label">Returns</p>
+
+`Option<DateTime<Utc>>`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">created_at()</span>
+
+```rust
+created_at()
+```
+
+First-pulled time
+
+<p className="msb-label">Returns</p>
+
+`Option<DateTime<Utc>>`
+
+## Types
 
 ### ImageDetail
 

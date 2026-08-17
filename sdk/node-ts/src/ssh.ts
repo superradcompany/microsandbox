@@ -21,6 +21,8 @@ export interface SshClientOptions {
   readonly user?: string;
   readonly term?: string;
   readonly sftp?: boolean;
+  /** Disconnect after this many whole seconds without SSH traffic. Use 0 to disable. */
+  readonly inactivityTimeoutSecs?: number;
 }
 
 export interface SshExecOptions {
@@ -37,6 +39,8 @@ export interface SshServerOptions {
   readonly authorizedKeysPath?: string;
   readonly user?: string;
   readonly sftp?: boolean;
+  /** Disconnect after this many whole seconds without SSH traffic. Use 0 to disable. */
+  readonly inactivityTimeoutSecs?: number;
 }
 
 export class SandboxSshOps {
@@ -167,10 +171,12 @@ export function sshClientOptionsToNapi(
   opts?: SshClientOptions,
 ): NapiSshClientOptions | undefined {
   if (!opts) return undefined;
+  validateInactivityTimeoutSecs(opts.inactivityTimeoutSecs);
   return {
     user: opts.user,
     term: opts.term,
     sftp: opts.sftp,
+    inactivityTimeoutSecs: opts.inactivityTimeoutSecs,
   };
 }
 
@@ -197,12 +203,25 @@ export function sshServerOptionsToNapi(
   opts?: SshServerOptions,
 ): NapiSshServerOptions | undefined {
   if (!opts) return undefined;
+  validateInactivityTimeoutSecs(opts.inactivityTimeoutSecs);
   return {
     hostKeyPath: opts.hostKeyPath,
     authorizedKeysPath: opts.authorizedKeysPath,
     user: opts.user,
     sftp: opts.sftp,
+    inactivityTimeoutSecs: opts.inactivityTimeoutSecs,
   };
+}
+
+function validateInactivityTimeoutSecs(value: number | undefined): void {
+  if (
+    value !== undefined &&
+    (!Number.isSafeInteger(value) || value < 0 || value > 0xffff_ffff)
+  ) {
+    throw new RangeError(
+      "inactivityTimeoutSecs must be an integer between 0 and 4294967295",
+    );
+  }
 }
 
 function sshOutputFromNapi(output: NapiSshOutput): SshOutput {

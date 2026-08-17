@@ -3,8 +3,8 @@
 use clap::Args;
 use microsandbox::sandbox::Sandbox;
 
-use super::common::{SandboxOpts, apply_sandbox_opts};
-use crate::ui;
+use super::common::{SandboxOpts, apply_sandbox_opts, apply_sandbox_opts_after_config};
+use crate::{sandbox_config, ui};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -14,7 +14,9 @@ use crate::ui;
 #[derive(Debug, Args)]
 pub struct CreateArgs {
     /// Image to use (e.g. alpine, python, ./rootfs, ./disk.qcow2).
-    pub image: String,
+    ///
+    /// May be omitted when a config file supplies `image`.
+    pub image: Option<String>,
 
     /// Sandbox configuration options.
     #[command(flatten)]
@@ -39,16 +41,23 @@ pub async fn run(
         args.sandbox.log_level = Some(log_level.to_string());
     }
 
-    let builder = Sandbox::builder(&name).image(args.image.as_str());
-    let builder = apply_sandbox_opts(builder, &args.sandbox)?;
+    let resolved = sandbox_config::resolve(&args.sandbox.config)?;
+    let image = resolved.image(args.image.as_deref(), None)?;
+    let builder = resolved.apply(Sandbox::builder(&name))?;
+    let builder = image.apply(builder)?;
+    let builder = if resolved.loaded() {
+        apply_sandbox_opts_after_config(builder, &args.sandbox)?
+    } else {
+        apply_sandbox_opts(builder, &args.sandbox)?
+    };
 
     let (mut progress, task) = builder
         .detached(true)
         .create_detached_with_pull_progress()?;
     let mut display = if args.sandbox.quiet {
-        ui::PullProgressDisplay::quiet(&args.image)
+        ui::PullProgressDisplay::quiet(&image.display())
     } else {
-        ui::PullProgressDisplay::new(&args.image)
+        ui::PullProgressDisplay::new(&image.display())
     };
 
     while let Some(event) = progress.recv().await {

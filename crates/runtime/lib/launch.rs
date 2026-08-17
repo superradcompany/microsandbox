@@ -10,8 +10,10 @@
 
 use std::path::PathBuf;
 
-use microsandbox_types::DeploymentProfile;
+use microsandbox_types::{CpuPlacement, DeploymentProfile, PlacementProfile, VsockRouteSpec};
 use serde::{Deserialize, Serialize};
+
+use microsandbox_types::TransparentHugePagePolicy;
 
 #[cfg(feature = "net")]
 use microsandbox_network::config::NetworkConfig;
@@ -40,11 +42,44 @@ pub struct LaunchConfig {
     /// Root directory holding every sandbox's persisted state.
     pub sandboxes_dir: PathBuf,
 
+    /// Root directory holding ephemeral host-runtime artifacts.
+    #[serde(default)]
+    pub run_dir: PathBuf,
+
+    /// Internal directory containing process-held CPU allocation leases.
+    pub cpu_lease_dir: PathBuf,
+
+    /// Internal directory containing process-held writeback pressure leases.
+    pub writeback_lease_dir: PathBuf,
+
+    /// Requested host CPU placement policy.
+    pub cpu_placement: CpuPlacement,
+
+    /// Host-defined profile name retained for diagnostics and missing-profile validation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_profile_name: Option<String>,
+
+    /// Host-resolved profile definition; sandbox clients submit only the name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_profile: Option<PlacementProfile>,
+
     /// Path to the Unix domain socket for the agent relay.
     pub agent_sock: PathBuf,
 
     /// Path to the libkrunfw shared library.
     pub libkrunfw_path: PathBuf,
+
+    /// Guest transparent huge-page policy selected at boot.
+    #[serde(default)]
+    pub thp: TransparentHugePagePolicy,
+
+    /// Per-writable-raw-disk hard budget for buffered host dirty data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_writeback_limit_bytes: Option<u64>,
+
+    /// Host-global dirty-credit pool shared fairly by live writable disks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_writeback_pool_bytes: Option<u64>,
 
     /// User workload to start after boot, if any.
     pub startup: Option<StartupCommand>,
@@ -91,6 +126,10 @@ pub struct LaunchConfig {
     /// Sandbox slot for deterministic network address derivation.
     #[cfg(feature = "net")]
     pub sandbox_slot: u64,
+
+    /// Host Unix sockets exposed through virtio-vsock.
+    #[serde(default)]
+    pub vsock: Vec<VsockRouteSpec>,
 }
 
 /// Lifetime bounds for the sandbox.

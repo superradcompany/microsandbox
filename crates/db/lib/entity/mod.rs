@@ -1,14 +1,18 @@
 //! SeaORM entity definitions for all microsandbox database tables.
 
 pub mod config;
+pub mod cpu_allocation;
+pub mod cpu_allocation_cpu;
 pub mod image_ref;
 pub mod layer;
 pub mod maintenance_lease;
 pub mod manifest;
 pub mod manifest_layer;
+pub mod memory_allocation_node;
 pub mod run;
 pub mod sandbox;
 pub mod sandbox_label;
 pub mod sandbox_rootfs;
 pub mod snapshot;
 pub mod volume;
+pub mod writeback_allocation;

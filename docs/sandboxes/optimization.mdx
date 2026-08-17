@@ -1,0 +1,90 @@
+---
+title: Optimization
+description: Choose the settings that can improve local sandbox performance
+icon: "bolt"
+---
+
+There is no single fastest setup. Start with the defaults, measure your workload, and change one setting at a time.
+
+Run these commands before tuning anything:
+
+```bash
+msb doctor
+msb inspect worker
+```
+
+`msb doctor` checks host capabilities. `msb inspect` shows the settings that a sandbox actually uses.
+
+## Quick guide
+
+| If you want to | Start with |
+| --- | --- |
+| Create OCI sandboxes faster | A flat root disk with `clone=auto` |
+| Spread CPU-heavy work across physical cores | `cpu_placement: spread` |
+| Favor cache locality | `cpu_placement: compact` |
+| Tune large memory mappings | Keep THP at `madvise`, then benchmark `always` |
+| Control buffered disk pressure on Linux | Keep block writeback at `auto` |
+
+## Storage layout: layered or flat
+
+The default layered root shares OCI layers between sandboxes. A flat root turns the image into one ext4 disk and clones it for each sandbox. This can improve creation time and filesystem-heavy workloads on hosts with copy-on-write cloning.
+
+```bash
+msb pull python:3.12 --materialize flat
+msb create python:3.12 --name worker --root-disk flat:8G,clone=auto
+```
+
+`clone=auto` uses a native copy-on-write clone when available and falls back to a sparse copy. Use the layered root when image layer sharing or maximum portability matters more.
+
+See [OCI images](/images/overview) for image behavior and [Bootstrap](/sandboxes/bootstrap#flat-oci-rootfs) for flat root details.
+
+## CPU placement
+
+CPU placement controls where vCPU threads run on Linux and Windows.
+
+| Policy | Best starting point for |
+| --- | --- |
+| `inherit` | External schedulers and macOS |
+| `auto` | General use on a dedicated host |
+| `spread` | Throughput across physical cores |
+| `compact` | Cache locality and host packing |
+
+These policies coordinate sandboxes that share the same `MSB_HOME`. They do not reserve physical cores or isolate other host processes.
+
+See [CPU placement](/sandboxes/cpu-placement) for setup and limits.
+
+## Transparent huge pages
+
+Transparent huge pages, or THP, control how the guest handles large memory mappings.
+
+| Policy | Use it when |
+| --- | --- |
+| `madvise` | You want the safe default |
+| `always` | Benchmarks show a gain for large, sustained mappings |
+| `never` | Predictable small-page behavior matters more |
+
+THP changes take effect the next time the sandbox boots. Keep `madvise` unless real workload tests show a clear improvement.
+
+## Buffered block writeback
+
+On Linux, block writeback limits how much buffered disk data active sandboxes can hold in host memory.
+
+- `auto` chooses safe limits from the host. This is the recommended setting.
+- `fixed` uses limits that you provide.
+- `off` disables the limits for new sandboxes.
+
+This setting has no effect on non-Linux hosts, read-only disks, or direct I/O. See [Global config](/configuration) for the available fields.
+
+## Host interrupt acceleration
+
+On Linux x86 hosts, AMD AVIC and Intel APICv can make virtual interrupt delivery faster. These are host KVM settings, not sandbox settings.
+
+Check their status with `msb doctor`. Read [Linux troubleshooting](/troubleshooting/linux#interrupt-acceleration) before changing a KVM module because the change affects every VM on the host.
+
+## Optimizations that are not knobs
+
+Microsandbox automatically selects compatible filesystem, guest kernel, interrupt, and vCPU affinity optimizations. These implementation details do not have user-facing settings.
+
+## Measure the result
+
+Keep the image, CPU and memory limits, storage, host power settings, and concurrency unchanged while comparing settings. Measure sandbox creation separately from workload performance.

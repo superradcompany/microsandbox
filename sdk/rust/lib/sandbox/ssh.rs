@@ -27,6 +27,10 @@ use russh::{Channel, ChannelId, ChannelMsg, ChannelOpenFailure, Sig};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use super::attach;
+#[cfg(windows)]
+use super::terminal::{
+    WindowsTerminalEvent, WindowsTerminalEventPump, WindowsTerminalGuard, current_terminal_size,
+};
 use crate::sandbox::exec::{ExecControl, ExecEvent, ExecOptions, ExecSink, StdinMode};
 use crate::{MicrosandboxError, MicrosandboxResult, Sandbox, agent::AgentClient, error::Operation};
 
@@ -61,6 +65,7 @@ pub struct SshClientOptions {
     user: String,
     term: String,
     sftp: bool,
+    inactivity_timeout: Option<Option<Duration>>,
 }
 
 /// Builder for [`SshExecOptions`].
@@ -127,6 +132,7 @@ pub struct SshServerOptions {
     authorized_keys: Vec<String>,
     guest_user: Option<String>,
     sftp: bool,
+    inactivity_timeout: Option<Option<Duration>>,
 }
 
 /// Reusable SSH server endpoint for a sandbox.
@@ -255,12 +261,15 @@ impl SandboxSshOps {
         let user = options.user.clone();
         let term = options.term.clone();
         let sftp = options.sftp;
+        let inactivity_timeout = options.inactivity_timeout;
         let server = self
             .server_with(|opts| {
-                opts.host_key(host_key)
+                let opts = opts
+                    .host_key(host_key)
                     .authorized_key(authorized_key)
                     .user(user.clone())
-                    .sftp(sftp)
+                    .sftp(sftp);
+                apply_inactivity_timeout(opts, inactivity_timeout)
             })
             .await?;
 
@@ -340,6 +349,10 @@ impl SandboxSshOps {
     ) -> MicrosandboxResult<SshServer> {
         let options = f(SshServerOptionsBuilder::default()).build();
         let local_backend = self.sandbox.backend().as_local();
+        let inactivity_timeout = resolve_inactivity_timeout(
+            options.inactivity_timeout,
+            local_backend.map(|backend| backend.config()),
+        );
 
         // Explicit/in-memory key material is backend-neutral. Only the
         // convenience defaults live under the local backend's config/runtime
@@ -369,6 +382,7 @@ impl SandboxSshOps {
             auth_rejection_time: Duration::from_secs(3),
             auth_rejection_time_initial: Some(Duration::from_millis(0)),
             keys: vec![host_key],
+            inactivity_timeout,
             ..Default::default()
         });
         let settings = SshSettings {
@@ -400,6 +414,7 @@ impl Default for SshClientOptions {
             user: "root".to_string(),
             term: default_ssh_term(),
             sftp: true,
+            inactivity_timeout: None,
         }
     }
 }
@@ -420,6 +435,21 @@ impl SshClientOptionsBuilder {
     /// Enable or disable SFTP on the internal server used by this client.
     pub fn sftp(mut self, enabled: bool) -> Self {
         self.options.sftp = enabled;
+        self
+    }
+
+    /// Override the inactivity timeout for the internal SSH server.
+    ///
+    /// [`Duration::ZERO`] disables the timeout. If this method is not called,
+    /// the active local backend's global SSH default is used.
+    pub fn inactivity_timeout(mut self, timeout: Duration) -> Self {
+        self.options.inactivity_timeout = Some((!timeout.is_zero()).then_some(timeout));
+        self
+    }
+
+    /// Disable the inactivity timeout for the internal SSH server.
+    pub fn disable_inactivity_timeout(mut self) -> Self {
+        self.options.inactivity_timeout = Some(None);
         self
     }
 
@@ -582,7 +612,7 @@ impl SshClient {
                 Some(spec) => attach::DetachKeys::parse(spec)?,
                 None => attach::DetachKeys::default_keys(),
             };
-            let (cols, rows) = attach::agent::current_terminal_size().unwrap_or((80, 24));
+            let (cols, rows) = current_terminal_size().unwrap_or((80, 24));
             let mut channel = self
                 .handle
                 .channel_open_session()
@@ -607,9 +637,8 @@ impl SshClient {
                 .map_err(|e| ssh_error("request shell", e))?;
             wait_channel_success(&mut channel, "request shell").await?;
 
-            let terminal_guard = attach::agent::WindowsTerminalGuard::enter()?;
-            let mut terminal_events =
-                attach::agent::WindowsTerminalEventPump::spawn_for_guard(&terminal_guard)?;
+            let mut terminal_guard = WindowsTerminalGuard::enter()?;
+            let mut terminal_events = WindowsTerminalEventPump::spawn_for_guard(&terminal_guard)?;
             let detach_seq = detach_keys.sequence();
             let mut match_pos = 0usize;
             let mut exit_code = 0i32;
@@ -619,7 +648,7 @@ impl SshClient {
                 tokio::select! {
                     Some(event) = terminal_events.recv() => {
                         match event {
-                            attach::agent::WindowsTerminalEvent::Input(data) => {
+                            WindowsTerminalEvent::Input(data) => {
                                 if attach::input_contains_detach_sequence(
                                     &data,
                                     detach_seq,
@@ -633,12 +662,12 @@ impl SshClient {
                                     .await
                                     .map_err(|e| ssh_error("write channel data", e))?;
                             }
-                            attach::agent::WindowsTerminalEvent::Resize { cols, rows } => {
+                            WindowsTerminalEvent::Resize { cols, rows } => {
                                 let _ = channel_tx
                                     .window_change(u32::from(cols), u32::from(rows), 0, 0)
                                     .await;
                             }
-                            attach::agent::WindowsTerminalEvent::Error(error) => {
+                            WindowsTerminalEvent::Error(error) => {
                                 return Err(MicrosandboxError::Terminal(error));
                             }
                         }
@@ -663,6 +692,8 @@ impl SshClient {
                     }
                 }
             }
+
+            terminal_guard.finish_output()?;
 
             Ok(exit_code)
         }
@@ -853,6 +884,7 @@ impl Default for SshServerOptions {
             authorized_keys: Vec::new(),
             guest_user: None,
             sftp: true,
+            inactivity_timeout: None,
         }
     }
 }
@@ -891,6 +923,21 @@ impl SshServerOptionsBuilder {
     /// Enable or disable SFTP.
     pub fn sftp(mut self, enabled: bool) -> Self {
         self.options.sftp = enabled;
+        self
+    }
+
+    /// Override the SSH session inactivity timeout.
+    ///
+    /// [`Duration::ZERO`] disables the timeout. If this method is not called,
+    /// the active local backend's global SSH default is used.
+    pub fn inactivity_timeout(mut self, timeout: Duration) -> Self {
+        self.options.inactivity_timeout = Some((!timeout.is_zero()).then_some(timeout));
+        self
+    }
+
+    /// Disable the SSH session inactivity timeout.
+    pub fn disable_inactivity_timeout(mut self) -> Self {
+        self.options.inactivity_timeout = Some(None);
         self
     }
 
@@ -2484,6 +2531,29 @@ fn status_code(error: MicrosandboxError) -> russh_sftp::protocol::StatusCode {
     }
 }
 
+fn apply_inactivity_timeout(
+    builder: SshServerOptionsBuilder,
+    timeout: Option<Option<Duration>>,
+) -> SshServerOptionsBuilder {
+    match timeout {
+        Some(Some(timeout)) => builder.inactivity_timeout(timeout),
+        Some(None) => builder.disable_inactivity_timeout(),
+        None => builder,
+    }
+}
+
+fn resolve_inactivity_timeout(
+    timeout: Option<Option<Duration>>,
+    local_config: Option<&crate::config::LocalConfig>,
+) -> Option<Duration> {
+    timeout.unwrap_or_else(|| {
+        let secs = local_config
+            .map(|config| config.ssh.inactivity_timeout_secs)
+            .unwrap_or(crate::config::DEFAULT_SSH_INACTIVITY_TIMEOUT_SECS);
+        (secs > 0).then(|| Duration::from_secs(secs))
+    })
+}
+
 fn default_ssh_term() -> String {
     match std::env::var("TERM") {
         Ok(term) if !term.trim().is_empty() && term != "dumb" => term,
@@ -2576,6 +2646,39 @@ mod tests {
         let error = build_authorized_keys(&options, None).unwrap_err();
 
         assert!(matches!(error, MicrosandboxError::Unsupported { .. }));
+    }
+
+    #[test]
+    fn inactivity_timeout_defaults_to_ten_minutes() {
+        assert_eq!(
+            resolve_inactivity_timeout(None, None),
+            Some(Duration::from_secs(600))
+        );
+    }
+
+    #[test]
+    fn inactivity_timeout_uses_global_config() {
+        let mut config = crate::config::LocalConfig::default();
+        config.ssh.inactivity_timeout_secs = 1800;
+
+        assert_eq!(
+            resolve_inactivity_timeout(None, Some(&config)),
+            Some(Duration::from_secs(1800))
+        );
+
+        config.ssh.inactivity_timeout_secs = 0;
+        assert_eq!(resolve_inactivity_timeout(None, Some(&config)), None);
+    }
+
+    #[test]
+    fn inactivity_timeout_per_call_override_wins() {
+        let config = crate::config::LocalConfig::default();
+
+        assert_eq!(
+            resolve_inactivity_timeout(Some(Some(Duration::from_secs(30))), Some(&config)),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(resolve_inactivity_timeout(Some(None), Some(&config)), None);
     }
 }
 

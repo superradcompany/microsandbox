@@ -1,0 +1,98 @@
+---
+title: VNC desktop
+description: Open a modern CPU-only Linux desktop in the browser with LXQt, TigerVNC, and noVNC
+icon: "desktop"
+---
+
+<Tooltip tip="This example publishes noVNC to a port on the computer running the CLI, which is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+VNC does not require a physical display or GPU. TigerVNC's X server draws into a virtual framebuffer in guest memory, encodes changed regions, and sends them to the client. noVNC provides the browser client over WebSockets.
+
+This example runs the lightweight LXQt desktop with Breeze styling and opens QTerminal. It is useful for GUI-only utilities, observing browser sessions, and testing desktop applications—not for graphics-performance workloads.
+
+## Start the desktop
+
+```sh
+msb run -d --name vnc-desktop --replace \
+  --cpus 2 --memory 2G --root-disk 5G \
+  -p 127.0.0.1:6080:6080 \
+  --script start-desktop='set -eu
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      breeze-icon-theme ca-certificates dbus-x11 lxqt-core novnc openbox \
+      qterminal tigervnc-standalone-server websockify
+    rm -rf /var/lib/apt/lists/*
+    mkdir -p /root/.config/lxqt /root/.config/openbox /tmp/runtime-root
+    chmod 700 /tmp/runtime-root
+    sed -e "s/,quicklaunch//" -e "/^\[quicklaunch\]/,/^$/d" \
+      /usr/share/lxqt/panel.conf > /root/.config/lxqt/panel.conf
+    sed "s#<name>Clearlooks</name>#<name>Breeze-ob</name>#" \
+      /etc/xdg/openbox/rc.xml > /root/.config/openbox/rc.xml
+    Xtigervnc :1 -SecurityTypes None -geometry 1440x900 -depth 24 >/tmp/xvnc.log 2>&1 &
+    vnc_pid=$!
+    sleep 2
+    if ! kill -0 "$vnc_pid"; then
+      cat /tmp/xvnc.log >&2
+      exit 1
+    fi
+    cat /tmp/xvnc.log
+    DISPLAY=:1 XDG_RUNTIME_DIR=/tmp/runtime-root \
+      dbus-launch --exit-with-session sh -c "
+        startlxqt &
+        session_pid=\$!
+        sleep 4
+        kill -0 \"\$session_pid\"
+        qterminal &
+        wait \"\$session_pid\"
+      " >/tmp/lxqt.log 2>&1 &
+    desktop_pid=$!
+    sleep 5
+    if ! kill -0 "$desktop_pid"; then
+      cat /tmp/lxqt.log >&2
+      exit 1
+    fi
+    exec websockify --web=/usr/share/novnc 0.0.0.0:6080 localhost:5901' \
+  --entrypoint start-desktop \
+  debian:bookworm-slim
+```
+
+Detached mode returns as soon as the VM starts, before the desktop packages are ready. The first install downloads about 183 MB, uses roughly 734 MB of guest disk, and can take a few minutes. Follow the installation, TigerVNC startup, and websockify output:
+
+```sh
+msb logs -f vnc-desktop
+```
+
+When websockify reports that it is listening, press `Ctrl-C` to stop following the log. The sandbox keeps running. Confirm that noVNC is serving HTTP:
+
+```sh
+curl -fsS http://127.0.0.1:6080/vnc.html >/dev/null &&
+  echo "noVNC is ready"
+```
+
+Open [http://127.0.0.1:6080/vnc.html?autoconnect=1&resize=scale](http://127.0.0.1:6080/vnc.html?autoconnect=1&resize=scale). You should see an LXQt desktop with QTerminal open.
+
+## Verify the services
+
+Check the browser endpoint from the host:
+
+```sh
+curl -sS http://127.0.0.1:6080/vnc.html | head
+```
+
+Then inspect the VNC server log inside the guest:
+
+```sh
+msb exec vnc-desktop -- sh -lc 'grep -E "Listening|created VNC server" /tmp/xvnc.log'
+```
+
+<Warning>
+  VNC authentication is disabled inside this VM. The host listener is therefore intentionally restricted to `127.0.0.1`. Do not publish port 6080 on a LAN or public interface without VNC authentication, TLS, and an authenticated reverse proxy.
+</Warning>
+
+## Cleanup
+
+```sh
+msb rm -f vnc-desktop
+```
+
+For repeated launches, stop the prepared sandbox, create a snapshot, and boot desktops from that snapshot instead of reinstalling the packages.

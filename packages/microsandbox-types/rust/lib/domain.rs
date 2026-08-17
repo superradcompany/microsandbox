@@ -559,6 +559,10 @@ pub struct NetworkSpec {
     /// Max concurrent guest connections.
     pub max_connections: Option<usize>,
 
+    /// Local network rate limits. Missing means unlimited in both directions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limiter: Option<NetworkRateLimiterConfig>,
+
     /// Whether to copy trusted host CAs into the guest at boot.
     pub trust_host_cas: bool,
 }
@@ -595,6 +599,58 @@ pub enum PortProtocol {
     /// UDP.
     #[serde(rename = "udp")]
     Udp,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Types: Vsock
+//--------------------------------------------------------------------------------------------------
+
+/// Host services exposed to a sandbox through virtio-vsock.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(default)]
+pub struct VsockSpec {
+    /// Guest-to-host routes registered before the VM starts.
+    pub routes: Vec<VsockRouteSpec>,
+}
+
+impl VsockSpec {
+    /// Return whether no host services are exposed through vsock.
+    pub fn is_empty(&self) -> bool {
+        self.routes.is_empty()
+    }
+}
+
+/// One host local-IPC endpoint exposed on a host-CID vsock port.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct VsockRouteSpec {
+    /// Existing Unix socket path or local Windows named-pipe path.
+    #[cfg_attr(feature = "utoipa", schema(value_type = String))]
+    pub host_socket: PathBuf,
+
+    /// Port guests address on `VMADDR_CID_HOST` (CID 2).
+    pub port: u32,
+
+    /// Message semantics used by the guest and host endpoints.
+    #[serde(default)]
+    pub socket_type: VsockSocketType,
+}
+
+/// Socket semantics for a host-CID vsock route.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum VsockSocketType {
+    /// Reliable, ordered byte stream.
+    #[default]
+    Stream,
+
+    /// Best-effort message transport preserving datagram boundaries.
+    Dgram,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -733,6 +789,10 @@ pub struct SandboxSpec {
     /// Network specification.
     pub network: NetworkSpec,
 
+    /// Local host services exposed through virtio-vsock.
+    #[serde(default, skip_serializing_if = "VsockSpec::is_empty")]
+    pub vsock: VsockSpec,
+
     /// Hand off PID 1 to a guest init binary after agentd setup.
     pub init: Option<HandoffInit>,
 
@@ -754,7 +814,7 @@ pub struct SandboxSpec {
 }
 
 /// CPU and memory resources for a sandbox.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SandboxResources {
@@ -769,6 +829,93 @@ pub struct SandboxResources {
 
     /// Maximum guest memory the sandbox may expose after boot-time hotplug support lands, in MiB.
     pub max_memory_mib: u32,
+
+    /// Host CPU placement requested for this sandbox.
+    #[serde(default, skip_serializing_if = "CpuPlacement::is_inherit")]
+    pub cpu_placement: CpuPlacement,
+
+    /// Host-defined placement profile selected for this sandbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_profile: Option<String>,
+
+    /// Guest transparent huge-page policy selected at boot.
+    #[serde(default, skip_serializing_if = "TransparentHugePagePolicy::is_madvise")]
+    pub thp: TransparentHugePagePolicy,
+}
+
+/// Controls how Microsandbox places vCPU threads on host processors.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "lowercase")]
+pub enum CpuPlacement {
+    /// Preserve the invoking process's existing scheduler and affinity behavior.
+    #[default]
+    Inherit,
+
+    /// Spread across cores, then use SMT siblings, then share logical processors under pressure.
+    Auto,
+
+    /// Preserve the widest practical distribution, sharing logical processors when necessary.
+    Spread,
+
+    /// Prefer SMT siblings and fewer physical cores, then share balanced logical processors.
+    Compact,
+}
+
+/// Concrete host NUMA scope selected by a named placement profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NumaPlacement {
+    /// Prefer one host NUMA node, falling back to inherited host placement when it cannot fit.
+    PreferSingle,
+    /// Require maximum CPU and memory capacity to fit one host NUMA node.
+    StrictSingle,
+    /// Preserve the operating system's ordinary NUMA behavior.
+    Inherit,
+}
+
+/// Host backing policy for guest memory selected by a named placement profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MemoryPlacement {
+    /// Back guest RAM from the selected CPU node when enforceable, otherwise inherit host policy.
+    FollowCpu,
+    /// Preserve the operating system's ordinary memory policy.
+    Inherit,
+}
+
+/// Host-owned named placement profile resolved before a local VM starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct PlacementProfile {
+    /// NUMA scope used while selecting host CPU capacity.
+    pub numa: NumaPlacement,
+    /// Host-memory behavior used for the resolved CPU nodes.
+    pub memory: MemoryPlacement,
+}
+
+/// Guest transparent huge-page policy applied through the kernel command line.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "lowercase")]
+pub enum TransparentHugePagePolicy {
+    /// Transparently use huge pages for eligible anonymous mappings.
+    Always,
+
+    /// Use huge pages only for mappings that explicitly request them.
+    #[default]
+    Madvise,
+
+    /// Disable transparent huge pages for anonymous mappings.
+    Never,
 }
 
 /// Guest runtime options for a sandbox.
@@ -956,6 +1103,22 @@ impl OciRootfsSource {
         Self {
             reference: reference.into(),
             root_disk: None,
+        }
+    }
+}
+
+impl TransparentHugePagePolicy {
+    /// Whether this is the density-conscious default policy.
+    pub fn is_madvise(&self) -> bool {
+        matches!(self, Self::Madvise)
+    }
+
+    /// Return the lowercase kernel command-line representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Always => "always",
+            Self::Madvise => "madvise",
+            Self::Never => "never",
         }
     }
 }
@@ -1239,6 +1402,27 @@ impl FromStr for DiskImageFormat {
     }
 }
 
+impl fmt::Display for TransparentHugePagePolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for TransparentHugePagePolicy {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "always" => Ok(Self::Always),
+            "madvise" => Ok(Self::Madvise),
+            "never" => Ok(Self::Never),
+            _ => Err(format!(
+                "unknown transparent huge-page policy: {value}; expected always, madvise, or never"
+            )),
+        }
+    }
+}
+
 impl Default for RootfsSource {
     fn default() -> Self {
         Self::oci(String::new())
@@ -1252,6 +1436,9 @@ impl Default for SandboxResources {
             memory_mib: DEFAULT_SANDBOX_MEMORY_MIB,
             max_cpus: DEFAULT_SANDBOX_CPUS,
             max_memory_mib: DEFAULT_SANDBOX_MEMORY_MIB,
+            cpu_placement: CpuPlacement::Inherit,
+            placement_profile: None,
+            thp: TransparentHugePagePolicy::Madvise,
         }
     }
 }
@@ -1269,6 +1456,12 @@ impl<'de> Deserialize<'de> for SandboxResources {
             memory_mib: u32,
             max_cpus: Option<u8>,
             max_memory_mib: Option<u32>,
+            #[serde(default)]
+            cpu_placement: CpuPlacement,
+            #[serde(default)]
+            placement_profile: Option<String>,
+            #[serde(default)]
+            thp: TransparentHugePagePolicy,
         }
 
         let raw = RawResources::deserialize(deserializer)?;
@@ -1280,7 +1473,44 @@ impl<'de> Deserialize<'de> for SandboxResources {
             // deserialize into an impossible cpus > max_cpus state.
             max_cpus: raw.max_cpus.unwrap_or(raw.cpus),
             max_memory_mib: raw.max_memory_mib.unwrap_or(raw.memory_mib),
+            cpu_placement: raw.cpu_placement,
+            placement_profile: raw.placement_profile,
+            thp: raw.thp,
         })
+    }
+}
+
+impl CpuPlacement {
+    /// Returns whether this policy preserves the inherited host placement.
+    pub const fn is_inherit(&self) -> bool {
+        matches!(self, Self::Inherit)
+    }
+}
+
+impl std::fmt::Display for CpuPlacement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Inherit => "inherit",
+            Self::Auto => "auto",
+            Self::Spread => "spread",
+            Self::Compact => "compact",
+        })
+    }
+}
+
+impl FromStr for CpuPlacement {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "inherit" => Ok(Self::Inherit),
+            "auto" => Ok(Self::Auto),
+            "spread" => Ok(Self::Spread),
+            "compact" => Ok(Self::Compact),
+            _ => Err(format!(
+                "unknown CPU placement: {value} (expected: inherit, auto, spread, compact)"
+            )),
+        }
     }
 }
 
@@ -1312,6 +1542,7 @@ impl Default for NetworkSpec {
             tls: None,
             secrets: None,
             max_connections: None,
+            rate_limiter: None,
             trust_host_cas: false,
         }
     }
@@ -2397,6 +2628,134 @@ fn empty_secret_value() -> Zeroizing<String> {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Types: Networking — rate limits
+//--------------------------------------------------------------------------------------------------
+
+/// Sandbox-relative direction governed by a network rate limiter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NetworkRateLimitDirection {
+    /// Traffic leaving the sandbox.
+    Egress,
+    /// Traffic entering the sandbox.
+    Ingress,
+}
+
+/// Egress and ingress rate limits for a local sandbox network.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(default)]
+pub struct NetworkRateLimiterConfig {
+    /// Guest-to-runtime (egress) rate limiter. Missing means unlimited.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub egress: Option<RateLimiterConfig>,
+
+    /// Runtime-to-guest (ingress) rate limiter. Missing means unlimited.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ingress: Option<RateLimiterConfig>,
+}
+
+/// Token-bucket rate limiter for one traffic direction. Carried in
+/// [`NetworkRateLimiterConfig::egress`] and [`NetworkRateLimiterConfig::ingress`].
+///
+/// A limiter caps bandwidth (bytes) and packet rate (operations)
+/// independently; a missing bucket leaves that dimension unlimited.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(default)]
+pub struct RateLimiterConfig {
+    /// Bandwidth bucket. One token is one byte of frame data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bandwidth: Option<TokenBucketConfig>,
+
+    /// Operations bucket. One token is one network frame.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ops: Option<TokenBucketConfig>,
+}
+
+/// One token bucket of a [`RateLimiterConfig`].
+///
+/// The bucket starts full and refills continuously at `size` tokens per
+/// `refill_time_ms`. `one_time_burst` grants extra startup tokens that are
+/// spent before the regular budget and never refill.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct TokenBucketConfig {
+    /// Bucket capacity in tokens. Must be greater than zero.
+    pub size: u64,
+
+    /// Time to refill `size` tokens, in milliseconds. Must be greater than
+    /// zero.
+    pub refill_time_ms: u64,
+
+    /// Extra tokens granted once at startup. Default: 0.
+    #[serde(default)]
+    pub one_time_burst: u64,
+}
+
+/// Invalid rate limiter configuration.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RateLimitConfigError {
+    /// The limiter has neither a bandwidth nor an ops bucket.
+    #[error("rate limiter must configure at least one of bandwidth or ops")]
+    EmptyLimiter,
+
+    /// A bucket capacity is zero.
+    #[error("{bucket} bucket: size must be greater than zero")]
+    ZeroSize {
+        /// Which bucket is invalid (`bandwidth` or `ops`).
+        bucket: &'static str,
+    },
+
+    /// A bucket refill interval is zero.
+    #[error("{bucket} bucket: refill_time_ms must be greater than zero")]
+    ZeroRefillTime {
+        /// Which bucket is invalid (`bandwidth` or `ops`).
+        bucket: &'static str,
+    },
+}
+
+impl RateLimiterConfig {
+    /// Validate the limiter and each configured bucket.
+    pub fn validate(&self) -> Result<(), RateLimitConfigError> {
+        if self.bandwidth.is_none() && self.ops.is_none() {
+            return Err(RateLimitConfigError::EmptyLimiter);
+        }
+        if let Some(bandwidth) = &self.bandwidth {
+            bandwidth.validate("bandwidth")?;
+        }
+        if let Some(ops) = &self.ops {
+            ops.validate("ops")?;
+        }
+        Ok(())
+    }
+}
+
+impl TokenBucketConfig {
+    /// Validate this bucket. `bucket` names it in error messages.
+    pub fn validate(&self, bucket: &'static str) -> Result<(), RateLimitConfigError> {
+        if self.size == 0 {
+            return Err(RateLimitConfigError::ZeroSize { bucket });
+        }
+        if self.refill_time_ms == 0 {
+            return Err(RateLimitConfigError::ZeroRefillTime { bucket });
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for NetworkRateLimitDirection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Egress => f.write_str("egress"),
+            Self::Ingress => f.write_str("ingress"),
+        }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
 
@@ -2431,6 +2790,58 @@ mod tests {
         assert_eq!(resources.max_cpus, 4);
         assert_eq!(resources.memory_mib, 2048);
         assert_eq!(resources.max_memory_mib, 2048);
+        assert_eq!(resources.cpu_placement, CpuPlacement::Inherit);
+        assert_eq!(resources.thp, TransparentHugePagePolicy::Madvise);
+        assert_eq!(
+            serde_json::to_value(resources).unwrap(),
+            serde_json::json!({
+                "cpus": 4,
+                "memory_mib": 2048,
+                "max_cpus": 4,
+                "max_memory_mib": 2048
+            })
+        );
+    }
+
+    #[test]
+    fn cpu_placement_omits_inherit_and_roundtrips_managed_policies() {
+        let inherited = serde_json::to_value(SandboxResources::default()).unwrap();
+        assert!(inherited.get("cpu_placement").is_none());
+
+        for policy in [
+            CpuPlacement::Auto,
+            CpuPlacement::Spread,
+            CpuPlacement::Compact,
+        ] {
+            let resources = SandboxResources {
+                cpu_placement: policy,
+                ..Default::default()
+            };
+            let json = serde_json::to_string(&resources).unwrap();
+            let decoded: SandboxResources = serde_json::from_str(&json).unwrap();
+
+            assert_eq!(decoded.cpu_placement, policy);
+            assert_eq!(policy.to_string().parse::<CpuPlacement>().unwrap(), policy);
+        }
+    }
+
+    #[test]
+    fn transparent_huge_page_policy_roundtrips_non_default() {
+        let resources: SandboxResources = serde_json::from_str(
+            r#"{"cpus":2,"memory_mib":8192,"max_cpus":2,"max_memory_mib":8192,"thp":"always"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(resources.thp, TransparentHugePagePolicy::Always);
+        assert_eq!(
+            serde_json::to_value(resources).unwrap()["thp"],
+            serde_json::json!("always")
+        );
+        assert_eq!(
+            "never".parse::<TransparentHugePagePolicy>().unwrap(),
+            TransparentHugePagePolicy::Never
+        );
+        assert!("auto".parse::<TransparentHugePagePolicy>().is_err());
     }
 
     #[test]

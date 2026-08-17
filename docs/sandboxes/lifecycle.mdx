@@ -33,11 +33,13 @@ stateDiagram-v2
 
 ## Create a sandbox
 
+<Tooltip tip="Local attached SDK handles stop their sandbox when the client process exits. Cloud sandboxes are service-owned, so stop or remove them explicitly."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 Creating a sandbox boots the microVM, mounts the filesystem, initializes the guest agent, and waits until it's ready to accept commands. Names must be non-empty and no longer than 128 UTF-8 bytes.
 
 <CodeGroup>
 ```rust Rust
-// Attached: sandbox stops when your process exits
+// Local attached handle: sandbox stops when your process exits
 let sb = Sandbox::builder("worker").image("python").create().await?;
 
 // Detached: sandbox survives after your process exits
@@ -49,7 +51,7 @@ let sb = Sandbox::builder("worker")
 ```
 
 ```typescript TypeScript
-// Attached: sandbox stops when your process exits
+// Local attached handle: sandbox stops when your process exits
 await using sb = await Sandbox.builder("worker").image("python").create();
 
 // Detached: sandbox survives after your process exits
@@ -60,7 +62,7 @@ const detached = await Sandbox.builder("worker")
 ```
 
 ```python Python
-# Attached: sandbox stops when your process exits
+# Local attached handle: sandbox stops when your process exits
 sb = await Sandbox.create("worker", image="python")
 
 # Detached: sandbox survives after your process exits
@@ -69,7 +71,7 @@ await sb.detach()
 ```
 
 ```go Go
-// Attached: sandbox stops when your process exits
+// Local attached handle: sandbox stops when your process exits
 sb, err := m.CreateSandbox(ctx, "worker", m.WithImage("python"))
 
 // Detached: sandbox survives after your process exits
@@ -169,6 +171,8 @@ See [Tuning](/sandboxes/tuning) for the change model, CPU and memory resize, lab
 
 ## Ping and touch
 
+<Tooltip tip="Not yet available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 Use `ping` to check that a running sandbox's guest agent is reachable, and `touch` to intentionally refresh its idle timer. Ping is a health check only: it does not count as sandbox activity and will not keep an idle sandbox alive by itself. Touch is the explicit keepalive.
 
 <CodeGroup>
@@ -190,6 +194,8 @@ msb ping worker --touch
 </CodeGroup>
 
 ## Kill immediately
+
+<Tooltip tip="Not yet available on microsandbox cloud; use a graceful stop instead."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 If a sandbox is unresponsive (e.g., stuck in a tight loop or a panic), force-kill it. The sandbox is terminated immediately with no graceful shutdown.
 
@@ -241,6 +247,8 @@ err := sb.Detach(ctx)
 
 ## Request drain
 
+<Tooltip tip="Not yet available on microsandbox cloud; use a graceful stop instead."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 Trigger a graceful shutdown that lets existing commands finish but rejects new ones. The sandbox moves to `Draining` and transitions to `Stopped` when all in-flight commands complete. This is useful for zero-downtime rotation of worker sandboxes.
 
 <CodeGroup>
@@ -287,7 +295,7 @@ result, err := sb.WaitUntilStopped(ctx)
 
 ## Remove
 
-Delete a stopped sandbox and its associated state from disk.
+Delete a stopped sandbox. Every local SDK entry point and `msb rm` uses the same deletion scope.
 
 <CodeGroup>
 ```rust Rust
@@ -311,6 +319,18 @@ msb rm worker
 ```
 
 </CodeGroup>
+
+For a local sandbox, removal deletes sandbox-owned state while leaving independently managed resources intact:
+
+| Removed | Kept |
+|---------|------|
+| Sandbox record, configuration, status, labels, and run history | Cached OCI images and layers |
+| Managed OCI writable root disk (`upper.ext4`) and its guest filesystem changes | Named volumes and their contents |
+| Captured sandbox logs | Snapshots created from the sandbox |
+| Runtime staging files, including generated scripts | Bind-mounted host files or directories |
+| Root filesystem pin metadata for this sandbox | User-supplied root disk images |
+
+Removing a sandbox does not undo writes made to a named volume, bind mount, or user-supplied disk image. On cloud, removal deletes the remote sandbox resource; the local disk details above do not apply.
 
 ## List and inspect
 

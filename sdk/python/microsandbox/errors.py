@@ -17,6 +17,11 @@ class InvalidConfigError(MicrosandboxError):
     code = "invalid-config"
 
 
+class NoDefaultCommandError(MicrosandboxError):
+    """Sandbox configuration does not provide an executable default command."""
+    code = "no-default-command"
+
+
 class CloudHttpError(MicrosandboxError):
     """Cloud control-plane request failed."""
     code = "cloud-http"

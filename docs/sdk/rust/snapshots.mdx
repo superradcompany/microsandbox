@@ -3,37 +3,11 @@ title: Snapshots
 description: Rust SDK - Snapshot API reference
 ---
 
-Capture a stopped sandbox's writable upper layer into a self-describing, content-addressed artifact on disk, then list, verify, save, load, or boot a fresh sandbox from it. See [Snapshots](/sandboxes/snapshots) for concepts and walkthroughs; this page is the Rust SDK reference.
+<Tooltip tip="Snapshot creation, restore, import, and export use local disk artifacts and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-<Note>
-  Snapshots are **local-only** and **disk-only** today: they capture a sandbox that is stopped or crashed, and every operation runs against the default local backend. Cloud snapshots and qcow2 backing chains are deferred.
-</Note>
+Create and manage disk-only snapshots of stopped sandboxes. See [Snapshots](/sandboxes/snapshots) for usage and lifecycle concepts.
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```rust
-use microsandbox::{Sandbox, Snapshot};
-
-// 1. stop the sandbox you want to capture
-let sb = Sandbox::get("api").await?;
-sb.stop().await?;
-
-// 2. capture its writable upper layer
-let snap = Snapshot::builder("after-pip-install")
-    .from_sandbox("api")           // sandbox to capture
-    .record_integrity()            // hash the upper layer
-    .create()
-    .await?;
-println!("{} ({} bytes)", snap.digest(), snap.size_bytes());
-
-// 3. boot a fresh sandbox from it
-let restored = Sandbox::builder("api-restored")
-    .from_snapshot("after-pip-install")
-    .create()
-    .await?;
-```
-
-## Static methods
+## Snapshot
 
 #### <span className="msb-recv">Snapshot::</span><span className="msb-hn">builder()</span>
 
@@ -317,7 +291,7 @@ println!("indexed {n} snapshots");
 async fn save(name_or_path: &str, out: &Path, opts: SaveOpts) -> MicrosandboxResult<()>
 ```
 
-Bundle a snapshot into a `.tar.zst` archive (or plain `.tar`) at `out`. The head snapshot is verified before bundling. The recorded manifest is archived as-is, so create the snapshot with [`record_integrity()`](#record_integrity) when the archive will cross a trust boundary. See [`SaveOpts`](#saveopts) to also include ancestors and the OCI image cache.
+Bundle a snapshot into a `.tar.zst` archive (or plain `.tar`) at `out`. Recorded payload integrity is preserved but not executed implicitly; call [`verify()`](#snap-verify) when an independent content scan is part of your workflow. See [`SaveOpts`](#saveopts) to also include ancestors and the OCI image cache.
 
 <p className="msb-label">Parameters</p>
 
@@ -365,13 +339,13 @@ async fn load(archive_path: &Path, dest: Option<&Path>) -> MicrosandboxResult<Sn
 ```rust
 use std::path::Path;
 
-let h = Snapshot::import(Path::new("/tmp/baseline.tar.zst"), None).await?;
-println!("imported {}", h.digest());
+let h = Snapshot::load(Path::new("/tmp/baseline.tar.zst"), None).await?;
+println!("loaded {}", h.digest());
 ```
 
 </Accordion>
 
-Unpack a snapshot archive (`.tar.zst` or `.tar`, detected from magic bytes) into the snapshots directory (or `dest`), routing any bundled image-cache entries into the global cache and registering everything found in the index. Recorded integrity is verified as artifacts land. Returns a handle for the head snapshot.
+Unpack a snapshot archive (`.tar.zst` or `.tar`, detected from magic bytes) into the snapshots directory (or `dest`), routing any bundled image-cache entries into the global cache and registering everything found in the index. Structural and archive-entry checks remain mandatory, while recorded payload integrity is preserved for explicit [`verify()`](#snap-verify). Returns a handle for the head snapshot.
 
 <p className="msb-label">Parameters</p>
 
@@ -408,7 +382,7 @@ println!("loaded {}", h.digest());
 
 ---
 
-## Instance methods
+<p className="msb-member-group">Instance methods</p>
 
 Methods on an opened [`Snapshot`](#snapshotopen) artifact.
 
@@ -510,7 +484,7 @@ match snap.verify().await?.upper {
 
 </Accordion>
 
-Recompute the upper layer's content hash and compare it against the manifest. Walks data extents only, so a multi-GiB sparse file with a little data verifies in milliseconds. Returns `NotRecorded` when the manifest has no integrity descriptor; errors with `SnapshotIntegrity` on mismatch.
+Recompute the upper layer's recorded content integrity and compare it against the descriptor. Current BLAKE3 Merkle integrity skips known all-hole subtrees and hashes allocated leaves in batches. Released SHA algorithms retain their exact verifier and may still cost O(logical size). Returns `NotRecorded` without reading payload contents when the descriptor has `integrity: null`; errors with `SnapshotIntegrity` on mismatch.
 
 <p className="msb-label">Returns</p>
 
@@ -521,9 +495,13 @@ Recompute the upper layer's content hash and compare it against the manifest. Wa
   </div>
 </div>
 
-## SnapshotHandle methods
+## SnapshotHandle
 
-Accessors and lifecycle on a [`SnapshotHandle`](#snapshothandle) (an index row). Returned by [`Snapshot::get()`](#snapshotget), [`Snapshot::list()`](#snapshotlist), and [`Snapshot::load()`](#snapshotload).
+<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
+
+<p className="msb-backref">Returned by <a href="#snapshotget">Snapshot::get()</a> · <a href="#snapshotlist">Snapshot::list()</a> · <a href="#snapshotload">Snapshot::load()</a></p>
+
+A snapshot handle backed by the local index.
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">digest()</span>
 
@@ -664,11 +642,11 @@ Remove this snapshot. Delegates to [`Snapshot::remove(self.digest(), force)`](#s
   </div>
 </div>
 
-## Sandbox entry points
+## SandboxBuilder
 
 Snapshot-related methods that live on the sandbox builder and handle. See [Sandbox](/sdk/rust/sandbox) for the full sandbox API.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">from_snapshot()</span>
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">from_snapshot()</span>
 
 ```rust
 fn from_snapshot(self, path_or_name: impl Into<String>) -> Self
@@ -685,7 +663,7 @@ let sb = Sandbox::builder("api-restored")
 
 </Accordion>
 
-`SandboxBuilder` setter. Boot a fresh sandbox from a snapshot artifact. The snapshot already pins the image reference and digest, so this is mutually exclusive with [`image()`](/sdk/rust/sandbox#image) and [`image_with()`](/sdk/rust/sandbox#image_with). The artifact is opened and its integrity verified at [`create()`](/sdk/rust/sandbox#create) time, not here.
+`SandboxBuilder` setter. Boot a fresh sandbox from a snapshot artifact. The snapshot already pins the image reference and digest, so this is mutually exclusive with [`image()`](/sdk/rust/sandbox#image) and [`image_with()`](/sdk/rust/sandbox#image_with). The artifact is structurally opened at [`create()`](/sdk/rust/sandbox#create) time; persistent payload integrity is checked only through explicit [`Snapshot::verify()`](#snap-verify).
 
 <p className="msb-label">Parameters</p>
 
@@ -695,6 +673,8 @@ let sb = Sandbox::builder("api-restored")
     <div className="msb-param-desc">Bare name resolved under the default snapshots directory, or a path to an artifact directory.</div>
   </div>
 </div>
+
+## SandboxHandle
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">snapshot()</span>
 
@@ -742,21 +722,11 @@ let snap = h.snapshot_to("/data/snapshots/baseline").await?;
 
 ## SnapshotBuilder
 
-Builder for a [`SnapshotConfig`](#snapshotconfig). Obtained via [`Snapshot::builder(name)`](#snapshotbuilder). A source sandbox is required ([`from_sandbox`](#from_sandbox)); the other setters are optional. Every setter returns `Self`, so calls chain.
-
-```rust
-let snap = Snapshot::builder("after-pip-install")
-    .from_sandbox("api")           // sandbox to capture
-    .label("stage", "post-deps")
-    .force()                       // overwrite if it exists
-    .record_integrity()            // hash the upper layer
-    .create()
-    .await?;
-```
+Builder for snapshot configuration.
 
 ---
 
-#### <span className="msb-recv">.</span><span className="msb-hn">from_sandbox()</span>
+#### <span className="msb-recv">snapshot_builder.</span><span className="msb-hn">from_sandbox()</span>
 <div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
@@ -776,7 +746,7 @@ Set the sandbox to capture. Required; [`build()`](#build) and [`create()`](#crea
 
 ---
 
-#### <span className="msb-recv">.</span><span className="msb-hn">dest_dir()</span>
+#### <span className="msb-recv">snapshot_builder.</span><span className="msb-hn">dest_dir()</span>
 <div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
@@ -794,7 +764,7 @@ Create the artifact under this parent directory instead of the default snapshots
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">label()</span>
+#### <span className="msb-recv">snapshot_builder.</span><span className="msb-hn">label()</span>
 
 ```rust
 fn label(self, key: impl Into<String>, value: impl Into<String>) -> Self
@@ -815,7 +785,7 @@ Add a user label. Can be called multiple times. Labels are sorted by key in the 
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">force()</span>
+#### <span className="msb-recv">snapshot_builder.</span><span className="msb-hn">force()</span>
 
 ```rust
 fn force(self) -> Self
@@ -823,17 +793,17 @@ fn force(self) -> Self
 
 Overwrite an existing artifact with the same name. Without this, creation fails with `SnapshotAlreadyExists` if the artifact directory exists.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">record_integrity()</span>
+#### <span className="msb-recv">snapshot_builder.</span><span className="msb-hn">record_integrity()</span>
 
 ```rust
 fn record_integrity(self) -> Self
 ```
 
-Compute and record an upper-layer content-integrity hash during creation. Recorded integrity is what [`verify()`](#snap-verify) checks and what save/load rely on when crossing a trust boundary.
+Compute and record sparse-aware BLAKE3 Merkle integrity during creation. [`verify()`](#snap-verify) checks it explicitly; ordinary open, boot, save, load, and upgrade preserve the value without adding an independent payload pass.
 
 ---
 
-#### <span className="msb-recv">.</span><span className="msb-hn">resumable()</span>
+#### <span className="msb-recv">snapshot_builder.</span><span className="msb-hn">resumable()</span>
 <div className="msb-tags"><span className="msb-tag is-builder">builder</span></div>
 
 ```rust
@@ -842,7 +812,7 @@ fn resumable(self) -> Self
 
 Request a resumable snapshot (disk plus VM state). Accepted by the builder, but [`create()`](#create) currently fails with `Unsupported`; resumable snapshots have not landed yet.
 
-#### <span className="msb-recv">.</span><span className="msb-hn">build()</span>
+#### <span className="msb-recv">snapshot_builder.</span><span className="msb-hn">build()</span>
 
 ```rust
 fn build(self) -> MicrosandboxResult<SnapshotConfig>
@@ -859,7 +829,7 @@ Materialize the [`SnapshotConfig`](#snapshotconfig) without creating the snapsho
   </div>
 </div>
 
-#### <span className="msb-recv">.</span><span className="msb-hn">create()</span>
+#### <span className="msb-recv">snapshot_builder.</span><span className="msb-hn">create()</span>
 
 ```rust
 async fn create(self) -> MicrosandboxResult<Snapshot>
@@ -877,28 +847,6 @@ Build and execute the snapshot in one step. Equivalent to [`Snapshot::create(sel
 </div>
 
 ## Types
-
-### SnapshotHandle
-
-<div className="msb-tags"><span className="msb-tag is-type">struct</span></div>
-
-<p className="msb-backref">Returned by <a href="#snapshotget">Snapshot::get()</a> · <a href="#snapshotlist">Snapshot::list()</a> · <a href="#snapshotload">Snapshot::load()</a></p>
-
-A lightweight handle backed by a local index row. Use [`open()`](#h-open) to read the artifact metadata, and [`Snapshot::verify()`](#snap-verify) for explicit content verification. All accessors are listed under [SnapshotHandle methods](#snapshothandle-methods).
-
-| Method | Type | Description |
-|--------|------|-------------|
-| digest() | `&str` | Manifest digest (`sha256:hex`) |
-| name() | `Option<&str>` | Name alias; `None` for digest-only entries |
-| parent_digest() | `Option<&str>` | Parent snapshot digest, or `None` for a root |
-| scope() | [`SnapshotScope`](#snapshotscope) | Snapshot payload scope (`Disk` today) |
-| image_ref() | `&str` | Source image reference |
-| format() | [`SnapshotFormat`](#snapshotformat) | On-disk upper format |
-| size_bytes() | `Option<u64>` | Upper file size at index time |
-| created_at() | `chrono::NaiveDateTime` | Creation time from the manifest |
-| path() | `&Path` | Local artifact directory |
-| open() | `Result<`[`Snapshot`](#instance-methods)`>` | Open the underlying artifact |
-| remove(force) | `Result<()>` | Remove this snapshot |
 
 ### SnapshotConfig
 
@@ -1028,5 +976,8 @@ Content integrity descriptor for the captured upper layer.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| algorithm | `String` | Digest algorithm name (e.g. `msb-sparse-sha256-v1`) |
-| digest | `String` | Algorithm output, in `sha256:hex` form for current algorithms |
+| Variant | Serialized algorithm | Fields | Purpose |
+|---------|----------------------|--------|---------|
+| `Sha256` | `sha256` | `digest` | Exact released compatibility |
+| `SparseSha256V1` | `msb-sparse-sha256-v1` | `digest` | Exact released sparse-SHA compatibility |
+| `FileMerkleBlake3V1` | `msb-file-merkle-blake3-v1` | `root`, `logical_size`, `leaf_size` | Current opt-in sparse-aware integrity |

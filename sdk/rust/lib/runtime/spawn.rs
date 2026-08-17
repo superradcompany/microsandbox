@@ -5,6 +5,8 @@
 //! sandbox process PID. The sandbox process runs the VMM and agent relay
 //! internally.
 
+#[cfg(windows)]
+use std::fmt::Write as _;
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 #[cfg(unix)]
@@ -20,7 +22,6 @@ use std::os::windows::io::AsRawHandle;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     ffi::{OsStr, OsString},
-    fmt::Write,
     fs::File,
     io::{Seek, SeekFrom, Write as IoWrite},
     path::{Path, PathBuf},
@@ -65,15 +66,18 @@ use microsandbox_protocol::{
 };
 use microsandbox_runtime::launch::{LaunchConfig, Lifecycle};
 use microsandbox_runtime::vm::{MetricsSlotHandoff, StartupCommand};
-use microsandbox_types::SandboxLogLevel;
+use microsandbox_types::{CommandResolutionError, SandboxLogLevel, resolve_default_command};
 use microsandbox_utils::{DB_FILENAME, DB_SUBDIR};
 
+#[cfg(not(target_os = "linux"))]
+use crate::error::{Operation, UnsupportedReason};
 use crate::runtime::handle::ProcessHandle;
 #[cfg(windows)]
 use crate::runtime::handle::WindowsJob;
 use crate::{
     MicrosandboxError, MicrosandboxResult,
     backend::LocalBackend,
+    config::{BlockWritebackConfig, RuntimeConfig},
     db::entity::volume as volume_entity,
     runtime::handle::MetricsReservationCleanup,
     sandbox::{
@@ -90,12 +94,17 @@ use crate::{
 // Constants
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 static SIGCHLD_ALT_STACK_INIT: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
-const AGENT_SOCKET_HASH_HEX_LEN: usize = 32;
 #[cfg(windows)]
 const STARTUP_PIPE_HASH_HEX_LEN: usize = 32;
+#[cfg(target_os = "linux")]
+const AUTO_BLOCK_WRITEBACK_LIMIT_BYTES: u64 = 1536 * 1024 * 1024;
+#[cfg(target_os = "linux")]
+const AUTO_BLOCK_WRITEBACK_POOL_DIVISOR: u64 = 10;
+#[cfg(target_os = "linux")]
+const MIN_BLOCK_WRITEBACK_LIMIT_BYTES: u64 = 128 * 1024 * 1024;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -264,6 +273,7 @@ pub async fn spawn_sandbox(
     config: &SandboxConfig,
     sandbox_id: i32,
     mode: SpawnMode,
+    lifecycle_guard: Option<microsandbox_runtime::ipc::SandboxLifecycleGuard>,
 ) -> MicrosandboxResult<(ProcessHandle, PathBuf)> {
     // Reference-model secrets store only a host-side source reference in the
     // durable config; resolve the actual values now so they travel to the
@@ -298,6 +308,34 @@ pub async fn spawn_sandbox(
     let scripts_dir = runtime_dir.join("scripts");
     let db_dir = global.home().join(DB_SUBDIR);
     let db_path = db_dir.join(DB_FILENAME);
+
+    // Own the sandbox's runtime namespace before touching any deterministic
+    // endpoint. The descriptor is duplicated into the child below and remains
+    // locked there for the runtime's entire lifetime.
+    #[cfg(unix)]
+    let lifecycle_guard = match lifecycle_guard {
+        Some(guard) => guard,
+        None => {
+            acquire_sandbox_lifecycle_guard(
+                &global.run_dir(),
+                &config.spec.name,
+                std::time::Duration::from_secs(5),
+            )
+            .await?
+        }
+    };
+
+    #[cfg(not(unix))]
+    let _ = lifecycle_guard;
+
+    // Lifecycle callers prove any previous owner dead before reaching spawn.
+    // With ownership now serialized, remove exact leftovers from that prior
+    // generation so compatibility-link publication cannot be masked by them.
+    remove_sandbox_socket_artifacts_at(
+        &global.run_dir(),
+        &global.sandboxes_dir(),
+        &config.spec.name,
+    )?;
 
     // Create directories concurrently.
     tokio::try_join!(
@@ -410,7 +448,7 @@ pub async fn spawn_sandbox(
     // Split the config: `visible` stays on argv, the typed `LaunchConfig` is
     // delivered over the config fd (keeps the network-config blob and
     // secret-bearing env off `ps` / `/proc/<pid>/cmdline` — see issue #997).
-    let (mut visible, launch) = sandbox_cli_args(
+    let (mut visible, mut launch) = sandbox_cli_args(
         local,
         config,
         sandbox_id,
@@ -437,6 +475,14 @@ pub async fn spawn_sandbox(
         #[cfg(windows)]
         startup_pipe_name,
     );
+    let (writeback_limit_bytes, writeback_pool_bytes) = block_writeback_policy(&global.runtime)?;
+    tracing::debug!(
+        per_disk_limit_bytes = ?writeback_limit_bytes,
+        pool_bytes = ?writeback_pool_bytes,
+        "resolved buffered writeback policy"
+    );
+    launch.block_writeback_limit_bytes = writeback_limit_bytes;
+    launch.block_writeback_pool_bytes = writeback_pool_bytes;
 
     #[cfg(unix)]
     let config_file = match write_launch_config_fd(&launch) {
@@ -453,6 +499,10 @@ pub async fn spawn_sandbox(
         visible.push(OsString::from("--config-fd"));
         visible.push(OsString::from(
             microsandbox_runtime::vm::CONFIG_FD.to_string(),
+        ));
+        visible.push(OsString::from("--lifecycle-lock-fd"));
+        visible.push(OsString::from(
+            microsandbox_runtime::vm::LIFECYCLE_LOCK_FD.to_string(),
         ));
     }
 
@@ -484,11 +534,12 @@ pub async fn spawn_sandbox(
     cmd.stdin(Stdio::null());
 
     #[cfg(unix)]
-    if parent_watchdog.is_some() || startup_pipe.is_some() {
+    {
         let parent_watch_fd = parent_watchdog
             .as_ref()
             .map(|pipe| pipe.read_fd.as_raw_fd());
         let startup_write_fd = startup_pipe.as_ref().map(|pipe| pipe.write_fd.as_raw_fd());
+        let lifecycle_lock_fd = lifecycle_guard.as_raw_fd();
         unsafe {
             cmd.pre_exec(move || {
                 if startup_write_fd.is_some() {
@@ -502,12 +553,16 @@ pub async fn spawn_sandbox(
                 });
                 let mut startup_mapping = startup_write_fd
                     .map(|fd| InheritedFdMapping::new(fd, microsandbox_runtime::vm::STARTUP_FD));
+                let mut lifecycle_mapping = InheritedFdMapping::new(
+                    lifecycle_lock_fd,
+                    microsandbox_runtime::vm::LIFECYCLE_LOCK_FD,
+                );
 
                 // Parent runtimes such as Vitest or Go tests can have enough
                 // open files that pipe/tempfile allocation lands on one of the
                 // fixed inherited fd numbers. Move those sources away before
                 // any dup2 call can overwrite a later source fd.
-                let mut next_spare_fd = microsandbox_runtime::vm::STARTUP_FD + 1;
+                let mut next_spare_fd = microsandbox_runtime::vm::LIFECYCLE_LOCK_FD + 1;
                 move_reserved_source_fd(&mut config_mapping, &mut next_spare_fd)?;
                 if let Some(mapping) = parent_watch_mapping.as_mut() {
                     move_reserved_source_fd(mapping, &mut next_spare_fd)?;
@@ -515,6 +570,7 @@ pub async fn spawn_sandbox(
                 if let Some(mapping) = startup_mapping.as_mut() {
                     move_reserved_source_fd(mapping, &mut next_spare_fd)?;
                 }
+                move_reserved_source_fd(&mut lifecycle_mapping, &mut next_spare_fd)?;
 
                 dup_inherited_fd(config_mapping.src, config_mapping.dst)?;
                 if let Some(mapping) = parent_watch_mapping {
@@ -523,6 +579,7 @@ pub async fn spawn_sandbox(
                 if let Some(mapping) = startup_mapping {
                     dup_inherited_fd(mapping.src, mapping.dst)?;
                 }
+                dup_inherited_fd(lifecycle_mapping.src, lifecycle_mapping.dst)?;
 
                 Ok(())
             });
@@ -686,6 +743,192 @@ pub async fn spawn_sandbox(
     );
 
     Ok((handle, agent_sock_path))
+}
+
+fn block_writeback_policy(
+    config: &RuntimeConfig,
+) -> MicrosandboxResult<(Option<u64>, Option<u64>)> {
+    #[cfg(target_os = "linux")]
+    {
+        if matches!(config.block_writeback, BlockWritebackConfig::Off {}) {
+            return Ok((None, None));
+        }
+
+        let derived_pool_bytes = match config.block_writeback {
+            BlockWritebackConfig::Auto { pool_mib: None }
+            | BlockWritebackConfig::Fixed { pool_mib: None, .. } => {
+                Some(linux_auto_block_writeback_pool_bytes(
+                    linux_meminfo_bytes("MemTotal:")?,
+                    linux_meminfo_bytes("MemAvailable:")?,
+                )?)
+            }
+            BlockWritebackConfig::Auto { pool_mib: Some(_) }
+            | BlockWritebackConfig::Fixed {
+                pool_mib: Some(_), ..
+            }
+            | BlockWritebackConfig::Off {} => None,
+        };
+        resolve_linux_block_writeback_policy(
+            config.block_writeback,
+            linux_meminfo_bytes("MemTotal:")?,
+            derived_pool_bytes,
+        )
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        match config.block_writeback {
+            BlockWritebackConfig::Auto { pool_mib: None } | BlockWritebackConfig::Off {} => {
+                Ok((None, None))
+            }
+            BlockWritebackConfig::Auto { pool_mib: Some(_) }
+            | BlockWritebackConfig::Fixed { .. } => Err(MicrosandboxError::Unsupported {
+                op: Operation::SandboxCreate,
+                reason: UnsupportedReason::NotAvailable(
+                    "bounded buffered block writeback requires a Linux host".into(),
+                ),
+            }),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_linux_block_writeback_policy(
+    config: BlockWritebackConfig,
+    total_memory_bytes: u64,
+    derived_pool_bytes: Option<u64>,
+) -> MicrosandboxResult<(Option<u64>, Option<u64>)> {
+    let (limit_bytes, explicit_pool_mib) = match config {
+        BlockWritebackConfig::Auto { pool_mib } => (AUTO_BLOCK_WRITEBACK_LIMIT_BYTES, pool_mib),
+        BlockWritebackConfig::Off {} => return Ok((None, None)),
+        BlockWritebackConfig::Fixed {
+            per_disk_mib,
+            pool_mib,
+        } => {
+            if per_disk_mib.get() < MIN_BLOCK_WRITEBACK_LIMIT_BYTES / (1024 * 1024) {
+                return Err(MicrosandboxError::InvalidConfig(format!(
+                    "runtime.block_writeback.per_disk_mib must be at least {} MiB",
+                    MIN_BLOCK_WRITEBACK_LIMIT_BYTES / (1024 * 1024)
+                )));
+            }
+            let limit_bytes = per_disk_mib.get().checked_mul(1024 * 1024).ok_or_else(|| {
+                MicrosandboxError::InvalidConfig(
+                    "runtime.block_writeback.per_disk_mib exceeds the supported byte range".into(),
+                )
+            })?;
+            (limit_bytes, pool_mib)
+        }
+    };
+    let explicit_pool_bytes = explicit_pool_mib
+        .map(|mib| {
+            mib.get().checked_mul(1024 * 1024).ok_or_else(|| {
+                MicrosandboxError::InvalidConfig(
+                    "runtime.block_writeback.pool_mib exceeds the supported byte range".into(),
+                )
+            })
+        })
+        .transpose()?;
+    let pool_bytes = explicit_pool_bytes.or(derived_pool_bytes).ok_or_else(|| {
+        MicrosandboxError::Runtime(
+            "derived writeback pool is unavailable while resolving Linux auto policy".into(),
+        )
+    })?;
+    if pool_bytes > total_memory_bytes {
+        return Err(MicrosandboxError::InvalidConfig(format!(
+            "writeback pool ({pool_bytes} bytes) exceeds physical host memory ({total_memory_bytes} bytes)"
+        )));
+    }
+
+    Ok((Some(limit_bytes), Some(pool_bytes)))
+}
+
+#[cfg(target_os = "linux")]
+fn auto_block_writeback_pool_bytes(
+    total_memory_bytes: u64,
+    available_memory_bytes: u64,
+    dirty_background_bytes: u64,
+    dirty_background_ratio: u64,
+) -> MicrosandboxResult<u64> {
+    if dirty_background_ratio > 100 {
+        return Err(MicrosandboxError::InvalidConfig(format!(
+            "host vm.dirty_background_ratio must not exceed 100, got {dirty_background_ratio}"
+        )));
+    }
+
+    // Respect a stricter host dirty-background policy, but never treat a permissive sysctl as
+    // permission for Microsandbox alone to reserve more than 10% of physical memory.
+    let conservative_cap = total_memory_bytes / AUTO_BLOCK_WRITEBACK_POOL_DIVISOR;
+    let kernel_background = if dirty_background_bytes != 0 {
+        dirty_background_bytes
+    } else {
+        // Linux applies the ratio to free and reclaimable memory, explicitly not total physical
+        // memory. MemAvailable is a deliberately conservative userspace estimate of that dynamic
+        // pool after reserves, so it avoids admitting against RAM the host cannot currently spare.
+        available_memory_bytes
+            .checked_mul(dirty_background_ratio)
+            .ok_or_else(|| {
+                MicrosandboxError::Runtime(
+                    "host dirty-background threshold calculation overflowed u64".into(),
+                )
+            })?
+            / 100
+    };
+    // A zero background threshold is a valid host tuning. Preserve one byte of cooperative
+    // credit so libkrun can clamp it to one host page and retain forward progress.
+    Ok(conservative_cap.min(kernel_background).max(1))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_auto_block_writeback_pool_bytes(
+    total_memory_bytes: u64,
+    available_memory_bytes: u64,
+) -> MicrosandboxResult<u64> {
+    let dirty_background_bytes = linux_u64_file("/proc/sys/vm/dirty_background_bytes")?;
+    let dirty_background_ratio = if dirty_background_bytes == 0 {
+        linux_u64_file("/proc/sys/vm/dirty_background_ratio")?
+    } else {
+        0
+    };
+    auto_block_writeback_pool_bytes(
+        total_memory_bytes,
+        available_memory_bytes,
+        dirty_background_bytes,
+        dirty_background_ratio,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn linux_meminfo_bytes(field: &str) -> MicrosandboxResult<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").map_err(|error| {
+        MicrosandboxError::Runtime(format!(
+            "read /proc/meminfo for writeback pressure policy: {error}"
+        ))
+    })?;
+    let value_kib = meminfo
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split_whitespace();
+            (fields.next() == Some(field))
+                .then(|| fields.next()?.parse::<u64>().ok())
+                .flatten()
+        })
+        .ok_or_else(|| {
+            MicrosandboxError::Runtime(format!(
+                "parse {field} from /proc/meminfo for writeback pressure policy"
+            ))
+        })?;
+    value_kib.checked_mul(1024).ok_or_else(|| {
+        MicrosandboxError::Runtime(format!("{field} byte conversion overflowed u64"))
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn linux_u64_file(path: &str) -> MicrosandboxResult<u64> {
+    let value = std::fs::read_to_string(path)
+        .map_err(|error| MicrosandboxError::Runtime(format!("read {path}: {error}")))?;
+    value.trim().parse::<u64>().map_err(|error| {
+        MicrosandboxError::Runtime(format!("parse unsigned integer from {path}: {error}"))
+    })
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -943,6 +1186,7 @@ fn inherited_fd_source_needs_spare(src: i32, dst: i32) -> bool {
             microsandbox_runtime::vm::CONFIG_FD
                 | microsandbox_runtime::vm::PARENT_WATCH_FD
                 | microsandbox_runtime::vm::STARTUP_FD
+                | microsandbox_runtime::vm::LIFECYCLE_LOCK_FD
         )
 }
 
@@ -1024,7 +1268,7 @@ fn release_metrics_reservation(config: &SandboxConfig, reservation: Option<&Metr
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 async fn ensure_sigchld_handler_uses_alt_stack_before_spawn() -> MicrosandboxResult<()> {
     SIGCHLD_ALT_STACK_INIT
         .get_or_try_init(|| async {
@@ -1036,19 +1280,19 @@ async fn ensure_sigchld_handler_uses_alt_stack_before_spawn() -> MicrosandboxRes
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 async fn ensure_sigchld_handler_uses_alt_stack_before_spawn() -> MicrosandboxResult<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn install_tokio_sigchld_handler() -> MicrosandboxResult<()> {
     let signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child())?;
     let _ = Box::leak(Box::new(signal));
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn patch_sigchld_handler_uses_alt_stack() {
     unsafe {
         let mut action = std::mem::MaybeUninit::<libc::sigaction>::uninit();
@@ -1607,18 +1851,21 @@ fn sandbox_agent_socket_path_candidates_with_roots(
     sandboxes_dir: &Path,
     name: &str,
 ) -> Vec<PathBuf> {
-    let primary = sandbox_agent_socket_path(run_dir, name);
+    let primary = microsandbox_runtime::ipc::canonical_agent_endpoint(run_dir, name);
 
-    // On Unix a long sandbox name or a deep MSB_HOME can overflow the AF_UNIX
-    // `sun_path` limit, so keep the legacy
-    // `<sandboxes>/<name>/runtime/agent.sock` path as a fallback. Windows named
-    // pipes have no such length limit and never shipped a pre-hash naming
-    // scheme, so the primary pipe is the only candidate.
+    // New clients prefer the canonical per-sandbox endpoint, then the flat
+    // legacy path used by older runtimes, and finally the pre-hash in-sandbox
+    // fallback retained for unusually deep homes. Windows named pipes did not
+    // change layout, so the canonical endpoint is the only candidate there.
     #[cfg(unix)]
-    let candidates = vec![
-        primary,
-        legacy_sandbox_agent_socket_path(sandboxes_dir, name),
-    ];
+    let candidates = {
+        let paths = microsandbox_runtime::ipc::sandbox_socket_paths(run_dir, name);
+        vec![
+            primary,
+            paths.legacy_agent,
+            in_sandbox_agent_socket_path(sandboxes_dir, name),
+        ]
+    };
     #[cfg(not(unix))]
     let candidates = {
         let _ = sandboxes_dir;
@@ -1633,6 +1880,12 @@ pub(crate) fn resolve_sandbox_agent_socket_path_for(
     local: &LocalBackend,
     name: &str,
 ) -> MicrosandboxResult<PathBuf> {
+    #[cfg(unix)]
+    let candidates = vec![microsandbox_runtime::ipc::canonical_agent_endpoint(
+        &local.config().run_dir(),
+        name,
+    )];
+    #[cfg(not(unix))]
     let candidates = sandbox_agent_socket_path_candidates_for(local, name);
     resolve_sandbox_agent_socket_path_from_candidates(candidates)
 }
@@ -1640,7 +1893,18 @@ pub(crate) fn resolve_sandbox_agent_socket_path_for(
 /// Pick the first socket path usable on this platform.
 pub(crate) fn resolve_sandbox_agent_socket_path(name: &str) -> MicrosandboxResult<PathBuf> {
     let candidates = sandbox_agent_socket_path_candidates(name);
+
+    #[cfg(unix)]
+    if let Some(existing) = first_existing_socket_candidate(&candidates) {
+        return Ok(existing);
+    }
+
     resolve_sandbox_agent_socket_path_from_candidates(candidates)
+}
+
+#[cfg(unix)]
+fn first_existing_socket_candidate(candidates: &[PathBuf]) -> Option<PathBuf> {
+    candidates.iter().find(|path| path.exists()).cloned()
 }
 
 #[cfg(unix)]
@@ -1648,21 +1912,31 @@ fn resolve_sandbox_agent_socket_path_from_candidates(
     candidates: Vec<PathBuf>,
 ) -> MicrosandboxResult<PathBuf> {
     for path in &candidates {
-        if sandbox_agent_socket_path_fits(path) {
+        if microsandbox_runtime::ipc::validate_socket_pair(path).is_ok() {
             return Ok(path.clone());
         }
     }
 
     let shortest = candidates
         .iter()
-        .map(|path| sandbox_agent_socket_path_len(path))
+        .flat_map(|path| {
+            [
+                path.as_os_str().as_bytes().len(),
+                microsandbox_runtime::ipc::control_socket_path_for(path)
+                    .as_os_str()
+                    .as_bytes()
+                    .len(),
+            ]
+        })
         .min()
         .unwrap_or(0);
     Err(crate::MicrosandboxError::InvalidConfig(format!(
-        "agent relay socket path is too long: shortest derived path is {shortest} bytes, \
+        "sandbox runtime socket path is too long: shortest derived path is {shortest} bytes, \
          but Unix socket paths on this platform must be shorter than {} bytes; set \
-         MSB_HOME or paths.sandboxes to a shorter directory",
-        unix_socket_path_capacity()
+         MSB_HOME to a shorter directory",
+        unsafe { std::mem::zeroed::<libc::sockaddr_un>() }
+            .sun_path
+            .len()
     )))
 }
 
@@ -1677,30 +1951,6 @@ fn resolve_sandbox_agent_socket_path_from_candidates(
             "no agent relay socket candidates were derived".to_string(),
         )
     })
-}
-
-#[cfg(unix)]
-fn sandbox_agent_socket_path(run_dir: &Path, name: &str) -> PathBuf {
-    run_dir
-        .join("agent")
-        .join(format!("{}.sock", agent_socket_hash(name)))
-}
-
-#[cfg(windows)]
-fn sandbox_agent_socket_path(_run_dir: &Path, name: &str) -> PathBuf {
-    PathBuf::from(format!(r"\\.\pipe\msb-agent-{}", agent_socket_hash(name)))
-}
-
-fn agent_socket_hash(name: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(name.as_bytes());
-    let digest = hasher.finalize();
-
-    let mut hash = String::with_capacity(AGENT_SOCKET_HASH_HEX_LEN);
-    for byte in digest.iter().take(AGENT_SOCKET_HASH_HEX_LEN / 2) {
-        let _ = Write::write_fmt(&mut hash, format_args!("{byte:02x}"));
-    }
-    hash
 }
 
 /// What a client-side open of the agent pipe name revealed.
@@ -1794,26 +2044,65 @@ fn probe_agent_pipe_server(pipe_path: &Path) -> std::io::Result<AgentPipeProbe> 
 // backward compatibility with the pre-hash Unix layout; Windows never shipped a
 // different agent-pipe scheme, so this is Unix-only.
 #[cfg(unix)]
-fn legacy_sandbox_agent_socket_path(sandboxes_dir: &Path, name: &str) -> PathBuf {
+fn in_sandbox_agent_socket_path(sandboxes_dir: &Path, name: &str) -> PathBuf {
     sandboxes_dir.join(name).join("runtime").join("agent.sock")
 }
 
-// Agent socket path length only constrains AF_UNIX `sun_path` on Unix; Windows
-// named pipes have no equivalent limit, so these helpers are Unix-only.
-#[cfg(unix)]
-fn sandbox_agent_socket_path_fits(path: &Path) -> bool {
-    sandbox_agent_socket_path_len(path) < unix_socket_path_capacity()
+/// Remove every Unix runtime socket artifact deterministically owned by a sandbox.
+pub(crate) fn remove_sandbox_socket_artifacts_for(
+    local: &LocalBackend,
+    name: &str,
+) -> MicrosandboxResult<()> {
+    remove_sandbox_socket_artifacts_at(
+        &local.config().run_dir(),
+        &local.config().sandboxes_dir(),
+        name,
+    )
 }
 
-#[cfg(unix)]
-fn sandbox_agent_socket_path_len(path: &Path) -> usize {
-    path.as_os_str().as_bytes().len()
+/// Remove runtime socket artifacts using explicit storage roots.
+pub(crate) fn remove_sandbox_socket_artifacts_at(
+    run_dir: &Path,
+    sandboxes_dir: &Path,
+    name: &str,
+) -> MicrosandboxResult<()> {
+    let canonical_result =
+        microsandbox_runtime::ipc::remove_sandbox_socket_artifacts(run_dir, name);
+
+    #[cfg(unix)]
+    let fallback_result = microsandbox_runtime::ipc::remove_socket_pair(
+        &in_sandbox_agent_socket_path(sandboxes_dir, name),
+    );
+
+    #[cfg(not(unix))]
+    let fallback_result: std::io::Result<()> = {
+        let _ = sandboxes_dir;
+        Ok(())
+    };
+
+    canonical_result.and(fallback_result)?;
+    Ok(())
 }
 
-#[cfg(unix)]
-fn unix_socket_path_capacity() -> usize {
-    let storage = unsafe { std::mem::zeroed::<libc::sockaddr_un>() };
-    storage.sun_path.len()
+/// Wait until no runtime generation owns a sandbox's deterministic namespace.
+pub(crate) async fn acquire_sandbox_lifecycle_guard(
+    run_dir: &Path,
+    name: &str,
+    timeout: std::time::Duration,
+) -> MicrosandboxResult<microsandbox_runtime::ipc::SandboxLifecycleGuard> {
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(guard) = microsandbox_runtime::ipc::try_acquire_lifecycle_guard(run_dir, name)?
+        {
+            return Ok(guard);
+        }
+        if started.elapsed() >= timeout {
+            return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
+                "sandbox {name:?} runtime still owns its lifecycle lock"
+            )));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
 }
 
 async fn terminate_startup_process(
@@ -2247,13 +2536,27 @@ fn sandbox_cli_args(
         log_dir: log_dir.to_path_buf(),
         runtime_dir: runtime_dir.to_path_buf(),
         sandboxes_dir: local.sandboxes_dir(),
+        run_dir: local.config().run_dir(),
+        cpu_lease_dir: local.config().run_dir().join("cpu-leases"),
+        writeback_lease_dir: local.config().run_dir().join("writeback-leases"),
+        cpu_placement: config.spec.resources.cpu_placement,
+        placement_profile_name: config.spec.resources.placement_profile.clone(),
+        placement_profile: config
+            .spec
+            .resources
+            .placement_profile
+            .as_ref()
+            .and_then(|name| local.config().runtime.placement_profiles.get(name))
+            .copied(),
         agent_sock: agent_sock_path.to_path_buf(),
         libkrunfw_path: libkrunfw_path.to_path_buf(),
+        thp: config.spec.resources.thp,
         startup: startup_command(config),
         lifecycle: Lifecycle {
             max_duration_secs: config.spec.lifecycle.max_duration_secs,
             idle_timeout_secs: config.spec.lifecycle.idle_timeout_secs,
         },
+        vsock: config.spec.vsock.routes.clone(),
         #[cfg(feature = "net")]
         deployment_profile: config.spec.deployment_profile,
         workdir: config.spec.runtime.workdir.as_ref().map(PathBuf::from),
@@ -2606,22 +2909,17 @@ fn resolve_startup_command(config: &SandboxConfig) -> Option<(String, Vec<String
         return None;
     }
 
-    match (&config.spec.runtime.entrypoint, &config.spec.runtime.cmd) {
-        (Some(entrypoint), cmd) if !entrypoint.is_empty() => {
-            let bin = entrypoint[0].clone();
-            let args = entrypoint[1..]
-                .iter()
-                .chain(cmd.iter().flatten())
-                .cloned()
-                .collect();
-            Some((bin, args))
+    match resolve_default_command(
+        config.spec.runtime.entrypoint.as_deref(),
+        config.spec.runtime.cmd.as_deref(),
+        None,
+    ) {
+        Ok(command) => Some((command.program, command.args)),
+        Err(CommandResolutionError::NoDefaultCommand) => None,
+        Err(error) => {
+            tracing::error!(%error, "invalid startup command reached runtime launch planning");
+            None
         }
-        (_, Some(cmd)) if !cmd.is_empty() => {
-            let bin = cmd[0].clone();
-            let args = cmd[1..].to_vec();
-            Some((bin, args))
-        }
-        _ => None,
     }
 }
 
@@ -2643,6 +2941,8 @@ fn sandbox_log_level_cli_flag(level: SandboxLogLevel) -> &'static str {
 mod tests {
     use std::collections::HashMap;
     use std::ffi::{OsStr, OsString};
+    #[cfg(target_os = "linux")]
+    use std::num::NonZero;
     use std::path::{Path, PathBuf};
 
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -2653,10 +2953,16 @@ mod tests {
 
     use microsandbox_runtime::launch::LaunchConfig;
 
-    use super::sandbox_cli_args;
+    #[cfg(target_os = "linux")]
+    use super::{
+        AUTO_BLOCK_WRITEBACK_LIMIT_BYTES, MIN_BLOCK_WRITEBACK_LIMIT_BYTES,
+        auto_block_writeback_pool_bytes, resolve_linux_block_writeback_policy,
+    };
+    use super::{block_writeback_policy, sandbox_cli_args};
     use crate::{
         LogLevel,
         backend::LocalBackend,
+        config::{BlockWritebackConfig, RuntimeConfig},
         sandbox::{
             DiskImageFormat, HostPermissions, MountOptions, OciRootfsSource, Rlimit,
             RlimitResource, RootfsSource, SandboxBuilder, SandboxConfig, StatVirtualization,
@@ -2700,7 +3006,7 @@ mod tests {
         ));
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_sigchld_handler_uses_alt_stack_after_prepare() {
         super::ensure_sigchld_handler_uses_alt_stack_before_spawn()
@@ -3201,10 +3507,12 @@ mod tests {
 
         #[cfg(unix)]
         {
-            assert_eq!(candidates.len(), 2);
-            assert!(candidates[0].starts_with(backend.config().run_dir().join("agent")));
+            assert_eq!(candidates.len(), 3);
+            assert!(candidates[0].starts_with(backend.config().run_dir().join("sandboxes")));
+            assert_eq!(candidates[0].file_name().unwrap(), "agent.sock");
+            assert!(candidates[1].starts_with(backend.config().run_dir().join("agent")));
             assert_eq!(
-                candidates[1],
+                candidates[2],
                 backend
                     .config()
                     .sandboxes_dir()
@@ -3246,13 +3554,37 @@ mod tests {
             super::resolve_sandbox_agent_socket_path_for(&backend, "sdk-socket-test").unwrap();
 
         #[cfg(unix)]
-        assert!(resolved.starts_with(backend.config().run_dir().join("agent")));
+        assert!(resolved.starts_with(backend.config().run_dir().join("sandboxes")));
         #[cfg(windows)]
         assert!(
             resolved
                 .to_string_lossy()
                 .starts_with(r"\\.\pipe\msb-agent-")
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_new_client_selects_old_runtime_socket_when_canonical_is_absent() {
+        let temp = tempfile::Builder::new()
+            .prefix("msb-compat")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let run_dir = temp.path().join("run");
+        let sandboxes_dir = temp.path().join("sandboxes");
+        let paths = microsandbox_runtime::ipc::sandbox_socket_paths(&run_dir, "old-runtime");
+        std::fs::create_dir_all(paths.legacy_agent.parent().unwrap()).unwrap();
+        let _listener = std::os::unix::net::UnixListener::bind(&paths.legacy_agent).unwrap();
+
+        let candidates = super::sandbox_agent_socket_path_candidates_with_roots(
+            &run_dir,
+            &sandboxes_dir,
+            "old-runtime",
+        );
+        let selected = super::first_existing_socket_candidate(&candidates).unwrap();
+
+        assert_eq!(selected, paths.legacy_agent);
+        std::os::unix::net::UnixStream::connect(selected).unwrap();
     }
 
     #[tokio::test]
@@ -4481,5 +4813,182 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{err}").contains("must not contain '='"));
+    }
+
+    #[test]
+    fn block_writeback_policy_resolves_by_platform() {
+        #[cfg(target_os = "linux")]
+        {
+            let automatic = resolve_linux_block_writeback_policy(
+                BlockWritebackConfig::Auto { pool_mib: None },
+                64 * 1024 * 1024 * 1024,
+                Some(6 * 1024 * 1024 * 1024),
+            )
+            .unwrap();
+            assert_eq!(automatic.0, Some(AUTO_BLOCK_WRITEBACK_LIMIT_BYTES));
+            assert_eq!(automatic.1, Some(6 * 1024 * 1024 * 1024));
+
+            let constrained_pool = 512 * 1024 * 1024;
+            assert_eq!(
+                resolve_linux_block_writeback_policy(
+                    BlockWritebackConfig::Auto { pool_mib: None },
+                    64 * 1024 * 1024 * 1024,
+                    Some(constrained_pool),
+                )
+                .unwrap(),
+                (
+                    Some(AUTO_BLOCK_WRITEBACK_LIMIT_BYTES),
+                    Some(constrained_pool)
+                )
+            );
+
+            assert_eq!(
+                resolve_linux_block_writeback_policy(
+                    BlockWritebackConfig::Auto { pool_mib: None },
+                    64 * 1024 * 1024 * 1024,
+                    Some(MIN_BLOCK_WRITEBACK_LIMIT_BYTES - 1),
+                )
+                .unwrap(),
+                (
+                    Some(AUTO_BLOCK_WRITEBACK_LIMIT_BYTES),
+                    Some(MIN_BLOCK_WRITEBACK_LIMIT_BYTES - 1)
+                )
+            );
+            assert_eq!(
+                auto_block_writeback_pool_bytes(
+                    64 * 1024 * 1024 * 1024,
+                    60 * 1024 * 1024 * 1024,
+                    0,
+                    10,
+                )
+                .unwrap(),
+                60 * 1024 * 1024 * 1024 / 10
+            );
+            assert_eq!(
+                auto_block_writeback_pool_bytes(
+                    64 * 1024 * 1024 * 1024,
+                    60 * 1024 * 1024 * 1024,
+                    2 * 1024 * 1024 * 1024,
+                    50,
+                )
+                .unwrap(),
+                2 * 1024 * 1024 * 1024
+            );
+            assert_eq!(
+                auto_block_writeback_pool_bytes(
+                    64 * 1024 * 1024 * 1024,
+                    60 * 1024 * 1024 * 1024,
+                    0,
+                    20,
+                )
+                .unwrap(),
+                64 * 1024 * 1024 * 1024 / 10
+            );
+            assert_eq!(
+                auto_block_writeback_pool_bytes(
+                    64 * 1024 * 1024 * 1024,
+                    8 * 1024 * 1024 * 1024,
+                    0,
+                    10,
+                )
+                .unwrap(),
+                8 * 1024 * 1024 * 1024 / 10
+            );
+            assert_eq!(
+                auto_block_writeback_pool_bytes(
+                    64 * 1024 * 1024 * 1024,
+                    60 * 1024 * 1024 * 1024,
+                    0,
+                    0,
+                )
+                .unwrap(),
+                1
+            );
+            assert!(
+                auto_block_writeback_pool_bytes(
+                    64 * 1024 * 1024 * 1024,
+                    60 * 1024 * 1024 * 1024,
+                    0,
+                    101,
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("must not exceed 100")
+            );
+        }
+        // The portable default enables live pressure sharing on Linux and remains a no-op on
+        // platforms where this host page-cache controller does not apply.
+        let default_policy = block_writeback_policy(&RuntimeConfig::default()).unwrap();
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(default_policy.0, Some(AUTO_BLOCK_WRITEBACK_LIMIT_BYTES));
+            assert!(default_policy.1.is_some_and(|pool_bytes| pool_bytes > 0));
+        }
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(default_policy, (None, None));
+
+        assert_eq!(
+            block_writeback_policy(&RuntimeConfig {
+                block_writeback: BlockWritebackConfig::Off {},
+                ..Default::default()
+            })
+            .unwrap(),
+            (None, None)
+        );
+
+        #[cfg(target_os = "linux")]
+        {
+            let fixed = resolve_linux_block_writeback_policy(
+                BlockWritebackConfig::Fixed {
+                    per_disk_mib: NonZero::new(1024).unwrap(),
+                    pool_mib: None,
+                },
+                64 * 1024 * 1024 * 1024,
+                Some(4 * 1024 * 1024 * 1024),
+            )
+            .unwrap();
+            assert_eq!(fixed.0, Some(1024 * 1024 * 1024));
+            assert_eq!(fixed.1, Some(4 * 1024 * 1024 * 1024));
+            assert!(
+                resolve_linux_block_writeback_policy(
+                    BlockWritebackConfig::Fixed {
+                        per_disk_mib: NonZero::new(127).unwrap(),
+                        pool_mib: None,
+                    },
+                    64 * 1024 * 1024 * 1024,
+                    Some(4 * 1024 * 1024 * 1024),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("at least 128 MiB")
+            );
+
+            assert_eq!(
+                resolve_linux_block_writeback_policy(
+                    BlockWritebackConfig::Auto {
+                        pool_mib: NonZero::new(512),
+                    },
+                    64 * 1024 * 1024 * 1024,
+                    None,
+                )
+                .unwrap(),
+                (
+                    Some(AUTO_BLOCK_WRITEBACK_LIMIT_BYTES),
+                    Some(512 * 1024 * 1024)
+                )
+            );
+            assert_eq!(
+                resolve_linux_block_writeback_policy(
+                    BlockWritebackConfig::Fixed {
+                        per_disk_mib: NonZero::new(1024).unwrap(),
+                        pool_mib: NonZero::new(512),
+                    },
+                    64 * 1024 * 1024 * 1024,
+                    None,
+                )
+                .unwrap(),
+                (Some(1024 * 1024 * 1024), Some(512 * 1024 * 1024))
+            );
+        }
     }
 }

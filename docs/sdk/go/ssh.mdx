@@ -5,31 +5,8 @@ description: Go SDK - SSH API reference
 
 Reach a running sandbox over SSH: open a native in-process SSH client, run exec requests, attach an interactive shell, transfer files over SFTP, or stand up a reusable SSH server endpoint. See [SSH](/sandboxes/ssh) for usage flows.
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
 
-```go
-import (
-    "context"
-
-    m "github.com/superradcompany/microsandbox/sdk/go"
-)
-
-ctx := context.Background()
-
-client, err := sb.SSH().OpenClient(ctx)   // 1. open a native client
-if err != nil {
-    return err
-}
-defer client.Close(ctx)
-
-out, err := client.Exec(ctx, "uname -a")  // 2. run a command
-if err != nil {
-    return err
-}
-fmt.Printf("%s (exit %d)\n", out.Stdout, out.Status)
-```
-
-## Methods
+## Sandbox
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">SSH()</span>
 
@@ -56,6 +33,13 @@ Return the SSH operations namespace for this sandbox. The namespace groups the c
     <div className="msb-param-desc">SSH client and server helpers for this sandbox.</div>
   </div>
 </div>
+
+## SandboxSSHOps
+
+<p className="msb-backref">Returned by <a href="#sb-ssh">SSH()</a></p>
+
+SSH operations namespace for a sandbox. Obtained via [`sb.SSH()`](#sb-ssh). Holds no resources; it groups the client and server entry points.
+
 
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">OpenClient()</span>
 
@@ -89,7 +73,7 @@ Open a native in-process SSH client to this sandbox. Generates an ephemeral Ed25
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#sshclientoption">...SSHClientOption</a></div>
-    <div className="msb-param-desc">Login user, terminal name, and SFTP toggle.</div>
+    <div className="msb-param-desc">Login user, terminal name, SFTP toggle, and inactivity timeout.</div>
   </div>
 </div>
 
@@ -107,6 +91,8 @@ Open a native in-process SSH client to this sandbox. Generates an ephemeral Ed25
 </div>
 
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">PrepareServer()</span>
+
+<Tooltip tip="On microsandbox cloud, the reusable server works when you supply explicit host-key and authorized-key material; the convenience defaults are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (ssh *SandboxSSHOps) PrepareServer(ctx context.Context, opts ...SSHServerOption) (*SSHServer, error)
@@ -137,7 +123,7 @@ Prepare a reusable SSH server endpoint for this sandbox. Loads or creates the ho
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#sshserveroption">...SSHServerOption</a></div>
-    <div className="msb-param-desc">Host key, authorized keys, guest user, and SFTP toggle.</div>
+    <div className="msb-param-desc">Host key, authorized keys, guest user, SFTP toggle, and inactivity timeout.</div>
   </div>
 </div>
 
@@ -153,6 +139,13 @@ Prepare a reusable SSH server endpoint for this sandbox. Loads or creates the ho
     <div className="msb-param-desc">Typed microsandbox error.</div>
   </div>
 </div>
+
+## SSHClient
+
+<p className="msb-backref">Returned by <a href="#ssh-openclient">OpenClient()</a></p>
+
+A native in-process SSH client session. Obtained via [`OpenClient()`](#ssh-openclient).
+
 
 #### <span className="msb-recv">c.</span><span className="msb-hn">Exec()</span>
 
@@ -336,6 +329,13 @@ Close this SSH client session. The handle is consumed; do not use it after closi
   </div>
 </div>
 
+## SSHServer
+
+<p className="msb-backref">Returned by <a href="#ssh-prepareserver">PrepareServer()</a></p>
+
+A prepared SSH server endpoint for a sandbox. Obtained via [`PrepareServer()`](#ssh-prepareserver).
+
+
 #### <span className="msb-recv">srv.</span><span className="msb-hn">ServeConnection()</span>
 
 ```go
@@ -412,6 +412,30 @@ Release this prepared server endpoint. The handle is consumed; do not use it aft
   </div>
 </div>
 
+## SSHOutput
+
+<p className="msb-backref">Returned by <a href="#c-exec">Exec()</a></p>
+
+The output from an SSH exec request.
+
+#### <span className="msb-recv">o.</span><span className="msb-hn">Status</span>
+
+`int`
+
+Exit status code
+
+#### <span className="msb-recv">o.</span><span className="msb-hn">Stdout</span>
+
+`[]byte`
+
+Captured stdout bytes
+
+#### <span className="msb-recv">o.</span><span className="msb-hn">Stderr</span>
+
+`[]byte`
+
+Captured stderr bytes
+
 #### <span className="msb-recv">o.</span><span className="msb-hn">Success()</span>
 
 ```go
@@ -441,86 +465,148 @@ Report whether the command exited with status `0`.
   </div>
 </div>
 
-## Types
+## SFTPClient
 
-### SandboxSSHOps
-
-<p className="msb-backref">Returned by <a href="#sb-ssh">SSH()</a></p>
-
-SSH operations namespace for a sandbox. Obtained via [`sb.SSH()`](#sb-ssh). Holds no resources; it groups the client and server entry points.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`OpenClient(ctx, opts...)`](#ssh-openclient) | `(`[`*SSHClient`](#sshclient)`, error)` | Open a native in-process SSH client |
-| [`PrepareServer(ctx, opts...)`](#ssh-prepareserver) | `(`[`*SSHServer`](#sshserver)`, error)` | Prepare a reusable SSH server endpoint |
-
-### SSHClient
-
-<p className="msb-backref">Returned by <a href="#ssh-openclient">OpenClient()</a></p>
-
-A native in-process SSH client session. Obtained via [`OpenClient()`](#ssh-openclient).
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`Exec(ctx, command, opts...)`](#c-exec) | `(`[`*SSHOutput`](#sshoutput)`, error)` | Run a command and collect output |
-| [`Attach(ctx, opts...)`](#c-attach) | `(int, error)` | Bridge the local terminal to an interactive shell |
-| [`SFTP(ctx)`](#c-sftp) | `(`[`*SFTPClient`](#sftpclient)`, error)` | Open an SFTP session over this connection |
-| [`Close(ctx)`](#c-close) | `error` | Close the session (consumes the handle) |
-
-### SFTPClient
 
 <p className="msb-backref">Returned by <a href="#c-sftp">SFTP()</a></p>
 
 A high-level SFTP client session over an SSH connection. Obtained via [`SFTP()`](#c-sftp).
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| Read(ctx, path) | `([]byte, error)` | Read a file into memory |
-| Write(ctx, path, data) | `error` | Write a file, creating or truncating it |
-| Mkdir(ctx, path) | `error` | Create a directory |
-| RemoveFile(ctx, path) | `error` | Remove a file |
-| RemoveDir(ctx, path) | `error` | Remove an empty directory |
-| Rename(ctx, oldPath, newPath) | `error` | Rename a file or directory |
-| RealPath(ctx, path) | `(string, error)` | Resolve a path to its canonical absolute form |
-| ReadLink(ctx, path) | `(string, error)` | Read a symlink target |
-| Symlink(ctx, target, linkPath) | `error` | Create a symlink |
-| Close(ctx) | `error` | Close the session (consumes the handle) |
 
-### SSHServer
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">Read()</span>
 
-<p className="msb-backref">Returned by <a href="#ssh-prepareserver">PrepareServer()</a></p>
+```go
+Read(ctx, path)
+```
 
-A prepared SSH server endpoint for a sandbox. Obtained via [`PrepareServer()`](#ssh-prepareserver).
+Read a file into memory
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| [`ServeConnection(ctx)`](#srv-serveconnection) | `error` | Serve one SSH transport over stdin/stdout |
-| [`Close(ctx)`](#srv-close) | `error` | Release the endpoint (consumes the handle) |
+<p className="msb-label">Returns</p>
 
-### SSHOutput
+`([]byte, error)`
 
-<p className="msb-backref">Returned by <a href="#c-exec">Exec()</a></p>
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">Write()</span>
 
-The output from an SSH exec request.
+```go
+Write(ctx, path, data)
+```
 
-| Field / Method | Type | Description |
-|----------------|------|-------------|
-| Status | `int` | Exit status code |
-| Stdout | `[]byte` | Captured stdout bytes |
-| Stderr | `[]byte` | Captured stderr bytes |
-| [`Success()`](#o-success) | `bool` | `true` when `Status` is `0` |
+Write a file, creating or truncating it
+
+<p className="msb-label">Returns</p>
+
+`error`
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">Mkdir()</span>
+
+```go
+Mkdir(ctx, path)
+```
+
+Create a directory
+
+<p className="msb-label">Returns</p>
+
+`error`
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">RemoveFile()</span>
+
+```go
+RemoveFile(ctx, path)
+```
+
+Remove a file
+
+<p className="msb-label">Returns</p>
+
+`error`
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">RemoveDir()</span>
+
+```go
+RemoveDir(ctx, path)
+```
+
+Remove an empty directory
+
+<p className="msb-label">Returns</p>
+
+`error`
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">Rename()</span>
+
+```go
+Rename(ctx, oldPath, newPath)
+```
+
+Rename a file or directory
+
+<p className="msb-label">Returns</p>
+
+`error`
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">RealPath()</span>
+
+```go
+RealPath(ctx, path)
+```
+
+Resolve a path to its canonical absolute form
+
+<p className="msb-label">Returns</p>
+
+`(string, error)`
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">ReadLink()</span>
+
+```go
+ReadLink(ctx, path)
+```
+
+Read a symlink target
+
+<p className="msb-label">Returns</p>
+
+`(string, error)`
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">Symlink()</span>
+
+```go
+Symlink(ctx, target, linkPath)
+```
+
+Create a symlink
+
+<p className="msb-label">Returns</p>
+
+`error`
+
+#### <span className="msb-recv">sftp.</span><span className="msb-hn">Close()</span>
+
+```go
+Close(ctx)
+```
+
+Close the session (consumes the handle)
+
+<p className="msb-label">Returns</p>
+
+`error`
+
+## Types
 
 ### SSHClientOption
 
 <p className="msb-backref">Used by <a href="#ssh-openclient">OpenClient()</a></p>
 
-Functional option for [`OpenClient()`](#ssh-openclient). Defaults: user `root`, terminal from `$TERM` (falling back to `xterm`), SFTP enabled.
+Functional option for [`OpenClient()`](#ssh-openclient). Defaults: user `root`, terminal from `$TERM` (falling back to `xterm`), SFTP enabled, and the global SSH inactivity timeout.
 
 | Option | Description |
 |--------|-------------|
 | WithSSHUser(user) | SSH login user. Default `root` |
 | WithSSHTerm(term) | Terminal name for interactive sessions |
 | WithSSHClientSFTP(enabled) | Enable or disable SFTP on the internal server. Default `true` |
+| WithSSHClientInactivityTimeout(timeout) | Override the internal server inactivity timeout. A zero duration disables it |
 
 ### SSHExecOption
 
@@ -547,7 +633,7 @@ Functional option for [`Attach()`](#c-attach). The default terminal comes from `
 
 <p className="msb-backref">Used by <a href="#ssh-prepareserver">PrepareServer()</a></p>
 
-Functional option for [`PrepareServer()`](#ssh-prepareserver). SFTP is enabled by default; when no authorized-keys path is provided, the default authorized-keys file is loaded.
+Functional option for [`PrepareServer()`](#ssh-prepareserver). SFTP is enabled by default, the inactivity timeout inherits the global SSH setting, and the default authorized-keys file is loaded when no path is provided.
 
 | Option | Description |
 |--------|-------------|
@@ -555,3 +641,4 @@ Functional option for [`PrepareServer()`](#ssh-prepareserver). SFTP is enabled b
 | WithSSHAuthorizedKeysPath(path) | Override the authorized-keys path |
 | WithSSHServerUser(user) | Override the guest user used for SSH exec requests |
 | WithSSHServerSFTP(enabled) | Enable or disable SFTP on the server endpoint. Default `true` |
+| WithSSHServerInactivityTimeout(timeout) | Override the SSH inactivity timeout. A zero duration disables it |

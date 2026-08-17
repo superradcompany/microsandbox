@@ -22,10 +22,10 @@ install without a Rust toolchain:
 
 | Gem platform        | Ruby     | Notes              |
 | ------------------- | -------- | ------------------ |
-| `x86_64-linux-gnu`  | 3.1–3.4  | glibc 2.35+        |
-| `aarch64-linux-gnu` | 3.1–3.4  | glibc 2.35+        |
-| `arm64-darwin`      | 3.1–3.4  | Apple Silicon      |
-| `x64-mingw-ucrt`    | 3.1–3.4  | RubyInstaller 3.1+ |
+| `x86_64-linux-gnu`  | 3.1–4.0  | glibc 2.35+        |
+| `aarch64-linux-gnu` | 3.1–4.0  | glibc 2.35+        |
+| `arm64-darwin`      | 3.1–4.0  | Apple Silicon      |
+| `x64-mingw-ucrt`    | 3.1–4.0  | RubyInstaller 3.1+ |
 
 The Linux gems require glibc 2.35 or newer (Ubuntu 22.04, Debian 12, and
 later). The platform name carries no glibc version, so on an older glibc host
@@ -62,11 +62,11 @@ from `sdk/ruby`:
 
 ```sh
 rake version_check cargo:patch_workspace
-rake gem:stage # Once per installed Ruby, 3.1 through 3.4
+rake gem:stage # Once per installed Ruby, 3.1 through 4.0
 GEM_PLATFORM=arm64-darwin rake gem:platform
 ```
 
-`gem:platform` refuses to package unless all four ABIs are staged. Set
+`gem:platform` refuses to package unless all five ABIs are staged. Set
 `RUBY_ABIS` (for example `RUBY_ABIS=3.4`) to relax that when testing against a
 single local Ruby; CI never sets it.
 
@@ -161,6 +161,14 @@ them, and rotate them after suspected host compromise.
 The gem supports sandbox lifecycle operations, collected exec and shell
 output, SSH exec, logs, metrics, guest filesystem operations, local image,
 volume, and snapshot management, and local or cloud backend selection.
+
+SSH exec inherits the global inactivity timeout by default. Override it for a
+single command in seconds, or use `0` to disable it:
+
+```ruby
+output = sandbox.ssh_exec("long-running-agent", inactivity_timeout: 1_800)
+persistent = sandbox.ssh_exec("long-running-agent", inactivity_timeout: 0)
+```
 
 Streaming exec, logs, metrics, and filesystem handles; interactive SSH/SFTP;
 live modification plans; and the complete Rust network and mount builders are

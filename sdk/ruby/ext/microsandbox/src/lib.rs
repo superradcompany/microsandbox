@@ -5,7 +5,7 @@ use std::{
     mem::ManuallyDrop,
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicPtr, AtomicU32, Ordering},
     },
     time::Duration,
@@ -45,11 +45,54 @@ unsafe extern "C" {
     ) -> *mut c_void;
 }
 
-/// Carrier for a oneshot receiver, accessed from the C callback inside
-/// `rb_thread_call_without_gvl`.
+/// Per-call completion state created in the process that starts the operation.
+///
+/// Tokio's blocking oneshot receiver caches a thread parker. Reusing that
+/// inherited cache after `fork(2)` can dereference stale synchronization state,
+/// so the Ruby extension waits on a fresh condition variable instead.
+struct BlockingState<T> {
+    result: Mutex<Option<T>>,
+    ready: Condvar,
+}
+
+impl<T> BlockingState<T> {
+    fn new() -> Self {
+        Self {
+            result: Mutex::new(None),
+            ready: Condvar::new(),
+        }
+    }
+
+    fn complete(&self, value: T) {
+        let mut result = self
+            .result
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *result = Some(value);
+        self.ready.notify_one();
+    }
+
+    fn wait(&self) -> T {
+        let mut result = self
+            .result
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        loop {
+            if let Some(value) = result.take() {
+                return value;
+            }
+            result = self
+                .ready
+                .wait(result)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+    }
+}
+
+/// Carrier accessed from the C callback inside `rb_thread_call_without_gvl`.
 struct BlockingRecv<T> {
-    rx: Option<tokio::sync::oneshot::Receiver<T>>,
-    result: Option<std::thread::Result<Option<T>>>,
+    state: Arc<BlockingState<Result<T, tokio::task::JoinError>>>,
+    result: Option<std::thread::Result<Result<T, tokio::task::JoinError>>>,
 }
 
 fn catch_callback<F, T>(callback: F) -> std::thread::Result<T>
@@ -71,13 +114,7 @@ fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
 
 unsafe extern "C" fn do_blocking_recv<T>(data: *mut c_void) -> *mut c_void {
     let carrier = unsafe { &mut *(data as *mut BlockingRecv<T>) };
-    let receiver = carrier.rx.take();
-    carrier.result = Some(catch_callback(move || {
-        receiver
-            .expect("GVL callback invoked twice")
-            .blocking_recv()
-            .ok()
-    }));
+    carrier.result = Some(catch_callback(|| carrier.state.wait()));
     std::ptr::null_mut()
 }
 
@@ -205,12 +242,15 @@ where
     F: Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    runtime()?.spawn(async move {
-        let _ = tx.send(future.await);
+    let runtime = runtime()?;
+    let state = Arc::new(BlockingState::new());
+    let task = runtime.spawn(future);
+    let completion = Arc::clone(&state);
+    runtime.spawn(async move {
+        completion.complete(task.await);
     });
     let mut carrier = BlockingRecv {
-        rx: Some(rx),
+        state,
         result: None,
     };
     unsafe {
@@ -222,11 +262,23 @@ where
         );
     }
     match carrier.result.take() {
-        Some(Ok(Some(value))) => Ok(value),
-        Some(Ok(None)) => Err(Error::new(
+        Some(Ok(Ok(value))) => Ok(value),
+        Some(Ok(Err(error))) if error.is_cancelled() => Err(Error::new(
             ruby.exception_runtime_error(),
             "sandbox operation was canceled",
         )),
+        Some(Ok(Err(error))) => {
+            let message = if error.is_panic() {
+                let panic = error.into_panic();
+                panic_message(panic.as_ref()).to_owned()
+            } else {
+                error.to_string()
+            };
+            Err(Error::new(
+                ruby.exception_runtime_error(),
+                format!("native operation panicked while the Ruby GVL was released: {message}"),
+            ))
+        }
         Some(Err(panic)) => Err(Error::new(
             ruby.exception_runtime_error(),
             format!(
@@ -812,6 +864,12 @@ impl RubySandboxBuilder {
     fn init(this: typed_data::Obj<Self>, v: String) -> Result<(), Error> {
         put_builder(&this, |b| b.init(v))
     }
+    fn vsock(this: typed_data::Obj<Self>, host_path: String, port: u32) -> Result<(), Error> {
+        put_builder(&this, |b| b.vsock(host_path, port))
+    }
+    fn vsock_dgram(this: typed_data::Obj<Self>, host_path: String, port: u32) -> Result<(), Error> {
+        put_builder(&this, |b| b.vsock_dgram(host_path, port))
+    }
     fn create(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<RubySandbox, Error> {
         let b = take_builder(&this)?;
         let sb = run(ruby, b.create())?;
@@ -973,10 +1031,22 @@ impl RubySandbox {
         }
         Ok(array)
     }
-    fn ssh_exec(ruby: &Ruby, this: typed_data::Obj<Self>, command: String) -> Result<RHash, Error> {
+    fn ssh_exec(ruby: &Ruby, this: typed_data::Obj<Self>, args: &[Value]) -> Result<RHash, Error> {
+        let parsed = scan_args::<(String,), (), (), (), RHash, ()>(args)?;
+        reject_unknown_keywords(ruby, parsed.keywords, &["inactivity_timeout"])?;
+        let inactivity_timeout = keyword::<f64>(parsed.keywords, "inactivity_timeout")?
+            .map(|seconds| duration(ruby, seconds, "inactivity_timeout"))
+            .transpose()?;
+        let command = parsed.required.0;
         let sb = this.inner_clone()?;
         let output = run(ruby, async move {
-            let client = sb.ssh().connect().await?;
+            let client = sb
+                .ssh()
+                .connect_with(|builder| match inactivity_timeout {
+                    Some(timeout) => builder.inactivity_timeout(timeout),
+                    None => builder,
+                })
+                .await?;
             client.exec(command).await
         })?;
         let hash = current_ruby().hash_new();
@@ -1991,7 +2061,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     sandbox.define_method("touch", method!(RubySandbox::touch, 0))?;
     sandbox.define_method("metrics", method!(RubySandbox::metrics, 0))?;
     sandbox.define_method("logs", method!(RubySandbox::logs, -1))?;
-    sandbox.define_method("ssh_exec", method!(RubySandbox::ssh_exec, 1))?;
+    sandbox.define_method("ssh_exec", method!(RubySandbox::ssh_exec, -1))?;
     // filesystem
     sandbox.define_method("fs_read", method!(RubySandbox::fs_read, 1))?;
     sandbox.define_method("fs_write", method!(RubySandbox::fs_write, 2))?;
@@ -2073,6 +2143,8 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     builder.define_method("quiet_logs!", method!(RubySandboxBuilder::quiet_logs, 0))?;
     builder.define_method("entrypoint!", method!(RubySandboxBuilder::entrypoint, 1))?;
     builder.define_method("init!", method!(RubySandboxBuilder::init, 1))?;
+    builder.define_method("vsock!", method!(RubySandboxBuilder::vsock, 2))?;
+    builder.define_method("vsock_dgram!", method!(RubySandboxBuilder::vsock_dgram, 2))?;
     builder.define_method("create", method!(RubySandboxBuilder::create, 0))?;
 
     // -- ExecOutput ----------------------------------------------------------
@@ -2163,7 +2235,19 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
 
 #[cfg(test)]
 mod runtime_tests {
-    use super::{catch_callback, panic_message};
+    use std::{sync::Arc, thread};
+
+    use super::{BlockingState, catch_callback, panic_message};
+
+    #[test]
+    fn blocking_state_waits_for_completion() {
+        let state = Arc::new(BlockingState::new());
+        let completion = Arc::clone(&state);
+        let worker = thread::spawn(move || completion.complete(42));
+
+        assert_eq!(state.wait(), 42);
+        worker.join().unwrap();
+    }
 
     #[test]
     fn no_gvl_callback_panics_are_captured() {

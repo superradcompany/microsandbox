@@ -31,6 +31,9 @@ type SandboxConfig struct {
 	CPUs              uint8
 	MaxMemoryMiB      uint32
 	MaxCPUs           uint8
+	CPUPlacement      CPUPlacement
+	PlacementProfile  string
+	THP               THPPolicy
 	Workdir           string
 	Shell             string
 	SecurityProfile   SecurityProfile
@@ -49,6 +52,7 @@ type SandboxConfig struct {
 	Detached           bool
 	Ephemeral          bool
 	Entrypoint         []string
+	Cmd                []string
 	Init               *InitConfig
 	LogLevel           LogLevel
 	QuietLogs          bool
@@ -68,6 +72,7 @@ type SandboxConfig struct {
 	Ports               map[uint16]uint16 // host port → guest port (TCP)
 	PortsUDP            map[uint16]uint16 // host port → guest port (UDP)
 	PortBindings        []PortBinding     // explicit bind address host→guest ports
+	Vsock               []VsockRoute      // host local IPC → guest host-CID port
 	Network             *NetworkConfig
 	Secrets             []SecretEntry
 	Patches             []PatchConfig
@@ -76,6 +81,16 @@ type SandboxConfig struct {
 
 // SandboxOption is a functional option for configuring a sandbox.
 type SandboxOption func(*SandboxConfig)
+
+// CPUPlacement controls how sandbox vCPU threads are placed on host processors.
+type CPUPlacement string
+
+const (
+	CPUPlacementInherit CPUPlacement = "inherit"
+	CPUPlacementAuto    CPUPlacement = "auto"
+	CPUPlacementSpread  CPUPlacement = "spread"
+	CPUPlacementCompact CPUPlacement = "compact"
+)
 
 type persistedSandboxConfig struct {
 	Name              string               `json:"name"`
@@ -86,7 +101,10 @@ type persistedSandboxConfig struct {
 	CPUs              uint8                `json:"cpus"`
 	MaxMemoryMiB      uint32               `json:"max_memory_mib"`
 	MaxCPUs           uint8                `json:"max_cpus"`
+	CPUPlacement      CPUPlacement         `json:"cpu_placement"`
+	PlacementProfile  string               `json:"placement_profile"`
 	Resources         *persistedResources  `json:"resources"`
+	Runtime           *persistedRuntime    `json:"runtime"`
 	Workdir           string               `json:"workdir"`
 	Shell             string               `json:"shell"`
 	SecurityProfile   SecurityProfile      `json:"security_profile"`
@@ -98,6 +116,7 @@ type persistedSandboxConfig struct {
 	Detached          bool                 `json:"detached"`
 	Lifecycle         *persistedLifecycle  `json:"lifecycle"`
 	Entrypoint        []string             `json:"entrypoint"`
+	Cmd               []string             `json:"cmd"`
 	Init              *persistedInitConfig `json:"init"`
 	LogLevel          LogLevel             `json:"log_level"`
 	QuietLogs         bool                 `json:"quiet_logs"`
@@ -112,10 +131,24 @@ type persistedInitConfig struct {
 }
 
 type persistedResources struct {
-	CPUs         uint8  `json:"cpus"`
-	MemoryMiB    uint32 `json:"memory_mib"`
-	MaxCPUs      uint8  `json:"max_cpus"`
-	MaxMemoryMiB uint32 `json:"max_memory_mib"`
+	CPUs             uint8        `json:"cpus"`
+	MemoryMiB        uint32       `json:"memory_mib"`
+	MaxCPUs          uint8        `json:"max_cpus"`
+	MaxMemoryMiB     uint32       `json:"max_memory_mib"`
+	CPUPlacement     CPUPlacement `json:"cpu_placement"`
+	PlacementProfile string       `json:"placement_profile"`
+	THP              THPPolicy    `json:"thp"`
+}
+
+type persistedRuntime struct {
+	Workdir    string            `json:"workdir"`
+	Shell      string            `json:"shell"`
+	Scripts    map[string]string `json:"scripts"`
+	Entrypoint []string          `json:"entrypoint"`
+	Cmd        []string          `json:"cmd"`
+	Hostname   string            `json:"hostname"`
+	User       string            `json:"user"`
+	LogLevel   LogLevel          `json:"log_level"`
 }
 
 type persistedLifecycle struct {
@@ -154,6 +187,20 @@ func (c *SandboxConfig) UnmarshalJSON(data []byte) error {
 		upperSizeSet = true
 	}
 
+	runtime := persistedRuntime{
+		Workdir:    raw.Workdir,
+		Shell:      raw.Shell,
+		Scripts:    raw.Scripts,
+		Entrypoint: raw.Entrypoint,
+		Cmd:        raw.Cmd,
+		Hostname:   raw.Hostname,
+		User:       raw.User,
+		LogLevel:   raw.LogLevel,
+	}
+	if raw.Runtime != nil {
+		runtime = *raw.Runtime
+	}
+
 	*c = SandboxConfig{
 		Name:              raw.Name,
 		Image:             image,
@@ -165,21 +212,25 @@ func (c *SandboxConfig) UnmarshalJSON(data []byte) error {
 		CPUs:              raw.cpus(),
 		MaxMemoryMiB:      raw.maxMemoryMiB(),
 		MaxCPUs:           raw.maxCPUs(),
-		Workdir:           raw.Workdir,
-		Shell:             raw.Shell,
+		CPUPlacement:      raw.cpuPlacement(),
+		PlacementProfile:  raw.placementProfile(),
+		THP:               raw.thp(),
+		Workdir:           runtime.Workdir,
+		Shell:             runtime.Shell,
 		SecurityProfile:   raw.SecurityProfile,
 		DeploymentProfile: normalizeDeploymentProfile(raw.DeploymentProfile),
-		Hostname:          raw.Hostname,
-		User:              raw.User,
+		Hostname:          runtime.Hostname,
+		User:              runtime.User,
 		Replace:           raw.Replace,
 		Labels:            raw.Labels,
 		Detached:          raw.Detached,
 		Ephemeral:         raw.lifecycleEphemeral(),
-		Entrypoint:        raw.Entrypoint,
+		Entrypoint:        runtime.Entrypoint,
+		Cmd:               runtime.Cmd,
 		Init:              decodePersistedInit(raw.Init),
-		LogLevel:          raw.LogLevel,
+		LogLevel:          runtime.LogLevel,
 		QuietLogs:         raw.QuietLogs,
-		Scripts:           raw.Scripts,
+		Scripts:           runtime.Scripts,
 		PullPolicy:        raw.PullPolicy,
 		MaxDuration:       time.Duration(raw.lifecycleMaxDurationSecs()) * time.Second,
 		IdleTimeout:       time.Duration(raw.lifecycleIdleTimeoutSecs()) * time.Second,
@@ -225,6 +276,30 @@ func (c persistedSandboxConfig) maxMemoryMiB() uint32 {
 		return c.MaxMemoryMiB
 	}
 	return c.MemoryMiB
+}
+
+func (c persistedSandboxConfig) cpuPlacement() CPUPlacement {
+	if c.Resources != nil && c.Resources.CPUPlacement != "" {
+		return c.Resources.CPUPlacement
+	}
+	if c.CPUPlacement != "" {
+		return c.CPUPlacement
+	}
+	return CPUPlacementInherit
+}
+
+func (c persistedSandboxConfig) placementProfile() string {
+	if c.Resources != nil && c.Resources.PlacementProfile != "" {
+		return c.Resources.PlacementProfile
+	}
+	return c.PlacementProfile
+}
+
+func (c persistedSandboxConfig) thp() THPPolicy {
+	if c.Resources != nil && c.Resources.THP != "" {
+		return c.Resources.THP
+	}
+	return THPMadvise
 }
 
 func (c persistedSandboxConfig) lifecycleEphemeral() bool {
@@ -396,6 +471,18 @@ const (
 	DeploymentProfileSingleTenant DeploymentProfile = "single-tenant"
 	// DeploymentProfileMultiTenant enables platform-owned isolation floors.
 	DeploymentProfileMultiTenant DeploymentProfile = "multi-tenant"
+)
+
+// THPPolicy selects the guest transparent huge-page policy at boot.
+type THPPolicy string
+
+const (
+	// THPAlways transparently uses huge pages for eligible anonymous mappings.
+	THPAlways THPPolicy = "always"
+	// THPMadvise uses huge pages only for mappings that explicitly request them.
+	THPMadvise THPPolicy = "madvise"
+	// THPNever disables transparent huge pages for anonymous mappings.
+	THPNever THPPolicy = "never"
 )
 
 // WithImage sets the container image to use (e.g. "python:3.12").
@@ -596,6 +683,21 @@ func WithMaxCPUs(cpus uint8) SandboxOption {
 	return func(o *SandboxConfig) { o.MaxCPUs = cpus }
 }
 
+// WithCPUPlacement selects the host placement policy for sandbox vCPU threads.
+func WithCPUPlacement(policy CPUPlacement) SandboxOption {
+	return func(o *SandboxConfig) { o.CPUPlacement = policy }
+}
+
+// WithPlacementProfile selects a host-defined placement profile by name.
+func WithPlacementProfile(profile string) SandboxOption {
+	return func(o *SandboxConfig) { o.PlacementProfile = profile }
+}
+
+// WithTHP selects the guest transparent huge-page policy applied at boot.
+func WithTHP(policy THPPolicy) SandboxOption {
+	return func(o *SandboxConfig) { o.THP = policy }
+}
+
 // WithWorkdir sets the working directory inside the sandbox.
 func WithWorkdir(path string) SandboxOption {
 	return func(o *SandboxConfig) { o.Workdir = path }
@@ -697,11 +799,17 @@ func WithEphemeral(ephemeral bool) SandboxOption {
 	return func(o *SandboxConfig) { o.Ephemeral = ephemeral }
 }
 
-// WithEntrypoint overrides the user-workload entrypoint baked into the image.
-// Note this is the user workload (what the agent execs per request), not the
-// guest PID 1 — for that, use WithInit.
+// WithEntrypoint overrides the image ENTRYPOINT used by default-workload execution.
+// Literal Exec, Attach, and Shell calls ignore it. This is the user workload,
+// not guest PID 1 — for that, use WithInit.
 func WithEntrypoint(cmd ...string) SandboxOption {
-	return func(o *SandboxConfig) { o.Entrypoint = append([]string(nil), cmd...) }
+	return func(o *SandboxConfig) { o.Entrypoint = append([]string{}, cmd...) }
+}
+
+// WithCmd overrides the image CMD used by default-workload execution.
+// Calling WithCmd with no arguments explicitly clears the image CMD.
+func WithCmd(cmd ...string) SandboxOption {
+	return func(o *SandboxConfig) { o.Cmd = append([]string{}, cmd...) }
 }
 
 // WithInit hands off PID 1 to a guest init binary.
@@ -843,6 +951,29 @@ func WithPortBindings(bindings ...PortBinding) SandboxOption {
 	}
 }
 
+// VsockRoute exposes a host Unix socket or local Windows named pipe through
+// virtio-vsock host CID 2. SocketType defaults to stream when empty.
+type VsockRoute struct {
+	HostSocket string
+	Port       uint32
+	SocketType VsockSocketType
+}
+
+// VsockSocketType identifies the message semantics of a vsock route.
+type VsockSocketType string
+
+const (
+	VsockSocketTypeStream VsockSocketType = "stream"
+	VsockSocketTypeDgram  VsockSocketType = "dgram"
+)
+
+// WithVsock appends guest-to-host vsock routes backed by local host IPC.
+func WithVsock(routes ...VsockRoute) SandboxOption {
+	return func(o *SandboxConfig) {
+		o.Vsock = append(o.Vsock, routes...)
+	}
+}
+
 // WithNetwork sets the network configuration for the sandbox.
 func WithNetwork(net *NetworkConfig) SandboxOption {
 	return func(o *SandboxConfig) { o.Network = net }
@@ -956,6 +1087,10 @@ type NetworkConfig struct {
 	// MaxConnections caps concurrent network connections from the sandbox.
 	MaxConnections *uint
 
+	// RateLimiter configures local egress and ingress traffic limits. Nil means
+	// unlimited in both directions.
+	RateLimiter *NetworkRateLimiterConfig
+
 	// OnSecretViolation is the sandbox-wide action when a secret is sent to
 	// a disallowed host. Per-secret overrides via SecretEntry.OnViolation.
 	OnSecretViolation ViolationAction
@@ -972,6 +1107,37 @@ type DNSConfig struct {
 	Nameservers []string
 	// QueryTimeoutMs caps DNS query latency.
 	QueryTimeoutMs *uint64
+}
+
+// RateLimiterConfig limits one traffic direction. A nil bucket leaves that
+// dimension unlimited.
+type RateLimiterConfig struct {
+	// Bandwidth caps throughput in bytes.
+	Bandwidth *TokenBucketConfig
+	// Ops caps packet rate in frames.
+	Ops *TokenBucketConfig
+}
+
+// NetworkRateLimiterConfig groups local network limits by traffic direction.
+type NetworkRateLimiterConfig struct {
+	// Egress throttles guest-to-runtime traffic. Nil means unlimited.
+	Egress *RateLimiterConfig
+	// Ingress throttles runtime-to-guest traffic. Nil means unlimited.
+	Ingress *RateLimiterConfig
+}
+
+// TokenBucketConfig describes a token bucket. The bucket starts full and
+// refills continuously: Size tokens every RefillTime.
+type TokenBucketConfig struct {
+	// Size is the bucket capacity in tokens: bytes for bandwidth buckets,
+	// frames for ops buckets.
+	Size uint64
+	// RefillTime is the time it takes to refill Size tokens. It must be at
+	// least one millisecond and a whole number of milliseconds.
+	RefillTime time.Duration
+	// OneTimeBurst grants extra tokens available at startup; the burst
+	// never refills. Optional.
+	OneTimeBurst uint64
 }
 
 // PolicyRule is a single firewall rule.

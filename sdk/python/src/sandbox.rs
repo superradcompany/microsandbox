@@ -420,6 +420,78 @@ impl PySandbox {
     // Execution
     //----------------------------------------------------------------------------------------------
 
+    /// Execute the sandbox's effective OCI entrypoint and CMD.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (
+        *,
+        cwd = None,
+        user = None,
+        env = None,
+        timeout = None,
+        stdin = None,
+        tty = false,
+        rlimits = None,
+    ))]
+    fn exec_default<'py>(
+        &self,
+        py: Python<'py>,
+        cwd: Option<String>,
+        user: Option<String>,
+        env: Option<HashMap<String, String>>,
+        timeout: Option<f64>,
+        stdin: Option<&Bound<'py, PyAny>>,
+        tty: bool,
+        rlimits: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let opts = parse_shell_call(cwd, user, env, timeout, stdin, tty, rlimits)?;
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            let output = sandbox
+                .exec_default_with(|e| apply_exec_options(e, Vec::new(), opts))
+                .await
+                .map_err(to_py_err)?;
+            Ok(PyExecOutput::from_rust(output))
+        })
+    }
+
+    /// Execute the sandbox's effective OCI entrypoint and CMD with streaming I/O.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (
+        *,
+        cwd = None,
+        user = None,
+        env = None,
+        timeout = None,
+        stdin = None,
+        tty = false,
+        rlimits = None,
+    ))]
+    fn exec_default_stream<'py>(
+        &self,
+        py: Python<'py>,
+        cwd: Option<String>,
+        user: Option<String>,
+        env: Option<HashMap<String, String>>,
+        timeout: Option<f64>,
+        stdin: Option<&Bound<'py, PyAny>>,
+        tty: bool,
+        rlimits: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let opts = parse_shell_call(cwd, user, env, timeout, stdin, tty, rlimits)?;
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            let handle = sandbox
+                .exec_default_stream_with(|e| apply_exec_options(e, Vec::new(), opts))
+                .await
+                .map_err(to_py_err)?;
+            Ok(PyExecHandle::from_rust(handle))
+        })
+    }
+
     /// Execute a command and wait for completion.
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (
@@ -588,6 +660,35 @@ impl PySandbox {
     //----------------------------------------------------------------------------------------------
     // Attach
     //----------------------------------------------------------------------------------------------
+
+    /// Attach to the sandbox's effective OCI entrypoint and CMD.
+    #[pyo3(signature = (
+        *,
+        cwd = None,
+        user = None,
+        env = None,
+        detach_keys = None,
+    ))]
+    fn attach_default<'py>(
+        &self,
+        py: Python<'py>,
+        cwd: Option<String>,
+        user: Option<String>,
+        env: Option<HashMap<String, String>>,
+        detach_keys: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let (args, opts) = parse_attach_call(None, cwd, user, env, detach_keys)?;
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            let exit_code = sandbox
+                .attach_default_with(|a| apply_attach_options(a, args, opts))
+                .await
+                .map_err(to_py_err)?;
+            Ok(exit_code)
+        })
+    }
 
     /// Attach to the sandbox with an interactive terminal session.
     /// Note: attach requires a real terminal (PTY) and blocks the calling thread.

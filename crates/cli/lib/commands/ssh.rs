@@ -2,10 +2,14 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::Context;
 use clap::{ArgGroup, Args, Subcommand};
-use microsandbox::sandbox::{DEFAULT_SSH_HOST, DEFAULT_SSH_PORT, SshStdioStream};
+use microsandbox::sandbox::{
+    DEFAULT_SSH_HOST, DEFAULT_SSH_PORT, SshClientOptionsBuilder, SshServerOptionsBuilder,
+    SshStdioStream,
+};
 use russh::keys::PublicKeyBase64;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
@@ -30,6 +34,10 @@ pub struct SshArgs {
     /// Remote command to run inside the sandbox (after --).
     #[arg(last = true)]
     pub remote_command: Vec<String>,
+
+    /// SSH inactivity timeout options.
+    #[command(flatten)]
+    pub inactivity: SshInactivityTimeoutArgs,
 
     /// SSH subcommand.
     #[command(subcommand)]
@@ -62,6 +70,10 @@ pub struct SshConnectArgs {
     /// Remote command to run inside the sandbox (after --).
     #[arg(last = true)]
     pub remote_command: Vec<String>,
+
+    /// SSH inactivity timeout options.
+    #[command(flatten)]
+    pub inactivity: SshInactivityTimeoutArgs,
 }
 
 /// Arguments for `msb ssh serve`.
@@ -81,6 +93,26 @@ pub struct SshServeArgs {
     /// Serve one SSH transport over stdin/stdout.
     #[arg(long)]
     pub stdio: bool,
+
+    /// SSH inactivity timeout options.
+    #[command(flatten)]
+    pub inactivity: SshInactivityTimeoutArgs,
+}
+
+/// Arguments controlling SSH session inactivity timeouts.
+#[derive(Debug, Args)]
+pub struct SshInactivityTimeoutArgs {
+    /// Disconnect after this duration without SSH traffic. Use 0 to disable.
+    #[arg(
+        long,
+        value_name = "DURATION",
+        conflicts_with = "no_inactivity_timeout"
+    )]
+    pub inactivity_timeout: Option<String>,
+
+    /// Disable the SSH session inactivity timeout.
+    #[arg(long)]
+    pub no_inactivity_timeout: bool,
 }
 
 /// Arguments for `msb ssh authorize`.
@@ -119,6 +151,7 @@ pub async fn run(args: SshArgs) -> anyhow::Result<()> {
 }
 
 async fn run_connect(args: SshArgs) -> anyhow::Result<()> {
+    let inactivity_timeout = parse_inactivity_timeout(&args.inactivity)?;
     let mut remote_command = args.remote_command;
     let sandbox = match (args.name.as_ref(), args.sandbox) {
         (None, None)
@@ -131,18 +164,28 @@ async fn run_connect(args: SshArgs) -> anyhow::Result<()> {
         (_, sandbox) => sandbox,
     };
     let name = resolve_sandbox_name(args.name, sandbox)?;
-    connect_to_sandbox(name, remote_command).await
+    connect_to_sandbox(name, remote_command, inactivity_timeout).await
 }
 
 async fn run_connect_args(args: SshConnectArgs) -> anyhow::Result<()> {
+    let inactivity_timeout = parse_inactivity_timeout(&args.inactivity)?;
     let name = resolve_sandbox_name(args.name, args.sandbox)?;
-    connect_to_sandbox(name, args.remote_command).await
+    connect_to_sandbox(name, args.remote_command, inactivity_timeout).await
 }
 
-async fn connect_to_sandbox(name: String, remote_command: Vec<String>) -> anyhow::Result<()> {
+async fn connect_to_sandbox(
+    name: String,
+    remote_command: Vec<String>,
+    inactivity_timeout: Option<Option<Duration>>,
+) -> anyhow::Result<()> {
     let sandbox = super::resolve_and_start(&name, false).await?;
     let result = async {
-        let ssh = sandbox.ssh().open_client().await?;
+        let ssh = sandbox
+            .ssh()
+            .open_client_with(|builder| {
+                apply_client_inactivity_timeout(builder, inactivity_timeout)
+            })
+            .await?;
         if remote_command.is_empty() {
             ssh.attach().await
         } else {
@@ -167,12 +210,18 @@ async fn connect_to_sandbox(name: String, remote_command: Vec<String>) -> anyhow
 }
 
 async fn run_serve(args: SshServeArgs) -> anyhow::Result<()> {
+    let inactivity_timeout = parse_inactivity_timeout(&args.inactivity)?;
     let sandbox = super::resolve_and_start(&args.sandbox, args.stdio).await?;
     let host = args.host.unwrap_or_else(|| DEFAULT_SSH_HOST.to_string());
     let port = args.port.unwrap_or(DEFAULT_SSH_PORT);
 
     let result = async {
-        let server = sandbox.ssh().prepare_server().await?;
+        let server = sandbox
+            .ssh()
+            .prepare_server_with(|builder| {
+                apply_server_inactivity_timeout(builder, inactivity_timeout)
+            })
+            .await?;
         if args.stdio {
             server.serve_connection(SshStdioStream::new()).await
         } else {
@@ -249,6 +298,42 @@ fn is_reserved_name(value: &str) -> bool {
     matches!(value, "serve" | "authorize" | "help")
 }
 
+fn parse_inactivity_timeout(
+    args: &SshInactivityTimeoutArgs,
+) -> anyhow::Result<Option<Option<Duration>>> {
+    if args.no_inactivity_timeout {
+        return Ok(Some(None));
+    }
+    let Some(value) = &args.inactivity_timeout else {
+        return Ok(None);
+    };
+    let timeout = super::common::parse_duration(value)
+        .map_err(|error| anyhow::anyhow!("--inactivity-timeout: {error}"))?;
+    Ok(Some((!timeout.is_zero()).then_some(timeout)))
+}
+
+fn apply_client_inactivity_timeout(
+    builder: SshClientOptionsBuilder,
+    timeout: Option<Option<Duration>>,
+) -> SshClientOptionsBuilder {
+    match timeout {
+        Some(Some(timeout)) => builder.inactivity_timeout(timeout),
+        Some(None) => builder.disable_inactivity_timeout(),
+        None => builder,
+    }
+}
+
+fn apply_server_inactivity_timeout(
+    builder: SshServerOptionsBuilder,
+    timeout: Option<Option<Duration>>,
+) -> SshServerOptionsBuilder {
+    match timeout {
+        Some(Some(timeout)) => builder.inactivity_timeout(timeout),
+        Some(None) => builder.disable_inactivity_timeout(),
+        None => builder,
+    }
+}
+
 fn read_public_key_source(args: SshAuthorizeArgs) -> anyhow::Result<String> {
     if let Some(path) = args.file {
         return std::fs::read_to_string(&path)
@@ -306,4 +391,50 @@ fn set_private_file_permissions(_path: &Path) -> anyhow::Result<()> {
         std::fs::set_permissions(_path, std::fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(timeout: Option<&str>, disabled: bool) -> SshInactivityTimeoutArgs {
+        SshInactivityTimeoutArgs {
+            inactivity_timeout: timeout.map(str::to_string),
+            no_inactivity_timeout: disabled,
+        }
+    }
+
+    #[test]
+    fn inactivity_timeout_inherits_when_unspecified() {
+        assert_eq!(parse_inactivity_timeout(&args(None, false)).unwrap(), None);
+    }
+
+    #[test]
+    fn inactivity_timeout_parses_duration() {
+        assert_eq!(
+            parse_inactivity_timeout(&args(Some("30m"), false)).unwrap(),
+            Some(Some(Duration::from_secs(1800)))
+        );
+    }
+
+    #[test]
+    fn inactivity_timeout_zero_and_disable_flag_turn_it_off() {
+        assert_eq!(
+            parse_inactivity_timeout(&args(Some("0"), false)).unwrap(),
+            Some(None)
+        );
+        assert_eq!(
+            parse_inactivity_timeout(&args(None, true)).unwrap(),
+            Some(None)
+        );
+    }
+
+    #[test]
+    fn inactivity_timeout_rejects_invalid_duration() {
+        assert!(parse_inactivity_timeout(&args(Some("later"), false)).is_err());
+    }
 }

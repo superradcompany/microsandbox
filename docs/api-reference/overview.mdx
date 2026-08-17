@@ -1,0 +1,60 @@
+---
+title: "Overview"
+description: "The REST API behind the SDKs and CLI"
+icon: "book-open"
+---
+
+<Note>
+  microsandbox cloud is in [private beta](/cloud/overview); the API is available to organizations with access.
+</Note>
+
+The microsandbox cloud REST API manages sandboxes, volumes, quotas, usage, and audit events for your organization. It is the control-plane API behind the SDKs and CLI. Reach for it directly from environments without an SDK, or for automation around usage and auditing.
+
+For running code in sandboxes (exec, streaming, PTY, file transfer, SSH), use the [SDKs](/sdk/overview) or [CLI](/cli/overview). They speak the sandbox command channel, which is not part of this REST surface.
+
+## Base URL
+
+```text
+https://api.microsandbox.dev
+```
+
+## Authentication
+
+Authenticate every request with an organization API key (`msb_...`) as a bearer token. Keys are created in the [dashboard](https://dashboard.microsandbox.dev/access/api-keys). The key identifies your organization; no org identifier appears in these paths.
+
+```bash
+curl https://api.microsandbox.dev/v1/sandboxes \
+  -H "Authorization: Bearer $MSB_API_KEY"
+```
+
+## Errors
+
+Errors return an `error` object with a stable machine-readable `code`, a human-readable `message`, and optional structured `details`:
+
+```json
+{
+  "error": {
+    "code": "invalid_api_key",
+    "message": "unauthorized",
+    "details": null
+  }
+}
+```
+
+## Pagination
+
+List endpoints use cursor pagination. Pass `limit` to size the page and `cursor` to continue from a previous response:
+
+```json
+{
+  "data": [ ... ],
+  "has_more": true,
+  "next_cursor": "eyJv..."
+}
+```
+
+Request the next page with `?cursor=<next_cursor>`; `has_more: false` means you have everything.
+
+## Usage and billing
+
+The usage endpoints report metered consumption for the current period. Reported cost figures are estimates; the [dashboard](https://dashboard.microsandbox.dev/billing) is the source of truth for billing.

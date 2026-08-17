@@ -3,28 +3,9 @@ title: Filesystem
 description: Rust SDK - Filesystem API reference
 ---
 
-Read, write, list, and manipulate files inside a running sandbox. Obtained via [`sb.fs()`](/sdk/rust/sandbox#sb-fs). Every op dispatches through the same host-guest channel as command execution, so there is no SSH and no network involved. Path-style helpers are the usual choice; handle-style helpers are available for callers that need POSIX-like file descriptor reuse. For bulk file movement, prefer a [volume](/sdk/rust/volumes) that gives the guest direct filesystem access. See [Filesystem](/sandboxes/filesystem) for conceptual usage.
+Read and write files inside a running sandbox. See [Filesystem](/sandboxes/filesystem) for usage examples.
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```rust
-use microsandbox::Sandbox;
-
-let sb = Sandbox::builder("api").image("python").create().await?;
-let fs = sb.fs();
-
-fs.write("/tmp/config.json", r#"{"debug": true}"#).await?;
-let text = fs.read_to_string("/tmp/config.json").await?;
-println!("{text}");
-
-for entry in fs.list("/tmp").await? {
-    println!("{} ({} bytes)", entry.path, entry.size);
-}
-```
-
-`sb.fs()` is synchronous and just borrows the sandbox's backend and name; the work happens on the `await`ed methods below, every one of which is `async`.
-
-## Read operations
+## SandboxFsOps
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read()</span>
 
@@ -135,7 +116,7 @@ Open a streaming reader that yields chunks of file data as they arrive. Use this
   </div>
 </div>
 
-## Write operations
+<p className="msb-member-group">Write operations</p>
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">write()</span>
 
@@ -203,7 +184,9 @@ Open a streaming writer for large files. Write chunks incrementally, then call [
   </div>
 </div>
 
-## Handle operations
+<p className="msb-member-group">Handle operations</p>
+
+<Tooltip tip="Open-handle filesystem operations require a live local relay client. Use the path-based methods on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Handle operations expose agentd-side file and directory handles. Use them when you need repeated reads/writes against the same open file, directory iteration state, or handle-based metadata updates. They require `Sandbox::fs()` on a live local sandbox because agentd scopes handles to the relay client; `SandboxFsOps::with_backend()` can run path-style methods but returns `Unsupported` for handle methods.
 
@@ -331,7 +314,7 @@ async fn fset_stat(&self, handle: FsHandle, attrs: FsSetAttrs) -> MicrosandboxRe
 
 Unix-style compatibility alias for [`set_stat_handle()`](#fs-set_stat_handle).
 
-## Directory operations
+<p className="msb-member-group">Directory operations</p>
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">list()</span>
 
@@ -444,7 +427,7 @@ Remove an empty directory. Unlike [`remove_dir()`](#fs-remove_dir), this does no
   </div>
 </div>
 
-## File operations
+<p className="msb-member-group">File operations</p>
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">remove()</span>
 
@@ -529,7 +512,7 @@ Rename or move a file or directory within the sandbox.
   </div>
 </div>
 
-## Metadata
+<p className="msb-member-group">Metadata</p>
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">stat()</span>
 
@@ -581,7 +564,7 @@ println!("{:?}", link_meta.kind);
 
 </Accordion>
 
-Get metadata, choosing whether to follow a final symlink. With `follow_symlink = false` you stat the link itself rather than its target. Local backend only; cloud returns `Unsupported`.
+Get metadata, choosing whether to follow a final symlink. With `follow_symlink = false` you stat the link itself rather than its target.
 
 <p className="msb-label">Parameters</p>
 
@@ -624,7 +607,7 @@ sb.fs().set_stat("/app/run.sh", true, FsSetAttrs {
 
 </Accordion>
 
-Update metadata on a file or directory: mode, owner uid/gid, size, and access/modification times. Only the fields you set on [`FsSetAttrs`](#fssetattrs) are applied. Local backend only; cloud returns `Unsupported`.
+Update metadata on a file or directory: mode, owner uid/gid, size, and access/modification times. Only the fields you set on [`FsSetAttrs`](#fssetattrs) are applied.
 
 <p className="msb-label">Parameters</p>
 
@@ -658,7 +641,7 @@ println!("-> {target}");
 
 </Accordion>
 
-Read the target of a symbolic link, returning the literal target text. Local backend only; cloud returns `Unsupported`.
+Read the target of a symbolic link, returning the literal target text.
 
 <p className="msb-label">Parameters</p>
 
@@ -692,7 +675,7 @@ sb.fs().symlink("/app/releases/v2", "/app/current").await?;
 
 </Accordion>
 
-Create a symbolic link at `link_path` that points to `target`. Local backend only; cloud returns `Unsupported`.
+Create a symbolic link at `link_path` that points to `target`.
 
 <p className="msb-label">Parameters</p>
 
@@ -778,7 +761,7 @@ Check whether a file or directory exists at the given path in the guest. Impleme
   </div>
 </div>
 
-## Host transfer
+<p className="msb-member-group">Host transfer</p>
 
 #### <span className="msb-recv">fs.</span><span className="msb-hn">copy_from_host()</span>
 
@@ -838,15 +821,55 @@ Copy a file from the sandbox to the host machine.
   </div>
 </div>
 
+## FsReadStream
+
+
+<p className="msb-backref">Returned by <a href="#fs-read_stream">read_stream()</a> · <a href="#fs-read_handle_stream">read_handle_stream()</a></p>
+
+Streaming reader for file data from the sandbox. Obtained via [`read_stream()`](#fs-read_stream) or [`read_handle_stream()`](#fs-read_handle_stream).
+
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">recv()</span>
+
+```rust
+recv()
+```
+
+Receive the next chunk; `None` once the file is fully read. Errors if the guest reports a failure.
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">collect()</span>
+
+```rust
+collect()
+```
+
+Consume the stream and collect all remaining chunks into a single buffer.
+
+## FsWriteSink
+
+
+<p className="msb-backref">Returned by <a href="#fs-write_stream">write_stream()</a> · <a href="#fs-write_handle_stream">write_handle_stream()</a></p>
+
+Streaming writer for file data to the sandbox. Obtained via [`write_stream()`](#fs-write_stream) or [`write_handle_stream()`](#fs-write_handle_stream).
+
+
+#### <span className="msb-recv">sink.</span><span className="msb-hn">write()</span>
+
+```rust
+write()
+```
+
+Write a chunk of data.
+
+#### <span className="msb-recv">sink.</span><span className="msb-hn">close()</span>
+
+```rust
+close()
+```
+
+Send EOF and wait for confirmation. Must be called to finalize the write; errors if the guest reports a write failure.
+
 ## Types
-
-### SandboxFsOps
-
-<p className="msb-backref">Returned by <a href="/sdk/rust/sandbox#sb-fs">sb.fs()</a></p>
-
-Filesystem operations handle for a running sandbox, borrowing the parent sandbox's backend and name (it is generic over a lifetime, `SandboxFsOps<'a>`). Every method dispatches through the same host-guest channel as command execution. Local routes to `core.fs.*` agent messages; cloud returns `Unsupported` per method until cloud guest-fs lands. All operations are listed in the sections above.
-
-`with_backend(backend, name)` is a public constructor for FFI shims that re-assemble a `SandboxFsOps` per call; most callers obtain one via [`sb.fs()`](/sdk/rust/sandbox#sb-fs).
 
 ### FsEntry
 
@@ -926,28 +949,6 @@ Attributes accepted by `set_stat()`. Re-exported from `microsandbox_protocol::fs
 | size | `Option<u64>` | File size (truncate or extend) |
 | atime | `Option<i64>` | Access time as Unix timestamp seconds |
 | mtime | `Option<i64>` | Modification time as Unix timestamp seconds |
-
-### FsReadStream
-
-<p className="msb-backref">Returned by <a href="#fs-read_stream">read_stream()</a> · <a href="#fs-read_handle_stream">read_handle_stream()</a></p>
-
-Streaming reader for file data from the sandbox. Obtained via [`read_stream()`](#fs-read_stream) or [`read_handle_stream()`](#fs-read_handle_stream).
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| recv() | `recv(&mut self) -> MicrosandboxResult<Option<Bytes>>` | Receive the next chunk; `None` once the file is fully read. Errors if the guest reports a failure. |
-| collect() | `collect(self) -> MicrosandboxResult<Bytes>` | Consume the stream and collect all remaining chunks into a single buffer. |
-
-### FsWriteSink
-
-<p className="msb-backref">Returned by <a href="#fs-write_stream">write_stream()</a> · <a href="#fs-write_handle_stream">write_handle_stream()</a></p>
-
-Streaming writer for file data to the sandbox. Obtained via [`write_stream()`](#fs-write_stream) or [`write_handle_stream()`](#fs-write_handle_stream).
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| write() | `write(&self, data: impl AsRef<[u8]>) -> MicrosandboxResult<()>` | Write a chunk of data. |
-| close() | `close(self) -> MicrosandboxResult<()>` | Send EOF and wait for confirmation. Must be called to finalize the write; errors if the guest reports a write failure. |
 
 ### FsHandle
 

@@ -42,6 +42,7 @@ from microsandbox.types import (
     ViolationAction,
     ViolationPolicy,
     VolumeKind,
+    VsockRoute,
 )
 
 class PyAgentClient:
@@ -100,6 +101,7 @@ class Sandbox:
         hostname: str | None = None,
         user: str | None = None,
         entrypoint: Sequence[str] | None = None,
+        cmd: Sequence[str] | None = None,
         init: str | InitConfig | InitOptions | None = None,
         replace: bool = False,
         replace_with_timeout: float | None = None,
@@ -117,6 +119,7 @@ class Sandbox:
         volumes: Mapping[str, MountConfig] | None = None,
         patches: Sequence[PatchConfig] | None = None,
         ports: Mapping[int, int] | Sequence[PortBinding] | None = None,
+        vsock: Mapping[str, int] | Sequence[VsockRoute] | None = None,
         network: Network | None = None,
         secrets: Sequence[SecretEntry] | None = None,
         on_secret_violation: ViolationAction | ViolationPolicy | None = None,
@@ -153,6 +156,7 @@ class Sandbox:
         hostname: str | None = None,
         user: str | None = None,
         entrypoint: Sequence[str] | None = None,
+        cmd: Sequence[str] | None = None,
         init: str | InitConfig | InitOptions | None = None,
         replace: bool = False,
         replace_with_timeout: float | None = None,
@@ -170,6 +174,7 @@ class Sandbox:
         volumes: Mapping[str, MountConfig] | None = None,
         patches: Sequence[PatchConfig] | None = None,
         ports: Mapping[int, int] | Sequence[PortBinding] | None = None,
+        vsock: Mapping[str, int] | Sequence[VsockRoute] | None = None,
         network: Network | None = None,
         secrets: Sequence[SecretEntry] | None = None,
         on_secret_violation: ViolationAction | ViolationPolicy | None = None,
@@ -180,6 +185,28 @@ class Sandbox:
     def owns_lifecycle(self) -> Awaitable[bool]: ...
     @property
     def fs(self) -> SandboxFsOps: ...
+    async def exec_default(
+        self,
+        *,
+        cwd: str | None = None,
+        user: str | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        stdin: Stdin | bytes | None = None,
+        tty: bool = False,
+        rlimits: list[Rlimit] | None = None,
+    ) -> ExecOutput: ...
+    async def exec_default_stream(
+        self,
+        *,
+        cwd: str | None = None,
+        user: str | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        stdin: Stdin | bytes | None = None,
+        tty: bool = False,
+        rlimits: list[Rlimit] | None = None,
+    ) -> ExecHandle: ...
     async def exec(
         self,
         cmd: str,
@@ -231,6 +258,14 @@ class Sandbox:
         rlimits: list[Rlimit] | None = None,
     ) -> ExecHandle: ...
     def ssh(self) -> SandboxSshOps: ...
+    async def attach_default(
+        self,
+        *,
+        cwd: str | None = None,
+        user: str | None = None,
+        env: Mapping[str, str] | None = None,
+        detach_keys: str | None = None,
+    ) -> int: ...
     async def attach(
         self,
         cmd: str,
@@ -426,6 +461,7 @@ class SandboxSshOps:
         user: str = "root",
         term: str | None = None,
         sftp: bool = True,
+        inactivity_timeout: float | None = None,
     ) -> SshClient: ...
     async def prepare_server(
         self,
@@ -434,6 +470,7 @@ class SandboxSshOps:
         authorized_keys_path: str | os.PathLike[str] | None = None,
         user: str | None = None,
         sftp: bool = True,
+        inactivity_timeout: float | None = None,
     ) -> SshServer: ...
 
 class SshOutput:

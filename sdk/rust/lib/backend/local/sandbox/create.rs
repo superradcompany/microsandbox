@@ -92,14 +92,14 @@ impl LocalBackend {
         );
 
         self.apply_deployment_profile(&mut config);
-        config.apply_rootfs_defaults(self.config().sandbox_defaults.oci.upper_size_mib);
+        config.apply_rootfs_defaults(&self.config().sandbox_defaults.oci)?;
 
         let mut pinned_manifest_digest: Option<String> = None;
         let mut pinned_reference: Option<String> = None;
 
         config.apply_runtime_defaults();
-        self.validate_sandbox_name_for_runtime(&config.spec.name)?;
         validate_hostname(config.spec.runtime.hostname.as_deref())?;
+        self.validate_sandbox_name_for_runtime(&config.spec.name)?;
         Self::validate_rootfs_source(&config.spec.image)?;
         validate_env(&config.spec.env)?;
         validate_labels(&config.spec.labels)?;
@@ -112,7 +112,7 @@ impl LocalBackend {
         // fail fast on conflicting persisted sandbox state.
         let db = self.db().await?;
         let sandbox_dir = self.sandboxes_dir().join(&config.spec.name);
-        Self::prepare_create_target(db, &config, &sandbox_dir).await?;
+        Self::prepare_create_target(db, &config, &sandbox_dir, &self.config().run_dir()).await?;
 
         // Resolve OCI images before spawning the sandbox process.
         if let RootfsSource::Oci(oci) = config.spec.image.clone() {
@@ -373,7 +373,7 @@ impl LocalBackend {
         // Spawn the sandbox process and create the bridge. On failure, mark the sandbox
         // as stopped so it doesn't appear as a phantom "Running" entry.
         let (local_state, returned_config) = match self
-            .create_sandbox_inner(config, sandbox_id, mode)
+            .create_sandbox_inner(config, sandbox_id, mode, None)
             .await
         {
             Ok(pair) => pair,
@@ -471,8 +471,10 @@ impl LocalBackend {
         config: SandboxConfig,
         sandbox_id: i32,
         mode: SpawnMode,
+        lifecycle_guard: Option<microsandbox_runtime::ipc::SandboxLifecycleGuard>,
     ) -> MicrosandboxResult<(crate::backend::SandboxLocalState, SandboxConfig)> {
-        let (mut handle, agent_sock_path) = spawn_sandbox(self, &config, sandbox_id, mode).await?;
+        let (mut handle, agent_sock_path) =
+            spawn_sandbox(self, &config, sandbox_id, mode, lifecycle_guard).await?;
         let log_dir = self.sandboxes_dir().join(&config.spec.name).join("logs");
 
         // Wait for the relay socket to become available.
@@ -917,6 +919,7 @@ impl LocalBackend {
         pools: &DbPools,
         config: &SandboxConfig,
         sandbox_dir: &Path,
+        run_dir: &Path,
     ) -> MicrosandboxResult<()> {
         let existing = sandbox_entity::Entity::find()
             .filter(sandbox_entity::Column::Name.eq(&config.spec.name))
@@ -936,7 +939,18 @@ impl LocalBackend {
         }
 
         if let Some(model) = existing {
-            let model = Self::reconcile_sandbox_runtime_state(pools, model).await?;
+            let sandboxes_dir = sandbox_dir.parent().ok_or_else(|| {
+                crate::MicrosandboxError::InvalidConfig(format!(
+                    "sandbox directory has no storage root: {}",
+                    sandbox_dir.display()
+                ))
+            })?;
+            let model = Self::reconcile_sandbox_runtime_state_with_paths(
+                pools,
+                model,
+                Some((run_dir, sandboxes_dir)),
+            )
+            .await?;
             let active = matches!(
                 model.status,
                 SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
@@ -946,11 +960,45 @@ impl LocalBackend {
                     .await?;
             }
 
+            let _guard = crate::runtime::acquire_sandbox_lifecycle_guard(
+                run_dir,
+                &config.spec.name,
+                std::time::Duration::from_secs(5),
+            )
+            .await?;
+            if Self::load_latest_run(pools.read(), model.id)
+                .await?
+                .and_then(|run| run.pid)
+                .is_some_and(Self::pid_is_alive)
+            {
+                return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
+                    "cannot replace sandbox {:?}: its recorded runtime process is still alive",
+                    config.spec.name
+                )));
+            }
+
+            microsandbox_runtime::ipc::remove_sandbox_socket_artifacts(run_dir, &config.spec.name)?;
+            remove_dir_if_exists(sandbox_dir)?;
+
             sandbox_entity::Entity::delete_by_id(model.id)
                 .exec(pools.write())
                 .await?;
+            return Ok(());
         }
 
+        let _guard = crate::runtime::acquire_sandbox_lifecycle_guard(
+            run_dir,
+            &config.spec.name,
+            std::time::Duration::from_secs(5),
+        )
+        .await?;
+        if sandbox_runtime_endpoint_is_live(run_dir, sandbox_dir, &config.spec.name)? {
+            return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
+                "cannot replace sandbox {:?}: an untracked runtime endpoint is still live",
+                config.spec.name
+            )));
+        }
+        microsandbox_runtime::ipc::remove_sandbox_socket_artifacts(run_dir, &config.spec.name)?;
         remove_dir_if_exists(sandbox_dir)?;
         Ok(())
     }
@@ -988,16 +1036,21 @@ impl LocalBackend {
                 Self::wait_for_pids_to_exit(&pids, grace).await;
             }
 
-            // SIGKILL anything still alive. We don't wait or verify after
-            // SIGKILL: it's uncatchable, so termination is bounded by kernel
-            // time, and the only state that would have us spin is the
-            // zombie window between exit and the parent's `waitpid`. That
-            // window is harmless: prepare_create_target wipes the DB row
-            // and the sandbox dir, the new spawn gets a fresh PID, and the
-            // zombie reaps on its own (tokio's SIGCHLD driver when we own
-            // it, or the foreign parent's wait machinery otherwise).
+            // SIGKILL anything still alive, then prove every recorded owner
+            // exited before deterministic sockets or storage can be reused.
             for pid in pids.iter().copied().filter(|p| Self::pid_is_alive(*p)) {
-                let _ = Self::kill_pid(pid);
+                if let Err(error) = Self::kill_pid(pid)
+                    && Self::pid_is_alive(pid)
+                {
+                    return Err(error);
+                }
+            }
+            Self::wait_for_pids_to_exit(&pids, std::time::Duration::from_secs(5)).await;
+            if pids.iter().any(|pid| !Self::pid_has_exited(*pid)) {
+                return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
+                    "cannot replace sandbox {:?}: runtime did not exit after SIGKILL",
+                    sandbox.name
+                )));
             }
         }
 
@@ -1055,7 +1108,7 @@ impl LocalBackend {
         let poll_interval = std::time::Duration::from_millis(50);
 
         loop {
-            if pids.iter().all(|pid| !Self::pid_is_alive(*pid)) {
+            if pids.iter().all(|pid| Self::pid_has_exited(*pid)) {
                 return;
             }
 
@@ -1220,6 +1273,55 @@ impl LocalBackend {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+/// Probe every backward-compatible Unix endpoint before recovering an
+/// untracked namespace. A successful connection is direct evidence that an
+/// older runtime (which predates lifecycle locks) still owns the name.
+#[cfg(unix)]
+fn sandbox_runtime_endpoint_is_live(
+    run_dir: &Path,
+    sandbox_dir: &Path,
+    name: &str,
+) -> std::io::Result<bool> {
+    let paths = microsandbox_runtime::ipc::sandbox_socket_paths(run_dir, name);
+    let fallback_agent = sandbox_dir.join("runtime").join("agent.sock");
+    let fallback_control = microsandbox_runtime::ipc::control_socket_path_for(&fallback_agent);
+    for path in [
+        paths.agent,
+        paths.control,
+        paths.legacy_agent,
+        paths.legacy_control,
+        fallback_agent,
+        fallback_control,
+    ] {
+        if std::fs::symlink_metadata(&path).is_err() {
+            continue;
+        }
+        match std::os::unix::net::UnixStream::connect(&path) {
+            Ok(_) => return Ok(true),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                ) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(not(unix))]
+fn sandbox_runtime_endpoint_is_live(
+    _run_dir: &Path,
+    _sandbox_dir: &Path,
+    _name: &str,
+) -> std::io::Result<bool> {
+    Ok(false)
+}
+
+//--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
 
@@ -1237,10 +1339,12 @@ mod tests {
     use microsandbox_db::entity::{run as run_entity, sandbox_rootfs as sandbox_rootfs_entity};
     use microsandbox_db::pool::DbPools;
     use microsandbox_migration::{Migrator, MigratorTrait};
-    use sea_orm::{EntityTrait, Set};
+    use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set};
     use tempfile::tempdir;
 
-    use super::sandbox_entity;
+    #[cfg(unix)]
+    use super::sandbox_runtime_endpoint_is_live;
+    use super::{sandbox_entity, sandbox_label_entity};
     use crate::backend::{Backend, LocalBackend};
     use crate::runtime::SpawnMode;
     use crate::sandbox::{
@@ -1263,6 +1367,24 @@ mod tests {
         .unwrap();
         Migrator::up(pools.write().inner(), None).await.unwrap();
         pools
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn untracked_runtime_probe_distinguishes_live_and_stale_endpoints() {
+        let temp = tempfile::Builder::new()
+            .prefix("msb-untracked")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let run_dir = temp.path().join("run");
+        let sandbox_dir = temp.path().join("sandboxes").join("worker");
+        let paths = microsandbox_runtime::ipc::sandbox_socket_paths(&run_dir, "worker");
+        std::fs::create_dir_all(paths.legacy_agent.parent().unwrap()).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&paths.legacy_agent).unwrap();
+
+        assert!(sandbox_runtime_endpoint_is_live(&run_dir, &sandbox_dir, "worker").unwrap());
+        drop(listener);
+        assert!(!sandbox_runtime_endpoint_is_live(&run_dir, &sandbox_dir, "worker").unwrap());
     }
 
     fn test_config(name: impl Into<String>) -> SandboxConfig {
@@ -1554,6 +1676,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_insert_sandbox_record_persists_label_projection() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let pools = open_test_pools(&db_path).await;
+        let mut config = test_config("labelled");
+        config.spec.labels.insert("team".into(), "metrics".into());
+        config.spec.labels.insert("tier".into(), "gold".into());
+
+        let sandbox_id = LocalBackend::insert_sandbox_record(pools.write(), &config)
+            .await
+            .unwrap();
+        let mut rows = sandbox_label_entity::Entity::find()
+            .filter(sandbox_label_entity::Column::SandboxId.eq(sandbox_id))
+            .all(pools.read())
+            .await
+            .unwrap();
+        rows.sort_by(|left, right| left.key.cmp(&right.key));
+
+        assert_eq!(
+            rows.into_iter()
+                .map(|row| (row.key, row.value))
+                .collect::<Vec<_>>(),
+            vec![
+                ("team".into(), "metrics".into()),
+                ("tier".into(), "gold".into()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_label_rebuild_migrates_serialized_sandbox_config() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let pools = open_test_pools(&db_path).await;
+        let mut config = test_config("migration-labels");
+        config.spec.labels.insert("team".into(), "metrics".into());
+        config.spec.labels.insert("tier".into(), "gold".into());
+        let sandbox_id = LocalBackend::insert_sandbox_record(pools.write(), &config)
+            .await
+            .unwrap();
+
+        sandbox_label_entity::Entity::delete_many()
+            .filter(sandbox_label_entity::Column::SandboxId.eq(sandbox_id))
+            .exec(pools.write())
+            .await
+            .unwrap();
+        pools
+            .write()
+            .inner()
+            .execute_unprepared(
+                "DELETE FROM seaql_migrations \
+                 WHERE version = 'm20260810_000001_rebuild_sandbox_labels'",
+            )
+            .await
+            .unwrap();
+
+        Migrator::up(pools.write().inner(), None).await.unwrap();
+
+        let mut rows = sandbox_label_entity::Entity::find()
+            .filter(sandbox_label_entity::Column::SandboxId.eq(sandbox_id))
+            .all(pools.read())
+            .await
+            .unwrap();
+        rows.sort_by(|left, right| left.key.cmp(&right.key));
+        assert_eq!(
+            rows.into_iter()
+                .map(|row| (row.key, row.value))
+                .collect::<Vec<_>>(),
+            vec![
+                ("team".into(), "metrics".into()),
+                ("tier".into(), "gold".into()),
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn test_prepare_create_target_rejects_existing_state_without_force() {
         let temp = tempdir().unwrap();
         let db_path = temp.path().join("test.db");
@@ -1564,7 +1762,8 @@ mod tests {
 
         let config = test_config("existing");
 
-        let err = LocalBackend::prepare_create_target(&pools, &config, &sandbox_dir)
+        let run_dir = temp.path().join("run");
+        let err = LocalBackend::prepare_create_target(&pools, &config, &sandbox_dir, &run_dir)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("already exists"));
@@ -1572,6 +1771,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_prepare_create_target_force_replaces_stopped_sandbox_state() {
+        #[cfg(unix)]
+        let temp = tempfile::Builder::new()
+            .prefix("msb-replace")
+            .tempdir_in("/tmp")
+            .unwrap();
+        #[cfg(not(unix))]
         let temp = tempdir().unwrap();
         let db_path = temp.path().join("test.db");
         let pools = open_test_pools(&db_path).await;
@@ -1589,11 +1794,42 @@ mod tests {
         let mut forced = test_config("replaceable");
         forced.replace_existing = true;
 
-        LocalBackend::prepare_create_target(&pools, &forced, &sandbox_dir)
+        let run_dir = temp.path().join("run");
+        #[cfg(unix)]
+        let socket_paths = {
+            let paths = microsandbox_runtime::ipc::sandbox_socket_paths(&run_dir, "replaceable");
+            fs::create_dir_all(&paths.canonical_dir).unwrap();
+            fs::write(&paths.agent, b"stale").unwrap();
+            fs::write(&paths.control, b"stale").unwrap();
+            microsandbox_runtime::ipc::publish_legacy_agent_link(
+                &run_dir,
+                "replaceable",
+                &paths.agent,
+            )
+            .unwrap();
+            microsandbox_runtime::ipc::publish_legacy_control_link(
+                &run_dir,
+                "replaceable",
+                &paths.control,
+            )
+            .unwrap();
+            paths
+        };
+        LocalBackend::prepare_create_target(&pools, &forced, &sandbox_dir, &run_dir)
             .await
             .unwrap();
 
         assert!(!sandbox_dir.exists());
+        #[cfg(unix)]
+        for path in [
+            &socket_paths.agent,
+            &socket_paths.control,
+            &socket_paths.legacy_agent,
+            &socket_paths.legacy_control,
+            &socket_paths.canonical_dir,
+        ] {
+            assert!(std::fs::symlink_metadata(path).is_err());
+        }
         assert!(
             sandbox_entity::Entity::find_by_id(sandbox_id)
                 .one(pools.write())
@@ -1630,7 +1866,8 @@ mod tests {
         let mut forced = test_config("stale-running");
         forced.replace_existing = true;
 
-        LocalBackend::prepare_create_target(&pools, &forced, &sandbox_dir)
+        let run_dir = temp.path().join("run");
+        LocalBackend::prepare_create_target(&pools, &forced, &sandbox_dir, &run_dir)
             .await
             .unwrap();
 
@@ -1678,7 +1915,8 @@ mod tests {
         let mut forced = test_config("running");
         forced.replace_existing = true;
 
-        LocalBackend::prepare_create_target(&pools, &forced, &sandbox_dir)
+        let run_dir = temp.path().join("run");
+        LocalBackend::prepare_create_target(&pools, &forced, &sandbox_dir, &run_dir)
             .await
             .unwrap();
 

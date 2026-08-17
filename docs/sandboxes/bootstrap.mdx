@@ -8,6 +8,8 @@ Before a sandbox starts doing real work, you can choose its root storage and pre
 
 ## Flat OCI rootfs
 
+<Tooltip tip="Flat OCI root disks are not available on microsandbox cloud; use the managed layered root."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 OCI sandboxes use stitched EROFS lower layers with a writable ext4 upper and guest OverlayFS by default. A flat root disk is an explicit alternative: microsandbox merges the OCI layers into one deterministic ext4 base, caches it by content, creates a private clone for each sandbox, grows that clone to the requested capacity, and mounts it directly as the guest root. The immutable cached base is never attached writable.
 
 <CodeGroup>
@@ -56,7 +58,9 @@ sb, err := m.CreateSandbox(ctx, "worker",
 
 `auto` first asks the host filesystem for a native copy-on-write clone and falls back to an independent sparse copy when cloning is unsupported. Use `copy` when independence from the base's physical extents matters more than provisioning latency, or `reflink` when clone support is an operational requirement and failure is preferable to fallback. Linux uses `FICLONE`, macOS uses `clonefile`, and Windows uses block cloning only on volumes that advertise block refcounting.
 
-The normal layered root remains the default and retains layer-level deduplication. Flat v1 is local-only, ext4-only, and incompatible with rootfs patches and snapshots; unsupported combinations fail explicitly.
+The normal layered root remains the default and retains layer-level deduplication. Flat v1 uses ext4 and is incompatible with rootfs patches and snapshots; unsupported combinations fail explicitly.
+
+See [Optimization](/sandboxes/optimization#storage-layout-layered-or-flat) for workload tradeoffs, host filesystem expectations, and how to verify the clone strategy actually used.
 
 ## Scripts
 
@@ -219,6 +223,52 @@ For per-language signatures and option shapes, see the SDK references:
 - TypeScript: [`PatchBuilder`](/sdk/typescript/sandbox#patchbuilder)
 - Python: [`Patch`](/sdk/python/sandbox#patch) (factory) and [`PatchConfig`](/sdk/python/sandbox#patchconfig) (the value type)
 - Go: [`Patch`](/sdk/go/sandbox#patch) (helpers) and [`PatchConfig`](/sdk/go/sandbox#patchconfig) (the value type)
+
+## Transparent huge pages
+
+Transparent huge pages (THP) let the guest kernel back eligible anonymous memory with larger pages. This can reduce address-translation overhead for large memory working sets, especially inside a virtual machine, but `always` may allocate memory in 2 MiB units for sparsely touched mappings. Microsandbox therefore defaults to the density-conscious `madvise` policy and lets each sandbox choose its policy at creation time.
+
+The selected value is applied as the Linux `transparent_hugepage=` kernel boot parameter before agentd or the user workload starts. It is persisted with the sandbox and takes effect again on every start. It cannot be changed with `msb modify`; create or replace the sandbox to select another policy.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::{Sandbox, sandbox::TransparentHugePagePolicy};
+
+let sb = Sandbox::builder("memory-worker")
+    .image("python:3.12")
+    .thp(TransparentHugePagePolicy::Always)
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.builder("memory-worker")
+  .image("python:3.12")
+  .thp("always")
+  .create();
+```
+
+```python Python
+sb = await Sandbox.create(
+    "memory-worker",
+    image="python:3.12",
+    thp="always",
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "memory-worker",
+    m.WithImage("python:3.12"),
+    m.WithTHP(m.THPAlways),
+)
+```
+
+```bash CLI
+msb create python:3.12 --name memory-worker --thp always
+```
+</CodeGroup>
+
+Use `always` when the workload has large, densely touched anonymous allocations and memory bandwidth or TLB pressure matters. Keep `madvise` for general-purpose and high-density sandboxes. Use `never` for diagnostics or workloads that must avoid transparent huge pages entirely.
 
 ## Custom init system
 

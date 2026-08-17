@@ -507,6 +507,7 @@ pub fn run_schema_baseline(args: SchemaBaselineArgs) -> anyhow::Result<()> {
 pub fn run_doctor(args: DoctorArgs) -> anyhow::Result<()> {
     let diagnosis = diagnose_host();
     render_diagnosis(&diagnosis);
+    render_performance_advisories(&diagnosis);
 
     if diagnosis.is_healthy() {
         done("Host setup is ready.");
@@ -626,6 +627,71 @@ fn render_check(check: &microsandbox::setup::Check) {
             );
         }
         CheckState::Info => info(&format!("{}: {}", check.label, check.value)),
+    }
+}
+
+/// Explain non-blocking performance checks without changing doctor's healthy exit status.
+fn render_performance_advisories(diagnosis: &microsandbox::setup::Diagnosis) {
+    use microsandbox::setup::CheckState;
+
+    for check in diagnosis
+        .sections
+        .iter()
+        .flat_map(|section| &section.checks)
+    {
+        if check.state != CheckState::Warn {
+            continue;
+        }
+
+        match check.label.as_str() {
+            "KVM AVIC" if check.value.starts_with("disabled") => ui::warn_with_lines(
+                "AMD AVIC is available but disabled",
+                &[
+                    ui::ErrorLine::Hint(
+                        "AVIC is optional; sandbox correctness and isolation are unaffected",
+                    ),
+                    ui::ErrorLine::Hint(
+                        "it is a privileged, host-wide KVM setting; stop all KVM guests first",
+                    ),
+                    ui::ErrorLine::Hint(
+                        "enable for the current boot: sudo modprobe -r kvm_amd && sudo modprobe kvm_amd avic=1",
+                    ),
+                    ui::ErrorLine::Hint("verify: cat /sys/module/kvm_amd/parameters/avic"),
+                ],
+            ),
+            "KVM APICv" if check.value.starts_with("disabled") => ui::warn_with_lines(
+                "Intel APICv is disabled by KVM policy",
+                &[
+                    ui::ErrorLine::Hint(
+                        "APICv is optional; sandbox correctness and isolation are unaffected",
+                    ),
+                    ui::ErrorLine::Hint(
+                        "it is a privileged, host-wide KVM setting; stop all KVM guests first",
+                    ),
+                    ui::ErrorLine::Hint(
+                        "enable for the current boot: sudo modprobe -r kvm_intel && sudo modprobe kvm_intel enable_apicv=1",
+                    ),
+                    ui::ErrorLine::Hint(
+                        "verify: cat /sys/module/kvm_intel/parameters/enable_apicv",
+                    ),
+                ],
+            ),
+            "Root clone" if check.value.starts_with("copy fallback") => ui::warn_with_lines(
+                "MSB_HOME does not support reflink clones",
+                &[
+                    ui::ErrorLine::Hint(
+                        "clone=auto will use independent sparse copies for flat sandbox roots",
+                    ),
+                    ui::ErrorLine::Hint(
+                        "sandbox creation may be slower and each private root may allocate more storage",
+                    ),
+                    ui::ErrorLine::Hint(
+                        "use a reflink-capable filesystem for MSB_HOME to enable copy-on-write clones",
+                    ),
+                ],
+            ),
+            _ => {}
+        }
     }
 }
 
@@ -2387,7 +2453,7 @@ async fn applied_migrations(db: &DatabaseConnection) -> anyhow::Result<Vec<Strin
     let rows = match db
         .query_all_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
-            "SELECT version FROM seaql_migrations ORDER BY applied_at ASC, version ASC",
+            "SELECT version FROM seaql_migrations",
         ))
         .await
     {
@@ -2396,9 +2462,23 @@ async fn applied_migrations(db: &DatabaseConnection) -> anyhow::Result<Vec<Strin
         Err(err) => return Err(err.into()),
     };
 
-    rows.iter()
+    let applied = rows
+        .iter()
         .map(|row| row.try_get_by_index::<String>(0).map_err(Into::into))
-        .collect()
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let Some(prefix) =
+        schema_metadata::canonical_applied_prefix(applied.iter().map(String::as_str))
+    else {
+        anyhow::bail!(
+            "local database was updated by a newer msb or does not contain a valid migration prefix"
+        );
+    };
+
+    Ok(prefix
+        .iter()
+        .map(|metadata| metadata.id.to_string())
+        .collect())
 }
 
 async fn user_data_warnings(db: &DatabaseConnection) -> anyhow::Result<Vec<String>> {
@@ -3387,7 +3467,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rollback_schema_rolls_back_latest_migration() {
+    async fn rollback_schema_steps_through_latest_migrations() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("msb.db");
         let db = microsandbox_db::connection::DbWriteConnection::open(
@@ -3399,9 +3479,105 @@ mod tests {
         .unwrap();
         Migrator::up(db.inner(), None).await.unwrap();
 
-        // The snapshot artifact transition is latest; one step must restore
-        // the preceding file-only index while everything older stays intact.
+        // Shared CPU assignment rows downgrade first. Active sandboxes are
+        // prohibited during schema rollback, so the allocation table is empty
+        // and can safely return to its exclusive logical-CPU key.
         rollback_schema(db.inner(), 1).await.unwrap();
+
+        let rows = db
+            .query_all_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                "SELECT version FROM seaql_migrations WHERE version = ?",
+                [schema_metadata::SHARED_CPU_ALLOCATION_MIGRATION_ID.into()],
+            ))
+            .await
+            .unwrap();
+        assert!(
+            rows.is_empty(),
+            "shared CPU allocation should be rolled back"
+        );
+
+        // The label rebuild is compatible with older releases, so its down
+        // migration only removes the migration record. NUMA memory and
+        // writeback state must remain until their own rollback steps.
+        rollback_schema(db.inner(), 1).await.unwrap();
+
+        let rows = db
+            .query_all_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                "SELECT version FROM seaql_migrations WHERE version = ?",
+                [schema_metadata::SANDBOX_LABEL_REBUILD_MIGRATION_ID.into()],
+            ))
+            .await
+            .unwrap();
+        assert!(rows.is_empty(), "label rebuild should be rolled back");
+
+        let rows = db
+            .query_all_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'writeback_allocation'",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "writeback allocation should remain after one rollback"
+        );
+
+        rollback_schema(db.inner(), 1).await.unwrap();
+
+        let rows = db
+            .query_all_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'memory_allocation_node'",
+            ))
+            .await
+            .unwrap();
+        assert!(
+            rows.is_empty(),
+            "NUMA memory allocation should be rolled back"
+        );
+
+        let rows = db
+            .query_all_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'writeback_allocation'",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "writeback allocation should remain after NUMA rollback"
+        );
+
+        rollback_schema(db.inner(), 1).await.unwrap();
+
+        let rows = db
+            .query_all_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'writeback_allocation'",
+            ))
+            .await
+            .unwrap();
+        assert!(
+            rows.is_empty(),
+            "writeback allocation should be rolled back"
+        );
+
+        for table in ["cpu_allocation", "cpu_allocation_cpu"] {
+            let rows = db
+                .query_all_raw(Statement::from_string(
+                    DatabaseBackend::Sqlite,
+                    format!(
+                        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '{table}'"
+                    ),
+                ))
+                .await
+                .unwrap();
+            assert!(!rows.is_empty(), "{table} should remain after one rollback");
+        }
 
         let columns = db
             .query_all_raw(Statement::from_string(
@@ -3417,7 +3593,7 @@ mod tests {
             .iter()
             .any(|row| row.try_get_by_index::<String>(1).unwrap() == "state_kind");
         assert!(has_scope);
-        assert!(!has_state_kind);
+        assert!(has_state_kind);
 
         let rows = db
             .query_all_raw(Statement::from_string(

@@ -78,6 +78,9 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		CPUs:              o.CPUs,
 		MaxMemoryMiB:      o.MaxMemoryMiB,
 		MaxCPUs:           o.MaxCPUs,
+		CPUPlacement:      string(o.CPUPlacement),
+		PlacementProfile:  o.PlacementProfile,
+		THP:               string(o.THP),
 		Workdir:           o.Workdir,
 		Shell:             o.Shell,
 		SecurityProfile:   string(o.SecurityProfile),
@@ -89,7 +92,6 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		Labels:            o.Labels,
 		Detached:          o.Detached,
 		Ephemeral:         o.Ephemeral,
-		Entrypoint:        o.Entrypoint,
 		LogLevel:          string(o.LogLevel),
 		QuietLogs:         o.QuietLogs,
 		Scripts:           o.Scripts,
@@ -99,7 +101,16 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		Ports:             o.Ports,
 		PortsUDP:          o.PortsUDP,
 		PortBindings:      buildFFIPortBindings(o.PortBindings),
+		Vsock:             buildFFIVsockRoutes(o.Vsock),
 		RegistryInsecure:  o.RegistryInsecure,
+	}
+	if o.Entrypoint != nil {
+		entrypoint := append([]string{}, o.Entrypoint...)
+		ffiOpts.Entrypoint = &entrypoint
+	}
+	if o.Cmd != nil {
+		cmd := append([]string{}, o.Cmd...)
+		ffiOpts.Cmd = &cmd
 	}
 	if o.RootDisk != nil {
 		ffiOpts.RootDisk = buildFFIRootDisk(*o.RootDisk)
@@ -298,6 +309,7 @@ func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 		IPv4Pool:            n.IPv4Pool,
 		IPv6Pool:            n.IPv6Pool,
 		MaxConnections:      n.MaxConnections,
+		RateLimiter:         buildFFINetworkRateLimiter(n.RateLimiter),
 		OnSecretViolation:   string(n.OnSecretViolation),
 		TrustHostCAs:        n.TrustHostCAs,
 	}
@@ -363,6 +375,44 @@ func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 	return out
 }
 
+func buildFFINetworkRateLimiter(l *NetworkRateLimiterConfig) *ffi.NetworkRateLimiterOptions {
+	if l == nil {
+		return nil
+	}
+	return &ffi.NetworkRateLimiterOptions{
+		Egress:  buildFFIRateLimiter(l.Egress),
+		Ingress: buildFFIRateLimiter(l.Ingress),
+	}
+}
+
+func buildFFIRateLimiter(l *RateLimiterConfig) *ffi.RateLimiterOptions {
+	if l == nil {
+		return nil
+	}
+	return &ffi.RateLimiterOptions{
+		Bandwidth: buildFFITokenBucket(l.Bandwidth),
+		Ops:       buildFFITokenBucket(l.Ops),
+	}
+}
+
+func buildFFITokenBucket(b *TokenBucketConfig) *ffi.TokenBucketOptions {
+	if b == nil {
+		return nil
+	}
+	// Keep invalid durations invalid on the wire so the Rust builder returns
+	// a configuration error. Casting a negative Milliseconds result directly
+	// to uint64 would otherwise turn it into an enormous valid interval.
+	var refillTimeMs uint64
+	if b.RefillTime >= time.Millisecond && b.RefillTime%time.Millisecond == 0 {
+		refillTimeMs = uint64(b.RefillTime / time.Millisecond)
+	}
+	return &ffi.TokenBucketOptions{
+		Size:         b.Size,
+		RefillTimeMs: refillTimeMs,
+		OneTimeBurst: b.OneTimeBurst,
+	}
+}
+
 func buildFFIPortBindings(bindings []PortBinding) []ffi.PortBindingOptions {
 	out := make([]ffi.PortBindingOptions, 0, len(bindings))
 	for _, b := range bindings {
@@ -371,6 +421,18 @@ func buildFFIPortBindings(bindings []PortBinding) []ffi.PortBindingOptions {
 			HostPort:  b.HostPort,
 			GuestPort: b.GuestPort,
 			Protocol:  string(b.Protocol),
+		})
+	}
+	return out
+}
+
+func buildFFIVsockRoutes(routes []VsockRoute) []ffi.VsockRouteOptions {
+	out := make([]ffi.VsockRouteOptions, 0, len(routes))
+	for _, route := range routes {
+		out = append(out, ffi.VsockRouteOptions{
+			HostSocket: route.HostSocket,
+			Port:       route.Port,
+			SocketType: string(route.SocketType),
 		})
 	}
 	return out
@@ -818,6 +880,21 @@ func (s *Sandbox) OwnsLifecycleOrFalse() bool {
 // CLI tools, not library code.
 func (s *Sandbox) Attach(ctx context.Context, cmd string, args ...string) (int, error) {
 	code, err := s.inner.Attach(ctx, cmd, ffi.AttachOptions{Args: args})
+	return code, wrapFFI(err)
+}
+
+// AttachDefault starts an interactive PTY session for the effective OCI entrypoint and CMD.
+func (s *Sandbox) AttachDefault(ctx context.Context, opts ...AttachOption) (int, error) {
+	o := AttachConfig{}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	code, err := s.inner.AttachDefault(ctx, ffi.AttachOptions{
+		Cwd:        o.Cwd,
+		User:       o.User,
+		Env:        o.Env,
+		DetachKeys: o.DetachKeys,
+	})
 	return code, wrapFFI(err)
 }
 

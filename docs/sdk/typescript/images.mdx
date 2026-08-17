@@ -3,30 +3,11 @@ title: Images
 description: TypeScript SDK - Image cache API reference
 ---
 
-Inspect, remove, prune, and archive the local OCI image cache: the images that sandbox creation has already pulled. These APIs are exposed through the public `Image` class and require a local backend; cloud backends report `Unsupported`.
+<Tooltip tip="The image-cache API manages the local cache and is local-only. On microsandbox cloud, specify an OCI image when creating the sandbox and it is pulled for you."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-```typescript
-import { Image, ImageHandle } from "microsandbox";
-import type { ImageDetail, ImagePruneReport } from "microsandbox";
-```
+Inspect and manage the local OCI image cache.
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```typescript
-import { Image } from "microsandbox";
-
-for (const image of await Image.list()) {
-  console.log(image.reference, image.layerCount);
-}
-
-const detail = await Image.inspect("python:3.12");
-console.log(detail.config?.workingDir);
-
-const report = await Image.prune();
-console.log(report.bytesReclaimed);
-```
-
-## Static methods
+## Image
 
 #### <span className="msb-recv">Image.</span><span className="msb-hn">get()</span>
 

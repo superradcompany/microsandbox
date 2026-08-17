@@ -30,6 +30,8 @@
             "pages": [
               "getting-started/introduction",
               "getting-started/quickstart",
+              "cloud/overview",
+              "getting-started/backends",
               "getting-started/agents"
             ]
           },
@@ -45,6 +47,8 @@
               "sandboxes/tuning",
               "sandboxes/ssh",
               "sandboxes/volumes",
+              "images/overview",
+              "images/disk-images",
               "sandboxes/snapshots",
               "sandboxes/labels",
               "sandboxes/logs",
@@ -57,24 +61,19 @@
             "icon": "network-wired",
             "pages": [
               "networking/overview",
+              "networking/host-sockets",
               "networking/dns",
               "networking/tls"
             ]
           },
           {
-            "group": "Observability",
+            "group": "Operations",
             "icon": "gauge",
             "pages": [
               "observability/msb-metrics",
-              "observability/deep-dive"
-            ]
-          },
-          {
-            "group": "Images",
-            "icon": "layer-group",
-            "pages": [
-              "images/overview",
-              "images/disk-images"
+              "observability/deep-dive",
+              "sandboxes/optimization",
+              "sandboxes/cpu-placement"
             ]
           },
           {
@@ -89,14 +88,16 @@
         ]
       },
       {
-        "tab": "References",
+        "tab": "SDKs & CLI",
         "groups": [
           {
             "group": "Getting Started",
             "icon": "flag",
             "pages": [
               "sdk/overview",
-              "sdk/errors"
+              "sdk/setup",
+              "sdk/errors",
+              "configuration"
             ]
           },
           {
@@ -178,49 +179,191 @@
             "icon": "terminal",
             "pages": [
               "cli/overview",
+              "cli/configuration",
               "cli/sandbox-commands",
               "cli/ssh-commands",
               "cli/volume-commands",
               "cli/image-commands"
             ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "icon": "book-open",
+            "pages": [
+              "api-reference/overview"
+            ]
           },
           {
-            "group": "Configuration",
-            "icon": "gear",
+            "group": "Sandboxes",
+            "icon": "cube",
+            "openapi": {
+              "source": "/api-reference/openapi.json",
+              "directory": "api-reference/endpoints"
+            },
             "pages": [
-              "configuration"
+              "POST /v1/sandboxes",
+              "GET /v1/sandboxes",
+              "GET /v1/sandboxes/{sandbox_id}",
+              "GET /v1/sandboxes/by-name/{name}",
+              "POST /v1/sandboxes/{sandbox_id}/start",
+              "POST /v1/sandboxes/by-name/{name}/start",
+              "POST /v1/sandboxes/{sandbox_id}/stop",
+              "POST /v1/sandboxes/by-name/{name}/stop",
+              "PATCH /v1/sandboxes/{sandbox_id}",
+              "DELETE /v1/sandboxes/{sandbox_id}",
+              "DELETE /v1/sandboxes/by-name/{name}"
+            ]
+          },
+          {
+            "group": "Volumes",
+            "icon": "hard-drive",
+            "openapi": {
+              "source": "/api-reference/openapi.json",
+              "directory": "api-reference/endpoints"
+            },
+            "pages": [
+              "POST /v1/volumes",
+              "GET /v1/volumes",
+              "PATCH /v1/volumes/{id}",
+              "DELETE /v1/volumes/{id}"
+            ]
+          },
+          {
+            "group": "Quotas",
+            "icon": "gauge-high",
+            "openapi": {
+              "source": "/api-reference/openapi.json",
+              "directory": "api-reference/endpoints"
+            },
+            "pages": [
+              "GET /v1/quotas"
+            ]
+          },
+          {
+            "group": "Usage",
+            "icon": "chart-line",
+            "openapi": {
+              "source": "/api-reference/openapi.json",
+              "directory": "api-reference/endpoints"
+            },
+            "pages": [
+              "GET /v1/billing/usage",
+              "GET /v1/billing/usage/sandbox",
+              "GET /v1/billing/usage/storage"
+            ]
+          },
+          {
+            "group": "Audit events",
+            "icon": "clipboard-list",
+            "openapi": {
+              "source": "/api-reference/openapi.json",
+              "directory": "api-reference/endpoints"
+            },
+            "pages": [
+              "GET /v1/events",
+              "GET /v1/events/{event_id}"
+            ]
+          },
+          {
+            "group": "Organization",
+            "icon": "building",
+            "openapi": {
+              "source": "/api-reference/openapi.json",
+              "directory": "api-reference/endpoints"
+            },
+            "pages": [
+              "GET /v1/me/org"
+            ]
+          },
+          {
+            "group": "Members",
+            "icon": "users",
+            "openapi": {
+              "source": "/api-reference/openapi.json",
+              "directory": "api-reference/endpoints"
+            },
+            "pages": [
+              "GET /v1/members"
             ]
           }
         ]
       },
       {
-        "tab": "Recipes",
+        "tab": "Examples",
         "groups": [
+          {
+            "group": "Agents",
+            "icon": "robot",
+            "pages": [
+              "examples/overview",
+              "examples/agents/opencode",
+              "examples/agents/openclaw",
+              "examples/agents/goose",
+              "examples/agents/gemini-cli",
+              "examples/agents/hermes-agent",
+              "examples/agents/pi"
+            ]
+          },
+          {
+            "group": "CI/CD",
+            "icon": "code-pull-request",
+            "pages": [
+              "examples/ci-cd/github-actions-runner",
+              "examples/ci-cd/pr-checks",
+              "examples/ci-cd/compose-tests",
+              "examples/ci-cd/preview-deploys"
+            ]
+          },
           {
             "group": "Docker",
             "icon": "docker",
             "pages": [
-              "recipes/docker/docker-in-sandbox",
-              "recipes/docker/docker",
-              "recipes/docker/local-images"
+              "examples/docker/docker-in-sandbox",
+              "examples/docker/docker",
+              "examples/docker/local-images"
             ]
           },
           {
-            "group": "Guest",
-            "icon": "server",
+            "group": "Sandbox Workflows",
+            "icon": "shield-halved",
             "pages": [
-              "recipes/guest/systemd-services"
+              "examples/sandboxing/warm-workers",
+              "examples/development/vnc-desktop",
+              "examples/guest/systemd-services",
+              "examples/development/code-server",
+              "examples/development/jupyterlab"
             ]
           },
           {
-            "group": "Metrics backends",
-            "icon": "paper-plane",
+            "group": "Automation & Tooling",
+            "icon": "gears",
             "pages": [
-              "recipes/metrics-backends/grafana-cloud",
-              "recipes/metrics-backends/grafana-alloy",
-              "recipes/metrics-backends/otel-collector",
-              "recipes/metrics-backends/prometheus",
-              "recipes/metrics-backends/datadog"
+              "examples/automation/dependency-audits",
+              "examples/automation/parallel-batch-jobs",
+              "examples/plugins/terraform",
+              "examples/browser-automation/playwright",
+              "examples/web-automation/scrapy",
+              "examples/file-processing/libreoffice-pdf",
+              "examples/file-processing/ffmpeg"
+            ]
+          },
+          {
+            "group": "Data & Observability",
+            "icon": "database",
+            "pages": [
+              "examples/data/postgresql",
+              "examples/data/migration-rehearsal",
+              "examples/data/redis",
+              "examples/metrics-backends/grafana-cloud",
+              "examples/metrics-backends/grafana-alloy",
+              "examples/metrics-backends/otel-collector",
+              "examples/metrics-backends/prometheus",
+              "examples/metrics-backends/datadog"
             ]
           }
         ]
@@ -238,26 +381,99 @@
       },
       {
         "tab": "Changelog",
-        "pages": [
-          "changelog/2026-07-17",
-          "changelog/2026-07-10",
-          "changelog/2026-07-05",
-          "changelog/2026-06-26",
-          "changelog/2026-06-19",
-          "changelog/2026-06-12",
-          "changelog/2026-06-05",
-          "changelog/2026-05-29",
-          "changelog/2026-05-22",
-          "changelog/2026-05-15",
-          "changelog/2026-05-01",
-          "changelog/2026-04-24",
-          "changelog/2026-04-17",
-          "changelog/2026-04-10",
-          "changelog/2026-04-03"
+        "groups": [
+          {
+            "group": "Releases",
+            "icon": "clock-rotate-left",
+            "pages": [
+              {
+                "group": "August 2026",
+                "expanded": true,
+                "pages": [
+                  "changelog/2026-08-07"
+                ]
+              },
+              {
+                "group": "July 2026",
+                "expanded": false,
+                "pages": [
+                  "changelog/2026-07-31",
+                  "changelog/2026-07-24",
+                  "changelog/2026-07-17",
+                  "changelog/2026-07-10",
+                  "changelog/2026-07-05"
+                ]
+              },
+              {
+                "group": "June 2026",
+                "expanded": false,
+                "pages": [
+                  "changelog/2026-06-26",
+                  "changelog/2026-06-19",
+                  "changelog/2026-06-12",
+                  "changelog/2026-06-05"
+                ]
+              },
+              {
+                "group": "May 2026",
+                "expanded": false,
+                "pages": [
+                  "changelog/2026-05-29",
+                  "changelog/2026-05-22",
+                  "changelog/2026-05-15",
+                  "changelog/2026-05-01"
+                ]
+              },
+              {
+                "group": "April 2026",
+                "expanded": false,
+                "pages": [
+                  "changelog/2026-04-24",
+                  "changelog/2026-04-17",
+                  "changelog/2026-04-10",
+                  "changelog/2026-04-03"
+                ]
+              }
+            ]
+          }
         ]
       }
     ]
   },
+  "redirects": [
+    {
+      "source": "/optimization/overview",
+      "destination": "/sandboxes/optimization"
+    },
+    {
+      "source": "/networking/vsock",
+      "destination": "/networking/host-sockets"
+    },
+    {
+      "source": "/sandbox-config",
+      "destination": "/cli/configuration"
+    },
+    {
+      "source": "/recipes/use-cases/ai-coding-agent",
+      "destination": "/getting-started/agents"
+    },
+    {
+      "source": "/examples/use-cases/ai-coding-agent",
+      "destination": "/getting-started/agents"
+    },
+    {
+      "source": "/recipes",
+      "destination": "/examples/overview"
+    },
+    {
+      "source": "/recipes/:slug*",
+      "destination": "/examples/:slug*"
+    },
+    {
+      "source": "/cloud/compatibility",
+      "destination": "/cloud/overview#compatibility"
+    }
+  ],
   "integrations": {
     "posthog": {
       "apiKey": "phc_mMJPTEQbarHl4JMTdFBcgw5v612dmQrvKv5mcK3KJ3O",
@@ -267,7 +483,7 @@
   "appearance": {
     "default": "system"
   },
-  "description": "Easy, fast, local microVMs for untrusted workloads",
+  "description": "Easy, fast microVMs for untrusted workloads, on your machine or in the cloud",
   "footer": {
     "socials": {
       "github": "https://github.com/superradcompany/microsandbox",

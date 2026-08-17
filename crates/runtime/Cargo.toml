@@ -30,12 +30,15 @@ microsandbox-network = { workspace = true, optional = true }
 microsandbox-protocol.workspace = true
 microsandbox-types.workspace = true
 microsandbox-utils.workspace = true
+microsandbox-vsock.workspace = true
 msb_krun = { workspace = true, features = ["blk"] }
 nix = { workspace = true, features = ["process", "signal"] }
+rand.workspace = true
 rustls = { workspace = true }
 sea-orm.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
@@ -43,7 +46,7 @@ tracing.workspace = true
 zeroize.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Kernel", "Win32_System_SystemInformation", "Win32_System_Threading"] }
 
 [target.'cfg(unix)'.dependencies]
 microsandbox-agent-client = { workspace = true, features = ["uds"] }

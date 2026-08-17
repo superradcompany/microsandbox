@@ -8,6 +8,7 @@
 pub(crate) mod attach;
 mod builder;
 pub(crate) mod config;
+mod config_patch;
 pub mod exec;
 pub(crate) mod flat_rootfs;
 pub mod fs;
@@ -20,6 +21,10 @@ mod patch;
 mod reap;
 #[cfg(feature = "ssh")]
 pub mod ssh;
+// Windows-only in shipping builds, but kept compiled under `test` so the
+// platform-independent encoding logic is covered on every host.
+#[cfg(any(windows, test))]
+pub(crate) mod terminal;
 mod types;
 pub(crate) mod upper;
 
@@ -32,14 +37,15 @@ use microsandbox_protocol::{
     message::MessageType,
 };
 use microsandbox_types::hostname_from_sandbox_name as derive_hostname;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 
 use microsandbox_image::progress_channel;
 
 use crate::{
     MicrosandboxResult,
     agent::AgentClient,
-    db::entity::sandbox as sandbox_entity,
+    backend::LocalBackend,
+    db::entity::{run as run_entity, sandbox as sandbox_entity},
     error::{Operation, UnsupportedReason},
     runtime::SpawnMode,
 };
@@ -96,6 +102,15 @@ pub use crate::logs::{LogEntry, LogOptions, LogSource, LogStreamOptions};
 pub use attach::AttachOptionsBuilder;
 pub use builder::{RegistryConfigBuilder, SandboxBuilder};
 pub use config::SandboxConfig;
+#[cfg(feature = "net")]
+pub use config_patch::{
+    DnsConfigPatch, NetworkConfigPatch, NetworkPolicyConfigPatch, SecretConfigPatch,
+    SecretEntryConfigPatch, TlsConfigPatch,
+};
+pub use config_patch::{
+    FilesystemConfigPatch, InitConfigPatch, ResourceConfigPatch, RuntimeConfigPatch,
+    SandboxConfigPatch, SandboxImagePatch, ScriptConfigPatch,
+};
 pub use exec::{ExecOptionsBuilder, ExecOutput, Rlimit, RlimitResource};
 pub use fs::{
     FsEntry, FsEntryKind, FsHandle, FsMetadata, FsOpenOptions, FsReadStream, FsSetAttrs,
@@ -111,15 +126,22 @@ pub use microsandbox_image::{PullProgress, PullProgressHandle};
 #[cfg(feature = "net")]
 pub use microsandbox_network::builder::SecretBuilder;
 #[cfg(feature = "net")]
-pub use microsandbox_network::config::NetworkConfig;
+pub use microsandbox_network::config::{NetworkConfig, PublishedPort};
 #[cfg(feature = "net")]
-pub use microsandbox_network::policy::{NetworkPolicy, NetworkProfile};
+pub use microsandbox_network::dns::Nameserver;
+#[cfg(feature = "net")]
+pub use microsandbox_network::policy::{
+    Action as NetworkAction, NetworkPolicy, NetworkProfile, Rule as NetworkRule,
+};
 pub use microsandbox_runtime::logging::LogLevel;
-pub use microsandbox_types::PullPolicy;
+pub use microsandbox_types::{CpuPlacement, PullPolicy};
 pub use microsandbox_types::{
     EnvVar, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, NetworkSpec, PortProtocol,
     PublishedPortSpec, SandboxLogLevel, SandboxResources, SandboxRuntimeOptions, SandboxSpec,
+    TransparentHugePagePolicy, VsockRouteSpec, VsockSocketType, VsockSpec,
 };
+#[cfg(feature = "net")]
+pub use microsandbox_types::{HostPattern, SecretInjection};
 pub use modify::{
     ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,
     ModificationPolicy, ModificationWarning, PlannedChange, ResourceConvergenceState, ResourceKind,
@@ -236,7 +258,12 @@ pub struct SandboxTouchResult {
 impl Sandbox {
     /// Start building a new sandbox configuration.
     pub fn builder(name: impl Into<String>) -> SandboxBuilder {
-        SandboxBuilder::new(name)
+        let builder = SandboxBuilder::new(name);
+        let backend = crate::backend::default_backend();
+        match backend.as_local() {
+            Some(local) => builder.with_local_defaults(local.config()),
+            None => builder,
+        }
     }
 
     /// Create a sandbox from a config.
@@ -561,14 +588,7 @@ impl Sandbox {
                 UnsupportedReason::UseInstead(Operation::SandboxRemove),
             )
         })?;
-        let pools = local_backend.db().await?;
-
-        remove_dir_if_exists(&local_backend.sandboxes_dir().join(&self.name))?;
-        sandbox_entity::Entity::delete_by_id(local.db_id)
-            .exec(pools.write())
-            .await?;
-
-        Ok(())
+        remove_local_persisted_sandbox(local_backend, &self.name, local.db_id).await
     }
 
     /// Unique name identifying this sandbox.
@@ -946,6 +966,15 @@ impl Sandbox {
     fn is_local_ephemeral(&self) -> bool {
         self.local().is_some() && self.config.spec.lifecycle.ephemeral
     }
+
+    fn resolve_default_command(&self) -> MicrosandboxResult<microsandbox_types::ResolvedCommand> {
+        microsandbox_types::resolve_default_command(
+            self.config.spec.runtime.entrypoint.as_deref(),
+            self.config.spec.runtime.cmd.as_deref(),
+            None,
+        )
+        .map_err(Into::into)
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -953,6 +982,64 @@ impl Sandbox {
 //--------------------------------------------------------------------------------------------------
 
 impl Sandbox {
+    /// Execute the sandbox's effective OCI entrypoint and CMD and return a streaming handle.
+    pub async fn exec_default_stream(&self) -> MicrosandboxResult<ExecHandle> {
+        self.exec_default_stream_with(|options| options).await
+    }
+
+    /// Execute the sandbox's effective OCI entrypoint and CMD with full streaming options.
+    ///
+    /// Arguments configured through the options builder are appended after the resolved default
+    /// argv. They are execution arguments, not an OCI CMD override.
+    pub async fn exec_default_stream_with(
+        &self,
+        f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
+    ) -> MicrosandboxResult<ExecHandle> {
+        let command = self.resolve_default_command()?;
+        let opts = f(ExecOptionsBuilder::default())
+            .prepend_args(command.args)
+            .build()?;
+        self.backend
+            .sandboxes()
+            .exec_stream(
+                self.backend.clone(),
+                &self.name,
+                &self.config,
+                command.program,
+                opts,
+            )
+            .await
+    }
+
+    /// Execute the sandbox's effective OCI entrypoint and CMD and wait for completion.
+    pub async fn exec_default(&self) -> MicrosandboxResult<ExecOutput> {
+        self.exec_default_with(|options| options).await
+    }
+
+    /// Execute the sandbox's effective OCI entrypoint and CMD with full options.
+    ///
+    /// Arguments configured through the options builder are appended after the resolved default
+    /// argv. They are execution arguments, not an OCI CMD override.
+    pub async fn exec_default_with(
+        &self,
+        f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
+    ) -> MicrosandboxResult<ExecOutput> {
+        let command = self.resolve_default_command()?;
+        let opts = f(ExecOptionsBuilder::default())
+            .prepend_args(command.args)
+            .build()?;
+        self.backend
+            .sandboxes()
+            .exec(
+                self.backend.clone(),
+                &self.name,
+                &self.config,
+                command.program,
+                opts,
+            )
+            .await
+    }
+
     /// Execute a command and return a streaming handle.
     ///
     /// ```ignore
@@ -1150,6 +1237,33 @@ impl Sandbox {
 //--------------------------------------------------------------------------------------------------
 
 impl Sandbox {
+    /// Attach to the sandbox's effective OCI entrypoint and CMD.
+    pub async fn attach_default(&self) -> MicrosandboxResult<i32> {
+        self.attach_default_with(|options| options).await
+    }
+
+    /// Attach to the sandbox's effective OCI entrypoint and CMD with full options.
+    ///
+    /// Arguments configured through the options builder are appended after the resolved default
+    /// argv. They are execution arguments, not an OCI CMD override.
+    pub async fn attach_default_with(
+        &self,
+        f: impl FnOnce(AttachOptionsBuilder) -> AttachOptionsBuilder,
+    ) -> MicrosandboxResult<i32> {
+        let command = self.resolve_default_command()?;
+        let builder = f(AttachOptionsBuilder::default()).prepend_args(command.args);
+        self.backend
+            .sandboxes()
+            .attach(
+                self.backend.clone(),
+                &self.name,
+                &self.config,
+                command.program,
+                builder,
+            )
+            .await
+    }
+
     /// Attach to the sandbox with an interactive terminal session.
     ///
     /// ```ignore
@@ -1424,6 +1538,66 @@ pub(super) fn remove_dir_if_exists(path: &Path) -> MicrosandboxResult<()> {
     }
 }
 
+/// Remove one exact local sandbox identity after proving no runtime owns it.
+pub(super) async fn remove_local_persisted_sandbox(
+    local_backend: &LocalBackend,
+    name: &str,
+    expected_id: i32,
+) -> MicrosandboxResult<()> {
+    let _guard = crate::runtime::acquire_sandbox_lifecycle_guard(
+        &local_backend.config().run_dir(),
+        name,
+        std::time::Duration::from_secs(5),
+    )
+    .await?;
+
+    // Re-read only after acquiring ownership. A stale `Sandbox` object must
+    // never delete a newer sandbox that reused the same deterministic name.
+    let pools = local_backend.db().await?;
+    let current = sandbox_entity::Entity::find()
+        .filter(sandbox_entity::Column::Name.eq(name))
+        .one(pools.read())
+        .await?
+        .ok_or_else(|| crate::MicrosandboxError::SandboxNotFound(name.to_string()))?;
+    if current.id != expected_id {
+        return Err(crate::MicrosandboxError::Runtime(format!(
+            "sandbox {name:?} identity changed from database id {expected_id} to {}; refusing stale removal",
+            current.id
+        )));
+    }
+    if !matches!(
+        current.status,
+        SandboxStatus::Stopped | SandboxStatus::Crashed
+    ) {
+        return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
+            "cannot remove sandbox {name:?}: status is {:?}",
+            current.status
+        )));
+    }
+
+    let latest_run = run_entity::Entity::find()
+        .filter(run_entity::Column::SandboxId.eq(expected_id))
+        .order_by_desc(run_entity::Column::Id)
+        .one(pools.read())
+        .await?;
+    if latest_run
+        .and_then(|run| run.pid)
+        .is_some_and(microsandbox_utils::process::pid_is_alive)
+    {
+        return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
+            "cannot remove sandbox {name:?}: its recorded runtime process is still alive"
+        )));
+    }
+
+    crate::runtime::remove_sandbox_socket_artifacts_for(local_backend, name)?;
+    remove_dir_if_exists(&local_backend.sandboxes_dir().join(name))?;
+    sandbox_entity::Entity::delete_by_id(expected_id)
+        .exec(pools.write())
+        .await?;
+
+    Ok(())
+}
+
 /// Load a sandbox row by name.
 pub(super) async fn load_sandbox_record(
     db: &DbReadConnection,
@@ -1446,13 +1620,15 @@ mod tests {
     #[cfg(unix)]
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
+    use sea_orm::{ActiveModelTrait, Set};
     use tempfile::tempdir;
 
     use super::{
         MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, SandboxStatus, ephemeral_cleanup_stop_result,
-        hostname_from_sandbox_name, remove_dir_if_exists, sandbox_not_found_for_name,
-        validate_hostname,
+        hostname_from_sandbox_name, remove_dir_if_exists, remove_local_persisted_sandbox,
+        sandbox_not_found_for_name, validate_hostname,
     };
+    use crate::backend::LocalBackend;
 
     #[test]
     fn test_sandbox_not_found_for_name_requires_exact_match() {
@@ -1669,5 +1845,36 @@ mod tests {
         remove_dir_if_exists(&sandbox_dir).unwrap();
 
         assert!(!sandbox_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn persisted_removal_rejects_a_stale_sandbox_identity() {
+        let temp = tempdir().unwrap();
+        let backend = LocalBackend::builder()
+            .home(temp.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        let pools = backend.db().await.unwrap();
+        let current = super::sandbox_entity::ActiveModel {
+            name: Set("recreated".to_string()),
+            config: Set("{}".to_string()),
+            status: Set(SandboxStatus::Stopped),
+            ephemeral: Set(false),
+            ..Default::default()
+        }
+        .insert(pools.write())
+        .await
+        .unwrap();
+        let sandbox_dir = backend.sandboxes_dir().join("recreated");
+        std::fs::create_dir_all(&sandbox_dir).unwrap();
+        std::fs::write(sandbox_dir.join("marker"), b"successor").unwrap();
+
+        let error = remove_local_persisted_sandbox(&backend, "recreated", current.id + 1)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("identity changed"));
+        assert!(sandbox_dir.join("marker").exists());
     }
 }
