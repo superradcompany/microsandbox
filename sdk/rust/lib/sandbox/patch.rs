@@ -340,8 +340,14 @@ impl RootedPatchFs {
             self.ensure_parent(path)?;
             let mut builder = DirBuilder::new();
             builder.mode(mode);
-            self.root.create_dir_with(path, &builder)?;
-            Ok(())
+            match self.root.create_dir_with(path, &builder) {
+                Ok(()) => Ok(()),
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let existing = self.root.open_dir(path)?;
+                    set_dir_mode(&existing, mode)
+                }
+                Err(err) => Err(err.into()),
+            }
         }
 
         #[cfg(windows)]
