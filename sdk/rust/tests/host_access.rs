@@ -1,7 +1,7 @@
 //! Integration tests for the `host.microsandbox.internal` alias.
 
 use std::io;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use ipnetwork::{IpNetwork, Ipv4Network};
@@ -17,8 +17,9 @@ use tokio::task::JoinHandle;
 // Host HTTP fixture
 //--------------------------------------------------------------------------------------------------
 
-/// Minimal HTTP server bound to `127.0.0.1` and `::1` on the same port. Dual-family avoids
-/// flakes when the guest's happy-eyeballs picks v6 and the listener only lives on v4.
+/// Minimal HTTP server bound only to IPv4 loopback.
+///
+/// Host-alias access must work even when the guest selects its IPv6 gateway.
 struct HostHttp {
     port: u16,
     shutdown: Option<oneshot::Sender<()>>,
@@ -29,7 +30,6 @@ impl HostHttp {
     async fn start(body: &'static str) -> io::Result<Self> {
         let v4_listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).await?;
         let port = v4_listener.local_addr()?.port();
-        let v6_listener = TcpListener::bind(SocketAddr::from((Ipv6Addr::LOCALHOST, port))).await?;
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let body = Arc::new(body.to_owned());
@@ -40,7 +40,6 @@ impl HostHttp {
                 tokio::select! {
                     _ = &mut shutdown_rx => return,
                     accept = v4_listener.accept() => Self::handle_accept(accept, &body),
-                    accept = v6_listener.accept() => Self::handle_accept(accept, &body),
                 }
             }
         });
@@ -115,6 +114,17 @@ async fn read_gateway_ip(sb: &Sandbox) -> String {
         .shell("awk '/^nameserver /{print $2; exit}' /etc/resolv.conf")
         .await
         .expect("read resolv.conf");
+    out.stdout().expect("utf8").trim().to_owned()
+}
+
+/// Read the sandbox gateway IPv6 from the host-alias entry in `/etc/hosts`.
+async fn read_gateway_ipv6(sb: &Sandbox) -> String {
+    let out = sb
+        .shell(
+            "awk '$2 == \"host.microsandbox.internal\" && index($1, \":\") {print $1; exit}' /etc/hosts",
+        )
+        .await
+        .expect("read host alias IPv6");
     out.stdout().expect("utf8").trim().to_owned()
 }
 
@@ -206,6 +216,39 @@ async fn host_alias_reachable_by_hostname_and_gateway_ip() {
     assert!(
         hosts.contains(&gw),
         "expected gateway IPv4 {gw} in /etc/hosts, got:\n{hosts}"
+    );
+
+    teardown(sb, name).await;
+}
+
+/// An IPv6 host-alias choice must still reach a service bound only on IPv4 loopback.
+#[msb_test]
+async fn host_alias_ipv6_falls_back_to_ipv4_only_listener() {
+    let server = HostHttp::start("hello from ipv4")
+        .await
+        .expect("IPv4-only HTTP fixture");
+    let port = server.port();
+
+    let name = "host-alias-ipv6-to-ipv4";
+    let sb = spawn_sandbox(name, Some(NetworkPolicy::allow_all())).await;
+    let gateway_ipv6 = read_gateway_ipv6(&sb).await;
+    if gateway_ipv6.is_empty() {
+        eprintln!("skip: host has no IPv6 route — guest IPv6 gateway was not provisioned");
+        teardown(sb, name).await;
+        return;
+    }
+
+    let out = sb
+        .shell(format!(
+            "wget -qO- --timeout=10 'http://[{gateway_ipv6}]:{port}/'"
+        ))
+        .await
+        .expect("wget IPv6 gateway");
+    assert_eq!(
+        out.stdout().unwrap().trim(),
+        "hello from ipv4",
+        "IPv6-to-IPv4 fallback body mismatch (stderr: {})",
+        out.stderr().unwrap_or_default()
     );
 
     teardown(sb, name).await;

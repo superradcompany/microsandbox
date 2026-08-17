@@ -19,7 +19,7 @@ use super::sni;
 use super::state::TlsState;
 use crate::conn::ProxyConnectState;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
-use crate::proxy::connect_upstream;
+use crate::proxy::upstream::UpstreamTcpTarget;
 use crate::secrets::config::ViolationAction;
 use crate::secrets::handler::SecretsHandler;
 use crate::shared::SharedState;
@@ -40,12 +40,12 @@ const RELAY_BUF_SIZE: usize = 16384;
 
 pub(crate) struct TlsProxyContext {
     pub(crate) guest_dst: SocketAddr,
-    pub(crate) connect_dst: SocketAddr,
+    pub(crate) connect_target: UpstreamTcpTarget,
     pub(crate) shared: Arc<SharedState>,
     pub(crate) tls_state: Arc<TlsState>,
     pub(crate) network_policy: Arc<NetworkPolicy>,
     pub(crate) proxy_connect: Arc<ProxyConnectState>,
-    /// Pre-connected upstream; when `Some`, skips dialing `connect_dst`.
+    /// Pre-connected upstream; when `Some`, skips dialing `connect_target`.
     pub(crate) upstream_stream: Option<TcpStream>,
     /// Hostname from a CONNECT authority that must match the ClientHello SNI.
     pub(crate) expected_sni: Option<String>,
@@ -62,10 +62,10 @@ pub(crate) struct TlsProxyContext {
 /// See [`crate::proxy::spawn_tcp_proxy`] for the `proxy_connect`
 /// contract.
 #[allow(clippy::too_many_arguments)]
-pub fn spawn_tls_proxy(
+pub(crate) fn spawn_tls_proxy(
     handle: &tokio::runtime::Handle,
     guest_dst: SocketAddr,
-    connect_dst: SocketAddr,
+    connect_target: UpstreamTcpTarget,
     from_smoltcp: mpsc::Receiver<Bytes>,
     to_smoltcp: mpsc::Sender<Bytes>,
     shared: Arc<SharedState>,
@@ -76,7 +76,7 @@ pub fn spawn_tls_proxy(
     handle.spawn(async move {
         let context = TlsProxyContext {
             guest_dst,
-            connect_dst,
+            connect_target,
             shared,
             tls_state,
             network_policy,
@@ -87,7 +87,7 @@ pub fn spawn_tls_proxy(
         };
 
         if let Err(e) = tls_proxy_task(context, from_smoltcp, to_smoltcp, Vec::new()).await {
-            tracing::debug!(dst = %connect_dst, guest_dst = %guest_dst, error = %e, "TLS proxy task ended");
+            tracing::debug!(dst = %connect_target.primary(), guest_dst = %guest_dst, error = %e, "TLS proxy task ended");
         }
     });
 }
@@ -101,7 +101,7 @@ pub(crate) async fn tls_proxy_task(
 ) -> io::Result<()> {
     let TlsProxyContext {
         guest_dst,
-        connect_dst,
+        connect_target,
         shared,
         tls_state,
         network_policy,
@@ -110,6 +110,7 @@ pub(crate) async fn tls_proxy_task(
         expected_sni,
         via_connect,
     } = context;
+    let connect_dst = connect_target.primary();
 
     // Buffer initial data to extract SNI from ClientHello. Timeout prevents a
     // slow/malicious guest from holding a proxy slot indefinitely.
@@ -159,7 +160,7 @@ pub(crate) async fn tls_proxy_task(
     if tls_state.should_bypass(&sni_name) {
         tracing::debug!(sni = %sni_name, dst = %connect_dst, guest_dst = %guest_dst, "TLS bypass");
         bypass_relay(
-            connect_dst,
+            connect_target,
             initial_buf,
             from_smoltcp,
             to_smoltcp,
@@ -172,7 +173,7 @@ pub(crate) async fn tls_proxy_task(
         tracing::debug!(sni = %sni_name, dst = %connect_dst, guest_dst = %guest_dst, "TLS intercept");
         intercept_relay(
             guest_dst,
-            connect_dst,
+            connect_target,
             &sni_name,
             via_connect,
             initial_buf,
@@ -189,7 +190,7 @@ pub(crate) async fn tls_proxy_task(
 
 /// Bypass mode: plain TCP splice, no TLS termination.
 async fn bypass_relay(
-    dst: SocketAddr,
+    connect_target: UpstreamTcpTarget,
     initial_buf: Vec<u8>,
     mut from_smoltcp: mpsc::Receiver<Bytes>,
     to_smoltcp: mpsc::Sender<Bytes>,
@@ -199,7 +200,7 @@ async fn bypass_relay(
 ) -> io::Result<()> {
     let mut server = match upstream_stream {
         Some(s) => s,
-        None => connect_upstream(dst, &proxy_connect, &shared).await?,
+        None => connect_target.connect(&proxy_connect, &shared).await?,
     };
     server.write_all(&initial_buf).await?;
 
@@ -244,7 +245,7 @@ async fn bypass_relay(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn intercept_relay(
     guest_dst: SocketAddr,
-    connect_dst: SocketAddr,
+    connect_target: UpstreamTcpTarget,
     sni_name: &str,
     via_connect: bool,
     initial_buf: Vec<u8>,
@@ -314,7 +315,7 @@ pub(crate) async fn intercept_relay(
     // Connect to real server with TLS.
     let server_stream = match upstream_stream {
         Some(s) => s,
-        None => connect_upstream(connect_dst, &proxy_connect, &shared).await?,
+        None => connect_target.connect(&proxy_connect, &shared).await?,
     };
     let server_name = ServerName::try_from(sni_name.to_string())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
