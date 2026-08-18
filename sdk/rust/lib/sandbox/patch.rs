@@ -2,23 +2,30 @@
 
 use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
-use std::io::Write;
+use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+#[cfg(windows)]
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
+#[cfg(windows)]
+use std::os::windows::io::{AsRawHandle, FromRawHandle, RawHandle};
 
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, File, OpenOptions, Permissions};
 #[cfg(unix)]
-use cap_std::fs::{DirBuilder, DirBuilderExt};
+use cap_std::fs::{DirBuilder, DirBuilderExt, OpenOptionsExt};
 use microsandbox_image::erofs::{ErofsEntryInfo, ErofsEntryKind, ErofsReader};
 use microsandbox_image::tree::{
     DeviceNode, DirectoryNode, FileData, FileTree, FileTreeError, InodeMetadata, RegularFileId,
     RegularFileNode, SymlinkNode, TreeNode,
 };
 use tokio::fs;
+use tokio::io::AsyncReadExt;
 
 use super::types::{Patch, RootfsSource};
 use crate::MicrosandboxResult;
@@ -48,6 +55,17 @@ struct RootedPatchFs {
 enum PendingComponent {
     Parent { clamp_at_root: bool },
     Normal(OsString),
+    RequireDirectory,
+}
+
+/// One frame in the iterative Windows removal walk.
+#[cfg(windows)]
+enum WindowsRemovalFrame {
+    Visit(std::fs::File),
+    Directory {
+        entry: std::fs::File,
+        pending: VecDeque<OsString>,
+    },
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -120,6 +138,26 @@ impl RootedPatchFs {
         Ok(Self { root })
     }
 
+    fn write_all(&self, writer: &mut impl Write, content: &[u8]) -> MicrosandboxResult<()> {
+        writer.write_all(content)?;
+        Ok(())
+    }
+
+    fn copy_stream(
+        &self,
+        reader: &mut impl Read,
+        writer: &mut impl Write,
+    ) -> MicrosandboxResult<()> {
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let read = reader.read(&mut buffer)?;
+            if read == 0 {
+                return Ok(());
+            }
+            writer.write_all(&buffer[..read])?;
+        }
+    }
+
     /// Resolve a guest path beneath the pinned root.
     ///
     /// Existing symlinks are expanded explicitly so absolute targets restart
@@ -172,6 +210,14 @@ impl RootedPatchFs {
                             "patch path escapes rootfs: '{guest_path}'"
                         )));
                     }
+                }
+                PendingComponent::RequireDirectory => {
+                    let candidate = join_components(&resolved, None);
+                    self.root.open_dir(candidate).map_err(|err| {
+                        crate::MicrosandboxError::PatchFailed(format!(
+                            "symlink target must resolve to a directory while resolving '{guest_path}': {err}"
+                        ))
+                    })?;
                 }
                 PendingComponent::Normal(name) => {
                     let is_final = remaining.is_empty();
@@ -233,23 +279,39 @@ impl RootedPatchFs {
         path: &Path,
         guest_path: &str,
         replace: bool,
+        mode: Option<u32>,
     ) -> MicrosandboxResult<File> {
         self.ensure_parent(path)?;
         let mut options = OpenOptions::new();
         options.write(true);
         if replace {
-            options.create(true).truncate(true);
+            // Defer truncation until the opened handle has its requested mode.
+            // Otherwise replacing a public file with private content exposes a
+            // window where readers can observe the new bytes under the old mode.
+            options.create(true);
         } else {
             options.create_new(true);
         }
+        #[cfg(unix)]
+        if let Some(mode) = mode {
+            options.mode(mode);
+        }
 
-        self.root.open_with(path, &options).map_err(|err| {
+        let file = self.root.open_with(path, &options).map_err(|err| {
             if !replace && err.kind() == std::io::ErrorKind::AlreadyExists {
                 path_exists_error(guest_path)
             } else {
                 err.into()
             }
-        })
+        })?;
+
+        if let Some(mode) = mode {
+            set_file_mode(&file, mode)?;
+        }
+        if replace {
+            file.set_len(0)?;
+        }
+        Ok(file)
     }
 
     fn write_file(
@@ -260,8 +322,9 @@ impl RootedPatchFs {
         replace: bool,
         mode: Option<u32>,
     ) -> MicrosandboxResult<()> {
-        let mut file = self.open_file_for_write(path, guest_path, replace)?;
-        file.write_all(content)?;
+        let mut file = self.open_file_for_write(path, guest_path, replace, mode)?;
+        self.write_all(&mut file, content)?;
+        // Writing may clear set-id bits, so restore the exact requested mode.
         if let Some(mode) = mode {
             set_file_mode(&file, mode)?;
         }
@@ -276,15 +339,30 @@ impl RootedPatchFs {
         replace: bool,
         mode: Option<u32>,
     ) -> MicrosandboxResult<()> {
-        let mut source = std::fs::File::open(src)?;
-        let permissions = source.metadata()?.permissions();
-        let mut destination = self.open_file_for_write(dst, guest_path, replace)?;
-        std::io::copy(&mut source, &mut destination)?;
-        if let Some(mode) = mode {
-            set_file_mode(&destination, mode)?;
-        } else {
-            destination.set_permissions(Permissions::from_std(permissions))?;
+        let mut source_options = std::fs::OpenOptions::new();
+        source_options.read(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::custom_flags(&mut source_options, libc::O_NONBLOCK);
+        let mut source = source_options.open(src)?;
+        let source_metadata = source.metadata()?;
+        if !source_metadata.is_file() {
+            return Err(crate::MicrosandboxError::PatchFailed(format!(
+                "CopyFile source is not a regular file: {}",
+                src.display()
+            )));
         }
+        let source_mode = source_std_permissions_mode(&source_metadata.permissions());
+        #[cfg(windows)]
+        let source_permissions = source_metadata.permissions();
+        let destination_mode = mode.or(source_mode);
+        let mut destination =
+            self.open_file_for_write(dst, guest_path, replace, destination_mode)?;
+        self.copy_stream(&mut source, &mut destination)?;
+        if let Some(mode) = destination_mode {
+            set_file_mode(&destination, mode)?;
+        }
+        #[cfg(windows)]
+        destination.set_permissions(Permissions::from_std(source_permissions))?;
         Ok(())
     }
 
@@ -295,32 +373,188 @@ impl RootedPatchFs {
         guest_path: &str,
         replace: bool,
     ) -> MicrosandboxResult<()> {
+        let source = Dir::open_ambient_dir(src, ambient_authority()).map_err(|err| {
+            crate::MicrosandboxError::PatchFailed(format!(
+                "failed to open CopyDir source {}: {err}",
+                src.display()
+            ))
+        })?;
+        self.validate_copy_dir_source(&source)?;
+        self.copy_dir_from(&source, dst, guest_path, replace)
+    }
+
+    /// Validate the complete source tree before creating a destination.
+    fn validate_copy_dir_source(&self, source: &Dir) -> MicrosandboxResult<()> {
+        for entry in source.entries()? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_symlink() {
+                #[cfg(unix)]
+                continue;
+                #[cfg(windows)]
+                return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    "CopyDir source contains a symlink unsupported for Windows host bind roots: '{}'",
+                    entry.file_name().to_string_lossy()
+                )));
+            }
+            if file_type.is_dir() {
+                let source_file = source.try_clone()?.into_std_file();
+                let child = cap_primitives::fs::open_dir_nofollow(
+                    &source_file,
+                    Path::new(&entry.file_name()),
+                )?;
+                self.validate_copy_dir_source(&Dir::from_std_file(child))?;
+            } else if !file_type.is_file() {
+                return Err(crate::MicrosandboxError::PatchFailed(format!(
+                    "CopyDir source contains an unsupported file type: '{}'",
+                    entry.file_name().to_string_lossy()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Copy one already-pinned source directory without following child links.
+    fn copy_dir_from(
+        &self,
+        source: &Dir,
+        dst: &Path,
+        guest_path: &str,
+        replace: bool,
+    ) -> MicrosandboxResult<()> {
+        #[cfg(unix)]
+        let source_mode = source_cap_permissions_mode(&source.dir_metadata()?.permissions());
         self.ensure_parent(dst)?;
+        #[cfg(unix)]
+        {
+            if replace {
+                self.root.create_dir_all(dst)?;
+            } else {
+                let mut builder = DirBuilder::new();
+                builder.mode(source_mode.unwrap_or(0o755));
+                self.root.create_dir_with(dst, &builder).map_err(|err| {
+                    if err.kind() == std::io::ErrorKind::AlreadyExists {
+                        path_exists_error(guest_path)
+                    } else {
+                        err.into()
+                    }
+                })?;
+            }
+            if let Some(mode) = source_mode {
+                set_dir_mode(&self.root.open_dir(dst)?, mode)?;
+            }
+        }
+        #[cfg(windows)]
+        {
+            if replace {
+                self.root.create_dir_all(dst)?;
+            } else {
+                self.root.create_dir(dst).map_err(|err| {
+                    if err.kind() == std::io::ErrorKind::AlreadyExists {
+                        path_exists_error(guest_path)
+                    } else {
+                        err.into()
+                    }
+                })?;
+            }
+        }
+
+        for entry in source.entries()? {
+            let entry = entry?;
+            let unresolved_dst = dst.join(entry.file_name());
+            let child_guest_path = format!("/{}", unresolved_dst.display());
+            let file_type = entry.file_type()?;
+            // A copied source symlink replaces the destination entry itself.
+            // Regular files and directories retain the existing patch rule
+            // that replace=true follows a final destination symlink.
+            let resolved_dst =
+                self.resolve_relative(&unresolved_dst, replace && !file_type.is_symlink())?;
+
+            if file_type.is_symlink() {
+                #[cfg(unix)]
+                {
+                    let target = source.read_link_contents(entry.file_name())?;
+                    self.create_symlink(&target, &resolved_dst, &child_guest_path, replace)?;
+                    continue;
+                }
+                #[cfg(windows)]
+                {
+                    return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                        "CopyDir source contains a symlink unsupported for Windows host bind roots: '{}'",
+                        entry.file_name().to_string_lossy()
+                    )));
+                }
+            }
+
+            if file_type.is_dir() {
+                let source_file = source.try_clone()?.into_std_file();
+                let child = cap_primitives::fs::open_dir_nofollow(
+                    &source_file,
+                    Path::new(&entry.file_name()),
+                )?;
+                self.copy_dir_from(
+                    &Dir::from_std_file(child),
+                    &resolved_dst,
+                    &child_guest_path,
+                    replace,
+                )?;
+                continue;
+            }
+
+            if !file_type.is_file() {
+                return Err(crate::MicrosandboxError::PatchFailed(format!(
+                    "CopyDir source contains an unsupported file type: '{}'",
+                    entry.file_name().to_string_lossy()
+                )));
+            }
+
+            let mut source_options = OpenOptions::new();
+            source_options.read(true);
+            source_options._cap_fs_ext_follow(cap_primitives::fs::FollowSymlinks::No);
+            #[cfg(unix)]
+            source_options.custom_flags(libc::O_NONBLOCK);
+            let mut source_file = source.open_with(entry.file_name(), &source_options)?;
+            if !source_file.metadata()?.is_file() {
+                return Err(crate::MicrosandboxError::PatchFailed(format!(
+                    "CopyDir source changed to an unsupported file type: '{}'",
+                    entry.file_name().to_string_lossy()
+                )));
+            }
+            let source_permissions = source_file.metadata()?.permissions();
+            let source_mode = source_cap_permissions_mode(&source_permissions);
+            let mut destination =
+                self.open_file_for_write(&resolved_dst, &child_guest_path, replace, source_mode)?;
+            self.copy_stream(&mut source_file, &mut destination)?;
+            if let Some(mode) = source_mode {
+                set_file_mode(&destination, mode)?;
+            }
+            #[cfg(windows)]
+            destination.set_permissions(source_permissions)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn create_symlink(
+        &self,
+        target: &Path,
+        link_path: &Path,
+        guest_path: &str,
+        replace: bool,
+    ) -> MicrosandboxResult<()> {
+        self.ensure_parent(link_path)?;
         if replace {
-            self.root.create_dir_all(dst)?;
-        } else {
-            self.root.create_dir(dst).map_err(|err| {
-                if err.kind() == std::io::ErrorKind::AlreadyExists {
+            self.remove_entry(link_path)?;
+        }
+        self.root
+            .symlink_contents(target, link_path)
+            .map_err(|err| {
+                if !replace && err.kind() == std::io::ErrorKind::AlreadyExists {
                     path_exists_error(guest_path)
                 } else {
                     err.into()
                 }
-            })?;
-        }
-
-        for entry in std::fs::read_dir(src)? {
-            let entry = entry?;
-            let src_path = entry.path();
-            let unresolved_dst = dst.join(entry.file_name());
-            let resolved_dst = self.resolve_relative(&unresolved_dst, replace)?;
-            let child_guest_path = format!("/{}", unresolved_dst.display());
-            if entry.file_type()?.is_dir() {
-                self.copy_dir(&src_path, &resolved_dst, &child_guest_path, replace)?;
-            } else {
-                self.copy_file(&src_path, &resolved_dst, &child_guest_path, replace, None)?;
-            }
-        }
-        Ok(())
+            })
     }
 
     fn create_dir(&self, path: &Path, mode: Option<u32>) -> MicrosandboxResult<()> {
@@ -341,7 +575,10 @@ impl RootedPatchFs {
             let mut builder = DirBuilder::new();
             builder.mode(mode);
             match self.root.create_dir_with(path, &builder) {
-                Ok(()) => Ok(()),
+                Ok(()) => {
+                    let created = self.root.open_dir(path)?;
+                    set_dir_mode(&created, mode)
+                }
                 Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
                     let existing = self.root.open_dir(path)?;
                     set_dir_mode(&existing, mode)
@@ -360,16 +597,46 @@ impl RootedPatchFs {
     }
 
     fn remove_entry(&self, path: &Path) -> MicrosandboxResult<()> {
-        match self.root.symlink_metadata(path) {
-            Ok(metadata) if metadata.file_type().is_dir() => {
-                self.root.remove_dir_all(path)?;
+        #[cfg(unix)]
+        {
+            match self.root.symlink_metadata(path) {
+                Ok(metadata) if metadata.file_type().is_dir() => {
+                    let directory = self.root.open_dir(path)?;
+                    directory.remove_open_dir_all()?;
+                }
+                Ok(_) => {
+                    self.root.remove_file(path)?;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err.into()),
             }
-            Ok(_) => {
-                self.root.remove_file(path)?;
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err.into()),
+            return Ok(());
         }
+
+        #[cfg(windows)]
+        {
+            let parent_path = path.parent().unwrap_or_else(|| Path::new(""));
+            let name = path.file_name().ok_or_else(|| {
+                crate::MicrosandboxError::PatchFailed(format!(
+                    "patch removal path has no final component: {}",
+                    path.display()
+                ))
+            })?;
+            let parent = if parent_path.as_os_str().is_empty() {
+                self.root.try_clone()?
+            } else {
+                self.root.open_dir(parent_path)?
+            };
+            let parent = parent.into_std_file();
+            match windows_open_relative_for_removal(&parent, name) {
+                Ok(entry) => windows_remove_open_entry(entry)?,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err.into()),
+            }
+            return Ok(());
+        }
+
+        #[allow(unreachable_code)]
         Ok(())
     }
 }
@@ -412,18 +679,27 @@ pub(crate) async fn apply_patches(
     // unsupported and must not fail after earlier patches have been applied.
     validate_bind_patches(patches)?;
 
-    let patches = patches.to_vec();
-    tokio::task::spawn_blocking(move || -> MicrosandboxResult<()> {
-        let root = RootedPatchFs::open(&target_dir, follow_root_symlinks)?;
-        for patch in &patches {
-            apply_one_to_bind(&root, patch)?;
-        }
-        Ok(())
-    })
-    .await
-    .map_err(|err| {
-        crate::MicrosandboxError::PatchFailed(format!("bind-root patch task failed: {err}"))
-    })?
+    let root =
+        tokio::task::spawn_blocking(move || RootedPatchFs::open(&target_dir, follow_root_symlinks))
+            .await
+            .map_err(|err| {
+                crate::MicrosandboxError::PatchFailed(format!("bind-root open task failed: {err}"))
+            })??;
+    let root = Arc::new(root);
+
+    // Dispatch one patch at a time. Dropping this future lets the active patch
+    // finish, but never starts the rest of the batch. This avoids leaving a
+    // partially written persistent root while bounding payload clones.
+    for patch in patches {
+        let root = Arc::clone(&root);
+        let patch = patch.clone();
+        tokio::task::spawn_blocking(move || apply_one_to_bind(&root, &patch))
+            .await
+            .map_err(|err| {
+                crate::MicrosandboxError::PatchFailed(format!("bind-root patch task failed: {err}"))
+            })??;
+    }
+    Ok(())
 }
 
 pub(crate) async fn build_upper_tree(
@@ -497,12 +773,8 @@ async fn apply_one_to_tree(
             let rel = normalize_guest_path_bytes(dst)?;
             check_replace_tree(tree, lowers, dst, *replace)?;
             ensure_tree_parents(tree, lowers, &rel)?;
-            let data = fs::read(src).await?;
-            let file_mode = if let Some(mode) = mode {
-                *mode as u16
-            } else {
-                source_mode(src, false).await?
-            };
+            let (data, source_mode) = read_regular_source(src).await?;
+            let file_mode = mode.map_or(source_mode, |mode| mode as u16);
             insert_tree_node(
                 tree,
                 &rel,
@@ -676,24 +948,14 @@ fn apply_one_to_bind(root: &RootedPatchFs, patch: &Patch) -> MicrosandboxResult<
             link,
             replace,
         } => {
-            let link_path = root.resolve(link, false)?;
-            root.ensure_parent(&link_path)?;
-            if *replace {
-                root.remove_entry(&link_path)?;
-            }
             #[cfg(unix)]
-            root.root
-                .symlink_contents(target, &link_path)
-                .map_err(|err| {
-                    if !replace && err.kind() == std::io::ErrorKind::AlreadyExists {
-                        path_exists_error(link)
-                    } else {
-                        err.into()
-                    }
-                })?;
+            {
+                let link_path = root.resolve(link, false)?;
+                root.create_symlink(Path::new(target), &link_path, link, *replace)?;
+            }
             #[cfg(windows)]
             {
-                let _ = target;
+                let _ = (root, target, link, replace);
                 return Err(crate::MicrosandboxError::InvalidConfig(
                     "symlink patches are not supported for Windows host bind roots".into(),
                 ));
@@ -709,16 +971,18 @@ fn apply_one_to_bind(root: &RootedPatchFs, patch: &Patch) -> MicrosandboxResult<
         }
         Patch::Append { path, content } => {
             let dest = root.resolve(path, true)?;
-            if root.root.try_exists(&dest)? {
-                let mut options = OpenOptions::new();
-                options.append(true);
-                let mut file = root.root.open_with(&dest, &options)?;
-                file.write_all(content.as_bytes())?;
-            } else {
-                return Err(crate::MicrosandboxError::PatchFailed(format!(
-                    "cannot append to '{path}': file not found in rootfs"
-                )));
-            }
+            let mut options = OpenOptions::new();
+            options.append(true);
+            let mut file = root.root.open_with(&dest, &options).map_err(|err| {
+                if err.kind() == std::io::ErrorKind::NotFound {
+                    crate::MicrosandboxError::PatchFailed(format!(
+                        "cannot append to '{path}': file not found in rootfs"
+                    ))
+                } else {
+                    err.into()
+                }
+            })?;
+            root.write_all(&mut file, content.as_bytes())?;
         }
     }
 
@@ -892,9 +1156,8 @@ async fn copy_dir_into_tree(
                     target: os_str_bytes(target.as_os_str()),
                 }),
             )?;
-        } else {
-            let mode = source_mode(&child_path, false).await?;
-            let data = fs::read(&child_path).await?;
+        } else if file_type.is_file() {
+            let (data, mode) = read_regular_source(&child_path).await?;
             insert_tree_node(
                 tree,
                 &child_relative,
@@ -906,6 +1169,11 @@ async fn copy_dir_into_tree(
                     nlink: 1,
                 }),
             )?;
+        } else {
+            return Err(crate::MicrosandboxError::PatchFailed(format!(
+                "CopyDir source contains an unsupported file type: '{}'",
+                child_path.display()
+            )));
         }
     }
 
@@ -928,6 +1196,30 @@ async fn source_mode(_path: &Path, is_dir: bool) -> MicrosandboxResult<u16> {
     {
         Ok(if is_dir { 0o755 } else { 0o644 })
     }
+}
+
+/// Read a regular patch source through one opened handle.
+async fn read_regular_source(path: &Path) -> MicrosandboxResult<(Vec<u8>, u16)> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NONBLOCK);
+    let mut file = options.open(path).await?;
+    let metadata = file.metadata().await?;
+    if !metadata.is_file() {
+        return Err(crate::MicrosandboxError::PatchFailed(format!(
+            "patch source is not a regular file: {}",
+            path.display()
+        )));
+    }
+
+    #[cfg(unix)]
+    let mode = metadata.permissions().mode() as u16 & 0o7777;
+    #[cfg(not(unix))]
+    let mode = 0o644;
+    let mut data = Vec::new();
+    file.read_to_end(&mut data).await?;
+    Ok((data, if mode == 0 { 0o644 } else { mode }))
 }
 
 fn metadata_with_mode(mode: u16) -> InodeMetadata {
@@ -1174,12 +1466,309 @@ fn set_file_mode(file: &File, mode: u32) -> MicrosandboxResult<()> {
     }
 }
 
+fn source_std_permissions_mode(_permissions: &std::fs::Permissions) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        Some(_permissions.mode() & 0o7777)
+    }
+
+    #[cfg(windows)]
+    {
+        None
+    }
+}
+
+fn source_cap_permissions_mode(_permissions: &Permissions) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        Some(cap_std::fs::PermissionsExt::mode(_permissions) & 0o7777)
+    }
+
+    #[cfg(windows)]
+    {
+        None
+    }
+}
+
 #[cfg(unix)]
 fn set_dir_mode(dir: &Dir, mode: u32) -> MicrosandboxResult<()> {
     dir.set_permissions(
         Path::new("."),
         Permissions::from_std(std::fs::Permissions::from_mode(mode)),
     )?;
+    Ok(())
+}
+
+/// Open one child relative to a pinned Windows directory without processing
+/// a reparse point in the child's final component.
+#[cfg(windows)]
+fn windows_open_relative_for_removal(
+    parent: &std::fs::File,
+    name: &OsStr,
+) -> std::io::Result<std::fs::File> {
+    use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT, NtCreateFile,
+    };
+    use windows_sys::Win32::Foundation::{
+        HANDLE, INVALID_HANDLE_VALUE, OBJ_CASE_INSENSITIVE, RtlNtStatusToDosError, UNICODE_STRING,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_ATTRIBUTES, SYNCHRONIZE,
+    };
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+
+    let mut wide_name: Vec<u16> = name.encode_wide().collect();
+    if wide_name.is_empty() || wide_name.contains(&0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "removal component is empty or contains NUL",
+        ));
+    }
+    let byte_length = wide_name
+        .len()
+        .checked_mul(std::mem::size_of::<u16>())
+        .and_then(|length| u16::try_from(length).ok())
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "component is too long")
+        })?;
+    let unicode_name = UNICODE_STRING {
+        Length: byte_length,
+        MaximumLength: byte_length,
+        Buffer: wide_name.as_mut_ptr(),
+    };
+    let object_attributes = OBJECT_ATTRIBUTES {
+        Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: parent.as_raw_handle() as HANDLE,
+        ObjectName: std::ptr::from_ref(&unicode_name),
+        Attributes: OBJ_CASE_INSENSITIVE,
+        SecurityDescriptor: std::ptr::null(),
+        SecurityQualityOfService: std::ptr::null(),
+    };
+    let mut io_status = IO_STATUS_BLOCK::default();
+    let mut handle = INVALID_HANDLE_VALUE;
+    let status = unsafe {
+        NtCreateFile(
+            &mut handle,
+            DELETE
+                | FILE_LIST_DIRECTORY
+                | FILE_TRAVERSE
+                | FILE_READ_ATTRIBUTES
+                | FILE_WRITE_ATTRIBUTES
+                | SYNCHRONIZE,
+            &object_attributes,
+            &mut io_status,
+            std::ptr::null(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_OPEN,
+            FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+            std::ptr::null(),
+            0,
+        )
+    };
+    if status < 0 {
+        let win32_error = unsafe { RtlNtStatusToDosError(status) };
+        return Err(std::io::Error::from_raw_os_error(win32_error as i32));
+    }
+    if handle == INVALID_HANDLE_VALUE || handle.is_null() {
+        return Err(std::io::Error::other(
+            "NtCreateFile succeeded without returning a handle",
+        ));
+    }
+
+    Ok(unsafe { std::fs::File::from_raw_handle(handle as RawHandle) })
+}
+
+/// Recursively remove an entry by handle on Windows.
+///
+/// Reparse points are deleted as links and never traversed. Directory names
+/// are enumerated from the open handle, and every child is opened relative to
+/// that same handle, so no ambient pathname is reconstructed during removal.
+#[cfg(windows)]
+fn windows_remove_open_entry(entry: std::fs::File) -> std::io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+    };
+
+    let mut stack = vec![WindowsRemovalFrame::Visit(entry)];
+    while let Some(frame) = stack.pop() {
+        match frame {
+            WindowsRemovalFrame::Visit(entry) => {
+                let attributes = entry.metadata()?.file_attributes();
+                if attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
+                    && attributes & FILE_ATTRIBUTE_DIRECTORY != 0
+                {
+                    stack.push(WindowsRemovalFrame::Directory {
+                        entry,
+                        pending: VecDeque::new(),
+                    });
+                } else {
+                    windows_mark_delete(&entry)?;
+                }
+            }
+            WindowsRemovalFrame::Directory { entry, mut pending } => {
+                if pending.is_empty() {
+                    pending.extend(windows_read_directory_names(&entry)?);
+                }
+                if let Some(name) = pending.pop_front() {
+                    let child = windows_open_relative_for_removal(&entry, &name)?;
+                    stack.push(WindowsRemovalFrame::Directory { entry, pending });
+                    stack.push(WindowsRemovalFrame::Visit(child));
+                } else {
+                    windows_mark_delete(&entry)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Read the next batch of names from an open Windows directory handle.
+#[cfg(windows)]
+fn windows_read_directory_names(directory: &std::fs::File) -> std::io::Result<Vec<OsString>> {
+    use windows_sys::Win32::Foundation::{ERROR_NO_MORE_FILES, HANDLE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ID_BOTH_DIR_INFO, FileIdBothDirectoryInfo, GetFileInformationByHandleEx,
+    };
+
+    // The API writes FILE_ID_BOTH_DIR_INFO records into this storage. A u64
+    // backing allocation provides enough alignment for safely viewing them.
+    let mut buffer = vec![0u64; (64 * 1024) / std::mem::size_of::<u64>()];
+    let buffer_len = buffer.len() * std::mem::size_of::<u64>();
+    let result = unsafe {
+        GetFileInformationByHandleEx(
+            directory.as_raw_handle() as HANDLE,
+            FileIdBothDirectoryInfo,
+            buffer.as_mut_ptr().cast(),
+            buffer_len as u32,
+        )
+    };
+    if result == 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(ERROR_NO_MORE_FILES as i32) {
+            return Ok(Vec::new());
+        }
+        return Err(error);
+    }
+
+    let mut names = Vec::new();
+    let mut offset = 0usize;
+    loop {
+        if !offset.is_multiple_of(std::mem::align_of::<FILE_ID_BOTH_DIR_INFO>())
+            || offset + std::mem::size_of::<FILE_ID_BOTH_DIR_INFO>() > buffer_len
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid Windows directory enumeration buffer",
+            ));
+        }
+        let info = unsafe {
+            &*(buffer
+                .as_ptr()
+                .cast::<u8>()
+                .add(offset)
+                .cast::<FILE_ID_BOTH_DIR_INFO>())
+        };
+        let name_length = usize::try_from(info.FileNameLength)
+            .ok()
+            .filter(|length| length % 2 == 0)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "invalid Windows directory entry name length",
+                )
+            })?;
+        let name_units = name_length / 2;
+        let name_offset = offset
+            .checked_add(std::mem::offset_of!(FILE_ID_BOTH_DIR_INFO, FileName))
+            .and_then(|start| start.checked_add(name_length).map(|end| (start, end)))
+            .filter(|(_, end)| *end <= buffer_len)
+            .map(|(start, _)| start)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Windows directory entry name exceeds enumeration buffer",
+                )
+            })?;
+        let name_ptr = unsafe { buffer.as_ptr().cast::<u8>().add(name_offset).cast::<u16>() };
+        let name_slice = unsafe { std::slice::from_raw_parts(name_ptr, name_units) };
+        let name = OsString::from_wide(name_slice);
+        if name != "." && name != ".." {
+            names.push(name);
+        }
+
+        if info.NextEntryOffset == 0 {
+            break;
+        }
+        offset = offset
+            .checked_add(info.NextEntryOffset as usize)
+            .filter(|next| *next < buffer_len)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "invalid Windows directory entry offset",
+                )
+            })?;
+    }
+    Ok(names)
+}
+
+/// Mark an opened Windows file, directory, or reparse point for deletion.
+#[cfg(windows)]
+fn windows_mark_delete(entry: &std::fs::File) -> std::io::Result<()> {
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY, FILE_BASIC_INFO, FILE_DISPOSITION_INFO,
+        FileBasicInfo, FileDispositionInfo, GetFileInformationByHandleEx,
+        SetFileInformationByHandle,
+    };
+
+    let mut basic = FILE_BASIC_INFO::default();
+    let result = unsafe {
+        GetFileInformationByHandleEx(
+            entry.as_raw_handle() as HANDLE,
+            FileBasicInfo,
+            std::ptr::from_mut(&mut basic).cast(),
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    };
+    if result == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if basic.FileAttributes & FILE_ATTRIBUTE_READONLY != 0 {
+        basic.FileAttributes &= !FILE_ATTRIBUTE_READONLY;
+        if basic.FileAttributes == 0 {
+            basic.FileAttributes = FILE_ATTRIBUTE_NORMAL;
+        }
+        let result = unsafe {
+            SetFileInformationByHandle(
+                entry.as_raw_handle() as HANDLE,
+                FileBasicInfo,
+                std::ptr::from_ref(&basic).cast(),
+                std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+            )
+        };
+        if result == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+
+    let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+    let result = unsafe {
+        SetFileInformationByHandle(
+            entry.as_raw_handle() as HANDLE,
+            FileDispositionInfo,
+            std::ptr::from_ref(&disposition).cast(),
+            std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    };
+    if result == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
     Ok(())
 }
 
@@ -1228,6 +1817,19 @@ fn guest_path_components(guest_path: &str) -> MicrosandboxResult<VecDeque<Pendin
     if !guest_path.starts_with('/') {
         return Err(crate::MicrosandboxError::PatchFailed(format!(
             "patch path must be absolute: '{guest_path}'"
+        )));
+    }
+    if guest_path.len() > 1 && guest_path.ends_with('/') {
+        return Err(crate::MicrosandboxError::PatchFailed(format!(
+            "patch path must not have a trailing slash: '{guest_path}'"
+        )));
+    }
+    if guest_path[1..]
+        .split('/')
+        .any(|component| component.is_empty() || component == ".")
+    {
+        return Err(crate::MicrosandboxError::PatchFailed(format!(
+            "patch path must be canonical: '{guest_path}'"
         )));
     }
 
@@ -1279,6 +1881,14 @@ fn validate_bind_patches(patches: &[Patch]) -> MicrosandboxResult<()> {
     for patch in patches {
         guest_path_components(patch_destination(patch))?;
 
+        if let Patch::Symlink { target, .. } = patch
+            && (target.is_empty() || target.contains('\0'))
+        {
+            return Err(crate::MicrosandboxError::PatchFailed(
+                "symlink patch target must be non-empty and contain no null bytes".into(),
+            ));
+        }
+
         #[cfg(windows)]
         match patch {
             Patch::Text { mode: Some(_), .. }
@@ -1326,6 +1936,7 @@ fn prepend_link_target(
     guest_path: &str,
 ) -> MicrosandboxResult<()> {
     let mut target_components = Vec::new();
+    let requires_directory = path_requires_directory(target);
 
     for component in target.components() {
         match component {
@@ -1348,11 +1959,28 @@ fn prepend_link_target(
             }
         }
     }
+    if requires_directory {
+        target_components.push(PendingComponent::RequireDirectory);
+    }
 
     for component in target_components.into_iter().rev() {
         remaining.push_front(component);
     }
     Ok(())
+}
+
+fn path_requires_directory(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        let bytes = path.as_os_str().as_bytes();
+        bytes.ends_with(b"/") || bytes.ends_with(b"/.")
+    }
+
+    #[cfg(windows)]
+    {
+        let target = path.as_os_str().to_string_lossy();
+        target.ends_with(['/', '\\']) || target.ends_with("/.") || target.ends_with("\\.")
+    }
 }
 
 fn join_components(components: &[OsString], final_name: Option<&OsStr>) -> PathBuf {
@@ -1382,10 +2010,13 @@ fn open_root_without_links(path: &Path) -> MicrosandboxResult<Dir> {
         return Err(root_open_error(path, "contains '..'"));
     }
 
+    // Opening `.` pins the process working directory directly. Converting it
+    // through `current_dir()` would create an ambient pathname race if an
+    // ancestor were renamed before the directory was reopened.
     let mut base = if path.is_absolute() {
         PathBuf::new()
     } else {
-        std::env::current_dir()?
+        PathBuf::from(".")
     };
     let mut names = Vec::new();
 
@@ -1670,6 +2301,207 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn bind_patch_copy_dir_preserves_source_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let source = temp.path().join("source");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("target.txt"), "source").unwrap();
+        symlink("target.txt", source.join("relative-link")).unwrap();
+        symlink("/outside/target.txt", source.join("absolute-link")).unwrap();
+
+        apply_patches(
+            &bind_root(root.clone(), true),
+            &[Patch::CopyDir {
+                src: source,
+                dst: "/copied".into(),
+                replace: false,
+            }],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_link(root.join("copied/relative-link")).unwrap(),
+            Path::new("target.txt")
+        );
+        assert_eq!(
+            std::fs::read_link(root.join("copied/absolute-link")).unwrap(),
+            Path::new("/outside/target.txt")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_patch_copy_dir_replaces_destination_link_not_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let source = temp.path().join("source");
+        std::fs::create_dir_all(root.join("copied")).unwrap();
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(root.join("victim.txt"), "keep").unwrap();
+        symlink("../../victim.txt", root.join("copied/link")).unwrap();
+        symlink("source-target", source.join("link")).unwrap();
+
+        apply_patches(
+            &bind_root(root.clone(), true),
+            &[Patch::CopyDir {
+                src: source,
+                dst: "/copied".into(),
+                replace: true,
+            }],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("victim.txt")).unwrap(),
+            "keep"
+        );
+        assert_eq!(
+            std::fs::read_link(root.join("copied/link")).unwrap(),
+            Path::new("source-target")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_patch_copy_dir_rejects_special_source_files() {
+        use std::ffi::CString;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let source = temp.path().join("source");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&source).unwrap();
+        let fifo = CString::new(source.join("pipe").as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+
+        let error = apply_patches(
+            &bind_root(root.clone(), true),
+            &[Patch::CopyDir {
+                src: source,
+                dst: "/copied".into(),
+                replace: false,
+            }],
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unsupported file type"));
+        assert!(!root.join("copied").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_patch_copy_file_rejects_fifo_source_without_creating_destination() {
+        use std::ffi::CString;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let fifo_path = temp.path().join("pipe");
+        let fifo = CString::new(fifo_path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+
+        let error = apply_patches(
+            &bind_root(root.clone(), true),
+            &[Patch::CopyFile {
+                src: fifo_path,
+                dst: "/copied.txt".into(),
+                mode: None,
+                replace: false,
+            }],
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("not a regular file"));
+        assert!(!root.join("copied.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_patch_copy_dir_preserves_directory_modes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let source = temp.path().join("source");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(source.join("private")).unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o710)).unwrap();
+        std::fs::set_permissions(
+            source.join("private"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+
+        apply_patches(
+            &bind_root(root.clone(), true),
+            &[Patch::CopyDir {
+                src: source,
+                dst: "/copied".into(),
+                replace: false,
+            }],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            std::fs::metadata(root.join("copied"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o710
+        );
+        assert_eq!(
+            std::fs::metadata(root.join("copied/private"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_patch_preserves_symlink_target_directory_requirement() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        std::fs::write(root.join("target.txt"), "keep").unwrap();
+        symlink("target.txt/", root.join("link")).unwrap();
+
+        let error = apply_patches(
+            &bind_root(root.clone(), true),
+            &[Patch::Text {
+                path: "/link".into(),
+                content: "overwrite".into(),
+                mode: None,
+                replace: true,
+            }],
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("must resolve to a directory"));
+        assert_eq!(
+            std::fs::read_to_string(root.join("target.txt")).unwrap(),
+            "keep"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn bind_patch_no_replace_rejects_existing_final_symlink() {
         use std::os::unix::fs::symlink;
 
@@ -1760,7 +2592,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = RootedPatchFs::open(temp.path(), true).unwrap();
         let mut opened = root
-            .open_file_for_write(Path::new("destination.txt"), "/destination.txt", false)
+            .open_file_for_write(
+                Path::new("destination.txt"),
+                "/destination.txt",
+                false,
+                None,
+            )
             .unwrap();
         opened.write_all(b"created").unwrap();
 
@@ -1958,6 +2795,70 @@ mod tests {
         assert!(error.to_string().contains("must not contain '..'"));
         assert!(!root.join("first.txt").exists());
         assert!(!temp.path().join("escaped.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn bind_patch_preflights_noncanonical_path_before_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+
+        for invalid in ["/trailing/", "/double//slash", "/dot/./segment"] {
+            let error = apply_patches(
+                &bind_root(root.clone(), true),
+                &[
+                    text_patch("/first.txt", "must-not-write"),
+                    text_patch(invalid, "invalid"),
+                ],
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("patch path"));
+            assert!(!root.join("first.txt").exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_patch_preflights_invalid_symlink_target_before_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+
+        let error = apply_patches(
+            &bind_root(root.clone(), true),
+            &[
+                text_patch("/first.txt", "must-not-write"),
+                Patch::Symlink {
+                    target: String::new(),
+                    link: "/link".into(),
+                    replace: false,
+                },
+            ],
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("symlink patch target"));
+        assert!(!root.join("first.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn bind_patch_copy_dir_opens_source_before_destination() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+
+        apply_patches(
+            &bind_root(root.clone(), true),
+            &[Patch::CopyDir {
+                src: temp.path().join("missing"),
+                dst: "/copied".into(),
+                replace: false,
+            }],
+        )
+        .await
+        .unwrap_err();
+
+        assert!(!root.join("copied").exists());
     }
 
     #[cfg(unix)]
@@ -2282,6 +3183,34 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn bind_patch_windows_remove_recurses_without_following_junctions() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(root.join("remove/nested")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(root.join("remove/nested/file.txt"), "remove").unwrap();
+        std::fs::write(outside.join("sentinel.txt"), "keep").unwrap();
+        create_windows_junction(&root.join("remove").join("link"), &outside);
+
+        apply_patches(
+            &bind_root(root.clone(), true),
+            &[Patch::Remove {
+                path: "/remove".into(),
+            }],
+        )
+        .await
+        .unwrap();
+
+        assert!(!root.join("remove").exists());
+        assert_eq!(
+            std::fs::read_to_string(outside.join("sentinel.txt")).unwrap(),
+            "keep"
+        );
+    }
+
     #[tokio::test]
     async fn build_upper_tree_creates_missing_parents_for_text_patch() {
         let patches = vec![Patch::Text {
@@ -2297,6 +3226,56 @@ mod tests {
             TreeNode::RegularFile(file) => assert_eq!(file.data.read_all().unwrap(), b"hello"),
             _ => panic!("expected regular file"),
         }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn bind_patch_windows_preserves_copy_source_readonly_attribute() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let source_file = temp.path().join("source.txt");
+        let source_dir = temp.path().join("source-dir");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(&source_file, "file").unwrap();
+        std::fs::write(source_dir.join("nested.txt"), "nested").unwrap();
+        for path in [&source_file, &source_dir.join("nested.txt")] {
+            let mut permissions = std::fs::metadata(path).unwrap().permissions();
+            permissions.set_readonly(true);
+            std::fs::set_permissions(path, permissions).unwrap();
+        }
+
+        apply_patches(
+            &bind_root(root.clone(), true),
+            &[
+                Patch::CopyFile {
+                    src: source_file,
+                    dst: "/copied.txt".into(),
+                    mode: None,
+                    replace: false,
+                },
+                Patch::CopyDir {
+                    src: source_dir,
+                    dst: "/copied-dir".into(),
+                    replace: false,
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            std::fs::metadata(root.join("copied.txt"))
+                .unwrap()
+                .permissions()
+                .readonly()
+        );
+        assert!(
+            std::fs::metadata(root.join("copied-dir/nested.txt"))
+                .unwrap()
+                .permissions()
+                .readonly()
+        );
     }
 
     #[tokio::test]
@@ -2477,5 +3456,61 @@ mod tests {
 
         let tree = build_upper_tree(&patches, &[]).await.unwrap();
         assert!(tree.get(b"tmp/demo.txt").is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn build_upper_tree_copy_dir_rejects_special_source_files() {
+        use std::ffi::CString;
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        let fifo = CString::new(source.join("pipe").as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+
+        let error = match build_upper_tree(
+            &[Patch::CopyDir {
+                src: source,
+                dst: "/copied".into(),
+                replace: false,
+            }],
+            &[],
+        )
+        .await
+        {
+            Ok(_) => panic!("expected special source file to fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("unsupported file type"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn build_upper_tree_copy_file_rejects_fifo_source() {
+        use std::ffi::CString;
+
+        let temp = tempfile::tempdir().unwrap();
+        let fifo_path = temp.path().join("pipe");
+        let fifo = CString::new(fifo_path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+
+        let error = match build_upper_tree(
+            &[Patch::CopyFile {
+                src: fifo_path,
+                dst: "/copied.txt".into(),
+                mode: None,
+                replace: false,
+            }],
+            &[],
+        )
+        .await
+        {
+            Ok(_) => panic!("expected FIFO source to fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("not a regular file"));
     }
 }
