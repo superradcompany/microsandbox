@@ -10,9 +10,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use cap_std::ambient_authority;
+use cap_std::fs::{Dir, File, OpenOptions, Permissions};
 #[cfg(unix)]
-use cap_std::fs::DirBuilderExt;
-use cap_std::fs::{Dir, DirBuilder, File, OpenOptions, Permissions};
+use cap_std::fs::{DirBuilder, DirBuilderExt};
 use microsandbox_image::erofs::{ErofsEntryInfo, ErofsEntryKind, ErofsReader};
 use microsandbox_image::tree::{
     DeviceNode, DirectoryNode, FileData, FileTree, FileTreeError, InodeMetadata, RegularFileId,
