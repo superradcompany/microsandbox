@@ -3,6 +3,7 @@
 use std::io::{IsTerminal, Write};
 use std::time::Duration;
 
+use base64::Engine as _;
 use clap::Args;
 use microsandbox::sandbox::exec::{ExecEvent, ExecHandle};
 use microsandbox::sandbox::{ExecOptionsBuilder, ExecOutput, RlimitResource, Sandbox};
@@ -61,6 +62,15 @@ pub struct ExecArgs {
     #[arg(long, conflicts_with = "tty")]
     pub stream: bool,
 
+    /// Output the captured result as JSON.
+    #[arg(
+        long,
+        value_name = "FORMAT",
+        value_parser = ["json"],
+        conflicts_with_all = ["stream", "tty"]
+    )]
+    pub format: Option<String>,
+
     /// Command to run inside the sandbox (after --).
     /// When omitted in interactive mode, attaches to the default shell.
     #[arg(last = true)]
@@ -94,7 +104,11 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
 
     let workdir = args.workdir;
     let stdin_is_terminal = std::io::stdin().is_terminal();
-    let interactive = super::common::use_interactive_tty(stdin_is_terminal, args.no_tty);
+    let interactive = use_interactive_exec(
+        stdin_is_terminal,
+        args.no_tty,
+        args.format.as_deref() == Some("json"),
+    );
 
     // Read piped stdin upfront so it can be forwarded into the sandbox.
     // Skipped in `--stream` mode, where stdin is forwarded incrementally.
@@ -188,8 +202,19 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
             })
             .await?;
 
-        std::io::stdout().write_all(output.stdout_bytes())?;
-        std::io::stderr().write_all(output.stderr_bytes())?;
+        if args.format.as_deref() == Some("json") {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&exec_result_json(
+                    output.status().code,
+                    output.stdout_bytes(),
+                    output.stderr_bytes(),
+                ))?
+            );
+        } else {
+            std::io::stdout().write_all(output.stdout_bytes())?;
+            std::io::stderr().write_all(output.stderr_bytes())?;
+        }
 
         super::maybe_stop(&sandbox).await;
 
@@ -237,6 +262,37 @@ fn apply_common_exec_opts(
 /// Return whether buffered exec should consume host stdin before starting.
 fn should_read_buffered_stdin(stdin_is_terminal: bool, interactive: bool, stream: bool) -> bool {
     !stdin_is_terminal && !interactive && !stream
+}
+
+/// Decide whether execution should use the interactive PTY path.
+fn use_interactive_exec(stdin_is_terminal: bool, no_tty: bool, json: bool) -> bool {
+    !json && super::common::use_interactive_tty(stdin_is_terminal, no_tty)
+}
+
+/// Build the machine-readable result for one captured execution.
+fn exec_result_json(exit_code: i32, stdout: &[u8], stderr: &[u8]) -> serde_json::Value {
+    let (stdout, stdout_encoding) = encode_output(stdout);
+    let (stderr, stderr_encoding) = encode_output(stderr);
+
+    serde_json::json!({
+        "exit_code": exit_code,
+        "success": exit_code == 0,
+        "stdout": stdout,
+        "stdout_encoding": stdout_encoding,
+        "stderr": stderr,
+        "stderr_encoding": stderr_encoding,
+    })
+}
+
+/// Preserve UTF-8 output as text and encode arbitrary bytes losslessly.
+fn encode_output(bytes: &[u8]) -> (String, &'static str) {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => (text.to_string(), "utf8"),
+        Err(_) => (
+            base64::engine::general_purpose::STANDARD.encode(bytes),
+            "base64",
+        ),
+    }
 }
 
 /// Drive a non-PTY bidirectional streaming exec session (`--stream`).
@@ -401,6 +457,58 @@ mod tests {
     }
 
     #[test]
+    fn parses_json_format() {
+        let args = parse_exec_args(&["worker", "--format", "json", "--", "true"]);
+
+        assert_eq!(args.format.as_deref(), Some("json"));
+        assert_eq!(args.command, vec!["true"]);
+    }
+
+    #[test]
+    fn json_format_conflicts_with_streaming_modes() {
+        for mode in ["--stream", "--tty"] {
+            let err =
+                TestCli::try_parse_from(["msb", "worker", "--format", "json", mode]).unwrap_err();
+
+            assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+        }
+    }
+
+    #[test]
+    fn renders_utf8_exec_result_as_json() {
+        let result = exec_result_json(0, b"hello\n", b"");
+
+        assert_eq!(
+            result,
+            serde_json::json!({
+                "exit_code": 0,
+                "success": true,
+                "stdout": "hello\n",
+                "stdout_encoding": "utf8",
+                "stderr": "",
+                "stderr_encoding": "utf8",
+            })
+        );
+    }
+
+    #[test]
+    fn renders_binary_exec_result_as_base64() {
+        let result = exec_result_json(7, &[0xff, 0x00], &[0x80]);
+
+        assert_eq!(
+            result,
+            serde_json::json!({
+                "exit_code": 7,
+                "success": false,
+                "stdout": "/wA=",
+                "stdout_encoding": "base64",
+                "stderr": "gA==",
+                "stderr_encoding": "base64",
+            })
+        );
+    }
+
+    #[test]
     fn no_tty_parses_before_command_delimiter() {
         let args = parse_exec_args(&["box", "--no-tty", "--", "python3", "-c", "print('ok')"]);
 
@@ -426,5 +534,10 @@ mod tests {
     #[test]
     fn no_tty_with_terminal_stdin_does_not_buffer_stdin() {
         assert!(!should_read_buffered_stdin(true, false, false));
+    }
+
+    #[test]
+    fn json_format_disables_interactive_exec() {
+        assert!(!use_interactive_exec(true, false, true));
     }
 }
