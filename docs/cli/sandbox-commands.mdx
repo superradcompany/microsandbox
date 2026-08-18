@@ -248,6 +248,7 @@ msb ping devbox
 msb ping api worker
 msb ping --label app=engine
 msb ping api --touch
+msb ping api worker --format json
 ```
 
 Use `--touch` when a successful health check should also refresh the idle timer. Without `--touch`, ping is a pure reachability check.
@@ -256,7 +257,14 @@ Use `--touch` when a successful health check should also refresh the idle timer.
 |------|-------------|
 | `--label` | Ping every sandbox carrying this label (`KEY=VALUE`). Repeatable; AND-matched. Unioned with any named sandboxes |
 | `--touch` | Refresh the sandbox idle timer after a successful ping |
+| `--format json` | Emit one reachability report per selected sandbox |
 | `-q`, `--quiet` | Suppress progress output |
+
+JSON output includes each sandbox name, a `reachable` flag, round-trip
+`latency_us`, and an error message when the probe or requested touch fails. If
+ping succeeds but touch fails, `reachable` remains `true` and the measured
+latency is preserved. All selected sandboxes are checked even when one is
+unreachable; the command exits nonzero if any probe or requested touch fails.
 
 ## msb touch
 
