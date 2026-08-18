@@ -32,6 +32,9 @@ pub const RELAY_CLIENT_LEASE_SIZE: usize = 41;
 /// First backwards-readable range-lease record format.
 pub const RELAY_LEASE_FORMAT_V1: u8 = 1;
 
+/// First backwards-readable SDK-to-runtime shared-arena format.
+pub const LOCAL_SHM_FORMAT_V1: u8 = 1;
+
 const BULK_HELLO_MAGIC: [u8; 4] = *b"MSBB";
 const BULK_ACK_MAGIC: [u8; 4] = *b"MSBA";
 const RELAY_CLIENT_MAGIC: [u8; 4] = *b"MSBL";
@@ -62,6 +65,16 @@ pub type ClientIncarnation = [u8; CLIENT_INCARNATION_SIZE];
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelayLeaseReady {
     /// Highest fixed MSBL record format this agent can read.
+    pub max_format: u8,
+}
+
+/// Unix-local SDK-to-runtime transport formats supported by the relay.
+///
+/// This is an additive Ready capability rather than a guest protocol generation. The guest does
+/// not allocate, map, or interpret these arenas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalTransportReady {
+    /// Highest backwards-readable shared-arena format.
     pub max_format: u8,
 }
 
@@ -148,6 +161,21 @@ impl RelayLeaseReady {
     pub fn select_supported(&self, host_max: u8) -> Option<u8> {
         let selected = self.max_format.min(host_max);
         (selected >= RELAY_LEASE_FORMAT_V1).then_some(selected)
+    }
+}
+
+impl LocalTransportReady {
+    /// Advertise support for the first single-socket shared-arena format.
+    pub fn shared_arena_v1() -> Self {
+        Self {
+            max_format: LOCAL_SHM_FORMAT_V1,
+        }
+    }
+
+    /// Select the highest mutually supported backwards-readable format.
+    pub fn select_supported(&self, client_max: u8) -> Option<u8> {
+        let selected = self.max_format.min(client_max);
+        (selected >= LOCAL_SHM_FORMAT_V1).then_some(selected)
     }
 }
 
@@ -443,6 +471,17 @@ mod tests {
         BulkTransportReady::dual_port_v1(id)
             .validate_dual_port_v1(id)
             .unwrap();
+    }
+
+    #[test]
+    fn local_transport_selects_only_a_mutually_supported_format() {
+        let capability = LocalTransportReady::shared_arena_v1();
+        assert_eq!(capability.select_supported(LOCAL_SHM_FORMAT_V1), Some(1));
+        assert_eq!(capability.select_supported(0), None);
+        assert_eq!(
+            LocalTransportReady { max_format: 9 }.select_supported(LOCAL_SHM_FORMAT_V1),
+            Some(1)
+        );
     }
 
     #[test]

@@ -42,6 +42,10 @@ pub enum AgentClientError {
     #[error("protocol: {0}")]
     Protocol(#[from] microsandbox_protocol::ProtocolError),
 
+    /// The optional Unix-local shared-memory transport failed before or during use.
+    #[error("local transport: {0}")]
+    LocalTransport(String),
+
     /// CBOR encoding or decoding failed.
     #[error("cbor: {0}")]
     Cbor(String),

@@ -13,6 +13,9 @@
 
 pub mod client;
 pub mod error;
+/// Unix-local shared-memory bulk transport primitives.
+#[cfg(all(feature = "uds", unix))]
+pub mod local_shm;
 pub mod message;
 pub mod stream;
 pub mod transport;
