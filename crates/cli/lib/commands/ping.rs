@@ -1,5 +1,6 @@
 //! `msb ping` command — check agent reachability for running sandboxes.
 
+use std::io::Write;
 use std::time::Duration;
 
 use clap::Args;
@@ -105,7 +106,9 @@ pub async fn run(args: PingArgs) -> anyhow::Result<()> {
     }
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&reports)?);
+        let json = serde_json::to_string_pretty(&reports)?;
+        let mut stdout = std::io::stdout().lock();
+        write_json_report(&mut stdout, &json)?;
     }
 
     if failed {
@@ -113,6 +116,11 @@ pub async fn run(args: PingArgs) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn write_json_report(mut writer: impl Write, json: &str) -> std::io::Result<()> {
+    writeln!(writer, "{json}")?;
+    writer.flush()
 }
 
 async fn ping_one(name: &str, touch: bool, quiet: bool) -> anyhow::Result<PingReport> {
@@ -250,6 +258,15 @@ mod tests {
                 },
             ])
         );
+    }
+
+    #[test]
+    fn writes_complete_json_report() {
+        let mut output = Vec::new();
+
+        write_json_report(&mut output, r#"[{"reachable":false}]"#).unwrap();
+
+        assert_eq!(output, b"[{\"reachable\":false}]\n");
     }
 
     #[test]
