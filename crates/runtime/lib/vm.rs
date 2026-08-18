@@ -1605,8 +1605,9 @@ fn build_vm(
             // Name the folder on a permission error, usually an OS access restriction.
             if e.kind() == std::io::ErrorKind::PermissionDenied {
                 RuntimeError::Custom(format!(
-                    "mount {tag}: permission denied reading host folder {host_path} ({e}). \
-                     On macOS, grant access in System Settings > Privacy & Security."
+                    "mount {tag}: permission denied reading host folder {} ({e}). \
+                     On macOS, grant access in System Settings > Privacy & Security.",
+                    host_path.display()
                 ))
             } else {
                 RuntimeError::Custom(format!("mount {tag}: {e}"))
