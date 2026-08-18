@@ -8,6 +8,7 @@
 //! where it fits the pool, preserving every host's current addressing.
 
 use sea_orm_migration::prelude::*;
+use sea_orm_migration::sea_orm::{DatabaseBackend, Statement};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -42,11 +43,24 @@ impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let connection = manager.get_connection();
 
-        connection.execute_unprepared(ADD_COLUMN).await?;
-        // Rows whose id already fits the u16 pool keep exactly the addressing
-        // they had; rows past the cap (hosts that hit #1390) stay NULL and
-        // receive a recycled slot on their next spawn.
-        connection.execute_unprepared(BACKFILL_FROM_ID).await?;
+        // Idempotent: `down` deliberately leaves the column in place (SQLite
+        // DROP COLUMN is not available on every supported version), so a
+        // rollback that removes the migration record followed by a re-upgrade
+        // must not fail on the duplicate column. Probe PRAGMA first.
+        let has_column = !connection
+            .query_all_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT 1 FROM pragma_table_info('sandbox') WHERE name = 'network_slot'".to_owned(),
+            ))
+            .await?
+            .is_empty();
+        if !has_column {
+            connection.execute_unprepared(ADD_COLUMN).await?;
+            // Rows whose id already fits the u16 pool keep exactly the
+            // addressing they had; rows past the cap (hosts that hit #1390)
+            // stay NULL and receive a recycled slot on their next spawn.
+            connection.execute_unprepared(BACKFILL_FROM_ID).await?;
+        }
 
         Ok(())
     }
@@ -54,7 +68,8 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         // SQLite has no DROP COLUMN on every supported version; recreating
         // the table to shed one column is out of proportion for a host-local
-        // schema. The column is harmless when unused.
+        // schema. The column is harmless when unused; `up` probes for it so
+        // a re-upgrade after this rollback succeeds.
         let _ = manager;
         Ok(())
     }
