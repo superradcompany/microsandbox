@@ -409,29 +409,37 @@ impl ConsolePortBackend for AgentConsoleBackend {
         // notifications are not lost if the VMM uses edge-triggered polling.
         self.shared.rx_wake.drain();
 
-        let mut pending = self.pending.lock().unwrap();
+        if buf.is_empty() {
+            return Ok(0);
+        }
 
-        // Serve from leftover bytes first (use memcpy via slices).
-        if let Some(chunk) = pending.as_mut() {
-            let n = chunk.copy_prefix_into(buf);
+        let mut pending = self.pending.lock().unwrap();
+        let mut written = 0;
+
+        // The queue stores independently-owned fragments so shared-arena bulk can retain its
+        // zero-copy payload. Virtio-console is still a byte stream, however, and returning after a
+        // tiny incarnation or header fragment wastes an entire guest descriptor and interrupt.
+        // Fill the caller's descriptor across fragment boundaries while preserving exact order.
+        while written < buf.len() {
+            if pending.is_none() {
+                *pending = self.shared.rx_ring.pop();
+            }
+            let Some(chunk) = pending.as_mut() else {
+                break;
+            };
+
+            written += chunk.copy_prefix_into(&mut buf[written..]);
             if chunk.is_empty() {
                 pending.take();
             }
-            self.shared.rx_capacity_wake.wake();
-            return Ok(n);
         }
 
-        // Pop a new chunk from the ring.
-        match self.shared.rx_ring.pop() {
-            Some(mut chunk) => {
-                let n = chunk.copy_prefix_into(buf);
-                if !chunk.is_empty() {
-                    *pending = Some(chunk);
-                }
-                self.shared.rx_capacity_wake.wake();
-                Ok(n)
-            }
-            None => Err(io::ErrorKind::WouldBlock.into()),
+        if written == 0 {
+            Err(io::ErrorKind::WouldBlock.into())
+        } else {
+            // One notification covers every fragment whose capacity this read released.
+            self.shared.rx_capacity_wake.wake();
+            Ok(written)
         }
     }
 
@@ -633,6 +641,32 @@ mod tests {
         let mut buf = [0u8; 16];
         let err = backend.read(&mut buf).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backend_read_fills_one_guest_buffer_across_fragments() {
+        let shared = Arc::new(ConsoleSharedState::new());
+        let backend = AgentConsoleBackend::new(Arc::clone(&shared));
+
+        // Shared bulk arrives as an incarnation, public header, and retained payload. The guest
+        // should observe one continuous read rather than three undersized virtio descriptors.
+        shared.rx_ring.push(Bytes::from_static(b"inc")).unwrap();
+        shared.rx_ring.push(Bytes::from_static(b"hdr")).unwrap();
+        shared.rx_ring.push(Bytes::from_static(b"payload")).unwrap();
+
+        let mut first = [0u8; 10];
+        let n = backend.read(&mut first).unwrap();
+        assert_eq!(n, first.len());
+        assert_eq!(&first, b"inchdrpayl");
+
+        let mut second = [0u8; 8];
+        let n = backend.read(&mut second).unwrap();
+        assert_eq!(&second[..n], b"oad");
+        assert_eq!(
+            backend.read(&mut second).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
     }
 
     #[cfg(unix)]

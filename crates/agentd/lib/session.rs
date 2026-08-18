@@ -242,8 +242,8 @@ pub struct BulkSessionOutput {
 /// Activity represented by a pre-encoded session frame.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RawActivity {
-    /// Whether this frame is a meaningful guest-to-host protocol message.
-    pub guest_message: bool,
+    /// Meaningful guest-to-host protocol messages represented by this update.
+    pub guest_messages: usize,
 
     /// Filesystem bytes moved by this frame.
     pub fs_bytes: usize,
@@ -539,7 +539,7 @@ impl RawActivity {
     /// A guest-to-host frame with no byte counter.
     pub fn guest_message() -> Self {
         Self {
-            guest_message: true,
+            guest_messages: 1,
             ..Self::default()
         }
     }
@@ -547,7 +547,7 @@ impl RawActivity {
     /// A guest-to-host filesystem data frame.
     pub fn fs_bytes(len: usize) -> Self {
         Self {
-            guest_message: true,
+            guest_messages: 1,
             fs_bytes: len,
             tcp_bytes: 0,
         }
@@ -556,7 +556,7 @@ impl RawActivity {
     /// A guest-to-host TCP data frame.
     pub fn tcp_bytes(len: usize) -> Self {
         Self {
-            guest_message: true,
+            guest_messages: 1,
             fs_bytes: 0,
             tcp_bytes: len,
         }

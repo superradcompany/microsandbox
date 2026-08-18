@@ -148,6 +148,26 @@ pub struct FsWriteSink {
     bulk_active: bool,
 }
 
+/// Host-side durability requested when publishing a copied guest file.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HostCopyDurability {
+    /// Atomically replace the destination after buffered writes complete, without forcing the
+    /// temporary file to stable storage.
+    #[default]
+    Buffered,
+
+    /// Call `sync_all` on the completed temporary file before atomically replacing the destination.
+    /// This does not by itself guarantee that the containing directory entry survives a crash.
+    File,
+}
+
+/// Options controlling a guest-to-host file copy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HostCopyOptions {
+    /// Durability applied before the temporary file is published.
+    pub durability: HostCopyDurability,
+}
+
 enum FsWriteProtocol {
     Legacy {
         rx: mpsc::Receiver<AgentFrame>,
@@ -518,6 +538,25 @@ impl<'a> SandboxFsOps<'a> {
             .await
     }
 
+    /// Copy a file from the sandbox to the host with explicit publication durability.
+    pub async fn copy_to_host_with_options(
+        &self,
+        guest_path: &str,
+        host_path: impl AsRef<Path>,
+        options: HostCopyOptions,
+    ) -> MicrosandboxResult<()> {
+        self.backend
+            .sandboxes()
+            .fs_copy_to_host_with_options(
+                self.backend.clone(),
+                self.name,
+                guest_path,
+                host_path.as_ref(),
+                options,
+            )
+            .await
+    }
+
     /// The backend as an agent dialer: the relay socket locally, the agent
     /// WebSocket route on cloud.
     fn dialer(&self) -> &dyn Backend {
@@ -748,6 +787,7 @@ impl FsWriteSink {
                     while sender.available_credit() == 0 {
                         apply_next_fs_write_credit(rx, sender).await?;
                     }
+
                     let chunk_len = remaining
                         .len()
                         .min(sender.max_record_payload() as usize)
@@ -1072,8 +1112,9 @@ pub(crate) mod agent {
     use crate::{MicrosandboxError, MicrosandboxResult, agent::AgentClient, backend::Backend};
 
     use super::{
-        FsEntry, FsHandle, FsMetadata, FsReadStream, FsWriteSink, check_response,
-        entry_info_to_fs_entry, entry_info_to_metadata, receive_fs_bulk_acceptance,
+        FsEntry, FsHandle, FsMetadata, FsReadStream, FsWriteSink, HostCopyDurability,
+        HostCopyOptions, check_response, entry_info_to_fs_entry, entry_info_to_metadata,
+        receive_fs_bulk_acceptance,
     };
 
     /// Open a fresh agent connection for the named sandbox.
@@ -1684,6 +1725,23 @@ pub(crate) mod agent {
         guest_path: &str,
         host_path: &Path,
     ) -> MicrosandboxResult<()> {
+        copy_to_host_with_options(
+            backend,
+            name,
+            guest_path,
+            host_path,
+            HostCopyOptions::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn copy_to_host_with_options(
+        backend: &dyn Backend,
+        name: &str,
+        guest_path: &str,
+        host_path: &Path,
+        options: HostCopyOptions,
+    ) -> MicrosandboxResult<()> {
         let (std_file, temp_path) = prepare_host_copy_target(host_path).await?;
         let mut file = tokio::fs::File::from_std(std_file);
         let mut stream = read_stream(backend, name, guest_path).await?;
@@ -1707,7 +1765,9 @@ pub(crate) mod agent {
             )
             .into());
         }
-        file.sync_all().await?;
+        if options.durability == HostCopyDurability::File {
+            file.sync_all().await?;
+        }
         drop(file);
 
         publish_host_copy_target(temp_path, host_path)?;
@@ -1811,6 +1871,14 @@ pub(crate) mod agent {
         use std::os::unix::fs::{PermissionsExt, symlink};
 
         use super::*;
+
+        #[test]
+        fn host_copy_defaults_to_buffered_atomic_publication() {
+            assert_eq!(
+                HostCopyOptions::default().durability,
+                HostCopyDurability::Buffered
+            );
+        }
 
         #[tokio::test]
         async fn host_copy_target_atomically_replaces_existing_file() {

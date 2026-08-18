@@ -17,8 +17,9 @@ use tokio::time::{self, Duration};
 use microsandbox_protocol::AGENT_TRANSPORT_DUAL_PORT_CMDLINE;
 use microsandbox_protocol::HANDOFF_POWEROFF_TIMEOUT;
 use microsandbox_protocol::bulk::{
-    BulkCancel, BulkCancelReason, BulkCredit, BulkFinish, BulkFlow, BulkKind, BulkRecord,
-    MAX_BULK_RECORD_PAYLOAD,
+    BULK_HEADER_SIZE, BulkCancel, BulkCancelReason, BulkCredit, BulkFinish, BulkFlow, BulkKind,
+    BulkRecord, DEFAULT_BULK_WINDOW, DEFAULT_FILESYSTEM_BULK_RECORD_PAYLOAD,
+    MAX_BULK_RECORD_PAYLOAD, MIN_BULK_RECORD_PAYLOAD,
 };
 use microsandbox_protocol::codec::{self, DecodedFrame, MAX_FRAME_SIZE};
 use microsandbox_protocol::core::{
@@ -29,9 +30,9 @@ use microsandbox_protocol::exec::{
     ExecExited, ExecFailed, ExecFailureKind, ExecRequest, ExecResize, ExecSignal, ExecStarted,
     ExecStderr, ExecStdin, ExecStdinError, ExecStdout,
 };
-use microsandbox_protocol::fs::{FsData, FsRequest, FsResponse};
+use microsandbox_protocol::fs::{FS_CHUNK_SIZE, FsData, FsRequest, FsResponse};
 use microsandbox_protocol::heartbeat::{ActivityCounters, Heartbeat};
-use microsandbox_protocol::message::{Message, MessageType};
+use microsandbox_protocol::message::{FRAME_HEADER_SIZE, Message, MessageType};
 use microsandbox_protocol::tcp::{TcpClose, TcpConnect, TcpData, TcpEof, TcpFailed};
 use microsandbox_protocol::transport::{
     BULK_BINDING_SIZE, BulkTransportReady, CLIENT_INCARNATION_SIZE, ClientIncarnation,
@@ -66,7 +67,15 @@ use crate::{clock, fs, handoff, heartbeat, serial};
 const HEARTBEAT_INTERVAL_SECS: u64 = 1;
 
 /// Read buffer size for the serial port.
-const SERIAL_READ_BUF_SIZE: usize = 64 * 1024;
+/// Control-only serial reads stay cache-friendly because their frames are small.
+const CONTROL_SERIAL_READ_BUF_SIZE: usize = 64 * 1024;
+
+/// Combined transport can receive any negotiated raw record without avoidable read cycles.
+const COMBINED_SERIAL_READ_BUF_SIZE: usize = DEFAULT_FILESYSTEM_BULK_RECORD_PAYLOAD as usize + 32;
+
+/// Dedicated bulk reads can consume one negotiated record in a single syscall when available.
+const BULK_SERIAL_READ_BUF_SIZE: usize =
+    DEFAULT_FILESYSTEM_BULK_RECORD_PAYLOAD as usize + CLIENT_INCARNATION_SIZE + 32;
 
 /// Maximum allowed input buffer size (frame size limit + 4 bytes for length prefix).
 const MAX_INPUT_BUF_SIZE: usize = MAX_FRAME_SIZE as usize + 4;
@@ -84,7 +93,7 @@ const BULK_BINDING_TIMEOUT_SECS: u64 = 60;
 const BULK_SCHEDULER_QUANTUM: usize = 256 * 1024;
 
 /// Maximum bytes one correlation may emit in one scheduler round.
-const BULK_SCHEDULER_MAX_BURST: usize = 1024 * 1024;
+const BULK_SCHEDULER_MAX_BURST: usize = MAX_BULK_RECORD_PAYLOAD as usize;
 
 /// Maximum bytes queued for one correlation outside the console backend.
 const BULK_SCHEDULER_FLOW_CAPACITY: usize = 8 * 1024 * 1024;
@@ -98,8 +107,19 @@ const BULK_READER_MAX_RECORDS_PER_TURN: usize = 64;
 /// Payload bytes processed before the bulk reader yields on a one-vCPU guest.
 const BULK_READER_MAX_BYTES_PER_TURN: usize = 1024 * 1024;
 
-/// Records and finish markers buffered for one filesystem bulk-write worker.
-const FS_BULK_INPUT_ITEM_CAPACITY: usize = 32;
+/// Enough data slots for the default byte window at the smallest negotiated record size.
+const FS_BULK_INPUT_ITEM_CAPACITY: usize =
+    DEFAULT_BULK_WINDOW as usize / MIN_BULK_RECORD_PAYLOAD as usize;
+
+/// Filesystem activity bytes coalesced before publishing an otherwise empty worker event.
+const FS_ACTIVITY_BATCH_BYTES: usize = 4 * 1024 * 1024;
+
+/// Maximum contiguous payload coalesced into one guest filesystem effect.
+const FS_BULK_WRITE_COALESCE_BYTES: usize = FS_CHUNK_SIZE;
+
+/// Byte and time bounds for coalescing bulk-only heartbeat publications.
+const BULK_ACTIVITY_PUBLISH_BYTES: usize = 4 * 1024 * 1024;
+const BULK_ACTIVITY_PUBLISH_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Best-effort window for publishing typed cancellation before agentd terminates a failed lane.
 const BULK_FAILURE_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
@@ -123,14 +143,9 @@ struct AgentState {
 
 /// Bounded command path for one filesystem bulk write, isolated from the control loop.
 struct FsBulkWriteWorker {
-    commands: tokio::sync::mpsc::Sender<FsBulkWriteCommand>,
+    records: tokio::sync::mpsc::Sender<BulkRecord>,
+    finish: tokio::sync::mpsc::Sender<BulkFinish>,
     task: tokio::task::JoinHandle<()>,
-}
-
-/// Ordered filesystem effects owned by one bulk-write worker.
-enum FsBulkWriteCommand {
-    Record(BulkRecord),
-    Finish(BulkFinish),
 }
 
 struct ActivityTracker {
@@ -151,6 +166,16 @@ struct HeartbeatSnapshot {
 pub struct BoundBulkPort {
     file: File,
     connection_id: [u8; 16],
+}
+
+/// Dedicated-lane input owned by the main agent actor.
+///
+/// Keeping framing here removes the reader-task/channel round trip while bounded turns still give
+/// control work a scheduling point between filesystem or TCP bursts.
+struct BulkInputState {
+    port: AsyncFd<File>,
+    read_buf: Vec<u8>,
+    input: BytesMut,
 }
 
 /// One correlation's pending records in the guest-to-host DRR scheduler.
@@ -209,6 +234,71 @@ impl ActivityTracker {
     }
 }
 
+impl BulkInputState {
+    fn new(file: File) -> AgentdResult<Self> {
+        Ok(Self {
+            port: AsyncFd::new(file)?,
+            read_buf: vec![0u8; BULK_SERIAL_READ_BUF_SIZE],
+            input: BytesMut::new(),
+        })
+    }
+
+    /// Read at most once, then return one bounded batch already available to the actor.
+    async fn read_turn(&mut self) -> AgentdResult<Vec<IncarnatedBulkFrame>> {
+        let buffered = self.drain_turn()?;
+        if !buffered.is_empty() {
+            return Ok(buffered);
+        }
+
+        let mut guard = self.port.readable().await?;
+        match guard.try_io(|inner| read_from_fd(inner.get_ref().as_raw_fd(), &mut self.read_buf)) {
+            Ok(Ok(0)) => {
+                return Err(AgentdError::ExecSession(
+                    "dedicated bulk port closed".into(),
+                ));
+            }
+            Ok(Ok(read)) => {
+                self.input.extend_from_slice(&self.read_buf[..read]);
+                if self.input.len() > MAX_BULK_INPUT_BUF_SIZE {
+                    return Err(AgentdError::ExecSession(
+                        "dedicated bulk input exceeded maximum frame buffer".into(),
+                    ));
+                }
+            }
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Ok(Err(error)) => return Err(error.into()),
+            Err(_would_block) => {}
+        }
+        self.drain_turn()
+    }
+
+    fn drain_turn(&mut self) -> AgentdResult<Vec<IncarnatedBulkFrame>> {
+        let mut frames = Vec::new();
+        let mut fs_bytes = 0usize;
+        let mut tcp_bytes = 0usize;
+        while frames.len() < BULK_READER_MAX_RECORDS_PER_TURN
+            && fs_bytes < MAX_BULK_RECORD_PAYLOAD as usize
+            && tcp_bytes < BULK_READER_MAX_BYTES_PER_TURN
+        {
+            let Some(frame) = try_decode_incarnated_bulk_from_bytes(&mut self.input)
+                .map_err(|error| AgentdError::ExecSession(format!("decode agent-bulk: {error}")))?
+            else {
+                break;
+            };
+            match frame.record.kind {
+                BulkKind::Filesystem => {
+                    fs_bytes = fs_bytes.saturating_add(frame.record.payload.len());
+                }
+                BulkKind::Tcp => {
+                    tcp_bytes = tcp_bytes.saturating_add(frame.record.payload.len());
+                }
+            }
+            frames.push(frame);
+        }
+        Ok(frames)
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -238,8 +328,10 @@ pub async fn run(
     // A single AsyncFd tracks both readable and writable readiness.
     let async_port = AsyncFd::new(port_file)?;
 
-    // Buffer for serial reads.
-    let mut read_buf = vec![0u8; SERIAL_READ_BUF_SIZE];
+    // A combined port carries full raw records; a dual-port control stream does not. Size the
+    // allocation from the selected topology so combined throughput does not pay four reads per
+    // default record while dual mode retains the small control-only working set.
+    let mut read_buf = vec![0u8; primary_serial_read_buf_size(bulk_port.is_some())];
     let mut serial_in_buf = BytesMut::new();
     let mut serial_out_buf = Vec::new();
 
@@ -275,6 +367,8 @@ pub async fn run(
                 .as_ref()
                 .map(|port| BulkTransportReady::dual_port_v1(port.connection_id)),
             relay_lease: Some(RelayLeaseReady::range_lease_v1()),
+            // The runtime injects local SDK-hop capabilities after this guest handshake.
+            local_transport: None,
         },
     )
     .map_err(|e| AgentdError::ExecSession(format!("encode ready: {e}")))?;
@@ -282,19 +376,22 @@ pub async fn run(
         .map_err(|e| AgentdError::ExecSession(format!("encode ready frame: {e}")))?;
     flush_write_buf(&async_port, &mut serial_out_buf).await?;
 
-    let (mut combined_bulk_rx, mut bulk_input_rx, mut bulk_failure_rx, mut bulk_activity_rx) =
+    let (mut combined_bulk_rx, mut bulk_input, mut bulk_failure_rx, mut bulk_activity_rx) =
         match bulk_port {
             Some(port) => {
-                let (input_rx, failure_rx, activity_rx) =
-                    spawn_bulk_port_tasks(port, bulk_session_rx, bulk_command_rx)?;
-                (None, Some(input_rx), Some(failure_rx), Some(activity_rx))
+                let input = BulkInputState::new(port.file.try_clone()?)?;
+                let (failure_rx, activity_rx) =
+                    spawn_bulk_writer_task(port.file, bulk_session_rx, bulk_command_rx);
+                (None, Some(input), Some(failure_rx), Some(activity_rx))
             }
             None => {
                 session_tx.disable_bulk_scheduler();
                 (Some(bulk_session_rx), None, None, None)
             }
         };
-    let dual_port_active = bulk_input_rx.is_some();
+    let dual_port_active = bulk_input.is_some();
+    let mut bulk_input_bytes_since_snapshot = 0usize;
+    let mut last_bulk_input_snapshot = Instant::now();
 
     // Main loop.
     'agent: loop {
@@ -350,25 +447,60 @@ pub async fn run(
                 publish_heartbeat_snapshot(&heartbeat_tx, &state, &activity);
             }
 
-            Some(frame) = recv_optional(&mut bulk_input_rx) => {
-                if !validate_bulk_client_incarnation(
-                    &state,
-                    frame.record.id,
-                    frame.incarnation,
-                )? {
-                    // The range has been disconnected or recycled since this record entered the
-                    // other physical lane. It must not produce an error on the new owner's ID.
-                    continue;
+            turn = async {
+                bulk_input
+                    .as_mut()
+                    .expect("guarded dedicated bulk input")
+                    .read_turn()
+                    .await
+            }, if bulk_input.is_some() => {
+                let frames = match turn {
+                    Ok(frames) => frames,
+                    Err(error) => {
+                        cancel_all_bulk_correlations(
+                            &mut state,
+                            &session_tx,
+                            &mut serial_out_buf,
+                            "dedicated bulk transport failed",
+                        )?;
+                        let _ = time::timeout(
+                            BULK_FAILURE_FLUSH_TIMEOUT,
+                            flush_write_buf(&async_port, &mut serial_out_buf),
+                        ).await;
+                        return Err(AgentdError::ExecSession(format!(
+                            "dedicated bulk transport failed: {error}"
+                        )));
+                    }
+                };
+                for frame in frames {
+                    if !validate_bulk_client_incarnation(
+                        &state,
+                        frame.record.id,
+                        frame.incarnation,
+                    )? {
+                        // The range has been disconnected or recycled since these bytes entered
+                        // the other physical lane. They must not affect the new owner's ID.
+                        continue;
+                    }
+                    let payload_len = frame.record.payload.len();
+                    let bulk_session_tx = session_tx.with_incarnation(Some(frame.incarnation));
+                    handle_bulk_record(
+                        frame.record,
+                        &mut state,
+                        &mut activity,
+                        &mut serial_out_buf,
+                        &bulk_session_tx,
+                    ).await?;
+                    bulk_input_bytes_since_snapshot =
+                        bulk_input_bytes_since_snapshot.saturating_add(payload_len);
                 }
-                let bulk_session_tx = session_tx.with_incarnation(Some(frame.incarnation));
-                handle_bulk_record(
-                    frame.record,
-                    &mut state,
-                    &mut activity,
-                    &mut serial_out_buf,
-                    &bulk_session_tx,
-                ).await?;
-                publish_heartbeat_snapshot(&heartbeat_tx, &state, &activity);
+                if bulk_input_bytes_since_snapshot >= BULK_ACTIVITY_PUBLISH_BYTES
+                    || last_bulk_input_snapshot.elapsed() >= BULK_ACTIVITY_PUBLISH_INTERVAL
+                {
+                    publish_heartbeat_snapshot(&heartbeat_tx, &state, &activity);
+                    bulk_input_bytes_since_snapshot = 0;
+                    last_bulk_input_snapshot = Instant::now();
+                }
                 if !serial_out_buf.is_empty() {
                     flush_write_buf(&async_port, &mut serial_out_buf).await?;
                 }
@@ -379,6 +511,9 @@ pub async fn run(
                 let Ok(mut guard) = result else {
                     break;
                 };
+                let mut combined_bulk_records = 0usize;
+                let mut combined_bulk_payload_bytes = 0usize;
+                let mut combined_turn_exhausted = false;
 
                 loop {
                     match guard.try_io(|inner| read_from_fd(inner.get_ref().as_raw_fd(), &mut read_buf)) {
@@ -434,6 +569,7 @@ pub async fn run(
                                     let bulk_session_tx = session_tx.with_incarnation(
                                         client_incarnation_for_id(&state, record.id),
                                     );
+                                    let payload_len = record.payload.len();
                                     handle_bulk_record(
                                         record,
                                         &mut state,
@@ -441,7 +577,30 @@ pub async fn run(
                                         &mut serial_out_buf,
                                         &bulk_session_tx,
                                     ).await?;
-                                    publish_heartbeat_snapshot(&heartbeat_tx, &state, &activity);
+                                    combined_bulk_records = combined_bulk_records.saturating_add(1);
+                                    combined_bulk_payload_bytes =
+                                        combined_bulk_payload_bytes.saturating_add(payload_len);
+                                    bulk_input_bytes_since_snapshot =
+                                        bulk_input_bytes_since_snapshot.saturating_add(payload_len);
+                                    if bulk_input_bytes_since_snapshot >= BULK_ACTIVITY_PUBLISH_BYTES
+                                        || last_bulk_input_snapshot.elapsed()
+                                            >= BULK_ACTIVITY_PUBLISH_INTERVAL
+                                    {
+                                        publish_heartbeat_snapshot(&heartbeat_tx, &state, &activity);
+                                        bulk_input_bytes_since_snapshot = 0;
+                                        last_bulk_input_snapshot = Instant::now();
+                                    }
+                                    if bulk_reader_turn_exhausted(
+                                        combined_bulk_records,
+                                        combined_bulk_payload_bytes,
+                                    ) {
+                                        // A task-level yield is insufficient here: this branch is
+                                        // still inside the serial drain loop, so agent session
+                                        // output (including bulk credit) cannot be selected. Finish
+                                        // decoding the bytes already read, then return to the outer
+                                        // select before reading another batch from the port.
+                                        combined_turn_exhausted = true;
+                                    }
                                     continue;
                                 };
                                 if msg.flags != msg.t.flags() {
@@ -493,6 +652,9 @@ pub async fn run(
                             // Flush any outgoing messages.
                             if !serial_out_buf.is_empty() {
                                 flush_write_buf(&async_port, &mut serial_out_buf).await?;
+                            }
+                            if combined_turn_exhausted {
+                                break;
                             }
                         }
                         Ok(Err(e)) if e.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -595,28 +757,18 @@ pub async fn run(
     Ok(())
 }
 
-/// Start independent full-duplex workers for the already-bound bulk port.
-fn spawn_bulk_port_tasks(
-    port: BoundBulkPort,
+/// Start the dedicated-lane output actor; input stays fused into the main control actor.
+fn spawn_bulk_writer_task(
+    writer_file: File,
     output_rx: tokio::sync::mpsc::Receiver<SessionOutputEnvelope>,
     command_rx: tokio::sync::mpsc::Receiver<BulkOutputCommand>,
-) -> AgentdResult<(
-    tokio::sync::mpsc::Receiver<IncarnatedBulkFrame>,
+) -> (
     tokio::sync::mpsc::Receiver<String>,
     tokio::sync::mpsc::Receiver<RawActivity>,
-)> {
-    let reader_file = port.file.try_clone()?;
-    let writer_file = port.file;
-    let (input_tx, input_rx) = tokio::sync::mpsc::channel(32);
-    let (failure_tx, failure_rx) = tokio::sync::mpsc::channel(2);
+) {
+    let (failure_tx, failure_rx) = tokio::sync::mpsc::channel(1);
     let (activity_tx, activity_rx) = tokio::sync::mpsc::channel(128);
 
-    let reader_failure_tx = failure_tx.clone();
-    tokio::spawn(async move {
-        if let Err(error) = bulk_reader_task(reader_file, input_tx).await {
-            let _ = reader_failure_tx.send(error.to_string()).await;
-        }
-    });
     tokio::spawn(async move {
         if let Err(error) = bulk_writer_task(writer_file, output_rx, command_rx, activity_tx).await
         {
@@ -624,7 +776,21 @@ fn spawn_bulk_port_tasks(
         }
     });
 
-    Ok((input_rx, failure_rx, activity_rx))
+    (failure_rx, activity_rx)
+}
+
+/// Select the primary port's read working set from whether bulk has its own physical lane.
+fn primary_serial_read_buf_size(has_dedicated_bulk_port: bool) -> usize {
+    if has_dedicated_bulk_port {
+        CONTROL_SERIAL_READ_BUF_SIZE
+    } else {
+        COMBINED_SERIAL_READ_BUF_SIZE
+    }
+}
+
+/// Bound one raw-input scheduling turn so a single-thread guest can run the destination worker.
+fn bulk_reader_turn_exhausted(records: usize, payload_bytes: usize) -> bool {
+    records >= BULK_READER_MAX_RECORDS_PER_TURN || payload_bytes >= BULK_READER_MAX_BYTES_PER_TURN
 }
 
 /// Receive from an optional channel without making combined mode spin.
@@ -644,60 +810,6 @@ async fn recv_optional<T>(receiver: &mut Option<tokio::sync::mpsc::Receiver<T>>)
     }
 }
 
-/// Decode only generation-7 raw records from the dedicated physical lane.
-async fn bulk_reader_task(
-    file: File,
-    input_tx: tokio::sync::mpsc::Sender<IncarnatedBulkFrame>,
-) -> AgentdResult<()> {
-    let async_port = AsyncFd::new(file)?;
-    let mut read_buf = vec![0u8; SERIAL_READ_BUF_SIZE];
-    let mut input = BytesMut::new();
-
-    loop {
-        let mut records = 0usize;
-        let mut payload_bytes = 0usize;
-        while records < BULK_READER_MAX_RECORDS_PER_TURN
-            && payload_bytes < BULK_READER_MAX_BYTES_PER_TURN
-        {
-            let Some(frame) = try_decode_incarnated_bulk_from_bytes(&mut input)
-                .map_err(|error| AgentdError::ExecSession(format!("decode agent-bulk: {error}")))?
-            else {
-                break;
-            };
-            payload_bytes = payload_bytes.saturating_add(frame.record.payload.len());
-            records += 1;
-            input_tx
-                .send(frame)
-                .await
-                .map_err(|_| AgentdError::ExecSession("bulk input consumer stopped".into()))?;
-        }
-        if records != 0 {
-            tokio::task::yield_now().await;
-            continue;
-        }
-
-        let mut guard = async_port.readable().await?;
-        match guard.try_io(|inner| read_from_fd(inner.get_ref().as_raw_fd(), &mut read_buf)) {
-            Ok(Ok(0)) => {
-                return Err(AgentdError::ExecSession(
-                    "dedicated bulk port closed".into(),
-                ));
-            }
-            Ok(Ok(read)) => {
-                input.extend_from_slice(&read_buf[..read]);
-                if input.len() > MAX_BULK_INPUT_BUF_SIZE {
-                    return Err(AgentdError::ExecSession(
-                        "dedicated bulk input exceeded maximum frame buffer".into(),
-                    ));
-                }
-            }
-            Ok(Err(error)) if error.kind() == std::io::ErrorKind::Interrupted => {}
-            Ok(Err(error)) => return Err(error.into()),
-            Err(_would_block) => {}
-        }
-    }
-}
-
 /// Schedule guest-to-host records fairly by correlation before writing the bulk port.
 async fn bulk_writer_task(
     file: File,
@@ -710,6 +822,7 @@ async fn bulk_writer_task(
     let mut active = VecDeque::<(ClientIncarnation, u32)>::new();
     let mut retired = HashMap::<ClientIncarnation, Vec<u64>>::new();
     let mut retiring_incarnations = HashSet::<ClientIncarnation>::new();
+    let mut pending_activity = RawActivity::default();
 
     loop {
         let mut cleanups = Vec::new();
@@ -757,12 +870,17 @@ async fn bulk_writer_task(
 
         while !active.is_empty() {
             let round_len = active.len();
+            let quantum = if round_len == 1 {
+                BULK_SCHEDULER_MAX_BURST
+            } else {
+                BULK_SCHEDULER_QUANTUM
+            };
             for _ in 0..round_len {
                 let key = active.pop_front().expect("active flow exists");
                 if let Some(flow) = flows.get_mut(&key) {
                     flow.deficit = flow
                         .deficit
-                        .saturating_add(BULK_SCHEDULER_QUANTUM)
+                        .saturating_add(quantum)
                         .min(BULK_SCHEDULER_MAX_BURST);
                 }
 
@@ -801,9 +919,29 @@ async fn bulk_writer_task(
                     let output_activity = output.activity;
                     write_incarnated_bulk_record_async_fd(&async_port, incarnation, &output.record)
                         .await?;
-                    activity_tx.send(output_activity).await.map_err(|_| {
-                        AgentdError::ExecSession("dedicated bulk activity consumer stopped".into())
-                    })?;
+                    pending_activity.guest_messages = pending_activity
+                        .guest_messages
+                        .saturating_add(output_activity.guest_messages);
+                    pending_activity.fs_bytes = pending_activity
+                        .fs_bytes
+                        .saturating_add(output_activity.fs_bytes);
+                    pending_activity.tcp_bytes = pending_activity
+                        .tcp_bytes
+                        .saturating_add(output_activity.tcp_bytes);
+                    if pending_activity
+                        .fs_bytes
+                        .saturating_add(pending_activity.tcp_bytes)
+                        >= BULK_ACTIVITY_PUBLISH_BYTES
+                    {
+                        activity_tx
+                            .send(std::mem::take(&mut pending_activity))
+                            .await
+                            .map_err(|_| {
+                                AgentdError::ExecSession(
+                                    "dedicated bulk activity consumer stopped".into(),
+                                )
+                            })?;
+                    }
                     burst = burst.saturating_add(next_len);
                 }
 
@@ -834,6 +972,14 @@ async fn bulk_writer_task(
                 )?;
             }
             complete_bulk_output_cleanups(cleanups, &mut retired, &mut retiring_incarnations);
+            if active.is_empty() && pending_activity.guest_messages != 0 {
+                activity_tx
+                    .send(std::mem::take(&mut pending_activity))
+                    .await
+                    .map_err(|_| {
+                        AgentdError::ExecSession("dedicated bulk activity consumer stopped".into())
+                    })?;
+            }
             tokio::task::yield_now().await;
         }
     }
@@ -1065,18 +1211,28 @@ fn ensure_fs_bulk_write_worker(
         return Err("raw bulk record sent to a generation-6 filesystem write".into());
     }
 
-    let (commands, command_rx) = tokio::sync::mpsc::channel(FS_BULK_INPUT_ITEM_CAPACITY);
+    let (records, record_rx) = tokio::sync::mpsc::channel(FS_BULK_INPUT_ITEM_CAPACITY);
+    // Finish is a lifecycle cut, not another data record. Its dedicated slot cannot be consumed by
+    // a legal full 8 MiB data window.
+    let (finish, finish_rx) = tokio::sync::mpsc::channel(1);
     let output = session_tx.clone();
-    let task = tokio::spawn(run_fs_bulk_write_worker(id, session, command_rx, output));
-    state
-        .bulk_write_workers
-        .insert(id, FsBulkWriteWorker { commands, task });
+    let task = tokio::spawn(run_fs_bulk_write_worker(
+        id, session, record_rx, finish_rx, output,
+    ));
+    state.bulk_write_workers.insert(
+        id,
+        FsBulkWriteWorker {
+            records,
+            finish,
+            task,
+        },
+    );
     Ok(())
 }
 
-fn enqueue_fs_bulk_write(
+fn enqueue_fs_bulk_record(
     id: u32,
-    command: FsBulkWriteCommand,
+    record: BulkRecord,
     state: &mut AgentState,
     session_tx: &SessionOutputSender,
 ) -> Result<(), String> {
@@ -1085,9 +1241,31 @@ fn enqueue_fs_bulk_write(
         .bulk_write_workers
         .get(&id)
         .expect("filesystem bulk worker was just established")
-        .commands
-        .try_send(command)
+        .records
+        .try_send(record)
         .map_err(|error| format!("filesystem bulk input queue is unavailable: {error}"));
+    if result.is_err()
+        && let Some(worker) = state.bulk_write_workers.remove(&id)
+    {
+        worker.task.abort();
+    }
+    result
+}
+
+fn finish_fs_bulk_write(
+    id: u32,
+    finish: BulkFinish,
+    state: &mut AgentState,
+    session_tx: &SessionOutputSender,
+) -> Result<(), String> {
+    ensure_fs_bulk_write_worker(id, state, session_tx)?;
+    let result = state
+        .bulk_write_workers
+        .get(&id)
+        .expect("filesystem bulk worker was just established")
+        .finish
+        .try_send(finish)
+        .map_err(|error| format!("filesystem bulk finish path is unavailable: {error}"));
     if result.is_err()
         && let Some(worker) = state.bulk_write_workers.remove(&id)
     {
@@ -1099,43 +1277,146 @@ fn enqueue_fs_bulk_write(
 async fn run_fs_bulk_write_worker(
     id: u32,
     mut session: FsWriteSession,
-    mut command_rx: tokio::sync::mpsc::Receiver<FsBulkWriteCommand>,
+    mut record_rx: tokio::sync::mpsc::Receiver<BulkRecord>,
+    mut finish_rx: tokio::sync::mpsc::Receiver<BulkFinish>,
     output_tx: SessionOutputSender,
 ) {
-    while let Some(command) = command_rx.recv().await {
-        let mut frame = Vec::new();
-        let mut activity = RawActivity::default();
-        let completed = match command {
-            FsBulkWriteCommand::Record(record) => {
-                let payload_len = record.payload.len();
-                match fs::handle_fs_bulk_record(id, &record, &mut session, &mut frame).await {
-                    Ok(completed) => {
-                        if !completed {
-                            activity.fs_bytes = payload_len;
-                        }
-                        completed
+    let mut pending_finish = None;
+    let mut finish_open = true;
+    let mut received_offset = 0u64;
+    let mut pending_activity_bytes = 0usize;
+    let mut pending_record = None;
+
+    loop {
+        let record = if pending_record.is_some() {
+            pending_record.take()
+        } else {
+            tokio::select! {
+                biased;
+                finish = finish_rx.recv(), if pending_finish.is_none() && finish_open => {
+                    match finish {
+                        Some(finish) => pending_finish = Some(finish),
+                        None => finish_open = false,
                     }
-                    Err(error) => {
-                        if encode_bulk_fs_failure(id, error, &mut frame).is_err() {
-                            return;
-                        }
-                        true
-                    }
+                    None
                 }
-            }
-            FsBulkWriteCommand::Finish(finish) => {
-                match fs::handle_fs_bulk_finish(id, finish, &mut session, &mut frame).await {
-                    Ok(completed) => completed,
-                    Err(error) => {
-                        if encode_bulk_fs_failure(id, error, &mut frame).is_err() {
-                            return;
-                        }
-                        true
-                    }
-                }
+                record = record_rx.recv() => record,
             }
         };
-        activity.guest_message = !frame.is_empty();
+
+        let Some(record) = record else {
+            if pending_finish
+                .as_ref()
+                .is_some_and(|finish| finish.final_offset <= received_offset)
+            {
+                let finish = pending_finish
+                    .take()
+                    .expect("checked pending finish exists");
+                let mut frame = Vec::new();
+                if let Err(error) =
+                    fs::handle_fs_bulk_finish(id, finish, &mut session, &mut frame).await
+                    && encode_bulk_fs_failure(id, error, &mut frame).is_err()
+                {
+                    return;
+                }
+                let activity = RawActivity {
+                    guest_messages: 1,
+                    fs_bytes: std::mem::take(&mut pending_activity_bytes),
+                    ..RawActivity::default()
+                };
+                let output = crate::session::RawSessionOutput::new(
+                    frame,
+                    activity,
+                    Some(RawSessionCompletion::FsWrite),
+                );
+                let _ = output_tx.send(id, SessionOutput::Raw(output)).await;
+                return;
+            }
+            if record_rx.is_closed() {
+                return;
+            }
+            continue;
+        };
+
+        // Drain only records already admitted to this flow. Waiting for a larger batch would add
+        // latency and could deadlock at a credit boundary; the next input scheduling turn will
+        // naturally form the next batch.
+        let mut records = Vec::with_capacity(
+            FS_BULK_WRITE_COALESCE_BYTES.div_ceil(DEFAULT_FILESYSTEM_BULK_RECORD_PAYLOAD as usize),
+        );
+        let mut payload_len = record.payload.len();
+        records.push(record);
+        while payload_len < FS_BULK_WRITE_COALESCE_BYTES {
+            match record_rx.try_recv() {
+                Ok(record) => {
+                    let next_len = payload_len.saturating_add(record.payload.len());
+                    if next_len > FS_BULK_WRITE_COALESCE_BYTES {
+                        pending_record = Some(record);
+                        break;
+                    }
+                    payload_len = next_len;
+                    records.push(record);
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+            }
+        }
+
+        let mut frame = Vec::new();
+        let last_record = records
+            .last()
+            .expect("filesystem bulk batch contains its initial record");
+        let record_end = last_record
+            .offset
+            .saturating_add(last_record.payload.len() as u64);
+        let mut completed =
+            match fs::handle_fs_bulk_records(id, &records, &mut session, &mut frame).await {
+                Ok(completed) => {
+                    if !completed {
+                        received_offset = record_end;
+                        pending_activity_bytes = pending_activity_bytes.saturating_add(payload_len);
+                    }
+                    completed
+                }
+                Err(error) => {
+                    if encode_bulk_fs_failure(id, error, &mut frame).is_err() {
+                        return;
+                    }
+                    true
+                }
+            };
+
+        if !completed
+            && pending_finish
+                .as_ref()
+                .is_some_and(|finish| finish.final_offset <= received_offset)
+        {
+            let finish = pending_finish
+                .take()
+                .expect("checked pending finish exists");
+            completed = match fs::handle_fs_bulk_finish(id, finish, &mut session, &mut frame).await
+            {
+                Ok(completed) => completed,
+                Err(error) => {
+                    if encode_bulk_fs_failure(id, error, &mut frame).is_err() {
+                        return;
+                    }
+                    true
+                }
+            };
+        }
+
+        // Credits and terminal results already need an outward event. Pure byte accounting is
+        // coalesced so a successful 256 KiB record does not make a second trip through the agent
+        // main loop solely to update heartbeat counters.
+        if frame.is_empty() && pending_activity_bytes < FS_ACTIVITY_BATCH_BYTES && !completed {
+            continue;
+        }
+        let activity = RawActivity {
+            guest_messages: usize::from(!frame.is_empty()),
+            fs_bytes: std::mem::take(&mut pending_activity_bytes),
+            ..RawActivity::default()
+        };
         let completion = completed.then_some(RawSessionCompletion::FsWrite);
         let output = crate::session::RawSessionOutput::new(frame, activity, completion);
         if !output_tx.send(id, SessionOutput::Raw(output)).await || completed {
@@ -1172,9 +1453,7 @@ async fn handle_bulk_record(
                 return Ok(());
             }
 
-            if let Err(error) =
-                enqueue_fs_bulk_write(id, FsBulkWriteCommand::Record(record), state, session_tx)
-            {
+            if let Err(error) = enqueue_fs_bulk_record(id, record, state, session_tx) {
                 encode_bulk_fs_failure(id, error, out_buf)?;
                 cancel_bulk_correlation(id, BulkKind::Filesystem, state, session_tx);
             } else {
@@ -1231,9 +1510,7 @@ async fn dispatch_bulk_finish(
 ) -> AgentdResult<()> {
     match finish.kind {
         BulkKind::Filesystem => {
-            if let Err(error) =
-                enqueue_fs_bulk_write(id, FsBulkWriteCommand::Finish(finish), state, session_tx)
-            {
+            if let Err(error) = finish_fs_bulk_write(id, finish, state, session_tx) {
                 encode_bulk_fs_failure(id, error, out_buf)?;
                 cancel_bulk_correlation(id, BulkKind::Filesystem, state, session_tx);
             }
@@ -2109,8 +2386,14 @@ fn encoded_guest_message_refreshes_idle_timer(
 }
 
 fn apply_raw_activity(raw: RawActivity, activity: &mut ActivityTracker) {
-    if raw.guest_message {
-        activity.record_guest_message();
+    if raw.guest_messages != 0 {
+        activity.activity_seq = activity
+            .activity_seq
+            .saturating_add(raw.guest_messages as u64);
+        activity.counters.guest_messages = activity
+            .counters
+            .guest_messages
+            .saturating_add(raw.guest_messages as u64);
     }
     if raw.fs_bytes > 0 {
         activity.add_fs_bytes(raw.fs_bytes);
@@ -2602,9 +2885,9 @@ async fn write_incarnated_bulk_record_async_fd(
 ) -> AgentdResult<()> {
     let public_header = codec::encode_bulk_header(record)
         .map_err(|error| AgentdError::ExecSession(format!("encode bulk header: {error}")))?;
-    let mut header = Vec::with_capacity(CLIENT_INCARNATION_SIZE + public_header.len());
-    header.extend_from_slice(&incarnation);
-    header.extend_from_slice(&public_header);
+    let mut header = [0u8; CLIENT_INCARNATION_SIZE + 4 + FRAME_HEADER_SIZE + BULK_HEADER_SIZE];
+    header[..CLIENT_INCARNATION_SIZE].copy_from_slice(&incarnation);
+    header[CLIENT_INCARNATION_SIZE..].copy_from_slice(&public_header);
     write_bulk_parts_async_fd(fd, &header, &record.payload).await
 }
 
@@ -2724,6 +3007,7 @@ fn request_guest_poweroff() -> AgentdResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
 
     #[test]
     fn dual_port_cmdline_hint_requires_an_exact_argument() {
@@ -2735,6 +3019,31 @@ mod tests {
         ));
         assert!(!cmdline_requests_dual_port(
             "prefix=microsandbox.agent_transport=dual-port-v1"
+        ));
+    }
+
+    #[test]
+    fn primary_read_buffer_tracks_whether_it_carries_bulk() {
+        assert_eq!(
+            primary_serial_read_buf_size(false),
+            COMBINED_SERIAL_READ_BUF_SIZE
+        );
+        assert_eq!(
+            primary_serial_read_buf_size(true),
+            CONTROL_SERIAL_READ_BUF_SIZE
+        );
+    }
+
+    #[test]
+    fn bulk_reader_turn_is_bounded_by_records_or_payload_bytes() {
+        assert!(!bulk_reader_turn_exhausted(1, 1));
+        assert!(bulk_reader_turn_exhausted(
+            BULK_READER_MAX_RECORDS_PER_TURN,
+            1
+        ));
+        assert!(bulk_reader_turn_exhausted(
+            1,
+            BULK_READER_MAX_BYTES_PER_TURN
         ));
     }
 
@@ -2977,6 +3286,59 @@ mod tests {
         assert_eq!(activity.counters.guest_messages, 2);
         assert_eq!(activity.counters.fs_bytes, 42);
         assert_eq!(activity.counters.tcp_bytes, 7);
+    }
+
+    #[test]
+    fn apply_raw_activity_preserves_coalesced_message_count() {
+        let mut activity = ActivityTracker::new();
+
+        apply_raw_activity(
+            RawActivity {
+                guest_messages: 16,
+                fs_bytes: 4 * 1024 * 1024,
+                tcp_bytes: 0,
+            },
+            &mut activity,
+        );
+
+        assert_eq!(activity.activity_seq, 16);
+        assert_eq!(activity.counters.guest_messages, 16);
+        assert_eq!(activity.counters.fs_bytes, 4 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn filesystem_finish_remains_admissible_after_a_full_data_window() {
+        let (records, _record_rx) = tokio::sync::mpsc::channel(FS_BULK_INPUT_ITEM_CAPACITY);
+        let (finish, mut finish_rx) = tokio::sync::mpsc::channel(1);
+        let worker = FsBulkWriteWorker {
+            records,
+            finish,
+            task: tokio::spawn(std::future::pending::<()>()),
+        };
+        let payload = Bytes::from(vec![0u8; MIN_BULK_RECORD_PAYLOAD as usize]);
+
+        for index in 0..FS_BULK_INPUT_ITEM_CAPACITY {
+            worker
+                .records
+                .try_send(BulkRecord {
+                    id: 17,
+                    kind: BulkKind::Filesystem,
+                    flow: BulkFlow::HostToGuest,
+                    offset: (index * MIN_BULK_RECORD_PAYLOAD as usize) as u64,
+                    payload: payload.clone(),
+                })
+                .unwrap();
+        }
+        assert_eq!(worker.records.capacity(), 0);
+
+        let expected = BulkFinish {
+            kind: BulkKind::Filesystem,
+            flow: BulkFlow::HostToGuest,
+            final_offset: microsandbox_protocol::bulk::DEFAULT_BULK_WINDOW,
+        };
+        worker.finish.try_send(expected).unwrap();
+        assert_eq!(finish_rx.recv().await, Some(expected));
+        worker.task.abort();
     }
 
     #[test]

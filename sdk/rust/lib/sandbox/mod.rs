@@ -114,7 +114,7 @@ pub use config_patch::{
 pub use exec::{ExecOptionsBuilder, ExecOutput, Rlimit, RlimitResource};
 pub use fs::{
     FsEntry, FsEntryKind, FsHandle, FsMetadata, FsOpenOptions, FsReadStream, FsSetAttrs,
-    FsWriteSink, SandboxFsOps,
+    FsWriteSink, HostCopyDurability, HostCopyOptions, SandboxFsOps,
 };
 pub use handle::{DEFAULT_KILL_TIMEOUT, DEFAULT_STOP_TIMEOUT, SandboxHandle};
 pub use init::{HandoffInit, InitOptionsBuilder};

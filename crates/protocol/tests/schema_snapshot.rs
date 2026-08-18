@@ -20,7 +20,8 @@ use std::{collections::HashSet, fs};
 use microsandbox_protocol::{
     bulk::{
         BULK_FORMAT_RAW_V1, BULK_HEADER_SIZE, DEFAULT_BULK_RECORD_PAYLOAD, DEFAULT_BULK_WINDOW,
-        MAX_BULK_RECORD_PAYLOAD, MAX_BULK_WINDOW, MIN_BULK_RECORD_PAYLOAD,
+        DEFAULT_FILESYSTEM_BULK_RECORD_PAYLOAD, MAX_BULK_RECORD_PAYLOAD, MAX_BULK_WINDOW,
+        MIN_BULK_RECORD_PAYLOAD,
     },
     codec::MAX_FRAME_SIZE,
     message::{
@@ -57,6 +58,7 @@ fn render_surface() -> String {
             "header_size": BULK_HEADER_SIZE,
             "min_record_payload": MIN_BULK_RECORD_PAYLOAD,
             "default_record_payload": DEFAULT_BULK_RECORD_PAYLOAD,
+            "default_filesystem_record_payload": DEFAULT_FILESYSTEM_BULK_RECORD_PAYLOAD,
             "max_record_payload": MAX_BULK_RECORD_PAYLOAD,
             "default_window": DEFAULT_BULK_WINDOW,
             "max_window": MAX_BULK_WINDOW,

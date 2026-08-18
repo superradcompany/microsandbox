@@ -87,15 +87,23 @@ type SessionRegistry = std::sync::Mutex<HashMap<u32, SessionInfo>>;
 /// Size of the length prefix in the wire format.
 const LEN_PREFIX_SIZE: usize = 4;
 
-/// Capacity of the per-client write channel.
-const CLIENT_WRITE_CHANNEL_CAPACITY: usize = 2;
-
 /// Aggregate guest-to-client bytes retained by the relay.
 const CLIENT_OUTPUT_BYTE_CAPACITY: usize = 32 * 1024 * 1024;
+
+/// Maximum time a local SDK socket may make no progress on an admitted output batch.
+const CLIENT_OUTPUT_STALL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Separate dual-port reserve for latency-sensitive guest control frames.
 const CONTROL_LANE_OUTPUT_BYTE_CAPACITY: usize =
     2 * MAX_WIRE_FRAME.div_ceil(OUTPUT_BUDGET_GRANULE) * OUTPUT_BUDGET_GRANULE;
+
+/// Maximum guest output retained for one SDK client across both physical lanes.
+///
+/// Matching the sum of the lane budgets guarantees that scheduling a healthy writer cannot itself
+/// exhaust this bound. Actual stalls are detected by elapsed socket-write progress instead of a
+/// transient queue depth.
+const CLIENT_OUTPUT_PER_CLIENT_BYTE_CAPACITY: usize =
+    CLIENT_OUTPUT_BYTE_CAPACITY + CONTROL_LANE_OUTPUT_BYTE_CAPACITY;
 
 /// Allocation granularity used for relay output admission.
 const OUTPUT_BUDGET_GRANULE: usize = 4096;
@@ -120,7 +128,7 @@ const BULK_WRITE_FLOW_CAPACITY: usize = 8 * 1024 * 1024;
 const BULK_WRITE_QUANTUM: usize = 256 * 1024;
 
 /// Maximum bytes one correlation may write in one bulk scheduling round.
-const BULK_WRITE_MAX_BURST: usize = 1024 * 1024;
+const BULK_WRITE_MAX_BURST: usize = MAX_BULK_RECORD_PAYLOAD as usize;
 
 /// Maximum concurrently queued flows from one relay client.
 const BULK_WRITE_MAX_FLOWS_PER_CLIENT: usize = 64;
@@ -144,11 +152,14 @@ struct ClientState {
     active_sessions: HashSet<u32>,
 
     /// Active generation-7 bulk operations that need typed transport-failure cancellation.
-    active_bulk: HashMap<u32, BulkKind>,
+    active_bulk: Arc<std::sync::Mutex<HashMap<u32, BulkKind>>>,
     /// Channel for sending frames to this client's writer task.
     /// Using a channel avoids holding the client mutex across async writes.
     /// Uses `Bytes` for zero-copy frame forwarding from the ring buffer.
-    write_tx: mpsc::Sender<ClientWrite>,
+    write_tx: mpsc::UnboundedSender<ClientWrite>,
+
+    /// Byte admission for this client's nonblocking writer mailbox.
+    write_budget: Arc<Semaphore>,
 
     /// Requests teardown when this client's bounded output path stops making progress.
     disconnect_tx: watch::Sender<bool>,
@@ -188,7 +199,6 @@ enum MergeCommand {
 /// Shared routing and observability state owned by the guest-to-host reader.
 struct RingReaderContext {
     clients: Arc<Mutex<HashMap<u32, ClientState>>>,
-    output_budget: Arc<Semaphore>,
     log_writer: Option<Arc<LogWriter>>,
     session_registry: Arc<SessionRegistry>,
     pending_disconnects: Arc<Mutex<HashMap<ClientIncarnation, PendingClientDisconnect>>>,
@@ -198,7 +208,17 @@ struct RingReaderContext {
 /// A client-bound frame whose aggregate capacity lives until the socket accepts it.
 struct ClientWrite {
     data: Bytes,
-    _permit: tokio::sync::OwnedSemaphorePermit,
+    /// Aggregate physical-lane admission, retained until the SDK socket consumes the frame.
+    _lane_permit: tokio::sync::OwnedSemaphorePermit,
+    /// Per-client admission, retained for the same lifetime as the aggregate permit.
+    _client_permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+/// Nonblocking handles cloned from one live client owner before guest-output routing.
+struct ClientRoute {
+    write_tx: mpsc::UnboundedSender<ClientWrite>,
+    write_budget: Arc<Semaphore>,
+    disconnect_tx: watch::Sender<bool>,
 }
 
 /// Client-originated raw frame retained until the bulk console ring accepts it.
@@ -206,6 +226,10 @@ struct BulkWrite {
     id: u32,
     incarnation: ClientIncarnation,
     data: Bytes,
+    /// Validated direction carried from the client boundary.
+    flow: BulkFlow,
+    /// Validated payload length carried through scheduling to avoid reparsing the wire header.
+    payload_len: usize,
     _permit: tokio::sync::OwnedSemaphorePermit,
 }
 
@@ -562,6 +586,18 @@ impl GuestFrameMerger {
             return Err(RuntimeError::Custom(format!(
                 "overlapping raw record ending at {end} for correlation {id}"
             )));
+        }
+        if flow.accepted_forwarded
+            && flow.guest_to_host
+            && offset == flow.next_raw_offset
+            && flow.pending_raw.is_empty()
+        {
+            // The normal case is already ordered. Forward it without a BTreeMap insertion/removal
+            // and let `drain_flow` release any finish or terminal that this record satisfied.
+            flow.next_raw_offset = end;
+            let mut ready = vec![lane_frame];
+            self.drain_flow(key, &mut ready)?;
+            return Ok(ready);
         }
         if flow.pending_raw.len() >= BULK_MERGE_MAX_PENDING_RECORDS {
             return Err(RuntimeError::Custom(format!(
@@ -1065,7 +1101,6 @@ impl AgentRelay {
         let next_session_id: Arc<AtomicU64> = Arc::new(AtomicU64::new(1));
         let clients_for_reader = Arc::clone(&clients);
         let shared_for_reader = Arc::clone(&self.shared);
-        let client_output_budget = Arc::new(Semaphore::new(CLIENT_OUTPUT_BYTE_CAPACITY));
         let log_writer_for_reader = self.log_writer.clone();
         let registry_for_reader = Arc::clone(&session_registry);
         let mut ring_reader_handle = tokio::spawn(ring_reader_task(
@@ -1076,7 +1111,6 @@ impl AgentRelay {
             merge_command_rx,
             RingReaderContext {
                 clients: clients_for_reader,
-                output_budget: client_output_budget,
                 log_writer: log_writer_for_reader,
                 session_registry: registry_for_reader,
                 pending_disconnects: Arc::clone(&pending_disconnects),
@@ -1200,47 +1234,19 @@ impl AgentRelay {
 
                             // Spawn a per-client writer task so the ring reader
                             // never holds the mutex across async writes.
-                            let (write_tx, mut write_rx) =
-                                mpsc::channel::<ClientWrite>(CLIENT_WRITE_CHANNEL_CAPACITY);
+                            // The mailbox is item-unbounded but byte-bounded by permits carried by
+                            // every entry. This keeps routing nonblocking without allowing a burst
+                            // of three frames to be mistaken for a stalled SDK client.
+                            let (write_tx, write_rx) = mpsc::unbounded_channel::<ClientWrite>();
                             let writer_disconnect_tx = disconnect_tx.clone();
-                            tokio::spawn(async move {
-                                let mut batch = VecDeque::new();
-                                let mut deferred = None;
-                                loop {
-                                    let write = match deferred.take() {
-                                        Some(write) => write,
-                                        None => match write_rx.recv().await {
-                                            Some(write) => write,
-                                            None => break,
-                                        },
-                                    };
-                                    let mut batch_bytes = write.data.len();
-                                    batch.push_back(write);
-                                    while batch.len() < CLIENT_WRITE_BATCH_FRAMES
-                                        && batch_bytes < CLIENT_WRITE_BATCH_BYTES
-                                    {
-                                        let Ok(write) = write_rx.try_recv() else {
-                                            break;
-                                        };
-                                        if batch_bytes.saturating_add(write.data.len())
-                                            > CLIENT_WRITE_BATCH_BYTES
-                                        {
-                                            deferred = Some(write);
-                                            break;
-                                        }
-                                        batch_bytes = batch_bytes.saturating_add(write.data.len());
-                                        batch.push_back(write);
-                                    }
+                            tokio::spawn(client_writer_task(
+                                slot,
+                                writer_half,
+                                write_rx,
+                                writer_disconnect_tx,
+                            ));
 
-                                    if let Err(e) = write_client_batch(&mut writer_half, &mut batch).await {
-                                        tracing::error!(
-                                            "agent relay: client writer slot={slot} failed: {e}"
-                                        );
-                                        let _ = writer_disconnect_tx.send(true);
-                                        break;
-                                    }
-                                }
-                            });
+                            let active_bulk = Arc::new(std::sync::Mutex::new(HashMap::new()));
 
                             // Register the client.
                             {
@@ -1248,8 +1254,11 @@ impl AgentRelay {
                                 map.insert(slot, ClientState {
                                     incarnation,
                                     active_sessions: HashSet::new(),
-                                    active_bulk: HashMap::new(),
+                                    active_bulk: Arc::clone(&active_bulk),
                                     write_tx,
+                                    write_budget: Arc::new(Semaphore::new(
+                                        CLIENT_OUTPUT_PER_CLIENT_BYTE_CAPACITY,
+                                    )),
                                     disconnect_tx,
                                 });
                             }
@@ -1282,6 +1291,7 @@ impl AgentRelay {
                                 id_start,
                                 id_end_exclusive,
                                 incarnation,
+                                active_bulk,
                                 disconnect_rx,
                             ));
                         }
@@ -1506,6 +1516,47 @@ fn decode_frame(buf: &[u8]) -> RuntimeResult<Message> {
     codec::decode_message_frame(buf).map_err(|e| RuntimeError::Custom(format!("decode frame: {e}")))
 }
 
+/// Drain one client's byte-bounded mailbox through a single batching writer.
+async fn client_writer_task<W>(
+    slot: u32,
+    mut writer: W,
+    mut write_rx: mpsc::UnboundedReceiver<ClientWrite>,
+    disconnect_tx: watch::Sender<bool>,
+) where
+    W: AsyncWrite + Unpin,
+{
+    let mut batch = VecDeque::new();
+    let mut deferred = None;
+    loop {
+        let write = match deferred.take() {
+            Some(write) => write,
+            None => match write_rx.recv().await {
+                Some(write) => write,
+                None => break,
+            },
+        };
+        let mut batch_bytes = write.data.len();
+        batch.push_back(write);
+        while batch.len() < CLIENT_WRITE_BATCH_FRAMES && batch_bytes < CLIENT_WRITE_BATCH_BYTES {
+            let Ok(write) = write_rx.try_recv() else {
+                break;
+            };
+            if batch_bytes.saturating_add(write.data.len()) > CLIENT_WRITE_BATCH_BYTES {
+                deferred = Some(write);
+                break;
+            }
+            batch_bytes = batch_bytes.saturating_add(write.data.len());
+            batch.push_back(write);
+        }
+
+        if let Err(error) = write_client_batch(&mut writer, &mut batch).await {
+            tracing::error!("agent relay: client writer slot={slot} failed: {error}");
+            let _ = disconnect_tx.send(true);
+            break;
+        }
+    }
+}
+
 /// Write a client batch with cursor advancement so short writes never compact frame tails.
 async fn write_client_batch<W: AsyncWrite + Unpin>(
     writer: &mut W,
@@ -1517,7 +1568,15 @@ async fn write_client_batch<W: AsyncWrite + Unpin>(
             .take(CLIENT_WRITE_BATCH_FRAMES)
             .map(|write| IoSlice::new(&write.data))
             .collect();
-        let written = writer.write_vectored(&slices).await?;
+        let written =
+            tokio::time::timeout(CLIENT_OUTPUT_STALL_GRACE, writer.write_vectored(&slices))
+                .await
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "SDK client output made no write progress",
+                    )
+                })??;
         if written == 0 {
             return Err(std::io::ErrorKind::WriteZero.into());
         }
@@ -1534,7 +1593,14 @@ async fn write_client_batch<W: AsyncWrite + Unpin>(
             }
         }
     }
-    writer.flush().await
+    tokio::time::timeout(CLIENT_OUTPUT_STALL_GRACE, writer.flush())
+        .await
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "SDK client output flush made no progress",
+            )
+        })?
 }
 
 /// Tap a guest-originated frame into `exec.log` if it belongs to the
@@ -1706,12 +1772,20 @@ async fn bulk_ring_writer_task(
 
         while !active.is_empty() {
             let round_len = active.len();
+            // DRR fairness is irrelevant when only one flow is runnable. Grant the full bounded
+            // burst in that case so a 256 KiB default record does not force one executor yield per
+            // record. Once a competitor appears, return to the normal per-flow quantum.
+            let quantum = if round_len == 1 {
+                BULK_WRITE_MAX_BURST
+            } else {
+                BULK_WRITE_QUANTUM
+            };
             for _ in 0..round_len {
                 let key = active.pop_front().expect("active bulk flow exists");
                 if let Some(flow) = flows.get_mut(&key) {
                     flow.deficit = flow
                         .deficit
-                        .saturating_add(BULK_WRITE_QUANTUM)
+                        .saturating_add(quantum)
                         .min(BULK_WRITE_MAX_BURST);
                 }
 
@@ -1720,7 +1794,7 @@ async fn bulk_ring_writer_task(
                     let next_len = flows
                         .get(&key)
                         .and_then(|flow| flow.queue.front())
-                        .and_then(|write| bulk_wire_payload_len(&write.data).ok())
+                        .map(|write| write.payload_len)
                         .unwrap_or(0);
                     let can_send = flows.get(&key).is_some_and(|flow| {
                         next_len != 0
@@ -1807,7 +1881,8 @@ fn enqueue_bulk_write(
     active: &mut VecDeque<(ClientIncarnation, u32)>,
     retired: &HashMap<ClientIncarnation, Vec<u64>>,
 ) -> RuntimeResult<()> {
-    let (_, flow, _, payload_len) = bulk_wire_metadata(&write.data)?;
+    let flow = write.flow;
+    let payload_len = write.payload_len;
     if flow != BulkFlow::HostToGuest {
         return Err(RuntimeError::Custom(
             "host bulk scheduler received a guest-to-host record".into(),
@@ -1860,10 +1935,6 @@ fn enqueue_bulk_write(
     flow.queued_bytes = queued_bytes;
     flow.queue.push_back(write);
     Ok(())
-}
-
-fn bulk_wire_payload_len(data: &Bytes) -> RuntimeResult<usize> {
-    bulk_wire_metadata(data).map(|(_, _, _, payload_len)| payload_len)
 }
 
 /// Validate the fixed outer and generation-7 bulk headers without copying the payload.
@@ -2001,12 +2072,25 @@ async fn ring_reader_task(
 ) -> RuntimeResult<()> {
     let RingReaderContext {
         clients,
-        output_budget,
         log_writer,
         session_registry,
         pending_disconnects,
         bulk_writer,
     } = context;
+    if bulk_shared.is_none() {
+        // Combined mode has one inherently ordered physical stream, so it needs neither a lane
+        // actor nor a cross-lane merger. Reading and routing it directly preserves the PR2 hot
+        // path while dual-port keeps the isolation machinery below.
+        return combined_ring_reader_task(
+            shared,
+            range_lease_active,
+            clients,
+            log_writer,
+            session_registry,
+            pending_disconnects,
+        )
+        .await;
+    }
     let dual_port = bulk_shared.is_some();
     let control_lane_budget = Arc::new(Semaphore::new(if dual_port {
         CONTROL_LANE_OUTPUT_BYTE_CAPACITY
@@ -2014,9 +2098,9 @@ async fn ring_reader_task(
         CLIENT_OUTPUT_BYTE_CAPACITY
     }));
     let bulk_lane_budget = Arc::new(Semaphore::new(CLIENT_OUTPUT_BYTE_CAPACITY));
-    let (lane_tx, mut lane_rx) = mpsc::channel::<LaneEvent>(128);
+    let (control_lane_tx, mut control_lane_rx) = mpsc::channel::<LaneEvent>(128);
+    let (bulk_lane_tx, mut bulk_lane_rx) = mpsc::channel::<LaneEvent>(128);
     let (lane_failure_tx, mut lane_failure_rx) = mpsc::channel(2);
-    let control_lane_tx = lane_tx.clone();
     let control_failure_tx = lane_failure_tx.clone();
     let control_handle = tokio::spawn(async move {
         let result = lane_reader_task(
@@ -2037,7 +2121,7 @@ async fn ring_reader_task(
                 GuestLane::Bulk,
                 true,
                 range_lease_active,
-                lane_tx,
+                bulk_lane_tx,
                 bulk_lane_budget,
             )
             .await;
@@ -2048,10 +2132,11 @@ async fn ring_reader_task(
 
     let outcome = 'reader: loop {
         let lane_event = tokio::select! {
-            event = lane_rx.recv() => {
+            biased;
+            event = control_lane_rx.recv() => {
                 let Some(event) = event else {
                     break 'reader Err(RuntimeError::Custom(
-                        "agent relay: all console lane readers stopped".into(),
+                        "agent relay: control console lane reader stopped".into(),
                     ));
                 };
                 event
@@ -2088,6 +2173,14 @@ async fn ring_reader_task(
                         continue;
                     }
                 }
+            }
+            event = bulk_lane_rx.recv(), if dual_port => {
+                let Some(event) = event else {
+                    break 'reader Err(RuntimeError::Custom(
+                        "agent relay: bulk console lane reader stopped".into(),
+                    ));
+                };
+                event
             }
         };
 
@@ -2188,84 +2281,16 @@ async fn ring_reader_task(
         };
 
         for lane_frame in frames {
-            let frame = lane_frame.frame;
-            if !has_valid_frame_flags(frame.flags) {
-                break 'reader Err(RuntimeError::Custom(format!(
-                    "agent relay: guest frame id={} has invalid flags {}",
-                    frame.id, frame.flags
-                )));
-            }
-            let Some(client_slot) = relay_client_slot(frame.id) else {
-                break 'reader Err(RuntimeError::Custom(format!(
-                    "agent relay: guest frame uses unassigned correlation ID {}",
-                    frame.id
-                )));
-            };
-
-            let is_terminal = (frame.flags & FLAG_TERMINAL) != 0;
-
-            // Acquire lock briefly to get session bookkeeping + clone writer.
-            // Then release before the async write to avoid blocking other clients.
-            let writer_result = {
-                let mut map = clients.lock().await;
-                if let Some(client) = map.get_mut(&client_slot)
-                    && (!dual_port || client.incarnation == lane_frame.incarnation)
-                {
-                    if is_terminal {
-                        client.active_sessions.remove(&frame.id);
-                        client.active_bulk.remove(&frame.id);
-                    }
-                    Ok((client.write_tx.clone(), client.disconnect_tx.clone()))
-                } else {
-                    Err(frame.id)
-                }
-            };
-
-            // In dual mode, stale incarnation-bearing merge output must not reach either the SDK
-            // or the correlation-keyed log registry after a slot has been reused. Combined mode
-            // retains its existing behavior of capturing terminal output after client disconnect.
-            if (!dual_port || writer_result.is_ok())
-                && frame.flags != FLAG_BULK
-                && let Some(writer) = log_writer.as_ref()
+            if let Err(error) = route_guest_lane_frame(
+                lane_frame,
+                dual_port,
+                &clients,
+                log_writer.as_deref(),
+                &session_registry,
+            )
+            .await
             {
-                tap_frame_into_log(&frame, writer, &session_registry);
-            }
-
-            match writer_result {
-                Ok((write_tx, disconnect_tx)) => {
-                    let charged = frame.data.len().saturating_add(OUTPUT_BUDGET_GRANULE - 1)
-                        / OUTPUT_BUDGET_GRANULE
-                        * OUTPUT_BUDGET_GRANULE;
-                    let Ok(charged) = u32::try_from(charged) else {
-                        tracing::error!("agent relay: client frame budget overflow");
-                        continue;
-                    };
-                    let permit = match Arc::clone(&output_budget).try_acquire_many_owned(charged) {
-                        Ok(permit) => permit,
-                        Err(_) => {
-                            tracing::warn!(
-                                "agent relay: disconnecting slot={client_slot}; output budget exhausted"
-                            );
-                            let _ = disconnect_tx.send(true);
-                            continue;
-                        }
-                    };
-                    if let Err(error) = write_tx.try_send(ClientWrite {
-                        data: frame.data,
-                        _permit: permit,
-                    }) {
-                        tracing::warn!(
-                            %error,
-                            "agent relay: disconnecting slot={client_slot}; client output stalled"
-                        );
-                        let _ = disconnect_tx.send(true);
-                    }
-                }
-                Err(id) => {
-                    tracing::debug!(
-                        "agent relay: no client for slot={client_slot} id={id} (frame dropped)"
-                    );
-                }
+                break 'reader Err(error);
             }
         }
     };
@@ -2275,6 +2300,190 @@ async fn ring_reader_task(
         handle.abort();
     }
     outcome
+}
+
+/// Route one admitted guest frame without awaiting the destination SDK socket.
+async fn route_guest_lane_frame(
+    lane_frame: LaneFrame,
+    dual_port: bool,
+    clients: &Arc<Mutex<HashMap<u32, ClientState>>>,
+    log_writer: Option<&LogWriter>,
+    session_registry: &SessionRegistry,
+) -> RuntimeResult<()> {
+    let LaneFrame {
+        frame,
+        incarnation,
+        _permit: lane_permit,
+    } = lane_frame;
+    if !has_valid_frame_flags(frame.flags) {
+        return Err(RuntimeError::Custom(format!(
+            "agent relay: guest frame id={} has invalid flags {}",
+            frame.id, frame.flags
+        )));
+    }
+    let Some(client_slot) = relay_client_slot(frame.id) else {
+        return Err(RuntimeError::Custom(format!(
+            "agent relay: guest frame uses unassigned correlation ID {}",
+            frame.id
+        )));
+    };
+    let is_terminal = (frame.flags & FLAG_TERMINAL) != 0;
+
+    // Clone only nonblocking routing handles while holding the shared owner map.
+    let writer_result = {
+        let mut map = clients.lock().await;
+        if let Some(client) = map.get_mut(&client_slot)
+            && (!dual_port || client.incarnation == incarnation)
+        {
+            if is_terminal {
+                client.active_sessions.remove(&frame.id);
+                client.active_bulk.lock().unwrap().remove(&frame.id);
+            }
+            Ok(ClientRoute {
+                write_tx: client.write_tx.clone(),
+                write_budget: Arc::clone(&client.write_budget),
+                disconnect_tx: client.disconnect_tx.clone(),
+            })
+        } else {
+            Err(frame.id)
+        }
+    };
+
+    // Incarnation-bearing output must not reach logs after its owner has changed. Combined mode
+    // retains the historical behavior of capturing terminal output after SDK disconnect.
+    if (!dual_port || writer_result.is_ok())
+        && frame.flags != FLAG_BULK
+        && let Some(writer) = log_writer
+    {
+        tap_frame_into_log(&frame, writer, session_registry);
+    }
+
+    match writer_result {
+        Ok(route) => {
+            let charged = frame.data.len().saturating_add(OUTPUT_BUDGET_GRANULE - 1)
+                / OUTPUT_BUDGET_GRANULE
+                * OUTPUT_BUDGET_GRANULE;
+            let Ok(charged) = u32::try_from(charged) else {
+                return Err(RuntimeError::Custom(
+                    "agent relay: client frame budget overflow".into(),
+                ));
+            };
+            let client_permit = route
+                .write_budget
+                .try_acquire_many_owned(charged)
+                .map_err(|_| {
+                RuntimeError::Custom(format!(
+                    "agent relay: per-client output budget invariant failed for slot {client_slot}"
+                ))
+            })?;
+
+            if let Err(error) = route.write_tx.send(ClientWrite {
+                data: frame.data,
+                _lane_permit: lane_permit,
+                _client_permit: client_permit,
+            }) {
+                tracing::warn!(
+                    %error,
+                    "agent relay: disconnecting slot={client_slot}; client writer stopped"
+                );
+                let _ = route.disconnect_tx.send(true);
+            }
+        }
+        Err(id) => {
+            tracing::debug!(
+                "agent relay: no client for slot={client_slot} id={id} (frame dropped)"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Read and route the single ordered guest stream without dual-port actor hops.
+async fn combined_ring_reader_task(
+    shared: Arc<ConsoleSharedState>,
+    range_lease_active: bool,
+    clients: Arc<Mutex<HashMap<u32, ClientState>>>,
+    log_writer: Option<Arc<LogWriter>>,
+    session_registry: Arc<SessionRegistry>,
+    pending_disconnects: Arc<Mutex<HashMap<ClientIncarnation, PendingClientDisconnect>>>,
+) -> RuntimeResult<()> {
+    #[cfg(unix)]
+    let async_fd = AsyncFd::new(shared.tx_wake.as_raw_fd()).map_err(RuntimeError::Io)?;
+    let output_budget = Arc::new(Semaphore::new(CLIENT_OUTPUT_BYTE_CAPACITY));
+    let mut buf = BytesMut::new();
+
+    loop {
+        #[cfg(unix)]
+        {
+            let mut guard = async_fd.readable().await.map_err(RuntimeError::Io)?;
+            guard.clear_ready();
+        }
+        #[cfg(windows)]
+        {
+            let shared_for_wait = Arc::clone(&shared);
+            let woke = tokio::task::spawn_blocking(move || {
+                shared_for_wait
+                    .tx_wake
+                    .wait_timeout(std::time::Duration::from_millis(100))
+            })
+            .await
+            .unwrap_or(false);
+            if !woke {
+                continue;
+            }
+        }
+
+        shared.tx_wake.drain();
+        while let Some(chunk) = shared.tx_ring.pop() {
+            buf.extend_from_slice(&chunk);
+            drop(chunk);
+            shared.tx_capacity_wake.wake();
+        }
+
+        loop {
+            if range_lease_active {
+                match try_decode_relay_client_disconnected_ack_from_bytes(&mut buf) {
+                    Ok(Some(ack)) => {
+                        complete_relay_client_disconnect(&pending_disconnects, ack).await?;
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        shared.close();
+                        return Err(RuntimeError::Custom(format!(
+                            "decode relay client disconnect acknowledgement: {error}"
+                        )));
+                    }
+                }
+            }
+
+            let Some(frame) = try_extract_frame(&mut buf)? else {
+                break;
+            };
+            let charged = frame.data.len().saturating_add(OUTPUT_BUDGET_GRANULE - 1)
+                / OUTPUT_BUDGET_GRANULE
+                * OUTPUT_BUDGET_GRANULE;
+            let charged = u32::try_from(charged).map_err(|_| {
+                RuntimeError::Custom("agent relay: lane frame budget overflow".into())
+            })?;
+            let lane_permit = Arc::clone(&output_budget)
+                .acquire_many_owned(charged)
+                .await
+                .map_err(|_| RuntimeError::Custom("agent relay: lane budget closed".into()))?;
+            route_guest_lane_frame(
+                LaneFrame {
+                    frame,
+                    incarnation: None,
+                    _permit: lane_permit,
+                },
+                false,
+                &clients,
+                log_writer.as_deref(),
+                &session_registry,
+            )
+            .await?;
+        }
+    }
 }
 
 /// Read and frame one physical guest console lane without interpreting control payloads.
@@ -2375,7 +2584,10 @@ async fn lane_reader_task(
                     frame.id, frame.flags
                 )));
             }
-            let charged = u32::try_from(frame.data.len()).map_err(|_| {
+            let charged = frame.data.len().saturating_add(OUTPUT_BUDGET_GRANULE - 1)
+                / OUTPUT_BUDGET_GRANULE
+                * OUTPUT_BUDGET_GRANULE;
+            let charged = u32::try_from(charged).map_err(|_| {
                 RuntimeError::Custom("agent relay: lane frame budget overflow".into())
             })?;
             let permit = Arc::clone(&budget)
@@ -2472,14 +2684,15 @@ async fn client_reader_task(
     id_start: u32,
     id_end_exclusive: u32,
     incarnation: Option<ClientIncarnation>,
+    active_bulk: Arc<std::sync::Mutex<HashMap<u32, BulkKind>>>,
     mut disconnect_rx: watch::Receiver<bool>,
 ) {
     loop {
         let frame = tokio::select! {
             result = read_raw_frame(&mut reader) => match result {
                 Ok(frame) => frame,
-                Err(_) => {
-                    tracing::info!("agent relay: client disconnected slot={slot}");
+                Err(error) => {
+                    tracing::info!(%error, "agent relay: client disconnected slot={slot}");
                     break;
                 }
             },
@@ -2563,12 +2776,7 @@ async fn client_reader_task(
         }
 
         if let Some(kind) = opened_bulk_kind {
-            let duplicate = clients
-                .lock()
-                .await
-                .get_mut(&slot)
-                .and_then(|client| client.active_bulk.insert(frame.id, kind))
-                .is_some();
+            let duplicate = active_bulk.lock().unwrap().insert(frame.id, kind).is_some();
             if duplicate {
                 tracing::error!(
                     id = frame.id,
@@ -2578,11 +2786,16 @@ async fn client_reader_task(
             }
         }
 
-        if frame.flags == FLAG_BULK {
-            let Ok((kind, flow, _, _)) = bulk_wire_metadata(&frame.data) else {
+        let bulk_metadata = if frame.flags == FLAG_BULK {
+            let Ok(metadata) = bulk_wire_metadata(&frame.data) else {
                 tracing::error!(id = frame.id, "agent relay: malformed client bulk record");
                 break;
             };
+            Some(metadata)
+        } else {
+            None
+        };
+        if let Some((kind, flow, _, _)) = bulk_metadata {
             if flow != BulkFlow::HostToGuest {
                 tracing::error!(
                     id = frame.id,
@@ -2593,12 +2806,8 @@ async fn client_reader_task(
 
             // A raw record is meaningful only after the same client opened a matching operation.
             // This prevents arbitrary IDs from creating scheduler state or consuming its budget.
-            let belongs_to_active_operation = clients
-                .lock()
-                .await
-                .get(&slot)
-                .and_then(|client| client.active_bulk.get(&frame.id))
-                == Some(&kind);
+            let belongs_to_active_operation =
+                active_bulk.lock().unwrap().get(&frame.id).copied() == Some(kind);
             if !belongs_to_active_operation {
                 tracing::error!(
                     id = frame.id,
@@ -2704,8 +2913,10 @@ async fn client_reader_task(
             && let (Some(bulk_tx), Some(bulk_budget)) = (&bulk_tx, &bulk_budget)
         {
             let incarnation = incarnation.expect("dual-port client has an incarnation");
-            let Ok(charged) =
-                u32::try_from(frame.data.len().saturating_add(CLIENT_INCARNATION_SIZE))
+            let (_, flow, _, payload_len) =
+                bulk_metadata.expect("bulk frame metadata was validated");
+            let wire_len = frame.data.len();
+            let Ok(charged) = u32::try_from(wire_len.saturating_add(CLIENT_INCARNATION_SIZE))
             else {
                 tracing::error!("agent relay: bulk frame budget overflow");
                 break;
@@ -2719,6 +2930,8 @@ async fn client_reader_task(
                     id: frame.id,
                     incarnation,
                     data: frame.data,
+                    flow,
+                    payload_len,
                     _permit: permit,
                 }))
                 .await
@@ -2745,8 +2958,11 @@ async fn client_reader_task(
 
     // Tombstone the routing owner before clearing scheduler and merger state. Once the client map
     // entry is gone, a queued old frame can no longer recreate state after these acknowledged cuts.
-    if let Some(incarnation) = incarnation {
-        if let Some(bulk_tx) = &bulk_tx {
+    if let (Some(incarnation), Some(bulk_tx)) = (incarnation, &bulk_tx) {
+        // Only dual-port mode owns a bulk scheduler and cross-lane merger. Combined leased mode
+        // deliberately bypasses both actors, so waiting for a merger acknowledgement there would
+        // quarantine every disconnected slot forever.
+        {
             let (completion, completed) = oneshot::channel();
             if bulk_tx
                 .send(BulkWriterCommand::DropIncarnation {
@@ -3005,8 +3221,11 @@ async fn handle_relay_transport_failure(
         .flat_map(|client| {
             client
                 .active_bulk
+                .lock()
+                .unwrap()
                 .iter()
                 .map(|(id, kind)| (client.incarnation, *id, *kind))
+                .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
     correlations.sort_unstable_by_key(|(_, id, _)| *id);
@@ -3066,7 +3285,7 @@ async fn handle_relay_transport_failure(
                 .lock()
                 .await
                 .values()
-                .all(|client| client.active_bulk.is_empty());
+                .all(|client| client.active_bulk.lock().unwrap().is_empty());
             if all_terminal {
                 break;
             }
@@ -3395,6 +3614,79 @@ mod tests {
         .unwrap();
         completion.await.unwrap();
         assert!(!pending.lock().await.contains_key(&incarnation));
+    }
+
+    #[tokio::test]
+    async fn combined_leased_disconnect_releases_slot_without_a_merger() {
+        let slot = 0;
+        let incarnation = [0x82; CLIENT_INCARNATION_SIZE];
+        let (id_start, id_end_exclusive) = relay_client_id_range(slot).unwrap();
+        let (reader, peer) = tokio::io::duplex(64);
+        drop(peer);
+        let (agent_tx, mut agent_rx) = mpsc::channel(4);
+        let (write_tx, _write_rx) = mpsc::unbounded_channel();
+        let (disconnect_tx, disconnect_rx) = watch::channel(false);
+        let active_bulk = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let clients = Arc::new(Mutex::new(HashMap::from([(
+            slot,
+            ClientState {
+                incarnation: Some(incarnation),
+                active_sessions: HashSet::new(),
+                active_bulk: Arc::clone(&active_bulk),
+                write_tx,
+                write_budget: Arc::new(Semaphore::new(CLIENT_OUTPUT_PER_CLIENT_BYTE_CAPACITY)),
+                disconnect_tx,
+            },
+        )])));
+        let used_slots = Arc::new(Mutex::new(HashSet::from([slot])));
+        let (drain_tx, _drain_rx) = mpsc::channel(1);
+        let (merge_command_tx, _merge_command_rx) = mpsc::channel(1);
+        let pending_disconnects = Arc::new(Mutex::new(HashMap::new()));
+
+        let task = tokio::spawn(client_reader_task(
+            slot,
+            reader,
+            agent_tx,
+            Arc::clone(&clients),
+            Arc::clone(&used_slots),
+            drain_tx,
+            Arc::new(std::sync::Mutex::new(HashMap::new())),
+            Arc::new(AtomicU64::new(1)),
+            None,
+            None,
+            merge_command_tx,
+            Arc::clone(&pending_disconnects),
+            id_start,
+            id_end_exclusive,
+            Some(incarnation),
+            active_bulk,
+            disconnect_rx,
+        ));
+
+        // Combined mode has no merger actor. Its ordered disconnect reaches agentd directly and
+        // the reverse acknowledgement remains the sole cut before the range can be recycled.
+        let wire = tokio::time::timeout(Duration::from_secs(1), agent_rx.recv())
+            .await
+            .expect("combined disconnect waited for an absent merger")
+            .expect("combined control writer stopped");
+        let message = decode_frame(wire.data.as_ref()).unwrap();
+        let disconnected: RelayClientDisconnected = message.payload().unwrap();
+        assert_eq!(disconnected.incarnation, Some(incarnation));
+
+        complete_relay_client_disconnect(
+            &pending_disconnects,
+            RelayClientDisconnectedAck {
+                id_start,
+                id_end_exclusive,
+                incarnation,
+            },
+        )
+        .await
+        .unwrap();
+        task.await.unwrap();
+
+        assert!(clients.lock().await.is_empty());
+        assert!(used_slots.lock().await.is_empty());
     }
 
     #[test]
@@ -3743,6 +4035,8 @@ mod tests {
                 id: 1,
                 incarnation: TEST_INCARNATION,
                 data,
+                flow: BulkFlow::HostToGuest,
+                payload_len: b"queued".len(),
                 _permit: permit,
             }),
             &mut flows,
@@ -3781,6 +4075,8 @@ mod tests {
                 id: 1,
                 incarnation: TEST_INCARNATION,
                 data: late_data,
+                flow: BulkFlow::HostToGuest,
+                payload_len: b"late".len(),
                 _permit: late_permit,
             }),
             &mut flows,
@@ -3846,6 +4142,8 @@ mod tests {
                 id: 1,
                 incarnation: TEST_INCARNATION,
                 data,
+                flow: BulkFlow::HostToGuest,
+                payload_len: PAYLOAD.len(),
                 _permit: permit,
             }))
             .await
@@ -3860,6 +4158,8 @@ mod tests {
             id: 2,
             incarnation: TEST_INCARNATION,
             data,
+            flow: BulkFlow::HostToGuest,
+            payload_len: PAYLOAD.len(),
             _permit: permit,
         }))
         .await
@@ -3891,18 +4191,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bulk_scheduler_admits_one_maximum_filesystem_record() {
+        let capacity = 4 * 1024 * 1024;
+        let shared = Arc::new(ConsoleSharedState::with_capacity(capacity));
+        let budget = Arc::new(Semaphore::new(capacity));
+        let (tx, rx) = mpsc::channel(1);
+        let record = BulkRecord {
+            id: 1,
+            kind: BulkKind::Filesystem,
+            flow: BulkFlow::HostToGuest,
+            offset: 0,
+            payload: Bytes::from(vec![0x5a; MAX_BULK_RECORD_PAYLOAD as usize]),
+        };
+        let mut encoded = Vec::new();
+        codec::encode_bulk_to_buf(&record, &mut encoded).unwrap();
+        let data = Bytes::from(encoded);
+        let permit = Arc::clone(&budget)
+            .acquire_many_owned(data.len() as u32)
+            .await
+            .unwrap();
+        tx.send(BulkWriterCommand::Write(BulkWrite {
+            id: record.id,
+            incarnation: TEST_INCARNATION,
+            data,
+            flow: record.flow,
+            payload_len: record.payload.len(),
+            _permit: permit,
+        }))
+        .await
+        .unwrap();
+        drop(tx);
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            bulk_ring_writer_task(Arc::clone(&shared), rx),
+        )
+        .await
+        .expect("maximum filesystem record stalled")
+        .unwrap();
+
+        let mut wire = BytesMut::new();
+        while let Some(fragment) = shared.rx_ring.pop() {
+            wire.extend_from_slice(&fragment);
+        }
+        let decoded = try_decode_incarnated_bulk_from_bytes(&mut wire)
+            .unwrap()
+            .expect("maximum filesystem record was emitted");
+        assert_eq!(decoded.incarnation, TEST_INCARNATION);
+        assert_eq!(
+            decoded.record.payload.len(),
+            MAX_BULK_RECORD_PAYLOAD as usize
+        );
+        assert!(wire.is_empty());
+        assert_eq!(budget.available_permits(), capacity);
+    }
+
+    #[tokio::test]
     async fn client_batch_handles_short_vectored_writes_and_releases_budget() {
-        let budget = Arc::new(Semaphore::new(8));
-        let first = Arc::clone(&budget).acquire_many_owned(3).await.unwrap();
-        let second = Arc::clone(&budget).acquire_many_owned(5).await.unwrap();
+        let lane_budget = Arc::new(Semaphore::new(8));
+        let client_budget = Arc::new(Semaphore::new(8));
+        let first_lane = Arc::clone(&lane_budget)
+            .acquire_many_owned(3)
+            .await
+            .unwrap();
+        let first_client = Arc::clone(&client_budget)
+            .acquire_many_owned(3)
+            .await
+            .unwrap();
+        let second_lane = Arc::clone(&lane_budget)
+            .acquire_many_owned(5)
+            .await
+            .unwrap();
+        let second_client = Arc::clone(&client_budget)
+            .acquire_many_owned(5)
+            .await
+            .unwrap();
         let mut batch = VecDeque::from([
             ClientWrite {
                 data: Bytes::from_static(b"abc"),
-                _permit: first,
+                _lane_permit: first_lane,
+                _client_permit: first_client,
             },
             ClientWrite {
                 data: Bytes::from_static(b"defgh"),
-                _permit: second,
+                _lane_permit: second_lane,
+                _client_permit: second_client,
             },
         ]);
         let mut writer = ShortVectoredWriter {
@@ -3914,7 +4287,82 @@ mod tests {
 
         assert_eq!(writer.bytes, b"abcdefgh");
         assert!(batch.is_empty());
-        assert_eq!(budget.available_permits(), 8);
+        assert_eq!(lane_budget.available_permits(), 8);
+        assert_eq!(client_budget.available_permits(), 8);
+    }
+
+    #[tokio::test]
+    async fn client_mailbox_absorbs_more_than_two_large_frames_without_blocking() {
+        const FRAME_BYTES: usize = 3 * 1024 * 1024;
+        const FRAME_COUNT: usize = 3;
+
+        let lane_budget = Arc::new(Semaphore::new(CLIENT_OUTPUT_BYTE_CAPACITY));
+        let client_budget = Arc::new(Semaphore::new(CLIENT_OUTPUT_PER_CLIENT_BYTE_CAPACITY));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        for _ in 0..FRAME_COUNT {
+            let lane_permit = Arc::clone(&lane_budget)
+                .try_acquire_many_owned(FRAME_BYTES as u32)
+                .unwrap();
+            let client_permit = Arc::clone(&client_budget)
+                .try_acquire_many_owned(FRAME_BYTES as u32)
+                .unwrap();
+            tx.send(ClientWrite {
+                data: Bytes::from(vec![0u8; FRAME_BYTES]),
+                _lane_permit: lane_permit,
+                _client_permit: client_permit,
+            })
+            .unwrap();
+        }
+
+        assert_eq!(rx.len(), FRAME_COUNT);
+        while rx.recv().await.is_some() {
+            if rx.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(lane_budget.available_permits(), CLIENT_OUTPUT_BYTE_CAPACITY);
+        assert_eq!(
+            client_budget.available_permits(),
+            CLIENT_OUTPUT_PER_CLIENT_BYTE_CAPACITY
+        );
+    }
+
+    #[tokio::test]
+    async fn combined_reader_routes_directly_without_a_lane_actor() {
+        let shared = Arc::new(ConsoleSharedState::with_capacity(64 * 1024));
+        let (write_tx, mut write_rx) = mpsc::unbounded_channel();
+        let (disconnect_tx, _disconnect_rx) = watch::channel(false);
+        let clients = Arc::new(Mutex::new(HashMap::from([(
+            0,
+            ClientState {
+                incarnation: None,
+                active_sessions: HashSet::new(),
+                active_bulk: Arc::new(std::sync::Mutex::new(HashMap::new())),
+                write_tx,
+                write_budget: Arc::new(Semaphore::new(CLIENT_OUTPUT_PER_CLIENT_BYTE_CAPACITY)),
+                disconnect_tx,
+            },
+        )])));
+        let frame = encoded_message_id(MessageType::Pong, 1, &microsandbox_protocol::core::Pong {});
+        let reader = tokio::spawn(combined_ring_reader_task(
+            Arc::clone(&shared),
+            false,
+            clients,
+            None,
+            Arc::new(std::sync::Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashMap::new())),
+        ));
+
+        shared.tx_ring.push(frame.clone()).unwrap();
+        shared.tx_wake.wake();
+        let output = tokio::time::timeout(Duration::from_secs(1), write_rx.recv())
+            .await
+            .expect("combined reader stalled")
+            .expect("combined client writer stopped");
+
+        assert_eq!(output.data.as_ref(), frame);
+        reader.abort();
     }
 
     #[tokio::test]
@@ -4026,7 +4474,7 @@ mod tests {
 
         relay.wait_ready().unwrap();
 
-        assert_eq!(relay.ready_frame, Some(ready));
+        assert_eq!(relay.ready_frame.as_deref(), Some(ready.as_slice()));
         assert!(
             shared.rx_ring.pop().is_none(),
             "no init context means no ack should be sent"

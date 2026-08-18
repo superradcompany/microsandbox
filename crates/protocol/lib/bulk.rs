@@ -20,11 +20,18 @@ pub const BULK_HEADER_SIZE: usize = 12;
 /// Default raw-record payload selected by generation-7 peers.
 pub const DEFAULT_BULK_RECORD_PAYLOAD: u32 = 256 * 1024;
 
+/// Default filesystem payload selected by generation-7 peers.
+///
+/// This matches the existing filesystem streaming chunk so raw transport removes serialization
+/// work without multiplying file, channel and scheduler operations. TCP retains the smaller
+/// default above for interactive latency and fairness.
+pub const DEFAULT_FILESYSTEM_BULK_RECORD_PAYLOAD: u32 = 3 * 1024 * 1024;
+
 /// Smallest record payload a peer may negotiate.
 pub const MIN_BULK_RECORD_PAYLOAD: u32 = 16 * 1024;
 
 /// Largest record payload generation 7 permits.
-pub const MAX_BULK_RECORD_PAYLOAD: u32 = 1024 * 1024;
+pub const MAX_BULK_RECORD_PAYLOAD: u32 = DEFAULT_FILESYSTEM_BULK_RECORD_PAYLOAD;
 
 /// Default receive window granted to one bulk flow.
 pub const DEFAULT_BULK_WINDOW: u64 = 8 * 1024 * 1024;
@@ -306,17 +313,17 @@ impl BulkFlow {
 impl BulkOffer {
     /// Build the default offer for a filesystem read.
     pub fn filesystem_read() -> Self {
-        Self::new(DEFAULT_BULK_WINDOW)
+        Self::new(DEFAULT_FILESYSTEM_BULK_RECORD_PAYLOAD, DEFAULT_BULK_WINDOW)
     }
 
     /// Build the default offer for a filesystem write.
     pub fn filesystem_write() -> Self {
-        Self::new(0)
+        Self::new(DEFAULT_FILESYSTEM_BULK_RECORD_PAYLOAD, 0)
     }
 
     /// Build the default bidirectional TCP offer.
     pub fn tcp() -> Self {
-        Self::new(DEFAULT_BULK_WINDOW)
+        Self::new(DEFAULT_BULK_RECORD_PAYLOAD, DEFAULT_BULK_WINDOW)
     }
 
     /// Validate generation-7 offer limits.
@@ -334,10 +341,10 @@ impl BulkOffer {
         Ok(self)
     }
 
-    fn new(guest_to_host_credit_limit: u64) -> Self {
+    fn new(max_record_payload: u32, guest_to_host_credit_limit: u64) -> Self {
         Self {
             format: BULK_FORMAT_RAW_V1,
-            max_record_payload: DEFAULT_BULK_RECORD_PAYLOAD,
+            max_record_payload,
             guest_to_host_credit_limit,
         }
     }
@@ -698,6 +705,40 @@ fn validate_payload_len(length: usize, max: u32) -> Result<(), BulkStateError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_offers_keep_filesystem_throughput_and_tcp_latency_granularity() {
+        assert_eq!(
+            BulkOffer::filesystem_read().max_record_payload,
+            DEFAULT_FILESYSTEM_BULK_RECORD_PAYLOAD
+        );
+        assert_eq!(
+            BulkOffer::filesystem_write().max_record_payload,
+            DEFAULT_FILESYSTEM_BULK_RECORD_PAYLOAD
+        );
+        assert_eq!(
+            BulkOffer::tcp().max_record_payload,
+            DEFAULT_BULK_RECORD_PAYLOAD
+        );
+    }
+
+    #[test]
+    fn new_filesystem_offer_accepts_an_older_peers_smaller_limit() {
+        let offer = BulkOffer::filesystem_write();
+        let accepted = BulkAccepted {
+            kind: BulkKind::Filesystem,
+            flows: BULK_FLOW_MASK_HOST_TO_GUEST,
+            format: BULK_FORMAT_RAW_V1,
+            max_record_payload: DEFAULT_BULK_RECORD_PAYLOAD,
+            host_to_guest_credit_limit: DEFAULT_BULK_WINDOW,
+            guest_to_host_credit_limit: 0,
+        };
+
+        let negotiated = accepted
+            .validate_against(offer, BulkKind::Filesystem, BULK_FLOW_MASK_HOST_TO_GUEST)
+            .unwrap();
+        assert_eq!(negotiated.max_record_payload, DEFAULT_BULK_RECORD_PAYLOAD);
+    }
 
     #[test]
     fn sender_stops_at_exact_credit_and_accepts_absolute_replenishment() {

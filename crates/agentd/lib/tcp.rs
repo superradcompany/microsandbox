@@ -6,15 +6,15 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use microsandbox_protocol::bulk::{
     BULK_FLOW_MASK_GUEST_TO_HOST, BULK_FLOW_MASK_HOST_TO_GUEST, BulkAccepted, BulkCredit,
     BulkFinish, BulkFlow, BulkKind, BulkOffer, BulkReceiveState, BulkRecord, BulkSendState,
-    DEFAULT_BULK_RECORD_PAYLOAD, DEFAULT_BULK_WINDOW,
+    DEFAULT_BULK_RECORD_PAYLOAD, DEFAULT_BULK_WINDOW, MIN_BULK_RECORD_PAYLOAD,
 };
 use microsandbox_protocol::codec;
 use microsandbox_protocol::message::{Message, MessageType};
@@ -40,11 +40,9 @@ const TCP_CHUNK_SIZE: usize = 64 * 1024;
 /// TCP chunks eligible under the aggregate 32 MiB output budget.
 const TCP_OUTPUT_RESERVATION: usize = 2 * TCP_CHUNK_SIZE;
 
-/// How many host->guest command frames may queue before the agent loop has to
-/// wait. Bounding this turns a slow or stalled destination into backpressure
-/// (the serial reader pauses, which throttles the SSH window) instead of
-/// unbounded guest memory growth.
-const TCP_COMMAND_CAPACITY: usize = 32;
+/// Enough host-to-guest data slots for the default byte window at the smallest negotiated record.
+/// Lifecycle and absolute-credit updates use separate channels and cannot consume these slots.
+const TCP_COMMAND_CAPACITY: usize = DEFAULT_BULK_WINDOW as usize / MIN_BULK_RECORD_PAYLOAD as usize;
 
 /// Upper bound on a single guest-side connect attempt. The connect runs in the
 /// per-session task, so this only bounds that task's lifetime; it never blocks
@@ -59,6 +57,7 @@ const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct TcpSession {
     owner_id: u32,
     commands: mpsc::Sender<TcpCommand>,
+    bulk_control: Option<TcpBulkControlSenders>,
     task: JoinHandle<()>,
     bulk: bool,
 }
@@ -67,13 +66,30 @@ enum TcpCommand {
     Data(Vec<u8>),
     Eof,
     BulkRecord(BulkRecord),
-    BulkCredit(BulkCredit),
-    BulkFinish(BulkFinish),
+}
+
+/// Coalescing lifecycle channels that cannot be starved by a full TCP data queue.
+struct TcpBulkControlSenders {
+    credit: watch::Sender<Option<BulkCredit>>,
+    finish: mpsc::Sender<BulkFinish>,
+}
+
+struct TcpBulkControlReceivers {
+    credit: watch::Receiver<Option<BulkCredit>>,
+    finish: mpsc::Receiver<BulkFinish>,
 }
 
 struct TcpBulkState {
     send: BulkSendState,
     receive: BulkReceiveState,
+}
+
+/// One ordered host-to-guest record being written incrementally. Keeping at most one record here
+/// preserves credit semantics while allowing the opposite TCP half to keep reading concurrently.
+struct PendingTcpWrite {
+    payload: Bytes,
+    written: usize,
+    bulk_end: Option<u64>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -129,9 +145,15 @@ impl TcpSession {
         if !self.bulk {
             return Err("bulk credit sent to a generation-6 TCP stream".into());
         }
-        self.commands
-            .try_send(TcpCommand::BulkCredit(credit))
-            .map_err(|error| format!("TCP bulk control queue is unavailable: {error}"))
+        let control = self
+            .bulk_control
+            .as_ref()
+            .ok_or_else(|| "TCP bulk control path is unavailable".to_string())?;
+        if control.credit.is_closed() {
+            return Err("TCP session is closed".into());
+        }
+        control.credit.send_replace(Some(credit));
+        Ok(())
     }
 
     /// Queue the exact host-to-guest half-close marker.
@@ -139,9 +161,14 @@ impl TcpSession {
         if !self.bulk {
             return Err("bulk finish sent to a generation-6 TCP stream".into());
         }
-        self.commands
-            .try_send(TcpCommand::BulkFinish(finish))
-            .map_err(|error| format!("TCP bulk control queue is unavailable: {error}"))
+        let control = self
+            .bulk_control
+            .as_ref()
+            .ok_or_else(|| "TCP bulk control path is unavailable".to_string())?;
+        control
+            .finish
+            .try_send(finish)
+            .map_err(|error| format!("TCP bulk finish path is unavailable: {error}"))
     }
 
     /// Whether this TCP session negotiated generation-7 raw bulk.
@@ -175,14 +202,31 @@ impl TcpSession {
     pub fn open(id: u32, req: TcpConnect, session_tx: &SessionOutputSender) -> Self {
         let bulk = req.bulk.is_some();
         let (commands_tx, commands_rx) = mpsc::channel(TCP_COMMAND_CAPACITY);
+        let (bulk_control, bulk_control_rx) = if bulk {
+            let (credit_tx, credit_rx) = watch::channel(None);
+            let (finish_tx, finish_rx) = mpsc::channel(1);
+            (
+                Some(TcpBulkControlSenders {
+                    credit: credit_tx,
+                    finish: finish_tx,
+                }),
+                Some(TcpBulkControlReceivers {
+                    credit: credit_rx,
+                    finish: finish_rx,
+                }),
+            )
+        } else {
+            (None, None)
+        };
         let output_tx = session_tx.clone();
         let task = tokio::spawn(async move {
-            connect_and_relay(id, req, commands_rx, output_tx).await;
+            connect_and_relay(id, req, commands_rx, bulk_control_rx, output_tx).await;
         });
 
         Self {
             owner_id: id,
             commands: commands_tx,
+            bulk_control,
             task,
             bulk,
         }
@@ -203,6 +247,7 @@ async fn connect_and_relay(
     id: u32,
     req: TcpConnect,
     commands: mpsc::Receiver<TcpCommand>,
+    bulk_control: Option<TcpBulkControlReceivers>,
     tx: SessionOutputSender,
 ) {
     let TcpConnect { host, port, bulk } = req;
@@ -311,7 +356,7 @@ async fn connect_and_relay(
         None => None,
     };
 
-    relay_tcp_session(id, stream, commands, tx, bulk).await;
+    relay_tcp_session(id, stream, commands, bulk_control, tx, bulk).await;
 }
 
 fn accept_tcp_offer(offer: BulkOffer) -> Result<BulkAccepted, String> {
@@ -331,18 +376,90 @@ fn accept_tcp_offer(offer: BulkOffer) -> Result<BulkAccepted, String> {
     })
 }
 
+/// Receive lifecycle data without making a non-bulk session's select loop spin.
+async fn recv_optional_mpsc<T>(receiver: &mut Option<mpsc::Receiver<T>>) -> Option<T> {
+    loop {
+        let Some(active) = receiver.as_mut() else {
+            return std::future::pending().await;
+        };
+        match active.recv().await {
+            Some(value) => return Some(value),
+            None => *receiver = None,
+        }
+    }
+}
+
+/// Return only the newest absolute credit update; intermediate grants are intentionally coalesced.
+async fn recv_optional_credit(
+    receiver: &mut Option<watch::Receiver<Option<BulkCredit>>>,
+) -> Option<BulkCredit> {
+    loop {
+        let Some(active) = receiver.as_mut() else {
+            return std::future::pending().await;
+        };
+        if active.changed().await.is_err() {
+            *receiver = None;
+            continue;
+        }
+        if let Some(credit) = *active.borrow_and_update() {
+            return Some(credit);
+        }
+    }
+}
+
+/// Apply an overtaking half-close only after the data worker has consumed every prior record.
+async fn apply_pending_tcp_finish<W>(
+    stream: &mut W,
+    state: &mut TcpBulkState,
+    pending: &mut Option<BulkFinish>,
+) -> Result<(), String>
+where
+    W: AsyncWrite + Unpin,
+{
+    let Some(finish) = *pending else {
+        return Ok(());
+    };
+    if finish.kind != BulkKind::Tcp || finish.flow != BulkFlow::HostToGuest {
+        return Err("bulk finish does not describe the TCP host-to-guest flow".into());
+    }
+    if finish.final_offset > state.receive.next_expected_offset() {
+        return Ok(());
+    }
+    state
+        .receive
+        .accept_finish(finish)
+        .map_err(|error| error.to_string())?;
+    stream
+        .shutdown()
+        .await
+        .map_err(|error| format!("shutdown TCP stream: {error}"))?;
+    *pending = None;
+    Ok(())
+}
+
 async fn relay_tcp_session(
     id: u32,
-    mut stream: TcpStream,
+    stream: TcpStream,
     mut commands: mpsc::Receiver<TcpCommand>,
+    bulk_control: Option<TcpBulkControlReceivers>,
     tx: SessionOutputSender,
     mut bulk: Option<TcpBulkState>,
 ) {
+    // A single task still owns protocol state, but independent socket halves let a blocked
+    // destination write make progress concurrently with guest-to-host reads.
+    let (mut reader, mut writer) = stream.into_split();
+    let (mut credit_rx, mut finish_rx) = match bulk_control {
+        Some(control) => (Some(control.credit), Some(control.finish)),
+        None => (None, None),
+    };
+    let mut pending_finish = None;
     let read_capacity = bulk.as_ref().map_or(TCP_CHUNK_SIZE, |state| {
         state.send.max_record_payload() as usize
     });
     let mut read_buf = vec![0u8; read_capacity];
     let mut terminal_sent = false;
+    let mut pending_write: Option<PendingTcpWrite> = None;
+    let mut write_shutdown = false;
     // The destination half-closed its write side. We stop reading but keep the
     // loop alive so host->destination data still flows until the host closes.
     let mut read_eof = false;
@@ -355,7 +472,63 @@ async fn relay_tcp_session(
                 .min(state.send.max_record_payload() as u64) as usize
         });
         tokio::select! {
-            read = stream.read(&mut read_buf[..read_limit]), if !read_eof && read_limit != 0 => {
+            Some(finish) = recv_optional_mpsc(&mut finish_rx) => {
+                if pending_finish.replace(finish).is_some() {
+                    terminal_sent = send_tcp_failure(
+                        id,
+                        "duplicate TCP bulk finish".into(),
+                        &tx,
+                    )
+                    .await;
+                    break;
+                }
+                let Some(state) = bulk.as_mut() else {
+                    terminal_sent = send_tcp_failure(
+                        id,
+                        "bulk finish received on a generation-6 TCP stream".into(),
+                        &tx,
+                    )
+                    .await;
+                    break;
+                };
+                if pending_write.is_none() {
+                    if let Err(error) = apply_pending_tcp_finish(
+                        &mut writer,
+                        state,
+                        &mut pending_finish,
+                    ).await {
+                        terminal_sent = send_tcp_failure(
+                            id,
+                            format!("invalid TCP bulk finish: {error}"),
+                            &tx,
+                        )
+                        .await;
+                        break;
+                    }
+                    write_shutdown = pending_finish.is_none();
+                }
+            }
+            Some(credit) = recv_optional_credit(&mut credit_rx) => {
+                let Some(state) = bulk.as_mut() else {
+                    terminal_sent = send_tcp_failure(
+                        id,
+                        "bulk credit received on a generation-6 TCP stream".into(),
+                        &tx,
+                    )
+                    .await;
+                    break;
+                };
+                if let Err(error) = state.send.apply_credit(credit) {
+                    terminal_sent = send_tcp_failure(
+                        id,
+                        format!("invalid TCP bulk credit: {error}"),
+                        &tx,
+                    )
+                    .await;
+                    break;
+                }
+            }
+            read = reader.read(&mut read_buf[..read_limit]), if !read_eof && read_limit != 0 => {
                 match read {
                     Ok(0) => {
                         if let Some(state) = bulk.as_mut() {
@@ -447,7 +620,100 @@ async fn relay_tcp_session(
                     }
                 }
             }
-            command = commands.recv() => {
+            write = async {
+                let pending = pending_write.as_ref().expect("guarded pending TCP write");
+                writer.write(&pending.payload[pending.written..]).await
+            }, if pending_write.is_some() => {
+                match write {
+                    Ok(0) => {
+                        terminal_sent = send_tcp_failure(
+                            id,
+                            "write TCP stream made no progress".into(),
+                            &tx,
+                        )
+                        .await;
+                        break;
+                    }
+                    Ok(written) => {
+                        let pending = pending_write.as_mut().expect("guarded pending TCP write");
+                        pending.written += written;
+                        if pending.written != pending.payload.len() {
+                            continue;
+                        }
+
+                        let completed = pending_write.take().expect("completed TCP write exists");
+                        if let Some(end) = completed.bulk_end {
+                            let Some(state) = bulk.as_mut() else {
+                                terminal_sent = send_tcp_failure(
+                                    id,
+                                    "bulk TCP write lost its protocol state".into(),
+                                    &tx,
+                                )
+                                .await;
+                                break;
+                            };
+                            match state.receive.consume(end) {
+                                Ok(Some(credit)) => {
+                                    if !send_raw_tcp_message(
+                                        id,
+                                        MessageType::BulkCredit,
+                                        &credit,
+                                        RawActivity::guest_message(),
+                                        None,
+                                        &tx,
+                                    )
+                                    .await
+                                    {
+                                        break;
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(error) => {
+                                    terminal_sent = send_tcp_failure(
+                                        id,
+                                        format!("advance TCP bulk credit: {error}"),
+                                        &tx,
+                                    )
+                                    .await;
+                                    break;
+                                }
+                            }
+                            let finish_was_pending = pending_finish.is_some();
+                            if let Err(error) = apply_pending_tcp_finish(
+                                &mut writer,
+                                state,
+                                &mut pending_finish,
+                            ).await {
+                                terminal_sent = send_tcp_failure(
+                                    id,
+                                    format!("invalid TCP bulk finish: {error}"),
+                                    &tx,
+                                )
+                                .await;
+                                break;
+                            }
+                            if finish_was_pending && pending_finish.is_none() {
+                                write_shutdown = true;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        terminal_sent = send_raw_tcp_message(
+                            id,
+                            MessageType::TcpFailed,
+                            &TcpFailed {
+                                error: format!("write TCP stream: {error}"),
+                            },
+                            RawActivity::guest_message(),
+                            Some(RawSessionCompletion::Tcp),
+                            &tx,
+                        )
+                        .await;
+                        break;
+                    }
+                }
+            }
+            command = commands.recv(), if pending_write.is_none() && !write_shutdown => {
                 match command {
                     Some(TcpCommand::Data(data)) => {
                         if bulk.is_some() {
@@ -459,20 +725,11 @@ async fn relay_tcp_session(
                             .await;
                             break;
                         }
-                        if let Err(e) = stream.write_all(&data).await {
-                            terminal_sent = send_raw_tcp_message(
-                                id,
-                                MessageType::TcpFailed,
-                                &TcpFailed {
-                                    error: format!("write TCP stream: {e}"),
-                                },
-                                RawActivity::guest_message(),
-                                Some(RawSessionCompletion::Tcp),
-                                &tx,
-                            )
-                            .await;
-                            break;
-                        }
+                        pending_write = Some(PendingTcpWrite {
+                            payload: Bytes::from(data),
+                            written: 0,
+                            bulk_end: None,
+                        });
                     }
                     Some(TcpCommand::Eof) => {
                         if bulk.is_some() {
@@ -484,7 +741,7 @@ async fn relay_tcp_session(
                             .await;
                             break;
                         }
-                        if let Err(e) = stream.shutdown().await {
+                        if let Err(e) = writer.shutdown().await {
                             terminal_sent = send_raw_tcp_message(
                                 id,
                                 MessageType::TcpFailed,
@@ -498,6 +755,7 @@ async fn relay_tcp_session(
                             .await;
                             break;
                         }
+                        write_shutdown = true;
                     }
                     None => {
                         break;
@@ -524,90 +782,11 @@ async fn relay_tcp_session(
                                 break;
                             }
                         };
-                        if let Err(error) = stream.write_all(&record.payload).await {
-                            terminal_sent = send_tcp_failure(
-                                id,
-                                format!("write TCP stream: {error}"),
-                                &tx,
-                            )
-                            .await;
-                            break;
-                        }
-                        match state.receive.consume(end) {
-                            Ok(Some(credit)) => {
-                                if !send_raw_tcp_message(
-                                    id,
-                                    MessageType::BulkCredit,
-                                    &credit,
-                                    RawActivity::guest_message(),
-                                    None,
-                                    &tx,
-                                )
-                                .await
-                                {
-                                    break;
-                                }
-                            }
-                            Ok(None) => {}
-                            Err(error) => {
-                                terminal_sent = send_tcp_failure(
-                                    id,
-                                    format!("advance TCP bulk credit: {error}"),
-                                    &tx,
-                                )
-                                .await;
-                                break;
-                            }
-                        }
-                    }
-                    Some(TcpCommand::BulkCredit(credit)) => {
-                        let Some(state) = bulk.as_mut() else {
-                            terminal_sent = send_tcp_failure(
-                                id,
-                                "bulk credit received on a generation-6 TCP stream".into(),
-                                &tx,
-                            )
-                            .await;
-                            break;
-                        };
-                        if let Err(error) = state.send.apply_credit(credit) {
-                            terminal_sent = send_tcp_failure(
-                                id,
-                                format!("invalid TCP bulk credit: {error}"),
-                                &tx,
-                            )
-                            .await;
-                            break;
-                        }
-                    }
-                    Some(TcpCommand::BulkFinish(finish)) => {
-                        let Some(state) = bulk.as_mut() else {
-                            terminal_sent = send_tcp_failure(
-                                id,
-                                "bulk finish received on a generation-6 TCP stream".into(),
-                                &tx,
-                            )
-                            .await;
-                            break;
-                        };
-                        if let Err(error) = state.receive.accept_finish(finish) {
-                            terminal_sent = send_tcp_failure(
-                                id,
-                                format!("invalid TCP bulk finish: {error}"),
-                                &tx,
-                            )
-                            .await;
-                            break;
-                        }
-                        if let Err(error) = stream.shutdown().await {
-                            terminal_sent = send_tcp_failure(
-                                id,
-                                format!("shutdown TCP stream: {error}"),
-                                &tx,
-                            )
-                            .await;
-                            break;
-                        }
+                        pending_write = Some(PendingTcpWrite {
+                            payload: record.payload,
+                            written: 0,
+                            bulk_end: Some(end),
+                        });
                     }
                 }
             }
@@ -892,6 +1071,133 @@ mod tests {
         session.close();
         wait_finished(&session).await;
         accept_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn blocked_host_to_guest_write_does_not_stop_guest_to_host_reads() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (session_tx, mut session_rx) = SessionOutputSender::channel();
+        let host_payload = Bytes::from(vec![0x3c; DEFAULT_BULK_RECORD_PAYLOAD as usize]);
+        let guest_payload = vec![0x7a; DEFAULT_BULK_WINDOW as usize];
+        let expected_guest_payload = guest_payload.clone();
+        let expected_host_payload = host_payload.clone();
+        let host_payload_len = host_payload.len();
+        let (got_tx, got_rx) = tokio::sync::oneshot::channel();
+
+        // Both peers deliberately fill their send side before reading the other direction. A
+        // single write_all/read loop deadlocks here once the kernel buffers fill; split halves do
+        // not, because agentd keeps draining the destination while its write is pending.
+        let accept_task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut received = vec![0u8; host_payload_len];
+            socket.read_exact(&mut received[..1]).await.unwrap();
+            socket.write_all(&guest_payload).await.unwrap();
+            socket.read_exact(&mut received[1..]).await.unwrap();
+            got_tx.send(received).unwrap();
+        });
+
+        let session = TcpSession::open(
+            17,
+            TcpConnect {
+                host: "127.0.0.1".to_string(),
+                port,
+                bulk: Some(BulkOffer::tcp()),
+            },
+            &session_tx,
+        );
+        assert_eq!(
+            recv_message(&mut session_rx).await.t,
+            MessageType::TcpConnected
+        );
+        assert_eq!(
+            recv_message(&mut session_rx).await.t,
+            MessageType::BulkAccepted
+        );
+
+        session
+            .write_bulk(BulkRecord {
+                id: 17,
+                kind: BulkKind::Tcp,
+                flow: BulkFlow::HostToGuest,
+                offset: 0,
+                payload: host_payload,
+            })
+            .await
+            .unwrap();
+
+        let received_guest_payload = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut received = Vec::with_capacity(expected_guest_payload.len());
+            while received.len() < expected_guest_payload.len() {
+                let record = recv_bulk(&mut session_rx).await;
+                assert_eq!(record.offset, received.len() as u64);
+                received.extend_from_slice(&record.payload);
+            }
+            received
+        })
+        .await
+        .expect("guest-to-host reads must progress while the opposite write is blocked");
+        assert_eq!(received_guest_payload, expected_guest_payload);
+
+        let received_host_payload = tokio::time::timeout(Duration::from_secs(5), got_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received_host_payload, expected_host_payload);
+
+        session.close();
+        wait_finished(&session).await;
+        accept_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn full_bulk_data_queue_does_not_starve_credit_or_finish() {
+        let (commands, _commands_rx) = mpsc::channel(TCP_COMMAND_CAPACITY);
+        let (credit, mut credit_rx) = watch::channel(None);
+        let (finish, mut finish_rx) = mpsc::channel(1);
+        let task = tokio::spawn(std::future::pending());
+        let session = TcpSession {
+            owner_id: 29,
+            commands,
+            bulk_control: Some(TcpBulkControlSenders { credit, finish }),
+            task,
+            bulk: true,
+        };
+        let payload = Bytes::from(vec![0u8; MIN_BULK_RECORD_PAYLOAD as usize]);
+
+        for index in 0..TCP_COMMAND_CAPACITY {
+            session
+                .write_bulk(BulkRecord {
+                    id: 29,
+                    kind: BulkKind::Tcp,
+                    flow: BulkFlow::HostToGuest,
+                    offset: (index * MIN_BULK_RECORD_PAYLOAD as usize) as u64,
+                    payload: payload.clone(),
+                })
+                .await
+                .unwrap();
+        }
+        assert_eq!(session.commands.capacity(), 0);
+
+        let credit_update = BulkCredit {
+            kind: BulkKind::Tcp,
+            flow: BulkFlow::GuestToHost,
+            consumed_offset: 4,
+            credit_limit: 8,
+        };
+        session.apply_credit(credit_update).await.unwrap();
+        credit_rx.changed().await.unwrap();
+        assert_eq!(*credit_rx.borrow_and_update(), Some(credit_update));
+
+        let finish_update = BulkFinish {
+            kind: BulkKind::Tcp,
+            flow: BulkFlow::HostToGuest,
+            final_offset: DEFAULT_BULK_WINDOW,
+        };
+        session.finish_bulk(finish_update).await.unwrap();
+        assert_eq!(finish_rx.recv().await, Some(finish_update));
+
+        session.close();
     }
 
     async fn wait_finished(session: &TcpSession) {
