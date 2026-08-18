@@ -31,8 +31,8 @@ use crate::icmp::relay::IcmpRelay;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::ports::PortPublisher;
 use crate::secrets::handle::SecretsHandle;
-use crate::tcp::{connection::ConnectionTracker, proxy, upstream::UpstreamTcpTarget};
-use crate::tls::{proxy as tls_proxy, state::TlsState};
+use crate::tcp::{connection::ConnectionTracker, proxy::TcpProxy, upstream::UpstreamTcpTarget};
+use crate::tls::{proxy::TlsProxy, state::TlsState};
 use crate::udp::fragments::{
     Ipv4UdpFragmentReassembler, Ipv6UdpFragmentReassembler, ReassembledUdpDatagram,
     is_ipv4_udp_fragment, is_ipv6_fragment, is_ipv6_udp_fragment,
@@ -523,8 +523,7 @@ pub fn smoltcp_poll_loop(
             {
                 // TLS-intercepted port — spawn TLS MITM proxy.
                 let connect_target = resolve_tcp_host_target(conn.dst, config.gateway);
-                tls_proxy::spawn_tls_proxy(
-                    &tokio_handle,
+                let proxy = TlsProxy::new(
                     conn.dst,
                     connect_target,
                     conn.from_smoltcp,
@@ -534,6 +533,7 @@ pub fn smoltcp_poll_loop(
                     network_policy.clone(),
                     conn.proxy_connect,
                 );
+                tokio_handle.spawn(proxy.run());
                 continue;
             }
             if conn.dst.port() == 53 {
@@ -554,14 +554,14 @@ pub fn smoltcp_poll_loop(
                 // otherwise. No gateway→loopback rewrite here: the
                 // forwarder dials the configured upstream, not the
                 // gateway.
-                DnsTcpProxy::spawn(
-                    &tokio_handle,
+                let proxy = DnsTcpProxy::new(
                     conn.dst,
                     conn.from_smoltcp,
                     conn.to_smoltcp,
                     dns_forwarder_handle.clone(),
                     shared.clone(),
                 );
+                tokio_handle.spawn(proxy.run());
                 continue;
             }
             if conn.dst.port() == 853
@@ -575,8 +575,7 @@ pub fn smoltcp_poll_loop(
                 // same forwarder plain DNS uses. Policy for the
                 // chosen `@target` resolver is applied per-query by
                 // the forwarder (block list + rebind + egress).
-                DotProxy::spawn(
-                    &tokio_handle,
+                let proxy = DotProxy::new(
                     conn.dst,
                     conn.from_smoltcp,
                     conn.to_smoltcp,
@@ -584,12 +583,12 @@ pub fn smoltcp_poll_loop(
                     tls_state.clone(),
                     shared.clone(),
                 );
+                tokio_handle.spawn(proxy.run());
                 continue;
             }
             // Plain TCP proxy.
             let connect_target = resolve_tcp_host_target(conn.dst, config.gateway);
-            proxy::spawn_tcp_proxy_with_target(
-                &tokio_handle,
+            let proxy = TcpProxy::new(
                 conn.dst,
                 connect_target,
                 conn.from_smoltcp,
@@ -602,6 +601,7 @@ pub fn smoltcp_poll_loop(
                 tls_state.clone(),
                 conn.proxy_connect,
             );
+            tokio_handle.spawn(proxy.run());
         }
 
         // Rate-limited cleanup: TIME_WAIT is 60s, session timeout is 60s,
