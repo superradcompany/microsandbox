@@ -2435,11 +2435,20 @@ async fn recycle_network_slot(local: &LocalBackend, sandbox_id: i32) -> Microsan
                 .map(|row| row.network_slot.unwrap_or(row.id as i64))
                 .collect();
 
+            // Our own row's existing assignment always wins: a persistent
+            // sandbox that restarts keeps the addressing it already held
+            // (and the row below found ours must exist to reach here).
+            let own_row_slot = rows
+                .iter()
+                .find(|row| row.id == sandbox_id)
+                .and_then(|row| row.network_slot);
+
             // Legacy behavior while ids fit the pool: the id stays the slot,
             // so addressing never changes for hosts that have not hit the
             // cap yet.
-            let assigned = if (sandbox_id as i64) <= MAX_SLOT && used.contains(&(sandbox_id as i64))
-            {
+            let assigned = if let Some(held) = own_row_slot {
+                held
+            } else if (sandbox_id as i64) <= MAX_SLOT && used.contains(&(sandbox_id as i64)) {
                 sandbox_id as i64
             } else {
                 (1..=MAX_SLOT)
