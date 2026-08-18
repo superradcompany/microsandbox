@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::ffi::CString;
+use std::io::IoSlice;
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -12,11 +13,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use microsandbox_protocol::AGENT_RELAY_ID_RANGE_STEP;
 use microsandbox_protocol::bulk::{
     BULK_FLOW_MASK_GUEST_TO_HOST, BULK_FLOW_MASK_HOST_TO_GUEST, BulkAccepted, BulkCredit,
     BulkFinish, BulkFlow, BulkKind, BulkOffer, BulkReceiveState, BulkRecord, BulkSendState,
-    DEFAULT_BULK_WINDOW,
+    DEFAULT_BULK_WINDOW, DEFAULT_FILESYSTEM_BULK_RECORD_PAYLOAD,
 };
 use microsandbox_protocol::codec;
 use microsandbox_protocol::fs::{
@@ -24,6 +24,7 @@ use microsandbox_protocol::fs::{
     FsSetAttrs,
 };
 use microsandbox_protocol::message::{Message, MessageType};
+use microsandbox_protocol::transport::relay_client_slot;
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{Mutex, watch};
@@ -318,14 +319,6 @@ impl FsWriteSession {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-fn relay_client_slot(id: u32) -> Option<u32> {
-    if id == 0 {
-        None
-    } else {
-        Some((id - 1) / AGENT_RELAY_ID_RANGE_STEP)
-    }
-}
-
 fn same_relay_client(left: u32, right: u32) -> bool {
     relay_client_slot(left).is_some_and(|left| Some(left) == relay_client_slot(right))
 }
@@ -610,24 +603,51 @@ pub async fn handle_fs_bulk_record(
     session: &mut FsWriteSession,
     out_buf: &mut Vec<u8>,
 ) -> Result<bool, String> {
-    let Some(receiver) = session.bulk.as_mut() else {
-        return Err("raw bulk record sent to a generation-6 filesystem write".into());
-    };
-    let end = receiver
-        .accept_record(record)
-        .map_err(|error| format!("invalid filesystem bulk record: {error}"))?;
+    handle_fs_bulk_records(id, std::slice::from_ref(record), session, out_buf).await
+}
 
-    if let Some(expected) = session.expected_len
-        && end > expected
+/// Handles a bounded contiguous batch of generation-7 filesystem records.
+///
+/// The protocol still validates and accounts for each wire record independently. Coalescing only
+/// changes the local filesystem effect: one lock, one seek and a vectored write replace multiple
+/// blocking-file tasks when a peer negotiates records below the current filesystem default.
+pub async fn handle_fs_bulk_records(
+    id: u32,
+    records: &[BulkRecord],
+    session: &mut FsWriteSession,
+    out_buf: &mut Vec<u8>,
+) -> Result<bool, String> {
+    if records.is_empty() {
+        return Err("filesystem bulk record batch is empty".into());
+    }
+
+    let mut final_end = session.written;
+    let mut payload_bytes = 0usize;
     {
-        encode_response(
-            id,
-            error_response(format!(
-                "write length mismatch: expected {expected}, received at least {end}"
-            )),
-            out_buf,
-        )?;
-        return Ok(true);
+        let Some(receiver) = session.bulk.as_mut() else {
+            return Err("raw bulk record sent to a generation-6 filesystem write".into());
+        };
+        for record in records {
+            final_end = receiver
+                .accept_record(record)
+                .map_err(|error| format!("invalid filesystem bulk record: {error}"))?;
+            payload_bytes = payload_bytes
+                .checked_add(record.payload.len())
+                .ok_or_else(|| "filesystem bulk batch byte count overflowed usize".to_string())?;
+
+            if let Some(expected) = session.expected_len
+                && final_end > expected
+            {
+                encode_response(
+                    id,
+                    error_response(format!(
+                        "write length mismatch: expected {expected}, received at least {final_end}"
+                    )),
+                    out_buf,
+                )?;
+                return Ok(true);
+            }
+        }
     }
 
     let mut file = session.file.lock().await;
@@ -637,21 +657,74 @@ pub async fn handle_fs_bulk_record(
         encode_response(id, error_response(format!("seek: {error}")), out_buf)?;
         return Ok(true);
     }
-    if let Err(error) = file.write_all(&record.payload).await {
+    if let Err(error) = write_bulk_payloads_vectored(&mut file, records).await {
         encode_response(id, error_response(format!("write: {error}")), out_buf)?;
         return Ok(true);
     }
     drop(file);
 
-    session.offset = session.offset.saturating_add(record.payload.len() as u64);
-    session.written = end;
+    session.offset = session.offset.saturating_add(payload_bytes as u64);
+    session.written = final_end;
+    let receiver = session
+        .bulk
+        .as_mut()
+        .expect("bulk receiver was validated before the filesystem write");
     if let Some(credit) = receiver
-        .consume(end)
+        .consume(final_end)
         .map_err(|error| format!("advance filesystem bulk credit: {error}"))?
     {
         encode_control(MessageType::BulkCredit, id, &credit, out_buf)?;
     }
     Ok(false)
+}
+
+/// Completes a vectored Tokio file write even when the kernel accepts only a prefix of the batch.
+async fn write_bulk_payloads_vectored(
+    file: &mut tokio::fs::File,
+    records: &[BulkRecord],
+) -> std::io::Result<()> {
+    if records.len() == 1 {
+        return file.write_all(&records[0].payload).await;
+    }
+
+    let mut record_index = 0usize;
+    let mut record_offset = 0usize;
+
+    while record_index < records.len() {
+        let mut slices = Vec::with_capacity(records.len() - record_index);
+        slices.push(IoSlice::new(
+            &records[record_index].payload[record_offset..],
+        ));
+        slices.extend(
+            records[record_index + 1..]
+                .iter()
+                .map(|record| IoSlice::new(&record.payload)),
+        );
+
+        let written = file.write_vectored(&slices).await?;
+        if written == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "failed to write filesystem bulk batch",
+            ));
+        }
+
+        let mut remaining = written;
+        while record_index < records.len() {
+            let record_remaining = records[record_index].payload.len() - record_offset;
+            if remaining < record_remaining {
+                record_offset += remaining;
+                break;
+            }
+            remaining -= record_remaining;
+            record_index += 1;
+            record_offset = 0;
+            if remaining == 0 {
+                break;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Handles the exact end marker for a generation-7 filesystem write.
@@ -949,7 +1022,7 @@ fn accept_fs_read_offer(offer: BulkOffer) -> Result<BulkAccepted, String> {
         format: offer.format,
         max_record_payload: offer
             .max_record_payload
-            .min(microsandbox_protocol::bulk::DEFAULT_BULK_RECORD_PAYLOAD),
+            .min(DEFAULT_FILESYSTEM_BULK_RECORD_PAYLOAD),
         host_to_guest_credit_limit: 0,
         guest_to_host_credit_limit: offer.guest_to_host_credit_limit,
     })
@@ -968,7 +1041,7 @@ fn accept_fs_write_offer(offer: BulkOffer) -> Result<BulkAccepted, String> {
         format: offer.format,
         max_record_payload: offer
             .max_record_payload
-            .min(microsandbox_protocol::bulk::DEFAULT_BULK_RECORD_PAYLOAD),
+            .min(DEFAULT_FILESYSTEM_BULK_RECORD_PAYLOAD),
         host_to_guest_credit_limit: DEFAULT_BULK_WINDOW,
         guest_to_host_credit_limit: 0,
     })
@@ -1018,7 +1091,7 @@ async fn handle_bulk_read_stream(
             .available_credit()
             .min(sender.max_record_payload() as u64)
             .min(remaining.unwrap_or(u64::MAX)) as usize;
-        let Some(permit) = tx.reserve(read_len).await else {
+        let Some(permit) = tx.reserve_bulk(read_len).await else {
             return;
         };
         let mut payload = vec![0u8; read_len];
@@ -1512,6 +1585,24 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn filesystem_offer_preserves_an_older_hosts_smaller_record_limit() {
+        assert_eq!(
+            DEFAULT_FILESYSTEM_BULK_RECORD_PAYLOAD as usize,
+            FS_CHUNK_SIZE
+        );
+        let old_offer = BulkOffer {
+            max_record_payload: microsandbox_protocol::bulk::DEFAULT_BULK_RECORD_PAYLOAD,
+            ..BulkOffer::filesystem_write()
+        };
+
+        let accepted = accept_fs_write_offer(old_offer).unwrap();
+        assert_eq!(
+            accepted.max_record_payload,
+            microsandbox_protocol::bulk::DEFAULT_BULK_RECORD_PAYLOAD
+        );
+    }
+
     #[tokio::test]
     async fn raw_bulk_write_requires_exact_offsets_and_finish_length() {
         let path = test_path("bulk-write");
@@ -1551,12 +1642,18 @@ mod tests {
                 .contains("does not match expected")
         );
 
-        let record = BulkRecord {
+        let first = BulkRecord {
             offset: 0,
+            payload: Bytes::from_static(b"ign"),
             ..wrong_offset
         };
+        let second = BulkRecord {
+            offset: 3,
+            payload: Bytes::from_static(b"ored"),
+            ..first.clone()
+        };
         assert!(
-            !handle_fs_bulk_record(1, &record, &mut session, &mut out)
+            !handle_fs_bulk_records(1, &[first, second], &mut session, &mut out)
                 .await
                 .unwrap()
         );

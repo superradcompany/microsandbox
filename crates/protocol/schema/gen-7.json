@@ -1,10 +1,11 @@
 {
   "bulk": {
+    "default_filesystem_record_payload": 3145728,
     "default_record_payload": 262144,
     "default_window": 8388608,
     "format_raw_v1": 1,
     "header_size": 12,
-    "max_record_payload": 1048576,
+    "max_record_payload": 3145728,
     "max_window": 33554432,
     "min_record_payload": 16384
   },

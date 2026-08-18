@@ -27,6 +27,9 @@ use crate::{
 /// `id (4) + flags (1) + control or raw body`.
 pub const MAX_FRAME_SIZE: u32 = 4 * 1024 * 1024;
 
+/// Maximum complete encoded frame size, including the four-byte length prefix.
+pub const MAX_WIRE_FRAME: usize = 4 + MAX_FRAME_SIZE as usize;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -430,7 +433,11 @@ pub fn encode_bulk_header(
     Ok(header)
 }
 
-fn decode_bulk_body(id: u32, body: Bytes, max_payload: u32) -> ProtocolResult<BulkRecord> {
+pub(crate) fn decode_bulk_body(
+    id: u32,
+    body: Bytes,
+    max_payload: u32,
+) -> ProtocolResult<BulkRecord> {
     if max_payload == 0 || max_payload > MAX_BULK_RECORD_PAYLOAD {
         return Err(invalid_bulk(format!(
             "invalid decoder payload limit {max_payload}"

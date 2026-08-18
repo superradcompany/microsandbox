@@ -23,7 +23,7 @@ use crate::agent::AgentClient;
 use crate::logs::{LogEntry, LogOptions, LogStreamOptions};
 use crate::runtime::ProcessHandle;
 use crate::sandbox::exec::{ExecHandle, ExecOptions, ExecOutput};
-use crate::sandbox::fs::{FsEntry, FsMetadata, FsReadStream, FsWriteSink};
+use crate::sandbox::fs::{FsEntry, FsMetadata, FsReadStream, FsWriteSink, HostCopyOptions};
 use crate::sandbox::metrics::SandboxMetrics;
 use crate::sandbox::{
     Sandbox, SandboxConfig, SandboxHandle, SandboxListBuilder, SandboxPage, SandboxStatus,
@@ -463,6 +463,27 @@ pub trait SandboxBackend: Send + Sync {
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
         Box::pin(async move {
             crate::sandbox::fs::agent::copy_to_host(backend.as_ref(), name, guest, host).await
+        })
+    }
+
+    /// Copy a guest file out to the host with explicit publication durability.
+    fn fs_copy_to_host_with_options<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        name: &'a str,
+        guest: &'a str,
+        host: &'a Path,
+        options: HostCopyOptions,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        Box::pin(async move {
+            crate::sandbox::fs::agent::copy_to_host_with_options(
+                backend.as_ref(),
+                name,
+                guest,
+                host,
+                options,
+            )
+            .await
         })
     }
 }

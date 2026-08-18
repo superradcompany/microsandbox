@@ -18,7 +18,7 @@ use clap::Args;
 use microsandbox_runtime::{
     launch::LaunchConfig,
     logging::LogLevel,
-    vm::{Config, DiskMountSpec, UpperSpec, VmConfig, validate_disk_format},
+    vm::{AgentTransportProfile, Config, DiskMountSpec, UpperSpec, VmConfig, validate_disk_format},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -33,6 +33,15 @@ use microsandbox_runtime::{
 /// `--config-file` for manual invocation). See issue #997.
 #[derive(Debug, Args)]
 pub struct SandboxArgs {
+    /// Override automatic internal host/guest agent transport selection.
+    #[arg(
+        long = "agent-transport",
+        hide = true,
+        default_value = "auto",
+        value_parser = parse_agent_transport_profile
+    )]
+    pub agent_transport: AgentTransportProfile,
+
     /// Name of the sandbox.
     #[arg(long = "name")]
     pub sandbox_name: String,
@@ -109,6 +118,18 @@ fn parse_log_level(s: &str) -> Result<LogLevel, String> {
         "trace" => Ok(LogLevel::Trace),
         _ => Err(format!(
             "invalid log level: {s} (expected: error, warn, info, debug, trace)"
+        )),
+    }
+}
+
+/// Parse the hidden internal agent transport policy override.
+fn parse_agent_transport_profile(s: &str) -> Result<AgentTransportProfile, String> {
+    match s {
+        "auto" => Ok(AgentTransportProfile::Auto),
+        "combined" => Ok(AgentTransportProfile::Combined),
+        "dual-port-v1" => Ok(AgentTransportProfile::DualPortV1),
+        _ => Err(format!(
+            "invalid agent transport: {s} (expected: auto, combined, dual-port-v1)"
         )),
     }
 }
@@ -260,6 +281,7 @@ pub fn run(args: SandboxArgs) -> ! {
     };
 
     let config = Config {
+        agent_transport: args.agent_transport,
         sandbox_name: args.sandbox_name,
         sandbox_id: args.sandbox_id,
         log_level: args.log_level,
@@ -642,6 +664,7 @@ mod tests {
         let _ = config_fd;
 
         SandboxArgs {
+            agent_transport: AgentTransportProfile::Auto,
             sandbox_name: "test".to_string(),
             sandbox_id: 1,
             log_level: None,
@@ -662,6 +685,68 @@ mod tests {
             config_fd,
             config_file,
         }
+    }
+
+    #[test]
+    fn test_parse_hidden_agent_transport_profiles() {
+        assert_eq!(
+            parse_agent_transport_profile("auto").unwrap(),
+            AgentTransportProfile::Auto
+        );
+        assert_eq!(
+            parse_agent_transport_profile("combined").unwrap(),
+            AgentTransportProfile::Combined
+        );
+        assert_eq!(
+            parse_agent_transport_profile("dual-port-v1").unwrap(),
+            AgentTransportProfile::DualPortV1
+        );
+        assert!(parse_agent_transport_profile("dual-port-v2").is_err());
+    }
+
+    #[test]
+    fn test_hidden_agent_transport_defaults_to_auto_without_help_surface() {
+        use clap::{CommandFactory, Parser};
+
+        #[derive(Debug, Parser)]
+        struct TestCli {
+            #[command(flatten)]
+            sandbox: SandboxArgs,
+        }
+
+        let parsed =
+            TestCli::try_parse_from(["msb", "--name", "box", "--sandbox-id", "1"]).unwrap();
+        assert_eq!(parsed.sandbox.agent_transport, AgentTransportProfile::Auto);
+
+        let help = TestCli::command().render_long_help().to_string();
+        assert!(!help.contains("--agent-transport"));
+        assert!(!help.contains("dual-port-v1"));
+
+        let combined = TestCli::try_parse_from([
+            "msb",
+            "--name",
+            "box",
+            "--sandbox-id",
+            "1",
+            "--agent-transport",
+            "combined",
+        ])
+        .unwrap();
+        assert_eq!(
+            combined.sandbox.agent_transport,
+            AgentTransportProfile::Combined
+        );
+
+        let retired = TestCli::try_parse_from([
+            "msb",
+            "--name",
+            "box",
+            "--sandbox-id",
+            "1",
+            "--unstable-agent-transport",
+            "combined",
+        ]);
+        assert!(retired.is_err());
     }
 
     #[test]
