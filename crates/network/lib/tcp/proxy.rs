@@ -152,8 +152,23 @@ impl TcpProxy {
         }
     }
 
-    /// Drive the TCP proxy to completion.
-    pub(crate) async fn run(self) -> io::Result<()> {
+    /// Run the TCP proxy task to completion.
+    pub(crate) async fn run(self) {
+        let guest_dst = self.guest_dst;
+        let connect_dst = self.connect_target.primary();
+
+        if let Err(error) = self.try_run().await {
+            tracing::debug!(
+                dst = %connect_dst,
+                %guest_dst,
+                %error,
+                "TCP proxy task ended",
+            );
+        }
+    }
+
+    /// Drive the TCP proxy to completion, returning operational failures.
+    async fn try_run(self) -> io::Result<()> {
         let Self {
             guest_dst,
             connect_target,
@@ -476,11 +491,7 @@ pub fn spawn_tcp_proxy(
         proxy_connect,
     );
 
-    handle.spawn(async move {
-        if let Err(error) = proxy.run().await {
-            tracing::debug!(dst = %connect_dst, %guest_dst, %error, "TCP proxy task ended");
-        }
-    });
+    handle.spawn(proxy.run());
 }
 
 /// Forward an HTTP CONNECT tunnel: dial the proxy, splice the handshake,
@@ -603,7 +614,7 @@ async fn handle_connect_tunnel(
     .with_upstream(proxy_stream)
     .with_expected_sni(expected_sni)
     .with_initial_buf(tls_seed)
-    .run()
+    .try_run()
     .await
 }
 
@@ -1686,7 +1697,7 @@ mod tests {
             None,
             proxy_connect,
         )
-        .run()
+        .try_run()
         .await
         .unwrap();
 
@@ -1727,7 +1738,7 @@ mod tests {
             None,
             proxy_connect,
         )
-        .run()
+        .try_run()
         .await
         .unwrap();
 
@@ -1798,7 +1809,7 @@ mod tests {
             None,
             proxy_connect,
         )
-        .run()
+        .try_run()
         .await
         .unwrap();
 
@@ -1899,7 +1910,7 @@ mod tests {
             None,
             proxy_connect,
         )
-        .run()
+        .try_run()
         .await
         .unwrap();
 

@@ -17,7 +17,7 @@ use smoltcp::wire::{EthernetAddress, IpEndpoint};
 use tokio::sync::mpsc;
 
 use super::super::common::transport::Transport;
-use super::super::forwarder::DnsForwarder;
+use super::super::forwarder::{DnsForwarder, DnsForwarderHandle};
 use super::super::interceptor::DnsQuery;
 use crate::netstack::shared::SharedState;
 use crate::udp::relay::construct_udp_response;
@@ -39,8 +39,8 @@ const DNS_PORT: u16 = 53;
 pub(crate) struct UdpProxy {
     /// Queries pushed by the interceptor's smoltcp read loop.
     query_rx: mpsc::Receiver<DnsQuery>,
-    /// Shared forwarder handle used by every inner query.
-    forwarder: Arc<DnsForwarder>,
+    /// Handle that resolves to the shared forwarder used by every inner query.
+    forwarder: DnsForwarderHandle,
     /// Shared rings and wake handles for guest delivery.
     shared: Arc<SharedState>,
     /// Source MAC on synthesized response frames.
@@ -57,7 +57,7 @@ impl UdpProxy {
     /// Build a DNS-over-UDP proxy bound to the interceptor's channel pair.
     pub(crate) fn new(
         query_rx: mpsc::Receiver<DnsQuery>,
-        forwarder: Arc<DnsForwarder>,
+        forwarder: DnsForwarderHandle,
         shared: Arc<SharedState>,
         gateway_mac: [u8; 6],
         guest_mac: [u8; 6],
@@ -73,12 +73,23 @@ impl UdpProxy {
 
     /// Drive the per-query dispatch loop. Consumes `self`: the channels
     /// are owned by this task for its lifetime.
-    pub(crate) async fn run(mut self) {
-        while let Some(query) = self.query_rx.recv().await {
-            let shared = self.shared.clone();
-            let forwarder = self.forwarder.clone();
-            let gateway_mac = self.gateway_mac;
-            let guest_mac = self.guest_mac;
+    pub(crate) async fn run(self) {
+        let Self {
+            mut query_rx,
+            forwarder,
+            shared,
+            gateway_mac,
+            guest_mac,
+        } = self;
+
+        let Some(forwarder) = DnsForwarder::wait(forwarder).await else {
+            tracing::debug!("dns/udp: upstream forwarder unavailable; UDP queries will be dropped");
+            return;
+        };
+
+        while let Some(query) = query_rx.recv().await {
+            let shared = shared.clone();
+            let forwarder = forwarder.clone();
             // Two views of the same address: smoltcp's IpAddress for
             // the outgoing source-IP stamp on the response, and std's
             // IpAddr for the forwarder's policy lookup.

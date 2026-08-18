@@ -37,7 +37,7 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use super::super::common::transport::Transport;
-use super::super::forwarder::DnsForwarder;
+use super::super::forwarder::{DnsForwarder, DnsForwarderHandle};
 use super::framing::{frame, take_message};
 use crate::netstack::shared::SharedState;
 use crate::tls::state::TlsState;
@@ -68,15 +68,24 @@ const RESPONSE_CHANNEL_CAPACITY: usize = 32;
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Per-connection DoT proxy. Owns the guest-facing rustls session, the
-/// smoltcp byte-stream channels, scratch buffers, and the pieces needed
-/// to dispatch inner queries through the shared forwarder.
-///
-/// Construction via [`Self::new`] extracts SNI, builds the rustls
-/// session, and primes it with the ClientHello bytes already read.
-/// [`Self::run`] consumes the proxy and drives it to completion:
-/// handshake pump → framed DNS dispatch loop.
+/// Per-connection DoT proxy task.
 pub(crate) struct DotProxy {
+    /// The (resolver-IP, 853) the guest aimed at.
+    dst: SocketAddr,
+    /// Encrypted bytes from the smoltcp TCP stream.
+    from_smoltcp: mpsc::Receiver<Bytes>,
+    /// Encrypted bytes to the smoltcp TCP stream.
+    to_smoltcp: mpsc::Sender<Bytes>,
+    /// Handle that resolves to the shared DNS forwarder.
+    forwarder: DnsForwarderHandle,
+    /// TLS state used to build the guest-facing session.
+    tls_state: Arc<TlsState>,
+    /// Shared wake handle for poking the smoltcp poll loop after send.
+    shared: Arc<SharedState>,
+}
+
+/// Initialized DoT session owned by a running [`DotProxy`].
+struct DotSession {
     /// Guest-facing TLS session. Only touched from the proxy task so
     /// rustls' non-Send/non-Sync state stays on one thread.
     guest_tls: rustls::ServerConnection,
@@ -106,14 +115,71 @@ pub(crate) struct DotProxy {
 //--------------------------------------------------------------------------------------------------
 
 impl DotProxy {
-    /// Build a DoT proxy from a freshly accepted TCP/853 connection.
+    /// Build a DoT proxy task from a freshly accepted TCP/853 connection.
+    pub(crate) fn new(
+        dst: SocketAddr,
+        from_smoltcp: mpsc::Receiver<Bytes>,
+        to_smoltcp: mpsc::Sender<Bytes>,
+        forwarder: DnsForwarderHandle,
+        tls_state: Arc<TlsState>,
+        shared: Arc<SharedState>,
+    ) -> Self {
+        Self {
+            dst,
+            from_smoltcp,
+            to_smoltcp,
+            forwarder,
+            tls_state,
+            shared,
+        }
+    }
+
+    /// Run the DoT proxy task to completion.
+    pub(crate) async fn run(self) {
+        let Self {
+            dst,
+            from_smoltcp,
+            to_smoltcp,
+            forwarder,
+            tls_state,
+            shared,
+        } = self;
+
+        let Some(forwarder) = DnsForwarder::wait(forwarder).await else {
+            tracing::debug!(%dst, "DoT: forwarder unavailable; closing connection");
+            return;
+        };
+        let proxy = match DotSession::new(
+            dst,
+            from_smoltcp,
+            to_smoltcp,
+            forwarder,
+            tls_state,
+            shared,
+        )
+        .await
+        {
+            Ok(proxy) => proxy,
+            Err(error) => {
+                tracing::debug!(%dst, %error, "DoT proxy setup failed");
+                return;
+            }
+        };
+        if let Err(error) = proxy.run().await {
+            tracing::debug!(%dst, %error, "DoT proxy task ended");
+        }
+    }
+}
+
+impl DotSession {
+    /// Initialize a DoT session from a freshly accepted TCP/853 connection.
     ///
     /// Buffers guest bytes until the ClientHello is available, picks a
     /// server name (or falls back to the dst IP), builds the
     /// guest-facing rustls session with the per-domain intercept cert,
     /// and primes the rustls state machine with the ClientHello bytes
     /// so [`Self::run`] starts at a clean handshake-pump entry.
-    pub(crate) async fn new(
+    async fn new(
         dst: SocketAddr,
         mut from_smoltcp: mpsc::Receiver<Bytes>,
         to_smoltcp: mpsc::Sender<Bytes>,
@@ -160,7 +226,7 @@ impl DotProxy {
 
     /// Drive the proxy to completion. Consumes `self`: the guest-facing
     /// rustls session is owned by this task for its lifetime.
-    pub(crate) async fn run(mut self) -> io::Result<()> {
+    async fn run(mut self) -> io::Result<()> {
         self.drive_handshake().await?;
         self.dispatch_loop().await
     }
@@ -412,7 +478,7 @@ mod tests {
             RecordType::A,
         ));
 
-        let mut proxy = DotProxy {
+        let mut proxy = DotSession {
             guest_tls,
             from_smoltcp,
             to_smoltcp,

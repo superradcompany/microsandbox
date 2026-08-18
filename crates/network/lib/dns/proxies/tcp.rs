@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use super::super::common::transport::Transport;
-use super::super::forwarder::DnsForwarder;
+use super::super::forwarder::{DnsForwarder, DnsForwarderHandle};
 use super::framing::{take_message, write_framed};
 use crate::netstack::shared::SharedState;
 
@@ -56,8 +56,8 @@ pub(crate) struct DnsTcpProxy {
     to_smoltcp: mpsc::Sender<Bytes>,
     /// Framing buffer: incoming bytes pending message extraction.
     frame_buf: Vec<u8>,
-    /// Shared forwarder handle used by every inner query.
-    forwarder: Arc<DnsForwarder>,
+    /// Handle that resolves to the shared forwarder used by every inner query.
+    forwarder: DnsForwarderHandle,
     /// Shared wake handle for poking the smoltcp poll loop after send.
     shared: Arc<SharedState>,
 }
@@ -77,7 +77,7 @@ impl DnsTcpProxy {
         dst: SocketAddr,
         from_smoltcp: mpsc::Receiver<Bytes>,
         to_smoltcp: mpsc::Sender<Bytes>,
-        forwarder: Arc<DnsForwarder>,
+        forwarder: DnsForwarderHandle,
         shared: Arc<SharedState>,
     ) -> Self {
         Self {
@@ -92,27 +92,44 @@ impl DnsTcpProxy {
 
     /// Drive the proxy to completion. Consumes `self`: the framing
     /// buffer and channels are owned by this task for its lifetime.
-    pub(crate) async fn run(mut self) {
-        let original_dst = Some(self.dst.ip());
+    pub(crate) async fn run(self) {
+        let Self {
+            dst,
+            mut from_smoltcp,
+            to_smoltcp,
+            mut frame_buf,
+            forwarder,
+            shared,
+        } = self;
+
+        let Some(forwarder) = DnsForwarder::wait(forwarder).await else {
+            tracing::debug!(
+                %dst,
+                "dns/tcp: upstream forwarder unavailable; closing connection",
+            );
+            return;
+        };
+
+        let original_dst = Some(dst.ip());
         loop {
-            let next = match timeout(IDLE_TIMEOUT, self.from_smoltcp.recv()).await {
+            let next = match timeout(IDLE_TIMEOUT, from_smoltcp.recv()).await {
                 Ok(Some(chunk)) => chunk,
                 Ok(None) => return, // guest closed
                 Err(_) => {
-                    tracing::debug!(dst = %self.dst, "dns/tcp: idle timeout, closing connection");
+                    tracing::debug!(%dst, "dns/tcp: idle timeout, closing connection");
                     return;
                 }
             };
-            self.frame_buf.extend_from_slice(&next);
+            frame_buf.extend_from_slice(&next);
 
             // Drain all complete messages currently in the buffer. Each
             // query is forwarded in its own task so a slow upstream
             // doesn't block subsequent pipelined queries on the same
             // connection.
-            while let Some(query) = take_message(&mut self.frame_buf) {
-                let forwarder = self.forwarder.clone();
-                let to_smoltcp = self.to_smoltcp.clone();
-                let shared = self.shared.clone();
+            while let Some(query) = take_message(&mut frame_buf) {
+                let forwarder = forwarder.clone();
+                let to_smoltcp = to_smoltcp.clone();
+                let shared = shared.clone();
                 tokio::spawn(async move {
                     let Some(response) = forwarder
                         .forward(&query, original_dst, Transport::Tcp, None)

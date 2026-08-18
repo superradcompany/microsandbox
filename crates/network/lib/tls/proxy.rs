@@ -109,11 +109,26 @@ impl TlsProxy {
         self
     }
 
-    /// Drive the TLS proxy to completion.
+    /// Run the TLS proxy task to completion.
     ///
     /// See [`crate::tcp::proxy::spawn_tcp_proxy`] for the `proxy_connect`
     /// contract.
-    pub(crate) async fn run(self) -> io::Result<()> {
+    pub(crate) async fn run(self) {
+        let guest_dst = self.guest_dst;
+        let connect_dst = self.connect_target.primary();
+
+        if let Err(error) = self.try_run().await {
+            tracing::debug!(
+                dst = %connect_dst,
+                %guest_dst,
+                %error,
+                "TLS proxy task ended",
+            );
+        }
+    }
+
+    /// Drive the TLS proxy to completion, returning operational failures.
+    pub(crate) async fn try_run(self) -> io::Result<()> {
         let Self {
             guest_dst,
             connect_target,

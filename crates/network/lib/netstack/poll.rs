@@ -24,7 +24,6 @@ use smoltcp::wire::{
 use crate::config::{DnsConfig, PublishedPort};
 use crate::dns::common::ports::DnsPortType;
 use crate::dns::{
-    forwarder::DnsForwarder,
     interceptor::DnsInterceptor,
     proxies::{dot::DotProxy, tcp::DnsTcpProxy},
 };
@@ -524,7 +523,6 @@ pub fn smoltcp_poll_loop(
             {
                 // TLS-intercepted port — spawn TLS MITM proxy.
                 let connect_target = resolve_tcp_host_target(conn.dst, config.gateway);
-                let guest_dst = conn.dst;
                 let proxy = TlsProxy::new(
                     conn.dst,
                     connect_target,
@@ -535,16 +533,7 @@ pub fn smoltcp_poll_loop(
                     network_policy.clone(),
                     conn.proxy_connect,
                 );
-                tokio_handle.spawn(async move {
-                    if let Err(error) = proxy.run().await {
-                        tracing::debug!(
-                            dst = %connect_target.primary(),
-                            %guest_dst,
-                            %error,
-                            "TLS proxy task ended",
-                        );
-                    }
-                });
+                tokio_handle.spawn(proxy.run());
                 continue;
             }
             if conn.dst.port() == 53 {
@@ -565,21 +554,14 @@ pub fn smoltcp_poll_loop(
                 // otherwise. No gateway→loopback rewrite here: the
                 // forwarder dials the configured upstream, not the
                 // gateway.
-                let dst = conn.dst;
-                let forwarder_handle = dns_forwarder_handle.clone();
-                let shared = shared.clone();
-                tokio_handle.spawn(async move {
-                    let Some(forwarder) = DnsForwarder::wait(forwarder_handle).await else {
-                        tracing::debug!(
-                            %dst,
-                            "dns/tcp: upstream forwarder unavailable; closing connection",
-                        );
-                        return;
-                    };
-                    DnsTcpProxy::new(dst, conn.from_smoltcp, conn.to_smoltcp, forwarder, shared)
-                        .run()
-                        .await;
-                });
+                let proxy = DnsTcpProxy::new(
+                    conn.dst,
+                    conn.from_smoltcp,
+                    conn.to_smoltcp,
+                    dns_forwarder_handle.clone(),
+                    shared.clone(),
+                );
+                tokio_handle.spawn(proxy.run());
                 continue;
             }
             if conn.dst.port() == 853
@@ -593,40 +575,19 @@ pub fn smoltcp_poll_loop(
                 // same forwarder plain DNS uses. Policy for the
                 // chosen `@target` resolver is applied per-query by
                 // the forwarder (block list + rebind + egress).
-                let dst = conn.dst;
-                let forwarder_handle = dns_forwarder_handle.clone();
-                let tls_state = tls_state.clone();
-                let shared = shared.clone();
-                tokio_handle.spawn(async move {
-                    let Some(forwarder) = DnsForwarder::wait(forwarder_handle).await else {
-                        tracing::debug!(%dst, "DoT: forwarder unavailable; closing connection");
-                        return;
-                    };
-                    let proxy = match DotProxy::new(
-                        dst,
-                        conn.from_smoltcp,
-                        conn.to_smoltcp,
-                        forwarder,
-                        tls_state,
-                        shared,
-                    )
-                    .await
-                    {
-                        Ok(proxy) => proxy,
-                        Err(error) => {
-                            tracing::debug!(%dst, %error, "DoT proxy setup failed");
-                            return;
-                        }
-                    };
-                    if let Err(error) = proxy.run().await {
-                        tracing::debug!(%dst, %error, "DoT proxy task ended");
-                    }
-                });
+                let proxy = DotProxy::new(
+                    conn.dst,
+                    conn.from_smoltcp,
+                    conn.to_smoltcp,
+                    dns_forwarder_handle.clone(),
+                    tls_state.clone(),
+                    shared.clone(),
+                );
+                tokio_handle.spawn(proxy.run());
                 continue;
             }
             // Plain TCP proxy.
             let connect_target = resolve_tcp_host_target(conn.dst, config.gateway);
-            let guest_dst = conn.dst;
             let proxy = TcpProxy::new(
                 conn.dst,
                 connect_target,
@@ -640,16 +601,7 @@ pub fn smoltcp_poll_loop(
                 tls_state.clone(),
                 conn.proxy_connect,
             );
-            tokio_handle.spawn(async move {
-                if let Err(error) = proxy.run().await {
-                    tracing::debug!(
-                        dst = %connect_target.primary(),
-                        %guest_dst,
-                        %error,
-                        "TCP proxy task ended",
-                    );
-                }
-            });
+            tokio_handle.spawn(proxy.run());
         }
 
         // Rate-limited cleanup: TIME_WAIT is 60s, session timeout is 60s,

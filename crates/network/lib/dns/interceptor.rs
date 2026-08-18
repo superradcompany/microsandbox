@@ -136,18 +136,14 @@ impl DnsInterceptor {
             shared.clone(),
             gateway,
         );
-        let udp_forwarder_handle = forwarder_handle.clone();
-        tokio_handle.spawn(async move {
-            let Some(forwarder) = DnsForwarder::wait(udp_forwarder_handle).await else {
-                tracing::debug!(
-                    "dns/udp: upstream forwarder unavailable; UDP queries will be dropped"
-                );
-                return;
-            };
-            UdpProxy::new(query_rx, forwarder, shared, gateway_mac, guest_mac)
-                .run()
-                .await;
-        });
+        let proxy = UdpProxy::new(
+            query_rx,
+            forwarder_handle.clone(),
+            shared,
+            gateway_mac,
+            guest_mac,
+        );
+        tokio_handle.spawn(proxy.run());
 
         (
             Self {
