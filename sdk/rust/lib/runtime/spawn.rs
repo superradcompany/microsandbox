@@ -8,6 +8,8 @@
 #[cfg(windows)]
 use std::fmt::Write as _;
 #[cfg(unix)]
+use std::fs::OpenOptions;
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::fd::{FromRawFd, OwnedFd};
@@ -22,7 +24,7 @@ use std::os::windows::io::AsRawHandle;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     ffi::{OsStr, OsString},
-    fs::File,
+    fs::{self, File},
     io::{Seek, SeekFrom, Write as IoWrite},
     path::{Path, PathBuf},
     process::Stdio,
@@ -588,12 +590,24 @@ pub async fn spawn_sandbox(
         }
     }
 
+    let startup_stderr_path = startup_pipe
+        .is_some()
+        .then(|| log_dir.join("startup.stderr.log"));
+
     // Capture stdout for attached startup JSON. Detached mode uses a
-    // dedicated startup fd so stdio can be severed from the launcher.
+    // dedicated startup fd so stdout can be severed from the launcher; stderr
+    // is written to a small startup log so callers like Docker can surface
+    // pre-handoff failures.
     #[cfg(unix)]
     if startup_pipe.is_some() {
         cmd.stdout(Stdio::null());
-        cmd.stderr(Stdio::null());
+        let stderr_path = startup_stderr_path.as_ref().expect("path set above");
+        let stderr = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(stderr_path)?;
+        cmd.stderr(Stdio::from(stderr));
     } else {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::inherit());
@@ -670,9 +684,14 @@ pub async fn spawn_sandbox(
         Err(_) => {
             terminate_startup_process(&mut child).await;
             release_metrics_reservation(config, metrics_reservation.as_ref());
-            return Err(crate::MicrosandboxError::Runtime(
-                "sandbox startup timeout: no JSON received within 30 seconds".into(),
-            ));
+            let stderr = startup_stderr_excerpt(startup_stderr_path.as_deref());
+            let message = match stderr {
+                Some(stderr) => format!(
+                    "sandbox startup timeout: no JSON received within 30 seconds; stderr: {stderr}"
+                ),
+                None => "sandbox startup timeout: no JSON received within 30 seconds".into(),
+            };
+            return Err(crate::MicrosandboxError::Runtime(message));
         }
     };
 
@@ -686,10 +705,18 @@ pub async fn spawn_sandbox(
                 exit_status = ?status,
                 "spawn_sandbox: failed to parse startup JSON"
             );
-            return Err(crate::MicrosandboxError::Runtime(format!(
-                "sandbox process exited ({status:?}) before sending startup info \
-                 (line: {line:?}, check stderr above for details)"
-            )));
+            let stderr = startup_stderr_excerpt(startup_stderr_path.as_deref());
+            let message = match stderr {
+                Some(stderr) => format!(
+                    "sandbox process exited ({status:?}) before sending startup info \
+                     (line: {line:?}); stderr: {stderr}"
+                ),
+                None => format!(
+                    "sandbox process exited ({status:?}) before sending startup info \
+                     (line: {line:?}, check stderr above for details)"
+                ),
+            };
+            return Err(crate::MicrosandboxError::Runtime(message));
         }
     };
     if startup.pid != _pid {
@@ -2114,6 +2141,20 @@ async fn terminate_startup_process(
     child.wait().await.ok()
 }
 
+fn startup_stderr_excerpt(path: Option<&Path>) -> Option<String> {
+    const MAX_STARTUP_STDERR_BYTES: usize = 8 * 1024;
+
+    let path = path?;
+    let bytes = fs::read(path).ok()?;
+    let bytes = if bytes.len() > MAX_STARTUP_STDERR_BYTES {
+        &bytes[bytes.len() - MAX_STARTUP_STDERR_BYTES..]
+    } else {
+        &bytes
+    };
+    let stderr = String::from_utf8_lossy(bytes).trim().to_string();
+    (!stderr.is_empty()).then_some(stderr)
+}
+
 /// Scan `config.spec.mounts` for file bind mounts and stage each file in its own
 /// isolated directory inside an ephemeral [`TempDir`].
 ///
@@ -2839,6 +2880,7 @@ fn sandbox_log_level_cli_flag(level: SandboxLogLevel) -> &'static str {
 mod tests {
     use std::collections::HashMap;
     use std::ffi::{OsStr, OsString};
+    use std::fs;
     #[cfg(target_os = "linux")]
     use std::num::NonZero;
     use std::path::{Path, PathBuf};
@@ -2924,6 +2966,20 @@ mod tests {
                 "SIGCHLD handler should run on the alternate signal stack"
             );
         }
+    }
+
+    #[test]
+    fn test_startup_stderr_excerpt_returns_trimmed_tail() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("startup.stderr.log");
+        let prefix = "x".repeat(9 * 1024);
+        fs::write(&path, format!("{prefix}real startup error\n")).unwrap();
+
+        let excerpt = super::startup_stderr_excerpt(Some(&path)).unwrap();
+
+        assert!(excerpt.len() <= 8 * 1024 + "real startup error".len());
+        assert!(excerpt.ends_with("real startup error"));
+        assert!(!excerpt.ends_with('\n'));
     }
 
     //----------------------------------------------------------------------------------------------

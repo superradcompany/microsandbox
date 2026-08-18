@@ -4175,6 +4175,7 @@ dependencies = [
  "microsandbox-vsock",
  "msb_krun",
  "nix 0.31.3",
+ "oci-spec 0.10.0",
  "rand 0.10.2",
  "rustls",
  "sea-orm",
