@@ -17,14 +17,19 @@ default = []
 # adapted to bytes). No extra dependencies.
 stream = []
 # Unix domain socket transport. Builds on the generic byte-stream path.
-uds = ["stream"]
+uds = ["stream", "dep:bytes", "dep:libc", "dep:memmap2", "dep:nix", "dep:tempfile"]
 # Windows named-pipe transport. Builds on the generic byte-stream path.
 named-pipe = ["stream"]
 
 [dependencies]
 ciborium.workspace = true
+bytes = { workspace = true, optional = true }
+libc = { workspace = true, optional = true }
+memmap2 = { workspace = true, optional = true }
 microsandbox-protocol.workspace = true
+nix = { workspace = true, features = ["socket", "uio"], optional = true }
 serde.workspace = true
+tempfile = { workspace = true, optional = true }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "net", "sync"] }
 tracing.workspace = true

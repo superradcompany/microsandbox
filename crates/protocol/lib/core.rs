@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::transport::{BulkTransportReady, RelayLeaseReady};
+use crate::transport::{BulkTransportReady, LocalTransportReady, RelayLeaseReady};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -44,6 +44,12 @@ pub struct Ready {
     /// Optional topology-independent relay correlation-range lease capability.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_lease: Option<RelayLeaseReady>,
+
+    /// Optional SDK-to-runtime transport capability injected by a local Unix relay.
+    ///
+    /// Agentd leaves this absent because local shared memory is below the guest protocol.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_transport: Option<LocalTransportReady>,
 }
 
 /// Payload for `core.clock.sync` messages.
@@ -213,6 +219,7 @@ mod tests {
             agent_version: legacy.agent_version.clone(),
             bulk_transport: None,
             relay_lease: None,
+            local_transport: None,
         };
         let mut legacy_bytes = Vec::new();
         ciborium::into_writer(&legacy, &mut legacy_bytes).unwrap();
@@ -223,6 +230,7 @@ mod tests {
         let decoded: Ready = ciborium::from_reader(legacy_bytes.as_slice()).unwrap();
         assert!(decoded.bulk_transport.is_none());
         assert!(decoded.relay_lease.is_none());
+        assert!(decoded.local_transport.is_none());
     }
 
     #[test]
