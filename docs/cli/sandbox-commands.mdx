@@ -343,7 +343,8 @@ JSON output includes `exit_code`, `success`, `stdout`, and `stderr`. Each output
 field has a matching `*_encoding` field: valid UTF-8 is returned as text, while
 arbitrary bytes use lossless Base64. The `msb exec` process still exits with the
 guest command's exit code, so orchestration scripts can inspect the JSON result
-and use the normal process status.
+and use the normal process status. JSON mode returns an error when neither an
+explicit command nor an image default command is available.
 
 ## msb copy
 

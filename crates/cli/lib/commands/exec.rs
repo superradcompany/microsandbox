@@ -132,6 +132,7 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
             (Some(cmd), cmd_args) => (cmd, cmd_args),
             (None, _) => {
                 super::maybe_stop(&sandbox).await;
+                reject_missing_json_command(args.format.as_deref() == Some("json"))?;
                 std::process::exit(0);
             }
         };
@@ -203,14 +204,13 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
             .await?;
 
         if args.format.as_deref() == Some("json") {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&exec_result_json(
-                    output.status().code,
-                    output.stdout_bytes(),
-                    output.stderr_bytes(),
-                ))?
-            );
+            let json = serde_json::to_string_pretty(&exec_result_json(
+                output.status().code,
+                output.stdout_bytes(),
+                output.stderr_bytes(),
+            ))?;
+            let mut stdout = std::io::stdout().lock();
+            write_json_result(&mut stdout, &json)?;
         } else {
             std::io::stdout().write_all(output.stdout_bytes())?;
             std::io::stderr().write_all(output.stderr_bytes())?;
@@ -267,6 +267,20 @@ fn should_read_buffered_stdin(stdin_is_terminal: bool, interactive: bool, stream
 /// Decide whether execution should use the interactive PTY path.
 fn use_interactive_exec(stdin_is_terminal: bool, no_tty: bool, json: bool) -> bool {
     !json && super::common::use_interactive_tty(stdin_is_terminal, no_tty)
+}
+
+fn reject_missing_json_command(json: bool) -> anyhow::Result<()> {
+    if json {
+        anyhow::bail!(
+            "cannot produce an exec result: no command was provided and the image has no default command"
+        );
+    }
+    Ok(())
+}
+
+fn write_json_result(mut writer: impl Write, json: &str) -> std::io::Result<()> {
+    writeln!(writer, "{json}")?;
+    writer.flush()
 }
 
 /// Build the machine-readable result for one captured execution.
@@ -539,5 +553,22 @@ mod tests {
     #[test]
     fn json_format_disables_interactive_exec() {
         assert!(!use_interactive_exec(true, false, true));
+    }
+
+    #[test]
+    fn json_format_rejects_missing_command() {
+        let error = reject_missing_json_command(true).unwrap_err();
+
+        assert!(error.to_string().contains("no command was provided"));
+        assert!(reject_missing_json_command(false).is_ok());
+    }
+
+    #[test]
+    fn writes_complete_json_result() {
+        let mut output = Vec::new();
+
+        write_json_result(&mut output, r#"{"success":false}"#).unwrap();
+
+        assert_eq!(output, b"{\"success\":false}\n");
     }
 }
