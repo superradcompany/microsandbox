@@ -2405,45 +2405,74 @@ fn guest_mount_tag(guest_path: &str) -> String {
     out
 }
 
-/// Build the `msb sandbox` CLI args for a sandbox.
-#[allow(clippy::too_many_arguments)]
 /// Recycles the bounded network address-pool slot instead of deriving it from
 /// the ever-growing sandbox AUTOINCREMENT id (#1390).
 ///
 /// The slot space is `u16` (MAC/IPv6 encoding in the network crate). While
 /// ids still fit that space the id IS the slot, so every existing host keeps
 /// its exact addressing until the counter first crosses the cap; past it, the
-/// smallest slot not held by any live sandbox row is used, so the pool serves
-/// hosts that create hundreds of short-lived sandboxes a day indefinitely.
-/// Our own row is inserted before spawn, so a slot we return can never
-/// collide with a concurrently live sandbox.
+/// smallest slot not held by any live sandbox row is used, and the assignment
+/// is persisted on our own row (`network_slot`) so occupancy reflects what is
+/// actually held — not what the id counter implies.
+///
+/// The whole read-decide-write runs inside one write-connection transaction:
+/// SQLite serializes writers, which closes the window where two concurrent
+/// creates would pick the same recycled slot.
 #[cfg(feature = "net")]
 async fn recycle_network_slot(local: &LocalBackend, sandbox_id: i32) -> MicrosandboxResult<u64> {
     const MAX_SLOT: i64 = u16::MAX as i64;
 
     let pools = local.db().await?;
-    let rows = microsandbox_db::entity::sandbox::Entity::find()
-        .all(pools.read())
+    let write = pools.write();
+
+    let assigned = write
+        .transaction(|txn| async move {
+            let rows = microsandbox_db::entity::sandbox::Entity::find()
+                .all(&txn)
+                .await?;
+            let used: std::collections::HashSet<i64> = rows
+                .iter()
+                .map(|row| row.network_slot.unwrap_or(row.id as i64))
+                .collect();
+
+            // Legacy behavior while ids fit the pool: the id stays the slot,
+            // so addressing never changes for hosts that have not hit the
+            // cap yet.
+            let assigned = if (sandbox_id as i64) <= MAX_SLOT && used.contains(&(sandbox_id as i64))
+            {
+                sandbox_id as i64
+            } else {
+                (1..=MAX_SLOT)
+                    .find(|slot| !used.contains(slot))
+                    .ok_or_else(|| {
+                        crate::MicrosandboxError::Runtime(
+                            "network address pool exhausted: every slot up to 65535 is held by a live sandbox;                              stop or remove sandboxes before creating more"
+                                .to_string(),
+                        )
+                    })?
+            };
+
+            // Persist the assignment so the next create sees this slot as
+            // held even though the row's id says nothing about it.
+            use sea_orm::ActiveModelTrait;
+            let mut model: microsandbox_db::entity::sandbox::ActiveModel = rows
+                .iter()
+                .find(|row| row.id == sandbox_id)
+                .ok_or_else(|| {
+                    crate::MicrosandboxError::Runtime(format!(
+                        "sandbox row {sandbox_id} disappeared before network slot assignment"
+                    ))
+                })?
+                .clone()
+                .into();
+            model.network_slot = sea_orm::Set(Some(assigned));
+            model.update(&txn).await?;
+
+            Ok((txn, assigned))
+        })
         .await?;
-    let used: std::collections::HashSet<i64> = rows.iter().map(|row| row.id as i64).collect();
 
-    // Legacy behavior while ids fit the pool: the id stays the slot, so
-    // addressing never changes for hosts that have not hit the cap yet.
-    let own = sandbox_id as i64;
-    if own <= MAX_SLOT && used.contains(&own) {
-        return Ok(own as u64);
-    }
-
-    for slot in 1..=MAX_SLOT {
-        if !used.contains(&slot) {
-            return Ok(slot as u64);
-        }
-    }
-
-    Err(crate::MicrosandboxError::Runtime(
-        "network address pool exhausted: every slot up to 65535 is held by a live sandbox;          stop or remove sandboxes before creating more"
-            .to_string(),
-    ))
+    Ok(assigned as u64)
 }
 
 fn sandbox_cli_args(
@@ -3632,6 +3661,42 @@ mod tests {
             .exec(pools.write())
             .await
             .unwrap();
+    }
+
+    /// #1390 review: two live rows whose ids both exceed the pool cap must
+    /// hold DIFFERENT slots — occupancy comes from the persisted assignment,
+    /// not the id.
+    #[tokio::test]
+    #[cfg(feature = "net")]
+    async fn test_network_slot_high_ids_get_distinct_persisted_slots() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("msb-home");
+        let backend = LocalBackend::builder().home(&home).build().await.unwrap();
+
+        insert_sandbox_rows_with_ids(&backend, &[65_700]).await;
+        let first = super::recycle_network_slot(&backend, 65_700).await.unwrap();
+
+        insert_sandbox_rows_with_ids(&backend, &[65_701]).await;
+        let second = super::recycle_network_slot(&backend, 65_701).await.unwrap();
+
+        assert_ne!(
+            first, second,
+            "recycled slots must not collide between high-id sandboxes"
+        );
+
+        // The first assignment was persisted: re-deriving for the same row
+        // returns the slot it already holds, and a third high id skips it.
+        use microsandbox_db::entity::sandbox as sandbox_entity;
+        let pools = backend.db().await.unwrap();
+        let held: Vec<Option<i64>> = sandbox_entity::Entity::find()
+            .all(pools.read())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.network_slot)
+            .collect();
+        assert!(held.contains(&Some(first as i64)));
+        assert!(held.contains(&Some(second as i64)));
     }
 
     #[tokio::test]
