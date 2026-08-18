@@ -70,7 +70,7 @@ jobs:
 
       - name: Install kernel build deps
         if: steps.cache-kernel.outputs.cache-hit != 'true'
-        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
+        run: scripts/ci/install-apt-packages.sh libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
 
       - name: Build kernel.c
         if: steps.cache-kernel.outputs.cache-hit != 'true'
@@ -110,7 +110,7 @@ jobs:
 
       - name: Install kernel build deps
         if: steps.cache-kernel.outputs.cache-hit != 'true'
-        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
+        run: scripts/ci/install-apt-packages.sh libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
 
       - name: Build kernel.c
         if: steps.cache-kernel.outputs.cache-hit != 'true'
@@ -145,7 +145,7 @@ jobs:
           cache-targets: true
 
       - name: Install agentd build deps
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+        run: scripts/ci/install-apt-packages.sh musl-tools
 
       - name: Build agentd
         run: |
@@ -178,7 +178,7 @@ jobs:
           cache-targets: true
 
       - name: Install agentd build deps
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+        run: scripts/ci/install-apt-packages.sh musl-tools
 
       - name: Build agentd
         run: |
@@ -224,7 +224,7 @@ jobs:
           cache-targets: true
 
       - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
+        run: scripts/ci/install-apt-packages.sh libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
 
       - name: Download agentd
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -293,7 +293,7 @@ jobs:
           cache-targets: true
 
       - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+        run: scripts/ci/install-apt-packages.sh libcap-ng-dev
 
       - name: Download runtime artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -342,7 +342,7 @@ jobs:
         uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
 
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+        run: scripts/ci/install-apt-packages.sh libcap-ng-dev
 
       - name: Download agentd
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -682,7 +682,7 @@ jobs:
           cache-targets: true
 
       - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y musl-tools libcap-ng-dev
+        run: scripts/ci/install-apt-packages.sh musl-tools libcap-ng-dev
 
       - name: Download runtime artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -741,7 +741,7 @@ jobs:
           node-version: 22
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+        run: scripts/ci/install-apt-packages.sh libcap-ng-dev
 
       - name: Download runtime artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -797,7 +797,10 @@ jobs:
     needs: [build-linux-x86_64, changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: ${{ vars.CI_LINUX_X86_RUNNER || 'ubuntu-latest' }}
-    timeout-minutes: 45
+    # Healthy runs complete in roughly three minutes. Leave ample build
+    # headroom while preventing a bad hosted runner from blocking every
+    # downstream Python lane for most of an hour.
+    timeout-minutes: 15
     env:
       CARGO_INCREMENTAL: "0"
     steps:
@@ -819,7 +822,7 @@ jobs:
           cache-dependency-glob: "sdk/python/uv.lock"
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+        run: scripts/ci/install-apt-packages.sh libcap-ng-dev
 
       - name: Download runtime artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
