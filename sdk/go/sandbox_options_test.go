@@ -624,6 +624,31 @@ func TestFFIWireShape_Volumes(t *testing.T) {
 	}
 }
 
+func TestFFIWireShape_MountOwner(t *testing.T) {
+	got := marshalCreateOptions(t,
+		WithImage("alpine"),
+		WithMounts(map[string]MountConfig{
+			"/owned":   Mount.Bind("/host/owned", MountOptions{Owner: &MountOwner{Uid: 1000, Gid: 1000}}),
+			"/root":    Mount.Bind("/host/root", MountOptions{Owner: &MountOwner{Uid: 0, Gid: 0}}),
+			"/default": Mount.Bind("/host/default", MountOptions{}),
+		}),
+	)
+	volumes := mustField(t, got, "volumes").(map[string]any)
+
+	// An explicit owner rides the wire as override_uid/override_gid.
+	if v := volumes["/owned"].(map[string]any); v["override_uid"] != float64(1000) || v["override_gid"] != float64(1000) {
+		t.Fatalf("/owned = %v", v)
+	}
+	// uid 0 (root) is a real value and must be present, not omitted.
+	if v := volumes["/root"].(map[string]any); v["override_uid"] != float64(0) || v["override_gid"] != float64(0) {
+		t.Fatalf("/root = %v", v)
+	}
+	// No owner → the keys are omitted entirely (unset, not 0).
+	if v := volumes["/default"].(map[string]any); v["override_uid"] != nil || v["override_gid"] != nil {
+		t.Fatalf("/default should omit override_uid/override_gid, got %v", v)
+	}
+}
+
 func TestFFIWireShape_SecurityProfile(t *testing.T) {
 	got := marshalCreateOptions(t,
 		WithImage("alpine"),

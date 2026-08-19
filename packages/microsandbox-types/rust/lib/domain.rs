@@ -273,6 +273,22 @@ pub struct MountOptions {
 
     /// Whether device files on the mount are ignored.
     pub nodev: bool,
+
+    /// Guest uid presented for host files under this mount that carry no
+    /// per-file stat override.
+    ///
+    /// Host-created files (written outside the guest) have no override, so
+    /// without this they surface with the runtime's fallback owner. When set,
+    /// such files are presented as this uid instead. Must be set together with
+    /// [`override_gid`](Self::override_gid). `None` keeps the fallback.
+    #[serde(default)]
+    pub override_uid: Option<u32>,
+
+    /// Guest gid presented for host files under this mount that carry no
+    /// per-file stat override. See [`override_uid`](Self::override_uid); the two
+    /// must be set together.
+    #[serde(default)]
+    pub override_gid: Option<u32>,
 }
 
 /// Storage kind for a named volume.

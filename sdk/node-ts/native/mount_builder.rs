@@ -41,6 +41,12 @@ pub struct JsBuiltVolumeMount {
     pub stat_virtualization: Option<String>,
     /// `"private" | "mirror"` for bind/named mounts; `None` for tmpfs/disk.
     pub host_permissions: Option<String>,
+    /// Guest owner uid for host-created files under bind/named mounts; `None`
+    /// when unset or for tmpfs/disk. Set together with `override_gid`.
+    pub override_uid: Option<u32>,
+    /// Guest owner gid for host-created files under bind/named mounts; `None`
+    /// when unset or for tmpfs/disk. Set together with `override_uid`.
+    pub override_gid: Option<u32>,
 }
 
 /// Fluent builder for a sandbox volume mount.
@@ -266,6 +272,15 @@ impl JsMountBuilder {
         Ok(self)
     }
 
+    /// Present host files that carry no per-file stat override as this guest
+    /// owner. Valid only for bind and directory-backed named volume mounts.
+    #[napi]
+    pub fn owner(&mut self, uid: u32, gid: u32) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.owner(uid, gid));
+        self
+    }
+
     /// Materialize the mount spec. Returns a flat `VolumeMount` with a
     /// `kind` discriminator and per-variant fields.
     #[napi]
@@ -324,6 +339,8 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             fstype: None,
             stat_virtualization: Some(sv_str(stat_virtualization)),
             host_permissions: Some(hp_str(host_permissions)),
+            override_uid: options.override_uid,
+            override_gid: options.override_gid,
         },
         RustVolumeMount::Named {
             name,
@@ -363,6 +380,8 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
                 fstype: None,
                 stat_virtualization: Some(sv_str(stat_virtualization)),
                 host_permissions: Some(hp_str(host_permissions)),
+                override_uid: options.override_uid,
+                override_gid: options.override_gid,
             }
         }
         RustVolumeMount::Tmpfs {
@@ -386,6 +405,8 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             fstype: None,
             stat_virtualization: None,
             host_permissions: None,
+            override_uid: None,
+            override_gid: None,
         },
         RustVolumeMount::DiskImage {
             host,
@@ -417,6 +438,8 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             fstype,
             stat_virtualization: None,
             host_permissions: None,
+            override_uid: None,
+            override_gid: None,
         },
     }
 }

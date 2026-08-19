@@ -64,6 +64,36 @@ def test_bind_with_relaxed_and_mirror_serializes_lowercase() -> None:
     assert d["host_permissions"] == "mirror"
 
 
+def test_bind_owner_serializes() -> None:
+    mc = MountConfig(
+        kind=MountKind.BIND,
+        bind="/host/data",
+        override_uid=1000,
+        override_gid=1000,
+    )
+    d = mc._to_dict()
+    assert d["override_uid"] == 1000
+    assert d["override_gid"] == 1000
+
+
+def test_bind_owner_omitted_when_unset() -> None:
+    d = MountConfig(kind=MountKind.BIND, bind="/host/data")._to_dict()
+    assert "override_uid" not in d
+    assert "override_gid" not in d
+
+
+def test_owner_must_be_paired() -> None:
+    mc = MountConfig(kind=MountKind.BIND, bind="/host/data", override_uid=1000)
+    with pytest.raises(ValueError, match="together"):
+        mc._to_dict()
+
+
+def test_owner_rejected_on_tmpfs() -> None:
+    mc = MountConfig(kind=MountKind.TMPFS, override_uid=1000, override_gid=1000)
+    with pytest.raises(ValueError, match="BIND/NAMED"):
+        mc._to_dict()
+
+
 def test_named_with_off_serializes() -> None:
     mc = MountConfig(
         kind=MountKind.NAMED,

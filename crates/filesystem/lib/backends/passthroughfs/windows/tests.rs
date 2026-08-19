@@ -1091,3 +1091,64 @@ fn no_symlink_root_allows_deep_real_path() {
 
     build_no_symlink(deep).expect("deep real path should mount");
 }
+
+#[test]
+fn no_override_falls_back_to_configured_default_owner() {
+    let temp = TempDir::new();
+    std::fs::write(temp.path.join("hostfile.txt"), b"host-created").unwrap();
+
+    // A host-created file has no override stored; with default_owner set it is
+    // presented as that owner instead of the raw 0:0.
+    let fs = PassthroughFs::new(PassthroughConfig {
+        root_dir: temp.path.clone(),
+        inject_init: false,
+        default_owner: Some((1000, 1000)),
+        ..Default::default()
+    })
+    .unwrap();
+    fs.init(FsOptions::empty()).unwrap();
+
+    let entry = fs.lookup(context(), ROOT_INODE, c"hostfile.txt").unwrap();
+    assert_eq!(entry.attr.st_uid, 1000);
+    assert_eq!(entry.attr.st_gid, 1000);
+
+    // Without default_owner the same host file falls back to 0:0.
+    let plain = fs_for(&temp.path);
+    let entry = plain
+        .lookup(context(), ROOT_INODE, c"hostfile.txt")
+        .unwrap();
+    assert_eq!(entry.attr.st_uid, 0);
+    assert_eq!(entry.attr.st_gid, 0);
+}
+
+#[test]
+fn setattr_preserves_default_owner_for_host_created_file() {
+    let temp = TempDir::new();
+    std::fs::write(temp.path.join("hostfile.txt"), b"host-created").unwrap();
+
+    let fs = PassthroughFs::new(PassthroughConfig {
+        root_dir: temp.path.clone(),
+        inject_init: false,
+        default_owner: Some((1000, 1000)),
+        ..Default::default()
+    })
+    .unwrap();
+    fs.init(FsOptions::empty()).unwrap();
+
+    let entry = fs.lookup(context(), ROOT_INODE, c"hostfile.txt").unwrap();
+
+    // The guest changes only the mode (chmod, no chown). The mutation baseline
+    // must seed the configured default owner rather than 0:0, so the file does
+    // not silently become root-owned after the metadata write.
+    let attr = stat64 {
+        st_mode: S_IFREG | 0o640,
+        ..Default::default()
+    };
+    fs.setattr(context(), entry.inode, attr, None, SetattrValid::MODE)
+        .unwrap();
+
+    let (st, _) = fs.getattr(context(), entry.inode, None).unwrap();
+    assert_eq!(st.st_uid, 1000);
+    assert_eq!(st.st_gid, 1000);
+    assert_eq!(st.st_mode & 0o7777, 0o640);
+}

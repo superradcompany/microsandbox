@@ -806,6 +806,8 @@ fn apply_mount(
     let host_perms = extract_opt::<String>(mount, "host_permissions")?
         .map(parse_host_perms)
         .transpose()?;
+    let override_uid = extract_opt::<u32>(mount, "override_uid")?;
+    let override_gid = extract_opt::<u32>(mount, "override_gid")?;
 
     if let Some(bind_path) = extract_opt::<String>(mount, "bind")? {
         let quota_mib = extract_opt::<u32>(mount, "quota_mib")?;
@@ -828,6 +830,9 @@ fn apply_mount(
             }
             if let Some(p) = host_perms {
                 m = m.host_permissions(p);
+            }
+            if let (Some(uid), Some(gid)) = (override_uid, override_gid) {
+                m = m.owner(uid, gid);
             }
             if let Some(quota_mib) = quota_mib {
                 m = m.quota(quota_mib);
@@ -889,6 +894,9 @@ fn apply_mount(
             }
             if let Some(p) = host_perms {
                 m = m.host_permissions(p);
+            }
+            if let (Some(uid), Some(gid)) = (override_uid, override_gid) {
+                m = m.owner(uid, gid);
             }
             m
         }))

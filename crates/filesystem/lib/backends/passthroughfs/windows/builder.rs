@@ -75,6 +75,15 @@ pub struct PassthroughConfig {
     /// `None` means unbounded. When set, guest-attributable growth past this
     /// many bytes is rejected with `ENOSPC`.
     pub quota_bytes: Option<u64>,
+
+    /// Guest `(uid, gid)` to present for host files that carry no per-file
+    /// override in the metadata store.
+    ///
+    /// Host-created files have no store entry, so without this they surface as
+    /// `0:0` (root). When set, such files are presented as this owner instead.
+    /// `None` keeps the legacy `0:0` fallback. Only consulted while stat
+    /// virtualization is enabled.
+    pub default_owner: Option<(u32, u32)>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -204,6 +213,7 @@ impl Default for PassthroughConfig {
             attr_timeout: Duration::from_secs(5),
             inject_init: true,
             quota_bytes: None,
+            default_owner: None,
         }
     }
 }

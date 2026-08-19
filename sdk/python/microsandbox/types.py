@@ -702,6 +702,10 @@ class MountConfig:
     fstype: str | None = None
     stat_virtualization: StatVirtualization | None = None
     host_permissions: HostPermissions | None = None
+    #: Guest owner presented for host files with no per-file stat override.
+    #: Must be set together with ``override_gid``. BIND/NAMED mounts only.
+    override_uid: int | None = None
+    override_gid: int | None = None
 
     def _to_dict(self) -> dict:
         # Validate every supplied enum before selecting a mount arm. This
@@ -789,10 +793,22 @@ class MountConfig:
                 d["stat_virtualization"] = stat_virtualization
             if host_permissions is not None:
                 d["host_permissions"] = host_permissions
-        elif self.stat_virtualization is not None or self.host_permissions is not None:
+            if (self.override_uid is None) != (self.override_gid is None):
+                raise ValueError(
+                    "MountConfig.override_uid and override_gid must be set together"
+                )
+            if self.override_uid is not None:
+                d["override_uid"] = self.override_uid
+                d["override_gid"] = self.override_gid
+        elif (
+            self.stat_virtualization is not None
+            or self.host_permissions is not None
+            or self.override_uid is not None
+            or self.override_gid is not None
+        ):
             raise ValueError(
-                f"stat_virtualization/host_permissions are only valid for "
-                f"BIND/NAMED mounts (got kind={self.kind.value})"
+                f"stat_virtualization/host_permissions/override_uid/override_gid are only "
+                f"valid for BIND/NAMED mounts (got kind={self.kind.value})"
             )
         return d
 

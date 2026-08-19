@@ -361,6 +361,19 @@ impl MountBuilder {
         self
     }
 
+    /// Present host files that carry no per-file stat override as this guest
+    /// owner.
+    ///
+    /// Files created outside the guest (directly on the host) have no override,
+    /// so by default they surface with the runtime's fallback owner. Pinning an
+    /// owner here makes them appear as `(uid, gid)` instead. Valid only for bind
+    /// and named-directory/file mounts (requires stat virtualization).
+    pub fn owner(mut self, uid: u32, gid: u32) -> Self {
+        self.options.override_uid = Some(uid);
+        self.options.override_gid = Some(gid);
+        self
+    }
+
     /// Set size limit (for tmpfs).
     ///
     /// Accepts bare `u32` (interpreted as MiB) or a [`SizeExt`](crate::size::SizeExt) helper:
@@ -494,6 +507,22 @@ impl MountBuilder {
             .stat_virtualization
             .unwrap_or(StatVirtualization::Strict);
         let host_permissions = self.host_permissions.unwrap_or(HostPermissions::Private);
+
+        // An explicit owner needs stat virtualization to carry it: on Unix the
+        // BindIdentityMap is only installed when virtualization is on, and the
+        // Windows `default_owner` stat path is likewise gated. With `Off` the
+        // owner would be silently dropped, so reject the combination rather than
+        // accept a no-op.
+        if matches!(stat_virtualization, StatVirtualization::Off)
+            && (self.options.override_uid.is_some() || self.options.override_gid.is_some())
+        {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "mount owner (uid/gid) requires stat virtualization and cannot be combined \
+                 with stat_virtualization=Off: Off installs no identity map, so the owner \
+                 would be silently dropped. Drop one or the other."
+                    .into(),
+            ));
+        }
 
         let mount = match self.mount {
             MountKind::Bind(host) => {
@@ -1380,6 +1409,38 @@ mod tests {
             err.to_string()
                 .contains(".format() is only valid for disk image mounts")
         );
+    }
+
+    #[test]
+    fn test_mount_builder_owner_rejected_with_stat_virt_off() {
+        let err = MountBuilder::new("/data")
+            .bind("/host/data")
+            .stat_virtualization(StatVirtualization::Off)
+            .owner(1000, 1000)
+            .build()
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("mount owner (uid/gid) requires stat virtualization"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_mount_builder_owner_accepted_with_default_stat_virt() {
+        // Default stat virtualization is Strict, so owner is honored.
+        let mount = MountBuilder::new("/data")
+            .bind("/host/data")
+            .owner(1000, 1000)
+            .build()
+            .unwrap();
+        match mount {
+            VolumeMount::Bind { options, .. } => {
+                assert_eq!(options.override_uid, Some(1000));
+                assert_eq!(options.override_gid, Some(1000));
+            }
+            other => panic!("expected bind mount, got {other:?}"),
+        }
     }
 
     #[test]
