@@ -45,6 +45,7 @@ pub const SANDBOX_LABEL_REBUILD_MIGRATION_ID: &str = "m20260810_000001_rebuild_s
 
 /// Migration that permits several managed vCPUs to share one host logical processor.
 pub const SHARED_CPU_ALLOCATION_MIGRATION_ID: &str = "m20260813_000001_share_cpu_allocations";
+pub const SANDBOX_NETWORK_SLOT_MIGRATION_ID: &str = "m20260818_000001_sandbox_network_slot";
 
 /// Frozen migration baseline for the transitional 0.6.0 release.
 ///
@@ -230,6 +231,16 @@ pub const MIGRATION_METADATA: &[MigrationMetadata] = &[
         affects_cache: false,
         affects_user_data: false,
         summary: "restore exclusive logical CPU allocation rows",
+    },
+    MigrationMetadata {
+        id: SANDBOX_NETWORK_SLOT_MIGRATION_ID,
+        // The column is deliberately left in place on rollback (SQLite has
+        // no DROP COLUMN on every supported version); `up` probes for it so a
+        // re-upgrade after this rollback succeeds.
+        reversible: true,
+        affects_cache: false,
+        affects_user_data: false,
+        summary: "restore the persisted sandbox network slot column",
     },
 ];
 
