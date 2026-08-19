@@ -236,8 +236,9 @@ jobs:
       - name: Stage runtime bundle
         run: |
           mkdir -p sdk/python/microsandbox/_bundled/bin sdk/python/microsandbox/_bundled/lib
-          cp build/msb sdk/python/microsandbox/_bundled/bin/
-          cp build/${{ inputs.libkrunfw_file }} sdk/python/microsandbox/_bundled/lib/
+          # Match the release wheel after artifact download strips executable bits.
+          install -m 755 build/msb sdk/python/microsandbox/_bundled/bin/msb
+          install -m 644 build/${{ inputs.libkrunfw_file }} sdk/python/microsandbox/_bundled/lib/
           cd sdk/python/microsandbox/_bundled/lib
           if [ "${{ inputs.os }}" = "darwin" ]; then
             ln -sf ${{ inputs.libkrunfw_file }} libkrunfw.dylib

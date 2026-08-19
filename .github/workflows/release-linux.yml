@@ -321,8 +321,10 @@ jobs:
       - name: Stage runtime bundle
         run: |
           mkdir -p sdk/python/microsandbox/_bundled/bin sdk/python/microsandbox/_bundled/lib
-          cp build/msb sdk/python/microsandbox/_bundled/bin/
-          cp build/${{ inputs.libkrunfw_file }} sdk/python/microsandbox/_bundled/lib/
+          # GitHub artifact archives normalize every file to 0644. Restore the
+          # runtime mode explicitly before maturin records it in the wheel.
+          install -m 755 build/msb sdk/python/microsandbox/_bundled/bin/msb
+          install -m 644 build/${{ inputs.libkrunfw_file }} sdk/python/microsandbox/_bundled/lib/
 
       - name: Build Python wheel
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
@@ -373,6 +375,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts
+          # Preserve an executable msb entry in the release tarball after the
+          # runtime artifact round trip normalized it to 0644.
+          chmod 755 bundle/runtime/msb
           cp bundle/runtime/msb artifacts/msb-${{ inputs.target }}
           cp bundle/metrics/msb-metrics artifacts/msb-metrics-${{ inputs.target }}
           cp bundle/runtime/${{ inputs.libkrunfw_file }} artifacts/${{ inputs.libkrunfw_asset }}

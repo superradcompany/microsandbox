@@ -26,3 +26,5 @@ def test_native_resolver_returns_bundled_path():
     expected = os.environ.get("MSB_PATH") or str(bundled)
     assert resolved_msb_path() == expected
     assert os.path.exists(expected)
+    if os.name != "nt":
+        assert os.access(expected, os.X_OK), f"bundled msb is not executable: {expected}"

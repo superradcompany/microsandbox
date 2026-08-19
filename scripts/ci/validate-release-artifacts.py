@@ -7,6 +7,8 @@ import argparse
 import hashlib
 import json
 import re
+import tarfile
+import zipfile
 from pathlib import Path
 
 
@@ -41,6 +43,14 @@ RELEASE_FILES = {
     "msb-metrics-windows-aarch64.exe",
     "msb-metrics-windows-x86_64.exe",
 }
+
+UNIX_RELEASE_BUNDLES = {
+    "microsandbox-darwin-aarch64.tar.gz",
+    "microsandbox-linux-aarch64.tar.gz",
+    "microsandbox-linux-x86_64.tar.gz",
+}
+
+WHEEL_MSB_PATH = "microsandbox/_bundled/bin/msb"
 
 NODE_PACKAGES = {
     "darwin-arm64": ("microsandbox.darwin-arm64.node", "msb", "libkrunfw.5.dylib"),
@@ -83,6 +93,39 @@ def require_nonempty(path: Path, errors: list[str]) -> None:
         errors.append(f"empty file: {path}")
 
 
+def require_executable(mode: int, description: str, errors: list[str]) -> None:
+    if mode & 0o111 != 0o111:
+        errors.append(f"non-executable {description}: mode {mode & 0o777:#05o}")
+
+
+def validate_bundle_executable(path: Path, errors: list[str]) -> None:
+    if not path.is_file() or path.stat().st_size == 0:
+        return
+
+    try:
+        with tarfile.open(path, "r:gz") as archive:
+            member = archive.getmember("msb")
+            require_executable(member.mode, f"msb in {path.name}", errors)
+    except (KeyError, OSError, tarfile.TarError) as error:
+        errors.append(f"invalid Unix release bundle {path}: {error}")
+
+
+def validate_wheel_executable(path: Path, errors: list[str]) -> None:
+    if not path.is_file() or path.stat().st_size == 0:
+        return
+
+    try:
+        with zipfile.ZipFile(path) as archive:
+            member = archive.getinfo(WHEEL_MSB_PATH)
+            require_executable(
+                member.external_attr >> 16,
+                f"{WHEEL_MSB_PATH} in {path.name}",
+                errors,
+            )
+    except (KeyError, OSError, zipfile.BadZipFile) as error:
+        errors.append(f"invalid Unix Python wheel {path}: {error}")
+
+
 def validate_release_files(root: Path, errors: list[str]) -> list[Path]:
     actual = {path.name for path in root.iterdir() if path.is_file()} if root.is_dir() else set()
     for name in sorted(RELEASE_FILES - actual):
@@ -93,6 +136,8 @@ def validate_release_files(root: Path, errors: list[str]) -> list[Path]:
     files = [root / name for name in sorted(RELEASE_FILES)]
     for path in files:
         require_nonempty(path, errors)
+        if path.name in UNIX_RELEASE_BUNDLES:
+            validate_bundle_executable(path, errors)
     return files
 
 
@@ -124,6 +169,8 @@ def validate_wheels(root: Path, errors: list[str]) -> list[Path]:
         if len(matches) != 1:
             names = ", ".join(wheel.name for wheel in matches) or "none"
             errors.append(f"expected one {platform} wheel, found: {names}")
+        elif not platform.startswith("windows-"):
+            validate_wheel_executable(matches[0], errors)
     for wheel in wheels:
         require_nonempty(wheel, errors)
     return wheels
