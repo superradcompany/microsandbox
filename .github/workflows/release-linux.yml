@@ -270,7 +270,10 @@ jobs:
           consumer_dir="${RUNNER_TEMP}/microsandbox-consumer"
           mkdir -p "$pack_dir" "$consumer_dir"
           main_tarball=$(npm pack --silent --pack-destination "$pack_dir")
-          platform_tarball=$(npm pack --silent --pack-destination "$pack_dir" npm/${{ inputs.npm_dir }})
+          platform_tarball=$(
+            cd npm/${{ inputs.npm_dir }}
+            npm pack --silent --pack-destination "$pack_dir"
+          )
           cd "$consumer_dir"
           npm init --yes >/dev/null
           npm install --ignore-scripts --omit=optional \
