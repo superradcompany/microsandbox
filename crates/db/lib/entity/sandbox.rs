@@ -58,6 +58,11 @@ pub struct Model {
     /// Configuration actually used by the currently running VM, when active.
     pub active_config: Option<String>,
     pub status: SandboxStatus,
+    /// Network address-pool slot this sandbox actually holds (#1390).
+    /// `None` on rows that predate slot recycling and whose id exceeds the
+    /// u16 pool; they receive a recycled slot on their next spawn.
+    pub network_slot: Option<i64>,
+
     /// Denormalized copy of `config.policy.ephemeral`.
     ///
     /// Indexed alongside `status` so host-runtime lifecycle maintenance can
