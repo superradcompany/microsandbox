@@ -12,6 +12,7 @@ on:
       - .github/actions/cache-libkrunfw-kernel/action.yml
       - scripts/ci/publish-crates.py
       - scripts/ci/validate-release-artifacts.py
+      - scripts/ci/test_validate_release_artifacts.py
       - scripts/ci/validate_linux_glibc.py
       - scripts/ci/test_validate_linux_glibc.py
       - scripts/ci/wait-for-npm-packages.mjs
@@ -947,6 +948,7 @@ jobs:
 
       - name: Validate artifact manifest
         run: |
+          python3 -m unittest scripts.ci.test_validate_release_artifacts
           python3 scripts/ci/validate-release-artifacts.py \
             --release-dir release-artifacts \
             --node-dir node-artifacts \
