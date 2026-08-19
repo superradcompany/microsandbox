@@ -1,4 +1,4 @@
-name: Release Unix
+name: Release macOS
 
 on:
   workflow_call:

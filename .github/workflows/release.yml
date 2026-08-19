@@ -7,7 +7,7 @@ on:
     paths:
       - .github/workflows/release.yml
       - .github/workflows/release-linux.yml
-      - .github/workflows/release-unix.yml
+      - .github/workflows/release-macos.yml
       - .github/workflows/release-windows.yml
       - .github/actions/cache-libkrunfw-kernel/action.yml
       - scripts/ci/publish-crates.py
@@ -248,7 +248,7 @@ jobs:
   darwin-aarch64:
     name: macOS aarch64
     needs: [firmware-aarch64, agentd-aarch64]
-    uses: ./.github/workflows/release-unix.yml
+    uses: ./.github/workflows/release-macos.yml
     with:
       target: darwin-aarch64
       runner: macos-14
