@@ -228,6 +228,27 @@ pub fn bundle_download_url(version: &str, arch: &str, os: &str) -> String {
     )
 }
 
+/// Returns the GitHub release download URL for the `checksums.sha256` asset
+/// listing the SHA-256 digest of every asset in the release.
+pub fn checksums_download_url(version: &str) -> String {
+    format!(
+        "https://github.com/{GITHUB_ORG}/{MICROSANDBOX_REPO}/releases/download/v{version}/checksums.sha256"
+    )
+}
+
+/// Extracts the digest published for `filename` from `sha256sum`-formatted
+/// checksums, as released in the `checksums.sha256` asset. Returns `None`
+/// when no entry matches.
+pub fn bundle_digest_from_checksums(checksums: &str, filename: &str) -> Option<String> {
+    checksums.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        let digest = fields.next()?;
+        // sha256sum marks binary-mode entries with a leading `*`.
+        let name = fields.next()?.trim_start_matches('*');
+        (name == filename).then(|| digest.to_owned())
+    })
+}
+
 /// Returns an HTTP client configured for release asset downloads.
 #[cfg(feature = "http-client")]
 pub fn http_client() -> ureq::Agent {
@@ -287,6 +308,33 @@ pub fn is_windows_drive_separator_at(s: &str, index: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundle_digest_is_selected_from_sha256sum_checksums() {
+        let checksums = format!(
+            "{}  agentd-aarch64\n\
+             {}  microsandbox-darwin-aarch64.tar.gz\n\
+             {} *microsandbox-linux-x86_64.tar.gz\n\
+             malformed line\n",
+            "a".repeat(64),
+            "b".repeat(64),
+            "c".repeat(64),
+        );
+
+        assert_eq!(
+            bundle_digest_from_checksums(&checksums, "microsandbox-darwin-aarch64.tar.gz"),
+            Some("b".repeat(64)),
+        );
+        // Binary-mode `*` markers are stripped before matching.
+        assert_eq!(
+            bundle_digest_from_checksums(&checksums, "microsandbox-linux-x86_64.tar.gz"),
+            Some("c".repeat(64)),
+        );
+        assert_eq!(
+            bundle_digest_from_checksums(&checksums, "microsandbox-windows-x86_64.tar.gz"),
+            None,
+        );
+    }
 
     /// `MSB_HOME` is honoured verbatim (no `.microsandbox` suffix appended)
     /// so callers can isolate state per process without disturbing tooling
