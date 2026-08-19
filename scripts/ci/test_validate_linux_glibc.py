@@ -8,6 +8,7 @@ import unittest
 from scripts.ci.validate_linux_glibc import (
     parse_glibc_versions,
     parse_version,
+    validate_installer_baseline,
     version_key,
 )
 
@@ -39,6 +40,21 @@ class ValidateLinuxGlibcTests(unittest.TestCase):
     def test_parse_version_rejects_non_numeric_values(self) -> None:
         with self.assertRaises(ValueError):
             parse_version("GLIBC_2.28")
+
+    def test_installer_baseline_matches_release_artifacts(self) -> None:
+        installer = 'LINUX_GLIBC_MIN_VERSION="2.28"\n'
+
+        self.assertEqual(validate_installer_baseline(installer, (2, 28)), (2, 28))
+
+    def test_installer_baseline_rejects_drift(self) -> None:
+        installer = 'LINUX_GLIBC_MIN_VERSION="2.39"\n'
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "installer requires glibc 2.39, but release artifacts are audited "
+            "against glibc 2.28",
+        ):
+            validate_installer_baseline(installer, (2, 28))
 
 
 if __name__ == "__main__":

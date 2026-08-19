@@ -16,6 +16,9 @@ from typing import BinaryIO
 
 ELF_MAGIC = b"\x7fELF"
 GLIBC_VERSION = re.compile(r"\bGLIBC_(\d+(?:\.\d+)+)\b")
+INSTALLER_GLIBC_MIN_VERSION = re.compile(
+    r'^LINUX_GLIBC_MIN_VERSION="(?P<version>\d+(?:\.\d+)+)"$', re.MULTILINE
+)
 ARCHIVE_SUFFIXES = (".tar.gz", ".tgz", ".tar", ".whl", ".zip")
 
 
@@ -33,6 +36,11 @@ def parse_args() -> argparse.Namespace:
         "--max-version",
         default="2.28",
         help="Highest allowed GLIBC symbol version (default: 2.28).",
+    )
+    parser.add_argument(
+        "--installer",
+        type=Path,
+        help="Installer script whose declared minimum must match --max-version.",
     )
     return parser.parse_args()
 
@@ -52,6 +60,25 @@ def version_key(version: tuple[int, ...], width: int = 4) -> tuple[int, ...]:
 def parse_glibc_versions(readelf_output: str) -> set[tuple[int, ...]]:
     """Extract every versioned glibc dependency reported by readelf."""
     return {parse_version(match) for match in GLIBC_VERSION.findall(readelf_output)}
+
+
+def validate_installer_baseline(
+    installer: str, maximum: tuple[int, ...]
+) -> tuple[int, ...]:
+    """Return the installer floor when it matches the audited artifact baseline."""
+    match = INSTALLER_GLIBC_MIN_VERSION.search(installer)
+    if match is None:
+        raise ValueError("installer does not declare LINUX_GLIBC_MIN_VERSION")
+
+    minimum = parse_version(match.group("version"))
+    if version_key(minimum) != version_key(maximum):
+        rendered_minimum = ".".join(map(str, minimum))
+        rendered_maximum = ".".join(map(str, maximum))
+        raise ValueError(
+            f"installer requires glibc {rendered_minimum}, but release artifacts "
+            f"are audited against glibc {rendered_maximum}"
+        )
+    return minimum
 
 
 def is_elf(path: Path) -> bool:
@@ -129,6 +156,13 @@ def main() -> None:
         maximum = parse_version(args.max_version)
     except ValueError as error:
         raise SystemExit(str(error)) from error
+
+    if args.installer is not None:
+        try:
+            installer = args.installer.read_text()
+            validate_installer_baseline(installer, maximum)
+        except (OSError, ValueError) as error:
+            raise SystemExit(str(error)) from error
 
     readelf = shutil.which("readelf")
     if readelf is None:
