@@ -2491,4 +2491,8 @@ export interface VolumeMount {
   statVirtualization?: string
   /** `"private" | "mirror"` for bind/named mounts; `None` for tmpfs/disk. */
   hostPermissions?: string
+  /** Guest owner uid for host-created files under bind/named mounts; unset otherwise. Set with `overrideGid`. */
+  overrideUid?: number
+  /** Guest owner gid for host-created files under bind/named mounts; unset otherwise. Set with `overrideUid`. */
+  overrideGid?: number
 }

@@ -1146,6 +1146,8 @@ export interface NapiVolumeMount {
   readonly fstype?: string;
   readonly statVirtualization?: string;
   readonly hostPermissions?: string;
+  readonly overrideUid?: number;
+  readonly overrideGid?: number;
 }
 
 export interface NapiPatchBuilder {

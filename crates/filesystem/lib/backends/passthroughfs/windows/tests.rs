@@ -1120,3 +1120,35 @@ fn no_override_falls_back_to_configured_default_owner() {
     assert_eq!(entry.attr.st_uid, 0);
     assert_eq!(entry.attr.st_gid, 0);
 }
+
+#[test]
+fn setattr_preserves_default_owner_for_host_created_file() {
+    let temp = TempDir::new();
+    std::fs::write(temp.path.join("hostfile.txt"), b"host-created").unwrap();
+
+    let fs = PassthroughFs::new(PassthroughConfig {
+        root_dir: temp.path.clone(),
+        inject_init: false,
+        default_owner: Some((1000, 1000)),
+        ..Default::default()
+    })
+    .unwrap();
+    fs.init(FsOptions::empty()).unwrap();
+
+    let entry = fs.lookup(context(), ROOT_INODE, c"hostfile.txt").unwrap();
+
+    // The guest changes only the mode (chmod, no chown). The mutation baseline
+    // must seed the configured default owner rather than 0:0, so the file does
+    // not silently become root-owned after the metadata write.
+    let attr = stat64 {
+        st_mode: S_IFREG | 0o640,
+        ..Default::default()
+    };
+    fs.setattr(context(), entry.inode, attr, None, SetattrValid::MODE)
+        .unwrap();
+
+    let (st, _) = fs.getattr(context(), entry.inode, None).unwrap();
+    assert_eq!(st.st_uid, 1000);
+    assert_eq!(st.st_gid, 1000);
+    assert_eq!(st.st_mode & 0o7777, 0o640);
+}
