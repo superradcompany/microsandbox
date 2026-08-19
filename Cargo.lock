@@ -3806,7 +3806,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox"
-version = "0.6.10"
+version = "0.6.11"
 dependencies = [
  "anyhow",
  "astral-tokio-tar",
@@ -3871,7 +3871,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-agent-client"
-version = "0.6.10"
+version = "0.6.11"
 dependencies = [
  "ciborium",
  "microsandbox-protocol",
@@ -3884,7 +3884,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-agentd"
-version = "0.6.10"
+version = "0.6.11"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -3901,7 +3901,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-cli"
-version = "0.6.10"
+version = "0.6.11"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -3944,7 +3944,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-db"
-version = "0.6.10"
+version = "0.6.11"
 dependencies = [
  "async-trait",
  "sea-orm",
@@ -3956,7 +3956,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-filesystem"
-version = "0.6.10"
+version = "0.6.11"
 dependencies = [
  "libc",
  "microsandbox-utils",
@@ -3968,7 +3968,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-go"
-version = "0.6.10"
+version = "0.6.11"
 dependencies = [
  "base64 0.23.1",
  "cbindgen",
@@ -3986,7 +3986,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-image"
-version = "0.6.10"
+version = "0.6.11"
 dependencies = [
  "astral-tokio-tar",
  "async-compression",
@@ -4014,7 +4014,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-metrics"
-version = "0.6.10"
+version = "0.6.11"
 dependencies = [
  "chrono",
  "libc",
@@ -4026,7 +4026,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-metrics-collector"
-version = "0.6.10"
+version = "0.6.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4054,7 +4054,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-migration"
-version = "0.6.10"
+version = "0.6.11"
 dependencies = [
  "sea-orm-migration",
  "serde_json",
@@ -4063,7 +4063,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-network"
-version = "0.6.10"
+version = "0.6.11"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -4107,7 +4107,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-node"
-version = "0.6.10"
+version = "0.6.11"
 dependencies = [
  "bytes",
  "chrono",
@@ -4124,7 +4124,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-protocol"
-version = "0.6.10"
+version = "0.6.11"
 dependencies = [
  "chrono",
  "ciborium",
@@ -4139,7 +4139,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-py"
-version = "0.6.10"
+version = "0.6.11"
 dependencies = [
  "chrono",
  "futures",
@@ -4156,7 +4156,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-runtime"
-version = "0.6.10"
+version = "0.6.11"
 dependencies = [
  "bytes",
  "chrono",
@@ -4191,7 +4191,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-types"
-version = "0.6.10"
+version = "0.6.11"
 dependencies = [
  "chrono",
  "dprint-plugin-typescript",
@@ -4208,7 +4208,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-utils"
-version = "0.6.10"
+version = "0.6.11"
 dependencies = [
  "dirs",
  "libc",
@@ -4221,7 +4221,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-vsock"
-version = "0.6.10"
+version = "0.6.11"
 dependencies = [
  "libc",
  "msb_krun",
@@ -7635,14 +7635,14 @@ dependencies = [
 
 [[package]]
 name = "test-init"
-version = "0.6.10"
+version = "0.6.11"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "test-macros"
-version = "0.6.10"
+version = "0.6.11"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7651,7 +7651,7 @@ dependencies = [
 
 [[package]]
 name = "test-utils"
-version = "0.6.10"
+version = "0.6.11"
 dependencies = [
  "tempfile",
  "test-macros",
