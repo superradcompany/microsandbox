@@ -1,9 +1,9 @@
 //! Offline grow-only resizer for ext4 upper images produced by this crate's formatter.
 //!
 //! The resizer parses and strictly validates the primary superblock (it refuses anything the formatter did not write), then appends whole block groups: per-group bitmaps, backup
-//! superblock + GDT copies in new sparse_super groups, descriptors appended to the primary GDT and every backup GDT, and finally the updated primary superblock. Because the
-//! formatter reserves `RESERVED_GDT_BLOCKS` after the GDT, descriptors can extend into that reserved span without moving any existing metadata: `gdt_blocks +
-//! s_reserved_gdt_blocks` stays constant across grows.
+//! superblock + GDT copies in new sparse_super groups, descriptors appended to the primary GDT and every backup GDT, and finally the updated primary superblock. Both the current
+//! resize-inode layout and the exact pre-0.6.9 microsandbox layout are supported. Because both formatters reserve `RESERVED_GDT_BLOCKS` after the GDT, descriptors can extend into
+//! that reserved span without moving any existing metadata: `gdt_blocks + s_reserved_gdt_blocks` stays constant across grows.
 //!
 //! Images whose guest was stopped without unmounting carry `EXT4_FEATURE_INCOMPAT_RECOVER` plus a pending jbd2 log; those are recovered first (see the [`jbd2`](super::jbd2)
 //! module) and then grown as clean images.
@@ -20,8 +20,8 @@ use super::format::{
     EXT4_FEATURE_RO_COMPAT_DIR_NLINK, EXT4_FEATURE_RO_COMPAT_EXTRA_ISIZE,
     EXT4_FEATURE_RO_COMPAT_HUGE_FILE, EXT4_FEATURE_RO_COMPAT_LARGE_FILE,
     EXT4_FEATURE_RO_COMPAT_METADATA_CSUM, EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER, EXT4_FIRST_INO,
-    EXT4_INODE_SIZE, EXT4_INODES_PER_GROUP, EXT4_JOURNAL_INO, EXT4_LOG_BLOCK_SIZE, EXT4_ROOT_INO,
-    EXT4_SB_ERROR_COUNT_OFFSET, EXT4_SB_OVERHEAD_BLOCKS_OFFSET, EXT4_SUPER_MAGIC,
+    EXT4_INODE_SIZE, EXT4_INODES_PER_GROUP, EXT4_JOURNAL_INO, EXT4_LOG_BLOCK_SIZE, EXT4_RESIZE_INO,
+    EXT4_ROOT_INO, EXT4_SB_ERROR_COUNT_OFFSET, EXT4_SB_OVERHEAD_BLOCKS_OFFSET, EXT4_SUPER_MAGIC,
     sparse_super_group,
 };
 use super::formatter::{Ext4Error, mark_sparse};
@@ -45,6 +45,14 @@ const SB_OFFSET: u64 = 1024;
 /// On-disk superblock size.
 const SB_SIZE: usize = 1024;
 
+/// Feature mask written by microsandbox through v0.6.8. These images reserve
+/// GDT headroom but intentionally have no resize inode.
+const LEGACY_FEATURE_COMPAT: u32 =
+    EXT4_FEATURE_COMPAT_HAS_JOURNAL | EXT4_FEATURE_COMPAT_EXT_ATTR | EXT4_FEATURE_COMPAT_DIR_INDEX;
+
+/// Feature mask written by the current formatter.
+const MODERN_FEATURE_COMPAT: u32 = LEGACY_FEATURE_COMPAT | EXT4_FEATURE_COMPAT_RESIZE_INODE;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -63,6 +71,26 @@ pub struct GrowOutcome {
 
     /// Block group count after the grow.
     pub new_groups: u32,
+}
+
+/// Resize metadata layout identified from both feature flags and structural
+/// invariants. A dirty modern image has no parsed block until journal replay
+/// completes and the clean image is validated again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResizeMetadata {
+    Legacy,
+    Modern { block: Option<u64> },
+}
+
+impl ResizeMetadata {
+    fn overhead_blocks_offset(self) -> usize {
+        match self {
+            // The pre-0.6.9 formatter used 0x194 for its used-block/overhead counter. Preserve
+            // that released layout exactly instead of silently converting superblock semantics.
+            Self::Legacy => EXT4_SB_ERROR_COUNT_OFFSET,
+            Self::Modern { .. } => EXT4_SB_OVERHEAD_BLOCKS_OFFSET,
+        }
+    }
 }
 
 /// Superblock and primary GDT state parsed from an image and validated to match exactly what
@@ -86,7 +114,7 @@ struct ParsedImage {
     free_blocks: u64,
     free_inodes: u32,
     overhead_blocks: u32,
-    resize_inode_block: u64,
+    resize_metadata: ResizeMetadata,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -111,6 +139,16 @@ impl ParsedImage {
         let capacity_groups =
             (self.gdt_blocks as u64 + self.reserved_gdt_blocks as u64) * descs_per_block;
         (capacity_groups * EXT4_BLOCKS_PER_GROUP as u64).min(MAX_BLOCKS)
+    }
+
+    fn resize_inode_block(&self) -> Result<Option<u64>, Ext4Error> {
+        match self.resize_metadata {
+            ResizeMetadata::Legacy => Ok(None),
+            ResizeMetadata::Modern { block: Some(block) } => Ok(Some(block)),
+            ResizeMetadata::Modern { block: None } => Err(unsupported(
+                "modern resize metadata was not validated after journal recovery",
+            )),
+        }
     }
 }
 
@@ -295,7 +333,11 @@ pub fn grow_image(path: &Path, new_size_bytes: u64) -> Result<GrowOutcome, Ext4E
         img.free_inodes + added_groups * EXT4_INODES_PER_GROUP,
     );
     put_le16(&mut new_sb, 0xCE, new_reserved as u16);
-    put_le32(&mut new_sb, EXT4_SB_OVERHEAD_BLOCKS_OFFSET, overhead as u32);
+    put_le32(
+        &mut new_sb,
+        img.resize_metadata.overhead_blocks_offset(),
+        overhead as u32,
+    );
     let new_sb_csum = superblock_checksum(&new_sb);
     put_le32(&mut new_sb, 0x3FC, new_sb_csum);
 
@@ -317,16 +359,19 @@ pub fn grow_image(path: &Path, new_size_bytes: u64) -> Result<GrowOutcome, Ext4E
         write_backup_superblock_at(&mut file, new_geo.group_start_block(group), &backup_sb)?;
         write_gdt_at(&mut file, new_geo.group_start_block(group), &gdt)?;
     }
-    // Consuming reserved headroom shifts the live pointer range in inode 7. Rebuild the complete
-    // structure after all descriptor copies are in place so no consumed GDT block is overwritten.
-    write_resize_inode(
-        &mut file,
-        &new_geo,
-        new_geo.group_inode_table_block(0),
-        img.resize_inode_block,
-        img.csum_seed,
-        new_groups,
-    )?;
+    // Modern images account for reserved GDT blocks through inode 7. Legacy microsandbox images
+    // predate that ownership graph and must retain their original layout; fabricating inode 7
+    // here would require allocating and publishing another data block transactionally.
+    if let Some(resize_inode_block) = img.resize_inode_block()? {
+        write_resize_inode(
+            &mut file,
+            &new_geo,
+            new_geo.group_inode_table_block(0),
+            resize_inode_block,
+            img.csum_seed,
+            new_groups,
+        )?;
+    }
     file.sync_all()?;
 
     // Phase 2: the only pre-publish writes visible at the old size (the old final group's
@@ -364,6 +409,11 @@ pub(super) fn validate_rootfs_image(path: &Path) -> Result<(), Ext4Error> {
     if img.needs_recovery {
         return Err(unsupported(
             "new rootfs unexpectedly requires journal recovery",
+        ));
+    }
+    if matches!(img.resize_metadata, ResizeMetadata::Legacy) {
+        return Err(unsupported(
+            "new rootfs unexpectedly uses the legacy resize-metadata layout",
         ));
     }
     let geometry = img.geometry();
@@ -443,10 +493,6 @@ fn parse_and_validate(file: &mut File) -> Result<ParsedImage, Ext4Error> {
     let compat = get_le32(&sb, 0x5C);
     let incompat = get_le32(&sb, 0x60);
     let ro_compat = get_le32(&sb, 0x64);
-    let expected_compat = EXT4_FEATURE_COMPAT_HAS_JOURNAL
-        | EXT4_FEATURE_COMPAT_EXT_ATTR
-        | EXT4_FEATURE_COMPAT_RESIZE_INODE
-        | EXT4_FEATURE_COMPAT_DIR_INDEX;
     let expected_incompat = EXT4_FEATURE_INCOMPAT_FILETYPE
         | EXT4_FEATURE_INCOMPAT_EXTENTS
         | EXT4_FEATURE_INCOMPAT_64BIT;
@@ -456,11 +502,21 @@ fn parse_and_validate(file: &mut File) -> Result<ParsedImage, Ext4Error> {
         | EXT4_FEATURE_RO_COMPAT_DIR_NLINK
         | EXT4_FEATURE_RO_COMPAT_EXTRA_ISIZE
         | EXT4_FEATURE_RO_COMPAT_METADATA_CSUM;
-    // Acceptance rule: exactly the formatter's masks, with one exception — INCOMPAT_RECOVER may additionally be set, because every upper that was ever mounted carries it (the
-    // guest does not unmount on stop). RECOVER images get their journal replayed by grow_image before the deep validation below ever runs on them.
+    // Acceptance rule: exactly one of microsandbox's two formatter masks, with one exception —
+    // INCOMPAT_RECOVER may additionally be set because every mounted upper carries it. Structural
+    // validation below distinguishes a real legacy image from a damaged modern image whose
+    // RESIZE_INODE bit was merely cleared.
+    let resize_metadata = match compat {
+        LEGACY_FEATURE_COMPAT => ResizeMetadata::Legacy,
+        MODERN_FEATURE_COMPAT => ResizeMetadata::Modern { block: None },
+        _ => {
+            return Err(unsupported(format!(
+                "feature flags do not match this crate's formatter (compat={compat:#x}, incompat={incompat:#x}, ro_compat={ro_compat:#x})"
+            )));
+        }
+    };
     let needs_recovery = incompat & EXT4_FEATURE_INCOMPAT_RECOVER != 0;
-    if compat != expected_compat
-        || incompat & !EXT4_FEATURE_INCOMPAT_RECOVER != expected_incompat
+    if incompat & !EXT4_FEATURE_INCOMPAT_RECOVER != expected_incompat
         || ro_compat != expected_ro_compat
     {
         return Err(unsupported(format!(
@@ -510,7 +566,8 @@ fn parse_and_validate(file: &mut File) -> Result<ParsedImage, Ext4Error> {
             "unexpected flex_bg/meta_bg layout",
         ),
         (
-            get_le32(&sb, EXT4_SB_ERROR_COUNT_OFFSET) == 0,
+            matches!(resize_metadata, ResizeMetadata::Legacy)
+                || get_le32(&sb, EXT4_SB_ERROR_COUNT_OFFSET) == 0,
             "superblock error count is nonzero",
         ),
     ];
@@ -559,8 +616,8 @@ fn parse_and_validate(file: &mut File) -> Result<ParsedImage, Ext4Error> {
         csum_seed,
         free_blocks: get_le32(&sb, 0x0C) as u64 | ((get_le32(&sb, 0x158) as u64) << 32),
         free_inodes: get_le32(&sb, 0x10),
-        overhead_blocks: get_le32(&sb, EXT4_SB_OVERHEAD_BLOCKS_OFFSET),
-        resize_inode_block: 0,
+        overhead_blocks: get_le32(&sb, resize_metadata.overhead_blocks_offset()),
+        resize_metadata,
         gdt: Vec::new(),
         needs_recovery,
         sb,
@@ -612,20 +669,96 @@ fn parse_and_validate(file: &mut File) -> Result<ParsedImage, Ext4Error> {
         }
     }
 
-    let resize_inode_block = validate_resize_inode(
-        file,
-        &geo,
-        geo.group_inode_table_block(0),
-        img.csum_seed,
-        img.num_groups,
-        img.num_blocks,
-    )?;
+    let resize_metadata = match img.resize_metadata {
+        ResizeMetadata::Legacy => {
+            validate_legacy_resize_metadata(file, &img)?;
+            ResizeMetadata::Legacy
+        }
+        ResizeMetadata::Modern { .. } => {
+            let block = validate_resize_inode(
+                file,
+                &geo,
+                geo.group_inode_table_block(0),
+                img.csum_seed,
+                img.num_groups,
+                img.num_blocks,
+            )?;
+            ResizeMetadata::Modern { block: Some(block) }
+        }
+    };
 
     Ok(ParsedImage {
         gdt,
-        resize_inode_block,
+        resize_metadata,
         ..img
     })
+}
+
+/// Validate the exact layout emitted through v0.6.8.
+///
+/// Feature flags alone are insufficient: clearing RESIZE_INODE on a modern
+/// image must not route it through the legacy grow path. Old images have a
+/// zero inode 7, place the root directory immediately after the inode table,
+/// and leave every still-reserved primary GDT block sparse-zeroed. These
+/// invariants remain true after any number of grows by the legacy resizer.
+fn validate_legacy_resize_metadata(file: &mut File, img: &ParsedImage) -> Result<(), Ext4Error> {
+    let geometry = img.geometry();
+    let resize_inode = read_inode(file, &geometry, EXT4_RESIZE_INO)?;
+    if resize_inode.iter().any(|byte| *byte != 0) {
+        return Err(unsupported("legacy image has a non-empty resize inode"));
+    }
+
+    let root_inode = read_inode(file, &geometry, EXT4_ROOT_INO)?;
+    validate_allocated_inode(file, img, 0, EXT4_ROOT_INO - 1, EXT4_ROOT_INO, &[])?;
+    let extent_root = &root_inode[0x28..0x64];
+    if get_le32(&root_inode, 0x20) & EXT4_EXTENTS_FL == 0
+        || get_le16(extent_root, 0) != EXT4_EH_MAGIC
+        || get_le16(extent_root, 2) != 1
+        || get_le16(extent_root, 6) != 0
+        || get_le32(extent_root, 12) != 0
+    {
+        return Err(unsupported(
+            "legacy image root inode does not use the expected single extent",
+        ));
+    }
+    let root_block =
+        u64::from(get_le32(extent_root, 20)) | (u64::from(get_le16(extent_root, 18)) << 32);
+    let expected_root_block =
+        geometry.group_inode_table_block(0) + u64::from(img.inode_table_blocks);
+    if root_block != expected_root_block {
+        return Err(unsupported(
+            "legacy image root directory is not immediately after the inode table",
+        ));
+    }
+
+    // A modern resize inode stores backup pointers in these blocks. Requiring zeros prevents a
+    // modern image with a cleared feature bit from passing as legacy. GDT blocks consumed by a
+    // previous legacy grow are excluded because `gdt_blocks` has already advanced past them.
+    for offset in 0..img.reserved_gdt_blocks {
+        let block = 1 + u64::from(img.gdt_blocks + offset);
+        if read_block_at(file, block)?.iter().any(|byte| *byte != 0) {
+            return Err(unsupported(format!(
+                "legacy image reserved GDT block {block} is not zeroed"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn read_inode(
+    file: &mut File,
+    geometry: &GroupGeometry,
+    inode_number: u32,
+) -> Result<Vec<u8>, Ext4Error> {
+    let group = (inode_number - 1) / EXT4_INODES_PER_GROUP;
+    let local_inode = (inode_number - 1) % EXT4_INODES_PER_GROUP;
+    let offset = geometry.group_inode_table_block(group) * u64::from(EXT4_BLOCK_SIZE)
+        + u64::from(local_inode) * u64::from(EXT4_INODE_SIZE);
+    let mut inode = vec![0u8; EXT4_INODE_SIZE as usize];
+    file.seek(SeekFrom::Start(offset))?;
+    file.read_exact(&mut inode)?;
+    Ok(inode)
 }
 
 /// Replay the pending jbd2 log, then clear `EXT4_FEATURE_INCOMPAT_RECOVER` from the primary and every backup superblock.
@@ -1013,6 +1146,7 @@ mod tests {
     use super::super::format::JBD2_MAGIC;
     use super::super::formatter::{
         Ext4FormatOptions, format_ext4, format_ext4_for_test_with_reserved_gdt,
+        format_ext4_legacy_for_test,
     };
     use super::super::jbd2::{JournalLocation, TestTransaction, write_test_log};
     use super::super::layout::{RESERVED_GDT_BLOCKS, count_used_bits, get_be32, put_be32};
@@ -1027,6 +1161,14 @@ mod tests {
             journal_blocks: 4096,
         };
         format_ext4(path, &opts).unwrap();
+    }
+
+    fn format_legacy_image(path: &Path, size_bytes: u64) {
+        let opts = Ext4FormatOptions {
+            size_bytes,
+            journal_blocks: 4096,
+        };
+        format_ext4_legacy_for_test(path, &opts).unwrap();
     }
 
     fn parse(path: &Path) -> ParsedImage {
@@ -1143,7 +1285,9 @@ mod tests {
             }
             // A grow legitimately refreshes inode 7 and its double-indirect block so that the
             // reserved-GDT ownership graph includes newly created sparse-super backups.
-            if block == resize_inode_table_block || block == img.resize_inode_block {
+            if let Some(resize_inode_block) = img.resize_inode_block().unwrap()
+                && (block == resize_inode_table_block || block == resize_inode_block)
+            {
                 continue;
             }
             file.seek(SeekFrom::Start(block * EXT4_BLOCK_SIZE as u64))
@@ -1168,8 +1312,12 @@ mod tests {
         (location, uuid)
     }
 
-    /// Simulate the state every mounted-but-never-unmounted upper is left in: RECOVER set in the primary superblock (the kernel never sets it in backups).
-    fn set_recover_flag(path: &Path) {
+    fn parse_dirty_superblock(path: &Path) -> Vec<u8> {
+        let mut file = File::open(path).unwrap();
+        read_superblock_at(&mut file, SB_OFFSET, "test primary").unwrap()
+    }
+
+    fn rewrite_primary_superblock(path: &Path, update: impl FnOnce(&mut [u8])) {
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -1178,12 +1326,19 @@ mod tests {
         let mut sb = vec![0u8; SB_SIZE];
         file.seek(SeekFrom::Start(SB_OFFSET)).unwrap();
         file.read_exact(&mut sb).unwrap();
-        let incompat = get_le32(&sb, 0x60) | EXT4_FEATURE_INCOMPAT_RECOVER;
-        put_le32(&mut sb, 0x60, incompat);
+        update(&mut sb);
         let checksum = superblock_checksum(&sb);
         put_le32(&mut sb, 0x3FC, checksum);
         file.seek(SeekFrom::Start(SB_OFFSET)).unwrap();
         file.write_all(&sb).unwrap();
+    }
+
+    /// Simulate the state every mounted-but-never-unmounted upper is left in: RECOVER set in the primary superblock (the kernel never sets it in backups).
+    fn set_recover_flag(path: &Path) {
+        rewrite_primary_superblock(path, |sb| {
+            let incompat = get_le32(sb, 0x60) | EXT4_FEATURE_INCOMPAT_RECOVER;
+            put_le32(sb, 0x60, incompat);
+        });
     }
 
     fn write_dirty_journal(path: &Path, start_seq: u32, transactions: &[TestTransaction]) {
@@ -1277,6 +1432,264 @@ mod tests {
     }
 
     #[test]
+    fn test_legacy_image_matches_pre_0_6_9_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.ext4");
+        format_legacy_image(&path, 256 * MIB);
+
+        let img = parse(&path);
+        assert_eq!(img.resize_metadata, ResizeMetadata::Legacy);
+        assert_eq!(get_le32(&img.sb, 0x5C), LEGACY_FEATURE_COMPAT);
+        assert_eq!(get_le32(&img.sb, 0x60), 0xC2);
+        assert_eq!(get_le32(&img.sb, 0x64), 0x46B);
+        assert_ne!(get_le32(&img.sb, EXT4_SB_ERROR_COUNT_OFFSET), 0);
+        assert_eq!(get_le32(&img.sb, EXT4_SB_OVERHEAD_BLOCKS_OFFSET), 0);
+        assert_eq!(img.resize_inode_block().unwrap(), None);
+        assert_image_invariants(&path);
+    }
+
+    #[test]
+    fn test_grow_legacy_image_preserves_layout_and_existing_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-grow.ext4");
+        format_legacy_image(&path, 256 * MIB);
+
+        let before_img = parse(&path);
+        let span = before_img.gdt_blocks + before_img.reserved_gdt_blocks;
+        let before = hash_stable_prefix(&path, before_img.num_blocks, span);
+
+        let outcome = grow_image(&path, 512 * MIB).unwrap();
+        assert_eq!(outcome.old_groups, 2);
+        assert_eq!(outcome.new_groups, 4);
+
+        let after_img = parse(&path);
+        assert_eq!(after_img.resize_metadata, ResizeMetadata::Legacy);
+        assert_eq!(get_le32(&after_img.sb, 0x5C), LEGACY_FEATURE_COMPAT);
+        assert_eq!(
+            before,
+            hash_stable_prefix(&path, before_img.num_blocks, span)
+        );
+        assert_image_invariants(&path);
+    }
+
+    #[test]
+    fn test_grow_legacy_image_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-twice.ext4");
+        format_legacy_image(&path, 256 * MIB);
+
+        grow_image(&path, 512 * MIB).unwrap();
+        assert_image_invariants(&path);
+        let outcome = grow_image(&path, 1024 * MIB).unwrap();
+
+        assert_eq!(outcome.old_groups, 4);
+        assert_eq!(outcome.new_groups, 8);
+        assert_eq!(parse(&path).resize_metadata, ResizeMetadata::Legacy);
+        assert_image_invariants(&path);
+    }
+
+    #[test]
+    fn test_grow_legacy_image_consumes_reserved_gdt_headroom() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-consume.ext4");
+        format_legacy_image(&path, 256 * MIB);
+
+        let outcome = grow_image(&path, 68 * 128 * MIB).unwrap();
+        assert_eq!(outcome.new_groups, 68);
+
+        let img = parse(&path);
+        assert_eq!(img.resize_metadata, ResizeMetadata::Legacy);
+        assert_eq!(img.gdt_blocks, 2);
+        assert_eq!(img.reserved_gdt_blocks, RESERVED_GDT_BLOCKS - 1);
+        assert_image_invariants(&path);
+    }
+
+    #[test]
+    fn test_grow_legacy_image_to_reported_30_gib_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-30g.ext4");
+        format_legacy_image(&path, 4 * 1024 * MIB);
+
+        let outcome = grow_image(&path, 30 * 1024 * MIB).unwrap();
+
+        assert_eq!(outcome.old_groups, 32);
+        assert_eq!(outcome.new_groups, 240);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 30 * 1024 * MIB);
+        let img = parse(&path);
+        assert_eq!(img.resize_metadata, ResizeMetadata::Legacy);
+        assert_eq!(img.gdt_blocks, 4);
+        assert_eq!(img.reserved_gdt_blocks, RESERVED_GDT_BLOCKS - 3);
+        assert_image_invariants(&path);
+    }
+
+    #[test]
+    fn test_grow_replays_legacy_pending_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-replay.ext4");
+        format_legacy_image(&path, 256 * MIB);
+
+        let (location, _) = journal_location(&path);
+        let target = location.start_block + location.len_blocks as u64 + 16;
+        let data = pattern_block(0xA5);
+        write_dirty_journal(
+            &path,
+            2,
+            &[TestTransaction {
+                writes: vec![(target, data.clone())],
+                revokes: vec![],
+                corrupt_commit: false,
+            }],
+        );
+        assert_eq!(get_le32(&parse_dirty_superblock(&path), 0x60), 0xC6);
+
+        grow_image(&path, 512 * MIB).unwrap();
+
+        let mut file = File::open(&path).unwrap();
+        assert_eq!(read_block_at(&mut file, target).unwrap(), data);
+        drop(file);
+        assert_recover_cleared_everywhere(&path);
+        assert_eq!(parse(&path).resize_metadata, ResizeMetadata::Legacy);
+        assert_image_invariants(&path);
+    }
+
+    #[test]
+    fn test_legacy_replay_rejects_unknown_journal_features_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-bad-journal.ext4");
+        format_legacy_image(&path, 256 * MIB);
+
+        let (location, _) = journal_location(&path);
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let mut jsb = vec![0u8; 1024];
+        file.seek(SeekFrom::Start(
+            location.start_block * u64::from(EXT4_BLOCK_SIZE),
+        ))
+        .unwrap();
+        file.read_exact(&mut jsb).unwrap();
+        let incompat = get_be32(&jsb, 0x28);
+        put_be32(&mut jsb, 0x28, incompat | 0x04);
+        jsb[0xFC..0x100].fill(0);
+        let checksum = crc32c::crc32c_raw(0xFFFF_FFFF, &jsb);
+        put_be32(&mut jsb, 0xFC, checksum);
+        file.seek(SeekFrom::Start(
+            location.start_block * u64::from(EXT4_BLOCK_SIZE),
+        ))
+        .unwrap();
+        file.write_all(&jsb).unwrap();
+        drop(file);
+        set_recover_flag(&path);
+        let before = hash_file(&path);
+
+        let result = grow_image(&path, 512 * MIB);
+        match result {
+            Err(Ext4Error::Unsupported(message)) => {
+                assert!(message.contains("journal feature"), "message: {message}")
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+        assert_eq!(
+            hash_file(&path),
+            before,
+            "failed recovery modified the image"
+        );
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 256 * MIB);
+    }
+
+    #[test]
+    fn test_cleared_modern_resize_feature_is_not_misclassified_as_legacy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("modern-with-cleared-feature.ext4");
+        format_image(&path, 256 * MIB);
+
+        rewrite_primary_superblock(&path, |sb| {
+            put_le32(sb, 0x5C, LEGACY_FEATURE_COMPAT);
+        });
+        let before = hash_file(&path);
+
+        let result = grow_image(&path, 512 * MIB);
+        match result {
+            Err(Ext4Error::Unsupported(message)) => {
+                assert!(
+                    message.contains("non-empty resize inode"),
+                    "message: {message}"
+                )
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+        assert_eq!(hash_file(&path), before, "rejected image was modified");
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 256 * MIB);
+    }
+
+    #[test]
+    fn test_cleared_modern_feature_and_inode_still_fails_legacy_structure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("modern-with-cleared-inode.ext4");
+        format_image(&path, 256 * MIB);
+        let img = parse(&path);
+        let inode_offset = img.geometry().group_inode_table_block(0) * u64::from(EXT4_BLOCK_SIZE)
+            + u64::from(EXT4_RESIZE_INO - 1) * u64::from(EXT4_INODE_SIZE);
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        file.seek(SeekFrom::Start(inode_offset)).unwrap();
+        file.write_all(&vec![0u8; EXT4_INODE_SIZE as usize])
+            .unwrap();
+        drop(file);
+        rewrite_primary_superblock(&path, |sb| {
+            put_le32(sb, 0x5C, LEGACY_FEATURE_COMPAT);
+        });
+        let before = hash_file(&path);
+
+        let result = grow_image(&path, 512 * MIB);
+        match result {
+            Err(Ext4Error::Unsupported(message)) => assert!(
+                message.contains("root directory is not immediately after the inode table"),
+                "message: {message}"
+            ),
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+        assert_eq!(hash_file(&path), before, "rejected image was modified");
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 256 * MIB);
+    }
+
+    #[test]
+    fn test_legacy_grow_rejects_nonzero_reserved_gdt_block_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-corrupt-reserved.ext4");
+        format_legacy_image(&path, 256 * MIB);
+        let img = parse(&path);
+        let reserved_block = 1 + u64::from(img.gdt_blocks);
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        file.seek(SeekFrom::Start(reserved_block * u64::from(EXT4_BLOCK_SIZE)))
+            .unwrap();
+        file.write_all(&[1]).unwrap();
+        drop(file);
+        let before = hash_file(&path);
+
+        let result = grow_image(&path, 512 * MIB);
+        match result {
+            Err(Ext4Error::Unsupported(message)) => {
+                assert!(message.contains("reserved GDT block"), "message: {message}")
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+        assert_eq!(hash_file(&path), before, "rejected image was modified");
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 256 * MIB);
+    }
+
+    #[test]
     fn test_grow_doubles_aligned_image() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("grow.ext4");
@@ -1351,7 +1764,8 @@ mod tests {
             .open(&path)
             .unwrap();
         file.seek(SeekFrom::Start(
-            img.resize_inode_block * u64::from(EXT4_BLOCK_SIZE) + u64::from(img.gdt_blocks) * 4,
+            img.resize_inode_block().unwrap().unwrap() * u64::from(EXT4_BLOCK_SIZE)
+                + u64::from(img.gdt_blocks) * 4,
         ))
         .unwrap();
         file.write_all(&0u32.to_le_bytes()).unwrap();
@@ -1842,6 +2256,50 @@ mod tests {
         true
     }
 
+    /// Validate a released legacy layout without pretending its known formatter defect is new.
+    /// e2fsprogs has always diagnosed the reserved-GDT field because these images predate the
+    /// resize inode; growth is acceptable only when that remains the sole diagnostic.
+    fn assert_e2fsck_legacy_baseline(path: &Path, label: &str) -> bool {
+        let output = match std::process::Command::new("e2fsck")
+            .arg("-fn")
+            .arg(path)
+            .output()
+        {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("e2fsck not found; skipping");
+                return false;
+            }
+            Err(error) => panic!("failed to run e2fsck: {error}"),
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let diagnostics = format!("{stdout}\n{stderr}");
+        let expected = "Filesystem does not have resize_inode enabled, but s_reserved_gdt_blocks";
+        let unexpected = [
+            "WARNING:",
+            "UNEXPECTED INCONSISTENCY",
+            "Filesystem still has errors",
+            "Block bitmap differences",
+            "Inode bitmap differences",
+            "Free blocks count wrong",
+            "Free inodes count wrong",
+            "multiply-claimed",
+            "checksum does not match",
+        ];
+        assert!(
+            output.status.success()
+                && diagnostics.contains(expected)
+                && diagnostics.contains("should be zero.  Fix? no")
+                && unexpected
+                    .iter()
+                    .all(|diagnostic| !diagnostics.contains(diagnostic)),
+            "e2fsck found a non-baseline inconsistency after {label}:\nstdout: {stdout}\nstderr: {stderr}"
+        );
+        true
+    }
+
     /// Full `e2fsck -fn` validation of a formatted and grown image. Gated behind `--ignored`
     /// because e2fsprogs is only guaranteed on Linux CI; skips cleanly when the binary is absent.
     #[test]
@@ -1904,5 +2362,24 @@ mod tests {
 
         grow_image(&path, 512 * MIB).unwrap();
         assert_e2fsck_clean(&path, "replay + grow");
+    }
+
+    /// Compare a legacy image before and after repeated growth using e2fsprogs. The one accepted
+    /// warning is present in released v0.6.8 images before this resizer touches them; no additional
+    /// inconsistency may appear after either grow.
+    #[test]
+    #[ignore]
+    fn test_e2fsck_legacy_baseline_survives_repeated_growth() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fsck-legacy.ext4");
+        format_legacy_image(&path, 256 * MIB);
+
+        if !assert_e2fsck_legacy_baseline(&path, "legacy format") {
+            return;
+        }
+        grow_image(&path, 512 * MIB).unwrap();
+        assert_e2fsck_legacy_baseline(&path, "legacy grow to 512 MiB");
+        grow_image(&path, 1024 * MIB).unwrap();
+        assert_e2fsck_legacy_baseline(&path, "legacy grow to 1 GiB");
     }
 }
