@@ -405,7 +405,8 @@ impl LocalBackendBuilder {
     /// This retains the programmatic overrides from the builder while avoiding
     /// filesystem or migration work during construction. It is useful for
     /// embedding runtimes that must finish a protocol handshake before touching
-    /// sandbox state.
+    /// sandbox state. Persisted-config read or parse errors fall back to hard-coded
+    /// defaults; use [`try_build_lazy`](Self::try_build_lazy) to propagate them.
     pub fn build_lazy(self) -> LocalBackend {
         let persisted = load_persisted_config_or_default().unwrap_or_default();
         self.build_lazy_from(persisted)

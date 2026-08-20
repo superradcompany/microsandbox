@@ -843,34 +843,13 @@ pub fn config_path() -> PathBuf {
 }
 
 /// Load the persisted config file or return the default config if it does not exist.
-pub fn load_persisted_config_or_default() -> MicrosandboxResult<LocalConfig> {
+pub(crate) fn load_persisted_config_or_default() -> MicrosandboxResult<LocalConfig> {
     let path = config_path();
     if !path.exists() {
         return Ok(LocalConfig::default());
     }
 
     read_config_from(&path)
-}
-
-/// Persist the provided local config to disk as pretty JSON.
-pub fn save_persisted_config(config: &LocalConfig) -> MicrosandboxResult<()> {
-    let path = config_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            MicrosandboxError::Custom(format!(
-                "failed to create config directory `{}`: {e}",
-                parent.display()
-            ))
-        })?;
-    }
-
-    let content = serde_json::to_string_pretty(config)
-        .map_err(|e| MicrosandboxError::Custom(format!("failed to serialize config: {e}")))?;
-
-    std::fs::write(&path, format!("{content}\n")).map_err(|e| {
-        MicrosandboxError::Custom(format!("failed to write config `{}`: {e}", path.display()))
-    })?;
-    Ok(())
 }
 
 /// Store registry credentials in the OS keyring for interactive local use.

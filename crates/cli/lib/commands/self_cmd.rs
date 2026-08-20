@@ -1002,7 +1002,7 @@ async fn run_downgrade_local(args: SelfDowngradeArgs) -> anyhow::Result<()> {
         None
     };
 
-    let config = microsandbox::config::load_persisted_config_or_default()?;
+    let config = crate::local_config::load_local_config()?;
     let snapshots_dir = config.snapshots_dir();
 
     // Windows cannot atomically replace the running CLI and advance the
@@ -2439,7 +2439,7 @@ async fn open_downgrade_db(
         fs::create_dir_all(parent)?;
     }
 
-    let config = microsandbox::config::load_persisted_config_or_default()?;
+    let config = crate::local_config::load_local_config()?;
     let db = microsandbox_db::connection::DbWriteConnection::open(
         db_path,
         std::time::Duration::from_secs(config.database.connect_timeout_secs),
