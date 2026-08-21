@@ -33,7 +33,7 @@ pub fn run(args: ContextArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Format the concise stderr notice used before mutating and interactive commands.
+/// Format backend information for concise diagnostic notices.
 pub fn notice_text(info: &BackendInfo) -> String {
     match info.api_url.as_deref() {
         Some(api_url) => format!("{} · {api_url}", info.kind.as_str()),
