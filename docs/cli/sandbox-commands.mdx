@@ -279,6 +279,8 @@ msb touch --label app=engine
 
 <Tooltip tip="Not yet available on microsandbox cloud; recreate the sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
+`msb mod` is a shorter alias for `msb modify`.
+
 Change a running sandbox's configuration. Every change is planned and applied all-or-nothing. CPU and memory resize live within the `max_cpus` / `max_memory` ceilings; other changes that can't apply live need `--restart` or `--next-start`.
 
 ```bash

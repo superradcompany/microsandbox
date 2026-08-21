@@ -99,6 +99,7 @@ enum Commands {
     Create(create::CreateArgs),
 
     /// Modify sandbox configuration.
+    #[command(visible_alias = "mod")]
     Modify(modify::ModifyArgs),
 
     /// Start a stopped sandbox.
@@ -650,12 +651,7 @@ fn run_async_command_anyhow(
             // the SDK's ambient convenience fallback, the CLI must not run a
             // sandbox operation locally after an invalid explicit cloud selection.
             let backend = microsandbox::resolve_default_backend()?;
-            let backend_info = backend.info();
             microsandbox::set_default_backend(backend);
-
-            if shows_backend_notice(&command) {
-                microsandbox_cli::ui::notice("Backend", &context::notice_text(&backend_info));
-            }
         }
 
         match command {
@@ -739,30 +735,6 @@ fn is_backend_independent_maintenance_command(command: &Commands) -> bool {
     }
 }
 
-/// Return whether a command benefits from an explicit execution-context notice.
-fn shows_backend_notice(command: &Commands) -> bool {
-    matches!(
-        command,
-        Commands::Create(_) | Commands::Remove(_) | Commands::Exec(_)
-    ) || cfg!(feature = "ssh") && matches_ssh_command(command)
-}
-
-#[cfg(feature = "ssh")]
-fn matches_ssh_command(command: &Commands) -> bool {
-    match command {
-        Commands::Ssh(args) => !matches!(
-            args.subcommand.as_ref(),
-            Some(microsandbox_cli::commands::ssh::SshCommand::Authorize(_))
-        ),
-        _ => false,
-    }
-}
-
-#[cfg(not(feature = "ssh"))]
-fn matches_ssh_command(_command: &Commands) -> bool {
-    false
-}
-
 #[cfg(test)]
 mod command_tests {
     use super::*;
@@ -796,18 +768,12 @@ mod command_tests {
     }
 
     #[test]
-    fn backend_notices_cover_requested_commands_only() {
-        let create = Cli::try_parse_from(["msb", "create", "alpine:3.19"]).unwrap();
-        let remove = Cli::try_parse_from(["msb", "remove", "demo"]).unwrap();
-        let exec = Cli::try_parse_from(["msb", "exec", "demo", "--", "true"]).unwrap();
-        let context = Cli::try_parse_from(["msb", "context"]).unwrap();
-        let context_alias = Cli::try_parse_from(["msb", "ctx"]).unwrap();
+    fn command_aliases_route_to_their_canonical_commands() {
+        let context = Cli::try_parse_from(["msb", "ctx"]).unwrap();
+        let modify = Cli::try_parse_from(["msb", "mod", "demo", "--cpus", "2"]).unwrap();
 
-        assert!(shows_backend_notice(&create.command));
-        assert!(shows_backend_notice(&remove.command));
-        assert!(shows_backend_notice(&exec.command));
-        assert!(!shows_backend_notice(&context.command));
-        assert!(matches!(context_alias.command, Commands::Context(_)));
+        assert!(matches!(context.command, Commands::Context(_)));
+        assert!(matches!(modify.command, Commands::Modify(_)));
     }
 
     #[test]
@@ -829,23 +795,6 @@ mod command_tests {
             let cli = Cli::try_parse_from(["msb", command]).unwrap();
             assert!(matches!(cli.command, Commands::Registries(_)));
         }
-    }
-
-    #[cfg(feature = "ssh")]
-    #[test]
-    fn ssh_connect_has_notice_but_authorize_does_not() {
-        let connect = Cli::try_parse_from(["msb", "ssh", "demo"]).unwrap();
-        let authorize = Cli::try_parse_from([
-            "msb",
-            "ssh",
-            "authorize",
-            "--key",
-            "ssh-ed25519 AAAAexample",
-        ])
-        .unwrap();
-
-        assert!(shows_backend_notice(&connect.command));
-        assert!(!shows_backend_notice(&authorize.command));
     }
 }
 
