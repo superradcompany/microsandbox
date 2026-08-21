@@ -317,7 +317,9 @@ A live resize may not apply instantly; `--format json` reports a per-resource `r
 
 ## msb exec
 
-Execute a command inside a running sandbox.
+Execute a command inside a sandbox.
+
+`msb exec` leaves an already-running sandbox running. If the sandbox is stopped or crashed, the CLI starts it temporarily and waits for it to stop again before returning, including when the command cannot start or another execution error occurs. Invalid `--env`, `--rlimit`, and `--timeout` values fail before the sandbox starts.
 
 ```bash
 msb exec devbox -- python -c "print('hello')"
