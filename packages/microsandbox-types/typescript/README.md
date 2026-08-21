@@ -31,20 +31,29 @@ npm install @microsandbox/types
 Import the shapes you need with `import type`:
 
 ```ts
-import type { CloudSandboxSpec, CloudRootfsSource } from "@microsandbox/types";
+import type {
+  CloudCreateSandboxRequest,
+  CloudSnapshot,
+  CloudSnapshotOperation,
+} from "@microsandbox/types";
 
-const image: CloudRootfsSource = { type: "oci", reference: "python" };
-
-function createSandbox(spec: CloudSandboxSpec) {
-  // POST spec to the cloud API
+function createSandbox(request: CloudCreateSandboxRequest) {
+  // POST the source-tagged request to the cloud API
 }
 ```
+
+`CloudSnapshot` is the completed resource. `CloudSnapshotOperation` is the
+asynchronous capture operation and exposes only the public statuses `queued`,
+`in_progress`, `succeeded`, and `failed`. Both snapshot creation results and
+disk-snapshot restore requests use `CloudSnapshotLocation` to distinguish a
+managed artifact ID from a host-volume path.
 
 ## Generated Shape Notes
 
 The bindings follow `ts-rs` conventions, which mirror the Rust serde representation:
 
 - Cloud enums are internally tagged with a `type` field: `CloudRootfsSource` is `{ type: "bind"; … } | { type: "oci"; reference: string } | { type: "disk_image"; … }`, and `CloudVolumeMount` / `CloudHostPattern` / `CloudViolationAction` follow the same shape.
+- `CloudCreateSandboxRequest` is a flat union discriminated by `source: "oci" | "bind" | "disk_image" | "disk_snapshot"`. Common sandbox fields stay flat on every variant; source-specific fields such as `reference`, `path`, and `disk_snapshot_ref` appear only where they apply. Servers also accept the legacy `image` request shape without `source` during migration.
 - Lowercase domain enums like `StatVirtualization` are string-literal unions (`"strict" | "relaxed" | "off"`).
 - Optional Rust fields are `T | null`; fields skipped when absent are `?:` optional.
 - Referenced domain and snapshot types live in `domain.ts` and `snapshot.ts` and are re-exported from the package entry, so a single import from `@microsandbox/types` sees the whole cloud contract.

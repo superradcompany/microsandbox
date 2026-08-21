@@ -730,12 +730,14 @@ char *msb_snapshot_create(uint64_t cancel_id,
                           uintptr_t buf_len);
 
 char *msb_snapshot_open(uint64_t cancel_id,
-                        const char *path_or_name,
+                        const char *reference,
+                        const char *reference_kind,
                         unsigned char *buf,
                         uintptr_t buf_len);
 
 char *msb_snapshot_verify(uint64_t cancel_id,
-                          const char *path_or_name,
+                          const char *reference,
+                          const char *reference_kind,
                           unsigned char *buf,
                           uintptr_t buf_len);
 
@@ -752,7 +754,8 @@ char *msb_snapshot_list_dir(uint64_t cancel_id,
                             uintptr_t buf_len);
 
 char *msb_snapshot_remove(uint64_t cancel_id,
-                          const char *path_or_name,
+                          const char *reference,
+                          const char *reference_kind,
                           bool force,
                           unsigned char *buf,
                           uintptr_t buf_len);
@@ -763,7 +766,8 @@ char *msb_snapshot_reindex(uint64_t cancel_id,
                            uintptr_t buf_len);
 
 char *msb_snapshot_export(uint64_t cancel_id,
-                          const char *name_or_path,
+                          const char *reference,
+                          const char *reference_kind,
                           const char *out,
                           const char *opts_json,
                           unsigned char *buf,

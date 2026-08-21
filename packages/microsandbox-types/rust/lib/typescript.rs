@@ -14,16 +14,17 @@ use crate::snapshot::{
     SnapshotState, UpperIntegrity, UpperLayer,
 };
 use crate::{
-    Action, CloudCreateSandboxResponse, CloudCreateSnapshotRequest, CloudDiskImageFormat,
-    CloudErrorBody, CloudErrorDetails, CloudHostPattern, CloudMessageResponse, CloudNetworkSpec,
-    CloudPaginated, CloudPatch, CloudPullPolicy, CloudRlimit, CloudRlimitResource,
-    CloudRootfsSource, CloudSandboxResources, CloudSandboxRuntimeOptions, CloudSandboxSpec,
-    CloudSandboxStatus, CloudSandboxStatusReason, CloudSecretEntry, CloudSecretSource,
-    CloudSecretsConfig, CloudSnapshot, CloudSnapshotLocation, CloudSnapshotOperation,
-    CloudSnapshotOperationStatus, CloudSnapshotReference, CloudViolationAction, CloudVolumeMount,
-    Destination, DestinationGroup, Direction, EnvVar, HandoffInit, HostPermissions, MountOptions,
-    NetworkPolicy, PortRange, Protocol, Rule, SandboxLogLevel, SandboxPolicy, SecretInjection,
-    SecurityProfile, SnapshotManifest, StatVirtualization,
+    Action, CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudCreateSnapshotRequest,
+    CloudDiskImageFormat, CloudErrorBody, CloudErrorDetails, CloudHostPattern,
+    CloudMessageResponse, CloudNetworkSpec, CloudPaginated, CloudPatch, CloudPullPolicy,
+    CloudRlimit, CloudRlimitResource, CloudRootfsSource, CloudSandboxComputeResources,
+    CloudSandboxResources, CloudSandboxRuntimeOptions, CloudSandboxSpec, CloudSandboxStatus,
+    CloudSandboxStatusReason, CloudSecretEntry, CloudSecretSource, CloudSecretsConfig,
+    CloudSnapshot, CloudSnapshotLocation, CloudSnapshotOperation, CloudSnapshotOperationStatus,
+    CloudViolationAction, CloudVolumeMount, Destination, DestinationGroup, Direction, EnvVar,
+    HandoffInit, HostPermissions, MountOptions, NetworkPolicy, PortRange, Protocol, Rule,
+    SandboxLogLevel, SandboxPolicy, SecretInjection, SecurityProfile, SnapshotManifest,
+    StatVirtualization,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -183,9 +184,10 @@ pub fn cloud_declarations() -> Vec<String> {
     let cfg = ts_rs::Config::new().with_large_int("number");
 
     vec![
+        CloudCreateSandboxRequest::decl(&cfg),
         CloudSandboxSpec::decl(&cfg),
+        CloudSandboxComputeResources::decl(&cfg),
         CloudRootfsSource::decl(&cfg),
-        CloudSnapshotReference::decl(&cfg),
         CloudVolumeMount::decl(&cfg),
         CloudSandboxResources::decl(&cfg),
         CloudSandboxRuntimeOptions::decl(&cfg),
@@ -295,11 +297,15 @@ mod tests {
     fn cloud_bindings_import_domain_and_stay_scoped() {
         assert_eq!(domain_declarations().len(), 17);
         assert_eq!(snapshot_declarations().len(), 9);
-        assert_eq!(cloud_declarations().len(), 29);
+        assert_eq!(cloud_declarations().len(), 30);
 
         let cloud = render_cloud();
         // Cloud twins live here and their domain deps are imported/re-exported.
+        for source in ["oci", "bind", "disk_image", "disk_snapshot"] {
+            assert!(cloud.contains(&format!("\"source\": \"{source}\"")));
+        }
         assert!(cloud.contains("export type CloudSandboxSpec"));
+        assert!(cloud.contains("export type CloudSandboxComputeResources"));
         assert!(cloud.contains("import type {"));
         assert!(cloud.contains("EnvVar"));
         assert!(cloud.contains("export type * from \"./domain.js\""));

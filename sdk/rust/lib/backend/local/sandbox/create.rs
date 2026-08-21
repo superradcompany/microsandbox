@@ -22,7 +22,7 @@ use tokio::sync::Mutex;
 use super::LocalBackend;
 use crate::MicrosandboxResult;
 use crate::agent::AgentClient;
-use crate::backend::Backend;
+use crate::backend::{Backend, SnapshotBackend};
 use crate::db::entity::{
     run as run_entity, sandbox as sandbox_entity, sandbox_label as sandbox_label_entity,
     sandbox_rootfs as sandbox_rootfs_entity,
@@ -92,6 +92,16 @@ impl LocalBackend {
         mode: SpawnMode,
         progress: Option<PullProgressSender>,
     ) -> MicrosandboxResult<Sandbox> {
+        let mut restore_upper_path = if let Some(reference) = config.snapshot_reference.clone() {
+            let snapshot = SnapshotBackend::open(self, backend.clone(), reference).await?;
+            Some(super::super::snapshot::materialize_restore_config(
+                &mut config,
+                &snapshot,
+            )?)
+        } else {
+            None
+        };
+
         tracing::debug!(
             sandbox = %config.spec.name,
             image = ?config.spec.image,
@@ -133,8 +143,7 @@ impl LocalBackend {
         // Resolve OCI images before spawning the sandbox process.
         if let RootfsSource::Oci(oci) = config.spec.image.clone() {
             let reference = oci.reference;
-            let expected_snapshot_manifest_digest = config
-                .snapshot_upper_source
+            let expected_snapshot_manifest_digest = restore_upper_path
                 .as_ref()
                 .and(config.manifest_digest.clone());
             let root_disk = oci
@@ -225,7 +234,7 @@ impl LocalBackend {
                             "patches are not yet compatible with flat OCI rootfs".into(),
                         ));
                     }
-                    if config.snapshot_upper_source.is_some() {
+                    if restore_upper_path.is_some() {
                         return Err(crate::MicrosandboxError::InvalidConfig(
                             "from_snapshot is not yet compatible with flat OCI rootfs".into(),
                         ));
@@ -284,7 +293,7 @@ impl LocalBackend {
                 {
                     *size_mib = Some(target_mib);
                 }
-            } else if let Some(snap_upper) = config.snapshot_upper_source.take() {
+            } else if let Some(snap_upper) = restore_upper_path.take() {
                 // Booting from a snapshot: copy the captured upper into
                 // place, preserving sparseness. Patches are not
                 // compatible with this path because they'd need to be

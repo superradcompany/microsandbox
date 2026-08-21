@@ -41,9 +41,22 @@ cargo run -p microsandbox-types --features ts --bin microsandbox-types-generate 
 
 - Sandbox specs: `SandboxSpec`, `SandboxResources`, `SandboxRuntimeOptions`, rootfs sources, mounts, patches, init, lifecycle policy.
 - Networking intent: `NetworkSpec`, published ports, protocols.
-- Volumes and snapshots: `VolumeSpec`, `SnapshotSpec`, and their kinds.
+- Volumes and snapshot manifests: `VolumeSpec`, `SnapshotSpec`, and their kinds.
 - Exec and logging: `Rlimit`, `RlimitResource`, `LogSource`, `SandboxLogLevel`.
-- Cloud wire contracts: `CloudCreateSandboxRequest`, `CloudSandbox`, paginated/message/error bodies.
+- Cloud wire contracts: the source-tagged `CloudCreateSandboxRequest` union,
+  `CloudSandbox`, snapshot resources and operations, and
+  paginated/message/error bodies.
+
+Cloud snapshot contracts distinguish the durable resource from the asynchronous
+capture operation:
+
+- `CloudSnapshot` is the completed snapshot resource, including its canonical
+  manifest, byte size, labels, and `CloudSnapshotLocation`.
+- `CloudSnapshotLocation` is either a managed artifact ID or a host-volume
+  path. The same type is used when restoring a sandbox so location semantics
+  are not duplicated.
+- `CloudSnapshotOperation` tracks a capture request through `queued`,
+  `in_progress`, `succeeded`, or `failed`; `result` is populated on success.
 - Validation helpers: sandbox-name and hostname rules shared across SDK, CLI, and cloud.
 
 Backend-private materialized state (registry credentials, local cache paths, DB rows, resolved manifest digests, process handles) deliberately stays out of these packages. See each language's README for details.

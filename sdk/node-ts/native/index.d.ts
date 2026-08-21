@@ -1084,6 +1084,11 @@ export declare class SandboxBuilder {
    * snapshot already pins the image reference and digest.
    */
   fromSnapshot(pathOrName: string): this
+  /**
+   * Boot from a snapshot while preserving its backend-neutral reference kind.
+   * Used by the TypeScript wrapper when passed a Snapshot or SnapshotHandle.
+   */
+  fromSnapshotRef(reference: string, kind: 'auto' | 'id' | 'path'): this
   /** Number of virtual CPUs. */
   cpus(count: number): this
   /** Boot-time maximum possible virtual CPUs. */
@@ -1503,28 +1508,14 @@ export declare class SftpClient {
 }
 export type JsSftpClient = SftpClient
 
-/** A snapshot artifact on disk. */
+/** A backend-neutral snapshot artifact. */
 export declare class Snapshot {
   static open(pathOrName: string): Promise<Snapshot>
   static get(nameOrDigest: string): Promise<SnapshotHandle>
   static list(): Promise<Array<SnapshotInfo>>
-  /**
-   * Walk `dir` and parse each subdirectory's `snapshot.json`. Does
-   * not touch the local index — useful for inspecting external
-   * snapshot collections (e.g. a mounted volume of artifacts that
-   * were never imported).
-   */
-  static listDir(dir: string): Promise<Array<Snapshot>>
   static remove(pathOrName: string, opts?: SnapshotRemoveOptions | undefined | null): Promise<void>
-  static reindex(dir?: string | undefined | null): Promise<number>
-  /**
-   * Bundle a snapshot into a `.tar.zst` archive. The recorded
-   * manifest is archived as-is, so create the snapshot with
-   * `recordIntegrity()` if receivers must verify content.
-   */
-  static save(nameOrPath: string, out: string, opts?: SaveOpts | undefined | null): Promise<void>
-  static load(archive: string, dest?: string | undefined | null): Promise<SnapshotHandle>
-  get path(): string
+  get reference(): string
+  get referenceKind(): 'id' | 'path'
   get digest(): string
   get sizeBytes(): bigint | null
   get imageRef(): string
@@ -1544,6 +1535,17 @@ export declare class Snapshot {
   get createdAt(): string
   get labels(): Record<string, string>
   get sourceSandbox(): string | null
+  /** Walk `dir` and parse each snapshot artifact within it. */
+  static listDir(dir: string): Promise<Array<Snapshot>>
+  /** Rebuild the backend snapshot index from artifacts in `dir`. */
+  static reindex(dir?: string | undefined | null): Promise<number>
+  /** Bundle a snapshot into a `.tar.zst` archive. */
+  static save(nameOrPath: string, out: string, opts?: SaveOpts | undefined | null): Promise<void>
+  /** Bundle this snapshot into a `.tar.zst` archive. */
+  saveTo(out: string, opts?: SaveOpts | undefined | null): Promise<void>
+  /** Unpack a snapshot archive into the active backend's snapshot store. */
+  static load(archive: string, dest?: string | undefined | null): Promise<SnapshotHandle>
+  /** Verify this snapshot's recorded payload integrity. */
   verify(): Promise<SnapshotVerifyReport>
 }
 export type JsSnapshot = Snapshot
@@ -1584,7 +1586,7 @@ export declare class SnapshotBuilder {
 }
 export type JsSnapshotBuilder = SnapshotBuilder
 
-/** Lightweight snapshot handle from the local index. */
+/** Lightweight snapshot handle returned by the active backend. */
 export declare class SnapshotHandle {
   get digest(): string
   get name(): string | null
@@ -1601,9 +1603,12 @@ export declare class SnapshotHandle {
   get migrationState(): string
   get migrationErrorCode(): string | null
   get createdAt(): number
-  get path(): string
+  get reference(): string
+  get referenceKind(): 'id' | 'path'
   open(): Promise<Snapshot>
   remove(opts?: SnapshotRemoveOptions | undefined | null): Promise<void>
+  /** Bundle this snapshot into a `.tar.zst` archive. */
+  saveTo(out: string, opts?: SaveOpts | undefined | null): Promise<void>
 }
 export type JsSnapshotHandle = SnapshotHandle
 
@@ -2298,7 +2303,7 @@ export interface SandboxTouchResult {
   activitySeq: number
 }
 
-/** Options for `Snapshot.save()`. */
+/** Options for `Snapshot.save()` and instance `saveTo()` methods. */
 export interface SaveOpts {
   /** Walk the parent chain and include each ancestor in the archive. */
   withParents?: boolean
@@ -2424,7 +2429,8 @@ export interface SnapshotInfo {
   migrationState: string
   migrationErrorCode?: string
   createdAt: number
-  path: string
+  reference: string
+  referenceKind: 'id' | 'path'
 }
 
 export interface SnapshotLabel {

@@ -34,7 +34,8 @@ async def test_snapshot_create_open_list_and_boot(sandbox_name):
         base_handle = await Sandbox.get(base_name)
         snapshot = await base_handle.snapshot(snapshot_name)
         assert snapshot.digest
-        assert snapshot.path
+        assert snapshot.reference
+        assert snapshot.reference_kind == "path"
         assert snapshot.size_bytes > 0
         assert snapshot.source_sandbox == base_name
         assert snapshot.state_kind is SnapshotStateKind.FILE

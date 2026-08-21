@@ -48,7 +48,7 @@ export type SnapshotState =
     };
 
 /**
- * Bundle options for `Snapshot.save`.
+ * Bundle options for `Snapshot.save` and instance `saveTo` methods.
  */
 export interface SaveOpts {
   /** Walk the parent chain and include each ancestor in the archive. */
@@ -88,15 +88,13 @@ export interface SnapshotBuilder extends NapiSnapshotBuilderSetters {
 }
 
 /**
- * A snapshot artifact on disk.
+ * A backend-neutral snapshot artifact.
  *
  * Returned by `Snapshot.builder(name).create()`, `Snapshot.open(...)`,
  * and `SandboxHandle.snapshot(name)`.
  *
- * The artifact is a directory containing `snapshot.json` and the
- * captured `upper.ext4`. The directory is the source of truth; the
- * local DB index (used for queries like `Snapshot.list()`) is just a
- * cache and is rebuildable via `Snapshot.reindex()`.
+ * The snapshot retains its originating backend internally and exposes a
+ * stable reference for subsequent lifecycle and restore operations.
  */
 export class Snapshot {
   /** @internal */
@@ -108,8 +106,7 @@ export class Snapshot {
   }
 
   /**
-   * Begin building a snapshot named `name`, stored under the default
-   * snapshots directory.
+   * Begin building a snapshot named `name` using the active backend.
    *
    * The source sandbox is required:
    * `Snapshot.builder("clean").fromSandbox("box").create()`.
@@ -123,38 +120,25 @@ export class Snapshot {
   }
 
   /**
-   * Open an existing snapshot artifact. Bare names resolve under the
-   * default snapshots directory; anything else is treated as a path.
+   * Open an existing snapshot. Strings are interpreted by the active backend.
    *
-   * Cheap metadata validation only — does not read the upper file.
-   * Use `verify()` for content checks.
+   * Cheap metadata validation only — does not read snapshot contents.
    */
   static async open(pathOrName: string): Promise<Snapshot> {
     const inner = await withMappedErrors(() => napi.Snapshot.open(pathOrName));
     return new Snapshot(inner);
   }
 
-  /** Look up an indexed snapshot by digest, name, or path. */
+  /** Look up a snapshot using the active backend's public identifier. */
   static async get(nameOrDigest: string): Promise<SnapshotHandle> {
     const raw = await withMappedErrors(() => napi.Snapshot.get(nameOrDigest));
     return new SnapshotHandle(raw);
   }
 
-  /** List indexed snapshots from the local DB cache. */
+  /** List snapshots visible through the active backend. */
   static async list(): Promise<SnapshotHandle[]> {
     const infos = await withMappedErrors(() => napi.Snapshot.list());
     return infos.map(snapshotInfoToHandle);
-  }
-
-  /**
-   * Walk a directory and parse each subdirectory's manifest. Does
-   * not touch the index — useful for inspecting external snapshot
-   * collections that were never imported. Skips entries that don't
-   * look like snapshot artifacts.
-   */
-  static async listDir(dir: string): Promise<Snapshot[]> {
-    const raw = await withMappedErrors(() => napi.Snapshot.listDir(dir));
-    return raw.map((s) => new Snapshot(s));
   }
 
   /**
@@ -170,45 +154,18 @@ export class Snapshot {
     );
   }
 
-  /**
-   * Walk the snapshots directory (default: configured snapshots dir)
-   * and rebuild the local index. Returns the number of artifacts
-   * indexed.
-   */
-  static async reindex(dir?: string): Promise<number> {
-    return withMappedErrors(() => napi.Snapshot.reindex(dir));
-  }
-
-  /**
-   * Bundle a snapshot into a `.tar.zst` archive. The recorded
-   * manifest is archived as-is, so create the snapshot with
-   * `recordIntegrity()` if receivers must verify content.
-   */
-  static async save(
-    nameOrPath: string,
-    out: string,
-    opts?: SaveOpts,
-  ): Promise<void> {
-    await withMappedErrors(() => napi.Snapshot.save(nameOrPath, out, opts));
-  }
-
-  /**
-   * Unpack a snapshot archive (`.tar.zst` or `.tar`) into the
-   * snapshots directory. Recorded payload integrity is preserved for
-   * explicit verification. Compression is detected from magic bytes.
-   */
-  static async load(archive: string, dest?: string): Promise<SnapshotHandle> {
-    const raw = await withMappedErrors(() => napi.Snapshot.load(archive, dest));
-    return new SnapshotHandle(raw);
-  }
-
   //--------------------------------------------------------------------------
   // Instance accessors
   //--------------------------------------------------------------------------
 
-  /** Path to the artifact directory. */
-  get path(): string {
-    return this.inner.path;
+  /** Stable value accepted by `SandboxBuilder.fromSnapshot()`. */
+  get reference(): string {
+    return this.inner.reference;
+  }
+
+  /** How the backend resolves `reference`. */
+  get referenceKind(): "id" | "path" {
+    return this.inner.referenceKind;
   }
 
   /** Canonical content digest (`sha256:hex`). The snapshot's identity. */
@@ -216,7 +173,7 @@ export class Snapshot {
     return this.inner.digest;
   }
 
-  /** Apparent size of the captured upper layer in bytes (sparse on disk). */
+  /** Backend-reported stored payload size in bytes. */
   get sizeBytes(): bigint | null {
     return this.inner.sizeBytes ?? null;
   }
@@ -351,16 +308,62 @@ export class Snapshot {
   }
 
   /**
-   * Recompute recorded payload integrity and compare it with the
-   * descriptor. Returns `notRecorded` without reading payload contents
-   * when creation did not request integrity.
-   *
- * Checkpoint-state verification remains unavailable until its provider
- * closure implementation lands.
+   * Parse snapshot artifacts found directly beneath a backend-visible directory.
+   * Throws `UnsupportedError` when the backend does not expose artifact files.
+   */
+  static async listDir(dir: string): Promise<Snapshot[]> {
+    const raw = await withMappedErrors(() => napi.Snapshot.listDir(dir));
+    return raw.map((snapshot) => new Snapshot(snapshot));
+  }
+
+  /**
+   * Rebuild the backend snapshot index from artifacts in `dir`.
+   * Throws `UnsupportedError` when the backend does not expose a rebuildable index.
+   */
+  static async reindex(dir?: string): Promise<number> {
+    return withMappedErrors(() => napi.Snapshot.reindex(dir));
+  }
+
+  /**
+   * Bundle a snapshot into a `.tar.zst` archive.
+   * Throws `UnsupportedError` when the backend does not expose artifact archives.
+   */
+  static async save(
+    nameOrPath: string,
+    out: string,
+    opts?: SaveOpts,
+  ): Promise<void> {
+    await withMappedErrors(() =>
+      napi.Snapshot.save(nameOrPath, out, opts),
+    );
+  }
+
+  /**
+   * Unpack a snapshot archive into the active backend's snapshot store.
+   * Throws `UnsupportedError` when the backend does not expose artifact archives.
+   */
+  static async load(archive: string, dest?: string): Promise<SnapshotHandle> {
+    const raw = await withMappedErrors(() =>
+      napi.Snapshot.load(archive, dest),
+    );
+    return new SnapshotHandle(raw);
+  }
+
+  /**
+   * Bundle this snapshot into a `.tar.zst` archive.
+   * Throws `UnsupportedError` when the backend does not expose artifact archives.
+   */
+  async saveTo(out: string, opts?: SaveOpts): Promise<void> {
+    await withMappedErrors(() => this.inner.saveTo(out, opts));
+  }
+
+  /**
+   * Verify this snapshot's recorded payload integrity.
+   * Throws `UnsupportedError` when the backend does not expose payload verification.
    */
   async verify(): Promise<SnapshotVerifyReport> {
-    const r = await withMappedErrors(() => this.inner.verify());
-    return verifyReportToTs(r);
+    const report = await withMappedErrors(() => this.inner.verify());
+    return verifyReportToTs(report);
   }
 }
 

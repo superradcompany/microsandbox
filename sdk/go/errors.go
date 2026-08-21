@@ -145,8 +145,8 @@ const (
 	// ErrMetricsUnavailable indicates metrics have no current sample for this sandbox.
 	ErrMetricsUnavailable
 
-	// ErrUnsupportedOperation indicates the sandbox runtime is too old for the
-	// requested feature; restart the sandbox to update it.
+	// ErrUnsupportedOperation indicates that the selected backend or sandbox
+	// runtime does not provide the requested operation.
 	ErrUnsupportedOperation
 
 	// ErrInternal is every other error from the runtime.
