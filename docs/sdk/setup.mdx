@@ -45,14 +45,21 @@ if !m.IsInstalled() {
     }
 }
 ```
+
+```ruby Ruby
+require "microsandbox"
+
+Microsandbox.install unless Microsandbox.installed?
+```
 </CodeGroup>
 
 | SDK | Install | Check | Behavior |
 |-----|---------|-------|----------|
 | Rust | `setup::install() -> MicrosandboxResult<()>` | `setup::is_installed() -> bool` | Downloads the SDK's pinned runtime and verifies it. |
 | TypeScript | `install(): Promise<void>` | `isInstalled(): boolean` | Downloads the package's pinned runtime and verifies it. |
-| Python | `install() -> None` (async) | `is_installed() -> bool` | Installs and verifies the runtime; release wheels normally bundle matching files. |
+| Python | `install() -> Awaitable[None]` | `is_installed() -> bool` | Installs and verifies the runtime; release wheels normally bundle matching files. |
 | Go | `EnsureInstalled(ctx, ...SetupOption) error` | `IsInstalled() bool` | Installs `msb` and `libkrunfw`; the Go FFI library is embedded separately. |
+| Ruby | `install -> nil` | `installed? -> bool` | Installs and verifies the runtime used by the native extension. |
 
 ## Customize installation
 
@@ -108,7 +115,7 @@ In Go, `WithSkipDownload()` returns a `SetupOption`, whose exported type is `fun
 
 ## Override runtime paths
 
-The Rust, TypeScript, and Python SDKs can override the process-wide `libkrunfw` path directly. Call the setter before creating a local sandbox.
+The Rust, TypeScript, Python, and Ruby SDKs can override the process-wide `libkrunfw` path directly. Call the setter before creating a local sandbox.
 
 <CodeGroup>
 ```rust Rust
@@ -127,6 +134,12 @@ setRuntimeLibkrunfwPath("/opt/microsandbox/lib/libkrunfw.dylib");
 from microsandbox import set_libkrunfw_path
 
 set_libkrunfw_path("/opt/microsandbox/lib/libkrunfw.dylib")
+```
+
+```ruby Ruby
+require "microsandbox"
+
+Microsandbox.set_runtime_libkrunfw_path("/opt/microsandbox/lib/libkrunfw.dylib")
 ```
 </CodeGroup>
 

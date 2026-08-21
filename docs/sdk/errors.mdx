@@ -1,10 +1,10 @@
 ---
 title: Error handling
-description: Typed errors and resource cleanup patterns
+description: Error matching and resource cleanup patterns
 icon: "triangle-exclamation"
 ---
 
-All SDKs surface typed errors so you can match on specific failure modes instead of parsing strings. Rust has an `Error` enum, TypeScript exposes a dedicated subclass per variant (use `instanceof`), Python provides dedicated exception classes, and Go provides an `*Error` value with an `ErrorKind` discriminator matched via `m.IsKind(err, kind)` or `errors.As`.
+SDKs surface failures through language-idiomatic error values. Match documented typed variants where they are available, and otherwise report or propagate the returned error without parsing its message.
 
 ## Matching errors
 
@@ -29,7 +29,7 @@ match sb.exec("python", ["script.py"]).await {
     Ok(output) => {
         eprintln!("Exit {}: {}", output.status().code, output.stderr()?);
     }
-    Err(Error::ExecTimeout) => eprintln!("Timed out"),
+    Err(Error::ExecTimeout(_)) => eprintln!("Timed out"),
     Err(Error::Runtime(msg)) => eprintln!("Runtime: {msg}"),
     Err(e) => return Err(e),
 }
@@ -134,14 +134,13 @@ case err != nil:
 `exec()` distinguishes between:
 
 - **A program that ran and exited non-zero**: the call returns an `ExecOutput` with a non-zero `code`. This is *not* an error in the SDK sense; it's a normal result.
-- **A program that never started**: the binary doesn't exist, isn't executable, the working directory is unreachable, etc. This surfaces as a typed error variant: `ExecFailed` (Rust), `ExecFailedError` (TypeScript), `ExecFailedError` (Python).
+- **A program that never started**: the binary doesn't exist, isn't executable, the working directory is unreachable, etc. The call returns or raises an SDK error.
 
-The typed error carries a classified `kind` plus the underlying `errno`, so callers can branch on the cause and react. Common kinds: `NotFound` (binary missing on PATH), `PermissionDenied`, `NotExecutable`, `BadCwd`, `BadArgs`, `ResourceLimit`, `UserSetupFailed`, `OutOfMemory`, `PtySetupFailed`, `Other`.
+Rust exposes a structured `ExecFailed` payload, and Go exposes the same detail on streaming execution events. Common failure kinds include `NotFound` (binary missing on `PATH`), `PermissionDenied`, `NotExecutable`, `BadCwd`, `BadArgs`, `ResourceLimit`, `UserSetupFailed`, `OutOfMemory`, `PtySetupFailed`, and `Other`.
 
 <CodeGroup>
 ```rust Rust
-use microsandbox::Error;
-use microsandbox_protocol::exec::ExecFailureKind;
+use microsandbox::{protocol::exec::ExecFailureKind, Error};
 
 match sb.exec("nonexistent", []).await {
     Ok(output) => { /* program ran, check output.status() */ }
@@ -164,44 +163,33 @@ match sb.exec("nonexistent", []).await {
 ```
 
 ```typescript TypeScript
-import { ExecFailedError, Sandbox } from "microsandbox";
-
 try {
     const output = await sb.exec("nonexistent");
     // program ran, check output.success / output.code
 } catch (e) {
-    if (e instanceof ExecFailedError) {
-        switch (e.kind) {
-            case "not_found":
-                console.error("Binary not on PATH:", e.message);
-                break;
-            case "permission_denied":
-                console.error("Not executable (chmod +x?):", e.message);
-                break;
-            default:
-                console.error(`Spawn failed (${e.kind}):`, e.message);
-        }
-        // e.errno, e.errnoName, e.stage are also available
-    } else {
-        throw e;
-    }
+    console.error("Program could not be started:", e);
 }
 ```
 
 ```python Python
-from microsandbox import ExecFailedError
+from microsandbox import MicrosandboxError
 
 try:
     output = await sb.exec("nonexistent")
     # program ran, check output.success / output.exit_code
-except ExecFailedError as e:
-    if e.kind == "not_found":
-        print(f"Binary not on PATH: {e.message}")
-    elif e.kind == "permission_denied":
-        print(f"Not executable (chmod +x?): {e.message}")
-    else:
-        print(f"Spawn failed ({e.kind}): {e.message}")
-    # e.errno, e.errno_name, e.stage are also available
+except MicrosandboxError as e:
+    print(f"Program could not be started: {e}")
+```
+
+```ruby Ruby
+require "microsandbox"
+
+begin
+  output = sandbox.exec("nonexistent")
+  # program ran, check output.success / output.exit_code
+rescue Microsandbox::Error => e
+  warn "Program could not be started: #{e.message}"
+end
 ```
 
 ```go Go
@@ -238,7 +226,7 @@ for {
 ```
 </CodeGroup>
 
-The CLI maps these kinds to POSIX-style exit codes: `127` for `NotFound`, `126` for `PermissionDenied` and `NotExecutable`, `1` otherwise. SDK callers reading the error directly don't need to think about exit codes; branch on `kind` instead.
+The CLI maps these kinds to POSIX-style exit codes: `127` for `NotFound`, `126` for `PermissionDenied` and `NotExecutable`, and `1` otherwise.
 
 ## Name conflicts
 
@@ -246,7 +234,7 @@ Creating a sandbox with a name that's already in use (and without `replace`) sur
 
 <CodeGroup>
 ```rust Rust
-use microsandbox::Error;
+use microsandbox::{Error, Sandbox};
 
 match Sandbox::builder("worker").image("alpine").create().await {
     Ok(sb) => { /* ... */ }
@@ -258,7 +246,7 @@ match Sandbox::builder("worker").image("alpine").create().await {
 ```
 
 ```typescript TypeScript
-import { SandboxAlreadyExistsError } from "microsandbox";
+import { Sandbox, SandboxAlreadyExistsError } from "microsandbox";
 
 try {
     const sb = await Sandbox.builder("worker").image("alpine").create();
@@ -272,20 +260,12 @@ try {
 ```
 
 ```python Python
-from microsandbox import SandboxAlreadyExistsError
+from microsandbox import Sandbox, SandboxAlreadyExistsError
 
 try:
     sb = await Sandbox.create("worker", image="alpine")
 except SandboxAlreadyExistsError:
     print("sandbox already exists; resume or pass replace=True")
-```
-
-```go Go
-sb, err := m.CreateSandbox(ctx, "worker",
-    m.WithImage("alpine"))
-if m.IsKind(err, m.ErrSandboxAlreadyExists) {
-    log.Println("sandbox already exists; resume or pass WithReplace()")
-}
 ```
 
 </CodeGroup>
@@ -294,65 +274,59 @@ Pass `replace()` / `replace=True` / `--replace` / `WithReplace()` to stop the ex
 
 ## Sandbox start failures
 
-When a sandbox process exits before the agent relay is ready (mount errors, missing rootfs, network setup failures), the SDK surfaces a typed `BootStart` / `BootStartError`. The payload carries the failure stage and errno so callers can recover or report cleanly.
+When a sandbox process exits before the agent relay is ready, creation returns or raises an SDK error. Rust exposes a structured `BootStart` payload with the failure stage and underlying message.
 
 <CodeGroup>
 ```rust Rust
-use microsandbox::Error;
-use microsandbox_runtime::boot_error::BootErrorStage;
+use microsandbox::{Error, Sandbox};
 
 match Sandbox::builder("svc").image("alpine").create().await {
     Ok(sb) => { /* ... */ }
     Err(Error::BootStart { name, err }) => {
         eprintln!("Sandbox {name:?} failed at stage {:?}: {}", err.stage, err.message);
-        if matches!(err.stage, BootErrorStage::Mount) {
-            eprintln!("Hint: a host volume path may not exist.");
-        }
     }
     Err(e) => return Err(e),
 }
 ```
 
 ```typescript TypeScript
-import { BootStartError } from "microsandbox";
+import { Sandbox } from "microsandbox";
 
 try {
     const sb = await Sandbox.builder("svc").image("alpine").create();
 } catch (e) {
-    if (e instanceof BootStartError) {
-        console.error(`Sandbox "${e.name}" failed at stage ${e.stage}: ${e.message}`);
-        if (e.stage === "mount") {
-            console.error("Hint: a host volume path may not exist.");
-        }
-    } else {
-        throw e;
-    }
+    console.error("Sandbox failed to start:", e);
 }
 ```
 
 ```python Python
-from microsandbox import BootStartError
+from microsandbox import MicrosandboxError, Sandbox
 
 try:
     sb = await Sandbox.create("svc", image="alpine")
-except BootStartError as e:
-    print(f"Sandbox {e.name!r} failed at stage {e.stage}: {e.message}")
-    if e.stage == "mount":
-        print("Hint: a host volume path may not exist.")
+except MicrosandboxError as e:
+    print(f"Sandbox failed to start: {e}")
 ```
 
 ```go Go
-// The Go SDK surfaces boot failures as *m.Error.
-// Inspect Kind and Message for the failure details.
 _, err := m.CreateSandbox(ctx, "svc", m.WithImage("alpine"))
-var me *m.Error
-if errors.As(err, &me) {
-    log.Printf("sandbox boot failed (kind=%s): %s", me.Kind, me.Message)
+if err != nil {
+    log.Printf("sandbox failed to start: %v", err)
 }
+```
+
+```ruby Ruby
+require "microsandbox"
+
+begin
+  sandbox = Microsandbox::Sandbox.create("svc", image: "alpine")
+rescue Microsandbox::Error => e
+  warn "Sandbox failed to start: #{e.message}"
+end
 ```
 </CodeGroup>
 
-The CLI prepends the same payload as a styled `error:` block before any captured log output, so you see "what went wrong + a hint" inline. SDK callers get the structured payload to make their own decisions.
+The CLI prints the startup failure before any captured log output so the immediate cause stays visible.
 
 ## Resource cleanup
 
@@ -407,12 +381,19 @@ if err != nil {
 defer func() {
     stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
     defer cancel()
-    _, _ = sb.Stop(stopCtx)
+    _ = sb.Stop(stopCtx)
     _ = sb.Close()
 }()
 
 out, _ := sb.Exec(ctx, "python", []string{"-c", "print('hello')"})
 fmt.Println(out.Stdout())
+```
+
+```ruby Ruby
+Microsandbox::Sandbox.with("temp", image: "python", replace: true) do |sandbox|
+  output = sandbox.exec("python", ["-c", "print('hello')"])
+  puts output.stdout
+end
 ```
 
 </CodeGroup>

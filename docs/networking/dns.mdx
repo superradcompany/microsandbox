@@ -124,7 +124,8 @@ await using sb = await Sandbox.builder("safe-agent")
 ```
 
 ```python Python
-from microsandbox import DnsConfig, Network, Sandbox
+from microsandbox import Network, Sandbox
+from microsandbox.types import DnsConfig
 
 sb = await Sandbox.create(
     "safe-agent",

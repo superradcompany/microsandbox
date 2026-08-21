@@ -1033,13 +1033,41 @@ Set the root filesystem source: an OCI image name, local directory path, or disk
   </div>
 </div>
 
+#### <span className="msb-recv"></span><span className="msb-hn">WithRootDisk()</span>
+
+```go
+func WithRootDisk(disk RootDiskConfig) SandboxOption
+```
+
+Configure root storage for an OCI image. Construct the value with the [`RootDisk`](#rootdisk) factory.
+
+<Accordion title="Example">
+
+```go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python:3.12"),
+    m.WithRootDisk(m.RootDisk.Managed(8192)),
+)
+```
+
+</Accordion>
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>disk</code><span className="msb-type">RootDiskConfig</span></div>
+    <div className="msb-param-desc">Managed, tmpfs, user-supplied disk-image, or flat OCI root storage.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv"></span><span className="msb-hn">WithOCIUpperSize()</span>
 
 ```go
 func WithOCIUpperSize(mebibytes uint32) SandboxOption
 ```
 
-Set the writable overlay upper size for an OCI image, in MiB. Valid only with an OCI image rootfs, not disk images or snapshots.
+Deprecated alias for `WithRootDisk(RootDisk.Managed(mebibytes))`.
 
 <p className="msb-label">Parameters</p>
 
@@ -2663,7 +2691,8 @@ The full configuration of a sandbox. Most callers build a sandbox via `CreateSan
 | Name | `string` | Sandbox name, up to 128 UTF-8 bytes |
 | Image | `string` | OCI image, local path, or disk image |
 | ImageFstype | `string` | Optional inner filesystem type for disk-image roots |
-| OCIUpperSizeMiB | `uint32` | Writable overlay upper size for OCI image roots |
+| RootDisk | [`*RootDiskConfig`](#rootdiskconfig) | Root storage for an OCI image |
+| OCIUpperSizeMiB | `uint32` | Deprecated managed-root-disk size alias; ignored when `RootDisk` is set |
 | Snapshot | `string` | Snapshot artifact path or bare name; mutually exclusive with `Image` |
 | MemoryMiB | `uint32` | Guest memory in MiB |
 | CPUs | `uint8` | Virtual CPUs |
@@ -2697,6 +2726,75 @@ The full configuration of a sandbox. Most callers build a sandbox via `CreateSan
 | Secrets | [`[]SecretEntry`](/sdk/go/secrets#secretentry) | Secret injection entries |
 | Patches | [`[]PatchConfig`](#patchconfig) | Rootfs modifications applied before boot |
 | Volumes | `map[string]MountConfig` | Volume mounts keyed by guest path |
+
+### RootDisk
+
+Factory namespace for [`RootDiskConfig`](#rootdiskconfig) values. Pass the result to [`WithRootDisk`](#withrootdisk).
+
+```go
+m.RootDisk.Managed(8192)
+m.RootDisk.Tmpfs(m.RootDiskTmpfsOptions{SizeMiB: 512})
+m.RootDisk.Disk("./scratch.qcow2", m.RootDiskImageOptions{Format: "qcow2", Fstype: "ext4"})
+m.RootDisk.Flat(m.RootDiskFlatOptions{SizeMiB: 8192, Clone: m.FlatCloneAuto})
+```
+
+### RootDiskConfig
+
+Root storage configuration returned by the [`RootDisk`](#rootdisk) factory. Use [`Kind()`](#rootdiskconfig-kind) to inspect its backing.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `SizeMiB` | `uint32` | Managed, tmpfs, or flat root-disk size; zero selects the runtime default where supported |
+| `Path` | `string` | Host path for a user-supplied disk image |
+| `Format` | `string` | Disk-image format: `raw` or `qcow2`; inferred from the path when empty |
+| `Fstype` | `string` | Inner filesystem type; defaults to `ext4` |
+| `Clone` | [`FlatClone`](#flatclone) | Private flat-root provisioning strategy |
+
+#### <span className="msb-recv">rootDiskConfig.</span><span className="msb-hn">Kind()</span>
+
+```go
+func (r RootDiskConfig) Kind() RootDiskKind
+```
+
+Return the configured root-disk backing.
+
+### RootDiskKind
+
+| Constant | Description |
+|----------|-------------|
+| `RootDiskKindManaged` | Microsandbox-owned sparse ext4 writable layer |
+| `RootDiskKindTmpfs` | Ephemeral RAM-backed writable layer |
+| `RootDiskKindDiskImage` | User-supplied writable disk image |
+| `RootDiskKindFlat` | Complete OCI root filesystem mounted without guest OverlayFS |
+
+### RootDiskTmpfsOptions
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `SizeMiB` | `uint32` | Tmpfs size; zero uses half of sandbox memory |
+
+### RootDiskImageOptions
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Format` | `string` | Optional `raw` or `qcow2` format; inferred from the path when empty |
+| `Fstype` | `string` | Optional inner filesystem type; defaults to `ext4` |
+
+### RootDiskFlatOptions
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `SizeMiB` | `uint32` | Final guest capacity; zero uses the runtime default |
+| `Fstype` | `string` | Generated filesystem type; currently `ext4` |
+| `Clone` | [`FlatClone`](#flatclone) | Private disk provisioning strategy |
+
+### FlatClone
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `FlatCloneAuto` | `"auto"` | Try a native reflink, then fall back to a sparse copy |
+| `FlatCloneCopy` | `"copy"` | Always create a sparse copy |
+| `FlatCloneReflink` | `"reflink"` | Require a native reflink and fail when unavailable |
 
 ### SandboxOption
 

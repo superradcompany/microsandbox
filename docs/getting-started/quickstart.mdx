@@ -60,6 +60,10 @@ Having trouble with a local installation? Choose your platform for setup checks 
     go get github.com/superradcompany/microsandbox/sdk/go
     ```
 
+    ```bash Ruby
+    gem install microsandbox
+    ```
+
     </CodeGroup>
 
     Check local virtualization support with:
@@ -140,6 +144,17 @@ Having trouble with a local installation? Choose your platform for setup checks 
         return err
     }
     fmt.Println(output.Stdout()) // Hello from a microVM!
+    ```
+
+    ```ruby Ruby
+    require "microsandbox"
+
+    Microsandbox.install unless Microsandbox.installed?
+
+    Microsandbox::Sandbox.with("hello", image: "python", memory: 512) do |sandbox|
+      output = sandbox.exec("python", ["-c", "print('Hello from a microVM!')"])
+      puts output.stdout
+    end
     ```
 
     ```bash CLI

@@ -557,7 +557,8 @@ Explicit rootfs image source. Build one with [`Image.oci()`](#image-oci), [`Imag
 | `_type` | [`ImageSourceKind`](#imagesourcekind) | Source kind |
 | `_path` | `str \| None` | Host path for `bind` / `disk` sources |
 | `_reference` | `str \| None` | OCI reference for `oci` sources |
-| `_upper_size_mib` | `int \| None` | Writable overlay upper size in MiB (OCI only) |
+| `_root_disk` | [`RootDiskConfig`](#rootdiskconfig)` \| int \| None` | Writable root disk configuration or managed-disk size in MiB (OCI only) |
+| `_upper_size_mib` | `int \| None` | Deprecated managed-disk size alias |
 | `_fstype` | `str \| None` | Filesystem type for `disk` sources |
 | `_format` | [`DiskImageFormat`](#diskimageformat)` \| None` | Disk image format (inferred from extension) |
 

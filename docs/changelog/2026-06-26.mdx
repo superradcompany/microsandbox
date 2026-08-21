@@ -37,13 +37,14 @@ See the [volumes guide](/sandboxes/volumes).
 `RootfsSource::Bind` is now a first-class SDK option in Rust, Go, TypeScript, and Python, so a sandbox can boot directly off a host directory with no OCI pull and no overlay. The Python SDK already exposed `ImageSource.bind`; this brings the other languages to parity with `ImageBuilder.bind(host)` in Rust and TypeScript, and `WithBindRootfs(path)` in Go.
 
 ```python
-from microsandbox import PythonSandbox, Image
+from microsandbox import Image, Sandbox
 
-async with PythonSandbox.create(
-    name="dev",
+async with await Sandbox.create(
+    "dev",
     image=Image.bind("/srv/rootfs/python-base"),
 ) as sb:
-    await sb.run("print('hello from bind rootfs')")
+    output = await sb.exec("python", ["-c", "print('hello from bind rootfs')"])
+    print(output.stdout_text)
 ```
 
 See the [Python images reference](/sdk/python/images).

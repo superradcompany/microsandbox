@@ -37,7 +37,7 @@ await volume.fs().write("state.json", b'{"ready": true}')
 
 ```go Go
 volume, err := m.GetDefaultVolume(ctx)
-err = volume.FS().WriteString("state.json", `{"ready":true}`)
+err = volume.FS().WriteString(ctx, "state.json", `{"ready":true}`)
 ```
 </CodeGroup>
 

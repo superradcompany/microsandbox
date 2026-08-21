@@ -62,10 +62,13 @@ set_default_backend("cloud", api_key=os.environ["MSB_API_KEY"])
 set_default_backend("local")
 ```
 
-```go Go
-// Select cloud explicitly and provide its credential before the first call.
-os.Setenv("MSB_BACKEND", "cloud")
-os.Setenv("MSB_API_KEY", apiKey)
+```ruby Ruby
+require "microsandbox"
+
+Microsandbox.use_cloud_backend!(ENV.fetch("MSB_API_KEY"))
+
+# Or force the local runtime.
+Microsandbox.use_local_backend!
 ```
 </CodeGroup>
 
@@ -117,7 +120,7 @@ msb context
 msb context --format json
 ```
 
-The SDKs expose the same secret-safe information:
+Use the SDK accessors to inspect the active backend without exposing its API key. Detailed backend info includes the kind, cloud API URL, selection source, and profile when applicable:
 
 <CodeGroup>
 ```rust Rust
@@ -147,6 +150,13 @@ if err != nil {
 }
 fmt.Println(info.Kind)
 fmt.Println(sandbox.BackendKind())
+```
+
+```ruby Ruby
+require "microsandbox"
+
+puts Microsandbox.default_backend_kind
+puts sandbox.backend
 ```
 </CodeGroup>
 

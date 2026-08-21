@@ -13,9 +13,9 @@ microsandbox now ships a first-class Ruby 3.1\+ gem backed by a native Magnus ex
 ```ruby
 require "microsandbox"
 
-Microsandbox::Sandbox.with(name: "worker", image: "alpine:3.19") do |sb|
+Microsandbox::Sandbox.with("worker", image: "alpine:3.19") do |sb|
   result = sb.shell("echo hello from ruby")
-  puts result.stdout_text
+  puts result.stdout
 end
 ```
 

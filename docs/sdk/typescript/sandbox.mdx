@@ -1159,13 +1159,13 @@ imageWith(configure: (b: ImageBuilder) => ImageBuilder): this
 
 ```typescript
 const sandbox = await Sandbox.builder("worker")
-  .imageWith((i) => i.oci("python:3.12").upperSize(8192))
+  .imageWith((i) => i.oci("python:3.12").rootDisk(8192))
   .create();
 ```
 
 </Accordion>
 
-Configure an explicit rootfs source. Use this for OCI-only settings such as the writable overlay upper size, or for disk images when the filesystem type can't be auto-detected.
+Configure an explicit rootfs source. Use this for OCI-only settings such as the writable root disk, or for disk images when the filesystem type can't be auto-detected.
 
 <p className="msb-label">Parameters</p>
 
