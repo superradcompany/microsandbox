@@ -1104,11 +1104,12 @@ async fn run_downgrade_with_db(
                 && ctx.operation.phase() < DowngradePhase::ArtifactsReverted
             {
                 let spinner = ui::Spinner::start("Checking", "retained snapshot graph");
-                let result = microsandbox::snapshot::downgrade::preflight_managed_v066(
-                    ctx.db.inner(),
-                    ctx.snapshots_dir,
-                )
-                .await;
+                let result =
+                    microsandbox::backend::local_snapshot_downgrade::preflight_managed_v066(
+                        ctx.db.inner(),
+                        ctx.snapshots_dir,
+                    )
+                    .await;
                 match result {
                     Ok(plan) => {
                         spinner.finish_success("Checked");
@@ -1175,7 +1176,7 @@ async fn run_downgrade_with_db(
                     .set_phase(DowngradePhase::ArtifactsReverting)?;
                 if let Some(plan) = snapshot_plan {
                     let spinner = ui::Spinner::start("Reverting", "snapshot artifacts");
-                    match microsandbox::snapshot::downgrade::execute_managed_v066(
+                    match microsandbox::backend::local_snapshot_downgrade::execute_managed_v066(
                         ctx.db.inner(),
                         ctx.operation.recovery_dir(),
                         plan,

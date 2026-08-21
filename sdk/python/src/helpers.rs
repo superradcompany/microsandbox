@@ -2,10 +2,12 @@ use microsandbox::sandbox::{
     CpuPlacement, DeploymentProfile, NetworkPolicy, Patch, PullPolicy, SandboxBuilder,
     SecurityProfile, TransparentHugePagePolicy,
 };
-use microsandbox::{LogLevel, RegistryAuth};
+use microsandbox::{LogLevel, RegistryAuth, SnapshotReference};
 use microsandbox_network::dns::Nameserver;
 use pyo3::prelude::*;
 use pyo3::types::{PyByteArray, PyBytes, PyDict, PyList, PyModule};
+
+use crate::snapshot::{PySnapshot, PySnapshotHandle};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -191,71 +193,23 @@ pub fn sandbox_builder_from_args(
     let mut builder = microsandbox::Sandbox::builder(name);
 
     if snapshot_present {
-        // Boot from a snapshot. Accept str or PathLike.
+        // Boot from a snapshot. Accept a stable snapshot reference, str, or PathLike.
         let snap_obj = kwargs.get_item("from_snapshot")?.unwrap();
-        let snap_str: String = if let Ok(s) = snap_obj.extract::<String>() {
-            s
+        let snapshot_reference = if let Ok(snapshot) = snap_obj.extract::<PyRef<'_, PySnapshot>>() {
+            snapshot.rust_reference()
+        } else if let Ok(handle) = snap_obj.extract::<PyRef<'_, PySnapshotHandle>>() {
+            handle.rust_reference()
+        } else if let Ok(reference) = snap_obj.extract::<String>() {
+            SnapshotReference::auto(reference)
         } else if let Ok(fspath) = snap_obj.call_method0("__fspath__") {
-            fspath.extract()?
+            let path = fspath.extract::<String>()?;
+            SnapshotReference::path(path)
         } else {
             return Err(pyo3::exceptions::PyTypeError::new_err(
-                "from_snapshot must be str or os.PathLike",
+                "from_snapshot must be Snapshot, SnapshotHandle, str, or os.PathLike",
             ));
         };
-        // Resolve the snapshot synchronously: read the manifest and
-        // pin the image. We can't use the async `from_snapshot` here
-        // because `sandbox_builder_from_args` runs in sync context; instead
-        // we replicate the resolution against the on-disk artifact
-        // directly via `snapshot_resolved`.
-        let snap_dir = resolve_snapshot_dir(&snap_str);
-        if !snap_dir.exists() {
-            return Err(pyo3::exceptions::PyFileNotFoundError::new_err(format!(
-                "snapshot artifact not found: {}",
-                snap_dir.display()
-            )));
-        }
-        let manifest_bytes = std::fs::read(
-            snap_dir.join(microsandbox::snapshot::DESCRIPTOR_FILENAME),
-        )
-        .map_err(|e| {
-            pyo3::exceptions::PyFileNotFoundError::new_err(format!(
-                "snapshot descriptor not readable at {}: {e}",
-                snap_dir.display(),
-            ))
-        })?;
-        let manifest =
-            microsandbox::snapshot::Manifest::from_bytes(&manifest_bytes).map_err(|e| {
-                pyo3::exceptions::PyValueError::new_err(format!("snapshot descriptor invalid: {e}"))
-            })?;
-        if manifest.scope != microsandbox::snapshot::SnapshotScope::Disk {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "restoring non-disk snapshots is not supported by this runtime",
-            ));
-        }
-        let file_state = match &manifest.state {
-            microsandbox::snapshot::SnapshotState::File(state) => state,
-            microsandbox::snapshot::SnapshotState::Checkpoint(_) => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "restoring checkpoint-state snapshots is not supported by this runtime",
-                ));
-            }
-        };
-        if file_state.format != microsandbox::snapshot::SnapshotFormat::Raw
-            || file_state.fstype != "ext4"
-        {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "snapshot file state is not a supported raw ext4 upper",
-            ));
-        }
-        let upper_path = snap_dir.join(&file_state.upper.file);
-        if !upper_path.exists() {
-            return Err(pyo3::exceptions::PyFileNotFoundError::new_err(format!(
-                "snapshot upper file missing: {}",
-                upper_path.display(),
-            )));
-        }
-        builder = builder.image(manifest.image.reference.as_str());
-        builder = builder.snapshot_resolved(manifest.image.manifest_digest.clone(), upper_path);
+        builder = builder.from_snapshot_ref(snapshot_reference);
     } else {
         let image_obj = kwargs.get_item("image")?.unwrap();
         // Accept an open image reference/path or the concrete ImageSource
@@ -2022,39 +1976,4 @@ fn extract_required<'py, T: FromPyObject<'py>>(
     dict.get_item(key)?
         .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(format!("{key} is required")))?
         .extract()
-}
-
-/// Resolve a snapshot reference (bare name or path) to its on-disk
-/// directory. Mirrors the convention used by `Snapshot::open`
-/// (`snapshot::store::looks_like_path`) — keep the heuristics in sync.
-fn resolve_snapshot_dir(s: &str) -> std::path::PathBuf {
-    if snapshot_ref_looks_like_path(s) {
-        std::path::PathBuf::from(s)
-    } else {
-        microsandbox::backend::default_backend()
-            .as_local()
-            .map(|local| local.snapshots_dir().join(s))
-            .unwrap_or_else(|| std::path::PathBuf::from(s))
-    }
-}
-
-/// Heuristic split between a bare snapshot name and a filesystem path.
-fn snapshot_ref_looks_like_path(s: &str) -> bool {
-    if s.contains('/') || s.starts_with('.') || s.starts_with('~') {
-        return true;
-    }
-    // On Windows hosts, native separators and drive/UNC prefixes (`C:\snaps\foo`, `C:foo`, `\\server\share`) mark a path even when no forward slash appears.
-    #[cfg(windows)]
-    {
-        use typed_path::{Utf8WindowsComponent, Utf8WindowsPath};
-        s.contains('\\')
-            || matches!(
-                Utf8WindowsPath::new(s).components().next(),
-                Some(Utf8WindowsComponent::Prefix(_))
-            )
-    }
-    #[cfg(not(windows))]
-    {
-        false
-    }
 }

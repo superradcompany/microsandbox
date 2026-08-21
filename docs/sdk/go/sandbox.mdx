@@ -1080,17 +1080,20 @@ Use a disk image as the root filesystem and optionally provide the inner filesys
 <Tooltip tip="Snapshots use local disk artifacts and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
-func WithFromSnapshot(pathOrName string) SandboxOption
+func WithFromSnapshot[T SnapshotSeed](snapshot T) SandboxOption
 ```
 
-Boot from a snapshot artifact by bare name or filesystem path. Mutually exclusive with [`WithImage`](#withimage). See [Snapshots](/sdk/go/snapshots).
+Boot from a snapshot using a backend-relative reference. Mutually exclusive
+with [`WithImage`](#withimage). Pass a `SnapshotArtifact` or `SnapshotHandle`
+directly to preserve its typed identifier-or-path reference without inspecting
+the selected backend.
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><code>pathOrName</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Snapshot artifact path or bare name.</div>
+    <div className="msb-param-key"><code>snapshot</code><span className="msb-type">string | *SnapshotArtifact | *SnapshotHandle</span></div>
+    <div className="msb-param-desc">Snapshot object or backend-relative compatibility string.</div>
   </div>
 </div>
 

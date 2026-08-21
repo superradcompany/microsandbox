@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator, Awaitable, Mapping, Sequence
-from typing import Any
+from typing import Any, Literal
 
 from microsandbox.types import (
     BackendKind,
@@ -90,7 +90,7 @@ class Sandbox:
         name: str,
         *,
         image: str | os.PathLike[str] | ImageSource | None = None,
-        from_snapshot: str | os.PathLike[str] | None = None,
+        from_snapshot: Snapshot | SnapshotHandle | str | os.PathLike[str] | None = None,
         memory: int | None = None,
         cpus: int | None = None,
         max_memory: int | None = None,
@@ -145,7 +145,7 @@ class Sandbox:
         name: str,
         *,
         image: str | os.PathLike[str] | ImageSource | None = None,
-        from_snapshot: str | os.PathLike[str] | None = None,
+        from_snapshot: Snapshot | SnapshotHandle | str | os.PathLike[str] | None = None,
         memory: int | None = None,
         cpus: int | None = None,
         max_memory: int | None = None,
@@ -821,28 +821,11 @@ class Snapshot:
     @staticmethod
     async def list() -> list[SnapshotHandle]: ...
     @staticmethod
-    async def list_dir(dir: str | os.PathLike[str]) -> list[Snapshot]: ...
-    @staticmethod
     async def remove(path_or_name: str, *, force: bool = False) -> None: ...
-    @staticmethod
-    async def reindex(dir: str | os.PathLike[str] | None = None) -> int: ...
-    @staticmethod
-    async def save(
-        name_or_path: str,
-        out: str | os.PathLike[str],
-        *,
-        with_parents: bool = False,
-        with_image: bool = False,
-        plain_tar: bool = False,
-    ) -> None: ...
-    @staticmethod
-    async def load(
-        archive: str | os.PathLike[str],
-        *,
-        dest: str | os.PathLike[str] | None = None,
-    ) -> SnapshotHandle: ...
     @property
-    def path(self) -> str: ...
+    def reference(self) -> str: ...
+    @property
+    def reference_kind(self) -> Literal["id", "path"]: ...
     @property
     def digest(self) -> str: ...
     @property
@@ -871,6 +854,33 @@ class Snapshot:
     def labels(self) -> dict[str, str]: ...
     @property
     def source_sandbox(self) -> str | None: ...
+    @staticmethod
+    async def list_dir(dir: str | os.PathLike[str]) -> list[Snapshot]: ...
+    @staticmethod
+    async def reindex(dir: str | os.PathLike[str] | None = None) -> int: ...
+    @staticmethod
+    async def save(
+        name_or_path: str,
+        out: str | os.PathLike[str],
+        *,
+        with_parents: bool = False,
+        with_image: bool = False,
+        plain_tar: bool = False,
+    ) -> None: ...
+    @staticmethod
+    async def load(
+        archive: str | os.PathLike[str],
+        *,
+        dest: str | os.PathLike[str] | None = None,
+    ) -> SnapshotHandle: ...
+    async def save_to(
+        self,
+        out: str | os.PathLike[str],
+        *,
+        with_parents: bool = False,
+        with_image: bool = False,
+        plain_tar: bool = False,
+    ) -> None: ...
     async def verify(self) -> dict[str, Any]: ...
 
 class SnapshotHandle:
@@ -905,9 +915,19 @@ class SnapshotHandle:
     @property
     def created_at(self) -> float: ...
     @property
-    def path(self) -> str: ...
+    def reference(self) -> str: ...
+    @property
+    def reference_kind(self) -> Literal["id", "path"]: ...
     async def open(self) -> Snapshot: ...
     async def remove(self, *, force: bool = False) -> None: ...
+    async def save_to(
+        self,
+        out: str | os.PathLike[str],
+        *,
+        with_parents: bool = False,
+        with_image: bool = False,
+        plain_tar: bool = False,
+    ) -> None: ...
 
 class PullSession:
     @property

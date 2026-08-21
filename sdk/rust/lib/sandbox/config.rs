@@ -2,7 +2,6 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZero;
-use std::path::PathBuf;
 
 use microsandbox_runtime::logging::LogLevel;
 use microsandbox_types::{
@@ -16,6 +15,7 @@ use microsandbox_protocol::{HANDOFF_INIT_AUTO, HANDOFF_INIT_IMAGE_ENTRYPOINT_CAN
 use typed_path::Utf8UnixPath;
 
 use super::types::{MountOptions, RootDisk, RootfsSource, VolumeMount};
+use crate::snapshot::SnapshotReference;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -162,14 +162,13 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub(crate) manifest_digest: Option<String>,
 
-    /// Path to a snapshot's `upper.ext4` file to copy into the new
-    /// sandbox's upper layer at create time, replacing the fresh-format
-    /// step.
+    /// Original backend-neutral reference supplied to
+    /// `SandboxBuilder::from_snapshot_ref`.
     ///
-    /// Transient: set by `SandboxBuilder::from_snapshot` and consumed
-    /// during `create_with_mode`. Never persisted.
+    /// The selected backend resolves this into its restore configuration. It
+    /// is operation-only and is never persisted.
     #[serde(skip)]
-    pub(crate) snapshot_upper_source: Option<PathBuf>,
+    pub(crate) snapshot_reference: Option<SnapshotReference>,
 
     /// Transient process-launch intent for the current create operation.
     #[serde(skip)]
@@ -417,7 +416,7 @@ impl SandboxConfig {
             ));
         }
 
-        if self.snapshot_upper_source.is_some() {
+        if self.snapshot_reference.is_some() {
             return Ok(());
         }
 
@@ -703,7 +702,7 @@ impl Default for SandboxConfig {
             replace_with_timeout: DEFAULT_REPLACE_TIMEOUT,
             slug: None,
             manifest_digest: None,
-            snapshot_upper_source: None,
+            snapshot_reference: None,
             launch_intent: LaunchIntent::None,
             init_owns_workload: false,
             init_workload_arg_count: 0,
@@ -722,6 +721,7 @@ mod tests {
         HandoffInit, MountOptions, NamedVolumeMode, RootDisk, RootfsSource, StatVirtualization,
         VolumeMount,
     };
+    use crate::snapshot::SnapshotReference;
     use microsandbox_image::ImageConfig;
     use microsandbox_types::{
         EnvVar, NamedVolumeCreate, SandboxLogLevel, SandboxPolicy, SandboxResources,
@@ -1621,13 +1621,13 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_rootfs_defaults_skips_snapshot_upper_source() {
+    fn test_apply_rootfs_defaults_skips_snapshot_reference() {
         let mut config = SandboxConfig {
             spec: SandboxSpec {
                 image: RootfsSource::oci("python:3.12"),
                 ..Default::default()
             },
-            snapshot_upper_source: Some("/tmp/upper.ext4".into()),
+            snapshot_reference: Some(SnapshotReference::path("/tmp/snapshot")),
             ..Default::default()
         };
 

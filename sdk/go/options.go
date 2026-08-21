@@ -24,23 +24,24 @@ type SandboxConfig struct {
 	// RootDisk is nil.
 	//
 	// Deprecated: set RootDisk (via WithRootDisk / RootDisk.Managed) instead.
-	OCIUpperSizeMiB   uint32
-	ociUpperSizeSet   bool
-	Snapshot          string
-	MemoryMiB         uint32
-	CPUs              uint8
-	MaxMemoryMiB      uint32
-	MaxCPUs           uint8
-	CPUPlacement      CPUPlacement
-	PlacementProfile  string
-	THP               THPPolicy
-	Workdir           string
-	Shell             string
-	SecurityProfile   SecurityProfile
-	DeploymentProfile DeploymentProfile
-	Hostname          string
-	User              string
-	Replace           bool
+	OCIUpperSizeMiB       uint32
+	ociUpperSizeSet       bool
+	Snapshot              string
+	SnapshotReferenceKind string
+	MemoryMiB             uint32
+	CPUs                  uint8
+	MaxMemoryMiB          uint32
+	MaxCPUs               uint8
+	CPUPlacement          CPUPlacement
+	PlacementProfile      string
+	THP                   THPPolicy
+	Workdir               string
+	Shell                 string
+	SecurityProfile       SecurityProfile
+	DeploymentProfile     DeploymentProfile
+	Hostname              string
+	User                  string
+	Replace               bool
 	// ReplaceWithTimeout, if non-nil, sets a specific timeout between
 	// SIGTERM and SIGKILL when replacing an existing sandbox. nil means
 	// "use the runtime default" (10s when Replace is set). Setting this
@@ -77,6 +78,13 @@ type SandboxConfig struct {
 	Secrets             []SecretEntry
 	Patches             []PatchConfig
 	Volumes             map[string]MountConfig // guest path → mount config
+}
+
+// SnapshotSeed is accepted by WithFromSnapshot. Passing a SnapshotArtifact or
+// SnapshotHandle preserves its typed reference; a string remains a
+// backend-relative compatibility reference.
+type SnapshotSeed interface {
+	string | *SnapshotArtifact | *SnapshotHandle
 }
 
 // SandboxOption is a functional option for configuring a sandbox.
@@ -657,10 +665,28 @@ func WithBindRootfs(path string) SandboxOption {
 	return func(o *SandboxConfig) { o.ImageBind = path }
 }
 
-// WithFromSnapshot boots from a snapshot artifact by bare name or filesystem path.
+// WithFromSnapshot boots from a snapshot. It accepts a backend-relative string
+// or a SnapshotArtifact/SnapshotHandle returned by this SDK. Passing an object
+// preserves whether the backend resolves it as an id or a path.
 // It is mutually exclusive with WithImage.
-func WithFromSnapshot(pathOrName string) SandboxOption {
-	return func(o *SandboxConfig) { o.Snapshot = pathOrName }
+func WithFromSnapshot[T SnapshotSeed](snapshot T) SandboxOption {
+	return func(o *SandboxConfig) {
+		switch value := any(snapshot).(type) {
+		case string:
+			o.Snapshot = value
+			o.SnapshotReferenceKind = ""
+		case *SnapshotArtifact:
+			if value != nil {
+				o.Snapshot = value.Reference()
+				o.SnapshotReferenceKind = value.ReferenceKind()
+			}
+		case *SnapshotHandle:
+			if value != nil {
+				o.Snapshot = value.Reference()
+				o.SnapshotReferenceKind = value.ReferenceKind()
+			}
+		}
+	}
 }
 
 // WithMemory sets the memory limit in MiB (default 512MiB).

@@ -1,5 +1,6 @@
 //! Fail-closed backend used when ambient backend configuration is invalid.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,10 +8,13 @@ use futures::future::BoxFuture;
 use futures::stream;
 
 use super::sandbox::{LogStream, MetricsStream};
-use super::{Backend, BackendKind, SandboxBackend, VolumeBackend};
+use super::{Backend, BackendKind, SandboxBackend, SnapshotBackend, VolumeBackend};
 use crate::logs::{LogEntry, LogOptions, LogStreamOptions};
 use crate::sandbox::metrics::SandboxMetrics;
 use crate::sandbox::{Sandbox, SandboxConfig, SandboxHandle, SandboxListBuilder, SandboxPage};
+use crate::snapshot::{
+    SaveOpts, Snapshot, SnapshotConfig, SnapshotHandle, SnapshotReference, SnapshotVerifyReport,
+};
 use crate::volume::{Volume, VolumeConfig, VolumeFsReadStream, VolumeFsWriteSink, VolumeHandle};
 use crate::{MicrosandboxError, MicrosandboxResult};
 
@@ -70,6 +74,10 @@ impl Backend for ConfigurationErrorBackend {
     }
 
     fn volumes(&self) -> &dyn VolumeBackend {
+        self
+    }
+
+    fn snapshots(&self) -> &dyn SnapshotBackend {
         self
     }
 
@@ -200,6 +208,94 @@ impl SandboxBackend for ConfigurationErrorBackend {
     ) -> MetricsStream {
         let error = self.error();
         Box::pin(stream::once(async move { Err(error) }))
+    }
+}
+
+impl SnapshotBackend for ConfigurationErrorBackend {
+    fn create<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _config: SnapshotConfig,
+    ) -> BoxFuture<'a, MicrosandboxResult<Snapshot>> {
+        self.fail()
+    }
+
+    fn open<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _reference: SnapshotReference,
+    ) -> BoxFuture<'a, MicrosandboxResult<Snapshot>> {
+        self.fail()
+    }
+
+    fn get<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _identifier: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<SnapshotHandle>> {
+        self.fail()
+    }
+
+    fn list(
+        &self,
+        _backend: Arc<dyn Backend>,
+    ) -> BoxFuture<'_, MicrosandboxResult<Vec<SnapshotHandle>>> {
+        self.fail()
+    }
+
+    fn remove<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _reference: SnapshotReference,
+        _force: bool,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        self.fail()
+    }
+
+    fn prepare_restore<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _config: &'a mut SandboxConfig,
+        _reference: SnapshotReference,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        self.fail()
+    }
+
+    fn verify<'a>(
+        &'a self,
+        _snapshot: &'a Snapshot,
+    ) -> BoxFuture<'a, MicrosandboxResult<SnapshotVerifyReport>> {
+        self.fail()
+    }
+
+    fn list_dir(
+        &self,
+        _backend: Arc<dyn Backend>,
+        _dir: PathBuf,
+    ) -> BoxFuture<'_, MicrosandboxResult<Vec<Snapshot>>> {
+        self.fail()
+    }
+
+    fn reindex(&self, _dir: Option<PathBuf>) -> BoxFuture<'_, MicrosandboxResult<usize>> {
+        self.fail()
+    }
+
+    fn save<'a>(
+        &'a self,
+        _reference: SnapshotReference,
+        _out: &'a Path,
+        _opts: SaveOpts,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        self.fail()
+    }
+
+    fn load<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _archive: &'a Path,
+        _dest: Option<&'a Path>,
+    ) -> BoxFuture<'a, MicrosandboxResult<SnapshotHandle>> {
+        self.fail()
     }
 }
 

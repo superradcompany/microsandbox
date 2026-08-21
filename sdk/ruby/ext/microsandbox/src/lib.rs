@@ -3,6 +3,7 @@ use std::{
     fmt::Display,
     future::Future,
     mem::ManuallyDrop,
+    path::PathBuf,
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc, Condvar, Mutex,
@@ -28,7 +29,7 @@ use microsandbox_core::{
         SandboxHandle as CoreSandboxHandle, SandboxMetrics, SandboxPage, SandboxPingResult,
         SandboxStatus, SandboxStopResult, SandboxTouchResult,
     },
-    snapshot::{Snapshot, SnapshotHandle},
+    snapshot::{SaveOpts, Snapshot, SnapshotHandle},
     volume::{Volume, VolumeHandle, VolumeKind},
 };
 
@@ -764,6 +765,11 @@ struct RubySnapshotHandle {
     inner: SnapshotHandle,
 }
 
+#[magnus::wrap(class = "Microsandbox::Snapshot", free_immediately, size)]
+struct RubySnapshot {
+    inner: Snapshot,
+}
+
 // -------------------------------------------------------------------------------------------------
 // Builder methods
 // -------------------------------------------------------------------------------------------------
@@ -1489,8 +1495,32 @@ impl RubyVolumeHandle {
 }
 
 // -------------------------------------------------------------------------------------------------
-// SnapshotHandle methods
+// Snapshot methods
 // -------------------------------------------------------------------------------------------------
+
+impl RubySnapshot {
+    fn digest(&self) -> String {
+        self.inner.digest().to_owned()
+    }
+    fn size_bytes(&self) -> Option<u64> {
+        self.inner.size_bytes()
+    }
+    fn reference(&self) -> String {
+        self.inner.reference().value().to_owned()
+    }
+    fn reference_kind(&self) -> &'static str {
+        self.inner.reference().kind()
+    }
+    fn save_to(
+        ruby: &Ruby,
+        this: typed_data::Obj<Self>,
+        args: &[Value],
+    ) -> Result<(), Error> {
+        let (out, opts) = parse_snapshot_save_args(ruby, args)?;
+        let snapshot = this.inner.clone();
+        run(ruby, async move { snapshot.save_to(&out, opts).await })
+    }
+}
 
 impl RubySnapshotHandle {
     fn digest(&self) -> String {
@@ -1508,12 +1538,29 @@ impl RubySnapshotHandle {
     fn state_kind(&self) -> String {
         self.inner.state_kind().to_owned()
     }
-    fn path(&self) -> String {
-        self.inner.path().to_string_lossy().into_owned()
+    fn reference(&self) -> String {
+        self.inner.reference().value().to_owned()
+    }
+    fn reference_kind(&self) -> &'static str {
+        self.inner.reference().kind()
     }
     fn remove(ruby: &Ruby, this: typed_data::Obj<Self>, force: bool) -> Result<(), Error> {
         let handle = this.inner.clone();
         run(ruby, async move { handle.remove(force).await })
+    }
+    fn open(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<RubySnapshot, Error> {
+        let handle = this.inner.clone();
+        let inner = run(ruby, async move { handle.open().await })?;
+        Ok(RubySnapshot { inner })
+    }
+    fn save_to(
+        ruby: &Ruby,
+        this: typed_data::Obj<Self>,
+        args: &[Value],
+    ) -> Result<(), Error> {
+        let (out, opts) = parse_snapshot_save_args(ruby, args)?;
+        let handle = this.inner.clone();
+        run(ruby, async move { handle.save_to(&out, opts).await })
     }
 }
 
@@ -1712,6 +1759,16 @@ fn volume_builder(name: String) -> RubyVolumeBuilder {
 
 // -- Snapshot statics --------------------------------------------------------
 
+fn snapshot_open(ruby: &Ruby, args: &[Value]) -> Result<RubySnapshot, Error> {
+    let parsed = scan_args::<(String,), (), (), (), RHash, ()>(args)?;
+    if !parsed.keywords.is_empty() {
+        return Err(argument_error(ruby, "open does not accept keywords"));
+    }
+    let reference = parsed.required.0;
+    let inner = run(ruby, async move { Snapshot::open(&reference).await })?;
+    Ok(RubySnapshot { inner })
+}
+
 fn snapshot_get(ruby: &Ruby, args: &[Value]) -> Result<RubySnapshotHandle, Error> {
     let parsed = scan_args::<(String,), (), (), (), RHash, ()>(args)?;
     if !parsed.keywords.is_empty() {
@@ -1743,6 +1800,19 @@ fn snapshot_remove(ruby: &Ruby, args: &[Value]) -> Result<(), Error> {
     let name = parsed.required.0;
     let force = parsed.optional.0.unwrap_or(false);
     run(ruby, async move { Snapshot::remove(&name, force).await })
+}
+
+fn snapshot_save(ruby: &Ruby, args: &[Value]) -> Result<(), Error> {
+    let parsed = scan_args::<(String, String), (), (), (), RHash, ()>(args)?;
+    reject_unknown_keywords(
+        ruby,
+        parsed.keywords,
+        &["with_parents", "with_image", "plain_tar"],
+    )?;
+    let reference = parsed.required.0;
+    let out = PathBuf::from(parsed.required.1);
+    let opts = snapshot_save_opts(parsed.keywords)?;
+    run(ruby, async move { Snapshot::save(&reference, &out, opts).await })
 }
 
 // -- Image statics -----------------------------------------------------------
@@ -1992,9 +2062,31 @@ fn fs_metadata_hash(md: FsMetadata) -> Result<RHash, Error> {
 fn snapshot_hash(snapshot: Snapshot) -> Result<RHash, Error> {
     let hash = current_ruby().hash_new();
     hash.aset("digest", snapshot.digest())?;
-    hash.aset("path", snapshot.path().to_string_lossy().into_owned())?;
+    hash.aset("reference", snapshot.reference().value())?;
+    hash.aset("reference_kind", snapshot.reference().kind())?;
     hash.aset("size_bytes", snapshot.size_bytes())?;
     Ok(hash)
+}
+
+fn parse_snapshot_save_args(ruby: &Ruby, args: &[Value]) -> Result<(PathBuf, SaveOpts), Error> {
+    let parsed = scan_args::<(String,), (), (), (), RHash, ()>(args)?;
+    reject_unknown_keywords(
+        ruby,
+        parsed.keywords,
+        &["with_parents", "with_image", "plain_tar"],
+    )?;
+    Ok((
+        PathBuf::from(parsed.required.0),
+        snapshot_save_opts(parsed.keywords)?,
+    ))
+}
+
+fn snapshot_save_opts(keywords: RHash) -> Result<SaveOpts, Error> {
+    Ok(SaveOpts {
+        with_parents: keyword::<bool>(keywords, "with_parents")?.unwrap_or(false),
+        with_image: keyword::<bool>(keywords, "with_image")?.unwrap_or(false),
+        plain_tar: keyword::<bool>(keywords, "plain_tar")?.unwrap_or(false),
+    })
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -2217,9 +2309,19 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
 
     // -- Snapshot ------------------------------------------------------------
     let snapshot = module.define_class("Snapshot", ruby.class_object())?;
+    snapshot.define_singleton_method("open", function!(snapshot_open, -1))?;
     snapshot.define_singleton_method("get", function!(snapshot_get, -1))?;
     snapshot.define_singleton_method("list", function!(snapshot_list, -1))?;
     snapshot.define_singleton_method("remove", function!(snapshot_remove, -1))?;
+    snapshot.define_singleton_method("save", function!(snapshot_save, -1))?;
+    snapshot.define_method("digest", method!(RubySnapshot::digest, 0))?;
+    snapshot.define_method("size_bytes", method!(RubySnapshot::size_bytes, 0))?;
+    snapshot.define_method("reference", method!(RubySnapshot::reference, 0))?;
+    snapshot.define_method(
+        "reference_kind",
+        method!(RubySnapshot::reference_kind, 0),
+    )?;
+    snapshot.define_method("save_to", method!(RubySnapshot::save_to, -1))?;
 
     let snap_handle = module.define_class("SnapshotHandle", ruby.class_object())?;
     snap_handle.define_method("digest", method!(RubySnapshotHandle::digest, 0))?;
@@ -2227,8 +2329,14 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     snap_handle.define_method("size_bytes", method!(RubySnapshotHandle::size_bytes, 0))?;
     snap_handle.define_method("image_ref", method!(RubySnapshotHandle::image_ref, 0))?;
     snap_handle.define_method("state_kind", method!(RubySnapshotHandle::state_kind, 0))?;
-    snap_handle.define_method("path", method!(RubySnapshotHandle::path, 0))?;
+    snap_handle.define_method("reference", method!(RubySnapshotHandle::reference, 0))?;
+    snap_handle.define_method(
+        "reference_kind",
+        method!(RubySnapshotHandle::reference_kind, 0),
+    )?;
     snap_handle.define_method("remove", method!(RubySnapshotHandle::remove, 1))?;
+    snap_handle.define_method("open", method!(RubySnapshotHandle::open, 0))?;
+    snap_handle.define_method("save_to", method!(RubySnapshotHandle::save_to, -1))?;
 
     Ok(())
 }

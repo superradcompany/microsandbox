@@ -1,7 +1,7 @@
-//! Coverage-guided fuzzing of the snapshot import record walker: arbitrary bytes are fed
-//! through the same unpack path `Snapshot::import` uses (decompression excluded — zstd has
-//! its own fuzzing upstream; the walker is the code we own). Malformed input must produce
-//! errors, never panics, overflows, or hangs.
+//! Coverage-guided fuzzing of the local snapshot import record walker: arbitrary bytes are
+//! fed through the same unpack path local `Snapshot::load` uses (decompression excluded —
+//! zstd has its own fuzzing upstream; the walker is the code we own). Malformed input must
+//! produce errors, never panics, overflows, or hangs.
 
 #![no_main]
 
@@ -19,5 +19,7 @@ fuzz_target!(|data: &[u8]| {
             .build()
             .expect("fuzz runtime")
     });
-    rt.block_on(microsandbox::snapshot::fuzz_unpack_archive(data));
+    rt.block_on(microsandbox::backend::fuzz_unpack_local_snapshot_archive(
+        data,
+    ));
 });

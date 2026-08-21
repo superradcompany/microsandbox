@@ -17,6 +17,7 @@ import {
   type NapiSandboxConfig,
   type NapiSandboxListOptions,
   type NapiSandboxPage,
+  type NapiSnapshotSeed,
 } from "./internal/napi.js";
 import { ExecHandle, ExecOutput } from "./exec.js";
 import { SandboxFsOps } from "./fs.js";
@@ -59,6 +60,7 @@ export type SandboxConfig = NapiSandboxConfig;
 export type CpuPlacement = "inherit" | "auto" | "spread" | "compact";
 
 export interface SandboxBuilder extends NapiSandboxBuilderSetters {
+  fromSnapshot(snapshot: NapiSnapshotSeed): this;
   create(): Promise<Sandbox>;
   createWithPullProgress(): Promise<PullProgressCreate>;
 }
@@ -184,14 +186,25 @@ export class Sandbox implements AsyncDisposable {
     const nb = new napi.SandboxBuilder(name);
     let detached = false;
     const origDetached = nb.detached.bind(nb);
+    const origFromSnapshot = nb.fromSnapshot.bind(nb) as (reference: string) => unknown;
     const origCreate = nb.create.bind(nb);
     const origCreateWithPP = nb.createWithPullProgress.bind(nb);
+    const origFromSnapshotRef = nb.fromSnapshotRef.bind(nb);
     const wrapped = nb as unknown as {
       detached: (enabled: boolean) => SandboxBuilder;
+      fromSnapshot: (snapshot: NapiSnapshotSeed) => SandboxBuilder;
     };
     wrapped.detached = (enabled: boolean) => {
       detached = enabled;
       origDetached(enabled);
+      return nb as unknown as SandboxBuilder;
+    };
+    wrapped.fromSnapshot = (snapshot: NapiSnapshotSeed) => {
+      if (typeof snapshot === "string") {
+        origFromSnapshot(snapshot);
+      } else {
+        origFromSnapshotRef(snapshot.reference, snapshot.referenceKind);
+      }
       return nb as unknown as SandboxBuilder;
     };
     // Override the terminals so they return a TS Sandbox.

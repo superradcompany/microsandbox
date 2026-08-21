@@ -1,4 +1,4 @@
-//! Internal adjacent-release snapshot downgrade coordination.
+//! Internal adjacent-release local snapshot downgrade coordination.
 //!
 //! This module is public only so the workspace CLI can coordinate snapshot
 //! artifacts with its database and binary rollback. It is not a general
@@ -1104,7 +1104,7 @@ mod tests {
             .await
             .unwrap();
         Migrator::up(pools.write().inner(), None).await.unwrap();
-        crate::snapshot::migration::reconcile_managed(&pools, &snapshots)
+        super::super::migration::reconcile_managed(&pools, &snapshots)
             .await
             .unwrap();
 
@@ -1208,7 +1208,7 @@ mod tests {
             .await
             .unwrap();
         Migrator::up(pools.write().inner(), None).await.unwrap();
-        crate::snapshot::migration::reconcile_managed(&pools, &snapshots)
+        super::super::migration::reconcile_managed(&pools, &snapshots)
             .await
             .unwrap();
 
@@ -1288,7 +1288,7 @@ mod tests {
             .await
             .unwrap();
         Migrator::up(pools.write().inner(), None).await.unwrap();
-        crate::snapshot::migration::reconcile_managed(&pools, &snapshots)
+        super::super::migration::reconcile_managed(&pools, &snapshots)
             .await
             .unwrap();
 

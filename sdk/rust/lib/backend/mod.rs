@@ -25,10 +25,16 @@ mod local;
 mod misconfigured;
 mod profile;
 pub(crate) mod sandbox;
+pub(crate) mod snapshot;
 pub(crate) mod volume;
 
 pub use cloud::{CloudBackend, CloudBackendBuilder, DEFAULT_CLOUD_API_URL};
 use futures::future::BoxFuture;
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub use local::fuzz_unpack_local_snapshot_archive;
+#[doc(hidden)]
+pub use local::snapshot_downgrade as local_snapshot_downgrade;
 pub use local::{LocalBackend, LocalBackendBuilder};
 pub use microsandbox_types::{
     CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
@@ -39,6 +45,7 @@ pub use sandbox::{
     SandboxBackend, SandboxCloudState, SandboxHandleCloudState, SandboxHandleInner,
     SandboxHandleLocalState, SandboxInner, SandboxLocalState,
 };
+pub use snapshot::SnapshotBackend;
 pub use volume::{
     CloudVolumeKind, CloudVolumeStatus, VolumeBackend, VolumeCloudState, VolumeHandleCloudState,
     VolumeHandleInner, VolumeHandleLocalState, VolumeInner, VolumeLocalState,
@@ -146,11 +153,9 @@ impl BackendSelectionSource {
 /// resource-specific sub-traits (sandboxes, volumes, snapshots) via accessor
 /// methods.
 ///
-/// Object-safe — handles hold an `Arc<dyn Backend>`. Sub-trait accessors stay
-/// off this trait until each sub-trait's surface is finalised, which lets the
-/// scaffolding land without committing to method signatures that will change.
-/// New methods ship with default implementations, so custom backends
-/// (mocks, proxies) keep compiling as the trait grows.
+/// Object-safe — handles hold an `Arc<dyn Backend>`. Every implementation must
+/// explicitly provide each resource-specific backend so that missing
+/// capabilities are caught at compile time.
 pub trait Backend: Send + Sync + 'static {
     /// Return the kind of backend this is (`Local` or `Cloud`).
     fn kind(&self) -> BackendKind;
@@ -170,6 +175,9 @@ pub trait Backend: Send + Sync + 'static {
 
     /// Return the volume lifecycle backend.
     fn volumes(&self) -> &dyn VolumeBackend;
+
+    /// Return the snapshot lifecycle backend.
+    fn snapshots(&self) -> &dyn SnapshotBackend;
 
     /// Try downcast to a concrete `&LocalBackend` when in a local context.
     ///
@@ -326,6 +334,10 @@ mod tests {
             fn volumes(&self) -> &dyn VolumeBackend {
                 unimplemented!("fake backend only tests kind routing")
             }
+
+            fn snapshots(&self) -> &dyn SnapshotBackend {
+                unimplemented!("fake backend only tests kind routing")
+            }
         }
         let fake: Arc<dyn Backend> = Arc::new(Fake(BackendKind::Cloud));
         let observed = with_backend(fake, async { default_backend().kind() }).await;
@@ -351,6 +363,10 @@ mod tests {
             }
 
             fn volumes(&self) -> &dyn VolumeBackend {
+                unimplemented!("fake backend only tests kind routing")
+            }
+
+            fn snapshots(&self) -> &dyn SnapshotBackend {
                 unimplemented!("fake backend only tests kind routing")
             }
         }

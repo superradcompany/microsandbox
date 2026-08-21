@@ -411,7 +411,7 @@ impl CloudBackend {
 /// Parse a JSON response into `T`, mapping HTTP errors to typed
 /// `MicrosandboxError` variants. Tries to decode msb-cloud's typed error body
 /// for richer messages on 4xx/5xx.
-async fn decode_json<T: serde::de::DeserializeOwned>(
+pub(super) async fn decode_json<T: serde::de::DeserializeOwned>(
     resp: Response,
     op: &str,
 ) -> MicrosandboxResult<T> {
@@ -432,7 +432,7 @@ async fn decode_json<T: serde::de::DeserializeOwned>(
     ))
 }
 
-async fn ensure_success(resp: Response, op: &str) -> MicrosandboxResult<Response> {
+pub(super) async fn ensure_success(resp: Response, op: &str) -> MicrosandboxResult<Response> {
     let status = resp.status();
     if status.is_success() {
         return Ok(resp);
@@ -447,7 +447,7 @@ async fn ensure_success(resp: Response, op: &str) -> MicrosandboxResult<Response
     ))
 }
 
-fn cloud_io_error(op: &str, e: reqwest::Error) -> MicrosandboxError {
+pub(super) fn cloud_io_error(op: &str, e: reqwest::Error) -> MicrosandboxError {
     tracing::debug!(operation = op, error = %e, "cloud backend transport error");
     MicrosandboxError::Http(e)
 }
@@ -466,8 +466,18 @@ fn cloud_http_error(
 
     match code.as_deref() {
         Some("sandbox_not_found") => return MicrosandboxError::SandboxNotFound(message),
+        Some("snapshot_not_found") => return MicrosandboxError::SnapshotNotFound(message),
+        Some("snapshot_operation_not_found") => {
+            return MicrosandboxError::SnapshotNotFound(message);
+        }
         Some("volume_not_found") => return MicrosandboxError::VolumeNotFound(message),
         Some("volume_file_not_found") => return MicrosandboxError::SandboxFsOps(message),
+        Some("snapshot_name_already_exists") | Some("snapshot_already_exists") => {
+            return MicrosandboxError::SnapshotAlreadyExists(message);
+        }
+        Some("name_already_exists") if op == "POST /v1/snapshots" => {
+            return MicrosandboxError::SnapshotAlreadyExists(message);
+        }
         Some("name_already_exists") => return MicrosandboxError::SandboxAlreadyExists(message),
         Some("invalid_request") | Some("invalid_sandbox_config") | Some("invalid_volume_path") => {
             return MicrosandboxError::InvalidConfig(message);
@@ -480,10 +490,14 @@ fn cloud_http_error(
 
     match status {
         400 | 422 => MicrosandboxError::InvalidConfig(message),
+        404 if op.contains("/v1/snapshots") || op.contains("/v1/snapshot-operations") => {
+            MicrosandboxError::SnapshotNotFound(message)
+        }
         404 if op.contains("/v1/volumes") => MicrosandboxError::VolumeNotFound(message),
         404 => MicrosandboxError::SandboxNotFound(message),
         409 if op == "POST /v1/sandboxes" => MicrosandboxError::SandboxAlreadyExists(message),
         409 if op == "POST /v1/volumes" => MicrosandboxError::VolumeAlreadyExists(message),
+        409 if op == "POST /v1/snapshots" => MicrosandboxError::SnapshotAlreadyExists(message),
         502 => MicrosandboxError::Runtime(message),
         _ => MicrosandboxError::CloudHttp {
             status,
@@ -709,6 +723,27 @@ mod tests {
         assert!(
             matches!(err, MicrosandboxError::SandboxAlreadyExists(msg) if msg.contains("name taken"))
         );
+    }
+
+    #[test]
+    fn cloud_http_error_maps_snapshot_lifecycle_errors() {
+        let missing: CloudErrorBody = serde_json::from_str(
+            r#"{"error":{"code":"snapshot_not_found","message":"snapshot missing"}}"#,
+        )
+        .unwrap();
+        let conflict: CloudErrorBody = serde_json::from_str(
+            r#"{"error":{"code":"snapshot_name_already_exists","message":"name taken"}}"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            cloud_http_error(404, Some(&missing), "", "GET /v1/snapshots/:id"),
+            MicrosandboxError::SnapshotNotFound(_)
+        ));
+        assert!(matches!(
+            cloud_http_error(409, Some(&conflict), "", "POST /v1/snapshots"),
+            MicrosandboxError::SnapshotAlreadyExists(_)
+        ));
     }
 
     #[test]

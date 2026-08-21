@@ -1060,17 +1060,19 @@ When `true`, the sandbox and all its persisted state are removed automatically o
 <Tooltip tip="Snapshots use local disk artifacts and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
-fromSnapshot(pathOrName: string): this
+fromSnapshot(snapshot: string | Snapshot | SnapshotHandle): this
 ```
 
-Boot from a previously captured snapshot instead of a fresh image. The image reference and upper-layer source are pinned from the snapshot manifest. See [Snapshots](/sdk/typescript/snapshots).
+Boot from a previously captured snapshot instead of a fresh image. Passing a
+snapshot object uses its stable backend-relative reference. See
+[Snapshots](/sdk/typescript/snapshots).
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><code>pathOrName</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Snapshot name or filesystem path.</div>
+    <div className="msb-param-key"><code>snapshot</code><span className="msb-type">string | Snapshot | SnapshotHandle</span></div>
+    <div className="msb-param-desc">Backend-relative string or snapshot object.</div>
   </div>
 </div>
 
