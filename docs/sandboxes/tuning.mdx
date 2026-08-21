@@ -116,6 +116,7 @@ The plan labels each change as `live`, `next start`, `requires restart`, or `uns
 | `labels` | Live | Host-side metadata; no guest process changes |
 | `env`, `workdir` | Future execs | Running processes keep what they already have |
 | `secrets` | Live for rotation | Placeholder changes need a restart |
+| `tls` | Restart or next start | Configuring a secret turns interception on, and interception cannot start on a running sandbox |
 | Root disk size | Restart or next start | Managed and flat OCI disks grow only; tmpfs changes on next boot |
 | Other storage | Create or mount time | Named volumes, mount tmpfs, and user disk images are sized outside `modify` |
 
@@ -331,6 +332,8 @@ msb modify worker --secret GITHUB_TOKEN@api.github.com
 msb modify worker --secret-rm OLD_TOKEN
 ```
 </CodeGroup>
+
+Configuring a secret on a sandbox with TLS interception off also turns it on, since the proxy is what substitutes the value. That shows up in the plan as a `tls` change and needs a restart or the next start. Removing every secret leaves interception on.
 
 For the credential model and host allow lists, see [Secrets](/sandboxes/secrets).
 

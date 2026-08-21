@@ -42,6 +42,9 @@ const FUTURE_EXECS_ONLY: &str =
 const SECRETS_UNAVAILABLE_WITHOUT_NET: &str =
     "secret modification requires a build with the net feature";
 const SECRET_FIELD: &str = "secret";
+const TLS_FIELD: &str = "tls";
+const TLS_INTERCEPTION_REQUIRES_RESTART: &str =
+    "secrets require TLS interception, which cannot be enabled on a running sandbox";
 const ROOT_DISK_FIELD: &str = "root_disk_size";
 const ENV_FIELD: &str = "env";
 const LABEL_FIELD: &str = "label";
@@ -294,6 +297,12 @@ impl SandboxModificationBuilder {
     /// socket; the durable config records host-side source references for
     /// source-based specs and persists the value for value-based specs (the
     /// same at-rest property as create's `secret_env`).
+    ///
+    /// Configuring a secret on a sandbox with TLS interception off also
+    /// turns interception on, matching create's `secret` — secrets are
+    /// substituted by the TLS proxy, so they do nothing without it. That is
+    /// planned as a `tls` change and, like every other restart-backed change,
+    /// needs `restart` or `next_start` on a running sandbox.
     pub async fn apply(self) -> MicrosandboxResult<SandboxModificationPlan> {
         let handle = self
             .backend
@@ -967,6 +976,10 @@ fn apply_secret_patch_to_config(
         .secrets
         .secrets
         .retain(|entry| !patch.secrets_remove.contains(&entry.env_var));
+    // Same invariant create upholds in `SandboxBuilder::secret_entry`. The
+    // planner emits a matching `tls` change under the same condition, so the
+    // plan cannot disagree with what is persisted.
+    super::config::ensure_tls_for_secrets(&mut network);
     // Enforce env-var and placeholder shape rules before anything persists;
     // validation errors carry entry indexes and sizes, never values.
     network.secrets.validate().map_err(|err| {
@@ -1657,6 +1670,22 @@ fn push_secret_changes(
             reason,
         }));
     }
+
+    // Surface the implied TLS enable as its own change rather than flipping
+    // a config field invisibly: it keeps the dry-run honest and routes the
+    // patch through the restart path, the only way interception can start.
+    // Removal-only patches enable nothing, so they emit nothing.
+    if !patch.secrets.is_empty() && !tls_interception_enabled(config) {
+        changes.push(spec_change(
+            TLS_FIELD,
+            ChangeKind::Updated,
+            Some("interception disabled".to_string()),
+            Some("interception enabled".to_string()),
+            status,
+            policy,
+            TLS_INTERCEPTION_REQUIRES_RESTART,
+        ));
+    }
 }
 
 /// Infer what a declarative secret spec changes by diffing it against the
@@ -2235,6 +2264,23 @@ fn existing_secret_from_network_config(
     _name: &str,
 ) -> Option<ExistingSecret> {
     None
+}
+
+/// Whether the config already has TLS interception on. An unreadable network
+/// config counts as disabled: a redundant `tls` change beats a secret landing
+/// without interception.
+#[cfg(feature = "net")]
+fn tls_interception_enabled(config: &SandboxConfig) -> bool {
+    config
+        .local_network_config()
+        .map(|network| network.tls.enabled)
+        .unwrap_or(false)
+}
+
+/// Without `net`, secret changes already plan as unsupported; no `tls` on top.
+#[cfg(not(feature = "net"))]
+fn tls_interception_enabled(_config: &SandboxConfig) -> bool {
+    true
 }
 
 #[cfg(feature = "net")]
@@ -3438,6 +3484,18 @@ mod tests {
             on_violation: None,
             require_tls_identity: true,
         });
+        // Mirror the invariant every real entry point upholds.
+        crate::sandbox::config::ensure_tls_for_secrets(&mut network);
+        config.set_local_network_config(network).unwrap();
+        config
+    }
+
+    /// The pre-fix shape this bug used to persist: a secret with TLS off.
+    #[cfg(feature = "net")]
+    fn config_with_secret_and_tls_disabled(name: &str, value: &str) -> SandboxConfig {
+        let mut config = config_with_secret(name, value);
+        let mut network = config.local_network_config().unwrap();
+        network.tls.enabled = false;
         config.set_local_network_config(network).unwrap();
         config
     }
@@ -3472,6 +3530,15 @@ mod tests {
             secrets: specs,
             ..SandboxModificationPatch::default()
         }
+    }
+
+    /// The `tls` change a secret patch emits when it must turn interception on.
+    #[cfg(feature = "net")]
+    fn tls_plan_change(plan: &SandboxModificationPlan) -> Option<&ConfigPlannedChange> {
+        plan.changes.iter().find_map(|change| match change {
+            PlannedChange::Config(change) if change.field == TLS_FIELD => Some(change),
+            _ => None,
+        })
     }
 
     #[cfg(feature = "net")]
@@ -3851,6 +3918,167 @@ mod tests {
         assert!(conflicts[0].message.contains("needs a name"));
     }
 
+    /// Regression for #1422: the first secret left `tls.enabled` false, so the
+    /// placeholder reached the upstream unsubstituted.
+    #[cfg(feature = "net")]
+    #[test]
+    fn adding_first_secret_enables_tls_in_durable_config() {
+        let mut config = config(2, 1024);
+        assert!(!config.local_network_config().unwrap().tls.enabled);
+
+        let patch = patch_with_specs(vec![source_spec("API_KEY", &["api.example.com"])]);
+        apply_secret_patch_to_config(&mut config, &patch).unwrap();
+
+        let network = config.local_network_config().unwrap();
+        assert_eq!(network.secrets.secrets.len(), 1);
+        assert!(network.tls.enabled);
+    }
+
+    /// Interception is restart-backed, so the first secret must show up in the
+    /// plan and drive the restart rather than flip silently under a running VM.
+    #[cfg(feature = "net")]
+    #[test]
+    fn first_secret_plans_tls_change_and_forces_restart() {
+        let config = config(2, 1024);
+        let patch = patch_with_specs(vec![source_spec("API_KEY", &["api.example.com"])]);
+
+        // Stopped: lands on the next start.
+        let plan = build_plan(
+            "api".to_string(),
+            SandboxStatus::Stopped,
+            &config,
+            None,
+            LiveControl::default(),
+            patch.clone(),
+            ModificationPolicy::NoRestart,
+        );
+        let tls = tls_plan_change(&plan).expect("expected a tls change");
+        assert_eq!(tls.change, ChangeKind::Updated);
+        assert_eq!(tls.disposition, ModificationDisposition::NextStart);
+        assert!(validate_apply_supported(&plan).is_ok());
+
+        // Running under the default policy: an explicit error.
+        let plan = build_plan(
+            "api".to_string(),
+            SandboxStatus::Running,
+            &config,
+            None,
+            LiveControl {
+                resize: false,
+                secrets: true,
+            },
+            patch.clone(),
+            ModificationPolicy::NoRestart,
+        );
+        assert_eq!(
+            tls_plan_change(&plan).unwrap().disposition,
+            ModificationDisposition::RequiresRestart
+        );
+        assert!(validate_apply_supported(&plan).is_err());
+
+        // Restart opted in: the restart rebuilds active from the durable config.
+        let plan = build_plan(
+            "api".to_string(),
+            SandboxStatus::Running,
+            &config,
+            None,
+            LiveControl {
+                resize: false,
+                secrets: true,
+            },
+            patch,
+            ModificationPolicy::Restart,
+        );
+        assert!(validate_apply_supported(&plan).is_ok());
+        assert!(plan_requires_restart(&plan));
+    }
+
+    /// Rotating a secret on a legacy TLS-off config classifies as live, and
+    /// mirroring it would claim TLS the running proxy does not have.
+    #[cfg(feature = "net")]
+    #[test]
+    fn live_secret_change_on_tls_disabled_config_requires_restart() {
+        let config = config_with_secret_and_tls_disabled("API_KEY", SECRET_SENTINEL);
+        let patch = patch_with_specs(vec![source_spec("API_KEY", &[])]);
+
+        let plan = build_plan(
+            "api".to_string(),
+            SandboxStatus::Running,
+            &config,
+            None,
+            LiveControl {
+                resize: false,
+                secrets: true,
+            },
+            patch,
+            ModificationPolicy::NoRestart,
+        );
+
+        // The rotate itself is live-applicable, so tls is the only blocker.
+        let secret_dispositions: Vec<_> = plan
+            .changes
+            .iter()
+            .filter_map(|change| match change {
+                PlannedChange::Secret(change) => Some(change.disposition),
+                PlannedChange::Config(_) => None,
+            })
+            .collect();
+        assert_eq!(secret_dispositions, vec![ModificationDisposition::Live]);
+        assert_eq!(
+            tls_plan_change(&plan).unwrap().disposition,
+            ModificationDisposition::RequiresRestart
+        );
+        let err = validate_apply_supported(&plan).unwrap_err().to_string();
+        assert_eq!(err, "cannot apply modification: tls requires restart");
+    }
+
+    /// One-way: emptying the secret set must not turn interception off.
+    #[cfg(feature = "net")]
+    #[test]
+    fn removing_last_secret_keeps_tls_enabled() {
+        let mut config = config_with_secret("API_KEY", SECRET_SENTINEL);
+        let patch = SandboxModificationPatch {
+            secrets_remove: vec!["API_KEY".to_string()],
+            ..SandboxModificationPatch::default()
+        };
+
+        let plan = build_plan(
+            "api".to_string(),
+            SandboxStatus::Stopped,
+            &config,
+            None,
+            LiveControl::default(),
+            patch.clone(),
+            ModificationPolicy::NoRestart,
+        );
+        assert!(tls_plan_change(&plan).is_none());
+
+        apply_secret_patch_to_config(&mut config, &patch).unwrap();
+
+        let network = config.local_network_config().unwrap();
+        assert!(network.secrets.secrets.is_empty());
+        assert!(network.tls.enabled);
+    }
+
+    /// Interception already on: nothing to enable, so no extra plan noise.
+    #[cfg(feature = "net")]
+    #[test]
+    fn secret_change_with_tls_already_enabled_plans_no_tls_change() {
+        let config = config_with_secret("API_KEY", SECRET_SENTINEL);
+        let patch = patch_with_specs(vec![source_spec("API_KEY", &[])]);
+
+        let plan = build_plan(
+            "api".to_string(),
+            SandboxStatus::Stopped,
+            &config,
+            None,
+            LiveControl::default(),
+            patch,
+            ModificationPolicy::NoRestart,
+        );
+
+        assert!(tls_plan_change(&plan).is_none());
+    }
     #[cfg(feature = "net")]
     #[test]
     fn applying_new_source_spec_uses_create_placeholder_default() {
