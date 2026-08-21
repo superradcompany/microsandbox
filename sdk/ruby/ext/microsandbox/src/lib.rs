@@ -3,8 +3,8 @@ use std::{
     fmt::Display,
     future::Future,
     mem::ManuallyDrop,
-    path::PathBuf,
     panic::{AssertUnwindSafe, catch_unwind},
+    path::PathBuf,
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicPtr, AtomicU32, Ordering},
@@ -1707,11 +1707,7 @@ impl RubySnapshot {
     fn reference_kind(&self) -> &'static str {
         self.inner.reference().kind()
     }
-    fn save_to(
-        ruby: &Ruby,
-        this: typed_data::Obj<Self>,
-        args: &[Value],
-    ) -> Result<(), Error> {
+    fn save_to(ruby: &Ruby, this: typed_data::Obj<Self>, args: &[Value]) -> Result<(), Error> {
         let (out, opts) = parse_snapshot_save_args(ruby, args)?;
         let snapshot = this.inner.clone();
         run(ruby, async move { snapshot.save_to(&out, opts).await })
@@ -1749,11 +1745,7 @@ impl RubySnapshotHandle {
         let inner = run(ruby, async move { handle.open().await })?;
         Ok(RubySnapshot { inner })
     }
-    fn save_to(
-        ruby: &Ruby,
-        this: typed_data::Obj<Self>,
-        args: &[Value],
-    ) -> Result<(), Error> {
+    fn save_to(ruby: &Ruby, this: typed_data::Obj<Self>, args: &[Value]) -> Result<(), Error> {
         let (out, opts) = parse_snapshot_save_args(ruby, args)?;
         let handle = this.inner.clone();
         run(ruby, async move { handle.save_to(&out, opts).await })
@@ -2087,7 +2079,10 @@ fn snapshot_save(ruby: &Ruby, args: &[Value]) -> Result<(), Error> {
     let reference = parsed.required.0;
     let out = PathBuf::from(parsed.required.1);
     let opts = snapshot_save_opts(parsed.keywords)?;
-    run(ruby, async move { Snapshot::save(&reference, &out, opts).await })
+    run(
+        ruby,
+        async move { Snapshot::save(&reference, &out, opts).await },
+    )
 }
 
 // -- Image statics -----------------------------------------------------------
@@ -2626,10 +2621,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     snapshot.define_method("digest", method!(RubySnapshot::digest, 0))?;
     snapshot.define_method("size_bytes", method!(RubySnapshot::size_bytes, 0))?;
     snapshot.define_method("reference", method!(RubySnapshot::reference, 0))?;
-    snapshot.define_method(
-        "reference_kind",
-        method!(RubySnapshot::reference_kind, 0),
-    )?;
+    snapshot.define_method("reference_kind", method!(RubySnapshot::reference_kind, 0))?;
     snapshot.define_method("save_to", method!(RubySnapshot::save_to, -1))?;
 
     let snap_handle = module.define_class("SnapshotHandle", ruby.class_object())?;

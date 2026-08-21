@@ -58,6 +58,10 @@ pub trait SnapshotBackend: Send + Sync {
         reference: SnapshotReference,
     ) -> BoxFuture<'a, MicrosandboxResult<()>>;
 
+    /// Return the local artifact directory, or a typed unsupported error when
+    /// this backend does not expose snapshot artifacts on the client host.
+    fn path<'a>(&self, reference: &'a SnapshotReference) -> MicrosandboxResult<&'a Path>;
+
     /// Verify a snapshot's stored payload integrity.
     fn verify<'a>(
         &'a self,
