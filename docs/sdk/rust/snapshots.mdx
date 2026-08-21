@@ -516,6 +516,16 @@ snapshots.
   </div>
 </div>
 
+#### <span className="msb-recv">snap.</span><span className="msb-hn">path()</span>
+
+```rust
+fn path(&self) -> MicrosandboxResult<&Path>
+```
+
+Return the local artifact directory. Cloud snapshots return
+`MicrosandboxError::Unsupported` because managed and host-volume artifacts are
+not paths on the client host.
+
 #### <span className="msb-recv">snap.</span><span className="msb-hn">save_to()</span>
 
 ```rust
@@ -633,6 +643,15 @@ fn size_bytes(&self) -> Option<u64>
 ```
 
 Backend-reported stored payload size, if known.
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">path()</span>
+
+```rust
+fn path(&self) -> MicrosandboxResult<&Path>
+```
+
+Return the local artifact directory. Cloud snapshots return
+`MicrosandboxError::Unsupported`.
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">created_at()</span>
 

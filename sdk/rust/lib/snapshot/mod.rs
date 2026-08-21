@@ -105,6 +105,7 @@ pub struct SnapshotBuilder {
 pub struct SnapshotHandle {
     pub(crate) backend: Arc<dyn Backend>,
     pub(crate) reference: SnapshotReference,
+    pub(crate) local_path: Option<PathBuf>,
     pub(crate) digest: String,
     pub(crate) name: Option<String>,
     pub(crate) parent_digest: Option<String>,
@@ -199,6 +200,14 @@ impl Snapshot {
                 .as_file()
                 .map(|state| state.upper.size_bytes)
         })
+    }
+
+    /// Local artifact directory for this snapshot.
+    ///
+    /// Cloud backends return [`crate::MicrosandboxError::Unsupported`] because
+    /// managed and host-volume artifacts are not paths on the client host.
+    pub fn path(&self) -> MicrosandboxResult<&Path> {
+        self.backend.snapshots().path(&self.reference)
     }
 
     /// Closed state variant carried by the descriptor.
@@ -477,6 +486,16 @@ impl SnapshotHandle {
     /// Stable reference that can seed another sandbox on the same backend.
     pub fn reference(&self) -> SnapshotReference {
         self.reference.clone()
+    }
+
+    /// Local artifact directory for this snapshot handle.
+    ///
+    /// Cloud backends return [`crate::MicrosandboxError::Unsupported`] because
+    /// managed and host-volume artifacts are not paths on the client host.
+    pub fn path(&self) -> MicrosandboxResult<&Path> {
+        self.local_path
+            .as_deref()
+            .ok_or_else(|| crate::MicrosandboxError::local_only(crate::Operation::SnapshotOps))
     }
 
     /// Open the underlying artifact metadata.

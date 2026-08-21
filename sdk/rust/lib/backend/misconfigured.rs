@@ -261,6 +261,10 @@ impl SnapshotBackend for ConfigurationErrorBackend {
         self.fail()
     }
 
+    fn path<'a>(&self, _reference: &'a SnapshotReference) -> MicrosandboxResult<&'a Path> {
+        Err(self.error())
+    }
+
     fn verify<'a>(
         &'a self,
         _snapshot: &'a Snapshot,
