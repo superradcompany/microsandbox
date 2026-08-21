@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 #[cfg(unix)]
@@ -74,6 +75,19 @@ const LEN_PREFIX_SIZE: usize = 4;
 
 /// Capacity of the per-client write channel.
 const CLIENT_WRITE_CHANNEL_CAPACITY: usize = 64;
+
+/// Maximum time to retain a frame while the guest's receive ring is full.
+///
+/// A full ring normally clears as the guest consumes console input. If it does
+/// not, retaining the frame forever leaves the relay alive with no progress
+/// and can keep a runtime busy indefinitely.
+const RING_WRITE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Initial delay between retries of a full guest receive ring.
+const RING_WRITE_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(1);
+
+/// Upper bound for the delay between retries of a full guest receive ring.
+const RING_WRITE_RETRY_MAX_DELAY: Duration = Duration::from_millis(100);
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -140,6 +154,14 @@ struct RawFrame {
     id: u32,
     /// The flags byte extracted from the frame header.
     flags: u8,
+}
+
+/// Outcome of trying to deliver a frame to the guest receive ring.
+enum RingWriteError {
+    /// Relay shutdown interrupted delivery before the frame was queued.
+    Cancelled,
+    /// The guest did not drain the receive ring before the delivery deadline.
+    Failed(RuntimeError),
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -418,7 +440,12 @@ impl AgentRelay {
 
         // Spawn the ring writer task (client frames → rx_ring → guest).
         let shared_for_writer = Arc::clone(&self.shared);
-        let ring_writer_handle = tokio::spawn(ring_writer_task(shared_for_writer, agent_rx));
+        let ring_writer_shutdown = shutdown.clone();
+        let mut ring_writer_handle = tokio::spawn(ring_writer_task(
+            shared_for_writer,
+            agent_rx,
+            ring_writer_shutdown,
+        ));
         let clock_sync_handle = spawn_clock_sync_task(agent_tx.clone());
 
         // Spawn the ring reader task (tx_ring → guest frames → clients).
@@ -558,6 +585,31 @@ impl AgentRelay {
                         break;
                     }
                 }
+                ring_writer_result = &mut ring_writer_handle => {
+                    let error = match ring_writer_result {
+                        Ok(Ok(())) if *shutdown.borrow() => {
+                            tracing::debug!("agent relay: ring writer cancelled during shutdown");
+                            None
+                        }
+                        Ok(Ok(())) => Some(RuntimeError::Custom(
+                            "agent relay: ring writer task exited unexpectedly".into(),
+                        )),
+                        Ok(Err(error)) => Some(error),
+                        Err(error) => Some(RuntimeError::Custom(format!(
+                            "agent relay: ring writer task failed to join: {error}"
+                        ))),
+                    };
+
+                    let Some(error) = error else {
+                        break;
+                    };
+
+                    tracing::error!(error = %error, "agent relay: ring writer stopped");
+                    self.listener.cleanup(&self.endpoint);
+                    clock_sync_handle.abort();
+                    ring_reader_handle.abort();
+                    return Err(error);
+                }
             }
         }
 
@@ -585,15 +637,15 @@ pub(crate) fn push_guest_frame_blocking(
     shared: &ConsoleSharedState,
     frame: Vec<u8>,
 ) -> RuntimeResult<()> {
-    push_guest_frame_until(shared, frame, std::time::Duration::from_secs(60))
+    push_guest_frame_until(shared, frame, RING_WRITE_TIMEOUT)
 }
 
 pub(crate) fn push_guest_frame_until(
     shared: &ConsoleSharedState,
     mut frame: Vec<u8>,
-    timeout: std::time::Duration,
+    timeout: Duration,
 ) -> RuntimeResult<()> {
-    let deadline = std::time::Instant::now() + timeout;
+    let deadline = Instant::now() + timeout;
 
     loop {
         match shared.rx_ring.push(frame) {
@@ -603,12 +655,12 @@ pub(crate) fn push_guest_frame_until(
             }
             Err(returned) => {
                 frame = returned;
-                if std::time::Instant::now() >= deadline {
+                if Instant::now() >= deadline {
                     return Err(RuntimeError::Custom(
                         "timed out sending frame to agentd".into(),
                     ));
                 }
-                std::thread::sleep(std::time::Duration::from_millis(1));
+                std::thread::sleep(Duration::from_millis(1));
             }
         }
     }
@@ -726,32 +778,102 @@ fn tap_frame_into_log(frame: &RawFrame, writer: &LogWriter, session_registry: &S
 }
 
 /// Background task that pushes client frames into the rx_ring for the guest.
-/// Retries on full ring with backoff to avoid dropping frames.
-async fn ring_writer_task(shared: Arc<ConsoleSharedState>, mut rx: mpsc::Receiver<Vec<u8>>) {
-    while let Some(frame_bytes) = rx.recv().await {
-        let mut data = frame_bytes;
-        let mut attempts = 0u64;
-        loop {
-            match shared.rx_ring.push(data) {
-                Ok(()) => {
-                    shared.rx_wake.wake();
+/// Retries on a full ring with bounded exponential backoff, preserving frame
+/// ordering while avoiding a sustained timer-driven busy loop.
+async fn ring_writer_task(
+    shared: Arc<ConsoleSharedState>,
+    mut rx: mpsc::Receiver<Vec<u8>>,
+    mut shutdown: watch::Receiver<bool>,
+) -> RuntimeResult<()> {
+    loop {
+        let frame_bytes = tokio::select! {
+            frame = rx.recv() => frame,
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    tracing::debug!("agent relay: ring writer task cancelled");
                     break;
                 }
-                Err(returned) => {
-                    attempts = attempts.saturating_add(1);
-                    if attempts == 50 || attempts.is_multiple_of(500) {
-                        tracing::warn!(
-                            attempts,
-                            "agent relay: rx_ring full, waiting to deliver frame"
-                        );
-                    }
-                    data = returned;
-                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                continue;
+            }
+        };
+
+        let Some(frame_bytes) = frame_bytes else {
+            break;
+        };
+
+        match push_guest_frame_async(&shared, frame_bytes, &mut shutdown, RING_WRITE_TIMEOUT).await
+        {
+            Ok(()) => {}
+            Err(RingWriteError::Cancelled) => {
+                tracing::debug!("agent relay: ring writer task cancelled");
+                break;
+            }
+            Err(RingWriteError::Failed(error)) => return Err(error),
+        }
+    }
+    tracing::debug!("agent relay: ring writer task exiting");
+    Ok(())
+}
+
+/// Push one client frame into the guest receive ring without dropping it.
+///
+/// The caller owns ordering by awaiting this function before accepting the
+/// next frame. A temporarily full ring is handled with exponential backoff;
+/// a permanently full ring returns an error after `timeout`, and shutdown
+/// cancels the wait immediately.
+async fn push_guest_frame_async(
+    shared: &ConsoleSharedState,
+    mut data: Vec<u8>,
+    shutdown: &mut watch::Receiver<bool>,
+    timeout: Duration,
+) -> Result<(), RingWriteError> {
+    let deadline = Instant::now() + timeout;
+    let mut delay = RING_WRITE_RETRY_INITIAL_DELAY;
+    let mut attempts = 0u64;
+
+    loop {
+        if *shutdown.borrow() {
+            return Err(RingWriteError::Cancelled);
+        }
+
+        match shared.rx_ring.push(data) {
+            Ok(()) => {
+                shared.rx_wake.wake();
+                return Ok(());
+            }
+            Err(returned) => {
+                data = returned;
+                attempts = attempts.saturating_add(1);
+                if attempts == 1 || attempts.is_multiple_of(100) {
+                    tracing::warn!(
+                        attempts,
+                        "agent relay: rx_ring full, waiting to deliver frame"
+                    );
+                }
+            }
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            let error = RuntimeError::Custom(format!(
+                "agent relay: timed out delivering frame after {attempts} retries"
+            ));
+            tracing::error!(error = %error, "agent relay: rx_ring stayed full");
+            return Err(RingWriteError::Failed(error));
+        }
+
+        let wait = delay.min(remaining);
+        tokio::select! {
+            _ = tokio::time::sleep(wait) => {
+                delay = delay.saturating_mul(2).min(RING_WRITE_RETRY_MAX_DELAY);
+            }
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return Err(RingWriteError::Cancelled);
                 }
             }
         }
     }
-    tracing::debug!("agent relay: ring writer task exiting");
 }
 
 /// Background task that reads frames from the tx_ring (written by the guest
@@ -1287,5 +1409,62 @@ mod tests {
             shared.rx_ring.pop().is_none(),
             "no init context means no ack should be sent"
         );
+    }
+
+    #[tokio::test]
+    async fn ring_writer_delivers_after_temporary_backpressure() {
+        let shared = Arc::new(ConsoleSharedState::with_capacity(1));
+        shared.rx_ring.push(vec![0]).unwrap();
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let shared_for_writer = Arc::clone(&shared);
+        let writer = tokio::spawn(async move {
+            let mut shutdown = shutdown_rx;
+            push_guest_frame_async(
+                &shared_for_writer,
+                vec![1],
+                &mut shutdown,
+                Duration::from_secs(1),
+            )
+            .await
+        });
+
+        tokio::task::yield_now().await;
+        assert_eq!(shared.rx_ring.pop(), Some(vec![0]));
+        assert!(matches!(writer.await.unwrap(), Ok(())));
+        assert_eq!(shared.rx_ring.pop(), Some(vec![1]));
+    }
+
+    #[tokio::test]
+    async fn ring_writer_times_out_when_guest_never_drains() {
+        let shared = Arc::new(ConsoleSharedState::with_capacity(1));
+        shared.rx_ring.push(vec![0]).unwrap();
+        let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
+
+        let result =
+            push_guest_frame_async(&shared, vec![1], &mut shutdown_rx, Duration::ZERO).await;
+
+        assert!(matches!(result, Err(RingWriteError::Failed(_))));
+        assert_eq!(shared.rx_ring.pop(), Some(vec![0]));
+    }
+
+    #[tokio::test]
+    async fn ring_writer_shutdown_cancels_full_ring_cleanly() {
+        let shared = Arc::new(ConsoleSharedState::with_capacity(1));
+        shared.rx_ring.push(vec![0]).unwrap();
+        let (agent_tx, agent_rx) = mpsc::channel(1);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        agent_tx.send(vec![1]).await.unwrap();
+
+        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), agent_rx, shutdown_rx));
+        tokio::task::yield_now().await;
+        shutdown_tx.send(true).unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(1), writer)
+            .await
+            .expect("ring writer should stop promptly")
+            .unwrap();
+        assert!(result.is_ok(), "shutdown should not report a relay error");
+        assert_eq!(shared.rx_ring.pop(), Some(vec![0]));
     }
 }

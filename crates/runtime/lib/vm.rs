@@ -1110,6 +1110,11 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                 }
                 if let Err(e) = relay.run(relay_shutdown_rx, relay_drain_tx).await {
                     tracing::error!("agent relay error: {e}");
+                    relay_exit_reason.store(
+                        EXIT_REASON_AGENT_UNRESPONSIVE,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    relay_exit_handle.trigger();
                 }
             }
             Ok(Err(e)) => {
