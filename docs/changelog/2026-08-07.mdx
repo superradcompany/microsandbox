@@ -69,7 +69,7 @@ See [volumes](/sandboxes/volumes).
 **Other features**
 
 - **Root disk resizing in every SDK.** The TypeScript, Python, and Go SDKs now expose `rootDiskSize` / `root_disk_size` / `RootDiskSizeMiB` on `modify()`, mapped to the canonical `root_disk_size_mib` patch field. Restart and next-start semantics and backing-specific limits are documented in the [tuning guide](/sandboxes/tuning).
-- **Active backend context.** New `default_backend_info()` / `defaultBackendInfo()` accessors, and per-sandbox `backendKind` / `backend_kind` fields, let applications inspect the resolved default backend, its cloud API URL, the selector that chose it, and its profile. The API key is never included. A new `msb context` command prints the same information, and `create`, `remove`, `exec`, and `ssh` show a short backend notice. Invalid cloud CLI configuration now fails closed instead of silently dispatching locally. See [backends](/getting-started/backends).
+- **Active backend context.** New `default_backend_info()` / `defaultBackendInfo()` accessors, and per-sandbox `backendKind` / `backend_kind` fields, let applications inspect the resolved default backend, its cloud API URL, the selector that chose it, and its profile. The API key is never included. A new `msb context` command prints the same information. Invalid cloud CLI configuration now fails closed instead of silently dispatching locally. See [backends](/getting-started/backends).
 - **Go SDK: attach as non-default guest users.** The Go SDK gains `AttachWith`, with `WithAttachUser`, `WithAttachCwd`, `WithAttachEnv`, and `WithAttachDetachKeys`, matching the Python and TypeScript surface. The existing `Attach` API is unchanged. See the [Go SDK reference](/sdk/go/execution).
 
 ## Breaking changes

@@ -1553,7 +1553,7 @@ fn write_extent_bytes(
 }
 
 fn update_dir_block_checksums(csum_seed: u32, inode: u32, data: &mut [u8]) {
-    for chunk in data.chunks_exact_mut(EXT4_BLOCK_SIZE as usize) {
+    for chunk in data.as_chunks_mut::<{ EXT4_BLOCK_SIZE as usize }>().0 {
         let tail = EXT4_BLOCK_SIZE as usize - 12;
         let checksum = dir_block_checksum(csum_seed, inode, 0, &chunk[..tail]);
         put_le32(chunk, tail + 8, checksum);
@@ -2161,8 +2161,8 @@ fn xattr_entry_hash(name: &[u8], padded_value: &[u8]) -> u32 {
     for byte in name {
         hash = hash.rotate_left(5) ^ u32::from(*byte);
     }
-    for word in padded_value.chunks_exact(4) {
-        hash = hash.rotate_left(16) ^ u32::from_le_bytes(word.try_into().unwrap());
+    for word in padded_value.as_chunks::<4>().0 {
+        hash = hash.rotate_left(16) ^ u32::from_le_bytes(*word);
     }
     hash
 }
