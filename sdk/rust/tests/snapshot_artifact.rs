@@ -485,6 +485,7 @@ async fn open_reads_valid_artifact_metadata() {
     let snap = Snapshot::open(dir.to_string_lossy().as_ref())
         .await
         .unwrap();
+    assert_eq!(snap.path().unwrap(), dir);
     assert_eq!(snap.digest(), expected_digest);
     assert_eq!(reference_path(snap.reference()), dir);
     assert_eq!(
@@ -525,6 +526,7 @@ async fn indexed_handle_can_remove_a_missing_local_artifact() {
     microsandbox::with_backend(backend, async {
         Snapshot::reindex(&snapshots).await.unwrap();
         let handle = Snapshot::get(&digest).await.unwrap();
+        assert_eq!(handle.path().unwrap(), dir);
         std::fs::remove_dir_all(dir).unwrap();
 
         handle.remove(false).await.unwrap();

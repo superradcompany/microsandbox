@@ -143,6 +143,10 @@ impl SnapshotBackend for CloudBackend {
         })
     }
 
+    fn path<'a>(&self, _reference: &'a SnapshotReference) -> MicrosandboxResult<&'a Path> {
+        Err(MicrosandboxError::local_only(Operation::SnapshotOps))
+    }
+
     fn verify<'a>(
         &'a self,
         _snapshot: &'a Snapshot,
@@ -472,6 +476,7 @@ fn snapshot_handle_from_cloud(
     Ok(SnapshotHandle {
         backend,
         reference: reference_from_cloud_location(snapshot.location),
+        local_path: None,
         digest: snapshot.digest,
         name: Some(snapshot.name),
         parent_digest: snapshot.manifest.parent,
@@ -586,6 +591,11 @@ mod tests {
     async fn artifact_file_operations_return_typed_unsupported_errors() {
         let cloud = CloudBackend::new("https://example.invalid", "test-key").unwrap();
         let backend: Arc<dyn Backend> = Arc::new(cloud.clone());
+
+        assert_unsupported(SnapshotBackend::path(
+            &cloud,
+            &SnapshotReference::path("snapshots/base"),
+        ));
 
         assert_unsupported(
             SnapshotBackend::list_dir(&cloud, backend.clone(), PathBuf::from("snapshots")).await,

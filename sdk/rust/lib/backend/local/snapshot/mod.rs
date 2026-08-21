@@ -142,6 +142,15 @@ impl SnapshotBackend for LocalBackend {
         })
     }
 
+    fn path<'a>(&self, reference: &'a SnapshotReference) -> MicrosandboxResult<&'a Path> {
+        match reference {
+            SnapshotReference::Path(path) => Ok(Path::new(path)),
+            SnapshotReference::Auto(_) | SnapshotReference::Id(_) => {
+                Err(MicrosandboxError::local_only(Operation::SnapshotOps))
+            }
+        }
+    }
+
     fn verify<'a>(
         &'a self,
         snapshot: &'a Snapshot,
@@ -312,6 +321,7 @@ fn snapshot_handle_from_model(
     SnapshotHandle {
         backend,
         reference,
+        local_path: Some(PathBuf::from(model.artifact_path)),
         digest: model.digest,
         name: model.name,
         parent_digest: model.parent_digest,
@@ -364,6 +374,7 @@ fn snapshot_handle_from_artifact(
     SnapshotHandle {
         backend,
         reference,
+        local_path: Some(artifact.path),
         digest: artifact.digest,
         name,
         parent_digest: artifact.manifest.parent,
