@@ -3,16 +3,16 @@ import type {
   NapiSnapshotHandle,
   NapiSnapshotInfo,
 } from "./internal/napi.js";
-import { Snapshot, type SnapshotScope } from "./snapshot.js";
+import { Snapshot, type SaveOpts, type SnapshotScope } from "./snapshot.js";
 
 const READ_ONLY_MSG =
   "SnapshotHandle is read-only — fetch a live handle via Snapshot.get(name) for lifecycle methods.";
 
 /**
- * Lightweight handle backed by an index row.
+ * Lightweight handle returned by the active snapshot backend.
  *
  * Returned by `Snapshot.list()` and `Snapshot.get(...)`. Values are
- * snapshotted from the index at construction time — call
+ * snapshotted at construction time — call
  * `Snapshot.get(...)` again for a fresh reading if needed.
  */
 export class SnapshotHandle {
@@ -35,7 +35,7 @@ export class SnapshotHandle {
   readonly fstype: string | null;
   /** Checkpoint manifest digest for checkpoint state. */
   readonly checkpointManifestDigest: string | null;
-  /** Apparent size of the upper file at index time. */
+  /** Backend-reported stored payload size, when known. */
   readonly sizeBytes: bigint | null;
   /** Embedded versus provider-linked payload placement. */
   readonly locality: string;
@@ -47,8 +47,10 @@ export class SnapshotHandle {
   readonly migrationErrorCode: string | null;
   /** Snapshot creation time (from manifest). */
   readonly createdAt: Date;
-  /** Local artifact directory path. */
-  readonly path: string;
+  /** Stable value accepted by `SandboxBuilder.fromSnapshot()`. */
+  readonly reference: string;
+  /** How the backend resolves `reference`. */
+  readonly referenceKind: "id" | "path";
 
   /** @internal */
   constructor(inner: NapiSnapshotHandle | NapiSnapshotInfo) {
@@ -68,7 +70,8 @@ export class SnapshotHandle {
     this.migrationState = inner.migrationState;
     this.migrationErrorCode = inner.migrationErrorCode ?? null;
     this.createdAt = new Date(inner.createdAt);
-    this.path = inner.path;
+    this.reference = inner.reference;
+    this.referenceKind = inner.referenceKind;
   }
 
   /** Open and metadata-validate the underlying artifact. */
@@ -92,6 +95,19 @@ export class SnapshotHandle {
     }
     await withMappedErrors(() =>
       (this.inner as NapiSnapshotHandle).remove({ force: opts?.force ?? false }),
+    );
+  }
+
+  /**
+   * Bundle this snapshot into a `.tar.zst` archive.
+   * Throws `UnsupportedError` when the backend does not expose artifact archives.
+   */
+  async saveTo(out: string, opts?: SaveOpts): Promise<void> {
+    if (typeof (this.inner as NapiSnapshotHandle).saveTo !== "function") {
+      throw new Error(READ_ONLY_MSG);
+    }
+    await withMappedErrors(() =>
+      (this.inner as NapiSnapshotHandle).saveTo(out, opts),
     );
   }
 }

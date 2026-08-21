@@ -1,20 +1,21 @@
-//! Snapshot content verification.
+//! Local snapshot content verification.
 
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::io::{Read, Seek, SeekFrom};
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::SystemTime;
 
+use crate::snapshot::{SnapshotVerifyReport, UpperVerifyStatus};
 use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason};
-use microsandbox_types::snapshot::{FILE_MERKLE_BLAKE3_LEAF_SIZE, SnapshotState, UpperIntegrity};
+use microsandbox_types::snapshot::{
+    FILE_MERKLE_BLAKE3_LEAF_SIZE, Manifest, SnapshotState, UpperIntegrity,
+};
 use microsandbox_utils::extent::ExtentMap;
 use rayon::prelude::*;
 use sha2::{Digest as _, Sha256};
-
-use super::Snapshot;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -24,35 +25,6 @@ const MERKLE_LEAF_DOMAIN: &[u8] = b"msb-file-merkle-blake3-v1\0leaf\0";
 const MERKLE_PARENT_DOMAIN: &[u8] = b"msb-file-merkle-blake3-v1\0parent\0";
 const MERKLE_ROOT_DOMAIN: &[u8] = b"msb-file-merkle-blake3-v1\0root\0";
 const MERKLE_READ_BATCH: usize = 8 * 1024 * 1024;
-
-//--------------------------------------------------------------------------------------------------
-// Types
-//--------------------------------------------------------------------------------------------------
-
-/// Result of explicit snapshot verification.
-#[derive(Debug, Clone)]
-pub struct SnapshotVerifyReport {
-    /// Snapshot manifest digest.
-    pub digest: String,
-    /// Artifact directory.
-    pub path: PathBuf,
-    /// Upper-layer content verification result.
-    pub upper: UpperVerifyStatus,
-}
-
-/// Upper-layer content verification result.
-#[derive(Debug, Clone)]
-pub enum UpperVerifyStatus {
-    /// The snapshot intentionally has no persistent payload integrity.
-    NotRecorded,
-    /// Recorded content integrity matched the computed digest.
-    Verified {
-        /// Digest algorithm.
-        algorithm: String,
-        /// Matching digest or Merkle root.
-        digest: String,
-    },
-}
 
 /// Streaming binary-tree accumulator. Zero gaps are inserted as complete
 /// subtrees, keeping all-hole work logarithmic in the logical file size.
@@ -113,8 +85,12 @@ impl MerkleAccumulator {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-pub(super) async fn verify_snapshot(snap: &Snapshot) -> MicrosandboxResult<SnapshotVerifyReport> {
-    let SnapshotState::File(file_state) = &snap.manifest().state else {
+pub(super) async fn verify_snapshot(
+    path: &Path,
+    digest: &str,
+    manifest: &Manifest,
+) -> MicrosandboxResult<SnapshotVerifyReport> {
+    let SnapshotState::File(file_state) = &manifest.state else {
         return Err(MicrosandboxError::unsupported(
             Operation::SnapshotOps,
             UnsupportedReason::NotAvailable(
@@ -124,13 +100,13 @@ pub(super) async fn verify_snapshot(snap: &Snapshot) -> MicrosandboxResult<Snaps
     };
     let Some(expected) = file_state.upper.integrity.as_ref() else {
         return Ok(SnapshotVerifyReport {
-            digest: snap.digest().to_string(),
-            path: snap.path().to_path_buf(),
+            digest: digest.to_string(),
+            path: path.to_path_buf(),
             upper: UpperVerifyStatus::NotRecorded,
         });
     };
 
-    let upper_path = snap.path().join(&file_state.upper.file);
+    let upper_path = path.join(&file_state.upper.file);
     let payload = open_verification_source(&upper_path)?;
     let before = verification_source_identity(&payload.metadata()?);
     let actual = match expected {
@@ -155,8 +131,8 @@ pub(super) async fn verify_snapshot(snap: &Snapshot) -> MicrosandboxResult<Snaps
     }
 
     Ok(SnapshotVerifyReport {
-        digest: snap.digest().to_string(),
-        path: snap.path().to_path_buf(),
+        digest: digest.to_string(),
+        path: path.to_path_buf(),
         upper: UpperVerifyStatus::Verified {
             algorithm: expected.algorithm().into(),
             digest: actual.value().into(),

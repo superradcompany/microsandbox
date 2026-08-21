@@ -21,10 +21,10 @@ pub use cloud::{
     CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudCreateSnapshotRequest,
     CloudDiskImageFormat, CloudErrorBody, CloudErrorDetails, CloudHostPattern,
     CloudMessageResponse, CloudNetworkSpec, CloudPaginated, CloudPatch, CloudPullPolicy,
-    CloudRlimit, CloudRlimitResource, CloudRootfsSource, CloudSandboxResources,
-    CloudSandboxRuntimeOptions, CloudSandboxSpec, CloudSandboxStatus, CloudSandboxStatusReason,
-    CloudSecretEntry, CloudSecretSource, CloudSecretsConfig, CloudSnapshot, CloudSnapshotLocation,
-    CloudSnapshotOperation, CloudSnapshotOperationStatus, CloudSnapshotReference,
+    CloudRlimit, CloudRlimitResource, CloudRootfsSource, CloudSandboxComputeResources,
+    CloudSandboxResources, CloudSandboxRuntimeOptions, CloudSandboxSpec, CloudSandboxStatus,
+    CloudSandboxStatusReason, CloudSecretEntry, CloudSecretSource, CloudSecretsConfig,
+    CloudSnapshot, CloudSnapshotLocation, CloudSnapshotOperation, CloudSnapshotOperationStatus,
     CloudViolationAction, CloudVolumeMount,
 };
 #[doc(hidden)]

@@ -9,6 +9,15 @@ import (
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
 
+type snapshotSaver interface {
+	SaveTo(context.Context, string, SnapshotSaveOptions) error
+}
+
+var (
+	_ snapshotSaver = (*SnapshotArtifact)(nil)
+	_ snapshotSaver = (*SnapshotHandle)(nil)
+)
+
 func TestSnapshotCreateEmptyName(t *testing.T) {
 	_, err := Snapshot.Create(context.Background(), SnapshotCreateOptions{FromSandbox: "baseline"})
 	if !IsKind(err, ErrInvalidConfig) {

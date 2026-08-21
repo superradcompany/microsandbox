@@ -12,6 +12,7 @@
 
 mod http;
 pub(in crate::backend) mod sandbox;
+mod snapshot;
 mod volume;
 mod ws_io;
 
@@ -356,6 +357,10 @@ impl Backend for CloudBackend {
     }
 
     fn volumes(&self) -> &dyn VolumeBackend {
+        self
+    }
+
+    fn snapshots(&self) -> &dyn crate::backend::SnapshotBackend {
         self
     }
 

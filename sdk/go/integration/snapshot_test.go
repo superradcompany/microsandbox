@@ -181,7 +181,7 @@ func TestSnapshotCreateAndSnapshotDirectoryOps(t *testing.T) {
 		t.Fatalf("Snapshot.Create: %v", err)
 	}
 	logSnapshotPhase(t, "create snapshot", phaseStart)
-	snapshotDir := artifact.Path()
+	snapshotDir := artifact.Reference()
 	if filepath.Base(snapshotDir) != snapshotName {
 		t.Fatalf("Snapshot.Create path = %q, want basename %q", snapshotDir, snapshotName)
 	}
@@ -219,9 +219,9 @@ func TestSnapshotCreateAndSnapshotDirectoryOps(t *testing.T) {
 
 	archivePath := filepath.Join(t.TempDir(), "snapshot.tar")
 	phaseStart = time.Now()
-	if err := microsandbox.Snapshot.Save(ctx, snapshotName, archivePath,
+	if err := artifact.SaveTo(ctx, archivePath,
 		microsandbox.SnapshotSaveOptions{PlainTar: true}); err != nil {
-		t.Fatalf("Snapshot.Save: %v", err)
+		t.Fatalf("SnapshotArtifact.SaveTo: %v", err)
 	}
 	logSnapshotPhase(t, "save snapshot archive", phaseStart)
 
@@ -238,7 +238,7 @@ func TestSnapshotCreateAndSnapshotDirectoryOps(t *testing.T) {
 	}
 	logSnapshotPhase(t, "load snapshot archive", phaseStart)
 	t.Cleanup(func() {
-		removeSnapshotBestEffort(imported.Path())
+		removeSnapshotBestEffort(imported.Reference())
 	})
 	if imported.Digest() != artifact.Digest() {
 		t.Fatalf("Snapshot.Load digest = %q, want %q", imported.Digest(), artifact.Digest())

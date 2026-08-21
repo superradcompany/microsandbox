@@ -1,4 +1,4 @@
-//! Snapshot save / load via `.tar.zst` bundles.
+//! Local snapshot save / load via `.tar.zst` bundles.
 //!
 //! Default archive format is zstd-compressed tar. Regular files with holes, notably the sparse `upper.ext4` whose logical size is the configured upper cap rather than the data
 //! written, are stored as old-GNU sparse entries (type `S`): only allocated extents are read and archived, so save cost scales with the data a sandbox actually wrote instead of
@@ -34,9 +34,10 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 
 use crate::backend::LocalBackend;
+use crate::snapshot::SaveOpts;
 use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason};
 
-use super::{Snapshot, SnapshotHandle, store};
+use super::LocalSnapshotArtifact;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -53,18 +54,6 @@ const GNU_EXT_SPARSE_SLOTS: usize = 21;
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
-
-/// Options for [`super::Snapshot::save`].
-#[derive(Debug, Clone, Default)]
-pub struct SaveOpts {
-    /// Walk parent chain and include each ancestor in the archive.
-    pub with_parents: bool,
-    /// Include the OCI image artifacts (EROFS layers, VMDK descriptor)
-    /// from the global cache so the archive boots offline.
-    pub with_image: bool,
-    /// Skip zstd compression and write a plain `.tar`. Default: zstd.
-    pub plain_tar: bool,
-}
 
 struct UnpackedArchive {
     manifest_dirs: Vec<PathBuf>,
@@ -184,292 +173,294 @@ where
 }
 
 //--------------------------------------------------------------------------------------------------
-// Functions
+// Methods
 //--------------------------------------------------------------------------------------------------
 
-/// Bundle a snapshot artifact (and optionally its ancestors / image
-/// cache) into an archive at `out`.
-pub(super) async fn save_snapshot(
-    local: &LocalBackend,
-    name_or_path: &str,
-    out: &Path,
-    opts: SaveOpts,
-) -> MicrosandboxResult<()> {
-    // Collect the artifact dirs we need to ship: the head snapshot
-    // and (optionally) all ancestors via parent_digest.
-    let head = store::open_snapshot(local, name_or_path).await?;
-    let mut parents: Vec<Snapshot> = Vec::new();
+impl LocalBackend {
+    /// Bundle a snapshot artifact (and optionally its ancestors / image
+    /// cache) into an archive at `out`.
+    pub(super) async fn save_snapshot_archive(
+        &self,
+        name_or_path: &str,
+        out: &Path,
+        opts: SaveOpts,
+    ) -> MicrosandboxResult<()> {
+        // Collect the artifact dirs we need to ship: the head snapshot
+        // and (optionally) all ancestors via parent_digest.
+        let head = self.open_snapshot_artifact(name_or_path).await?;
+        let mut parents: Vec<LocalSnapshotArtifact> = Vec::new();
 
-    if opts.with_parents {
-        let mut current = head.manifest().parent.clone();
-        while let Some(parent_digest) = current {
-            let parent_path = resolve_parent_artifact(local, &parent_digest).await?;
-            let parent =
-                store::open_snapshot(local, parent_path.to_string_lossy().as_ref()).await?;
-            parents.push(parent.clone());
-            current = parent.manifest().parent.clone();
-        }
-    }
-    parents.reverse();
-
-    let mut snapshots = parents;
-    snapshots.push(head.clone());
-
-    // Optional image cache bundling.
-    let mut cache_files: Vec<(PathBuf, String)> = Vec::new();
-    if opts.with_image {
-        let cache_dir = local.cache_dir();
-        let img_digest_str = head.manifest().image.manifest_digest.clone();
-        let img_digest: microsandbox_image::Digest = img_digest_str
-            .parse()
-            .map_err(|e| MicrosandboxError::Custom(format!("invalid image digest: {e}")))?;
-        let cache = microsandbox_image::GlobalCache::new_async(&cache_dir).await?;
-
-        let image_ref: microsandbox_image::Reference =
-            head.manifest().image.reference.parse().map_err(|e| {
-                MicrosandboxError::Custom(format!("invalid snapshot image reference: {e}"))
-            })?;
-        let metadata = cache
-            .read_image_metadata_async(&image_ref)
-            .await?
-            .ok_or_else(|| {
-                MicrosandboxError::Custom(format!(
-                    "image metadata missing from cache for {}",
-                    head.manifest().image.reference
-                ))
-            })?;
-        if metadata.manifest_digest != img_digest_str {
-            return Err(MicrosandboxError::Custom(format!(
-                "cached image metadata digest mismatch: snapshot={}, cache={}",
-                img_digest_str, metadata.manifest_digest
-            )));
-        }
-
-        let metadata_path = cache.image_metadata_path(&image_ref);
-        push_required_cache_file(&mut cache_files, &metadata_path, "manifests")?;
-
-        let fsmeta = cache.fsmeta_erofs_path(&img_digest);
-        push_required_cache_file(&mut cache_files, &fsmeta, "fsmeta")?;
-
-        let vmdk = cache.vmdk_path(&img_digest);
-        push_required_cache_file(&mut cache_files, &vmdk, "vmdk")?;
-
-        let mut seen_layers = HashSet::new();
-        for layer in &metadata.layers {
-            let diff_id: microsandbox_image::Digest = layer.diff_id.parse().map_err(|e| {
-                MicrosandboxError::Custom(format!("invalid cached layer diff_id: {e}"))
-            })?;
-            let layer_path = cache.layer_erofs_path(&diff_id);
-            if seen_layers.insert(layer_path.clone()) {
-                push_required_cache_file(&mut cache_files, &layer_path, "layers")?;
+        if opts.with_parents {
+            let mut current = head.manifest().parent.clone();
+            while let Some(parent_digest) = current {
+                let parent_path = self
+                    .resolve_parent_snapshot_artifact(&parent_digest)
+                    .await?;
+                let parent = self
+                    .open_snapshot_artifact(parent_path.to_string_lossy().as_ref())
+                    .await?;
+                parents.push(parent.clone());
+                current = parent.manifest().parent.clone();
             }
         }
-    }
+        parents.reverse();
 
-    // Write the archive.
-    if let Some(parent) = out.parent()
-        && !parent.as_os_str().is_empty()
-        && !parent.exists()
-    {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    let temp_out = archive_temp_path(out)?;
-    let out_file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp_out)
-        .await?;
-    let write_result: MicrosandboxResult<()> = async {
-        if opts.plain_tar {
-            let mut builder = Builder::new(out_file);
-            // Entry writers retain hashing and sparse-I/O buffers across await
-            // points. Keep that state off Windows' smaller worker stack.
-            Box::pin(write_archive_entries(
-                &mut builder,
-                &snapshots,
-                &cache_files,
-                &head,
-                &opts,
-            ))
-            .await?;
-            let mut inner = builder.into_inner().await?;
-            tokio::io::AsyncWriteExt::shutdown(&mut inner).await?;
-        } else {
-            let writer = ZstdEncoder::new(out_file);
-            let mut builder = Builder::new(writer);
-            Box::pin(write_archive_entries(
-                &mut builder,
-                &snapshots,
-                &cache_files,
-                &head,
-                &opts,
-            ))
-            .await?;
-            let mut inner = builder.into_inner().await?;
-            tokio::io::AsyncWriteExt::shutdown(&mut inner).await?;
+        let mut snapshots = parents;
+        snapshots.push(head.clone());
+
+        // Optional image cache bundling.
+        let mut cache_files: Vec<(PathBuf, String)> = Vec::new();
+        if opts.with_image {
+            let cache_dir = self.cache_dir();
+            let img_digest_str = head.manifest().image.manifest_digest.clone();
+            let img_digest: microsandbox_image::Digest = img_digest_str
+                .parse()
+                .map_err(|e| MicrosandboxError::Custom(format!("invalid image digest: {e}")))?;
+            let cache = microsandbox_image::GlobalCache::new_async(&cache_dir).await?;
+
+            let image_ref: microsandbox_image::Reference =
+                head.manifest().image.reference.parse().map_err(|e| {
+                    MicrosandboxError::Custom(format!("invalid snapshot image reference: {e}"))
+                })?;
+            let metadata = cache
+                .read_image_metadata_async(&image_ref)
+                .await?
+                .ok_or_else(|| {
+                    MicrosandboxError::Custom(format!(
+                        "image metadata missing from cache for {}",
+                        head.manifest().image.reference
+                    ))
+                })?;
+            if metadata.manifest_digest != img_digest_str {
+                return Err(MicrosandboxError::Custom(format!(
+                    "cached image metadata digest mismatch: snapshot={}, cache={}",
+                    img_digest_str, metadata.manifest_digest
+                )));
+            }
+
+            let metadata_path = cache.image_metadata_path(&image_ref);
+            push_required_cache_file(&mut cache_files, &metadata_path, "manifests")?;
+
+            let fsmeta = cache.fsmeta_erofs_path(&img_digest);
+            push_required_cache_file(&mut cache_files, &fsmeta, "fsmeta")?;
+
+            let vmdk = cache.vmdk_path(&img_digest);
+            push_required_cache_file(&mut cache_files, &vmdk, "vmdk")?;
+
+            let mut seen_layers = HashSet::new();
+            for layer in &metadata.layers {
+                let diff_id: microsandbox_image::Digest = layer.diff_id.parse().map_err(|e| {
+                    MicrosandboxError::Custom(format!("invalid cached layer diff_id: {e}"))
+                })?;
+                let layer_path = cache.layer_erofs_path(&diff_id);
+                if seen_layers.insert(layer_path.clone()) {
+                    push_required_cache_file(&mut cache_files, &layer_path, "layers")?;
+                }
+            }
         }
+
+        // Write the archive.
+        if let Some(parent) = out.parent()
+            && !parent.as_os_str().is_empty()
+            && !parent.exists()
+        {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let temp_out = archive_temp_path(out)?;
+        let out_file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_out)
+            .await?;
+        let write_result: MicrosandboxResult<()> = async {
+            if opts.plain_tar {
+                let mut builder = Builder::new(out_file);
+                // Entry writers retain hashing and sparse-I/O buffers across await
+                // points. Keep that state off Windows' smaller worker stack.
+                Box::pin(write_archive_entries(
+                    &mut builder,
+                    &snapshots,
+                    &cache_files,
+                    &head,
+                    &opts,
+                ))
+                .await?;
+                let mut inner = builder.into_inner().await?;
+                tokio::io::AsyncWriteExt::shutdown(&mut inner).await?;
+            } else {
+                let writer = ZstdEncoder::new(out_file);
+                let mut builder = Builder::new(writer);
+                Box::pin(write_archive_entries(
+                    &mut builder,
+                    &snapshots,
+                    &cache_files,
+                    &head,
+                    &opts,
+                ))
+                .await?;
+                let mut inner = builder.into_inner().await?;
+                tokio::io::AsyncWriteExt::shutdown(&mut inner).await?;
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = write_result {
+            let _ = tokio::fs::remove_file(&temp_out).await;
+            return Err(error);
+        }
+        let durable = tokio::fs::OpenOptions::new()
+            .read(true)
+            // FlushFileBuffers requires a write-capable handle on Windows.
+            .write(true)
+            .open(&temp_out)
+            .await?;
+        durable.sync_all().await?;
+        // Windows will not replace a file while this durability handle is still
+        // open. Close it explicitly before the atomic rename; relying on the
+        // function-scope drop kept the source locked until after MoveFileExW.
+        drop(durable);
+        replace_archive(&temp_out, out).await?;
+        #[cfg(unix)]
+        if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+            std::fs::File::open(parent)?.sync_all()?;
+        }
+
         Ok(())
     }
-    .await;
-    if let Err(error) = write_result {
-        let _ = tokio::fs::remove_file(&temp_out).await;
-        return Err(error);
-    }
-    let durable = tokio::fs::OpenOptions::new()
-        .read(true)
-        // FlushFileBuffers requires a write-capable handle on Windows.
-        .write(true)
-        .open(&temp_out)
-        .await?;
-    durable.sync_all().await?;
-    // Windows will not replace a file while this durability handle is still
-    // open. Close it explicitly before the atomic rename; relying on the
-    // function-scope drop kept the source locked until after MoveFileExW.
-    drop(durable);
-    replace_archive(&temp_out, out).await?;
-    #[cfg(unix)]
-    if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
-        std::fs::File::open(parent)?.sync_all()?;
-    }
 
-    Ok(())
-}
-
-/// Unpack an archive into `dest` (defaults to the configured snapshots
-/// dir). Image-cache entries (`cache/...`) are routed into the global
-/// cache. Returns a handle for the head (last-listed) snapshot.
-pub(super) async fn load_snapshot(
-    local: &LocalBackend,
-    archive: &Path,
-    dest: Option<&Path>,
-) -> MicrosandboxResult<SnapshotHandle> {
-    let snapshots_dir = match dest {
-        Some(d) => d.to_path_buf(),
-        None => local.snapshots_dir(),
-    };
-    tokio::fs::create_dir_all(&snapshots_dir).await?;
-    let cache_dir = local.cache_dir();
-    tokio::fs::create_dir_all(&cache_dir).await?;
-
-    let snapshot_stage = tempfile::Builder::new()
-        .prefix(".msb-snapshot-import-")
-        .tempdir_in(&snapshots_dir)?;
-    let cache_tmp_dir = cache_dir.join("tmp");
-    tokio::fs::create_dir_all(&cache_tmp_dir).await?;
-    let cache_stage = tempfile::Builder::new()
-        .prefix("snapshot-import-")
-        .tempdir_in(&cache_tmp_dir)?;
-
-    // Stream rather than slurp — archives carry the full upper layer and are
-    // routinely multi-GB.
-    let file = tokio::fs::File::open(archive).await?;
-    let mut buf = BufReader::new(file);
-    let is_zstd = {
-        let bytes = buf.fill_buf().await?;
-        bytes.starts_with(&[0x28, 0xb5, 0x2f, 0xfd])
-    };
-
-    let unpacked = if is_zstd {
-        let decoder = ZstdDecoder::new(buf);
-        // The decoder and archive walker both carry sizeable buffers across
-        // await points. Keep their combined future off Tokio's worker stack.
-        Box::pin(unpack_archive(
-            decoder,
-            snapshot_stage.path(),
-            cache_stage.path(),
-        ))
-        .await?
-    } else {
-        Box::pin(unpack_archive(
-            buf,
-            snapshot_stage.path(),
-            cache_stage.path(),
-        ))
-        .await?
-    };
-
-    if unpacked.inventory.is_none() {
-        super::migration::normalize_staged(local.db().await?, &unpacked.manifest_dirs).await?;
-    }
-    let imported = verify_imported_snapshots(local, &unpacked.manifest_dirs).await?;
-    if let Some(inventory) = unpacked.inventory.as_ref() {
-        validate_inventory_snapshot_bindings(inventory, &imported)?;
-    }
-    let head_index = match unpacked.head.as_deref() {
-        Some(head) => imported
-            .iter()
-            .position(|snapshot| snapshot.digest() == head)
-            .ok_or_else(|| {
-                MicrosandboxError::Custom(format!("archive inventory head {head} was not imported"))
-            })?,
-        None => select_head_snapshot(&imported)?,
-    };
-    let head_stage_path = imported[head_index].path().to_path_buf();
-    let head_relative = head_stage_path
-        .strip_prefix(snapshot_stage.path())
-        .map_err(|_| MicrosandboxError::Custom("imported snapshot escaped staging dir".into()))?
-        .to_path_buf();
-    let head_manifest = imported[head_index].manifest().clone();
-    let head_path = snapshots_dir.join(&head_relative);
-
-    ensure_promote_targets_available(snapshot_stage.path(), &snapshots_dir).await?;
-    // Cache installation carries hashing buffers across await points. Keep
-    // that future on the heap so the archive loader remains within Windows'
-    // smaller default worker-thread stack.
-    Box::pin(install_staged_cache(
-        cache_stage.path(),
-        &cache_dir,
-        &head_manifest,
-    ))
-    .await?;
-    promote_stage(snapshot_stage.path(), &snapshots_dir).await?;
-
-    let snap = store::open_snapshot(local, head_path.to_string_lossy().as_ref()).await?;
-
-    // Index this and any sibling artifacts that landed in the dest dir.
-    let _ = store::reindex_dir(local, &snapshots_dir).await;
-
-    let (state_kind, format, fstype, checkpoint_manifest_digest, size_bytes) =
-        match &snap.manifest().state {
-            SnapshotState::File(state) => (
-                "file".to_string(),
-                Some(state.format),
-                Some(state.fstype.clone()),
-                None,
-                Some(state.upper.size_bytes),
-            ),
-            SnapshotState::Checkpoint(state) => (
-                "checkpoint".to_string(),
-                None,
-                None,
-                Some(state.manifest.clone()),
-                None,
-            ),
+    /// Unpack an archive into `dest` (defaults to the configured snapshots
+    /// dir). Image-cache entries (`cache/...`) are routed into the global
+    /// cache. Returns the head (last-listed) local artifact for the backend
+    /// adapter to wrap.
+    pub(super) async fn load_snapshot_archive(
+        &self,
+        archive: &Path,
+        dest: Option<&Path>,
+    ) -> MicrosandboxResult<LocalSnapshotArtifact> {
+        let snapshots_dir = match dest {
+            Some(d) => d.to_path_buf(),
+            None => self.snapshots_dir(),
         };
-    Ok(SnapshotHandle {
-        digest: snap.digest().to_string(),
-        name: snap
-            .path()
-            .file_name()
-            .and_then(|s| s.to_str())
-            .map(|s| s.to_string()),
-        parent_digest: snap.manifest().parent.clone(),
-        scope: snap.manifest().scope,
-        image_ref: snap.manifest().image.reference.clone(),
-        state_kind,
-        format,
-        fstype,
-        checkpoint_manifest_digest,
-        size_bytes,
-        locality: "embedded".into(),
-        availability: "ready".into(),
-        migration_state: "canonical".into(),
-        migration_error_code: None,
-        created_at: chrono::DateTime::parse_from_rfc3339(&snap.manifest().created_at)
-            .map(|d| d.naive_utc())
-            .unwrap_or_else(|_| chrono::Utc::now().naive_utc()),
-        artifact_path: snap.path().to_path_buf(),
-    })
+        tokio::fs::create_dir_all(&snapshots_dir).await?;
+        let cache_dir = self.cache_dir();
+        tokio::fs::create_dir_all(&cache_dir).await?;
+
+        let snapshot_stage = tempfile::Builder::new()
+            .prefix(".msb-snapshot-import-")
+            .tempdir_in(&snapshots_dir)?;
+        let cache_tmp_dir = cache_dir.join("tmp");
+        tokio::fs::create_dir_all(&cache_tmp_dir).await?;
+        let cache_stage = tempfile::Builder::new()
+            .prefix("snapshot-import-")
+            .tempdir_in(&cache_tmp_dir)?;
+
+        // Stream rather than slurp — archives carry the full upper layer and are
+        // routinely multi-GB.
+        let file = tokio::fs::File::open(archive).await?;
+        let mut buf = BufReader::new(file);
+        let is_zstd = {
+            let bytes = buf.fill_buf().await?;
+            bytes.starts_with(&[0x28, 0xb5, 0x2f, 0xfd])
+        };
+
+        let unpacked = if is_zstd {
+            let decoder = ZstdDecoder::new(buf);
+            // The decoder and archive walker both carry sizeable buffers across
+            // await points. Keep their combined future off Tokio's worker stack.
+            Box::pin(unpack_archive(
+                decoder,
+                snapshot_stage.path(),
+                cache_stage.path(),
+            ))
+            .await?
+        } else {
+            Box::pin(unpack_archive(
+                buf,
+                snapshot_stage.path(),
+                cache_stage.path(),
+            ))
+            .await?
+        };
+
+        if unpacked.inventory.is_none() {
+            super::migration::normalize_staged(self.db().await?, &unpacked.manifest_dirs).await?;
+        }
+        let imported = self
+            .verify_imported_snapshots(&unpacked.manifest_dirs)
+            .await?;
+        if let Some(inventory) = unpacked.inventory.as_ref() {
+            validate_inventory_snapshot_bindings(inventory, &imported)?;
+        }
+        let head_index = match unpacked.head.as_deref() {
+            Some(head) => imported
+                .iter()
+                .position(|snapshot| snapshot.digest() == head)
+                .ok_or_else(|| {
+                    MicrosandboxError::Custom(format!(
+                        "archive inventory head {head} was not imported"
+                    ))
+                })?,
+            None => select_head_snapshot(&imported)?,
+        };
+        let head_stage_path = imported[head_index].path().to_path_buf();
+        let head_relative = head_stage_path
+            .strip_prefix(snapshot_stage.path())
+            .map_err(|_| MicrosandboxError::Custom("imported snapshot escaped staging dir".into()))?
+            .to_path_buf();
+        let head_manifest = imported[head_index].manifest().clone();
+        let head_path = snapshots_dir.join(&head_relative);
+
+        ensure_promote_targets_available(snapshot_stage.path(), &snapshots_dir).await?;
+        // Cache installation carries hashing buffers across await points. Keep
+        // that future on the heap so the archive loader remains within Windows'
+        // smaller default worker-thread stack.
+        Box::pin(install_staged_cache(
+            cache_stage.path(),
+            &cache_dir,
+            &head_manifest,
+        ))
+        .await?;
+        promote_stage(snapshot_stage.path(), &snapshots_dir).await?;
+
+        let snapshot = self
+            .open_snapshot_artifact(head_path.to_string_lossy().as_ref())
+            .await?;
+
+        // Index this and any sibling artifacts that landed in the dest dir.
+        let _ = self.reindex_snapshot_dir(&snapshots_dir).await;
+
+        Ok(snapshot)
+    }
+
+    async fn verify_imported_snapshots(
+        &self,
+        manifest_dirs: &[PathBuf],
+    ) -> MicrosandboxResult<Vec<LocalSnapshotArtifact>> {
+        if manifest_dirs.is_empty() {
+            return Err(MicrosandboxError::Custom(
+                "archive contained no snapshot manifest".into(),
+            ));
+        }
+
+        let mut seen = HashSet::new();
+        let mut snapshots = Vec::new();
+        for dir in manifest_dirs {
+            if !seen.insert(dir.clone()) {
+                continue;
+            }
+            snapshots.push(
+                self.open_snapshot_artifact(dir.to_string_lossy().as_ref())
+                    .await?,
+            );
+        }
+
+        if snapshots.is_empty() {
+            return Err(MicrosandboxError::Custom(
+                "archive contained no snapshot manifest".into(),
+            ));
+        }
+        Ok(snapshots)
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -478,9 +469,9 @@ pub(super) async fn load_snapshot(
 
 async fn write_archive_entries<W>(
     builder: &mut Builder<W>,
-    snapshots: &[Snapshot],
+    snapshots: &[LocalSnapshotArtifact],
     cache_files: &[(PathBuf, String)],
-    head: &Snapshot,
+    head: &LocalSnapshotArtifact,
     opts: &SaveOpts,
 ) -> MicrosandboxResult<()>
 where
@@ -552,9 +543,9 @@ where
 }
 
 async fn build_archive_inventory(
-    snapshots: &[Snapshot],
+    snapshots: &[LocalSnapshotArtifact],
     cache_files: &[(PathBuf, String)],
-    head: &Snapshot,
+    head: &LocalSnapshotArtifact,
     opts: &SaveOpts,
 ) -> MicrosandboxResult<ArchiveInventory> {
     let mut snapshot_members = Vec::with_capacity(snapshots.len());
@@ -1701,9 +1692,9 @@ fn inventory_entry_target(
 
 fn validate_inventory_snapshot_bindings(
     inventory: &ArchiveInventory,
-    imported: &[Snapshot],
+    imported: &[LocalSnapshotArtifact],
 ) -> MicrosandboxResult<()> {
-    let snapshots: HashMap<&str, &Snapshot> = imported
+    let snapshots: HashMap<&str, &LocalSnapshotArtifact> = imported
         .iter()
         .map(|snapshot| (snapshot.digest(), snapshot))
         .collect();
@@ -1811,34 +1802,7 @@ fn is_supported_cache_file(kind: &str, file: &str) -> bool {
     }
 }
 
-async fn verify_imported_snapshots(
-    local: &LocalBackend,
-    manifest_dirs: &[PathBuf],
-) -> MicrosandboxResult<Vec<Snapshot>> {
-    if manifest_dirs.is_empty() {
-        return Err(MicrosandboxError::Custom(
-            "archive contained no snapshot manifest".into(),
-        ));
-    }
-
-    let mut seen = HashSet::new();
-    let mut snapshots = Vec::new();
-    for dir in manifest_dirs {
-        if !seen.insert(dir.clone()) {
-            continue;
-        }
-        snapshots.push(store::open_snapshot(local, dir.to_string_lossy().as_ref()).await?);
-    }
-
-    if snapshots.is_empty() {
-        return Err(MicrosandboxError::Custom(
-            "archive contained no snapshot manifest".into(),
-        ));
-    }
-    Ok(snapshots)
-}
-
-fn select_head_snapshot(snapshots: &[Snapshot]) -> MicrosandboxResult<usize> {
+fn select_head_snapshot(snapshots: &[LocalSnapshotArtifact]) -> MicrosandboxResult<usize> {
     let imported_digests: HashSet<&str> = snapshots.iter().map(|snap| snap.digest()).collect();
     let parent_digests: HashSet<&str> = snapshots
         .iter()
@@ -2257,26 +2221,28 @@ fn file_name_str(p: &Path) -> MicrosandboxResult<String> {
         })
 }
 
-async fn resolve_parent_artifact(
-    local: &LocalBackend,
-    parent_digest: &str,
-) -> MicrosandboxResult<PathBuf> {
-    if let Some(handle) = store::lookup_by_digest(local, parent_digest).await? {
-        return Ok(handle.artifact_path);
+impl LocalBackend {
+    async fn resolve_parent_snapshot_artifact(
+        &self,
+        parent_digest: &str,
+    ) -> MicrosandboxResult<PathBuf> {
+        if let Some(model) = self.find_snapshot_model_by_digest(parent_digest).await? {
+            return Ok(PathBuf::from(model.artifact_path));
+        }
+        Err(MicrosandboxError::SnapshotNotFound(format!(
+            "parent {parent_digest} not in local index; ship it alongside or re-save with --with-parents"
+        )))
     }
-    Err(MicrosandboxError::SnapshotNotFound(format!(
-        "parent {parent_digest} not in local index; ship it alongside or re-save with --with-parents"
-    )))
 }
 
 //--------------------------------------------------------------------------------------------------
 // Functions: Fuzzing Support
 //--------------------------------------------------------------------------------------------------
 
-/// Entry point for the archive-walker fuzz target (`sdk/rust/fuzz`): run the full import unpack over arbitrary bytes into throwaway directories. Errors are the expected outcome
-/// for malformed input; only panics, overflows, or hangs count as findings.
+/// Entry point for the local archive-walker fuzz target (`sdk/rust/fuzz`): run the full import unpack over arbitrary bytes into throwaway directories. Errors are the expected
+/// outcome for malformed input; only panics, overflows, or hangs count as findings.
 #[cfg(feature = "fuzzing")]
-pub async fn fuzz_unpack_archive(data: &[u8]) {
+pub async fn fuzz_unpack_local_snapshot_archive(data: &[u8]) {
     let Ok(snapshots) = tempfile::tempdir() else {
         return;
     };

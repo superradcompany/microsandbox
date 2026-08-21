@@ -57,6 +57,15 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
             };
         }
 
+        // Preserve the SDK's established Python exception mapping for missing
+        // snapshot references across backends.
+        if matches!(err, SnapshotNotFound(_)) {
+            return pyo3::exceptions::PyFileNotFoundError::new_err(err.to_string());
+        }
+        if matches!(err, SnapshotIntegrity(_)) {
+            return pyo3::exceptions::PyValueError::new_err(err.to_string());
+        }
+
         let (cls_name, msg) = match &err {
             InvalidConfig(_) => ("InvalidConfigError", err.to_string()),
             NoDefaultCommand => ("NoDefaultCommandError", err.to_string()),

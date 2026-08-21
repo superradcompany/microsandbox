@@ -846,7 +846,12 @@ Request a globally unique cloud slug. When omitted, microsandbox cloud assigns o
 async fn build(self) -> MicrosandboxResult<SandboxConfig>
 ```
 
-Materialize the [`SandboxConfig`](#sandboxconfig) without booting the sandbox. Validates the configuration and, if `from_snapshot` was called, opens the snapshot manifest to pin its image reference and upper-layer source. For booting, use [`create`](#sandbox-create) instead; call [`detached(true)`](#sandbox-detached) first for background mode. `create()` calls `build` internally.
+Materialize the [`SandboxConfig`](#sandboxconfig) without booting the sandbox.
+Local snapshot references are opened to pin their image and upper-layer source;
+cloud references remain typed and are resolved by the cloud backend. For
+booting, use [`create`](#sandbox-create) instead; call
+[`detached(true)`](#sandbox-detached) first for background mode. `create()` calls
+`build` internally.
 
 <p className="msb-label">Returns</p>
 

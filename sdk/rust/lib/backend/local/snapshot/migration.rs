@@ -1,4 +1,4 @@
-//! Automatic adjacent-release snapshot artifact migration.
+//! Automatic adjacent-release local snapshot artifact migration.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::File;

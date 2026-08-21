@@ -1,11 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Snapshot } from "../../dist/snapshot.js";
+import { SnapshotHandle } from "../../dist/snapshot-handle.js";
 
 function projectedSnapshot(
   overrides: Record<string, unknown> = {},
 ): Snapshot {
   const inner = {
-    path: "/snapshots/example",
+    reference: "/snapshots/example",
+    referenceKind: "path",
     digest: `sha256:${"a".repeat(64)}`,
     sizeBytes: 4096n,
     imageRef: "docker.io/library/alpine:3.20",
@@ -38,6 +40,34 @@ function projectedSnapshot(
 }
 
 describe("Snapshot native projections", () => {
+  it("preserves backend-neutral references on snapshots and handles", () => {
+    const snapshot = projectedSnapshot();
+    expect(snapshot.reference).toBe("/snapshots/example");
+    expect(snapshot.referenceKind).toBe("path");
+
+    const handle = new SnapshotHandle({
+      reference: "snapshot-id",
+      referenceKind: "id",
+      digest: `sha256:${"a".repeat(64)}`,
+      name: "example",
+      parentDigest: null,
+      scope: "disk",
+      imageRef: "docker.io/library/alpine:3.20",
+      stateKind: "file",
+      format: "raw",
+      fstype: "ext4",
+      checkpointManifestDigest: null,
+      sizeBytes: 4096n,
+      locality: "provider_linked",
+      availability: "ready",
+      migrationState: "complete",
+      migrationErrorCode: null,
+      createdAt: 0,
+    } as never);
+    expect(handle.reference).toBe("snapshot-id");
+    expect(handle.referenceKind).toBe("id");
+  });
+
   it("returns complete file and checkpoint states", () => {
     expect(projectedSnapshot().state).toMatchObject({
       kind: "file",
@@ -155,6 +185,41 @@ describe("Snapshot native projections", () => {
     });
     await expect(snapshot.verify()).resolves.toMatchObject({
       upper: { kind: "notRecorded" },
+    });
+  });
+
+  it("delegates saveTo to live snapshots and handles", async () => {
+    const saveSnapshot = vi.fn().mockResolvedValue(undefined);
+    const snapshot = projectedSnapshot({ saveTo: saveSnapshot });
+    await snapshot.saveTo("/tmp/snapshot.tar.zst", { withImage: true });
+    expect(saveSnapshot).toHaveBeenCalledWith("/tmp/snapshot.tar.zst", {
+      withImage: true,
+    });
+
+    const saveHandle = vi.fn().mockResolvedValue(undefined);
+    const handle = new SnapshotHandle({
+      reference: "snapshot-id",
+      referenceKind: "id",
+      digest: `sha256:${"a".repeat(64)}`,
+      name: "example",
+      parentDigest: null,
+      scope: "disk",
+      imageRef: "docker.io/library/alpine:3.20",
+      stateKind: "file",
+      format: "raw",
+      fstype: "ext4",
+      checkpointManifestDigest: null,
+      sizeBytes: 4096n,
+      locality: "provider_linked",
+      availability: "ready",
+      migrationState: "complete",
+      migrationErrorCode: null,
+      createdAt: 0,
+      saveTo: saveHandle,
+    } as never);
+    await handle.saveTo("/tmp/handle.tar", { plainTar: true });
+    expect(saveHandle).toHaveBeenCalledWith("/tmp/handle.tar", {
+      plainTar: true,
     });
   });
 });

@@ -58,6 +58,32 @@ func mustField(t *testing.T, m map[string]any, key string) any {
 	return v
 }
 
+func TestWithFromSnapshotPreservesTypedReference(t *testing.T) {
+	snapshot := &SnapshotArtifact{
+		reference:     "baseline",
+		referenceKind: "path",
+	}
+	payload := marshalCreateOptions(t, WithFromSnapshot(snapshot))
+
+	if got := mustField(t, payload, "snapshot"); got != "baseline" {
+		t.Fatalf("snapshot = %v, want baseline", got)
+	}
+	if got := mustField(t, payload, "snapshot_reference_kind"); got != "path" {
+		t.Fatalf("snapshot_reference_kind = %v, want path", got)
+	}
+}
+
+func TestWithFromSnapshotStringRemainsUnresolved(t *testing.T) {
+	payload := marshalCreateOptions(t, WithFromSnapshot("baseline"))
+
+	if got := mustField(t, payload, "snapshot"); got != "baseline" {
+		t.Fatalf("snapshot = %v, want baseline", got)
+	}
+	if _, ok := payload["snapshot_reference_kind"]; ok {
+		t.Fatalf("snapshot_reference_kind should be omitted for string references: %v", payload)
+	}
+}
+
 func TestSandboxConfigUnmarshalPersistedRootfsSource(t *testing.T) {
 	raw := []byte(`{
 		"name": "go-sdk-example-main",

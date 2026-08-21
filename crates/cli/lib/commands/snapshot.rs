@@ -1,7 +1,7 @@
 //! `msb snapshot` command — manage disk snapshots.
 
 use clap::{Args, Subcommand};
-use microsandbox::Snapshot;
+use microsandbox::{Snapshot, SnapshotReference};
 
 use crate::ui;
 
@@ -225,7 +225,7 @@ async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
             spinner.finish_success("Snapshotted");
             if !args.quiet {
                 println!("{}", snap.digest());
-                println!("{}", snap.path().display());
+                println!("{}", format_reference(&snap.reference()));
             }
             Ok(())
         }
@@ -259,7 +259,8 @@ async fn list(args: SnapshotListArgs) -> anyhow::Result<()> {
                     "migration_state": s.migration_state(),
                     "migration_error_code": s.migration_error_code(),
                     "created_at": ui::format_json_datetime(&s.created_at().and_utc()),
-                    "artifact_path": s.path().display().to_string(),
+                    "reference": format_reference(&s.reference()),
+                    "reference_kind": s.reference().kind(),
                 })
             })
             .collect();
@@ -315,7 +316,7 @@ async fn inspect(args: SnapshotInspectArgs) -> anyhow::Result<()> {
     let m = snap.manifest();
 
     ui::detail_kv("Digest", snap.digest());
-    ui::detail_kv("Path", &snap.path().display().to_string());
+    ui::detail_kv("Reference", &format_reference(&snap.reference()));
     ui::detail_kv("Image", &m.image.reference);
     ui::detail_kv("Image Manifest", &m.image.manifest_digest);
     ui::detail_kv("Scope", format_scope(m.scope));
@@ -427,7 +428,7 @@ async fn save(args: SnapshotSaveArgs) -> anyhow::Result<()> {
 async fn load(args: SnapshotLoadArgs) -> anyhow::Result<()> {
     let handle = Snapshot::load(&args.archive, args.dest.as_deref()).await?;
     println!("{}", handle.digest());
-    println!("{}", handle.path().display());
+    println!("{}", format_reference(&handle.reference()));
     Ok(())
 }
 
@@ -447,6 +448,10 @@ fn format_scope(scope: microsandbox::SnapshotScope) -> &'static str {
         microsandbox::SnapshotScope::Disk => "disk",
         microsandbox::SnapshotScope::Resumable => "resumable",
     }
+}
+
+fn format_reference(reference: &SnapshotReference) -> String {
+    reference.value().to_string()
 }
 
 fn format_size(bytes: u64) -> String {

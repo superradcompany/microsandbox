@@ -174,6 +174,31 @@ the real value only for the allowed TLS hostname. Secret values persist in
 host-side sandbox configuration, so load them from a secret manager, never log
 them, and rotate them after suspected host compromise.
 
+## Snapshots
+
+Snapshot operations use the selected backend and preserve whether a snapshot
+reference is an ID or a path. Existing static save calls remain available, and
+opened snapshots and live handles can save through the backend they retain:
+
+```ruby
+snapshot = Microsandbox::Snapshot.open("after-pip-install")
+snapshot.save_to("/tmp/after-pip-install.tar.zst", with_image: true)
+
+handle = Microsandbox::Snapshot.get("after-pip-install")
+handle.save_to("/tmp/after-pip-install.tar.zst")
+
+Microsandbox::Snapshot.save(
+  "after-pip-install",
+  "/tmp/after-pip-install.tar.zst",
+  plain_tar: false
+)
+```
+
+Snapshot archive operations are currently local-only. With the cloud backend,
+`save`, `save_to`, direct directory enumeration, reindexing, archive loading,
+and payload verification raise an unsupported-operation error. Capture,
+lookup, listing, open, restore, and removal remain backend-neutral.
+
 ## Supported surface
 
 The gem supports sandbox lifecycle operations, collected exec and shell

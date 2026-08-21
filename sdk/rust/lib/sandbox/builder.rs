@@ -30,7 +30,8 @@ use super::{
     },
 };
 use crate::{
-    LogLevel, MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason, size::Mebibytes,
+    LogLevel, MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason,
+    config::LocalConfig, size::Mebibytes, snapshot::SnapshotReference,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -49,7 +50,7 @@ pub struct SandboxBuilder {
     config_scripts: BTreeMap<String, String>,
     /// Pending snapshot reference (path or bare name) supplied via
     /// [`from_snapshot`]. Resolved during async `create()`.
-    pending_snapshot: Option<String>,
+    pending_snapshot: Option<SnapshotReference>,
     /// Distinguishes a sparse-patch snapshot, which later builder calls may override, from an
     /// explicit `from_snapshot` call that retains the established mutual-exclusion validation.
     pending_snapshot_from_config: bool,
@@ -236,8 +237,24 @@ impl SandboxBuilder {
     #[doc(hidden)]
     pub fn override_snapshot(mut self, snapshot: impl Into<String>) -> Self {
         self.config.spec.image = RootfsSource::oci("");
-        self.pending_snapshot = Some(snapshot.into());
+        self.pending_snapshot = Some(SnapshotReference::auto(snapshot));
         self.pending_snapshot_from_config = false;
+        self
+    }
+
+    pub(super) fn config_snapshot(mut self, snapshot: impl Into<String>) -> Self {
+        self.config.spec.image = RootfsSource::oci("");
+        self.pending_snapshot = Some(SnapshotReference::auto(snapshot));
+        self.pending_snapshot_from_config = true;
+        self
+    }
+
+    /// Record a deferred configuration error, surfaced at `build()`. Keeps the
+    /// first error so the earliest misconfiguration wins.
+    pub(super) fn config_error(mut self, message: impl Into<String>) -> Self {
+        if self.build_error.is_none() {
+            self.build_error = Some(MicrosandboxError::InvalidConfig(message.into()));
+        }
         self
     }
 
@@ -1141,38 +1158,57 @@ impl SandboxBuilder {
     /// and [`image_with`](Self::image_with). The snapshot is structurally
     /// opened at `create()` time; content verification stays explicit.
     ///
-    /// `path_or_name` accepts either a path to a snapshot artifact
-    /// directory (or a bare name resolved under the default snapshots
-    /// directory).
+    /// For local creation, `path_or_name` accepts an artifact directory or a
+    /// bare name under the default snapshots directory. For cloud creation, it
+    /// accepts a managed snapshot id or a host-volume path.
     pub fn from_snapshot(mut self, path_or_name: impl Into<String>) -> Self {
-        self.pending_snapshot = Some(path_or_name.into());
+        self.pending_snapshot = Some(SnapshotReference::auto(path_or_name));
         self.pending_snapshot_from_config = false;
         self
     }
 
-    /// Pre-populate the snapshot resolution for callers that opened
-    /// the artifact synchronously and don't want the async manifest
-    /// read that [`build`](Self::build) would otherwise perform.
+    /// Boot a fresh sandbox from a backend-neutral snapshot reference.
     ///
-    /// Used by the Python SDK helpers, where kwargs-style config
-    /// construction has to stay synchronous. Callers that take this
-    /// route are expected to also call [`image`](Self::image) with
-    /// the snapshot's pinned image reference.
+    /// References returned by [`crate::snapshot::Snapshot::reference`] and
+    /// [`SnapshotHandle::reference`](crate::snapshot::SnapshotHandle::reference)
+    /// preserve whether the selected backend resolves the value as an
+    /// identifier or a path.
+    pub fn from_snapshot_ref(mut self, reference: impl Into<SnapshotReference>) -> Self {
+        self.pending_snapshot = Some(reference.into());
+        self.pending_snapshot_from_config = false;
+        self
+    }
+
+    /// Record an already-resolved local snapshot artifact.
+    ///
+    /// This compatibility helper derives the artifact directory from
+    /// `upper_source`. New code should prefer [`from_snapshot_ref`](Self::from_snapshot_ref),
+    /// which lets the selected backend resolve the snapshot without requiring
+    /// callers to inspect its storage layout.
     pub fn snapshot_resolved(
         mut self,
         image_manifest_digest: impl Into<String>,
         upper_source: impl Into<std::path::PathBuf>,
     ) -> Self {
+        let upper_source = upper_source.into();
         self.config.manifest_digest = Some(image_manifest_digest.into());
-        self.config.snapshot_upper_source = Some(upper_source.into());
+        if let Some(artifact_dir) = upper_source.parent() {
+            self.config.snapshot_reference = Some(SnapshotReference::path(
+                artifact_dir.to_string_lossy().into_owned(),
+            ));
+        } else {
+            self =
+                self.config_error("snapshot upper source must have an artifact parent directory");
+        }
         self
     }
 
     /// Build the configuration without creating the sandbox.
     ///
     /// If [`from_snapshot`](Self::from_snapshot) was called, the snapshot
-    /// manifest is opened here and its pinned image reference, manifest
-    /// digest, and upper-layer source path are populated onto the config.
+    /// manifest is opened here and its backend-neutral reference is populated
+    /// onto the config. The selected backend resolves any storage-specific
+    /// restore inputs during sandbox creation.
     /// Backend-owned defaults were seeded before explicit builder methods were applied.
     pub async fn build(mut self) -> MicrosandboxResult<SandboxConfig> {
         self.materialize_config_scripts();
@@ -1219,53 +1255,17 @@ impl SandboxBuilder {
                 "from_snapshot is mutually exclusive with explicit rootfs configuration".into(),
             ));
         }
+        if !self.config.spec.patches.is_empty() {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "patches cannot be combined with from_snapshot".into(),
+            ));
+        }
 
-        let snap = crate::snapshot::Snapshot::open(&snapshot_ref).await?;
-        if snap.manifest().scope != crate::snapshot::SnapshotScope::Disk {
-            return Err(crate::MicrosandboxError::unsupported(
-                Operation::SnapshotOps,
-                UnsupportedReason::NotAvailable(
-                    "restoring non-disk snapshots requires resumable restore support".into(),
-                ),
-            ));
-        }
-        let unsupported = snap.manifest().unsupported_requires();
-        if !unsupported.is_empty() {
-            return Err(crate::MicrosandboxError::unsupported(
-                Operation::SnapshotOps,
-                UnsupportedReason::NotAvailable(format!(
-                    "snapshot requires unsupported runtime capabilities: {}",
-                    unsupported.join(", ")
-                )),
-            ));
-        }
-        let file_state = match &snap.manifest().state {
-            crate::snapshot::SnapshotState::File(state) => state,
-            crate::snapshot::SnapshotState::Checkpoint(_) => {
-                return Err(crate::MicrosandboxError::unsupported(
-                    Operation::SnapshotOps,
-                    UnsupportedReason::NotAvailable(
-                        "checkpoint-state restore providers are not available".into(),
-                    ),
-                ));
-            }
-        };
-        if file_state.format != crate::snapshot::SnapshotFormat::Raw || file_state.fstype != "ext4"
-        {
-            return Err(crate::MicrosandboxError::unsupported(
-                Operation::SnapshotOps,
-                UnsupportedReason::NotAvailable(format!(
-                    "snapshot file state {:?}/{} is not qualified for restore",
-                    file_state.format, file_state.fstype
-                )),
-            ));
-        }
-        let snap_ref = snap.manifest().image.reference.clone();
-
-        self.config.spec.image = RootfsSource::oci(snap_ref);
-        self.config.manifest_digest = Some(snap.manifest().image.manifest_digest.clone());
-        self.config.snapshot_upper_source = Some(snap.path().join(&file_state.upper.file));
-        Ok(())
+        let backend = crate::backend::default_backend();
+        backend
+            .snapshots()
+            .prepare_restore(backend.clone(), &mut self.config, snapshot_ref)
+            .await
     }
 
     fn has_explicit_rootfs_source(&self) -> bool {
@@ -1469,7 +1469,9 @@ impl SandboxBuilder {
 
         // Check that image is set (non-empty OCI string or Bind path).
         match &self.config.spec.image {
-            RootfsSource::Oci(oci) if oci.reference.is_empty() => {
+            RootfsSource::Oci(oci)
+                if oci.reference.is_empty() && self.config.snapshot_reference.is_none() =>
+            {
                 return Err(crate::MicrosandboxError::InvalidConfig(
                     "image source is required".into(),
                 ));
@@ -1597,7 +1599,7 @@ impl SandboxBuilder {
                 if route.socket_type == VsockSocketType::Dgram {
                     return Err(MicrosandboxError::unsupported(
                         Operation::SandboxCreate,
-                        UnsupportedReason::RequiresUnixHost,
+                        crate::UnsupportedReason::RequiresUnixHost,
                     ));
                 }
             }
@@ -1662,7 +1664,7 @@ impl SandboxBuilder {
                         "patches require a managed root disk (they are baked into the upper at create time)".into(),
                     ));
                 }
-                if self.config.snapshot_upper_source.is_some() {
+                if self.config.snapshot_reference.is_some() {
                     return Err(crate::MicrosandboxError::InvalidConfig(
                         "from_snapshot requires a managed root disk".into(),
                     ));
@@ -1680,7 +1682,7 @@ impl SandboxBuilder {
                         "patches require a managed root disk (they are baked into the upper at create time)".into(),
                     ));
                 }
-                if self.config.snapshot_upper_source.is_some() {
+                if self.config.snapshot_reference.is_some() {
                     return Err(crate::MicrosandboxError::InvalidConfig(
                         "from_snapshot requires a managed root disk".into(),
                     ));
@@ -1705,7 +1707,7 @@ impl SandboxBuilder {
                         "patches are not yet compatible with flat OCI rootfs".into(),
                     ));
                 }
-                if self.config.snapshot_upper_source.is_some() {
+                if self.config.snapshot_reference.is_some() {
                     return Err(crate::MicrosandboxError::InvalidConfig(
                         "from_snapshot is not yet compatible with flat OCI rootfs".into(),
                     ));
@@ -1778,7 +1780,9 @@ impl From<SandboxConfig> for SandboxBuilder {
 mod tests {
     use super::SandboxBuilder;
     use crate::LogLevel;
+    use crate::backend::{CloudBackend, with_backend};
     use crate::sandbox::{MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, RlimitResource};
+    use crate::snapshot::SnapshotReference;
     #[cfg(feature = "net")]
     use microsandbox_network::secrets::config::{HostPattern, SecretEntry, SecretInjection};
     use microsandbox_types::{
@@ -2188,6 +2192,38 @@ mod tests {
             err.to_string()
                 .contains("from_snapshot is mutually exclusive")
         );
+    }
+
+    #[tokio::test]
+    async fn test_builder_defers_snapshot_lookup_to_cloud_backend() {
+        let cloud = CloudBackend::new("https://api.example.test", "test-key").unwrap();
+        let config = with_backend(cloud, async {
+            SandboxBuilder::new("test")
+                .from_snapshot("00000000-0000-0000-0000-000000000003")
+                .build()
+                .await
+                .unwrap()
+        })
+        .await;
+
+        assert_eq!(
+            config.snapshot_reference,
+            Some(SnapshotReference::auto(
+                "00000000-0000-0000-0000-000000000003"
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_builder_from_snapshot_rejects_patches_before_backend_resolution() {
+        let err = SandboxBuilder::new("test")
+            .from_snapshot("post-setup")
+            .patch(|patch| patch.text("/etc/motd", "hello", None, true))
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("patches cannot be combined"));
     }
 
     #[tokio::test]

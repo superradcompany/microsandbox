@@ -7,20 +7,20 @@ import (
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
 
-// Snapshot is the factory namespace for snapshot artifact operations.
+// Snapshot is the factory namespace for backend-neutral snapshot operations.
 var Snapshot snapshotFactory
 
 type snapshotFactory struct{}
 
 // SnapshotCreateOptions configures Snapshot.Create.
 type SnapshotCreateOptions struct {
-	// Snapshot name, resolved under the default snapshots directory
-	// (or under DestDir when set).
+	// Snapshot name. With no DestDir, local uses its default store and cloud
+	// uses managed storage.
 	Name string
 	// Source sandbox to snapshot. Must be stopped. Required.
 	FromSandbox string
-	// Parent directory to create the artifact in; empty = the default
-	// snapshots directory. The artifact lands at DestDir/<name>.
+	// Local parent or cloud host-volume directory; empty = backend-managed
+	// storage. When set, the artifact lands at DestDir/<name>.
 	DestDir         string
 	Labels          map[string]string
 	Force           bool
@@ -28,7 +28,7 @@ type SnapshotCreateOptions struct {
 	Resumable       bool
 }
 
-// SnapshotSaveOptions configures Snapshot.Save.
+// SnapshotSaveOptions configures Snapshot.Save and instance SaveTo methods.
 type SnapshotSaveOptions struct {
 	WithParents bool
 	WithImage   bool
@@ -85,9 +85,10 @@ type SnapshotIntegrity struct {
 	LeafSize    uint32
 }
 
-// SnapshotArtifact is a snapshot artifact on disk.
+// SnapshotArtifact is a backend-neutral disk snapshot.
 type SnapshotArtifact struct {
-	path                string
+	reference           string
+	referenceKind       string
 	digest              string
 	sizeBytes           *uint64
 	imageRef            string
@@ -102,7 +103,8 @@ type SnapshotArtifact struct {
 
 func snapshotFromInfo(info *ffi.SnapshotInfo) *SnapshotArtifact {
 	return &SnapshotArtifact{
-		path:                info.Path,
+		reference:           info.Reference,
+		referenceKind:       info.ReferenceKind,
 		digest:              info.Digest,
 		sizeBytes:           info.SizeBytes,
 		imageRef:            info.ImageRef,
@@ -116,7 +118,8 @@ func snapshotFromInfo(info *ffi.SnapshotInfo) *SnapshotArtifact {
 	}
 }
 
-func (s *SnapshotArtifact) Path() string                { return s.path }
+func (s *SnapshotArtifact) Reference() string           { return s.reference }
+func (s *SnapshotArtifact) ReferenceKind() string       { return s.referenceKind }
 func (s *SnapshotArtifact) Digest() string              { return s.digest }
 func (s *SnapshotArtifact) SizeBytes() *uint64          { return cloneUint64Ptr(s.sizeBytes) }
 func (s *SnapshotArtifact) ImageRef() string            { return s.imageRef }
@@ -140,16 +143,23 @@ func (s *SnapshotArtifact) CreatedAt() string         { return s.createdAt }
 func (s *SnapshotArtifact) Labels() map[string]string { return cloneMap(s.labels) }
 func (s *SnapshotArtifact) SourceSandbox() *string    { return cloneStringPtr(s.sourceSandbox) }
 
-// Verify recomputes recorded content integrity for the snapshot.
+// Verify recomputes recorded content integrity for the snapshot. Backends that
+// do not expose direct payload verification return ErrUnsupportedOperation.
 func (s *SnapshotArtifact) Verify(ctx context.Context) (*SnapshotVerifyReport, error) {
-	report, err := ffi.SnapshotVerify(ctx, s.path)
+	report, err := ffi.SnapshotVerify(ctx, s.reference, s.referenceKind)
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
 	return snapshotVerifyReportFromInfo(report), nil
 }
 
-// SnapshotHandle is a lightweight handle backed by the snapshot index.
+// SaveTo bundles this snapshot using its typed backend-neutral reference.
+// Backends that do not expose artifact archives return ErrUnsupportedOperation.
+func (s *SnapshotArtifact) SaveTo(ctx context.Context, outPath string, opts SnapshotSaveOptions) error {
+	return saveSnapshotReference(ctx, s.reference, s.referenceKind, outPath, opts)
+}
+
+// SnapshotHandle is a lightweight handle returned by the active backend.
 type SnapshotHandle struct {
 	digest                   string
 	name                     *string
@@ -166,7 +176,8 @@ type SnapshotHandle struct {
 	migrationState           string
 	migrationErrorCode       *string
 	createdAtUnix            int64
-	path                     string
+	reference                string
+	referenceKind            string
 }
 
 func snapshotHandleFromInfo(info *ffi.SnapshotHandleInfo) *SnapshotHandle {
@@ -186,7 +197,8 @@ func snapshotHandleFromInfo(info *ffi.SnapshotHandleInfo) *SnapshotHandle {
 		migrationState:           info.MigrationState,
 		migrationErrorCode:       info.MigrationErrorCode,
 		createdAtUnix:            info.CreatedAtUnix,
-		path:                     info.Path,
+		reference:                info.Reference,
+		referenceKind:            info.ReferenceKind,
 	}
 }
 
@@ -206,15 +218,26 @@ func (h *SnapshotHandle) Locality() string            { return h.locality }
 func (h *SnapshotHandle) Availability() string        { return h.availability }
 func (h *SnapshotHandle) MigrationState() string      { return h.migrationState }
 func (h *SnapshotHandle) MigrationErrorCode() *string { return cloneStringPtr(h.migrationErrorCode) }
-func (h *SnapshotHandle) Path() string                { return h.path }
+func (h *SnapshotHandle) Reference() string           { return h.reference }
+func (h *SnapshotHandle) ReferenceKind() string       { return h.referenceKind }
 func (h *SnapshotHandle) CreatedAt() time.Time        { return time.Unix(h.createdAtUnix, 0) }
 
 func (h *SnapshotHandle) Open(ctx context.Context) (*SnapshotArtifact, error) {
-	return Snapshot.Open(ctx, h.path)
+	info, err := ffi.SnapshotOpen(ctx, h.reference, h.referenceKind)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return snapshotFromInfo(info), nil
 }
 
 func (h *SnapshotHandle) Remove(ctx context.Context, force bool) error {
-	return Snapshot.Remove(ctx, h.digest, force)
+	return wrapFFI(ffi.SnapshotRemove(ctx, h.reference, h.referenceKind, force))
+}
+
+// SaveTo bundles this snapshot using its typed backend-neutral reference.
+// Backends that do not expose artifact archives return ErrUnsupportedOperation.
+func (h *SnapshotHandle) SaveTo(ctx context.Context, outPath string, opts SnapshotSaveOptions) error {
+	return saveSnapshotReference(ctx, h.reference, h.referenceKind, outPath, opts)
 }
 
 func (snapshotFactory) Create(ctx context.Context, opts SnapshotCreateOptions) (*SnapshotArtifact, error) {
@@ -239,7 +262,7 @@ func (snapshotFactory) Create(ctx context.Context, opts SnapshotCreateOptions) (
 }
 
 func (snapshotFactory) Open(ctx context.Context, pathOrName string) (*SnapshotArtifact, error) {
-	info, err := ffi.SnapshotOpen(ctx, pathOrName)
+	info, err := ffi.SnapshotOpen(ctx, pathOrName, "")
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
@@ -279,7 +302,7 @@ func (snapshotFactory) ListDir(ctx context.Context, dir string) ([]*SnapshotArti
 }
 
 func (snapshotFactory) Remove(ctx context.Context, pathOrName string, force bool) error {
-	return wrapFFI(ffi.SnapshotRemove(ctx, pathOrName, force))
+	return wrapFFI(ffi.SnapshotRemove(ctx, pathOrName, "", force))
 }
 
 func (snapshotFactory) Reindex(ctx context.Context, dir string) (uint32, error) {
@@ -288,7 +311,11 @@ func (snapshotFactory) Reindex(ctx context.Context, dir string) (uint32, error) 
 }
 
 func (snapshotFactory) Save(ctx context.Context, nameOrPath, outPath string, opts SnapshotSaveOptions) error {
-	return wrapFFI(ffi.SnapshotSave(ctx, nameOrPath, outPath, ffi.SnapshotSaveOptions{
+	return saveSnapshotReference(ctx, nameOrPath, "", outPath, opts)
+}
+
+func saveSnapshotReference(ctx context.Context, reference, referenceKind, outPath string, opts SnapshotSaveOptions) error {
+	return wrapFFI(ffi.SnapshotSave(ctx, reference, referenceKind, outPath, ffi.SnapshotSaveOptions{
 		WithParents: opts.WithParents,
 		WithImage:   opts.WithImage,
 		PlainTar:    opts.PlainTar,
