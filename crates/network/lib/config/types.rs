@@ -165,6 +165,34 @@ pub enum PortProtocol {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl NetworkConfig {
+    /// Enforce the invariant that a non-empty secret set requires TLS
+    /// interception, returning whether `tls.enabled` had to be flipped.
+    ///
+    /// Secrets are injected by the TLS proxy: the guest only ever sees the
+    /// placeholder, and the real value is substituted on the way out for
+    /// allowed hosts. Without interception the placeholder travels to the
+    /// upstream unchanged, so a configured secret without TLS is never a
+    /// working state.
+    ///
+    /// The invariant is deliberately one-way. Emptying the secret set does
+    /// not disable interception, because [`TlsConfig::enabled`] does not
+    /// record why it was turned on and callers enable it independently of
+    /// secrets — for bypass and inspection policy, or for DNS-over-TLS.
+    /// Auto-disabling here would clobber that intent.
+    pub fn ensure_tls_for_secrets(&mut self) -> bool {
+        if self.secrets.secrets.is_empty() || self.tls.enabled {
+            return false;
+        }
+        self.tls.enabled = true;
+        true
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
@@ -220,6 +248,50 @@ mod tests {
     use super::{InterfaceOverrides, NetworkConfig, PortProtocol};
     use crate::dns::Nameserver;
     use crate::policy::{Destination, NetworkPolicy, Rule};
+    use crate::secrets::config::{HostPattern, SecretEntry, SecretInjection};
+
+    fn secret_entry() -> SecretEntry {
+        SecretEntry {
+            env_var: "API_KEY".to_string(),
+            value: Default::default(),
+            source: None,
+            placeholder: "$MSB_API_KEY".to_string(),
+            allowed_hosts: vec![HostPattern::Exact("api.example.com".into())],
+            injection: SecretInjection::default(),
+            on_violation: None,
+            require_tls_identity: true,
+        }
+    }
+
+    /// Secrets are injected by the TLS proxy, so configuring one turns
+    /// interception on. Both entry points that add secrets rely on this.
+    #[test]
+    fn ensure_tls_for_secrets_enables_interception_for_a_non_empty_set() {
+        let mut config = NetworkConfig::default();
+        assert!(!config.tls.enabled);
+
+        config.secrets.secrets.push(secret_entry());
+        assert!(config.ensure_tls_for_secrets());
+        assert!(config.tls.enabled);
+
+        // Already on: nothing to do, and callers can tell nothing changed.
+        assert!(!config.ensure_tls_for_secrets());
+        assert!(config.tls.enabled);
+    }
+
+    /// The invariant is one-way. An empty secret set never turns
+    /// interception on, and never turns off interception enabled for
+    /// other reasons such as bypass policy or DNS-over-TLS.
+    #[test]
+    fn ensure_tls_for_secrets_leaves_an_empty_set_alone() {
+        let mut config = NetworkConfig::default();
+        assert!(!config.ensure_tls_for_secrets());
+        assert!(!config.tls.enabled);
+
+        config.tls.enabled = true;
+        assert!(!config.ensure_tls_for_secrets());
+        assert!(config.tls.enabled);
+    }
 
     /// The engine's `policy`/`dns`/`interface` subdocuments must remain
     /// serde-compatible with the wire twins in `microsandbox_types` that the
