@@ -583,6 +583,25 @@ pub(crate) fn network_config_from_spec(
     Ok(serde_json::from_value(serde_json::to_value(spec)?)?)
 }
 
+/// Enforce the invariant that a non-empty secret set requires TLS
+/// interception, returning whether `tls.enabled` had to be flipped. The
+/// proxy is what substitutes secrets, so without interception the
+/// placeholder reaches the upstream unchanged.
+///
+/// One-way: emptying the secret set leaves interception on, since
+/// `TlsConfig::enabled` records no provenance and callers enable it
+/// independently of secrets.
+#[cfg(feature = "net")]
+pub(crate) fn ensure_tls_for_secrets(
+    network: &mut microsandbox_network::config::NetworkConfig,
+) -> bool {
+    if network.secrets.secrets.is_empty() || network.tls.enabled {
+        return false;
+    }
+    network.tls.enabled = true;
+    true
+}
+
 #[cfg(feature = "net")]
 impl SandboxConfig {
     pub(crate) fn local_network_config(
@@ -1739,6 +1758,42 @@ mod tests {
     //----------------------------------------------------------------------------------------------
     // Tests: Secret source references (create path + spawn resolution)
     //----------------------------------------------------------------------------------------------
+    #[cfg(feature = "net")]
+    #[test]
+    fn ensure_tls_for_secrets_enables_interception_for_a_non_empty_set() {
+        use microsandbox_network::secrets::config::{HostPattern, SecretEntry};
+
+        let mut network = microsandbox_network::config::NetworkConfig::default();
+        assert!(!network.tls.enabled);
+
+        network.secrets.secrets.push(SecretEntry {
+            env_var: "API_KEY".into(),
+            value: zeroize::Zeroizing::new(String::new()),
+            source: None,
+            placeholder: "$MSB_API_KEY".into(),
+            allowed_hosts: vec![HostPattern::Exact("api.example.com".into())],
+            injection: Default::default(),
+            on_violation: None,
+            require_tls_identity: true,
+        });
+        assert!(super::ensure_tls_for_secrets(&mut network));
+        assert!(network.tls.enabled);
+        assert!(!super::ensure_tls_for_secrets(&mut network));
+    }
+
+    /// One-way: an empty set never enables interception, and never disables
+    /// interception enabled for other reasons.
+    #[cfg(feature = "net")]
+    #[test]
+    fn ensure_tls_for_secrets_leaves_an_empty_set_alone() {
+        let mut network = microsandbox_network::config::NetworkConfig::default();
+        assert!(!super::ensure_tls_for_secrets(&mut network));
+        assert!(!network.tls.enabled);
+
+        network.tls.enabled = true;
+        assert!(!super::ensure_tls_for_secrets(&mut network));
+        assert!(network.tls.enabled);
+    }
 
     #[cfg(feature = "net")]
     const SECRET_SENTINEL: &str = "sentinel-secret-value";
