@@ -88,8 +88,8 @@ microsandbox-protocol = { version = "=0.6.13", path = "crates/protocol" }
 microsandbox-runtime = { version = "=0.6.13", path = "crates/runtime", default-features = false }
 microsandbox-utils = { version = "=0.6.13", path = "crates/utils" }
 microsandbox-vsock = { version = "=0.6.13", path = "crates/vsock" }
-msb_krun = "=0.1.31"
-msb_krun_utils = "=0.1.31"
+msb_krun = "=0.1.32"
+msb_krun_utils = "=0.1.32"
 test-macros = { path = "crates/testing/macros" }
 test-utils = { path = "crates/testing/utils" }
 
