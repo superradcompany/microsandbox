@@ -21,8 +21,20 @@ use super::types::{MountOptions, RootDisk, RootfsSource, VolumeMount};
 // Constants
 //--------------------------------------------------------------------------------------------------
 
+/// Where the automatic OCI `/tmp` tmpfs is mounted. Suppressed entirely when
+/// [`SandboxRuntimeOptions::disable_auto_tmpfs`] is set — the persisted
+/// opt-out that keeps `/tmp` on the writable root overlay (#1377).
 const DEFAULT_OCI_TMPFS_PATH: &str = "/tmp";
+/// Cap for the automatic OCI `/tmp` tmpfs, in MiB. The formula
+/// `memory / DEFAULT_OCI_TMPFS_MEMORY_DIVISOR` saturates here, so every
+/// sandbox with 2 GiB or more of RAM gets exactly this much; what it never
+/// reflects is the root-disk size. Callers who need more scratch space than
+/// this should size an explicit `--tmpfs` or opt out with
+/// `--tmpfs /tmp:0` so `/tmp` lives on the root disk (#1377).
 const DEFAULT_OCI_TMPFS_MAX_SIZE_MIB: u32 = 512;
+/// The automatic OCI `/tmp` tmpfs is sized `memory_mib / this` (then clamped
+/// to [`DEFAULT_OCI_TMPFS_MAX_SIZE_MIB`]). It is charged to guest RAM, not
+/// to the root disk (#1377).
 const DEFAULT_OCI_TMPFS_MEMORY_DIVISOR: u32 = 4;
 pub(crate) const DEFAULT_OCI_UPPER_SIZE_MIB: u32 = 4 * 1024;
 
@@ -450,6 +462,13 @@ impl SandboxConfig {
     /// user explicitly overrode them.
     pub(crate) fn apply_runtime_defaults(&mut self) {
         if !matches!(self.spec.image, RootfsSource::Oci(_)) {
+            return;
+        }
+
+        // #1377: the persisted opt-out — set by `--tmpfs /tmp:0` or the
+        // builder's `disable_auto_tmpfs()` — suppresses the automatic mount
+        // entirely, keeping `/tmp` on the writable root overlay.
+        if self.spec.runtime.disable_auto_tmpfs {
             return;
         }
 
