@@ -13,17 +13,17 @@ The security boundary is hardware virtualization, not Linux namespaces. That mak
 At minimum, a sandbox needs a name and an image. Everything else has defaults: 1 vCPU, 512 MiB memory, public-only networking, and `/bin/sh` as the default shell.
 
 <CodeGroup>
+```typescript TypeScript
+await using sb = await Sandbox.builder("worker")
+    .image("python")
+    .create();
+```
+
 ```rust Rust
 let sb = Sandbox::builder("worker")
     .image("python")
     .create()
     .await?;
-```
-
-```typescript TypeScript
-await using sb = await Sandbox.builder("worker")
-    .image("python")
-    .create();
 ```
 
 ```python Python
@@ -46,6 +46,17 @@ Sandbox names must be non-empty and no longer than 128 UTF-8 bytes.
 <Tooltip tip="max_cpus and max_memory are not carried on microsandbox cloud; set the CPU and memory you need at creation and recreate the sandbox to resize."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 <CodeGroup>
+```typescript TypeScript
+await using sb = await Sandbox.builder("worker")
+    .image("python")
+    .memory(1024)
+    .cpus(2)
+    .env("DEBUG", "true")
+    .label("user.id", "alice")
+    .volume("/tmp/scratch", (m) => m.tmpfs().size(100))
+    .create();
+```
+
 ```rust Rust
 let sb = Sandbox::builder("worker")
     .image("python")
@@ -56,17 +67,6 @@ let sb = Sandbox::builder("worker")
     .volume("/tmp/scratch", |v| v.tmpfs().size(100))
     .create()
     .await?;
-```
-
-```typescript TypeScript
-await using sb = await Sandbox.builder("worker")
-    .image("python")
-    .memory(1024)
-    .cpus(2)
-    .env("DEBUG", "true")
-    .label("user.id", "alice")
-    .volume("/tmp/scratch", (m) => m.tmpfs().size(100))
-    .create();
 ```
 
 ```python Python
@@ -167,19 +167,19 @@ See [Images](/images/overview) and [Disk Images](/images/disk-images) for the fu
 Creating a sandbox fails if another sandbox already has the same name. Use replace when you want a fresh sandbox with that name:
 
 <CodeGroup>
+```typescript TypeScript
+await using sb = await Sandbox.builder("worker")
+    .image("python")
+    .replace()
+    .create();
+```
+
 ```rust Rust
 let sb = Sandbox::builder("worker")
     .image("python")
     .replace()
     .create()
     .await?;
-```
-
-```typescript TypeScript
-await using sb = await Sandbox.builder("worker")
-    .image("python")
-    .replace()
-    .create();
 ```
 
 ```python Python

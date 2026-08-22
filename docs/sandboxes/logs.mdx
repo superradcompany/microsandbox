@@ -28,14 +28,14 @@ msb logs devbox --source all
 ## Read from the SDK
 
 <CodeGroup>
-```rust Rust
-let handle = Sandbox::get("web").await?;
-let entries = handle.logs(&LogOptions::default())?;
-```
-
 ```typescript TypeScript
 const handle = await Sandbox.get("web");
 const entries = await handle.logs();
+```
+
+```rust Rust
+let handle = Sandbox::get("web").await?;
+let entries = handle.logs(&LogOptions::default())?;
 ```
 
 ```python Python
@@ -52,19 +52,19 @@ entries, err := handle.Logs(ctx, m.LogOptions{})
 Use log options to filter at read time:
 
 <CodeGroup>
+```typescript TypeScript
+const recent = await handle.logs({
+    tail: 50,
+    sources: ["stdout", "stderr"],
+});
+```
+
 ```rust Rust
 let recent = handle.logs(&LogOptions {
     tail: Some(50),
     sources: vec![LogSource::Stdout, LogSource::Stderr],
     ..Default::default()
 })?;
-```
-
-```typescript TypeScript
-const recent = await handle.logs({
-    tail: 50,
-    sources: ["stdout", "stderr"],
-});
 ```
 
 ```python Python

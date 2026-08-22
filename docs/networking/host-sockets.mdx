@@ -36,19 +36,19 @@ Datagrams are best effort and limited to 64 KiB. They require the kernel bundled
 ## SDKs
 
 <CodeGroup>
+```typescript TypeScript
+const sandbox = await Sandbox.builder("worker")
+  .image("alpine")
+  .vsock("/run/host-api.sock", 5000)
+  .create();
+```
+
 ```rust Rust
 let sandbox = Sandbox::builder("worker")
     .image("alpine")
     .vsock("/run/host-api.sock", 5000)
     .create()
     .await?;
-```
-
-```typescript TypeScript
-const sandbox = await Sandbox.builder("worker")
-  .image("alpine")
-  .vsock("/run/host-api.sock", 5000)
-  .create();
 ```
 
 ```python Python

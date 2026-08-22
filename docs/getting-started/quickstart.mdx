@@ -46,12 +46,12 @@ msb run debian
     For application code, install the SDK for your language. For terminal workflows, use one of the CLI options above. Both run microsandbox locally by default; there is no separate server or daemon to set up. The same installation also drives [microsandbox cloud](/cloud/overview) when an API key is set.
 
     <CodeGroup>
-    ```bash Rust
-    cargo add microsandbox
-    ```
-
     ```bash TypeScript
     npm install microsandbox
+    ```
+
+    ```bash Rust
+    cargo add microsandbox
     ```
 
     ```bash Python
@@ -77,6 +77,18 @@ msb run debian
     Create a sandbox, execute code inside it, and get the result back.
 
     <CodeGroup>
+    ```typescript TypeScript
+    import { Sandbox } from "microsandbox";
+
+    await using sb = await Sandbox.builder("hello")
+        .image("python")
+        .memory(512)
+        .create();
+
+    const output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"]);
+    console.log(output.stdout()); // Hello from a microVM!
+    ```
+
     ```rust Rust
     use microsandbox::Sandbox;
 
@@ -94,18 +106,6 @@ msb run debian
         sb.stop().await?;
         Ok(())
     }
-    ```
-
-    ```typescript TypeScript
-    import { Sandbox } from "microsandbox";
-
-    await using sb = await Sandbox.builder("hello")
-        .image("python")
-        .memory(512)
-        .create();
-
-    const output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"]);
-    console.log(output.stdout()); // Hello from a microVM!
     ```
 
     ```python Python

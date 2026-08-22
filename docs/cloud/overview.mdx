@@ -22,6 +22,18 @@ export MSB_API_KEY="msb_..."
 Everything from the [quickstart](/getting-started/quickstart) works unchanged. With cloud selected and the API key exported, this creates a sandbox on cloud instead of your machine:
 
 <CodeGroup>
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("hello")
+    .image("python")
+    .memory(512)
+    .create();
+
+const output = await sb.exec("python", ["-c", "print('Hello from the cloud!')"]);
+console.log(output.stdout());
+```
+
 ```rust Rust
 use microsandbox::Sandbox;
 
@@ -35,18 +47,6 @@ let output = sb.exec("python", ["-c", "print('Hello from the cloud!')"]).await?;
 println!("{}", output.stdout()?);
 
 sb.stop().await?;
-```
-
-```typescript TypeScript
-import { Sandbox } from "microsandbox";
-
-await using sb = await Sandbox.builder("hello")
-    .image("python")
-    .memory(512)
-    .create();
-
-const output = await sb.exec("python", ["-c", "print('Hello from the cloud!')"]);
-console.log(output.stdout());
 ```
 
 ```python Python

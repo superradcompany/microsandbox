@@ -51,6 +51,13 @@ msb create python --name worker \
     --net-rule "deny@meta"
 ```
 
+```typescript TypeScript
+NetworkPolicy.builder()
+  .defaultAllow()
+  .egress((rule) => rule.denyMeta())
+  .build();
+```
+
 ```rust Rust
 NetworkPolicy::builder()
     .default_allow()

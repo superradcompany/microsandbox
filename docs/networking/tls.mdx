@@ -22,6 +22,17 @@ The default CA is stored at `~/.microsandbox/tls/ca.{crt,key}` and reused by loc
 ## Enabling interception
 
 <CodeGroup>
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("worker")
+  .image("python")
+  .network((n) => n.tls((t) =>
+    t.bypass("pinned-api.example.com").bypass("*.gov"),
+  ))
+  .create();
+```
+
 ```rust Rust
 use microsandbox::Sandbox;
 
@@ -33,17 +44,6 @@ let sb = Sandbox::builder("worker")
     ))
     .create()
     .await?;
-```
-
-```typescript TypeScript
-import { Sandbox } from "microsandbox";
-
-await using sb = await Sandbox.builder("worker")
-  .image("python")
-  .network((n) => n.tls((t) =>
-    t.bypass("pinned-api.example.com").bypass("*.gov"),
-  ))
-  .create();
 ```
 
 ```python Python
@@ -92,6 +92,19 @@ The proxy verifies upstream certificates with the host's root store by default. 
 - a host pattern that skips upstream verification
 
 <CodeGroup>
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("agent")
+  .image("python")
+  .network((n) => n.tls((t) =>
+    t.upstreamCaCert("/etc/ssl/corp-root.pem")
+      .upstreamCaCertFor("api.internal.example.com", "./certs/api-ca.pem")
+      .verifyUpstreamFor("*.preview.internal", false),
+  ))
+  .create();
+```
+
 ```rust Rust
 let sb = Sandbox::builder("agent")
     .image("python")
@@ -129,19 +142,19 @@ Corporate proxies often replace server certificates with certificates signed by 
 Enable host CA trust to copy trusted host roots into the guest when it starts:
 
 <CodeGroup>
+```typescript TypeScript
+await using sb = await Sandbox.builder("devbox")
+  .image("alpine")
+  .network((n) => n.trustHostCAs(true))
+  .create();
+```
+
 ```rust Rust
 let sb = Sandbox::builder("devbox")
     .image("alpine")
     .network(|n| n.trust_host_cas(true))
     .create()
     .await?;
-```
-
-```typescript TypeScript
-await using sb = await Sandbox.builder("devbox")
-  .image("alpine")
-  .network((n) => n.trustHostCAs(true))
-  .create();
 ```
 
 ```python Python
