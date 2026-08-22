@@ -29,15 +29,6 @@ MSB_BACKEND=cloud msb ls                        # explicit cloud
 Programmatic selection wins over environment and profile resolution. Use it when the application should decide regardless of its environment:
 
 <CodeGroup>
-```typescript TypeScript
-import { setDefaultBackend } from "microsandbox";
-
-setDefaultBackend({ kind: "cloud", apiKey: process.env.MSB_API_KEY! });
-
-// or: force the local runtime
-setDefaultBackend("local");
-```
-
 ```rust Rust
 use microsandbox::{set_default_backend, CloudBackend, LocalBackend};
 
@@ -49,6 +40,15 @@ set_default_backend(CloudBackend::with_api_key(api_key)?);
 
 // or: force the local runtime
 set_default_backend(LocalBackend::lazy());
+```
+
+```typescript TypeScript
+import { setDefaultBackend } from "microsandbox";
+
+setDefaultBackend({ kind: "cloud", apiKey: process.env.MSB_API_KEY! });
+
+// or: force the local runtime
+setDefaultBackend("local");
 ```
 
 ```python Python

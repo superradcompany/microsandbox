@@ -19,14 +19,14 @@ microsandbox supports four mount types on both backends: bind mounts, named volu
 Every Cloud organization has an always-present default volume. You can read and write it directly without starting a sandbox:
 
 <CodeGroup>
-```typescript TypeScript
-const volume = await Volume.getDefault();
-await volume.fs().write("state.json", JSON.stringify({ ready: true }));
-```
-
 ```rust Rust
 let volume = Volume::get_default().await?;
 volume.fs().write("state.json", br#"{"ready":true}"#).await?;
+```
+
+```typescript TypeScript
+const volume = await Volume.getDefault();
+await volume.fs().write("state.json", JSON.stringify({ ready: true }));
 ```
 
 ```python Python
@@ -49,6 +49,15 @@ The default volume is isolated to the authenticated Cloud organization and canno
 Mount a directory from the host directly into the sandbox. Changes inside the sandbox are reflected on the host, and vice versa.
 
 <CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("dev")
+    .image("python")
+    .volume("/app/src", |v| v.bind("./src").readonly().noexec())
+    .volume("/app/data", |v| v.bind("./data"))
+    .create()
+    .await?;
+```
+
 ```typescript TypeScript
 import { Sandbox } from "microsandbox";
 
@@ -57,15 +66,6 @@ await using sb = await Sandbox.builder("dev")
     .volume("/app/src",  (m) => m.bind("./src").readonly().noexec())
     .volume("/app/data", (m) => m.bind("./data"))
     .create();
-```
-
-```rust Rust
-let sb = Sandbox::builder("dev")
-    .image("python")
-    .volume("/app/src", |v| v.bind("./src").readonly().noexec())
-    .volume("/app/data", |v| v.bind("./data"))
-    .create()
-    .await?;
 ```
 
 ```python Python
@@ -123,16 +123,16 @@ SDK `named(...)` mount helpers are existing-only. They fail if the named volume 
 ### Create a volume
 
 <CodeGroup>
-```typescript TypeScript
-import { Volume } from "microsandbox";
-
-const cache = await Volume.builder("pip-cache").create();
-```
-
 ```rust Rust
 let cache = Volume::builder("pip-cache")
     .create()
     .await?;
+```
+
+```typescript TypeScript
+import { Volume } from "microsandbox";
+
+const cache = await Volume.builder("pip-cache").create();
 ```
 
 ```python Python
@@ -152,19 +152,19 @@ msb volume create pip-cache
 Create a disk-backed named volume when a workload needs a real guest block filesystem, such as Docker's data root:
 
 <CodeGroup>
-```typescript TypeScript
-const dockerData = await Volume.builder("docker-data")
-  .disk()
-  .size(20 * 1024)
-  .create();
-```
-
 ```rust Rust
 let docker_data = Volume::builder("docker-data")
     .disk()
     .size(20.gib())
     .create()
     .await?;
+```
+
+```typescript TypeScript
+const dockerData = await Volume.builder("docker-data")
+  .disk()
+  .size(20 * 1024)
+  .create();
 ```
 
 ```python Python
@@ -192,19 +192,19 @@ msb volume create docker-data --kind disk --size 20G
 ### Mount in a sandbox
 
 <CodeGroup>
-```typescript TypeScript
-await using sb = await Sandbox.builder("worker")
-    .image("python")
-    .volume("/root/.cache/pip", (m) => m.named(cache.name))
-    .create();
-```
-
 ```rust Rust
 let sb = Sandbox::builder("worker")
     .image("python")
     .volume("/root/.cache/pip", |v| v.named(cache.name()))
     .create()
     .await?;
+```
+
+```typescript TypeScript
+await using sb = await Sandbox.builder("worker")
+    .image("python")
+    .volume("/root/.cache/pip", (m) => m.named(cache.name))
+    .create();
 ```
 
 ```python Python
@@ -249,14 +249,14 @@ Directory-backed named volumes are also accessible without a running sandbox, so
 ### Manage volumes
 
 <CodeGroup>
-```typescript TypeScript
-const volumes = await Volume.list();
-await Volume.remove("old-cache");
-```
-
 ```rust Rust
 let volumes = Volume::list().await?;
 Volume::remove("old-cache").await?;
+```
+
+```typescript TypeScript
+const volumes = await Volume.list();
+await Volume.remove("old-cache");
 ```
 
 ```python Python
@@ -283,19 +283,19 @@ msb volume rm old-cache
 Disk-image volumes attach a host disk image as a virtio-blk device and mount its inner filesystem at a guest path. Use them when you want persistent state isolated from ordinary host filesystem metadata, or when distributing a prebuilt filesystem image. The disk format defaults from the file extension (`.qcow2`, `.raw`, `.vmdk`; otherwise raw), and the inner filesystem type is auto-detected unless you set `fstype`.
 
 <CodeGroup>
-```typescript TypeScript
-await using sb = await Sandbox.builder("seeded")
-    .image("alpine")
-    .volume("/seed", (m) => m.disk("./seed.raw").readonly().noexec())
-    .create();
-```
-
 ```rust Rust
 let sb = Sandbox::builder("seeded")
     .image("alpine")
     .volume("/seed", |v| v.disk("./seed.raw").readonly().noexec())
     .create()
     .await?;
+```
+
+```typescript TypeScript
+await using sb = await Sandbox.builder("seeded")
+    .image("alpine")
+    .volume("/seed", (m) => m.disk("./seed.raw").readonly().noexec())
+    .create();
 ```
 
 ```python Python
@@ -326,6 +326,14 @@ msb create alpine --name seeded \
 An in-memory filesystem that disappears when the sandbox stops. Useful for scratch space, build artifacts, or anything that doesn't need to outlive the sandbox.
 
 <CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .image("alpine")
+    .volume("/tmp/scratch", |v| v.tmpfs().size(100).noexec())
+    .create()
+    .await?;
+```
+
 ```typescript TypeScript
 import { Sandbox } from "microsandbox";
 
@@ -333,14 +341,6 @@ await using sb = await Sandbox.builder("worker")
     .image("alpine")
     .volume("/tmp/scratch", (m) => m.tmpfs().size(100).noexec())
     .create();
-```
-
-```rust Rust
-let sb = Sandbox::builder("worker")
-    .image("alpine")
-    .volume("/tmp/scratch", |v| v.tmpfs().size(100).noexec())
-    .create()
-    .await?;
 ```
 
 ```python Python
@@ -399,21 +399,6 @@ CLI mount flags use `SOURCE:DEST[:OPTIONS]`. The `:` before `OPTIONS` starts the
 Mount flags may be repeated, so a sandbox can combine host directories, individual files, named volumes, disk images, and tmpfs scratch space.
 
 <CodeGroup>
-```typescript TypeScript
-await using sb = await Sandbox.builder("full")
-  .image("python")
-  .volume("/app/src", (v) => v.bind("./src").readonly().noexec())
-  .volume("/app/pyproject.toml", (v) => v.bind("./pyproject.toml").readonly())
-  .volume("/root/.cache/pip", (v) =>
-    v.named("pip-cache").statVirtualization("relaxed"),
-  )
-  .volume("/dataset", (v) =>
-    v.disk("./dataset.qcow2").format("qcow2").fstype("ext4").readonly(),
-  )
-  .volume("/tmp", (v) => v.tmpfs().size(1024).noexec().nosuid().nodev())
-  .create();
-```
-
 ```rust Rust
 let sb = Sandbox::builder("full")
     .image("python")

@@ -17,14 +17,6 @@ Values may be empty. A valueless label such as `--label gpu` is stored as `gpu="
 Attach labels when you create a sandbox. Labels are repeatable, and a bare key with no value is allowed:
 
 <CodeGroup>
-```typescript TypeScript
-const sb = await Sandbox.builder("worker")
-    .image("python")
-    .label("app", "engine")
-    .label("user.id", "alice")
-    .create();
-```
-
 ```rust Rust
 let sb = Sandbox::builder("worker")
     .image("python")
@@ -32,6 +24,14 @@ let sb = Sandbox::builder("worker")
     .label("user.id", "alice")
     .create()
     .await?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.builder("worker")
+    .image("python")
+    .label("app", "engine")
+    .label("user.id", "alice")
+    .create();
 ```
 
 ```python Python
@@ -66,12 +66,12 @@ The OCI image's own labels (`LABEL` instructions, `org.opencontainers.image.*`, 
 Add, change, or remove labels without recreating the sandbox:
 
 <CodeGroup>
-```typescript TypeScript
-await sandbox.modify({ labels: { tier: "web" }, labelsRemove: ["stale"] });
-```
-
 ```rust Rust
 sb.modify().label("tier", "web").remove_label("stale").apply().await?;
+```
+
+```typescript TypeScript
+await sandbox.modify({ labels: { tier: "web" }, labelsRemove: ["stale"] });
 ```
 
 ```python Python
@@ -100,12 +100,12 @@ msb ps --label app=engine                    # matching sandboxes
 msb ps --label app=engine --label tier=web   # only those with both
 ```
 
-```typescript TypeScript
-const page = await Sandbox.listWith((list) => list.label("app", "engine"));
-```
-
 ```rust Rust
 let page = Sandbox::list_with(|list| list.label("app", "engine")).await?;
+```
+
+```typescript TypeScript
+const page = await Sandbox.listWith((list) => list.label("app", "engine"));
 ```
 
 ```python Python

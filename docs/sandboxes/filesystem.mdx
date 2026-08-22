@@ -11,12 +11,12 @@ Handy for pushing generated code into a sandbox, pulling back results, or inspec
 ## Write a file
 
 <CodeGroup>
-```typescript TypeScript
-await sb.fs().write("/app/config.json", '{"debug": true}');
-```
-
 ```rust Rust
 sb.fs().write("/app/config.json", r#"{"debug": true}"#).await?;
+```
+
+```typescript TypeScript
+await sb.fs().write("/app/config.json", '{"debug": true}');
 ```
 
 ```python Python
@@ -32,12 +32,12 @@ err := sb.FS().WriteString(ctx, "/app/config.json", `{"debug": true}`)
 ## Read a file
 
 <CodeGroup>
-```typescript TypeScript
-const content = await sb.fs().readToString("/app/config.json");
-```
-
 ```rust Rust
 let content = sb.fs().read_to_string("/app/config.json").await?;
+```
+
+```typescript TypeScript
+const content = await sb.fs().readToString("/app/config.json");
 ```
 
 ```python Python
@@ -53,17 +53,17 @@ content, err := sb.FS().ReadString(ctx, "/app/config.json")
 ## List a directory
 
 <CodeGroup>
-```typescript TypeScript
-const entries = await sb.fs().list("/app");
-for (const entry of entries) {
-    console.log(`${entry.path}: ${entry.kind}`);
-}
-```
-
 ```rust Rust
 let entries = sb.fs().list("/app").await?;
 for entry in entries {
     println!("{}: {:?}", entry.path, entry.kind);
+}
+```
+
+```typescript TypeScript
+const entries = await sb.fs().list("/app");
+for (const entry of entries) {
+    console.log(`${entry.path}: ${entry.kind}`);
 }
 ```
 
@@ -87,17 +87,17 @@ for _, entry := range entries {
 For files too large to fit in memory, use streaming. Data is transferred in chunks of approximately 3 MiB each.
 
 <CodeGroup>
-```typescript TypeScript
-const stream = await sb.fs().readStream("/app/data.bin");
-for await (const chunk of stream) {
-    processChunk(chunk); // chunk is a Uint8Array
-}
-```
-
 ```rust Rust
 let mut stream = sb.fs().read_stream("/app/data.bin").await?;
 while let Some(chunk) = stream.recv().await? {
     process(&chunk);
+}
+```
+
+```typescript TypeScript
+const stream = await sb.fs().readStream("/app/data.bin");
+for await (const chunk of stream) {
+    processChunk(chunk); // chunk is a Uint8Array
 }
 ```
 
@@ -128,12 +128,12 @@ for {
 Copy a file from the host machine into the sandbox in a single call.
 
 <CodeGroup>
-```typescript TypeScript
-await sb.fs().copyFromHost("./local-file.txt", "/app/remote-file.txt");
-```
-
 ```rust Rust
 sb.fs().copy_from_host("./local-file.txt", "/app/remote-file.txt").await?;
+```
+
+```typescript TypeScript
+await sb.fs().copyFromHost("./local-file.txt", "/app/remote-file.txt");
 ```
 
 ```python Python

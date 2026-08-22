@@ -123,6 +123,14 @@ msb pull localhost:5050/my-image:latest --insecure
 <Step title="Use it in microsandbox">
 
 <CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .image("localhost:5050/my-image:latest")
+    .registry(|r| r.insecure())
+    .create()
+    .await?;
+```
+
 ```typescript TypeScript
 import { Sandbox } from "microsandbox";
 
@@ -130,14 +138,6 @@ await using sb = await Sandbox.builder("worker")
     .image("localhost:5050/my-image:latest")
     .registry((r) => r.insecure())
     .create();
-```
-
-```rust Rust
-let sb = Sandbox::builder("worker")
-    .image("localhost:5050/my-image:latest")
-    .registry(|r| r.insecure())
-    .create()
-    .await?;
 ```
 </CodeGroup>
 

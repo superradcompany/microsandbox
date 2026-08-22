@@ -13,19 +13,19 @@ By default, sandboxes can reach the public internet but cannot reach private net
 To block network access:
 
 <CodeGroup>
-```typescript TypeScript
-await using sb = await Sandbox.builder("isolated")
-    .image("python")
-    .disableNetwork()
-    .create();
-```
-
 ```rust Rust
 let sb = Sandbox::builder("isolated")
     .image("python")
     .network(|n| n.enabled(false))
     .create()
     .await?;
+```
+
+```typescript TypeScript
+await using sb = await Sandbox.builder("isolated")
+    .image("python")
+    .disableNetwork()
+    .create();
 ```
 
 ```python Python
@@ -46,7 +46,7 @@ msb create python --name isolated --no-net
 ```
 </CodeGroup>
 
-The TypeScript and Rust examples disable the network device. Python `Network.none()`, Go `NetworkPolicy.None()`, and CLI `--no-net` retain the device but deny traffic in both directions through policy.
+The Rust and TypeScript examples disable the network device. Python `Network.none()`, Go `NetworkPolicy.None()`, and CLI `--no-net` retain the device but deny traffic in both directions through policy.
 
 ## Deployment profiles
 
@@ -55,13 +55,6 @@ The TypeScript and Rust examples disable the network device. Python `Network.non
 `single-tenant` is the default and preserves the network configuration requested by the sandbox. `multi-tenant` adds a host-runtime isolation floor: traffic must pass both the platform public-network policy and the sandbox's policy, DNS rebinding protection is forced on, custom DNS servers and interface overrides are removed, host CA import and published ports are disabled, and connection limits are capped. Sandbox policy can further restrict this floor but cannot broaden it.
 
 <CodeGroup>
-```typescript TypeScript
-await using sb = await Sandbox.builder("shared-worker")
-    .image("python")
-    .deploymentProfile("multi-tenant")
-    .create();
-```
-
 ```rust Rust
 use microsandbox::sandbox::DeploymentProfile;
 
@@ -70,6 +63,13 @@ let sb = Sandbox::builder("shared-worker")
     .deployment_profile(DeploymentProfile::MultiTenant)
     .create()
     .await?;
+```
+
+```typescript TypeScript
+await using sb = await Sandbox.builder("shared-worker")
+    .image("python")
+    .deploymentProfile("multi-tenant")
+    .create();
 ```
 
 ```python Python
@@ -101,15 +101,15 @@ An operator can set an authoritative profile with the top-level `deployment_prof
 For common access shapes, compose high-level profiles. Every non-empty profile set automatically adds narrow DNS access through the sandbox gateway.
 
 <CodeGroup>
-```typescript TypeScript
-const policy = NetworkPolicy.fromProfiles(["public", "private"]);
-```
-
 ```rust Rust
 let policy = NetworkPolicy::from_profiles([
     NetworkProfile::Public,
     NetworkProfile::Private,
 ]);
+```
+
+```typescript TypeScript
+const policy = NetworkPolicy.fromProfiles(["public", "private"]);
 ```
 
 ```python Python
@@ -143,6 +143,20 @@ rules           : first match wins
 For example, this creates a deny-by-default sandbox that can make HTTPS requests to the public internet and DNS requests through the host gateway:
 
 <CodeGroup>
+```rust Rust
+let policy = NetworkPolicy::builder()
+    .default_deny()
+    .egress(|e| e.tcp().port(443).allow_public())
+    .egress(|e| e.udp().tcp().port(53).allow_host())
+    .build()?;
+
+let sb = Sandbox::builder("restricted-worker")
+    .image("alpine")
+    .network(|n| n.policy(policy))
+    .create()
+    .await?;
+```
+
 ```typescript TypeScript
 import { NetworkPolicy, Sandbox } from "microsandbox";
 
@@ -156,20 +170,6 @@ await using sb = await Sandbox.builder("restricted-worker")
             .build(),
     ))
     .create();
-```
-
-```rust Rust
-let policy = NetworkPolicy::builder()
-    .default_deny()
-    .egress(|e| e.tcp().port(443).allow_public())
-    .egress(|e| e.udp().tcp().port(53).allow_host())
-    .build()?;
-
-let sb = Sandbox::builder("restricted-worker")
-    .image("alpine")
-    .network(|n| n.policy(policy))
-    .create()
-    .await?;
 ```
 
 ```python Python
@@ -217,19 +217,19 @@ Rules can target groups like `public`, `private`, and `host`, or specific IPs, C
 Publish a guest port when a service inside the sandbox should be reachable from the host. Published ports bind to `127.0.0.1` by default.
 
 <CodeGroup>
-```typescript TypeScript
-await using sb = await Sandbox.builder("api")
-    .image("python")
-    .port(8080, 80)
-    .create();
-```
-
 ```rust Rust
 let sb = Sandbox::builder("api")
     .image("python")
     .port(8080, 80)
     .create()
     .await?;
+```
+
+```typescript TypeScript
+await using sb = await Sandbox.builder("api")
+    .image("python")
+    .port(8080, 80)
+    .create();
 ```
 
 ```python Python
@@ -259,16 +259,6 @@ On Windows, the first published port may trigger a Windows Defender Firewall pro
 Sandboxes are unlimited by default. Optional per-sandbox rate limiters cap outbound (egress) and inbound (ingress) traffic independently. Each limiter has two token buckets: a bandwidth bucket measured in bytes, and an ops bucket measured in packets. Buckets start full, refill continuously, and can carry a one-time startup burst that never refills. Limits are set at creation and take effect on the next sandbox start.
 
 <CodeGroup>
-```typescript TypeScript
-await using sb = await Sandbox.builder("throttled")
-    .image("python")
-    .network((n) => n.rateLimiter((r) => r.egress((r) => r
-        .bandwidth(1_048_576, 1_000)
-        .bandwidthBurst(524_288)
-        .ops(1_000, 1_000))))
-    .create();
-```
-
 ```rust Rust
 use std::time::Duration;
 use microsandbox::size::SizeExt;
@@ -281,6 +271,16 @@ let sb = Sandbox::builder("throttled")
         .ops(1_000, Duration::from_secs(1)))))
     .create()
     .await?;
+```
+
+```typescript TypeScript
+await using sb = await Sandbox.builder("throttled")
+    .image("python")
+    .network((n) => n.rateLimiter((r) => r.egress((r) => r
+        .bandwidth(1_048_576, 1_000)
+        .bandwidthBurst(524_288)
+        .ops(1_000, 1_000))))
+    .create();
 ```
 
 ```python Python

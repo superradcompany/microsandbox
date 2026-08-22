@@ -22,16 +22,6 @@ Start with `auto` on a dedicated host. Use `spread` for CPU-heavy throughput wor
 msb create python:3.12 --name worker --cpus 2 --cpu-placement spread
 ```
 
-```typescript TypeScript
-import { Sandbox } from "microsandbox";
-
-await using sb = await Sandbox.builder("worker")
-  .image("python:3.12")
-  .cpus(2)
-  .cpuPlacement("spread")
-  .create();
-```
-
 ```rust Rust
 use microsandbox::sandbox::{CpuPlacement, Sandbox};
 
@@ -41,6 +31,16 @@ let sb = Sandbox::builder("worker")
     .cpu_placement(CpuPlacement::Spread)
     .create()
     .await?;
+```
+
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("worker")
+  .image("python:3.12")
+  .cpus(2)
+  .cpuPlacement("spread")
+  .create();
 ```
 
 ```python Python

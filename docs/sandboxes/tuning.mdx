@@ -15,16 +15,6 @@ Some configuration is fixed when the VM boots. Some can change while the sandbox
 Most settings are chosen when you create the sandbox. If the sandbox may need more CPU or memory later, set `max_cpus` and `max_memory` above the starting size so it has live resize headroom:
 
 <CodeGroup>
-```typescript TypeScript
-const sb = await Sandbox.builder("worker")
-    .image("python")
-    .cpus(2)
-    .memory(1024)
-    .maxCpus(8)
-    .maxMemory(4096)
-    .create();
-```
-
 ```rust Rust
 let sb = Sandbox::builder("worker")
     .image("python")
@@ -34,6 +24,16 @@ let sb = Sandbox::builder("worker")
     .max_memory(4096)
     .create()
     .await?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.builder("worker")
+    .image("python")
+    .cpus(2)
+    .memory(1024)
+    .maxCpus(8)
+    .maxMemory(4096)
+    .create();
 ```
 
 ```python Python
@@ -73,19 +73,19 @@ Reserving headroom is cheap: spare vCPUs stay parked, and spare memory is only b
 Use `modify` to plan or apply a patch to an existing sandbox. Every requested change is classified, and apply is all-or-nothing: if one change cannot be applied under the chosen policy, nothing changes.
 
 <CodeGroup>
-```typescript TypeScript
-const plan = await sandbox.modify({
-    cpus: 4,
-    labels: { tier: "web" },
-});
-```
-
 ```rust Rust
 let plan = sb.modify()
     .cpus(4)
     .label("tier", "web")
     .apply()
     .await?;
+```
+
+```typescript TypeScript
+const plan = await sandbox.modify({
+    cpus: 4,
+    labels: { tier: "web" },
+});
 ```
 
 ```python Python
@@ -124,15 +124,15 @@ The plan labels each change as `live`, `next start`, `requires restart`, or `uns
 Use a dry run to see what would happen before applying the patch:
 
 <CodeGroup>
-```typescript TypeScript
-const plan = await sandbox.modify({ maxMemory: 16384, dryRun: true });
-```
-
 ```rust Rust
 let plan = sb.modify()
     .max_memory_mib(16 * 1024)
     .dry_run()
     .await?;
+```
+
+```typescript TypeScript
+const plan = await sandbox.modify({ maxMemory: 16384, dryRun: true });
 ```
 
 ```python Python
@@ -156,11 +156,6 @@ msb modify worker --max-memory 16G --dry-run
 By default, `modify` only applies changes that do not require a restart. Use `--next-start` to save restart-backed changes for the next boot, or `--restart` to restart the sandbox and make them active now.
 
 <CodeGroup>
-```typescript TypeScript
-await sandbox.modify({ maxMemory: 16384, policy: "next_start" });
-await sandbox.modify({ env: { MODE: "prod" }, policy: "restart" });
-```
-
 ```rust Rust
 sb.modify()
     .max_memory_mib(16 * 1024)
@@ -173,6 +168,11 @@ sb.modify()
     .restart()
     .apply()
     .await?;
+```
+
+```typescript TypeScript
+await sandbox.modify({ maxMemory: 16384, policy: "next_start" });
+await sandbox.modify({ env: { MODE: "prod" }, policy: "restart" });
 ```
 
 ```python Python
@@ -206,12 +206,12 @@ msb modify worker --env MODE=prod --restart
 Raise or lower CPUs and memory on the fly, up to the ceilings reserved at create time:
 
 <CodeGroup>
-```typescript TypeScript
-await sandbox.modify({ cpus: 4, memory: 2048 });
-```
-
 ```rust Rust
 sb.modify().cpus(4).memory(2048).apply().await?;
+```
+
+```typescript TypeScript
+await sandbox.modify({ cpus: 4, memory: 2048 });
 ```
 
 ```python Python
@@ -236,19 +236,19 @@ Use [`msb ps`](/cli/sandbox-commands#msb-ps) to see a sandbox's allocation as `e
 Labels can be added, changed, or removed through the same configuration path:
 
 <CodeGroup>
-```typescript TypeScript
-await sandbox.modify({
-    labels: { tier: "web" },
-    labelsRemove: ["stale"],
-});
-```
-
 ```rust Rust
 sb.modify()
     .label("tier", "web")
     .remove_label("stale")
     .apply()
     .await?;
+```
+
+```typescript TypeScript
+await sandbox.modify({
+    labels: { tier: "web" },
+    labelsRemove: ["stale"],
+});
 ```
 
 ```python Python
@@ -277,19 +277,19 @@ They apply immediately because they are host-side metadata. They do not change r
 Environment and workdir changes affect future commands only. Existing guest processes keep the environment and working directory they already have.
 
 <CodeGroup>
-```typescript TypeScript
-await sandbox.modify({
-    env: { MODE: "prod" },
-    workdir: "/app",
-});
-```
-
 ```rust Rust
 sb.modify()
     .env("MODE", "prod")
     .workdir("/app")
     .apply()
     .await?;
+```
+
+```typescript TypeScript
+await sandbox.modify({
+    env: { MODE: "prod" },
+    workdir: "/app",
+});
 ```
 
 ```python Python
@@ -313,18 +313,6 @@ msb modify worker --env MODE=prod --workdir /app
 Secrets can be added, rotated, or removed without recreating the sandbox. Guest code keeps using the same placeholder; only the value injected at the network boundary changes.
 
 <CodeGroup>
-```typescript TypeScript
-await sb.modify({
-  secrets: {
-    GITHUB_TOKEN: {
-      env: "GITHUB_TOKEN",
-      allowedHosts: ["api.github.com"],
-    },
-  },
-  secretsRemove: ["OLD_TOKEN"],
-});
-```
-
 ```rust Rust
 use microsandbox::sandbox::SecretSource;
 
@@ -351,16 +339,16 @@ For the credential model and host allow lists, see [Secrets](/sandboxes/secrets)
 Resize an OCI sandbox's root disk through `modify`:
 
 <CodeGroup>
-```typescript TypeScript
-await sandbox.modify({ rootDiskSize: 8192, policy: "restart" });
-```
-
 ```rust Rust
 sb.modify()
     .root_disk_size_mib(8192)
     .restart()
     .apply()
     .await?;
+```
+
+```typescript TypeScript
+await sandbox.modify({ rootDiskSize: 8192, policy: "restart" });
 ```
 
 ```python Python

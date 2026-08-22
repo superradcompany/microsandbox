@@ -28,18 +28,6 @@ DNS rebinding protection is separate from query access. Private or reserved answ
 Denied domains receive a local `NXDOMAIN` response and are never sent to the upstream resolver. The same rules also protect connections that use TLS SNI or a recently resolved IP address.
 
 <CodeGroup>
-```typescript TypeScript
-import { Sandbox } from "microsandbox";
-
-await using sb = await Sandbox.builder("safe-agent")
-  .image("python")
-  .network({
-    denyDomains: ["malware.example.com"],
-    denyDomainSuffixes: [".tracking.com"],
-  })
-  .create();
-```
-
 ```rust Rust
 let policy = NetworkPolicy::builder()
     .default_allow()
@@ -53,6 +41,18 @@ let sb = Sandbox::builder("safe-agent")
     .network(|n| n.policy(policy))
     .create()
     .await?;
+```
+
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("safe-agent")
+  .image("python")
+  .network({
+    denyDomains: ["malware.example.com"],
+    denyDomainSuffixes: [".tracking.com"],
+  })
+  .create();
 ```
 
 ```python Python
@@ -95,18 +95,6 @@ Nameservers can be IP addresses, hostnames, or either form with a port. Hostname
 Resolvers are tried in order. A timeout or connection failure moves to the next resolver. DNS responses such as `SERVFAIL` and `REFUSED` do not. Each unreachable resolver can delay the query by up to `query_timeout_ms`.
 
 <CodeGroup>
-```typescript TypeScript
-import { Sandbox } from "microsandbox";
-
-await using sb = await Sandbox.builder("safe-agent")
-  .image("python")
-  .network((n) => n.dns((d) =>
-    d.nameservers(["1.1.1.1", "1.0.0.1"])
-      .queryTimeoutMs(3000),
-  ))
-  .create();
-```
-
 ```rust Rust
 use microsandbox_network::dns::Nameserver;
 
@@ -121,6 +109,18 @@ let sb = Sandbox::builder("safe-agent")
     ))
     .create()
     .await?;
+```
+
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("safe-agent")
+  .image("python")
+  .network((n) => n.dns((d) =>
+    d.nameservers(["1.1.1.1", "1.0.0.1"])
+      .queryTimeoutMs(3000),
+  ))
+  .create();
 ```
 
 ```python Python

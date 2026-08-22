@@ -15,19 +15,19 @@ If a workload doesn't need the network, remove it. Nothing to filter is the stro
 msb create python --name isolated --no-net
 ```
 
-```typescript TypeScript
-await using sb = await Sandbox.builder("isolated")
-    .image("python")
-    .disableNetwork()
-    .create();
-```
-
 ```rust Rust
 let sb = Sandbox::builder("isolated")
     .image("python")
     .network(|n| n.enabled(false))
     .create()
     .await?;
+```
+
+```typescript TypeScript
+await using sb = await Sandbox.builder("isolated")
+    .image("python")
+    .disableNetwork()
+    .create();
 ```
 
 ```python Python

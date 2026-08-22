@@ -19,6 +19,14 @@ By default, microsandbox pulls an image only if it isn't already cached. You can
 | `"never"` | Use local cache only, fail if missing |
 
 <CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .image("python")
+    .pull_policy(PullPolicy::Always)
+    .create()
+    .await?;
+```
+
 ```typescript TypeScript
 import { Sandbox } from "microsandbox";
 
@@ -26,14 +34,6 @@ await using sb = await Sandbox.builder("worker")
     .image("python")
     .pullPolicy("always")
     .create();
-```
-
-```rust Rust
-let sb = Sandbox::builder("worker")
-    .image("python")
-    .pull_policy(PullPolicy::Always)
-    .create()
-    .await?;
 ```
 
 ```python Python
@@ -59,18 +59,6 @@ sb, err := m.CreateSandbox(ctx, "worker",
 Authenticate to private registries by passing credentials.
 
 <CodeGroup>
-```typescript TypeScript
-await using sb = await Sandbox.builder("worker")
-    .image("registry.corp.io/team/app:latest")
-    .registry((r) => r.auth({
-        kind: "basic",
-        username: "deploy",
-        password: process.env.REGISTRY_TOKEN!,
-    }))
-    .pullPolicy("always")
-    .create();
-```
-
 ```rust Rust
 let sb = Sandbox::builder("worker")
     .image("registry.corp.io/team/app:latest")
@@ -81,6 +69,18 @@ let sb = Sandbox::builder("worker")
     .pull_policy(PullPolicy::Always)
     .create()
     .await?;
+```
+
+```typescript TypeScript
+await using sb = await Sandbox.builder("worker")
+    .image("registry.corp.io/team/app:latest")
+    .registry((r) => r.auth({
+        kind: "basic",
+        username: "deploy",
+        password: process.env.REGISTRY_TOKEN!,
+    }))
+    .pullPolicy("always")
+    .create();
 ```
 
 ```python Python
@@ -141,7 +141,7 @@ For registries using self-signed or internal CA certificates, point `ca_certs` t
 }
 ```
 
-microsandbox adds these certificates to the default system roots, so public registries continue to work normally. The same roots can be supplied per-sandbox through the SDK instead: `caCerts` in TypeScript, `ca_certs` in Rust, `registry_ca_certs` in Python, and `WithRegistryCACerts` / `WithRegistryCACertsPath` in Go.
+microsandbox adds these certificates to the default system roots, so public registries continue to work normally. The same roots can be supplied per-sandbox through the SDK instead: `ca_certs` in Rust, `caCerts` in TypeScript, `registry_ca_certs` in Python, and `WithRegistryCACerts` / `WithRegistryCACertsPath` in Go.
 
 ### Combined configuration
 
@@ -165,19 +165,19 @@ microsandbox adds these certificates to the default system roots, so public regi
 These settings can also be set per-sandbox via the SDK, overriding global config:
 
 <CodeGroup>
-```typescript TypeScript
-await using sb = await Sandbox.builder("worker")
-    .image("localhost:5050/my-app:latest")
-    .registry((r) => r.insecure())
-    .create();
-```
-
 ```rust Rust
 let sb = Sandbox::builder("worker")
     .image("localhost:5050/my-app:latest")
     .registry(|r| r.insecure())
     .create()
     .await?;
+```
+
+```typescript TypeScript
+await using sb = await Sandbox.builder("worker")
+    .image("localhost:5050/my-app:latest")
+    .registry((r) => r.insecure())
+    .create();
 ```
 
 ```python Python
