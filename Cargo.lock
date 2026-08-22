@@ -4175,6 +4175,7 @@ dependencies = [
  "microsandbox-vsock",
  "msb_krun",
  "nix 0.31.3",
+ "oci-spec 0.10.0",
  "rand 0.10.2",
  "rustls",
  "sea-orm",
@@ -6080,6 +6081,26 @@ checksum = "a7cc970b249fbe527d6e02e0a227762c9108b2f49d81094fe357ffc6d14d7f6f"
 dependencies = [
  "libc",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "runmsb"
+version = "0.6.10"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "libc",
+ "microsandbox",
+ "microsandbox-protocol",
+ "microsandbox-runtime",
+ "nix 0.31.3",
+ "oci-spec 0.10.0",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

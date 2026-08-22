@@ -2,7 +2,11 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZero;
+#[cfg(all(unix, feature = "oci-runtime"))]
+use std::os::fd::OwnedFd;
 use std::path::PathBuf;
+#[cfg(all(unix, feature = "oci-runtime"))]
+use std::sync::Arc;
 
 use microsandbox_runtime::logging::LogLevel;
 use microsandbox_types::{
@@ -182,6 +186,11 @@ pub struct SandboxConfig {
     /// Number of transient workload arguments appended to the init specification.
     #[serde(skip)]
     pub(crate) init_workload_arg_count: usize,
+
+    /// Host PTY slave transferred to the sandbox process for its startup workload.
+    #[cfg(all(unix, feature = "oci-runtime"))]
+    #[serde(skip)]
+    pub(crate) inherited_startup_console: Option<Arc<OwnedFd>>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -209,6 +218,10 @@ impl SandboxConfig {
         let mut config = self.clone();
         config.launch_intent = LaunchIntent::None;
         config.init_owns_workload = false;
+        #[cfg(all(unix, feature = "oci-runtime"))]
+        {
+            config.inherited_startup_console = None;
+        }
         if config.init_workload_arg_count > 0 {
             if let Some(init) = config.spec.init.as_mut() {
                 let durable_len = init
@@ -254,6 +267,16 @@ impl SandboxConfig {
     /// Clear process-launch intent after another mechanism takes ownership of the command.
     pub(crate) fn clear_launch_intent(&mut self) {
         self.launch_intent = LaunchIntent::None;
+    }
+
+    #[cfg(all(unix, feature = "oci-runtime"))]
+    pub(crate) fn inherited_startup_console(&self) -> Option<&OwnedFd> {
+        self.inherited_startup_console.as_deref()
+    }
+
+    #[cfg(all(unix, feature = "oci-runtime"))]
+    pub(crate) fn clear_inherited_startup_console(&mut self) {
+        self.inherited_startup_console = None;
     }
 
     /// Return whether inherited image init routing owns this create operation's boot workload.
@@ -707,6 +730,8 @@ impl Default for SandboxConfig {
             launch_intent: LaunchIntent::None,
             init_owns_workload: false,
             init_workload_arg_count: 0,
+            #[cfg(all(unix, feature = "oci-runtime"))]
+            inherited_startup_console: None,
         }
     }
 }
@@ -717,6 +742,9 @@ impl Default for SandboxConfig {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(unix, feature = "oci-runtime"))]
+    use std::os::fd::OwnedFd;
+
     use super::{SandboxConfig, merge_env};
     use crate::sandbox::{
         HandoffInit, MountOptions, NamedVolumeMode, RootDisk, RootfsSource, StatVirtualization,
@@ -1858,5 +1886,18 @@ mod tests {
             }
             mount => panic!("expected tmpfs mount, got {mount:?}"),
         }
+    }
+
+    #[test]
+    #[cfg(all(unix, feature = "oci-runtime"))]
+    fn test_clone_for_persistence_drops_inherited_startup_console() {
+        let console: OwnedFd = std::fs::File::open("/dev/null").expect("open fd").into();
+        let mut config = SandboxConfig::default();
+        config.inherited_startup_console = Some(std::sync::Arc::new(console));
+
+        let persisted = config.clone_for_persistence();
+
+        assert!(config.inherited_startup_console().is_some());
+        assert!(persisted.inherited_startup_console().is_none());
     }
 }

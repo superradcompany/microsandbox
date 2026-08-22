@@ -24,8 +24,13 @@ pub mod launch;
 pub mod logging;
 pub mod maintenance;
 pub mod metrics;
+pub mod oci;
 pub mod policy;
 pub mod relay;
+#[cfg(feature = "oci-runtime")]
+mod startup;
+#[cfg(not(feature = "oci-runtime"))]
+#[path = "startup_standard.rs"]
 mod startup;
 pub mod vm;
 pub(crate) mod writeback;

@@ -475,6 +475,12 @@ impl LocalBackend {
     ) -> MicrosandboxResult<(crate::backend::SandboxLocalState, SandboxConfig)> {
         let (mut handle, agent_sock_path) =
             spawn_sandbox(self, &config, sandbox_id, mode, lifecycle_guard).await?;
+        #[cfg(all(unix, feature = "oci-runtime"))]
+        let config = {
+            let mut config = config;
+            config.clear_inherited_startup_console();
+            config
+        };
         let log_dir = self.sandboxes_dir().join(&config.spec.name).join("logs");
 
         // Wait for the relay socket to become available.

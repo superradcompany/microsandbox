@@ -27,6 +27,7 @@ net = [
     "dep:ipnetwork",
     "dep:thiserror",
 ]
+oci-runtime = ["microsandbox/oci-runtime", "microsandbox-runtime/oci-runtime"]
 
 [dependencies]
 anyhow.workspace = true

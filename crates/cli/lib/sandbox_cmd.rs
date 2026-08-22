@@ -55,6 +55,11 @@ pub struct SandboxArgs {
     #[arg(long = "startup-fd", hide = true)]
     pub startup_fd: Option<i32>,
 
+    /// Terminal inherited for the startup workload.
+    #[cfg(all(unix, feature = "oci-runtime"))]
+    #[arg(long = "oci-console-fd", hide = true)]
+    pub oci_console_fd: Option<i32>,
+
     /// Inherited descriptor owning this sandbox's lifecycle lock.
     #[cfg(unix)]
     #[arg(long = "lifecycle-lock-fd", hide = true)]
@@ -136,6 +141,14 @@ pub fn run(args: SandboxArgs) -> ! {
     };
     #[cfg(unix)]
     let startup_fd = match args.startup_fd.map(startup_from_fd).transpose() {
+        Ok(fd) => fd,
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(2);
+        }
+    };
+    #[cfg(all(unix, feature = "oci-runtime"))]
+    let startup_console = match args.oci_console_fd.map(startup_console_from_fd).transpose() {
         Ok(fd) => fd,
         Err(err) => {
             eprintln!("{err}");
@@ -276,6 +289,8 @@ pub fn run(args: SandboxArgs) -> ! {
         startup_command: launch.startup,
         #[cfg(unix)]
         startup_fd,
+        #[cfg(all(unix, feature = "oci-runtime"))]
+        startup_console,
         #[cfg(windows)]
         startup_pipe: args.startup_pipe,
         #[cfg(unix)]
@@ -375,6 +390,21 @@ fn parent_watchdog_from_fd(fd: i32) -> Result<OwnedFd, String> {
 #[cfg(unix)]
 fn startup_from_fd(fd: i32) -> Result<OwnedFd, String> {
     validate_pipe_fd(fd, microsandbox_runtime::vm::STARTUP_FD, "startup-fd")?;
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+#[cfg(all(unix, feature = "oci-runtime"))]
+fn startup_console_from_fd(fd: i32) -> Result<OwnedFd, String> {
+    validate_open_fd(
+        fd,
+        microsandbox_runtime::vm::OCI_CONSOLE_FD,
+        "oci-console-fd",
+    )?;
+    if unsafe { libc::isatty(fd) } != 1 {
+        return Err(format!(
+            "invalid --oci-console-fd {fd}: fd is not a terminal"
+        ));
+    }
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
@@ -648,6 +678,8 @@ mod tests {
             parent_watch_fd: None,
             #[cfg(unix)]
             startup_fd: None,
+            #[cfg(all(unix, feature = "oci-runtime"))]
+            oci_console_fd: None,
             #[cfg(unix)]
             lifecycle_lock_fd: None,
             #[cfg(windows)]

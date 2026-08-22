@@ -380,6 +380,11 @@ fn reject_dropped_cloud_create_fields(config: &SandboxConfig) -> MicrosandboxRes
         )
     };
 
+    #[cfg(all(unix, feature = "oci-runtime"))]
+    if config.inherited_startup_console().is_some() {
+        return Err(unsupported("inherited_startup_console"));
+    }
+
     if config.spec.resources.max_cpus != config.spec.resources.cpus {
         return Err(unsupported("max_cpus"));
     }

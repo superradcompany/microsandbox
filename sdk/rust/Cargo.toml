@@ -27,6 +27,7 @@ prebuilt = [
     "microsandbox-utils/http-client",
 ]
 net = ["dep:microsandbox-network", "microsandbox-runtime/net"]
+oci-runtime = ["microsandbox-runtime/oci-runtime"]
 
 [dependencies]
 anyhow = { workspace = true, optional = true }

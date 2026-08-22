@@ -1,0 +1,13 @@
+---
+title: "Week of August 14, 2026"
+description: "Reliable non-interactive stdin handling and conventional OCI signal exit codes."
+icon: "bolt"
+---
+
+## Behavior changes
+
+- **Null stdin now closes immediately.** Rust SDK executions configured with `StdinMode::Null`
+  send EOF to the guest process instead of leaving its stdin pipe open. Programs such as `cat` and
+  interpreters reading from standard input now finish instead of waiting indefinitely.
+- **OCI signal exits use conventional status codes.** `runmsb` propagates signal termination through
+  the VMM using `128 + signal`, so Docker reports `143` for `SIGTERM` and `137` for `SIGKILL`.
