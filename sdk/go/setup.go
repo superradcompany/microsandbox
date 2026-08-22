@@ -107,11 +107,11 @@ var (
 	installDone bool
 )
 
-// EnsureInstalled ensures the msb + libkrunfw runtime is present at
-// ~/.microsandbox/ and downloads it from the matching GitHub release
-// if not. It is OPTIONAL: the SDK's FFI library is embedded in the
-// Go binary and loads automatically on first use, so EnsureInstalled
-// only governs the optional msb runtime download.
+// EnsureInstalled ensures the msb + libkrunfw runtime is present at the
+// install dir ($MSB_HOME, default ~/.microsandbox) and downloads it from
+// the matching GitHub release if not. It is OPTIONAL: the SDK's FFI
+// library is embedded in the Go binary and loads automatically on first
+// use, so EnsureInstalled only governs the optional msb runtime download.
 //
 // Call it explicitly at startup if you want to surface install errors
 // up front rather than at first sandbox-spawn time:
@@ -164,9 +164,9 @@ func EnsureInstalled(ctx context.Context, opts ...SetupOption) error {
 	return nil
 }
 
-// IsInstalled reports whether msb + libkrunfw are present at
-// ~/.microsandbox/ at the SDK's pinned version. It does NOT touch
-// the FFI library (which ships embedded in the SDK).
+// IsInstalled reports whether msb + libkrunfw are present at the install
+// dir ($MSB_HOME, default ~/.microsandbox) at the SDK's pinned version.
+// It does NOT touch the FFI library (which ships embedded in the SDK).
 func IsInstalled() bool {
 	dir, err := installDir()
 	if err != nil {
@@ -187,10 +187,25 @@ func RuntimeVersion() (string, error) {
 	return v, wrapFFI(err)
 }
 
-// installDir returns the fixed on-disk location ~/.microsandbox/.
-// Not user-overridable — every Go binary that links this SDK shares
-// this cache so msb + libkrunfw aren't redownloaded per consumer.
+// installDir returns the on-disk root under which the SDK materializes
+// the embedded FFI library (lib/v<ver>/) and, in download mode, fetches
+// and looks up msb + libkrunfw (bin/, lib/): $MSB_HOME when set,
+// otherwise ~/.microsandbox.
+//
+// Honoring MSB_HOME here matches the runtime's resolve_home(), which
+// already uses it for the state db, sandboxes, and cache. Previously
+// this path was hardcoded to ~/.microsandbox, so MSB_HOME could relocate
+// the runtime state but not the Go SDK's FFI/runtime files — leaving the
+// microsandbox footprint split between a private root and the shared
+// global home. Resolving both from the same env lets a single MSB_HOME
+// fully contain (or isolate) an instance's on-disk footprint. When
+// MSB_HOME is unset the behavior is unchanged: every Go binary linking
+// this SDK shares ~/.microsandbox so msb + libkrunfw aren't redownloaded
+// per consumer.
 func installDir() (string, error) {
+	if h := os.Getenv("MSB_HOME"); h != "" {
+		return h, nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve home directory: %w", err)
