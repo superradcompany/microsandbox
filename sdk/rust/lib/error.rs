@@ -536,6 +536,12 @@ impl From<microsandbox_types::CommandResolutionError> for MicrosandboxError {
     }
 }
 
+impl From<microsandbox_types::SnapshotManifestError> for MicrosandboxError {
+    fn from(value: microsandbox_types::SnapshotManifestError) -> Self {
+        Self::Image(value.into())
+    }
+}
+
 impl microsandbox_db::retry::IsSqliteBusy for MicrosandboxError {
     fn is_sqlite_busy(&self) -> bool {
         matches!(self, MicrosandboxError::Database(db_err) if microsandbox_db::retry::is_sqlite_busy(db_err))

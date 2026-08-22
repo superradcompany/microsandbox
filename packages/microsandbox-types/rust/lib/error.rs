@@ -15,6 +15,18 @@ pub enum TypesError {
     InvalidConfig(String),
 }
 
+/// The result type for snapshot descriptor operations.
+pub type SnapshotManifestResult<T> = Result<T, SnapshotManifestError>;
+
+/// Errors returned by snapshot descriptor parsing, validation, and canonical
+/// serialization.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SnapshotManifestError {
+    /// Snapshot descriptor bytes or fields violate the schema contract.
+    #[error("manifest parse error: {0}")]
+    ManifestParse(String),
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------

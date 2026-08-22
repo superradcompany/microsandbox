@@ -10,12 +10,13 @@ use std::path::{Component, Path};
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest as _, Sha256};
 
-use crate::error::{ImageError, ImageResult};
-
-use super::{
-    FileSnapshotState, ImageRef, Manifest, SCHEMA_VERSION, SNAPSHOT_ARTIFACT_KIND, SnapshotFormat,
-    SnapshotScope, SnapshotState, UpperIntegrity, UpperLayer,
+use microsandbox_types::snapshot::{
+    DESCRIPTOR_FILENAME, FileSnapshotState, ImageRef, Manifest, SCHEMA_VERSION,
+    SNAPSHOT_ARTIFACT_KIND, SnapshotFormat, SnapshotScope, SnapshotState, UpperIntegrity,
+    UpperLayer,
 };
+
+use crate::error::{ImageError, ImageResult};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -324,7 +325,7 @@ fn validate_filename(value: &str) -> ImageResult<()> {
         value,
         V066_DESCRIPTOR_FILENAME
             | V066_BACKUP_FILENAME
-            | super::DESCRIPTOR_FILENAME
+            | DESCRIPTOR_FILENAME
             | ".snapshot-migration.lock"
     ) {
         return legacy_error("legacy_descriptor_malformed: upper.file uses a reserved name");
@@ -429,7 +430,7 @@ mod tests {
         let current = UpperIntegrity::FileMerkleBlake3V1 {
             root: format!("blake3:{}", "b".repeat(64)),
             logical_size: 5,
-            leaf_size: crate::snapshot::FILE_MERKLE_BLAKE3_LEAF_SIZE,
+            leaf_size: microsandbox_types::snapshot::FILE_MERKLE_BLAKE3_LEAF_SIZE,
         };
         let SnapshotState::File(file) = &mut translated.target.state else {
             panic!("fixture must contain file state");

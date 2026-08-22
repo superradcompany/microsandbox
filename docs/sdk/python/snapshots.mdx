@@ -3,11 +3,18 @@ title: Snapshots
 description: Python SDK - Snapshot API reference
 ---
 
-<Tooltip tip="Snapshot creation, restore, import, and export use local disk artifacts and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+Capture the disk state of a stopped sandbox through the active backend, then
+boot fresh sandboxes from it. Local snapshots are reusable artifacts; cloud
+snapshots use managed storage or the organization's host volume. Snapshots are
+disk-only and require a sandbox that is not running.
 
-Create and manage disk-only snapshots of stopped sandboxes. See [Snapshots](/sandboxes/snapshots) for usage and lifecycle concepts.
+<Note>
+  `list_dir`, `reindex`, `save`/`save_to`, `load`, and `verify` keep the same
+  API on every backend, but currently raise `UnsupportedError` in cloud.
+</Note>
 
-## SandboxHandle
+
+## Take a snapshot
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot()</span>
 
@@ -15,14 +22,15 @@ Create and manage disk-only snapshots of stopped sandboxes. See [Snapshots](/san
 async def snapshot(self, name: str) -> Snapshot
 ```
 
-Snapshot this sandbox under a bare name in the default snapshots directory (`~/.microsandbox/snapshots/<name>/`). The sandbox must be stopped or crashed. To place the artifact elsewhere, use [`Snapshot.save()`](#snapshot-save) / [`Snapshot.load()`](#snapshot-load) or move the self-contained artifact directory. Called on a [`SandboxHandle`](/sdk/python/sandbox#sandboxhandle), obtained from [`Sandbox.get()`](/sdk/python/sandbox#sandbox-get).
+Snapshot this sandbox under a bare name. Local uses its default snapshot
+directory; cloud uses managed storage. The sandbox must be stopped or crashed.
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>name</code><span className="msb-type">str</span></div>
-    <div className="msb-param-desc">Snapshot name; resolved under the default snapshots directory.</div>
+    <div className="msb-param-desc">Snapshot name. Local stores it in the default snapshot directory; cloud creates a managed snapshot.</div>
   </div>
 </div>
 
@@ -47,152 +55,6 @@ print(snap.digest)
 
 ---
 
-
-## Sandbox
-
-#### <span className="msb-recv">Sandbox.</span><span className="msb-hn">create()</span>
-
-```python
-@staticmethod
-async def create(name: str, *, from_snapshot: str | os.PathLike | None = None, **kwargs) -> Sandbox
-```
-
-Boot a fresh sandbox from a snapshot artifact by passing `from_snapshot=` as a peer of `image=`. The two are mutually exclusive: pass exactly one. See [`Sandbox.create()`](/sdk/python/sandbox#sandbox-create) for the full set of configuration kwargs.
-
-<p className="msb-label">Parameters</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>name</code><span className="msb-type">str</span></div>
-    <div className="msb-param-desc">Sandbox name, up to 128 UTF-8 bytes.</div>
-  </div>
-  <div className="msb-param">
-    <div className="msb-param-key"><code>from_snapshot</code><span className="msb-type">str | os.PathLike | None</span></div>
-    <div className="msb-param-desc">Snapshot bare name or artifact path to boot from instead of <code>image=</code>.</div>
-  </div>
-</div>
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="/sdk/python/sandbox#instance-methods">Sandbox</a></div>
-    <div className="msb-param-desc">Running sandbox.</div>
-  </div>
-</div>
-
-<Accordion title="Example">
-
-```python
-# Boot from a snapshot
-sb = await Sandbox.create("worker", from_snapshot="after-pip-install")
-
-# Or from an image (existing flow, unchanged)
-sb = await Sandbox.create("worker", image="python:3.12")
-```
-
-</Accordion>
-
----
-
-## Snapshot
-
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
-
-<p className="msb-backref">Returned by <a href="#handle-snapshot">snapshot()</a> · <a href="#snapshot-create">Snapshot.create()</a> · <a href="#snapshot-open">Snapshot.open()</a> · <a href="#snapshot-list_dir">Snapshot.list_dir()</a> · <a href="#handle-open">handle.open()</a></p>
-
-A fully-parsed snapshot artifact. Properties are read-only attributes (not async).
-
-#### <span className="msb-recv">snapshot.</span><span className="msb-hn">path</span>
-
-`str`
-
-Path to the artifact directory
-
-#### <span className="msb-recv">snapshot.</span><span className="msb-hn">digest</span>
-
-`str`
-
-Canonical content digest (`sha256:hex`). The snapshot's identity
-
-#### <span className="msb-recv">snapshot.</span><span className="msb-hn">size_bytes</span>
-
-`int \| None`
-
-Apparent size of the captured upper layer in bytes (sparse on disk), when recorded
-
-#### <span className="msb-recv">snapshot.</span><span className="msb-hn">image_ref</span>
-
-`str`
-
-Image reference the snapshot was taken from
-
-#### <span className="msb-recv">snapshot.</span><span className="msb-hn">image_manifest_digest</span>
-
-`str`
-
-OCI manifest digest of the pinned image
-
-#### <span className="msb-recv">snapshot.</span><span className="msb-hn">state_kind</span>
-
-[`SnapshotStateKind`](#snapshotstatekind)
-
-File-backed or checkpoint-backed state
-
-#### <span className="msb-recv">snapshot.</span><span className="msb-hn">format</span>
-
-[`SnapshotFormat`](#snapshotformat)` \| None`
-
-On-disk format for file-backed state
-
-#### <span className="msb-recv">snapshot.</span><span className="msb-hn">scope</span>
-
-[`SnapshotScope`](#snapshotscope)
-
-Captured state scope
-
-#### <span className="msb-recv">snapshot.</span><span className="msb-hn">fstype</span>
-
-`str \| None`
-
-Filesystem type for file-backed state (e.g. `"ext4"`)
-
-#### <span className="msb-recv">snapshot.</span><span className="msb-hn">checkpoint_id</span>
-
-`str \| None`
-
-Checkpoint identifier for checkpoint-backed state
-
-#### <span className="msb-recv">snapshot.</span><span className="msb-hn">checkpoint_manifest_digest</span>
-
-`str \| None`
-
-Checkpoint manifest digest for checkpoint-backed state
-
-#### <span className="msb-recv">snapshot.</span><span className="msb-hn">parent</span>
-
-`str \| None`
-
-Parent snapshot's digest, or `None` for a root
-
-#### <span className="msb-recv">snapshot.</span><span className="msb-hn">created_at</span>
-
-`str`
-
-RFC 3339 timestamp
-
-#### <span className="msb-recv">snapshot.</span><span className="msb-hn">labels</span>
-
-`dict[str, str]`
-
-User-supplied labels
-
-#### <span className="msb-recv">snapshot.</span><span className="msb-hn">source_sandbox</span>
-
-`str \| None`
-
-Best-effort source-sandbox name
-
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">create()</span>
 
 ```python
@@ -209,14 +71,16 @@ async def create(
 ) -> Snapshot
 ```
 
-Create a snapshot from a stopped or crashed sandbox. `name` is resolved under the default snapshots directory (`~/.microsandbox/snapshots/<name>/`), or under `dest_dir=` when given; `from_sandbox=` names the sandbox to capture and is required.
+Create a snapshot from a stopped or crashed sandbox. With no `dest_dir`, local
+uses its default snapshot directory and cloud uses managed storage. A
+`dest_dir` selects a local parent or cloud host-volume directory.
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>name</code><span className="msb-type">str</span></div>
-    <div className="msb-param-desc">Bare snapshot name; resolved under the default snapshots directory.</div>
+    <div className="msb-param-desc">Snapshot name. Its storage location is selected by the active backend.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>from_sandbox</code><span className="msb-type">str</span></div>
@@ -224,7 +88,7 @@ Create a snapshot from a stopped or crashed sandbox. `name` is resolved under th
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>dest_dir</code><span className="msb-type">str | os.PathLike[str] | None</span></div>
-    <div className="msb-param-desc">Parent directory to create the artifact in; the artifact lands at <code>dest_dir/&lt;name&gt;</code>. Defaults to the snapshots directory.</div>
+    <div className="msb-param-desc">Local parent or cloud host-volume directory. Omit for backend-managed storage.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>labels</code><span className="msb-type">dict[str, str] | None</span></div>
@@ -268,6 +132,62 @@ snap = await Snapshot.create(
 
 ---
 
+## Boot from a snapshot
+
+#### <span className="msb-recv">Sandbox.</span><span className="msb-hn">create()</span>
+
+```python
+@staticmethod
+async def create(
+    name: str,
+    *,
+    from_snapshot: str | os.PathLike | Snapshot | SnapshotHandle | None = None,
+    **kwargs,
+) -> Sandbox
+```
+
+Boot a fresh sandbox from a snapshot by passing `from_snapshot=` as a peer of
+`image=`. The two are mutually exclusive. Passing a `Snapshot` or
+`SnapshotHandle` preserves its backend-relative reference automatically.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">str</span></div>
+    <div className="msb-param-desc">Sandbox name, up to 128 UTF-8 bytes.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>from_snapshot</code><span className="msb-type">str | os.PathLike | Snapshot | SnapshotHandle | None</span></div>
+    <div className="msb-param-desc">Backend-relative string, path, or snapshot object to boot from instead of <code>image=</code>.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="/sdk/python/sandbox#instance-methods">Sandbox</a></div>
+    <div className="msb-param-desc">Running sandbox.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```python
+# Boot from a snapshot
+sb = await Sandbox.create("worker", from_snapshot="after-pip-install")
+
+# Or from an image (existing flow, unchanged)
+sb = await Sandbox.create("worker", image="python:3.12")
+```
+
+</Accordion>
+
+---
+
+## Manage artifacts
+
 #### <span className="msb-recv">Snapshot.</span><span className="msb-hn">open()</span>
 
 ```python
@@ -284,14 +204,18 @@ print(snap.image_ref)
 
 </Accordion>
 
-Open an existing artifact by bare name (resolved under the default snapshots directory) or path. Cheap metadata validation only; does **not** read the upper file. Use [`verify()`](#snap-verify) for content checks.
+Open an existing snapshot through the active backend. Locally, bare names
+resolve under the default snapshot directory and other values are artifact
+paths. In cloud, bare values identify managed snapshots and path-like values
+identify host-volume artifacts. Cheap metadata validation only; use
+[`verify()`](#snap-verify) for content checks where supported.
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>path_or_name</code><span className="msb-type">str</span></div>
-    <div className="msb-param-desc">Bare snapshot name or artifact directory path.</div>
+    <div className="msb-param-desc">Backend-relative snapshot name, ID, or path.</div>
   </div>
 </div>
 
@@ -320,14 +244,14 @@ print(h.digest)
 
 </Accordion>
 
-Look up a handle in the local index by name, digest, or path.
+Look up a lightweight snapshot handle through the active backend.
 
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>name_or_digest</code><span className="msb-type">str</span></div>
-    <div className="msb-param-desc">Snapshot name, digest, or path.</div>
+    <div className="msb-param-desc">Public identifier understood by the active backend, such as a local name/digest or cloud snapshot ID.</div>
   </div>
 </div>
 
@@ -336,7 +260,7 @@ Look up a handle in the local index by name, digest, or path.
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><a className="msb-type" href="#snapshothandle">SnapshotHandle</a></div>
-    <div className="msb-param-desc">Lightweight handle backed by an index row.</div>
+    <div className="msb-param-desc">Lightweight handle returned by the active backend.</div>
   </div>
 </div>
 
@@ -356,7 +280,9 @@ for h in await Snapshot.list():
 
 </Accordion>
 
-List indexed snapshots from the local DB cache.
+List snapshots visible through the active backend. Local uses its index; cloud
+lists managed snapshots. Host-volume artifacts are opened explicitly by
+reference.
 
 <p className="msb-label">Returns</p>
 
@@ -374,7 +300,10 @@ List indexed snapshots from the local DB cache.
 async def list_dir(dir: str | os.PathLike) -> list[Snapshot]
 ```
 
-Walk a directory and parse each subdirectory's manifest. Does not touch the index, useful for inspecting external snapshot collections (e.g. a mounted volume of artifacts that were never loaded). Skips entries that don't look like snapshot artifacts.
+Walk a local directory and parse each subdirectory's manifest. Does not touch
+the local index, useful for inspecting external snapshot collections. Skips
+entries that don't look like snapshot artifacts. Cloud raises
+`UnsupportedError`.
 
 <p className="msb-label">Parameters</p>
 
@@ -409,7 +338,8 @@ await Snapshot.remove("after-pip-install", force=True)
 
 </Accordion>
 
-Remove a snapshot artifact and its index row. Refuses if the snapshot has indexed children unless `force=True`.
+Remove a snapshot through the active backend. Locally, removal also updates
+the index and refuses indexed children unless `force=True`.
 
 <p className="msb-label">Parameters</p>
 
@@ -440,7 +370,8 @@ print(f"indexed {count} snapshots")
 
 </Accordion>
 
-Walk `dir` (default: configured snapshots dir) and rebuild the local index. Returns the number of artifacts indexed.
+Walk `dir` (default: configured snapshots dir) and rebuild the local index.
+Returns the number of artifacts indexed. Cloud raises `UnsupportedError`.
 
 <p className="msb-label">Parameters</p>
 
@@ -459,15 +390,6 @@ Walk `dir` (default: configured snapshots dir) and rebuild the local index. Retu
     <div className="msb-param-desc">Number of artifacts indexed.</div>
   </div>
 </div>
-
-<Accordion title="Example">
-
-```python
-count = await Snapshot.reindex()
-print(f"indexed {count} snapshots")
-```
-
-</Accordion>
 
 ---
 
@@ -498,7 +420,9 @@ await Snapshot.save(
 
 </Accordion>
 
-Bundle a snapshot into a `.tar.zst` archive. The existing snapshot manifest is archived as-is; create the snapshot with recorded integrity when the archive will cross a trust boundary.
+Bundle a local snapshot into a `.tar.zst` archive. The existing snapshot
+manifest is archived as-is; create the snapshot with recorded integrity when
+the archive will cross a trust boundary. Cloud raises `UnsupportedError`.
 
 <p className="msb-label">Parameters</p>
 
@@ -525,21 +449,9 @@ Bundle a snapshot into a `.tar.zst` archive. The existing snapshot manifest is a
   </div>
 </div>
 
-<Accordion title="Example">
-
-```python
-await Snapshot.save(
-    "after-pip-install",
-    "/tmp/after-pip-install.tar.zst",
-    with_parents=True,
-)
-```
-
-</Accordion>
-
 ---
 
-<p className="msb-member-group">Move artifacts</p>
+## Move artifacts
 
 ---
 
@@ -555,7 +467,10 @@ async def load(
 ) -> SnapshotHandle
 ```
 
-Unpack a snapshot archive (`.tar.zst` or `.tar`) into the snapshots directory. Structural and archive-entry checks run during import; recorded payload integrity is preserved for explicit [`verify()`](#snap-verify). Compression is detected from magic bytes.
+Unpack a snapshot archive (`.tar.zst` or `.tar`) into the local snapshots
+directory. Structural and archive-entry checks run during import; recorded
+payload integrity is preserved for explicit [`verify()`](#snap-verify).
+Compression is detected from magic bytes. Cloud raises `UnsupportedError`.
 
 <p className="msb-label">Parameters</p>
 
@@ -583,14 +498,35 @@ Unpack a snapshot archive (`.tar.zst` or `.tar`) into the snapshots directory. S
 
 ```python
 h = await Snapshot.load("/tmp/after-pip-install.tar.zst")
-print(h.path)
+print(h.reference)
 ```
 
 </Accordion>
 
 ---
 
-<p className="msb-member-group">Inspect</p>
+## Inspect
+
+#### <span className="msb-recv">snap.</span><span className="msb-hn">save_to()</span>
+
+```python
+async def save_to(
+    self,
+    out: str | os.PathLike,
+    *,
+    with_parents: bool = False,
+    with_image: bool = False,
+    plain_tar: bool = False,
+) -> None
+```
+
+Bundle this snapshot through the backend retained when it was created or
+opened. This avoids resolving its reference through a possibly different
+current default backend. Cloud raises `UnsupportedError`.
+
+```python
+await snap.save_to("/tmp/after-pip-install.tar.zst", with_image=True)
+```
 
 #### <span className="msb-recv">snap.</span><span className="msb-hn">verify()</span>
 
@@ -610,7 +546,7 @@ else:
 
 </Accordion>
 
-Recompute the upper layer's recorded content integrity and compare against the descriptor. Current BLAKE3 Merkle integrity skips known all-hole subtrees and hashes allocated leaves in batches; released SHA descriptors retain their exact, potentially O(logical size), verifier. Returns `not_recorded` without reading payload contents when no integrity was stored.
+Recompute the upper layer's recorded content integrity and compare against the descriptor. Current BLAKE3 Merkle integrity skips known all-hole subtrees and hashes allocated leaves in batches; released SHA descriptors retain their exact, potentially O(logical size), verifier. Returns `not_recorded` without reading payload contents when no integrity was stored. The cloud backend currently raises `UnsupportedError`.
 
 <p className="msb-label">Returns</p>
 
@@ -631,110 +567,6 @@ The report shape:
         | {"kind": "verified", "algorithm": "...", "digest": "sha256:..."},
 }
 ```
-
-## SnapshotHandle
-
-<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
-
-<p className="msb-backref">Returned by <a href="#snapshot-get">Snapshot.get()</a> · <a href="#snapshot-list">Snapshot.list()</a> · <a href="#snapshot-load">Snapshot.load()</a></p>
-
-Lightweight handle backed by an index row. Properties are read-only attributes (not async).
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">digest</span>
-
-`str`
-
-Manifest digest, canonical identity
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">name</span>
-
-`str \| None`
-
-Convenience alias
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">parent_digest</span>
-
-`str \| None`
-
-Parent snapshot digest, or `None` for a root
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">image_ref</span>
-
-`str`
-
-Image the snapshot was taken from
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">state_kind</span>
-
-[`SnapshotStateKind`](#snapshotstatekind)
-
-File-backed or checkpoint-backed state
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">format</span>
-
-[`SnapshotFormat`](#snapshotformat)` \| None`
-
-On-disk format for file-backed state
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">scope</span>
-
-[`SnapshotScope`](#snapshotscope)
-
-Captured state scope
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">fstype</span>
-
-`str \| None`
-
-Filesystem type for file-backed state
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">checkpoint_manifest_digest</span>
-
-`str \| None`
-
-Checkpoint manifest digest for checkpoint-backed state
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">size_bytes</span>
-
-`int \| None`
-
-Apparent upper size at index time
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">locality</span>
-
-`str`
-
-Artifact locality reported by the index
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">availability</span>
-
-`str`
-
-Artifact availability reported by the index
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">migration_state</span>
-
-`str`
-
-Current migration state
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">migration_error_code</span>
-
-`str \| None`
-
-Migration error code, when migration failed
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">created_at</span>
-
-`float`
-
-ms since Unix epoch
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">path</span>
-
-`str`
-
-Local artifact directory path
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">open()</span>
 
@@ -789,7 +621,83 @@ Remove this snapshot artifact and its index row. Refuses if the snapshot has ind
   </div>
 </div>
 
+#### <span className="msb-recv">handle.</span><span className="msb-hn">save_to()</span>
+
+```python
+async def save_to(
+    self,
+    out: str | os.PathLike,
+    *,
+    with_parents: bool = False,
+    with_image: bool = False,
+    plain_tar: bool = False,
+) -> None
+```
+
+Bundle the referenced snapshot through the backend retained by the handle.
+Cloud raises `UnsupportedError`.
+
 ## Types
+
+### Snapshot
+
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Returned by <a href="#handle-snapshot">snapshot()</a> · <a href="#snapshot-create">Snapshot.create()</a> · <a href="#snapshot-open">Snapshot.open()</a> · <a href="#snapshot-list_dir">Snapshot.list_dir()</a> · <a href="#handle-open">handle.open()</a></p>
+
+A fully parsed backend-neutral snapshot. Properties are read-only attributes.
+
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
+| `reference` | `str` | Stable backend-relative restore reference |
+| `reference_kind` | `Literal["id", "path"]` | How the selected backend resolves the reference |
+| `digest` | `str` | Canonical content digest (`sha256:hex`). The snapshot's identity |
+| `size_bytes` | `int \| None` | Backend-reported stored payload size in bytes |
+| `image_ref` | `str` | Image reference the snapshot was taken from |
+| `image_manifest_digest` | `str` | OCI manifest digest of the pinned image |
+| `state_kind` | [`SnapshotStateKind`](#snapshotstatekind) | File-backed or checkpoint-backed state |
+| `format` | [`SnapshotFormat`](#snapshotformat)` \| None` | On-disk format for file-backed state |
+| `scope` | [`SnapshotScope`](#snapshotscope) | Captured state scope |
+| `fstype` | `str \| None` | Filesystem type for file-backed state (e.g. `"ext4"`) |
+| `checkpoint_id` | `str \| None` | Checkpoint identifier for checkpoint-backed state |
+| `checkpoint_manifest_digest` | `str \| None` | Checkpoint manifest digest for checkpoint-backed state |
+| `parent` | `str \| None` | Parent snapshot's digest, or `None` for a root |
+| `created_at` | `str` | RFC 3339 timestamp |
+| `labels` | `dict[str, str]` | User-supplied labels |
+| `source_sandbox` | `str \| None` | Best-effort source-sandbox name |
+| `save_to(...)` | `Awaitable[None]` | Bundle through the backend retained by this snapshot |
+| `verify()` | `Awaitable[dict[str, Any]]` | Recompute and check the upper-layer integrity hash. See [`verify()`](#snap-verify) |
+
+### SnapshotHandle
+
+<div className="msb-tags"><span className="msb-tag is-type">class</span></div>
+
+<p className="msb-backref">Returned by <a href="#snapshot-get">Snapshot.get()</a> · <a href="#snapshot-list">Snapshot.list()</a> · <a href="#snapshot-load">Snapshot.load()</a></p>
+
+Lightweight handle returned by the active backend. Properties are read-only.
+
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
+| `digest` | `str` | Manifest digest, canonical identity |
+| `name` | `str \| None` | Convenience alias |
+| `parent_digest` | `str \| None` | Parent snapshot digest, or `None` for a root |
+| `image_ref` | `str` | Image the snapshot was taken from |
+| `state_kind` | [`SnapshotStateKind`](#snapshotstatekind) | File-backed or checkpoint-backed state |
+| `format` | [`SnapshotFormat`](#snapshotformat)` \| None` | On-disk format for file-backed state |
+| `scope` | [`SnapshotScope`](#snapshotscope) | Captured state scope |
+| `fstype` | `str \| None` | Filesystem type for file-backed state |
+| `checkpoint_manifest_digest` | `str \| None` | Checkpoint manifest digest for checkpoint-backed state |
+| `size_bytes` | `int \| None` | Backend-reported stored payload size, when known |
+| `locality` | `str` | Artifact locality reported by the index |
+| `availability` | `str` | Artifact availability reported by the index |
+| `migration_state` | `str` | Current migration state |
+| `migration_error_code` | `str \| None` | Migration error code, when migration failed |
+| `created_at` | `float` | ms since Unix epoch |
+| `reference` | `str` | Stable backend-relative restore reference |
+| `reference_kind` | `Literal["id", "path"]` | How the selected backend resolves the reference |
+| `open()` | `Awaitable[`[`Snapshot`](#snapshot)`]` | Load full metadata. See [`open()`](#handle-open) |
+| `remove(force=False)` | `Awaitable[None]` | Delete the artifact and its index row. See [`remove()`](#handle-remove) |
+| `save_to(...)` | `Awaitable[None]` | Bundle through the backend retained by this handle |
 
 ### SnapshotStateKind
 

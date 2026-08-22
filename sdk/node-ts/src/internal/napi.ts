@@ -157,6 +157,12 @@ export interface NapiSandboxStatic {
 }
 
 export type NapiSandboxBuilderCtor = new (name: string) => NapiSandboxBuilder;
+export type NapiSnapshotSeed =
+  | string
+  | {
+      readonly reference: string;
+      readonly referenceKind: "id" | "path";
+    };
 
 /** The auto-generated native SandboxBuilder class. Each setter mutates
  * in place and returns `this`; closure-callback sub-builders are typed
@@ -171,7 +177,11 @@ export type NapiSandboxBuilderCtor = new (name: string) => NapiSandboxBuilder;
  * not preserve `this` correctly. */
 export interface NapiSandboxBuilderSetters {
   image(s: string): this;
-  fromSnapshot(pathOrName: string): this;
+  fromSnapshot(snapshot: string): this;
+  fromSnapshotRef(
+    reference: string,
+    referenceKind: "auto" | "id" | "path",
+  ): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   imageWith(configure: (b: any) => any): this;
   /** Managed root disk of the given size in MiB. Requires an OCI image. */
@@ -561,12 +571,14 @@ export interface NapiSnapshotBuilderSetters {
   resumable(): this;
 }
 
+
 export interface NapiSnapshotBuilder extends NapiSnapshotBuilderSetters {
   create(): Promise<NapiSnapshot>;
 }
 
 export interface NapiSnapshot {
-  readonly path: string;
+  readonly reference: string;
+  readonly referenceKind: "id" | "path";
   readonly digest: string;
   readonly sizeBytes: bigint | null | undefined;
   readonly imageRef: string;
@@ -586,6 +598,7 @@ export interface NapiSnapshot {
   readonly createdAt: string; // RFC 3339 UTC
   readonly labels: Record<string, string>;
   readonly sourceSandbox: string | null | undefined;
+  saveTo(out: string, opts?: NapiSaveOpts): Promise<void>;
   verify(): Promise<NapiSnapshotVerifyReport>;
 }
 
@@ -605,9 +618,11 @@ export interface NapiSnapshotHandle {
   readonly migrationState: string;
   readonly migrationErrorCode: string | null | undefined;
   readonly createdAt: number;
-  readonly path: string;
+  readonly reference: string;
+  readonly referenceKind: "id" | "path";
   open(): Promise<NapiSnapshot>;
   remove(opts?: NapiSnapshotRemoveOptions): Promise<void>;
+  saveTo(out: string, opts?: NapiSaveOpts): Promise<void>;
 }
 
 export interface NapiSnapshotInfo {
@@ -626,7 +641,8 @@ export interface NapiSnapshotInfo {
   readonly migrationState: string;
   readonly migrationErrorCode: string | null | undefined;
   readonly createdAt: number;
-  readonly path: string;
+  readonly reference: string;
+  readonly referenceKind: "id" | "path";
 }
 
 export interface NapiSaveOpts {

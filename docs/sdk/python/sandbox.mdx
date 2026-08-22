@@ -1677,7 +1677,7 @@ The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_wit
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | image | `str \| os.PathLike[str] \| `[`ImageSource`](/sdk/python/images) | - | OCI image, local path, or disk image. Required unless `from_snapshot=` is passed. Use `Image.oci("python:3.12", root_disk=RootDisk.managed(8192))` to set a managed OCI root-disk size |
-| from_snapshot | `str \| os.PathLike[str]` | - | Snapshot artifact to boot from instead of `image=`. Mutually exclusive with `image=` |
+| from_snapshot | `str \| os.PathLike[str] \| Snapshot \| SnapshotHandle` | - | Backend-relative snapshot reference or object to boot from instead of `image=`. Mutually exclusive with `image=` |
 | cpus | `int` | `1` | Virtual CPUs. This is a limit, not a reservation |
 | max_cpus | `int` | same as `cpus` | Boot-time maximum possible virtual CPUs |
 | memory | `int` | `512` | Guest memory in MiB. This is a limit, not a reservation |

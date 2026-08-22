@@ -15,7 +15,7 @@ use serde::de::{Error as _, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest as _, Sha256};
 
-use crate::error::{ImageError, ImageResult};
+use crate::error::{SnapshotManifestError, SnapshotManifestResult};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -62,6 +62,8 @@ const RESERVED_ARTIFACT_FILENAMES: &[&str] = &[
 
 /// On-disk format of a file-state upper layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum SnapshotFormat {
     /// Raw disk image.
@@ -73,6 +75,8 @@ pub enum SnapshotFormat {
 
 /// Snapshot payload scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum SnapshotScope {
     /// Disk-only state.
@@ -83,6 +87,8 @@ pub enum SnapshotScope {
 
 /// Reference to the pinned OCI image used by the snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct ImageRef {
     /// Human-readable image reference.
@@ -94,6 +100,8 @@ pub struct ImageRef {
 
 /// Captured file-state upper-layer metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct UpperLayer {
     /// One normal filename relative to the artifact directory.
@@ -108,6 +116,8 @@ pub struct UpperLayer {
 
 /// Content integrity descriptor for a file-state upper layer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "algorithm", deny_unknown_fields)]
 pub enum UpperIntegrity {
     /// Ordinary SHA-256 retained only for exact legacy compatibility and
@@ -137,6 +147,8 @@ pub enum UpperIntegrity {
 
 /// Concrete file-backed snapshot state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct FileSnapshotState {
     /// On-disk payload format.
@@ -149,6 +161,8 @@ pub struct FileSnapshotState {
 
 /// Immutable checkpoint-manifest-backed snapshot state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct CheckpointSnapshotState {
     /// Stable identifier for the captured cut.
@@ -159,6 +173,8 @@ pub struct CheckpointSnapshotState {
 
 /// Closed snapshot state family.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum SnapshotState {
     /// Concrete file-backed disk state.
@@ -170,7 +186,11 @@ pub enum SnapshotState {
 /// Final schema-1 snapshot descriptor.
 ///
 /// Field order is identity-bearing. Do not reorder these fields.
+///
+/// Generated bindings and API schemas expose this type as `SnapshotManifest`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema), schema(as = SnapshotManifest))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "SnapshotManifest"))]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     /// Schema version. Exactly [`SCHEMA_VERSION`].
@@ -194,6 +214,8 @@ pub struct Manifest {
     /// User-supplied labels, sorted by key in canonical form.
     pub labels: BTreeMap<String, String>,
     /// Namespaced additive extension values.
+    #[cfg_attr(feature = "utoipa", schema(value_type = Object))]
+    #[cfg_attr(feature = "ts", ts(type = "{ [key in string]: unknown }"))]
     pub extensions: BTreeMap<String, serde_json::Value>,
     /// Sorted unique must-understand extension keys.
     pub requires: Vec<String>,
@@ -257,7 +279,7 @@ impl UpperIntegrity {
 
 impl Manifest {
     /// Validate descriptor invariants.
-    pub fn validate(&self) -> ImageResult<()> {
+    pub fn validate(&self) -> SnapshotManifestResult<()> {
         if self.schema != SCHEMA_VERSION {
             return descriptor_error(format!(
                 "unsupported schema version {} (expected {})",
@@ -361,30 +383,34 @@ impl Manifest {
     }
 
     /// Serialize the normalized semantic value to canonical identity bytes.
-    pub fn to_canonical_bytes(&self) -> ImageResult<Vec<u8>> {
+    pub fn to_canonical_bytes(&self) -> SnapshotManifestResult<Vec<u8>> {
         let normalized = self.normalized()?;
         serde_json::to_vec(&normalized).map_err(|error| {
-            ImageError::ManifestParse(format!("snapshot descriptor: serialize failed: {error}"))
+            SnapshotManifestError::ManifestParse(format!(
+                "snapshot descriptor: serialize failed: {error}"
+            ))
         })
     }
 
     /// Parse, normalize, and validate one strict schema-1 descriptor.
-    pub fn from_bytes(bytes: &[u8]) -> ImageResult<Self> {
+    pub fn from_bytes(bytes: &[u8]) -> SnapshotManifestResult<Self> {
         reject_duplicate_json_keys(bytes)?;
         let parsed: Self = serde_json::from_slice(bytes).map_err(|error| {
-            ImageError::ManifestParse(format!("snapshot descriptor: parse failed: {error}"))
+            SnapshotManifestError::ManifestParse(format!(
+                "snapshot descriptor: parse failed: {error}"
+            ))
         })?;
         parsed.normalized()
     }
 
     /// Compute the snapshot identity over normalized canonical bytes.
-    pub fn digest(&self) -> ImageResult<String> {
+    pub fn digest(&self) -> SnapshotManifestResult<String> {
         let mut hasher = Sha256::new();
         hasher.update(self.to_canonical_bytes()?);
         Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
     }
 
-    fn normalized(&self) -> ImageResult<Self> {
+    fn normalized(&self) -> SnapshotManifestResult<Self> {
         let mut normalized = self.clone();
         normalized.created_at = normalize_timestamp(&normalized.created_at)?;
         for value in normalized.extensions.values_mut() {
@@ -479,14 +505,14 @@ impl<'de> Visitor<'de> for DuplicateCheckedJsonVisitor {
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
-fn descriptor_error<T>(message: impl Into<String>) -> ImageResult<T> {
-    Err(ImageError::ManifestParse(format!(
+fn descriptor_error<T>(message: impl Into<String>) -> SnapshotManifestResult<T> {
+    Err(SnapshotManifestError::ManifestParse(format!(
         "snapshot descriptor: {}",
         message.into()
     )))
 }
 
-fn validate_sha256_digest(value: &str, field: &str) -> ImageResult<()> {
+fn validate_sha256_digest(value: &str, field: &str) -> SnapshotManifestResult<()> {
     let Some(encoded) = value.strip_prefix("sha256:") else {
         return descriptor_error(format!("{field} must use sha256: {value}"));
     };
@@ -502,7 +528,7 @@ fn validate_sha256_digest(value: &str, field: &str) -> ImageResult<()> {
     Ok(())
 }
 
-fn validate_blake3_digest(value: &str, field: &str) -> ImageResult<()> {
+fn validate_blake3_digest(value: &str, field: &str) -> SnapshotManifestResult<()> {
     let Some(encoded) = value.strip_prefix("blake3:") else {
         return descriptor_error(format!("{field} must use blake3: {value}"));
     };
@@ -518,7 +544,7 @@ fn validate_blake3_digest(value: &str, field: &str) -> ImageResult<()> {
     Ok(())
 }
 
-fn validate_artifact_filename(value: &str, field: &str) -> ImageResult<()> {
+fn validate_artifact_filename(value: &str, field: &str) -> SnapshotManifestResult<()> {
     let mut components = Path::new(value).components();
     let Some(Component::Normal(name)) = components.next() else {
         return descriptor_error(format!(
@@ -538,10 +564,10 @@ fn validate_artifact_filename(value: &str, field: &str) -> ImageResult<()> {
     Ok(())
 }
 
-fn normalize_timestamp(value: &str) -> ImageResult<String> {
+fn normalize_timestamp(value: &str) -> SnapshotManifestResult<String> {
     let parsed = DateTime::parse_from_rfc3339(value)
         .map_err(|error| {
-            ImageError::ManifestParse(format!(
+            SnapshotManifestError::ManifestParse(format!(
                 "snapshot descriptor: created_at is not RFC 3339: {error}"
             ))
         })?
@@ -579,13 +605,13 @@ fn normalize_json_value(value: &mut serde_json::Value) {
     }
 }
 
-fn reject_duplicate_json_keys(bytes: &[u8]) -> ImageResult<()> {
+fn reject_duplicate_json_keys(bytes: &[u8]) -> SnapshotManifestResult<()> {
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
     DuplicateCheckedJson::deserialize(&mut deserializer).map_err(|error| {
-        ImageError::ManifestParse(format!("snapshot descriptor: parse failed: {error}"))
+        SnapshotManifestError::ManifestParse(format!("snapshot descriptor: parse failed: {error}"))
     })?;
     deserializer.end().map_err(|error| {
-        ImageError::ManifestParse(format!("snapshot descriptor: parse failed: {error}"))
+        SnapshotManifestError::ManifestParse(format!("snapshot descriptor: parse failed: {error}"))
     })
 }
 

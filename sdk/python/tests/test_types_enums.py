@@ -44,6 +44,8 @@ from microsandbox import (
     Secret,
     SecretChangeKind,
     SecurityProfile,
+    Snapshot,
+    SnapshotHandle,
     Stdin,
     StdinMode,
     ViolationPolicy,
@@ -51,6 +53,11 @@ from microsandbox import (
     default_backend_kind,
     set_default_backend,
 )
+
+
+def test_snapshot_instances_expose_save_to() -> None:
+    assert callable(Snapshot.save_to)
+    assert callable(SnapshotHandle.save_to)
 
 
 def test_enum_members_compare_equal_to_values() -> None:
@@ -282,10 +289,20 @@ def test_sandbox_create_treats_explicit_none_as_omitted() -> None:
     with pytest.raises(ValueError, match="image= or from_snapshot= is required"):
         Sandbox.create("explicit-none-image", image=None)
 
-    with pytest.raises(FileNotFoundError, match="snapshot artifact not found"):
+    with pytest.raises(type(baseline.value)) as accepted_snapshot:
         Sandbox.create(
             "explicit-none-image-with-snapshot",
             image=None,
+            from_snapshot="definitely-missing-snapshot",
+        )
+    assert str(accepted_snapshot.value) == str(baseline.value)
+
+
+@pytest.mark.asyncio
+async def test_missing_local_snapshot_is_reported_when_create_is_awaited() -> None:
+    with pytest.raises(FileNotFoundError, match="snapshot not found"):
+        await Sandbox.create(
+            "missing-local-snapshot",
             from_snapshot="definitely-missing-snapshot",
         )
 

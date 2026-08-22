@@ -4,6 +4,7 @@ use std::time::Duration;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
+use microsandbox::SnapshotReference;
 use microsandbox::sandbox::LogLevel as RustLogLevel;
 use microsandbox::sandbox::{
     CpuPlacement as RustCpuPlacement, DeploymentProfile as RustDeploymentProfile,
@@ -140,6 +141,29 @@ impl JsSandboxBuilder {
         let prev = self.take_inner();
         self.inner = Some(prev.from_snapshot(path_or_name));
         self
+    }
+
+    /// Boot from a snapshot while preserving its backend-neutral reference kind.
+    /// Used by the TypeScript wrapper when passed a Snapshot or SnapshotHandle.
+    #[napi(
+        js_name = "fromSnapshotRef",
+        ts_args_type = "reference: string, kind: 'auto' | 'id' | 'path'"
+    )]
+    #[allow(clippy::wrong_self_convention)]
+    pub fn from_snapshot_ref(&mut self, reference: String, kind: String) -> Result<&Self> {
+        let reference = match kind.as_str() {
+            "auto" => SnapshotReference::auto(reference),
+            "id" => SnapshotReference::id(reference),
+            "path" => SnapshotReference::path(reference),
+            other => {
+                return Err(napi::Error::from_reason(format!(
+                    "unknown snapshot reference kind: {other}"
+                )));
+            }
+        };
+        let prev = self.take_inner();
+        self.inner = Some(prev.from_snapshot_ref(reference));
+        Ok(self)
     }
 
     /// Number of virtual CPUs.
