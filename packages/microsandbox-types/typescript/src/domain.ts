@@ -82,7 +82,7 @@ export type MountOptions = {
    * mounts, must be paired with [`gid`](Self::gid), and requires stat
    * virtualization to remain enabled.
    */
-  uid: number | null;
+  uid?: number | null;
   /**
    * Guest-visible fallback gid for host inodes without virtual stat metadata.
    *
@@ -90,7 +90,7 @@ export type MountOptions = {
    * mounts, must be paired with [`uid`](Self::uid), and requires stat
    * virtualization to remain enabled.
    */
-  gid: number | null;
+  gid?: number | null;
 };
 
 export type StatVirtualization = "strict" | "relaxed" | "off";

@@ -212,18 +212,20 @@ impl JsMountBuilder {
 
     /// Set the guest-visible fallback uid for host files without an override.
     #[napi]
-    pub fn uid(&mut self, uid: u32) -> &Self {
+    pub fn uid(&mut self, uid: f64) -> Result<&Self> {
+        let uid = mount_identity("uid", uid)?;
         let prev = self.take_inner();
         self.inner = Some(prev.uid(uid));
-        self
+        Ok(self)
     }
 
     /// Set the guest-visible fallback gid for host files without an override.
     #[napi]
-    pub fn gid(&mut self, gid: u32) -> &Self {
+    pub fn gid(&mut self, gid: f64) -> Result<&Self> {
+        let gid = mount_identity("gid", gid)?;
         let prev = self.take_inner();
         self.inner = Some(prev.gid(gid));
-        self
+        Ok(self)
     }
 
     /// Tmpfs size cap in MiB (only valid with `.tmpfs()`).
@@ -298,6 +300,22 @@ impl JsMountBuilder {
             .map_err(to_napi_error)?;
         Ok(to_built_mount(mount))
     }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+/// Convert a JavaScript number to a Linux uid/gid without N-API's lossy
+/// `ToUint32` coercion of fractions, negative numbers, or overflowing values.
+fn mount_identity(name: &str, value: f64) -> Result<u32> {
+    if !value.is_finite() || value.fract() != 0.0 || !(0.0..=f64::from(u32::MAX)).contains(&value) {
+        return Err(napi::Error::from_reason(format!(
+            "{name} must be an integer between 0 and {}",
+            u32::MAX
+        )));
+    }
+    Ok(value as u32)
 }
 
 fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {

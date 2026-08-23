@@ -159,7 +159,8 @@ impl PyVolume {
 
     /// Create a bind mount config.
     #[staticmethod]
-    #[pyo3(signature = (path, *, readonly = false, noexec = false, nosuid = false, nodev = false))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (path, *, readonly = false, noexec = false, nosuid = false, nodev = false, stat_virtualization = None, host_permissions = None, uid = None, gid = None))]
     fn bind(
         py: Python<'_>,
         path: String,
@@ -167,6 +168,10 @@ impl PyVolume {
         noexec: bool,
         nosuid: bool,
         nodev: bool,
+        stat_virtualization: Option<Py<PyAny>>,
+        host_permissions: Option<Py<PyAny>>,
+        uid: Option<Py<PyAny>>,
+        gid: Option<Py<PyAny>>,
     ) -> PyResult<PyObject> {
         let kwargs = PyDict::new(py);
         kwargs.set_item("kind", mount_kind(py, "BIND")?)?;
@@ -175,13 +180,14 @@ impl PyVolume {
         kwargs.set_item("noexec", noexec)?;
         kwargs.set_item("nosuid", nosuid)?;
         kwargs.set_item("nodev", nodev)?;
+        set_mount_metadata_options(py, &kwargs, stat_virtualization, host_permissions, uid, gid)?;
         Ok(mount_config_class(py)?.call((), Some(&kwargs))?.unbind())
     }
 
     /// Create a named volume mount config.
     #[staticmethod]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (name, *, mode = None, kind = None, size_mib = None, quota_mib = None, readonly = false, noexec = false, nosuid = false, nodev = false))]
+    #[pyo3(signature = (name, *, mode = None, kind = None, size_mib = None, quota_mib = None, readonly = false, noexec = false, nosuid = false, nodev = false, stat_virtualization = None, host_permissions = None, uid = None, gid = None))]
     fn named(
         py: Python<'_>,
         name: String,
@@ -193,6 +199,10 @@ impl PyVolume {
         noexec: bool,
         nosuid: bool,
         nodev: bool,
+        stat_virtualization: Option<Py<PyAny>>,
+        host_permissions: Option<Py<PyAny>>,
+        uid: Option<Py<PyAny>>,
+        gid: Option<Py<PyAny>>,
     ) -> PyResult<PyObject> {
         let kwargs = PyDict::new(py);
         kwargs.set_item("kind", mount_kind(py, "NAMED")?)?;
@@ -215,6 +225,7 @@ impl PyVolume {
         kwargs.set_item("noexec", noexec)?;
         kwargs.set_item("nosuid", nosuid)?;
         kwargs.set_item("nodev", nodev)?;
+        set_mount_metadata_options(py, &kwargs, stat_virtualization, host_permissions, uid, gid)?;
         Ok(mount_config_class(py)?.call((), Some(&kwargs))?.unbind())
     }
 
@@ -497,4 +508,32 @@ fn mount_config_class<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
 fn mount_kind<'py>(py: Python<'py>, variant: &str) -> PyResult<Bound<'py, PyAny>> {
     let types = PyModule::import(py, "microsandbox.types")?;
     types.getattr("MountKind")?.getattr(variant)
+}
+
+/// Forward the shared virtiofs metadata options through the public mount
+/// factories. Enum values are checked here so malformed policies fail at the
+/// factory boundary; ownership validation remains centralized in MountConfig.
+fn set_mount_metadata_options(
+    py: Python<'_>,
+    kwargs: &Bound<'_, PyDict>,
+    stat_virtualization: Option<Py<PyAny>>,
+    host_permissions: Option<Py<PyAny>>,
+    uid: Option<Py<PyAny>>,
+    gid: Option<Py<PyAny>>,
+) -> PyResult<()> {
+    if let Some(policy) = stat_virtualization {
+        extract_str_enum(policy.bind(py), "StatVirtualization")?;
+        kwargs.set_item("stat_virtualization", policy)?;
+    }
+    if let Some(policy) = host_permissions {
+        extract_str_enum(policy.bind(py), "HostPermissions")?;
+        kwargs.set_item("host_permissions", policy)?;
+    }
+    if let Some(uid) = uid {
+        kwargs.set_item("uid", uid)?;
+    }
+    if let Some(gid) = gid {
+        kwargs.set_item("gid", gid)?;
+    }
+    Ok(())
 }

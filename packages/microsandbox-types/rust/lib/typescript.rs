@@ -250,4 +250,14 @@ mod tests {
         assert!(!domain.contains("SandboxModificationPlan"));
         assert!(!domain.contains("export type SandboxSpec ="));
     }
+
+    #[test]
+    fn mount_ownership_is_optional_in_the_typescript_wire_shape() {
+        let domain = render_domain();
+
+        // Rust omits unset ownership fields, so TypeScript callers must not be
+        // forced to provide nullable keys that are absent on the wire.
+        assert!(domain.contains("uid?: number | null;"));
+        assert!(domain.contains("gid?: number | null;"));
+    }
 }

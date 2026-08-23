@@ -209,6 +209,10 @@ def bind(
     noexec: bool = False,
     nosuid: bool = False,
     nodev: bool = False,
+    stat_virtualization: StatVirtualization | None = None,
+    host_permissions: HostPermissions | None = None,
+    uid: int | None = None,
+    gid: int | None = None,
 ) -> MountConfig
 ```
 
@@ -249,6 +253,22 @@ Mount a host directory into the sandbox. Changes in the guest are reflected on t
     <div className="msb-param-key"><code>nodev</code><span className="msb-type">bool</span></div>
     <div className="msb-param-desc">Ignore device files on the mount.</div>
   </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>stat_virtualization</code><a className="msb-type" href="#statvirtualization">StatVirtualization | None</a></div>
+    <div className="msb-param-desc">Guest metadata virtualization policy; defaults to strict.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>host_permissions</code><a className="msb-type" href="#hostpermissions">HostPermissions | None</a></div>
+    <div className="msb-param-desc">Whether guest permission changes stay private or mirror to the host.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>uid</code><span className="msb-type">int | None</span></div>
+    <div className="msb-param-desc">Guest-visible fallback uid. Set together with <code>gid</code>; never changes host ownership.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>gid</code><span className="msb-type">int | None</span></div>
+    <div className="msb-param-desc">Guest-visible fallback gid. Set together with <code>uid</code>; never changes host ownership.</div>
+  </div>
 </div>
 
 <p className="msb-label">Returns</p>
@@ -276,6 +296,10 @@ def named(
     noexec: bool = False,
     nosuid: bool = False,
     nodev: bool = False,
+    stat_virtualization: StatVirtualization | None = None,
+    host_permissions: HostPermissions | None = None,
+    uid: int | None = None,
+    gid: int | None = None,
 ) -> MountConfig
 ```
 
@@ -340,6 +364,22 @@ Mount a named volume. By default the volume must already exist; set `mode` to co
   <div className="msb-param">
     <div className="msb-param-key"><code>nodev</code><span className="msb-type">bool</span></div>
     <div className="msb-param-desc">Ignore device files on the mount.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>stat_virtualization</code><a className="msb-type" href="#statvirtualization">StatVirtualization | None</a></div>
+    <div className="msb-param-desc">Guest metadata virtualization policy; defaults to strict.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>host_permissions</code><a className="msb-type" href="#hostpermissions">HostPermissions | None</a></div>
+    <div className="msb-param-desc">Whether guest permission changes stay private or mirror to the host.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>uid</code><span className="msb-type">int | None</span></div>
+    <div className="msb-param-desc">Guest-visible fallback uid for directory-backed volumes. Set together with <code>gid</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>gid</code><span className="msb-type">int | None</span></div>
+    <div className="msb-param-desc">Guest-visible fallback gid for directory-backed volumes. Set together with <code>uid</code>.</div>
   </div>
 </div>
 

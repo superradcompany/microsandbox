@@ -351,6 +351,43 @@ Build and create the volume on disk, returning a [`Volume`](#instance-methods).
   </div>
 </div>
 
+## MountBuilder
+
+Fluent builder passed to [`SandboxBuilder.volume()`](/sdk/typescript/sandbox#volume). Select one mount kind, then chain mount options. Guest ownership applies only to bind and directory-backed named mounts with stat virtualization enabled.
+
+<Accordion title="Example">
+
+```typescript
+const sandbox = await Sandbox.builder("worker")
+  .image("python")
+  .volume("/workspace", (mount) =>
+    mount
+      .bind("./workspace")
+      .statVirtualization("relaxed")
+      .uid(1000)
+      .gid(1000),
+  )
+  .create();
+```
+
+</Accordion>
+
+#### <span className="msb-recv">mount.</span><span className="msb-hn">uid()</span>
+
+```typescript
+uid(uid: number): this
+```
+
+Set the guest-visible fallback uid for host files without virtual metadata. The value must be an integer from `0` through `4294967295`, must be paired with [`gid()`](#gid), and never changes host ownership.
+
+#### <span className="msb-recv">mount.</span><span className="msb-hn">gid()</span>
+
+```typescript
+gid(gid: number): this
+```
+
+Set the guest-visible fallback gid for host files without virtual metadata. The value must be an integer from `0` through `4294967295` and must be paired with [`uid()`](#uid).
+
 ## VolumeFs
 
 <p className="msb-backref">Returned by <a href="#volume-fs">volume.fs()</a> · <a href="#volumehandle">VolumeHandle.fs()</a></p>

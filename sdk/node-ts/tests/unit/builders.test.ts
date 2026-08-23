@@ -247,6 +247,32 @@ describe("MountBuilder", () => {
     expect(() => builder.build()).toThrow(/must be specified together/);
   });
 
+  it("rejects uid and gid values that cannot be represented as u32", () => {
+    for (const value of [
+      -1,
+      1.5,
+      0x1_0000_0000,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+    ]) {
+      expect(() => new MountBuilder("/data").bind("/host").uid(value)).toThrow(
+        /uid must be an integer between 0 and 4294967295/,
+      );
+      expect(() => new MountBuilder("/data").bind("/host").gid(value)).toThrow(
+        /gid must be an integer between 0 and 4294967295/,
+      );
+    }
+  });
+
+  it("accepts the maximum u32 uid and gid", () => {
+    const m = new MountBuilder("/data")
+      .bind("/host")
+      .uid(0xffff_ffff)
+      .gid(0xffff_ffff)
+      .build();
+    expect(m).toMatchObject({ uid: 0xffff_ffff, gid: 0xffff_ffff });
+  });
+
   it("rejects guest ownership with stat virtualization off", () => {
     const builder = new MountBuilder("/data")
       .bind("/host")
@@ -397,6 +423,17 @@ describe("SandboxBuilder.build", () => {
     expect(cfg.mounts[1]).toMatchObject({
       type: "Tmpfs",
       sizeMib: 64,
+    });
+  });
+
+  it("collects mount ownership through the MountBuilder callback", async () => {
+    const cfg = await Sandbox.builder("x")
+      .image("alpine")
+      .volume("/data", (m) => m.bind("/host").uid(1000).gid(1001))
+      .build();
+    expect(cfg.mounts[0]).toMatchObject({
+      type: "Bind",
+      options: { uid: 1000, gid: 1001 },
     });
   });
 

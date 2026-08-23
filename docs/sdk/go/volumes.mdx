@@ -836,6 +836,18 @@ Per-mount stat-virtualization policy (bind / named only)
 
 Per-mount host-permission propagation policy (bind / named only)
 
+#### <span className="msb-recv">mount.</span><span className="msb-hn">UID</span>
+
+`*uint32`
+
+Guest-visible fallback uid for virtiofs-backed mounts. Set together with `GID`; never changes host ownership.
+
+#### <span className="msb-recv">mount.</span><span className="msb-hn">GID</span>
+
+`*uint32`
+
+Guest-visible fallback gid for virtiofs-backed mounts. Set together with `UID`; never changes host ownership.
+
 
 #### <span className="msb-recv">mount.</span><span className="msb-hn">Kind()</span>
 

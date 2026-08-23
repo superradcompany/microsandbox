@@ -279,7 +279,7 @@ pub struct MountOptions {
     /// This never changes host ownership. It is valid only for virtiofs-backed
     /// mounts, must be paired with [`gid`](Self::gid), and requires stat
     /// virtualization to remain enabled.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uid: Option<u32>,
 
     /// Guest-visible fallback gid for host inodes without virtual stat metadata.
@@ -287,7 +287,7 @@ pub struct MountOptions {
     /// This never changes host ownership. It is valid only for virtiofs-backed
     /// mounts, must be paired with [`uid`](Self::uid), and requires stat
     /// virtualization to remain enabled.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gid: Option<u32>,
 }
 

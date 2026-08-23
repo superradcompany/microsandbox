@@ -17,6 +17,7 @@ from microsandbox import (
     NamedVolumeMode,
     SecurityProfile,
     StatVirtualization,
+    Volume,
 )
 
 
@@ -75,6 +76,28 @@ def test_bind_serializes_guest_ownership() -> None:
     d = mc._to_dict()
     assert d["uid"] == 1000
     assert d["gid"] == 1001
+
+
+def test_bind_factory_exposes_metadata_policies_and_guest_ownership() -> None:
+    mc = Volume.bind(
+        "/host/data",
+        stat_virtualization=StatVirtualization.RELAXED,
+        host_permissions=HostPermissions.MIRROR,
+        uid=1000,
+        gid=1001,
+    )
+    d = mc._to_dict()
+    assert d["stat_virtualization"] == "relaxed"
+    assert d["host_permissions"] == "mirror"
+    assert d["uid"] == 1000
+    assert d["gid"] == 1001
+
+
+def test_named_factory_exposes_guest_ownership() -> None:
+    mc = Volume.named("cache", uid=0, gid=0)
+    d = mc._to_dict()
+    assert d["uid"] == 0
+    assert d["gid"] == 0
 
 
 def test_bind_rejects_partial_guest_ownership() -> None:
