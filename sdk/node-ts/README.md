@@ -13,7 +13,7 @@ For the full API reference and longer guides, use the docs site:
 ## Features
 
 - Hardware VM isolation with a guest Linux kernel
-- ESM-first TypeScript API with generated native bindings
+- ESM-first API with CommonJS `require()` support and generated native bindings
 - Collected and streaming command execution
 - Guest filesystem read, write, list, copy, stat, and stream operations
 - Named volumes, bind mounts, tmpfs mounts, and disk-image mounts
@@ -28,10 +28,14 @@ For the full API reference and longer guides, use the docs site:
 - Linux with KVM, macOS with Apple Silicon, or Windows 10+ with WHP enabled
 - Windows support is currently preview; see the [Windows troubleshooting guide](https://docs.microsandbox.dev/troubleshooting/windows) for WHP and runtime setup notes.
 
-The package root is ESM-only for normal imports:
+The package root supports both ESM imports and CommonJS `require()` on Node.js 22+:
 
 ```typescript
 import { Sandbox } from "microsandbox";
+```
+
+```javascript
+const { Sandbox } = require("microsandbox");
 ```
 
 ## Supported Platforms
