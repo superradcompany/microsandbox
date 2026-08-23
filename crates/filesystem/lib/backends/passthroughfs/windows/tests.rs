@@ -479,26 +479,79 @@ fn strict_uses_ads_and_does_not_create_sidecar() {
 }
 
 #[test]
-fn readonly_strict_probe_does_not_create_ads() {
+fn readonly_probes_do_not_create_metadata() {
     let temp = TempDir::new();
-    let probe_path = ads_override_path(&temp.path);
-    assert_eq!(
-        std::fs::metadata(&probe_path).unwrap_err().kind(),
-        io::ErrorKind::NotFound
-    );
+    let override_path = ads_override_path(&temp.path);
+    let probe_path = ads_probe_path(&temp.path);
+
+    for policy in [StatVirtualization::Strict, StatVirtualization::Relaxed] {
+        let fs = PassthroughFs::new(PassthroughConfig {
+            root_dir: temp.path.clone(),
+            inject_init: false,
+            readonly: true,
+            stat_virtualization: policy,
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_ads_store(&fs);
+    }
+
+    for path in [override_path, probe_path] {
+        assert_eq!(
+            std::fs::metadata(path).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+    }
+    assert!(!temp.path.join(FALLBACK_METADATA_DIR_NAME).exists());
+}
+
+#[test]
+fn readonly_relaxed_probe_preserves_mount_root_override() {
+    let temp = TempDir::new();
+    write_override_stream(
+        &ads_override_path(&temp.path),
+        OverrideStat::new(1234, 2345, S_IFDIR | 0o1755, 0),
+    )
+    .unwrap();
 
     let fs = PassthroughFs::new(PassthroughConfig {
         root_dir: temp.path.clone(),
         inject_init: false,
         readonly: true,
-        stat_virtualization: StatVirtualization::Strict,
+        stat_virtualization: StatVirtualization::Relaxed,
         ..Default::default()
     })
     .unwrap();
 
     assert_ads_store(&fs);
+    assert_override(&temp.path, 1234, 2345, S_IFDIR | 0o1755, 0);
     assert_eq!(
-        std::fs::metadata(&probe_path).unwrap_err().kind(),
+        std::fs::metadata(ads_probe_path(&temp.path))
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::NotFound
+    );
+    assert!(!temp.path.join(FALLBACK_METADATA_DIR_NAME).exists());
+}
+
+#[test]
+fn writable_probe_preserves_mount_root_override() {
+    let temp = TempDir::new();
+    write_override_stream(
+        &ads_override_path(&temp.path),
+        OverrideStat::new(1234, 2345, S_IFDIR | 0o1755, 0),
+    )
+    .unwrap();
+
+    let fs = fs_for(&temp.path);
+    assert_ads_store(&fs);
+
+    assert_override(&temp.path, 1234, 2345, S_IFDIR | 0o1755, 0);
+    assert_eq!(
+        std::fs::metadata(ads_probe_path(&temp.path))
+            .unwrap_err()
+            .kind(),
         io::ErrorKind::NotFound
     );
 }
