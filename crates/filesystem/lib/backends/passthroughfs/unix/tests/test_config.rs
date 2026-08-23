@@ -15,6 +15,26 @@ fn test_strict_succeeds_on_xattr_capable_fs() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn test_readonly_strict_does_not_require_xattr_write_access() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let cfg = PassthroughConfig {
+        root_dir: tmp.path().to_path_buf(),
+        stat_virtualization: StatVirtualization::Strict,
+        readonly: true,
+        ..Default::default()
+    };
+
+    // The root is readable but cannot accept the write probe used by writable
+    // strict mounts. Read-only strict construction must remain non-mutating.
+    let _fs = PassthroughFs::new(cfg).unwrap();
+}
+
+#[test]
 fn test_relaxed_skips_eager_probe() {
     // Relaxed never probes the bind root.
     let sb = TestSandbox::with_config(|mut cfg| {

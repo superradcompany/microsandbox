@@ -117,7 +117,7 @@ impl PassthroughFs {
             }
             root
         };
-        let stat_store = StatStore::new(&root, cfg.stat_virtualization)?;
+        let stat_store = StatStore::new(&root, cfg.stat_virtualization, cfg.readonly)?;
 
         let init_file = if cfg.inject_init {
             let mut file = tempfile::tempfile().map_err(host_error)?;
@@ -182,7 +182,7 @@ impl PassthroughFs {
         let path = std::fs::canonicalize(path).map_err(host_error)?;
         let metadata = safe_metadata_under_root(&root, &path)?;
         let mode = (mode_from_metadata(&metadata) & S_IFMT) | (permissions & 0o7777);
-        let store = StatStore::new(&root, StatVirtualization::Strict)?
+        let store = StatStore::new(&root, StatVirtualization::Strict, false)?
             .ok_or_else(|| linux_error(LINUX_EIO))?;
         store.write(&path, uid, gid, mode, 0)
     }

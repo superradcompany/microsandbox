@@ -1,19 +1,30 @@
 //! Windows stat-virtualization store for the passthrough backend.
 
 use super::*;
+use windows_sys::Win32::Storage::FileSystem::{GetVolumeInformationW, GetVolumePathNameW};
+use windows_sys::Win32::System::SystemServices::FILE_NAMED_STREAMS;
 
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
 
 impl StatStore {
-    pub(super) fn new(root: &Path, policy: StatVirtualization) -> io::Result<Option<Self>> {
+    pub(super) fn new(
+        root: &Path,
+        policy: StatVirtualization,
+        readonly: bool,
+    ) -> io::Result<Option<Self>> {
         if matches!(policy, StatVirtualization::Off) {
             return Ok(None);
         }
 
         let ads_store = Self::ads(root);
-        match ads_store.probe() {
+        let ads_probe = if readonly && matches!(policy, StatVirtualization::Strict) {
+            ads_store.probe_ads_read()
+        } else {
+            ads_store.probe()
+        };
+        match ads_probe {
             Ok(()) => return Ok(Some(ads_store)),
             Err(error) if matches!(policy, StatVirtualization::Strict) => return Err(error),
             Err(error) => {
@@ -68,6 +79,21 @@ impl StatStore {
             Err(error) => return Err(host_error(error)),
         }
         Ok(())
+    }
+
+    /// Verify that a read-only strict mount can consume ADS metadata without
+    /// creating or deleting a stream on the host directory.
+    fn probe_ads_read(&self) -> io::Result<()> {
+        if !volume_supports_named_streams(&self.root)? {
+            return Err(linux_error(LINUX_EOPNOTSUPP));
+        }
+
+        let probe_path = ads_override_path(&self.root);
+        match read_override_stream(&probe_path) {
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     fn probe_sidecar(&self, dir: &Path) -> io::Result<()> {
@@ -231,4 +257,43 @@ impl OverrideStat {
         }
         buf
     }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+/// Query the backing volume instead of creating a probe ADS on a read-only mount.
+fn volume_supports_named_streams(path: &Path) -> io::Result<bool> {
+    let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut volume_path = [0u16; 32_768];
+    let found = unsafe {
+        GetVolumePathNameW(
+            path_wide.as_ptr(),
+            volume_path.as_mut_ptr(),
+            volume_path.len() as u32,
+        )
+    };
+    if found == 0 {
+        return Err(host_error(io::Error::last_os_error()));
+    }
+
+    let mut flags = 0u32;
+    let queried = unsafe {
+        GetVolumeInformationW(
+            volume_path.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut flags,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if queried == 0 {
+        return Err(host_error(io::Error::last_os_error()));
+    }
+
+    Ok(flags & FILE_NAMED_STREAMS != 0)
 }

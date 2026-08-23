@@ -412,10 +412,60 @@ pub(crate) fn get_override(
     read_override(fd, strict)
 }
 
-/// Check if the xattr system is functional by probing the given directory.
+/// Check whether xattrs can be read from the given directory without mutating it.
 ///
-/// Returns `Ok(true)` if xattrs work, `Ok(false)` if not supported.
-pub(crate) fn probe_xattr_support(dirfd: RawFd) -> io::Result<bool> {
+/// An absent override still proves that the lookup reached an xattr-capable
+/// filesystem. Read-only passthrough mounts use this probe because they never
+/// need to persist guest metadata changes.
+///
+/// Returns `Ok(true)` if xattr reads work, `Ok(false)` if they are unsupported.
+pub(crate) fn probe_xattr_read_support(dirfd: RawFd) -> io::Result<bool> {
+    #[cfg(target_os = "linux")]
+    let ret = {
+        let mut path_buf = [0u8; PROC_SELF_FD_PATH_BUF_LEN];
+        let path = format_proc_self_fd_path(dirfd, &mut path_buf)?;
+        unsafe { libc::getxattr(path, OVERRIDE_XATTR_KEY.as_ptr(), std::ptr::null_mut(), 0) }
+    };
+
+    #[cfg(target_os = "macos")]
+    let ret = unsafe {
+        libc::fgetxattr(
+            dirfd,
+            OVERRIDE_XATTR_KEY.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            0,
+            0,
+        )
+    };
+
+    if ret >= 0 {
+        return Ok(true);
+    }
+
+    let err = io::Error::last_os_error();
+    let errno = err.raw_os_error().unwrap_or(0);
+
+    #[cfg(target_os = "linux")]
+    if errno == libc::ENODATA {
+        return Ok(true);
+    }
+    #[cfg(target_os = "macos")]
+    if errno == libc::ENOATTR {
+        return Ok(true);
+    }
+
+    if errno == libc::EOPNOTSUPP || errno == libc::ENOTSUP {
+        return Ok(false);
+    }
+
+    Err(platform::linux_error(err))
+}
+
+/// Check if xattrs can be written by probing the given directory.
+///
+/// Returns `Ok(true)` if xattr writes work, `Ok(false)` if they are unsupported.
+pub(crate) fn probe_xattr_write_support(dirfd: RawFd) -> io::Result<bool> {
     let probe_val: [u8; 1] = [1];
 
     #[cfg(target_os = "linux")]

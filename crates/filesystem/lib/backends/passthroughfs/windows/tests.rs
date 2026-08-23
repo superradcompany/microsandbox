@@ -479,6 +479,31 @@ fn strict_uses_ads_and_does_not_create_sidecar() {
 }
 
 #[test]
+fn readonly_strict_probe_does_not_create_ads() {
+    let temp = TempDir::new();
+    let probe_path = ads_override_path(&temp.path);
+    assert_eq!(
+        std::fs::metadata(&probe_path).unwrap_err().kind(),
+        io::ErrorKind::NotFound
+    );
+
+    let fs = PassthroughFs::new(PassthroughConfig {
+        root_dir: temp.path.clone(),
+        inject_init: false,
+        readonly: true,
+        stat_virtualization: StatVirtualization::Strict,
+        ..Default::default()
+    })
+    .unwrap();
+
+    assert_ads_store(&fs);
+    assert_eq!(
+        std::fs::metadata(&probe_path).unwrap_err().kind(),
+        io::ErrorKind::NotFound
+    );
+}
+
+#[test]
 fn ads_stat_virtualization_persists_for_directories() {
     let temp = TempDir::new();
     {
