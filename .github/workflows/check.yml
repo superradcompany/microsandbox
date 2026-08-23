@@ -555,6 +555,14 @@ jobs:
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
           cargo +stable test --no-default-features --features net -p microsandbox --lib --target ${{ matrix.rust_target }} sandbox::patch::tests::bind_patch_
 
+      - name: Test Windows DNS resolver
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
+          cargo +stable test -p microsandbox-network --lib --target ${{ matrix.rust_target }} dns::windows_resolver::
+
   windows-build:
     name: Build Windows ${{ matrix.component }} (${{ matrix.target }})
     needs: [build-kernel, build-kernel-x86_64, build-agentd-aarch64, build-agentd-x86_64, changes]

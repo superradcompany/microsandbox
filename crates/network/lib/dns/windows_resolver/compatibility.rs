@@ -169,7 +169,7 @@ unsafe extern "system" fn query_complete(
         Err(Error::other("Windows system DNS returned no result"))
     } else {
         let mut owned_result = lock(&state.result);
-        if !ptr::eq(result, &mut *owned_result) {
+        if !ptr::eq(result, &*owned_result) {
             Err(Error::new(
                 ErrorKind::InvalidData,
                 "Windows system DNS returned an unexpected result pointer",
@@ -543,6 +543,8 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::CString;
+
     use super::*;
 
     pub(super) const EXAMPLE_QUERY: &[u8] = &[
@@ -558,8 +560,150 @@ mod tests {
     }
 
     #[test]
-    fn preserves_native_ipv4_network_bytes() {
-        let native = dns::DNS_RECORDA {
+    fn rejects_queries_the_compatibility_api_cannot_represent() {
+        let mut multiple = Message::from_vec(EXAMPLE_QUERY).unwrap();
+        let second = multiple.queries[0].clone();
+        multiple.add_query(second);
+        let error = parse_guest_query(&multiple.to_vec().unwrap())
+            .err()
+            .expect("multiple questions must be rejected");
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+
+        let mut non_internet = EXAMPLE_QUERY.to_vec();
+        *non_internet.last_mut().unwrap() = 3;
+        let error = parse_guest_query(&non_internet)
+            .err()
+            .expect("non-IN questions must be rejected");
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+    }
+
+    #[test]
+    fn maps_windows_status_codes_to_dns_response_codes() {
+        for (status, expected) in [
+            (ERROR_SUCCESS as i32, ResponseCode::NoError),
+            (DNS_INFO_NO_RECORDS, ResponseCode::NoError),
+            (DNS_ERROR_RCODE_FORMAT_ERROR as i32, ResponseCode::FormErr),
+            (
+                DNS_ERROR_RCODE_SERVER_FAILURE as i32,
+                ResponseCode::ServFail,
+            ),
+            (DNS_ERROR_RCODE_NAME_ERROR as i32, ResponseCode::NXDomain),
+            (DNS_ERROR_RCODE_NOT_IMPLEMENTED as i32, ResponseCode::NotImp),
+            (DNS_ERROR_RCODE_REFUSED as i32, ResponseCode::Refused),
+        ] {
+            assert_eq!(response_code(status).unwrap(), expected);
+        }
+        assert!(response_code(12345).is_err());
+    }
+
+    #[test]
+    fn converts_common_native_record_layouts_to_wire_bytes() {
+        let owner = CString::new("example.com.").unwrap();
+
+        let ipv4 = native_record(
+            &owner,
+            dns::DNS_TYPE_A,
+            dns::DNS_RECORDA_1 {
+                A: dns::DNS_A_DATA {
+                    IpAddress: u32::from_ne_bytes([192, 0, 2, 1]),
+                },
+            },
+        );
+        assert_eq!(convert_rdata(&ipv4).unwrap(), [192, 0, 2, 1]);
+
+        let mut ipv6_data = dns::DNS_AAAA_DATA::default();
+        ipv6_data.Ip6Address.IP6Byte = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let ipv6 = native_record(
+            &owner,
+            dns::DNS_TYPE_AAAA,
+            dns::DNS_RECORDA_1 { AAAA: ipv6_data },
+        );
+        assert_eq!(
+            convert_rdata(&ipv6).unwrap(),
+            [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+        );
+
+        let exchange = CString::new("mail.example.com.").unwrap();
+        let mx = native_record(
+            &owner,
+            dns::DNS_TYPE_MX,
+            dns::DNS_RECORDA_1 {
+                MX: dns::DNS_MX_DATAA {
+                    pNameExchange: pstr(&exchange),
+                    wPreference: 10,
+                    ..Default::default()
+                },
+            },
+        );
+        assert_eq!(
+            convert_rdata(&mx).unwrap(),
+            [
+                0, 10, 4, b'm', b'a', b'i', b'l', 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3,
+                b'c', b'o', b'm', 0,
+            ]
+        );
+
+        let target = CString::new("service.example.com.").unwrap();
+        let srv = native_record(
+            &owner,
+            dns::DNS_TYPE_SRV,
+            dns::DNS_RECORDA_1 {
+                SRV: dns::DNS_SRV_DATAA {
+                    pNameTarget: pstr(&target),
+                    wPriority: 1,
+                    wWeight: 2,
+                    wPort: 443,
+                    ..Default::default()
+                },
+            },
+        );
+        assert_eq!(
+            convert_rdata(&srv).unwrap(),
+            [
+                0, 1, 0, 2, 1, 187, 7, b's', b'e', b'r', b'v', b'i', b'c', b'e', 7, b'e', b'x',
+                b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm', 0,
+            ]
+        );
+
+        let text = CString::new("v=spf1 -all").unwrap();
+        let txt = native_record(
+            &owner,
+            dns::DNS_TYPE_TEXT,
+            dns::DNS_RECORDA_1 {
+                TXT: dns::DNS_TXT_DATAA {
+                    dwStringCount: 1,
+                    pStringArray: [pstr(&text)],
+                },
+            },
+        );
+        assert_eq!(convert_rdata(&txt).unwrap(), b"\x0bv=spf1 -all");
+    }
+
+    #[test]
+    fn rejects_unsupported_or_malformed_native_records() {
+        let owner = CString::new("example.com.").unwrap();
+        let unsupported = native_record(&owner, dns::DNS_TYPE_SVCB, dns::DNS_RECORDA_1::default());
+        assert_eq!(
+            convert_rdata(&unsupported).unwrap_err().kind(),
+            ErrorKind::Unsupported
+        );
+
+        let malformed = native_record(
+            &owner,
+            dns::DNS_TYPE_MX,
+            dns::DNS_RECORDA_1 {
+                MX: dns::DNS_MX_DATAA {
+                    pNameExchange: ptr::null_mut(),
+                    ..Default::default()
+                },
+            },
+        );
+        assert_eq!(
+            convert_rdata(&malformed).unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
+
+        let nameless = dns::DNS_RECORDA {
             wType: dns::DNS_TYPE_A,
             Data: dns::DNS_RECORDA_1 {
                 A: dns::DNS_A_DATA {
@@ -568,7 +712,84 @@ mod tests {
             },
             ..Default::default()
         };
-        assert_eq!(convert_rdata(&native).unwrap(), [192, 0, 2, 1]);
+        assert_eq!(
+            convert_record(&nameless).unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn rebuilds_dns_sections_and_preserves_guest_metadata() {
+        let guest = parse_guest_query(EXAMPLE_QUERY).unwrap();
+        let query_name = CString::new("example.com.").unwrap();
+        let nameserver = CString::new("ns1.example.com.").unwrap();
+
+        let mut additional = native_record(
+            &nameserver,
+            dns::DNS_TYPE_A,
+            dns::DNS_RECORDA_1 {
+                A: dns::DNS_A_DATA {
+                    IpAddress: u32::from_ne_bytes([192, 0, 2, 53]),
+                },
+            },
+        );
+        additional.Flags = dns::DNS_RECORDA_0 {
+            DW: dns::DNSREC_ADDITIONAL,
+        };
+        let mut authority = native_record(
+            &query_name,
+            dns::DNS_TYPE_NS,
+            dns::DNS_RECORDA_1 {
+                NS: dns::DNS_PTR_DATAA {
+                    pNameHost: pstr(&nameserver),
+                },
+            },
+        );
+        authority.Flags = dns::DNS_RECORDA_0 {
+            DW: dns::DNSREC_AUTHORITY,
+        };
+        authority.pNext = &mut additional;
+        let mut answer = native_record(
+            &query_name,
+            dns::DNS_TYPE_A,
+            dns::DNS_RECORDA_1 {
+                A: dns::DNS_A_DATA {
+                    IpAddress: u32::from_ne_bytes([192, 0, 2, 1]),
+                },
+            },
+        );
+        answer.Flags = dns::DNS_RECORDA_0 {
+            DW: dns::DNSREC_ANSWER,
+        };
+        answer.pNext = &mut authority;
+
+        let response = build_response(&guest, ERROR_SUCCESS as i32, &mut answer).unwrap();
+        let message = Message::from_vec(&response).unwrap();
+        assert_eq!(message.metadata.id, 0x1234);
+        assert_eq!(message.metadata.message_type, MessageType::Response);
+        assert!(message.metadata.recursion_available);
+        assert_eq!(message.queries.len(), 1);
+        assert_eq!(message.answers.len(), 1);
+        assert_eq!(message.authorities.len(), 1);
+        assert_eq!(message.additionals.len(), 1);
+    }
+
+    #[test]
+    fn omits_question_and_opt_pseudo_records_from_rebuilt_response() {
+        let guest = parse_guest_query(EXAMPLE_QUERY).unwrap();
+        let owner = CString::new("example.com.").unwrap();
+        let mut opt = native_record(&owner, dns::DNS_TYPE_OPT, dns::DNS_RECORDA_1::default());
+        opt.Flags = dns::DNS_RECORDA_0 {
+            DW: dns::DNSREC_ADDITIONAL,
+        };
+        let mut question = native_record(&owner, dns::DNS_TYPE_A, dns::DNS_RECORDA_1::default());
+        question.pNext = &mut opt;
+
+        let response = build_response(&guest, ERROR_SUCCESS as i32, &mut question).unwrap();
+        let message = Message::from_vec(&response).unwrap();
+        assert!(message.answers.is_empty());
+        assert!(message.authorities.is_empty());
+        assert!(message.additionals.is_empty());
     }
 
     #[tokio::test]
@@ -580,5 +801,22 @@ mod tests {
         let message = Message::from_vec(&response).unwrap();
         assert_eq!(message.metadata.id, 0x1234);
         assert!(!message.answers.is_empty());
+    }
+
+    fn native_record(
+        name: &CString,
+        record_type: u16,
+        data: dns::DNS_RECORDA_1,
+    ) -> dns::DNS_RECORDA {
+        dns::DNS_RECORDA {
+            pName: pstr(name),
+            wType: record_type,
+            Data: data,
+            ..Default::default()
+        }
+    }
+
+    fn pstr(value: &CString) -> *mut u8 {
+        value.as_ptr().cast_mut().cast()
     }
 }
