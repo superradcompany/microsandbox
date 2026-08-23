@@ -107,6 +107,21 @@ impl BindIdentityMap {
         }
     }
 
+    /// Create a map that presents every host owner as one guest uid/gid pair.
+    ///
+    /// This is used by explicit per-mount ownership. Both mapping branches use
+    /// the same identity so foreign-owned host files do not fall back to the
+    /// overflow user.
+    pub fn fixed(guest_uid: u32, guest_gid: u32) -> Self {
+        Self {
+            host_owner_uid: 0,
+            guest_uid,
+            guest_gid,
+            overflow_uid: guest_uid,
+            overflow_gid: guest_gid,
+        }
+    }
+
     /// Apply this map to a stat result in place.
     pub fn apply(&self, st: &mut stat64) {
         if st.st_uid == self.host_owner_uid {

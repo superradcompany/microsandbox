@@ -64,6 +64,37 @@ def test_bind_with_relaxed_and_mirror_serializes_lowercase() -> None:
     assert d["host_permissions"] == "mirror"
 
 
+def test_bind_serializes_guest_ownership() -> None:
+    mc = MountConfig(
+        kind=MountKind.BIND,
+        bind="/host/data",
+        stat_virtualization=StatVirtualization.RELAXED,
+        uid=1000,
+        gid=1001,
+    )
+    d = mc._to_dict()
+    assert d["uid"] == 1000
+    assert d["gid"] == 1001
+
+
+def test_bind_rejects_partial_guest_ownership() -> None:
+    mc = MountConfig(kind=MountKind.BIND, bind="/host/data", uid=1000)
+    with pytest.raises(ValueError, match="must be specified together"):
+        mc._to_dict()
+
+
+def test_bind_rejects_guest_ownership_with_stat_virt_off() -> None:
+    mc = MountConfig(
+        kind=MountKind.BIND,
+        bind="/host/data",
+        stat_virtualization=StatVirtualization.OFF,
+        uid=1000,
+        gid=1000,
+    )
+    with pytest.raises(ValueError, match="cannot be combined"):
+        mc._to_dict()
+
+
 def test_named_with_off_serializes() -> None:
     mc = MountConfig(
         kind=MountKind.NAMED,

@@ -25,6 +25,8 @@ impl PassthroughFs {
             let mut st = host_stat_from_metadata(metadata, data.inode);
             if let Some(override_stat) = store.read(&data.path)? {
                 apply_override_stat(&mut st, override_stat);
+            } else {
+                self.apply_mount_ownership(&mut st);
             }
             return Ok(st);
         }
@@ -59,7 +61,8 @@ impl PassthroughFs {
         }
 
         if self.stat_store.is_some() {
-            return Ok(OverrideStat::new(0, 0, mode_from_metadata(metadata), 0));
+            let (uid, gid) = self.mount_ownership().unwrap_or((0, 0));
+            return Ok(OverrideStat::new(uid, gid, mode_from_metadata(metadata), 0));
         }
 
         let virtual_meta = data.virtual_meta.read().unwrap();

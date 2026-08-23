@@ -549,6 +549,8 @@ struct CliMountOptions {
     follow_root_symlinks: bool,
     stat_virtualization: Option<microsandbox::sandbox::StatVirtualization>,
     host_permissions: Option<microsandbox::sandbox::HostPermissions>,
+    uid: Option<u32>,
+    gid: Option<u32>,
     size_mib: Option<u32>,
     quota_mib: Option<u32>,
     named_kind: Option<VolumeKind>,
@@ -1391,7 +1393,7 @@ fn validate_guest_path(context: &str, path: &str) -> anyhow::Result<()> {
 
 /// Parse a volume spec and apply it to the builder.
 ///
-/// Accepts: `SRC:DST[:ro|rw][,noexec][,nosuid][,nodev][,follow-root-symlinks][,stat-virt=...][,host-perms=...]`.
+/// Accepts: `SRC:DST[:ro|rw][,noexec][,nosuid][,nodev][,follow-root-symlinks][,stat-virt=...][,host-perms=...][,uid=...][,gid=...]`.
 pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<SandboxBuilder> {
     let parsed = parse_cli_mount_spec(
         "volume",
@@ -1446,6 +1448,12 @@ pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<Sandb
         }
         if let Some(hp) = options.host_permissions {
             m = m.host_permissions(hp);
+        }
+        if let Some(uid) = options.uid {
+            m = m.uid(uid);
+        }
+        if let Some(gid) = options.gid {
+            m = m.gid(gid);
         }
         m
     }))
@@ -1595,9 +1603,13 @@ pub fn apply_explicit_named_mount(
     }
     if matches!(parsed.options.named_kind, Some(VolumeKind::Disk))
         && (parsed.options.stat_virtualization.is_some()
-            || parsed.options.host_permissions.is_some())
+            || parsed.options.host_permissions.is_some()
+            || parsed.options.uid.is_some()
+            || parsed.options.gid.is_some())
     {
-        anyhow::bail!("mount-named kind=disk does not support stat-virt=... or host-perms=...");
+        anyhow::bail!(
+            "mount-named kind=disk does not support stat-virt=..., host-perms=..., uid=..., or gid=..."
+        );
     }
 
     let source = parsed.source.to_string();
@@ -1648,6 +1660,12 @@ fn apply_common_mount_options(mut mount: MountBuilder, options: CliMountOptions)
     }
     if let Some(hp) = options.host_permissions {
         mount = mount.host_permissions(hp);
+    }
+    if let Some(uid) = options.uid {
+        mount = mount.uid(uid);
+    }
+    if let Some(gid) = options.gid {
+        mount = mount.gid(gid);
     }
     if let Some(quota) = options.quota_mib {
         mount = mount.quota(quota);
@@ -1746,6 +1764,8 @@ fn parse_cli_mount_options(
     let mut seen_follow_root = false;
     let mut seen_stat_virt = false;
     let mut seen_host_perms = false;
+    let mut seen_uid = false;
+    let mut seen_gid = false;
     let mut seen_size = false;
     let mut seen_quota = false;
     let mut seen_named_kind = false;
@@ -1832,6 +1852,24 @@ fn parse_cli_mount_options(
                             ),
                         });
                     }
+                    "uid" if support.policies => {
+                        if seen_uid {
+                            anyhow::bail!("mount option `uid` specified more than once");
+                        }
+                        seen_uid = true;
+                        parsed.uid = Some(value.parse::<u32>().map_err(|_| {
+                            anyhow::anyhow!("invalid uid {value:?} (expected an unsigned integer)")
+                        })?);
+                    }
+                    "gid" if support.policies => {
+                        if seen_gid {
+                            anyhow::bail!("mount option `gid` specified more than once");
+                        }
+                        seen_gid = true;
+                        parsed.gid = Some(value.parse::<u32>().map_err(|_| {
+                            anyhow::anyhow!("invalid gid {value:?} (expected an unsigned integer)")
+                        })?);
+                    }
                     "size" if support.size => {
                         if seen_size {
                             anyhow::bail!("mount option `size` specified more than once");
@@ -1878,14 +1916,21 @@ fn parse_cli_mount_options(
                             anyhow::anyhow!("invalid disk image format {value:?}: {e}")
                         })?);
                     }
-                    "stat-virt" | "host-perms" | "size" | "quota" | "kind" | "fstype"
-                    | "format" => {
+                    "stat-virt" | "host-perms" | "uid" | "gid" | "size" | "quota" | "kind"
+                    | "fstype" | "format" => {
                         anyhow::bail!("mount option `{key}` is not valid here");
                     }
                     other => anyhow::bail!("unknown mount option {other:?}"),
                 }
             }
         }
+    }
+
+    if parsed.uid.is_some() != parsed.gid.is_some() {
+        anyhow::bail!("mount options `uid` and `gid` must be specified together");
+    }
+    if parsed.uid.is_some() && matches!(parsed.stat_virtualization, Some(StatVirtualization::Off)) {
+        anyhow::bail!("mount options `uid` and `gid` cannot be combined with stat-virt=off");
     }
 
     Ok(parsed)
@@ -3580,6 +3625,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_apply_volume_guest_ownership() {
+        let mount = build_one("/host:/guest:stat-virt=relaxed,uid=1000,gid=1001").await;
+        match mount {
+            VolumeMount::Bind { options, .. } => {
+                assert_eq!(options.uid, Some(1000));
+                assert_eq!(options.gid, Some(1001));
+            }
+            other => panic!("expected Bind, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn test_apply_volume_host_perms_mirror() {
         let mount = build_one("./project:/work:host-perms=mirror").await;
         match mount {
@@ -3866,6 +3923,18 @@ mod tests {
     fn test_apply_volume_rejects_unknown_stat_virt() {
         let err = expect_apply_volume_err("/host:/guest:stat-virt=bogus");
         assert!(err.contains("invalid stat-virt"), "got: {err}");
+    }
+
+    #[test]
+    fn test_apply_volume_rejects_partial_guest_ownership() {
+        let err = expect_apply_volume_err("/host:/guest:uid=1000");
+        assert!(err.contains("must be specified together"), "got: {err}");
+    }
+
+    #[test]
+    fn test_apply_volume_rejects_guest_ownership_with_stat_virt_off() {
+        let err = expect_apply_volume_err("/host:/guest:uid=1000,gid=1000,stat-virt=off");
+        assert!(err.contains("stat-virt=off"), "got: {err}");
     }
 
     #[test]

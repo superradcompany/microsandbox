@@ -61,6 +61,12 @@ pub struct PassthroughConfig {
     /// Whether mutating guest filesystem operations should be rejected.
     pub readonly: bool,
 
+    /// Guest-visible fallback uid for host paths without an override stream.
+    pub mount_uid: Option<u32>,
+
+    /// Guest-visible fallback gid for host paths without an override stream.
+    pub mount_gid: Option<u32>,
+
     /// FUSE entry cache timeout.
     pub entry_timeout: Duration,
 
@@ -200,6 +206,8 @@ impl Default for PassthroughConfig {
             stat_virtualization: StatVirtualization::Strict,
             host_permissions: HostPermissions::Private,
             readonly: false,
+            mount_uid: None,
+            mount_gid: None,
             entry_timeout: Duration::from_secs(5),
             attr_timeout: Duration::from_secs(5),
             inject_init: true,

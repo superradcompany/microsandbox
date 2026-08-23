@@ -237,6 +237,8 @@ struct MountObject {
     nodev: Option<bool>,
     stat_virtualization: Option<StatVirtualizationInput>,
     host_permissions: Option<HostPermissionsInput>,
+    uid: Option<u32>,
+    gid: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1503,12 +1505,15 @@ fn materialize_mount_object(object: &MountObject) -> anyhow::Result<VolumeMount>
     if (object.format.is_some() || object.fstype.is_some()) && object.disk.is_none() {
         anyhow::bail!("mount.format and mount.fstype are only valid for a disk mount");
     }
-    if (object.stat_virtualization.is_some() || object.host_permissions.is_some())
+    if (object.stat_virtualization.is_some()
+        || object.host_permissions.is_some()
+        || object.uid.is_some()
+        || object.gid.is_some())
         && object.bind.is_none()
         && object.named.is_none()
     {
         anyhow::bail!(
-            "mount.stat_virtualization and mount.host_permissions are only valid for bind or named mounts"
+            "mount.stat_virtualization, mount.host_permissions, mount.uid, and mount.gid are only valid for bind or named mounts"
         );
     }
 
@@ -1560,6 +1565,12 @@ fn materialize_mount_object(object: &MountObject) -> anyhow::Result<VolumeMount>
     }
     if let Some(policy) = object.host_permissions {
         mount = mount.host_permissions(policy.into());
+    }
+    if let Some(uid) = object.uid {
+        mount = mount.uid(uid);
+    }
+    if let Some(gid) = object.gid {
+        mount = mount.gid(gid);
     }
     mount.build().map_err(Into::into)
 }

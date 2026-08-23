@@ -1600,6 +1600,12 @@ type MountConfig struct {
 	// Only meaningful for Bind and Named mounts. Zero value preserves the
 	// conservative default (Private).
 	HostPermissions HostPermissions
+
+	// UID and GID set the guest-visible fallback ownership for host files
+	// without virtual stat metadata. They must either both be nil or both be
+	// non-nil. Host ownership is never changed.
+	UID *uint32
+	GID *uint32
 }
 
 // MountKind discriminates between the four mount flavours.
@@ -1631,6 +1637,10 @@ type MountOptions struct {
 	Nodev              bool
 	StatVirtualization StatVirtualization
 	HostPermissions    HostPermissions
+	// UID and GID set guest-visible fallback ownership. Use pointers so uid 0
+	// and gid 0 remain distinguishable from an unset option.
+	UID *uint32
+	GID *uint32
 	// QuotaMiB sets a guest-write quota for a bind mount, bounding how much
 	// the guest may add beyond the host directory's existing contents. Zero
 	// keeps the runtime's protective default. Bind mounts only; named volume
@@ -1690,6 +1700,8 @@ func (mountFactory) Bind(hostPath string, opts MountOptions) MountConfig {
 		Nodev:              opts.Nodev,
 		StatVirtualization: opts.StatVirtualization,
 		HostPermissions:    opts.HostPermissions,
+		UID:                opts.UID,
+		GID:                opts.GID,
 		QuotaMiB:           opts.QuotaMiB,
 	}
 }
@@ -1705,6 +1717,8 @@ func (mountFactory) Named(name string, opts MountOptions) MountConfig {
 		Nodev:              opts.Nodev,
 		StatVirtualization: opts.StatVirtualization,
 		HostPermissions:    opts.HostPermissions,
+		UID:                opts.UID,
+		GID:                opts.GID,
 	}
 }
 
@@ -1724,6 +1738,8 @@ func (mountFactory) NamedWith(name string, opts MountOptions, namedOpts NamedVol
 		Nodev:              opts.Nodev,
 		StatVirtualization: opts.StatVirtualization,
 		HostPermissions:    opts.HostPermissions,
+		UID:                opts.UID,
+		GID:                opts.GID,
 	}
 }
 

@@ -91,6 +91,20 @@ fn test_identity_map_applies_to_no_xattr_host_owner() {
 }
 
 #[test]
+fn test_fixed_identity_map_applies_to_every_host_owner() {
+    let sb = TestSandbox::with_config(|mut cfg| {
+        cfg.bind_identity_map = Some(identity_handle(BindIdentityMap::fixed(2468, 1357)));
+        cfg
+    });
+
+    sb.host_create_file("fixed.txt", b"data");
+
+    let entry = sb.lookup_root("fixed.txt").unwrap();
+    assert_eq!(entry.attr.st_uid, 2468);
+    assert_eq!(entry.attr.st_gid, 1357);
+}
+
+#[test]
 fn test_identity_map_preserves_xattr_precedence() {
     let host_uid = current_host_uid();
     let sb = TestSandbox::with_config(|mut cfg| {

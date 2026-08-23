@@ -947,6 +947,22 @@ func TestMountBindPropagatesPolicies(t *testing.T) {
 	}
 }
 
+func TestMountBindPropagatesGuestOwnership(t *testing.T) {
+	uid := uint32(1000)
+	gid := uint32(1001)
+	m := Mount.Bind("/host/data", MountOptions{
+		StatVirtualization: StatVirtualizationRelaxed,
+		UID:                &uid,
+		GID:                &gid,
+	})
+	if m.UID == nil || *m.UID != uid {
+		t.Errorf("UID: got %v, want %d", m.UID, uid)
+	}
+	if m.GID == nil || *m.GID != gid {
+		t.Errorf("GID: got %v, want %d", m.GID, gid)
+	}
+}
+
 func TestMountNamedPropagatesPolicies(t *testing.T) {
 	m := Mount.Named("cache", MountOptions{
 		StatVirtualization: StatVirtualizationOff,

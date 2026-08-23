@@ -433,6 +433,26 @@ fn host_files_without_override_are_executable() {
 }
 
 #[test]
+fn mount_ownership_applies_without_override() {
+    let temp = TempDir::new();
+    std::fs::write(temp.path.join("owned.txt"), b"data").unwrap();
+
+    let fs = PassthroughFs::new(PassthroughConfig {
+        root_dir: temp.path.clone(),
+        inject_init: false,
+        mount_uid: Some(2468),
+        mount_gid: Some(1357),
+        ..Default::default()
+    })
+    .unwrap();
+    fs.init(FsOptions::empty()).unwrap();
+
+    let entry = fs.lookup(context(), ROOT_INODE, c"owned.txt").unwrap();
+    assert_eq!(entry.attr.st_uid, 2468);
+    assert_eq!(entry.attr.st_gid, 1357);
+}
+
+#[test]
 fn readonly_host_files_without_override_are_read_execute_only() {
     let temp = TempDir::new();
     let file = temp.path.join("locked");

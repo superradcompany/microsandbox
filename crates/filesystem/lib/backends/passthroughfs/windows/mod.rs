@@ -207,6 +207,19 @@ impl PassthroughFs {
             quota.ensure_baseline();
         }
     }
+
+    /// Return the configured mount-wide guest ownership fallback.
+    fn mount_ownership(&self) -> Option<(u32, u32)> {
+        self.cfg.mount_uid.zip(self.cfg.mount_gid)
+    }
+
+    /// Apply mount-wide ownership only when no per-inode override exists.
+    fn apply_mount_ownership(&self, st: &mut stat64) {
+        if let Some((uid, gid)) = self.mount_ownership() {
+            st.st_uid = uid;
+            st.st_gid = gid;
+        }
+    }
 }
 
 //--------------------------------------------------------------------------------------------------

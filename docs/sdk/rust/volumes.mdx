@@ -1419,6 +1419,22 @@ fn nodev(self) -> Self
 
 Ignore device files on this mount.
 
+#### <span className="msb-recv">mount.</span><span className="msb-hn">uid()</span>
+
+```rust
+fn uid(self, uid: u32) -> Self
+```
+
+Set the guest-visible fallback uid for host files without per-file virtual metadata. This never changes host ownership. It must be paired with [`gid()`](#gid), is valid only for bind and directory-backed named mounts, and cannot be combined with [`StatVirtualization::Off`](#statvirtualization).
+
+#### <span className="msb-recv">mount.</span><span className="msb-hn">gid()</span>
+
+```rust
+fn gid(self, gid: u32) -> Self
+```
+
+Set the guest-visible fallback gid for host files without per-file virtual metadata. This never changes host ownership and must be paired with [`uid()`](#uid).
+
 #### <span className="msb-recv">mount.</span><span className="msb-hn">stat_virtualization()</span>
 
 ```rust
@@ -1721,7 +1737,7 @@ Configuration for creating a named volume. Re-exported as both `VolumeSpec` and 
 
 ### MountOptions
 
-Guest mount behavior shared by every mount kind. Set via the [`MountBuilder`](#mountbuilder-2) toggles; all fields default to `false`.
+Guest mount behavior shared by every mount kind. Set via the [`MountBuilder`](#mountbuilder-2) methods. Boolean fields default to `false`; ownership fields default to `None`.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -1729,6 +1745,8 @@ Guest mount behavior shared by every mount kind. Set via the [`MountBuilder`](#m
 | `noexec` | `bool` | Direct execution from the mount is disabled |
 | `nosuid` | `bool` | setuid/setgid elevation from files on the mount is ignored |
 | `nodev` | `bool` | Device files on the mount are ignored |
+| `uid` | `Option<u32>` | Guest-visible fallback uid for virtiofs host files without an override; must be paired with `gid` |
+| `gid` | `Option<u32>` | Guest-visible fallback gid for virtiofs host files without an override; must be paired with `uid` |
 
 ### StatVirtualization
 

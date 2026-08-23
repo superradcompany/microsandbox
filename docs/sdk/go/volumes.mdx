@@ -924,7 +924,7 @@ Discriminates between the four mount flavours. Inspect via `mount.Kind()`.
 
 ### MountOptions
 
-Tuning struct for [`Mount.Bind`](#mount-bind), [`Mount.Named`](#mount-named), and [`Mount.NamedWith`](#mount-namedwith). `StatVirtualization` and `HostPermissions` are virtiofs-only and rejected at build time if combined with a tmpfs or disk-image mount; their zero values preserve the conservative defaults (strict, private).
+Tuning struct for [`Mount.Bind`](#mount-bind), [`Mount.Named`](#mount-named), and [`Mount.NamedWith`](#mount-namedwith). `StatVirtualization`, `HostPermissions`, `UID`, and `GID` are virtiofs-only. `UID` and `GID` are pointers so zero remains a valid explicit identity; set both or neither. They affect guest-visible fallback ownership only and never host ownership.
 
 <p className="msb-backref">Used by <a href="#mount-bind">Mount.Bind()</a> · <a href="#mount-named">Mount.Named()</a> · <a href="#mount-namedwith">Mount.NamedWith()</a></p>
 
@@ -937,6 +937,8 @@ Tuning struct for [`Mount.Bind`](#mount-bind), [`Mount.Named`](#mount-named), an
 | `QuotaMiB` | `uint32` | Guest-write quota in MiB, bounding growth beyond the host directory's existing contents; zero keeps the protective default (bind mounts only; named volumes use [`NamedVolumeOptions.QuotaMiB`](#namedvolumeoptions)) |
 | `StatVirtualization` | `StatVirtualization` | Per-mount stat-virtualization policy (virtiofs only) |
 | `HostPermissions` | `HostPermissions` | Per-mount host-permission propagation policy (virtiofs only) |
+| `UID` | `*uint32` | Guest-visible fallback uid; must be paired with `GID` and cannot be used with stat virtualization off |
+| `GID` | `*uint32` | Guest-visible fallback gid; must be paired with `UID` and cannot be used with stat virtualization off |
 
 ### NamedVolumeOptions
 

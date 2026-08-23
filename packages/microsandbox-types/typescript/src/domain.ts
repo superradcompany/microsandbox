@@ -75,6 +75,22 @@ export type MountOptions = {
    * Whether device files on the mount are ignored.
    */
   nodev: boolean;
+  /**
+   * Guest-visible fallback uid for host inodes without virtual stat metadata.
+   *
+   * This never changes host ownership. It is valid only for virtiofs-backed
+   * mounts, must be paired with [`gid`](Self::gid), and requires stat
+   * virtualization to remain enabled.
+   */
+  uid: number | null;
+  /**
+   * Guest-visible fallback gid for host inodes without virtual stat metadata.
+   *
+   * This never changes host ownership. It is valid only for virtiofs-backed
+   * mounts, must be paired with [`uid`](Self::uid), and requires stat
+   * virtualization to remain enabled.
+   */
+  gid: number | null;
 };
 
 export type StatVirtualization = "strict" | "relaxed" | "off";

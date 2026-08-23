@@ -212,6 +212,8 @@ mounts:
     target: "/app"
     stat_virtualization: strict
     host_permissions: private
+    uid: 1000
+    gid: 1000
   - named: cache
     target: "/var/cache/app"
     create: ensure-exists
@@ -225,7 +227,7 @@ mounts:
     readonly: true
 ```
 
-All mount kinds accept `readonly`, `noexec`, `nosuid`, and `nodev`. `stat_virtualization` and `host_permissions` apply only to bind and named mounts. Duplicate guest targets are rejected.
+All mount kinds accept `readonly`, `noexec`, `nosuid`, and `nodev`. `stat_virtualization`, `host_permissions`, and paired `uid`/`gid` apply only to bind and directory-backed named mounts. `uid`/`gid` change only guest-visible fallback ownership, never host inode ownership, and cannot be combined with `stat_virtualization: off`. Duplicate guest targets are rejected.
 
 ### Rootfs patches
 

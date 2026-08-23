@@ -1123,6 +1123,8 @@ export interface NapiMountBuilder {
   noexec(): this;
   nosuid(): this;
   nodev(): this;
+  uid(uid: number): this;
+  gid(gid: number): this;
   size(mib: number): this;
   statVirtualization(policy: string): this;
   hostPermissions(policy: string): this;
@@ -1136,6 +1138,8 @@ export interface NapiVolumeMount {
   readonly noexec: boolean;
   readonly nosuid: boolean;
   readonly nodev: boolean;
+  readonly uid?: number;
+  readonly gid?: number;
   readonly host?: string;
   readonly name?: string;
   readonly namedMode?: "existing" | "create" | "ensure-exists";

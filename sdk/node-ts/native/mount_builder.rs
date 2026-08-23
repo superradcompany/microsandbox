@@ -29,6 +29,10 @@ pub struct JsBuiltVolumeMount {
     pub noexec: bool,
     pub nosuid: bool,
     pub nodev: bool,
+    /// Guest-visible fallback uid for virtiofs-backed mounts.
+    pub uid: Option<u32>,
+    /// Guest-visible fallback gid for virtiofs-backed mounts.
+    pub gid: Option<u32>,
     pub host: Option<String>,
     pub name: Option<String>,
     pub named_mode: Option<String>,
@@ -206,6 +210,22 @@ impl JsMountBuilder {
         self
     }
 
+    /// Set the guest-visible fallback uid for host files without an override.
+    #[napi]
+    pub fn uid(&mut self, uid: u32) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.uid(uid));
+        self
+    }
+
+    /// Set the guest-visible fallback gid for host files without an override.
+    #[napi]
+    pub fn gid(&mut self, gid: u32) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.gid(gid));
+        self
+    }
+
     /// Tmpfs size cap in MiB (only valid with `.tmpfs()`).
     #[napi]
     pub fn size(&mut self, mib: u32) -> &Self {
@@ -314,6 +334,8 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             noexec: options.noexec,
             nosuid: options.nosuid,
             nodev: options.nodev,
+            uid: options.uid,
+            gid: options.gid,
             host: Some(host.to_string_lossy().into_owned()),
             name: None,
             named_mode: None,
@@ -353,6 +375,8 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
                 noexec: options.noexec,
                 nosuid: options.nosuid,
                 nodev: options.nodev,
+                uid: options.uid,
+                gid: options.gid,
                 host: None,
                 name: Some(name),
                 named_mode,
@@ -376,6 +400,8 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             noexec: options.noexec,
             nosuid: options.nosuid,
             nodev: options.nodev,
+            uid: options.uid,
+            gid: options.gid,
             host: None,
             name: None,
             named_mode: None,
@@ -400,6 +426,8 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             noexec: options.noexec,
             nosuid: options.nosuid,
             nodev: options.nodev,
+            uid: options.uid,
+            gid: options.gid,
             host: Some(host.to_string_lossy().into_owned()),
             name: None,
             named_mode: None,

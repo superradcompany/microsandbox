@@ -46,7 +46,7 @@ impl PassthroughFs {
         let data = Arc::new(InodeData {
             inode: ROOT_INODE,
             path: self.root.clone(),
-            virtual_meta: RwLock::new(VirtualMetadata::default()),
+            virtual_meta: RwLock::new(self.default_virtual_metadata()),
         });
 
         let mut inodes = self.inodes.write().unwrap();
@@ -78,11 +78,22 @@ impl PassthroughFs {
         let data = Arc::new(InodeData {
             inode,
             path: path.clone(),
-            virtual_meta: RwLock::new(VirtualMetadata::default()),
+            virtual_meta: RwLock::new(self.default_virtual_metadata()),
         });
         inodes.by_inode.insert(inode, data.clone());
         inodes.by_path.insert(path, data.clone());
         data
+    }
+
+    /// Seed in-memory fallback metadata for hosts where persistent stat
+    /// virtualization is unavailable in relaxed mode.
+    fn default_virtual_metadata(&self) -> VirtualMetadata {
+        let (uid, gid) = self.mount_ownership().unwrap_or((0, 0));
+        VirtualMetadata {
+            uid,
+            gid,
+            ..VirtualMetadata::default()
+        }
     }
 
     pub(super) fn child_path(&self, parent: u64, name: &CStr) -> io::Result<PathBuf> {

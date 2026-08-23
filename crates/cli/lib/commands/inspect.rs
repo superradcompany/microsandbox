@@ -41,15 +41,21 @@ fn mount_policy_suffix(
 
 /// Render mount access and execution flags for `msb inspect` output.
 fn mount_flags_suffix(options: MountOptions) -> String {
-    let mut flags = vec![if options.readonly { "ro" } else { "rw" }];
+    let mut flags = vec![if options.readonly { "ro" } else { "rw" }.to_string()];
     if options.noexec {
-        flags.push("noexec");
+        flags.push("noexec".to_string());
     }
     if options.nosuid {
-        flags.push("nosuid");
+        flags.push("nosuid".to_string());
     }
     if options.nodev {
-        flags.push("nodev");
+        flags.push("nodev".to_string());
+    }
+    if let Some(uid) = options.uid {
+        flags.push(format!("uid={uid}"));
+    }
+    if let Some(gid) = options.gid {
+        flags.push(format!("gid={gid}"));
     }
     format!(" ({})", flags.join(","))
 }

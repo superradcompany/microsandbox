@@ -377,6 +377,7 @@ Mounts use normal Linux behavior by default: writable, executable, suid-enabled,
 - `noexec` when files on the mount should not be executed directly.
 - `nosuid` when setuid/setgid bits should be ignored.
 - `nodev` when device files should be ignored.
+- `uid` and `gid` together to present host files without virtual metadata as a fixed guest owner. This is guest-visible only and never calls `chown` on the host.
 
 `noexec` does not stop interpreters from reading scripts from the mount, for example `sh /app/src/script.sh`.
 
@@ -388,9 +389,9 @@ CLI mount flags use `SOURCE:DEST[:OPTIONS]`. The `:` before `OPTIONS` starts the
 
 | Flag | Source | Options |
 |------|--------|---------|
-| `--mount-dir` | Host directory | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror` |
-| `--mount-file` | Host file | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror` |
-| `--mount-named` | Named volume | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `kind=dir\|disk`, `size=<size>` for `kind=disk`, `quota=<size>` for directory volumes; directory-backed named volumes also support `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror` |
+| `--mount-dir` | Host directory | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror`, paired `uid=<id>,gid=<id>` |
+| `--mount-file` | Host file | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror`, paired `uid=<id>,gid=<id>` |
+| `--mount-named` | Named volume | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `kind=dir\|disk`, `size=<size>` for `kind=disk`, `quota=<size>` for directory volumes; directory-backed named volumes also support `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror`, and paired `uid=<id>,gid=<id>` |
 | `--mount-disk` | Host disk image | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `format=raw\|qcow2\|vmdk`, `fstype=<type>` |
 | `--tmpfs` | Guest path | `ro`, `rw`, `noexec`, `nosuid`, `nodev`; size may be passed as `PATH:SIZE[:OPTIONS]` |
 
@@ -402,7 +403,14 @@ Mount flags may be repeated, so a sandbox can combine host directories, individu
 ```rust Rust
 let sb = Sandbox::builder("full")
     .image("python")
-    .volume("/app/src", |v| v.bind("./src").readonly().noexec())
+    .volume("/app/src", |v| {
+        v.bind("./src")
+            .readonly()
+            .noexec()
+            .stat_virtualization(StatVirtualization::Relaxed)
+            .uid(1000)
+            .gid(1000)
+    })
     .volume("/app/pyproject.toml", |v| v.bind("./pyproject.toml").readonly())
     .volume("/root/.cache/pip", |v| {
         v.named("pip-cache")
@@ -421,7 +429,7 @@ let sb = Sandbox::builder("full")
 
 ```bash CLI
 msb create python --name full \
-  --mount-dir ./src:/app/src:ro,noexec \
+  --mount-dir ./src:/app/src:ro,noexec,stat-virt=relaxed,uid=1000,gid=1000 \
   --mount-file ./pyproject.toml:/app/pyproject.toml:ro \
   --mount-named pip-cache:/root/.cache/pip:stat-virt=relaxed \
   --mount-disk ./dataset.qcow2:/dataset:ro,format=qcow2,fstype=ext4 \

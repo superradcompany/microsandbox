@@ -1475,6 +1475,7 @@ async fn resolve_named_volumes(
     for mount in &config.spec.mounts {
         let VolumeMount::Named {
             name,
+            options,
             stat_virtualization,
             host_permissions,
             ..
@@ -1485,7 +1486,12 @@ async fn resolve_named_volumes(
 
         if let Some(volume) = resolved.get(name) {
             if volume.kind == VolumeKind::Disk {
-                validate_named_disk_mount_options(name, *stat_virtualization, *host_permissions)?;
+                validate_named_disk_mount_options(
+                    name,
+                    *stat_virtualization,
+                    *host_permissions,
+                    options,
+                )?;
             }
             continue;
         }
@@ -1508,7 +1514,12 @@ async fn resolve_named_volumes(
                 quota_mib: model.quota_mib.map(|value| value.max(0) as u32),
             },
             VolumeKind::Disk => {
-                validate_named_disk_mount_options(name, *stat_virtualization, *host_permissions)?;
+                validate_named_disk_mount_options(
+                    name,
+                    *stat_virtualization,
+                    *host_permissions,
+                    options,
+                )?;
                 let format = model
                     .disk_format
                     .as_deref()
@@ -2312,6 +2323,12 @@ fn mount_option_tokens(options: MountOptions) -> Vec<String> {
     }
     if options.nodev {
         tokens.push("nodev".to_string());
+    }
+    if let Some(uid) = options.uid {
+        tokens.push(format!("uid={uid}"));
+    }
+    if let Some(gid) = options.gid {
+        tokens.push(format!("gid={gid}"));
     }
     tokens
 }
@@ -4140,6 +4157,34 @@ mod tests {
                 .windows(2)
                 .any(|pair| pair[0] == "--mount" && pair[1] == expected),
             "missing override-quota --mount arg in {rendered:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_cli_args_bind_mount_guest_ownership() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/data", |m| {
+                m.bind("/host/data")
+                    .stat_virtualization(StatVirtualization::Relaxed)
+                    .uid(1000)
+                    .gid(1001)
+            })
+            .build()
+            .await
+            .unwrap();
+
+        let rendered = render_args(&config);
+        let data_tag = super::guest_mount_tag("/data");
+        let expected = format!(
+            "{data_tag}:/host/data:uid=1000,gid=1001,stat-virt=relaxed,quota={}",
+            crate::sandbox::config::DEFAULT_BIND_QUOTA_MIB
+        );
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair[0] == "--mount" && pair[1] == expected),
+            "missing guest ownership --mount arg in {rendered:?}"
         );
     }
 

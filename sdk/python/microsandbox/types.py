@@ -307,6 +307,7 @@ class DiskImageFormat(StrEnum):
     RAW = "raw"
     VMDK = "vmdk"
 
+
 class VolumeKind(StrEnum):
     DIRECTORY = "dir"
     DISK = "disk"
@@ -375,6 +376,7 @@ class SnapshotFormat(StrEnum):
 class SnapshotScope(StrEnum):
     DISK = "disk"
     RESUMABLE = "resumable"
+
 
 class RlimitResource(StrEnum):
     CPU = "cpu"
@@ -681,9 +683,9 @@ class InitConfig:
 class MountConfig:
     """Volume mount configuration.
 
-    ``stat_virtualization`` and ``host_permissions`` are only meaningful for
-    virtiofs-backed mounts (``BIND`` and ``NAMED``). Setting either on a
-    ``TMPFS`` or ``DISK`` mount raises ``ValueError`` at serialization time.
+    ``stat_virtualization``, ``host_permissions``, ``uid``, and ``gid`` are
+    only meaningful for virtiofs-backed mounts (``BIND`` and ``NAMED``).
+    ``uid`` and ``gid`` are guest-visible only and never change host ownership.
     """
 
     kind: MountKind
@@ -702,6 +704,8 @@ class MountConfig:
     fstype: str | None = None
     stat_virtualization: StatVirtualization | None = None
     host_permissions: HostPermissions | None = None
+    uid: int | None = None
+    gid: int | None = None
 
     def _to_dict(self) -> dict:
         # Validate every supplied enum before selecting a mount arm. This
@@ -741,6 +745,15 @@ class MountConfig:
             if self.host_permissions is not None
             else None
         )
+        if (self.uid is None) != (self.gid is None):
+            raise ValueError("MountConfig.uid and MountConfig.gid must be specified together")
+        for field_name, value in (("uid", self.uid), ("gid", self.gid)):
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+                raise TypeError(f"MountConfig.{field_name} must be int")
+            if value is not None and not 0 <= value <= 0xFFFFFFFF:
+                raise ValueError(f"MountConfig.{field_name} must be between 0 and 4294967295")
+        if self.uid is not None and stat_virtualization == StatVirtualization.OFF.value:
+            raise ValueError("MountConfig.uid/gid cannot be combined with stat_virtualization=OFF")
         # Drive emission off `kind` exclusively so a `MountConfig` with
         # contradictory fields (e.g. kind=DISK + bind=...) raises here
         # rather than silently letting the wrong arm of `apply_mount` win.
@@ -789,9 +802,23 @@ class MountConfig:
                 d["stat_virtualization"] = stat_virtualization
             if host_permissions is not None:
                 d["host_permissions"] = host_permissions
-        elif self.stat_virtualization is not None or self.host_permissions is not None:
+            if self.uid is not None:
+                d["uid"] = self.uid
+                d["gid"] = self.gid
+            if (
+                self.kind == MountKind.NAMED
+                and named_kind == VolumeKind.DISK.value
+                and self.uid is not None
+            ):
+                raise ValueError("MountConfig.uid/gid are only valid for directory named volumes")
+        elif (
+            self.stat_virtualization is not None
+            or self.host_permissions is not None
+            or self.uid is not None
+            or self.gid is not None
+        ):
             raise ValueError(
-                f"stat_virtualization/host_permissions are only valid for "
+                f"stat_virtualization/host_permissions/uid/gid are only valid for "
                 f"BIND/NAMED mounts (got kind={self.kind.value})"
             )
         return d
@@ -867,7 +894,6 @@ class RootDisk:
         derived from the file extension unless given (vmdk is not supported)."""
         return RootDiskConfig(kind=RootDiskKind.DISK_IMAGE, path=path, format=format, fstype=fstype)
 
-
     @staticmethod
     def flat(
         size_mib: int | None = None,
@@ -882,6 +908,7 @@ class RootDisk:
             fstype=fstype,
             clone=clone,
         )
+
 
 @dataclass(frozen=True, slots=True)
 class ImageSource:
@@ -1518,6 +1545,7 @@ class TokenBucket:
     ``refill_time_ms``. ``one_time_burst`` grants extra startup tokens that
     are spent before the regular budget and never refill.
     """
+
     size: int
     """Bucket capacity in tokens: bytes for bandwidth, frames for ops."""
     refill_time_ms: int
@@ -1539,6 +1567,7 @@ class RateLimiter:
     Caps bandwidth (bytes) and packet rate (frames) independently; a
     missing bucket leaves that dimension unlimited.
     """
+
     bandwidth: TokenBucket | None = None
     """Bandwidth bucket. One token is one byte of frame data."""
     ops: TokenBucket | None = None

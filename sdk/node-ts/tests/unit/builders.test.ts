@@ -232,6 +232,30 @@ describe("MountBuilder", () => {
     });
   });
 
+  it("propagates guest-visible uid and gid on a bind mount", () => {
+    const m = new MountBuilder("/work")
+      .bind("./project")
+      .statVirtualization("relaxed")
+      .uid(1000)
+      .gid(1001)
+      .build();
+    expect(m).toMatchObject({ kind: "bind", uid: 1000, gid: 1001 });
+  });
+
+  it("rejects partial guest ownership at build time", () => {
+    const builder = new MountBuilder("/data").bind("/host").uid(1000);
+    expect(() => builder.build()).toThrow(/must be specified together/);
+  });
+
+  it("rejects guest ownership with stat virtualization off", () => {
+    const builder = new MountBuilder("/data")
+      .bind("/host")
+      .uid(1000)
+      .gid(1000)
+      .statVirtualization("off");
+    expect(() => builder.build()).toThrow(/literal host metadata/);
+  });
+
   it("propagates stat-virt + host-perms on a named volume", () => {
     const m = new MountBuilder("/cache")
       .named("my-cache")

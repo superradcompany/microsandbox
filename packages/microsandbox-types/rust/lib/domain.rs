@@ -273,6 +273,22 @@ pub struct MountOptions {
 
     /// Whether device files on the mount are ignored.
     pub nodev: bool,
+
+    /// Guest-visible fallback uid for host inodes without virtual stat metadata.
+    ///
+    /// This never changes host ownership. It is valid only for virtiofs-backed
+    /// mounts, must be paired with [`gid`](Self::gid), and requires stat
+    /// virtualization to remain enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uid: Option<u32>,
+
+    /// Guest-visible fallback gid for host inodes without virtual stat metadata.
+    ///
+    /// This never changes host ownership. It is valid only for virtiofs-backed
+    /// mounts, must be paired with [`uid`](Self::uid), and requires stat
+    /// virtualization to remain enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gid: Option<u32>,
 }
 
 /// Storage kind for a named volume.

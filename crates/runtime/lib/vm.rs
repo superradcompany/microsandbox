@@ -18,7 +18,7 @@ use std::time::Duration;
 use microsandbox_db::DbWriteConnection;
 use microsandbox_db::entity::run as run_entity;
 #[cfg(unix)]
-use microsandbox_filesystem::{BindIdentityMapHandle, DynFileSystem};
+use microsandbox_filesystem::{BindIdentityMap, BindIdentityMapHandle, DynFileSystem};
 use microsandbox_filesystem::{
     HostPermissions, PassthroughConfig, PassthroughFs, StatVirtualization,
 };
@@ -1593,8 +1593,12 @@ fn build_vm(
         // without relying on the string-only mount spec field.
         let host_path = PathBuf::from(&parsed.host_path);
         #[cfg(unix)]
-        let mount_bind_identity_map =
-            bind_identity_map_for_mount(&mut bind_identity_map, parsed.stat_virtualization);
+        let mount_bind_identity_map = bind_identity_map_for_mount(
+            &mut bind_identity_map,
+            parsed.stat_virtualization,
+            parsed.uid,
+            parsed.gid,
+        );
         let cfg = PassthroughConfig {
             root_dir: host_path.clone(),
             inject_init: false,
@@ -1606,6 +1610,10 @@ fn build_vm(
             no_symlink_root: !parsed.follow_root_symlinks,
             #[cfg(unix)]
             bind_identity_map: mount_bind_identity_map,
+            #[cfg(windows)]
+            mount_uid: parsed.uid,
+            #[cfg(windows)]
+            mount_gid: parsed.gid,
             quota_bytes: parsed.quota_bytes,
             ..Default::default()
         };
@@ -2081,9 +2089,15 @@ fn release_reserved_metrics_slot(handoff: Option<&MetricsSlotHandoff>) {
 fn bind_identity_map_for_mount(
     registration: &mut BindIdentityMapRegistration,
     stat_virtualization: StatVirtualization,
+    uid: Option<u32>,
+    gid: Option<u32>,
 ) -> Option<BindIdentityMapHandle> {
     if matches!(stat_virtualization, StatVirtualization::Off) {
         return None;
+    }
+
+    if let (Some(uid), Some(gid)) = (uid, gid) {
+        return Some(Arc::new(OnceLock::from(BindIdentityMap::fixed(uid, gid))));
     }
 
     registration.mount_count += 1;
@@ -2412,13 +2426,16 @@ struct ParsedMountSpec {
     readonly: bool,
     follow_root_symlinks: bool,
     quota_bytes: Option<u64>,
+    uid: Option<u32>,
+    gid: Option<u32>,
 }
 
 /// Parse a `--mount` spec into [`ParsedMountSpec`].
 ///
 /// Wire grammar: `tag:host_path[:opts]`, where `opts` is a comma-separated
 /// option block of flags (`ro`, `rw`, `noexec`, `nosuid`, `nodev`,
-/// `follow-root-symlinks`) and keyed policies (`stat-virt=...`, `host-perms=...`).
+/// `follow-root-symlinks`) and keyed policies (`stat-virt=...`, `host-perms=...`,
+/// `uid=...`, `gid=...`).
 /// The `follow-root-symlinks` flag opts the mount out of the default no-follow
 /// root resolution; its absence keeps the protective default on.
 fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
@@ -2445,6 +2462,8 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
     let mut readonly = false;
     let mut follow_root_symlinks = false;
     let mut quota_bytes = None;
+    let mut uid = None;
+    let mut gid = None;
     let mut seen_stat_virt = false;
     let mut seen_host_perms = false;
     let mut seen_access = false;
@@ -2453,6 +2472,8 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
     let mut seen_nodev = false;
     let mut seen_follow_root = false;
     let mut seen_quota = false;
+    let mut seen_uid = false;
+    let mut seen_gid = false;
 
     if let Some(opts) = options {
         for opt in opts.split(',') {
@@ -2552,11 +2573,42 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
                             })?;
                             quota_bytes = Some(mib.saturating_mul(1024 * 1024));
                         }
+                        "uid" => {
+                            if seen_uid {
+                                return Err(
+                                    "mount option `uid` specified more than once".to_string()
+                                );
+                            }
+                            seen_uid = true;
+                            uid = Some(value.parse::<u32>().map_err(|_| {
+                                format!("invalid uid {value:?} (expected an unsigned integer)")
+                            })?);
+                        }
+                        "gid" => {
+                            if seen_gid {
+                                return Err(
+                                    "mount option `gid` specified more than once".to_string()
+                                );
+                            }
+                            seen_gid = true;
+                            gid = Some(value.parse::<u32>().map_err(|_| {
+                                format!("invalid gid {value:?} (expected an unsigned integer)")
+                            })?);
+                        }
                         other => return Err(format!("unknown mount option {other:?}")),
                     }
                 }
             }
         }
+    }
+
+    if uid.is_some() != gid.is_some() {
+        return Err("mount options `uid` and `gid` must be specified together".to_string());
+    }
+    if uid.is_some() && matches!(stat_virtualization, StatVirtualization::Off) {
+        return Err(
+            "mount options `uid` and `gid` cannot be combined with stat-virt=off".to_string(),
+        );
     }
 
     Ok(ParsedMountSpec {
@@ -2567,6 +2619,8 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
         readonly,
         follow_root_symlinks,
         quota_bytes,
+        uid,
+        gid,
     })
 }
 
@@ -2852,6 +2906,25 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_mount_spec_guest_ownership() {
+        let p = parse_mount_spec("foo:/host/data:stat-virt=relaxed,uid=1000,gid=1001").unwrap();
+        assert_eq!(p.uid, Some(1000));
+        assert_eq!(p.gid, Some(1001));
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_partial_guest_ownership() {
+        let err = parse_mount_spec("foo:/host/data:uid=1000").unwrap_err();
+        assert!(err.contains("must be specified together"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_guest_ownership_with_stat_virt_off() {
+        let err = parse_mount_spec("foo:/host/data:uid=1000,gid=1000,stat-virt=off").unwrap_err();
+        assert!(err.contains("stat-virt=off"), "got: {err}");
+    }
+
+    #[test]
     fn test_parse_mount_spec_rejects_duplicate_quota() {
         let err = parse_mount_spec("foo:/host/data:quota=1,quota=2").unwrap_err();
         assert!(
@@ -2946,12 +3019,25 @@ mod tests {
         };
 
         let first =
-            bind_identity_map_for_mount(&mut registration, StatVirtualization::Strict).unwrap();
+            bind_identity_map_for_mount(&mut registration, StatVirtualization::Strict, None, None)
+                .unwrap();
         let second =
-            bind_identity_map_for_mount(&mut registration, StatVirtualization::Relaxed).unwrap();
-        let off = bind_identity_map_for_mount(&mut registration, StatVirtualization::Off);
+            bind_identity_map_for_mount(&mut registration, StatVirtualization::Relaxed, None, None)
+                .unwrap();
+        let fixed = bind_identity_map_for_mount(
+            &mut registration,
+            StatVirtualization::Relaxed,
+            Some(1000),
+            Some(1001),
+        )
+        .unwrap();
+        let off =
+            bind_identity_map_for_mount(&mut registration, StatVirtualization::Off, None, None);
 
         assert!(Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&first, &fixed));
+        assert_eq!(fixed.get().unwrap().guest_uid, 1000);
+        assert_eq!(fixed.get().unwrap().guest_gid, 1001);
         assert!(off.is_none());
         assert_eq!(registration.mount_count, 2);
     }

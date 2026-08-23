@@ -753,7 +753,7 @@ Check whether a path exists within the volume.
 
 <p className="msb-backref">Returned by <a href="#volume-bind">Volume.bind()</a>, <a href="#volume-named">Volume.named()</a>, <a href="#volume-tmpfs">Volume.tmpfs()</a>, <a href="#volume-disk">Volume.disk()</a></p>
 
-Frozen dataclass representing a mount configuration. Build one with a [mount factory](#mount-factories) and pass it as a value in the sandbox `volumes` dict. `stat_virtualization` and `host_permissions` apply only to virtiofs-backed mounts (`BIND` and `NAMED`); setting either on a `TMPFS` or `DISK` mount raises `ValueError`.
+Frozen dataclass representing a mount configuration. Build one with a [mount factory](#mount-factories) and pass it as a value in the sandbox `volumes` dict. `stat_virtualization`, `host_permissions`, and paired `uid`/`gid` apply only to virtiofs-backed mounts (`BIND` and directory-backed `NAMED`). `uid`/`gid` change guest-visible fallback ownership only and never host ownership.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -773,6 +773,8 @@ Frozen dataclass representing a mount configuration. Build one with a [mount fac
 | fstype | `str \| None` | `None` | Inner filesystem type for disk mounts |
 | stat_virtualization | [`StatVirtualization`](#statvirtualization)` \| None` | `None` | Per-mount stat-virtualization policy (virtiofs-backed only) |
 | host_permissions | [`HostPermissions`](#hostpermissions)` \| None` | `None` | Per-mount host-permission policy (virtiofs-backed only) |
+| uid | `int \| None` | `None` | Guest-visible fallback uid; must be paired with `gid` and cannot be used with stat virtualization off |
+| gid | `int \| None` | `None` | Guest-visible fallback gid; must be paired with `uid` and cannot be used with stat virtualization off |
 
 ### MountKind
 

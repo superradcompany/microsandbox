@@ -169,6 +169,8 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 				QuotaMiB:           m.QuotaMiB,
 				StatVirtualization: string(m.StatVirtualization),
 				HostPermissions:    string(m.HostPermissions),
+				UID:                m.UID,
+				GID:                m.GID,
 			}
 		}
 	}

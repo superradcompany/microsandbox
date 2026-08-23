@@ -416,6 +416,10 @@ export declare class MountBuilder {
   nosuid(): this
   /** Ignore device files on the mount. */
   nodev(): this
+  /** Set the guest-visible fallback uid for host files without an override. */
+  uid(uid: number): this
+  /** Set the guest-visible fallback gid for host files without an override. */
+  gid(gid: number): this
   /** Tmpfs size cap in MiB (only valid with `.tmpfs()`). */
   size(mib: number): this
   /**
@@ -2474,6 +2478,10 @@ export interface VolumeMount {
   noexec: boolean
   nosuid: boolean
   nodev: boolean
+  /** Guest-visible fallback uid for virtiofs-backed mounts. */
+  uid?: number
+  /** Guest-visible fallback gid for virtiofs-backed mounts. */
+  gid?: number
   host?: string
   name?: string
   namedMode?: string

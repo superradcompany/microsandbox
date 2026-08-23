@@ -1183,6 +1183,10 @@ struct MountSpec {
     /// Per-mount host-permission policy ("private" | "mirror").
     /// Only valid for bind / named mounts.
     host_permissions: Option<String>,
+    /// Guest-visible fallback uid. Must be paired with `gid`.
+    uid: Option<u32>,
+    /// Guest-visible fallback gid. Must be paired with `uid`.
+    gid: Option<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -1903,6 +1907,8 @@ fn apply_volume(
     let nodev = m.nodev;
     let size_mib = m.size_mib;
     let quota_mib = m.quota_mib;
+    let uid = m.uid;
+    let gid = m.gid;
     let raw_named_mode = m.named_mode.clone();
     let raw_named_kind = m.named_kind.clone();
 
@@ -2010,6 +2016,12 @@ fn apply_volume(
         }
         if let Some(p) = host_perms {
             mb = mb.host_permissions(p);
+        }
+        if let Some(uid) = uid {
+            mb = mb.uid(uid);
+        }
+        if let Some(gid) = gid {
+            mb = mb.gid(gid);
         }
         mb
     }))
