@@ -1,14 +1,17 @@
-//! Windows system DNS resolution through `DnsQueryRaw`.
+//! Windows system DNS resolution through the Windows DNS Client.
 //!
 //! Host-default queries must follow the Windows DNS Client rather than flattening every adapter's
 //! configured servers into one list. The system client owns NRPT, VPN and split-DNS selection,
-//! encrypted DNS, resolver health, caching, and interface routing. `DnsQueryRaw` preserves that
-//! behavior while accepting and returning the wire-format packets used by the interceptor.
+//! encrypted DNS, resolver health, caching, and interface routing. New Windows builds use
+//! `DnsQueryRaw`; older builds fall back to `DnsQueryEx` through the compatibility module.
+
+mod compatibility;
 
 use std::ffi::c_void;
 use std::io::{self, Error, ErrorKind};
+use std::mem;
 use std::slice;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use tokio::sync::oneshot;
@@ -16,24 +19,56 @@ use windows_sys::Win32::Foundation::{DNS_REQUEST_PENDING, ERROR_SUCCESS};
 use windows_sys::Win32::NetworkManagement::Dns::{
     DNS_PROTOCOL_TCP, DNS_PROTOCOL_UDP, DNS_QUERY_RAW_CANCEL, DNS_QUERY_RAW_REQUEST,
     DNS_QUERY_RAW_REQUEST_VERSION1, DNS_QUERY_RAW_RESULT, DNS_QUERY_RAW_RESULTS_VERSION1,
-    DnsCancelQueryRaw, DnsQueryRaw, DnsQueryRawResultFree,
 };
+use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 
 use super::common::transport::Transport;
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+const DNSAPI_DLL: &[u16] = &[
+    b'd' as u16,
+    b'n' as u16,
+    b's' as u16,
+    b'a' as u16,
+    b'p' as u16,
+    b'i' as u16,
+    b'.' as u16,
+    b'd' as u16,
+    b'l' as u16,
+    b'l' as u16,
+    0,
+];
 
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
+type DnsQueryRawFn =
+    unsafe extern "system" fn(*const DNS_QUERY_RAW_REQUEST, *mut DNS_QUERY_RAW_CANCEL) -> i32;
+type DnsCancelQueryRawFn = unsafe extern "system" fn(*const DNS_QUERY_RAW_CANCEL) -> i32;
+type DnsQueryRawResultFreeFn = unsafe extern "system" fn(*const DNS_QUERY_RAW_RESULT);
+
+#[derive(Clone, Copy)]
+struct RawDnsApi {
+    query: DnsQueryRawFn,
+    cancel: DnsCancelQueryRawFn,
+    free_result: DnsQueryRawResultFreeFn,
+}
+
 /// Resolver for host-default DNS queries on Windows.
 pub(crate) struct WindowsSystemResolver {
     query_timeout: Duration,
+    raw_api: Option<RawDnsApi>,
 }
 
 /// Stable state shared by the waiting future and the Windows completion callback.
 struct QueryState {
     sender: Mutex<Option<oneshot::Sender<io::Result<Vec<u8>>>>>,
     cancel: Mutex<DNS_QUERY_RAW_CANCEL>,
+    api: RawDnsApi,
 }
 
 /// Cancels an in-flight Windows query when its future is timed out or dropped.
@@ -48,7 +83,10 @@ struct PendingQuery {
 
 impl WindowsSystemResolver {
     pub(crate) fn new(query_timeout: Duration) -> Self {
-        Self { query_timeout }
+        Self {
+            query_timeout,
+            raw_api: raw_dns_api(),
+        }
     }
 
     /// Resolve one guest wire-format query through the Windows DNS Client.
@@ -57,9 +95,13 @@ impl WindowsSystemResolver {
         raw_query: &[u8],
         transport: Transport,
     ) -> io::Result<Vec<u8>> {
+        if self.raw_api.is_none() {
+            return compatibility::query(raw_query, transport, self.query_timeout).await;
+        }
+
         // Launch synchronously so the pointer-bearing Windows request does not live across an
         // `.await`; only the cancellation handle and Send channel receiver enter the future state.
-        let (mut pending, receiver) = start_query(raw_query, transport)?;
+        let (mut pending, receiver) = start_query(self.raw_api.unwrap(), raw_query, transport)?;
         let result = tokio::time::timeout(self.query_timeout, receiver)
             .await
             .map_err(|_| Error::new(ErrorKind::TimedOut, "Windows system DNS query timed out"))?
@@ -81,7 +123,7 @@ impl Drop for PendingQuery {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             unsafe {
-                let _ = DnsCancelQueryRaw(&*cancel);
+                let _ = (self.state.api.cancel)(&*cancel);
             }
         }
     }
@@ -91,8 +133,41 @@ impl Drop for PendingQuery {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+fn raw_dns_api() -> Option<RawDnsApi> {
+    static API: OnceLock<Option<RawDnsApi>> = OnceLock::new();
+    *API.get_or_init(load_raw_dns_api)
+}
+
+fn load_raw_dns_api() -> Option<RawDnsApi> {
+    // DnsQueryEx statically loads dnsapi.dll. Runtime lookup keeps newer raw-query symbols out of
+    // the PE import table, allowing the same executable to start when those exports are absent.
+    // SAFETY: DNSAPI_DLL is a static, NUL-terminated UTF-16 string.
+    let module = unsafe { GetModuleHandleW(DNSAPI_DLL.as_ptr()) };
+    if module.is_null() {
+        return None;
+    }
+
+    // SAFETY: each non-null export is cast to its documented windns.h function signature.
+    unsafe {
+        let query = GetProcAddress(module, c"DnsQueryRaw".as_ptr().cast())?;
+        let cancel = GetProcAddress(module, c"DnsCancelQueryRaw".as_ptr().cast())?;
+        let free_result = GetProcAddress(module, c"DnsQueryRawResultFree".as_ptr().cast())?;
+        Some(RawDnsApi {
+            query: mem::transmute::<unsafe extern "system" fn() -> isize, DnsQueryRawFn>(query),
+            cancel: mem::transmute::<unsafe extern "system" fn() -> isize, DnsCancelQueryRawFn>(
+                cancel,
+            ),
+            free_result: mem::transmute::<
+                unsafe extern "system" fn() -> isize,
+                DnsQueryRawResultFreeFn,
+            >(free_result),
+        })
+    }
+}
+
 /// Start one asynchronous Windows DNS query without carrying its raw-pointer request across await.
 fn start_query(
+    api: RawDnsApi,
     raw_query: &[u8],
     transport: Transport,
 ) -> io::Result<(PendingQuery, oneshot::Receiver<io::Result<Vec<u8>>>)> {
@@ -101,6 +176,7 @@ fn start_query(
     let state = Arc::new(QueryState {
         sender: Mutex::new(Some(sender)),
         cancel: Mutex::new(DNS_QUERY_RAW_CANCEL::default()),
+        api,
     });
     // This strong reference belongs to Windows until the completion callback reclaims it. It also
     // keeps the cancel handle alive after a timed-out future drops its own PendingQuery reference.
@@ -123,7 +199,7 @@ fn start_query(
             .cancel
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        unsafe { DnsQueryRaw(&request, &mut *cancel) }
+        unsafe { (api.query)(&request, &mut *cancel) }
     };
     if status != DNS_REQUEST_PENDING {
         // Windows did not accept the asynchronous request, so it will not invoke the callback.
@@ -152,7 +228,7 @@ unsafe extern "system" fn query_complete(
     let result = copy_query_result(query_results);
     if !query_results.is_null() {
         // SAFETY: the result belongs to DnsQueryRaw and must be released after copying its buffer.
-        unsafe { DnsQueryRawResultFree(query_results) };
+        unsafe { (state.api.free_result)(query_results) };
     }
     let sender = state
         .sender
