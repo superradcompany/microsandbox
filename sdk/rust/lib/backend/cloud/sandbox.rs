@@ -249,7 +249,7 @@ impl SandboxBackend for CloudBackend {
                 return Err(MicrosandboxError::unsupported(
                     Operation::SandboxFollowLogs,
                     UnsupportedReason::NotAvailable(
-                        "cloud log stream is not yet available".to_string(),
+                        "bounded cloud log follow filters are not yet available".to_string(),
                     ),
                 ));
             }
@@ -656,8 +656,8 @@ mod tests {
                 error,
                 MicrosandboxError::Unsupported {
                     op: Operation::SandboxFollowLogs,
-                    ..
-                }
+                    reason: UnsupportedReason::NotAvailable(ref reason),
+                } if reason == "bounded cloud log follow filters are not yet available"
             ));
         }
     }
