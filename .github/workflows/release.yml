@@ -1283,14 +1283,21 @@ jobs:
         run: npm publish --access public
 
   # ---------------------------------------------------------------------------
-  # Refresh sdk/node-ts/package-lock.json against the just-published platform
-  # packages, so main always has lockfile integrity hashes that satisfy
-  # `npm ci`. Opens a PR that the maintainer merges manually.
+  # Refresh the lockfiles that can only resolve against just-published
+  # packages: sdk/node-ts/package-lock.json against the npm platform packages
+  # (so `npm ci` keeps its integrity hashes) and the Ruby extension's
+  # Cargo.lock against the crates.io release of `microsandbox` (so the lock
+  # the source gem ships matches its exact pin and `--locked` builds pass).
+  # Neither can be refreshed at bump time, before the packages exist. Opens a
+  # PR that the maintainer merges manually. The two refreshes are
+  # independent: the job runs when either publish succeeded, and each
+  # registry's steps are guarded on its own publish, so one failed publish
+  # only drops that lockfile from the PR.
   # ---------------------------------------------------------------------------
   refresh-lockfile:
-    name: Refresh npm lockfile
-    needs: npm-publish
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    name: Refresh lockfiles
+    needs: [npm-publish, crates-publish]
+    if: ${{ !cancelled() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && (needs.npm-publish.result == 'success' || needs.crates-publish.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -1301,10 +1308,12 @@ jobs:
           ref: main
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: needs.npm-publish.result == 'success'
         with:
           node-version: 22
 
       - name: Wait for npm to index platform packages
+        if: needs.npm-publish.result == 'success'
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           node scripts/ci/wait-for-npm-packages.mjs "$VERSION" \
@@ -1314,19 +1323,44 @@ jobs:
             @superradcompany/microsandbox-win32-arm64-msvc \
             @superradcompany/microsandbox-win32-x64-msvc
 
-      - name: Regenerate lockfile
+      - name: Regenerate npm lockfile
+        if: needs.npm-publish.result == 'success'
         working-directory: sdk/node-ts
         run: npm install --package-lock-only --ignore-scripts
 
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        if: needs.crates-publish.result == 'success'
+
+      # crates-publish waits for the sparse index to list the release, so the
+      # exact pin resolves here without a retry loop. No [patch.crates-io] is
+      # active on a plain checkout: this is a registry resolution, the same
+      # one `rake version_check` asserts against the pin.
+      - name: Regenerate Ruby extension lockfile
+        if: needs.crates-publish.result == 'success'
+        working-directory: sdk/ruby/ext/microsandbox
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          cargo update -p microsandbox --precise "$VERSION"
+
+      # Unguarded on purpose: only the lockfiles that actually changed are
+      # committed, and per the pinned action's README, "if there are no
+      # changes (i.e. no diff exists with the checked-out base branch), no
+      # pull request will be created and the action exits silently".
       - uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
-          title: "chore: refresh npm lockfile after ${{ github.ref_name }}"
+          title: "chore: refresh lockfiles after ${{ github.ref_name }}"
           body: |
-            Regenerates `sdk/node-ts/package-lock.json` against the platform packages published for ${{ github.ref_name }}, so `npm ci` keeps working on main.
+            Lockfiles that can only be resolved against the packages published for ${{ github.ref_name }}. Each one is included only if its publish job succeeded and the file changed.
+
+            If the npm publish succeeded, this PR regenerates `sdk/node-ts/package-lock.json` against the platform packages published for ${{ github.ref_name }}, so `npm ci` keeps working on main. If it failed, that lockfile is not in this PR and still needs `npm install --package-lock-only --ignore-scripts` in `sdk/node-ts` by hand.
+
+            If the crates.io publish succeeded, this PR regenerates `sdk/ruby/ext/microsandbox/Cargo.lock` against the `microsandbox` crate published for ${{ github.ref_name }}, so the lock the source gem ships matches its exact pin and `rake version_check` passes on main. If it failed, that lockfile is not in this PR and still needs `cargo update -p microsandbox --precise <version>` in `sdk/ruby/ext/microsandbox` by hand.
           branch: refresh-lockfile-${{ github.ref_name }}
-          commit-message: "chore: refresh npm lockfile after ${{ github.ref_name }}"
+          commit-message: "chore: refresh lockfiles after ${{ github.ref_name }}"
           base: main
-          add-paths: sdk/node-ts/package-lock.json
+          add-paths: |
+            sdk/node-ts/package-lock.json
+            sdk/ruby/ext/microsandbox/Cargo.lock
           delete-branch: true
 
   # ---------------------------------------------------------------------------
