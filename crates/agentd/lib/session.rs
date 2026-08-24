@@ -620,9 +620,9 @@ impl ExecSession {
                 if libc::setsid() < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
-                apply_exec_security_profile(security_profile).map_err(agentd_to_io_error)?;
+                apply_exec_security_profile(security_profile).map_err(agentd_to_pre_exec_error)?;
                 if let Some(ref user) = resolved_user {
-                    apply_resolved_user(user).map_err(agentd_to_io_error)?;
+                    apply_resolved_user(user).map_err(agentd_to_pre_exec_error)?;
                 }
                 for (resource, limit) in &parsed_rlimits {
                     if libc::setrlimit(*resource as _, limit) != 0 {
@@ -996,6 +996,9 @@ fn lookup_passwd_by_uid(uid: libc::uid_t) -> AgentdResult<ResolvedUserLookup> {
         )
     };
     if rc != 0 {
+        if passwd_lookup_errno_means_missing(rc) {
+            return Ok(ResolvedUserLookup::Numeric(uid));
+        }
         return Err(AgentdError::ExecSession(format!(
             "failed to resolve guest uid {uid}: {}",
             std::io::Error::from_raw_os_error(rc)
@@ -1054,6 +1057,10 @@ fn lookup_buffer_len() -> usize {
     if size > 0 { size as usize } else { 16 * 1024 }
 }
 
+fn passwd_lookup_errno_means_missing(errno: libc::c_int) -> bool {
+    matches!(errno, libc::ENOENT | libc::ESRCH)
+}
+
 fn apply_resolved_user(user: &ResolvedUser) -> AgentdResult<()> {
     if let Some(ref name) = user.initgroups_user {
         if unsafe { libc::initgroups(name.as_ptr(), user.gid) } != 0 {
@@ -1097,8 +1104,12 @@ fn env_contains_key(env: &[String], key: &str) -> bool {
     })
 }
 
-fn agentd_to_io_error(err: AgentdError) -> std::io::Error {
-    std::io::Error::other(err.to_string())
+fn agentd_to_pre_exec_error(err: AgentdError) -> std::io::Error {
+    match err {
+        AgentdError::Io(err) => err,
+        AgentdError::Nix(err) => std::io::Error::from_raw_os_error(err as i32),
+        _ => std::io::Error::from_raw_os_error(libc::EINVAL),
+    }
 }
 
 /// Writes data to a raw fd using a blocking task, handling short writes.

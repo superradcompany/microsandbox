@@ -33,6 +33,7 @@ microsandbox-utils.workspace = true
 microsandbox-vsock.workspace = true
 msb_krun = { workspace = true, features = ["blk"] }
 nix = { workspace = true, features = ["process", "signal"] }
+oci-spec.workspace = true
 rand.workspace = true
 rustls = { workspace = true }
 sea-orm.workspace = true
