@@ -49,6 +49,7 @@ const FALLBACK_METADATA_DIR_NAME: &str = ".msb_override_stat";
 const METADATA_ROOT_NAME: &str = "__root";
 const METADATA_STAT_NAME: &str = "stat.bin";
 const ADS_STREAM_NAME: &str = "msb.override_stat";
+const ADS_PROBE_STREAM_NAME: &str = "msb._probe";
 
 const DT_UNKNOWN: u32 = 0;
 const DT_FIFO: u32 = 1;
@@ -574,9 +575,21 @@ fn write_override_sidecar_file(path: &Path, override_stat: OverrideStat) -> io::
 }
 
 fn ads_override_path(path: &Path) -> PathBuf {
+    ads_stream_path(path, ADS_STREAM_NAME)
+}
+
+fn ads_probe_path(path: &Path) -> PathBuf {
+    ads_stream_path(path, ADS_PROBE_STREAM_NAME)
+}
+
+/// Build an alternate-data-stream path without changing the base path.
+///
+/// Capability probes must use their own stream name: writing to the real
+/// override stream would destroy persisted metadata for the mount root.
+fn ads_stream_path(path: &Path, stream_name: &str) -> PathBuf {
     let mut encoded: Vec<u16> = path.as_os_str().encode_wide().collect();
     encoded.push(b':' as u16);
-    encoded.extend(ADS_STREAM_NAME.encode_utf16());
+    encoded.extend(stream_name.encode_utf16());
     PathBuf::from(OsString::from_wide(&encoded))
 }
 

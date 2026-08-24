@@ -479,6 +479,84 @@ fn strict_uses_ads_and_does_not_create_sidecar() {
 }
 
 #[test]
+fn readonly_probes_do_not_create_metadata() {
+    let temp = TempDir::new();
+    let override_path = ads_override_path(&temp.path);
+    let probe_path = ads_probe_path(&temp.path);
+
+    for policy in [StatVirtualization::Strict, StatVirtualization::Relaxed] {
+        let fs = PassthroughFs::new(PassthroughConfig {
+            root_dir: temp.path.clone(),
+            inject_init: false,
+            readonly: true,
+            stat_virtualization: policy,
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_ads_store(&fs);
+    }
+
+    for path in [override_path, probe_path] {
+        assert_eq!(
+            std::fs::metadata(path).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+    }
+    assert!(!temp.path.join(FALLBACK_METADATA_DIR_NAME).exists());
+}
+
+#[test]
+fn readonly_relaxed_probe_preserves_mount_root_override() {
+    let temp = TempDir::new();
+    write_override_stream(
+        &ads_override_path(&temp.path),
+        OverrideStat::new(1234, 2345, S_IFDIR | 0o1755, 0),
+    )
+    .unwrap();
+
+    let fs = PassthroughFs::new(PassthroughConfig {
+        root_dir: temp.path.clone(),
+        inject_init: false,
+        readonly: true,
+        stat_virtualization: StatVirtualization::Relaxed,
+        ..Default::default()
+    })
+    .unwrap();
+
+    assert_ads_store(&fs);
+    assert_override(&temp.path, 1234, 2345, S_IFDIR | 0o1755, 0);
+    assert_eq!(
+        std::fs::metadata(ads_probe_path(&temp.path))
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::NotFound
+    );
+    assert!(!temp.path.join(FALLBACK_METADATA_DIR_NAME).exists());
+}
+
+#[test]
+fn writable_probe_preserves_mount_root_override() {
+    let temp = TempDir::new();
+    write_override_stream(
+        &ads_override_path(&temp.path),
+        OverrideStat::new(1234, 2345, S_IFDIR | 0o1755, 0),
+    )
+    .unwrap();
+
+    let fs = fs_for(&temp.path);
+    assert_ads_store(&fs);
+
+    assert_override(&temp.path, 1234, 2345, S_IFDIR | 0o1755, 0);
+    assert_eq!(
+        std::fs::metadata(ads_probe_path(&temp.path))
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::NotFound
+    );
+}
+
+#[test]
 fn ads_stat_virtualization_persists_for_directories() {
     let temp = TempDir::new();
     {
@@ -1090,4 +1168,83 @@ fn no_symlink_root_allows_deep_real_path() {
     std::fs::create_dir_all(&deep).unwrap();
 
     build_no_symlink(deep).expect("deep real path should mount");
+}
+
+#[test]
+fn no_override_falls_back_to_configured_default_owner() {
+    let temp = TempDir::new();
+    std::fs::write(temp.path.join("hostfile.txt"), b"host-created").unwrap();
+
+    // A host-created file has no override stored; with default_owner set it is
+    // presented as that owner instead of the raw 0:0.
+    let fs = PassthroughFs::new(PassthroughConfig {
+        root_dir: temp.path.clone(),
+        inject_init: false,
+        default_owner: Some((1000, 1000)),
+        ..Default::default()
+    })
+    .unwrap();
+    fs.init(FsOptions::empty()).unwrap();
+
+    let entry = fs.lookup(context(), ROOT_INODE, c"hostfile.txt").unwrap();
+    assert_eq!(entry.attr.st_uid, 1000);
+    assert_eq!(entry.attr.st_gid, 1000);
+
+    // Without default_owner the same host file falls back to 0:0.
+    let plain = fs_for(&temp.path);
+    let entry = plain
+        .lookup(context(), ROOT_INODE, c"hostfile.txt")
+        .unwrap();
+    assert_eq!(entry.attr.st_uid, 0);
+    assert_eq!(entry.attr.st_gid, 0);
+}
+
+#[test]
+fn default_owner_rejected_when_stat_virtualization_is_off() {
+    let cfg = PassthroughConfig {
+        root_dir: PathBuf::from(r"Z:\this-path-must-not-be-resolved"),
+        stat_virtualization: StatVirtualization::Off,
+        default_owner: Some((1000, 1000)),
+        ..Default::default()
+    };
+
+    // EINVAL proves validation happens before root resolution, which would
+    // otherwise return a host path-not-found error for this sentinel path.
+    let err = match PassthroughFs::new(cfg) {
+        Ok(_) => panic!("default owner with stat virtualization off must fail"),
+        Err(err) => err,
+    };
+    assert_eq!(err.raw_os_error(), Some(LINUX_EINVAL));
+}
+
+#[test]
+fn setattr_preserves_default_owner_for_host_created_file() {
+    let temp = TempDir::new();
+    std::fs::write(temp.path.join("hostfile.txt"), b"host-created").unwrap();
+
+    let fs = PassthroughFs::new(PassthroughConfig {
+        root_dir: temp.path.clone(),
+        inject_init: false,
+        default_owner: Some((1000, 1000)),
+        ..Default::default()
+    })
+    .unwrap();
+    fs.init(FsOptions::empty()).unwrap();
+
+    let entry = fs.lookup(context(), ROOT_INODE, c"hostfile.txt").unwrap();
+
+    // The guest changes only the mode (chmod, no chown). The mutation baseline
+    // must seed the configured default owner rather than 0:0, so the file does
+    // not silently become root-owned after the metadata write.
+    let attr = stat64 {
+        st_mode: S_IFREG | 0o640,
+        ..Default::default()
+    };
+    fs.setattr(context(), entry.inode, attr, None, SetattrValid::MODE)
+        .unwrap();
+
+    let (st, _) = fs.getattr(context(), entry.inode, None).unwrap();
+    assert_eq!(st.st_uid, 1000);
+    assert_eq!(st.st_gid, 1000);
+    assert_eq!(st.st_mode & 0o7777, 0o640);
 }
