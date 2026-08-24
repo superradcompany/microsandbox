@@ -1200,6 +1200,24 @@ fn no_override_falls_back_to_configured_default_owner() {
 }
 
 #[test]
+fn default_owner_rejected_when_stat_virtualization_is_off() {
+    let cfg = PassthroughConfig {
+        root_dir: PathBuf::from(r"Z:\this-path-must-not-be-resolved"),
+        stat_virtualization: StatVirtualization::Off,
+        default_owner: Some((1000, 1000)),
+        ..Default::default()
+    };
+
+    // EINVAL proves validation happens before root resolution, which would
+    // otherwise return a host path-not-found error for this sentinel path.
+    let err = match PassthroughFs::new(cfg) {
+        Ok(_) => panic!("default owner with stat virtualization off must fail"),
+        Err(err) => err,
+    };
+    assert_eq!(err.raw_os_error(), Some(LINUX_EINVAL));
+}
+
+#[test]
 fn setattr_preserves_default_owner_for_host_created_file() {
     let temp = TempDir::new();
     std::fs::write(temp.path.join("hostfile.txt"), b"host-created").unwrap();

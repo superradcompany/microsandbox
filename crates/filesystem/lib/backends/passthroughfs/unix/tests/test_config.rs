@@ -1,5 +1,25 @@
 use super::*;
-use crate::backends::passthroughfs::{HostPermissions, StatVirtualization};
+use crate::backends::passthroughfs::{BindIdentityMap, HostPermissions, StatVirtualization};
+
+#[test]
+fn test_identity_map_rejected_when_stat_virtualization_is_off() {
+    let tmp = tempfile::tempdir().unwrap();
+    let handle = std::sync::Arc::new(std::sync::OnceLock::from(BindIdentityMap::fixed(
+        1000, 1000,
+    )));
+    let err = match PassthroughFs::builder()
+        .root_dir(tmp.path())
+        .stat_virtualization(StatVirtualization::Off)
+        .bind_identity_map(handle)
+        .build()
+    {
+        Ok(_) => panic!("identity map with stat virtualization off must fail"),
+        Err(err) => err,
+    };
+
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(err.to_string().contains("require stat virtualization"));
+}
 
 #[test]
 fn test_strict_succeeds_on_xattr_capable_fs() {

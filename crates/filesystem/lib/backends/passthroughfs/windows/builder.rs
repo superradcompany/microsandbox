@@ -113,6 +113,14 @@ impl PassthroughConfig {
 impl PassthroughFs {
     /// Create a Windows passthrough filesystem rooted at `cfg.root_dir`.
     pub fn new(cfg: PassthroughConfig) -> io::Result<Self> {
+        // Reject contradictory metadata policy before resolving or probing the
+        // host root. Direct backend callers must receive the same guarantee as
+        // the SDK and runtime boundaries.
+        if cfg.default_owner.is_some() && matches!(cfg.stat_virtualization, StatVirtualization::Off)
+        {
+            return Err(linux_error(LINUX_EINVAL));
+        }
+
         let root = if cfg.no_symlink_root {
             // Resolve without following any reparse point; nothing in the path
             // is trusted, so the escaping-symlink-root vector is closed.

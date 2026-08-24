@@ -1324,6 +1324,16 @@ pub(crate) async fn ensure_named_volumes(
         return Err(err);
     }
 
+    // Resolve every named mount while the volume locks are still held and
+    // before the caller inserts the sandbox row. Existing disk-backed volumes
+    // are only distinguishable through the catalog, so this is the earliest
+    // point where virtiofs-only ownership can be rejected without leaving
+    // durable sandbox state behind.
+    if let Err(err) = resolve_named_volumes(local, config).await {
+        rollback_created_named_volume_records(local, &created).await;
+        return Err(err);
+    }
+
     Ok(EnsuredNamedVolumes {
         created,
         _locks: locks,
@@ -1475,6 +1485,7 @@ async fn resolve_named_volumes(
     for mount in &config.spec.mounts {
         let VolumeMount::Named {
             name,
+            options,
             stat_virtualization,
             host_permissions,
             ..
@@ -1485,7 +1496,12 @@ async fn resolve_named_volumes(
 
         if let Some(volume) = resolved.get(name) {
             if volume.kind == VolumeKind::Disk {
-                validate_named_disk_mount_options(name, *stat_virtualization, *host_permissions)?;
+                validate_named_disk_mount_options(
+                    name,
+                    *stat_virtualization,
+                    *host_permissions,
+                    options,
+                )?;
             }
             continue;
         }
@@ -1508,7 +1524,12 @@ async fn resolve_named_volumes(
                 quota_mib: model.quota_mib.map(|value| value.max(0) as u32),
             },
             VolumeKind::Disk => {
-                validate_named_disk_mount_options(name, *stat_virtualization, *host_permissions)?;
+                validate_named_disk_mount_options(
+                    name,
+                    *stat_virtualization,
+                    *host_permissions,
+                    options,
+                )?;
                 let format = model
                     .disk_format
                     .as_deref()
@@ -4534,6 +4555,20 @@ mod tests {
                 && pair[1] == format!("{tag}:{}:raw", volume.path.display()))
         );
         assert!(rendered.contains(&format!("MSB_DISK_MOUNTS={tag}:/data:fstype=ext4")));
+
+        let owned_config = SandboxBuilder::new("owned-test")
+            .image("/tmp/rootfs")
+            .volume("/data", |m| m.named("mydata").owner(1000, 1000))
+            .build()
+            .await
+            .unwrap();
+        let err = super::resolve_named_volumes(&local, &owned_config)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("directory named volumes"),
+            "got: {err}"
+        );
     }
 
     #[tokio::test]

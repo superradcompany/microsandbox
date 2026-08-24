@@ -2111,27 +2111,19 @@ fn bind_identity_map_for_mount(
         return None;
     }
 
+    // Explicit ownership is per mount. It must not initialize the shared
+    // default-user handle because doing so would make mount order determine the
+    // ownership of every other stat-virtualized mount in the VM.
+    if let Some((guest_uid, guest_gid)) = override_owner {
+        return Some(Arc::new(OnceLock::from(BindIdentityMap::fixed(
+            guest_uid, guest_gid,
+        ))));
+    }
+
     registration.mount_count += 1;
     let handle = registration
         .handle
         .get_or_insert_with(|| Arc::new(OnceLock::new()));
-
-    // When the mount pins an explicit guest owner, install the map now (host
-    // side): the host owner uid is the process uid, so nothing has to wait for
-    // the guest to report its default user.
-    //
-    // LIMITATION (Unix only): the map handle is a single `OnceLock` shared by
-    // every stat-virtualized mount in this VM (see `BindIdentityMapRegistration`),
-    // so `set` is first-wins. If two mounts request DIFFERENT owners, only the
-    // first-registered one takes effect and the others are silently dropped;
-    // mounts that pin the SAME owner (the common case) are unaffected. Windows is
-    // not subject to this -- each mount carries its own `default_owner` on its
-    // `PassthroughConfig` and is honored per-mount. Lifting this would mean a
-    // per-mount map handle instead of the shared registration handle.
-    if let Some((guest_uid, guest_gid)) = override_owner {
-        let host_owner_uid = unsafe { libc::getuid() as u32 };
-        let _ = handle.set(BindIdentityMap::new(host_owner_uid, guest_uid, guest_gid));
-    }
 
     Some(Arc::clone(handle))
 }
@@ -2644,6 +2636,11 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
     if override_uid.is_some() != override_gid.is_some() {
         return Err("mount options `uid` and `gid` must be specified together".to_string());
     }
+    if override_uid.is_some() && matches!(stat_virtualization, StatVirtualization::Off) {
+        return Err(
+            "mount options `uid` and `gid` cannot be combined with stat-virt=off".to_string(),
+        );
+    }
 
     Ok(ParsedMountSpec {
         tag: tag.to_string(),
@@ -2905,6 +2902,15 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_mount_spec_uid_gid_reject_stat_virt_off() {
+        let err = parse_mount_spec("home:/host/home:uid=1000,gid=1000,stat-virt=off").unwrap_err();
+        assert!(
+            err.contains("cannot be combined with stat-virt=off"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn test_parse_mount_spec_rejects_invalid_uid() {
         assert!(parse_mount_spec("home:/host/home:uid=abc,gid=1000").is_err());
     }
@@ -3052,7 +3058,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn test_bind_identity_map_registration_shares_handle_for_virtualized_mounts() {
+    fn test_bind_identity_map_registration_separates_explicit_owners() {
         let mut registration = BindIdentityMapRegistration {
             handle: None,
             mount_count: 0,
@@ -3064,9 +3070,19 @@ mod tests {
         let second =
             bind_identity_map_for_mount(&mut registration, StatVirtualization::Relaxed, None)
                 .unwrap();
+        let fixed = bind_identity_map_for_mount(
+            &mut registration,
+            StatVirtualization::Relaxed,
+            Some((1000, 1001)),
+        )
+        .unwrap();
         let off = bind_identity_map_for_mount(&mut registration, StatVirtualization::Off, None);
 
         assert!(Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&first, &fixed));
+        let fixed = fixed.get().unwrap();
+        assert_eq!((fixed.guest_uid, fixed.guest_gid), (1000, 1001));
+        assert_eq!((fixed.overflow_uid, fixed.overflow_gid), (1000, 1001));
         assert!(off.is_none());
         assert_eq!(registration.mount_count, 2);
     }
