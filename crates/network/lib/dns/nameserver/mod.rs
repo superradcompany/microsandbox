@@ -10,15 +10,12 @@
 //!    `SystemConfiguration` dynamic store (`configd`'s view), falling
 //!    back to `/etc/resolv.conf` only if the store is unavailable or
 //!    empty; VPN + split-DNS setups leave the file stale. On Linux
-//!    `/etc/resolv.conf` is authoritative. On Windows this is the IP
-//!    Helper adapter DNS server list.
+//!    `/etc/resolv.conf` is authoritative. Windows host-default queries
+//!    use the system DNS Client directly instead of discovering servers.
 
 pub mod parse;
 #[cfg(target_os = "macos")]
 pub(crate) mod scdynamicstore;
-#[cfg(windows)]
-pub(crate) mod windows;
-
 pub use parse::{Nameserver, ParseNameserverError};
 
 #[cfg(not(windows))]
@@ -77,21 +74,13 @@ pub(super) async fn resolve_nameservers(
 ///
 /// On Linux the file is authoritative.
 ///
-/// On Windows the IP Helper API is authoritative.
+#[cfg(not(windows))]
 pub(super) async fn read_host_dns_servers() -> std::io::Result<Vec<SocketAddr>> {
-    #[cfg(windows)]
-    {
-        self::windows::read_dns_servers()
+    #[cfg(target_os = "macos")]
+    if let Some(servers) = try_read_scdynamicstore() {
+        return Ok(servers);
     }
-
-    #[cfg(not(windows))]
-    {
-        #[cfg(target_os = "macos")]
-        if let Some(servers) = try_read_scdynamicstore() {
-            return Ok(servers);
-        }
-        read_resolv_conf(Path::new(RESOLV_CONF_PATH)).await
-    }
+    read_resolv_conf(Path::new(RESOLV_CONF_PATH)).await
 }
 
 /// Try to read nameservers from the macOS SystemConfiguration dynamic

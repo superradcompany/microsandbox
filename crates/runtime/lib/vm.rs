@@ -1621,12 +1621,25 @@ fn build_vm(
             ..Default::default()
         };
         let backend = PassthroughFs::new(cfg).map_err(|e| {
-            // Name the folder on a permission error, usually an OS access restriction.
+            // Name the folder on a permission error. The underlying error
+            // distinguishes path access from a strict metadata probe failure.
             if e.kind() == std::io::ErrorKind::PermissionDenied {
+                #[cfg(target_os = "macos")]
+                let platform_hint =
+                    " On macOS, grant access in System Settings > Privacy & Security.";
+                #[cfg(not(target_os = "macos"))]
+                let platform_hint = "";
+                let policy_hint = if matches!(
+                    parsed.stat_virtualization,
+                    StatVirtualization::Strict
+                ) {
+                    " For a foreign-owned path, use stat-virt=relaxed if full metadata virtualization is not required."
+                } else {
+                    ""
+                };
                 RuntimeError::Custom(format!(
-                    "mount {tag}: permission denied reading host folder {} ({e}). \
-                     On macOS, grant access in System Settings > Privacy & Security.",
-                    host_path.display()
+                    "mount {tag}: permission denied accessing host folder {} ({e}).{platform_hint}{policy_hint}",
+                    host_path.display(),
                 ))
             } else {
                 RuntimeError::Custom(format!("mount {tag}: {e}"))

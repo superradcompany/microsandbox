@@ -58,7 +58,6 @@ use crate::{
 pub struct LocalBackend {
     config: Arc<LocalConfig>,
     db: OnceCell<DbPools>,
-    deployment_profile: Option<DeploymentProfile>,
     selection_source: BackendSelectionSource,
     profile: Option<String>,
 }
@@ -130,11 +129,9 @@ impl LocalBackend {
         profile: Option<String>,
     ) -> Self {
         let config = load_persisted_config_or_default().unwrap_or_default();
-        let deployment_profile = config.deployment_profile;
         Self {
             config: Arc::new(config),
             db: OnceCell::new(),
-            deployment_profile,
             selection_source,
             profile,
         }
@@ -232,7 +229,7 @@ impl LocalBackend {
     /// the backend means an embedding host can enforce its isolation model even
     /// when the incoming sandbox specification requests a weaker profile.
     pub(crate) fn apply_deployment_profile(&self, config: &mut SandboxConfig) {
-        let Some(profile) = self.deployment_profile else {
+        let Some(profile) = self.config.deployment_profile else {
             return;
         };
 
@@ -417,15 +414,28 @@ impl LocalBackendBuilder {
     /// This retains the programmatic overrides from the builder while avoiding
     /// filesystem or migration work during construction. It is useful for
     /// embedding runtimes that must finish a protocol handshake before touching
-    /// sandbox state.
+    /// sandbox state. Persisted-config read or parse errors fall back to hard-coded
+    /// defaults; use [`try_build_lazy`](Self::try_build_lazy) to propagate them.
     pub fn build_lazy(self) -> LocalBackend {
         let persisted = load_persisted_config_or_default().unwrap_or_default();
+        self.build_lazy_from(persisted)
+    }
+
+    /// Build a lazy `LocalBackend`, returning persisted-config read or parse errors.
+    ///
+    /// Unlike [`build_lazy`](Self::build_lazy), this constructor does not fall
+    /// back to hard-coded defaults when the configured file is unreadable or
+    /// invalid. The database still initializes only on first use.
+    pub fn try_build_lazy(self) -> MicrosandboxResult<LocalBackend> {
+        Ok(self.build_lazy_from(load_persisted_config_or_default()?))
+    }
+
+    /// Finish lazy construction from an already resolved persisted config.
+    fn build_lazy_from(self, persisted: LocalConfig) -> LocalBackend {
         let config = self.merge_into(persisted);
-        let deployment_profile = config.deployment_profile;
         LocalBackend {
             config: Arc::new(config),
             db: OnceCell::new(),
-            deployment_profile,
             selection_source: BackendSelectionSource::Programmatic,
             profile: None,
         }
@@ -815,9 +825,11 @@ mod tests {
     #[test]
     fn operator_deployment_profile_overrides_sandbox_request() {
         let backend = LocalBackend {
-            config: Arc::new(LocalConfig::default()),
+            config: Arc::new(LocalConfig {
+                deployment_profile: Some(DeploymentProfile::MultiTenant),
+                ..Default::default()
+            }),
             db: OnceCell::new(),
-            deployment_profile: Some(DeploymentProfile::MultiTenant),
             selection_source: BackendSelectionSource::Programmatic,
             profile: None,
         };
@@ -838,7 +850,6 @@ mod tests {
         let backend = LocalBackend {
             config: Arc::new(LocalConfig::default()),
             db: OnceCell::new(),
-            deployment_profile: None,
             selection_source: BackendSelectionSource::Programmatic,
             profile: None,
         };
@@ -1239,6 +1250,31 @@ mod tests {
             "file must NOT appear under backend A's volumes_dir; \
              ambient() leak regressed"
         );
+    }
+
+    #[test]
+    fn try_build_lazy_rejects_invalid_persisted_config() {
+        let _env_guard = crate::test_support::lock_env();
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.json");
+        std::fs::write(&config_path, "not json").unwrap();
+        let previous = std::env::var_os("MSB_CONFIG_PATH");
+
+        // SAFETY: every environment-mutating SDK unit test holds the shared lock.
+        unsafe { std::env::set_var("MSB_CONFIG_PATH", &config_path) };
+        let result = LocalBackend::builder().try_build_lazy();
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("MSB_CONFIG_PATH", value),
+                None => std::env::remove_var("MSB_CONFIG_PATH"),
+            }
+        }
+
+        let error = match result {
+            Ok(_) => panic!("invalid persisted config must fail lazy construction"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, MicrosandboxError::InvalidConfig(_)));
     }
 
     /// `LocalBackendBuilder::build()` overlays builder overrides on top of

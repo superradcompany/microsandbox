@@ -15,8 +15,8 @@ use super::format::{
     EXT4_FEATURE_RO_COMPAT_LARGE_FILE, EXT4_FEATURE_RO_COMPAT_METADATA_CSUM,
     EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER, EXT4_FIRST_INO, EXT4_INODE_SIZE, EXT4_INODES_PER_GROUP,
     EXT4_JOURNAL_INO, EXT4_LOG_BLOCK_SIZE, EXT4_MIN_EXTRA_ISIZE, EXT4_ROOT_INO,
-    EXT4_SB_OVERHEAD_BLOCKS_OFFSET, EXT4_SUPER_MAGIC, JBD2_MAGIC, JBD2_SUPERBLOCK_V2, S_IFBLK,
-    S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFREG, S_IFSOCK,
+    EXT4_SB_ERROR_COUNT_OFFSET, EXT4_SB_OVERHEAD_BLOCKS_OFFSET, EXT4_SUPER_MAGIC, JBD2_MAGIC,
+    JBD2_SUPERBLOCK_V2, S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFREG, S_IFSOCK,
 };
 use super::layout::{
     GroupDescStats, GroupGeometry, MAX_BLOCKS, RESERVED_GDT_BLOCKS, bitmap_checksum,
@@ -148,8 +148,10 @@ struct Layout {
     inode_table_blocks: u32,
     /// First data block after inode table (root dir block).
     first_data_block: u64,
-    /// Double-indirect block owned by the reserved-GDT inode.
-    resize_inode_block: u64,
+    /// Double-indirect block owned by the reserved-GDT inode. Legacy test
+    /// images intentionally omit this block to reproduce the pre-0.6.9
+    /// formatter layout.
+    resize_inode_block: Option<u64>,
     /// First block of the journal region.
     journal_start_block: u64,
     /// Total journal blocks.
@@ -318,7 +320,13 @@ impl Layout {
         root_dir_blocks: u32,
         reserved_gdt_blocks: u32,
     ) -> Result<Self, Ext4Error> {
-        Self::compute_with_root_blocks_and_uuid(opts, root_dir_blocks, reserved_gdt_blocks, None)
+        Self::compute_with_root_blocks_and_uuid(
+            opts,
+            root_dir_blocks,
+            reserved_gdt_blocks,
+            None,
+            true,
+        )
     }
 
     fn compute_with_root_blocks_and_uuid(
@@ -326,6 +334,7 @@ impl Layout {
         root_dir_blocks: u32,
         reserved_gdt_blocks: u32,
         uuid: Option<[u8; 16]>,
+        with_resize_inode: bool,
     ) -> Result<Self, Ext4Error> {
         let block_size = EXT4_BLOCK_SIZE as u64;
         if !opts.size_bytes.is_multiple_of(block_size) {
@@ -376,8 +385,9 @@ impl Layout {
         let block_bitmap_block = overhead_blocks;
         let inode_bitmap_block = block_bitmap_block + 1;
         let inode_table_block = inode_bitmap_block + 1;
-        let resize_inode_block = inode_table_block + inode_table_blocks as u64;
-        let first_data_block = resize_inode_block + 1;
+        let inode_table_end = inode_table_block + inode_table_blocks as u64;
+        let resize_inode_block = with_resize_inode.then_some(inode_table_end);
+        let first_data_block = inode_table_end + u64::from(with_resize_inode);
         let journal_start_block = first_data_block + root_dir_blocks as u64;
 
         let min_blocks = journal_start_block + opts.journal_blocks as u64 + 1; // +1 slack
@@ -391,10 +401,12 @@ impl Layout {
 
         let csum_seed = crc32c::crc32c_raw(0xFFFF_FFFF, &uuid);
 
-        let feature_compat = EXT4_FEATURE_COMPAT_HAS_JOURNAL
+        let mut feature_compat = EXT4_FEATURE_COMPAT_HAS_JOURNAL
             | EXT4_FEATURE_COMPAT_EXT_ATTR
-            | EXT4_FEATURE_COMPAT_RESIZE_INODE
             | EXT4_FEATURE_COMPAT_DIR_INDEX;
+        if with_resize_inode {
+            feature_compat |= EXT4_FEATURE_COMPAT_RESIZE_INODE;
+        }
 
         let feature_incompat = EXT4_FEATURE_INCOMPAT_FILETYPE
             | EXT4_FEATURE_INCOMPAT_EXTENTS
@@ -494,7 +506,9 @@ impl Layout {
     fn group_used_blocks(&self, group: u32) -> u32 {
         let mut used = self.group_metadata_blocks(group);
         if group == 0 {
-            used += 2 + self.journal_blocks; // resize inode block + root dir + journal
+            // Root directory + journal, plus the reserved-GDT inode's pointer block in the
+            // modern layout. Pre-0.6.9 images did not allocate that final block.
+            used += 1 + self.journal_blocks + u32::from(self.resize_inode_block.is_some());
         }
         used.min(self.blocks_in_group(group))
     }
@@ -535,6 +549,19 @@ impl Layout {
             .sum()
     }
 
+    fn recorded_overhead_blocks(&self, total_free_blocks: u64) -> (usize, u64) {
+        if self.resize_inode_block.is_none() {
+            // The released pre-0.6.9 formatter wrote total used blocks at 0x194, before that
+            // offset was corrected to ext4's actual error counter and overhead moved to 0x248.
+            (
+                EXT4_SB_ERROR_COUNT_OFFSET,
+                self.num_blocks - total_free_blocks,
+            )
+        } else {
+            (EXT4_SB_OVERHEAD_BLOCKS_OFFSET, self.total_overhead_blocks())
+        }
+    }
+
     fn validate_group_metadata(&self) -> Result<(), Ext4Error> {
         for group in 0..self.num_groups {
             let blocks_in_group = self.blocks_in_group(group);
@@ -553,7 +580,9 @@ impl Layout {
 impl BitmapPlan {
     fn new(layout: &Layout, plans: &[NodePlan]) -> Self {
         let mut block_extents = Vec::new();
-        block_extents.push((layout.resize_inode_block, 1));
+        if let Some(block) = layout.resize_inode_block {
+            block_extents.push((block, 1));
+        }
         block_extents.push((
             layout.first_data_block,
             (layout.journal_start_block - layout.first_data_block) as u32,
@@ -641,6 +670,7 @@ fn format_ext4_with_tree_and_reserved(
         reserved_gdt_blocks,
         None,
         TreeEncodingMode::Upper,
+        true,
     )
 }
 
@@ -657,6 +687,27 @@ pub(super) fn format_ext4_rootfs_with_tree_and_uuid(
         RESERVED_GDT_BLOCKS,
         Some(uuid),
         TreeEncodingMode::Rootfs,
+        true,
+    )
+}
+
+/// Reproduce the resize-metadata shape written before v0.6.9.
+///
+/// This is deliberately test-only: production formatting must always create
+/// the resize inode and its ownership graph.
+#[cfg(test)]
+pub(super) fn format_ext4_legacy_for_test(
+    path: &Path,
+    options: &Ext4FormatOptions,
+) -> Result<(), Ext4Error> {
+    format_ext4_with_tree_and_reserved_uuid(
+        path,
+        options,
+        FileTree::new(),
+        RESERVED_GDT_BLOCKS,
+        None,
+        TreeEncodingMode::Upper,
+        false,
     )
 }
 
@@ -667,6 +718,7 @@ fn format_ext4_with_tree_and_reserved_uuid(
     reserved_gdt_blocks: u32,
     uuid: Option<[u8; 16]>,
     encoding_mode: TreeEncodingMode,
+    with_resize_inode: bool,
 ) -> Result<(), Ext4Error> {
     let mut next_inode = EXT4_FIRST_INO;
     let mut plans = Vec::new();
@@ -690,6 +742,7 @@ fn format_ext4_with_tree_and_reserved_uuid(
         root_dir_blocks.max(1),
         reserved_gdt_blocks,
         uuid,
+        with_resize_inode,
     )?;
     let max_inode = next_inode.saturating_sub(1);
     let available_inodes = layout.num_groups.saturating_mul(EXT4_INODES_PER_GROUP);
@@ -747,14 +800,16 @@ fn format_ext4_with_tree_and_reserved_uuid(
     write_bitmaps(&mut file, &layout, &bitmap_plan)?;
     write_tree_data(&mut file, &layout, &all_plans)?;
     write_inode_table_with_plan(&mut file, &layout, &all_plans)?;
-    write_resize_inode(
-        &mut file,
-        &layout.geometry(),
-        layout.group_inode_table_block(0),
-        layout.resize_inode_block,
-        layout.csum_seed,
-        layout.num_groups,
-    )?;
+    if let Some(resize_inode_block) = layout.resize_inode_block {
+        write_resize_inode(
+            &mut file,
+            &layout.geometry(),
+            layout.group_inode_table_block(0),
+            resize_inode_block,
+            layout.csum_seed,
+            layout.num_groups,
+        )?;
+    }
     write_journal(&mut file, &layout)?;
 
     let sb_bytes = build_superblock_with_stats(&layout, &stats)?;
@@ -1553,7 +1608,7 @@ fn write_extent_bytes(
 }
 
 fn update_dir_block_checksums(csum_seed: u32, inode: u32, data: &mut [u8]) {
-    for chunk in data.chunks_exact_mut(EXT4_BLOCK_SIZE as usize) {
+    for chunk in data.as_chunks_mut::<{ EXT4_BLOCK_SIZE as usize }>().0 {
         let tail = EXT4_BLOCK_SIZE as usize - 12;
         let checksum = dir_block_checksum(csum_seed, inode, 0, &chunk[..tail]);
         put_le32(chunk, tail + 8, checksum);
@@ -1760,11 +1815,12 @@ fn build_superblock_with_stats_for_group(
     put_le32(sb, 0x0C, stats.total_free_blocks as u32);
     put_le32(sb, 0x10, stats.total_free_inodes as u32);
     put_le32(sb, 0x158, (stats.total_free_blocks >> 32) as u32);
-    put_le32(
-        sb,
-        EXT4_SB_OVERHEAD_BLOCKS_OFFSET,
-        stats.overhead_blocks as u32,
-    );
+    let (overhead_offset, overhead_blocks) = if layout.resize_inode_block.is_none() {
+        layout.recorded_overhead_blocks(stats.total_free_blocks)
+    } else {
+        (EXT4_SB_OVERHEAD_BLOCKS_OFFSET, stats.overhead_blocks)
+    };
+    put_le32(sb, overhead_offset, overhead_blocks as u32);
     let checksum = superblock_checksum(sb);
     put_le32(sb, 0x3FC, checksum);
     Ok(block)
@@ -2161,8 +2217,8 @@ fn xattr_entry_hash(name: &[u8], padded_value: &[u8]) -> u32 {
     for byte in name {
         hash = hash.rotate_left(5) ^ u32::from(*byte);
     }
-    for word in padded_value.chunks_exact(4) {
-        hash = hash.rotate_left(16) ^ u32::from_le_bytes(word.try_into().unwrap());
+    for word in padded_value.as_chunks::<4>().0 {
+        hash = hash.rotate_left(16) ^ u32::from_le_bytes(*word);
     }
     hash
 }
@@ -2468,12 +2524,11 @@ fn build_superblock(
     // s_kbytes_written (0x178, u64) -- 0
     // s_snapshot_inum, etc. -- leave zeroed
 
-    // s_overhead_clusters (0x248, u32)
-    put_le32(
-        sb,
-        EXT4_SB_OVERHEAD_BLOCKS_OFFSET,
-        layout.total_overhead_blocks() as u32,
-    );
+    // Modern images use s_overhead_clusters at 0x248. The test-only legacy formatter preserves
+    // the pre-0.6.9 field placement at 0x194 so compatibility tests exercise released bytes.
+    let (overhead_offset, overhead_blocks) =
+        layout.recorded_overhead_blocks(layout.total_free_blocks());
+    put_le32(sb, overhead_offset, overhead_blocks as u32);
 
     // s_checksum_seed (0x270, u32) -- crc32c::crc32c_raw(~0, uuid)
     // Only used if INCOMPAT_CSUM_SEED is set. For METADATA_CSUM without

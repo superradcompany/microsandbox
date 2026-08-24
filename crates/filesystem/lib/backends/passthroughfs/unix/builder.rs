@@ -29,7 +29,7 @@ use super::{
 };
 #[cfg(target_os = "linux")]
 use crate::backends::shared::platform;
-use crate::backends::shared::{init_binary, inode_table::MultikeyBTreeMap, stat_override};
+use crate::backends::shared::{init_binary, inode_table::MultikeyBTreeMap};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -175,16 +175,7 @@ impl PassthroughFsBuilder {
         // Open the root directory, contained beneath the anchor when one is set.
         let root_fd = super::open_root(&cfg_probe)?;
 
-        // Probe xattr support if strict mode is enabled.
-        if cfg_probe.strict_enabled() && cfg_probe.xattr_enabled() {
-            let supported = stat_override::probe_xattr_support(root_fd.as_raw_fd())?;
-            if !supported {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "xattr not supported on root filesystem and stat_virtualization is Strict",
-                ));
-            }
-        }
+        super::probe_strict_xattr_support(&cfg_probe, root_fd.as_raw_fd())?;
 
         // Create the init binary file.
         let init_file = init_binary::create_init_file()?;

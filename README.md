@@ -45,15 +45,15 @@
 
 #### <img height="14" src="https://octicons-col.vercel.app/move-to-bottom/A770EF">&nbsp;&nbsp;Install the SDK
 > ```sh
+> npm i microsandbox                                       # 🟦 TypeScript
+> ```
+>
+> ```sh
 > cargo add microsandbox                                   # 🦀 Rust
 > ```
 >
 > ```sh
 > uv add microsandbox                                      # 🐍 Python
-> ```
->
-> ```sh
-> npm i microsandbox                                       # 🟦 TypeScript
 > ```
 >
 > ```sh
@@ -116,7 +116,7 @@
 >
 > - <img height="14" src="https://api.iconify.design/simple-icons:apple.svg?color=%23A770EF" alt="macOS"> **macOS**: Apple Silicon.
 > - <img height="14" src="https://api.iconify.design/simple-icons:linux.svg?color=%23A770EF" alt="Linux"> **Linux**: KVM enabled.
-> - <img height="14" src="https://api.iconify.design/simple-icons:windows.svg?color=%23A770EF" alt="Windows"> **Windows**: Windows 10+ (x64 or ARM64) with WHP enabled.
+> - <img height="14" src="https://api.iconify.design/simple-icons:windows.svg?color=%23A770EF" alt="Windows"> **Windows**: WHP enabled.
 >
 > **Warning**: Microsandbox is still **beta software**. Expect breaking changes, missing features, and rough edges.
 
@@ -124,11 +124,31 @@
 
 ## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/package-dependencies/ffffff" alt="sdk-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/package-dependencies/000000" alt="sdk"></a>&nbsp;&nbsp;SDK
 
-The SDK lets you create and control sandboxes directly from your application. `Sandbox::builder("...").create()` boots a microVM as a child process. No infrastructure required.
+The SDK lets you create and control sandboxes directly from your application. `Sandbox.builder("...").create()` boots a microVM as a child process. No infrastructure required.
 
 #### <img height="14" src="https://octicons-col.vercel.app/play/A770EF">&nbsp;&nbsp;Run Code in a Sandbox
 
-> ```rs
+> ```typescript
+> import { Sandbox } from "microsandbox";
+>
+> await using sandbox = await Sandbox.builder("my-sandbox")
+>   .image("python")
+>   .cpus(1)
+>   .memory(512)
+>   .create();
+>
+> const output = await sandbox.exec("python", [
+>   "-c",
+>   "print('Hello from a microVM!')",
+> ]);
+>
+> console.log(output.stdout());
+> ```
+>
+> <details>
+> <summary><b>&nbsp;Rust Example →</b></summary>
+>
+> ```rust
 > use microsandbox::Sandbox;
 >
 > #[tokio::main]
@@ -152,6 +172,7 @@ The SDK lets you create and control sandboxes directly from your application. `S
 > }
 > ```
 >
+> </details>
 > <details>
 > <summary><b>&nbsp;Python Example →</b></summary>
 >
@@ -207,28 +228,6 @@ The SDK lets you create and control sandboxes directly from your application. `S
 >
 > See the [Ruby SDK guide](./sdk/ruby/README.md) for installation, lifecycle,
 > networking, and backend details.
->
-> </details>
->
-> <details>
-> <summary><b>&nbsp;TypeScript Example →</b></summary>
->
-> ```typescript
-> import { Sandbox } from "microsandbox";
->
-> await using sandbox = await Sandbox.builder("my-sandbox")
->   .image("python")
->   .cpus(1)
->   .memory(512)
->   .create();
->
-> const output = await sandbox.exec("python", [
->   "-c",
->   "print('Hello from a microVM!')",
-> ]);
->
-> console.log(output.stdout());
-> ```
 >
 > </details>
 >

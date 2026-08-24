@@ -1,4 +1,4 @@
-name: Release Windows
+name: Release macOS
 
 on:
   workflow_call:
@@ -11,24 +11,28 @@ on:
         description: GitHub Actions runner label.
         required: true
         type: string
-      rust_target:
-        description: Rust target triple.
+      os:
+        description: Operating-system family (linux or darwin).
         required: true
         type: string
-      firmware_artifact:
-        description: Matching kernel bundle artifact.
+      arch:
+        description: Release architecture label.
         required: true
         type: string
       agentd_artifact:
         description: Matching musl agentd artifact.
         required: true
         type: string
-      vs_arch:
-        description: MSVC target architecture.
+      firmware_artifact:
+        description: Matching kernel/libkrunfw producer artifact.
         required: true
         type: string
-      vs_host_arch:
-        description: MSVC host architecture.
+      libkrunfw_file:
+        description: Canonical runtime library filename.
+        required: true
+        type: string
+      libkrunfw_asset:
+        description: Public release asset name for libkrunfw.
         required: true
         type: string
       napi_target:
@@ -43,16 +47,8 @@ on:
         description: Platform npm package directory.
         required: true
         type: string
-      msb_asset:
-        description: Public release asset name for msb.
-        required: true
-        type: string
-      metrics_asset:
-        description: Public release asset name for msb-metrics.
-        required: true
-        type: string
-      libkrunfw_asset:
-        description: Public release asset name for libkrunfw.
+      go_ffi_file:
+        description: Cargo output filename for the Go FFI library.
         required: true
         type: string
       go_bundle_name:
@@ -69,6 +65,7 @@ env:
   CARGO_HTTP_TIMEOUT: "120"
   CARGO_HTTP_MULTIPLEXING: "false"
   CARGO_INCREMENTAL: "0"
+  LIBKRUNFW_VERSION: "5.6.1"
   LIBKRUNFW_ABI: "5"
 
 # These jobs produce shipped artifacts. Keep every Cargo and maturin build on
@@ -81,15 +78,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Only Windows needs libkrunfw's MSVC helpers. Avoid initializing the
-      # unrelated MCP and skills submodules in every release lane.
-      - name: Checkout libkrunfw sources
-        shell: pwsh
-        run: git submodule update --init --depth 1 vendor/libkrunfw
-
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          targets: ${{ inputs.rust_target }}
 
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
@@ -97,11 +86,9 @@ jobs:
           cache-targets: true
           shared-key: release-runtime-${{ inputs.target }}
 
-      - name: Download kernel bundle
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: ${{ inputs.firmware_artifact }}
-          path: vendor/libkrunfw/
+      - name: Install build dependencies (Linux)
+        if: inputs.os == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
 
       - name: Download agentd
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -109,40 +96,52 @@ jobs:
           name: ${{ inputs.agentd_artifact }}
           path: build/
 
-      - name: Build libkrunfw.dll
-        shell: pwsh
+      - name: Download firmware
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.firmware_artifact }}
+          path: firmware/
+
+      - name: Stage libkrunfw (Linux)
+        if: inputs.os == 'linux'
         run: |
-          $ErrorActionPreference = "Stop"
-          & .\vendor\libkrunfw\scripts\build-windows.ps1 `
-            -SkipKernelBundle `
-            -AbiVersion ${{ env.LIBKRUNFW_ABI }} `
-            -Architecture ${{ inputs.vs_arch }} `
-            -HostArchitecture ${{ inputs.vs_host_arch }} `
-            -Output libkrunfw.dll `
-            -ImportLibrary libkrunfw.lib
-          New-Item -ItemType Directory -Force -Path build | Out-Null
-          Copy-Item vendor\libkrunfw\libkrunfw.dll build\libkrunfw.dll -Force
+          mkdir -p build
+          cp firmware/${{ inputs.libkrunfw_file }} build/
+          cd build
+          ln -sf ${{ inputs.libkrunfw_file }} libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} libkrunfw.so
+
+      - name: Build libkrunfw (macOS)
+        if: inputs.os == 'darwin'
+        run: |
+          mkdir -p build
+          cc -fPIC -DABI_VERSION=${{ env.LIBKRUNFW_ABI }} -shared \
+            -o build/${{ inputs.libkrunfw_file }} firmware/kernel.c
+          ln -sf ${{ inputs.libkrunfw_file }} build/libkrunfw.dylib
 
       - name: Build msb
-        shell: pwsh
-        env:
-          RUSTFLAGS: -C target-feature=+crt-static
         run: |
-          $ErrorActionPreference = "Stop"
-          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
-          Set-MsvcEnvironment -Architecture ${{ inputs.vs_arch }} -HostArchitecture ${{ inputs.vs_host_arch }}
-          cargo build --release --no-default-features --features net,ssh -p microsandbox-cli --target ${{ inputs.rust_target }}
-          Copy-Item target\${{ inputs.rust_target }}\release\msb.exe build\msb.exe -Force
-          & build\msb.exe --version
+          cargo build --release --no-default-features --features net,ssh -p microsandbox-cli
+          cp target/release/msb build/msb
+
+      - name: Codesign msb (macOS)
+        if: inputs.os == 'darwin'
+        run: codesign --entitlements msb-entitlements.plist --force -s - build/msb
+
+      - name: Verify runtime binary
+        run: build/msb --version
 
       - name: Upload runtime artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: runtime-${{ inputs.target }}
+          # upload-artifact dereferences symlinks. Listing only the canonical
+          # library prevents Linux SONAME aliases from becoming duplicate real
+          # files that downstream packaging could mistake for the release name.
           path: |
             build/agentd
-            build/libkrunfw.dll
-            build/msb.exe
+            build/msb
+            build/${{ inputs.libkrunfw_file }}
           compression-level: 0
 
   metrics:
@@ -152,13 +151,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Checkout libkrunfw build helpers
-        shell: pwsh
-        run: git submodule update --init --depth 1 vendor/libkrunfw
-
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          targets: ${{ inputs.rust_target }}
 
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
@@ -167,20 +160,13 @@ jobs:
           shared-key: release-metrics-${{ inputs.target }}
 
       - name: Build msb-metrics
-        shell: pwsh
-        env:
-          RUSTFLAGS: -C target-feature=+crt-static
-        run: |
-          $ErrorActionPreference = "Stop"
-          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
-          Set-MsvcEnvironment -Architecture ${{ inputs.vs_arch }} -HostArchitecture ${{ inputs.vs_host_arch }}
-          cargo build --release -p microsandbox-metrics-collector --target ${{ inputs.rust_target }}
+        run: cargo build --release -p microsandbox-metrics-collector
 
       - name: Upload metrics artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: metrics-${{ inputs.target }}
-          path: target/${{ inputs.rust_target }}/release/msb-metrics.exe
+          path: target/release/msb-metrics
           compression-level: 0
 
   go-ffi:
@@ -191,19 +177,17 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Checkout libkrunfw build helpers
-        shell: pwsh
-        run: git submodule update --init --depth 1 vendor/libkrunfw
-
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          targets: ${{ inputs.rust_target }}
 
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           cache-bin: false
           cache-targets: true
           shared-key: release-go-${{ inputs.target }}
+
+      - name: Install build dependencies (Linux)
+        if: inputs.os == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
 
       - name: Download runtime artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -212,20 +196,13 @@ jobs:
           path: build/
 
       - name: Build Go FFI
-        shell: pwsh
-        env:
-          RUSTFLAGS: -C target-feature=+crt-static
-        run: |
-          $ErrorActionPreference = "Stop"
-          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
-          Set-MsvcEnvironment -Architecture ${{ inputs.vs_arch }} -HostArchitecture ${{ inputs.vs_host_arch }}
-          cargo build --release -p microsandbox-go --target ${{ inputs.rust_target }}
+        run: cargo build --release -p microsandbox-go
 
       - name: Upload Go FFI artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: go-ffi-${{ inputs.target }}
-          path: target/${{ inputs.rust_target }}/release/microsandbox_go_ffi.dll
+          path: target/release/${{ inputs.go_ffi_file }}
           compression-level: 0
 
   node:
@@ -236,13 +213,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Checkout libkrunfw build helpers
-        shell: pwsh
-        run: git submodule update --init --depth 1 vendor/libkrunfw
-
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          targets: ${{ inputs.rust_target }}
 
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
@@ -256,6 +227,10 @@ jobs:
           cache: npm
           cache-dependency-path: sdk/node-ts/package-lock.json
 
+      - name: Install build dependencies (Linux)
+        if: inputs.os == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+
       - name: Download runtime artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -263,19 +238,14 @@ jobs:
           path: build/
 
       - name: Build Node native binding
-        shell: pwsh
         working-directory: sdk/node-ts
         run: |
-          $ErrorActionPreference = "Stop"
-          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
-          Set-MsvcEnvironment -Architecture ${{ inputs.vs_arch }} -HostArchitecture ${{ inputs.vs_host_arch }}
           node scripts/prune-platform-optional-deps.mjs
           npm install --package-lock=false
           npm run build:native -- --target ${{ inputs.napi_target }}
-          node -e "require('./native/index.cjs')"
+          node -e 'require("./native/index.cjs")'
 
       - name: Prepare Node platform package
-        shell: pwsh
         working-directory: sdk/node-ts
         run: node scripts/prepare-platform-package.mjs ${{ inputs.npm_dir }}
 
@@ -288,7 +258,7 @@ jobs:
             sdk/node-ts/native/index.cjs
             sdk/node-ts/native/index.d.ts
             sdk/node-ts/npm/${{ inputs.npm_dir }}/${{ inputs.node_file }}
-            sdk/node-ts/npm/${{ inputs.npm_dir }}/bin/*
+            sdk/node-ts/npm/${{ inputs.npm_dir }}/bin/msb
             sdk/node-ts/npm/${{ inputs.npm_dir }}/lib/*
           compression-level: 0
 
@@ -301,14 +271,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          targets: ${{ inputs.rust_target }}
 
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           cache-bin: false
           cache-targets: true
           shared-key: release-python-${{ inputs.target }}
+
+      - name: Install build dependencies (Linux)
+        if: inputs.os == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
 
       - name: Download runtime artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -317,20 +289,21 @@ jobs:
           path: build/
 
       - name: Stage runtime bundle
-        shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
-          New-Item -ItemType Directory -Force -Path sdk\python\microsandbox\_bundled\bin | Out-Null
-          New-Item -ItemType Directory -Force -Path sdk\python\microsandbox\_bundled\lib | Out-Null
-          Copy-Item build\msb.exe sdk\python\microsandbox\_bundled\bin\msb.exe -Force
-          Copy-Item build\libkrunfw.dll sdk\python\microsandbox\_bundled\lib\libkrunfw.dll -Force
+          mkdir -p sdk/python/microsandbox/_bundled/bin sdk/python/microsandbox/_bundled/lib
+          # GitHub artifact archives normalize every file to 0644. Restore the
+          # runtime mode explicitly before maturin records it in the wheel.
+          install -m 755 build/msb sdk/python/microsandbox/_bundled/bin/msb
+          install -m 644 build/${{ inputs.libkrunfw_file }} sdk/python/microsandbox/_bundled/lib/
 
       - name: Build Python wheel
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           working-directory: sdk/python
           command: build
-          args: --release --out dist --target ${{ inputs.rust_target }}
+          args: --release --out dist
+          manylinux: ${{ inputs.os == 'linux' && '2_28' || 'off' }}
+          before-script-linux: dnf install -y libcap-ng-devel
 
       - name: Upload Python SDK wheel
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -365,15 +338,19 @@ jobs:
       - name: Stage platform artifacts
         run: |
           set -euo pipefail
-          mkdir -p artifacts bundle/archive
-          cp bundle/runtime/msb.exe artifacts/${{ inputs.msb_asset }}
-          cp bundle/metrics/msb-metrics.exe artifacts/${{ inputs.metrics_asset }}
-          cp bundle/runtime/libkrunfw.dll artifacts/${{ inputs.libkrunfw_asset }}
-          cp bundle/runtime/msb.exe bundle/archive/msb.exe
-          cp bundle/runtime/libkrunfw.dll bundle/archive/libkrunfw.dll
-          (cd bundle/archive && zip -q ../../artifacts/microsandbox-${{ inputs.target }}.zip msb.exe libkrunfw.dll)
-          tar -czf artifacts/microsandbox-${{ inputs.target }}.tar.gz -C bundle/archive msb.exe libkrunfw.dll
-          cp bundle/go/microsandbox_go_ffi.dll artifacts/${{ inputs.go_bundle_name }}
+          mkdir -p artifacts
+          # Preserve an executable msb entry in the release tarball after the
+          # runtime artifact round trip normalized it to 0644.
+          chmod 755 bundle/runtime/msb
+          cp bundle/runtime/msb artifacts/msb-${{ inputs.target }}
+          cp bundle/metrics/msb-metrics artifacts/msb-metrics-${{ inputs.target }}
+          cp bundle/runtime/${{ inputs.libkrunfw_file }} artifacts/${{ inputs.libkrunfw_asset }}
+          if [ "${{ inputs.os }}" = "linux" ]; then
+            cp bundle/runtime/agentd artifacts/agentd-${{ inputs.arch }}
+          fi
+          tar -czf artifacts/microsandbox-${{ inputs.target }}.tar.gz \
+            -C bundle/runtime msb ${{ inputs.libkrunfw_file }}
+          cp bundle/go/${{ inputs.go_ffi_file }} artifacts/${{ inputs.go_bundle_name }}
 
       - name: Upload platform artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

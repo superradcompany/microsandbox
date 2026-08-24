@@ -1,19 +1,30 @@
 //! Windows stat-virtualization store for the passthrough backend.
 
 use super::*;
+use windows_sys::Win32::Storage::FileSystem::{GetVolumeInformationW, GetVolumePathNameW};
+use windows_sys::Win32::System::SystemServices::FILE_NAMED_STREAMS;
 
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
 
 impl StatStore {
-    pub(super) fn new(root: &Path, policy: StatVirtualization) -> io::Result<Option<Self>> {
+    pub(super) fn new(
+        root: &Path,
+        policy: StatVirtualization,
+        readonly: bool,
+    ) -> io::Result<Option<Self>> {
         if matches!(policy, StatVirtualization::Off) {
             return Ok(None);
         }
 
         let ads_store = Self::ads(root);
-        match ads_store.probe() {
+        let ads_probe = if readonly {
+            ads_store.probe_read()
+        } else {
+            ads_store.probe()
+        };
+        match ads_probe {
             Ok(()) => return Ok(Some(ads_store)),
             Err(error) if matches!(policy, StatVirtualization::Strict) => return Err(error),
             Err(error) => {
@@ -22,7 +33,12 @@ impl StatStore {
         }
 
         let sidecar_store = Self::sidecar(root);
-        match sidecar_store.probe() {
+        let sidecar_probe = if readonly {
+            sidecar_store.probe_read()
+        } else {
+            sidecar_store.probe()
+        };
+        match sidecar_probe {
             Ok(()) => Ok(Some(sidecar_store)),
             Err(error) => {
                 tracing::debug!(?error, "windows passthrough sidecar stat store unavailable");
@@ -54,20 +70,65 @@ impl StatStore {
         }
     }
 
+    /// Verify that an existing metadata store can be consumed without
+    /// creating, replacing, or deleting anything beneath a read-only mount.
+    fn probe_read(&self) -> io::Result<()> {
+        match &self.backend {
+            StatStoreBackend::AlternateDataStream => self.probe_ads_read(),
+            StatStoreBackend::Sidecar { dir } => self.probe_sidecar_read(dir),
+        }
+    }
+
     fn probe_ads(&self) -> io::Result<()> {
-        let probe_path = ads_override_path(&self.root);
+        // Never probe through `msb.override_stat`: that is the persistent
+        // metadata stream for the mount root and may already contain a guest
+        // chown/chmod override that must survive remounting.
+        let probe_path = ads_probe_path(&self.root);
         let probe = OverrideStat::new(0, 0, S_IFDIR | 0o700, 0);
         write_override_stream(&probe_path, probe)?;
-        let read_back = read_override_stream(&probe_path)?;
-        if read_back.version != OVERRIDE_VERSION {
-            return Err(linux_error(LINUX_EIO));
-        }
+        let validation = read_override_stream(&probe_path).and_then(|read_back| {
+            if read_back.version == OVERRIDE_VERSION {
+                Ok(())
+            } else {
+                Err(linux_error(LINUX_EIO))
+            }
+        });
         match std::fs::remove_file(&probe_path) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(host_error(error)),
         }
+        validation?;
         Ok(())
+    }
+
+    /// Verify that a read-only mount can consume ADS metadata without creating
+    /// or deleting a stream on the host directory.
+    fn probe_ads_read(&self) -> io::Result<()> {
+        if !volume_supports_named_streams(&self.root)? {
+            return Err(linux_error(LINUX_EOPNOTSUPP));
+        }
+
+        let probe_path = ads_override_path(&self.root);
+        match StdOpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+            .open(&probe_path)
+        {
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(host_error(error)),
+        }
+    }
+
+    fn probe_sidecar_read(&self, dir: &Path) -> io::Result<()> {
+        // A missing sidecar is a valid empty store. If it exists, opening its
+        // directory verifies read access without leaving a probe artifact.
+        match std::fs::read_dir(dir) {
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(host_error(error)),
+        }
     }
 
     fn probe_sidecar(&self, dir: &Path) -> io::Result<()> {
@@ -231,4 +292,43 @@ impl OverrideStat {
         }
         buf
     }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+/// Query the backing volume instead of creating a probe ADS on a read-only mount.
+fn volume_supports_named_streams(path: &Path) -> io::Result<bool> {
+    let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut volume_path = [0u16; 32_768];
+    let found = unsafe {
+        GetVolumePathNameW(
+            path_wide.as_ptr(),
+            volume_path.as_mut_ptr(),
+            volume_path.len() as u32,
+        )
+    };
+    if found == 0 {
+        return Err(host_error(io::Error::last_os_error()));
+    }
+
+    let mut flags = 0u32;
+    let queried = unsafe {
+        GetVolumeInformationW(
+            volume_path.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut flags,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if queried == 0 {
+        return Err(host_error(io::Error::last_os_error()));
+    }
+
+    Ok(flags & FILE_NAMED_STREAMS != 0)
 }
