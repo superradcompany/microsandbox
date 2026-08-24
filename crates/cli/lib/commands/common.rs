@@ -124,6 +124,7 @@ pub struct SandboxOpts {
     pub thp: Option<String>,
 
     /// Mount a host path or named volume into the sandbox (`SOURCE:DEST[:OPTIONS]`).
+    /// OPTIONS may include paired `uid=<N>,gid=<N>` for directory-backed mounts.
     #[arg(short, long)]
     pub volume: Vec<String>,
 
@@ -146,6 +147,7 @@ pub struct SandboxOpts {
     pub mount_disk: Vec<String>,
 
     /// Explicitly mount a named volume into the sandbox (`NAME:DEST[:OPTIONS]`).
+    /// OPTIONS may include paired `uid=<N>,gid=<N>` when the volume is a directory.
     #[arg(long = "mount-named", value_name = "NAME:DEST[:OPTIONS]")]
     pub mount_named: Vec<String>,
 
@@ -1400,7 +1402,7 @@ fn validate_guest_path(context: &str, path: &str) -> anyhow::Result<()> {
 
 /// Parse a volume spec and apply it to the builder.
 ///
-/// Accepts: `SRC:DST[:ro|rw][,noexec][,nosuid][,nodev][,follow-root-symlinks][,stat-virt=...][,host-perms=...]`.
+/// Accepts: `SRC:DST[:ro|rw][,noexec][,nosuid][,nodev][,follow-root-symlinks][,stat-virt=...][,host-perms=...][,uid=...,gid=...]`.
 pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<SandboxBuilder> {
     let parsed = parse_cli_mount_spec(
         "volume",
@@ -1408,6 +1410,7 @@ pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<Sandb
         CliMountOptionSupport {
             policies: true,
             quota: true,
+            owner: true,
             ..CliMountOptionSupport::default()
         },
     )?;
@@ -1455,6 +1458,9 @@ pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<Sandb
         }
         if let Some(hp) = options.host_permissions {
             m = m.host_permissions(hp);
+        }
+        if let (Some(uid), Some(gid)) = (options.override_uid, options.override_gid) {
+            m = m.owner(uid, gid);
         }
         m
     }))
@@ -1580,6 +1586,7 @@ pub fn apply_explicit_named_mount(
             size: true,
             quota: true,
             named_kind: true,
+            owner: true,
             ..CliMountOptionSupport::default()
         },
     )?;
@@ -1606,9 +1613,12 @@ pub fn apply_explicit_named_mount(
     }
     if matches!(parsed.options.named_kind, Some(VolumeKind::Disk))
         && (parsed.options.stat_virtualization.is_some()
-            || parsed.options.host_permissions.is_some())
+            || parsed.options.host_permissions.is_some()
+            || parsed.options.override_uid.is_some())
     {
-        anyhow::bail!("mount-named kind=disk does not support stat-virt=... or host-perms=...");
+        anyhow::bail!(
+            "mount-named kind=disk does not support stat-virt=..., host-perms=..., or uid/gid"
+        );
     }
 
     let source = parsed.source.to_string();
@@ -3685,6 +3695,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_apply_volume_owner_on_bind_and_named_directory() {
+        for spec in [
+            "/host:/data:uid=4242,gid=4343",
+            "mycache:/data:uid=4242,gid=4343",
+        ] {
+            let mount = build_one(spec).await;
+            let options = match mount {
+                VolumeMount::Bind { options, .. } | VolumeMount::Named { options, .. } => options,
+                other => panic!("expected virtiofs mount, got {other:?}"),
+            };
+            assert_eq!(options.override_uid, Some(4242));
+            assert_eq!(options.override_gid, Some(4343));
+        }
+    }
+
+    #[tokio::test]
     async fn test_apply_explicit_dir_mount() {
         let dir = make_temp_dir("msb-mount-dir");
         let spec = format!("{}:/work:ro,host-perms=mirror", dir.display());
@@ -3850,6 +3876,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_apply_explicit_named_mount_owner() {
+        let mount =
+            build_explicit("cache:/data:uid=4242,gid=4343", apply_explicit_named_mount).await;
+        match mount {
+            VolumeMount::Named { options, .. } => {
+                assert_eq!(options.override_uid, Some(4242));
+                assert_eq!(options.override_gid, Some(4343));
+            }
+            other => panic!("expected Named, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn test_apply_explicit_named_mount_disk_ensure_options() {
         let mount = build_explicit(
             "cache-disk:/data:kind=disk,size=2G",
@@ -3897,6 +3936,15 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.to_string().contains("does not support stat-virt"));
+
+        let err = match apply_explicit_named_mount(
+            SandboxBuilder::new("test").image("alpine"),
+            "cache-disk:/data:kind=disk,size=2G,uid=1000,gid=1000",
+        ) {
+            Ok(_) => panic!("expected mount-named disk to reject owner"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("uid/gid"));
 
         let err = match apply_explicit_named_mount(
             SandboxBuilder::new("test").image("alpine"),
