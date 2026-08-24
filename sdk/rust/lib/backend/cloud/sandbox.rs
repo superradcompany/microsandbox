@@ -13,7 +13,7 @@ use crate::backend::{
     sandbox::{LogStream, MetricsStream, SandboxBackend},
 };
 use crate::error::{Operation, UnsupportedReason};
-use crate::logs::{LogEntry, LogOptions, LogStreamOptions};
+use crate::logs::{BootError, LogEntry, LogOptions, LogStreamOptions};
 use crate::sandbox::metrics::SandboxMetrics;
 use crate::sandbox::{
     RootfsSource, Sandbox, SandboxConfig, SandboxHandle, SandboxListBuilder, SandboxPage,
@@ -210,6 +210,16 @@ impl SandboxBackend for CloudBackend {
         })
     }
 
+    fn boot_error<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _name: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<Option<BootError>>> {
+        // The cloud API does not currently expose a boot-error concept. Keep
+        // the optional backend contract so it can provide one in the future.
+        Box::pin(async { Ok(None) })
+    }
+
     fn logs<'a>(
         &'a self,
         _backend: Arc<dyn Backend>,
@@ -226,6 +236,30 @@ impl SandboxBackend for CloudBackend {
         opts: &'a LogStreamOptions,
     ) -> BoxFuture<'a, MicrosandboxResult<LogStream>> {
         Box::pin(async move { CloudBackend::log_stream(self, name, opts).await })
+    }
+
+    fn follow_logs<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        name: &'a str,
+        opts: &'a LogOptions,
+    ) -> BoxFuture<'a, MicrosandboxResult<LogStream>> {
+        Box::pin(async move {
+            if opts.tail.is_some() || opts.since.is_some() || opts.until.is_some() {
+                return Err(MicrosandboxError::unsupported(
+                    Operation::SandboxFollowLogs,
+                    UnsupportedReason::NotAvailable(
+                        "cloud log stream is not yet available".to_string(),
+                    ),
+                ));
+            }
+            let stream_opts = LogStreamOptions {
+                sources: opts.sources.clone(),
+                follow: true,
+                ..Default::default()
+            };
+            CloudBackend::log_stream(self, name, &stream_opts).await
+        })
     }
 
     fn metrics<'a>(
@@ -566,13 +600,67 @@ pub(crate) fn sandbox_config_from_cloud_spec(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use microsandbox_types::{
         CloudSandboxSpec, HostPermissions, MountOptions, NamedVolumeCreate, NamedVolumeMode,
         StatVirtualization, VolumeKind, VolumeMount,
     };
 
     use super::*;
+    use crate::backend::{Backend, SandboxBackend};
     use crate::sandbox::{EnvVar, OciRootfsSource, RootDisk, SandboxBuilder, SandboxSpec};
+
+    #[tokio::test]
+    async fn cloud_boot_error_is_absent_until_the_api_exposes_diagnostics() {
+        let backend = Arc::new(CloudBackend::new("http://127.0.0.1:1", "test-key").unwrap());
+        let backend_dyn: Arc<dyn Backend> = backend.clone();
+
+        let boot_error = backend
+            .boot_error(backend_dyn, "cloud-sandbox")
+            .await
+            .unwrap();
+
+        assert!(boot_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn cloud_follow_logs_rejects_bounded_filters_before_opening_stream() {
+        let backend = Arc::new(CloudBackend::new("http://127.0.0.1:1", "test-key").unwrap());
+        let now = chrono::Utc::now();
+
+        for opts in [
+            LogOptions {
+                tail: Some(10),
+                ..Default::default()
+            },
+            LogOptions {
+                since: Some(now),
+                ..Default::default()
+            },
+            LogOptions {
+                until: Some(now),
+                ..Default::default()
+            },
+        ] {
+            let backend_dyn: Arc<dyn Backend> = backend.clone();
+            let error = match backend
+                .follow_logs(backend_dyn, "cloud-sandbox", &opts)
+                .await
+            {
+                Ok(_) => panic!("bounded cloud follow should be unsupported"),
+                Err(error) => error,
+            };
+
+            assert!(matches!(
+                error,
+                MicrosandboxError::Unsupported {
+                    op: Operation::SandboxFollowLogs,
+                    ..
+                }
+            ));
+        }
+    }
 
     #[tokio::test]
     async fn cloud_create_request_maps_common_fields() {

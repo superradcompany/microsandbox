@@ -556,11 +556,8 @@ impl LocalBackend {
 
                         // Prefer the structured boot-error record if the
                         // sandbox got far enough to write one.
-                        if let Some(boot_err) = Self::read_boot_error(log_dir) {
-                            return Err(crate::MicrosandboxError::BootStart {
-                                name: sandbox_name.to_string(),
-                                err: boot_err,
-                            });
+                        if let Some(error) = Self::read_boot_start_error(log_dir, sandbox_name) {
+                            return Err(error);
                         }
 
                         // No structured boot-error.json — the sandbox died
@@ -595,11 +592,8 @@ impl LocalBackend {
                         error = %e,
                         "wait_for_relay: agent connection failed"
                     );
-                    if let Some(boot_err) = Self::read_boot_error(log_dir) {
-                        return Err(crate::MicrosandboxError::BootStart {
-                            name: sandbox_name.to_string(),
-                            err: boot_err,
-                        });
+                    if let Some(error) = Self::read_boot_start_error(log_dir, sandbox_name) {
+                        return Err(error);
                     }
                     return Err(e.into());
                 }
@@ -615,11 +609,8 @@ impl LocalBackend {
                     // and never produced the handshake bytes). Prefer that
                     // typed record over the raw IO/timeout error so the CLI
                     // can render the styled boot-error block.
-                    if let Some(boot_err) = Self::read_boot_error(log_dir) {
-                        return Err(crate::MicrosandboxError::BootStart {
-                            name: sandbox_name.to_string(),
-                            err: boot_err,
-                        });
+                    if let Some(error) = Self::read_boot_start_error(log_dir, sandbox_name) {
+                        return Err(error);
                     }
                     return Err(crate::MicrosandboxError::Runtime(format!(
                         "timed out waiting for agent relay: {e}"
@@ -634,12 +625,24 @@ impl LocalBackend {
     /// Returns `None` when the directory is unknown, the file is missing, or
     /// the contents cannot be deserialized — callers fall back to a raw
     /// error in those cases.
-    fn read_boot_error(
+    pub(crate) fn read_boot_error(
         log_dir: &std::path::Path,
     ) -> Option<microsandbox_runtime::boot_error::BootError> {
         microsandbox_runtime::boot_error::BootError::read(log_dir)
             .ok()
             .flatten()
+    }
+
+    /// Read a persisted boot error and attach the sandbox name expected by
+    /// SDK create/start callers.
+    fn read_boot_start_error(
+        log_dir: &std::path::Path,
+        sandbox_name: &str,
+    ) -> Option<crate::MicrosandboxError> {
+        Self::read_boot_error(log_dir).map(|err| crate::MicrosandboxError::BootStart {
+            name: sandbox_name.to_string(),
+            err,
+        })
     }
 
     /// Resolve a fresh create by tag, but restore a snapshot by its captured

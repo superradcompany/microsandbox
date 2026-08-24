@@ -362,9 +362,9 @@ Host-to-sandbox and sandbox-to-host forms follow `docker cp` syntax. Same-sandbo
 
 ## msb logs
 
-<Tooltip tip="Not yet available on microsandbox cloud; follow output live with the SDK and persist it externally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, use msb logs -f for a live stream. Bounded and historical reads remain local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Read captured output from a sandbox. Each sandbox stores its captured stdio under `<sandbox-dir>/logs/exec.log` as JSON Lines, plus runtime/kernel diagnostics in `runtime.log`/`kernel.log`. The command works on running and stopped sandboxes alike; there is no protocol traffic, just a file read.
+Read captured output from a sandbox. Local sandboxes store their captured stdio under `<sandbox-dir>/logs/exec.log` as JSON Lines, plus runtime/kernel diagnostics in `runtime.log`/`kernel.log`; these bounded reads work on running and stopped sandboxes. On microsandbox cloud, `msb logs -f <name>` streams a running sandbox through the cloud API. Cloud bounded reads and the `--tail`, `--since`, and `--until` filters are not yet available.
 
 ```bash
 # Captured user-program output (default sources: stdout + stderr + output)

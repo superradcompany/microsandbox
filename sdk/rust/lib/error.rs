@@ -267,6 +267,8 @@ pub enum Operation {
     SandboxLogStreamNoFollow,
     /// `Sandbox::log_stream` with `follow: true`.
     SandboxLogStreamFollow,
+    /// `Sandbox::follow_logs`.
+    SandboxFollowLogs,
     /// `Sandbox::logger`.
     SandboxLogger,
     /// `Sandbox::metrics`.
@@ -421,6 +423,7 @@ impl Operation {
             Operation::SandboxLogStream => "Sandbox::log_stream",
             Operation::SandboxLogStreamNoFollow => "Sandbox::log_stream(follow=false)",
             Operation::SandboxLogStreamFollow => "Sandbox::log_stream(follow=true)",
+            Operation::SandboxFollowLogs => "Sandbox::follow_logs",
             Operation::SandboxLogger => "Sandbox::logger",
             Operation::SandboxMetrics => "Sandbox::metrics",
             Operation::SandboxMetricsStream => "Sandbox::metrics_stream",
