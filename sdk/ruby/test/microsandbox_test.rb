@@ -1,10 +1,27 @@
 # frozen_string_literal: true
 
+require "rbconfig"
 require "test/unit"
 require "timeout"
 require_relative "../lib/microsandbox"
 
 class MicrosandboxTest < Test::Unit::TestCase
+  # Mirrors sdk/python/microsandbox/errors.py plus the Go SDK's snapshot,
+  # exec-failed, and volume-already-exists granularity.
+  ERROR_CLASSES = %i[
+    InvalidConfigError NoDefaultCommandError
+    SandboxNotFoundError SandboxNotRunningError SandboxAlreadyExistsError SandboxStillRunningError
+    ExecTimeoutError ExecFailedError
+    FilesystemError PathNotFoundError
+    VolumeNotFoundError VolumeAlreadyExistsError ImageNotFoundError ImageInUseError ImagePullFailedError
+    SnapshotNotFoundError SnapshotAlreadyExistsError SnapshotSandboxRunningError
+    SnapshotImageMissingError SnapshotIntegrityError SnapshotMigrationError
+    NetworkPolicyError SecretViolationError TlsError
+    IoError
+    MetricsDisabledError MetricsUnavailableError
+    UnsupportedOperationError CloudHttpError UnsupportedError
+  ].freeze
+
   def test_version_is_available
     assert_match(/\A\d+\.\d+\.\d+\z/, Microsandbox.version)
   end
@@ -36,7 +53,107 @@ class MicrosandboxTest < Test::Unit::TestCase
   end
 
   def test_invalid_sandbox_name_is_reported_as_sdk_error
-    assert_raise(Microsandbox::Error) { Microsandbox::Sandbox.create("") }
+    error = assert_raise(Microsandbox::InvalidConfigError) { Microsandbox::Sandbox.create("") }
+
+    assert_kind_of Microsandbox::Error, error
+    assert_equal "invalid-config", error.code
+  end
+
+  def test_invalid_network_host_raises_network_policy_error
+    # The policy is built while parsing the create options, before any
+    # runtime call, so a malformed hostname fails without a sandbox.
+    error = assert_raise(Microsandbox::NetworkPolicyError) do
+      Microsandbox::Sandbox.create("ruby-test", network: { allowed_hosts: ["not a host!"], allowed_ports: [443] })
+    end
+
+    assert_kind_of Microsandbox::Error, error
+    assert_equal "network-policy-error", error.code
+    assert_match(/not a host!/, error.message)
+  end
+
+  def test_typed_error_is_rescued_by_base_error
+    rescued = begin
+      Microsandbox::Sandbox.create("")
+    rescue Microsandbox::Error => error
+      error
+    end
+
+    assert_instance_of Microsandbox::InvalidConfigError, rescued
+  end
+
+  def test_base_error_code
+    assert_equal "microsandbox-error", Microsandbox::Error.code
+    assert_equal "microsandbox-error", Microsandbox::Error.new("boom").code
+  end
+
+  def test_error_classes_are_direct_subclasses_of_error
+    defined_classes = Microsandbox.constants.select do |name|
+      constant = Microsandbox.const_get(name)
+      constant.is_a?(Class) && constant < Microsandbox::Error
+    end
+
+    assert_equal ERROR_CLASSES.sort, defined_classes.sort
+    ERROR_CLASSES.each do |name|
+      assert_equal Microsandbox::Error, Microsandbox.const_get(name).superclass, name
+    end
+  end
+
+  def test_error_codes_are_unique_kebab_case
+    codes = ERROR_CLASSES.map { |name| Microsandbox.const_get(name).code }
+
+    codes.each { |code| assert_match(/\A[a-z]+(-[a-z]+)*\z/, code) }
+    assert_equal codes, codes.uniq
+    assert_not_include codes, Microsandbox::Error.code
+    assert_equal "exec-timeout", Microsandbox::ExecTimeoutError.new("boom").code
+  end
+
+  def test_unsupported_error_attributes_default_to_nil
+    error = Microsandbox::UnsupportedError.new("boom")
+
+    assert_nil error.operation
+    assert_nil error.hint
+    assert_equal "unsupported", error.code
+  end
+
+  def test_missing_sandbox_raises_sandbox_not_found_error
+    # The local backend answers from its catalog without booting a VM.
+    name = "does-not-exist-#{Process.pid}-#{rand(1_000_000)}"
+
+    error = assert_raise(Microsandbox::SandboxNotFoundError) { Microsandbox::Sandbox.get(name) }
+
+    assert_kind_of Microsandbox::Error, error
+    assert_equal "sandbox-not-found", error.code
+  end
+
+  def test_unsupported_error_carries_operation_and_hint
+    # The cloud backend rejects `replace:` while building the request, before
+    # any network access, so this needs neither credentials nor connectivity.
+    # Selecting a backend is process-global, so the probe runs in a separate
+    # Ruby process and this process keeps its backend selection. A fork would
+    # not do: on macOS the cloud client initializes Foundation classes on
+    # first use, which the Objective-C runtime refuses in a forked child.
+    backend_kind = Microsandbox.default_backend_kind
+    script = <<~RUBY
+      require "microsandbox"
+      Microsandbox.use_cloud_backend!("test-key", url: "http://127.0.0.1:9")
+      begin
+        Microsandbox::Sandbox.create("ruby-test", image: "alpine", replace: true)
+        puts "no error raised"
+      rescue Microsandbox::UnsupportedError => error
+        puts error.message, error.operation, error.hint
+      end
+    RUBY
+    lib = File.expand_path("../lib", __dir__)
+
+    output = IO.popen([RbConfig.ruby, "-I", lib, "-e", script], &:read)
+
+    assert_true $?.success?
+    assert_equal [
+      "sandbox.create is not supported by this backend: the replace option is not accepted here",
+      "sandbox.create",
+      "the replace option is not accepted here"
+    ], output.lines(chomp: true)
+    assert_equal backend_kind, Microsandbox.default_backend_kind
   end
 
   def test_with_is_available

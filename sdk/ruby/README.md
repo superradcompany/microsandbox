@@ -159,7 +159,8 @@ them, and rotate them after suspected host compromise.
 
 The gem supports sandbox lifecycle operations, collected exec and shell
 output, SSH exec, logs, metrics, guest filesystem operations, local image,
-volume, and snapshot management, and local or cloud backend selection.
+volume, and snapshot management, local or cloud backend selection, and typed
+error classes (see [Errors](#errors)).
 
 SSH exec inherits the global inactivity timeout by default. Override it for a
 single command in seconds, or use `0` to disable it:
@@ -172,6 +173,68 @@ persistent = sandbox.ssh_exec("long-running-agent", inactivity_timeout: 0)
 Streaming exec, logs, metrics, and filesystem handles; interactive SSH/SFTP;
 live modification plans; and the complete Rust network and mount builders are
 not currently exposed. Use the Rust SDK when those APIs are required.
+
+## Errors
+
+Every error reported by a sandbox, image, volume, snapshot, or backend
+operation is a `Microsandbox::Error`, so `rescue Microsandbox::Error` catches
+all of them. The native layer raises the subclass matching the core error,
+which lets callers branch on the failure without matching message text:
+
+```ruby
+begin
+  sandbox.exec("sleep", ["30"], timeout: 1)
+rescue Microsandbox::ExecTimeoutError => error
+  puts "timed out: #{error.message}"
+rescue Microsandbox::Error => error
+  puts "#{error.code}: #{error.message}"
+end
+```
+
+Class names and `#code` strings mirror the Python SDK; the snapshot,
+exec-failed, and volume-already-exists classes follow the Go SDK's finer
+coverage. All classes are direct subclasses of `Microsandbox::Error`
+(code `microsandbox-error`):
+
+| Group                 | Classes                                                                                                                                                                 |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Configuration         | `InvalidConfigError`, `NoDefaultCommandError`                                                                                                                           |
+| Lifecycle             | `SandboxNotFoundError`, `SandboxNotRunningError`, `SandboxAlreadyExistsError`, `SandboxStillRunningError`                                                               |
+| Execution             | `ExecTimeoutError`, `ExecFailedError`                                                                                                                                   |
+| Filesystem            | `FilesystemError`, `PathNotFoundError`                                                                                                                                  |
+| Volumes and images    | `VolumeNotFoundError`, `VolumeAlreadyExistsError`, `ImageNotFoundError`, `ImageInUseError`, `ImagePullFailedError`                                                      |
+| Snapshots             | `SnapshotNotFoundError`, `SnapshotAlreadyExistsError`, `SnapshotSandboxRunningError`, `SnapshotImageMissingError`, `SnapshotIntegrityError`, `SnapshotMigrationError` |
+| Networking            | `NetworkPolicyError`, `SecretViolationError`, `TlsError`                                                                                                                |
+| I/O                   | `IoError`                                                                                                                                                               |
+| Metrics               | `MetricsDisabledError`, `MetricsUnavailableError`                                                                                                                       |
+| Runtime compatibility | `UnsupportedOperationError`                                                                                                                                             |
+| Backend routing       | `CloudHttpError`, `UnsupportedError`                                                                                                                                    |
+
+Each class exposes its stable, machine-readable code through `.code` and
+`#code` (for example `Microsandbox::ExecTimeoutError.code == "exec-timeout"`).
+Core errors without a dedicated class raise `Microsandbox::Error` itself.
+`PathNotFoundError`, `ImagePullFailedError`, `SecretViolationError`, and
+`TlsError` are defined for parity with the Python SDK but are not raised by
+the current core.
+
+`UnsupportedError` is raised when the selected backend does not implement an
+operation. Its message names the Ruby API and the remedy, both also available
+as attributes:
+
+```ruby
+Microsandbox.use_cloud_backend!(ENV.fetch("MSB_API_KEY"))
+begin
+  Microsandbox::Sandbox.create("my-sandbox", image: "python", replace: true)
+rescue Microsandbox::UnsupportedError => error
+  error.message   # => "sandbox.create is not supported by this backend: the replace option is not accepted here"
+  error.operation # => "sandbox.create"
+  error.hint      # => "the replace option is not accepted here"
+end
+```
+
+Argument validation is not covered by that guarantee: unknown keywords and
+wrongly typed values keep raising Ruby's `ArgumentError` and `TypeError`
+before any operation runs.
 
 ## Development
 

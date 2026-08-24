@@ -1,6 +1,5 @@
 use std::{
     ffi::c_void,
-    fmt::Display,
     future::Future,
     mem::ManuallyDrop,
     panic::{AssertUnwindSafe, catch_unwind},
@@ -12,11 +11,12 @@ use std::{
 };
 
 use magnus::{
-    Error, ExceptionClass, RArray, RHash, RString, Ruby, Symbol, TryConvert, Value, function,
-    method, prelude::*, r_hash::ForEach, scan_args::scan_args, typed_data,
+    Error, ExceptionClass, RArray, RHash, RObject, RString, Ruby, Symbol, TryConvert, Value,
+    function, method, prelude::*, r_hash::ForEach, scan_args::scan_args, typed_data,
 };
 use microsandbox_core::{
-    BackendKind, MicrosandboxResult,
+    AgentClientError, BackendKind, MicrosandboxError, MicrosandboxResult, Operation,
+    UnsupportedReason,
     backend::{
         CloudBackend, LocalBackend, default_backend, resolve_default_backend, set_default_backend,
     },
@@ -164,7 +164,7 @@ fn reset_backend_after_fork(ruby: &Ruby) -> Result<(), Error> {
         .clone();
     match selection {
         BackendSelection::Ambient => {
-            let backend = resolve_default_backend().map_err(|error| native_error(ruby, error))?;
+            let backend = resolve_default_backend().map_err(|error| core_error(ruby, error))?;
             set_default_backend(backend);
         }
         BackendSelection::Local => set_default_backend(LocalBackend::lazy()),
@@ -173,12 +173,12 @@ fn reset_backend_after_fork(ruby: &Ruby) -> Result<(), Error> {
                 Some(url) => CloudBackend::new(url, api_key),
                 None => CloudBackend::with_api_key(api_key),
             }
-            .map_err(|error| native_error(ruby, error))?;
+            .map_err(|error| core_error(ruby, error))?;
             set_default_backend(backend);
         }
         BackendSelection::CloudProfile(name) => {
             let backend =
-                CloudBackend::from_profile(&name).map_err(|error| native_error(ruby, error))?;
+                CloudBackend::from_profile(&name).map_err(|error| core_error(ruby, error))?;
             set_default_backend(backend);
         }
     }
@@ -225,13 +225,131 @@ fn runtime() -> Result<&'static tokio::runtime::Runtime, Error> {
     Ok(unsafe { &*runtime_ptr })
 }
 
-fn native_error(ruby: &Ruby, error: impl Display) -> Error {
-    let msg = error.to_string();
-    let exc = ruby
-        .define_module("Microsandbox")
-        .and_then(|m| m.const_get::<_, ExceptionClass>("Error"))
-        .unwrap_or_else(|_| ruby.exception_runtime_error());
-    Error::new(exc, msg)
+// -------------------------------------------------------------------------------------------------
+// Core error mapping
+// -------------------------------------------------------------------------------------------------
+
+/// The `Microsandbox::*` exception class for a core error. `"Error"` is the
+/// natively defined base class; the subclasses live in
+/// `lib/microsandbox/errors.rb`. Class names mirror the Python SDK's bridge
+/// (`sdk/python/src/error.rs`), extended with the Go SDK's per-variant coverage
+/// for snapshots, exec spawn failures, and duplicate volumes. Every other
+/// variant falls back to the base class.
+fn core_error_class_name(error: &MicrosandboxError) -> &'static str {
+    match error {
+        MicrosandboxError::InvalidConfig(_) => "InvalidConfigError",
+        MicrosandboxError::NoDefaultCommand => "NoDefaultCommandError",
+        MicrosandboxError::CloudHttp { .. } => "CloudHttpError",
+        MicrosandboxError::SandboxNotFound(_) => "SandboxNotFoundError",
+        MicrosandboxError::SandboxNotRunning(_) => "SandboxNotRunningError",
+        MicrosandboxError::SandboxAlreadyExists(_) => "SandboxAlreadyExistsError",
+        MicrosandboxError::SandboxStillRunning(_) => "SandboxStillRunningError",
+        MicrosandboxError::ExecTimeout(_) => "ExecTimeoutError",
+        MicrosandboxError::ExecFailed(_) => "ExecFailedError",
+        MicrosandboxError::SandboxFsOps(_) => "FilesystemError",
+        MicrosandboxError::VolumeNotFound(_) => "VolumeNotFoundError",
+        MicrosandboxError::VolumeAlreadyExists(_) => "VolumeAlreadyExistsError",
+        MicrosandboxError::ImageNotFound(_) => "ImageNotFoundError",
+        MicrosandboxError::ImageInUse(_) => "ImageInUseError",
+        MicrosandboxError::SnapshotNotFound(_) => "SnapshotNotFoundError",
+        MicrosandboxError::SnapshotAlreadyExists(_) => "SnapshotAlreadyExistsError",
+        MicrosandboxError::SnapshotSandboxRunning(_) => "SnapshotSandboxRunningError",
+        MicrosandboxError::SnapshotImageMissing(_) => "SnapshotImageMissingError",
+        MicrosandboxError::SnapshotIntegrity(_) => "SnapshotIntegrityError",
+        MicrosandboxError::SnapshotMigration { .. } => "SnapshotMigrationError",
+        // Always present: the extension enables the core's `net` feature.
+        MicrosandboxError::NetworkBuilder(_) => "NetworkPolicyError",
+        MicrosandboxError::Io(_) => "IoError",
+        MicrosandboxError::MetricsDisabled(_) => "MetricsDisabledError",
+        MicrosandboxError::MetricsUnavailable(_) => "MetricsUnavailableError",
+        MicrosandboxError::AgentClient(AgentClientError::UnsupportedOperation { .. }) => {
+            "UnsupportedOperationError"
+        }
+        MicrosandboxError::Unsupported { .. } => "UnsupportedError",
+        _ => "Error",
+    }
+}
+
+/// Look up `Microsandbox::<name>`, falling back to the base `Error`, then to
+/// `RuntimeError` if even that is missing.
+fn exception_class(ruby: &Ruby, name: &str) -> ExceptionClass {
+    ruby.define_module("Microsandbox")
+        .and_then(|module| {
+            module
+                .const_get::<_, ExceptionClass>(name)
+                .or_else(|_| module.const_get::<_, ExceptionClass>("Error"))
+        })
+        .unwrap_or_else(|_| ruby.exception_runtime_error())
+}
+
+/// Convert a core error into the matching typed Ruby exception. The message is
+/// always the core error's `Display` rendering, except for `Unsupported`,
+/// which names the Ruby API instead of the Rust path.
+fn core_error(ruby: &Ruby, error: MicrosandboxError) -> Error {
+    if let MicrosandboxError::Unsupported { op, reason } = &error {
+        return unsupported_error(ruby, &ruby_api_name(*op), &ruby_hint(reason));
+    }
+    Error::new(
+        exception_class(ruby, core_error_class_name(&error)),
+        error.to_string(),
+    )
+}
+
+/// Build a `Microsandbox::UnsupportedError` carrying the rendered message plus
+/// the structured `@operation` / `@hint` attributes read by
+/// `UnsupportedError#operation` / `#hint`.
+fn unsupported_error(ruby: &Ruby, operation: &str, hint: &str) -> Error {
+    let message = format!("{operation} is not supported by this backend: {hint}");
+    let class = exception_class(ruby, "UnsupportedError");
+    match class.new_instance((message.as_str(),)) {
+        Ok(exception) => {
+            // Best-effort extras; the message already carries both.
+            if let Some(object) = RObject::from_value(exception.as_value()) {
+                let _ = object.ivar_set("@operation", operation);
+                let _ = object.ivar_set("@hint", hint);
+            }
+            exception.into()
+        }
+        Err(_) => Error::new(class, message),
+    }
+}
+
+/// Render an [`Operation`] as the Ruby API it corresponds to: `Sandbox::kill`
+/// becomes `sandbox.kill` and `Sandbox::log_stream(follow=false)` becomes
+/// `sandbox.log_stream(follow: false)`. Plain phrases without a `Type::method`
+/// shape (`config`, `snapshot operations`) pass through as-is.
+fn ruby_api_name(op: Operation) -> String {
+    let path = op.api_path();
+    let Some((ty, method)) = path.split_once("::") else {
+        return path.to_string();
+    };
+    format!("{}.{}", camel_to_snake(ty), method.replace('=', ": "))
+}
+
+/// Render an [`UnsupportedReason`] with `use instead` targets pointing at the
+/// Ruby API name rather than the Rust path.
+fn ruby_hint(reason: &UnsupportedReason) -> String {
+    match reason {
+        UnsupportedReason::UseInstead(op) => format!("use {}", ruby_api_name(*op)),
+        other => other.hint(),
+    }
+}
+
+/// Lower a `CamelCase` type name to `snake_case` (`SandboxFsOps` becomes
+/// `sandbox_fs_ops`).
+fn camel_to_snake(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 4);
+    for (i, ch) in name.char_indices() {
+        if ch.is_ascii_uppercase() {
+            if i > 0 {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 /// Spawn `future` on the tokio runtime and block the Ruby thread **without the
@@ -296,7 +414,7 @@ where
     F: Future<Output = MicrosandboxResult<T>> + Send + 'static,
     T: Send + 'static,
 {
-    block_without_gvl(ruby, future)?.map_err(|e| native_error(ruby, e))
+    block_without_gvl(ruby, future)?.map_err(|e| core_error(ruby, e))
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -410,7 +528,7 @@ fn restricted_network_policy(ruby: &Ruby, value: Value) -> Result<NetworkPolicy,
         .default_deny()
         .egress(|eg| eg.tcp().ports(ports).allow_domains(hosts))
         .build()
-        .map_err(|e| native_error(ruby, e))
+        .map_err(|e| core_error(ruby, MicrosandboxError::from(e)))
 }
 
 fn apply_secret_options(
@@ -1573,13 +1691,13 @@ fn set_default_backend_cloud(ruby: &Ruby, args: &[Value]) -> Result<(), Error> {
         Some(url) => CloudBackend::new(url, &api_key),
         None => CloudBackend::with_api_key(&api_key),
     }
-    .map_err(|error| native_error(ruby, error))?;
+    .map_err(|error| core_error(ruby, error))?;
     set_default_backend(backend);
     remember_backend_selection(ruby, BackendSelection::Cloud { api_key, url })
 }
 
 fn set_default_backend_profile(ruby: &Ruby, name: String) -> Result<(), Error> {
-    let backend = CloudBackend::from_profile(&name).map_err(|error| native_error(ruby, error))?;
+    let backend = CloudBackend::from_profile(&name).map_err(|error| core_error(ruby, error))?;
     set_default_backend(backend);
     remember_backend_selection(ruby, BackendSelection::CloudProfile(name))
 }
