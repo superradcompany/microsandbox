@@ -171,7 +171,7 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 				HostPermissions:    string(m.HostPermissions),
 			}
 			if m.Owner != nil {
-				uid, gid := m.Owner.Uid, m.Owner.Gid
+				uid, gid := m.Owner.UID, m.Owner.GID
 				spec.OverrideUid, spec.OverrideGid = &uid, &gid
 			}
 			ffiOpts.Volumes[guestPath] = spec

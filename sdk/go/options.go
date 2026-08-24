@@ -1612,8 +1612,8 @@ type MountConfig struct {
 // are required together; because uid 0 (root) is a valid value, this is passed
 // by pointer so that "unset" is distinct from "root".
 type MountOwner struct {
-	Uid uint32
-	Gid uint32
+	UID uint32
+	GID uint32
 }
 
 // MountKind discriminates between the four mount flavours.

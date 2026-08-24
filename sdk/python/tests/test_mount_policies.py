@@ -17,6 +17,8 @@ from microsandbox import (
     NamedVolumeMode,
     SecurityProfile,
     StatVirtualization,
+    Volume,
+    VolumeKind,
 )
 
 
@@ -92,6 +94,60 @@ def test_owner_rejected_on_tmpfs() -> None:
     mc = MountConfig(kind=MountKind.TMPFS, override_uid=1000, override_gid=1000)
     with pytest.raises(ValueError, match="BIND/NAMED"):
         mc._to_dict()
+
+
+@pytest.mark.parametrize("value", [True, -1, 1.5, 2**32, "1000"])
+def test_owner_rejects_invalid_python_values(value: object) -> None:
+    mc = MountConfig(
+        kind=MountKind.BIND,
+        bind="/host/data",
+        override_uid=value,  # type: ignore[arg-type]
+        override_gid=1000,
+    )
+    with pytest.raises(ValueError, match="integer between"):
+        mc._to_dict()
+
+
+def test_owner_rejects_stat_virtualization_off() -> None:
+    mc = MountConfig(
+        kind=MountKind.BIND,
+        bind="/host/data",
+        stat_virtualization=StatVirtualization.OFF,
+        override_uid=1000,
+        override_gid=1000,
+    )
+    with pytest.raises(ValueError, match="cannot be combined"):
+        mc._to_dict()
+
+
+def test_owner_rejects_explicit_named_disk() -> None:
+    mc = MountConfig(
+        kind=MountKind.NAMED,
+        named="disk-volume",
+        named_kind=VolumeKind.DISK,
+        override_uid=1000,
+        override_gid=1000,
+    )
+    with pytest.raises(ValueError, match="disk-backed"):
+        mc._to_dict()
+
+
+def test_volume_factories_forward_mount_metadata_policies() -> None:
+    bind = Volume.bind(
+        "/host/data",
+        stat_virtualization=StatVirtualization.RELAXED,
+        host_permissions=HostPermissions.MIRROR,
+        uid=0,
+        gid=0,
+    )
+    assert bind._to_dict()["stat_virtualization"] == "relaxed"
+    assert bind._to_dict()["host_permissions"] == "mirror"
+    assert bind._to_dict()["override_uid"] == 0
+    assert bind._to_dict()["override_gid"] == 0
+
+    named = Volume.named("cache", uid=1000, gid=1000)
+    assert named._to_dict()["override_uid"] == 1000
+    assert named._to_dict()["override_gid"] == 1000
 
 
 def test_named_with_off_serializes() -> None:

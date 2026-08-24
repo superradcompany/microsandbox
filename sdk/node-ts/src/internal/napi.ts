@@ -1124,8 +1124,10 @@ export interface NapiMountBuilder {
   nosuid(): this;
   nodev(): this;
   size(mib: number): this;
+  quota(mib: number): this;
   statVirtualization(policy: string): this;
   hostPermissions(policy: string): this;
+  owner(uid: number, gid: number): this;
   build(): NapiVolumeMount;
 }
 

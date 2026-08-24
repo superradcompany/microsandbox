@@ -628,8 +628,8 @@ func TestFFIWireShape_MountOwner(t *testing.T) {
 	got := marshalCreateOptions(t,
 		WithImage("alpine"),
 		WithMounts(map[string]MountConfig{
-			"/owned":   Mount.Bind("/host/owned", MountOptions{Owner: &MountOwner{Uid: 1000, Gid: 1000}}),
-			"/root":    Mount.Bind("/host/root", MountOptions{Owner: &MountOwner{Uid: 0, Gid: 0}}),
+			"/owned":   Mount.Bind("/host/owned", MountOptions{Owner: &MountOwner{UID: 1000, GID: 1000}}),
+			"/root":    Mount.Bind("/host/root", MountOptions{Owner: &MountOwner{UID: 0, GID: 0}}),
 			"/default": Mount.Bind("/host/default", MountOptions{}),
 		}),
 	)

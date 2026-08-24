@@ -12,6 +12,7 @@ from microsandbox.types import (
     ExecEventType,
     ExecOptions,
     FsEntryKind,
+    HostPermissions,
     ImageArchiveFormat,
     ImageSource,
     InitConfig,
@@ -39,6 +40,7 @@ from microsandbox.types import (
     SnapshotScope,
     SnapshotStateKind,
     Stdin,
+    StatVirtualization,
     ViolationAction,
     ViolationPolicy,
     VolumeKind,
@@ -619,6 +621,10 @@ class Volume:
         noexec: bool = False,
         nosuid: bool = False,
         nodev: bool = False,
+        stat_virtualization: StatVirtualization | None = None,
+        host_permissions: HostPermissions | None = None,
+        uid: int | None = None,
+        gid: int | None = None,
     ) -> MountConfig: ...
     @staticmethod
     def named(
@@ -632,6 +638,10 @@ class Volume:
         noexec: bool = False,
         nosuid: bool = False,
         nodev: bool = False,
+        stat_virtualization: StatVirtualization | None = None,
+        host_permissions: HostPermissions | None = None,
+        uid: int | None = None,
+        gid: int | None = None,
     ) -> MountConfig: ...
     @staticmethod
     def tmpfs(

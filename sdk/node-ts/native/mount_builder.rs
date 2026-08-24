@@ -275,10 +275,15 @@ impl JsMountBuilder {
     /// Present host files that carry no per-file stat override as this guest
     /// owner. Valid only for bind and directory-backed named volume mounts.
     #[napi]
-    pub fn owner(&mut self, uid: u32, gid: u32) -> &Self {
+    pub fn owner(&mut self, uid: f64, gid: f64) -> Result<&Self> {
+        // N-API's direct u32 conversion follows JavaScript's ToUint32 rules,
+        // which would silently wrap negatives and truncate fractions. Identity
+        // values must cross the language boundary without changing meaning.
+        let uid = validate_owner_id("uid", uid)?;
+        let gid = validate_owner_id("gid", gid)?;
         let prev = self.take_inner();
         self.inner = Some(prev.owner(uid, gid));
-        self
+        Ok(self)
     }
 
     /// Materialize the mount spec. Returns a flat `VolumeMount` with a
@@ -293,6 +298,20 @@ impl JsMountBuilder {
             .map_err(to_napi_error)?;
         Ok(to_built_mount(mount))
     }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+fn validate_owner_id(name: &str, value: f64) -> Result<u32> {
+    if !value.is_finite() || value.fract() != 0.0 || !(0.0..=u32::MAX as f64).contains(&value) {
+        return Err(napi::Error::from_reason(format!(
+            "mount owner {name} must be an integer between 0 and {}",
+            u32::MAX
+        )));
+    }
+    Ok(value as u32)
 }
 
 fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
