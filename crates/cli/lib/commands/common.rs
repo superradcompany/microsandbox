@@ -328,7 +328,12 @@ pub struct SandboxOpts {
     #[cfg(feature = "net")]
     #[arg(
         long = "no-net",
-        conflicts_with_all = ["net_default", "net_default_egress", "net_default_ingress"]
+        conflicts_with_all = [
+            "net_conf",
+            "net_default",
+            "net_default_egress",
+            "net_default_ingress"
+        ]
     )]
     pub no_net: bool,
 
@@ -341,6 +346,7 @@ pub struct SandboxOpts {
         long = "net",
         value_name = "PROFILE",
         conflicts_with_all = [
+            "net_conf",
             "no_net",
             "net_default",
             "net_default_egress",
@@ -392,7 +398,7 @@ pub struct SandboxOpts {
     /// --net-rule "allow@example.com:tcp:443"
     /// --net-rule "deny@*.ads.example.com"
     #[cfg(feature = "net")]
-    #[arg(long = "net-rule", value_name = "TOKENS")]
+    #[arg(long = "net-rule", value_name = "TOKENS", conflicts_with = "net_conf")]
     pub net_rule: Vec<String>,
 
     /// Default action for traffic in both directions that doesn't match
@@ -403,7 +409,7 @@ pub struct SandboxOpts {
     #[arg(
         long = "net-default",
         value_name = "ACTION",
-        conflicts_with_all = ["net_default_egress", "net_default_ingress"],
+        conflicts_with_all = ["net_conf", "net_default_egress", "net_default_ingress"],
     )]
     pub net_default: Option<String>,
 
@@ -411,14 +417,22 @@ pub struct SandboxOpts {
     /// `--net-rule`. Default: deny (with an implicit allow@public rule
     /// when no other rules are present).
     #[cfg(feature = "net")]
-    #[arg(long = "net-default-egress", value_name = "ACTION")]
+    #[arg(
+        long = "net-default-egress",
+        value_name = "ACTION",
+        conflicts_with = "net_conf"
+    )]
     pub net_default_egress: Option<String>,
 
     /// Default action for ingress traffic that doesn't match any
     /// `--net-rule`. Default: allow (preserves today's unfiltered
     /// published-port behavior when no ingress rules are set).
     #[cfg(feature = "net")]
-    #[arg(long = "net-default-ingress", value_name = "ACTION")]
+    #[arg(
+        long = "net-default-ingress",
+        value_name = "ACTION",
+        conflicts_with = "net_conf"
+    )]
     pub net_default_ingress: Option<String>,
 
     /// Limit outbound (egress) bandwidth, e.g. 1M/1s. SIZE accepts
@@ -2072,14 +2086,14 @@ fn apply_network_opts(
             opts.net_default_egress.as_deref(),
             opts.net_default_ingress.as_deref(),
         )?;
-        let replaces_configured_base = !opts.net.is_empty()
+        let replaces_configured_policy = !opts.net.is_empty()
             || opts.no_net
             || opts.net_default.is_some()
             || opts.net_default_egress.is_some()
             || opts.net_default_ingress.is_some();
-        if replaces_configured_base {
+        if replaces_configured_policy {
             if let Some(policy) = network_policy {
-                builder = builder.replace_network_policy_preserving_config_rules(policy);
+                builder = builder.network(move |network| network.policy(policy));
             }
         } else if !opts.net_rule.is_empty() {
             let mut rules = Vec::new();

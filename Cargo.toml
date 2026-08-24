@@ -10,6 +10,7 @@ members = [
     "crates/metrics",
     "crates/metrics-collector",
     "packages/agent-client/rust",
+    "packages/microsandbox-types/macros",
     "packages/microsandbox-types/rust",
     "sdk/rust",
     "crates/migration",
@@ -81,6 +82,7 @@ microsandbox-db = { version = "=0.6.15", path = "crates/db" }
 microsandbox-filesystem = { version = "=0.6.15", path = "crates/filesystem", default-features = false }
 microsandbox-image = { version = "=0.6.15", path = "crates/image" }
 microsandbox-metrics = { version = "=0.6.15", path = "crates/metrics" }
+microsandbox-types-macros = { version = "=0.6.15", path = "packages/microsandbox-types/macros" }
 microsandbox-types = { version = "=0.6.15", path = "packages/microsandbox-types/rust" }
 microsandbox-migration = { version = "=0.6.15", path = "crates/migration" }
 microsandbox-network = { version = "=0.6.15", path = "crates/network" }

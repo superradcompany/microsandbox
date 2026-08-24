@@ -8,7 +8,6 @@
 pub(crate) mod attach;
 mod builder;
 pub(crate) mod config;
-mod config_patch;
 pub mod exec;
 pub(crate) mod flat_rootfs;
 pub mod fs;
@@ -102,15 +101,6 @@ pub use crate::logs::{LogEntry, LogOptions, LogSource, LogStreamOptions};
 pub use attach::AttachOptionsBuilder;
 pub use builder::{RegistryConfigBuilder, SandboxBuilder};
 pub use config::SandboxConfig;
-#[cfg(feature = "net")]
-pub use config_patch::{
-    DnsConfigPatch, NetworkConfigPatch, NetworkPolicyConfigPatch, SecretConfigPatch,
-    SecretEntryConfigPatch, TlsConfigPatch,
-};
-pub use config_patch::{
-    FilesystemConfigPatch, InitConfigPatch, ResourceConfigPatch, RuntimeConfigPatch,
-    SandboxConfigPatch, SandboxImagePatch, ScriptConfigPatch,
-};
 pub use exec::{ExecOptionsBuilder, ExecOutput, Rlimit, RlimitResource};
 pub use fs::{
     FsEntry, FsEntryKind, FsHandle, FsMetadata, FsOpenOptions, FsReadStream, FsSetAttrs,
@@ -135,13 +125,18 @@ pub use microsandbox_network::policy::{
 };
 pub use microsandbox_runtime::logging::LogLevel;
 pub use microsandbox_types::{CpuPlacement, PullPolicy};
-pub use microsandbox_types::{
-    EnvVar, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, NetworkSpec, PortProtocol,
-    PublishedPortSpec, SandboxLogLevel, SandboxResources, SandboxRuntimeOptions, SandboxSpec,
-    TransparentHugePagePolicy, VsockRouteSpec, VsockSocketType, VsockSpec,
-};
 #[cfg(feature = "net")]
-pub use microsandbox_types::{HostPattern, SecretInjection};
+pub use microsandbox_types::{
+    DnsConfigPatch, HostPattern, InterfaceOverridesPatch, NetworkRateLimiterConfigPatch,
+    SecretInjection, SecretsConfigPatch, TlsConfigPatch,
+};
+pub use microsandbox_types::{
+    EnvVar, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, NetworkSpec, NetworkSpecPatch,
+    PortProtocol, PublishedPortSpec, SandboxConfigPatch, SandboxLogLevel, SandboxPolicyPatch,
+    SandboxResources, SandboxResourcesPatch, SandboxRuntimeOptions, SandboxRuntimeOptionsPatch,
+    SandboxSpec, TransparentHugePagePolicy, VsockRouteSpec, VsockSocketType, VsockSpec,
+    VsockSpecPatch,
+};
 pub use modify::{
     ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,
     ModificationPolicy, ModificationWarning, PlannedChange, ResourceConvergenceState, ResourceKind,
@@ -258,12 +253,7 @@ pub struct SandboxTouchResult {
 impl Sandbox {
     /// Start building a new sandbox configuration.
     pub fn builder(name: impl Into<String>) -> SandboxBuilder {
-        let builder = SandboxBuilder::new(name);
-        let backend = crate::backend::default_backend();
-        match backend.as_local() {
-            Some(local) => builder.with_local_defaults(local.config()),
-            None => builder,
-        }
+        SandboxBuilder::new(name)
     }
 
     /// Create a sandbox from a config.
