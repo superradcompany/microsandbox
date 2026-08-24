@@ -26,7 +26,8 @@ use serde_saphyr::{DuplicateKeyPolicy, MergeKeyPolicy, Options};
 #[cfg(test)]
 use crate::commands::common::SandboxOpts;
 use crate::commands::common::{
-    SandboxConfigKind, SandboxConfigSources, parse_duration_secs, validate_shell,
+    SandboxConfigKind, SandboxConfigSources, materialize_bind_mount, parse_duration_secs,
+    validate_shell,
 };
 use crate::ui;
 
@@ -237,6 +238,8 @@ struct MountObject {
     nodev: Option<bool>,
     stat_virtualization: Option<StatVirtualizationInput>,
     host_permissions: Option<HostPermissionsInput>,
+    uid: Option<u32>,
+    gid: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1126,6 +1129,8 @@ fn absolutize_mounts(mounts: &mut [MountInput], base: &Path) {
         match mount {
             MountInput::String(spec) => {
                 if let Some(index) = bind_mount_separator(spec) {
+                    // YAML string mounts have always been config-relative bind
+                    // paths, including bare sources such as `src`.
                     let source = absolute_path(Path::new(&spec[..index]), base);
                     *spec = format!("{}{}", source.display(), &spec[index..]);
                 }
@@ -1452,32 +1457,9 @@ fn resolve_registry_auth(registry: &RegistryInput) -> anyhow::Result<Option<Regi
 
 fn materialize_mount(input: &MountInput) -> anyhow::Result<VolumeMount> {
     match input {
-        MountInput::String(spec) => materialize_bind_mount_string(spec),
+        MountInput::String(spec) => materialize_bind_mount(spec),
         MountInput::Object(object) => materialize_mount_object(object),
     }
-}
-
-fn materialize_bind_mount_string(spec: &str) -> anyhow::Result<VolumeMount> {
-    let index = bind_mount_separator(spec)
-        .ok_or_else(|| anyhow::anyhow!("bind mount {spec:?} must use SOURCE:TARGET[:ro]"))?;
-    let source = &spec[..index];
-    let rest = &spec[index + 1..];
-    if !source.starts_with('.') && !source.starts_with('/') && !Path::new(source).is_absolute() {
-        anyhow::bail!("bind mount source must start with `.` or `/`, got {source:?}");
-    }
-    let (target, readonly) = match rest.strip_suffix(":ro") {
-        Some(target) => (target, true),
-        None => (rest, false),
-    };
-    if target.is_empty() || !target.starts_with('/') {
-        anyhow::bail!("bind mount target must be an absolute guest path, got {target:?}");
-    }
-    let source = PathBuf::from(source);
-    let mut mount = MountBuilder::new(target).bind(source);
-    if readonly {
-        mount = mount.readonly();
-    }
-    mount.build().map_err(Into::into)
 }
 
 fn materialize_mount_object(object: &MountObject) -> anyhow::Result<VolumeMount> {
@@ -1510,6 +1492,12 @@ fn materialize_mount_object(object: &MountObject) -> anyhow::Result<VolumeMount>
         anyhow::bail!(
             "mount.stat_virtualization and mount.host_permissions are only valid for bind or named mounts"
         );
+    }
+    if object.uid.is_some() != object.gid.is_some() {
+        anyhow::bail!("mount.uid and mount.gid must be specified together");
+    }
+    if object.uid.is_some() && object.bind.is_none() && object.named.is_none() {
+        anyhow::bail!("mount.uid and mount.gid are only valid for bind or named mounts");
     }
 
     let tmpfs_size = object
@@ -1560,6 +1548,9 @@ fn materialize_mount_object(object: &MountObject) -> anyhow::Result<VolumeMount>
     }
     if let Some(policy) = object.host_permissions {
         mount = mount.host_permissions(policy.into());
+    }
+    if let (Some(uid), Some(gid)) = (object.uid, object.gid) {
+        mount = mount.owner(uid, gid);
     }
     mount.build().map_err(Into::into)
 }
@@ -2010,7 +2001,7 @@ allow: ["scoped.example.com"]
             r#"
 image: { bind: "./rootfs" }
 mounts:
-  - "./src:/app"
+  - "src:/app"
 patch_files: ["./patch.yaml"]
 patches:
   - copy_file: { src: "./app.toml", dst: "/etc/app.toml" }
@@ -2033,12 +2024,107 @@ patches:
         };
         assert_eq!(
             mount,
-            &format!("{}:/app", config_base.join("./src").display())
+            &format!("{}:/app", config_base.join("src").display())
         );
         let PatchInput::CopyFile(copy) = &resolved.patch.patches.unwrap()[0] else {
             panic!("expected copy-file patch")
         };
         assert_eq!(copy.src, config_base.join("./app.toml"));
+    }
+
+    #[test]
+    fn yaml_string_mounts_share_the_full_bind_option_grammar() {
+        let bind = materialize_mount(&MountInput::String(
+            "/host:/workspace:ro,noexec,nosuid,nodev,stat-virt=relaxed,host-perms=mirror,quota=64M,uid=1000,gid=1001"
+                .to_string(),
+        ))
+        .unwrap();
+
+        match bind {
+            VolumeMount::Bind {
+                host,
+                guest,
+                options,
+                stat_virtualization,
+                host_permissions,
+                quota_mib,
+                ..
+            } => {
+                assert_eq!(host, PathBuf::from("/host"));
+                assert_eq!(guest, "/workspace");
+                assert!(options.readonly);
+                assert!(options.noexec);
+                assert!(options.nosuid);
+                assert!(options.nodev);
+                assert_eq!(options.override_uid, Some(1000));
+                assert_eq!(options.override_gid, Some(1001));
+                assert_eq!(stat_virtualization, StatVirtualization::Relaxed);
+                assert_eq!(host_permissions, HostPermissions::Mirror);
+                assert_eq!(quota_mib, Some(64));
+            }
+            other => panic!("expected bind mount, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn yaml_object_mounts_accept_paired_owner_and_reject_invalid_uses() {
+        let dir = tempfile::tempdir().unwrap();
+        let valid = write_config(
+            dir.path(),
+            "valid-owner.yaml",
+            r#"
+image: alpine
+mounts:
+  - bind: "./workspace"
+    target: "/workspace"
+    uid: 1000
+    gid: 1001
+  - named: cache
+    target: "/cache"
+    uid: 2000
+    gid: 2001
+"#,
+        );
+        let patch = load_root(&valid).unwrap();
+        let mounts = patch.mounts.unwrap();
+        let mount = materialize_mount(&mounts[0]).unwrap();
+        match mount {
+            VolumeMount::Bind { options, .. } => {
+                assert_eq!(options.override_uid, Some(1000));
+                assert_eq!(options.override_gid, Some(1001));
+            }
+            other => panic!("expected bind mount, got {other:?}"),
+        }
+        let mount = materialize_mount(&mounts[1]).unwrap();
+        match mount {
+            VolumeMount::Named { options, .. } => {
+                assert_eq!(options.override_uid, Some(2000));
+                assert_eq!(options.override_gid, Some(2001));
+            }
+            other => panic!("expected named mount, got {other:?}"),
+        }
+
+        let partial = write_config(
+            dir.path(),
+            "partial-owner.yaml",
+            "image: alpine\nmounts:\n  - bind: ./workspace\n    target: /workspace\n    uid: 1000\n",
+        );
+        let error =
+            resolve(&SandboxConfigSources::default().source(SandboxConfigKind::Root, partial))
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("mount.uid and mount.gid must be specified together"));
+
+        let tmpfs = write_config(
+            dir.path(),
+            "tmpfs-owner.yaml",
+            "image: alpine\nmounts:\n  - tmpfs: {}\n    target: /tmp\n    uid: 1000\n    gid: 1000\n",
+        );
+        let error =
+            resolve(&SandboxConfigSources::default().source(SandboxConfigKind::Root, tmpfs))
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("only valid for bind or named mounts"));
     }
 
     #[test]

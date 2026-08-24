@@ -9,7 +9,7 @@ use microsandbox::backend::{Backend, LocalBackend};
 use microsandbox::sandbox::{
     CpuPlacement, DeploymentProfile, DiskImageFormat, FlatClone, MountBuilder, Patch,
     RootDiskBuilder, Sandbox, SandboxBuilder, SandboxHandle, SecurityProfile,
-    TransparentHugePagePolicy, VsockSocketType,
+    TransparentHugePagePolicy, VolumeMount, VsockSocketType,
 };
 #[cfg(feature = "net")]
 use microsandbox_types::NetworkRateLimitDirection;
@@ -1404,7 +1404,39 @@ fn validate_guest_path(context: &str, path: &str) -> anyhow::Result<()> {
 ///
 /// Accepts: `SRC:DST[:ro|rw][,noexec][,nosuid][,nodev][,follow-root-symlinks][,stat-virt=...][,host-perms=...][,uid=...,gid=...]`.
 pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<SandboxBuilder> {
-    let parsed = parse_cli_mount_spec(
+    let parsed = parse_volume_mount_spec(spec)?;
+    let is_path = microsandbox_utils::looks_like_local_path_text(parsed.source);
+    let source = parsed.source.to_string();
+    let guest = parsed.guest.to_string();
+    let options = parsed.options;
+
+    // Keep SDK validation at the existing SandboxBuilder boundary. YAML uses
+    // the same configurator below but builds the individual mount immediately.
+    Ok(builder.volume(guest, move |mount| {
+        configure_volume_mount(mount, &source, is_path, options)
+    }))
+}
+
+/// Parse and materialize a bind mount with the shared `-v/--volume` options.
+///
+/// YAML strings historically treat every source as a config-relative bind path,
+/// including bare values such as `src`. Reuse the option grammar and builder
+/// configurator without inheriting `-v`'s bare-name named-volume inference.
+pub(crate) fn materialize_bind_mount(spec: &str) -> anyhow::Result<VolumeMount> {
+    let parsed = parse_volume_mount_spec(spec)?;
+    configure_volume_mount(
+        MountBuilder::new(parsed.guest),
+        parsed.source,
+        true,
+        parsed.options,
+    )
+    .build()
+    .map_err(Into::into)
+}
+
+/// Parse the generic bind-or-named volume syntax shared by CLI and YAML.
+fn parse_volume_mount_spec(spec: &str) -> anyhow::Result<ParsedCliMountSpec<'_>> {
+    parse_cli_mount_spec(
         "volume",
         spec,
         CliMountOptionSupport {
@@ -1413,57 +1445,32 @@ pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<Sandb
             owner: true,
             ..CliMountOptionSupport::default()
         },
-    )?;
+    )
+}
 
-    let is_path = microsandbox_utils::looks_like_local_path_text(parsed.source);
-    let source = parsed.source.to_string();
-    let guest = parsed.guest.to_string();
-    let options = parsed.options;
-    Ok(builder.volume(guest, move |mut m| {
-        let quota_mib = options.quota_mib;
-        m = if is_path {
-            let mut b = m.bind(&source);
-            if let Some(q) = quota_mib {
-                b = b.quota(q);
+/// Apply a parsed generic volume source and its common options to a mount.
+fn configure_volume_mount(
+    mount: MountBuilder,
+    source: &str,
+    is_path: bool,
+    mut options: CliMountOptions,
+) -> MountBuilder {
+    let mount = if is_path {
+        mount.bind(source)
+    } else {
+        // Named-volume quotas belong to the named sub-builder, unlike bind
+        // quotas which are applied by `apply_common_mount_options` below.
+        let quota_mib = options.quota_mib.take();
+        mount.named_with(source, |mut volume| {
+            volume = volume.ensure_exists();
+            if let Some(quota_mib) = quota_mib {
+                volume = volume.quota(quota_mib);
             }
-            b
-        } else {
-            // A named volume routes its quota through the named sub-builder
-            // rather than the bind-only `.quota()`.
-            m.named_with(&source, move |mut v| {
-                v = v.ensure_exists();
-                if let Some(q) = quota_mib {
-                    v = v.quota(q);
-                }
-                v
-            })
-        };
-        if options.readonly {
-            m = m.readonly();
-        }
-        if options.noexec {
-            m = m.noexec();
-        }
-        if options.nosuid {
-            m = m.nosuid();
-        }
-        if options.nodev {
-            m = m.nodev();
-        }
-        if options.follow_root_symlinks {
-            m = m.follow_root_symlinks(true);
-        }
-        if let Some(sv) = options.stat_virtualization {
-            m = m.stat_virtualization(sv);
-        }
-        if let Some(hp) = options.host_permissions {
-            m = m.host_permissions(hp);
-        }
-        if let (Some(uid), Some(gid)) = (options.override_uid, options.override_gid) {
-            m = m.owner(uid, gid);
-        }
-        m
-    }))
+            volume
+        })
+    };
+
+    apply_common_mount_options(mount, options)
 }
 
 /// Validate the public `-v/--volume` syntax without retaining a builder.
