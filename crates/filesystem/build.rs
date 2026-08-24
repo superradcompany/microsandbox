@@ -1,147 +1,125 @@
+#[cfg(feature = "embed-binaries")]
 use std::path::{Path, PathBuf};
-#[cfg(not(feature = "prebuilt"))]
+
+#[cfg(all(feature = "embed-binaries", not(feature = "download-binaries")))]
 use std::time::SystemTime;
 
+#[cfg(feature = "embed-binaries")]
 use microsandbox_utils::AGENTD_BINARY;
-#[cfg(feature = "prebuilt")]
+#[cfg(feature = "download-binaries")]
 use microsandbox_utils::{PREBUILT_VERSION, agentd_download_url, http_client};
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=../utils/lib/lib.rs");
-    // Invalidate the embedded agentd when its source changes.
-    // This won't auto-rebuild agentd (that requires `just build-agentd`),
-    // but it forces cargo to re-check that `build/agentd` is fresh.
-    println!("cargo:rerun-if-changed=../agentd");
-    println!("cargo:rerun-if-changed=../protocol");
+    println!("cargo:rerun-if-env-changed=MSB_EMBED_ARTIFACTS_DIR");
 
-    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
-
-    build_agentd(&workspace_root, &out_dir);
+    #[cfg(feature = "embed-binaries")]
+    {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR is set by Cargo"));
+        stage_agentd(&workspace_root, &out_dir);
+    }
 }
 
-fn build_agentd(workspace_root: &Path, out_dir: &Path) {
+#[cfg(feature = "embed-binaries")]
+fn stage_agentd(workspace_root: &Path, out_dir: &Path) {
+    let destination = out_dir.join(AGENTD_BINARY);
+
+    if let Some(artifacts_dir) = std::env::var_os("MSB_EMBED_ARTIFACTS_DIR").map(PathBuf::from) {
+        let source = artifacts_dir.join(AGENTD_BINARY);
+        if !source.is_file() {
+            panic!(
+                "MSB_EMBED_ARTIFACTS_DIR does not contain {AGENTD_BINARY}: {}",
+                source.display()
+            );
+        }
+        println!("cargo:rerun-if-changed={}", source.display());
+        copy_agentd(&source, &destination);
+        return;
+    }
+
     let local = workspace_root.join("build").join(AGENTD_BINARY);
-    println!("cargo:rerun-if-changed={}", local.display());
+    if local.is_file() {
+        // Source and output watches belong only to the workspace-local path. Watching a missing
+        // build/agentd makes Cargo rerun this script forever for ordinary release-download builds.
+        println!("cargo:rerun-if-changed=../agentd");
+        println!("cargo:rerun-if-changed=../protocol");
+        println!("cargo:rerun-if-changed={}", local.display());
+        #[cfg(not(feature = "download-binaries"))]
+        reject_stale_agentd(workspace_root, &local);
+        copy_agentd(&local, &destination);
+        return;
+    }
 
-    #[cfg(feature = "prebuilt")]
+    #[cfg(feature = "download-binaries")]
     {
-        let dest = out_dir.join(AGENTD_BINARY);
-
-        // Local development recipes rebuild build/agentd before compiling msb.
-        // Prefer it over a cached OUT_DIR copy so the embedded PID 1 binary
-        // cannot silently lag behind the freshly built guest agent.
-        if local.is_file() {
-            copy_agentd(&local, &dest);
-            return;
-        }
-
-        println!("cargo:rerun-if-env-changed=MSB_AGENTD_PATH");
-
-        // A caller-supplied agentd stages the binary instead of using the cache or downloading.
-        if apply_msb_agentd_path(out_dir) {
-            return;
-        }
-
-        if dest.exists() {
-            return;
-        }
-
-        let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
+        let arch = std::env::var("CARGO_CFG_TARGET_ARCH").expect("Cargo target architecture");
         let url = agentd_download_url(PREBUILT_VERSION, &arch);
-
-        download_to(&url, &dest);
+        download_to(&url, &destination);
     }
 
-    #[cfg(not(feature = "prebuilt"))]
-    {
-        if !local.exists() {
-            panic!(
-                "{AGENTD_BINARY} binary not found at `{}`.\n\
-                 Run `just build-deps` first.",
-                local.display()
-            );
-        }
-
-        // Fail fast if build/agentd is stale relative to the guest source tree.
-        // A warning is too easy to miss and leads to confusing runtime behavior
-        // when msb embeds an older guest payload than the source implies.
-        let agentd_src = workspace_root.join("crates/agentd");
-        let protocol_src = workspace_root.join("crates/protocol");
-        if let Ok(bin_time) = std::fs::metadata(&local).and_then(|m| m.modified())
-            && newest_tree_mtime(&agentd_src)
-                .into_iter()
-                .chain(newest_tree_mtime(&protocol_src))
-                .any(|src_time| src_time > bin_time)
-        {
-            panic!(
-                "build/{AGENTD_BINARY} is older than crates/agentd or crates/protocol source.\n\
-                 Run `just build-agentd` to rebuild the guest agent binary."
-            );
-        }
-
-        let dest = out_dir.join(AGENTD_BINARY);
-        copy_agentd(&local, &dest);
-    }
+    #[cfg(not(feature = "download-binaries"))]
+    panic!(
+        "agentd is required by embed-binaries but was not found. Set \
+         MSB_EMBED_ARTIFACTS_DIR or run `just build-agentd`; alternatively enable \
+         download-binaries"
+    );
 }
 
-#[cfg(feature = "prebuilt")]
-fn apply_msb_agentd_path(out_dir: &Path) -> bool {
-    let Some(staged) = std::env::var_os("MSB_AGENTD_PATH").map(PathBuf::from) else {
-        return false;
-    };
-    if !staged.is_file() {
+#[cfg(feature = "embed-binaries")]
+fn copy_agentd(source: &Path, destination: &Path) {
+    match std::fs::remove_file(destination) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("failed to replace {}: {error}", destination.display()),
+    }
+    std::fs::copy(source, destination).unwrap_or_else(|error| {
         panic!(
-            "MSB_AGENTD_PATH does not point to an agentd file: {}",
-            staged.display()
+            "failed to copy {} to {}: {error}",
+            source.display(),
+            destination.display()
+        )
+    });
+}
+
+#[cfg(all(feature = "embed-binaries", not(feature = "download-binaries")))]
+fn reject_stale_agentd(workspace_root: &Path, binary: &Path) {
+    let binary_time = std::fs::metadata(binary).and_then(|metadata| metadata.modified());
+    let Ok(binary_time) = binary_time else {
+        return;
+    };
+    let stale = [
+        workspace_root.join("crates/agentd"),
+        workspace_root.join("crates/protocol"),
+    ]
+    .iter()
+    .filter_map(|root| newest_tree_mtime(root))
+    .any(|source_time| source_time > binary_time);
+    if stale {
+        panic!(
+            "build/{AGENTD_BINARY} is older than crates/agentd or crates/protocol source. \
+             Run `just build-agentd` to rebuild the guest agent binary."
         );
     }
-
-    println!("cargo:rerun-if-changed={}", staged.display());
-    copy_agentd(&staged, &out_dir.join(AGENTD_BINARY));
-    true
 }
 
-fn copy_agentd(local: &Path, dest: &Path) {
-    // Remove any previous copy first: fs::copy preserves a read-only source
-    // mode, which would make the next overwrite fail with EACCES.
-    match std::fs::remove_file(dest) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => panic!("failed to replace {}: {e}", dest.display()),
-    }
-    std::fs::copy(local, dest).expect("failed to copy agentd to OUT_DIR");
-}
-
-#[cfg(not(feature = "prebuilt"))]
+#[cfg(all(feature = "embed-binaries", not(feature = "download-binaries")))]
 fn newest_tree_mtime(root: &Path) -> Option<SystemTime> {
     fn walk(path: &Path, newest: &mut Option<SystemTime>) {
-        let entries = match std::fs::read_dir(path) {
-            Ok(entries) => entries,
-            Err(_) => return,
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return;
         };
-
         for entry in entries.flatten() {
-            let entry_path = entry.path();
-            let meta = match entry.metadata() {
-                Ok(meta) => meta,
-                Err(_) => continue,
-            };
-
-            if meta.is_dir() {
-                walk(&entry_path, newest);
+            let path = entry.path();
+            let Ok(metadata) = entry.metadata() else {
                 continue;
-            }
-
-            let modified = match meta.modified() {
-                Ok(modified) => modified,
-                Err(_) => continue,
             };
-
-            match newest {
-                Some(current) if *current >= modified => {}
-                _ => *newest = Some(modified),
+            if metadata.is_dir() {
+                walk(&path, newest);
+            } else if let Ok(modified) = metadata.modified()
+                && newest.is_none_or(|current| modified > current)
+            {
+                *newest = Some(modified);
             }
         }
     }
@@ -151,34 +129,33 @@ fn newest_tree_mtime(root: &Path) -> Option<SystemTime> {
     newest
 }
 
-#[cfg(feature = "prebuilt")]
-fn download_to(url: &str, dest: &Path) {
-    eprintln!("Downloading {url}");
+#[cfg(feature = "download-binaries")]
+fn download_to(url: &str, destination: &Path) {
+    use std::io::Write as _;
 
-    let part_path = {
-        let mut s = dest.as_os_str().to_os_string();
-        s.push(".part");
-        PathBuf::from(s)
-    };
-
-    let response = http_client().get(url).call().unwrap_or_else(|e| {
-        panic!("failed to download {url}: {e}");
-    });
-
+    println!("cargo:warning=downloading agentd from {url}");
+    let part_path = destination.with_extension("part");
+    let response = http_client()
+        .get(url)
+        .call()
+        .unwrap_or_else(|error| panic!("failed to download {url}: {error}"));
     let mut reader = response.into_body().into_reader();
-    let mut file = std::fs::File::create(&part_path).unwrap_or_else(|e| {
-        panic!("failed to create {}: {e}", part_path.display());
-    });
-
-    std::io::copy(&mut reader, &mut file).unwrap_or_else(|e| {
-        panic!("failed to write {}: {e}", part_path.display());
-    });
-
-    std::fs::rename(&part_path, dest).unwrap_or_else(|e| {
+    let mut file = std::fs::File::create(&part_path)
+        .unwrap_or_else(|error| panic!("failed to create {}: {error}", part_path.display()));
+    std::io::copy(&mut reader, &mut file)
+        .unwrap_or_else(|error| panic!("failed to write {}: {error}", part_path.display()));
+    file.flush()
+        .unwrap_or_else(|error| panic!("failed to flush {}: {error}", part_path.display()));
+    match std::fs::remove_file(destination) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("failed to replace {}: {error}", destination.display()),
+    }
+    std::fs::rename(&part_path, destination).unwrap_or_else(|error| {
         panic!(
-            "failed to rename {} to {}: {e}",
+            "failed to rename {} to {}: {error}",
             part_path.display(),
-            dest.display()
-        );
+            destination.display()
+        )
     });
 }

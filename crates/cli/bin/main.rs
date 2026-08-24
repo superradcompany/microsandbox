@@ -317,6 +317,10 @@ fn main() {
             // runtime.log via setup_log_capture(), so disable ANSI —
             // color escapes have nowhere useful to render.
             log_args::init_tracing(sandbox_level, false);
+            if let Err(error) = microsandbox_filesystem::agentd::initialize_agentd_payload() {
+                eprintln!("msb: failed to select agentd payload: {error}");
+                std::process::exit(1);
+            }
             sandbox_cmd::run(args); // returns `!`
         }
         command => {

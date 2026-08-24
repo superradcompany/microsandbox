@@ -60,42 +60,22 @@ impl JsSetup {
 
     #[napi]
     pub async fn install(&self) -> Result<()> {
-        let skip = self.skip_verify;
-        let force = self.force;
-        match (self.base_dir.clone(), self.version.clone()) {
-            (Some(dir), Some(v)) => microsandbox::setup::Setup::builder()
-                .base_dir(dir)
-                .version(v)
-                .skip_verify(skip)
-                .force(force)
-                .build()
-                .install()
-                .await
-                .map_err(to_napi_error),
-            (Some(dir), None) => microsandbox::setup::Setup::builder()
-                .base_dir(dir)
-                .skip_verify(skip)
-                .force(force)
-                .build()
-                .install()
-                .await
-                .map_err(to_napi_error),
-            (None, Some(v)) => microsandbox::setup::Setup::builder()
-                .version(v)
-                .skip_verify(skip)
-                .force(force)
-                .build()
-                .install()
-                .await
-                .map_err(to_napi_error),
-            (None, None) => microsandbox::setup::Setup::builder()
-                .skip_verify(skip)
-                .force(force)
-                .build()
-                .install()
-                .await
-                .map_err(to_napi_error),
+        let config = microsandbox::config::LocalConfig {
+            home: self.base_dir.clone(),
+            ..Default::default()
+        };
+        let mut options = microsandbox::setup::InstallOptions {
+            force: self.force,
+            verify: !self.skip_verify,
+            ..Default::default()
+        };
+        if let Some(version) = &self.version {
+            options.version.clone_from(version);
         }
+        microsandbox::setup::install_runtime(&config, options)
+            .await
+            .map(|_| ())
+            .map_err(to_napi_error)
     }
 }
 
@@ -106,11 +86,17 @@ impl JsSetup {
 /// Check if msb and libkrunfw are installed and available.
 #[napi]
 pub fn is_installed() -> bool {
-    microsandbox::setup::is_installed()
+    microsandbox::setup::is_runtime_installed(&microsandbox::config::LocalConfig::default())
 }
 
 /// Download and install msb + libkrunfw to ~/.microsandbox/.
 #[napi]
 pub async fn install() -> Result<()> {
-    microsandbox::setup::install().await.map_err(to_napi_error)
+    microsandbox::setup::install_runtime(
+        &microsandbox::config::LocalConfig::default(),
+        Default::default(),
+    )
+    .await
+    .map(|_| ())
+    .map_err(to_napi_error)
 }

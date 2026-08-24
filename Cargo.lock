@@ -3864,7 +3864,6 @@ dependencies = [
  "tracing",
  "typed-builder",
  "typed-path",
- "which",
  "windows-sys 0.61.2",
  "zeroize",
 ]
@@ -3917,6 +3916,7 @@ dependencies = [
  "libc",
  "microsandbox",
  "microsandbox-db",
+ "microsandbox-filesystem",
  "microsandbox-image",
  "microsandbox-migration",
  "microsandbox-network",
@@ -3958,11 +3958,14 @@ dependencies = [
 name = "microsandbox-filesystem"
 version = "0.6.14"
 dependencies = [
+ "hex",
  "libc",
  "microsandbox-utils",
  "msb_krun",
  "scopeguard",
+ "sha2 0.11.0",
  "tempfile",
+ "thiserror",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -8609,15 +8612,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
 dependencies = [
  "rustls-pki-types",
-]
-
-[[package]]
-name = "which"
-version = "8.0.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f3ef584124b911bcc3875c2f1472e80f24361ceb789bd1c62b3e9a3df9ff43c"
-dependencies = [
- "libc",
 ]
 
 [[package]]

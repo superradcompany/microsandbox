@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::agentd::AGENTD_BYTES;
+use crate::agentd::agentd_bytes;
 use crate::{
     AddDirEntry, AddDirEntryPlus, Context, DirEntry, DynFileSystem, Entry, Extensions, FsOptions,
     GetxattrReply, ListxattrReply, OpenOptions, SetattrValid, ZeroCopyReader, ZeroCopyWriter,
@@ -633,8 +633,8 @@ fn init_entry(entry_timeout: Duration, attr_timeout: Duration) -> Entry {
 fn init_stat() -> stat64 {
     stat64 {
         st_ino: INIT_INODE,
-        st_size: AGENTD_BYTES.len() as i64,
-        st_blocks: blocks_for_size(AGENTD_BYTES.len() as u64),
+        st_size: agentd_bytes().len() as i64,
+        st_blocks: blocks_for_size(agentd_bytes().len() as u64),
         st_mode: S_IFREG | 0o755,
         st_nlink: 1,
         st_uid: 0,

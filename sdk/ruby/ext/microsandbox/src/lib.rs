@@ -1526,11 +1526,20 @@ fn version() -> &'static str {
 }
 
 fn installed() -> bool {
-    microsandbox_core::setup::is_installed()
+    microsandbox_core::setup::is_runtime_installed(
+        &microsandbox_core::config::LocalConfig::default(),
+    )
 }
 
 fn install(ruby: &Ruby) -> Result<(), Error> {
-    run(ruby, microsandbox_core::setup::install())
+    run(ruby, async {
+        microsandbox_core::setup::install_runtime(
+            &microsandbox_core::config::LocalConfig::default(),
+            Default::default(),
+        )
+        .await
+        .map(|_| ())
+    })
 }
 
 fn set_runtime_msb_path(path: String) {

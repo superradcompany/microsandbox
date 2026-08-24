@@ -40,13 +40,14 @@ cargo add microsandbox
 | --- | --- | --- |
 | `keyring` | yes | Registry credential lookup through the platform keyring |
 | `net` | yes | Networking, port publishing, policies, TLS interception, and secrets |
-| `prebuilt` | yes | Use prebuilt runtime artifacts where available |
+| `download-binaries` | yes | Install missing official runtime artifacts during Cargo builds |
+| `embed-binaries` | no | Embed a compressed `msb` + `libkrunfw` archive for offline runtime materialization |
 | `ssh` | no | SSH, SFTP, and interactive SSH helpers |
 
-To build without the networking stack while keeping the default keyring and prebuilt-runtime behavior:
+To build without the networking stack while keeping the default keyring and Cargo-time runtime installation:
 
 ```bash
-cargo add microsandbox --no-default-features --features keyring,prebuilt
+cargo add microsandbox --no-default-features --features download-binaries,keyring
 ```
 
 ## Quick Start

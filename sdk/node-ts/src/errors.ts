@@ -3,6 +3,8 @@ export type MicrosandboxErrorCode =
   | "http"
   | "cloudHttp"
   | "libkrunfwNotFound"
+  | "runtimeNotInstalled"
+  | "runtimeIncomplete"
   | "database"
   | "invalidConfig"
   | "noDefaultCommand"
@@ -59,6 +61,18 @@ export class CloudHttpError extends MicrosandboxError {
 export class LibkrunfwNotFoundError extends MicrosandboxError {
   constructor(message: string, options?: ErrorOptions) {
     super("libkrunfwNotFound", message, options);
+  }
+}
+
+export class RuntimeNotInstalledError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("runtimeNotInstalled", message, options);
+  }
+}
+
+export class RuntimeIncompleteError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("runtimeIncomplete", message, options);
   }
 }
 

@@ -131,7 +131,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
           Set-MsvcEnvironment -Architecture ${{ inputs.vs_arch }} -HostArchitecture ${{ inputs.vs_host_arch }}
-          cargo build --release --no-default-features --features net,ssh -p microsandbox-cli --target ${{ inputs.rust_target }}
+          cargo build --release --no-default-features --features embed-binaries,net,ssh -p microsandbox-cli --target ${{ inputs.rust_target }}
           Copy-Item target\${{ inputs.rust_target }}\release\msb.exe build\msb.exe -Force
           & build\msb.exe --version
 

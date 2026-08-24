@@ -859,16 +859,22 @@ async fn install_update_release(
     let bin_dir = base_dir.join(microsandbox_utils::BIN_SUBDIR);
     let lib_dir = base_dir.join(microsandbox_utils::LIB_SUBDIR);
     let spinner = ui::Spinner::start("Updating", &format!("to {display_version}"));
-    let result = microsandbox::setup::Setup::builder()
-        .base_dir(base_dir.to_path_buf())
-        .version(target_version.to_string())
-        .force(true)
-        .build()
-        .install()
-        .await;
+    let config = microsandbox::config::LocalConfig {
+        home: Some(base_dir.to_path_buf()),
+        ..Default::default()
+    };
+    let result = microsandbox::setup::install_runtime(
+        &config,
+        microsandbox::setup::InstallOptions {
+            version: target_version.to_string(),
+            force: true,
+            ..Default::default()
+        },
+    )
+    .await;
 
     match result {
-        Ok(()) => {
+        Ok(_) => {
             spinner.finish_clear();
             done(&format!("Updated msb in {}", bin_dir.display()));
             done(&format!("Updated libkrunfw in {}/", lib_dir.display()));
@@ -1344,15 +1350,20 @@ async fn prepare_windows_update_recovery(
 
     let result = async {
         let bundle_digest = fetch_release_bundle_digest(target_version).await?;
-        microsandbox::setup::Setup::builder()
-            .base_dir(staged_dir.clone())
-            .version(target_version.to_string())
-            .allow_ci_local_bundle(false)
-            .expected_bundle_sha256(bundle_digest)
-            .force(true)
-            .build()
-            .install()
-            .await?;
+        let config = microsandbox::config::LocalConfig {
+            home: Some(staged_dir.clone()),
+            ..Default::default()
+        };
+        microsandbox::setup::install_runtime(
+            &config,
+            microsandbox::setup::InstallOptions {
+                version: target_version.to_string(),
+                force: true,
+                expected_archive_sha256: Some(bundle_digest),
+                ..Default::default()
+            },
+        )
+        .await?;
         verify_installed_msb_version(&staged_dir, target_version).await?;
 
         prepare_windows_self_swap_recovery(
@@ -2275,15 +2286,20 @@ async fn prepare_downgrade_operation(
     let staged_target = stage_directory.join("target");
 
     let stage_result = async {
-        microsandbox::setup::Setup::builder()
-            .base_dir(staged_target.clone())
-            .version(target.to_string())
-            .allow_ci_local_bundle(false)
-            .expected_bundle_sha256(bundle_digest)
-            .force(true)
-            .build()
-            .install()
-            .await?;
+        let config = microsandbox::config::LocalConfig {
+            home: Some(staged_target.clone()),
+            ..Default::default()
+        };
+        microsandbox::setup::install_runtime(
+            &config,
+            microsandbox::setup::InstallOptions {
+                version: target.to_string(),
+                force: true,
+                expected_archive_sha256: Some(bundle_digest),
+                ..Default::default()
+            },
+        )
+        .await?;
         verify_installed_msb_version(&staged_target, target).await?;
         let baseline = load_staged_schema_baseline(&staged_target, target).await?;
 

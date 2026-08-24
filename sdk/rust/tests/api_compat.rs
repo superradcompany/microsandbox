@@ -14,14 +14,13 @@ fn rust_root_compat_exports_stay_available() {
 }
 
 #[test]
-fn rust_config_compat_surface_stays_available() {
-    // Ambient local config access and method-style path resolution are the
-    // public shape; explicit free functions taking `&LocalConfig` are not.
-    let _ = microsandbox::config::config;
-    let _ = microsandbox::config::resolve_msb_path;
-    let _ = microsandbox::config::resolve_libkrunfw_path;
-    let _ = microsandbox::config::LocalConfig::resolve_msb_path;
-    let _ = microsandbox::config::LocalConfig::resolve_libkrunfw_path;
+fn rust_runtime_setup_surface_stays_available() {
+    let _ = microsandbox::setup::resolve_runtime;
+    let _ = microsandbox::setup::install_runtime;
+    let _ = microsandbox::setup::ensure_runtime;
+    let _: Option<microsandbox::setup::ResolvedRuntime> = None;
+    let _: Option<microsandbox::setup::InstallOptions> = None;
+    let _: Option<microsandbox::setup::EnsureOptions> = None;
 }
 
 #[cfg(feature = "ssh")]

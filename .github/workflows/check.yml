@@ -298,7 +298,7 @@ jobs:
 
       - name: Build msb
         run: |
-          cargo build --profile ci --no-default-features --features net,ssh -p microsandbox-cli
+          cargo build --profile ci --no-default-features --features embed-binaries,net,ssh -p microsandbox-cli
           cp target/ci/msb build/msb
 
       # Upload immediately. All KVM lanes can begin while independent quality
@@ -390,8 +390,8 @@ jobs:
           chmod +x build/agentd
           mkdir -p artifacts
           # The target KVM job installs the freshly built runtime separately.
-          # Omitting `prebuilt` here avoids waiting for that artifact solely to
-          # satisfy SDK build scripts; the downloaded current agentd is embedded.
+          # The KVM job supplies both the host runtime and Agentd explicitly,
+          # so this archive needs neither download nor embedded binary features.
           mold -run cargo nextest archive -p microsandbox --tests \
             --no-default-features --features keyring,net \
             --archive-file artifacts/rust-integration-tests.tar.zst
@@ -664,7 +664,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
-          cargo +stable build --profile ci --no-default-features --features net,ssh -p microsandbox-cli --target ${{ matrix.rust_target }}
+          cargo +stable build --profile ci --no-default-features --features embed-binaries,net,ssh -p microsandbox-cli --target ${{ matrix.rust_target }}
 
       - name: Build Go FFI cdylib
         if: matrix.component == 'Go'
@@ -1460,6 +1460,7 @@ jobs:
       - name: Run integration tests
         env:
           MSB_TEST_ISOLATE_HOME: "1"
+          MSB_AGENTD_PATH: ${{ github.workspace }}/build/agentd
         run: |
           export PATH="$HOME/.microsandbox/bin:$PATH"
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"

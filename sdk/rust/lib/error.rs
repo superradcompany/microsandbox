@@ -33,6 +33,14 @@ pub enum MicrosandboxError {
     #[error("libkrunfw not found: {0}")]
     LibkrunfwNotFound(String),
 
+    /// Neither member of the host runtime pair is installed.
+    #[error("microsandbox runtime is not installed: {0}")]
+    RuntimeNotInstalled(String),
+
+    /// Only one member of the host runtime pair is available.
+    #[error("microsandbox runtime installation is incomplete: {0}")]
+    RuntimeIncomplete(String),
+
     /// A database error occurred.
     #[error("database error: {0}")]
     Database(#[from] sea_orm::DbErr),

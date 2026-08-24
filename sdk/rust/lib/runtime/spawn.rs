@@ -286,12 +286,24 @@ pub async fn spawn_sandbox(
     #[cfg(feature = "net")]
     let config = resolved_config.as_ref().unwrap_or(config);
 
-    // libkrunfw is process-level (one dylib per process address space). The
-    // resolver consults MSB_LIBKRUNFW_PATH env, then SDK_LIBKRUNFW_PATH static,
-    // then config.paths.libkrunfw, then filesystem fallbacks.
+    // Resolve msb and libkrunfw as one pair so a partial or mixed-version
+    // installation cannot reach process launch.
     let global = local.config();
-    let msb_path = global.resolve_msb_path()?;
-    let libkrunfw_path = global.resolve_libkrunfw_path()?;
+    #[cfg(feature = "embed-binaries")]
+    let resolved_runtime = crate::setup::ensure_runtime(
+        global,
+        crate::setup::EnsureOptions {
+            install: crate::setup::InstallOptions {
+                source: crate::setup::InstallSource::EmbeddedArchive,
+                ..Default::default()
+            },
+        },
+    )
+    .await?;
+    #[cfg(not(feature = "embed-binaries"))]
+    let resolved_runtime = crate::setup::resolve_runtime(global)?;
+    let msb_path = resolved_runtime.msb_path;
+    let libkrunfw_path = resolved_runtime.libkrunfw_path;
     #[cfg(windows)]
     crate::setup::verify_windows_host_prerequisites()?;
     tracing::debug!(

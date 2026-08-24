@@ -10,7 +10,12 @@ use crate::error::to_py_err;
 #[pyfunction]
 pub fn install<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        microsandbox::setup::install().await.map_err(to_py_err)?;
+        microsandbox::setup::install_runtime(
+            &microsandbox::config::LocalConfig::default(),
+            Default::default(),
+        )
+        .await
+        .map_err(to_py_err)?;
         Ok(())
     })
 }
@@ -18,5 +23,5 @@ pub fn install<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
 /// Check if msb and libkrunfw are installed and available.
 #[pyfunction]
 pub fn is_installed() -> bool {
-    microsandbox::setup::is_installed()
+    microsandbox::setup::is_runtime_installed(&microsandbox::config::LocalConfig::default())
 }
