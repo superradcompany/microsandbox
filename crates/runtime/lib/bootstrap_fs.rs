@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use microsandbox_filesystem::agentd::AGENTD_BYTES;
+use microsandbox_filesystem::agentd::agentd_bytes;
 use msb_krun::backends::fs::{
     Context, DirEntry, DynFileSystem, Entry, FsOptions, OpenOptions, ZeroCopyWriter, stat64,
     statvfs64,
@@ -63,7 +63,7 @@ struct DirNode {
 impl AgentBootstrapFs {
     pub(crate) fn new() -> io::Result<Self> {
         let mut init_file = tempfile::tempfile()?;
-        init_file.write_all(AGENTD_BYTES)?;
+        init_file.write_all(agentd_bytes())?;
         init_file.sync_data()?;
 
         Ok(Self {
@@ -215,7 +215,7 @@ impl DynFileSystem for AgentBootstrapFs {
             return Err(linux_error(LINUX_EBADF));
         }
 
-        let data_len = AGENTD_BYTES.len() as u64;
+        let data_len = agentd_bytes().len() as u64;
         if offset >= data_len {
             return Ok(0);
         }
@@ -475,8 +475,8 @@ fn dir_stat(inode: u64) -> stat64 {
 fn init_stat() -> stat64 {
     stat64 {
         st_ino: INIT_INODE,
-        st_size: AGENTD_BYTES.len() as i64,
-        st_blocks: blocks_for_size(AGENTD_BYTES.len() as u64),
+        st_size: agentd_bytes().len() as i64,
+        st_blocks: blocks_for_size(agentd_bytes().len() as u64),
         st_mode: S_IFREG | 0o755,
         st_nlink: 1,
         st_uid: 0,
@@ -537,7 +537,7 @@ mod tests {
         let name = c"init.krun";
         let entry = fs.lookup(context(), ROOT_INODE, name).unwrap();
         assert_eq!(entry.inode, INIT_INODE);
-        assert_eq!(entry.attr.st_size, AGENTD_BYTES.len() as i64);
+        assert_eq!(entry.attr.st_size, agentd_bytes().len() as i64);
 
         let (handle, _) = fs.open(context(), INIT_INODE, false, 0).unwrap();
         let mut writer = VecWriter(Vec::new());
@@ -555,6 +555,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(read, 4);
-        assert_eq!(writer.0, &AGENTD_BYTES[..4]);
+        assert_eq!(writer.0, &agentd_bytes()[..4]);
     }
 }

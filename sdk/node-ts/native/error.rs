@@ -18,6 +18,8 @@ fn error_type_str(err: &MicrosandboxError) -> &'static str {
         MicrosandboxError::Http(_) => "Http",
         MicrosandboxError::CloudHttp { .. } => "CloudHttp",
         MicrosandboxError::LibkrunfwNotFound(_) => "LibkrunfwNotFound",
+        MicrosandboxError::RuntimeNotInstalled(_) => "RuntimeNotInstalled",
+        MicrosandboxError::RuntimeIncomplete(_) => "RuntimeIncomplete",
         MicrosandboxError::Database(_) => "Database",
         MicrosandboxError::InvalidConfig(_) => "InvalidConfig",
         MicrosandboxError::NoDefaultCommand => "NoDefaultCommand",

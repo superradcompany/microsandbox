@@ -181,7 +181,7 @@ pub(crate) fn do_lseek(
 ) -> io::Result<u64> {
     if ino == init_binary::INIT_INODE {
         // Simple seek for init binary.
-        let size = crate::agentd::AGENTD_BYTES.len() as u64;
+        let size = crate::agentd::agentd_bytes().len() as u64;
         return match whence {
             w if w == libc::SEEK_SET as u32 => Ok(offset),
             w if w == libc::SEEK_END as u32 => Ok(size),

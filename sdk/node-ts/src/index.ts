@@ -427,6 +427,8 @@ export {
   PatchFailedError,
   ProtocolError,
   RuntimeError,
+  RuntimeIncompleteError,
+  RuntimeNotInstalledError,
   SandboxFsOpsError,
   SandboxAlreadyExistsError,
   SandboxNotFoundError,

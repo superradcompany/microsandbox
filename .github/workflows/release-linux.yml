@@ -118,7 +118,7 @@ jobs:
 
       - name: Build msb
         run: |
-          cargo build --release --no-default-features --features net,ssh -p microsandbox-cli
+          cargo build --release --no-default-features --features embed-binaries,net,ssh -p microsandbox-cli
           cp target/release/msb build/msb
 
       - name: Verify runtime and glibc baseline

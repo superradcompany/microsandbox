@@ -12,8 +12,9 @@ name = "microsandbox_runtime"
 path = "lib/lib.rs"
 
 [features]
-default = ["prebuilt", "net"]
-prebuilt = ["microsandbox-filesystem/prebuilt"]
+default = ["download-binaries", "embed-binaries", "net"]
+download-binaries = ["microsandbox-filesystem/download-binaries"]
+embed-binaries = ["microsandbox-filesystem/embed-binaries"]
 net = ["dep:microsandbox-network", "msb_krun/net"]
 
 [dependencies]

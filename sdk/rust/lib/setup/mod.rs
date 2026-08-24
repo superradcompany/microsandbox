@@ -1,7 +1,7 @@
 //! Setup and installation utilities for microsandbox runtime dependencies.
 
-mod download;
 mod host;
+mod runtime;
 mod verify;
 
 #[cfg(target_os = "linux")]
@@ -15,7 +15,7 @@ mod windows;
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-pub use download::*;
 pub use host::*;
+pub use runtime::*;
 #[cfg(windows)]
 pub use windows::*;

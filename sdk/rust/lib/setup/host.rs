@@ -367,9 +367,9 @@ fn concise_io_error(error: &io::Error) -> &'static str {
 }
 
 fn resolve_msb_runtime_file(config: &LocalConfig) -> Result<PathBuf, String> {
-    let path = config
-        .resolve_msb_path()
-        .map_err(|error| error.to_string())?;
+    let path = super::resolve_runtime(config)
+        .map_err(|error| error.to_string())?
+        .msb_path;
     if path.is_file() {
         Ok(path)
     } else {
@@ -378,8 +378,8 @@ fn resolve_msb_runtime_file(config: &LocalConfig) -> Result<PathBuf, String> {
 }
 
 fn resolve_libkrunfw_runtime_file(config: &LocalConfig) -> Result<PathBuf, String> {
-    config
-        .resolve_libkrunfw_path()
+    super::resolve_runtime(config)
+        .map(|runtime| runtime.libkrunfw_path)
         .map_err(|error| error.to_string())
 }
 
