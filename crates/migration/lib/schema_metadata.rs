@@ -236,10 +236,10 @@ pub const MIGRATION_METADATA: &[MigrationMetadata] = &[
     },
     MigrationMetadata {
         id: MOUNT_OWNER_CONFIG_MIGRATION_ID,
-        reversible: false,
+        reversible: true,
         affects_cache: false,
         affects_user_data: false,
-        summary: "discard persisted mount ownership policy",
+        summary: "remove the compatibility marker after confirming no persisted mount ownership",
     },
 ];
 
