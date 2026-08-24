@@ -84,13 +84,13 @@ export type MountOptions = {
    * such files are presented as this uid instead. Must be set together with
    * [`override_gid`](Self::override_gid). `None` keeps the fallback.
    */
-  override_uid: number | null;
+  override_uid?: number | null;
   /**
    * Guest gid presented for host files under this mount that carry no
    * per-file stat override. See [`override_uid`](Self::override_uid); the two
    * must be set together.
    */
-  override_gid: number | null;
+  override_gid?: number | null;
 };
 
 export type StatVirtualization = "strict" | "relaxed" | "off";

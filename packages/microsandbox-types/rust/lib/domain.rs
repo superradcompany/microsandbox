@@ -281,13 +281,13 @@ pub struct MountOptions {
     /// without this they surface with the runtime's fallback owner. When set,
     /// such files are presented as this uid instead. Must be set together with
     /// [`override_gid`](Self::override_gid). `None` keeps the fallback.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub override_uid: Option<u32>,
 
     /// Guest gid presented for host files under this mount that carry no
     /// per-file stat override. See [`override_uid`](Self::override_uid); the two
     /// must be set together.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub override_gid: Option<u32>,
 }
 
@@ -2869,6 +2869,17 @@ mod tests {
             size_mib: None,
             options: MountOptions::default(),
         }
+    }
+
+    #[test]
+    fn mount_options_omit_unset_owner_but_accept_missing_fields() {
+        let value = serde_json::to_value(MountOptions::default()).unwrap();
+        assert!(value.get("override_uid").is_none());
+        assert!(value.get("override_gid").is_none());
+
+        let decoded: MountOptions = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.override_uid, None);
+        assert_eq!(decoded.override_gid, None);
     }
 
     #[test]

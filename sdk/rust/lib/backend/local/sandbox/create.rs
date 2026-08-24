@@ -1348,8 +1348,8 @@ mod tests {
     use crate::backend::{Backend, LocalBackend};
     use crate::runtime::SpawnMode;
     use crate::sandbox::{
-        MAX_HOSTNAME_BYTES, MountOptions, OciRootfsSource, RootfsSource, SandboxConfig,
-        SandboxStatus, VolumeMount,
+        HostPermissions, MAX_HOSTNAME_BYTES, MountOptions, OciRootfsSource, RootfsSource,
+        SandboxConfig, SandboxStatus, StatVirtualization, VolumeMount,
     };
 
     /// Open both pools at `db_path` for tests, with migrations applied.
@@ -1673,6 +1673,48 @@ mod tests {
         let decoded: SandboxConfig = serde_json::from_str(&row.config).unwrap();
 
         assert_eq!(decoded.manifest_digest, config.manifest_digest);
+    }
+
+    #[tokio::test]
+    async fn test_desired_and_active_configs_persist_mount_owner() {
+        let temp = tempdir().unwrap();
+        let pools = open_test_pools(&temp.path().join("test.db")).await;
+        let mut config = test_config("owned-mount");
+        config.spec.mounts.push(VolumeMount::Bind {
+            host: "/host/data".into(),
+            guest: "/data".into(),
+            options: MountOptions {
+                override_uid: Some(1000),
+                override_gid: Some(1001),
+                ..MountOptions::default()
+            },
+            stat_virtualization: StatVirtualization::Strict,
+            host_permissions: HostPermissions::Private,
+            follow_root_symlinks: false,
+            quota_mib: None,
+        });
+
+        let sandbox_id = LocalBackend::insert_sandbox_record(pools.write(), &config)
+            .await
+            .unwrap();
+        LocalBackend::update_sandbox_active_config(pools.write(), sandbox_id, &config)
+            .await
+            .unwrap();
+
+        let row = sandbox_entity::Entity::find_by_id(sandbox_id)
+            .one(pools.read())
+            .await
+            .unwrap()
+            .unwrap();
+        for persisted in [row.config.as_str(), row.active_config.as_deref().unwrap()] {
+            let decoded: SandboxConfig = serde_json::from_str(persisted).unwrap();
+            let options = match &decoded.spec.mounts[0] {
+                VolumeMount::Bind { options, .. } => options,
+                other => panic!("expected bind mount, got {other:?}"),
+            };
+            assert_eq!(options.override_uid, Some(1000));
+            assert_eq!(options.override_gid, Some(1001));
+        }
     }
 
     #[tokio::test]

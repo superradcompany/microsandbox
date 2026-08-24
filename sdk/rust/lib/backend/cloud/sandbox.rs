@@ -428,6 +428,20 @@ fn reject_dropped_cloud_create_fields(config: &SandboxConfig) -> MicrosandboxRes
     {
         return Err(unsupported("named volume inline create"));
     }
+    if config.spec.mounts.iter().any(|mount| {
+        let options = match mount {
+            microsandbox_types::VolumeMount::Bind { options, .. }
+            | microsandbox_types::VolumeMount::Named { options, .. }
+            | microsandbox_types::VolumeMount::Tmpfs { options, .. }
+            | microsandbox_types::VolumeMount::DiskImage { options, .. } => options,
+        };
+        options.override_uid.is_some() || options.override_gid.is_some()
+    }) {
+        // Mount ownership is currently a local host-filesystem presentation
+        // policy. Until the cloud control plane advertises this capability,
+        // sending it would let older servers silently ignore access semantics.
+        return Err(unsupported("mount owner"));
+    }
 
     if config.snapshot_upper_source.is_some() {
         return Err(unsupported("from_snapshot"));
@@ -912,6 +926,26 @@ mod tests {
         });
 
         assert_unsupported_config_field(config, "named volume inline create");
+    }
+
+    #[test]
+    fn cloud_create_request_rejects_mount_owner_without_capability() {
+        let mut config = base_cloud_config();
+        config.spec.mounts.push(VolumeMount::Bind {
+            host: "/host/data".into(),
+            guest: "/data".into(),
+            options: MountOptions {
+                override_uid: Some(1000),
+                override_gid: Some(1000),
+                ..MountOptions::default()
+            },
+            stat_virtualization: StatVirtualization::Strict,
+            host_permissions: HostPermissions::Private,
+            follow_root_symlinks: false,
+            quota_mib: None,
+        });
+
+        assert_unsupported_config_field(config, "mount owner");
     }
 
     #[test]
