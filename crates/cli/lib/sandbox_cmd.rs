@@ -242,6 +242,7 @@ pub fn run(args: SandboxArgs) -> ! {
         },
         rootfs_disk_readonly: launch.rootfs.disk_readonly,
         mounts: launch.mounts,
+        file_mounts: launch.file_mounts,
         disks,
         vsock: launch.vsock,
         #[cfg(unix)]

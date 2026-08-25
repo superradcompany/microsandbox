@@ -113,6 +113,14 @@ impl PassthroughConfig {
 impl PassthroughFs {
     /// Create a Windows passthrough filesystem rooted at `cfg.root_dir`.
     pub fn new(cfg: PassthroughConfig) -> io::Result<Self> {
+        Self::new_with_stat_probe(cfg, None)
+    }
+
+    /// Create a passthrough backend whose read-only metadata probe targets one child.
+    pub(crate) fn new_with_stat_probe(
+        cfg: PassthroughConfig,
+        probe_name: Option<&CStr>,
+    ) -> io::Result<Self> {
         // Reject contradictory metadata policy before resolving or probing the
         // host root. Direct backend callers must receive the same guarantee as
         // the SDK and runtime boundaries.
@@ -134,7 +142,16 @@ impl PassthroughFs {
             }
             root
         };
-        let stat_store = StatStore::new(&root, cfg.stat_virtualization, cfg.readonly)?;
+        let probe_path = probe_name
+            .map(|name| std::str::from_utf8(name.to_bytes()).map(|name| root.join(name)))
+            .transpose()
+            .map_err(|_| linux_error(LINUX_EINVAL))?;
+        let stat_store = StatStore::new(
+            &root,
+            probe_path.as_deref(),
+            cfg.stat_virtualization,
+            cfg.readonly,
+        )?;
 
         let init_file = if cfg.inject_init {
             let mut file = tempfile::tempfile().map_err(host_error)?;
@@ -199,7 +216,7 @@ impl PassthroughFs {
         let path = std::fs::canonicalize(path).map_err(host_error)?;
         let metadata = safe_metadata_under_root(&root, &path)?;
         let mode = (mode_from_metadata(&metadata) & S_IFMT) | (permissions & 0o7777);
-        let store = StatStore::new(&root, StatVirtualization::Strict, false)?
+        let store = StatStore::new(&root, None, StatVirtualization::Strict, false)?
             .ok_or_else(|| linux_error(LINUX_EIO))?;
         store.write(&path, uid, gid, mode, 0)
     }

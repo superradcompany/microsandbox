@@ -264,10 +264,46 @@ impl PassthroughFs {
     ///
     /// Opens the root directory and optionally probes for xattr support.
     pub fn new(cfg: PassthroughConfig) -> io::Result<Self> {
+        Self::new_with_stat_probe(cfg, None)
+    }
+
+    /// Create a passthrough backend whose strict-stat probe targets one child.
+    ///
+    /// A single-file facade uses this to verify the only exposed inode instead
+    /// of the otherwise-hidden parent directory. The normal directory backend
+    /// continues to probe its root because every child is guest-visible.
+    pub(crate) fn new_with_stat_probe(
+        cfg: PassthroughConfig,
+        probe_name: Option<&CStr>,
+    ) -> io::Result<Self> {
         // Open the root directory, contained beneath the anchor when one is set.
         let root_fd = open_root(&cfg)?;
 
-        probe_strict_xattr_support(&cfg, root_fd.as_raw_fd())?;
+        let probe_file = match probe_name {
+            Some(name) => {
+                let access_mode = if cfg.readonly() {
+                    libc::O_RDONLY
+                } else {
+                    libc::O_WRONLY
+                };
+                let fd = unsafe {
+                    libc::openat(
+                        root_fd.as_raw_fd(),
+                        name.as_ptr(),
+                        access_mode | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                    )
+                };
+                if fd < 0 {
+                    return Err(platform::linux_error(io::Error::last_os_error()));
+                }
+                Some(unsafe { File::from_raw_fd(fd) })
+            }
+            None => None,
+        };
+        let probe_fd = probe_file
+            .as_ref()
+            .map_or_else(|| root_fd.as_raw_fd(), AsRawFd::as_raw_fd);
+        probe_strict_xattr_support(&cfg, probe_fd)?;
 
         // Create the init binary file.
         let init_file = init_binary::create_init_file()?;

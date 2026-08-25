@@ -20,7 +20,7 @@ use microsandbox_db::entity::run as run_entity;
 #[cfg(unix)]
 use microsandbox_filesystem::{BindIdentityMap, BindIdentityMapHandle, DynFileSystem};
 use microsandbox_filesystem::{
-    HostPermissions, PassthroughConfig, PassthroughFs, StatVirtualization,
+    HostPermissions, PassthroughConfig, PassthroughFs, SingleFileFs, StatVirtualization,
 };
 use microsandbox_metrics::{ActivateSlot, MetricsRegistry, ReleaseMode};
 use microsandbox_protocol::{
@@ -43,6 +43,7 @@ use crate::bootstrap_fs::AgentBootstrapFs;
 use crate::console::AgentConsolePipeBridge;
 use crate::console::{AgentConsoleBackend, ConsoleSharedState};
 use crate::heartbeat::{self, HeartbeatDecision, HeartbeatReader};
+use crate::launch::FileMountConfig;
 use crate::logging::LogLevel;
 use crate::metrics::run_metrics_sampler;
 use crate::relay::{self, AgentRelay};
@@ -344,6 +345,9 @@ pub struct VmConfig {
 
     /// Additional mounts as `tag:host_path[:opts]` strings.
     pub mounts: Vec<String>,
+
+    /// Isolated host-file mounts backed by synthetic one-entry filesystems.
+    pub file_mounts: Vec<FileMountConfig>,
 
     /// Disk-image volume mounts attached as extra virtio-blk devices.
     pub disks: Vec<DiskMountSpec>,
@@ -1583,7 +1587,44 @@ fn build_vm(
         builder = builder.fs(move |fs| fs.tag(&runtime_tag).custom(Box::new(backend)));
     }
 
-    // Additional mounts.
+    // Isolated file mounts. Each backend exposes a synthetic root containing
+    // only the selected file, so remounting the tag cannot reveal host siblings.
+    for file_mount in &vm.file_mounts {
+        let parsed = parse_mount_spec(&file_mount.mount)
+            .map_err(|e| RuntimeError::Custom(format!("file mount {:?}: {e}", file_mount.mount)))?;
+        let tag = parsed.tag;
+        let host_path = PathBuf::from(&parsed.host_path);
+        let override_owner = match (parsed.override_uid, parsed.override_gid) {
+            (Some(uid), Some(gid)) => Some((uid, gid)),
+            _ => None,
+        };
+        #[cfg(unix)]
+        let mount_bind_identity_map = bind_identity_map_for_mount(
+            &mut bind_identity_map,
+            parsed.stat_virtualization,
+            override_owner,
+        );
+        let cfg = PassthroughConfig {
+            stat_virtualization: parsed.stat_virtualization,
+            host_permissions: parsed.host_permissions,
+            readonly: parsed.readonly,
+            #[cfg(unix)]
+            bind_identity_map: mount_bind_identity_map,
+            #[cfg(windows)]
+            default_owner: override_owner,
+            ..Default::default()
+        };
+        let backend = SingleFileFs::new(host_path.clone(), file_mount.filename.clone(), cfg)
+            .map_err(|e| {
+                RuntimeError::Custom(format!(
+                    "file mount {tag}: failed to open host file {}: {e}",
+                    host_path.display()
+                ))
+            })?;
+        builder = builder.fs(move |fs| fs.tag(&tag).custom(Box::new(backend)));
+    }
+
+    // Additional directory mounts.
     for mount_spec in &vm.mounts {
         let parsed = parse_mount_spec(mount_spec)
             .map_err(|e| RuntimeError::Custom(format!("--mount {mount_spec:?}: {e}")))?;

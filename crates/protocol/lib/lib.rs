@@ -217,10 +217,9 @@ pub const ENV_DIR_MOUNTS: &str = "MSB_DIR_MOUNTS";
 /// Environment variable carrying virtiofs **file** volume mount specs for guest init.
 ///
 /// Used when the host path is a single file rather than a directory. The SDK
-/// wraps each file in an isolated staging directory (hard-linked to preserve
-/// the same inode) and shares that directory via virtiofs. Agentd mounts the
-/// share at [`FILE_MOUNTS_DIR`]`/<tag>/` and bind-mounts the file to the
-/// guest path.
+/// asks the runtime to expose the source through a synthetic one-entry
+/// filesystem. Agentd mounts that share at [`FILE_MOUNTS_DIR`]`/<tag>/` and
+/// bind-mounts the file to the guest path.
 ///
 /// Format: `tag:filename:guest_path[:opts][;tag:filename:guest_path[:opts];...]`
 ///

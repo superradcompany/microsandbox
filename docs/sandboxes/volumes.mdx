@@ -103,6 +103,8 @@ Nested destinations are supported. microsandbox canonicalizes guest paths and al
 
 Use `--mount-file` when you want to bind one host file instead of an entire directory.
 
+File mounts expose the selected host inode through an isolated one-entry filesystem. They do not hard-link or copy the source, host changes remain visible, and other files in the source directory are not part of the guest-visible share.
+
 ```bash
 msb create alpine --name config-reader \
   --mount-file ./config.toml:/etc/app/config.toml:ro,nodev
