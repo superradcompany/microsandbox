@@ -13,9 +13,9 @@ BIN_DIR="$INSTALL_DIR/bin"
 LIB_DIR="$INSTALL_DIR/lib"
 LOCAL_BIN_DIR="$HOME/.local/bin"
 
-# Current Linux release bundles are built on GitHub Actions ubuntu-latest,
-# which currently maps to Ubuntu 24.04 (glibc 2.39).
-LINUX_GLIBC_MIN_VERSION="2.39"
+# Published Linux release bundles are built and audited against the
+# manylinux_2_28 baseline.
+LINUX_GLIBC_MIN_VERSION="2.28"
 
 # Progress bar
 BAR_WIDTH=40

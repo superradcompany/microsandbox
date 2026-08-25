@@ -9,7 +9,7 @@ For contribution guidelines (forking, commit signing, pull requests), see [CONTR
 - **Operating System**:
   - macOS with Apple Silicon (M1/M2/M3/M4)
   - Linux with KVM enabled
-  - Windows 11, or Windows Server with nested virtualization, with Windows Hypervisor Platform enabled
+  - Windows 11 (x64 or ARM64) with Windows Hypervisor Platform enabled; Windows Server also needs nested virtualization
 - **Tools**: [`just`](https://github.com/casey/just), `git`, and `pre-commit`
   - Linux: `sudo apt install just git` and `pip install pre-commit` (or `sudo apt install pre-commit`)
   - macOS: `brew install just git pre-commit`

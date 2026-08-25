@@ -196,12 +196,13 @@ init:
 
 ### Mounts
 
-A string mount is a bind mount with an optional trailing `:ro`:
+A string mount is a config-relative bind mount using the same `SOURCE:TARGET[:OPTIONS]` option grammar as a bind passed to `-v/--volume`. Options include `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `follow-root-symlinks`, `stat-virt=strict|relaxed|off`, `host-perms=private|mirror`, `quota=<size>`, and paired `uid=<N>,gid=<N>`:
 
 ```yaml
 mounts:
   - "./src:/app"
-  - "./certs:/etc/app/certs:ro"
+  - "./certs:/etc/app/certs:ro,noexec"
+  - "./workspace:/workspace:uid=1000,gid=1000"
 ```
 
 Object mounts require exactly one source and a guest `target`:
@@ -212,6 +213,8 @@ mounts:
     target: "/app"
     stat_virtualization: strict
     host_permissions: private
+    uid: 1000
+    gid: 1000
   - named: cache
     target: "/var/cache/app"
     create: ensure-exists
@@ -225,7 +228,7 @@ mounts:
     readonly: true
 ```
 
-All mount kinds accept `readonly`, `noexec`, `nosuid`, and `nodev`. `stat_virtualization` and `host_permissions` apply only to bind and named mounts. Duplicate guest targets are rejected.
+All mount kinds accept `readonly`, `noexec`, `nosuid`, and `nodev`. `stat_virtualization`, `host_permissions`, and paired `uid`/`gid` apply only to bind and directory-backed named mounts. Ownership changes only the guest fallback for files without a per-file stat override; it does not change host inode ownership. Duplicate guest targets are rejected.
 
 ### Rootfs patches
 

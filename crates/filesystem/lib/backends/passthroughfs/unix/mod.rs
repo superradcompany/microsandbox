@@ -20,7 +20,7 @@ use std::{
     ffi::{CStr, CString},
     fs::File,
     io,
-    os::fd::{AsRawFd, FromRawFd},
+    os::fd::{AsRawFd, FromRawFd, RawFd},
     os::unix::ffi::OsStrExt,
     path::{Component, Path, PathBuf},
     sync::{
@@ -67,8 +67,8 @@ pub enum CachePolicy {
 pub enum StatVirtualization {
     /// Fail-closed: require xattr support; eager probe at mount time.
     ///
-    /// Reads and writes the override xattr. Mount fails if the host
-    /// filesystem cannot store `user.*` xattrs on the bind root.
+    /// Read-only mounts require readable xattrs. Writable mounts require
+    /// writable xattrs so every guest metadata operation can be persisted.
     Strict,
 
     /// Opportunistic: apply the overlay if present; tolerate missing xattr support.
@@ -267,16 +267,7 @@ impl PassthroughFs {
         // Open the root directory, contained beneath the anchor when one is set.
         let root_fd = open_root(&cfg)?;
 
-        // Probe xattr support if strict mode is enabled.
-        if cfg.strict_enabled() && cfg.xattr_enabled() {
-            let supported = stat_override::probe_xattr_support(root_fd.as_raw_fd())?;
-            if !supported {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "xattr not supported on root filesystem and stat_virtualization is Strict",
-                ));
-            }
-        }
+        probe_strict_xattr_support(&cfg, root_fd.as_raw_fd())?;
 
         // Create the init binary file.
         let init_file = init_binary::create_init_file()?;
@@ -883,6 +874,44 @@ impl DynFileSystem for PassthroughFs {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Verify the xattr capability required by a strict mount's access mode.
+///
+/// A read-only mount only consumes existing stat overrides, so requiring a
+/// write would reject readable paths such as foreign-owned sticky directories.
+/// Writable mounts retain the stronger write probe because guest metadata
+/// changes must be persisted on every exposed inode, including the mount root.
+pub(crate) fn probe_strict_xattr_support(
+    cfg: &PassthroughConfig,
+    root_fd: RawFd,
+) -> io::Result<()> {
+    if !cfg.strict_enabled() || !cfg.xattr_enabled() {
+        return Ok(());
+    }
+
+    let (operation, supported) = if cfg.readonly() {
+        ("read", stat_override::probe_xattr_read_support(root_fd))
+    } else {
+        ("write", stat_override::probe_xattr_write_support(root_fd))
+    };
+    let supported = supported.map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("strict stat virtualization {operation} probe failed: {error}"),
+        )
+    })?;
+
+    if !supported {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "strict stat virtualization requires xattr {operation} support on the mount root"
+            ),
+        ));
+    }
+
+    Ok(())
+}
 
 /// Open the mount root directory.
 ///

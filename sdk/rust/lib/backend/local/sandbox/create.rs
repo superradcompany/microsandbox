@@ -556,11 +556,8 @@ impl LocalBackend {
 
                         // Prefer the structured boot-error record if the
                         // sandbox got far enough to write one.
-                        if let Some(boot_err) = Self::read_boot_error(log_dir) {
-                            return Err(crate::MicrosandboxError::BootStart {
-                                name: sandbox_name.to_string(),
-                                err: boot_err,
-                            });
+                        if let Some(error) = Self::read_boot_start_error(log_dir, sandbox_name) {
+                            return Err(error);
                         }
 
                         // No structured boot-error.json — the sandbox died
@@ -595,11 +592,8 @@ impl LocalBackend {
                         error = %e,
                         "wait_for_relay: agent connection failed"
                     );
-                    if let Some(boot_err) = Self::read_boot_error(log_dir) {
-                        return Err(crate::MicrosandboxError::BootStart {
-                            name: sandbox_name.to_string(),
-                            err: boot_err,
-                        });
+                    if let Some(error) = Self::read_boot_start_error(log_dir, sandbox_name) {
+                        return Err(error);
                     }
                     return Err(e.into());
                 }
@@ -615,11 +609,8 @@ impl LocalBackend {
                     // and never produced the handshake bytes). Prefer that
                     // typed record over the raw IO/timeout error so the CLI
                     // can render the styled boot-error block.
-                    if let Some(boot_err) = Self::read_boot_error(log_dir) {
-                        return Err(crate::MicrosandboxError::BootStart {
-                            name: sandbox_name.to_string(),
-                            err: boot_err,
-                        });
+                    if let Some(error) = Self::read_boot_start_error(log_dir, sandbox_name) {
+                        return Err(error);
                     }
                     return Err(crate::MicrosandboxError::Runtime(format!(
                         "timed out waiting for agent relay: {e}"
@@ -634,12 +625,24 @@ impl LocalBackend {
     /// Returns `None` when the directory is unknown, the file is missing, or
     /// the contents cannot be deserialized — callers fall back to a raw
     /// error in those cases.
-    fn read_boot_error(
+    pub(crate) fn read_boot_error(
         log_dir: &std::path::Path,
     ) -> Option<microsandbox_runtime::boot_error::BootError> {
         microsandbox_runtime::boot_error::BootError::read(log_dir)
             .ok()
             .flatten()
+    }
+
+    /// Read a persisted boot error and attach the sandbox name expected by
+    /// SDK create/start callers.
+    fn read_boot_start_error(
+        log_dir: &std::path::Path,
+        sandbox_name: &str,
+    ) -> Option<crate::MicrosandboxError> {
+        Self::read_boot_error(log_dir).map(|err| crate::MicrosandboxError::BootStart {
+            name: sandbox_name.to_string(),
+            err,
+        })
     }
 
     /// Resolve a fresh create by tag, but restore a snapshot by its captured
@@ -1348,8 +1351,8 @@ mod tests {
     use crate::backend::{Backend, LocalBackend};
     use crate::runtime::SpawnMode;
     use crate::sandbox::{
-        MAX_HOSTNAME_BYTES, MountOptions, OciRootfsSource, RootfsSource, SandboxConfig,
-        SandboxStatus, VolumeMount,
+        HostPermissions, MAX_HOSTNAME_BYTES, MountOptions, OciRootfsSource, RootfsSource,
+        SandboxConfig, SandboxStatus, StatVirtualization, VolumeMount,
     };
 
     /// Open both pools at `db_path` for tests, with migrations applied.
@@ -1673,6 +1676,48 @@ mod tests {
         let decoded: SandboxConfig = serde_json::from_str(&row.config).unwrap();
 
         assert_eq!(decoded.manifest_digest, config.manifest_digest);
+    }
+
+    #[tokio::test]
+    async fn test_desired_and_active_configs_persist_mount_owner() {
+        let temp = tempdir().unwrap();
+        let pools = open_test_pools(&temp.path().join("test.db")).await;
+        let mut config = test_config("owned-mount");
+        config.spec.mounts.push(VolumeMount::Bind {
+            host: "/host/data".into(),
+            guest: "/data".into(),
+            options: MountOptions {
+                override_uid: Some(1000),
+                override_gid: Some(1001),
+                ..MountOptions::default()
+            },
+            stat_virtualization: StatVirtualization::Strict,
+            host_permissions: HostPermissions::Private,
+            follow_root_symlinks: false,
+            quota_mib: None,
+        });
+
+        let sandbox_id = LocalBackend::insert_sandbox_record(pools.write(), &config)
+            .await
+            .unwrap();
+        LocalBackend::update_sandbox_active_config(pools.write(), sandbox_id, &config)
+            .await
+            .unwrap();
+
+        let row = sandbox_entity::Entity::find_by_id(sandbox_id)
+            .one(pools.read())
+            .await
+            .unwrap()
+            .unwrap();
+        for persisted in [row.config.as_str(), row.active_config.as_deref().unwrap()] {
+            let decoded: SandboxConfig = serde_json::from_str(persisted).unwrap();
+            let options = match &decoded.spec.mounts[0] {
+                VolumeMount::Bind { options, .. } => options,
+                other => panic!("expected bind mount, got {other:?}"),
+            };
+            assert_eq!(options.override_uid, Some(1000));
+            assert_eq!(options.override_gid, Some(1001));
+        }
     }
 
     #[tokio::test]

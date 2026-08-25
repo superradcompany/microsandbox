@@ -305,6 +305,31 @@ describe("MountBuilder", () => {
     expect(() => builder.build()).toThrow(/Off cannot be combined with/);
   });
 
+  it("preserves an explicit mount owner including root and max IDs", () => {
+    expect(new MountBuilder("/data").bind("/host").owner(0, 0).build()).toMatchObject({
+      overrideUid: 0,
+      overrideGid: 0,
+    });
+    expect(
+      new MountBuilder("/max")
+        .bind("/host")
+        .owner(0xffffffff, 0xffffffff)
+        .build(),
+    ).toMatchObject({ overrideUid: 0xffffffff, overrideGid: 0xffffffff });
+  });
+
+  it.each([-1, 1.5, 0x100000000, Number.NaN, Infinity, -Infinity])(
+    "rejects invalid mount owner ID %s at the JavaScript boundary",
+    (id) => {
+      expect(() => new MountBuilder("/data").bind("/host").owner(id, 1000)).toThrow(
+        /mount owner uid must be an integer/,
+      );
+      expect(() => new MountBuilder("/data").bind("/host").owner(1000, id)).toThrow(
+        /mount owner gid must be an integer/,
+      );
+    },
+  );
+
   it("rejects commas in bind host paths at build time", () => {
     const builder = new MountBuilder("/data").bind("/host/with,comma");
     expect(() => builder.build()).toThrow(/must not contain ','/);

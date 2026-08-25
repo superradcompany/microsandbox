@@ -112,7 +112,7 @@ Across the docs, no badge means a feature works everywhere. Exceptions use only 
 | Volume and host paths | **Limited on cloud** | Bind and disk-image source paths resolve against the organization's host volume, not the machine running the client. |
 | Network policy and secrets | **Works everywhere** | Egress policies and hostname-scoped secret substitution carry across backends. |
 | Custom networking | **Local-only** | Published ports, custom nameservers, interface overrides, rate limiters, TLS interception, and host-CA trust are not accepted by cloud create. |
-| Logs | **Limited on cloud** | SDK live-follow works. Bounded or historical reads and the `msb logs` command are local-only; persist followed output externally when retention matters. |
+| Logs | **Limited on cloud** | SDK live-follow and `msb logs -f` work. Bounded or historical reads are local-only; persist followed output externally when retention matters. |
 | SSH | **Limited on cloud** | Native SDK sessions and `msb ssh` work. `msb ssh serve` is local-only; reusable SDK servers require explicit key material. |
 | Images | **Limited on cloud** | OCI image references and registry credentials work. Local cache commands, host-directory or disk-image roots, plain-HTTP registries, and custom registry CAs are local-only. |
 | Reconfiguration | **Local-only** | Recreate the sandbox with the new CPU, memory, mounts, or other settings instead of using `modify`. |

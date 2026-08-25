@@ -25,7 +25,7 @@ For full API documentation, use the docs site and generated Rust docs:
 ## Requirements
 
 - Rust toolchain with Rust 2024 edition support
-- Linux with KVM, macOS with Apple Silicon, or Windows with Windows Hypervisor Platform
+- Linux with KVM, macOS with Apple Silicon, or Windows 11 (x64 or ARM64) with WHP enabled
 - Windows support is currently preview; see the [Windows troubleshooting guide](https://docs.microsandbox.dev/troubleshooting/windows) for WHP and runtime setup notes.
 
 ## Installation

@@ -5,6 +5,23 @@ description: TypeScript SDK - Volume API reference
 
 Create, manage, and mount named volumes. See [Volumes](/sandboxes/volumes) for usage examples.
 
+## MountBuilder
+
+Sandbox mount callbacks receive a fluent `MountBuilder`. For bind and directory-backed named-volume mounts, use `owner(uid, gid)` to choose the guest owner shown for host files that do not carry a per-file stat override.
+
+```typescript
+const sb = await Sandbox.builder("worker")
+  .image("python")
+  .volume("/workspace", (mount) => mount.bind("./workspace").owner(1000, 1000))
+  .create();
+```
+
+```typescript
+owner(uid: number, gid: number): this
+```
+
+Both values must be finite integers from `0` through `4294967295`. Existing per-file overrides still take precedence, and no host inode ownership is changed. The policy is rejected for tmpfs, host disk images, disk-backed named volumes, and mounts using `statVirtualization("off")`.
+
 ## Volume
 
 <p className="msb-member-group">Instance properties</p>

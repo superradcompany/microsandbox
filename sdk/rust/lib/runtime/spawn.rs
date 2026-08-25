@@ -1324,6 +1324,16 @@ pub(crate) async fn ensure_named_volumes(
         return Err(err);
     }
 
+    // Resolve every named mount while the volume locks are still held and
+    // before the caller inserts the sandbox row. Existing disk-backed volumes
+    // are only distinguishable through the catalog, so this is the earliest
+    // point where virtiofs-only ownership can be rejected without leaving
+    // durable sandbox state behind.
+    if let Err(err) = resolve_named_volumes(local, config).await {
+        rollback_created_named_volume_records(local, &created).await;
+        return Err(err);
+    }
+
     Ok(EnsuredNamedVolumes {
         created,
         _locks: locks,
@@ -1475,6 +1485,7 @@ async fn resolve_named_volumes(
     for mount in &config.spec.mounts {
         let VolumeMount::Named {
             name,
+            options,
             stat_virtualization,
             host_permissions,
             ..
@@ -1485,7 +1496,12 @@ async fn resolve_named_volumes(
 
         if let Some(volume) = resolved.get(name) {
             if volume.kind == VolumeKind::Disk {
-                validate_named_disk_mount_options(name, *stat_virtualization, *host_permissions)?;
+                validate_named_disk_mount_options(
+                    name,
+                    *stat_virtualization,
+                    *host_permissions,
+                    options,
+                )?;
             }
             continue;
         }
@@ -1508,7 +1524,12 @@ async fn resolve_named_volumes(
                 quota_mib: model.quota_mib.map(|value| value.max(0) as u32),
             },
             VolumeKind::Disk => {
-                validate_named_disk_mount_options(name, *stat_virtualization, *host_permissions)?;
+                validate_named_disk_mount_options(
+                    name,
+                    *stat_virtualization,
+                    *host_permissions,
+                    options,
+                )?;
                 let format = model
                     .disk_format
                     .as_deref()
@@ -2258,6 +2279,8 @@ fn push_dir_mount_arg(
         stat_virtualization,
         host_permissions,
         follow_root_symlinks,
+        options.override_uid,
+        options.override_gid,
     );
     if let Some(mib) = quota_mib {
         opts.push(format!("quota={mib}"));
@@ -2279,7 +2302,14 @@ fn push_file_mount_arg(
     let mut opts = mount_option_tokens(options);
     // The staging directory is canonicalized at creation, so it is symlink-free
     // and stays under the default no-follow root protection — no opt-out here.
-    append_policy_options(&mut opts, stat_virtualization, host_permissions, false);
+    append_policy_options(
+        &mut opts,
+        stat_virtualization,
+        host_permissions,
+        false,
+        options.override_uid,
+        options.override_gid,
+    );
     append_option_block(&mut arg, opts);
     mounts.push(arg);
 }
@@ -2330,6 +2360,8 @@ fn append_policy_options(
     stat_virtualization: StatVirtualization,
     host_permissions: HostPermissions,
     follow_root_symlinks: bool,
+    override_uid: Option<u32>,
+    override_gid: Option<u32>,
 ) {
     match stat_virtualization {
         StatVirtualization::Strict => {}
@@ -2344,6 +2376,18 @@ fn append_policy_options(
     // resolution); its absence keeps the default protection on.
     if follow_root_symlinks {
         opts.push("follow-root-symlinks".to_string());
+    }
+    // Explicit guest owner for host files with no per-file override. This is a
+    // host-side virtiofs presentation policy (like stat-virt/host-perms above):
+    // it rides the `--mount` arg the VMM parses and must NOT leak into the guest
+    // mount specs (`MSB_DIR_MOUNTS`/`MSB_FILE_MOUNTS`), where agentd would reject
+    // `uid`/`gid` as unknown. The runtime requires the pair together; the SDK's
+    // `owner()` setter always sets both.
+    if let Some(uid) = override_uid {
+        opts.push(format!("uid={uid}"));
+    }
+    if let Some(gid) = override_gid {
+        opts.push(format!("gid={gid}"));
     }
 }
 
@@ -4124,6 +4168,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_sandbox_cli_args_bind_mount_owner_host_only() {
+        // An explicit owner is a host-side virtiofs presentation policy: it must
+        // ride the `--mount` arg the VMM parses, and must NOT leak into the guest
+        // `MSB_DIR_MOUNTS` spec (where agentd rejects `uid`/`gid` as unknown).
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/data", |m| m.bind("/host/data").owner(1000, 1000))
+            .build()
+            .await
+            .unwrap();
+        let rendered = render_args(&config);
+        let data_tag = super::guest_mount_tag("/data");
+
+        let mount_arg = rendered
+            .windows(2)
+            .find(|p| p[0] == "--mount" && p[1].starts_with(&format!("{data_tag}:/host/data")))
+            .map(|p| p[1].clone())
+            .unwrap_or_default();
+        assert!(
+            mount_arg.contains("uid=1000") && mount_arg.contains("gid=1000"),
+            "host --mount arg must carry the owner, got {mount_arg:?}"
+        );
+
+        let dir_mounts = rendered
+            .iter()
+            .find(|a| a.starts_with("MSB_DIR_MOUNTS="))
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            !dir_mounts.contains("uid=") && !dir_mounts.contains("gid="),
+            "guest MSB_DIR_MOUNTS must not carry uid/gid, got {dir_mounts:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_sandbox_cli_args_bind_mount_quota_override() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
@@ -4476,6 +4555,20 @@ mod tests {
                 && pair[1] == format!("{tag}:{}:raw", volume.path.display()))
         );
         assert!(rendered.contains(&format!("MSB_DISK_MOUNTS={tag}:/data:fstype=ext4")));
+
+        let owned_config = SandboxBuilder::new("owned-test")
+            .image("/tmp/rootfs")
+            .volume("/data", |m| m.named("mydata").owner(1000, 1000))
+            .build()
+            .await
+            .unwrap();
+        let err = super::resolve_named_volumes(&local, &owned_config)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("directory named volumes"),
+            "got: {err}"
+        );
     }
 
     #[tokio::test]

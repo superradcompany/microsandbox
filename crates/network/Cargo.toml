@@ -72,7 +72,7 @@ core-foundation = "0.9"
 system-configuration = "0.7"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_NetworkManagement_Dns", "Win32_System_LibraryLoader"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }

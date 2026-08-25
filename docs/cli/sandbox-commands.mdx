@@ -52,7 +52,7 @@ Common flags:
 | `--thp` | Guest transparent huge-page policy: `always`, `madvise` (default), or `never` |
 | `--root-disk` | OCI root storage, such as `8G`, `tmpfs:2G`, `flat:8G,clone=auto`, or `./rootfs.qcow2:format=qcow2,fstype=ext4` |
 | `-v`, `--volume` | Mount a host path or named volume, such as `./src:/app:ro` |
-| `--mount-dir`, `--mount-file`, `--mount-disk`, `--mount-named` | Mount a source with an explicit kind (`SOURCE:DEST[:OPTIONS]` or `NAME:DEST[:OPTIONS]`). `--mount-named` creates missing named volumes idempotently and accepts `kind=dir\|disk`, `size=...`, and `quota=...` |
+| `--mount-dir`, `--mount-file`, `--mount-disk`, `--mount-named` | Mount a source with an explicit kind (`SOURCE:DEST[:OPTIONS]` or `NAME:DEST[:OPTIONS]`). Directory-backed mounts accept paired `uid=...,gid=...`; `--mount-named` creates missing named volumes idempotently and accepts `kind=dir\|disk`, `size=...`, and `quota=...` |
 | `-p`, `--port` | Publish a port, such as `8000:8000` for loopback-only or `0.0.0.0:8000:8000` for all host interfaces |
 | `--vsock` | Expose local host IPC at host CID 2 using `HOST_PATH:PORT[/stream\|/dgram]`; Unix sockets and local Windows named pipes are supported, the flag is repeatable, and stream is the default |
 | `-e`, `--env` | Set an environment variable |
@@ -302,6 +302,8 @@ msb touch --label app=engine
 
 <Tooltip tip="Not yet available on microsandbox cloud; recreate the sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
+`msb mod` is a shorter alias for `msb modify`.
+
 Change a running sandbox's configuration. Every change is planned and applied all-or-nothing. CPU and memory resize live within the `max_cpus` / `max_memory` ceilings; other changes that can't apply live need `--restart` or `--next-start`.
 
 ```bash
@@ -338,7 +340,9 @@ A live resize may not apply instantly; `--format json` reports a per-resource `r
 
 ## msb exec
 
-Execute a command inside a running sandbox.
+Execute a command inside a sandbox.
+
+`msb exec` leaves an already-running sandbox running. If the sandbox is stopped or crashed, the CLI starts it temporarily and waits for it to stop again before returning, including when the command cannot start or another execution error occurs. Invalid `--env`, `--rlimit`, and `--timeout` values fail before the sandbox starts.
 
 ```bash
 msb exec devbox -- python -c "print('hello')"
@@ -381,9 +385,9 @@ Host-to-sandbox and sandbox-to-host forms follow `docker cp` syntax. Same-sandbo
 
 ## msb logs
 
-<Tooltip tip="Not yet available on microsandbox cloud; follow output live with the SDK and persist it externally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, use msb logs -f for a live stream. Bounded and historical reads remain local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Read captured output from a sandbox. Each sandbox stores its captured stdio under `<sandbox-dir>/logs/exec.log` as JSON Lines, plus runtime/kernel diagnostics in `runtime.log`/`kernel.log`. The command works on running and stopped sandboxes alike; there is no protocol traffic, just a file read.
+Read captured output from a sandbox. Local sandboxes store their captured stdio under `<sandbox-dir>/logs/exec.log` as JSON Lines, plus runtime/kernel diagnostics in `runtime.log`/`kernel.log`; these bounded reads work on running and stopped sandboxes. On microsandbox cloud, `msb logs -f <name>` streams a running sandbox through the cloud API. Cloud bounded reads and the `--tail`, `--since`, and `--until` filters are not yet available.
 
 ```bash
 # Captured user-program output (default sources: stdout + stderr + output)
@@ -572,7 +576,7 @@ msb install --list                   # List installed commands
 | `-c`, `--cpus` | Number of virtual CPUs to allocate |
 | `-m`, `--memory` | Amount of memory (e.g. `512M`, `1G`) |
 | `-v`, `--volume` | Mount a host path or named volume (`SOURCE:DEST[:OPTIONS]`, e.g. `./src:/app:ro,noexec`) |
-| `--mount-dir`, `--mount-file`, `--mount-disk`, `--mount-named` | Mount a source with an explicit kind (`SOURCE:DEST[:OPTIONS]` or `NAME:DEST[:OPTIONS]`). `--mount-named` creates missing named volumes idempotently and accepts `kind=dir\|disk`, `size=...`, and `quota=...` |
+| `--mount-dir`, `--mount-file`, `--mount-disk`, `--mount-named` | Mount a source with an explicit kind (`SOURCE:DEST[:OPTIONS]` or `NAME:DEST[:OPTIONS]`). Directory-backed mounts accept paired `uid=...,gid=...`; `--mount-named` creates missing named volumes idempotently and accepts `kind=dir\|disk`, `size=...`, and `quota=...` |
 | `--security` | In-guest security profile (`default` or `restricted`) |
 | `-w`, `--workdir` | Working directory inside the sandbox |
 | `--shell` | Shell for interactive sessions |

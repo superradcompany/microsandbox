@@ -25,7 +25,7 @@ For the full API reference and longer guides, use the docs site:
 ## Requirements
 
 - Node.js 22+
-- Linux with KVM, macOS with Apple Silicon, or Windows with Windows Hypervisor Platform
+- Linux with KVM, macOS with Apple Silicon, or Windows 11 with WHP enabled
 - Windows support is currently preview; see the [Windows troubleshooting guide](https://docs.microsandbox.dev/troubleshooting/windows) for WHP and runtime setup notes.
 
 The package root is ESM-only for normal imports:

@@ -712,6 +712,22 @@ impl Sandbox {
             .await
     }
 
+    /// Replay a filtered log snapshot, then follow new entries.
+    ///
+    /// The backend performs the snapshot-to-stream handoff. Local backends
+    /// preserve the exact snapshot cursor; cloud backends use their live SSE
+    /// transport and return a typed unsupported error for bounded-history
+    /// filters.
+    pub async fn follow_logs(
+        &self,
+        opts: &LogOptions,
+    ) -> MicrosandboxResult<crate::backend::sandbox::LogStream> {
+        self.backend
+            .sandboxes()
+            .follow_logs(self.backend.clone(), &self.name, opts)
+            .await
+    }
+
     /// A local logger handle over this sandbox's on-disk logs.
     ///
     /// Used directly, followed streams each own a private filesystem watcher.

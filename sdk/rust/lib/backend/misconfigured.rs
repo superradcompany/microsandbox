@@ -8,7 +8,7 @@ use futures::stream;
 
 use super::sandbox::{LogStream, MetricsStream};
 use super::{Backend, BackendKind, SandboxBackend, VolumeBackend};
-use crate::logs::{LogEntry, LogOptions, LogStreamOptions};
+use crate::logs::{BootError, LogEntry, LogOptions, LogStreamOptions};
 use crate::sandbox::metrics::SandboxMetrics;
 use crate::sandbox::{Sandbox, SandboxConfig, SandboxHandle, SandboxListBuilder, SandboxPage};
 use crate::volume::{Volume, VolumeConfig, VolumeFsReadStream, VolumeFsWriteSink, VolumeHandle};
@@ -164,6 +164,14 @@ impl SandboxBackend for ConfigurationErrorBackend {
         self.fail()
     }
 
+    fn boot_error<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _name: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<Option<BootError>>> {
+        self.fail()
+    }
+
     fn logs<'a>(
         &'a self,
         _backend: Arc<dyn Backend>,
@@ -178,6 +186,15 @@ impl SandboxBackend for ConfigurationErrorBackend {
         _backend: Arc<dyn Backend>,
         _name: &'a str,
         _opts: &'a LogStreamOptions,
+    ) -> BoxFuture<'a, MicrosandboxResult<LogStream>> {
+        self.fail()
+    }
+
+    fn follow_logs<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _name: &'a str,
+        _opts: &'a LogOptions,
     ) -> BoxFuture<'a, MicrosandboxResult<LogStream>> {
         self.fail()
     }
