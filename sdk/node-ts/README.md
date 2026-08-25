@@ -70,6 +70,24 @@ console.log(output.stdout().trim());
 
 `await using` calls `Sandbox.stop()` when the handle leaves scope. Use a plain `const sandbox = ...` and call lifecycle methods yourself when you need finer control.
 
+### Reusable Lifecycle Convergence
+
+Use `findOrCreate` when a stable name should converge on one persisted sandbox. Existing configuration wins; the builder is used only if creation is necessary. Handles retain a stable `id`, so lifecycle calls on stale receivers refuse to act on a replacement that reused the name.
+
+```typescript
+const sandbox = await Sandbox.builder("worker")
+  .image("python")
+  .memory(MiB(1024))
+  .findOrCreate();
+
+console.log(`${sandbox.name}: ${sandbox.id}`);
+const running = await (await Sandbox.get("worker")).connectOrStart();
+await running.requestStop();
+const stopped = await running.waitForStatus("stopped");
+const restarted = await stopped.restart();
+await restarted.destroy();
+```
+
 ## Common Examples
 
 These snippets assume you already have a live `sandbox: Sandbox`.

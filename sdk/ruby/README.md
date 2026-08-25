@@ -132,6 +132,23 @@ exception is preserved.
 Blocking calls do not prevent other Ruby threads from running. Forked child
 processes recreate the native runtime before use.
 
+Use `find_or_create` when a stable name should converge on one persisted sandbox. Existing configuration wins; options are used only if creation is necessary. Handles retain a stable `id`, so lifecycle calls on stale receivers refuse to act on a replacement that reused the name.
+
+```ruby
+sandbox = Microsandbox::Sandbox.find_or_create(
+  "worker",
+  image: "python",
+  memory: 1024
+)
+
+puts "#{sandbox.name}: #{sandbox.id}"
+running = Microsandbox::Sandbox.get("worker").connect_or_start
+running.request_stop
+stopped = running.wait_for_status("stopped")
+restarted = stopped.restart
+restarted.destroy
+```
+
 ## Networking and secrets
 
 `network: :none` disables networking. An allowlist creates a default-deny

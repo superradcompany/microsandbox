@@ -5,6 +5,20 @@ description: TypeScript SDK - Sandbox API reference
 
 Create and control a microVM sandbox: boot it from an image, run commands, stream logs and metrics, then shut it down. See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
 
+## Lifecycle convergence
+
+```typescript
+Sandbox.builder(name).findOrCreate(): Promise<Sandbox>
+handle.connectOrStart(options?): Promise<Sandbox>
+handle.waitForStatus(status): Promise<SandboxHandle>
+handle.restart(options?): Promise<Sandbox>
+handle.destroy(options?): Promise<void>
+sandbox.id: string
+handle.id: string
+```
+
+`findOrCreate` converges on the current persisted sandbox by name and uses builder configuration only when it creates. Receiver lifecycle operations are bound to the stable opaque `id`; a stale receiver throws `SandboxReplacedError` instead of acting on a replacement that reused the name. `Sandbox` also exposes `waitForStatus`, `restart`, and `destroy`. See [Lifecycle convergence and identity safety](/sandboxes/lifecycle#converge-on-a-named-sandbox) for state behavior and examples.
+
 ## Functions
 
 #### <span className="msb-hn">allSandboxMetrics()</span>
@@ -3002,7 +3016,10 @@ Current lifecycle state of a sandbox. String literal type.
 
 | Value | Description |
 |-------|-------------|
+| `"created"` | Persisted resource exists but has not started |
+| `"starting"` | Runtime is booting or waiting for capacity |
 | `"running"` | Guest agent is ready; `exec`, `shell`, `fs` work |
+| `"draining"` | Graceful shutdown in progress; existing commands finish, new ones rejected |
+| `"paused"` | VM is paused |
 | `"stopped"` | VM shut down; configuration persisted; can be restarted |
 | `"crashed"` | VM exited unexpectedly (kernel panic, OOM, etc.) |
-| `"draining"` | Graceful shutdown in progress; existing commands finish, new ones rejected |

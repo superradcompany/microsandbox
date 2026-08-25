@@ -908,8 +908,10 @@ export declare class Sandbox {
   get backendKind(): string
   /** Sandbox name. Names are limited to 128 UTF-8 bytes. */
   get name(): Promise<string>
+  /** Stable backend-assigned identity for this persisted sandbox. */
+  get id(): string
   /** Whether this handle owns the sandbox lifecycle (attached mode). */
-  get ownsLifecycle(): Promise<boolean>
+  get ownsLifecycle(): boolean
   /**
    * Get the full configuration this sandbox was created with
    * (image, cpus, memory, env, mounts, etc.) as a JSON string.
@@ -998,6 +1000,12 @@ export declare class Sandbox {
   drain(): Promise<void>
   /** Request graceful drain without waiting for observed exit. */
   requestDrain(): Promise<void>
+  /** Wait until this exact sandbox reaches the requested status. */
+  waitForStatus(status: string): Promise<JsSandboxHandle>
+  /** Stop and start this exact sandbox. */
+  restart(options?: SandboxRestartOptions | undefined | null): Promise<Sandbox>
+  /** Stop and remove this exact sandbox. */
+  destroy(options?: SandboxDestroyOptions | undefined | null): Promise<void>
   /** Wait until the sandbox is observed in a terminal non-running state. */
   waitUntilStopped(): Promise<SandboxStopResult>
   /** Wait for the sandbox process to exit. */
@@ -1236,6 +1244,13 @@ export declare class SandboxBuilder {
    */
   create(): Promise<JsSandbox>
   /**
+   * Find an existing sandbox by name or create it from this builder.
+   *
+   * # Safety
+   * Same justification as `create`.
+   */
+  findOrCreate(): Promise<JsSandbox>
+  /**
    * Create the sandbox with image-pull progress reporting. Returns
    * a `PullProgressStream` of per-layer download/materialization
    * events. The actual `Sandbox` is awaited via `.awaitSandbox()`
@@ -1292,7 +1307,9 @@ export type JsSandboxFsOps = SandboxFsOps
 export declare class SandboxHandle {
   /** Sandbox name. Names are limited to 128 UTF-8 bytes. */
   get name(): string
-  /** Status at time of query: "running", "stopped", "crashed", or "draining". */
+  /** Stable backend-assigned identity for this persisted sandbox. */
+  get id(): string
+  /** Status at time of query. */
   get status(): string
   /** Backend retained by this handle (`"local"` or `"cloud"`). */
   get backendKind(): string
@@ -1331,6 +1348,8 @@ export declare class SandboxHandle {
   startDetached(): Promise<Sandbox>
   /** Connect to an already-running sandbox (no lifecycle ownership). */
   connect(): Promise<Sandbox>
+  /** Connect when running, or start the same persisted sandbox when stopped. */
+  connectOrStart(detached?: boolean | undefined | null): Promise<Sandbox>
   /**
    * Connect with an explicit timeout in milliseconds.
    *
@@ -1363,6 +1382,12 @@ export declare class SandboxHandle {
   killWithTimeout(timeoutMs: number): Promise<void>
   /** Request graceful drain without waiting for completion. */
   requestDrain(): Promise<void>
+  /** Wait until this exact sandbox reaches the requested status. */
+  waitForStatus(status: string): Promise<SandboxHandle>
+  /** Stop and start this exact sandbox. */
+  restart(options?: SandboxRestartOptions | undefined | null): Promise<Sandbox>
+  /** Stop and remove this exact sandbox. */
+  destroy(options?: SandboxDestroyOptions | undefined | null): Promise<void>
   /** Wait until the sandbox is observed in a terminal non-running state. */
   waitUntilStopped(): Promise<SandboxStopResult>
   /** Remove the sandbox from the database. */
@@ -2157,6 +2182,12 @@ export interface Rlimit {
   hard: number
 }
 
+/** Options for `destroy`. */
+export interface SandboxDestroyOptions {
+  force?: boolean
+  timeoutMs?: number
+}
+
 /** Options for one paginated sandbox list request. */
 export interface SandboxListOptions {
   cursor?: string
@@ -2213,6 +2244,13 @@ export interface SandboxModifyOptions {
 export interface SandboxPingResult {
   name: string
   latencyMs: number
+}
+
+/** Options for `restart`. */
+export interface SandboxRestartOptions {
+  force?: boolean
+  timeoutMs?: number
+  detached?: boolean
 }
 
 /** Result of observing a sandbox in a terminal state. */

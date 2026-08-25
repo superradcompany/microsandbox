@@ -9,6 +9,29 @@ import (
 	"time"
 )
 
+func TestLifecycleConvergenceOptions(t *testing.T) {
+	connect := connectOrStartOptions{}
+	WithConnectOrStartDetached()(&connect)
+	if !connect.detached {
+		t.Fatal("WithConnectOrStartDetached did not enable detached mode")
+	}
+
+	restart := restartOptions{}
+	WithRestartForce()(&restart)
+	WithRestartTimeout(3 * time.Second)(&restart)
+	WithRestartDetached()(&restart)
+	if !restart.force || restart.timeout != 3*time.Second || !restart.detached {
+		t.Fatalf("restart options = %#v", restart)
+	}
+
+	destroy := destroyOptions{}
+	WithDestroyForce()(&destroy)
+	WithDestroyTimeout(4 * time.Second)(&destroy)
+	if !destroy.force || destroy.timeout != 4*time.Second {
+		t.Fatalf("destroy options = %#v", destroy)
+	}
+}
+
 func marshalCreateOptions(t *testing.T, opts ...SandboxOption) map[string]any {
 	t.Helper()
 	cfg := SandboxConfig{}

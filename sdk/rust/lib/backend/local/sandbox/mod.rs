@@ -31,7 +31,7 @@ use super::LocalBackend;
 use crate::MicrosandboxResult;
 use crate::backend::{
     Backend,
-    sandbox::{LogStream, MetricsStream, SandboxBackend},
+    sandbox::{LogStream, MetricsStream, SandboxBackend, SandboxIdentity},
 };
 use crate::db::entity::{
     run as run_entity, sandbox as sandbox_entity, sandbox_label as sandbox_label_entity,
@@ -67,12 +67,14 @@ impl LocalBackend {
         &self,
         backend: Arc<dyn Backend>,
         name: &str,
+        expected_id: Option<i32>,
         mode: SpawnMode,
     ) -> MicrosandboxResult<Sandbox> {
         tracing::debug!(sandbox = name, ?mode, "start_local: loading record");
         let pools = self.db().await?;
         let write_db = pools.write();
         let model = self.load_sandbox_record_reconciled(pools, name).await?;
+        ensure_local_identity(name, expected_id, model.id)?;
         tracing::debug!(sandbox = name, status = ?model.status, "start_local: current status");
 
         if model.status == SandboxStatus::Running || model.status == SandboxStatus::Draining {
@@ -100,10 +102,7 @@ impl LocalBackend {
         // same persisted identity before changing state or touching sockets.
         let current = load_sandbox_record(pools.read(), name).await?;
         if current.id != model.id {
-            return Err(crate::MicrosandboxError::Runtime(format!(
-                "sandbox {name:?} identity changed from database id {} to {}; refusing stale start",
-                model.id, current.id
-            )));
+            return Err(sandbox_replaced(name, model.id, current.id));
         }
         if !matches!(
             current.status,
@@ -184,8 +183,8 @@ impl LocalBackend {
     /// transitioning, etc.).
     ///
     /// No-op when the sandbox isn't in Running/Draining.
-    async fn stop_sandbox(&self, name: &str) -> MicrosandboxResult<()> {
-        let (model, pid) = self.sandbox_handle_state(name).await?;
+    async fn stop_sandbox(&self, name: &str, expected_id: Option<i32>) -> MicrosandboxResult<()> {
+        let (model, pid) = self.sandbox_handle_state(name, expected_id).await?;
         if model.status != SandboxStatus::Running && model.status != SandboxStatus::Draining {
             return Ok(());
         }
@@ -194,8 +193,9 @@ impl LocalBackend {
             Self::mark_sandbox_draining_if_running(self.db().await?.write(), model.id).await?;
         }
 
-        match self.request_agent_shutdown(name).await {
+        match self.request_agent_shutdown(name, model.id).await {
             Ok(()) => Ok(()),
+            Err(error @ crate::MicrosandboxError::SandboxReplaced { .. }) => Err(error),
             Err(e) => {
                 // Graceful degradation: agent endpoint unreachable (socket/pipe
                 // missing, ECONNREFUSED, handshake timeout) or shutdown delivery
@@ -220,8 +220,8 @@ impl LocalBackend {
     /// Destructive by design — no clean-shutdown path. Signals SIGKILL to the
     /// libkrun PID, waits briefly for the process to exit, then marks the DB
     /// row Stopped if all signalled PIDs are confirmed dead.
-    async fn kill_sandbox(&self, name: &str) -> MicrosandboxResult<()> {
-        let (model, pid) = self.sandbox_handle_state(name).await?;
+    async fn kill_sandbox(&self, name: &str, expected_id: Option<i32>) -> MicrosandboxResult<()> {
+        let (model, pid) = self.sandbox_handle_state(name, expected_id).await?;
         if model.status != SandboxStatus::Running && model.status != SandboxStatus::Draining {
             return Ok(());
         }
@@ -261,8 +261,8 @@ impl LocalBackend {
     /// Unix keeps the legacy SIGUSR1 drain path. Windows uses the existing
     /// `core.shutdown` agent message so the guest can sync and power off
     /// without pretending a direct process termination is graceful.
-    async fn drain_sandbox(&self, name: &str) -> MicrosandboxResult<()> {
-        let (model, pid) = self.sandbox_handle_state(name).await?;
+    async fn drain_sandbox(&self, name: &str, expected_id: Option<i32>) -> MicrosandboxResult<()> {
+        let (model, pid) = self.sandbox_handle_state(name, expected_id).await?;
         if model.status != SandboxStatus::Running && model.status != SandboxStatus::Draining {
             return Ok(());
         }
@@ -274,11 +274,17 @@ impl LocalBackend {
         #[cfg(windows)]
         {
             if pid.is_some_and(Self::pid_is_alive) {
-                self.request_agent_shutdown(name).await.map_err(|err| {
-                    crate::MicrosandboxError::Runtime(format!(
-                        "windows drain requires the agent shutdown path, but the agent endpoint is unavailable: {err}"
-                    ))
-                })?;
+                match self.request_agent_shutdown(name, model.id).await {
+                    Ok(()) => {}
+                    Err(error @ crate::MicrosandboxError::SandboxReplaced { .. }) => {
+                        return Err(error);
+                    }
+                    Err(error) => {
+                        return Err(crate::MicrosandboxError::Runtime(format!(
+                            "windows drain requires the agent shutdown path, but the agent endpoint is unavailable: {error}"
+                        )));
+                    }
+                }
             }
             Ok(())
         }
@@ -302,8 +308,9 @@ impl LocalBackend {
         &self,
         backend: Arc<dyn Backend>,
         name: &str,
+        expected_id: Option<i32>,
     ) -> MicrosandboxResult<()> {
-        let (model, pid) = self.sandbox_handle_state(name).await?;
+        let (model, pid) = self.sandbox_handle_state(name, expected_id).await?;
         let handle = SandboxHandle::from_local_model(backend, model, pid);
         handle.remove().await
     }
@@ -312,6 +319,7 @@ impl LocalBackend {
     async fn sandbox_handle_state(
         &self,
         name: &str,
+        expected_id: Option<i32>,
     ) -> MicrosandboxResult<(sandbox_entity::Model, Option<i32>)> {
         let pools = self.db().await?;
         let model = sandbox_entity::Entity::find()
@@ -319,6 +327,7 @@ impl LocalBackend {
             .one(pools.read())
             .await?
             .ok_or_else(|| crate::MicrosandboxError::SandboxNotFound(name.into()))?;
+        ensure_local_identity(name, expected_id, model.id)?;
         let model = self.reconcile_sandbox_runtime_state(pools, model).await?;
         let run = Self::load_active_run(pools.read(), model.id).await?;
         let pid = Self::pid_from_run(run.as_ref());
@@ -380,13 +389,18 @@ impl LocalBackend {
     }
 
     /// Connect to the named sandbox's agent endpoint and send `core.shutdown`.
-    async fn request_agent_shutdown(&self, name: &str) -> MicrosandboxResult<()> {
+    async fn request_agent_shutdown(&self, name: &str, expected_id: i32) -> MicrosandboxResult<()> {
         let client = crate::sandbox::fs::agent::connect_agent_with_timeout(
             self,
             name,
             AGENT_SHUTDOWN_CONNECT_TIMEOUT,
         )
         .await?;
+
+        // The local agent transport is name-addressed. Verify identity after
+        // connecting and before sending so a concurrent remove/recreate
+        // cannot redirect a stale receiver's shutdown to the replacement.
+        self.sandbox_handle_state(name, Some(expected_id)).await?;
         client.send(0, MessageType::Shutdown, &()).await?;
         Ok(())
     }
@@ -898,7 +912,10 @@ impl SandboxBackend for LocalBackend {
         backend: Arc<dyn Backend>,
         name: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
-        Box::pin(async move { self.start_sandbox(backend, name, SpawnMode::Attached).await })
+        Box::pin(async move {
+            self.start_sandbox(backend, name, None, SpawnMode::Attached)
+                .await
+        })
     }
 
     fn start_detached<'a>(
@@ -906,7 +923,36 @@ impl SandboxBackend for LocalBackend {
         backend: Arc<dyn Backend>,
         name: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
-        Box::pin(async move { self.start_sandbox(backend, name, SpawnMode::Detached).await })
+        Box::pin(async move {
+            self.start_sandbox(backend, name, None, SpawnMode::Detached)
+                .await
+        })
+    }
+
+    fn start_identified<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        name: &'a str,
+        identity: SandboxIdentity,
+    ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
+        Box::pin(async move {
+            let expected_id = local_identity(identity)?;
+            self.start_sandbox(backend, name, Some(expected_id), SpawnMode::Attached)
+                .await
+        })
+    }
+
+    fn start_detached_identified<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        name: &'a str,
+        identity: SandboxIdentity,
+    ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
+        Box::pin(async move {
+            let expected_id = local_identity(identity)?;
+            self.start_sandbox(backend, name, Some(expected_id), SpawnMode::Detached)
+                .await
+        })
     }
 
     fn get<'a>(
@@ -915,7 +961,7 @@ impl SandboxBackend for LocalBackend {
         name: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<SandboxHandle>> {
         Box::pin(async move {
-            let (model, pid) = self.sandbox_handle_state(name).await?;
+            let (model, pid) = self.sandbox_handle_state(name, None).await?;
             Ok(SandboxHandle::from_local_model(backend, model, pid))
         })
     }
@@ -943,7 +989,19 @@ impl SandboxBackend for LocalBackend {
         backend: Arc<dyn Backend>,
         name: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
-        Box::pin(async move { self.remove_sandbox(backend, name).await })
+        Box::pin(async move { self.remove_sandbox(backend, name, None).await })
+    }
+
+    fn remove_identified<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        name: &'a str,
+        identity: SandboxIdentity,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        Box::pin(async move {
+            self.remove_sandbox(backend, name, Some(local_identity(identity)?))
+                .await
+        })
     }
 
     fn stop<'a>(
@@ -951,7 +1009,19 @@ impl SandboxBackend for LocalBackend {
         _backend: Arc<dyn Backend>,
         name: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
-        Box::pin(async move { self.stop_sandbox(name).await })
+        Box::pin(async move { self.stop_sandbox(name, None).await })
+    }
+
+    fn stop_identified<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        name: &'a str,
+        identity: SandboxIdentity,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        Box::pin(async move {
+            self.stop_sandbox(name, Some(local_identity(identity)?))
+                .await
+        })
     }
 
     fn kill<'a>(
@@ -959,7 +1029,19 @@ impl SandboxBackend for LocalBackend {
         _backend: Arc<dyn Backend>,
         name: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
-        Box::pin(async move { self.kill_sandbox(name).await })
+        Box::pin(async move { self.kill_sandbox(name, None).await })
+    }
+
+    fn kill_identified<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        name: &'a str,
+        identity: SandboxIdentity,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        Box::pin(async move {
+            self.kill_sandbox(name, Some(local_identity(identity)?))
+                .await
+        })
     }
 
     fn drain<'a>(
@@ -967,7 +1049,19 @@ impl SandboxBackend for LocalBackend {
         _backend: Arc<dyn Backend>,
         name: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
-        Box::pin(async move { self.drain_sandbox(name).await })
+        Box::pin(async move { self.drain_sandbox(name, None).await })
+    }
+
+    fn drain_identified<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        name: &'a str,
+        identity: SandboxIdentity,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        Box::pin(async move {
+            self.drain_sandbox(name, Some(local_identity(identity)?))
+                .await
+        })
     }
 
     fn boot_error<'a>(
@@ -1046,6 +1140,36 @@ impl SandboxBackend for LocalBackend {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+fn local_identity(identity: SandboxIdentity) -> MicrosandboxResult<i32> {
+    match identity {
+        SandboxIdentity::Local(id) => Ok(id),
+        SandboxIdentity::Cloud(id) => Err(crate::MicrosandboxError::Runtime(format!(
+            "cloud sandbox identity {id:?} was routed to the local backend"
+        ))),
+    }
+}
+
+fn ensure_local_identity(
+    name: &str,
+    expected_id: Option<i32>,
+    actual_id: i32,
+) -> MicrosandboxResult<()> {
+    match expected_id {
+        Some(expected_id) if expected_id != actual_id => {
+            Err(sandbox_replaced(name, expected_id, actual_id))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn sandbox_replaced(name: &str, expected_id: i32, actual_id: i32) -> crate::MicrosandboxError {
+    crate::MicrosandboxError::SandboxReplaced {
+        name: name.to_string(),
+        expected: format!("local:{expected_id}"),
+        actual: format!("local:{actual_id}"),
+    }
+}
 
 fn encode_list_cursor(id: i32) -> String {
     URL_SAFE_NO_PAD.encode(id.to_string())

@@ -5,6 +5,20 @@ description: Go SDK - Sandbox API reference
 
 Create and control a microVM sandbox: boot it from an image, run commands, stream logs and metrics, then shut it down. See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
 
+## Lifecycle convergence
+
+```go
+FindOrCreateSandbox(ctx, name, opts...) (*Sandbox, error)
+handle.ConnectOrStart(ctx, opts...) (*Sandbox, error)
+handle.WaitForStatus(ctx, status) (*SandboxHandle, error)
+handle.Restart(ctx, opts...) (*Sandbox, error)
+handle.Destroy(ctx, opts...) error
+sandbox.ID() string
+handle.ID() string
+```
+
+`FindOrCreateSandbox` converges on the current persisted sandbox by name and uses options only when it creates. Receiver lifecycle operations are bound to the stable opaque `ID`; a stale receiver returns `ErrSandboxReplaced` instead of acting on a replacement that reused the name. `Sandbox` also exposes `WaitForStatus`, `Restart`, and `Destroy`. See [Lifecycle convergence and identity safety](/sandboxes/lifecycle#converge-on-a-named-sandbox) for state behavior and examples.
+
 
 ## Functions
 
@@ -2778,11 +2792,13 @@ type SandboxStatus string
 
 | Constant | Value | Description |
 |----------|-------|-------------|
+| `SandboxStatusCreated` | `"created"` | Persisted resource exists but has not started |
+| `SandboxStatusStarting` | `"starting"` | Runtime is booting or waiting for capacity |
 | `SandboxStatusRunning` | `"running"` | Guest agent is ready; `Exec`, `Shell`, `FS` work |
-| `SandboxStatusStopped` | `"stopped"` | VM shut down; configuration persisted; can be restarted |
-| `SandboxStatusCrashed` | `"crashed"` | VM exited unexpectedly (kernel panic, OOM, etc.) |
 | `SandboxStatusDraining` | `"draining"` | Graceful shutdown in progress; existing commands finish, new ones rejected |
 | `SandboxStatusPaused` | `"paused"` | VM is paused |
+| `SandboxStatusStopped` | `"stopped"` | VM shut down; configuration persisted; can be restarted |
+| `SandboxStatusCrashed` | `"crashed"` | VM exited unexpectedly (kernel panic, OOM, etc.) |
 
 ### LogOptions
 

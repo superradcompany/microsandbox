@@ -7,6 +7,20 @@ Create and control a microVM sandbox: boot it from an image, run commands, strea
 
 For local runtime installation and verification, see [Runtime setup](/sdk/setup#install-and-verify).
 
+## Lifecycle convergence
+
+```python
+await Sandbox.find_or_create(name, **kwargs) -> Sandbox
+await handle.connect_or_start(detached=False) -> Sandbox
+await handle.wait_for_status(status) -> SandboxHandle
+await handle.restart(force=False, timeout=None, detached=False) -> Sandbox
+await handle.destroy(force=False, timeout=None) -> None
+await sandbox.id -> str
+handle.id -> str
+```
+
+`find_or_create` converges on the current persisted sandbox by name and uses creation arguments only when it creates. Receiver lifecycle operations are bound to the stable opaque `id`; a stale receiver raises `SandboxReplacedError` instead of acting on a replacement that reused the name. `Sandbox` also exposes `wait_for_status`, `restart`, and `destroy`. See [Lifecycle convergence and identity safety](/sandboxes/lifecycle#converge-on-a-named-sandbox) for state behavior and examples.
+
 ## Sandbox
 
 <p className="msb-member-group">Instance properties</p>

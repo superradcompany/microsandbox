@@ -154,6 +154,10 @@ const (
 
 	// ErrNoDefaultCommand indicates that neither the effective entrypoint nor CMD is executable.
 	ErrNoDefaultCommand
+
+	// ErrSandboxReplaced indicates that a receiver's name now refers to a
+	// different persisted sandbox identity.
+	ErrSandboxReplaced
 )
 
 func (k ErrorKind) String() string {
@@ -164,6 +168,8 @@ func (k ErrorKind) String() string {
 		return "SandboxNotRunning"
 	case ErrSandboxAlreadyExists:
 		return "SandboxAlreadyExists"
+	case ErrSandboxReplaced:
+		return "SandboxReplaced"
 	case ErrSandboxStillRunning:
 		return "SandboxStillRunning"
 	case ErrVolumeNotFound:
@@ -299,6 +305,8 @@ func kindFromFFI(kind string) ErrorKind {
 		return ErrSandboxNotFound
 	case ffi.KindSandboxAlreadyExists:
 		return ErrSandboxAlreadyExists
+	case ffi.KindSandboxReplaced:
+		return ErrSandboxReplaced
 	case ffi.KindSandboxStillRunning:
 		return ErrSandboxStillRunning
 	case ffi.KindVolumeNotFound:

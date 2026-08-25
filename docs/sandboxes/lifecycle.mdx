@@ -91,6 +91,101 @@ msb run -d python --name worker
 
 </CodeGroup>
 
+## Converge on a named sandbox
+
+Use `find_or_create` when several callers may converge on the same reusable name. It finds the current persisted sandbox, connects if it is already running, starts it if it is stopped or crashed, and creates it only when the name is missing. If another caller wins a concurrent create or start, the operation observes the winner and converges on it.
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .image("python")
+    .memory(1024)
+    .find_or_create()
+    .await?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.builder("worker")
+  .image("python")
+  .memory(MiB(1024))
+  .findOrCreate();
+```
+
+```python Python
+sb = await Sandbox.find_or_create(
+    "worker",
+    image="python",
+    memory=1024,
+)
+```
+
+```go Go
+sb, err := m.FindOrCreateSandbox(ctx, "worker",
+    m.WithImage("python"),
+    m.WithMemory(1024),
+)
+```
+
+```ruby Ruby
+sb = Microsandbox::Sandbox.find_or_create(
+  "worker",
+  image: "python",
+  memory: 1024
+)
+```
+</CodeGroup>
+
+Builder options apply only when a sandbox is created. An existing sandbox always keeps its persisted image, resources, environment, mounts, and other configuration. `find_or_create` rejects replace options because replacing and converging express conflicting identity semantics.
+
+If you already hold a metadata handle, use `connect_or_start` instead. It connects without taking lifecycle ownership when the exact sandbox is running, waits through `Starting`, or starts the exact persisted sandbox when it is created, stopped, or crashed.
+
+<CodeGroup>
+```rust Rust
+let handle = Sandbox::get("worker").await?;
+let sb = handle.connect_or_start().await?;
+```
+
+```typescript TypeScript
+const handle = await Sandbox.get("worker");
+const sb = await handle.connectOrStart();
+```
+
+```python Python
+handle = await Sandbox.get("worker")
+sb = await handle.connect_or_start()
+```
+
+```go Go
+handle, err := m.GetSandbox(ctx, "worker")
+sb, err := handle.ConnectOrStart(ctx)
+```
+
+```ruby Ruby
+handle = Microsandbox::Sandbox.get("worker")
+sb = handle.connect_or_start
+```
+</CodeGroup>
+
+`Draining` is not reinterpreted as a start request, and `Paused` requires explicit resume support, which is not currently exposed.
+
+## Identity-safe receivers
+
+Sandbox names are reusable lookup keys. Every `Sandbox` and `SandboxHandle` also exposes an opaque stable `id` (`ID()` in Go) for the persisted sandbox it represents. Do not parse this value; use it for logging, correlation, and equality checks.
+
+On the built-in local and cloud backends, receiver-based status and lifecycle operations remain bound to that captured identity. If `worker` is removed and another sandbox is created with the same name, a stale receiver cannot refresh, start, stop, kill, drain, restart, destroy, or remove the replacement. The SDK returns `SandboxReplaced` (or the language's typed equivalent) when it can observe the new identity; ID-addressed cloud operations may instead report that the old resource is gone. Custom Rust backends should override the `*_identified` backend methods to provide the same guarantee.
+
+This closes the check-then-act race that an `exists()` helper would encourage:
+
+```text
+name lookup         stable identity check/action
+    │                           │
+    ├── find_or_create ─────────┤ selects the current identity
+    │                           │
+    └── SandboxHandle(id=A) ────┤ may act only on A, never replacement B
+```
+
+Identity safety uses the existing local database row ID and cloud sandbox UUID. It requires no persistence migration or wire-protocol change.
+
 ## Stop and restart
 
 Stopping gracefully terminates guest processes and shuts down the VM. The sandbox moves to `Stopped` and can be restarted later with all its configuration preserved.
@@ -136,6 +231,8 @@ msb restart worker
 </CodeGroup>
 
 `msb restart` follows the same lifecycle semantics as `msb stop` followed by `msb start`. If the sandbox is already stopped or crashed, it starts it directly.
+
+SDK receivers also expose a convergent `restart` operation with graceful shutdown by default and options for force, timeout, and detached start where supported.
 
 ## Configuration
 
@@ -291,6 +388,34 @@ result = await sb.wait_until_stopped()
 result, err := sb.WaitUntilStopped(ctx)
 ```
 
+</CodeGroup>
+
+Use `wait_for_status` / `waitForStatus` / `WaitForStatus` when you need any exact lifecycle state rather than only a terminal state. It intentionally has no built-in timeout; compose the language's normal deadline or cancellation primitive around it.
+
+## Destroy
+
+`destroy` combines stop and remove for the exact sandbox identity. It requests a graceful stop by default, escalates after the configured timeout, and refuses to act on a replacement that reused the name.
+
+<CodeGroup>
+```rust Rust
+sb.destroy().await?;
+```
+
+```typescript TypeScript
+await sb.destroy();
+```
+
+```python Python
+await sb.destroy()
+```
+
+```go Go
+err := sb.Destroy(ctx)
+```
+
+```ruby Ruby
+sb.destroy
+```
 </CodeGroup>
 
 ## Remove
