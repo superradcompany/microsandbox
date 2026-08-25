@@ -198,16 +198,16 @@ impl PatchField {
         }
     }
 
-    fn updater(&self) -> Option<proc_macro2::TokenStream> {
+    fn modifier(&self) -> Option<proc_macro2::TokenStream> {
         let patch = self.nested_patch.as_ref()?;
         let ident = &self.ident;
-        let method = format_ident!("update_{ident}");
+        let method = format_ident!("modify_{ident}");
         let doc = format!("Transform the current nested `{ident}` patch.");
         if self.nested_optional {
             Some(quote! {
                 #[doc = #doc]
-                pub fn #method(mut self, update: impl FnOnce(#patch) -> #patch) -> Self {
-                    self.#ident = ::std::option::Option::Some(update(
+                pub fn #method(mut self, modify: impl FnOnce(#patch) -> #patch) -> Self {
+                    self.#ident = ::std::option::Option::Some(modify(
                         self.#ident.take().unwrap_or_else(#patch::new),
                     ));
                     self
@@ -216,8 +216,8 @@ impl PatchField {
         } else {
             Some(quote! {
                 #[doc = #doc]
-                pub fn #method(mut self, update: impl FnOnce(#patch) -> #patch) -> Self {
-                    self.#ident = update(self.#ident);
+                pub fn #method(mut self, modify: impl FnOnce(#patch) -> #patch) -> Self {
+                    self.#ident = modify(self.#ident);
                     self
                 }
             })
@@ -401,7 +401,7 @@ pub(crate) fn expand_config_patch(input: DeriveInput) -> syn::Result<proc_macro2
     let setters = fields.iter().map(PatchField::setter);
     let replacers = fields.iter().filter_map(PatchField::replacer);
     let clearers = fields.iter().map(PatchField::clearer);
-    let updaters = fields.iter().filter_map(PatchField::updater);
+    let modifiers = fields.iter().filter_map(PatchField::modifier);
     let overlay_fields = fields.iter().map(PatchField::overlay);
     let apply_fields = fields.iter().map(PatchField::apply);
     let present_destructured_fields = fields.iter().map(|field| &field.ident);
@@ -423,7 +423,7 @@ pub(crate) fn expand_config_patch(input: DeriveInput) -> syn::Result<proc_macro2
             #(#setters)*
             #(#replacers)*
             #(#clearers)*
-            #(#updaters)*
+            #(#modifiers)*
 
             /// Overlay a higher-precedence patch using each field's declared strategy.
             pub fn overlay(mut self, higher: Self) -> Self {

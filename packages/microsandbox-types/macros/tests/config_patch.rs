@@ -111,7 +111,7 @@ fn clear_removes_nullable_changes_from_the_patch() {
 }
 
 #[test]
-fn optional_nested_patches_update_and_clear_pending_changes() {
+fn optional_nested_patches_modify_and_clear_pending_changes() {
     let mut target = OptionalOuter {
         inner: Some(Inner {
             scalar: 1,
@@ -120,7 +120,7 @@ fn optional_nested_patches_update_and_clear_pending_changes() {
     };
 
     OptionalOuterPatch::new()
-        .update_inner(|inner| inner.scalar(2))
+        .modify_inner(|inner| inner.scalar(2))
         .apply_to(&mut target);
     assert_eq!(
         target.inner,
@@ -131,7 +131,7 @@ fn optional_nested_patches_update_and_clear_pending_changes() {
     );
 
     OptionalOuterPatch::new()
-        .update_inner(|inner| inner.scalar(9))
+        .modify_inner(|inner| inner.scalar(9))
         .clear_inner()
         .apply_to(&mut target);
     assert_eq!(target.inner.as_ref().unwrap().scalar, 2);
@@ -142,7 +142,7 @@ fn optional_nested_patches_update_and_clear_pending_changes() {
     });
     OptionalOuterPatch::new()
         .clear_inner()
-        .overlay(OptionalOuterPatch::new().update_inner(|inner| inner.scalar(4)))
+        .overlay(OptionalOuterPatch::new().modify_inner(|inner| inner.scalar(4)))
         .apply_to(&mut target);
     assert_eq!(
         target.inner,

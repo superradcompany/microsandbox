@@ -99,7 +99,7 @@ fn optional_nested_patch_preserves_unmentioned_and_cleared_changes() {
     });
 
     SandboxConfigPatch::new()
-        .network(NetworkSpecPatch::new().update_dns(|dns| dns.query_timeout_ms(250)))
+        .network(NetworkSpecPatch::new().modify_dns(|dns| dns.query_timeout_ms(250)))
         .apply_to(&mut target);
 
     let dns = target.network.dns.as_ref().unwrap();
@@ -110,7 +110,7 @@ fn optional_nested_patch_preserves_unmentioned_and_cleared_changes() {
     SandboxConfigPatch::new()
         .network(
             NetworkSpecPatch::new()
-                .update_dns(|dns| dns.query_timeout_ms(100))
+                .modify_dns(|dns| dns.query_timeout_ms(100))
                 .clear_dns(),
         )
         .apply_to(&mut target);
