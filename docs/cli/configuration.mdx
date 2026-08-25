@@ -143,6 +143,8 @@ Every canonical nested struct has a corresponding generated patch type. Adding a
 
 Collection fields are atomic unless their canonical field declares a merge strategy. Environment variables merge by variable name, labels and scripts merge by map key, and secret entries merge by environment-variable name; higher values win when keys match. Their normal setters merge, while generated `replace_*` and `clear_*` methods explicitly replace or empty the collection.
 
+The generated model replaces the earlier handwritten patch hierarchy. Use `SandboxResourcesPatch`, `SandboxRuntimeOptionsPatch`, `NetworkSpecPatch`, `SandboxPolicyPatch`, and `SecretsConfigPatch` in place of the former resource, runtime, network, network-policy, and secret patch types. Filesystem, script, image, and init changes are now expressed directly through `SandboxConfigPatch` and its canonical nested patches. The old `LocalConfig` name remains as a deprecated alias of `GlobalConfig`.
+
 ## Schema
 
 ### Image and registry

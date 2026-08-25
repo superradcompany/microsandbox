@@ -182,6 +182,10 @@ pub struct GlobalConfig {
     pub metrics: MetricsConfig,
 }
 
+/// Compatibility alias for the backend-owned global configuration.
+#[deprecated(since = "0.6.15", note = "renamed to GlobalConfig")]
+pub type LocalConfig = GlobalConfig;
+
 /// Default settings for host-side SSH sessions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]

@@ -22,6 +22,9 @@ fn rust_config_compat_surface_stays_available() {
     let _ = microsandbox::config::resolve_libkrunfw_path;
     let _ = microsandbox::config::GlobalConfig::resolve_msb_path;
     let _ = microsandbox::config::GlobalConfig::resolve_libkrunfw_path;
+
+    #[allow(deprecated)]
+    let _: Option<microsandbox::config::LocalConfig> = None;
 }
 
 #[cfg(feature = "ssh")]
