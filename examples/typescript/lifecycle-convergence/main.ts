@@ -1,4 +1,5 @@
-import { Sandbox, SandboxReplacedError } from "microsandbox";
+// Import the in-tree build so this live example always exercises the current checkout's native module.
+import { Sandbox, SandboxReplacedError } from "../../../sdk/node-ts/dist/index.js";
 
 const name = process.env.MSB_E2E_NAME ?? `lifecycle-typescript-${process.pid}`;
 const image = process.env.MSB_E2E_IMAGE ?? "alpine:3.19";

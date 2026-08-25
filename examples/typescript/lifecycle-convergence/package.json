@@ -6,9 +6,6 @@
   "scripts": {
     "start": "tsx main.ts"
   },
-  "dependencies": {
-    "microsandbox": "file:../../../sdk/node-ts"
-  },
   "devDependencies": {
     "tsx": "^4"
   }
