@@ -20,7 +20,6 @@ fn rust_runtime_setup_surface_stays_available() {
     let _ = microsandbox::setup::ensure_runtime;
     let _: Option<microsandbox::setup::ResolvedRuntime> = None;
     let _: Option<microsandbox::setup::InstallOptions> = None;
-    let _: Option<microsandbox::setup::EnsureOptions> = None;
 }
 
 #[cfg(feature = "ssh")]

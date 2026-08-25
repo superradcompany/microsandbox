@@ -88,13 +88,6 @@ pub struct InstallOptions {
     pub expected_archive_sha256: Option<String>,
 }
 
-/// Options for [`ensure_runtime`].
-#[derive(Clone, Debug, Default)]
-pub struct EnsureOptions {
-    /// Installation to perform only when the runtime is wholly absent.
-    pub install: InstallOptions,
-}
-
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
@@ -215,14 +208,17 @@ pub async fn install_runtime(
 }
 
 /// Resolve the host runtime or explicitly install it when wholly absent.
+///
+/// `install_options` is ignored when a complete runtime already resolves. An
+/// incomplete or invalid explicit pair fails closed instead of being repaired.
 pub async fn ensure_runtime(
     config: &LocalConfig,
-    options: EnsureOptions,
+    install_options: InstallOptions,
 ) -> MicrosandboxResult<ResolvedRuntime> {
     match resolve_runtime(config) {
         Ok(runtime) => Ok(runtime),
         Err(MicrosandboxError::RuntimeNotInstalled(_)) => {
-            install_runtime(config, options.install).await
+            install_runtime(config, install_options).await
         }
         Err(error) => Err(error),
     }
@@ -737,12 +733,10 @@ mod tests {
 
         let runtime = ensure_runtime(
             &config,
-            EnsureOptions {
-                install: InstallOptions {
-                    source: InstallSource::EmbeddedArchive,
-                    verify: false,
-                    ..Default::default()
-                },
+            InstallOptions {
+                source: InstallSource::EmbeddedArchive,
+                verify: false,
+                ..Default::default()
             },
         )
         .await
