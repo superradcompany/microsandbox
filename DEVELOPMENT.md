@@ -104,7 +104,7 @@ Set `MSB_EMBED_ARTIFACTS_DIR` at build time to an unpacked directory containing 
 MSB_EMBED_ARTIFACTS_DIR=/path/to/artifacts cargo build
 ```
 
-At runtime, `MSB_AGENTD_PATH` selects an external Agentd executable instead of the embedded fallback. The file is eagerly read and validated before VM construction; it is never downloaded or copied into `MSB_HOME`.
+At runtime, `MSB_AGENTD_PATH` selects an external Agentd executable instead of global `paths.agentd` or the embedded fallback. The file is eagerly read and validated before VM construction; it is never downloaded or copied into `MSB_HOME`.
 
 ## Project Structure
 

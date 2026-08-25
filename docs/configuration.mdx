@@ -21,6 +21,7 @@ microsandbox reads its global configuration from `~/.microsandbox/config.json`. 
   "paths": {
     "msb": "/usr/local/bin/msb",
     "libkrunfw": "/usr/local/lib/libkrunfw.so",
+    "agentd": "/usr/local/libexec/microsandbox/agentd",
     "cache": "/mnt/fast/msb-cache",
     "sandboxes": null,
     "volumes": null,
@@ -155,6 +156,7 @@ On Windows, the default `home` is `%USERPROFILE%\.microsandbox`. JSON strings ca
 |-------|---------|-------------|
 | `msb` | `{home}/bin/msb` | `msb` binary. Set this together with `libkrunfw`; runtime resolution returns a matched pair or fails closed. |
 | `libkrunfw` | `{home}/lib/libkrunfw` | Matching libkrunfw shared library (`.so` on Linux, `.dylib` on macOS, `.dll` on Windows). Set this together with `msb`. |
+| `agentd` | embedded in `msb` | Linux guest Agentd executable. `MSB_AGENTD_PATH` takes precedence; an explicitly configured missing or invalid file fails closed. |
 | `cache` | `{home}/cache` | Image layer cache |
 | `sandboxes` | `{home}/sandboxes` | Per-sandbox state |
 | `volumes` | `{home}/volumes` | Named volumes |

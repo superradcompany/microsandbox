@@ -237,13 +237,16 @@ pub struct DatabaseConfig {
 #[serde(default)]
 pub struct PathsConfig {
     /// Path to `msb` binary.
-    ///
-    /// Resolution: `MSB_PATH` env → SDK runtime path → this →
-    /// workspace-local (debug only) → `~/.microsandbox/bin/msb` → PATH lookup.
     pub msb: Option<PathBuf>,
 
     /// Path to `libkrunfw.{so,dylib}`.
     pub libkrunfw: Option<PathBuf>,
+
+    /// Path to the Linux guest Agentd executable.
+    ///
+    /// `MSB_AGENTD_PATH` takes precedence. When neither is set, the runtime
+    /// uses the Agentd payload embedded in `msb`.
+    pub agentd: Option<PathBuf>,
 
     /// Cache directory.
     pub cache: Option<PathBuf>,
@@ -1440,6 +1443,17 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(cfg.sandboxes_dir(), PathBuf::from("/custom/sandboxes"));
+    }
+
+    #[test]
+    fn test_deserialize_agentd_path() {
+        let json = r#"{"paths": {"agentd": "/opt/microsandbox/agentd"}}"#;
+        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(
+            cfg.paths.agentd,
+            Some(PathBuf::from("/opt/microsandbox/agentd"))
+        );
     }
 
     #[test]
