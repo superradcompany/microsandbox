@@ -149,6 +149,8 @@ restarted = stopped.restart
 restarted.destroy
 ```
 
+Run `ruby examples/lifecycle_convergence.rb` from `sdk/ruby` to exercise the complete local lifecycle against a live microVM. The example verifies convergence, restart, destroy, and stale-handle identity safety, then emits machine-readable timing metrics.
+
 ## Networking and secrets
 
 `network: :none` disables networking. An allowlist creates a default-deny

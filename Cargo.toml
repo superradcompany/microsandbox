@@ -24,6 +24,7 @@ members = [
     "examples/rust/cloud-backend",
     "examples/rust/fs-read-stream",
     "examples/rust/init-handoff",
+    "examples/rust/lifecycle-convergence",
     "examples/rust/logs-read",
     "examples/rust/metrics-stream",
     "examples/rust/net-basic",

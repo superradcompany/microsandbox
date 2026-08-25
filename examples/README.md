@@ -1,6 +1,6 @@
 # Examples
 
-Examples showing how to use the microsandbox SDK in TypeScript, Rust, Python, and Go.
+Examples showing how to use the microsandbox SDK in TypeScript, Rust, Python, Go, and Ruby.
 
 Each language directory has its own README with setup and run instructions.
 
@@ -10,6 +10,7 @@ Each language directory has its own README with setup and run instructions.
 | Rust | [`rust/`](./rust/) | [rust/README.md](./rust/README.md) |
 | Python | [`python/`](./python/) | [python/README.md](./python/README.md) |
 | Go | [`../sdk/go/examples/`](../sdk/go/examples/) | [../sdk/go/examples/README.md](../sdk/go/examples/README.md) |
+| Ruby | [`../sdk/ruby/examples/`](../sdk/ruby/examples/) | [../sdk/ruby/README.md](../sdk/ruby/README.md) |
 
 ## Prerequisites
 
@@ -23,6 +24,7 @@ git submodule update --init --recursive
 
 | Example | Description |
 |---------|-------------|
+| `lifecycle-convergence` | Live convergence, restart, destroy, and stale-handle identity-safety checks |
 | `root-oci` | Create a sandbox from an OCI image (e.g. `alpine`) |
 | `root-bind` | Create a sandbox from a local bind-mounted directory |
 | `root-block` | Create a sandbox from a qcow2 disk image |

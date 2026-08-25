@@ -17,6 +17,7 @@ go run ./examples/basic
 | `errors` | Typed error handling with `IsKind` and `errors.As` |
 | `filesystem` | Filesystem read/write/list/stat/copy/streaming operations |
 | `image-cache` | List, get, inspect, and garbage-collect cached OCI images |
+| `lifecycle-convergence` | Live convergence and stale-handle identity-safety checks with timing metrics |
 | `metrics` | Point-in-time and streaming metrics |
 | `network` | Presets, DNS, TLS, and custom network settings |
 | `patches` | Pre-boot rootfs patches |
