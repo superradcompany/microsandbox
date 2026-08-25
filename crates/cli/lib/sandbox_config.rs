@@ -975,14 +975,7 @@ fn config_base(path: &Path) -> anyhow::Result<PathBuf> {
         .to_path_buf())
 }
 
-fn merge_secrets(
-    base: &mut Option<BTreeMap<String, SecretInput>>,
-    higher: Option<BTreeMap<String, SecretInput>>,
-) {
-    let Some(higher) = higher else {
-        return;
-    };
-    let base = base.get_or_insert_with(BTreeMap::new);
+fn merge_secrets(base: &mut BTreeMap<String, SecretInput>, higher: BTreeMap<String, SecretInput>) {
     for (name, higher) in higher {
         match base.get_mut(&name) {
             Some(current) => SecretInputPatch::from_present_fields(higher).apply_to(current),
@@ -993,16 +986,11 @@ fn merge_secrets(
     }
 }
 
-fn merge_network(base: &mut Option<NetworkInput>, higher: Option<NetworkInput>) {
-    let Some(higher) = higher else {
-        return;
-    };
+fn merge_network(base: &mut NetworkInput, higher: NetworkInput) {
     let higher = higher.into_object();
     let replaces_policy =
         higher.policy.is_some() || higher.allow.is_some() || higher.deny.is_some();
-    let base = base
-        .get_or_insert_with(|| NetworkInput::Object(NetworkConfigInput::default()))
-        .object_mut();
+    let base = base.object_mut();
     if replaces_policy {
         // A source that supplies policy input replaces the complete lower-layer policy.
         base.policy = None;
@@ -1167,10 +1155,10 @@ fn materialize_config_patch(input: &SandboxConfigInput) -> anyhow::Result<Sandbo
 
     let mut lifecycle = SandboxPolicyPatch::new();
     if let Some(duration) = &input.max_duration {
-        lifecycle = lifecycle.max_duration_secs(Some(parse_duration_secs(duration)?));
+        lifecycle = lifecycle.max_duration_secs(parse_duration_secs(duration)?);
     }
     if let Some(duration) = &input.idle_timeout {
-        lifecycle = lifecycle.idle_timeout_secs(Some(parse_duration_secs(duration)?));
+        lifecycle = lifecycle.idle_timeout_secs(parse_duration_secs(duration)?);
     }
     config_patch = config_patch.lifecycle(lifecycle);
 
@@ -1192,17 +1180,17 @@ fn materialize_config_patch(input: &SandboxConfigInput) -> anyhow::Result<Sandbo
 
     let mut runtime = SandboxRuntimeOptionsPatch::new();
     if let Some(value) = &input.workdir {
-        runtime = runtime.workdir(Some(value.clone()));
+        runtime = runtime.workdir(value.clone());
     }
     if let Some(value) = &input.shell {
         validate_shell(value)?;
-        runtime = runtime.shell(Some(value.clone()));
+        runtime = runtime.shell(value.clone());
     }
     if let Some(value) = &input.user {
-        runtime = runtime.user(Some(value.clone()));
+        runtime = runtime.user(value.clone());
     }
     if let Some(value) = &input.hostname {
-        runtime = runtime.hostname(Some(value.clone()));
+        runtime = runtime.hostname(value.clone());
     }
     if let Some(value) = input.security {
         config_patch = config_patch.security_profile(match value {
@@ -1211,10 +1199,10 @@ fn materialize_config_patch(input: &SandboxConfigInput) -> anyhow::Result<Sandbo
         });
     }
     if let Some(value) = &input.entrypoint {
-        runtime = runtime.entrypoint(Some(value.clone()));
+        runtime = runtime.entrypoint(value.clone());
     }
     if let Some(value) = &input.cmd {
-        runtime = runtime.cmd(Some(value.clone()));
+        runtime = runtime.cmd(value.clone());
     }
     if let Some(value) = &input.env {
         config_patch = config_patch.env(
@@ -1228,7 +1216,7 @@ fn materialize_config_patch(input: &SandboxConfigInput) -> anyhow::Result<Sandbo
         config_patch = config_patch.labels(value.clone());
     }
     if let Some(value) = &input.init {
-        config_patch = config_patch.init(Some(materialize_init(value)?));
+        config_patch = config_patch.init(materialize_init(value)?);
     }
     config_patch = config_patch.runtime(runtime);
 
@@ -1646,7 +1634,7 @@ fn materialize_network_patch(
         };
         let policy: microsandbox_types::NetworkPolicy =
             serde_json::from_value(serde_json::to_value(policy)?)?;
-        patch = patch.policy(Some(policy));
+        patch = patch.policy(policy);
     }
 
     if let Some(ports) = input.ports {
@@ -1720,7 +1708,7 @@ fn materialize_network_patch(
         patch = patch.trust_host_cas(enabled);
     }
     if let Some(max) = input.max_connections {
-        patch = patch.max_connections(Some(max));
+        patch = patch.max_connections(max);
     }
     Ok(patch)
 }

@@ -80,33 +80,38 @@ fn generated_patch_preserves_presence_and_recurses() {
 }
 
 #[test]
-fn exact_and_explicit_clear_replace_nullable_fields() {
+fn clear_removes_nullable_changes_from_the_patch() {
     let mut target = Outer {
         inner: Inner {
+            scalar: 3,
             nullable: Some("inherited".into()),
-            ..Default::default()
         },
         optional: Some(7),
         ..Default::default()
     };
 
-    OuterPatch::from_exact(Outer::default()).apply_to(&mut target);
-    assert!(target.inner.nullable.is_none());
-    assert!(target.optional.is_none());
-
-    target.inner.nullable = Some("again".into());
-    target.optional = Some(9);
     OuterPatch::new()
-        .inner(InnerPatch::new().clear_nullable())
+        .inner(
+            InnerPatch::new()
+                .scalar(9)
+                .clear_scalar()
+                .nullable("higher".into())
+                .clear_nullable(),
+        )
+        .optional(9)
         .clear_optional()
+        .future_field(true)
+        .clear_future_field()
         .apply_to(&mut target);
 
-    assert!(target.inner.nullable.is_none());
-    assert!(target.optional.is_none());
+    assert_eq!(target.inner.scalar, 3);
+    assert_eq!(target.inner.nullable.as_deref(), Some("inherited"));
+    assert_eq!(target.optional, Some(7));
+    assert!(!target.future_field);
 }
 
 #[test]
-fn optional_nested_patches_inherit_update_and_clear() {
+fn optional_nested_patches_update_and_clear_pending_changes() {
     let mut target = OptionalOuter {
         inner: Some(Inner {
             scalar: 1,
@@ -126,13 +131,14 @@ fn optional_nested_patches_inherit_update_and_clear() {
     );
 
     OptionalOuterPatch::new()
+        .update_inner(|inner| inner.scalar(9))
         .clear_inner()
         .apply_to(&mut target);
-    assert!(target.inner.is_none());
+    assert_eq!(target.inner.as_ref().unwrap().scalar, 2);
 
     target.inner = Some(Inner {
         scalar: 7,
-        nullable: Some("must not survive reset".into()),
+        nullable: Some("must survive".into()),
     });
     OptionalOuterPatch::new()
         .clear_inner()
@@ -142,12 +148,12 @@ fn optional_nested_patches_inherit_update_and_clear() {
         target.inner,
         Some(Inner {
             scalar: 4,
-            nullable: None,
+            nullable: Some("must survive".into()),
         })
     );
 
-    OptionalOuterPatch::from_exact(OptionalOuter::default()).apply_to(&mut target);
-    assert!(target.inner.is_none());
+    OptionalOuterPatch::from_present_fields(OptionalOuter::default()).apply_to(&mut target);
+    assert!(target.inner.is_some());
 }
 
 #[test]
@@ -169,7 +175,7 @@ fn collection_fields_merge_replace_and_clear() {
     CollectionsPatch::new()
         .values(vec![2])
         .values(vec![3])
-        .optional_values(Some(vec![2]))
+        .optional_values(vec![2])
         .labels(BTreeMap::from([
             ("shared".into(), "higher".into()),
             ("new".into(), "value".into()),
@@ -185,16 +191,16 @@ fn collection_fields_merge_replace_and_clear() {
 
     CollectionsPatch::new()
         .replace_values(vec![9])
+        .optional_values(vec![9])
         .clear_optional_values()
+        .labels(BTreeMap::from([("ignored".into(), "value".into())]))
         .clear_labels()
         .apply_to(&mut target);
 
     assert_eq!(target.values, [9]);
-    assert!(target.optional_values.is_none());
-    assert!(target.labels.is_empty());
-
-    CollectionsPatch::from_exact(Collections::default()).apply_to(&mut target);
-    assert_eq!(target, Collections::default());
+    assert_eq!(target.optional_values.as_deref(), Some([1, 2].as_slice()));
+    assert_eq!(target.labels["shared"], "higher");
+    assert_eq!(target.labels["new"], "value");
 }
 
 #[test]

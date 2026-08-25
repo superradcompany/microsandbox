@@ -91,18 +91,16 @@ impl PatchField {
     fn declaration(&self) -> proc_macro2::TokenStream {
         let ident = &self.ident;
         if self.merge.is_some() {
-            let ty = &self.ty;
+            let ty = self.option_inner.as_ref().unwrap_or(&self.ty);
             quote! { #ident: ::std::option::Option<(bool, #ty)> }
         } else if let Some(patch) = &self.nested_patch {
             if self.nested_optional {
-                quote! {
-                    #ident: ::std::option::Option<(bool, ::std::option::Option<#patch>)>
-                }
+                quote! { #ident: ::std::option::Option<#patch> }
             } else {
                 quote! { #ident: #patch }
             }
         } else {
-            let ty = &self.ty;
+            let ty = self.option_inner.as_ref().unwrap_or(&self.ty);
             quote! { #ident: ::std::option::Option<#ty> }
         }
     }
@@ -110,9 +108,9 @@ impl PatchField {
     fn setter(&self) -> proc_macro2::TokenStream {
         let ident = &self.ident;
         if self.merge.is_some() {
-            let ty = &self.ty;
+            let ty = self.option_inner.as_ref().unwrap_or(&self.ty);
             let doc = format!("Merge `value` into the `{ident}` field.");
-            let merge = self.merge_statement(quote!(current), quote!(value));
+            let merge = self.merge_patch_statement(quote!(current), quote!(value));
             quote! {
                 #[doc = #doc]
                 pub fn #ident(mut self, value: #ty) -> Self {
@@ -132,14 +130,10 @@ impl PatchField {
                 quote! {
                     #[doc = #doc]
                     pub fn #ident(mut self, patch: #patch) -> Self {
-                        let (reset, current) = self.#ident.take().unwrap_or((false, None));
-                        self.#ident = ::std::option::Option::Some((
-                            reset,
-                            ::std::option::Option::Some(match current {
-                                ::std::option::Option::Some(current) => current.overlay(patch),
-                                ::std::option::Option::None => patch,
-                            }),
-                        ));
+                        self.#ident = ::std::option::Option::Some(match self.#ident.take() {
+                            ::std::option::Option::Some(current) => current.overlay(patch),
+                            ::std::option::Option::None => patch,
+                        });
                         self
                     }
                 }
@@ -153,7 +147,7 @@ impl PatchField {
                 }
             }
         } else {
-            let ty = &self.ty;
+            let ty = self.option_inner.as_ref().unwrap_or(&self.ty);
             let doc = format!("Set the `{ident}` field in this patch.");
             quote! {
                 #[doc = #doc]
@@ -169,7 +163,7 @@ impl PatchField {
         self.merge.as_ref()?;
         let ident = &self.ident;
         let method = format_ident!("replace_{ident}");
-        let ty = &self.ty;
+        let ty = self.option_inner.as_ref().unwrap_or(&self.ty);
         let doc = format!("Replace the complete `{ident}` field.");
         Some(quote! {
             #[doc = #doc]
@@ -180,10 +174,11 @@ impl PatchField {
         })
     }
 
-    fn inheriter(&self) -> proc_macro2::TokenStream {
+    fn clearer(&self) -> proc_macro2::TokenStream {
         let ident = &self.ident;
-        let method = format_ident!("inherit_{ident}");
-        let doc = format!("Discard any patch for `{ident}` so the existing value is inherited.");
+        let method = format_ident!("clear_{ident}");
+        let doc =
+            format!("Remove `{ident}` from this patch so applying it leaves the target unchanged.");
         if self.nested_patch.is_some() && !self.nested_optional {
             quote! {
                 #[doc = #doc]
@@ -203,46 +198,6 @@ impl PatchField {
         }
     }
 
-    fn clearer(&self) -> Option<proc_macro2::TokenStream> {
-        let ident = &self.ident;
-        let method = format_ident!("clear_{ident}");
-        if self.merge.is_some() {
-            let doc = format!("Clear every value from the `{ident}` field.");
-            let value = if self.option_inner.is_some() {
-                quote!(::std::option::Option::None)
-            } else {
-                quote!(::std::default::Default::default())
-            };
-            Some(quote! {
-                #[doc = #doc]
-                pub fn #method(mut self) -> Self {
-                    self.#ident = ::std::option::Option::Some((true, #value));
-                    self
-                }
-            })
-        } else if self.nested_optional {
-            let doc = format!("Explicitly clear the nullable `{ident}` field.");
-            Some(quote! {
-                #[doc = #doc]
-                pub fn #method(mut self) -> Self {
-                    self.#ident = ::std::option::Option::Some((true, ::std::option::Option::None));
-                    self
-                }
-            })
-        } else if self.option_inner.is_some() {
-            let doc = format!("Explicitly clear the nullable `{ident}` field.");
-            Some(quote! {
-                #[doc = #doc]
-                pub fn #method(mut self) -> Self {
-                    self.#ident = ::std::option::Option::Some(::std::option::Option::None);
-                    self
-                }
-            })
-        } else {
-            None
-        }
-    }
-
     fn updater(&self) -> Option<proc_macro2::TokenStream> {
         let patch = self.nested_patch.as_ref()?;
         let ident = &self.ident;
@@ -252,10 +207,8 @@ impl PatchField {
             Some(quote! {
                 #[doc = #doc]
                 pub fn #method(mut self, update: impl FnOnce(#patch) -> #patch) -> Self {
-                    let (reset, current) = self.#ident.take().unwrap_or((false, None));
-                    self.#ident = ::std::option::Option::Some((
-                        reset,
-                        ::std::option::Option::Some(update(current.unwrap_or_else(#patch::new))),
+                    self.#ident = ::std::option::Option::Some(update(
+                        self.#ident.take().unwrap_or_else(#patch::new),
                     ));
                     self
                 }
@@ -271,28 +224,46 @@ impl PatchField {
         }
     }
 
-    fn merge_statement(
+    fn merge_patch_statement(
         &self,
         base: proc_macro2::TokenStream,
         higher: proc_macro2::TokenStream,
     ) -> proc_macro2::TokenStream {
         match self.merge.as_ref().expect("merge strategy is present") {
-            MergeStrategy::Extend if self.option_inner.is_some() => quote! {
-                if let ::std::option::Option::Some(higher) = #higher {
-                    #base
-                        .get_or_insert_with(::std::default::Default::default)
-                        .extend(higher);
-                }
-            },
             MergeStrategy::Extend => quote! { #base.extend(#higher); },
             MergeStrategy::Custom(path) => quote! { #path(&mut #base, #higher); },
+        }
+    }
+
+    fn merge_target_statement(
+        &self,
+        target: proc_macro2::TokenStream,
+        higher: proc_macro2::TokenStream,
+    ) -> proc_macro2::TokenStream {
+        match (
+            self.merge.as_ref().expect("merge strategy is present"),
+            self.option_inner.is_some(),
+        ) {
+            (MergeStrategy::Extend, true) => quote! {
+                #target
+                    .get_or_insert_with(::std::default::Default::default)
+                    .extend(#higher);
+            },
+            (MergeStrategy::Extend, false) => quote! { #target.extend(#higher); },
+            (MergeStrategy::Custom(path), true) => quote! {
+                match #target.as_mut() {
+                    ::std::option::Option::Some(current) => #path(current, #higher),
+                    ::std::option::Option::None => #target = ::std::option::Option::Some(#higher),
+                }
+            },
+            (MergeStrategy::Custom(path), false) => quote! { #path(&mut #target, #higher); },
         }
     }
 
     fn overlay(&self) -> proc_macro2::TokenStream {
         let ident = &self.ident;
         if self.merge.is_some() {
-            let merge = self.merge_statement(quote!(current), quote!(higher_value));
+            let merge = self.merge_patch_statement(quote!(current), quote!(higher_value));
             quote! {
                 if let ::std::option::Option::Some((higher_reset, higher_value)) = higher.#ident {
                     if higher_reset {
@@ -310,19 +281,11 @@ impl PatchField {
             }
         } else if self.nested_optional {
             quote! {
-                if let ::std::option::Option::Some((higher_reset, higher_patch)) = higher.#ident {
-                    if higher_reset {
-                        self.#ident = ::std::option::Option::Some((true, higher_patch));
-                    } else if let ::std::option::Option::Some(higher_patch) = higher_patch {
-                        let (reset, current) = self.#ident.take().unwrap_or((false, None));
-                        self.#ident = ::std::option::Option::Some((
-                            reset,
-                            ::std::option::Option::Some(match current {
-                                ::std::option::Option::Some(current) => current.overlay(higher_patch),
-                                ::std::option::Option::None => higher_patch,
-                            }),
-                        ));
-                    }
+                if let ::std::option::Option::Some(higher_patch) = higher.#ident {
+                    self.#ident = ::std::option::Option::Some(match self.#ident.take() {
+                        ::std::option::Option::Some(current) => current.overlay(higher_patch),
+                        ::std::option::Option::None => higher_patch,
+                    });
                 }
             }
         } else if self.nested_patch.is_some() {
@@ -339,11 +302,16 @@ impl PatchField {
     fn apply(&self) -> proc_macro2::TokenStream {
         let ident = &self.ident;
         if self.merge.is_some() {
-            let merge = self.merge_statement(quote!(target.#ident), quote!(value));
+            let merge = self.merge_target_statement(quote!(target.#ident), quote!(value));
+            let replace = if self.option_inner.is_some() {
+                quote! { target.#ident = ::std::option::Option::Some(value); }
+            } else {
+                quote! { target.#ident = value; }
+            };
             quote! {
                 if let ::std::option::Option::Some((reset, value)) = self.#ident {
                     if reset {
-                        target.#ident = value;
+                        #replace
                     } else {
                         #merge
                     }
@@ -351,17 +319,18 @@ impl PatchField {
             }
         } else if self.nested_optional {
             quote! {
-                if let ::std::option::Option::Some((reset, patch)) = self.#ident {
-                    if reset {
-                        target.#ident = ::std::option::Option::None;
-                    }
-                    if let ::std::option::Option::Some(patch) = patch {
-                        patch.apply_to(target.#ident.get_or_insert_with(::std::default::Default::default));
-                    }
+                if let ::std::option::Option::Some(patch) = self.#ident {
+                    patch.apply_to(target.#ident.get_or_insert_with(::std::default::Default::default));
                 }
             }
         } else if self.nested_patch.is_some() {
             quote! { self.#ident.apply_to(&mut target.#ident); }
+        } else if self.option_inner.is_some() {
+            quote! {
+                if let ::std::option::Option::Some(value) = self.#ident {
+                    target.#ident = ::std::option::Option::Some(value);
+                }
+            }
         } else {
             quote! {
                 if let ::std::option::Option::Some(value) = self.#ident {
@@ -371,50 +340,22 @@ impl PatchField {
         }
     }
 
-    fn render_exact(&self) -> proc_macro2::TokenStream {
-        let ident = &self.ident;
-        if self.merge.is_some() {
-            quote! { #ident: ::std::option::Option::Some((true, #ident)) }
-        } else if let Some(patch) = &self.nested_patch {
-            if self.nested_optional {
-                quote! {
-                    #ident: ::std::option::Option::Some((
-                        true,
-                        #ident.map(#patch::from_exact),
-                    ))
-                }
-            } else {
-                quote! { #ident: #patch::from_exact(#ident) }
-            }
-        } else {
-            quote! { #ident: ::std::option::Option::Some(#ident) }
-        }
-    }
-
     fn render_present(&self) -> proc_macro2::TokenStream {
         let ident = &self.ident;
         if self.merge.is_some() {
             if self.option_inner.is_some() {
-                quote! {
-                    #ident: #ident.map(|value| {
-                        (false, ::std::option::Option::Some(value))
-                    })
-                }
+                quote! { #ident: #ident.map(|value| (false, value)) }
             } else {
                 quote! { #ident: ::std::option::Option::Some((false, #ident)) }
             }
         } else if let Some(patch) = &self.nested_patch {
             if self.nested_optional {
-                quote! {
-                    #ident: #ident.map(|value| {
-                        (false, ::std::option::Option::Some(#patch::from_present_fields(value)))
-                    })
-                }
+                quote! { #ident: #ident.map(#patch::from_present_fields) }
             } else {
                 quote! { #ident: #patch::from_present_fields(#ident) }
             }
         } else if self.option_inner.is_some() {
-            quote! { #ident: #ident.map(::std::option::Option::Some) }
+            quote! { #ident }
         } else {
             quote! { #ident: ::std::option::Option::Some(#ident) }
         }
@@ -459,14 +400,11 @@ pub(crate) fn expand_config_patch(input: DeriveInput) -> syn::Result<proc_macro2
     let patch_fields = fields.iter().map(PatchField::declaration);
     let setters = fields.iter().map(PatchField::setter);
     let replacers = fields.iter().filter_map(PatchField::replacer);
-    let clearers = fields.iter().filter_map(PatchField::clearer);
-    let inheriters = fields.iter().map(PatchField::inheriter);
+    let clearers = fields.iter().map(PatchField::clearer);
     let updaters = fields.iter().filter_map(PatchField::updater);
     let overlay_fields = fields.iter().map(PatchField::overlay);
     let apply_fields = fields.iter().map(PatchField::apply);
-    let exact_destructured_fields = fields.iter().map(|field| &field.ident);
     let present_destructured_fields = fields.iter().map(|field| &field.ident);
-    let exact_fields = fields.iter().map(PatchField::render_exact);
     let present_fields = fields.iter().map(PatchField::render_present);
 
     Ok(quote! {
@@ -477,7 +415,7 @@ pub(crate) fn expand_config_patch(input: DeriveInput) -> syn::Result<proc_macro2
         }
 
         impl #patch_ident {
-            /// Create an empty patch that inherits every field.
+            /// Create an empty patch that leaves every target field unchanged.
             pub fn new() -> Self {
                 Self::default()
             }
@@ -485,7 +423,6 @@ pub(crate) fn expand_config_patch(input: DeriveInput) -> syn::Result<proc_macro2
             #(#setters)*
             #(#replacers)*
             #(#clearers)*
-            #(#inheriters)*
             #(#updaters)*
 
             /// Overlay a higher-precedence patch using each field's declared strategy.
@@ -499,15 +436,7 @@ pub(crate) fn expand_config_patch(input: DeriveInput) -> syn::Result<proc_macro2
                 #(#apply_fields)*
             }
 
-            /// Convert a complete value into a patch, including explicit clears for `None` fields.
-            pub fn from_exact(value: #struct_ident) -> Self {
-                let #struct_ident { #(#exact_destructured_fields,)* } = value;
-                Self {
-                    #(#exact_fields,)*
-                }
-            }
-
-            /// Convert non-null fields into a patch, treating `Option::None` as inheritance.
+            /// Convert non-null fields into a changeset, treating `Option::None` as absent.
             pub fn from_present_fields(value: #struct_ident) -> Self {
                 let #struct_ident { #(#present_destructured_fields,)* } = value;
                 Self {
@@ -518,7 +447,7 @@ pub(crate) fn expand_config_patch(input: DeriveInput) -> syn::Result<proc_macro2
 
         impl From<#struct_ident> for #patch_ident {
             fn from(value: #struct_ident) -> Self {
-                Self::from_exact(value)
+                Self::from_present_fields(value)
             }
         }
     })

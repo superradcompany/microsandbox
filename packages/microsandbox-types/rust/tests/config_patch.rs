@@ -5,7 +5,7 @@ use microsandbox_types::{
 };
 
 #[test]
-fn exact_patch_replaces_every_sandbox_spec_field() {
+fn complete_value_conversion_is_still_a_changeset() {
     let mut source = SandboxSpec {
         name: "source".into(),
         ..Default::default()
@@ -43,16 +43,24 @@ fn exact_patch_replaces_every_sandbox_spec_field() {
     target.labels.insert("target".into(), "true".into());
     target.lifecycle.max_duration_secs = Some(60);
 
-    SandboxConfigPatch::from_exact(source.clone()).apply_to(&mut target);
+    SandboxConfigPatch::from(source).apply_to(&mut target);
 
+    assert_eq!(target.name, "source");
+    assert_eq!(target.resources.cpus, 3);
     assert_eq!(
-        serde_json::to_value(target).unwrap(),
-        serde_json::to_value(source).unwrap()
+        target.resources.placement_profile.as_deref(),
+        Some("target-profile")
     );
+    assert_eq!(target.runtime.workdir.as_deref(), Some("/target"));
+    assert!(target.env.iter().any(|entry| entry.key == "TARGET"));
+    assert!(target.env.iter().any(|entry| entry.key == "SOURCE"));
+    assert_eq!(target.labels["target"], "true");
+    assert_eq!(target.labels["source"], "true");
+    assert_eq!(target.lifecycle.max_duration_secs, Some(60));
 }
 
 #[test]
-fn present_fields_inherit_nulls_and_nested_patch_is_sparse() {
+fn absent_fields_preserve_lower_values_and_nested_patch_is_sparse() {
     let mut target = SandboxSpec::default();
     target.resources.placement_profile = Some("global-profile".into());
     target.runtime.workdir = Some("/global".into());
@@ -69,16 +77,20 @@ fn present_fields_inherit_nulls_and_nested_patch_is_sparse() {
 
     SandboxConfigPatch::new()
         .resources(SandboxResourcesPatch::new().cpus(4))
-        .runtime(SandboxRuntimeOptionsPatch::new().clear_workdir())
+        .runtime(
+            SandboxRuntimeOptionsPatch::new()
+                .workdir("/discarded".into())
+                .clear_workdir(),
+        )
         .apply_to(&mut target);
 
     assert_eq!(target.resources.cpus, 4);
     assert_eq!(target.resources.memory_mib, 512);
-    assert!(target.runtime.workdir.is_none());
+    assert_eq!(target.runtime.workdir.as_deref(), Some("/global"));
 }
 
 #[test]
-fn optional_nested_patch_preserves_unmentioned_fields_and_can_clear() {
+fn optional_nested_patch_preserves_unmentioned_and_cleared_changes() {
     let mut target = SandboxSpec::default();
     target.network.dns = Some(DnsConfig {
         rebind_protection: false,
@@ -96,9 +108,13 @@ fn optional_nested_patch_preserves_unmentioned_fields_and_can_clear() {
     assert_eq!(dns.query_timeout_ms, 250);
 
     SandboxConfigPatch::new()
-        .network(NetworkSpecPatch::new().clear_dns())
+        .network(
+            NetworkSpecPatch::new()
+                .update_dns(|dns| dns.query_timeout_ms(100))
+                .clear_dns(),
+        )
         .apply_to(&mut target);
-    assert!(target.network.dns.is_none());
+    assert_eq!(target.network.dns.as_ref().unwrap().query_timeout_ms, 250);
 }
 
 #[test]
@@ -161,6 +177,7 @@ fn declared_collection_strategies_merge_and_can_be_replaced() {
 
     SandboxConfigPatch::new()
         .replace_env(vec![EnvVar::new("ONLY", "replacement")])
+        .labels([("ignored".into(), "value".into())].into())
         .clear_labels()
         .runtime(
             SandboxRuntimeOptionsPatch::new()
@@ -170,7 +187,9 @@ fn declared_collection_strategies_merge_and_can_be_replaced() {
 
     assert_eq!(target.env.len(), 1);
     assert_eq!(target.env[0].key, "ONLY");
-    assert!(target.labels.is_empty());
+    assert_eq!(target.labels["keep"], "lower");
+    assert_eq!(target.labels["change"], "higher");
+    assert_eq!(target.labels["add"], "higher");
     assert_eq!(target.runtime.scripts.len(), 1);
     assert_eq!(target.runtime.scripts["only"], "echo replacement");
 }
@@ -213,7 +232,8 @@ fn secret_entries_merge_by_environment_variable_name() {
     );
 
     SecretsConfigPatch::new()
+        .secrets(vec![secret("IGNORED", "ignored")])
         .clear_secrets()
         .apply_to(&mut target);
-    assert!(target.secrets.is_empty());
+    assert_eq!(target.secrets.len(), 3);
 }
