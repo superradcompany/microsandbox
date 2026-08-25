@@ -1,5 +1,7 @@
 //! Agentd payload selection for guest bootstrap.
 
+mod format;
+
 use std::{
     path::PathBuf,
     sync::{Arc, OnceLock},
@@ -10,8 +12,6 @@ use sha2::{Digest as _, Sha256};
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
-
-const MAX_AGENTD_BYTES: usize = 128 * 1024 * 1024;
 
 static AGENTD_PAYLOAD: OnceLock<AgentdPayload> = OnceLock::new();
 
@@ -138,46 +138,7 @@ pub fn embedded_agentd_payload() -> Option<AgentdPayload> {
 }
 
 fn validate_agentd(bytes: &[u8]) -> Result<(), AgentdPayloadError> {
-    if bytes.len() < 64 {
-        return Err(AgentdPayloadError::Invalid(
-            "file is too small to be an ELF executable".into(),
-        ));
-    }
-    if bytes.len() > MAX_AGENTD_BYTES {
-        return Err(AgentdPayloadError::Invalid(format!(
-            "file exceeds the {MAX_AGENTD_BYTES}-byte safety limit"
-        )));
-    }
-    if &bytes[..4] != b"\x7fELF" || bytes[4] != 2 || bytes[5] != 1 {
-        return Err(AgentdPayloadError::Invalid(
-            "expected a 64-bit little-endian ELF executable".into(),
-        ));
-    }
-
-    let file_type = u16::from_le_bytes([bytes[16], bytes[17]]);
-    if !matches!(file_type, 2 | 3) {
-        return Err(AgentdPayloadError::Invalid(format!(
-            "ELF type {file_type} is not executable or position-independent"
-        )));
-    }
-
-    let machine = u16::from_le_bytes([bytes[18], bytes[19]]);
-    let expected = match std::env::consts::ARCH {
-        "x86_64" => 62,
-        "aarch64" => 183,
-        architecture => {
-            return Err(AgentdPayloadError::Invalid(format!(
-                "unsupported host architecture {architecture}"
-            )));
-        }
-    };
-    if machine != expected {
-        return Err(AgentdPayloadError::Invalid(format!(
-            "ELF machine {machine} does not match host architecture {}",
-            std::env::consts::ARCH
-        )));
-    }
-    Ok(())
+    format::validate_agentd(bytes, std::env::consts::ARCH).map_err(AgentdPayloadError::Invalid)
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -225,7 +186,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("does not match host architecture")
+                .contains("does not match target architecture")
         );
     }
 

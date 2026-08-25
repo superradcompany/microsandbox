@@ -9,6 +9,10 @@ use microsandbox_utils::AGENTD_BINARY;
 #[cfg(feature = "download-binaries")]
 use microsandbox_utils::{PREBUILT_VERSION, agentd_download_url, http_client};
 
+#[cfg(feature = "embed-binaries")]
+#[path = "lib/agentd/format.rs"]
+mod agentd_format;
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=MSB_EMBED_ARTIFACTS_DIR");
@@ -24,6 +28,8 @@ fn main() {
 #[cfg(feature = "embed-binaries")]
 fn stage_agentd(workspace_root: &Path, out_dir: &Path) {
     let destination = out_dir.join(AGENTD_BINARY);
+    let target_arch =
+        std::env::var("CARGO_CFG_TARGET_ARCH").expect("Cargo target architecture is set");
 
     if let Some(artifacts_dir) = std::env::var_os("MSB_EMBED_ARTIFACTS_DIR").map(PathBuf::from) {
         let source = artifacts_dir.join(AGENTD_BINARY);
@@ -34,6 +40,7 @@ fn stage_agentd(workspace_root: &Path, out_dir: &Path) {
             );
         }
         println!("cargo:rerun-if-changed={}", source.display());
+        validate_agentd_file(&source, &target_arch);
         copy_agentd(&source, &destination);
         return;
     }
@@ -47,15 +54,16 @@ fn stage_agentd(workspace_root: &Path, out_dir: &Path) {
         println!("cargo:rerun-if-changed={}", local.display());
         #[cfg(not(feature = "download-binaries"))]
         reject_stale_agentd(workspace_root, &local);
+        validate_agentd_file(&local, &target_arch);
         copy_agentd(&local, &destination);
         return;
     }
 
     #[cfg(feature = "download-binaries")]
     {
-        let arch = std::env::var("CARGO_CFG_TARGET_ARCH").expect("Cargo target architecture");
-        let url = agentd_download_url(PREBUILT_VERSION, &arch);
+        let url = agentd_download_url(PREBUILT_VERSION, &target_arch);
         download_to(&url, &destination);
+        validate_agentd_file(&destination, &target_arch);
     }
 
     #[cfg(not(feature = "download-binaries"))]
@@ -64,6 +72,19 @@ fn stage_agentd(workspace_root: &Path, out_dir: &Path) {
          MSB_EMBED_ARTIFACTS_DIR or run `just build-agentd`; alternatively enable \
          download-binaries"
     );
+}
+
+#[cfg(feature = "embed-binaries")]
+fn validate_agentd_file(path: &Path, target_arch: &str) {
+    let bytes = std::fs::read(path).unwrap_or_else(|error| {
+        panic!("failed to read Agentd payload {}: {error}", path.display())
+    });
+    agentd_format::validate_agentd(&bytes, target_arch).unwrap_or_else(|error| {
+        panic!(
+            "invalid Agentd payload {} for target architecture {target_arch}: {error}",
+            path.display()
+        )
+    });
 }
 
 #[cfg(feature = "embed-binaries")]
