@@ -815,7 +815,9 @@ fn is_missing_migrations_table(err: &DbErr) -> bool {
 #[cfg(test)]
 mod tests {
     use microsandbox_image::snapshot::Manifest;
-    use microsandbox_types::{CpuPlacement, SandboxResourcesPatch};
+    use microsandbox_types::{
+        CpuPlacement, MemoryPlacement, NumaPlacement, PlacementProfile, SandboxResourcesPatch,
+    };
     use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement};
     use sha2::{Digest as _, Sha256};
 
@@ -827,18 +829,28 @@ mod tests {
 
     #[tokio::test]
     async fn sandbox_config_patch_overlays_global_config_by_field_presence() {
-        let backend = LocalBackend {
-            config: Arc::new(GlobalConfig {
-                sandbox_defaults: crate::config::SandboxDefaults {
-                    cpus: 4,
-                    memory_mib: 2048,
-                    cpu_placement: CpuPlacement::Auto,
-                    thp: microsandbox_types::TransparentHugePagePolicy::Always,
-                    shell: "/bin/bash".into(),
-                    ..Default::default()
-                },
+        let mut config = GlobalConfig {
+            sandbox_defaults: crate::config::SandboxDefaults {
+                cpus: 4,
+                memory_mib: 2048,
+                cpu_placement: CpuPlacement::Auto,
+                placement_profile: Some("global-locality".into()),
+                thp: microsandbox_types::TransparentHugePagePolicy::Always,
+                shell: "/bin/bash".into(),
                 ..Default::default()
-            }),
+            },
+            ..Default::default()
+        };
+        config.runtime.placement_profiles.insert(
+            "global-locality".into(),
+            PlacementProfile {
+                numa: NumaPlacement::PreferSingle,
+                memory: MemoryPlacement::FollowCpu,
+            },
+        );
+
+        let backend = LocalBackend {
+            config: Arc::new(config),
             db: OnceCell::new(),
             selection_source: BackendSelectionSource::Programmatic,
             profile: None,
@@ -876,6 +888,10 @@ mod tests {
         assert_eq!(inherited.spec.resources.max_cpus, 2);
         assert_eq!(inherited.spec.resources.memory_mib, 512);
         assert_eq!(inherited.spec.resources.cpu_placement, CpuPlacement::Auto);
+        assert_eq!(
+            inherited.spec.resources.placement_profile.as_deref(),
+            Some("global-locality")
+        );
         assert_eq!(
             inherited.spec.resources.thp,
             microsandbox_types::TransparentHugePagePolicy::Always
