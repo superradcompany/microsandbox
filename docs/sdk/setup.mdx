@@ -10,13 +10,13 @@ The default install root is `~/.microsandbox/` (`%USERPROFILE%\.microsandbox` on
 
 ## Install and verify
 
-Check for the runtime and install it only when needed. These installation helpers are idempotent and reuse a matching installation.
+Check for the runtime and install it only when needed. These installation helpers are idempotent and reuse an existing complete installation.
 
 <CodeGroup>
 ```rust Rust
-use microsandbox::{config::LocalConfig, setup::{EnsureOptions, ensure_runtime}};
+use microsandbox::{config::LocalConfig, setup::{InstallOptions, ensure_runtime}};
 
-let runtime = ensure_runtime(&LocalConfig::default(), EnsureOptions::default()).await?;
+let runtime = ensure_runtime(&LocalConfig::default(), InstallOptions::default()).await?;
 ```
 
 ```typescript TypeScript
@@ -62,6 +62,8 @@ Microsandbox.install unless Microsandbox.installed?
 ## Customize installation
 
 Rust exposes explicit install sources and options for custom install roots, versions, verification, and replacement. TypeScript exposes its existing setup builder. Go exposes `WithSkipDownload()` for pre-provisioned or air-gapped environments. Python's setup helper uses the default installation behavior.
+
+`InstallSource::EmbeddedArchive` requires the Rust SDK's `embed-binaries` feature. Without that feature, selecting the embedded source returns an error instead of downloading or falling back to another source.
 
 <CodeGroup>
 ```rust Rust

@@ -7,7 +7,7 @@ use std::{
 
 use microsandbox::{
     config::LocalConfig,
-    setup::{EnsureOptions, ensure_runtime},
+    setup::{InstallOptions, ensure_runtime},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -22,7 +22,7 @@ fn main() -> ExitCode {
             runtime
                 .block_on(ensure_runtime(
                     &LocalConfig::default(),
-                    EnsureOptions::default(),
+                    InstallOptions::default(),
                 ))
                 .map_err(std::io::Error::other)
         }) {

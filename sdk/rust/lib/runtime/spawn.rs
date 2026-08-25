@@ -292,11 +292,9 @@ pub async fn spawn_sandbox(
     #[cfg(feature = "embed-binaries")]
     let resolved_runtime = crate::setup::ensure_runtime(
         global,
-        crate::setup::EnsureOptions {
-            install: crate::setup::InstallOptions {
-                source: crate::setup::InstallSource::EmbeddedArchive,
-                ..Default::default()
-            },
+        crate::setup::InstallOptions {
+            source: crate::setup::InstallSource::EmbeddedArchive,
+            ..Default::default()
         },
     )
     .await?;
