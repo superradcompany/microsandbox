@@ -460,6 +460,9 @@ jobs:
     timeout-minutes: 45
     env:
       CARGO_INCREMENTAL: "0"
+      # This lane intentionally disables embedding and exercises the downloaded
+      # target-matched guest payload through the runtime override instead.
+      MSB_AGENTD_PATH: ${{ github.workspace }}/build/agentd
     strategy:
       fail-fast: false
       matrix:
