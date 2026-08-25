@@ -542,6 +542,17 @@ pub async fn spawn_sandbox(
     }
     cmd.args(visible);
 
+    // Agentd selection is process-wide for the VMM. Forward the explicit
+    // environment override first, otherwise map the backend-owned global
+    // config into the child environment. The child validates and eagerly
+    // reads the selected payload before constructing any filesystem.
+    if let Some(path) = agentd_path_override(
+        std::env::var_os("MSB_AGENTD_PATH"),
+        global.paths.agentd.as_deref(),
+    ) {
+        cmd.env("MSB_AGENTD_PATH", path);
+    }
+
     // Prevent the sandbox process from inheriting the parent's terminal on
     // stdin — the VMM's implicit console auto-detects terminals and sets raw
     // mode, which corrupts the parent's terminal output (\n without \r).
@@ -2367,6 +2378,14 @@ fn append_option_block(spec: &mut String, opts: Vec<String>) {
     spec.push_str(&opts.join(","));
 }
 
+/// Resolve the process-wide Agentd path without consulting the filesystem.
+fn agentd_path_override(
+    environment: Option<OsString>,
+    configured: Option<&Path>,
+) -> Option<OsString> {
+    environment.or_else(|| configured.map(Path::as_os_str).map(OsString::from))
+}
+
 /// Derive a stable, collision-resistant identifier from a guest mount path.
 ///
 /// Used for virtiofs tags and for virtio-blk `serial` fields (the block id
@@ -2870,7 +2889,7 @@ mod tests {
         AUTO_BLOCK_WRITEBACK_LIMIT_BYTES, MIN_BLOCK_WRITEBACK_LIMIT_BYTES,
         auto_block_writeback_pool_bytes, resolve_linux_block_writeback_policy,
     };
-    use super::{block_writeback_policy, sandbox_cli_args};
+    use super::{agentd_path_override, block_writeback_policy, sandbox_cli_args};
     use crate::{
         LogLevel,
         backend::LocalBackend,
@@ -2970,6 +2989,25 @@ mod tests {
             None,
         );
         launch
+    }
+
+    #[test]
+    fn agentd_environment_override_wins_over_global_config() {
+        assert_eq!(
+            agentd_path_override(
+                Some(OsString::from("/from/environment")),
+                Some(Path::new("/from/config")),
+            ),
+            Some(OsString::from("/from/environment"))
+        );
+    }
+
+    #[test]
+    fn agentd_global_config_is_used_without_environment_override() {
+        assert_eq!(
+            agentd_path_override(None, Some(Path::new("/from/config"))),
+            Some(OsString::from("/from/config"))
+        );
     }
 
     /// Re-expand a [`LaunchConfig`] into the historical `--flag value` token

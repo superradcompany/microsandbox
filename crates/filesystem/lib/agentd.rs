@@ -73,7 +73,12 @@ impl AgentdPayload {
 
     /// Load the runtime override, or fall back to the compiled payload.
     pub fn resolve() -> Result<Self, AgentdPayloadError> {
-        if let Some(path) = std::env::var_os("MSB_AGENTD_PATH").map(PathBuf::from) {
+        Self::resolve_from(std::env::var_os("MSB_AGENTD_PATH").map(PathBuf::from))
+    }
+
+    /// Load an explicit runtime override, or fall back to the compiled payload.
+    fn resolve_from(path: Option<PathBuf>) -> Result<Self, AgentdPayloadError> {
+        if let Some(path) = path {
             let bytes = std::fs::read(&path).map_err(|source| AgentdPayloadError::Read {
                 path: path.clone(),
                 source,
@@ -222,5 +227,25 @@ mod tests {
                 .to_string()
                 .contains("does not match host architecture")
         );
+    }
+
+    #[test]
+    fn explicit_missing_payload_fails_without_embedded_fallback() {
+        let error = AgentdPayload::resolve_from(Some(PathBuf::from(
+            "/definitely/missing/microsandbox-agentd",
+        )))
+        .unwrap_err();
+
+        assert!(matches!(error, AgentdPayloadError::Read { .. }));
+    }
+
+    #[test]
+    fn explicit_invalid_payload_fails_without_embedded_fallback() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("agentd");
+        std::fs::write(&path, [0_u8; 64]).unwrap();
+
+        let error = AgentdPayload::resolve_from(Some(path)).unwrap_err();
+        assert!(matches!(error, AgentdPayloadError::Invalid(_)));
     }
 }
