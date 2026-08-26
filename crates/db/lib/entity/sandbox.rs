@@ -58,10 +58,9 @@ pub struct Model {
     /// Configuration actually used by the currently running VM, when active.
     pub active_config: Option<String>,
     pub status: SandboxStatus,
-    /// Network address-pool slot this sandbox actually holds (#1390).
-    /// `None` on rows that predate slot recycling and whose id exceeds the
-    /// u16 pool; they receive a recycled slot on their next spawn.
-    pub network_slot: Option<i64>,
+    /// Network address-pool slot leased to this sandbox's current run (#1390).
+    /// `None` while the sandbox is terminal or has not started.
+    pub network_slot: Option<u16>,
 
     /// Denormalized copy of `config.policy.ephemeral`.
     ///

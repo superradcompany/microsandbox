@@ -1092,6 +1092,10 @@ impl LocalBackend {
                     sandbox_entity::Column::Status,
                     Expr::value(SandboxStatus::Stopped),
                 )
+                .col_expr(
+                    sandbox_entity::Column::NetworkSlot,
+                    Expr::value(Option::<u16>::None),
+                )
                 .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
                 .filter(sandbox_entity::Column::Id.eq(sandbox_id))
                 .exec(&txn)

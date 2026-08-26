@@ -123,7 +123,7 @@ pub struct LaunchConfig {
 
     /// Sandbox slot for deterministic network address derivation.
     #[cfg(feature = "net")]
-    pub sandbox_slot: u64,
+    pub sandbox_slot: u16,
 
     /// Host Unix sockets exposed through virtio-vsock.
     #[serde(default)]

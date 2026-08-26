@@ -753,6 +753,10 @@ async fn reconcile_stale_active(
                     sandbox_entity::Column::ActiveConfig,
                     Expr::value(Option::<String>::None),
                 )
+                .col_expr(
+                    sandbox_entity::Column::NetworkSlot,
+                    Expr::value(Option::<u16>::None),
+                )
                 .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
                 .filter(sandbox_entity::Column::Id.eq(sandbox.id))
                 .filter(sandbox_entity::Column::Status.eq(sandbox_entity::SandboxStatus::Draining))
@@ -802,6 +806,10 @@ async fn reconcile_stale_active(
         .col_expr(
             sandbox_entity::Column::ActiveConfig,
             Expr::value(Option::<String>::None),
+        )
+        .col_expr(
+            sandbox_entity::Column::NetworkSlot,
+            Expr::value(Option::<u16>::None),
         )
         .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
         .filter(sandbox_entity::Column::Id.eq(sandbox.id))

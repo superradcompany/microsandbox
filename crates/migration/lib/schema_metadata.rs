@@ -328,6 +328,7 @@ mod tests {
     #[test]
     fn canonical_applied_prefix_uses_metadata_order() {
         let applied = [
+            SANDBOX_NETWORK_SLOT_MIGRATION_ID,
             SHARED_CPU_ALLOCATION_MIGRATION_ID,
             SANDBOX_LABEL_REBUILD_MIGRATION_ID,
             MEMORY_ALLOCATION_NODES_MIGRATION_ID,
