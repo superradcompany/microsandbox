@@ -1202,7 +1202,7 @@ fn read_config_from(path: &Path) -> MicrosandboxResult<GlobalConfig> {
     })
 }
 
-/// Resolve the default home directory (`~/.microsandbox`, or `$MSB_HOME` if set).
+/// Resolve the default home directory (`~/.microsandbox`, or non-empty `$MSB_HOME`).
 fn resolve_default_home() -> PathBuf {
     microsandbox_utils::resolve_home()
 }

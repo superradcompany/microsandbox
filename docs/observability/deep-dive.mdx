@@ -25,7 +25,7 @@ The shm object is mode `0600` (owner read/write only). Running
 
 The shm name is derived from `stable_hash($MSB_HOME)`, so both
 processes must agree on it. Pass `--msb-home` explicitly if your
-environment doesn't set `$MSB_HOME`; the default is `~/.microsandbox`.
+environment leaves `$MSB_HOME` unset or empty; the default is `~/.microsandbox`.
 
 ### Per-host
 

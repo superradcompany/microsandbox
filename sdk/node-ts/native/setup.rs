@@ -109,7 +109,8 @@ pub fn is_installed() -> bool {
     microsandbox::setup::is_installed()
 }
 
-/// Download and install msb + libkrunfw to ~/.microsandbox/.
+/// Download and install msb + libkrunfw under non-empty $MSB_HOME, or
+/// ~/.microsandbox/ when the override is unset or empty.
 #[napi]
 pub async fn install() -> Result<()> {
     microsandbox::setup::install().await.map_err(to_napi_error)
