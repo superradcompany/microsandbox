@@ -3494,6 +3494,37 @@ mod tests {
             .unwrap();
         assert!(rows.is_empty(), "mount owner marker should be rolled back");
 
+        // The network-slot migration leaves its compatible SQLite column in
+        // place, but removes the migration record and slot constraints.
+        rollback_schema(db.inner(), 1).await.unwrap();
+
+        let rows = db
+            .query_all_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                "SELECT version FROM seaql_migrations WHERE version = ?",
+                [schema_metadata::SANDBOX_NETWORK_SLOT_MIGRATION_ID.into()],
+            ))
+            .await
+            .unwrap();
+        assert!(
+            rows.is_empty(),
+            "network slot migration should be rolled back"
+        );
+
+        let columns = db
+            .query_all_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "PRAGMA table_info(sandbox)",
+            ))
+            .await
+            .unwrap();
+        assert!(
+            columns
+                .iter()
+                .any(|row| row.try_get_by_index::<String>(1).unwrap() == "network_slot"),
+            "network slot column should remain compatible after rollback"
+        );
+
         // Shared CPU assignment rows downgrade first. Active sandboxes are
         // prohibited during schema rollback, so the allocation table is empty
         // and can safely return to its exclusive logical-CPU key.
