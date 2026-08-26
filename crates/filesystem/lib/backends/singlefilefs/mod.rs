@@ -102,6 +102,10 @@ impl SingleFileFs {
         cfg.no_symlink_root = true;
         cfg.inject_init = false;
         cfg.quota_bytes = None;
+        // Host writes bypass FUSE, so expire attributes immediately. With
+        // AUTO_INVAL_DATA negotiated below, each guest read revalidates mtime
+        // and invalidates cached contents when the host changed them.
+        cfg.attr_timeout = Duration::ZERO;
 
         let inner_name = CString::new(inner_name).map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidInput, "host filename contains NUL")
@@ -172,7 +176,15 @@ impl SingleFileFs {
 
 impl DynFileSystem for SingleFileFs {
     fn init(&self, capable: FsOptions) -> io::Result<FsOptions> {
-        self.inner.init(capable)
+        let options = self.inner.init(capable)?;
+        let options = if capable.contains(FsOptions::AUTO_INVAL_DATA) {
+            // Single-file binds are externally mutable. Ask the guest kernel
+            // to compare refreshed attributes before serving cached pages.
+            options | FsOptions::AUTO_INVAL_DATA
+        } else {
+            options
+        };
+        Ok(options)
     }
 
     fn destroy(&self) {
@@ -621,5 +633,27 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn negotiates_automatic_data_invalidation() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("selected.txt");
+        std::fs::write(&source, b"initial").unwrap();
+
+        let fs = SingleFileFs::new(
+            source,
+            "config.txt".to_string(),
+            PassthroughConfig {
+                attr_timeout: Duration::from_secs(60),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let options = fs.init(FsOptions::AUTO_INVAL_DATA).unwrap();
+
+        assert!(options.contains(FsOptions::AUTO_INVAL_DATA));
+        #[cfg(unix)]
+        assert_eq!(fs.inner.cfg.attr_timeout, Duration::ZERO);
     }
 }
