@@ -218,8 +218,10 @@ impl SmoltcpNetwork {
         let gateway_mac = derive_gateway_mac(slot);
         let mtu = config.interface.mtu.unwrap_or(1500);
 
+        let ipv4_requested =
+            config.interface.ipv4_address.is_some() || config.interface.ipv4_pool.is_some();
         let guest_ipv4 = config.interface.ipv4_address.or_else(|| {
-            host_has_ipv4.then(|| {
+            (host_has_ipv4 || ipv4_requested).then(|| {
                 derive_guest_ipv4(
                     config
                         .interface
@@ -230,8 +232,10 @@ impl SmoltcpNetwork {
             })
         });
         let gateway_ipv4 = guest_ipv4.map(gateway_from_guest_ipv4);
+        let ipv6_requested =
+            config.interface.ipv6_address.is_some() || config.interface.ipv6_pool.is_some();
         let guest_ipv6 = config.interface.ipv6_address.or_else(|| {
-            host_has_ipv6.then(|| {
+            (host_has_ipv6 || ipv6_requested).then(|| {
                 derive_guest_ipv6(
                     config
                         .interface
@@ -777,6 +781,17 @@ mod tests {
             derive_guest_ipv4(pool, 63),
             Ipv4Addr::new(172, 31, 240, 254)
         );
+    }
+
+    #[test]
+    fn explicit_ipv4_pool_survives_missing_startup_route() {
+        let mut config = NetworkConfig::default();
+        config.interface.ipv4_pool = Some(default_guest_ipv4_pool());
+
+        let network = SmoltcpNetwork::new_with_routes(config, 0, false, false).unwrap();
+
+        assert_eq!(network.guest_ipv4, Some(Ipv4Addr::new(172, 16, 0, 2)));
+        assert_eq!(network.gateway_ipv4, Some(Ipv4Addr::new(172, 16, 0, 1)));
     }
 
     #[test]

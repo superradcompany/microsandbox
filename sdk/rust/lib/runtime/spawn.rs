@@ -8,6 +8,8 @@
 #[cfg(windows)]
 use std::fmt::Write as _;
 #[cfg(unix)]
+use std::fs::OpenOptions;
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::fd::{FromRawFd, OwnedFd};
@@ -22,7 +24,7 @@ use std::os::windows::io::AsRawHandle;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     ffi::{OsStr, OsString},
-    fs::File,
+    fs::{self, File},
     io::{Seek, SeekFrom, Write as IoWrite},
     path::{Path, PathBuf},
     process::Stdio,
@@ -107,6 +109,22 @@ const AUTO_BLOCK_WRITEBACK_LIMIT_BYTES: u64 = 1536 * 1024 * 1024;
 const AUTO_BLOCK_WRITEBACK_POOL_DIVISOR: u64 = 10;
 #[cfg(target_os = "linux")]
 const MIN_BLOCK_WRITEBACK_LIMIT_BYTES: u64 = 128 * 1024 * 1024;
+#[cfg(feature = "oci-runtime")]
+const OCI_FORWARD_STDIO_LABEL: &str = "oci.microsandbox.forward_stdio";
+#[cfg(feature = "oci-runtime")]
+const OCI_CONSOLE_ROWS_LABEL: &str = "oci.microsandbox.console_rows";
+#[cfg(feature = "oci-runtime")]
+const OCI_CONSOLE_COLS_LABEL: &str = "oci.microsandbox.console_cols";
+#[cfg(feature = "oci-runtime")]
+const OCI_INIT_SESSION_PATH_LABEL: &str = "oci.microsandbox.init_session_path";
+#[cfg(feature = "oci-runtime")]
+const OCI_ISOLATE_NETWORK_NAMESPACE_LABEL: &str = "oci.microsandbox.isolate_network_namespace";
+#[cfg(feature = "oci-runtime")]
+const OCI_SIGNAL_PATH_LABEL: &str = "oci.microsandbox.signal_path";
+#[cfg(feature = "oci-runtime")]
+const OCI_STARTUP_CWD_LABEL: &str = "oci.microsandbox.startup_cwd";
+#[cfg(feature = "oci-runtime")]
+const OCI_START_SIGNAL_PATH_LABEL: &str = "oci.microsandbox.start_signal_path";
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -521,6 +539,12 @@ pub async fn spawn_sandbox(
         }
     };
 
+    let isolate_network_namespace = should_isolate_network_namespace(config);
+    #[cfg(all(unix, feature = "oci-runtime"))]
+    let inherited_console_fd = config
+        .inherited_startup_console()
+        .map(|console| console.as_raw_fd());
+
     // Build the command.
     let mut cmd = Command::new(&msb_path);
     #[cfg(windows)]
@@ -544,6 +568,10 @@ pub async fn spawn_sandbox(
         let lifecycle_lock_fd = lifecycle_guard.as_raw_fd();
         unsafe {
             cmd.pre_exec(move || {
+                if isolate_network_namespace && libc::unshare(libc::CLONE_NEWNET) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+
                 if startup_write_fd.is_some() {
                     detach_from_launcher_session()?;
                 }
@@ -555,6 +583,10 @@ pub async fn spawn_sandbox(
                 });
                 let mut startup_mapping = startup_write_fd
                     .map(|fd| InheritedFdMapping::new(fd, microsandbox_runtime::vm::STARTUP_FD));
+                #[cfg(feature = "oci-runtime")]
+                let mut console_mapping = inherited_console_fd.map(|fd| {
+                    InheritedFdMapping::new(fd, microsandbox_runtime::vm::OCI_CONSOLE_FD)
+                });
                 let mut lifecycle_mapping = InheritedFdMapping::new(
                     lifecycle_lock_fd,
                     microsandbox_runtime::vm::LIFECYCLE_LOCK_FD,
@@ -564,12 +596,19 @@ pub async fn spawn_sandbox(
                 // open files that pipe/tempfile allocation lands on one of the
                 // fixed inherited fd numbers. Move those sources away before
                 // any dup2 call can overwrite a later source fd.
+                #[cfg(feature = "oci-runtime")]
+                let mut next_spare_fd = microsandbox_runtime::vm::OCI_CONSOLE_FD + 1;
+                #[cfg(not(feature = "oci-runtime"))]
                 let mut next_spare_fd = microsandbox_runtime::vm::LIFECYCLE_LOCK_FD + 1;
                 move_reserved_source_fd(&mut config_mapping, &mut next_spare_fd)?;
                 if let Some(mapping) = parent_watch_mapping.as_mut() {
                     move_reserved_source_fd(mapping, &mut next_spare_fd)?;
                 }
                 if let Some(mapping) = startup_mapping.as_mut() {
+                    move_reserved_source_fd(mapping, &mut next_spare_fd)?;
+                }
+                #[cfg(feature = "oci-runtime")]
+                if let Some(mapping) = console_mapping.as_mut() {
                     move_reserved_source_fd(mapping, &mut next_spare_fd)?;
                 }
                 move_reserved_source_fd(&mut lifecycle_mapping, &mut next_spare_fd)?;
@@ -581,6 +620,10 @@ pub async fn spawn_sandbox(
                 if let Some(mapping) = startup_mapping {
                     dup_inherited_fd(mapping.src, mapping.dst)?;
                 }
+                #[cfg(feature = "oci-runtime")]
+                if let Some(mapping) = console_mapping {
+                    dup_inherited_fd(mapping.src, mapping.dst)?;
+                }
                 dup_inherited_fd(lifecycle_mapping.src, lifecycle_mapping.dst)?;
 
                 Ok(())
@@ -588,12 +631,39 @@ pub async fn spawn_sandbox(
         }
     }
 
+    let startup_stderr_path = startup_pipe
+        .is_some()
+        .then(|| log_dir.join("startup.stderr.log"));
+
     // Capture stdout for attached startup JSON. Detached mode uses a
-    // dedicated startup fd so stdio can be severed from the launcher.
+    // dedicated startup fd so stdout can be severed from the launcher; stderr
+    // is written to a small startup log so callers like Docker can surface
+    // pre-handoff failures.
     #[cfg(unix)]
     if startup_pipe.is_some() {
-        cmd.stdout(Stdio::null());
-        cmd.stderr(Stdio::null());
+        if should_inherit_detached_stdio(config) {
+            cmd.stdout(Stdio::inherit());
+        } else {
+            cmd.stdout(Stdio::null());
+        }
+        let stderr_path = startup_stderr_path.as_ref().expect("path set above");
+        let stderr = match OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(stderr_path)
+        {
+            Ok(stderr) => stderr,
+            Err(err) => {
+                release_metrics_reservation(config, metrics_reservation.as_ref());
+                return Err(err.into());
+            }
+        };
+        if should_inherit_detached_stdio(config) {
+            cmd.stderr(Stdio::inherit());
+        } else {
+            cmd.stderr(Stdio::from(stderr));
+        }
     } else {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::inherit());
@@ -670,9 +740,14 @@ pub async fn spawn_sandbox(
         Err(_) => {
             terminate_startup_process(&mut child).await;
             release_metrics_reservation(config, metrics_reservation.as_ref());
-            return Err(crate::MicrosandboxError::Runtime(
-                "sandbox startup timeout: no JSON received within 30 seconds".into(),
-            ));
+            let stderr = startup_stderr_excerpt(startup_stderr_path.as_deref());
+            let message = match stderr {
+                Some(stderr) => format!(
+                    "sandbox startup timeout: no JSON received within 30 seconds; stderr: {stderr}"
+                ),
+                None => "sandbox startup timeout: no JSON received within 30 seconds".into(),
+            };
+            return Err(crate::MicrosandboxError::Runtime(message));
         }
     };
 
@@ -686,10 +761,18 @@ pub async fn spawn_sandbox(
                 exit_status = ?status,
                 "spawn_sandbox: failed to parse startup JSON"
             );
-            return Err(crate::MicrosandboxError::Runtime(format!(
-                "sandbox process exited ({status:?}) before sending startup info \
-                 (line: {line:?}, check stderr above for details)"
-            )));
+            let stderr = startup_stderr_excerpt(startup_stderr_path.as_deref());
+            let message = match stderr {
+                Some(stderr) => format!(
+                    "sandbox process exited ({status:?}) before sending startup info \
+                     (line: {line:?}); stderr: {stderr}"
+                ),
+                None => format!(
+                    "sandbox process exited ({status:?}) before sending startup info \
+                     (line: {line:?}, check stderr above for details)"
+                ),
+            };
+            return Err(crate::MicrosandboxError::Runtime(message));
         }
     };
     if startup.pid != _pid {
@@ -1182,14 +1265,16 @@ fn move_reserved_source_fd(
 
 #[cfg(unix)]
 fn inherited_fd_source_needs_spare(src: i32, dst: i32) -> bool {
-    src != dst
-        && matches!(
-            src,
-            microsandbox_runtime::vm::CONFIG_FD
-                | microsandbox_runtime::vm::PARENT_WATCH_FD
-                | microsandbox_runtime::vm::STARTUP_FD
-                | microsandbox_runtime::vm::LIFECYCLE_LOCK_FD
-        )
+    let reserved = matches!(
+        src,
+        microsandbox_runtime::vm::CONFIG_FD
+            | microsandbox_runtime::vm::PARENT_WATCH_FD
+            | microsandbox_runtime::vm::STARTUP_FD
+            | microsandbox_runtime::vm::LIFECYCLE_LOCK_FD
+    );
+    #[cfg(feature = "oci-runtime")]
+    let reserved = reserved || src == microsandbox_runtime::vm::OCI_CONSOLE_FD;
+    src != dst && reserved
 }
 
 #[cfg(unix)]
@@ -2135,6 +2220,20 @@ async fn terminate_startup_process(
     child.wait().await.ok()
 }
 
+fn startup_stderr_excerpt(path: Option<&Path>) -> Option<String> {
+    const MAX_STARTUP_STDERR_BYTES: usize = 8 * 1024;
+
+    let path = path?;
+    let bytes = fs::read(path).ok()?;
+    let bytes = if bytes.len() > MAX_STARTUP_STDERR_BYTES {
+        &bytes[bytes.len() - MAX_STARTUP_STDERR_BYTES..]
+    } else {
+        &bytes
+    };
+    let stderr = String::from_utf8_lossy(bytes).trim().to_string();
+    (!stderr.is_empty()).then_some(stderr)
+}
+
 /// Scan `config.spec.mounts` for file bind mounts and stage each file in its own
 /// isolated directory inside an ephemeral [`TempDir`].
 ///
@@ -2483,6 +2582,13 @@ fn sandbox_cli_args(
     if let Some(pipe) = startup_pipe {
         visible.push(OsString::from("--startup-pipe"));
         visible.push(pipe.to_os_string());
+    }
+    #[cfg(all(unix, feature = "oci-runtime"))]
+    if config.inherited_startup_console().is_some() {
+        visible.push(OsString::from("--oci-console-fd"));
+        visible.push(OsString::from(
+            microsandbox_runtime::vm::OCI_CONSOLE_FD.to_string(),
+        ));
     }
     visible.push(OsString::from("--vcpus"));
     visible.push(OsString::from(config.spec.resources.cpus.to_string()));
@@ -2841,13 +2947,121 @@ fn startup_command(config: &SandboxConfig) -> Option<StartupCommand> {
             .iter()
             .map(|var| format!("{}={}", var.key, var.value))
             .collect(),
-        cwd: config.spec.runtime.workdir.clone(),
+        cwd: startup_command_cwd(config),
         user: config.spec.runtime.user.clone(),
+        #[cfg(feature = "oci-runtime")]
+        tty: has_inherited_startup_console(config),
+        #[cfg(feature = "oci-runtime")]
+        rows: oci_console_size(config, OCI_CONSOLE_ROWS_LABEL).unwrap_or(24),
+        #[cfg(feature = "oci-runtime")]
+        cols: oci_console_size(config, OCI_CONSOLE_COLS_LABEL).unwrap_or(80),
+        #[cfg(feature = "oci-runtime")]
+        start_signal_path: oci_start_signal_path(config),
+        #[cfg(feature = "oci-runtime")]
+        session_id_path: oci_init_session_path(config),
+        #[cfg(feature = "oci-runtime")]
+        signal_path: oci_signal_path(config),
+        #[cfg(feature = "oci-runtime")]
+        forward_stdio: should_forward_oci_stdio(config),
     })
 }
 
+#[cfg(feature = "oci-runtime")]
+fn has_inherited_startup_console(config: &SandboxConfig) -> bool {
+    #[cfg(unix)]
+    {
+        config.inherited_startup_console().is_some()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = config;
+        false
+    }
+}
+
+#[cfg(feature = "oci-runtime")]
+fn oci_console_size(config: &SandboxConfig, label: &str) -> Option<u16> {
+    config.spec.labels.get(label)?.parse().ok()
+}
+
+fn startup_command_cwd(config: &SandboxConfig) -> Option<String> {
+    #[cfg(feature = "oci-runtime")]
+    if let Some(cwd) = config.spec.labels.get(OCI_STARTUP_CWD_LABEL) {
+        return Some(cwd.clone());
+    }
+    config.spec.runtime.workdir.clone()
+}
+
+#[cfg(feature = "oci-runtime")]
+fn oci_start_signal_path(config: &SandboxConfig) -> Option<PathBuf> {
+    config
+        .spec
+        .labels
+        .get(OCI_START_SIGNAL_PATH_LABEL)
+        .map(PathBuf::from)
+}
+
+#[cfg(feature = "oci-runtime")]
+fn oci_init_session_path(config: &SandboxConfig) -> Option<PathBuf> {
+    config
+        .spec
+        .labels
+        .get(OCI_INIT_SESSION_PATH_LABEL)
+        .map(PathBuf::from)
+}
+
+#[cfg(feature = "oci-runtime")]
+fn oci_signal_path(config: &SandboxConfig) -> Option<PathBuf> {
+    config
+        .spec
+        .labels
+        .get(OCI_SIGNAL_PATH_LABEL)
+        .map(PathBuf::from)
+}
+
+#[cfg(feature = "oci-runtime")]
+fn should_forward_oci_stdio(config: &SandboxConfig) -> bool {
+    config
+        .spec
+        .labels
+        .get(OCI_FORWARD_STDIO_LABEL)
+        .is_some_and(|value| value == "true")
+}
+
+fn should_inherit_detached_stdio(config: &SandboxConfig) -> bool {
+    #[cfg(feature = "oci-runtime")]
+    {
+        should_forward_oci_stdio(config) && !has_inherited_startup_console(config)
+    }
+    #[cfg(not(feature = "oci-runtime"))]
+    {
+        let _ = config;
+        false
+    }
+}
+
+fn should_isolate_network_namespace(config: &SandboxConfig) -> bool {
+    #[cfg(feature = "oci-runtime")]
+    {
+        config
+            .spec
+            .labels
+            .get(OCI_ISOLATE_NETWORK_NAMESPACE_LABEL)
+            .is_some_and(|value| value == "true")
+    }
+    #[cfg(not(feature = "oci-runtime"))]
+    {
+        let _ = config;
+        false
+    }
+}
+
 fn resolve_startup_command(config: &SandboxConfig) -> Option<(String, Vec<String>)> {
-    if !config.should_launch_background_command() {
+    #[cfg(feature = "oci-runtime")]
+    let has_oci_start_signal = oci_start_signal_path(config).is_some();
+    #[cfg(not(feature = "oci-runtime"))]
+    let has_oci_start_signal = false;
+    if !config.should_launch_background_command() && !has_oci_start_signal {
         return None;
     }
 
@@ -2883,8 +3097,11 @@ fn sandbox_log_level_cli_flag(level: SandboxLogLevel) -> &'static str {
 mod tests {
     use std::collections::HashMap;
     use std::ffi::{OsStr, OsString};
+    use std::fs;
     #[cfg(target_os = "linux")]
     use std::num::NonZero;
+    #[cfg(all(unix, feature = "oci-runtime"))]
+    use std::os::fd::OwnedFd;
     use std::path::{Path, PathBuf};
 
     use microsandbox_protocol::{
@@ -2924,6 +3141,11 @@ mod tests {
         assert!(super::inherited_fd_source_needs_spare(
             microsandbox_runtime::vm::PARENT_WATCH_FD,
             microsandbox_runtime::vm::STARTUP_FD,
+        ));
+        #[cfg(feature = "oci-runtime")]
+        assert!(super::inherited_fd_source_needs_spare(
+            microsandbox_runtime::vm::LIFECYCLE_LOCK_FD,
+            microsandbox_runtime::vm::OCI_CONSOLE_FD,
         ));
     }
 
@@ -2968,6 +3190,20 @@ mod tests {
                 "SIGCHLD handler should run on the alternate signal stack"
             );
         }
+    }
+
+    #[test]
+    fn test_startup_stderr_excerpt_returns_trimmed_tail() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("startup.stderr.log");
+        let prefix = "x".repeat(9 * 1024);
+        fs::write(&path, format!("{prefix}real startup error\n")).unwrap();
+
+        let excerpt = super::startup_stderr_excerpt(Some(&path)).unwrap();
+
+        assert!(excerpt.len() <= 8 * 1024 + "real startup error".len());
+        assert!(excerpt.ends_with("real startup error"));
+        assert!(!excerpt.ends_with('\n'));
     }
 
     //----------------------------------------------------------------------------------------------
@@ -3491,6 +3727,69 @@ mod tests {
 
         assert!(rendered.contains(&"--startup-cmd=/entrypoint".to_string()));
         assert!(rendered.contains(&"--startup-arg=bash".to_string()));
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "oci-runtime")]
+    async fn test_sandbox_cli_args_include_oci_startup_after_launch_intent_is_cleared() {
+        let mut config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .background_command(["/hello"])
+            .label(super::OCI_START_SIGNAL_PATH_LABEL, "/tmp/start.request")
+            .label(super::OCI_INIT_SESSION_PATH_LABEL, "/tmp/init.session")
+            .build()
+            .await
+            .unwrap();
+        config.clear_launch_intent();
+
+        let startup = super::startup_command(&config).expect("OCI startup command");
+
+        assert_eq!(startup.cmd, "/hello");
+        assert_eq!(
+            startup.start_signal_path.as_deref(),
+            Some(Path::new("/tmp/start.request"))
+        );
+        assert_eq!(
+            startup.session_id_path.as_deref(),
+            Some(Path::new("/tmp/init.session"))
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(all(unix, feature = "oci-runtime"))]
+    async fn test_oci_console_does_not_inherit_detached_launcher_stdio() {
+        let console: OwnedFd = std::fs::File::open("/dev/null").expect("open fd").into();
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .background_command(["/bin/bash"])
+            .label(super::OCI_FORWARD_STDIO_LABEL, "true")
+            .inherited_startup_console(console)
+            .build()
+            .await
+            .unwrap();
+
+        assert!(super::should_forward_oci_stdio(&config));
+        assert!(!super::should_inherit_detached_stdio(&config));
+        let startup = super::startup_command(&config).expect("startup command");
+        assert!(startup.tty);
+        assert!(render_args(&config).contains(&format!(
+            "--oci-console-fd={}",
+            microsandbox_runtime::vm::OCI_CONSOLE_FD
+        )));
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "oci-runtime")]
+    async fn test_non_console_oci_inherits_detached_launcher_stdio() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .background_command(["/hello"])
+            .label(super::OCI_FORWARD_STDIO_LABEL, "true")
+            .build()
+            .await
+            .unwrap();
+
+        assert!(super::should_inherit_detached_stdio(&config));
     }
 
     #[tokio::test]

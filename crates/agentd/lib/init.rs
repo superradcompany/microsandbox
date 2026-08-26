@@ -204,8 +204,9 @@ mod linux {
             "/dev/pts",
             Some("devpts"),
             noexec_nosuid,
-            None::<&str>,
+            Some("ptmxmode=0666,mode=0620"),
         )?;
+        ensure_dev_ptmx()?;
 
         // /dev/shm — tmpfs
         mkdir_ignore_exists("/dev/shm")?;
@@ -242,6 +243,16 @@ mod linux {
             MsFlags::MS_NODEV | MsFlags::MS_NOEXEC | MsFlags::MS_NOSUID | MsFlags::MS_RELATIME;
         mkdir_ignore_exists("/sys")?;
         mount_ignore_busy(Some("sysfs"), "/sys", Some("sysfs"), flags, None::<&str>)
+    }
+
+    fn ensure_dev_ptmx() -> AgentdResult<()> {
+        let ptmx = Path::new("/dev/ptmx");
+        if fs::symlink_metadata(ptmx).is_ok() {
+            return Ok(());
+        }
+
+        unix_fs::symlink("pts/ptmx", ptmx)
+            .map_err(|e| AgentdError::Init(format!("failed to symlink /dev/ptmx: {e}")))
     }
 
     /// Mounts the virtiofs runtime filesystem at the canonical mount point.

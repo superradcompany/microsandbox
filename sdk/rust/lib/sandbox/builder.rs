@@ -3,6 +3,8 @@
 use std::collections::{BTreeMap, HashSet};
 #[cfg(feature = "net")]
 use std::net::{IpAddr, Ipv4Addr};
+#[cfg(all(unix, feature = "oci-runtime"))]
+use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -953,6 +955,16 @@ impl SandboxBuilder {
         for (k, v) in labels {
             self.config.spec.labels.insert(k.into(), v.into());
         }
+        self
+    }
+
+    /// Transfer a host terminal descriptor to the sandbox startup workload.
+    ///
+    /// This is an internal runtime handoff and is not persisted with the sandbox configuration.
+    #[doc(hidden)]
+    #[cfg(all(unix, feature = "oci-runtime"))]
+    pub fn inherited_startup_console(mut self, console: OwnedFd) -> Self {
+        self.config.inherited_startup_console = Some(std::sync::Arc::new(console));
         self
     }
 

@@ -15,6 +15,7 @@ path = "lib/lib.rs"
 default = ["prebuilt", "net"]
 prebuilt = ["microsandbox-filesystem/prebuilt"]
 net = ["dep:microsandbox-network", "msb_krun/net"]
+oci-runtime = []
 
 [dependencies]
 bytes = { workspace = true }
@@ -33,6 +34,7 @@ microsandbox-utils.workspace = true
 microsandbox-vsock.workspace = true
 msb_krun = { workspace = true, features = ["blk"] }
 nix = { workspace = true, features = ["process", "signal"] }
+oci-spec.workspace = true
 rand.workspace = true
 rustls = { workspace = true }
 sea-orm.workspace = true
