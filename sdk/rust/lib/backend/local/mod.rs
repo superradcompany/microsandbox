@@ -42,7 +42,7 @@ use super::{
 use crate::{MicrosandboxError, MicrosandboxResult};
 use crate::{
     SandboxConfig,
-    config::{DatabaseConfig, LocalConfig, RegistryEntry, load_persisted_config_or_default},
+    config::{DatabaseConfig, GlobalConfig, RegistryEntry, load_persisted_config_or_default},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -51,14 +51,13 @@ use crate::{
 
 /// Local-runtime backend: spawns microVMs via libkrun on the calling host.
 ///
-/// Owns the persisted [`LocalConfig`] (paths, sandbox defaults, registry
+/// Owns the persisted [`GlobalConfig`] (paths, sandbox defaults, registry
 /// settings, database tuning) and the SQLite [`DbPools`] for this instance.
 /// Built via either [`LocalBackend::lazy`] (no-explicit-setup ambient
 /// default, lazily initialised) or [`LocalBackend::builder`] (programmatic).
 pub struct LocalBackend {
-    config: Arc<LocalConfig>,
+    config: Arc<GlobalConfig>,
     db: OnceCell<DbPools>,
-    deployment_profile: Option<DeploymentProfile>,
     selection_source: BackendSelectionSource,
     profile: Option<String>,
 }
@@ -130,11 +129,9 @@ impl LocalBackend {
         profile: Option<String>,
     ) -> Self {
         let config = load_persisted_config_or_default().unwrap_or_default();
-        let deployment_profile = config.deployment_profile;
         Self {
             config: Arc::new(config),
             db: OnceCell::new(),
-            deployment_profile,
             selection_source,
             profile,
         }
@@ -165,14 +162,14 @@ impl LocalBackend {
             .await
     }
 
-    /// Borrow this backend's [`LocalConfig`].
-    pub fn config(&self) -> &LocalConfig {
+    /// Borrow this backend's [`GlobalConfig`].
+    pub fn config(&self) -> &GlobalConfig {
         &self.config
     }
 
     /// Clone the backend-owned config handle for APIs that need to return the
     /// ambient local config without borrowing through a temporary backend `Arc`.
-    pub(crate) fn config_handle(&self) -> Arc<LocalConfig> {
+    pub(crate) fn config_handle(&self) -> Arc<GlobalConfig> {
         self.config.clone()
     }
 
@@ -232,7 +229,7 @@ impl LocalBackend {
     /// the backend means an embedding host can enforce its isolation model even
     /// when the incoming sandbox specification requests a weaker profile.
     pub(crate) fn apply_deployment_profile(&self, config: &mut SandboxConfig) {
-        let Some(profile) = self.deployment_profile else {
+        let Some(profile) = self.config.deployment_profile else {
             return;
         };
 
@@ -417,15 +414,28 @@ impl LocalBackendBuilder {
     /// This retains the programmatic overrides from the builder while avoiding
     /// filesystem or migration work during construction. It is useful for
     /// embedding runtimes that must finish a protocol handshake before touching
-    /// sandbox state.
+    /// sandbox state. Persisted-config read or parse errors fall back to hard-coded
+    /// defaults; use [`try_build_lazy`](Self::try_build_lazy) to propagate them.
     pub fn build_lazy(self) -> LocalBackend {
         let persisted = load_persisted_config_or_default().unwrap_or_default();
+        self.build_lazy_from(persisted)
+    }
+
+    /// Build a lazy `LocalBackend`, returning persisted-config read or parse errors.
+    ///
+    /// Unlike [`build_lazy`](Self::build_lazy), this constructor does not fall
+    /// back to hard-coded defaults when the configured file is unreadable or
+    /// invalid. The database still initializes only on first use.
+    pub fn try_build_lazy(self) -> MicrosandboxResult<LocalBackend> {
+        Ok(self.build_lazy_from(load_persisted_config_or_default()?))
+    }
+
+    /// Finish lazy construction from an already resolved persisted config.
+    fn build_lazy_from(self, persisted: GlobalConfig) -> LocalBackend {
         let config = self.merge_into(persisted);
-        let deployment_profile = config.deployment_profile;
         LocalBackend {
             config: Arc::new(config),
             db: OnceCell::new(),
-            deployment_profile,
             selection_source: BackendSelectionSource::Programmatic,
             profile: None,
         }
@@ -433,7 +443,7 @@ impl LocalBackendBuilder {
 
     /// Overlay the builder's overrides on top of `base`. Builder values win;
     /// `None` builder fields fall through to `base`.
-    fn merge_into(self, mut base: LocalConfig) -> LocalConfig {
+    fn merge_into(self, mut base: GlobalConfig) -> GlobalConfig {
         let LocalBackendBuilder {
             home,
             sandboxes_dir,
@@ -805,19 +815,106 @@ fn is_missing_migrations_table(err: &DbErr) -> bool {
 #[cfg(test)]
 mod tests {
     use microsandbox_image::snapshot::Manifest;
+    use microsandbox_types::{
+        CpuPlacement, MemoryPlacement, NumaPlacement, PlacementProfile, SandboxResourcesPatch,
+    };
     use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement};
     use sha2::{Digest as _, Sha256};
 
     use super::*;
+    use crate::SandboxConfigPatch;
     use crate::backend::with_backend;
+    use crate::sandbox::SandboxBuilder;
     use crate::volume::VolumeConfig;
+
+    #[tokio::test]
+    async fn sandbox_config_patch_overlays_global_config_by_field_presence() {
+        let mut config = GlobalConfig {
+            sandbox_defaults: crate::config::SandboxDefaults {
+                cpus: 4,
+                memory_mib: 2048,
+                cpu_placement: CpuPlacement::Auto,
+                placement_profile: Some("global-locality".into()),
+                thp: microsandbox_types::TransparentHugePagePolicy::Always,
+                shell: "/bin/bash".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        config.runtime.placement_profiles.insert(
+            "global-locality".into(),
+            PlacementProfile {
+                numa: NumaPlacement::PreferSingle,
+                memory: MemoryPlacement::FollowCpu,
+            },
+        );
+
+        let backend = LocalBackend {
+            config: Arc::new(config),
+            db: OnceCell::new(),
+            selection_source: BackendSelectionSource::Programmatic,
+            profile: None,
+        };
+
+        let (inherited, overridden) = with_backend(backend, async {
+            let patch = SandboxResourcesPatch::new()
+                .cpus(2)
+                .max_cpus(2)
+                .memory_mib(512);
+            let supplied = SandboxConfigPatch::new().resources(patch);
+            let inherited = SandboxBuilder::new("test")
+                .overlay(supplied.clone())
+                .image("alpine")
+                .build()
+                .await
+                .unwrap();
+
+            let patch = SandboxResourcesPatch::new()
+                .cpu_placement(CpuPlacement::Spread)
+                .thp(microsandbox_types::TransparentHugePagePolicy::Never);
+            let supplied = supplied.overlay(SandboxConfigPatch::new().resources(patch));
+            let overridden = SandboxBuilder::new("test")
+                .overlay(supplied)
+                .image("alpine")
+                .build()
+                .await
+                .unwrap();
+
+            (inherited, overridden)
+        })
+        .await;
+
+        assert_eq!(inherited.spec.resources.cpus, 2);
+        assert_eq!(inherited.spec.resources.max_cpus, 2);
+        assert_eq!(inherited.spec.resources.memory_mib, 512);
+        assert_eq!(inherited.spec.resources.cpu_placement, CpuPlacement::Auto);
+        assert_eq!(
+            inherited.spec.resources.placement_profile.as_deref(),
+            Some("global-locality")
+        );
+        assert_eq!(
+            inherited.spec.resources.thp,
+            microsandbox_types::TransparentHugePagePolicy::Always
+        );
+        assert_eq!(inherited.spec.runtime.shell.as_deref(), Some("/bin/bash"));
+        assert_eq!(
+            overridden.spec.resources.cpu_placement,
+            CpuPlacement::Spread
+        );
+        assert_eq!(
+            overridden.spec.resources.thp,
+            microsandbox_types::TransparentHugePagePolicy::Never
+        );
+    }
 
     #[test]
     fn operator_deployment_profile_overrides_sandbox_request() {
         let backend = LocalBackend {
-            config: Arc::new(LocalConfig::default()),
+            config: Arc::new(GlobalConfig {
+                deployment_profile: Some(DeploymentProfile::MultiTenant),
+                ..Default::default()
+            }),
             db: OnceCell::new(),
-            deployment_profile: Some(DeploymentProfile::MultiTenant),
             selection_source: BackendSelectionSource::Programmatic,
             profile: None,
         };
@@ -836,9 +933,8 @@ mod tests {
     #[test]
     fn sandbox_deployment_profile_is_preserved_without_operator_override() {
         let backend = LocalBackend {
-            config: Arc::new(LocalConfig::default()),
+            config: Arc::new(GlobalConfig::default()),
             db: OnceCell::new(),
-            deployment_profile: None,
             selection_source: BackendSelectionSource::Programmatic,
             profile: None,
         };
@@ -1241,6 +1337,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn try_build_lazy_rejects_invalid_persisted_config() {
+        let _env_guard = crate::test_support::lock_env();
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.json");
+        std::fs::write(&config_path, "not json").unwrap();
+        let previous = std::env::var_os("MSB_CONFIG_PATH");
+
+        // SAFETY: every environment-mutating SDK unit test holds the shared lock.
+        unsafe { std::env::set_var("MSB_CONFIG_PATH", &config_path) };
+        let result = LocalBackend::builder().try_build_lazy();
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("MSB_CONFIG_PATH", value),
+                None => std::env::remove_var("MSB_CONFIG_PATH"),
+            }
+        }
+
+        let error = match result {
+            Ok(_) => panic!("invalid persisted config must fail lazy construction"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, MicrosandboxError::InvalidConfig(_)));
+    }
+
     /// `LocalBackendBuilder::build()` overlays builder overrides on top of
     /// the persisted config — values the builder didn't set must be
     /// preserved from the base. This test runs `merge_into` directly so it
@@ -1249,7 +1370,7 @@ mod tests {
     fn builder_merge_preserves_persisted_fields_when_not_overridden() {
         // Persisted base: a fully-populated config the user supposedly
         // wrote to ~/.microsandbox/config.json.
-        let base = LocalConfig {
+        let base = GlobalConfig {
             log_level: Some(microsandbox_runtime::logging::LogLevel::Debug),
             deployment_profile: Some(DeploymentProfile::MultiTenant),
             database: DatabaseConfig {
@@ -1305,7 +1426,7 @@ mod tests {
 
     #[test]
     fn builder_deployment_profile_overrides_persisted_policy() {
-        let base = LocalConfig {
+        let base = GlobalConfig {
             deployment_profile: Some(DeploymentProfile::SingleTenant),
             ..Default::default()
         };
@@ -1322,7 +1443,7 @@ mod tests {
 
     #[test]
     fn builder_ssh_inactivity_timeout_overrides_persisted_default() {
-        let base = LocalConfig {
+        let base = GlobalConfig {
             ssh: crate::config::SshConfig {
                 inactivity_timeout_secs: 1800,
             },

@@ -8,11 +8,11 @@
 //!    on APFS, btrfs, XFS (with `reflink=1`), and bcachefs. Returns
 //!    `EOPNOTSUPP` (or similar) on ext4 and other non-COW filesystems.
 //!
-//! 2. **Sparse-aware copy**. POSIX `SEEK_DATA` / `SEEK_HOLE` walk of
-//!    the source's allocation map, with `copy_file_range(2)` on Linux
-//!    for in-kernel zero-copy of data extents. The destination is
-//!    `ftruncate`d to the source size up front so unallocated regions
-//!    stay holes.
+//! 2. **Sparse-aware copy**. Walks the source's allocation map with
+//!    POSIX `SEEK_DATA` / `SEEK_HOLE` or Windows
+//!    `FSCTL_QUERY_ALLOCATED_RANGES`, then copies only allocated
+//!    extents. The destination is extended to the source size up
+//!    front so unallocated regions stay holes.
 //!
 //! Never falls back to a naive byte-for-byte copy — that would
 //! densify a 4 GiB sparse file with a few MB of data into 4 GiB on
@@ -35,7 +35,7 @@ use std::path::Path;
 use std::ptr;
 
 #[cfg(windows)]
-use crate::extent::mark_sparse;
+use crate::extent::{ExtentMap, mark_sparse};
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::HANDLE;
 #[cfg(windows)]
@@ -75,6 +75,16 @@ pub enum FastCopyStrategy {
     Reflink,
     /// The destination is an independent sparse-aware copy.
     SparseCopy,
+}
+
+/// Windows strategy used to materialize the sparse destination's data.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowsSparseCopyStrategy {
+    /// Copy the filesystem-allocated ranges reported by `FSCTL_QUERY_ALLOCATED_RANGES`.
+    AllocatedRanges,
+    /// Preserve holes by finding non-zero byte runs when allocation metadata is unavailable.
+    NonzeroRuns,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -124,7 +134,7 @@ pub fn reflink(src: &Path, dst: &Path) -> io::Result<u64> {
     Ok(src_len)
 }
 
-/// Sparse-aware copy via `SEEK_DATA`/`SEEK_HOLE` and per-extent copy.
+/// Sparse-aware copy via platform allocation metadata and per-extent copy.
 ///
 /// Public for callers that want to skip the reflink attempt — e.g.
 /// when they already know the destination filesystem doesn't support
@@ -231,17 +241,7 @@ fn sparse_copy_impl(src: &Path, dst: &Path) -> io::Result<u64> {
     dst_file.set_len(len)?;
     mark_sparse(&dst_file)?;
 
-    let mut offset = 0u64;
-    let mut buf = vec![0u8; BUF_SIZE];
-    loop {
-        let n = src_file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-
-        write_nonzero_runs(&mut dst_file, offset, &buf[..n])?;
-        offset += n as u64;
-    }
+    copy_windows_sparse_data(&mut src_file, &mut dst_file, BUF_SIZE)?;
 
     dst_file.sync_all()?;
     Ok(len)
@@ -417,6 +417,68 @@ fn copy_windows_tail(src: &mut File, dst: &mut File, offset: u64, len: u64) -> i
     Ok(())
 }
 
+#[cfg(windows)]
+fn copy_windows_range(
+    src: &mut File,
+    dst: &mut File,
+    offset: u64,
+    len: u64,
+    buf: &mut [u8],
+) -> io::Result<()> {
+    src.seek(SeekFrom::Start(offset))?;
+    dst.seek(SeekFrom::Start(offset))?;
+
+    let mut remaining = len;
+    while remaining != 0 {
+        let chunk_len = remaining.min(buf.len() as u64) as usize;
+        src.read_exact(&mut buf[..chunk_len])?;
+        dst.write_all(&buf[..chunk_len])?;
+        remaining -= chunk_len as u64;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn copy_windows_sparse_data(
+    src: &mut File,
+    dst: &mut File,
+    buf_size: usize,
+) -> io::Result<WindowsSparseCopyStrategy> {
+    if let Some(map) = ExtentMap::scan_file(src)? {
+        // NTFS can enumerate the ranges that actually occupy filesystem blocks. Copy those ranges
+        // wholesale: inspecting zero/non-zero byte runs inside an allocated extent turns raw disk
+        // images into millions of tiny seeks and writes.
+        let mut buf = vec![0u8; buf_size];
+        for (offset, extent_len) in map.extents {
+            copy_windows_range(src, dst, offset, extent_len, &mut buf)?;
+        }
+        Ok(WindowsSparseCopyStrategy::AllocatedRanges)
+    } else {
+        // Filesystems without FSCTL_QUERY_ALLOCATED_RANGES cannot expose their allocation map.
+        // Preserve sparseness there with the slower byte-run fallback instead of densifying the
+        // destination with a naive full-file copy.
+        copy_windows_nonzero_runs(src, dst, buf_size)?;
+        Ok(WindowsSparseCopyStrategy::NonzeroRuns)
+    }
+}
+
+#[cfg(windows)]
+fn copy_windows_nonzero_runs(src: &mut File, dst: &mut File, buf_size: usize) -> io::Result<()> {
+    src.seek(SeekFrom::Start(0))?;
+    let mut offset = 0u64;
+    let mut buf = vec![0u8; buf_size];
+    loop {
+        let n = src.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+
+        write_nonzero_runs(dst, offset, &buf[..n])?;
+        offset += n as u64;
+    }
+    Ok(())
+}
+
 /// Reflink can fail with several different errnos depending on the
 /// filesystem and platform. Treat them all as "fall through to Tier 2"
 /// rather than propagating to the caller.
@@ -566,6 +628,8 @@ mod tests {
             .create(true)
             .truncate(true)
             .open(path)?;
+        #[cfg(windows)]
+        mark_sparse(&f)?;
         f.set_len(len)?;
         for &off in data_offsets {
             let buf = vec![0xAB_u8; 64 * 1024];
@@ -651,6 +715,35 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_sparse_copy_uses_allocated_ranges_when_available() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.bin");
+        let dst = dir.path().join("dst.bin");
+        let len = 8 * 1024 * 1024;
+
+        make_sparse(&src, len, &[0, 4 * 1024 * 1024]).unwrap();
+        let mut src_file = File::open(&src).unwrap();
+        if ExtentMap::scan_file(&src_file).unwrap().is_none() {
+            eprintln!("filesystem cannot enumerate allocated ranges; strategy not exercised");
+            return;
+        }
+
+        let mut dst_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&dst)
+            .unwrap();
+        dst_file.set_len(len).unwrap();
+        mark_sparse(&dst_file).unwrap();
+
+        let strategy = copy_windows_sparse_data(&mut src_file, &mut dst_file, 1024 * 1024).unwrap();
+        assert_eq!(strategy, WindowsSparseCopyStrategy::AllocatedRanges);
     }
 
     #[test]

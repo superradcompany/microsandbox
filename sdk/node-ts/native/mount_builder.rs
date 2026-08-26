@@ -41,6 +41,12 @@ pub struct JsBuiltVolumeMount {
     pub stat_virtualization: Option<String>,
     /// `"private" | "mirror"` for bind/named mounts; `None` for tmpfs/disk.
     pub host_permissions: Option<String>,
+    /// Guest owner uid for host-created files under bind/named mounts; `None`
+    /// when unset or for tmpfs/disk. Set together with `override_gid`.
+    pub override_uid: Option<u32>,
+    /// Guest owner gid for host-created files under bind/named mounts; `None`
+    /// when unset or for tmpfs/disk. Set together with `override_uid`.
+    pub override_gid: Option<u32>,
 }
 
 /// Fluent builder for a sandbox volume mount.
@@ -266,6 +272,20 @@ impl JsMountBuilder {
         Ok(self)
     }
 
+    /// Present host files that carry no per-file stat override as this guest
+    /// owner. Valid only for bind and directory-backed named volume mounts.
+    #[napi]
+    pub fn owner(&mut self, uid: f64, gid: f64) -> Result<&Self> {
+        // N-API's direct u32 conversion follows JavaScript's ToUint32 rules,
+        // which would silently wrap negatives and truncate fractions. Identity
+        // values must cross the language boundary without changing meaning.
+        let uid = validate_owner_id("uid", uid)?;
+        let gid = validate_owner_id("gid", gid)?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.owner(uid, gid));
+        Ok(self)
+    }
+
     /// Materialize the mount spec. Returns a flat `VolumeMount` with a
     /// `kind` discriminator and per-variant fields.
     #[napi]
@@ -278,6 +298,20 @@ impl JsMountBuilder {
             .map_err(to_napi_error)?;
         Ok(to_built_mount(mount))
     }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+fn validate_owner_id(name: &str, value: f64) -> Result<u32> {
+    if !value.is_finite() || value.fract() != 0.0 || !(0.0..=u32::MAX as f64).contains(&value) {
+        return Err(napi::Error::from_reason(format!(
+            "mount owner {name} must be an integer between 0 and {}",
+            u32::MAX
+        )));
+    }
+    Ok(value as u32)
 }
 
 fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
@@ -324,6 +358,8 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             fstype: None,
             stat_virtualization: Some(sv_str(stat_virtualization)),
             host_permissions: Some(hp_str(host_permissions)),
+            override_uid: options.override_uid,
+            override_gid: options.override_gid,
         },
         RustVolumeMount::Named {
             name,
@@ -363,6 +399,8 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
                 fstype: None,
                 stat_virtualization: Some(sv_str(stat_virtualization)),
                 host_permissions: Some(hp_str(host_permissions)),
+                override_uid: options.override_uid,
+                override_gid: options.override_gid,
             }
         }
         RustVolumeMount::Tmpfs {
@@ -386,6 +424,8 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             fstype: None,
             stat_virtualization: None,
             host_permissions: None,
+            override_uid: None,
+            override_gid: None,
         },
         RustVolumeMount::DiskImage {
             host,
@@ -417,6 +457,8 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             fstype,
             stat_virtualization: None,
             host_permissions: None,
+            override_uid: None,
+            override_gid: None,
         },
     }
 }

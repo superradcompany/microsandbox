@@ -1124,8 +1124,10 @@ export interface NapiMountBuilder {
   nosuid(): this;
   nodev(): this;
   size(mib: number): this;
+  quota(mib: number): this;
   statVirtualization(policy: string): this;
   hostPermissions(policy: string): this;
+  owner(uid: number, gid: number): this;
   build(): NapiVolumeMount;
 }
 
@@ -1146,6 +1148,8 @@ export interface NapiVolumeMount {
   readonly fstype?: string;
   readonly statVirtualization?: string;
   readonly hostPermissions?: string;
+  readonly overrideUid?: number;
+  readonly overrideGid?: number;
 }
 
 export interface NapiPatchBuilder {

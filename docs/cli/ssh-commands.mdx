@@ -41,7 +41,7 @@ cat ~/.ssh/id_ed25519.pub | msb ssh authorize --stdin
 | `--key KEY` | Read one public key from the flag value |
 | `--stdin` | Read one public key from stdin |
 
-The default authorization file is `<MSB_HOME>/ssh/authorized_keys`, or `~/.microsandbox/ssh/authorized_keys` when `MSB_HOME` is unset. The file is created with private permissions.
+The default authorization file is `<MSB_HOME>/ssh/authorized_keys`, or `~/.microsandbox/ssh/authorized_keys` when `MSB_HOME` is unset or empty. The file is created with private permissions.
 
 ## msb ssh serve
 
@@ -108,4 +108,4 @@ All SSH commands inherit `ssh.inactivity_timeout_secs` from the global configura
 | `<sandbox-dir>/ssh/host_ed25519` | Per-sandbox SSH host private key, created on first serve |
 | `<MSB_HOME>/ssh/authorized_keys` | Public keys allowed to connect |
 
-When `MSB_HOME` is unset, `<MSB_HOME>` is `~/.microsandbox`.
+When `MSB_HOME` is unset or empty, `<MSB_HOME>` is `~/.microsandbox`.

@@ -12,7 +12,7 @@
 //! 5. Fallback: `LocalBackend`.
 //!
 //! The SDK-level config lives at `~/.microsandbox/config.json` alongside the
-//! existing [`LocalConfig`](crate::config::LocalConfig) (paths, DB url,
+//! existing [`GlobalConfig`](crate::config::GlobalConfig) (paths, DB url,
 //! sandbox defaults, …). The two are orthogonal sections of the same file;
 //! this module only touches `active_profile` + `profiles`.
 
@@ -33,7 +33,7 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 /// SDK-level configuration loaded from `~/.microsandbox/config.json`.
 ///
 /// `serde(default)` everywhere — a missing file or missing keys are equivalent
-/// to defaults. Coexists with [`LocalConfig`](crate::config::LocalConfig) in
+/// to defaults. Coexists with [`GlobalConfig`](crate::config::GlobalConfig) in
 /// the same JSON document; serde ignores fields it doesn't know.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -111,7 +111,7 @@ pub fn load_sdk_config() -> MicrosandboxResult<SdkConfig> {
         ))
     })?;
     // Parse with serde's permissive shape — `serde(default)` on SdkConfig means
-    // a JSON document that only contains LocalConfig fields produces an empty
+    // a JSON document that only contains GlobalConfig fields produces an empty
     // SdkConfig without error.
     let cfg: SdkConfig = serde_json::from_str(&raw).map_err(|e| {
         MicrosandboxError::InvalidConfig(format!(
@@ -405,7 +405,7 @@ fn resolve_api_key_ref(profile: &str, key_ref: &str) -> MicrosandboxResult<Strin
 }
 
 /// Return the SDK config file path. Delegates to [`crate::config::config_path`]
-/// so the SDK config and the [`LocalConfig`](crate::config::LocalConfig)
+/// so the SDK config and the [`GlobalConfig`](crate::config::GlobalConfig)
 /// always agree on the path (they live in the same JSON document). Honours
 /// `MSB_CONFIG_PATH` via that.
 fn sdk_config_path() -> PathBuf {
@@ -439,7 +439,7 @@ mod tests {
 
     #[test]
     fn sdk_config_ignores_unknown_keys() {
-        // LocalConfig fields (home, log_level, paths, ...) coexist in the same file.
+        // GlobalConfig fields (home, log_level, paths, ...) coexist in the same file.
         let json = r#"{
             "home": "/opt/microsandbox",
             "log_level": "info",

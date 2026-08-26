@@ -20,7 +20,7 @@ use std::{
     ffi::{CStr, CString},
     fs::File,
     io,
-    os::fd::{AsRawFd, FromRawFd},
+    os::fd::{AsRawFd, FromRawFd, RawFd},
     os::unix::ffi::OsStrExt,
     path::{Component, Path, PathBuf},
     sync::{
@@ -67,8 +67,8 @@ pub enum CachePolicy {
 pub enum StatVirtualization {
     /// Fail-closed: require xattr support; eager probe at mount time.
     ///
-    /// Reads and writes the override xattr. Mount fails if the host
-    /// filesystem cannot store `user.*` xattrs on the bind root.
+    /// Read-only mounts require readable xattrs. Writable mounts require
+    /// writable xattrs so every guest metadata operation can be persisted.
     Strict,
 
     /// Opportunistic: apply the overlay if present; tolerate missing xattr support.
@@ -171,6 +171,12 @@ pub struct PassthroughConfig {
     /// `None` means unbounded. When set, guest-attributable growth past this
     /// many bytes is rejected with `ENOSPC`.
     pub quota_bytes: Option<u64>,
+
+    /// Optional quota accounting root when it differs from `root_dir`.
+    ///
+    /// Single-file mounts anchor pathname resolution at the parent directory,
+    /// while accounting only the selected file. `None` uses `root_dir`.
+    pub quota_root: Option<PathBuf>,
 }
 
 /// Passthrough filesystem backend.
@@ -264,19 +270,46 @@ impl PassthroughFs {
     ///
     /// Opens the root directory and optionally probes for xattr support.
     pub fn new(cfg: PassthroughConfig) -> io::Result<Self> {
+        Self::new_with_stat_probe(cfg, None)
+    }
+
+    /// Create a passthrough backend whose strict-stat probe targets one child.
+    ///
+    /// A single-file facade uses this to verify the only exposed inode instead
+    /// of the otherwise-hidden parent directory. The normal directory backend
+    /// continues to probe its root because every child is guest-visible.
+    pub(crate) fn new_with_stat_probe(
+        cfg: PassthroughConfig,
+        probe_name: Option<&CStr>,
+    ) -> io::Result<Self> {
         // Open the root directory, contained beneath the anchor when one is set.
         let root_fd = open_root(&cfg)?;
 
-        // Probe xattr support if strict mode is enabled.
-        if cfg.strict_enabled() && cfg.xattr_enabled() {
-            let supported = stat_override::probe_xattr_support(root_fd.as_raw_fd())?;
-            if !supported {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "xattr not supported on root filesystem and stat_virtualization is Strict",
-                ));
+        let probe_file = match probe_name {
+            Some(name) => {
+                let access_mode = if cfg.readonly() {
+                    libc::O_RDONLY
+                } else {
+                    libc::O_WRONLY
+                };
+                let fd = unsafe {
+                    libc::openat(
+                        root_fd.as_raw_fd(),
+                        name.as_ptr(),
+                        access_mode | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                    )
+                };
+                if fd < 0 {
+                    return Err(platform::linux_error(io::Error::last_os_error()));
+                }
+                Some(unsafe { File::from_raw_fd(fd) })
             }
-        }
+            None => None,
+        };
+        let probe_fd = probe_file
+            .as_ref()
+            .map_or_else(|| root_fd.as_raw_fd(), AsRawFd::as_raw_fd);
+        probe_strict_xattr_support(&cfg, probe_fd)?;
 
         // Create the init binary file.
         let init_file = init_binary::create_init_file()?;
@@ -296,9 +329,14 @@ impl PassthroughFs {
             unsafe { File::from_raw_fd(fd) }
         };
 
-        let quota = cfg
-            .quota_bytes
-            .map(|limit| super::quota::DirQuota::new(cfg.root_dir.clone(), limit));
+        let quota = cfg.quota_bytes.map(|limit| {
+            super::quota::DirQuota::new(
+                cfg.quota_root
+                    .clone()
+                    .unwrap_or_else(|| cfg.root_dir.clone()),
+                limit,
+            )
+        });
 
         Ok(Self {
             cfg,
@@ -477,6 +515,7 @@ impl Default for PassthroughConfig {
             inject_init: true,
             bind_identity_map: None,
             quota_bytes: None,
+            quota_root: None,
         }
     }
 }
@@ -883,6 +922,44 @@ impl DynFileSystem for PassthroughFs {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Verify the xattr capability required by a strict mount's access mode.
+///
+/// A read-only mount only consumes existing stat overrides, so requiring a
+/// write would reject readable paths such as foreign-owned sticky directories.
+/// Writable mounts retain the stronger write probe because guest metadata
+/// changes must be persisted on every exposed inode, including the mount root.
+pub(crate) fn probe_strict_xattr_support(
+    cfg: &PassthroughConfig,
+    root_fd: RawFd,
+) -> io::Result<()> {
+    if !cfg.strict_enabled() || !cfg.xattr_enabled() {
+        return Ok(());
+    }
+
+    let (operation, supported) = if cfg.readonly() {
+        ("read", stat_override::probe_xattr_read_support(root_fd))
+    } else {
+        ("write", stat_override::probe_xattr_write_support(root_fd))
+    };
+    let supported = supported.map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("strict stat virtualization {operation} probe failed: {error}"),
+        )
+    })?;
+
+    if !supported {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "strict stat virtualization requires xattr {operation} support on the mount root"
+            ),
+        ));
+    }
+
+    Ok(())
+}
 
 /// Open the mount root directory.
 ///

@@ -29,7 +29,7 @@ use super::{
 };
 #[cfg(target_os = "linux")]
 use crate::backends::shared::platform;
-use crate::backends::shared::{init_binary, inode_table::MultikeyBTreeMap, stat_override};
+use crate::backends::shared::{init_binary, inode_table::MultikeyBTreeMap};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -156,6 +156,14 @@ impl PassthroughFsBuilder {
         let root_dir = self
             .root_dir
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "root_dir not set"))?;
+        if self.bind_identity_map.is_some()
+            && matches!(self.stat_virtualization, StatVirtualization::Off)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "bind identity maps require stat virtualization",
+            ));
+        }
 
         let cfg_probe = super::PassthroughConfig {
             root_dir: root_dir.clone(),
@@ -170,21 +178,13 @@ impl PassthroughFsBuilder {
             inject_init: self.inject_init,
             bind_identity_map: self.bind_identity_map,
             quota_bytes: self.quota_bytes,
+            quota_root: None,
         };
 
         // Open the root directory, contained beneath the anchor when one is set.
         let root_fd = super::open_root(&cfg_probe)?;
 
-        // Probe xattr support if strict mode is enabled.
-        if cfg_probe.strict_enabled() && cfg_probe.xattr_enabled() {
-            let supported = stat_override::probe_xattr_support(root_fd.as_raw_fd())?;
-            if !supported {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "xattr not supported on root filesystem and stat_virtualization is Strict",
-                ));
-            }
-        }
+        super::probe_strict_xattr_support(&cfg_probe, root_fd.as_raw_fd())?;
 
         // Create the init binary file.
         let init_file = init_binary::create_init_file()?;
@@ -206,9 +206,14 @@ impl PassthroughFsBuilder {
 
         let cfg = cfg_probe;
 
-        let quota = cfg
-            .quota_bytes
-            .map(|limit| super::super::quota::DirQuota::new(cfg.root_dir.clone(), limit));
+        let quota = cfg.quota_bytes.map(|limit| {
+            super::super::quota::DirQuota::new(
+                cfg.quota_root
+                    .clone()
+                    .unwrap_or_else(|| cfg.root_dir.clone()),
+                limit,
+            )
+        });
 
         Ok(PassthroughFs {
             cfg,

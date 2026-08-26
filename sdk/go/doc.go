@@ -10,7 +10,8 @@
 //
 // The SDK works out of the box: the FFI library is embedded in the Go
 // binary and loads on first use. EnsureInstalled is optional and only
-// governs the msb + libkrunfw runtime download into ~/.microsandbox/.
+// governs the msb + libkrunfw runtime download into the install dir
+// ($MSB_HOME, default ~/.microsandbox).
 // Call it at startup if you want install errors surfaced up front:
 //
 //	if err := microsandbox.EnsureInstalled(ctx); err != nil {

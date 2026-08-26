@@ -1,5 +1,25 @@
 use super::*;
-use crate::backends::passthroughfs::{HostPermissions, StatVirtualization};
+use crate::backends::passthroughfs::{BindIdentityMap, HostPermissions, StatVirtualization};
+
+#[test]
+fn test_identity_map_rejected_when_stat_virtualization_is_off() {
+    let tmp = tempfile::tempdir().unwrap();
+    let handle = std::sync::Arc::new(std::sync::OnceLock::from(BindIdentityMap::fixed(
+        1000, 1000,
+    )));
+    let err = match PassthroughFs::builder()
+        .root_dir(tmp.path())
+        .stat_virtualization(StatVirtualization::Off)
+        .bind_identity_map(handle)
+        .build()
+    {
+        Ok(_) => panic!("identity map with stat virtualization off must fail"),
+        Err(err) => err,
+    };
+
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(err.to_string().contains("require stat virtualization"));
+}
 
 #[test]
 fn test_strict_succeeds_on_xattr_capable_fs() {
@@ -12,6 +32,26 @@ fn test_strict_succeeds_on_xattr_capable_fs() {
     sb.fuse_write(entry.inode, handle, b"ok", 0).unwrap();
     let data = sb.fuse_read(entry.inode, handle, 1024, 0).unwrap();
     assert_eq!(&data[..], b"ok");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn test_readonly_strict_does_not_require_xattr_write_access() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let cfg = PassthroughConfig {
+        root_dir: tmp.path().to_path_buf(),
+        stat_virtualization: StatVirtualization::Strict,
+        readonly: true,
+        ..Default::default()
+    };
+
+    // The root is readable but cannot accept the write probe used by writable
+    // strict mounts. Read-only strict construction must remain non-mutating.
+    let _fs = PassthroughFs::new(cfg).unwrap();
 }
 
 #[test]

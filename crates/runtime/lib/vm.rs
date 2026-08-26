@@ -18,9 +18,9 @@ use std::time::Duration;
 use microsandbox_db::DbWriteConnection;
 use microsandbox_db::entity::run as run_entity;
 #[cfg(unix)]
-use microsandbox_filesystem::{BindIdentityMapHandle, DynFileSystem};
+use microsandbox_filesystem::{BindIdentityMap, BindIdentityMapHandle, DynFileSystem};
 use microsandbox_filesystem::{
-    HostPermissions, PassthroughConfig, PassthroughFs, StatVirtualization,
+    HostPermissions, PassthroughConfig, PassthroughFs, SingleFileFs, StatVirtualization,
 };
 use microsandbox_metrics::{ActivateSlot, MetricsRegistry, ReleaseMode};
 use microsandbox_protocol::{
@@ -43,6 +43,7 @@ use crate::bootstrap_fs::AgentBootstrapFs;
 use crate::console::AgentConsolePipeBridge;
 use crate::console::{AgentConsoleBackend, ConsoleSharedState};
 use crate::heartbeat::{self, HeartbeatDecision, HeartbeatReader};
+use crate::launch::FileMountConfig;
 use crate::logging::LogLevel;
 use crate::metrics::run_metrics_sampler;
 use crate::relay::{self, AgentRelay};
@@ -344,6 +345,9 @@ pub struct VmConfig {
 
     /// Additional mounts as `tag:host_path[:opts]` strings.
     pub mounts: Vec<String>,
+
+    /// Isolated host-file mounts backed by synthetic one-entry filesystems.
+    pub file_mounts: Vec<FileMountConfig>,
 
     /// Disk-image volume mounts attached as extra virtio-blk devices.
     pub disks: Vec<DiskMountSpec>,
@@ -1587,7 +1591,45 @@ fn build_vm(
         builder = builder.fs(move |fs| fs.tag(&runtime_tag).custom(Box::new(backend)));
     }
 
-    // Additional mounts.
+    // Isolated file mounts. Each backend exposes a synthetic root containing
+    // only the selected file, so remounting the tag cannot reveal host siblings.
+    for file_mount in &vm.file_mounts {
+        let parsed = parse_mount_spec(&file_mount.mount)
+            .map_err(|e| RuntimeError::Custom(format!("file mount {:?}: {e}", file_mount.mount)))?;
+        let tag = parsed.tag;
+        let host_path = PathBuf::from(&parsed.host_path);
+        let override_owner = match (parsed.override_uid, parsed.override_gid) {
+            (Some(uid), Some(gid)) => Some((uid, gid)),
+            _ => None,
+        };
+        #[cfg(unix)]
+        let mount_bind_identity_map = bind_identity_map_for_mount(
+            &mut bind_identity_map,
+            parsed.stat_virtualization,
+            override_owner,
+        );
+        let cfg = PassthroughConfig {
+            stat_virtualization: parsed.stat_virtualization,
+            host_permissions: parsed.host_permissions,
+            readonly: parsed.readonly,
+            quota_bytes: parsed.quota_bytes,
+            #[cfg(unix)]
+            bind_identity_map: mount_bind_identity_map,
+            #[cfg(windows)]
+            default_owner: override_owner,
+            ..Default::default()
+        };
+        let backend = SingleFileFs::new(host_path.clone(), file_mount.filename.clone(), cfg)
+            .map_err(|e| {
+                RuntimeError::Custom(format!(
+                    "file mount {tag}: failed to open host file {}: {e}",
+                    host_path.display()
+                ))
+            })?;
+        builder = builder.fs(move |fs| fs.tag(&tag).custom(Box::new(backend)));
+    }
+
+    // Additional directory mounts.
     for mount_spec in &vm.mounts {
         let parsed = parse_mount_spec(mount_spec)
             .map_err(|e| RuntimeError::Custom(format!("--mount {mount_spec:?}: {e}")))?;
@@ -1596,9 +1638,18 @@ fn build_vm(
         // Keep the host path as a PathBuf so mount failures can format it
         // without relying on the string-only mount spec field.
         let host_path = PathBuf::from(&parsed.host_path);
+        // Explicit guest owner for host files with no per-file override. Parsing
+        // guarantees uid/gid come as a pair, so this is Some only when both are set.
+        let override_owner = match (parsed.override_uid, parsed.override_gid) {
+            (Some(uid), Some(gid)) => Some((uid, gid)),
+            _ => None,
+        };
         #[cfg(unix)]
-        let mount_bind_identity_map =
-            bind_identity_map_for_mount(&mut bind_identity_map, parsed.stat_virtualization);
+        let mount_bind_identity_map = bind_identity_map_for_mount(
+            &mut bind_identity_map,
+            parsed.stat_virtualization,
+            override_owner,
+        );
         let cfg = PassthroughConfig {
             root_dir: host_path.clone(),
             inject_init: false,
@@ -1610,16 +1661,31 @@ fn build_vm(
             no_symlink_root: !parsed.follow_root_symlinks,
             #[cfg(unix)]
             bind_identity_map: mount_bind_identity_map,
+            #[cfg(windows)]
+            default_owner: override_owner,
             quota_bytes: parsed.quota_bytes,
             ..Default::default()
         };
         let backend = PassthroughFs::new(cfg).map_err(|e| {
-            // Name the folder on a permission error, usually an OS access restriction.
+            // Name the folder on a permission error. The underlying error
+            // distinguishes path access from a strict metadata probe failure.
             if e.kind() == std::io::ErrorKind::PermissionDenied {
+                #[cfg(target_os = "macos")]
+                let platform_hint =
+                    " On macOS, grant access in System Settings > Privacy & Security.";
+                #[cfg(not(target_os = "macos"))]
+                let platform_hint = "";
+                let policy_hint = if matches!(
+                    parsed.stat_virtualization,
+                    StatVirtualization::Strict
+                ) {
+                    " For a foreign-owned path, use stat-virt=relaxed if full metadata virtualization is not required."
+                } else {
+                    ""
+                };
                 RuntimeError::Custom(format!(
-                    "mount {tag}: permission denied reading host folder {} ({e}). \
-                     On macOS, grant access in System Settings > Privacy & Security.",
-                    host_path.display()
+                    "mount {tag}: permission denied accessing host folder {} ({e}).{platform_hint}{policy_hint}",
+                    host_path.display(),
                 ))
             } else {
                 RuntimeError::Custom(format!("mount {tag}: {e}"))
@@ -2085,15 +2151,26 @@ fn release_reserved_metrics_slot(handoff: Option<&MetricsSlotHandoff>) {
 fn bind_identity_map_for_mount(
     registration: &mut BindIdentityMapRegistration,
     stat_virtualization: StatVirtualization,
+    override_owner: Option<(u32, u32)>,
 ) -> Option<BindIdentityMapHandle> {
     if matches!(stat_virtualization, StatVirtualization::Off) {
         return None;
+    }
+
+    // Explicit ownership is per mount. It must not initialize the shared
+    // default-user handle because doing so would make mount order determine the
+    // ownership of every other stat-virtualized mount in the VM.
+    if let Some((guest_uid, guest_gid)) = override_owner {
+        return Some(Arc::new(OnceLock::from(BindIdentityMap::fixed(
+            guest_uid, guest_gid,
+        ))));
     }
 
     registration.mount_count += 1;
     let handle = registration
         .handle
         .get_or_insert_with(|| Arc::new(OnceLock::new()));
+
     Some(Arc::clone(handle))
 }
 
@@ -2416,15 +2493,25 @@ struct ParsedMountSpec {
     readonly: bool,
     follow_root_symlinks: bool,
     quota_bytes: Option<u64>,
+    /// Guest uid to present for host files that carry no per-file override
+    /// (`uid=` option). `None` keeps the runtime default. Must be set together
+    /// with [`override_gid`](Self::override_gid).
+    override_uid: Option<u32>,
+    /// Guest gid to present for host files that carry no per-file override
+    /// (`gid=` option). `None` keeps the runtime default. Must be set together
+    /// with [`override_uid`](Self::override_uid).
+    override_gid: Option<u32>,
 }
 
 /// Parse a `--mount` spec into [`ParsedMountSpec`].
 ///
 /// Wire grammar: `tag:host_path[:opts]`, where `opts` is a comma-separated
 /// option block of flags (`ro`, `rw`, `noexec`, `nosuid`, `nodev`,
-/// `follow-root-symlinks`) and keyed policies (`stat-virt=...`, `host-perms=...`).
-/// The `follow-root-symlinks` flag opts the mount out of the default no-follow
-/// root resolution; its absence keeps the protective default on.
+/// `follow-root-symlinks`) and keyed policies (`stat-virt=...`, `host-perms=...`,
+/// `uid=...`, `gid=...`). The `follow-root-symlinks` flag opts the mount out of the
+/// default no-follow root resolution; its absence keeps the protective default on.
+/// `uid=`/`gid=` set the guest owner presented for host files that have no per-file
+/// override (see [`ParsedMountSpec::override_uid`]); they must be given together.
 fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
     let (tag, rest) = spec
         .split_once(':')
@@ -2449,6 +2536,8 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
     let mut readonly = false;
     let mut follow_root_symlinks = false;
     let mut quota_bytes = None;
+    let mut override_uid = None;
+    let mut override_gid = None;
     let mut seen_stat_virt = false;
     let mut seen_host_perms = false;
     let mut seen_access = false;
@@ -2457,6 +2546,8 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
     let mut seen_nodev = false;
     let mut seen_follow_root = false;
     let mut seen_quota = false;
+    let mut seen_uid = false;
+    let mut seen_gid = false;
 
     if let Some(opts) = options {
         for opt in opts.split(',') {
@@ -2556,11 +2647,45 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
                             })?;
                             quota_bytes = Some(mib.saturating_mul(1024 * 1024));
                         }
+                        "uid" => {
+                            if seen_uid {
+                                return Err(
+                                    "mount option `uid` specified more than once".to_string()
+                                );
+                            }
+                            seen_uid = true;
+                            override_uid = Some(value.parse::<u32>().map_err(|_| {
+                                format!("invalid uid {value:?} (expected an unsigned integer)")
+                            })?);
+                        }
+                        "gid" => {
+                            if seen_gid {
+                                return Err(
+                                    "mount option `gid` specified more than once".to_string()
+                                );
+                            }
+                            seen_gid = true;
+                            override_gid = Some(value.parse::<u32>().map_err(|_| {
+                                format!("invalid gid {value:?} (expected an unsigned integer)")
+                            })?);
+                        }
                         other => return Err(format!("unknown mount option {other:?}")),
                     }
                 }
             }
         }
+    }
+
+    // The override owner is applied host-side (before the guest resolves its
+    // default user), so both halves must be known up front: reject a lone
+    // `uid=`/`gid=`.
+    if override_uid.is_some() != override_gid.is_some() {
+        return Err("mount options `uid` and `gid` must be specified together".to_string());
+    }
+    if override_uid.is_some() && matches!(stat_virtualization, StatVirtualization::Off) {
+        return Err(
+            "mount options `uid` and `gid` cannot be combined with stat-virt=off".to_string(),
+        );
     }
 
     Ok(ParsedMountSpec {
@@ -2571,6 +2696,8 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
         readonly,
         follow_root_symlinks,
         quota_bytes,
+        override_uid,
+        override_gid,
     })
 }
 
@@ -2798,6 +2925,40 @@ mod tests {
         assert!(matches!(p.stat_virtualization, StatVirtualization::Strict));
         assert!(matches!(p.host_permissions, HostPermissions::Private));
         assert!(!p.readonly);
+        assert_eq!(p.override_uid, None);
+        assert_eq!(p.override_gid, None);
+    }
+
+    #[test]
+    fn test_parse_mount_spec_uid_gid() {
+        let p = parse_mount_spec("home:/host/home:uid=1000,gid=1000").unwrap();
+        assert_eq!(p.override_uid, Some(1000));
+        assert_eq!(p.override_gid, Some(1000));
+
+        // uid 0 (root) is a valid, distinct value from "unset".
+        let p = parse_mount_spec("home:/host/home:uid=0,gid=0").unwrap();
+        assert_eq!(p.override_uid, Some(0));
+        assert_eq!(p.override_gid, Some(0));
+    }
+
+    #[test]
+    fn test_parse_mount_spec_uid_gid_must_be_paired() {
+        assert!(parse_mount_spec("home:/host/home:uid=1000").is_err());
+        assert!(parse_mount_spec("home:/host/home:gid=1000").is_err());
+    }
+
+    #[test]
+    fn test_parse_mount_spec_uid_gid_reject_stat_virt_off() {
+        let err = parse_mount_spec("home:/host/home:uid=1000,gid=1000,stat-virt=off").unwrap_err();
+        assert!(
+            err.contains("cannot be combined with stat-virt=off"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_invalid_uid() {
+        assert!(parse_mount_spec("home:/host/home:uid=abc,gid=1000").is_err());
     }
 
     #[test]
@@ -2943,19 +3104,31 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn test_bind_identity_map_registration_shares_handle_for_virtualized_mounts() {
+    fn test_bind_identity_map_registration_separates_explicit_owners() {
         let mut registration = BindIdentityMapRegistration {
             handle: None,
             mount_count: 0,
         };
 
         let first =
-            bind_identity_map_for_mount(&mut registration, StatVirtualization::Strict).unwrap();
+            bind_identity_map_for_mount(&mut registration, StatVirtualization::Strict, None)
+                .unwrap();
         let second =
-            bind_identity_map_for_mount(&mut registration, StatVirtualization::Relaxed).unwrap();
-        let off = bind_identity_map_for_mount(&mut registration, StatVirtualization::Off);
+            bind_identity_map_for_mount(&mut registration, StatVirtualization::Relaxed, None)
+                .unwrap();
+        let fixed = bind_identity_map_for_mount(
+            &mut registration,
+            StatVirtualization::Relaxed,
+            Some((1000, 1001)),
+        )
+        .unwrap();
+        let off = bind_identity_map_for_mount(&mut registration, StatVirtualization::Off, None);
 
         assert!(Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&first, &fixed));
+        let fixed = fixed.get().unwrap();
+        assert_eq!((fixed.guest_uid, fixed.guest_gid), (1000, 1001));
+        assert_eq!((fixed.overflow_uid, fixed.overflow_gid), (1000, 1001));
         assert!(off.is_none());
         assert_eq!(registration.mount_count, 2);
     }

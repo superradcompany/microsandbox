@@ -174,7 +174,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           cache-bin: false
           cache-targets: true
@@ -207,7 +207,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           cache-bin: false
           cache-targets: true
@@ -253,7 +253,7 @@ jobs:
 
       # Cache dependency artifacts as one archive instead of uploading every
       # compiler result separately through the GitHub Actions cache API.
-      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           cache-bin: false
           cache-targets: true
@@ -322,7 +322,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           cache-bin: false
           cache-targets: true
@@ -364,12 +364,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           cache-bin: false
           cache-targets: true
 
-      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2
+      - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2
         with:
           tool: cargo-nextest@0.9.143
 
@@ -490,7 +490,7 @@ jobs:
           components: clippy
           targets: ${{ matrix.rust_target }}
 
-      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           cache-bin: false
           # Preserve Cargo fingerprints and linked outputs across quality runs.
@@ -555,6 +555,14 @@ jobs:
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
           cargo +stable test --no-default-features --features net -p microsandbox --lib --target ${{ matrix.rust_target }} sandbox::patch::tests::bind_patch_
 
+      - name: Test Windows DNS resolver
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
+          cargo +stable test -p microsandbox-network --lib --target ${{ matrix.rust_target }} dns::windows_resolver::
+
   windows-build:
     name: Build Windows ${{ matrix.component }} (${{ matrix.target }})
     needs: [build-kernel, build-kernel-x86_64, build-agentd-aarch64, build-agentd-x86_64, changes]
@@ -614,7 +622,7 @@ jobs:
         with:
           targets: ${{ matrix.rust_target }}
 
-      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           cache-bin: false
           # Retain exact Cargo outputs, including release links.
@@ -711,7 +719,7 @@ jobs:
           components: clippy, rustfmt
           targets: x86_64-unknown-linux-musl
 
-      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           cache-bin: false
           cache-targets: true
@@ -763,7 +771,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           cache-bin: false
           cache-targets: true
@@ -843,7 +851,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           cache-bin: false
           cache-targets: true
@@ -851,7 +859,7 @@ jobs:
       - name: Set up mold
         uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
 
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
           cache-dependency-glob: "sdk/python/uv.lock"
@@ -868,8 +876,9 @@ jobs:
       - name: Stage runtime bundle
         run: |
           mkdir -p sdk/python/microsandbox/_bundled/bin sdk/python/microsandbox/_bundled/lib
-          cp build/msb sdk/python/microsandbox/_bundled/bin/
-          cp build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} sdk/python/microsandbox/_bundled/lib/
+          # Match the release wheel after artifact download strips executable bits.
+          install -m 755 build/msb sdk/python/microsandbox/_bundled/bin/msb
+          install -m 644 build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} sdk/python/microsandbox/_bundled/lib/
           cd sdk/python/microsandbox/_bundled/lib
           ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
           ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} libkrunfw.so
@@ -898,7 +907,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
           cache-dependency-glob: "sdk/python/uv.lock"
@@ -951,7 +960,7 @@ jobs:
       - name: Use checkout Rust SDK
         run: scripts/ci/ruby-sdk-checkout.sh prepare
 
-      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           workspaces: . -> target/ruby-${{ matrix.ruby }}
           key: ruby-${{ matrix.ruby }}-ci
@@ -1010,7 +1019,7 @@ jobs:
       - name: Use checkout Rust SDK
         run: scripts/ci/ruby-sdk-checkout.sh prepare
 
-      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           workspaces: . -> target/ruby-source-gem-4.0
           key: ruby-4.0-source-gem
@@ -1039,7 +1048,7 @@ jobs:
         run: |
           gem build microsandbox.gemspec
           mold -run gem install --local microsandbox-*.gem --no-document
-          ruby --disable-gems -e 'require "rubygems"; require "microsandbox"; abort unless Microsandbox.version == "0.6.9"'
+          ruby --disable-gems -e 'require "rubygems"; require "microsandbox"; abort unless Microsandbox.version == "0.6.15"'
 
       - name: Restore standalone Ruby lockfile
         if: always()
@@ -1084,7 +1093,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           workspaces: . -> target/ruby-platform-${{ matrix.platform }}
           key: ruby-platform-${{ matrix.platform }}
@@ -1410,7 +1419,7 @@ jobs:
       - name: Clean runner disk
         run: scripts/ci/clean-runner-disk.sh
 
-      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2
+      - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2
         with:
           tool: cargo-nextest@0.9.143
 
@@ -1644,7 +1653,7 @@ jobs:
       - name: Clean runner disk
         run: scripts/ci/clean-runner-disk.sh
 
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
           cache-dependency-glob: "sdk/python/uv.lock"
@@ -1701,7 +1710,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
           cache-dependency-glob: "sdk/python/uv.lock"

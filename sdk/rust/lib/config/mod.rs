@@ -1,6 +1,6 @@
 //! Configuration schema for the microsandbox library.
 //!
-//! [`LocalConfig`] is the persisted schema for `~/.microsandbox/config.json`.
+//! [`GlobalConfig`] is the persisted schema for `~/.microsandbox/config.json`.
 //! It is owned by [`LocalBackend`](crate::backend::LocalBackend); accessors
 //! live on explicit backend instances, with [`config`] providing an ambient
 //! helper for the active local backend. See D6.7 Layer 2a in
@@ -138,7 +138,7 @@ static SDK_LIBKRUNFW_PATH: OnceLock<PathBuf> = OnceLock::new();
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 #[derive(Default)]
-pub struct LocalConfig {
+pub struct GlobalConfig {
     /// Root directory for all microsandbox data.
     pub home: Option<PathBuf>,
 
@@ -182,6 +182,10 @@ pub struct LocalConfig {
     pub metrics: MetricsConfig,
 }
 
+/// Compatibility alias for the backend-owned global configuration.
+#[deprecated(since = "0.6.15", note = "renamed to GlobalConfig")]
+pub type LocalConfig = GlobalConfig;
+
 /// Default settings for host-side SSH sessions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -208,7 +212,7 @@ pub struct SshConfig {
 pub struct MetricsConfig {
     /// Number of slots reserved in the metrics shared-memory segment.
     /// A value of `0` (the default) falls back to the built-in default at
-    /// read time via [`LocalConfig::metrics_registry_capacity`]. The
+    /// read time via [`GlobalConfig::metrics_registry_capacity`]. The
     /// derived `Default` therefore avoids pinning serialized configs to a
     /// particular release's default capacity.
     pub capacity: u32,
@@ -432,7 +436,7 @@ struct KeyringRegistryCredential {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
-impl LocalConfig {
+impl GlobalConfig {
     /// Validate defaults that affect sandbox construction.
     pub(crate) fn validate_sandbox_defaults(&self) -> MicrosandboxResult<()> {
         let oci = &self.sandbox_defaults.oci;
@@ -847,7 +851,7 @@ fn docker_credential_servers(hostname: &str) -> Vec<String> {
 /// This is the ambient convenience path for callers that do not explicitly
 /// construct a [`LocalBackend`](crate::backend::LocalBackend). It returns
 /// [`MicrosandboxError::Unsupported`] when the active backend is cloud.
-pub fn config() -> MicrosandboxResult<Arc<LocalConfig>> {
+pub fn config() -> MicrosandboxResult<Arc<GlobalConfig>> {
     let backend = crate::backend::default_backend();
     let local = backend
         .as_local()
@@ -858,7 +862,7 @@ pub fn config() -> MicrosandboxResult<Arc<LocalConfig>> {
 /// Resolve the path to the persisted local config file.
 pub fn config_path() -> PathBuf {
     // Honour MSB_CONFIG_PATH if set — same env var the SDK config loader
-    // checks. The LocalConfig and the SdkConfig live in the same JSON
+    // checks. The GlobalConfig and the SdkConfig live in the same JSON
     // document, so both layers must agree on the path.
     if let Ok(p) = std::env::var("MSB_CONFIG_PATH") {
         return PathBuf::from(p);
@@ -867,17 +871,17 @@ pub fn config_path() -> PathBuf {
 }
 
 /// Load the persisted config file or return the default config if it does not exist.
-pub fn load_persisted_config_or_default() -> MicrosandboxResult<LocalConfig> {
+pub fn load_persisted_config_or_default() -> MicrosandboxResult<GlobalConfig> {
     let path = config_path();
     if !path.exists() {
-        return Ok(LocalConfig::default());
+        return Ok(GlobalConfig::default());
     }
 
     read_config_from(&path)
 }
 
 /// Persist the provided local config to disk as pretty JSON.
-pub fn save_persisted_config(config: &LocalConfig) -> MicrosandboxResult<()> {
+pub fn save_persisted_config(config: &GlobalConfig) -> MicrosandboxResult<()> {
     let path = config_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
@@ -930,7 +934,7 @@ pub fn resolve_msb_path() -> MicrosandboxResult<PathBuf> {
     config()?.resolve_msb_path()
 }
 
-/// Resolve the path to the `msb` binary against the supplied [`LocalConfig`].
+/// Resolve the path to the `msb` binary against the supplied [`GlobalConfig`].
 ///
 /// Resolution order:
 /// 1. `MSB_PATH` environment variable
@@ -939,7 +943,7 @@ pub fn resolve_msb_path() -> MicrosandboxResult<PathBuf> {
 /// 4. workspace-local `build/msb` or `target/debug/msb` (debug builds only)
 /// 5. `~/.microsandbox/bin/msb`
 /// 6. `which::which("msb")`
-fn resolve_msb_path_for_config(config: &LocalConfig) -> MicrosandboxResult<PathBuf> {
+fn resolve_msb_path_for_config(config: &GlobalConfig) -> MicrosandboxResult<PathBuf> {
     let env_msb = std::env::var("MSB_PATH").ok();
     let sdk_msb = SDK_MSB_PATH.get().cloned();
     let config_msb = config.paths.msb.clone();
@@ -1044,7 +1048,7 @@ pub fn resolve_libkrunfw_path() -> MicrosandboxResult<PathBuf> {
     config()?.resolve_libkrunfw_path()
 }
 
-/// Resolve the path to `libkrunfw` against the supplied [`LocalConfig`].
+/// Resolve the path to `libkrunfw` against the supplied [`GlobalConfig`].
 ///
 /// Resolution order (highest first):
 /// 1. `MSB_LIBKRUNFW_PATH` environment variable (user-facing override).
@@ -1054,7 +1058,7 @@ pub fn resolve_libkrunfw_path() -> MicrosandboxResult<PathBuf> {
 /// 4. A sibling of the resolved `msb` binary (for `build/msb`).
 /// 5. `../lib/` next to the resolved `msb` binary (for installed layouts).
 /// 6. `{home}/lib/libkrunfw.{so,dylib}`.
-fn resolve_libkrunfw_path_for_config(config: &LocalConfig) -> MicrosandboxResult<PathBuf> {
+fn resolve_libkrunfw_path_for_config(config: &GlobalConfig) -> MicrosandboxResult<PathBuf> {
     if let Ok(env_path) = std::env::var("MSB_LIBKRUNFW_PATH") {
         let path = PathBuf::from(env_path);
         if path.is_file() {
@@ -1185,7 +1189,7 @@ fn dedupe_strings(values: &mut Vec<String>) {
     *values = deduped;
 }
 
-fn read_config_from(path: &Path) -> MicrosandboxResult<LocalConfig> {
+fn read_config_from(path: &Path) -> MicrosandboxResult<GlobalConfig> {
     let content = std::fs::read_to_string(path).map_err(|e| {
         MicrosandboxError::Custom(format!("failed to read config `{}`: {e}", path.display()))
     })?;
@@ -1198,7 +1202,7 @@ fn read_config_from(path: &Path) -> MicrosandboxResult<LocalConfig> {
     })
 }
 
-/// Resolve the default home directory (`~/.microsandbox`, or `$MSB_HOME` if set).
+/// Resolve the default home directory (`~/.microsandbox`, or non-empty `$MSB_HOME`).
 fn resolve_default_home() -> PathBuf {
     microsandbox_utils::resolve_home()
 }
@@ -1328,7 +1332,7 @@ mod tests {
 
     #[test]
     fn test_default_config() {
-        let cfg = LocalConfig::default();
+        let cfg = GlobalConfig::default();
         assert_eq!(cfg.sandbox_defaults.cpus, 1);
         assert_eq!(cfg.sandbox_defaults.memory_mib, 512);
         assert_eq!(cfg.sandbox_defaults.cpu_placement, CpuPlacement::Inherit);
@@ -1360,7 +1364,7 @@ mod tests {
 
     #[test]
     fn test_deserialize_empty_json() {
-        let cfg: LocalConfig = serde_json::from_str("{}").unwrap();
+        let cfg: GlobalConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(cfg.sandbox_defaults.cpus, 1);
         assert!(cfg.home.is_none());
         assert_eq!(
@@ -1372,14 +1376,14 @@ mod tests {
     #[test]
     fn test_deserialize_partial_json() {
         let json = r#"{"sandbox_defaults": {"cpus": 4}}"#;
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.sandbox_defaults.cpus, 4);
         assert_eq!(cfg.sandbox_defaults.memory_mib, 512);
     }
 
     #[test]
     fn test_deployment_profile_uses_human_facing_config_values() {
-        let cfg: LocalConfig =
+        let cfg: GlobalConfig =
             serde_json::from_str(r#"{"deployment_profile":"multi-tenant"}"#).unwrap();
         assert_eq!(cfg.deployment_profile, Some(DeploymentProfile::MultiTenant));
 
@@ -1389,7 +1393,7 @@ mod tests {
 
     #[test]
     fn test_deployment_profile_accepts_snake_case_wire_values() {
-        let cfg: LocalConfig =
+        let cfg: GlobalConfig =
             serde_json::from_str(r#"{"deployment_profile":"single_tenant"}"#).unwrap();
         assert_eq!(
             cfg.deployment_profile,
@@ -1400,7 +1404,7 @@ mod tests {
     #[test]
     fn test_deployment_profile_rejects_unknown_values() {
         let error =
-            serde_json::from_str::<LocalConfig>(r#"{"deployment_profile":"shared"}"#).unwrap_err();
+            serde_json::from_str::<GlobalConfig>(r#"{"deployment_profile":"shared"}"#).unwrap_err();
         assert!(error.to_string().contains("unknown deployment profile"));
     }
 
@@ -1421,7 +1425,7 @@ mod tests {
             "runtime": { "block_writeback": { "mode": "off" } }
         }"#;
 
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.sandbox_defaults.cpu_placement, CpuPlacement::Spread);
         assert_eq!(cfg.sandbox_defaults.thp, TransparentHugePagePolicy::Always);
         assert_eq!(
@@ -1451,7 +1455,7 @@ mod tests {
                 }
             }
         }"#;
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
 
         cfg.validate_sandbox_defaults().unwrap();
         assert_eq!(
@@ -1468,7 +1472,7 @@ mod tests {
             microsandbox_types::MemoryPlacement::FollowCpu
         );
 
-        let round: LocalConfig =
+        let round: GlobalConfig =
             serde_json::from_value(serde_json::to_value(cfg).unwrap()).unwrap();
         assert_eq!(
             round.sandbox_defaults.placement_profile.as_deref(),
@@ -1478,7 +1482,7 @@ mod tests {
 
     #[test]
     fn test_validate_rejects_unknown_default_placement_profile() {
-        let cfg: LocalConfig =
+        let cfg: GlobalConfig =
             serde_json::from_str(r#"{"sandbox_defaults":{"placement_profile":"missing"}}"#)
                 .unwrap();
 
@@ -1501,7 +1505,7 @@ mod tests {
                 }
             }
         }"#;
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
 
         assert_eq!(
             cfg.runtime.block_writeback,
@@ -1541,8 +1545,8 @@ mod tests {
             }
         }"#;
 
-        assert!(serde_json::from_str::<LocalConfig>(auto_with_fixed_limit).is_err());
-        assert!(serde_json::from_str::<LocalConfig>(off_with_pool).is_err());
+        assert!(serde_json::from_str::<GlobalConfig>(auto_with_fixed_limit).is_err());
+        assert!(serde_json::from_str::<GlobalConfig>(off_with_pool).is_err());
     }
 
     #[test]
@@ -1555,7 +1559,7 @@ mod tests {
                 }
             }
         }"#;
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
 
         let error = cfg.validate_sandbox_defaults().unwrap_err();
         assert!(error.to_string().contains("mutually exclusive"));
@@ -1564,7 +1568,7 @@ mod tests {
     #[test]
     fn test_deserialize_metrics_interval_missing_uses_default() {
         let json = r#"{"sandbox_defaults": {}}"#;
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(
             cfg.sandbox_defaults.metrics_sample_interval_ms,
             NonZero::new(DEFAULT_METRICS_SAMPLE_INTERVAL_MS)
@@ -1574,14 +1578,14 @@ mod tests {
     #[test]
     fn test_deserialize_metrics_interval_zero_disables() {
         let json = r#"{"sandbox_defaults": {"metrics_sample_interval_ms": 0}}"#;
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert!(cfg.sandbox_defaults.metrics_sample_interval_ms.is_none());
     }
 
     #[test]
     fn test_deserialize_metrics_interval_positive() {
         let json = r#"{"sandbox_defaults": {"metrics_sample_interval_ms": 2500}}"#;
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(
             cfg.sandbox_defaults.metrics_sample_interval_ms,
             NonZero::new(2500)
@@ -1590,20 +1594,20 @@ mod tests {
 
     #[test]
     fn test_serialize_metrics_interval_disabled_round_trips() {
-        let mut cfg = LocalConfig::default();
+        let mut cfg = GlobalConfig::default();
         cfg.sandbox_defaults.metrics_sample_interval_ms = None;
         let json = serde_json::to_string(&cfg).unwrap();
         assert!(
             json.contains("\"metrics_sample_interval_ms\":0"),
             "expected `0` serialization, got: {json}"
         );
-        let round: LocalConfig = serde_json::from_str(&json).unwrap();
+        let round: GlobalConfig = serde_json::from_str(&json).unwrap();
         assert!(round.sandbox_defaults.metrics_sample_interval_ms.is_none());
     }
 
     #[test]
     fn test_metrics_capacity_default_uses_crate_default() {
-        let cfg = LocalConfig::default();
+        let cfg = GlobalConfig::default();
         assert_eq!(
             cfg.metrics_registry_capacity(),
             microsandbox_metrics::default_capacity()
@@ -1613,7 +1617,7 @@ mod tests {
     #[test]
     fn test_metrics_capacity_zero_falls_back_to_default() {
         let json = r#"{"metrics": {"capacity": 0}}"#;
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.metrics.capacity, 0);
         assert_eq!(
             cfg.metrics_registry_capacity(),
@@ -1624,28 +1628,28 @@ mod tests {
     #[test]
     fn test_metrics_capacity_explicit_value_overrides_default() {
         let json = r#"{"metrics": {"capacity": 2048}}"#;
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.metrics.capacity, 2048);
         assert_eq!(cfg.metrics_registry_capacity(), 2048);
     }
 
     #[test]
     fn test_deserialize_disable_metrics_sample_default_false() {
-        let cfg: LocalConfig = serde_json::from_str("{}").unwrap();
+        let cfg: GlobalConfig = serde_json::from_str("{}").unwrap();
         assert!(!cfg.sandbox_defaults.disable_metrics_sample);
     }
 
     #[test]
     fn test_deserialize_disable_metrics_sample_true() {
         let json = r#"{"sandbox_defaults": {"disable_metrics_sample": true}}"#;
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert!(cfg.sandbox_defaults.disable_metrics_sample);
     }
 
     #[test]
     fn test_deserialize_log_level() {
         let json = r#"{"log_level":"debug"}"#;
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.log_level, Some(LogLevel::Debug));
     }
 
@@ -1658,7 +1662,7 @@ mod tests {
                 "busy_timeout_secs": 12
             }
         }"#;
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.database.max_connections, 9);
         assert_eq!(cfg.database.connect_timeout_secs, 7);
         assert_eq!(cfg.database.busy_timeout_secs, 12);
@@ -1667,20 +1671,20 @@ mod tests {
     #[test]
     fn test_deserialize_ssh_config() {
         let json = r#"{"ssh": {"inactivity_timeout_secs": 1800}}"#;
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.ssh.inactivity_timeout_secs, 1800);
     }
 
     #[test]
     fn test_deserialize_ssh_timeout_disabled() {
         let json = r#"{"ssh": {"inactivity_timeout_secs": 0}}"#;
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.ssh.inactivity_timeout_secs, 0);
     }
 
     #[test]
     fn test_home_resolution() {
-        let cfg = LocalConfig {
+        let cfg = GlobalConfig {
             home: Some(PathBuf::from("/custom/home")),
             ..Default::default()
         };
@@ -1689,7 +1693,7 @@ mod tests {
 
     #[test]
     fn test_sandboxes_dir_override() {
-        let cfg = LocalConfig {
+        let cfg = GlobalConfig {
             paths: PathsConfig {
                 sandboxes: Some(PathBuf::from("/custom/sandboxes")),
                 ..Default::default()
@@ -1731,7 +1735,7 @@ mod tests {
             }
         }"#;
 
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         let entry = cfg
             .registries
             .hosts
@@ -1751,7 +1755,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("config.json");
 
-        let cfg = LocalConfig {
+        let cfg = GlobalConfig {
             registries: registries(vec![(
                 "ghcr.io",
                 RegistryEntry {
@@ -1843,7 +1847,7 @@ mod tests {
         std::fs::create_dir_all(&secret_dir).unwrap();
         std::fs::write(secret_dir.join("ghcr-token"), "secret-token\n").unwrap();
 
-        let cfg = LocalConfig {
+        let cfg = GlobalConfig {
             home: Some(temp.path().to_path_buf()),
             paths: PathsConfig {
                 secrets: Some(temp.path().to_path_buf()),
@@ -1876,7 +1880,7 @@ mod tests {
 
     #[test]
     fn test_resolve_configured_registry_auth_rejects_multiple_sources() {
-        let cfg = LocalConfig {
+        let cfg = GlobalConfig {
             registries: registries(vec![(
                 "ghcr.io",
                 RegistryEntry {
@@ -1906,7 +1910,7 @@ mod tests {
     )))]
     #[test]
     fn test_resolve_configured_registry_auth_reports_disabled_keyring() {
-        let cfg = LocalConfig {
+        let cfg = GlobalConfig {
             registries: registries(vec![(
                 "ghcr.io",
                 RegistryEntry {
@@ -2009,7 +2013,7 @@ mod tests {
             }
         }"#;
 
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         let entry = cfg.registries.hosts.get("localhost:5050").unwrap();
         assert!(entry.insecure);
         assert!(entry.auth.is_none());
@@ -2023,7 +2027,7 @@ mod tests {
             }
         }"#;
 
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(
             cfg.registries.ca_certs,
             Some(PathBuf::from("/path/to/ca.pem"))
@@ -2047,7 +2051,7 @@ mod tests {
             }
         }"#;
 
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(
             cfg.registries.ca_certs,
             Some(PathBuf::from("/path/to/ca.pem"))
@@ -2062,7 +2066,7 @@ mod tests {
     #[test]
     fn test_deserialize_empty_registries() {
         let json = r#"{"registries": {}}"#;
-        let cfg: LocalConfig = serde_json::from_str(json).unwrap();
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert!(cfg.registries.hosts.is_empty());
         assert!(cfg.registries.ca_certs.is_none());
     }
@@ -2074,7 +2078,7 @@ mod tests {
         let pem_data = b"-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n";
         std::fs::write(&pem_path, pem_data).unwrap();
 
-        let cfg = LocalConfig {
+        let cfg = GlobalConfig {
             registries: RegistriesConfig {
                 ca_certs: Some(pem_path),
                 ..Default::default()
@@ -2089,7 +2093,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_ca_certs_missing_file_errors() {
-        let cfg = LocalConfig {
+        let cfg = GlobalConfig {
             registries: RegistriesConfig {
                 ca_certs: Some(PathBuf::from("/nonexistent/ca.pem")),
                 ..Default::default()
@@ -2103,14 +2107,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_ca_certs_none_returns_empty() {
-        let cfg = LocalConfig::default();
+        let cfg = GlobalConfig::default();
         let certs = cfg.resolve_ca_certs().await.unwrap();
         assert!(certs.is_empty());
     }
 
     #[test]
     fn test_insecure_registries() {
-        let cfg = LocalConfig {
+        let cfg = GlobalConfig {
             registries: registries(vec![
                 (
                     "localhost:5050",
