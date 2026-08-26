@@ -75,6 +75,15 @@ pub struct PassthroughConfig {
     /// `None` means unbounded. When set, guest-attributable growth past this
     /// many bytes is rejected with `ENOSPC`.
     pub quota_bytes: Option<u64>,
+
+    /// Guest `(uid, gid)` to present for host files that carry no per-file
+    /// override in the metadata store.
+    ///
+    /// Host-created files have no store entry, so without this they surface as
+    /// `0:0` (root). When set, such files are presented as this owner instead.
+    /// `None` keeps the legacy `0:0` fallback. Only consulted while stat
+    /// virtualization is enabled.
+    pub default_owner: Option<(u32, u32)>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -104,6 +113,14 @@ impl PassthroughConfig {
 impl PassthroughFs {
     /// Create a Windows passthrough filesystem rooted at `cfg.root_dir`.
     pub fn new(cfg: PassthroughConfig) -> io::Result<Self> {
+        // Reject contradictory metadata policy before resolving or probing the
+        // host root. Direct backend callers must receive the same guarantee as
+        // the SDK and runtime boundaries.
+        if cfg.default_owner.is_some() && matches!(cfg.stat_virtualization, StatVirtualization::Off)
+        {
+            return Err(linux_error(LINUX_EINVAL));
+        }
+
         let root = if cfg.no_symlink_root {
             // Resolve without following any reparse point; nothing in the path
             // is trusted, so the escaping-symlink-root vector is closed.
@@ -117,7 +134,7 @@ impl PassthroughFs {
             }
             root
         };
-        let stat_store = StatStore::new(&root, cfg.stat_virtualization)?;
+        let stat_store = StatStore::new(&root, cfg.stat_virtualization, cfg.readonly)?;
 
         let init_file = if cfg.inject_init {
             let mut file = tempfile::tempfile().map_err(host_error)?;
@@ -182,7 +199,7 @@ impl PassthroughFs {
         let path = std::fs::canonicalize(path).map_err(host_error)?;
         let metadata = safe_metadata_under_root(&root, &path)?;
         let mode = (mode_from_metadata(&metadata) & S_IFMT) | (permissions & 0o7777);
-        let store = StatStore::new(&root, StatVirtualization::Strict)?
+        let store = StatStore::new(&root, StatVirtualization::Strict, false)?
             .ok_or_else(|| linux_error(LINUX_EIO))?;
         store.write(&path, uid, gid, mode, 0)
     }
@@ -204,6 +221,7 @@ impl Default for PassthroughConfig {
             attr_timeout: Duration::from_secs(5),
             inject_init: true,
             quota_bytes: None,
+            default_owner: None,
         }
     }
 }

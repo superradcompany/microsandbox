@@ -3806,7 +3806,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "anyhow",
  "astral-tokio-tar",
@@ -3871,7 +3871,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-agent-client"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "ciborium",
  "microsandbox-protocol",
@@ -3884,7 +3884,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-agentd"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -3901,7 +3901,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-cli"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -3923,6 +3923,7 @@ dependencies = [
  "microsandbox-protocol",
  "microsandbox-runtime",
  "microsandbox-types",
+ "microsandbox-types-macros",
  "microsandbox-utils",
  "rand 0.10.2",
  "regex",
@@ -3940,11 +3941,12 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "windows-sys 0.61.2",
+ "zeroize",
 ]
 
 [[package]]
 name = "microsandbox-db"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "async-trait",
  "sea-orm",
@@ -3956,7 +3958,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-filesystem"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "libc",
  "microsandbox-utils",
@@ -3964,11 +3966,12 @@ dependencies = [
  "scopeguard",
  "tempfile",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "microsandbox-go"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "base64 0.23.1",
  "cbindgen",
@@ -3986,7 +3989,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-image"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "astral-tokio-tar",
  "async-compression",
@@ -4014,7 +4017,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-metrics"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "chrono",
  "libc",
@@ -4026,7 +4029,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-metrics-collector"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4054,7 +4057,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-migration"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "sea-orm-migration",
  "serde_json",
@@ -4063,7 +4066,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-network"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -4107,7 +4110,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-node"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "bytes",
  "chrono",
@@ -4124,7 +4127,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-protocol"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "chrono",
  "ciborium",
@@ -4139,7 +4142,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-py"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "chrono",
  "futures",
@@ -4156,7 +4159,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-runtime"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "bytes",
  "chrono",
@@ -4191,11 +4194,12 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-types"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "chrono",
  "dprint-plugin-typescript",
  "ipnetwork",
+ "microsandbox-types-macros",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -4207,8 +4211,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "microsandbox-types-macros"
+version = "0.6.15"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
+]
+
+[[package]]
 name = "microsandbox-utils"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "dirs",
  "libc",
@@ -4221,7 +4234,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-vsock"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "libc",
  "msb_krun",
@@ -4322,9 +4335,9 @@ dependencies = [
 
 [[package]]
 name = "msb_krun"
-version = "0.1.31"
+version = "0.1.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "40e6b83f6cf90f676779409ac026f4429adfd7a11886085a59773ddd3aa8207f"
+checksum = "d4c0de669aeda774c3da60692af7e693fdf000f4813922b15389dd1209b042ac"
 dependencies = [
  "crossbeam-channel",
  "kvm-bindings",
@@ -4342,9 +4355,9 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_arch"
-version = "0.1.31"
+version = "0.1.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "929f9765edd9e12cc45e5876998456bf2dfb0d2244d4fe6ddf2fdb5c3dd7e99c"
+checksum = "0e9631350df54bde880a7cf3fda67ff03132b115abae95f7b668599611286c87"
 dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
@@ -4357,15 +4370,15 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_arch_gen"
-version = "0.1.31"
+version = "0.1.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df83bf780774e4e131547a4e17d0ca389e5bbb04cdebcb626880b090cae20f2c"
+checksum = "fb11ff7f19adb1ee23d25ca65c9a06a75069e3b949e70922ba52a133dc9e43bb"
 
 [[package]]
 name = "msb_krun_cpuid"
-version = "0.1.31"
+version = "0.1.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c569d5d7285ed8f8f80e58454fb3ee213fd2c06ec647cc108a16a2e095558bb"
+checksum = "09a315fabad3ffbf3cd6b4922dfa8e95b25e11624f548850c8029f46039c332a"
 dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
@@ -4374,9 +4387,9 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_devices"
-version = "0.1.31"
+version = "0.1.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "422da6e72923c2debae8eaeddd2990b924df9042079b51a323b4f3de37ebbdaf"
+checksum = "b54befdee0428ae481ecd894306f2ceef19ad951275908bd4d9182a4216a4933"
 dependencies = [
  "bitflags 1.3.2",
  "capng",
@@ -4404,9 +4417,9 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_hvf"
-version = "0.1.31"
+version = "0.1.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e5034e7b5ebd4f2f8caefb199f5f18483f8ed0c5cc6afb944b6ed0d127d59aa9"
+checksum = "cbde98ef6b71b920af6e4a8ee89110ffac6204942620799772dad12dcf2273ac"
 dependencies = [
  "crossbeam-channel",
  "libloading 0.8.9",
@@ -4416,9 +4429,9 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_kernel"
-version = "0.1.31"
+version = "0.1.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04163d07028500bf08e6247c40c64dd5bae462bbb1997cf6a9613d019976a055"
+checksum = "080d35863dad4a81a5eb6c5ff9292caab0219e50e7c8b3d0da4ebe74e7797322"
 dependencies = [
  "msb-vm-memory",
  "msb_krun_utils",
@@ -4426,9 +4439,9 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_polly"
-version = "0.1.31"
+version = "0.1.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9812193639b368ab800b5f87e18509ad30fd85a2e6a77a05265ffadfed2553d1"
+checksum = "af85cc51c6f8f196224793975aad7da7e51ef8247b42b5cd8f7635561a9d5fdb"
 dependencies = [
  "libc",
  "msb_krun_utils",
@@ -4436,18 +4449,18 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_smbios"
-version = "0.1.31"
+version = "0.1.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8cfd3f05f6447f0ad85f04f688b106eb9f04bb64525fee1183757cf9705070a0"
+checksum = "f36a5c9866ccf755b4675338d4e696ee50e7425a153ac71db89e3bb95b1cffce"
 dependencies = [
  "msb-vm-memory",
 ]
 
 [[package]]
 name = "msb_krun_utils"
-version = "0.1.31"
+version = "0.1.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5ce62484f07792ab43a5ac64baa84435556f56a7633805e15030e990c3b98a3"
+checksum = "112be8806546f721718a88ba01f9e86d4189aff39f79d5816a90465e9eb4dbe0"
 dependencies = [
  "bitflags 1.3.2",
  "crossbeam-channel",
@@ -4461,9 +4474,9 @@ dependencies = [
 
 [[package]]
 name = "msb_krun_vmm"
-version = "0.1.31"
+version = "0.1.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67546eb70fa306e3c7e97f525dac2db44b9cc1642b6684aec4369e3b7f9b3af3"
+checksum = "f9865e5331c61d4dea48fae764f5c6a8248f83cd8d0f961dd03598b79885ace4"
 dependencies = [
  "bzip2",
  "crossbeam-channel",
@@ -7635,14 +7648,14 @@ dependencies = [
 
 [[package]]
 name = "test-init"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "test-macros"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7651,7 +7664,7 @@ dependencies = [
 
 [[package]]
 name = "test-utils"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "tempfile",
  "test-macros",

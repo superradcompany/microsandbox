@@ -10,8 +10,10 @@ use microsandbox_image::{PullProgressHandle, RegistryAuth};
 #[cfg(feature = "net")]
 use microsandbox_network::builder::{NetworkBuilder, SecretBuilder};
 #[cfg(feature = "net")]
-use microsandbox_network::policy::{NetworkPolicy, Rule};
-use microsandbox_types::{CpuPlacement, EnvVar, PullPolicy, VsockRouteSpec, VsockSocketType};
+use microsandbox_network::policy::Rule;
+use microsandbox_types::{
+    CpuPlacement, EnvVar, PullPolicy, SandboxConfigPatch, VsockRouteSpec, VsockSocketType,
+};
 #[cfg(feature = "net")]
 use microsandbox_types::{PortProtocol, PublishedPortSpec};
 
@@ -26,8 +28,7 @@ use super::{
     },
 };
 use crate::{
-    LogLevel, MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason,
-    config::LocalConfig, size::Mebibytes,
+    LogLevel, MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason, size::Mebibytes,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -44,8 +45,6 @@ pub struct SandboxBuilder {
     /// Raw script snippets supplied through construction patches. They are materialized only when
     /// building so later shell overrides determine their shebang.
     config_scripts: BTreeMap<String, String>,
-    #[cfg(feature = "net")]
-    configured_network_rules: Vec<Rule>,
     /// Pending snapshot reference (path or bare name) supplied via
     /// [`from_snapshot`]. Resolved during async `create()`.
     pending_snapshot: Option<String>,
@@ -91,38 +90,47 @@ impl SandboxBuilder {
     ///
     /// The name must be unique among existing sandboxes (unless
     /// [`replace`](Self::replace) is set) and no longer than 128 UTF-8 bytes.
-    /// This low-level constructor starts from built-in defaults; prefer
-    /// [`Sandbox::builder`](super::Sandbox::builder) when backend-owned global defaults should apply.
+    /// Built-in defaults are applied first, followed by the active global `config.json`.
     pub fn new(name: impl Into<String>) -> Self {
+        // Start with the hardcoded sandbox defaults.
         let mut config = SandboxConfig::default();
         config.spec.name = name.into();
 
-        Self {
+        let builder = Self {
             config,
             detached: false,
             build_error: None,
             max_cpus_explicit: false,
             max_memory_explicit: false,
             config_scripts: BTreeMap::new(),
-            #[cfg(feature = "net")]
-            configured_network_rules: Vec::new(),
             pending_snapshot: None,
             pending_snapshot_from_config: false,
-        }
+        };
+
+        // Overlay the global `config.json` defaults on the hardcoded defaults.
+        builder.apply_global_config()
     }
 
-    /// Apply defaults owned by the selected local backend.
-    ///
-    /// This runs before caller-supplied builder methods, so explicit SDK and CLI options retain
-    /// ordinary last-write-wins behavior. Root-disk defaults remain unresolved until local create,
-    /// where the runtime knows the rootfs is OCI-backed and can persist the effective disk shape.
-    pub(crate) fn with_local_defaults(mut self, local: &LocalConfig) -> Self {
-        if let Err(error) = local.validate_sandbox_defaults() {
+    /// Overlay sparse sandbox configuration on the hardcoded and global defaults.
+    pub fn overlay(mut self, patch: SandboxConfigPatch) -> Self {
+        // Overlay caller-provided sandbox fields on the hardcoded and global defaults.
+        patch.apply_to(&mut self.config.spec);
+        self
+    }
+
+    /// Load and apply defaults from the active global `config.json`.
+    fn apply_global_config(mut self) -> Self {
+        let backend = crate::backend::default_backend();
+        let Some(local) = backend.as_local() else {
+            return self;
+        };
+        let config = local.config();
+        if let Err(error) = config.validate_sandbox_defaults() {
             self.build_error = Some(error);
             return self;
         }
 
-        let defaults = &local.sandbox_defaults;
+        let defaults = &config.sandbox_defaults;
         self.config.spec.resources.cpus = defaults.cpus;
         self.config.spec.resources.max_cpus = defaults.cpus;
         self.config.spec.resources.memory_mib = defaults.memory_mib;
@@ -136,7 +144,7 @@ impl SandboxBuilder {
             .metrics_sample_interval_ms
             .map(std::num::NonZero::get);
         self.config.spec.runtime.disable_metrics_sample = defaults.disable_metrics_sample;
-        self.config.spec.runtime.log_level = local.log_level.map(sandbox_log_level_from_runtime);
+        self.config.spec.runtime.log_level = config.log_level.map(sandbox_log_level_from_runtime);
         self
     }
 
@@ -228,13 +236,6 @@ impl SandboxBuilder {
         self.config.spec.image = RootfsSource::oci("");
         self.pending_snapshot = Some(snapshot.into());
         self.pending_snapshot_from_config = false;
-        self
-    }
-
-    pub(super) fn config_snapshot(mut self, snapshot: impl Into<String>) -> Self {
-        self.config.spec.image = RootfsSource::oci("");
-        self.pending_snapshot = Some(snapshot.into());
-        self.pending_snapshot_from_config = true;
         self
     }
 
@@ -705,29 +706,6 @@ impl SandboxBuilder {
         self
     }
 
-    /// Replace policy defaults/profile rules while retaining rules supplied by a config patch.
-    #[cfg(feature = "net")]
-    #[doc(hidden)]
-    pub fn replace_network_policy_preserving_config_rules(
-        mut self,
-        mut policy: NetworkPolicy,
-    ) -> Self {
-        policy.rules.extend(self.configured_network_rules.clone());
-        match self.config.local_network_config() {
-            Ok(mut network) => {
-                network.policy = policy;
-                if let Err(error) = self.config.set_local_network_config(network)
-                    && self.build_error.is_none()
-                {
-                    self.build_error = Some(error);
-                }
-            }
-            Err(error) if self.build_error.is_none() => self.build_error = Some(error),
-            Err(_) => {}
-        }
-        self
-    }
-
     /// Publish a TCP port directly on the sandbox builder.
     ///
     /// Repeatable: call multiple times to expose multiple ports.
@@ -1160,21 +1138,10 @@ impl SandboxBuilder {
         Ok(self.config)
     }
 
-    pub(super) fn config_scripts(mut self, scripts: BTreeMap<String, String>) -> Self {
+    /// Apply raw scripts loaded from configuration after the final shell is known.
+    #[doc(hidden)]
+    pub fn config_scripts(mut self, scripts: BTreeMap<String, String>) -> Self {
         self.config_scripts.extend(scripts);
-        self
-    }
-
-    #[cfg(feature = "net")]
-    pub(super) fn config_network_rules(mut self, rules: Vec<Rule>) -> Self {
-        self.configured_network_rules = rules;
-        self
-    }
-
-    pub(super) fn config_error(mut self, message: impl Into<String>) -> Self {
-        if self.build_error.is_none() {
-            self.build_error = Some(MicrosandboxError::InvalidConfig(message.into()));
-        }
         self
     }
 
@@ -1721,8 +1688,6 @@ impl From<SandboxConfig> for SandboxBuilder {
             max_cpus_explicit: true,
             max_memory_explicit: true,
             config_scripts: BTreeMap::new(),
-            #[cfg(feature = "net")]
-            configured_network_rules: Vec::new(),
             pending_snapshot: None,
             pending_snapshot_from_config: false,
         }
@@ -1985,39 +1950,6 @@ mod tests {
             .unwrap();
 
         assert!(config.spec.image.oci_root_disk().is_none());
-    }
-
-    #[tokio::test]
-    async fn test_local_defaults_are_seeded_before_explicit_builder_options() {
-        let mut local = crate::config::LocalConfig::default();
-        local.sandbox_defaults.cpus = 4;
-        local.sandbox_defaults.memory_mib = 2048;
-        local.sandbox_defaults.cpu_placement = CpuPlacement::Spread;
-        local.sandbox_defaults.thp = TransparentHugePagePolicy::Always;
-        local.sandbox_defaults.shell = "/bin/bash".into();
-        local.sandbox_defaults.workdir = Some("/workspace".into());
-        local.log_level = Some(microsandbox_runtime::logging::LogLevel::Info);
-
-        let config = SandboxBuilder::new("test")
-            .with_local_defaults(&local)
-            .image("alpine")
-            .cpus(2)
-            .thp(TransparentHugePagePolicy::Never)
-            .build()
-            .await
-            .unwrap();
-
-        assert_eq!(config.spec.resources.cpus, 2);
-        assert_eq!(config.spec.resources.max_cpus, 2);
-        assert_eq!(config.spec.resources.memory_mib, 2048);
-        assert_eq!(config.spec.resources.cpu_placement, CpuPlacement::Spread);
-        assert_eq!(config.spec.resources.thp, TransparentHugePagePolicy::Never);
-        assert_eq!(config.spec.runtime.shell.as_deref(), Some("/bin/bash"));
-        assert_eq!(config.spec.runtime.workdir.as_deref(), Some("/workspace"));
-        assert_eq!(
-            config.spec.runtime.log_level,
-            Some(microsandbox_types::SandboxLogLevel::Info)
-        );
     }
 
     #[tokio::test]

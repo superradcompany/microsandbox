@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use futures::future::BoxFuture;
+use futures::{StreamExt, future::BoxFuture, stream};
 use microsandbox_db::pool::DbPools;
 use microsandbox_db::{DbReadConnection, DbWriteConnection};
 use microsandbox_image::{Digest, GlobalCache};
@@ -36,7 +36,7 @@ use crate::backend::{
 use crate::db::entity::{
     run as run_entity, sandbox as sandbox_entity, sandbox_label as sandbox_label_entity,
 };
-use crate::logs::{LogEntry, LogOptions, LogStreamOptions};
+use crate::logs::{BootError, LogEntry, LogOptions, LogStreamOptions};
 use crate::runtime::SpawnMode;
 use crate::sandbox::metrics::SandboxMetrics;
 use crate::sandbox::{
@@ -970,6 +970,18 @@ impl SandboxBackend for LocalBackend {
         Box::pin(async move { self.drain_sandbox(name).await })
     }
 
+    fn boot_error<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        name: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<Option<BootError>>> {
+        Box::pin(async move {
+            crate::sandbox::validate_sandbox_name(name)?;
+            let log_dir = crate::logs::log_dir_for_local(self, name);
+            Ok(Self::read_boot_error(&log_dir))
+        })
+    }
+
     fn logs<'a>(
         &'a self,
         _backend: Arc<dyn Backend>,
@@ -988,6 +1000,26 @@ impl SandboxBackend for LocalBackend {
         Box::pin(async move {
             let stream = crate::logs::log_stream_local(self, name, opts).await?;
             Ok(Box::pin(stream) as LogStream)
+        })
+    }
+
+    fn follow_logs<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        name: &'a str,
+        opts: &'a LogOptions,
+    ) -> BoxFuture<'a, MicrosandboxResult<LogStream>> {
+        Box::pin(async move {
+            let snapshot = crate::logs::read_logs_snapshot_local(self, name, opts).await?;
+            let follow_opts = LogStreamOptions {
+                sources: opts.sources.clone(),
+                start: crate::logs::LogStreamStart::From(snapshot.cursor),
+                until: opts.until,
+                follow: true,
+            };
+            let follow = crate::logs::log_stream_local(self, name, &follow_opts).await?;
+            let history = stream::iter(snapshot.entries.into_iter().map(Ok));
+            Ok(Box::pin(history.chain(follow)) as LogStream)
         })
     }
 
@@ -1069,9 +1101,12 @@ async fn filter_sandbox_ids(
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::Write;
     #[cfg(unix)]
     use std::process::Command;
+    use std::sync::Arc;
 
+    use futures::StreamExt;
     use microsandbox_db::entity::run as run_entity;
     use microsandbox_db::pool::DbPools;
     use microsandbox_migration::{Migrator, MigratorTrait};
@@ -1081,7 +1116,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::sandbox_entity;
-    use crate::backend::LocalBackend;
+    use crate::backend::{Backend, LocalBackend, SandboxBackend};
+    use crate::logs::{LogOptions, LogSource};
     use crate::sandbox::{
         OciRootfsSource, RootfsSource, SandboxConfig, SandboxListBuilder, SandboxStatus,
     };
@@ -1130,6 +1166,58 @@ mod tests {
             pid += 1;
         }
         pid
+    }
+
+    #[tokio::test]
+    async fn follow_logs_replays_filtered_history_then_streams_from_snapshot_cursor() {
+        let temp = tempdir().unwrap();
+        let backend = Arc::new(
+            LocalBackend::builder()
+                .home(temp.path())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let log_dir = crate::logs::log_dir_for_local(&backend, "follow-test");
+        fs::create_dir_all(&log_dir).unwrap();
+        let exec_log = log_dir.join("exec.log");
+        fs::write(
+            &exec_log,
+            concat!(
+                "{\"t\":\"2026-08-24T10:00:00.000Z\",\"s\":\"stdout\",\"d\":\"first\",\"id\":1}\n",
+                "{\"t\":\"2026-08-24T10:00:01.000Z\",\"s\":\"stdout\",\"d\":\"second\",\"id\":1}\n",
+            ),
+        )
+        .unwrap();
+
+        let backend_dyn: Arc<dyn Backend> = backend.clone();
+        let opts = LogOptions {
+            tail: Some(1),
+            sources: vec![LogSource::Stdout],
+            ..Default::default()
+        };
+        let mut stream = backend
+            .follow_logs(backend_dyn, "follow-test", &opts)
+            .await
+            .unwrap();
+
+        let history = stream.next().await.unwrap().unwrap();
+        assert_eq!(history.data.as_ref(), b"second");
+
+        let mut file = fs::OpenOptions::new().append(true).open(exec_log).unwrap();
+        writeln!(
+            file,
+            "{{\"t\":\"2026-08-24T10:00:02.000Z\",\"s\":\"stdout\",\"d\":\"third\",\"id\":1}}"
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let live = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+            .await
+            .expect("follow stream should observe appended entry")
+            .unwrap()
+            .unwrap();
+        assert_eq!(live.data.as_ref(), b"third");
     }
 
     #[test]

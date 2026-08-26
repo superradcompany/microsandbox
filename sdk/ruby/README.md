@@ -85,7 +85,7 @@ require "microsandbox"
 Microsandbox.install unless Microsandbox.installed?
 ```
 
-Local sandboxes require Apple Silicon virtualization on macOS or KVM on Linux. On Windows, use Windows 10 or later on x64 or ARM64 and enable WHP. Ruby CI currently covers Linux x86_64.
+Local sandboxes require Apple Silicon virtualization on macOS or KVM on Linux. On Windows, use Windows 11 on x64 or ARM64 and enable WHP. Ruby CI currently covers Linux x86_64.
 
 ## Quick start
 

@@ -297,6 +297,19 @@ impl SandboxHandle {
             .await
     }
 
+    /// Replay a filtered log snapshot, then follow new entries.
+    ///
+    /// The backend owns the cursor handoff and transport selection.
+    pub async fn follow_logs(
+        &self,
+        opts: &crate::logs::LogOptions,
+    ) -> MicrosandboxResult<crate::backend::sandbox::LogStream> {
+        self.backend
+            .sandboxes()
+            .follow_logs(self.backend.clone(), &self.name, opts)
+            .await
+    }
+
     /// Get the latest metrics snapshot for this sandbox. **Local handles only**.
     pub async fn metrics(&self) -> MicrosandboxResult<super::SandboxMetrics> {
         let local = self

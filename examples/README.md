@@ -1,14 +1,14 @@
 # Examples
 
-Examples showing how to use the microsandbox SDK in Rust, Python, TypeScript, and Go.
+Examples showing how to use the microsandbox SDK in TypeScript, Rust, Python, and Go.
 
 Each language directory has its own README with setup and run instructions.
 
 | Language | Directory | README |
 |----------|-----------|--------|
+| TypeScript | [`typescript/`](./typescript/) | [typescript/README.md](./typescript/README.md) |
 | Rust | [`rust/`](./rust/) | [rust/README.md](./rust/README.md) |
 | Python | [`python/`](./python/) | [python/README.md](./python/README.md) |
-| TypeScript | [`typescript/`](./typescript/) | [typescript/README.md](./typescript/README.md) |
 | Go | [`../sdk/go/examples/`](../sdk/go/examples/) | [../sdk/go/examples/README.md](../sdk/go/examples/README.md) |
 
 ## Prerequisites

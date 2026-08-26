@@ -20,7 +20,7 @@ use futures::future::BoxFuture;
 use super::Backend;
 use crate::MicrosandboxResult;
 use crate::agent::AgentClient;
-use crate::logs::{LogEntry, LogOptions, LogStreamOptions};
+use crate::logs::{BootError, LogEntry, LogOptions, LogStreamOptions};
 use crate::runtime::ProcessHandle;
 use crate::sandbox::exec::{ExecHandle, ExecOptions, ExecOutput};
 use crate::sandbox::fs::{FsEntry, FsMetadata, FsReadStream, FsWriteSink};
@@ -271,6 +271,14 @@ pub trait SandboxBackend: Send + Sync {
     // Logs / metrics
     // ============================================================
 
+    /// Return the most recent startup diagnostic for the named sandbox, when
+    /// the selected backend provides one.
+    fn boot_error<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        name: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<Option<BootError>>>;
+
     /// Read captured output for the named sandbox.
     fn logs<'a>(
         &'a self,
@@ -285,6 +293,17 @@ pub trait SandboxBackend: Send + Sync {
         backend: Arc<dyn Backend>,
         name: &'a str,
         opts: &'a LogStreamOptions,
+    ) -> BoxFuture<'a, MicrosandboxResult<LogStream>>;
+
+    /// Replay a filtered snapshot, then follow new log entries.
+    ///
+    /// The backend owns the snapshot-to-stream handoff so callers do not need
+    /// backend-specific cursor or transport logic.
+    fn follow_logs<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        name: &'a str,
+        opts: &'a LogOptions,
     ) -> BoxFuture<'a, MicrosandboxResult<LogStream>>;
 
     /// Latest metrics sample for the named sandbox.

@@ -27,7 +27,7 @@ For the full API reference and longer guides, use Go docs and the microsandbox d
 
 - Go 1.22+
 - CGO enabled and a C compiler/toolchain available
-- Linux with KVM, macOS with Apple Silicon, or Windows 10+ with WHP enabled
+- Linux with KVM, macOS with Apple Silicon, or Windows 11 with WHP enabled
 
 ## Supported Platforms
 

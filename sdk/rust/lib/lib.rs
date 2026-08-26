@@ -57,23 +57,22 @@ pub use sandbox::ssh::{
     SshServerOptionsBuilder, SshStdioStream,
 };
 pub use sandbox::{
-    ChangeKind, ConfigPlannedChange, ExecOutput, FilesystemConfigPatch, InitConfigPatch,
-    MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, ModificationConflict, ModificationDisposition,
-    ModificationPolicy, ModificationWarning, PlannedChange, ResourceConfigPatch,
-    ResourceConvergenceState, ResourceKind, ResourceResizeStatus, RuntimeConfigPatch, Sandbox,
-    SandboxConfig, SandboxConfigPatch, SandboxImagePatch, SandboxListBuilder, SandboxMetrics,
+    ChangeKind, ConfigPlannedChange, ExecOutput, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES,
+    ModificationConflict, ModificationDisposition, ModificationPolicy, ModificationWarning,
+    NetworkSpecPatch, PlannedChange, ResourceConvergenceState, ResourceKind, ResourceResizeStatus,
+    Sandbox, SandboxConfig, SandboxConfigPatch, SandboxListBuilder, SandboxMetrics,
     SandboxMetricsReport, SandboxMetricsState, SandboxModificationBuilder,
     SandboxModificationPatch, SandboxModificationPlan, SandboxPage, SandboxPingResult,
-    SandboxTouchResult, ScriptConfigPatch, SecretChangeKind, SecretModificationPatch,
-    SecretPatchBuilder, SecretPlannedChange, SecretSource, all_sandbox_metrics,
-    all_sandbox_metrics_local, all_sandbox_metrics_reports_local, sandbox_metrics_report_local,
-    validate_sandbox_name,
+    SandboxPolicyPatch, SandboxResourcesPatch, SandboxRuntimeOptionsPatch, SandboxTouchResult,
+    SecretChangeKind, SecretModificationPatch, SecretPatchBuilder, SecretPlannedChange,
+    SecretSource, VsockSpecPatch, all_sandbox_metrics, all_sandbox_metrics_local,
+    all_sandbox_metrics_reports_local, sandbox_metrics_report_local, validate_sandbox_name,
 };
 #[cfg(feature = "net")]
 pub use sandbox::{
-    DnsConfigPatch, HostPattern, Nameserver, NetworkAction, NetworkConfigPatch, NetworkPolicy,
-    NetworkPolicyConfigPatch, NetworkProfile, NetworkRule, PublishedPort, SecretConfigPatch,
-    SecretEntryConfigPatch, SecretInjection, TlsConfigPatch,
+    DnsConfigPatch, HostPattern, InterfaceOverridesPatch, Nameserver, NetworkAction, NetworkPolicy,
+    NetworkProfile, NetworkRateLimiterConfigPatch, NetworkRule, PublishedPort, SecretInjection,
+    SecretsConfigPatch, TlsConfigPatch,
 };
 pub use snapshot::{
     CheckpointSnapshotState, FileSnapshotState, SaveOpts, Snapshot, SnapshotBuilder,

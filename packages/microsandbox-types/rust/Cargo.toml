@@ -35,6 +35,7 @@ ts = [
 chrono.workspace = true
 dprint-plugin-typescript = { version = "=0.95", optional = true }
 ipnetwork.workspace = true
+microsandbox-types-macros.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
