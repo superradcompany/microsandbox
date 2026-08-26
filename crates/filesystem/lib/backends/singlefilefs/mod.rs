@@ -844,7 +844,13 @@ mod tests {
         fs.init(FsOptions::empty()).unwrap();
 
         let old_entry = fs.lookup(context(), ROOT_INODE, c"config.txt").unwrap();
-        let (old_handle, _) = fs.open(context(), old_entry.inode, false, 0).unwrap();
+        #[cfg(unix)]
+        let old_flags = libc::O_RDWR as u32;
+        #[cfg(windows)]
+        let old_flags = 0;
+        let (old_handle, _) = fs
+            .open(context(), old_entry.inode, false, old_flags)
+            .unwrap();
         let old_handle = old_handle.unwrap();
 
         #[cfg(windows)]
@@ -898,6 +904,21 @@ mod tests {
         // FUSE may drop the pathname lookup before the descriptor is closed.
         // The handle admission must independently retain access to that inode.
         fs.forget(context(), old_entry.inode, 1);
+        #[cfg(unix)]
+        {
+            // Handle-based setattr must keep targeting this descriptor after
+            // its inode has been detached from the host namespace.
+            let mut detached_attr: stat64 = unsafe { std::mem::zeroed() };
+            detached_attr.st_size = 3;
+            fs.setattr(
+                context(),
+                old_entry.inode,
+                detached_attr,
+                Some(old_handle),
+                SetattrValid::SIZE,
+            )
+            .unwrap();
+        }
         let mut old_writer = CaptureWriter { bytes: Vec::new() };
         fs.read(
             context(),
@@ -910,6 +931,9 @@ mod tests {
             0,
         )
         .unwrap();
+        #[cfg(unix)]
+        assert_eq!(old_writer.bytes, b"old");
+        #[cfg(windows)]
         assert_eq!(old_writer.bytes, b"old contents");
         fs.release(
             context(),
