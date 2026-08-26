@@ -885,10 +885,14 @@ mod tests {
             .readdir(context(), ROOT_INODE, ROOT_HANDLE, 4096, 0)
             .unwrap();
         let replacement_inode = directory_entries.last().unwrap().ino;
+        // Unix passthrough identities follow host inodes, while Windows keeps
+        // a stable synthetic node ID for the selected pathname.
+        #[cfg(unix)]
         assert_ne!(old_entry.inode, replacement_inode);
         fs.getattr(context(), replacement_inode, None).unwrap();
 
         let new_entry = fs.lookup(context(), ROOT_INODE, c"config.txt").unwrap();
+        #[cfg(unix)]
         assert_ne!(old_entry.inode, new_entry.inode);
 
         // FUSE may drop the pathname lookup before the descriptor is closed.
