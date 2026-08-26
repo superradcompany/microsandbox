@@ -2,9 +2,9 @@
 
 use std::num::NonZeroU16;
 
-use microsandbox_db::entity::sandbox::{self as sandbox_entity, Column};
+use microsandbox_db::entity::sandbox as sandbox_entity;
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseTransaction, EntityTrait, QueryFilter, Statement,
+    ActiveEnum, ColumnTrait, ConnectionTrait, EntityTrait, Iterable, QueryFilter, Statement,
     sea_query::Expr,
 };
 
@@ -22,78 +22,88 @@ impl NetworkSlot {
         self.0.get()
     }
 
-    /// Lease a slot to the current startup attempt.
+    /// Assign the lowest available network slot to a running sandbox.
     ///
-    /// The assignment is kept only for the active run. Terminal lifecycle
-    /// transitions clear the database column, so a restart may receive a
-    /// different address. SQLite serializes the read-decide-write transaction,
-    /// while the partial unique index provides a final collision guard.
+    /// The slot is released when the sandbox stops and may change after a
+    /// restart. Concurrent starts cannot receive the same slot.
     pub(super) async fn lease(local: &LocalBackend, sandbox_id: i32) -> MicrosandboxResult<Self> {
         let pools = local.db().await?;
         let db = pools.write();
 
+        if let Some(slot) = Self::try_lease(db, sandbox_id).await? {
+            return Ok(slot);
+        }
+
+        // Exhaustion can be caused by a missed terminal-state cleanup. Repair
+        // those stale leases only on this cold path, then retry atomically.
         db.transaction(|txn| async move {
-            let slot = Self::next_available_slot(&txn).await?;
-            Self::claim_slot(&txn, sandbox_id, slot).await?;
+            Self::reclaim_inactive(&txn).await?;
+            let slot = Self::try_lease(&txn, sandbox_id)
+                .await?
+                .ok_or_else(|| MicrosandboxError::Runtime("network slot pool exhausted".into()))?;
+
             Ok((txn, slot))
         })
         .await
     }
 
-    /// Claim the slot only while the sandbox status is `Running`.
-    async fn claim_slot(
-        db: &DatabaseTransaction,
+    /// Atomically claim the lowest available slot, returning `None` at capacity.
+    async fn try_lease(
+        db: &impl ConnectionTrait,
         sandbox_id: i32,
-        slot: Self,
-    ) -> MicrosandboxResult<()> {
-        // Do not resurrect a lease if a concurrent stop won before this
-        // transaction acquired the writer.
-        let update = sandbox_entity::Entity::update_many()
-            .col_expr(Column::NetworkSlot, Expr::value(Some(slot.get())))
-            .filter(Column::Id.eq(sandbox_id))
-            .filter(Column::Status.eq(sandbox_entity::SandboxStatus::Running))
-            .exec(db)
-            .await?;
-
-        if update.rows_affected != 1 {
-            return Err(MicrosandboxError::Runtime(format!(
-                "sandbox {sandbox_id} stopped while leasing network slot"
-            )));
-        }
-
-        Ok(())
-    }
-
-    /// Ask SQLite for the lowest free slot in the active leases.
-    ///
-    /// The lowest free slot is either 1 or the successor of an occupied slot.
-    /// The partial unique index covers the candidate scan and occupancy lookup;
-    /// only the selected scalar crosses into Rust.
-    async fn next_available_slot(db: &DatabaseTransaction) -> MicrosandboxResult<Self> {
+    ) -> MicrosandboxResult<Option<Self>> {
         const QUERY: &str = "
-            SELECT MIN(candidate.slot)
-            FROM (
-                SELECT 1 AS slot
-                UNION ALL
-                SELECT network_slot + 1 AS slot
-                FROM sandbox
-                WHERE network_slot < ?
-            ) AS candidate
-            LEFT JOIN sandbox AS occupied
-                ON occupied.network_slot = candidate.slot
-            WHERE occupied.network_slot IS NULL
+            UPDATE sandbox
+            SET network_slot = COALESCE(network_slot, (
+                SELECT MIN(candidate.slot)
+                FROM (
+                    SELECT 1 AS slot
+                    UNION ALL
+                    SELECT network_slot + 1 AS slot
+                    FROM sandbox
+                    WHERE network_slot < ?
+                ) AS candidate
+                LEFT JOIN sandbox AS occupied
+                    ON occupied.network_slot = candidate.slot
+                WHERE occupied.network_slot IS NULL
+            ))
+            WHERE id = ? AND status = ?
+            RETURNING network_slot
         ";
 
-        let values = [u16::MAX.into()];
-        let conn = db.get_database_backend();
-        let slot = db
-            .query_one_raw(Statement::from_sql_and_values(conn, QUERY, values))
-            .await?
-            .ok_or_else(|| MicrosandboxError::Runtime("network slot query returned no row".into()))?
-            .try_get_by_index::<Option<u16>>(0)?
-            .ok_or_else(|| MicrosandboxError::Runtime("network slot pool exhausted".into()))?;
+        let values = [
+            u16::MAX.into(),
+            sandbox_id.into(),
+            sandbox_entity::SandboxStatus::Running.into_value().into(),
+        ];
 
-        Self::try_from(slot)
+        let conn = db.get_database_backend();
+        db.query_one_raw(Statement::from_sql_and_values(conn, QUERY, values))
+            .await?
+            .ok_or_else(|| {
+                MicrosandboxError::Runtime(format!(
+                    "sandbox {sandbox_id} is missing or not running"
+                ))
+            })?
+            .try_get_by_index::<Option<u16>>(0)?
+            .map(Self::try_from)
+            .transpose()
+    }
+
+    /// Release leaked slots held by inactive sandboxes.
+    async fn reclaim_inactive(db: &impl ConnectionTrait) -> MicrosandboxResult<()> {
+        let inactive_statuses = sandbox_entity::SandboxStatus::iter()
+            .filter(|status| !status.has_active_runtime_state());
+        sandbox_entity::Entity::update_many()
+            .col_expr(
+                sandbox_entity::Column::NetworkSlot,
+                Expr::value(Option::<u16>::None),
+            )
+            .filter(sandbox_entity::Column::NetworkSlot.is_not_null())
+            .filter(sandbox_entity::Column::Status.is_in(inactive_statuses))
+            .exec(db)
+            .await?;
+        Ok(())
     }
 }
 
@@ -109,8 +119,14 @@ impl TryFrom<u16> for NetworkSlot {
 
 #[cfg(test)]
 mod tests {
-    use sea_orm::{ConnectionTrait, EntityTrait, QuerySelect, Set};
+    use std::sync::Arc;
+
+    use futures::future::join_all;
+    use sea_orm::{
+        ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter, QuerySelect, Set,
+    };
     use tempfile::tempdir;
+    use tokio::sync::Barrier;
 
     use super::*;
 
@@ -157,9 +173,9 @@ mod tests {
             .await
             .unwrap();
 
-        insert_sandbox_rows_with_ids(&backend, &[1, 2]).await;
-        assert_eq!(NetworkSlot::lease(&backend, 1).await.unwrap().get(), 1);
-        assert_eq!(NetworkSlot::lease(&backend, 2).await.unwrap().get(), 2);
+        insert_sandbox_rows_with_ids(&backend, &[65_700, 65_701]).await;
+        assert_eq!(NetworkSlot::lease(&backend, 65_700).await.unwrap().get(), 1);
+        assert_eq!(NetworkSlot::lease(&backend, 65_701).await.unwrap().get(), 2);
     }
 
     #[tokio::test]
@@ -237,23 +253,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repeated_lease_keeps_the_existing_slot() {
+        let temp = tempdir().unwrap();
+        let backend = LocalBackend::builder()
+            .home(temp.path().join("msb-home"))
+            .build()
+            .await
+            .unwrap();
+
+        insert_sandbox_rows_with_ids(&backend, &[65_700]).await;
+        let pools = backend.db().await.unwrap();
+        pools
+            .write()
+            .execute_unprepared("UPDATE sandbox SET network_slot = 3 WHERE id = 65700;")
+            .await
+            .unwrap();
+
+        assert_eq!(NetworkSlot::lease(&backend, 65_700).await.unwrap().get(), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_allocations_use_distinct_slots() {
+        const COUNT: usize = 8;
+
         let temp = tempdir().unwrap();
         let home = temp.path().join("msb-home");
-        let first_backend = LocalBackend::builder().home(&home).build().await.unwrap();
-        let second_backend = LocalBackend::builder().home(&home).build().await.unwrap();
+        let mut backends = Vec::with_capacity(COUNT);
+        for _ in 0..COUNT {
+            let backend = LocalBackend::builder().home(&home).build().await.unwrap();
+            backend.db().await.unwrap();
+            backends.push(backend);
+        }
+        let ids: Vec<i32> = (0..COUNT).map(|offset| 65_700 + offset as i32).collect();
+        insert_sandbox_rows_with_ids(&backends[0], &ids).await;
 
-        insert_sandbox_rows_with_ids(&first_backend, &[65_700, 65_701]).await;
-        let (first, second) = tokio::join!(
-            NetworkSlot::lease(&first_backend, 65_700),
-            NetworkSlot::lease(&second_backend, 65_701),
-        );
+        let barrier = Arc::new(Barrier::new(COUNT));
+        let leases = backends.iter().zip(&ids).map(|(backend, sandbox_id)| {
+            let barrier = Arc::clone(&barrier);
+            async move {
+                barrier.wait().await;
+                NetworkSlot::lease(backend, *sandbox_id)
+                    .await
+                    .unwrap()
+                    .get()
+            }
+        });
+        let mut slots = join_all(leases).await;
+        slots.sort_unstable();
 
-        let first = first.unwrap().get();
-        let second = second.unwrap().get();
-        assert_ne!(first, second);
-        assert_eq!([first, second].into_iter().min(), Some(1));
-        assert_eq!([first, second].into_iter().max(), Some(2));
+        assert_eq!(slots, (1..=COUNT as u16).collect::<Vec<_>>());
     }
 
     #[tokio::test]
@@ -265,6 +313,7 @@ mod tests {
             .await
             .unwrap();
         insert_sandbox_rows_with_ids(&backend, &[65_700]).await;
+        assert_eq!(NetworkSlot::lease(&backend, 65_700).await.unwrap().get(), 1);
 
         let pools = backend.db().await.unwrap();
         sandbox_entity::Entity::update_many()
@@ -282,7 +331,7 @@ mod tests {
             .expect_err("a stopped start attempt must not acquire a lease");
         assert!(
             err.to_string()
-                .contains("stopped while leasing network slot")
+                .contains("sandbox 65700 is missing or not running")
         );
         let slot: Option<u16> = sandbox_entity::Entity::find_by_id(65_700)
             .select_only()
@@ -292,7 +341,41 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(slot, None);
+        assert_eq!(slot, Some(1));
+    }
+
+    #[tokio::test]
+    async fn exhaustion_reclaims_inactive_slots_and_retries() {
+        let temp = tempdir().unwrap();
+        let backend = LocalBackend::builder()
+            .home(temp.path().join("msb-home"))
+            .build()
+            .await
+            .unwrap();
+
+        let pools = backend.db().await.unwrap();
+        pools
+            .write()
+            .execute_unprepared(
+                "WITH RECURSIVE slots(id) AS (\
+                     SELECT 1 UNION ALL SELECT id + 1 FROM slots WHERE id < 65535\
+                 )\
+                 INSERT INTO sandbox (id, name, config, status, network_slot, ephemeral)\
+                 SELECT id, 'stopped-slot-' || id, '{}', 'Stopped', id, 0 FROM slots;\
+                 INSERT INTO sandbox (id, name, config, status, ephemeral)\
+                 VALUES (65700, 'slot-test-65700', '{}', 'Running', 0);",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(NetworkSlot::lease(&backend, 65_700).await.unwrap().get(), 1);
+        let stale_count = sandbox_entity::Entity::find()
+            .filter(sandbox_entity::Column::Status.eq(sandbox_entity::SandboxStatus::Stopped))
+            .filter(sandbox_entity::Column::NetworkSlot.is_not_null())
+            .count(pools.read())
+            .await
+            .unwrap();
+        assert_eq!(stale_count, 0);
     }
 
     #[tokio::test]

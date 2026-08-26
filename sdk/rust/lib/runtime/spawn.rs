@@ -477,7 +477,14 @@ pub async fn spawn_sandbox(
         #[cfg(windows)]
         startup_pipe_name,
     );
-    let (writeback_limit_bytes, writeback_pool_bytes) = block_writeback_policy(&global.runtime)?;
+    let (writeback_limit_bytes, writeback_pool_bytes) =
+        match block_writeback_policy(&global.runtime) {
+            Ok(policy) => policy,
+            Err(err) => {
+                release_metrics_reservation(config, metrics_reservation.as_ref());
+                return Err(err);
+            }
+        };
     tracing::debug!(
         per_disk_limit_bytes = ?writeback_limit_bytes,
         pool_bytes = ?writeback_pool_bytes,
@@ -495,7 +502,13 @@ pub async fn spawn_sandbox(
     {
         use super::network_slot::NetworkSlot;
 
-        launch.sandbox_slot = NetworkSlot::lease(local, sandbox_id).await?.get();
+        launch.sandbox_slot = match NetworkSlot::lease(local, sandbox_id).await {
+            Ok(slot) => slot.get(),
+            Err(err) => {
+                release_metrics_reservation(config, metrics_reservation.as_ref());
+                return Err(err);
+            }
+        };
     }
 
     #[cfg(unix)]

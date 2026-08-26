@@ -1093,6 +1093,10 @@ impl LocalBackend {
                     Expr::value(SandboxStatus::Stopped),
                 )
                 .col_expr(
+                    sandbox_entity::Column::ActiveConfig,
+                    Expr::value(Option::<String>::None),
+                )
+                .col_expr(
                     sandbox_entity::Column::NetworkSlot,
                     Expr::value(Option::<u16>::None),
                 )

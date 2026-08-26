@@ -718,7 +718,7 @@ impl LocalBackend {
                     sandbox_entity::Column::UpdatedAt,
                     Expr::value(chrono::Utc::now().naive_utc()),
                 );
-            if Self::sandbox_status_clears_active_config(status) {
+            if !status.has_active_runtime_state() {
                 update = update.col_expr(
                     sandbox_entity::Column::ActiveConfig,
                     Expr::value(Option::<String>::None),
@@ -758,14 +758,6 @@ impl LocalBackend {
             .await?;
 
         Ok(())
-    }
-
-    /// Whether a status transition clears the persisted active config.
-    fn sandbox_status_clears_active_config(status: SandboxStatus) -> bool {
-        matches!(
-            status,
-            SandboxStatus::Created | SandboxStatus::Stopped | SandboxStatus::Crashed
-        )
     }
 
     /// Move a Running row to Draining (no-op for any other status).

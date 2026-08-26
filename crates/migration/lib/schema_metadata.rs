@@ -45,6 +45,7 @@ pub const SANDBOX_LABEL_REBUILD_MIGRATION_ID: &str = "m20260810_000001_rebuild_s
 
 /// Migration that permits several managed vCPUs to share one host logical processor.
 pub const SHARED_CPU_ALLOCATION_MIGRATION_ID: &str = "m20260813_000001_share_cpu_allocations";
+/// Migration that adds recyclable network address-pool slot leases.
 pub const SANDBOX_NETWORK_SLOT_MIGRATION_ID: &str = "m20260818_000001_sandbox_network_slot";
 
 /// Frozen migration baseline for the transitional 0.6.0 release.

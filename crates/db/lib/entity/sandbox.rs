@@ -45,6 +45,20 @@ pub enum SandboxStatus {
     Crashed,
 }
 
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl SandboxStatus {
+    /// Whether this status represents a live runtime or an in-flight runtime transition.
+    pub fn has_active_runtime_state(self) -> bool {
+        match self {
+            Self::Starting | Self::Running | Self::Draining | Self::Paused => true,
+            Self::Created | Self::Stopped | Self::Crashed => false,
+        }
+    }
+}
+
 /// The sandbox entity model.
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
 #[sea_orm(table_name = "sandbox")]
@@ -59,7 +73,7 @@ pub struct Model {
     pub active_config: Option<String>,
     pub status: SandboxStatus,
     /// Network address-pool slot leased to this sandbox's current run (#1390).
-    /// `None` while the sandbox is terminal or has not started.
+    /// Inactive rows should not retain a slot; maintenance repairs stale leases.
     pub network_slot: Option<u16>,
 
     /// Denormalized copy of `config.policy.ephemeral`.
