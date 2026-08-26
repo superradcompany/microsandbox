@@ -103,7 +103,7 @@ Nested destinations are supported. microsandbox canonicalizes guest paths and al
 
 Use `--mount-file` when you want to bind one host file instead of an entire directory.
 
-File mounts expose the selected host inode through an isolated one-entry filesystem. They do not hard-link or copy the source, host changes remain visible, and other files in the source directory are not part of the guest-visible share.
+File mounts expose the selected host inode through an isolated one-entry filesystem. They do not hard-link or copy the source, host changes remain visible, and other files in the source directory are not part of the guest-visible share. Writable file mounts receive the same default quota as directory binds; use `quota=<size>` to set a smaller or larger guest-growth budget.
 
 ```bash
 msb create alpine --name config-reader \
@@ -396,8 +396,8 @@ CLI mount flags use `SOURCE:DEST[:OPTIONS]`. The `:` before `OPTIONS` starts the
 
 | Flag | Source | Options |
 |------|--------|---------|
-| `--mount-dir` | Host directory | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror`, paired `uid=<N>,gid=<N>` |
-| `--mount-file` | Host file | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror`, paired `uid=<N>,gid=<N>` |
+| `--mount-dir` | Host directory | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror`, `quota=<size>`, paired `uid=<N>,gid=<N>` |
+| `--mount-file` | Host file | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror`, `quota=<size>`, paired `uid=<N>,gid=<N>` |
 | `--mount-named` | Named volume | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `kind=dir\|disk`, `size=<size>` for `kind=disk`, `quota=<size>` for directory volumes; directory-backed named volumes also support `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror`, paired `uid=<N>,gid=<N>` |
 | `--mount-disk` | Host disk image | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `format=raw\|qcow2\|vmdk`, `fstype=<type>` |
 | `--tmpfs` | Guest path | `ro`, `rw`, `noexec`, `nosuid`, `nodev`; size may be passed as `PATH:SIZE[:OPTIONS]` |

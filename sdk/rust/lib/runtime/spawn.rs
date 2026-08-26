@@ -2192,6 +2192,7 @@ fn push_dir_mount_arg(
 }
 
 /// Collect a typed host-file mount for the runtime's single-file backend.
+#[allow(clippy::too_many_arguments)]
 fn push_file_mount_arg(
     mounts: &mut Vec<FileMountConfig>,
     tag: &str,
@@ -2200,6 +2201,7 @@ fn push_file_mount_arg(
     options: MountOptions,
     stat_virtualization: StatVirtualization,
     host_permissions: HostPermissions,
+    quota_mib: u32,
 ) {
     let mut arg = format!("{tag}:{}", host_file.display());
     let mut opts = mount_option_tokens(options);
@@ -2213,6 +2215,7 @@ fn push_file_mount_arg(
         options.override_uid,
         options.override_gid,
     );
+    opts.push(format!("quota={quota_mib}"));
     append_option_block(&mut arg, opts);
     mounts.push(FileMountConfig {
         mount: arg,
@@ -2597,6 +2600,9 @@ fn sandbox_cli_args(
                 quota_mib,
             } => {
                 if let Some((filename, tag)) = file_mounts.get(guest) {
+                    // File binds receive the same default-on host disk
+                    // protection as directory binds.
+                    let quota = quota_mib.unwrap_or(crate::sandbox::config::DEFAULT_BIND_QUOTA_MIB);
                     push_file_mount_arg(
                         &mut launch.file_mounts,
                         tag,
@@ -2605,6 +2611,7 @@ fn sandbox_cli_args(
                         *options,
                         *stat_virtualization,
                         *host_permissions,
+                        quota,
                     );
                     launch.bootstrap.file_mounts.push(BootstrapFileMount {
                         tag: tag.clone(),
@@ -3962,10 +3969,12 @@ mod tests {
 
         let rendered = render_args_with_file_mounts(&config, &file_mounts);
 
-        assert!(
-            rendered.windows(2).any(|pair| pair[0] == "--file-mount"
-                && pair[1] == "fm_aabbccdd:/host/config.txt:ro,noexec")
-        );
+        assert!(rendered.windows(2).any(|pair| pair[0] == "--file-mount"
+            && pair[1]
+                == format!(
+                    "fm_aabbccdd:/host/config.txt:ro,noexec,quota={}",
+                    crate::sandbox::config::DEFAULT_BIND_QUOTA_MIB
+                )));
         // MSB_FILE_MOUNTS should contain the spec.
         assert!(rendered.contains(
             &"MSB_FILE_MOUNTS=fm_aabbccdd:config.txt:/guest/config.txt:ro,noexec".to_string()
@@ -4021,6 +4030,28 @@ mod tests {
                 .windows(2)
                 .any(|pair| pair[0] == "--mount" && pair[1] == expected),
             "missing default-quota --mount arg in {rendered:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_cli_args_file_mount_quota_override() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/guest/file.txt", |m| m.bind("/host/file.txt").quota(32u32))
+            .build()
+            .await
+            .unwrap();
+
+        let mut file_mounts = HashMap::new();
+        file_mounts.insert(
+            "/guest/file.txt".to_string(),
+            ("file.txt".to_string(), "fm_11223344".to_string()),
+        );
+        let rendered = render_args_with_file_mounts(&config, &file_mounts);
+
+        assert!(
+            rendered.windows(2).any(|pair| pair[0] == "--file-mount"
+                && pair[1] == "fm_11223344:/host/file.txt:quota=32")
         );
     }
 
@@ -4175,7 +4206,11 @@ mod tests {
         let rendered = render_args_with_file_mounts(&config, &file_mounts);
 
         assert!(rendered.windows(2).any(|pair| pair[0] == "--file-mount"
-            && pair[1] == r"fm_deadbeef:C:\Users\Stephen\config.txt:ro"));
+            && pair[1]
+                == format!(
+                    r"fm_deadbeef:C:\Users\Stephen\config.txt:ro,quota={}",
+                    crate::sandbox::config::DEFAULT_BIND_QUOTA_MIB
+                )));
         assert!(
             rendered.contains(
                 &"MSB_FILE_MOUNTS=fm_deadbeef:config.txt:/guest/config.txt:ro".to_string()

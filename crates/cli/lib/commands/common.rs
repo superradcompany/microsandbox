@@ -130,15 +130,15 @@ pub struct SandboxOpts {
 
     /// Explicitly mount a host directory into the sandbox (`SOURCE:DEST[:OPTIONS]`).
     ///
-    /// OPTIONS may include `uid=<N>,gid=<N>` to present host-created files (no
-    /// per-file stat override) as that guest owner; both are required together.
+    /// OPTIONS may include `quota=<size>` and `uid=<N>,gid=<N>` to present
+    /// host-created files as that guest owner; both IDs are required together.
     #[arg(long = "mount-dir", value_name = "SOURCE:DEST[:OPTIONS]")]
     pub mount_dir: Vec<String>,
 
     /// Explicitly mount a host file into the sandbox (`SOURCE:DEST[:OPTIONS]`).
     ///
-    /// OPTIONS may include `uid=<N>,gid=<N>` to present the host file (no
-    /// per-file stat override) as that guest owner; both are required together.
+    /// OPTIONS may include `quota=<size>` and `uid=<N>,gid=<N>` to present the
+    /// host file as that guest owner; both IDs are required together.
     #[arg(long = "mount-file", value_name = "SOURCE:DEST[:OPTIONS]")]
     pub mount_file: Vec<String>,
 
@@ -1536,6 +1536,7 @@ pub fn apply_explicit_file_mount(
         spec,
         CliMountOptionSupport {
             policies: true,
+            quota: true,
             owner: true,
             ..CliMountOptionSupport::default()
         },
@@ -3742,19 +3743,21 @@ mod tests {
     #[tokio::test]
     async fn test_apply_explicit_file_mount() {
         let file = write_temp("fixture");
-        let spec = format!("{}:/fixture:ro,noexec", file.display());
+        let spec = format!("{}:/fixture:ro,noexec,quota=32M", file.display());
         let mount = build_explicit(&spec, apply_explicit_file_mount).await;
         match mount {
             VolumeMount::Bind {
                 host,
                 guest,
                 options,
+                quota_mib,
                 ..
             } => {
                 assert_eq!(host, file);
                 assert_eq!(guest, "/fixture");
                 assert!(options.readonly);
                 assert!(options.noexec);
+                assert_eq!(quota_mib, Some(32));
             }
             other => panic!("expected Bind, got {other:?}"),
         }

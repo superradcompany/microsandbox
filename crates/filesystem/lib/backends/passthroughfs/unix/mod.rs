@@ -171,6 +171,12 @@ pub struct PassthroughConfig {
     /// `None` means unbounded. When set, guest-attributable growth past this
     /// many bytes is rejected with `ENOSPC`.
     pub quota_bytes: Option<u64>,
+
+    /// Optional quota accounting root when it differs from `root_dir`.
+    ///
+    /// Single-file mounts anchor pathname resolution at the parent directory,
+    /// while accounting only the selected file. `None` uses `root_dir`.
+    pub quota_root: Option<PathBuf>,
 }
 
 /// Passthrough filesystem backend.
@@ -323,9 +329,14 @@ impl PassthroughFs {
             unsafe { File::from_raw_fd(fd) }
         };
 
-        let quota = cfg
-            .quota_bytes
-            .map(|limit| super::quota::DirQuota::new(cfg.root_dir.clone(), limit));
+        let quota = cfg.quota_bytes.map(|limit| {
+            super::quota::DirQuota::new(
+                cfg.quota_root
+                    .clone()
+                    .unwrap_or_else(|| cfg.root_dir.clone()),
+                limit,
+            )
+        });
 
         Ok(Self {
             cfg,
@@ -504,6 +515,7 @@ impl Default for PassthroughConfig {
             inject_init: true,
             bind_identity_map: None,
             quota_bytes: None,
+            quota_root: None,
         }
     }
 }

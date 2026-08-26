@@ -64,10 +64,12 @@ pub struct InstallArgs {
     pub volume: Vec<String>,
 
     /// Explicitly mount a host directory into the sandbox (`SOURCE:DEST[:OPTIONS]`).
+    /// OPTIONS may include `quota=<size>`.
     #[arg(long = "mount-dir", value_name = "SOURCE:DEST[:OPTIONS]")]
     pub mount_dir: Vec<String>,
 
     /// Explicitly mount a host file into the sandbox (`SOURCE:DEST[:OPTIONS]`).
+    /// OPTIONS may include `quota=<size>`.
     #[arg(long = "mount-file", value_name = "SOURCE:DEST[:OPTIONS]")]
     pub mount_file: Vec<String>,
 

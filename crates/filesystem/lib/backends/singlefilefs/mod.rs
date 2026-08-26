@@ -6,10 +6,14 @@
 //! discovering or mutating any sibling names in the host directory.
 
 use std::{
+    collections::HashMap,
     ffi::{CStr, CString},
     io,
     path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        RwLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -48,7 +52,15 @@ pub struct SingleFileFs {
     inner: PassthroughFs,
     inner_name: CString,
     guest_name: &'static [u8],
-    file_inode: AtomicU64,
+    current_inode: AtomicU64,
+    lookup_refs: RwLock<HashMap<u64, u64>>,
+    open_handles: RwLock<HashMap<u64, OpenHandleAdmission>>,
+}
+
+#[derive(Clone, Copy)]
+struct OpenHandleAdmission {
+    guest_inode: u64,
+    inner_inode: u64,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -99,9 +111,15 @@ impl SingleFileFs {
         }
 
         cfg.root_dir = parent.to_path_buf();
+        // The passthrough backend needs the parent as its namespace anchor,
+        // but quota accounting must include only the selected file.
+        cfg.quota_root = Some(source.clone());
         cfg.no_symlink_root = true;
         cfg.inject_init = false;
-        cfg.quota_bytes = None;
+        // The host may atomically replace the selected path. Positive dentry
+        // caching would otherwise keep directing new opens to the unlinked
+        // inode, which a pathname-based passthrough backend cannot reopen.
+        cfg.entry_timeout = Duration::ZERO;
         // Host writes bypass FUSE, so expire attributes immediately. With
         // AUTO_INVAL_DATA negotiated below, each guest read revalidates mtime
         // and invalidates cached contents when the host changed them.
@@ -124,29 +142,100 @@ impl SingleFileFs {
             // The backend lives for the VM lifetime. A stable name lets both
             // vector and streaming readdir callbacks borrow it safely.
             guest_name: Box::leak(guest_name),
-            file_inode: AtomicU64::new(0),
+            current_inode: AtomicU64::new(0),
+            lookup_refs: RwLock::new(HashMap::new()),
+            open_handles: RwLock::new(HashMap::new()),
         })
     }
 
-    fn lookup_file(&self, ctx: Context) -> io::Result<Entry> {
+    /// Resolve the selected name and update its admission state.
+    ///
+    /// The current inode owns one inner lookup reference even when the kernel
+    /// owns none. This pin makes the inode emitted by plain `readdir` usable,
+    /// while `lookup_refs` tracks only references that FUSE may later forget.
+    fn admit_file(&self, ctx: Context, kernel_lookup: bool) -> io::Result<Entry> {
         let entry = self.inner.lookup(ctx, ROOT_INODE, &self.inner_name)?;
         if u32::from(entry.attr.st_mode) & S_IFMT != S_IFREG {
+            self.inner.forget(ctx, entry.inode, 1);
             return Err(linux_error(LINUX_ENOENT));
         }
-        self.file_inode.store(entry.inode, Ordering::Release);
+
+        let (release_old_pin, release_redundant_lookup) = {
+            let mut refs = self.lookup_refs.write().unwrap();
+            let old_inode = self.current_inode.load(Ordering::Acquire);
+            let was_current = old_inode == entry.inode;
+            let previous_refs = refs.get(&entry.inode).copied().unwrap_or(0);
+            let previous_inner_refs = previous_refs + u64::from(was_current && previous_refs == 0);
+            let next_refs = previous_refs + u64::from(kernel_lookup);
+            let next_inner_refs = next_refs.max(1);
+
+            let release_old_pin = if old_inode != 0 && !was_current {
+                if refs.get(&old_inode).copied().unwrap_or(0) == 0 {
+                    refs.remove(&old_inode);
+                    Some(old_inode)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            refs.insert(entry.inode, next_refs);
+            self.current_inode.store(entry.inode, Ordering::Release);
+
+            // `inner.lookup` added one reference. When an existing reference
+            // can become the current pin, release the newly added surplus.
+            let release_redundant_lookup = previous_inner_refs + 1 > next_inner_refs;
+            (release_old_pin, release_redundant_lookup)
+        };
+
+        if let Some(old_inode) = release_old_pin {
+            self.inner.forget(ctx, old_inode, 1);
+        }
+        if release_redundant_lookup {
+            self.inner.forget(ctx, entry.inode, 1);
+        }
         Ok(entry)
     }
 
-    fn require_file_inode(&self, inode: u64) -> io::Result<()> {
-        if inode != 0 && self.file_inode.load(Ordering::Acquire) == inode {
+    fn lookup_file(&self, ctx: Context) -> io::Result<Entry> {
+        self.admit_file(ctx, true)
+    }
+
+    fn refresh_file(&self, ctx: Context) -> io::Result<Entry> {
+        self.admit_file(ctx, false)
+    }
+
+    fn require_lookup(&self, inode: u64) -> io::Result<()> {
+        if inode != 0
+            && (self.current_inode.load(Ordering::Acquire) == inode
+                || self
+                    .lookup_refs
+                    .read()
+                    .unwrap()
+                    .get(&inode)
+                    .copied()
+                    .unwrap_or(0)
+                    != 0)
+        {
             Ok(())
         } else {
             Err(linux_error(LINUX_ENOENT))
         }
     }
 
+    fn inner_inode_for_handle(&self, inode: u64, handle: u64) -> io::Result<u64> {
+        self.open_handles
+            .read()
+            .unwrap()
+            .get(&handle)
+            .filter(|admission| admission.guest_inode == inode)
+            .map(|admission| admission.inner_inode)
+            .ok_or_else(|| linux_error(LINUX_EBADF))
+    }
+
     fn root_entries(&self) -> Vec<DirEntry<'static>> {
-        let file_inode = self.file_inode.load(Ordering::Acquire);
+        let file_inode = self.current_inode.load(Ordering::Acquire);
         vec![
             DirEntry {
                 ino: ROOT_INODE,
@@ -188,6 +277,8 @@ impl DynFileSystem for SingleFileFs {
     }
 
     fn destroy(&self) {
+        self.open_handles.write().unwrap().clear();
+        self.lookup_refs.write().unwrap().clear();
         self.inner.destroy();
     }
 
@@ -202,8 +293,28 @@ impl DynFileSystem for SingleFileFs {
     }
 
     fn forget(&self, ctx: Context, inode: u64, count: u64) {
-        if self.require_file_inode(inode).is_ok() {
-            self.inner.forget(ctx, inode, count);
+        let forgotten = {
+            let mut refs = self.lookup_refs.write().unwrap();
+            let Some(current) = refs.get_mut(&inode) else {
+                return;
+            };
+            let forgotten = count.min(*current);
+            *current -= forgotten;
+            let exhausted = *current == 0;
+            let is_current = self.current_inode.load(Ordering::Acquire) == inode;
+            if exhausted && !is_current {
+                refs.remove(&inode);
+            }
+            // The final current-inode reference becomes the façade's pin
+            // instead of being released to the inner backend.
+            if is_current && exhausted {
+                forgotten.saturating_sub(1)
+            } else {
+                forgotten
+            }
+        };
+        if forgotten != 0 {
+            self.inner.forget(ctx, inode, forgotten);
         }
     }
 
@@ -216,8 +327,14 @@ impl DynFileSystem for SingleFileFs {
         if inode == ROOT_INODE {
             return Ok((root_stat(), Duration::from_secs(5)));
         }
-        self.require_file_inode(inode)?;
-        self.inner.getattr(ctx, inode, handle)
+        let inner_inode = match handle {
+            Some(handle) => self.inner_inode_for_handle(inode, handle)?,
+            None => {
+                self.require_lookup(inode)?;
+                self.refresh_file(ctx)?.inode
+            }
+        };
+        self.inner.getattr(ctx, inner_inode, handle)
     }
 
     fn setattr(
@@ -228,8 +345,14 @@ impl DynFileSystem for SingleFileFs {
         handle: Option<u64>,
         valid: SetattrValid,
     ) -> io::Result<(stat64, Duration)> {
-        self.require_file_inode(inode)?;
-        self.inner.setattr(ctx, inode, attr, handle, valid)
+        let inner_inode = match handle {
+            Some(handle) => self.inner_inode_for_handle(inode, handle)?,
+            None => {
+                self.require_lookup(inode)?;
+                self.refresh_file(ctx)?.inode
+            }
+        };
+        self.inner.setattr(ctx, inner_inode, attr, handle, valid)
     }
 
     fn open(
@@ -242,8 +365,22 @@ impl DynFileSystem for SingleFileFs {
         if inode == ROOT_INODE {
             return Err(linux_error(LINUX_EISDIR));
         }
-        self.require_file_inode(inode)?;
-        self.inner.open(ctx, inode, kill_priv, flags)
+        self.require_lookup(inode)?;
+        // The FUSE client may reuse a cached node ID without another LOOKUP.
+        // Resolve the selected host path at OPEN so a new descriptor follows
+        // an atomic replacement, independently of already-open descriptors.
+        let inner_inode = self.refresh_file(ctx)?.inode;
+        let opened = self.inner.open(ctx, inner_inode, kill_priv, flags)?;
+        if let Some(handle) = opened.0 {
+            self.open_handles.write().unwrap().insert(
+                handle,
+                OpenHandleAdmission {
+                    guest_inode: inode,
+                    inner_inode,
+                },
+            );
+        }
+        Ok(opened)
     }
 
     fn read(
@@ -257,9 +394,17 @@ impl DynFileSystem for SingleFileFs {
         lock_owner: Option<u64>,
         flags: u32,
     ) -> io::Result<usize> {
-        self.require_file_inode(inode)?;
-        self.inner
-            .read(ctx, inode, handle, writer, size, offset, lock_owner, flags)
+        let inner_inode = self.inner_inode_for_handle(inode, handle)?;
+        self.inner.read(
+            ctx,
+            inner_inode,
+            handle,
+            writer,
+            size,
+            offset,
+            lock_owner,
+            flags,
+        )
     }
 
     fn write(
@@ -275,10 +420,10 @@ impl DynFileSystem for SingleFileFs {
         kill_priv: bool,
         flags: u32,
     ) -> io::Result<usize> {
-        self.require_file_inode(inode)?;
+        let inner_inode = self.inner_inode_for_handle(inode, handle)?;
         self.inner.write(
             ctx,
-            inode,
+            inner_inode,
             handle,
             reader,
             size,
@@ -291,13 +436,13 @@ impl DynFileSystem for SingleFileFs {
     }
 
     fn flush(&self, ctx: Context, inode: u64, handle: u64, lock_owner: u64) -> io::Result<()> {
-        self.require_file_inode(inode)?;
-        self.inner.flush(ctx, inode, handle, lock_owner)
+        let inner_inode = self.inner_inode_for_handle(inode, handle)?;
+        self.inner.flush(ctx, inner_inode, handle, lock_owner)
     }
 
     fn fsync(&self, ctx: Context, inode: u64, datasync: bool, handle: u64) -> io::Result<()> {
-        self.require_file_inode(inode)?;
-        self.inner.fsync(ctx, inode, datasync, handle)
+        let inner_inode = self.inner_inode_for_handle(inode, handle)?;
+        self.inner.fsync(ctx, inner_inode, datasync, handle)
     }
 
     fn fallocate(
@@ -309,9 +454,9 @@ impl DynFileSystem for SingleFileFs {
         offset: u64,
         length: u64,
     ) -> io::Result<()> {
-        self.require_file_inode(inode)?;
+        let inner_inode = self.inner_inode_for_handle(inode, handle)?;
         self.inner
-            .fallocate(ctx, inode, handle, mode, offset, length)
+            .fallocate(ctx, inner_inode, handle, mode, offset, length)
     }
 
     fn release(
@@ -324,9 +469,18 @@ impl DynFileSystem for SingleFileFs {
         flock_release: bool,
         lock_owner: Option<u64>,
     ) -> io::Result<()> {
-        self.require_file_inode(inode)?;
-        self.inner
-            .release(ctx, inode, flags, handle, flush, flock_release, lock_owner)
+        let inner_inode = self.inner_inode_for_handle(inode, handle)?;
+        self.inner.release(
+            ctx,
+            inner_inode,
+            flags,
+            handle,
+            flush,
+            flock_release,
+            lock_owner,
+        )?;
+        self.open_handles.write().unwrap().remove(&handle);
+        Ok(())
     }
 
     fn statfs(&self, ctx: Context, _inode: u64) -> io::Result<statvfs64> {
@@ -341,8 +495,9 @@ impl DynFileSystem for SingleFileFs {
         value: &[u8],
         flags: u32,
     ) -> io::Result<()> {
-        self.require_file_inode(inode)?;
-        self.inner.setxattr(ctx, inode, name, value, flags)
+        self.require_lookup(inode)?;
+        let inner_inode = self.refresh_file(ctx)?.inode;
+        self.inner.setxattr(ctx, inner_inode, name, value, flags)
     }
 
     fn getxattr(
@@ -352,18 +507,21 @@ impl DynFileSystem for SingleFileFs {
         name: &CStr,
         size: u32,
     ) -> io::Result<GetxattrReply> {
-        self.require_file_inode(inode)?;
-        self.inner.getxattr(ctx, inode, name, size)
+        self.require_lookup(inode)?;
+        let inner_inode = self.refresh_file(ctx)?.inode;
+        self.inner.getxattr(ctx, inner_inode, name, size)
     }
 
     fn listxattr(&self, ctx: Context, inode: u64, size: u32) -> io::Result<ListxattrReply> {
-        self.require_file_inode(inode)?;
-        self.inner.listxattr(ctx, inode, size)
+        self.require_lookup(inode)?;
+        let inner_inode = self.refresh_file(ctx)?.inode;
+        self.inner.listxattr(ctx, inner_inode, size)
     }
 
     fn removexattr(&self, ctx: Context, inode: u64, name: &CStr) -> io::Result<()> {
-        self.require_file_inode(inode)?;
-        self.inner.removexattr(ctx, inode, name)
+        self.require_lookup(inode)?;
+        let inner_inode = self.refresh_file(ctx)?.inode;
+        self.inner.removexattr(ctx, inner_inode, name)
     }
 
     fn opendir(
@@ -390,9 +548,9 @@ impl DynFileSystem for SingleFileFs {
         if inode != ROOT_INODE || handle != ROOT_HANDLE {
             return Err(linux_error(LINUX_EBADF));
         }
-        if self.file_inode.load(Ordering::Acquire) == 0 {
-            self.lookup_file(ctx)?;
-        }
+        // Plain readdir does not create a kernel lookup reference, so refresh
+        // only the façade-owned current-inode pin.
+        self.refresh_file(ctx)?;
         Ok(self
             .root_entries()
             .into_iter()
@@ -445,8 +603,9 @@ impl DynFileSystem for SingleFileFs {
                 Err(linux_error(LINUX_EACCES))
             };
         }
-        self.require_file_inode(inode)?;
-        self.inner.access(ctx, inode, mask)
+        self.require_lookup(inode)?;
+        let inner_inode = self.refresh_file(ctx)?.inode;
+        self.inner.access(ctx, inner_inode, mask)
     }
 
     fn lseek(
@@ -457,8 +616,8 @@ impl DynFileSystem for SingleFileFs {
         offset: u64,
         whence: u32,
     ) -> io::Result<u64> {
-        self.require_file_inode(inode)?;
-        self.inner.lseek(ctx, inode, handle, offset, whence)
+        let inner_inode = self.inner_inode_for_handle(inode, handle)?;
+        self.inner.lseek(ctx, inner_inode, handle, offset, whence)
     }
 
     fn copyfilerange(
@@ -473,10 +632,18 @@ impl DynFileSystem for SingleFileFs {
         len: u64,
         flags: u64,
     ) -> io::Result<usize> {
-        self.require_file_inode(inode_in)?;
-        self.require_file_inode(inode_out)?;
+        let inner_inode_in = self.inner_inode_for_handle(inode_in, handle_in)?;
+        let inner_inode_out = self.inner_inode_for_handle(inode_out, handle_out)?;
         self.inner.copyfilerange(
-            ctx, inode_in, handle_in, offset_in, inode_out, handle_out, offset_out, len, flags,
+            ctx,
+            inner_inode_in,
+            handle_in,
+            offset_in,
+            inner_inode_out,
+            handle_out,
+            offset_out,
+            len,
+            flags,
         )
     }
 }
@@ -654,6 +821,128 @@ mod tests {
 
         assert!(options.contains(FsOptions::AUTO_INVAL_DATA));
         #[cfg(unix)]
-        assert_eq!(fs.inner.cfg.attr_timeout, Duration::ZERO);
+        {
+            assert_eq!(fs.inner.cfg.entry_timeout, Duration::ZERO);
+            assert_eq!(fs.inner.cfg.attr_timeout, Duration::ZERO);
+        }
+    }
+
+    #[test]
+    fn replacement_keeps_the_old_open_handle_valid() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("selected.txt");
+        let replacement = temp.path().join("replacement.txt");
+        std::fs::write(&source, b"old contents").unwrap();
+        std::fs::write(&replacement, b"new contents").unwrap();
+
+        let fs = SingleFileFs::new(
+            source.clone(),
+            "config.txt".to_string(),
+            PassthroughConfig::default(),
+        )
+        .unwrap();
+        fs.init(FsOptions::empty()).unwrap();
+
+        let old_entry = fs.lookup(context(), ROOT_INODE, c"config.txt").unwrap();
+        let (old_handle, _) = fs.open(context(), old_entry.inode, false, 0).unwrap();
+        let old_handle = old_handle.unwrap();
+
+        #[cfg(windows)]
+        std::fs::remove_file(&source).unwrap();
+        std::fs::rename(&replacement, &source).unwrap();
+
+        // Linux may issue OPEN against the cached old node ID without another
+        // LOOKUP. A new descriptor must still follow the selected pathname.
+        let (replacement_attr, _) = fs.getattr(context(), old_entry.inode, None).unwrap();
+        assert_eq!(replacement_attr.st_size, b"new contents".len() as _);
+        let (cached_handle, _) = fs.open(context(), old_entry.inode, false, 0).unwrap();
+        let cached_handle = cached_handle.unwrap();
+        let mut cached_writer = CaptureWriter { bytes: Vec::new() };
+        fs.read(
+            context(),
+            old_entry.inode,
+            cached_handle,
+            &mut cached_writer,
+            64,
+            0,
+            None,
+            0,
+        )
+        .unwrap();
+        assert_eq!(cached_writer.bytes, b"new contents");
+        fs.release(
+            context(),
+            old_entry.inode,
+            0,
+            cached_handle,
+            false,
+            false,
+            None,
+        )
+        .unwrap();
+
+        let directory_entries = fs
+            .readdir(context(), ROOT_INODE, ROOT_HANDLE, 4096, 0)
+            .unwrap();
+        let replacement_inode = directory_entries.last().unwrap().ino;
+        assert_ne!(old_entry.inode, replacement_inode);
+        fs.getattr(context(), replacement_inode, None).unwrap();
+
+        let new_entry = fs.lookup(context(), ROOT_INODE, c"config.txt").unwrap();
+        assert_ne!(old_entry.inode, new_entry.inode);
+
+        // FUSE may drop the pathname lookup before the descriptor is closed.
+        // The handle admission must independently retain access to that inode.
+        fs.forget(context(), old_entry.inode, 1);
+        let mut old_writer = CaptureWriter { bytes: Vec::new() };
+        fs.read(
+            context(),
+            old_entry.inode,
+            old_handle,
+            &mut old_writer,
+            64,
+            0,
+            None,
+            0,
+        )
+        .unwrap();
+        assert_eq!(old_writer.bytes, b"old contents");
+        fs.release(
+            context(),
+            old_entry.inode,
+            0,
+            old_handle,
+            false,
+            false,
+            None,
+        )
+        .unwrap();
+
+        let (new_handle, _) = fs.open(context(), new_entry.inode, false, 0).unwrap();
+        let new_handle = new_handle.unwrap();
+        let mut new_writer = CaptureWriter { bytes: Vec::new() };
+        fs.read(
+            context(),
+            new_entry.inode,
+            new_handle,
+            &mut new_writer,
+            64,
+            0,
+            None,
+            0,
+        )
+        .unwrap();
+        assert_eq!(new_writer.bytes, b"new contents");
+        fs.release(
+            context(),
+            new_entry.inode,
+            0,
+            new_handle,
+            false,
+            false,
+            None,
+        )
+        .unwrap();
+        fs.forget(context(), new_entry.inode, 1);
     }
 }

@@ -1608,6 +1608,7 @@ fn build_vm(
             stat_virtualization: parsed.stat_virtualization,
             host_permissions: parsed.host_permissions,
             readonly: parsed.readonly,
+            quota_bytes: parsed.quota_bytes,
             #[cfg(unix)]
             bind_identity_map: mount_bind_identity_map,
             #[cfg(windows)]
