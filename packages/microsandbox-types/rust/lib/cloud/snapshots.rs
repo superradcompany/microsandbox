@@ -29,7 +29,7 @@ pub enum CloudSnapshotKind {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CloudSnapshotSpec {
     /// Immutable identifier of the sandbox to capture.
-    pub source_sandbox_id: String,
+    pub sandbox_id: String,
     /// Snapshot name.
     pub name: String,
     /// Directory on a mounted host volume to write the artifact into. `None`
@@ -74,7 +74,7 @@ pub struct CloudSnapshotDetails {
     pub location: CloudSnapshotLocation,
     /// Identifier of the sandbox the snapshot was captured from, when known.
     #[serde(default)]
-    pub source_sandbox_id: Option<String>,
+    pub sandbox_id: Option<String>,
     /// Snapshot identity: the `sha256:` digest of the canonical descriptor.
     pub digest: String,
     /// Stored payload size in bytes.
