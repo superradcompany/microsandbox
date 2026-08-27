@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use futures::future::BoxFuture;
 use microsandbox_types::{
-    CloudCreateSnapshotRequest, CloudPaginated, CloudSnapshot, CloudSnapshotLocation,
-    CloudSnapshotOperation, CloudSnapshotOperationStatus,
+    CloudCreateSnapshotRequest, CloudPaginated, CloudSnapshot, CloudSnapshotDetails,
+    CloudSnapshotLocation, CloudSnapshotOperation, CloudSnapshotOperationStatus, CloudSnapshotSpec,
 };
 use serde::Serialize;
 
@@ -18,7 +18,7 @@ use crate::backend::{Backend, SnapshotBackend};
 use crate::sandbox::{FsEntryKind, SandboxConfig};
 use crate::snapshot::{
     DESCRIPTOR_FILENAME, Manifest, SaveOpts, Snapshot, SnapshotConfig, SnapshotHandle,
-    SnapshotReference, SnapshotState, SnapshotVerifyReport,
+    SnapshotReference, SnapshotScope, SnapshotState, SnapshotVerifyReport,
 };
 use crate::{MicrosandboxError, MicrosandboxResult, Operation};
 
@@ -54,15 +54,7 @@ impl SnapshotBackend for CloudBackend {
     ) -> BoxFuture<'a, MicrosandboxResult<Snapshot>> {
         Box::pin(async move {
             let source = self.get_sandbox(&config.source_sandbox).await?;
-            let request = CloudCreateSnapshotRequest {
-                source_sandbox_id: source.id,
-                name: config.name,
-                dest_dir: config.dest_dir,
-                labels: config.labels.into_iter().collect::<BTreeMap<_, _>>(),
-                force: config.force,
-                record_integrity: config.record_integrity,
-                resumable: config.resumable,
-            };
+            let request = cloud_snapshot_request(source.id, config);
             let operation = self.create_snapshot(&request).await?;
             let snapshot = self.wait_for_snapshot(operation).await?;
 
@@ -412,7 +404,7 @@ impl CloudBackend {
             .unwrap_or(&path)
             .to_string();
 
-        Ok(CloudSnapshot {
+        let snapshot = CloudSnapshotDetails {
             name,
             location: CloudSnapshotLocation::HostVolume { path },
             source_sandbox_id: None,
@@ -421,6 +413,11 @@ impl CloudBackend {
             labels: manifest.labels.clone(),
             created_at,
             manifest,
+        };
+
+        Ok(match snapshot.manifest.scope {
+            SnapshotScope::Disk => CloudSnapshot::Disk { snapshot },
+            SnapshotScope::Resumable => CloudSnapshot::Checkpoint { snapshot },
         })
     }
 }
@@ -428,6 +425,27 @@ impl CloudBackend {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+fn cloud_snapshot_request(
+    source_sandbox_id: String,
+    config: SnapshotConfig,
+) -> CloudCreateSnapshotRequest {
+    let resumable = config.resumable;
+    let snapshot = CloudSnapshotSpec {
+        source_sandbox_id,
+        name: config.name,
+        dest_dir: config.dest_dir,
+        labels: config.labels.into_iter().collect::<BTreeMap<_, _>>(),
+        force: config.force,
+        record_integrity: config.record_integrity,
+    };
+
+    if resumable {
+        CloudCreateSnapshotRequest::Checkpoint { snapshot }
+    } else {
+        CloudCreateSnapshotRequest::Disk { snapshot }
+    }
+}
 
 pub(super) fn cloud_reference(
     reference: SnapshotReference,
@@ -448,6 +466,7 @@ pub(super) fn cloud_reference(
 }
 
 fn snapshot_from_cloud(backend: Arc<dyn Backend>, snapshot: CloudSnapshot) -> Snapshot {
+    let snapshot = snapshot.into_details();
     Snapshot {
         backend,
         reference: reference_from_cloud_location(snapshot.location),
@@ -461,6 +480,7 @@ fn snapshot_handle_from_cloud(
     backend: Arc<dyn Backend>,
     snapshot: CloudSnapshot,
 ) -> MicrosandboxResult<SnapshotHandle> {
+    let snapshot = snapshot.into_details();
     let (format, fstype, checkpoint_manifest_digest) = match &snapshot.manifest.state {
         SnapshotState::File(state) => (Some(state.format), Some(state.fstype.clone()), None),
         SnapshotState::Checkpoint(state) => (None, None, Some(state.manifest.clone())),
@@ -527,10 +547,33 @@ fn is_snapshot_not_found(error: &MicrosandboxError) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use microsandbox_types::CloudSnapshotKind;
+
     use super::*;
 
     fn assert_unsupported(result: MicrosandboxResult<impl Sized>) {
         assert!(matches!(result, Err(MicrosandboxError::Unsupported { .. })));
+    }
+
+    fn snapshot_config(resumable: bool) -> SnapshotConfig {
+        SnapshotConfig {
+            name: "checkpoint".into(),
+            dest_dir: None,
+            source_sandbox: "source".into(),
+            labels: Vec::new(),
+            force: false,
+            record_integrity: false,
+            resumable,
+        }
+    }
+
+    #[test]
+    fn resumable_builder_intent_maps_to_checkpoint_kind() {
+        let disk = cloud_snapshot_request("sandbox-id".into(), snapshot_config(false));
+        let checkpoint = cloud_snapshot_request("sandbox-id".into(), snapshot_config(true));
+
+        assert_eq!(disk.kind(), CloudSnapshotKind::Disk);
+        assert_eq!(checkpoint.kind(), CloudSnapshotKind::Checkpoint);
     }
 
     #[test]

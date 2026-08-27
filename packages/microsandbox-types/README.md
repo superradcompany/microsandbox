@@ -50,13 +50,17 @@ cargo run -p microsandbox-types --features ts --bin microsandbox-types-generate 
 Cloud snapshot contracts distinguish the durable resource from the asynchronous
 capture operation:
 
-- `CloudSnapshot` is the completed snapshot resource, including its canonical
+- `CloudCreateSnapshotRequest` is discriminated by `kind`: `disk` captures the
+  writable disk, while `checkpoint` identifies future disk, memory, and device
+  capture.
+- `CloudSnapshot` uses the same kind discriminator and includes its canonical
   manifest, byte size, labels, and `CloudSnapshotLocation`.
 - `CloudSnapshotLocation` is either a managed artifact ID or a host-volume
   path. The same type is used when restoring a sandbox so location semantics
   are not duplicated.
-- `CloudSnapshotOperation` tracks a capture request through `queued`,
-  `in_progress`, `succeeded`, or `failed`; `result` is populated on success.
+- `CloudSnapshotOperation` carries the requested kind and tracks capture
+  through `queued`, `in_progress`, `succeeded`, or `failed`; `result` is
+  populated on success.
 - Validation helpers: sandbox-name and hostname rules shared across SDK, CLI, and cloud.
 
 Backend-private materialized state (registry credentials, local cache paths, DB rows, resolved manifest digests, process handles) deliberately stays out of these packages. See each language's README for details.

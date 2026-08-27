@@ -13,13 +13,24 @@ use crate::snapshot::Manifest as SnapshotManifest;
 // Types: Snapshots
 //--------------------------------------------------------------------------------------------------
 
-/// Wire shape of a cloud snapshot create request body.
+/// Kind of cloud snapshot artifact or capture operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum CloudSnapshotKind {
+    /// Capture disk state only.
+    Disk,
+    /// Capture disk, memory, and device state.
+    Checkpoint,
+}
+
+/// Settings shared by every cloud snapshot capture kind.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-pub struct CloudCreateSnapshotRequest {
+pub struct CloudSnapshotSpec {
     /// Immutable identifier of the sandbox to capture.
-    #[serde(alias = "source_sandbox")]
     pub source_sandbox_id: String,
     /// Snapshot name.
     pub name: String,
@@ -38,16 +49,33 @@ pub struct CloudCreateSnapshotRequest {
     /// Record payload integrity metadata during capture.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub record_integrity: bool,
-    /// Capture memory and device state so the snapshot can resume execution.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub resumable: bool,
 }
 
-/// Wire shape of the cloud snapshot returned by snapshot endpoints.
+/// Wire shape of a cloud snapshot create request body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-pub struct CloudSnapshot {
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CloudCreateSnapshotRequest {
+    /// Capture disk state only.
+    Disk {
+        /// Settings shared by every snapshot kind.
+        #[serde(flatten)]
+        snapshot: CloudSnapshotSpec,
+    },
+    /// Capture disk, memory, and device state.
+    Checkpoint {
+        /// Settings shared by every snapshot kind.
+        #[serde(flatten)]
+        snapshot: CloudSnapshotSpec,
+    },
+}
+
+/// Fields shared by every completed cloud snapshot kind.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct CloudSnapshotDetails {
     /// Snapshot name.
     pub name: String,
     /// Where the snapshot artifact resides.
@@ -57,8 +85,7 @@ pub struct CloudSnapshot {
     pub source_sandbox_id: Option<String>,
     /// Snapshot identity: the `sha256:` digest of the canonical descriptor.
     pub digest: String,
-    /// Stored payload size in bytes: compressed archive size for managed
-    /// storage, apparent upper-file size for host-volume storage.
+    /// Stored payload size in bytes.
     pub size_bytes: u64,
     /// Canonical snapshot descriptor.
     pub manifest: SnapshotManifest,
@@ -67,6 +94,26 @@ pub struct CloudSnapshot {
     /// Creation timestamp.
     #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub created_at: DateTime<Utc>,
+}
+
+/// Wire shape of a completed cloud snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CloudSnapshot {
+    /// A disk-only snapshot.
+    Disk {
+        /// Fields shared by every snapshot kind.
+        #[serde(flatten)]
+        snapshot: CloudSnapshotDetails,
+    },
+    /// A disk, memory, and device-state checkpoint.
+    Checkpoint {
+        /// Fields shared by every snapshot kind.
+        #[serde(flatten)]
+        snapshot: CloudSnapshotDetails,
+    },
 }
 
 /// Public locator for a managed or host-volume cloud snapshot.
@@ -95,6 +142,8 @@ pub enum CloudSnapshotLocation {
 pub struct CloudSnapshotOperation {
     /// Server-side operation identifier.
     pub id: String,
+    /// Kind of snapshot being captured.
+    pub kind: CloudSnapshotKind,
     /// Current operation status.
     pub status: CloudSnapshotOperationStatus,
     /// The resulting snapshot, present once the operation succeeds.
@@ -129,4 +178,56 @@ pub enum CloudSnapshotOperationStatus {
     Succeeded,
     /// The operation failed.
     Failed,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl CloudCreateSnapshotRequest {
+    /// Return the requested snapshot kind.
+    pub const fn kind(&self) -> CloudSnapshotKind {
+        match self {
+            Self::Disk { .. } => CloudSnapshotKind::Disk,
+            Self::Checkpoint { .. } => CloudSnapshotKind::Checkpoint,
+        }
+    }
+
+    /// Return settings shared by every snapshot kind.
+    pub const fn snapshot_spec(&self) -> &CloudSnapshotSpec {
+        match self {
+            Self::Disk { snapshot } | Self::Checkpoint { snapshot } => snapshot,
+        }
+    }
+
+    /// Return mutable settings shared by every snapshot kind.
+    pub const fn snapshot_spec_mut(&mut self) -> &mut CloudSnapshotSpec {
+        match self {
+            Self::Disk { snapshot } | Self::Checkpoint { snapshot } => snapshot,
+        }
+    }
+}
+
+impl CloudSnapshot {
+    /// Return the completed snapshot kind.
+    pub const fn kind(&self) -> CloudSnapshotKind {
+        match self {
+            Self::Disk { .. } => CloudSnapshotKind::Disk,
+            Self::Checkpoint { .. } => CloudSnapshotKind::Checkpoint,
+        }
+    }
+
+    /// Return fields shared by every snapshot kind.
+    pub const fn details(&self) -> &CloudSnapshotDetails {
+        match self {
+            Self::Disk { snapshot } | Self::Checkpoint { snapshot } => snapshot,
+        }
+    }
+
+    /// Consume this snapshot and return its shared fields.
+    pub fn into_details(self) -> CloudSnapshotDetails {
+        match self {
+            Self::Disk { snapshot } | Self::Checkpoint { snapshot } => snapshot,
+        }
+    }
 }
