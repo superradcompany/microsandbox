@@ -3494,8 +3494,8 @@ mod tests {
             .unwrap();
         assert!(rows.is_empty(), "mount owner marker should be rolled back");
 
-        // The network-slot migration leaves its compatible SQLite column in
-        // place, but removes the migration record and slot constraints.
+        // The network-slot migration leaves its compatible SQLite column and
+        // constraints in place, but removes the migration record.
         rollback_schema(db.inner(), 1).await.unwrap();
 
         let rows = db

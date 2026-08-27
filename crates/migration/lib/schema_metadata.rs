@@ -244,7 +244,7 @@ pub const MIGRATION_METADATA: &[MigrationMetadata] = &[
         reversible: true,
         affects_cache: false,
         affects_user_data: false,
-        summary: "restore the persisted sandbox network slot column",
+        summary: "retain the compatible sandbox network slot column",
     },
     MigrationMetadata {
         id: MOUNT_OWNER_CONFIG_MIGRATION_ID,

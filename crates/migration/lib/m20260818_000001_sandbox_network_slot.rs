@@ -19,7 +19,12 @@ use sea_orm_migration::sea_orm::{DatabaseBackend, Statement};
 const ADD_COLUMN: &str = "
     ALTER TABLE sandbox
     ADD COLUMN network_slot INTEGER
-    CHECK (network_slot IS NULL OR network_slot BETWEEN 1 AND 65535);
+    CHECK (
+        network_slot IS NULL OR (
+            typeof(network_slot) = 'integer'
+            AND network_slot BETWEEN 1 AND 65535
+        )
+    );
 ";
 
 const BACKFILL_FROM_ID: &str = "
@@ -29,38 +34,11 @@ const BACKFILL_FROM_ID: &str = "
       AND status IN ('Starting', 'Running', 'Draining', 'Paused');
 ";
 
-const SANITIZE_INVALID_SLOTS: &str = "
-    UPDATE sandbox
-    SET network_slot = NULL
-    WHERE network_slot IS NOT NULL
-      AND (typeof(network_slot) != 'integer' OR network_slot NOT BETWEEN 1 AND 65535);
-";
-
 const CLEAR_INACTIVE_LEASES: &str = "
     UPDATE sandbox
     SET network_slot = NULL
     WHERE network_slot IS NOT NULL
       AND status IN ('Created', 'Stopped', 'Crashed');
-";
-
-const CREATE_RANGE_TRIGGERS: &str = "
-    CREATE TRIGGER IF NOT EXISTS trg_sandbox_network_slot_insert_range
-    BEFORE INSERT ON sandbox
-    FOR EACH ROW
-    WHEN NEW.network_slot IS NOT NULL
-      AND (typeof(NEW.network_slot) != 'integer' OR NEW.network_slot NOT BETWEEN 1 AND 65535)
-    BEGIN
-        SELECT RAISE(ABORT, 'network_slot must be an integer between 1 and 65535');
-    END;
-
-    CREATE TRIGGER IF NOT EXISTS trg_sandbox_network_slot_update_range
-    BEFORE UPDATE OF network_slot ON sandbox
-    FOR EACH ROW
-    WHEN NEW.network_slot IS NOT NULL
-      AND (typeof(NEW.network_slot) != 'integer' OR NEW.network_slot NOT BETWEEN 1 AND 65535)
-    BEGIN
-        SELECT RAISE(ABORT, 'network_slot must be an integer between 1 and 65535');
-    END;
 ";
 
 const CREATE_UNIQUE_INDEX: &str = "
@@ -109,16 +87,9 @@ impl MigrationTrait for Migration {
             connection.execute_unprepared(BACKFILL_FROM_ID).await?;
         }
 
-        // A rollback deliberately preserves the column, and early development
-        // versions could have created it without the CHECK constraint. Repair
-        // existing data and add idempotent guards regardless of who authored
-        // the column. Clearing inactive rows here also repairs leases left by a
-        // pre-upgrade runtime that stopped after the original backfill.
-        connection
-            .execute_unprepared(SANITIZE_INVALID_SLOTS)
-            .await?;
+        // Clearing inactive rows here repairs leases left by an older runtime
+        // that stopped after a rollback preserved the column.
         connection.execute_unprepared(CLEAR_INACTIVE_LEASES).await?;
-        connection.execute_unprepared(CREATE_RANGE_TRIGGERS).await?;
 
         // Keep the index creation outside the column guard so a rollback and
         // re-upgrade repairs an interrupted migration without overwriting any
@@ -205,6 +176,11 @@ mod tests {
                 .is_err()
         );
         assert!(
+            db.execute_unprepared("UPDATE sandbox SET network_slot = 1.5 WHERE id = 70000;")
+                .await
+                .is_err()
+        );
+        assert!(
             db.execute_unprepared("UPDATE sandbox SET network_slot = 1 WHERE id = 70000;")
                 .await
                 .is_err()
@@ -237,58 +213,5 @@ mod tests {
             .try_get_by_index::<Option<u16>>(0)
             .unwrap();
         assert_eq!(slot, None);
-    }
-
-    #[tokio::test]
-    async fn migration_hardens_a_preexisting_unconstrained_column() {
-        let db = open_catalog().await;
-        db.execute_unprepared(
-            "ALTER TABLE sandbox ADD COLUMN network_slot INTEGER;
-             INSERT INTO sandbox (id, status, network_slot) VALUES
-             (1, 'Running', 1),
-             (2, 'Stopped', 2),
-             (3, 'Running', 0),
-             (4, 'Running', 65536);",
-        )
-        .await
-        .unwrap();
-
-        Migration.up(&SchemaManager::new(&db)).await.unwrap();
-
-        let rows = db
-            .query_all_raw(Statement::from_string(
-                DatabaseBackend::Sqlite,
-                "SELECT id, network_slot FROM sandbox ORDER BY id".to_owned(),
-            ))
-            .await
-            .unwrap();
-        let slots: Vec<(i32, Option<u16>)> = rows
-            .into_iter()
-            .map(|row| {
-                (
-                    row.try_get_by_index(0).unwrap(),
-                    row.try_get_by_index(1).unwrap(),
-                )
-            })
-            .collect();
-        assert_eq!(slots, vec![(1, Some(1)), (2, None), (3, None), (4, None)]);
-
-        assert!(
-            db.execute_unprepared(
-                "INSERT INTO sandbox (id, status, network_slot) VALUES (5, 'Running', 0);"
-            )
-            .await
-            .is_err()
-        );
-        assert!(
-            db.execute_unprepared("UPDATE sandbox SET network_slot = 65536 WHERE id = 2;")
-                .await
-                .is_err()
-        );
-        assert!(
-            db.execute_unprepared("UPDATE sandbox SET network_slot = 1 WHERE id = 2;")
-                .await
-                .is_err()
-        );
     }
 }
