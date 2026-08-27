@@ -294,7 +294,7 @@ jobs:
 
       # mold keeps uncached workspace links fast.
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # 2.41.0
 
       - name: Build msb
         run: |
@@ -337,7 +337,7 @@ jobs:
           path: build/
 
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # 2.41.0
 
       - name: Build Go FFI
         run: cargo build --profile ci -p microsandbox-go
@@ -369,12 +369,12 @@ jobs:
           cache-bin: false
           cache-targets: true
 
-      - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2
+      - uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc # v2
         with:
           tool: cargo-nextest@0.9.143
 
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # 2.41.0
 
       - name: Install build dependencies
         run: scripts/ci/install-apt-packages.sh libcap-ng-dev
@@ -742,7 +742,7 @@ jobs:
           cargo +stable clippy --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl -- -D warnings
 
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # 2.41.0
 
       - name: Clippy
         run: cargo +stable clippy --workspace --exclude microsandbox-agentd -- -D warnings
@@ -777,7 +777,7 @@ jobs:
           cache-targets: true
 
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # 2.41.0
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -857,7 +857,7 @@ jobs:
           cache-targets: true
 
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # 2.41.0
 
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
@@ -968,7 +968,7 @@ jobs:
           cache-targets: true
 
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # 2.41.0
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
@@ -1027,7 +1027,7 @@ jobs:
           cache-targets: true
 
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # 2.41.0
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
@@ -1419,7 +1419,7 @@ jobs:
       - name: Clean runner disk
         run: scripts/ci/clean-runner-disk.sh
 
-      - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2
+      - uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc # v2
         with:
           tool: cargo-nextest@0.9.143
 

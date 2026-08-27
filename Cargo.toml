@@ -138,7 +138,7 @@ serde_bytes = "0.11"
 serde_json = "1.0"
 serde-saphyr = { version = "1.0.1", default-features = false, features = ["deserialize"] }
 sha2 = "0.11.0"
-smoltcp = { version = "0.13", default-features = false }
+smoltcp = { version = "0.14", default-features = false }
 socket2 = "0.6"
 strum = { version = "0.28", features = ["derive"] }
 tar = "0.4"
@@ -204,5 +204,5 @@ rcgen = { version = "0.14", features = ["x509-parser"] }
 lru = "0.18.0"
 parking_lot = "0.12"
 rpassword = "7"
-russh = "0.62.4"
+russh = "0.63.1"
 russh-sftp = "2.3.0"

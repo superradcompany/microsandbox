@@ -110,7 +110,7 @@ jobs:
 
       - name: Set up mold (Linux host link)
         if: inputs.os == 'linux'
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # 2.41.0
 
       - name: Build msb
         run: |
@@ -164,7 +164,7 @@ jobs:
 
       - name: Set up mold (Linux host link)
         if: inputs.os == 'linux'
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # 2.41.0
 
       - name: Check workspace
         run: cargo +stable check --workspace --exclude microsandbox-agentd
@@ -196,7 +196,7 @@ jobs:
           path: build/
       - name: Set up mold (Linux host link)
         if: inputs.os == 'linux'
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # 2.41.0
       - name: Build Node SDK
         working-directory: sdk/node-ts
         run: |
@@ -232,7 +232,7 @@ jobs:
           path: build/
       - name: Set up mold (Linux host link)
         if: inputs.os == 'linux'
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # 2.41.0
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # 2.41.0
       - name: Stage runtime bundle
         run: |
           mkdir -p sdk/python/microsandbox/_bundled/bin sdk/python/microsandbox/_bundled/lib
