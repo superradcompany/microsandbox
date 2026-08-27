@@ -620,7 +620,7 @@ async fn from_snapshot_rejects_resumable_scope_at_restore() {
     );
 
     let err = microsandbox::Sandbox::builder("restore-scope-test")
-        .from_snapshot(dir.to_string_lossy().to_string())
+        .from_snapshot_ref(SnapshotReference::path(dir.to_string_lossy()))
         .build()
         .await
         .unwrap_err();
@@ -1581,7 +1581,7 @@ async fn from_snapshot_rejects_unknown_required_extension_but_open_works() {
     assert_eq!(snap.manifest().requires, vec!["msb.future/1".to_string()]);
 
     let err = microsandbox::Sandbox::builder("requires-gate-test")
-        .from_snapshot(dir.to_string_lossy().to_string())
+        .from_snapshot_ref(snap.reference())
         .build()
         .await
         .unwrap_err();

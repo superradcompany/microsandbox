@@ -480,23 +480,26 @@ fn sample_snapshot_manifest() -> SnapshotManifest {
 fn cloud_snapshot_serializes_approved_shape_and_round_trips() {
     let manifest = sample_snapshot_manifest();
     let digest = manifest.digest().unwrap();
-    let snapshot = CloudSnapshot {
-        name: "post-setup".into(),
-        location: CloudSnapshotLocation::Managed {
-            id: "snap-00000000-0000-0000-0000-000000000003".into(),
+    let snapshot = CloudSnapshot::Disk {
+        snapshot: CloudSnapshotDetails {
+            name: "post-setup".into(),
+            location: CloudSnapshotLocation::Managed {
+                id: "snap-00000000-0000-0000-0000-000000000003".into(),
+            },
+            source_sandbox_id: Some("00000000-0000-0000-0000-000000000002".into()),
+            digest: digest.clone(),
+            size_bytes: 4_294_967_296,
+            manifest,
+            labels: BTreeMap::from([("owner".into(), "alice".into())]),
+            created_at: "2026-05-17T12:00:00Z".parse().unwrap(),
         },
-        source_sandbox_id: Some("00000000-0000-0000-0000-000000000002".into()),
-        digest: digest.clone(),
-        size_bytes: 4_294_967_296,
-        manifest,
-        labels: BTreeMap::from([("owner".into(), "alice".into())]),
-        created_at: "2026-05-17T12:00:00Z".parse().unwrap(),
     };
 
     let json = serde_json::to_value(&snapshot).unwrap();
     assert_eq!(
         json,
         serde_json::json!({
+            "kind": "disk",
             "name": "post-setup",
             "location": {
                 "type": "managed",
@@ -539,15 +542,23 @@ fn cloud_snapshot_serializes_approved_shape_and_round_trips() {
     );
 
     let back: CloudSnapshot = serde_json::from_value(json).unwrap();
-    assert_eq!(back.digest, snapshot.digest);
-    assert_eq!(back.manifest, snapshot.manifest);
-    assert_eq!(back.location, snapshot.location);
+    assert_eq!(back.kind(), CloudSnapshotKind::Disk);
+    assert_eq!(back.details().digest, snapshot.details().digest);
+    assert_eq!(back.details().manifest, snapshot.details().manifest);
+    assert_eq!(back.details().location, snapshot.details().location);
+
+    let checkpoint = CloudSnapshot::Checkpoint {
+        snapshot: back.into_details(),
+    };
+    let checkpoint_json = serde_json::to_value(checkpoint).unwrap();
+    assert_eq!(checkpoint_json["kind"], "checkpoint");
 }
 
 #[test]
 fn snapshot_operation_serializes_approved_shape() {
     let operation = CloudSnapshotOperation {
         id: "op-00000000-0000-0000-0000-000000000004".into(),
+        kind: CloudSnapshotKind::Disk,
         status: CloudSnapshotOperationStatus::Failed,
         result: None,
         error: Some(CloudErrorDetails {
@@ -564,6 +575,7 @@ fn snapshot_operation_serializes_approved_shape() {
         json,
         serde_json::json!({
             "id": "op-00000000-0000-0000-0000-000000000004",
+            "kind": "disk",
             "status": "failed",
             "result": null,
             "error": {
@@ -604,12 +616,14 @@ fn snapshot_operation_status_serializes_snake_case() {
 fn in_flight_snapshot_operation_defaults_result_fields() {
     let operation: CloudSnapshotOperation = serde_json::from_value(serde_json::json!({
         "id": "op-00000000-0000-0000-0000-000000000004",
+        "kind": "checkpoint",
         "status": "in_progress",
         "created_at": "2026-05-17T12:00:00Z",
         "updated_at": "2026-05-17T12:00:01Z",
     }))
     .unwrap();
 
+    assert_eq!(operation.kind, CloudSnapshotKind::Checkpoint);
     assert_eq!(operation.status, CloudSnapshotOperationStatus::InProgress);
     assert!(operation.result.is_none());
     assert!(operation.error.is_none());
@@ -618,26 +632,27 @@ fn in_flight_snapshot_operation_defaults_result_fields() {
 
 #[test]
 fn create_snapshot_request_serializes_approved_shape() {
-    let request = CloudCreateSnapshotRequest {
-        source_sandbox_id: "00000000-0000-0000-0000-000000000002".into(),
-        name: "post-setup".into(),
-        dest_dir: Some("/mnt/snapshots".into()),
-        labels: BTreeMap::from([("owner".into(), "alice".into())]),
-        force: true,
-        record_integrity: true,
-        resumable: true,
+    let request = CloudCreateSnapshotRequest::Disk {
+        snapshot: CloudSnapshotSpec {
+            source_sandbox_id: "00000000-0000-0000-0000-000000000002".into(),
+            name: "post-setup".into(),
+            dest_dir: Some("/mnt/snapshots".into()),
+            labels: BTreeMap::from([("owner".into(), "alice".into())]),
+            force: true,
+            record_integrity: true,
+        },
     };
 
     assert_eq!(
         serde_json::to_value(&request).unwrap(),
         serde_json::json!({
+            "kind": "disk",
             "source_sandbox_id": "00000000-0000-0000-0000-000000000002",
             "name": "post-setup",
             "dest_dir": "/mnt/snapshots",
             "labels": {"owner": "alice"},
             "force": true,
             "record_integrity": true,
-            "resumable": true,
         })
     );
 }
@@ -645,11 +660,14 @@ fn create_snapshot_request_serializes_approved_shape() {
 #[test]
 fn create_snapshot_request_requires_source_and_name_and_defaults_the_rest() {
     let request: CloudCreateSnapshotRequest = serde_json::from_value(serde_json::json!({
+        "kind": "checkpoint",
         "source_sandbox_id": "00000000-0000-0000-0000-000000000002",
         "name": "post-setup",
     }))
     .unwrap();
 
+    assert_eq!(request.kind(), CloudSnapshotKind::Checkpoint);
+    let request = request.snapshot_spec();
     assert_eq!(
         request.source_sandbox_id,
         "00000000-0000-0000-0000-000000000002"
@@ -659,38 +677,42 @@ fn create_snapshot_request_requires_source_and_name_and_defaults_the_rest() {
     assert!(request.labels.is_empty());
     assert!(!request.force);
     assert!(!request.record_integrity);
-    assert!(!request.resumable);
 
     // Defaulted fields stay off the wire entirely.
     assert_eq!(
-        serde_json::to_value(&request).unwrap(),
+        serde_json::to_value(CloudCreateSnapshotRequest::Checkpoint {
+            snapshot: request.clone(),
+        })
+        .unwrap(),
         serde_json::json!({
+            "kind": "checkpoint",
             "source_sandbox_id": "00000000-0000-0000-0000-000000000002",
             "name": "post-setup",
         })
     );
 
     let missing_source = serde_json::from_value::<CloudCreateSnapshotRequest>(serde_json::json!({
+        "kind": "disk",
         "name": "post-setup",
     }));
     assert!(missing_source.is_err());
 
     let missing_name = serde_json::from_value::<CloudCreateSnapshotRequest>(serde_json::json!({
+        "kind": "disk",
         "source_sandbox_id": "00000000-0000-0000-0000-000000000002",
     }));
     assert!(missing_name.is_err());
-}
 
-#[test]
-fn create_snapshot_request_accepts_legacy_source_sandbox_field() {
-    let request: CloudCreateSnapshotRequest = serde_json::from_value(serde_json::json!({
+    let missing_kind = serde_json::from_value::<CloudCreateSnapshotRequest>(serde_json::json!({
+        "source_sandbox_id": "00000000-0000-0000-0000-000000000002",
+        "name": "post-setup",
+    }));
+    assert!(missing_kind.is_err());
+
+    let legacy_source = serde_json::from_value::<CloudCreateSnapshotRequest>(serde_json::json!({
+        "kind": "disk",
         "source_sandbox": "00000000-0000-0000-0000-000000000002",
         "name": "post-setup",
-    }))
-    .unwrap();
-
-    assert_eq!(
-        request.source_sandbox_id,
-        "00000000-0000-0000-0000-000000000002"
-    );
+    }));
+    assert!(legacy_source.is_err());
 }

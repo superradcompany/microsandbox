@@ -528,7 +528,8 @@ fn path(&self) -> MicrosandboxResult<&Path>
 
 Return the local artifact directory. Cloud snapshots return
 `MicrosandboxError::Unsupported` because managed and host-volume artifacts are
-not paths on the client host.
+not paths on the client host. Use `reference()` for backend-neutral restore and
+lifecycle operations.
 
 #### <span className="msb-recv">snap.</span><span className="msb-hn">save_to()</span>
 
@@ -655,7 +656,8 @@ fn path(&self) -> MicrosandboxResult<&Path>
 ```
 
 Return the local artifact directory. Cloud snapshots return
-`MicrosandboxError::Unsupported`.
+`MicrosandboxError::Unsupported`. Use `reference()` for backend-neutral restore
+and lifecycle operations.
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">created_at()</span>
 
@@ -926,7 +928,9 @@ Compute and record sparse-aware BLAKE3 Merkle integrity during creation. [`verif
 fn resumable(self) -> Self
 ```
 
-Request a resumable snapshot (disk plus VM state). Accepted by the builder, but [`create()`](#snapshot_builder-create) currently fails with `Unsupported`; resumable snapshots have not landed yet.
+Request a resumable snapshot (disk plus VM state). The cloud backend translates
+this to the checkpoint kind, but [`create()`](#snapshot_builder-create) currently fails with
+`Unsupported`; checkpoint capture has not landed yet.
 
 #### <span className="msb-recv">.</span><span className="msb-hn">build()</span>
 

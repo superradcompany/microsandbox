@@ -27,8 +27,8 @@ pub use secrets::{
     CloudHostPattern, CloudSecretEntry, CloudSecretSource, CloudSecretsConfig, CloudViolationAction,
 };
 pub use snapshots::{
-    CloudCreateSnapshotRequest, CloudSnapshot, CloudSnapshotLocation, CloudSnapshotOperation,
-    CloudSnapshotOperationStatus,
+    CloudCreateSnapshotRequest, CloudSnapshot, CloudSnapshotDetails, CloudSnapshotKind,
+    CloudSnapshotLocation, CloudSnapshotOperation, CloudSnapshotOperationStatus, CloudSnapshotSpec,
 };
 pub use specs::{
     CloudDiskImageFormat, CloudNetworkSpec, CloudPatch, CloudPullPolicy, CloudRlimit,

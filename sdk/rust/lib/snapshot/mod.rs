@@ -206,6 +206,7 @@ impl Snapshot {
     ///
     /// Cloud backends return [`crate::MicrosandboxError::Unsupported`] because
     /// managed and host-volume artifacts are not paths on the client host.
+    /// Use [`Self::reference`] for backend-neutral restore and lifecycle calls.
     pub fn path(&self) -> MicrosandboxResult<&Path> {
         self.backend.snapshots().path(&self.reference)
     }
@@ -492,6 +493,7 @@ impl SnapshotHandle {
     ///
     /// Cloud backends return [`crate::MicrosandboxError::Unsupported`] because
     /// managed and host-volume artifacts are not paths on the client host.
+    /// Use [`Self::reference`] for backend-neutral restore and lifecycle calls.
     pub fn path(&self) -> MicrosandboxResult<&Path> {
         self.local_path
             .as_deref()
@@ -566,8 +568,8 @@ impl SnapshotBuilder {
 
     /// Request a future resumable snapshot.
     ///
-    /// The builder accepts this stable option now, but creation returns
-    /// `Unsupported` until VM pause/resume capture is implemented.
+    /// Cloud backends translate this intent to the checkpoint kind. Creation
+    /// returns `Unsupported` until VM pause/resume capture is implemented.
     pub fn resumable(mut self) -> Self {
         self.resumable = true;
         self
