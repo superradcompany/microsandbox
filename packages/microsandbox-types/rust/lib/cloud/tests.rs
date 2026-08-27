@@ -546,12 +546,6 @@ fn cloud_snapshot_serializes_approved_shape_and_round_trips() {
     assert_eq!(back.details().digest, snapshot.details().digest);
     assert_eq!(back.details().manifest, snapshot.details().manifest);
     assert_eq!(back.details().location, snapshot.details().location);
-
-    let checkpoint = CloudSnapshot::Checkpoint {
-        snapshot: back.into_details(),
-    };
-    let checkpoint_json = serde_json::to_value(checkpoint).unwrap();
-    assert_eq!(checkpoint_json["kind"], "checkpoint");
 }
 
 #[test]
@@ -616,14 +610,14 @@ fn snapshot_operation_status_serializes_snake_case() {
 fn in_flight_snapshot_operation_defaults_result_fields() {
     let operation: CloudSnapshotOperation = serde_json::from_value(serde_json::json!({
         "id": "op-00000000-0000-0000-0000-000000000004",
-        "kind": "checkpoint",
+        "kind": "disk",
         "status": "in_progress",
         "created_at": "2026-05-17T12:00:00Z",
         "updated_at": "2026-05-17T12:00:01Z",
     }))
     .unwrap();
 
-    assert_eq!(operation.kind, CloudSnapshotKind::Checkpoint);
+    assert_eq!(operation.kind, CloudSnapshotKind::Disk);
     assert_eq!(operation.status, CloudSnapshotOperationStatus::InProgress);
     assert!(operation.result.is_none());
     assert!(operation.error.is_none());
@@ -660,13 +654,13 @@ fn create_snapshot_request_serializes_approved_shape() {
 #[test]
 fn create_snapshot_request_requires_source_and_name_and_defaults_the_rest() {
     let request: CloudCreateSnapshotRequest = serde_json::from_value(serde_json::json!({
-        "kind": "checkpoint",
+        "kind": "disk",
         "source_sandbox_id": "00000000-0000-0000-0000-000000000002",
         "name": "post-setup",
     }))
     .unwrap();
 
-    assert_eq!(request.kind(), CloudSnapshotKind::Checkpoint);
+    assert_eq!(request.kind(), CloudSnapshotKind::Disk);
     let request = request.snapshot_spec();
     assert_eq!(
         request.source_sandbox_id,
@@ -680,12 +674,12 @@ fn create_snapshot_request_requires_source_and_name_and_defaults_the_rest() {
 
     // Defaulted fields stay off the wire entirely.
     assert_eq!(
-        serde_json::to_value(CloudCreateSnapshotRequest::Checkpoint {
+        serde_json::to_value(CloudCreateSnapshotRequest::Disk {
             snapshot: request.clone(),
         })
         .unwrap(),
         serde_json::json!({
-            "kind": "checkpoint",
+            "kind": "disk",
             "source_sandbox_id": "00000000-0000-0000-0000-000000000002",
             "name": "post-setup",
         })
@@ -708,6 +702,14 @@ fn create_snapshot_request_requires_source_and_name_and_defaults_the_rest() {
         "name": "post-setup",
     }));
     assert!(missing_kind.is_err());
+
+    let unsupported_kind =
+        serde_json::from_value::<CloudCreateSnapshotRequest>(serde_json::json!({
+            "kind": "checkpoint",
+            "source_sandbox_id": "00000000-0000-0000-0000-000000000002",
+            "name": "post-setup",
+        }));
+    assert!(unsupported_kind.is_err());
 
     let legacy_source = serde_json::from_value::<CloudCreateSnapshotRequest>(serde_json::json!({
         "kind": "disk",

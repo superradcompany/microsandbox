@@ -50,9 +50,9 @@ cargo run -p microsandbox-types --features ts --bin microsandbox-types-generate 
 Cloud snapshot contracts distinguish the durable resource from the asynchronous
 capture operation:
 
-- `CloudCreateSnapshotRequest` is discriminated by `kind`: `disk` captures the
-  writable disk, while `checkpoint` identifies future disk, memory, and device
-  capture.
+- `CloudCreateSnapshotRequest` is discriminated by `kind`. Its current `disk`
+  variant captures the writable disk, and the enum can gain other snapshot
+  kinds without changing the envelope shape.
 - `CloudSnapshot` uses the same kind discriminator and includes its canonical
   manifest, byte size, labels, and `CloudSnapshotLocation`.
 - `CloudSnapshotLocation` is either a managed artifact ID or a host-volume

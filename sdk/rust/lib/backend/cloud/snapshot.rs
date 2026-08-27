@@ -20,7 +20,7 @@ use crate::snapshot::{
     DESCRIPTOR_FILENAME, Manifest, SaveOpts, Snapshot, SnapshotConfig, SnapshotHandle,
     SnapshotReference, SnapshotScope, SnapshotState, SnapshotVerifyReport,
 };
-use crate::{MicrosandboxError, MicrosandboxResult, Operation};
+use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -53,6 +53,13 @@ impl SnapshotBackend for CloudBackend {
         config: SnapshotConfig,
     ) -> BoxFuture<'a, MicrosandboxResult<Snapshot>> {
         Box::pin(async move {
+            if config.resumable {
+                return Err(MicrosandboxError::unsupported(
+                    Operation::SnapshotOps,
+                    UnsupportedReason::NotAvailable("resumable snapshots are not supported".into()),
+                ));
+            }
+
             let source = self.get_sandbox(&config.source_sandbox).await?;
             let request = cloud_snapshot_request(source.id, config);
             let operation = self.create_snapshot(&request).await?;
@@ -415,10 +422,13 @@ impl CloudBackend {
             manifest,
         };
 
-        Ok(match snapshot.manifest.scope {
-            SnapshotScope::Disk => CloudSnapshot::Disk { snapshot },
-            SnapshotScope::Resumable => CloudSnapshot::Checkpoint { snapshot },
-        })
+        match snapshot.manifest.scope {
+            SnapshotScope::Disk => Ok(CloudSnapshot::Disk { snapshot }),
+            SnapshotScope::Resumable => Err(MicrosandboxError::unsupported(
+                Operation::SnapshotOps,
+                UnsupportedReason::NotAvailable("resumable snapshots are not supported".into()),
+            )),
+        }
     }
 }
 
@@ -430,7 +440,6 @@ fn cloud_snapshot_request(
     source_sandbox_id: String,
     config: SnapshotConfig,
 ) -> CloudCreateSnapshotRequest {
-    let resumable = config.resumable;
     let snapshot = CloudSnapshotSpec {
         source_sandbox_id,
         name: config.name,
@@ -440,11 +449,7 @@ fn cloud_snapshot_request(
         record_integrity: config.record_integrity,
     };
 
-    if resumable {
-        CloudCreateSnapshotRequest::Checkpoint { snapshot }
-    } else {
-        CloudCreateSnapshotRequest::Disk { snapshot }
-    }
+    CloudCreateSnapshotRequest::Disk { snapshot }
 }
 
 pub(super) fn cloud_reference(
@@ -555,7 +560,7 @@ mod tests {
         assert!(matches!(result, Err(MicrosandboxError::Unsupported { .. })));
     }
 
-    fn snapshot_config(resumable: bool) -> SnapshotConfig {
+    fn snapshot_config() -> SnapshotConfig {
         SnapshotConfig {
             name: "checkpoint".into(),
             dest_dir: None,
@@ -563,17 +568,14 @@ mod tests {
             labels: Vec::new(),
             force: false,
             record_integrity: false,
-            resumable,
+            resumable: false,
         }
     }
 
     #[test]
-    fn resumable_builder_intent_maps_to_checkpoint_kind() {
-        let disk = cloud_snapshot_request("sandbox-id".into(), snapshot_config(false));
-        let checkpoint = cloud_snapshot_request("sandbox-id".into(), snapshot_config(true));
-
+    fn cloud_snapshot_request_is_disk_kind() {
+        let disk = cloud_snapshot_request("sandbox-id".into(), snapshot_config());
         assert_eq!(disk.kind(), CloudSnapshotKind::Disk);
-        assert_eq!(checkpoint.kind(), CloudSnapshotKind::Checkpoint);
     }
 
     #[test]

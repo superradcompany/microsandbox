@@ -928,9 +928,9 @@ Compute and record sparse-aware BLAKE3 Merkle integrity during creation. [`verif
 fn resumable(self) -> Self
 ```
 
-Request a resumable snapshot (disk plus VM state). The cloud backend translates
-this to the checkpoint kind, but [`create()`](#snapshot_builder-create) currently fails with
-`Unsupported`; checkpoint capture has not landed yet.
+Request a future resumable snapshot (disk plus VM state).
+[`create()`](#snapshot_builder-create)
+currently fails with `Unsupported`; resumable capture has not landed yet.
 
 #### <span className="msb-recv">.</span><span className="msb-hn">build()</span>
 

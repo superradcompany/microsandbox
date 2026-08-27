@@ -568,8 +568,8 @@ impl SnapshotBuilder {
 
     /// Request a future resumable snapshot.
     ///
-    /// Cloud backends translate this intent to the checkpoint kind. Creation
-    /// returns `Unsupported` until VM pause/resume capture is implemented.
+    /// Creation returns `Unsupported` until VM pause/resume capture is
+    /// implemented by the selected backend.
     pub fn resumable(mut self) -> Self {
         self.resumable = true;
         self

@@ -21,8 +21,6 @@ use crate::snapshot::Manifest as SnapshotManifest;
 pub enum CloudSnapshotKind {
     /// Capture disk state only.
     Disk,
-    /// Capture disk, memory, and device state.
-    Checkpoint,
 }
 
 /// Settings shared by every cloud snapshot capture kind.
@@ -63,12 +61,6 @@ pub enum CloudCreateSnapshotRequest {
         #[serde(flatten)]
         snapshot: CloudSnapshotSpec,
     },
-    /// Capture disk, memory, and device state.
-    Checkpoint {
-        /// Settings shared by every snapshot kind.
-        #[serde(flatten)]
-        snapshot: CloudSnapshotSpec,
-    },
 }
 
 /// Fields shared by every completed cloud snapshot kind.
@@ -104,12 +96,6 @@ pub struct CloudSnapshotDetails {
 pub enum CloudSnapshot {
     /// A disk-only snapshot.
     Disk {
-        /// Fields shared by every snapshot kind.
-        #[serde(flatten)]
-        snapshot: CloudSnapshotDetails,
-    },
-    /// A disk, memory, and device-state checkpoint.
-    Checkpoint {
         /// Fields shared by every snapshot kind.
         #[serde(flatten)]
         snapshot: CloudSnapshotDetails,
@@ -189,21 +175,20 @@ impl CloudCreateSnapshotRequest {
     pub const fn kind(&self) -> CloudSnapshotKind {
         match self {
             Self::Disk { .. } => CloudSnapshotKind::Disk,
-            Self::Checkpoint { .. } => CloudSnapshotKind::Checkpoint,
         }
     }
 
     /// Return settings shared by every snapshot kind.
     pub const fn snapshot_spec(&self) -> &CloudSnapshotSpec {
         match self {
-            Self::Disk { snapshot } | Self::Checkpoint { snapshot } => snapshot,
+            Self::Disk { snapshot } => snapshot,
         }
     }
 
     /// Return mutable settings shared by every snapshot kind.
     pub const fn snapshot_spec_mut(&mut self) -> &mut CloudSnapshotSpec {
         match self {
-            Self::Disk { snapshot } | Self::Checkpoint { snapshot } => snapshot,
+            Self::Disk { snapshot } => snapshot,
         }
     }
 }
@@ -213,21 +198,20 @@ impl CloudSnapshot {
     pub const fn kind(&self) -> CloudSnapshotKind {
         match self {
             Self::Disk { .. } => CloudSnapshotKind::Disk,
-            Self::Checkpoint { .. } => CloudSnapshotKind::Checkpoint,
         }
     }
 
     /// Return fields shared by every snapshot kind.
     pub const fn details(&self) -> &CloudSnapshotDetails {
         match self {
-            Self::Disk { snapshot } | Self::Checkpoint { snapshot } => snapshot,
+            Self::Disk { snapshot } => snapshot,
         }
     }
 
     /// Consume this snapshot and return its shared fields.
     pub fn into_details(self) -> CloudSnapshotDetails {
         match self {
-            Self::Disk { snapshot } | Self::Checkpoint { snapshot } => snapshot,
+            Self::Disk { snapshot } => snapshot,
         }
     }
 }

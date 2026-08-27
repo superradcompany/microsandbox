@@ -803,33 +803,6 @@ export type CloudCreateSnapshotRequest = {
    * Record payload integrity metadata during capture.
    */
   record_integrity?: boolean;
-} | {
-  "kind": "checkpoint";
-  /**
-   * Immutable identifier of the sandbox to capture.
-   */
-  source_sandbox_id: string;
-  /**
-   * Snapshot name.
-   */
-  name: string;
-  /**
-   * Directory on a mounted host volume to write the artifact into. `None`
-   * stores the snapshot in managed snapshot storage.
-   */
-  dest_dir?: string | null;
-  /**
-   * User-defined labels stored on the snapshot.
-   */
-  labels?: { [key in string]: string };
-  /**
-   * Replace an existing snapshot with the same name.
-   */
-  force?: boolean;
-  /**
-   * Record payload integrity metadata during capture.
-   */
-  record_integrity?: boolean;
 };
 
 export type CloudSnapshotSpec = {
@@ -862,40 +835,6 @@ export type CloudSnapshotSpec = {
 
 export type CloudSnapshot = {
   "kind": "disk";
-  /**
-   * Snapshot name.
-   */
-  name: string;
-  /**
-   * Where the snapshot artifact resides.
-   */
-  location: CloudSnapshotLocation;
-  /**
-   * Identifier of the sandbox the snapshot was captured from, when known.
-   */
-  source_sandbox_id: string | null;
-  /**
-   * Snapshot identity: the `sha256:` digest of the canonical descriptor.
-   */
-  digest: string;
-  /**
-   * Stored payload size in bytes.
-   */
-  size_bytes: number;
-  /**
-   * Canonical snapshot descriptor.
-   */
-  manifest: SnapshotManifest;
-  /**
-   * User-defined labels stored on the snapshot.
-   */
-  labels: { [key in string]: string };
-  /**
-   * Creation timestamp.
-   */
-  created_at: string;
-} | {
-  "kind": "checkpoint";
   /**
    * Snapshot name.
    */
@@ -1020,7 +959,7 @@ export type CloudSnapshotOperationStatus =
   | "succeeded"
   | "failed";
 
-export type CloudSnapshotKind = "disk" | "checkpoint";
+export type CloudSnapshotKind = "disk";
 
 export type CloudPaginated<T> = {
   /**
