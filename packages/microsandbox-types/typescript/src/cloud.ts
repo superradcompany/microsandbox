@@ -781,7 +781,7 @@ export type CloudCreateSnapshotRequest = {
   /**
    * Immutable identifier of the sandbox to capture.
    */
-  source_sandbox_id: string;
+  sandbox_id: string;
   /**
    * Snapshot name.
    */
@@ -809,7 +809,7 @@ export type CloudSnapshotSpec = {
   /**
    * Immutable identifier of the sandbox to capture.
    */
-  source_sandbox_id: string;
+  sandbox_id: string;
   /**
    * Snapshot name.
    */
@@ -846,7 +846,7 @@ export type CloudSnapshot = {
   /**
    * Identifier of the sandbox the snapshot was captured from, when known.
    */
-  source_sandbox_id: string | null;
+  sandbox_id: string | null;
   /**
    * Snapshot identity: the `sha256:` digest of the canonical descriptor.
    */
@@ -881,7 +881,7 @@ export type CloudSnapshotDetails = {
   /**
    * Identifier of the sandbox the snapshot was captured from, when known.
    */
-  source_sandbox_id: string | null;
+  sandbox_id: string | null;
   /**
    * Snapshot identity: the `sha256:` digest of the canonical descriptor.
    */

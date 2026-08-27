@@ -414,7 +414,7 @@ impl CloudBackend {
         let snapshot = CloudSnapshotDetails {
             name,
             location: CloudSnapshotLocation::HostVolume { path },
-            source_sandbox_id: None,
+            sandbox_id: None,
             digest,
             size_bytes,
             labels: manifest.labels.clone(),
@@ -437,11 +437,11 @@ impl CloudBackend {
 //--------------------------------------------------------------------------------------------------
 
 fn cloud_snapshot_request(
-    source_sandbox_id: String,
+    sandbox_id: String,
     config: SnapshotConfig,
 ) -> CloudCreateSnapshotRequest {
     let snapshot = CloudSnapshotSpec {
-        source_sandbox_id,
+        sandbox_id,
         name: config.name,
         dest_dir: config.dest_dir,
         labels: config.labels.into_iter().collect::<BTreeMap<_, _>>(),
