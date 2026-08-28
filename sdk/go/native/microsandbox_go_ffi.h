@@ -56,7 +56,7 @@ void msb_cancel_unregister(uint64_t id);
 char *msb_sandbox_create(uint64_t cancel_id,
                          const char *name,
                          const char *opts_json,
-                         bool find_or_create,
+                         bool connect_or_create,
                          unsigned char *buf,
                          uintptr_t buf_len);
 

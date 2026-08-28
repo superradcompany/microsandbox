@@ -72,13 +72,13 @@ console.log(output.stdout().trim());
 
 ### Reusable Lifecycle Convergence
 
-Use `findOrCreate` when a stable name should converge on one persisted sandbox. Existing configuration wins; the builder is used only if creation is necessary. Handles retain a stable `id`, so lifecycle calls on stale receivers refuse to act on a replacement that reused the name.
+Use `connectOrCreate` when a stable name should converge on one persisted sandbox. Existing configuration wins; the builder is used only if creation is necessary. Handles retain a stable `id`, so lifecycle calls on stale receivers refuse to act on a replacement that reused the name.
 
 ```typescript
 const sandbox = await Sandbox.builder("worker")
   .image("python")
   .memory(MiB(1024))
-  .findOrCreate();
+  .connectOrCreate();
 
 console.log(`${sandbox.name}: ${sandbox.id}`);
 const running = await (await Sandbox.get("worker")).connectOrStart();

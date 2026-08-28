@@ -8,6 +8,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	microsandbox "github.com/superradcompany/microsandbox/sdk/go"
@@ -47,6 +48,159 @@ func cleanup(ctx context.Context, name string) {
 	_ = handle.Destroy(ctx, microsandbox.WithDestroyForce(), microsandbox.WithDestroyTimeout(5*time.Second))
 }
 
+func runConcurrencyChecks(
+	ctx context.Context,
+	name, image string,
+	timings map[string]float64,
+	live *[]*microsandbox.Sandbox,
+) error {
+	raceName := name + "-race"
+	cleanup(ctx, raceName)
+	candidates := []string{"candidate-0", "candidate-1", "candidate-2", "candidate-3"}
+	raced := make([]*microsandbox.Sandbox, len(candidates))
+	errs := make([]error, len(candidates))
+	start := make(chan struct{})
+	var group sync.WaitGroup
+	started := time.Now()
+	for index, marker := range candidates {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-start
+			raced[index], errs[index] = microsandbox.ConnectOrCreateSandbox(ctx, raceName,
+				microsandbox.WithImage(image),
+				microsandbox.WithCPUs(1),
+				microsandbox.WithMemory(256),
+				microsandbox.WithEnv(map[string]string{"LIFECYCLE_MARKER": marker}),
+			)
+		}()
+	}
+	close(start)
+	group.Wait()
+	timings["concurrent_connect_or_create"] = elapsedMS(started)
+	for index, err := range errs {
+		if err != nil {
+			return fmt.Errorf("concurrent connect_or_create caller %d: %w", index, err)
+		}
+	}
+	*live = append(*live, raced...)
+	raceID := raced[0].ID()
+	for _, sandbox := range raced {
+		if sandbox.ID() != raceID {
+			return fmt.Errorf("concurrent connect_or_create callers selected different identities")
+		}
+	}
+	marker, err := readMarker(ctx, raced[0])
+	if err != nil {
+		return err
+	}
+	marker = strings.TrimSpace(marker)
+	if marker != candidates[0] && marker != candidates[1] && marker != candidates[2] && marker != candidates[3] {
+		return fmt.Errorf("concurrent creation persisted unexpected marker %q", marker)
+	}
+
+	if err = raced[0].Stop(ctx); err != nil {
+		return err
+	}
+	handles := make([]*microsandbox.SandboxHandle, len(candidates))
+	for index := range handles {
+		handles[index], err = microsandbox.GetSandbox(ctx, raceName)
+		if err != nil {
+			return err
+		}
+	}
+	connected := make([]*microsandbox.Sandbox, len(candidates))
+	errs = make([]error, len(candidates))
+	start = make(chan struct{})
+	started = time.Now()
+	for index := range handles {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-start
+			connected[index], errs[index] = handles[index].ConnectOrStart(ctx)
+		}()
+	}
+	close(start)
+	group.Wait()
+	timings["concurrent_connect_or_start"] = elapsedMS(started)
+	for index, err := range errs {
+		if err != nil {
+			return fmt.Errorf("concurrent connect_or_start caller %d: %w", index, err)
+		}
+	}
+	*live = append(*live, connected...)
+	for _, sandbox := range connected {
+		if sandbox.ID() != raceID {
+			return fmt.Errorf("concurrent connect_or_start callers selected different identities")
+		}
+	}
+	if current, err := readMarker(ctx, connected[0]); err != nil || strings.TrimSpace(current) != marker {
+		return fmt.Errorf("start race lost persisted configuration: marker=%q err=%w", current, err)
+	}
+
+	if err = connected[0].Stop(ctx); err != nil {
+		return err
+	}
+	started = time.Now()
+	detached, err := handles[0].ConnectOrStart(ctx, microsandbox.WithConnectOrStartDetached())
+	if err != nil {
+		return err
+	}
+	*live = append(*live, detached)
+	timings["connect_or_start_detached"] = elapsedMS(started)
+	owns, err := detached.OwnsLifecycle()
+	if err != nil || detached.ID() != raceID || owns {
+		return fmt.Errorf("detached connect_or_start changed identity or took lifecycle ownership: owns=%v err=%w", owns, err)
+	}
+
+	started = time.Now()
+	forced, err := detached.Restart(ctx,
+		microsandbox.WithRestartForce(),
+		microsandbox.WithRestartTimeout(5*time.Second),
+	)
+	if err != nil {
+		return err
+	}
+	*live = append(*live, forced)
+	timings["restart_force"] = elapsedMS(started)
+	owns, err = forced.OwnsLifecycle()
+	if err != nil || forced.ID() != raceID || !owns {
+		return fmt.Errorf("forced restart changed identity or failed to return an attached handle: owns=%v err=%w", owns, err)
+	}
+	if current, err := readMarker(ctx, forced); err != nil || strings.TrimSpace(current) != marker {
+		return fmt.Errorf("forced restart lost persisted configuration: marker=%q err=%w", current, err)
+	}
+
+	started = time.Now()
+	detachedRestart, err := forced.Restart(ctx,
+		microsandbox.WithRestartTimeout(3*time.Second),
+		microsandbox.WithRestartDetached(),
+	)
+	if err != nil {
+		return err
+	}
+	*live = append(*live, detachedRestart)
+	timings["restart_detached_timeout"] = elapsedMS(started)
+	owns, err = detachedRestart.OwnsLifecycle()
+	if err != nil || detachedRestart.ID() != raceID || owns {
+		return fmt.Errorf("detached restart changed identity or took lifecycle ownership: owns=%v err=%w", owns, err)
+	}
+	if current, err := readMarker(ctx, detachedRestart); err != nil || strings.TrimSpace(current) != marker {
+		return fmt.Errorf("detached restart lost persisted configuration: marker=%q err=%w", current, err)
+	}
+
+	started = time.Now()
+	if err = detachedRestart.Destroy(ctx,
+		microsandbox.WithDestroyForce(),
+		microsandbox.WithDestroyTimeout(5*time.Second),
+	); err != nil {
+		return err
+	}
+	timings["destroy_force_timeout"] = elapsedMS(started)
+	return nil
+}
+
 func run(ctx context.Context, name, image, platform string) (_ *Metrics, err error) {
 	total := time.Now()
 	timings := make(map[string]float64)
@@ -57,11 +211,16 @@ func run(ctx context.Context, name, image, platform string) (_ *Metrics, err err
 		}
 		if err != nil {
 			cleanup(context.Background(), name)
+			cleanup(context.Background(), name+"-race")
 		}
 	}()
 
+	if err = runConcurrencyChecks(ctx, name, image, timings, &live); err != nil {
+		return nil, err
+	}
+
 	started := time.Now()
-	created, err := microsandbox.FindOrCreateSandbox(ctx, name,
+	created, err := microsandbox.ConnectOrCreateSandbox(ctx, name,
 		microsandbox.WithImage(image),
 		microsandbox.WithCPUs(1),
 		microsandbox.WithMemory(256),
@@ -71,11 +230,11 @@ func run(ctx context.Context, name, image, platform string) (_ *Metrics, err err
 		return nil, err
 	}
 	live = append(live, created)
-	timings["find_or_create_new"] = elapsedMS(started)
+	timings["connect_or_create_new"] = elapsedMS(started)
 	originalID := created.ID()
 
 	started = time.Now()
-	reused, err := microsandbox.FindOrCreateSandbox(ctx, name,
+	reused, err := microsandbox.ConnectOrCreateSandbox(ctx, name,
 		microsandbox.WithImage(image),
 		microsandbox.WithMemory(768),
 		microsandbox.WithEnv(map[string]string{"LIFECYCLE_MARKER": "ignored"}),
@@ -84,9 +243,9 @@ func run(ctx context.Context, name, image, platform string) (_ *Metrics, err err
 		return nil, err
 	}
 	live = append(live, reused)
-	timings["find_or_create_existing"] = elapsedMS(started)
+	timings["connect_or_create_existing"] = elapsedMS(started)
 	if reused.ID() != originalID {
-		return nil, fmt.Errorf("find_or_create changed the persisted identity")
+		return nil, fmt.Errorf("connect_or_create changed the persisted identity")
 	}
 	marker, err := readMarker(ctx, reused)
 	if err != nil || strings.TrimSpace(marker) != "original" {
@@ -145,7 +304,7 @@ func run(ctx context.Context, name, image, platform string) (_ *Metrics, err err
 	}
 	timings["destroy_original"] = elapsedMS(started)
 
-	replacement, err := microsandbox.FindOrCreateSandbox(ctx, name,
+	replacement, err := microsandbox.ConnectOrCreateSandbox(ctx, name,
 		microsandbox.WithImage(image),
 		microsandbox.WithCPUs(1),
 		microsandbox.WithMemory(256),
@@ -183,7 +342,7 @@ func run(ctx context.Context, name, image, platform string) (_ *Metrics, err err
 		Platform:  platform,
 		Sandbox:   name,
 		Identity:  originalID,
-		Checks:    10,
+		Checks:    16,
 		TimingsMS: timings,
 		Result:    "pass",
 	}, nil
@@ -206,6 +365,7 @@ func main() {
 	}
 
 	cleanup(ctx, name)
+	cleanup(ctx, name+"-race")
 	metrics, err := run(ctx, name, image, platform)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

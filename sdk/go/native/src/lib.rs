@@ -2119,7 +2119,7 @@ pub unsafe extern "C" fn msb_sandbox_create(
     cancel_id: u64,
     name: *const c_char,
     opts_json: *const c_char,
-    find_or_create: bool,
+    connect_or_create: bool,
     buf: *mut c_uchar,
     buf_len: usize,
 ) -> *mut c_char {
@@ -2346,8 +2346,8 @@ pub unsafe extern "C" fn msb_sandbox_create(
                 builder = apply_volume(builder, guest_path, mount)?;
             }
 
-            let sandbox = if find_or_create {
-                builder.detached(opts.detached).find_or_create().await?
+            let sandbox = if connect_or_create {
+                builder.detached(opts.detached).connect_or_create().await?
             } else if opts.detached {
                 builder.create_detached().await?
             } else {

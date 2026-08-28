@@ -340,7 +340,11 @@ impl PySandboxHandle {
         })
     }
 
-    /// Connect when running, or start the same persisted sandbox when stopped.
+    /// Connect when this exact sandbox is running, wait while it is starting, or
+    /// start it when it is created, stopped, or crashed.
+    ///
+    /// `detached` applies only when a start is required. A same-name replacement
+    /// is rejected instead of becoming the target of this handle.
     #[pyo3(signature = (*, detached = false))]
     fn connect_or_start<'py>(
         &self,
@@ -420,7 +424,10 @@ impl PySandboxHandle {
         })
     }
 
-    /// Wait until this exact sandbox reaches `status`.
+    /// Wait until this exact sandbox reaches `status` with no built-in timeout.
+    ///
+    /// A same-name replacement is rejected instead of silently redirecting the
+    /// wait to the new persisted identity.
     fn wait_for_status<'py>(&self, py: Python<'py>, status: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         let status = parse_sandbox_status(&status)?;
@@ -432,6 +439,8 @@ impl PySandboxHandle {
     }
 
     /// Stop and start this exact sandbox.
+    ///
+    /// Graceful shutdown and a ten-second convergence timeout are the defaults.
     #[pyo3(signature = (*, force = false, timeout = None, detached = false))]
     fn restart<'py>(
         &self,
@@ -457,6 +466,8 @@ impl PySandboxHandle {
     }
 
     /// Stop and remove this exact sandbox.
+    ///
+    /// The identity check refuses to remove a same-name replacement.
     #[pyo3(signature = (*, force = false, timeout = None))]
     fn destroy<'py>(
         &self,

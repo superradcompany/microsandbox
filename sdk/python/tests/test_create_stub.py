@@ -63,13 +63,13 @@ def _method(name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
 
 def test_create_methods_have_explicit_keyword_only_contracts() -> None:
     create = _method("create")
-    find_or_create = _method("find_or_create")
+    connect_or_create = _method("connect_or_create")
     create_with_progress = _method("create_with_progress")
 
     assert isinstance(create, ast.AsyncFunctionDef)
-    assert isinstance(find_or_create, ast.AsyncFunctionDef)
+    assert isinstance(connect_or_create, ast.AsyncFunctionDef)
     assert isinstance(create_with_progress, ast.FunctionDef)
-    for method in (create, find_or_create, create_with_progress):
+    for method in (create, connect_or_create, create_with_progress):
         assert method.args.kwarg is None
         assert [arg.arg for arg in method.args.kwonlyargs] == EXPECTED_KWARGS
         assert all(default is not None for default in method.args.kw_defaults)

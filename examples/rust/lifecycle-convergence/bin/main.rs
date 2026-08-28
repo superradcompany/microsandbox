@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, time::Instant};
 
 use microsandbox::{
     MicrosandboxError, Sandbox,
-    sandbox::{DestroyOptions, SandboxStatus},
+    sandbox::{DestroyOptions, RestartOptions, SandboxStatus},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -48,6 +48,117 @@ async fn cleanup(name: &str) {
         .await;
 }
 
+async fn run_concurrency_checks(
+    name: &str,
+    image: &str,
+    timings: &mut Timings,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let race_name = format!("{name}-race");
+    cleanup(&race_name).await;
+
+    let started = Instant::now();
+    let create = |marker: &'static str| {
+        Sandbox::builder(&race_name)
+            .image(image)
+            .cpus(1)
+            .memory(256)
+            .env("LIFECYCLE_MARKER", marker)
+            .connect_or_create()
+    };
+    let (first, second, third, fourth) = tokio::try_join!(
+        create("candidate-0"),
+        create("candidate-1"),
+        create("candidate-2"),
+        create("candidate-3"),
+    )?;
+    timings.insert("concurrent_connect_or_create", elapsed_ms(started));
+    let raced = vec![first, second, third, fourth];
+    let race_id = raced[0].id();
+    if raced.iter().any(|sandbox| sandbox.id() != race_id) {
+        return Err("concurrent connect_or_create callers selected different identities".into());
+    }
+    let marker = read_marker(&raced[0]).await?;
+    if !["candidate-0", "candidate-1", "candidate-2", "candidate-3"].contains(&marker.as_str()) {
+        return Err(
+            format!("concurrent creation persisted an unexpected marker: {marker:?}").into(),
+        );
+    }
+
+    raced[0].stop().await?;
+    let handles = tokio::try_join!(
+        Sandbox::get(&race_name),
+        Sandbox::get(&race_name),
+        Sandbox::get(&race_name),
+        Sandbox::get(&race_name),
+    )?;
+    let started = Instant::now();
+    let (first, second, third, fourth) = tokio::try_join!(
+        handles.0.connect_or_start(),
+        handles.1.connect_or_start(),
+        handles.2.connect_or_start(),
+        handles.3.connect_or_start(),
+    )?;
+    timings.insert("concurrent_connect_or_start", elapsed_ms(started));
+    let connected = vec![first, second, third, fourth];
+    if connected.iter().any(|sandbox| sandbox.id() != race_id) {
+        return Err("concurrent connect_or_start callers selected different identities".into());
+    }
+    assert_marker(&read_marker(&connected[0]).await?, &marker)?;
+
+    connected[0].stop().await?;
+    let started = Instant::now();
+    let detached = Sandbox::get(&race_name)
+        .await?
+        .connect_or_start_detached()
+        .await?;
+    timings.insert("connect_or_start_detached", elapsed_ms(started));
+    if detached.id() != race_id || detached.owns_lifecycle() {
+        return Err(
+            "detached connect_or_start changed identity or took lifecycle ownership".into(),
+        );
+    }
+
+    let started = Instant::now();
+    let forced = detached
+        .restart_with(RestartOptions {
+            force: true,
+            timeout: std::time::Duration::from_secs(5),
+            detached: false,
+        })
+        .await?;
+    timings.insert("restart_force", elapsed_ms(started));
+    if forced.id() != race_id || !forced.owns_lifecycle() {
+        return Err(
+            "forced restart changed identity or failed to return an attached handle".into(),
+        );
+    }
+    assert_marker(&read_marker(&forced).await?, &marker)?;
+
+    let started = Instant::now();
+    let detached_restart = forced
+        .restart_with(RestartOptions {
+            force: false,
+            timeout: std::time::Duration::from_secs(3),
+            detached: true,
+        })
+        .await?;
+    timings.insert("restart_detached_timeout", elapsed_ms(started));
+    if detached_restart.id() != race_id || detached_restart.owns_lifecycle() {
+        return Err("detached restart changed identity or took lifecycle ownership".into());
+    }
+    assert_marker(&read_marker(&detached_restart).await?, &marker)?;
+
+    let started = Instant::now();
+    detached_restart
+        .destroy_with(DestroyOptions {
+            force: true,
+            timeout: std::time::Duration::from_secs(5),
+        })
+        .await?;
+    timings.insert("destroy_force_timeout", elapsed_ms(started));
+    Ok(())
+}
+
 async fn run(name: &str) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let image = std::env::var("MSB_E2E_IMAGE").unwrap_or_else(|_| "alpine:3.19".to_string());
     let platform =
@@ -55,15 +166,17 @@ async fn run(name: &str) -> Result<serde_json::Value, Box<dyn std::error::Error>
     let total = Instant::now();
     let mut timings = Timings::new();
 
+    run_concurrency_checks(name, &image, &mut timings).await?;
+
     let started = Instant::now();
     let created = Sandbox::builder(name)
         .image(image.clone())
         .cpus(1)
         .memory(256)
         .env("LIFECYCLE_MARKER", "original")
-        .find_or_create()
+        .connect_or_create()
         .await?;
-    timings.insert("find_or_create_new", elapsed_ms(started));
+    timings.insert("connect_or_create_new", elapsed_ms(started));
     let original_id = created.id();
 
     let started = Instant::now();
@@ -71,11 +184,11 @@ async fn run(name: &str) -> Result<serde_json::Value, Box<dyn std::error::Error>
         .image(image.clone())
         .memory(768)
         .env("LIFECYCLE_MARKER", "ignored")
-        .find_or_create()
+        .connect_or_create()
         .await?;
-    timings.insert("find_or_create_existing", elapsed_ms(started));
+    timings.insert("connect_or_create_existing", elapsed_ms(started));
     if reused.id() != original_id {
-        return Err("find_or_create changed the persisted identity".into());
+        return Err("connect_or_create changed the persisted identity".into());
     }
     assert_marker(&read_marker(&reused).await?, "original")?;
 
@@ -113,7 +226,7 @@ async fn run(name: &str) -> Result<serde_json::Value, Box<dyn std::error::Error>
         .cpus(1)
         .memory(256)
         .env("LIFECYCLE_MARKER", "replacement")
-        .find_or_create()
+        .connect_or_create()
         .await?;
     if replacement.id() == original_id {
         return Err("replacement reused the destroyed sandbox identity".into());
@@ -138,7 +251,7 @@ async fn run(name: &str) -> Result<serde_json::Value, Box<dyn std::error::Error>
         "platform": platform,
         "sandbox": name,
         "identity": original_id.as_str(),
-        "checks": 10,
+        "checks": 16,
         "timings_ms": timings,
         "result": "pass"
     }))
@@ -149,9 +262,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let name = std::env::var("MSB_E2E_NAME")
         .unwrap_or_else(|_| format!("lifecycle-rust-{}", std::process::id()));
     cleanup(&name).await;
+    cleanup(&format!("{name}-race")).await;
     let result = run(&name).await;
     if result.is_err() {
         cleanup(&name).await;
+        cleanup(&format!("{name}-race")).await;
     }
     println!("MSB_LIFECYCLE_METRICS {}", serde_json::to_string(&result?)?);
     Ok(())

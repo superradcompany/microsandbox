@@ -240,7 +240,7 @@ export interface NapiSandboxBuilderSetters {
 
 export interface NapiSandboxBuilder extends NapiSandboxBuilderSetters {
   create(): Promise<NapiSandbox>;
-  findOrCreate(): Promise<NapiSandbox>;
+  connectOrCreate(): Promise<NapiSandbox>;
   createWithPullProgress(): Promise<NapiPullProgressCreate>;
 }
 

@@ -761,17 +761,17 @@ impl JsSandboxBuilder {
         Ok(JsSandbox::from_rust(inner))
     }
 
-    /// Find an existing sandbox by name or create it from this builder.
+    /// Connect to the persisted sandbox with this name, or create it.
     ///
     /// # Safety
     /// Same justification as `create`.
-    #[napi(js_name = "findOrCreate")]
-    pub async unsafe fn find_or_create(&mut self) -> Result<JsSandbox> {
+    #[napi(js_name = "connectOrCreate")]
+    pub async unsafe fn connect_or_create(&mut self) -> Result<JsSandbox> {
         let builder = self
             .inner
             .take()
             .ok_or_else(|| napi::Error::from_reason("SandboxBuilder already consumed"))?;
-        let inner = builder.find_or_create().await.map_err(to_napi_error)?;
+        let inner = builder.connect_or_create().await.map_err(to_napi_error)?;
         Ok(JsSandbox::from_rust(inner))
     }
 

@@ -1244,12 +1244,12 @@ export declare class SandboxBuilder {
    */
   create(): Promise<JsSandbox>
   /**
-   * Find an existing sandbox by name or create it from this builder.
+   * Connect to the persisted sandbox with this name, or create it.
    *
    * # Safety
    * Same justification as `create`.
    */
-  findOrCreate(): Promise<JsSandbox>
+  connectOrCreate(): Promise<JsSandbox>
   /**
    * Create the sandbox with image-pull progress reporting. Returns
    * a `PullProgressStream` of per-layer download/materialization

@@ -128,7 +128,7 @@ class Sandbox:
         detached: bool = False,
     ) -> Sandbox: ...
     @staticmethod
-    async def find_or_create(
+    async def connect_or_create(
         name: str,
         *,
         image: str | os.PathLike[str] | ImageSource | None = None,

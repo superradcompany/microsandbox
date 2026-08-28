@@ -71,6 +71,11 @@ impl LocalBackend {
         mode: SpawnMode,
     ) -> MicrosandboxResult<Sandbox> {
         tracing::debug!(sandbox = name, ?mode, "start_local: loading record");
+        // Serialize the state decision and launcher-to-runtime handoff by name. The database CAS
+        // below remains the authoritative start claim; this guard also protects deterministic
+        // host resources that are outside SQLite.
+        let _transition_guard =
+            Self::acquire_sandbox_transition_guard(&self.config().run_dir(), name).await?;
         let pools = self.db().await?;
         let write_db = pools.write();
         let model = self.load_sandbox_record_reconciled(pools, name).await?;
@@ -83,19 +88,38 @@ impl LocalBackend {
             )));
         }
 
-        if model.status != SandboxStatus::Stopped && model.status != SandboxStatus::Crashed {
+        if !matches!(
+            model.status,
+            SandboxStatus::Created | SandboxStatus::Stopped | SandboxStatus::Crashed
+        ) {
             return Err(crate::MicrosandboxError::Custom(format!(
-                "cannot start sandbox '{name}': status is {:?} (expected Stopped or Crashed)",
+                "cannot start sandbox '{name}': status is {:?} (expected Created, Stopped, or Crashed)",
                 model.status
             )));
         }
 
-        let lifecycle_guard = crate::runtime::acquire_sandbox_lifecycle_guard(
+        // Unix transfers this lock into the child. Windows cannot transfer LockFileEx ownership,
+        // so the parent proves the prior generation gone and releases its copy immediately before
+        // spawn; the child acquires its own runtime-held lock while the transition guard excludes
+        // competing namespace mutations.
+        #[cfg(unix)]
+        let lifecycle_guard = Some(
+            crate::runtime::acquire_sandbox_lifecycle_guard(
+                &self.config().run_dir(),
+                name,
+                Duration::from_secs(5),
+            )
+            .await?,
+        );
+        #[cfg(windows)]
+        let previous_runtime_guard = crate::runtime::acquire_sandbox_lifecycle_guard(
             &self.config().run_dir(),
             name,
             Duration::from_secs(5),
         )
         .await?;
+        #[cfg(not(any(unix, windows)))]
+        let lifecycle_guard = None;
 
         // Removal or another start may have won while the initial reconciled
         // snapshot was being loaded. Re-read under ownership and require the
@@ -106,7 +130,7 @@ impl LocalBackend {
         }
         if !matches!(
             current.status,
-            SandboxStatus::Stopped | SandboxStatus::Crashed
+            SandboxStatus::Created | SandboxStatus::Stopped | SandboxStatus::Crashed
         ) {
             return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
                 "cannot start sandbox {name:?}: status changed to {:?}",
@@ -145,14 +169,57 @@ impl LocalBackend {
         validate_labels(&config.spec.labels)?;
         validate_volume_mounts(&mut config.spec.mounts)?;
         self.validate_start_state(&config, &self.sandboxes_dir().join(name))?;
-        Self::update_sandbox_status(write_db, model.id, SandboxStatus::Running).await?;
+        // Claim the start atomically even though cooperative callers are serialized above. This
+        // keeps the database state machine authoritative if another version or code path does not
+        // participate in the host lock.
+        if !Self::compare_and_set_sandbox_status(
+            write_db,
+            model.id,
+            &[
+                SandboxStatus::Created,
+                SandboxStatus::Stopped,
+                SandboxStatus::Crashed,
+            ],
+            SandboxStatus::Starting,
+        )
+        .await?
+        {
+            let current = load_sandbox_record(pools.read(), name).await?;
+            if current.id != model.id {
+                return Err(sandbox_replaced(name, model.id, current.id));
+            }
+            return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
+                "cannot start sandbox {name:?}: another lifecycle transition changed status to {:?}",
+                current.status
+            )));
+        }
+
+        #[cfg(windows)]
+        drop(previous_runtime_guard);
+        #[cfg(windows)]
+        let lifecycle_guard = None;
 
         match self
-            .create_sandbox_inner(config, model.id, mode, Some(lifecycle_guard))
+            .create_sandbox_inner(config, model.id, mode, lifecycle_guard)
             .await
         {
             Ok((local_state, returned_config)) => {
                 let sandbox = Sandbox::from_local(backend.clone(), local_state, returned_config);
+                // Publish Running only after create_sandbox_inner has completed the agent
+                // readiness handshake, so concurrent connectors cannot race endpoint creation.
+                if !Self::compare_and_set_sandbox_status(
+                    write_db,
+                    model.id,
+                    &[SandboxStatus::Starting],
+                    SandboxStatus::Running,
+                )
+                .await?
+                {
+                    let _ = sandbox.stop().await;
+                    return Err(crate::MicrosandboxError::Runtime(format!(
+                        "sandbox {name:?} lost its Starting state before readiness publication"
+                    )));
+                }
                 if let Err(err) = Self::update_sandbox_active_config(
                     write_db,
                     model.id,
@@ -166,8 +233,13 @@ impl LocalBackend {
                 Ok(sandbox)
             }
             Err(err) => {
-                let _ =
-                    Self::update_sandbox_status(write_db, model.id, SandboxStatus::Stopped).await;
+                let _ = Self::compare_and_set_sandbox_status(
+                    write_db,
+                    model.id,
+                    &[SandboxStatus::Starting],
+                    SandboxStatus::Stopped,
+                )
+                .await;
                 Err(err)
             }
         }
@@ -182,10 +254,13 @@ impl LocalBackend {
     /// agent endpoint is unreachable (agentd wedged, sandbox just
     /// transitioning, etc.).
     ///
-    /// No-op when the sandbox isn't in Running/Draining.
+    /// No-op when the sandbox isn't Starting, Running, or Draining.
     async fn stop_sandbox(&self, name: &str, expected_id: Option<i32>) -> MicrosandboxResult<()> {
         let (model, pid) = self.sandbox_handle_state(name, expected_id).await?;
-        if model.status != SandboxStatus::Running && model.status != SandboxStatus::Draining {
+        if !matches!(
+            model.status,
+            SandboxStatus::Starting | SandboxStatus::Running | SandboxStatus::Draining
+        ) {
             return Ok(());
         }
 
@@ -222,7 +297,10 @@ impl LocalBackend {
     /// row Stopped if all signalled PIDs are confirmed dead.
     async fn kill_sandbox(&self, name: &str, expected_id: Option<i32>) -> MicrosandboxResult<()> {
         let (model, pid) = self.sandbox_handle_state(name, expected_id).await?;
-        if model.status != SandboxStatus::Running && model.status != SandboxStatus::Draining {
+        if !matches!(
+            model.status,
+            SandboxStatus::Starting | SandboxStatus::Running | SandboxStatus::Draining
+        ) {
             return Ok(());
         }
 
@@ -463,7 +541,7 @@ impl LocalBackend {
         self.reconcile_sandbox_runtime_state(pools, sandbox).await
     }
 
-    /// Reconcile a Running/Draining row against the owning process's
+    /// Reconcile a Starting/Running/Draining row against the owning process's
     /// liveness, marking it terminal when the runtime is gone.
     async fn reconcile_sandbox_runtime_state(
         &self,
@@ -488,7 +566,7 @@ impl LocalBackend {
     ) -> MicrosandboxResult<sandbox_entity::Model> {
         if !matches!(
             sandbox.status,
-            SandboxStatus::Running | SandboxStatus::Draining
+            SandboxStatus::Starting | SandboxStatus::Running | SandboxStatus::Draining
         ) {
             return Ok(sandbox);
         }
@@ -523,14 +601,13 @@ impl LocalBackend {
         };
         if !matches!(
             sandbox.status,
-            SandboxStatus::Running | SandboxStatus::Draining
+            SandboxStatus::Starting | SandboxStatus::Running | SandboxStatus::Draining
         ) {
             return Ok(sandbox);
         }
         let run = Self::load_active_run(pools.read(), sandbox.id).await?;
 
-        // No run record yet while Running means the sandbox is still starting up
-        // (the child process has not inserted its PID). A Draining row with no
+        // No run record yet while Starting means the child has not inserted its PID. A Draining row with no
         // active run, however, has already completed shutdown from the DB's point
         // of view and should not keep stop callers polling forever.
         let Some(run) = run else {
@@ -707,10 +784,11 @@ impl LocalBackend {
                 )
                 .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
                 .filter(sandbox_entity::Column::Id.eq(sandbox_id))
-                .filter(
-                    sandbox_entity::Column::Status
-                        .is_in([SandboxStatus::Running, SandboxStatus::Draining]),
-                )
+                .filter(sandbox_entity::Column::Status.is_in([
+                    SandboxStatus::Starting,
+                    SandboxStatus::Running,
+                    SandboxStatus::Draining,
+                ]))
                 .exec(&txn)
                 .await?;
 
@@ -719,7 +797,28 @@ impl LocalBackend {
         .await
     }
 
-    /// Update the sandbox status in the database.
+    /// Move a sandbox between lifecycle states only when its current state is expected.
+    async fn compare_and_set_sandbox_status(
+        db: &DbWriteConnection,
+        sandbox_id: i32,
+        expected: &[SandboxStatus],
+        status: SandboxStatus,
+    ) -> MicrosandboxResult<bool> {
+        let result = sandbox_entity::Entity::update_many()
+            .col_expr(sandbox_entity::Column::Status, Expr::value(status))
+            .col_expr(
+                sandbox_entity::Column::UpdatedAt,
+                Expr::value(chrono::Utc::now().naive_utc()),
+            )
+            .filter(sandbox_entity::Column::Id.eq(sandbox_id))
+            .filter(sandbox_entity::Column::Status.is_in(expected.iter().copied()))
+            .exec(db)
+            .await?;
+
+        Ok(result.rows_affected == 1)
+    }
+
+    /// Update the sandbox status in the database without requiring a source state.
     async fn update_sandbox_status(
         db: &DbWriteConnection,
         sandbox_id: i32,
@@ -1237,7 +1336,7 @@ mod tests {
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
     use tempfile::tempdir;
 
-    use super::sandbox_entity;
+    use super::{SpawnMode, sandbox_entity};
     use crate::backend::{Backend, LocalBackend, SandboxBackend};
     use crate::logs::{LogOptions, LogSource};
     use crate::sandbox::{
@@ -1407,6 +1506,127 @@ mod tests {
             .unwrap();
         assert_eq!(second[0].0.name, "first");
         assert!(cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn identified_lifecycle_operations_reject_a_recreated_name() {
+        let temp = tempdir().unwrap();
+        let backend = Arc::new(
+            LocalBackend::builder()
+                .home(temp.path())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let pools = backend.db().await.unwrap();
+        let current_id = LocalBackend::insert_sandbox_record(
+            pools.write(),
+            &test_config("identity-replacement"),
+        )
+        .await
+        .unwrap();
+        let stale_id = current_id + 1;
+        let backend_dyn: Arc<dyn Backend> = backend.clone();
+
+        let start_error = match backend
+            .start_sandbox(
+                backend_dyn.clone(),
+                "identity-replacement",
+                Some(stale_id),
+                SpawnMode::Attached,
+            )
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("stale identified start unexpectedly succeeded"),
+        };
+        assert!(matches!(
+            start_error,
+            crate::MicrosandboxError::SandboxReplaced { .. }
+        ));
+
+        for error in [
+            backend
+                .stop_sandbox("identity-replacement", Some(stale_id))
+                .await
+                .unwrap_err(),
+            backend
+                .kill_sandbox("identity-replacement", Some(stale_id))
+                .await
+                .unwrap_err(),
+            backend
+                .drain_sandbox("identity-replacement", Some(stale_id))
+                .await
+                .unwrap_err(),
+            backend
+                .remove_sandbox(backend_dyn, "identity-replacement", Some(stale_id))
+                .await
+                .unwrap_err(),
+        ] {
+            assert!(matches!(
+                error,
+                crate::MicrosandboxError::SandboxReplaced { .. }
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn atomic_start_claim_selects_exactly_one_winner() {
+        let temp = tempdir().unwrap();
+        let pools = open_test_pools(&temp.path().join("test.db")).await;
+        let sandbox_id =
+            LocalBackend::insert_sandbox_record(pools.write(), &test_config("atomic-start"))
+                .await
+                .unwrap();
+        LocalBackend::update_sandbox_status(pools.write(), sandbox_id, SandboxStatus::Stopped)
+            .await
+            .unwrap();
+
+        let claim = || {
+            LocalBackend::compare_and_set_sandbox_status(
+                pools.write(),
+                sandbox_id,
+                &[SandboxStatus::Stopped, SandboxStatus::Crashed],
+                SandboxStatus::Starting,
+            )
+        };
+        let (first, second, third, fourth) = tokio::join!(claim(), claim(), claim(), claim());
+        let winners = [first, second, third, fourth]
+            .into_iter()
+            .map(Result::unwrap)
+            .filter(|claimed| *claimed)
+            .count();
+
+        assert_eq!(winners, 1, "only one caller may claim a start generation");
+        let current = sandbox_entity::Entity::find_by_id(sandbox_id)
+            .one(pools.read())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.status, SandboxStatus::Starting);
+
+        assert!(
+            !LocalBackend::compare_and_set_sandbox_status(
+                pools.write(),
+                sandbox_id,
+                &[SandboxStatus::Stopped],
+                SandboxStatus::Running,
+            )
+            .await
+            .unwrap(),
+            "publication from the wrong source state must be rejected"
+        );
+        assert!(
+            LocalBackend::compare_and_set_sandbox_status(
+                pools.write(),
+                sandbox_id,
+                &[SandboxStatus::Starting],
+                SandboxStatus::Running,
+            )
+            .await
+            .unwrap(),
+            "the start winner must publish readiness from Starting"
+        );
     }
 
     #[tokio::test]
@@ -1650,13 +1870,12 @@ mod tests {
         let _ = backend.validate_start_state(&config, &sandbox_dir);
     }
 
-    /// Simulates the reaper sweep: queries all Running/Draining sandboxes and
+    /// Simulates the reaper sweep: queries all Starting/Running/Draining sandboxes and
     /// reconciles each. Verifies that only stale entries are reaped while
-    /// live, stopped, crashed, and starting (no run record) sandboxes are
-    /// left untouched.
+    /// live, stopped, and starting (no run record) sandboxes are left untouched.
     #[tokio::test]
     #[cfg(unix)]
-    async fn test_reap_marks_only_dead_running_and_draining_sandboxes() {
+    async fn test_reap_marks_only_dead_active_sandboxes() {
         let temp = tempdir().unwrap();
         let db_path = temp.path().join("test.db");
         let pools = open_test_pools(&db_path).await;
@@ -1736,18 +1955,40 @@ mod tests {
             .await
             .unwrap();
 
-        // --- Sandbox E: Running + no run record (still starting) → should stay Running ---
+        // --- Sandbox E: Starting + no run record → should stay Starting ---
         let cfg_e = test_config("starting");
         let id_e = LocalBackend::insert_sandbox_record(pools.write(), &cfg_e)
             .await
             .unwrap();
+        LocalBackend::update_sandbox_status(pools.write(), id_e, SandboxStatus::Starting)
+            .await
+            .unwrap();
 
-        // --- Reap: query all Running/Draining, reconcile each ---
+        // --- Sandbox F: Starting + dead PID → should become Crashed ---
+        let cfg_f = test_config("starting-dead");
+        let id_f = LocalBackend::insert_sandbox_record(pools.write(), &cfg_f)
+            .await
+            .unwrap();
+        LocalBackend::update_sandbox_status(pools.write(), id_f, SandboxStatus::Starting)
+            .await
+            .unwrap();
+        run_entity::Entity::insert(run_entity::ActiveModel {
+            sandbox_id: Set(id_f),
+            pid: Set(Some(dead)),
+            status: Set(run_entity::RunStatus::Running),
+            ..Default::default()
+        })
+        .exec(pools.write())
+        .await
+        .unwrap();
+
+        // --- Reap: query all Starting/Running/Draining, reconcile each ---
         let stale = sandbox_entity::Entity::find()
-            .filter(
-                sandbox_entity::Column::Status
-                    .is_in([SandboxStatus::Running, SandboxStatus::Draining]),
-            )
+            .filter(sandbox_entity::Column::Status.is_in([
+                SandboxStatus::Starting,
+                SandboxStatus::Running,
+                SandboxStatus::Draining,
+            ]))
             .all(pools.write())
             .await
             .unwrap();
@@ -1774,7 +2015,8 @@ mod tests {
         assert_eq!(load(id_c).await.status, SandboxStatus::Stopped);
         assert_eq!(load(id_c2).await.status, SandboxStatus::Stopped);
         assert_eq!(load(id_d).await.status, SandboxStatus::Stopped);
-        assert_eq!(load(id_e).await.status, SandboxStatus::Running);
+        assert_eq!(load(id_e).await.status, SandboxStatus::Starting);
+        assert_eq!(load(id_f).await.status, SandboxStatus::Crashed);
 
         // Cleanup the live process.
         unsafe { libc::kill(live_pid, libc::SIGKILL) };

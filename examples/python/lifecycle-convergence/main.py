@@ -7,8 +7,8 @@ import time
 
 from microsandbox import Sandbox, SandboxReplacedError
 
-
 NAME = os.environ.get("MSB_E2E_NAME", f"lifecycle-python-{os.getpid()}")
+RACE_NAME = f"{NAME}-race"
 IMAGE = os.environ.get("MSB_E2E_IMAGE", "alpine:3.19")
 PLATFORM = os.environ.get("MSB_E2E_PLATFORM", os.name)
 
@@ -20,9 +20,9 @@ async def read_marker(sandbox: Sandbox) -> str:
     return output.stdout_text
 
 
-async def cleanup() -> None:
+async def cleanup(name: str = NAME) -> None:
     try:
-        current = await Sandbox.get(NAME)
+        current = await Sandbox.get(name)
         await current.destroy(force=True, timeout=5.0)
     except Exception:
         # The unique example sandbox normally does not exist before or after a run.
@@ -39,11 +39,84 @@ async def main() -> None:
         timings[label] = (time.perf_counter() - started) * 1_000
         return value
 
+    async def run_concurrency_checks() -> None:
+        await cleanup(RACE_NAME)
+        candidates = ["candidate-0", "candidate-1", "candidate-2", "candidate-3"]
+
+        async def create_candidate(marker: str) -> Sandbox:
+            return await Sandbox.connect_or_create(
+                RACE_NAME,
+                image=IMAGE,
+                cpus=1,
+                memory=256,
+                env={"LIFECYCLE_MARKER": marker},
+            )
+
+        raced = await measured(
+            "concurrent_connect_or_create",
+            lambda: asyncio.gather(*(create_candidate(marker) for marker in candidates)),
+        )
+        race_id = await raced[0].id
+        race_ids = await asyncio.gather(*(sandbox.id for sandbox in raced))
+        if any(identity != race_id for identity in race_ids):
+            raise RuntimeError("concurrent connect_or_create callers selected different identities")
+        marker = await read_marker(raced[0])
+        if marker not in candidates:
+            raise RuntimeError(f"concurrent creation persisted unexpected marker {marker!r}")
+
+        await raced[0].stop()
+        handles = await asyncio.gather(*(Sandbox.get(RACE_NAME) for _ in candidates))
+        connected = await measured(
+            "concurrent_connect_or_start",
+            lambda: asyncio.gather(*(handle.connect_or_start() for handle in handles)),
+        )
+        connected_ids = await asyncio.gather(*(sandbox.id for sandbox in connected))
+        if any(identity != race_id for identity in connected_ids):
+            raise RuntimeError("concurrent connect_or_start callers selected different identities")
+        if await read_marker(connected[0]) != marker:
+            raise RuntimeError("start race lost persisted configuration")
+
+        await connected[0].stop()
+        detached = await measured(
+            "connect_or_start_detached",
+            lambda: handles[0].connect_or_start(detached=True),
+        )
+        if await detached.id != race_id or await detached.owns_lifecycle:
+            raise RuntimeError(
+                "detached connect_or_start changed identity or took lifecycle ownership"
+            )
+
+        forced = await measured(
+            "restart_force",
+            lambda: detached.restart(force=True, timeout=5.0),
+        )
+        if await forced.id != race_id or not await forced.owns_lifecycle:
+            raise RuntimeError(
+                "forced restart changed identity or failed to return an attached handle"
+            )
+        if await read_marker(forced) != marker:
+            raise RuntimeError("forced restart lost persisted configuration")
+
+        detached_restart = await measured(
+            "restart_detached_timeout",
+            lambda: forced.restart(timeout=3.0, detached=True),
+        )
+        if await detached_restart.id != race_id or await detached_restart.owns_lifecycle:
+            raise RuntimeError("detached restart changed identity or took lifecycle ownership")
+        if await read_marker(detached_restart) != marker:
+            raise RuntimeError("detached restart lost persisted configuration")
+        await measured(
+            "destroy_force_timeout",
+            lambda: detached_restart.destroy(force=True, timeout=5.0),
+        )
+
     await cleanup()
+    await cleanup(RACE_NAME)
     try:
+        await run_concurrency_checks()
         created = await measured(
-            "find_or_create_new",
-            lambda: Sandbox.find_or_create(
+            "connect_or_create_new",
+            lambda: Sandbox.connect_or_create(
                 NAME,
                 image=IMAGE,
                 cpus=1,
@@ -54,8 +127,8 @@ async def main() -> None:
         original_id = await created.id
 
         reused = await measured(
-            "find_or_create_existing",
-            lambda: Sandbox.find_or_create(
+            "connect_or_create_existing",
+            lambda: Sandbox.connect_or_create(
                 NAME,
                 image=IMAGE,
                 memory=768,
@@ -63,7 +136,7 @@ async def main() -> None:
             ),
         )
         if await reused.id != original_id:
-            raise RuntimeError("find_or_create changed the persisted identity")
+            raise RuntimeError("connect_or_create changed the persisted identity")
         if await read_marker(reused) != "original":
             raise RuntimeError("existing configuration did not win")
 
@@ -87,7 +160,7 @@ async def main() -> None:
 
         stale = await Sandbox.get(NAME)
         await measured("destroy_original", restarted.destroy)
-        replacement = await Sandbox.find_or_create(
+        replacement = await Sandbox.connect_or_create(
             NAME,
             image=IMAGE,
             cpus=1,
@@ -118,7 +191,7 @@ async def main() -> None:
                     "platform": PLATFORM,
                     "sandbox": NAME,
                     "identity": original_id,
-                    "checks": 10,
+                    "checks": 16,
                     "timings_ms": timings,
                     "result": "pass",
                 },
@@ -127,6 +200,7 @@ async def main() -> None:
         )
     except Exception:
         await cleanup()
+        await cleanup(RACE_NAME)
         raise
 
 

@@ -34,7 +34,7 @@ describe("native Sandbox lifecycle contract", () => {
   it("exports the durable CMD setter and convergent terminal", () => {
     const proto = napi.SandboxBuilder.prototype as Record<string, unknown>;
     expect(typeof proto.cmd).toBe("function");
-    expect(typeof proto.findOrCreate).toBe("function");
+    expect(typeof proto.connectOrCreate).toBe("function");
   });
 
   it("exports the handle health methods used by the TS wrapper", () => {

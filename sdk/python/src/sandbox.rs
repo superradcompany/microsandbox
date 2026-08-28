@@ -252,18 +252,21 @@ impl PySandbox {
         })
     }
 
-    /// Find an existing sandbox by name or create it from these arguments.
-    /// Existing sandboxes retain their persisted configuration.
+    /// Connect to and run the persisted sandbox with this name, or create it if absent.
+    ///
+    /// Keyword arguments are used only when creation is necessary. An existing
+    /// sandbox retains its persisted configuration, and concurrent callers
+    /// converge on the winning identity.
     #[staticmethod]
     #[pyo3(signature = (name, **kwargs))]
-    fn find_or_create<'py>(
+    fn connect_or_create<'py>(
         py: Python<'py>,
         name: String,
         kwargs: Option<&Bound<'py, PyDict>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let builder = sandbox_builder_from_args(name, kwargs)?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let sandbox = builder.find_or_create().await.map_err(to_py_err)?;
+            let sandbox = builder.connect_or_create().await.map_err(to_py_err)?;
             Ok(PySandbox::from_rust(sandbox))
         })
     }
@@ -1042,7 +1045,10 @@ impl PySandbox {
         })
     }
 
-    /// Wait until this exact sandbox reaches `status`.
+    /// Wait until this exact sandbox reaches `status` with no built-in timeout.
+    ///
+    /// A same-name replacement is rejected instead of silently redirecting the
+    /// wait to the new persisted identity.
     fn wait_for_status<'py>(&self, py: Python<'py>, status: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         let status = crate::sandbox_handle::parse_sandbox_status(&status)?;
@@ -1054,6 +1060,9 @@ impl PySandbox {
     }
 
     /// Stop and start this exact sandbox.
+    ///
+    /// Graceful shutdown and a ten-second convergence timeout are the defaults.
+    /// A created, stopped, or crashed sandbox starts directly.
     #[pyo3(signature = (*, force = false, timeout = None, detached = false))]
     fn restart<'py>(
         &self,
@@ -1079,6 +1088,9 @@ impl PySandbox {
     }
 
     /// Stop and remove this exact sandbox.
+    ///
+    /// Graceful shutdown and a ten-second convergence timeout are the defaults.
+    /// The identity check refuses to remove a same-name replacement.
     #[pyo3(signature = (*, force = false, timeout = None))]
     fn destroy<'py>(
         &self,

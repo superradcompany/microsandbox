@@ -148,7 +148,13 @@ export class SandboxHandle {
     return new Sandbox(raw, this.name, false);
   }
 
-  /** Connect when running, or start the same persisted sandbox when stopped. */
+  /**
+   * Connect when this exact sandbox is running, wait while it is starting, or
+   * start it when it is created, stopped, or crashed.
+   *
+   * `detached` applies only when a start is required. A same-name replacement
+   * is rejected instead of becoming the target of this handle.
+   */
   async connectOrStart(options?: { detached?: boolean }): Promise<Sandbox> {
     const detached = options?.detached ?? false;
     const raw = await withMappedErrors(() =>
@@ -199,19 +205,28 @@ export class SandboxHandle {
     await withMappedErrors(() => this.inner.requestDrain());
   }
 
-  /** Wait until this exact sandbox reaches `status`. */
+  /**
+   * Wait until this exact persisted sandbox reaches `status`.
+   * This method has no built-in timeout and rejects same-name replacements.
+   */
   async waitForStatus(status: SandboxStatus): Promise<SandboxHandle> {
     const raw = await withMappedErrors(() => this.inner.waitForStatus(status));
     return new SandboxHandle(raw);
   }
 
-  /** Stop and start this exact sandbox. */
+  /**
+   * Stop and start this exact persisted sandbox.
+   * Graceful shutdown and a ten-second convergence timeout are the defaults.
+   */
   async restart(options?: RestartOptions): Promise<Sandbox> {
     const raw = await withMappedErrors(() => this.inner.restart(options));
     return new Sandbox(raw, this.name);
   }
 
-  /** Stop and remove this exact sandbox. */
+  /**
+   * Stop and remove this exact persisted sandbox.
+   * The identity check refuses to remove a same-name replacement.
+   */
   async destroy(options?: DestroyOptions): Promise<void> {
     await withMappedErrors(() => this.inner.destroy(options));
   }

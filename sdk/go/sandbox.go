@@ -34,16 +34,18 @@ func (s *Sandbox) BackendKind() BackendKind { return BackendKind(s.inner.Backend
 // ctx controls the boot operation only; cancelling ctx after this function
 // returns has no effect on the running sandbox.
 func CreateSandbox(ctx context.Context, name string, opts ...SandboxOption) (*Sandbox, error) {
-	return createOrFindSandbox(ctx, name, false, opts...)
+	return createSandboxWithMode(ctx, name, false, opts...)
 }
 
-// FindOrCreateSandbox finds a sandbox by name or creates it with opts.
-// Existing sandboxes retain their persisted configuration.
-func FindOrCreateSandbox(ctx context.Context, name string, opts ...SandboxOption) (*Sandbox, error) {
-	return createOrFindSandbox(ctx, name, true, opts...)
+// ConnectOrCreateSandbox connects to and runs the persisted sandbox with this
+// name, or creates it if absent. opts apply only when creation is necessary; an
+// existing sandbox retains its persisted configuration. Concurrent callers
+// converge on the winning identity.
+func ConnectOrCreateSandbox(ctx context.Context, name string, opts ...SandboxOption) (*Sandbox, error) {
+	return createSandboxWithMode(ctx, name, true, opts...)
 }
 
-func createOrFindSandbox(ctx context.Context, name string, findOrCreate bool, opts ...SandboxOption) (*Sandbox, error) {
+func createSandboxWithMode(ctx context.Context, name string, connectOrCreate bool, opts ...SandboxOption) (*Sandbox, error) {
 	o := SandboxConfig{}
 	for _, opt := range opts {
 		opt(&o)
@@ -57,8 +59,8 @@ func createOrFindSandbox(ctx context.Context, name string, findOrCreate bool, op
 
 	var inner *ffi.Sandbox
 	var err error
-	if findOrCreate {
-		inner, err = ffi.FindOrCreateSandbox(ctx, name, ffiOpts)
+	if connectOrCreate {
+		inner, err = ffi.ConnectOrCreateSandbox(ctx, name, ffiOpts)
 	} else {
 		inner, err = ffi.CreateSandbox(ctx, name, ffiOpts)
 	}
@@ -603,6 +605,7 @@ func WithKillTimeout(timeout time.Duration) KillOption {
 }
 
 // WithConnectOrStartDetached starts in detached mode when a start is required.
+// It has no effect when ConnectOrStart connects to an already-running sandbox.
 func WithConnectOrStartDetached() ConnectOrStartOption {
 	return func(options *connectOrStartOptions) { options.detached = true }
 }
@@ -612,7 +615,8 @@ func WithRestartForce() RestartOption {
 	return func(options *restartOptions) { options.force = true }
 }
 
-// WithRestartTimeout sets the graceful-shutdown convergence timeout.
+// WithRestartTimeout sets the graceful-shutdown convergence timeout. Reaching
+// the timeout escalates the restart to forceful termination.
 func WithRestartTimeout(timeout time.Duration) RestartOption {
 	return func(options *restartOptions) { options.timeout = timeout }
 }
@@ -627,7 +631,8 @@ func WithDestroyForce() DestroyOption {
 	return func(options *destroyOptions) { options.force = true }
 }
 
-// WithDestroyTimeout sets the graceful-shutdown convergence timeout.
+// WithDestroyTimeout sets the graceful-shutdown convergence timeout. Reaching
+// the timeout escalates destruction to forceful termination.
 func WithDestroyTimeout(timeout time.Duration) DestroyOption {
 	return func(options *destroyOptions) { options.timeout = timeout }
 }
@@ -854,7 +859,9 @@ func (h *SandboxHandle) StartDetached(ctx context.Context) (*Sandbox, error) {
 	return &Sandbox{inner: inner}, nil
 }
 
-// ConnectOrStart connects when running or starts the same sandbox when stopped.
+// ConnectOrStart connects when this exact sandbox is running, waits while it is
+// starting, or starts it when it is created, stopped, or crashed. A same-name
+// replacement is rejected instead of becoming this handle's target.
 func (h *SandboxHandle) ConnectOrStart(ctx context.Context, opts ...ConnectOrStartOption) (*Sandbox, error) {
 	options := connectOrStartOptions{}
 	for _, apply := range opts {
@@ -909,7 +916,9 @@ func (h *SandboxHandle) Remove(ctx context.Context) error {
 	return wrapFFI(ffi.SandboxHandleVoidLifecycle(ctx, h.name, h.id, "remove", ffi.SandboxHandleLifecycleOptions{}))
 }
 
-// WaitForStatus waits until this exact sandbox reaches status.
+// WaitForStatus waits without a built-in timeout until this exact sandbox
+// reaches status. Use ctx for deadlines or cancellation. A same-name
+// replacement is rejected.
 func (h *SandboxHandle) WaitForStatus(ctx context.Context, status SandboxStatus) (*SandboxHandle, error) {
 	info, err := ffi.SandboxHandleInfoLifecycle(
 		ctx, h.name, h.id, "wait_for_status", ffi.SandboxHandleLifecycleOptions{Status: string(status)},
@@ -920,7 +929,9 @@ func (h *SandboxHandle) WaitForStatus(ctx context.Context, status SandboxStatus)
 	return newSandboxHandle(info), nil
 }
 
-// Restart stops and starts this exact sandbox.
+// Restart stops and starts this exact sandbox. It defaults to graceful shutdown
+// with a ten-second convergence timeout; created, stopped, and crashed
+// sandboxes start directly.
 func (h *SandboxHandle) Restart(ctx context.Context, opts ...RestartOption) (*Sandbox, error) {
 	options := restartOptions{timeout: defaultStopTimeout}
 	for _, apply := range opts {
@@ -937,7 +948,9 @@ func (h *SandboxHandle) Restart(ctx context.Context, opts ...RestartOption) (*Sa
 	return &Sandbox{inner: inner}, nil
 }
 
-// Destroy stops and removes this exact sandbox.
+// Destroy stops and removes this exact sandbox. It defaults to graceful
+// shutdown with a ten-second convergence timeout and refuses to remove a
+// same-name replacement.
 func (h *SandboxHandle) Destroy(ctx context.Context, opts ...DestroyOption) error {
 	options := destroyOptions{timeout: defaultStopTimeout}
 	for _, apply := range opts {
@@ -1023,17 +1036,23 @@ func (s *Sandbox) WaitUntilStopped(ctx context.Context) (*SandboxStopResult, err
 	return sandboxStopResultFromFFI(result), wrapFFI(err)
 }
 
-// WaitForStatus waits until this exact sandbox reaches status.
+// WaitForStatus waits without a built-in timeout until this exact sandbox
+// reaches status. Use ctx for deadlines or cancellation. A same-name
+// replacement is rejected.
 func (s *Sandbox) WaitForStatus(ctx context.Context, status SandboxStatus) (*SandboxHandle, error) {
 	return s.identityHandle().WaitForStatus(ctx, status)
 }
 
-// Restart stops and starts this exact sandbox.
+// Restart stops and starts this exact sandbox. It defaults to graceful shutdown
+// with a ten-second convergence timeout; created, stopped, and crashed
+// sandboxes start directly.
 func (s *Sandbox) Restart(ctx context.Context, opts ...RestartOption) (*Sandbox, error) {
 	return s.identityHandle().Restart(ctx, opts...)
 }
 
-// Destroy stops and removes this exact sandbox.
+// Destroy stops and removes this exact sandbox. It defaults to graceful
+// shutdown with a ten-second convergence timeout and refuses to remove a
+// same-name replacement.
 func (s *Sandbox) Destroy(ctx context.Context, opts ...DestroyOption) error {
 	return s.identityHandle().Destroy(ctx, opts...)
 }

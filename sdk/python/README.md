@@ -65,12 +65,12 @@ asyncio.run(main())
 
 ### Reusable Lifecycle Convergence
 
-Use `find_or_create` when a stable name should converge on one persisted sandbox. Existing configuration wins; creation arguments are used only if creation is necessary. Handles retain a stable `id`, so lifecycle calls on stale receivers refuse to act on a replacement that reused the name.
+Use `connect_or_create` when a stable name should converge on one persisted sandbox. Existing configuration wins; creation arguments are used only if creation is necessary. Handles retain a stable `id`, so lifecycle calls on stale receivers refuse to act on a replacement that reused the name.
 
 ```python
 from microsandbox import SandboxStatus
 
-sandbox = await Sandbox.find_or_create("worker", image="python", memory=1024)
+sandbox = await Sandbox.connect_or_create("worker", image="python", memory=1024)
 
 print(f"{await sandbox.name}: {await sandbox.id}")
 running = await (await Sandbox.get("worker")).connect_or_start()

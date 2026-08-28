@@ -921,9 +921,9 @@ impl RubySandboxBuilder {
         })
     }
 
-    fn find_or_create(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<RubySandbox, Error> {
+    fn connect_or_create(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<RubySandbox, Error> {
         let builder = take_builder(&this)?;
-        let sandbox = run(ruby, builder.find_or_create())?;
+        let sandbox = run(ruby, builder.connect_or_create())?;
         Ok(RubySandbox {
             inner: std::cell::RefCell::new(Some(sandbox)),
         })
@@ -1746,14 +1746,14 @@ fn sandbox_create(ruby: &Ruby, args: &[Value]) -> Result<RubySandbox, Error> {
     })
 }
 
-fn sandbox_find_or_create(ruby: &Ruby, args: &[Value]) -> Result<RubySandbox, Error> {
+fn sandbox_connect_or_create(ruby: &Ruby, args: &[Value]) -> Result<RubySandbox, Error> {
     let parsed = scan_args::<(String,), (), (), (), RHash, ()>(args)?;
     let builder = apply_builder_options(
         ruby,
         SandboxBuilder::new(parsed.required.0),
         parsed.keywords,
     )?;
-    let inner = run(ruby, builder.find_or_create())?;
+    let inner = run(ruby, builder.connect_or_create())?;
     Ok(RubySandbox {
         inner: std::cell::RefCell::new(Some(inner)),
     })
@@ -2189,7 +2189,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     let sandbox = module.define_class("Sandbox", ruby.class_object())?;
     sandbox.define_singleton_method("builder", function!(sandbox_builder, 1))?;
     sandbox.define_singleton_method("create", function!(sandbox_create, -1))?;
-    sandbox.define_singleton_method("find_or_create", function!(sandbox_find_or_create, -1))?;
+    sandbox.define_singleton_method("connect_or_create", function!(sandbox_connect_or_create, -1))?;
     sandbox.define_singleton_method("start", function!(sandbox_start, -1))?;
     sandbox.define_singleton_method("get", function!(sandbox_get, -1))?;
     sandbox.define_singleton_method("list", function!(sandbox_list, -1))?;
@@ -2318,8 +2318,8 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     builder.define_method("vsock_dgram!", method!(RubySandboxBuilder::vsock_dgram, 2))?;
     builder.define_method("create", method!(RubySandboxBuilder::create, 0))?;
     builder.define_method(
-        "find_or_create",
-        method!(RubySandboxBuilder::find_or_create, 0),
+        "connect_or_create",
+        method!(RubySandboxBuilder::connect_or_create, 0),
     )?;
 
     // -- ExecOutput ----------------------------------------------------------

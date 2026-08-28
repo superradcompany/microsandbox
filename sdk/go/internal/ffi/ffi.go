@@ -104,7 +104,7 @@ typedef void     (*msb_cancel_trigger_fn)(uint64_t id);
 typedef void     (*msb_cancel_unregister_fn)(uint64_t id);
 typedef char *(*msb_default_backend_info_fn)(uint8_t *buf, size_t buf_len);
 
-typedef char *(*msb_sandbox_create_fn)(uint64_t cancel_id, const char *name, const char *opts_json, bool find_or_create, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_create_fn)(uint64_t cancel_id, const char *name, const char *opts_json, bool connect_or_create, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_lifecycle_fn)(uint64_t cancel_id, const char *name, const char *expected_id, const char *operation, const char *opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_lookup_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_connect_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
@@ -587,8 +587,8 @@ void call_msb_cancel_trigger(uint64_t id) {
 void call_msb_cancel_unregister(uint64_t id) {
 	if (ptr_msb_cancel_unregister) ptr_msb_cancel_unregister(id);
 }
-char *call_msb_sandbox_create(uint64_t cancel_id, const char *name, const char *opts_json, bool find_or_create, uint8_t *buf, size_t buf_len) {
-	return ptr_msb_sandbox_create ? ptr_msb_sandbox_create(cancel_id, name, opts_json, find_or_create, buf, buf_len) : NULL;
+char *call_msb_sandbox_create(uint64_t cancel_id, const char *name, const char *opts_json, bool connect_or_create, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_create ? ptr_msb_sandbox_create(cancel_id, name, opts_json, connect_or_create, buf, buf_len) : NULL;
 }
 char *call_msb_sandbox_handle_lifecycle(uint64_t cancel_id, const char *name, const char *expected_id, const char *operation, const char *opts_json, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_handle_lifecycle ? ptr_msb_sandbox_handle_lifecycle(cancel_id, name, expected_id, operation, opts_json, buf, buf_len) : NULL;
@@ -1784,12 +1784,12 @@ func CreateSandbox(ctx context.Context, name string, opts CreateOptions) (*Sandb
 	return createSandbox(ctx, name, opts, false)
 }
 
-// FindOrCreateSandbox finds by name or creates using opts.
-func FindOrCreateSandbox(ctx context.Context, name string, opts CreateOptions) (*Sandbox, error) {
+// ConnectOrCreateSandbox connects by name or creates using opts.
+func ConnectOrCreateSandbox(ctx context.Context, name string, opts CreateOptions) (*Sandbox, error) {
 	return createSandbox(ctx, name, opts, true)
 }
 
-func createSandbox(ctx context.Context, name string, opts CreateOptions, findOrCreate bool) (*Sandbox, error) {
+func createSandbox(ctx context.Context, name string, opts CreateOptions, connectOrCreate bool) (*Sandbox, error) {
 	if err := ensureLoaded(); err != nil {
 		return nil, err
 	}
@@ -1803,7 +1803,7 @@ func createSandbox(ctx context.Context, name string, opts CreateOptions, findOrC
 	defer C.free(unsafe.Pointer(cOpts))
 
 	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_sandbox_create(cancelID, cName, cOpts, C.bool(findOrCreate), buf, bufLen)
+		return C.call_msb_sandbox_create(cancelID, cName, cOpts, C.bool(connectOrCreate), buf, bufLen)
 	})
 	if err != nil {
 		return nil, err
@@ -1872,8 +1872,8 @@ type SandboxHandleInfo struct {
 
 // SandboxHandleLifecycleOptions is the JSON payload for identity-safe handle operations.
 type SandboxHandleLifecycleOptions struct {
-	Detached  bool   `json:"detached,omitempty"`
-	Force     bool   `json:"force,omitempty"`
+	Detached bool `json:"detached,omitempty"`
+	Force    bool `json:"force,omitempty"`
 	// Keep zero on the wire: it means immediate escalation for lifecycle
 	// convergence and must not be mistaken for an omitted/default timeout.
 	TimeoutMs uint64 `json:"timeout_ms"`

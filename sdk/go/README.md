@@ -106,10 +106,10 @@ func main() {
 
 ### Reusable Lifecycle Convergence
 
-Use `FindOrCreateSandbox` when a stable name should converge on one persisted sandbox. Existing configuration wins; options are used only if creation is necessary. Handles retain a stable `ID`, so lifecycle calls on stale receivers refuse to act on a replacement that reused the name.
+Use `ConnectOrCreateSandbox` when a stable name should converge on one persisted sandbox. Existing configuration wins; options are used only if creation is necessary. Handles retain a stable `ID`, so lifecycle calls on stale receivers refuse to act on a replacement that reused the name.
 
 ```go
-sb, err := microsandbox.FindOrCreateSandbox(ctx, "worker",
+sb, err := microsandbox.ConnectOrCreateSandbox(ctx, "worker",
     microsandbox.WithImage("python"),
     microsandbox.WithMemory(1024),
 )

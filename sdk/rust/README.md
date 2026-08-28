@@ -76,13 +76,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Reusable Lifecycle Convergence
 
-Use `find_or_create` when a stable name should converge on one persisted sandbox. Existing configuration wins; the builder is used only if creation is necessary. Handles retain a stable `id`, so lifecycle calls on stale receivers refuse to act on a replacement that reused the name.
+Use `connect_or_create` when a stable name should converge on one persisted sandbox. Existing configuration wins; the builder is used only if creation is necessary. Handles retain a stable `id`, so lifecycle calls on stale receivers refuse to act on a replacement that reused the name.
 
 ```rust
 let sandbox = Sandbox::builder("worker")
     .image("python")
     .memory(1024)
-    .find_or_create()
+    .connect_or_create()
     .await?;
 
 println!("{}: {}", sandbox.name(), sandbox.id());

@@ -60,6 +60,23 @@ pub struct DestroyOptions {
     pub timeout: std::time::Duration,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConnectOrStartAction {
+    Connect,
+    Start,
+    Wait,
+    RejectDraining,
+    RejectPaused,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RestartAction {
+    Start,
+    Wait,
+    StopThenStart,
+    RejectPaused,
+}
+
 /// A lightweight handle to a sandbox.
 ///
 /// Provides metadata access and signal-based lifecycle management (stop, kill,
@@ -438,11 +455,11 @@ impl SandboxHandle {
     ) -> MicrosandboxResult<Sandbox> {
         loop {
             let current = self.refresh().await?;
-            match current.status_snapshot() {
-                SandboxStatus::Running => {
+            match connect_or_start_action(current.status_snapshot()) {
+                ConnectOrStartAction::Connect => {
                     return current.connect_with_timeout(DEFAULT_CONNECT_TIMEOUT).await;
                 }
-                SandboxStatus::Created | SandboxStatus::Stopped | SandboxStatus::Crashed => {
+                ConnectOrStartAction::Start => {
                     let start = if detached {
                         current.start_detached().await
                     } else {
@@ -457,14 +474,14 @@ impl SandboxHandle {
                         Err(error) => return Err(error),
                     }
                 }
-                SandboxStatus::Starting => {}
-                SandboxStatus::Draining => {
+                ConnectOrStartAction::Wait => {}
+                ConnectOrStartAction::RejectDraining => {
                     return Err(MicrosandboxError::SandboxStillRunning(format!(
                         "cannot connect or start sandbox '{}': shutdown is already in progress",
                         current.name
                     )));
                 }
-                SandboxStatus::Paused => {
+                ConnectOrStartAction::RejectPaused => {
                     return Err(MicrosandboxError::SandboxNotRunning(format!(
                         "'{}' is paused; resume support is required before it can be connected",
                         current.name
@@ -759,18 +776,16 @@ impl SandboxHandle {
     pub async fn restart_with(&self, options: RestartOptions) -> MicrosandboxResult<Sandbox> {
         let current = loop {
             let current = self.refresh().await?;
-            match current.status_snapshot() {
-                SandboxStatus::Created | SandboxStatus::Stopped | SandboxStatus::Crashed => {
-                    break current;
-                }
-                SandboxStatus::Starting => {
+            match restart_action(current.status_snapshot()) {
+                RestartAction::Start => break current,
+                RestartAction::Wait => {
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
-                SandboxStatus::Running | SandboxStatus::Draining => {
+                RestartAction::StopThenStart => {
                     stop_for_convergence(&current, options.force, options.timeout).await?;
                     break current;
                 }
-                SandboxStatus::Paused => {
+                RestartAction::RejectPaused => {
                     return Err(MicrosandboxError::SandboxNotRunning(format!(
                         "cannot restart paused sandbox '{}': resume support is not available",
                         current.name
@@ -794,9 +809,7 @@ impl SandboxHandle {
     /// Stop and remove this exact sandbox with explicit lifecycle options.
     pub async fn destroy_with(&self, options: DestroyOptions) -> MicrosandboxResult<()> {
         let current = self.refresh().await?;
-        if !sandbox_status_is_terminal(current.status_snapshot())
-            && current.status_snapshot() != SandboxStatus::Created
-        {
+        if destroy_requires_stop(current.status_snapshot()) {
             stop_for_convergence(&current, options.force, options.timeout).await?;
         }
         match current.remove().await {
@@ -856,7 +869,10 @@ impl SandboxHandle {
                     .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxHandleRemove))?;
                 if matches!(
                     local.status,
-                    SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
+                    SandboxStatus::Starting
+                        | SandboxStatus::Running
+                        | SandboxStatus::Draining
+                        | SandboxStatus::Paused
                 ) {
                     return Err(MicrosandboxError::SandboxStillRunning(format!(
                         "cannot remove sandbox '{}': still running",
@@ -869,12 +885,6 @@ impl SandboxHandle {
                     .as_local()
                     .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxHandleRemove))?;
 
-                // Windows: a terminal row can still be backed by a leaked VM
-                // process. Deleting the row and run records now would orphan
-                // it while it keeps serving this name's agent pipes, so kill
-                // it (identity-checked) or fail before touching any state.
-                #[cfg(windows)]
-                super::reap_leaked_runtime_process(local_backend, local.db_id, &self.name).await?;
                 super::remove_local_persisted_sandbox(local_backend, &self.name, local.db_id).await
             }
             SandboxHandleInner::Cloud(_) => {
@@ -941,6 +951,36 @@ fn is_local_ephemeral_handle(inner: &SandboxHandleInner) -> bool {
 
 fn sandbox_status_is_terminal(status: SandboxStatus) -> bool {
     matches!(status, SandboxStatus::Stopped | SandboxStatus::Crashed)
+}
+
+fn connect_or_start_action(status: SandboxStatus) -> ConnectOrStartAction {
+    match status {
+        SandboxStatus::Running => ConnectOrStartAction::Connect,
+        SandboxStatus::Created | SandboxStatus::Stopped | SandboxStatus::Crashed => {
+            ConnectOrStartAction::Start
+        }
+        SandboxStatus::Starting => ConnectOrStartAction::Wait,
+        SandboxStatus::Draining => ConnectOrStartAction::RejectDraining,
+        SandboxStatus::Paused => ConnectOrStartAction::RejectPaused,
+    }
+}
+
+fn restart_action(status: SandboxStatus) -> RestartAction {
+    match status {
+        SandboxStatus::Created | SandboxStatus::Stopped | SandboxStatus::Crashed => {
+            RestartAction::Start
+        }
+        SandboxStatus::Starting => RestartAction::Wait,
+        SandboxStatus::Running | SandboxStatus::Draining => RestartAction::StopThenStart,
+        SandboxStatus::Paused => RestartAction::RejectPaused,
+    }
+}
+
+fn destroy_requires_stop(status: SandboxStatus) -> bool {
+    !matches!(
+        status,
+        SandboxStatus::Created | SandboxStatus::Stopped | SandboxStatus::Crashed
+    )
 }
 
 async fn stop_for_convergence(
@@ -1027,6 +1067,52 @@ mod tests {
                 && expected == "cloud:old-id"
                 && actual == "cloud:new-id"
         ));
+    }
+
+    #[test]
+    fn lifecycle_action_tables_cover_every_status() {
+        assert_eq!(
+            connect_or_start_action(SandboxStatus::Running),
+            ConnectOrStartAction::Connect
+        );
+        for status in [
+            SandboxStatus::Created,
+            SandboxStatus::Stopped,
+            SandboxStatus::Crashed,
+        ] {
+            assert_eq!(connect_or_start_action(status), ConnectOrStartAction::Start);
+            assert_eq!(restart_action(status), RestartAction::Start);
+            assert!(!destroy_requires_stop(status));
+        }
+        assert_eq!(
+            connect_or_start_action(SandboxStatus::Starting),
+            ConnectOrStartAction::Wait
+        );
+        assert_eq!(restart_action(SandboxStatus::Starting), RestartAction::Wait);
+        assert!(destroy_requires_stop(SandboxStatus::Starting));
+        assert_eq!(
+            connect_or_start_action(SandboxStatus::Draining),
+            ConnectOrStartAction::RejectDraining
+        );
+        assert_eq!(
+            restart_action(SandboxStatus::Draining),
+            RestartAction::StopThenStart
+        );
+        assert!(destroy_requires_stop(SandboxStatus::Draining));
+        assert_eq!(
+            connect_or_start_action(SandboxStatus::Paused),
+            ConnectOrStartAction::RejectPaused
+        );
+        assert_eq!(
+            restart_action(SandboxStatus::Paused),
+            RestartAction::RejectPaused
+        );
+        assert!(destroy_requires_stop(SandboxStatus::Paused));
+        assert_eq!(
+            restart_action(SandboxStatus::Running),
+            RestartAction::StopThenStart
+        );
+        assert!(destroy_requires_stop(SandboxStatus::Running));
     }
 
     fn cloud_handle(status: CloudSandboxStatus) -> SandboxHandle {

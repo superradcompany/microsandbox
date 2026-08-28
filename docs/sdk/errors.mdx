@@ -4,7 +4,7 @@ description: Typed errors and resource cleanup patterns
 icon: "triangle-exclamation"
 ---
 
-All SDKs surface typed errors so you can match on specific failure modes instead of parsing strings. Rust has an `Error` enum, TypeScript exposes a dedicated subclass per variant (use `instanceof`), Python provides dedicated exception classes, and Go provides an `*Error` value with an `ErrorKind` discriminator matched via `m.IsKind(err, kind)` or `errors.As`.
+Rust, TypeScript, Python, and Go surface typed errors so you can match specific failure modes instead of parsing strings. Rust has an `Error` enum, TypeScript exposes a dedicated subclass per variant (use `instanceof`), Python provides dedicated exception classes, and Go provides an `*Error` value with an `ErrorKind` discriminator matched via `m.IsKind(err, kind)` or `errors.As`. Ruby currently exposes `Microsandbox::Error`; where no dedicated subclass exists, its reference documents the stable message contract explicitly.
 
 ## Matching errors
 
@@ -14,7 +14,7 @@ use microsandbox::{Sandbox, Error};
 
 let sb = Sandbox::builder("worker")
     .image("python")
-    .find_or_create()
+    .connect_or_create()
     .await?;
 
 match sb.exec("python", ["script.py"]).await {
@@ -39,7 +39,7 @@ import {
 
 const sb = await Sandbox.builder("worker")
     .image("python")
-    .findOrCreate();
+    .connectOrCreate();
 
 try {
     const output = await sb.exec("python", ["script.py"]);
@@ -60,7 +60,7 @@ try {
 ```python Python
 from microsandbox import ExecTimeoutError, Sandbox
 
-sb = await Sandbox.find_or_create("worker", image="python")
+sb = await Sandbox.connect_or_create("worker", image="python")
 
 try:
     output = await sb.exec("python", ["script.py"])
@@ -79,7 +79,7 @@ import (
     m "github.com/superradcompany/microsandbox/sdk/go"
 )
 
-sb, err := m.FindOrCreateSandbox(ctx, "worker", m.WithImage("python"))
+sb, err := m.ConnectOrCreateSandbox(ctx, "worker", m.WithImage("python"))
 if err != nil {
     log.Fatal(err)
 }
@@ -97,6 +97,19 @@ case err != nil:
         log.Printf("kind=%s message=%s", me.Kind, me.Message)
     }
 }
+```
+
+```ruby Ruby
+require "microsandbox"
+
+sb = Microsandbox::Sandbox.connect_or_create("worker", image: "python")
+
+begin
+  output = sb.exec("python", ["script.py"])
+  warn "Exit #{output.exit_code}: #{output.stderr}" unless output.success?
+rescue Microsandbox::Error => error
+  warn error.message
+end
 ```
 
 </CodeGroup>
@@ -260,9 +273,18 @@ if m.IsKind(err, m.ErrSandboxAlreadyExists) {
 }
 ```
 
+```ruby Ruby
+begin
+  sb = Microsandbox::Sandbox.create("worker", image: "alpine")
+rescue Microsandbox::Error => error
+  raise unless error.message.include?("already exists")
+  warn "sandbox already exists; use connect_or_create to reuse it or replace: true to recreate it"
+end
+```
+
 </CodeGroup>
 
-Pass `replace()` / `replace=True` / `--replace` / `WithReplace()` to stop the existing sandbox and recreate it. See [Naming conflicts](/sandboxes/overview#naming-conflicts) for the grace-period knob.
+Use `connect_or_create` and its language-idiomatic equivalents to converge on the existing persisted identity without changing its configuration. Pass `replace()` / `replace=True` / `replace: true` / `--replace` / `WithReplace()` only when you intend to stop the existing sandbox and create a new identity. See [Naming conflicts](/sandboxes/overview#naming-conflicts) for the grace-period knob.
 
 ## Stale receiver identities
 
@@ -302,7 +324,17 @@ if err := staleHandle.Destroy(ctx); m.IsKind(err, m.ErrSandboxReplaced) {
     log.Println("refusing stale lifecycle operation")
 }
 ```
+
+```ruby Ruby
+begin
+  stale_handle.destroy
+rescue Microsandbox::Error => error
+  raise unless error.message.include?("was replaced")
+end
+```
 </CodeGroup>
+
+Ruby does not yet expose a dedicated stale-identity subclass. Until it does, `Microsandbox::Error` with the stable `was replaced` message is the Ruby-specific contract; the operation still refuses to act on the replacement.
 
 ## Sandbox start failures
 

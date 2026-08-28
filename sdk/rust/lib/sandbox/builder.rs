@@ -1242,16 +1242,16 @@ impl SandboxBuilder {
         super::Sandbox::create(config).await
     }
 
-    /// Find a persisted sandbox by name, or create it from this builder.
+    /// Connect to the persisted sandbox with this name, or create it.
     ///
     /// Existing sandboxes keep their persisted configuration: running ones
     /// are connected and stopped ones are started. Builder configuration is
     /// used only when this call creates the sandbox. A concurrent creator is
-    /// handled by fetching and converging on the winner.
-    pub async fn find_or_create(self) -> MicrosandboxResult<super::Sandbox> {
+    /// handled by connecting to and converging on the winner.
+    pub async fn connect_or_create(self) -> MicrosandboxResult<super::Sandbox> {
         if self.config.replace_existing {
             return Err(MicrosandboxError::InvalidConfig(
-                "find_or_create cannot be combined with replace_existing".to_string(),
+                "connect_or_create cannot be combined with replace_existing".to_string(),
             ));
         }
 
@@ -2213,10 +2213,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn find_or_create_rejects_replace_semantics() {
-        let result = SandboxBuilder::new("find-or-replace")
+    async fn connect_or_create_rejects_replace_semantics() {
+        let result = SandboxBuilder::new("connect-or-replace")
             .replace()
-            .find_or_create()
+            .connect_or_create()
             .await;
 
         assert!(matches!(
