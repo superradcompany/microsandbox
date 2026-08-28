@@ -209,6 +209,10 @@ def bind(
     noexec: bool = False,
     nosuid: bool = False,
     nodev: bool = False,
+    stat_virtualization: StatVirtualization | None = None,
+    host_permissions: HostPermissions | None = None,
+    uid: int | None = None,
+    gid: int | None = None,
 ) -> MountConfig
 ```
 
@@ -249,6 +253,22 @@ Mount a host directory into the sandbox. Changes in the guest are reflected on t
     <div className="msb-param-key"><code>nodev</code><span className="msb-type">bool</span></div>
     <div className="msb-param-desc">Ignore device files on the mount.</div>
   </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>stat_virtualization</code><a className="msb-type" href="#statvirtualization">StatVirtualization | None</a></div>
+    <div className="msb-param-desc">Guest stat-virtualization policy.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>host_permissions</code><a className="msb-type" href="#hostpermissions">HostPermissions | None</a></div>
+    <div className="msb-param-desc">Host permission propagation policy.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>uid</code><span className="msb-type">int | None</span></div>
+    <div className="msb-param-desc">Guest uid fallback for host files without a per-file stat override; set together with <code>gid</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>gid</code><span className="msb-type">int | None</span></div>
+    <div className="msb-param-desc">Guest gid fallback for host files without a per-file stat override; set together with <code>uid</code>.</div>
+  </div>
 </div>
 
 <p className="msb-label">Returns</p>
@@ -276,6 +296,10 @@ def named(
     noexec: bool = False,
     nosuid: bool = False,
     nodev: bool = False,
+    stat_virtualization: StatVirtualization | None = None,
+    host_permissions: HostPermissions | None = None,
+    uid: int | None = None,
+    gid: int | None = None,
 ) -> MountConfig
 ```
 
@@ -340,6 +364,22 @@ Mount a named volume. By default the volume must already exist; set `mode` to co
   <div className="msb-param">
     <div className="msb-param-key"><code>nodev</code><span className="msb-type">bool</span></div>
     <div className="msb-param-desc">Ignore device files on the mount.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>stat_virtualization</code><a className="msb-type" href="#statvirtualization">StatVirtualization | None</a></div>
+    <div className="msb-param-desc">Guest stat-virtualization policy for a directory-backed volume.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>host_permissions</code><a className="msb-type" href="#hostpermissions">HostPermissions | None</a></div>
+    <div className="msb-param-desc">Host permission propagation policy for a directory-backed volume.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>uid</code><span className="msb-type">int | None</span></div>
+    <div className="msb-param-desc">Guest uid fallback; set together with <code>gid</code> and use only with directory-backed volumes.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>gid</code><span className="msb-type">int | None</span></div>
+    <div className="msb-param-desc">Guest gid fallback; set together with <code>uid</code> and use only with directory-backed volumes.</div>
   </div>
 </div>
 
@@ -753,7 +793,7 @@ Check whether a path exists within the volume.
 
 <p className="msb-backref">Returned by <a href="#volume-bind">Volume.bind()</a>, <a href="#volume-named">Volume.named()</a>, <a href="#volume-tmpfs">Volume.tmpfs()</a>, <a href="#volume-disk">Volume.disk()</a></p>
 
-Frozen dataclass representing a mount configuration. Build one with a [mount factory](#mount-factories) and pass it as a value in the sandbox `volumes` dict. `stat_virtualization` and `host_permissions` apply only to virtiofs-backed mounts (`BIND` and `NAMED`); setting either on a `TMPFS` or `DISK` mount raises `ValueError`.
+Frozen dataclass representing a mount configuration. Build one with a [mount factory](#mount-factories) and pass it as a value in the sandbox `volumes` dict. `stat_virtualization`, `host_permissions`, `override_uid`, and `override_gid` apply only to virtiofs-backed mounts (`BIND` and directory-backed `NAMED`). Owner IDs must be supplied together, must be integers from `0` through `4294967295`, and cannot be combined with `StatVirtualization.OFF`.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -773,6 +813,8 @@ Frozen dataclass representing a mount configuration. Build one with a [mount fac
 | fstype | `str \| None` | `None` | Inner filesystem type for disk mounts |
 | stat_virtualization | [`StatVirtualization`](#statvirtualization)` \| None` | `None` | Per-mount stat-virtualization policy (virtiofs-backed only) |
 | host_permissions | [`HostPermissions`](#hostpermissions)` \| None` | `None` | Per-mount host-permission policy (virtiofs-backed only) |
+| override_uid | `int \| None` | `None` | Guest uid fallback for host files without a per-file override; set through factory `uid=` with `gid=` |
+| override_gid | `int \| None` | `None` | Guest gid fallback for host files without a per-file override; set through factory `gid=` with `uid=` |
 
 ### MountKind
 

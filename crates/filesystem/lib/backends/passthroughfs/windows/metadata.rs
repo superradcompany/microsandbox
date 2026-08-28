@@ -25,11 +25,27 @@ impl PassthroughFs {
             let mut st = host_stat_from_metadata(metadata, data.inode);
             if let Some(override_stat) = store.read(&data.path)? {
                 apply_override_stat(&mut st, override_stat);
+            } else if let Some((uid, gid)) = self.cfg.default_owner {
+                // No per-file override: a host-created file. Present the
+                // configured default owner instead of the raw 0:0.
+                st.st_uid = uid;
+                st.st_gid = gid;
             }
             return Ok(st);
         }
 
-        Ok(stat_from_metadata(metadata, data))
+        // Storeless path (e.g. relaxed mode with no persistent stat store):
+        // virtual metadata lives only in memory. A host-created file the guest
+        // never touched has no virtual mode set, so present the configured
+        // default owner instead of the raw 0:0 from the default VirtualMetadata.
+        let mut st = stat_from_metadata(metadata, data);
+        if let Some((uid, gid)) = self.cfg.default_owner
+            && data.virtual_meta.read().unwrap().mode.is_none()
+        {
+            st.st_uid = uid;
+            st.st_gid = gid;
+        }
+        Ok(st)
     }
 
     pub(super) fn entry_from_metadata(
@@ -59,15 +75,26 @@ impl PassthroughFs {
         }
 
         if self.stat_store.is_some() {
-            return Ok(OverrideStat::new(0, 0, mode_from_metadata(metadata), 0));
+            // No stored entry yet: a host-created file. Seed the mutation
+            // baseline with the configured default owner (falling back to 0:0)
+            // so a later setattr persists that owner instead of resetting it to
+            // root — matching the read path in `stat_from_metadata`.
+            let (uid, gid) = self.cfg.default_owner.unwrap_or((0, 0));
+            return Ok(OverrideStat::new(uid, gid, mode_from_metadata(metadata), 0));
         }
 
         let virtual_meta = data.virtual_meta.read().unwrap();
+        // Storeless host-created file (no virtual mode set): baseline its owner
+        // to default_owner too, so a partial setattr does not collapse it to 0:0.
+        let (uid, gid) = match self.cfg.default_owner {
+            Some(owner) if virtual_meta.mode.is_none() => owner,
+            _ => (virtual_meta.uid, virtual_meta.gid),
+        };
         Ok(OverrideStat {
             version: OVERRIDE_VERSION,
             _pad: [0; 3],
-            uid: virtual_meta.uid,
-            gid: virtual_meta.gid,
+            uid,
+            gid,
             mode: virtual_meta
                 .mode
                 .unwrap_or_else(|| mode_from_metadata(metadata)),

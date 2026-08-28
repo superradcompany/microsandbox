@@ -9,7 +9,7 @@ use microsandbox::backend::{Backend, LocalBackend};
 use microsandbox::sandbox::{
     CpuPlacement, DeploymentProfile, DiskImageFormat, FlatClone, MountBuilder, Patch,
     RootDiskBuilder, Sandbox, SandboxBuilder, SandboxHandle, SecurityProfile,
-    TransparentHugePagePolicy, VsockSocketType,
+    TransparentHugePagePolicy, VolumeMount, VsockSocketType,
 };
 #[cfg(feature = "net")]
 use microsandbox_types::NetworkRateLimitDirection;
@@ -124,14 +124,21 @@ pub struct SandboxOpts {
     pub thp: Option<String>,
 
     /// Mount a host path or named volume into the sandbox (`SOURCE:DEST[:OPTIONS]`).
+    /// OPTIONS may include paired `uid=<N>,gid=<N>` for directory-backed mounts.
     #[arg(short, long)]
     pub volume: Vec<String>,
 
     /// Explicitly mount a host directory into the sandbox (`SOURCE:DEST[:OPTIONS]`).
+    ///
+    /// OPTIONS may include `quota=<size>` and `uid=<N>,gid=<N>` to present
+    /// host-created files as that guest owner; both IDs are required together.
     #[arg(long = "mount-dir", value_name = "SOURCE:DEST[:OPTIONS]")]
     pub mount_dir: Vec<String>,
 
     /// Explicitly mount a host file into the sandbox (`SOURCE:DEST[:OPTIONS]`).
+    ///
+    /// OPTIONS may include `quota=<size>` and `uid=<N>,gid=<N>` to present the
+    /// host file as that guest owner; both IDs are required together.
     #[arg(long = "mount-file", value_name = "SOURCE:DEST[:OPTIONS]")]
     pub mount_file: Vec<String>,
 
@@ -140,6 +147,7 @@ pub struct SandboxOpts {
     pub mount_disk: Vec<String>,
 
     /// Explicitly mount a named volume into the sandbox (`NAME:DEST[:OPTIONS]`).
+    /// OPTIONS may include paired `uid=<N>,gid=<N>` when the volume is a directory.
     #[arg(long = "mount-named", value_name = "NAME:DEST[:OPTIONS]")]
     pub mount_named: Vec<String>,
 
@@ -320,7 +328,12 @@ pub struct SandboxOpts {
     #[cfg(feature = "net")]
     #[arg(
         long = "no-net",
-        conflicts_with_all = ["net_default", "net_default_egress", "net_default_ingress"]
+        conflicts_with_all = [
+            "net_conf",
+            "net_default",
+            "net_default_egress",
+            "net_default_ingress"
+        ]
     )]
     pub no_net: bool,
 
@@ -333,6 +346,7 @@ pub struct SandboxOpts {
         long = "net",
         value_name = "PROFILE",
         conflicts_with_all = [
+            "net_conf",
             "no_net",
             "net_default",
             "net_default_egress",
@@ -384,7 +398,7 @@ pub struct SandboxOpts {
     /// --net-rule "allow@example.com:tcp:443"
     /// --net-rule "deny@*.ads.example.com"
     #[cfg(feature = "net")]
-    #[arg(long = "net-rule", value_name = "TOKENS")]
+    #[arg(long = "net-rule", value_name = "TOKENS", conflicts_with = "net_conf")]
     pub net_rule: Vec<String>,
 
     /// Default action for traffic in both directions that doesn't match
@@ -395,7 +409,7 @@ pub struct SandboxOpts {
     #[arg(
         long = "net-default",
         value_name = "ACTION",
-        conflicts_with_all = ["net_default_egress", "net_default_ingress"],
+        conflicts_with_all = ["net_conf", "net_default_egress", "net_default_ingress"],
     )]
     pub net_default: Option<String>,
 
@@ -403,14 +417,22 @@ pub struct SandboxOpts {
     /// `--net-rule`. Default: deny (with an implicit allow@public rule
     /// when no other rules are present).
     #[cfg(feature = "net")]
-    #[arg(long = "net-default-egress", value_name = "ACTION")]
+    #[arg(
+        long = "net-default-egress",
+        value_name = "ACTION",
+        conflicts_with = "net_conf"
+    )]
     pub net_default_egress: Option<String>,
 
     /// Default action for ingress traffic that doesn't match any
     /// `--net-rule`. Default: allow (preserves today's unfiltered
     /// published-port behavior when no ingress rules are set).
     #[cfg(feature = "net")]
-    #[arg(long = "net-default-ingress", value_name = "ACTION")]
+    #[arg(
+        long = "net-default-ingress",
+        value_name = "ACTION",
+        conflicts_with = "net_conf"
+    )]
     pub net_default_ingress: Option<String>,
 
     /// Limit outbound (egress) bandwidth, e.g. 1M/1s. SIZE accepts
@@ -554,6 +576,8 @@ struct CliMountOptions {
     named_kind: Option<VolumeKind>,
     fstype: Option<String>,
     format: Option<DiskImageFormat>,
+    override_uid: Option<u32>,
+    override_gid: Option<u32>,
 }
 
 /// Which keyed options are valid for a public CLI mount flag.
@@ -565,6 +589,7 @@ struct CliMountOptionSupport {
     named_kind: bool,
     fstype: bool,
     format: bool,
+    owner: bool,
 }
 
 /// Parsed `SOURCE:DEST[:OPTIONS]` mount specification.
@@ -1391,64 +1416,75 @@ fn validate_guest_path(context: &str, path: &str) -> anyhow::Result<()> {
 
 /// Parse a volume spec and apply it to the builder.
 ///
-/// Accepts: `SRC:DST[:ro|rw][,noexec][,nosuid][,nodev][,follow-root-symlinks][,stat-virt=...][,host-perms=...]`.
+/// Accepts: `SRC:DST[:ro|rw][,noexec][,nosuid][,nodev][,follow-root-symlinks][,stat-virt=...][,host-perms=...][,uid=...,gid=...]`.
 pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<SandboxBuilder> {
-    let parsed = parse_cli_mount_spec(
+    let parsed = parse_volume_mount_spec(spec)?;
+    let is_path = microsandbox_utils::looks_like_local_path_text(parsed.source);
+    let source = parsed.source.to_string();
+    let guest = parsed.guest.to_string();
+    let options = parsed.options;
+
+    // Keep SDK validation at the existing SandboxBuilder boundary. YAML uses
+    // the same configurator below but builds the individual mount immediately.
+    Ok(builder.volume(guest, move |mount| {
+        configure_volume_mount(mount, &source, is_path, options)
+    }))
+}
+
+/// Parse and materialize a bind mount with the shared `-v/--volume` options.
+///
+/// YAML strings historically treat every source as a config-relative bind path,
+/// including bare values such as `src`. Reuse the option grammar and builder
+/// configurator without inheriting `-v`'s bare-name named-volume inference.
+pub(crate) fn materialize_bind_mount(spec: &str) -> anyhow::Result<VolumeMount> {
+    let parsed = parse_volume_mount_spec(spec)?;
+    configure_volume_mount(
+        MountBuilder::new(parsed.guest),
+        parsed.source,
+        true,
+        parsed.options,
+    )
+    .build()
+    .map_err(Into::into)
+}
+
+/// Parse the generic bind-or-named volume syntax shared by CLI and YAML.
+fn parse_volume_mount_spec(spec: &str) -> anyhow::Result<ParsedCliMountSpec<'_>> {
+    parse_cli_mount_spec(
         "volume",
         spec,
         CliMountOptionSupport {
             policies: true,
             quota: true,
+            owner: true,
             ..CliMountOptionSupport::default()
         },
-    )?;
+    )
+}
 
-    let is_path = microsandbox_utils::looks_like_local_path_text(parsed.source);
-    let source = parsed.source.to_string();
-    let guest = parsed.guest.to_string();
-    let options = parsed.options;
-    Ok(builder.volume(guest, move |mut m| {
-        let quota_mib = options.quota_mib;
-        m = if is_path {
-            let mut b = m.bind(&source);
-            if let Some(q) = quota_mib {
-                b = b.quota(q);
+/// Apply a parsed generic volume source and its common options to a mount.
+fn configure_volume_mount(
+    mount: MountBuilder,
+    source: &str,
+    is_path: bool,
+    mut options: CliMountOptions,
+) -> MountBuilder {
+    let mount = if is_path {
+        mount.bind(source)
+    } else {
+        // Named-volume quotas belong to the named sub-builder, unlike bind
+        // quotas which are applied by `apply_common_mount_options` below.
+        let quota_mib = options.quota_mib.take();
+        mount.named_with(source, |mut volume| {
+            volume = volume.ensure_exists();
+            if let Some(quota_mib) = quota_mib {
+                volume = volume.quota(quota_mib);
             }
-            b
-        } else {
-            // A named volume routes its quota through the named sub-builder
-            // rather than the bind-only `.quota()`.
-            m.named_with(&source, move |mut v| {
-                v = v.ensure_exists();
-                if let Some(q) = quota_mib {
-                    v = v.quota(q);
-                }
-                v
-            })
-        };
-        if options.readonly {
-            m = m.readonly();
-        }
-        if options.noexec {
-            m = m.noexec();
-        }
-        if options.nosuid {
-            m = m.nosuid();
-        }
-        if options.nodev {
-            m = m.nodev();
-        }
-        if options.follow_root_symlinks {
-            m = m.follow_root_symlinks(true);
-        }
-        if let Some(sv) = options.stat_virtualization {
-            m = m.stat_virtualization(sv);
-        }
-        if let Some(hp) = options.host_permissions {
-            m = m.host_permissions(hp);
-        }
-        m
-    }))
+            volume
+        })
+    };
+
+    apply_common_mount_options(mount, options)
 }
 
 /// Validate the public `-v/--volume` syntax without retaining a builder.
@@ -1490,6 +1526,7 @@ pub fn apply_explicit_dir_mount(
         CliMountOptionSupport {
             policies: true,
             quota: true,
+            owner: true,
             ..CliMountOptionSupport::default()
         },
     )?;
@@ -1513,6 +1550,8 @@ pub fn apply_explicit_file_mount(
         spec,
         CliMountOptionSupport {
             policies: true,
+            quota: true,
+            owner: true,
             ..CliMountOptionSupport::default()
         },
     )?;
@@ -1569,6 +1608,7 @@ pub fn apply_explicit_named_mount(
             size: true,
             quota: true,
             named_kind: true,
+            owner: true,
             ..CliMountOptionSupport::default()
         },
     )?;
@@ -1595,9 +1635,12 @@ pub fn apply_explicit_named_mount(
     }
     if matches!(parsed.options.named_kind, Some(VolumeKind::Disk))
         && (parsed.options.stat_virtualization.is_some()
-            || parsed.options.host_permissions.is_some())
+            || parsed.options.host_permissions.is_some()
+            || parsed.options.override_uid.is_some())
     {
-        anyhow::bail!("mount-named kind=disk does not support stat-virt=... or host-perms=...");
+        anyhow::bail!(
+            "mount-named kind=disk does not support stat-virt=..., host-perms=..., or uid/gid"
+        );
     }
 
     let source = parsed.source.to_string();
@@ -1651,6 +1694,9 @@ fn apply_common_mount_options(mut mount: MountBuilder, options: CliMountOptions)
     }
     if let Some(quota) = options.quota_mib {
         mount = mount.quota(quota);
+    }
+    if let (Some(uid), Some(gid)) = (options.override_uid, options.override_gid) {
+        mount = mount.owner(uid, gid);
     }
     mount
 }
@@ -1751,6 +1797,8 @@ fn parse_cli_mount_options(
     let mut seen_named_kind = false;
     let mut seen_fstype = false;
     let mut seen_format = false;
+    let mut seen_uid = false;
+    let mut seen_gid = false;
 
     let Some(opts) = opts else {
         return Ok(parsed);
@@ -1878,14 +1926,36 @@ fn parse_cli_mount_options(
                             anyhow::anyhow!("invalid disk image format {value:?}: {e}")
                         })?);
                     }
+                    "uid" if support.owner => {
+                        if seen_uid {
+                            anyhow::bail!("mount option `uid` specified more than once");
+                        }
+                        seen_uid = true;
+                        parsed.override_uid = Some(value.parse::<u32>().map_err(|_| {
+                            anyhow::anyhow!("invalid uid {value:?} (expected an unsigned integer)")
+                        })?);
+                    }
+                    "gid" if support.owner => {
+                        if seen_gid {
+                            anyhow::bail!("mount option `gid` specified more than once");
+                        }
+                        seen_gid = true;
+                        parsed.override_gid = Some(value.parse::<u32>().map_err(|_| {
+                            anyhow::anyhow!("invalid gid {value:?} (expected an unsigned integer)")
+                        })?);
+                    }
                     "stat-virt" | "host-perms" | "size" | "quota" | "kind" | "fstype"
-                    | "format" => {
+                    | "format" | "uid" | "gid" => {
                         anyhow::bail!("mount option `{key}` is not valid here");
                     }
                     other => anyhow::bail!("unknown mount option {other:?}"),
                 }
             }
         }
+    }
+
+    if parsed.override_uid.is_some() != parsed.override_gid.is_some() {
+        anyhow::bail!("mount options `uid` and `gid` must be specified together");
     }
 
     Ok(parsed)
@@ -2017,14 +2087,14 @@ fn apply_network_opts(
             opts.net_default_egress.as_deref(),
             opts.net_default_ingress.as_deref(),
         )?;
-        let replaces_configured_base = !opts.net.is_empty()
+        let replaces_configured_policy = !opts.net.is_empty()
             || opts.no_net
             || opts.net_default.is_some()
             || opts.net_default_egress.is_some()
             || opts.net_default_ingress.is_some();
-        if replaces_configured_base {
+        if replaces_configured_policy {
             if let Some(policy) = network_policy {
-                builder = builder.replace_network_policy_preserving_config_rules(policy);
+                builder = builder.network(move |network| network.policy(policy));
             }
         } else if !opts.net_rule.is_empty() {
             let mut rules = Vec::new();
@@ -3647,6 +3717,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_apply_volume_owner_on_bind_and_named_directory() {
+        for spec in [
+            "/host:/data:uid=4242,gid=4343",
+            "mycache:/data:uid=4242,gid=4343",
+        ] {
+            let mount = build_one(spec).await;
+            let options = match mount {
+                VolumeMount::Bind { options, .. } | VolumeMount::Named { options, .. } => options,
+                other => panic!("expected virtiofs mount, got {other:?}"),
+            };
+            assert_eq!(options.override_uid, Some(4242));
+            assert_eq!(options.override_gid, Some(4343));
+        }
+    }
+
+    #[tokio::test]
     async fn test_apply_explicit_dir_mount() {
         let dir = make_temp_dir("msb-mount-dir");
         let spec = format!("{}:/work:ro,host-perms=mirror", dir.display());
@@ -3671,8 +3757,31 @@ mod tests {
     #[tokio::test]
     async fn test_apply_explicit_file_mount() {
         let file = write_temp("fixture");
-        let spec = format!("{}:/fixture:ro,noexec", file.display());
+        let spec = format!("{}:/fixture:ro,noexec,quota=32M", file.display());
         let mount = build_explicit(&spec, apply_explicit_file_mount).await;
+        match mount {
+            VolumeMount::Bind {
+                host,
+                guest,
+                options,
+                quota_mib,
+                ..
+            } => {
+                assert_eq!(host, file);
+                assert_eq!(guest, "/fixture");
+                assert!(options.readonly);
+                assert!(options.noexec);
+                assert_eq!(quota_mib, Some(32));
+            }
+            other => panic!("expected Bind, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_explicit_dir_mount_owner() {
+        let dir = make_temp_dir("msb-mount-dir-owner");
+        let spec = format!("{}:/work:uid=4242,gid=4242", dir.display());
+        let mount = build_explicit(&spec, apply_explicit_dir_mount).await;
         match mount {
             VolumeMount::Bind {
                 host,
@@ -3680,13 +3789,32 @@ mod tests {
                 options,
                 ..
             } => {
-                assert_eq!(host, file);
-                assert_eq!(guest, "/fixture");
-                assert!(options.readonly);
-                assert!(options.noexec);
+                assert_eq!(host, dir);
+                assert_eq!(guest, "/work");
+                assert_eq!(options.override_uid, Some(4242));
+                assert_eq!(options.override_gid, Some(4242));
             }
             other => panic!("expected Bind, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_parse_cli_mount_options_uid_gid() {
+        let owner = CliMountOptionSupport {
+            owner: true,
+            ..CliMountOptionSupport::default()
+        };
+        let parsed = parse_cli_mount_options(Some("uid=4242,gid=4242"), owner).unwrap();
+        assert_eq!(parsed.override_uid, Some(4242));
+        assert_eq!(parsed.override_gid, Some(4242));
+        // uid and gid must come as a pair.
+        assert!(parse_cli_mount_options(Some("uid=4242"), owner).is_err());
+        assert!(parse_cli_mount_options(Some("gid=4242"), owner).is_err());
+        // Rejected where owner is unsupported (e.g. --mount-disk).
+        assert!(
+            parse_cli_mount_options(Some("uid=4242,gid=4242"), CliMountOptionSupport::default())
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -3772,6 +3900,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_apply_explicit_named_mount_owner() {
+        let mount =
+            build_explicit("cache:/data:uid=4242,gid=4343", apply_explicit_named_mount).await;
+        match mount {
+            VolumeMount::Named { options, .. } => {
+                assert_eq!(options.override_uid, Some(4242));
+                assert_eq!(options.override_gid, Some(4343));
+            }
+            other => panic!("expected Named, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn test_apply_explicit_named_mount_disk_ensure_options() {
         let mount = build_explicit(
             "cache-disk:/data:kind=disk,size=2G",
@@ -3819,6 +3960,15 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.to_string().contains("does not support stat-virt"));
+
+        let err = match apply_explicit_named_mount(
+            SandboxBuilder::new("test").image("alpine"),
+            "cache-disk:/data:kind=disk,size=2G,uid=1000,gid=1000",
+        ) {
+            Ok(_) => panic!("expected mount-named disk to reject owner"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("uid/gid"));
 
         let err = match apply_explicit_named_mount(
             SandboxBuilder::new("test").image("alpine"),

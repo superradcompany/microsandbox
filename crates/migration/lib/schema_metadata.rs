@@ -45,6 +45,11 @@ pub const SANDBOX_LABEL_REBUILD_MIGRATION_ID: &str = "m20260810_000001_rebuild_s
 
 /// Migration that permits several managed vCPUs to share one host logical processor.
 pub const SHARED_CPU_ALLOCATION_MIGRATION_ID: &str = "m20260813_000001_share_cpu_allocations";
+/// Migration that adds recyclable network address-pool slot leases.
+pub const SANDBOX_NETWORK_SLOT_MIGRATION_ID: &str = "m20260818_000001_sandbox_network_slot";
+
+/// Migration that prevents old binaries from discarding persisted mount ownership.
+pub const MOUNT_OWNER_CONFIG_MIGRATION_ID: &str = "m20260824_000001_mount_owner_config";
 
 /// Frozen migration baseline for the transitional 0.6.0 release.
 ///
@@ -231,6 +236,23 @@ pub const MIGRATION_METADATA: &[MigrationMetadata] = &[
         affects_user_data: false,
         summary: "restore exclusive logical CPU allocation rows",
     },
+    MigrationMetadata {
+        id: SANDBOX_NETWORK_SLOT_MIGRATION_ID,
+        // The column is deliberately left in place on rollback (SQLite has
+        // no DROP COLUMN on every supported version); `up` probes for it so a
+        // re-upgrade after this rollback succeeds.
+        reversible: true,
+        affects_cache: false,
+        affects_user_data: false,
+        summary: "retain the compatible sandbox network slot column",
+    },
+    MigrationMetadata {
+        id: MOUNT_OWNER_CONFIG_MIGRATION_ID,
+        reversible: true,
+        affects_cache: false,
+        affects_user_data: false,
+        summary: "remove the compatibility marker after confirming no persisted mount ownership",
+    },
 ];
 
 //--------------------------------------------------------------------------------------------------
@@ -317,6 +339,8 @@ mod tests {
     #[test]
     fn canonical_applied_prefix_uses_metadata_order() {
         let applied = [
+            MOUNT_OWNER_CONFIG_MIGRATION_ID,
+            SANDBOX_NETWORK_SLOT_MIGRATION_ID,
             SHARED_CPU_ALLOCATION_MIGRATION_ID,
             SANDBOX_LABEL_REBUILD_MIGRATION_ID,
             MEMORY_ALLOCATION_NODES_MIGRATION_ID,

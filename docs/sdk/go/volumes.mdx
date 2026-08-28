@@ -836,6 +836,12 @@ Per-mount stat-virtualization policy (bind / named only)
 
 Per-mount host-permission propagation policy (bind / named only)
 
+#### <span className="msb-recv">mount.</span><span className="msb-hn">Owner</span>
+
+`*MountOwner`
+
+Guest owner fallback for host files without a per-file stat override (bind / directory-backed named only)
+
 
 #### <span className="msb-recv">mount.</span><span className="msb-hn">Kind()</span>
 
@@ -924,7 +930,7 @@ Discriminates between the four mount flavours. Inspect via `mount.Kind()`.
 
 ### MountOptions
 
-Tuning struct for [`Mount.Bind`](#mount-bind), [`Mount.Named`](#mount-named), and [`Mount.NamedWith`](#mount-namedwith). `StatVirtualization` and `HostPermissions` are virtiofs-only and rejected at build time if combined with a tmpfs or disk-image mount; their zero values preserve the conservative defaults (strict, private).
+Tuning struct for [`Mount.Bind`](#mount-bind), [`Mount.Named`](#mount-named), and [`Mount.NamedWith`](#mount-namedwith). `StatVirtualization`, `HostPermissions`, and `Owner` are virtiofs-only; owner is rejected for disk-backed named volumes and when stat virtualization is off. Zero policy values preserve the conservative defaults (strict, private), while a nil owner keeps the runtime fallback identity.
 
 <p className="msb-backref">Used by <a href="#mount-bind">Mount.Bind()</a> · <a href="#mount-named">Mount.Named()</a> · <a href="#mount-namedwith">Mount.NamedWith()</a></p>
 
@@ -937,6 +943,20 @@ Tuning struct for [`Mount.Bind`](#mount-bind), [`Mount.Named`](#mount-named), an
 | `QuotaMiB` | `uint32` | Guest-write quota in MiB, bounding growth beyond the host directory's existing contents; zero keeps the protective default (bind mounts only; named volumes use [`NamedVolumeOptions.QuotaMiB`](#namedvolumeoptions)) |
 | `StatVirtualization` | `StatVirtualization` | Per-mount stat-virtualization policy (virtiofs only) |
 | `HostPermissions` | `HostPermissions` | Per-mount host-permission propagation policy (virtiofs only) |
+| `Owner` | `*MountOwner` | Paired guest uid/gid fallback for host files without a per-file override; nil keeps the runtime fallback |
+
+### MountOwner
+
+An inseparable guest ownership pair used by [`MountOptions.Owner`](#mountoptions). UID and GID may include zero; using a pointer to `MountOwner` keeps an unset owner distinct from root.
+
+```go
+Owner: &m.MountOwner{UID: 1000, GID: 1000}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `UID` | `uint32` | Guest user ID |
+| `GID` | `uint32` | Guest group ID |
 
 ### NamedVolumeOptions
 

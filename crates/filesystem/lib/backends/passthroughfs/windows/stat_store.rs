@@ -11,6 +11,7 @@ use windows_sys::Win32::System::SystemServices::FILE_NAMED_STREAMS;
 impl StatStore {
     pub(super) fn new(
         root: &Path,
+        readonly_probe: Option<&Path>,
         policy: StatVirtualization,
         readonly: bool,
     ) -> io::Result<Option<Self>> {
@@ -20,7 +21,7 @@ impl StatStore {
 
         let ads_store = Self::ads(root);
         let ads_probe = if readonly {
-            ads_store.probe_read()
+            ads_store.probe_read(readonly_probe.unwrap_or(root))
         } else {
             ads_store.probe()
         };
@@ -34,7 +35,7 @@ impl StatStore {
 
         let sidecar_store = Self::sidecar(root);
         let sidecar_probe = if readonly {
-            sidecar_store.probe_read()
+            sidecar_store.probe_read(readonly_probe.unwrap_or(root))
         } else {
             sidecar_store.probe()
         };
@@ -72,9 +73,9 @@ impl StatStore {
 
     /// Verify that an existing metadata store can be consumed without
     /// creating, replacing, or deleting anything beneath a read-only mount.
-    fn probe_read(&self) -> io::Result<()> {
+    fn probe_read(&self, path: &Path) -> io::Result<()> {
         match &self.backend {
-            StatStoreBackend::AlternateDataStream => self.probe_ads_read(),
+            StatStoreBackend::AlternateDataStream => self.probe_ads_read(path),
             StatStoreBackend::Sidecar { dir } => self.probe_sidecar_read(dir),
         }
     }
@@ -104,12 +105,12 @@ impl StatStore {
 
     /// Verify that a read-only mount can consume ADS metadata without creating
     /// or deleting a stream on the host directory.
-    fn probe_ads_read(&self) -> io::Result<()> {
-        if !volume_supports_named_streams(&self.root)? {
+    fn probe_ads_read(&self, path: &Path) -> io::Result<()> {
+        if !volume_supports_named_streams(path)? {
             return Err(linux_error(LINUX_EOPNOTSUPP));
         }
 
-        let probe_path = ads_override_path(&self.root);
+        let probe_path = ads_override_path(path);
         match StdOpenOptions::new()
             .read(true)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)

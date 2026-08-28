@@ -175,6 +175,41 @@ fn test_setattr_size_expand() {
 }
 
 #[test]
+fn test_setattr_uses_handle_after_external_replacement() {
+    let sb = TestSandbox::new();
+    let (entry, handle) = sb.fuse_create_root("selected.txt").unwrap();
+    sb.fuse_write(entry.inode, handle, b"old contents", 0)
+        .unwrap();
+    let replacement = sb.host_create_file("replacement.txt", b"new contents");
+
+    // Simulate an atomic host update followed by the guest dropping its
+    // pathname lookup. Only the already-open descriptor still owns the old
+    // object, so handle-based setattr must not try to reopen its inode.
+    std::fs::rename(replacement, sb.root.join("selected.txt")).unwrap();
+    sb.fs.forget(sb.ctx(), entry.inode, 1);
+
+    let mut attr: stat64 = unsafe { std::mem::zeroed() };
+    attr.st_size = 3;
+    let (st, _timeout) = sb
+        .fs
+        .setattr(
+            sb.ctx(),
+            entry.inode,
+            attr,
+            Some(handle),
+            SetattrValid::SIZE,
+        )
+        .unwrap();
+
+    assert_eq!(st.st_size, 3);
+    assert_eq!(sb.fuse_read(entry.inode, handle, 64, 0).unwrap(), b"old");
+    assert_eq!(
+        std::fs::read(sb.root.join("selected.txt")).unwrap(),
+        b"new contents"
+    );
+}
+
+#[test]
 fn test_setattr_timestamps() {
     let sb = TestSandbox::new();
     let (entry, _handle) = sb.fuse_create_root("file.txt").unwrap();

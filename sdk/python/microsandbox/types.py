@@ -702,6 +702,10 @@ class MountConfig:
     fstype: str | None = None
     stat_virtualization: StatVirtualization | None = None
     host_permissions: HostPermissions | None = None
+    #: Guest owner presented for host files with no per-file stat override.
+    #: Must be set together with ``override_gid``. BIND/NAMED mounts only.
+    override_uid: int | None = None
+    override_gid: int | None = None
 
     def _to_dict(self) -> dict:
         # Validate every supplied enum before selecting a mount arm. This
@@ -789,10 +793,30 @@ class MountConfig:
                 d["stat_virtualization"] = stat_virtualization
             if host_permissions is not None:
                 d["host_permissions"] = host_permissions
-        elif self.stat_virtualization is not None or self.host_permissions is not None:
+            if (self.override_uid is None) != (self.override_gid is None):
+                raise ValueError(
+                    "MountConfig.override_uid and override_gid must be set together"
+                )
+            if self.override_uid is not None:
+                uid = _mount_owner_id(self.override_uid, "MountConfig.override_uid")
+                gid = _mount_owner_id(self.override_gid, "MountConfig.override_gid")
+                if stat_virtualization == StatVirtualization.OFF.value:
+                    raise ValueError(
+                        "mount owner cannot be combined with stat_virtualization=OFF"
+                    )
+                if self.kind == MountKind.NAMED and named_kind == VolumeKind.DISK.value:
+                    raise ValueError("mount owner is not supported for disk-backed named volumes")
+                d["override_uid"] = uid
+                d["override_gid"] = gid
+        elif (
+            self.stat_virtualization is not None
+            or self.host_permissions is not None
+            or self.override_uid is not None
+            or self.override_gid is not None
+        ):
             raise ValueError(
-                f"stat_virtualization/host_permissions are only valid for "
-                f"BIND/NAMED mounts (got kind={self.kind.value})"
+                f"stat_virtualization/host_permissions/override_uid/override_gid are only "
+                f"valid for BIND/NAMED mounts (got kind={self.kind.value})"
             )
         return d
 
@@ -802,6 +826,13 @@ def _enum_value(value: enum.Enum, expected: type[enum.Enum], field_name: str) ->
     if not isinstance(value, expected):
         raise TypeError(f"{field_name} must be {expected.__name__}")
     return str(value.value)
+
+
+def _mount_owner_id(value: object, field_name: str) -> int:
+    """Validate an owner ID without accepting bool or lossy numeric coercions."""
+    if type(value) is not int or not 0 <= value <= 0xFFFFFFFF:
+        raise ValueError(f"{field_name} must be an integer between 0 and 4294967295")
+    return value
 
 
 # --------------------------------------------------------------------------------------------------

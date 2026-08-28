@@ -1,12 +1,13 @@
 //! Rotation-aware multi-file log streaming.
 //!
-//! Two public entry points keyed by sandbox name:
+//! The public entry points are keyed by sandbox name:
 //!
-//! - [`read_logs`] returns a snapshot `Vec<LogEntry>` filtered with
-//!   [`LogOptions`]. Reads everything currently on disk, sorts by
-//!   timestamp, and returns.
+//! - [`boot_error`] returns the latest backend-provided startup diagnostic.
+//! - [`read_logs`] routes a bounded snapshot through the selected backend.
+//! - [`follow_logs`] routes filtered history plus live output through the
+//!   selected backend.
 //! - [`log_stream`] returns a [`futures::Stream`] over the same
-//!   files, suitable for live-tailing or replaying a fixed range.
+//!   local files, suitable for live-tailing or replaying a fixed range.
 //!   Uses filesystem change notifications (the `notify` crate) for
 //!   live updates with a fallback poll, and stamps each entry with
 //!   an opaque [`LogCursor`] for exact per-source resume.
@@ -63,6 +64,7 @@ mod watch;
 
 pub use cursor::{LogCursor, LogCursorParseError};
 pub use logger::{RegisteredSandboxLogger, SandboxLogger};
+pub use microsandbox_runtime::boot_error::{BootError, BootErrorStage};
 pub use stream::{LogStreamOptions, LogStreamStart};
 pub use types::{LogEntry, LogOptions, LogSource};
 pub use watch::{LogRegistration, LogRegistry, RegistryStatsSnapshot};
@@ -74,6 +76,7 @@ use futures::Stream;
 use stream::{LogEngine, LogFileConfig, LogFileFormat};
 
 use crate::backend::LocalBackend;
+use crate::backend::sandbox::LogStream;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -149,17 +152,42 @@ pub(crate) fn log_dir_for_local(local: &LocalBackend, name: &str) -> PathBuf {
 ///
 /// Sandbox names are limited to 128 UTF-8 bytes.
 ///
-/// Returns entries sorted by timestamp (strict chronological order
-/// across all sources). Returns
-/// [`MicrosandboxError::SandboxNotFound`] if the sandbox's log
-/// directory doesn't exist.
+/// Routes through the selected backend. Local entries are sorted by timestamp
+/// (strict chronological order across all sources) and return
+/// [`MicrosandboxError::SandboxNotFound`] if the sandbox's log directory does
+/// not exist. Backends without bounded log snapshots return a typed
+/// [`MicrosandboxError::Unsupported`] error.
 ///
-/// Implemented as a drain of [`log_stream`] with `follow: false`,
-/// sorted post-collect; `until` and `tail` are applied
-/// post-collect because the stream's per-source ordering doesn't
-/// match snapshot's "filter after sort" contract.
+/// The local implementation drains [`log_stream`] with `follow: false` and
+/// sorts post-collect; `until` and `tail` are applied post-collect because the
+/// stream's per-source ordering doesn't match snapshot's "filter after sort"
+/// contract.
 pub async fn read_logs(name: &str, opts: &LogOptions) -> MicrosandboxResult<Vec<LogEntry>> {
-    Ok(read_logs_snapshot(name, opts).await?.entries)
+    let backend = crate::backend::default_backend();
+    backend.sandboxes().logs(backend.clone(), name, opts).await
+}
+
+/// Replay filtered history, then follow new entries through the selected backend.
+///
+/// The backend owns any snapshot-to-stream cursor handoff. Backends that cannot
+/// satisfy a requested filter return a typed [`MicrosandboxError::Unsupported`]
+/// error.
+pub async fn follow_logs(name: &str, opts: &LogOptions) -> MicrosandboxResult<LogStream> {
+    let backend = crate::backend::default_backend();
+    backend
+        .sandboxes()
+        .follow_logs(backend.clone(), name, opts)
+        .await
+}
+
+/// Return the most recent startup diagnostic for the named sandbox, when any.
+///
+/// Local sandboxes read the same persisted record used to produce
+/// [`MicrosandboxError::BootStart`] during create/start. The cloud backend
+/// currently returns `None` because its API has no boot-error concept yet.
+pub async fn boot_error(name: &str) -> MicrosandboxResult<Option<BootError>> {
+    let backend = crate::backend::default_backend();
+    backend.sandboxes().boot_error(backend.clone(), name).await
 }
 
 /// Read all matching log entries through an explicit local backend.
@@ -168,14 +196,19 @@ pub(crate) async fn read_logs_local(
     name: &str,
     opts: &LogOptions,
 ) -> MicrosandboxResult<Vec<LogEntry>> {
-    Ok(
-        read_logs_snapshot_from_dir(name, log_dir_for_local(local, name), opts)
-            .await?
-            .entries,
-    )
+    Ok(read_logs_snapshot_local(local, name, opts).await?.entries)
 }
 
-/// Read all matching log entries and return the snapshot end cursor.
+/// Read a filtered snapshot and cursor through an explicit local backend.
+pub(crate) async fn read_logs_snapshot_local(
+    local: &LocalBackend,
+    name: &str,
+    opts: &LogOptions,
+) -> MicrosandboxResult<LogSnapshot> {
+    read_logs_snapshot_from_dir(name, log_dir_for_local(local, name), opts).await
+}
+
+/// Read all matching local log entries and return the snapshot end cursor.
 ///
 /// This is useful when handing a bounded historical read to
 /// [`log_stream`] with [`LogStreamStart::From`] without losing log

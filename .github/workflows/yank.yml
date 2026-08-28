@@ -36,7 +36,7 @@ jobs:
           set -uo pipefail
           fail=0
           for crate in \
-            microsandbox-utils microsandbox-types microsandbox-protocol \
+            microsandbox-utils microsandbox-types-macros microsandbox-types microsandbox-protocol \
             microsandbox-agent-client microsandbox-agentd microsandbox-db \
             microsandbox-migration microsandbox-image microsandbox-filesystem \
             microsandbox-network microsandbox-metrics microsandbox-metrics-collector \
