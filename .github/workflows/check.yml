@@ -1199,7 +1199,7 @@ jobs:
         working-directory: sdk/ruby
         run: |
           gem install rake rake-compiler rb_sys --no-document
-          rake version_check cargo:patch_workspace gem:stage
+          rake cargo:patch_workspace version_check gem:stage
 
       - name: Assert the extension uses the checkout Rust SDK
         working-directory: sdk/ruby
