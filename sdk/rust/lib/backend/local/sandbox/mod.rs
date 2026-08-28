@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use futures::future::BoxFuture;
+use futures::{StreamExt, future::BoxFuture, stream};
 use microsandbox_db::pool::DbPools;
 use microsandbox_db::{DbReadConnection, DbWriteConnection};
 use microsandbox_image::{Digest, GlobalCache};
@@ -36,7 +36,7 @@ use crate::backend::{
 use crate::db::entity::{
     run as run_entity, sandbox as sandbox_entity, sandbox_label as sandbox_label_entity,
 };
-use crate::logs::{LogEntry, LogOptions, LogStreamOptions};
+use crate::logs::{BootError, LogEntry, LogOptions, LogStreamOptions};
 use crate::runtime::SpawnMode;
 use crate::sandbox::metrics::SandboxMetrics;
 use crate::sandbox::{
@@ -687,6 +687,10 @@ impl LocalBackend {
                     sandbox_entity::Column::ActiveConfig,
                     Expr::value(Option::<String>::None),
                 )
+                .col_expr(
+                    sandbox_entity::Column::NetworkSlot,
+                    Expr::value(Option::<u16>::None),
+                )
                 .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
                 .filter(sandbox_entity::Column::Id.eq(sandbox_id))
                 .filter(
@@ -714,10 +718,14 @@ impl LocalBackend {
                     sandbox_entity::Column::UpdatedAt,
                     Expr::value(chrono::Utc::now().naive_utc()),
                 );
-            if Self::sandbox_status_clears_active_config(status) {
+            if !status.has_active_runtime_state() {
                 update = update.col_expr(
                     sandbox_entity::Column::ActiveConfig,
                     Expr::value(Option::<String>::None),
+                );
+                update = update.col_expr(
+                    sandbox_entity::Column::NetworkSlot,
+                    Expr::value(Option::<u16>::None),
                 );
             }
             update
@@ -750,14 +758,6 @@ impl LocalBackend {
             .await?;
 
         Ok(())
-    }
-
-    /// Whether a status transition clears the persisted active config.
-    fn sandbox_status_clears_active_config(status: SandboxStatus) -> bool {
-        matches!(
-            status,
-            SandboxStatus::Created | SandboxStatus::Stopped | SandboxStatus::Crashed
-        )
     }
 
     /// Move a Running row to Draining (no-op for any other status).
@@ -970,6 +970,18 @@ impl SandboxBackend for LocalBackend {
         Box::pin(async move { self.drain_sandbox(name).await })
     }
 
+    fn boot_error<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        name: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<Option<BootError>>> {
+        Box::pin(async move {
+            crate::sandbox::validate_sandbox_name(name)?;
+            let log_dir = crate::logs::log_dir_for_local(self, name);
+            Ok(Self::read_boot_error(&log_dir))
+        })
+    }
+
     fn logs<'a>(
         &'a self,
         _backend: Arc<dyn Backend>,
@@ -988,6 +1000,26 @@ impl SandboxBackend for LocalBackend {
         Box::pin(async move {
             let stream = crate::logs::log_stream_local(self, name, opts).await?;
             Ok(Box::pin(stream) as LogStream)
+        })
+    }
+
+    fn follow_logs<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        name: &'a str,
+        opts: &'a LogOptions,
+    ) -> BoxFuture<'a, MicrosandboxResult<LogStream>> {
+        Box::pin(async move {
+            let snapshot = crate::logs::read_logs_snapshot_local(self, name, opts).await?;
+            let follow_opts = LogStreamOptions {
+                sources: opts.sources.clone(),
+                start: crate::logs::LogStreamStart::From(snapshot.cursor),
+                until: opts.until,
+                follow: true,
+            };
+            let follow = crate::logs::log_stream_local(self, name, &follow_opts).await?;
+            let history = stream::iter(snapshot.entries.into_iter().map(Ok));
+            Ok(Box::pin(history.chain(follow)) as LogStream)
         })
     }
 
@@ -1069,19 +1101,21 @@ async fn filter_sandbox_ids(
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::Write;
     #[cfg(unix)]
     use std::process::Command;
+    use std::sync::Arc;
 
+    use futures::StreamExt;
     use microsandbox_db::entity::run as run_entity;
     use microsandbox_db::pool::DbPools;
     use microsandbox_migration::{Migrator, MigratorTrait};
-    #[cfg(unix)]
-    use sea_orm::{ColumnTrait, QueryFilter};
-    use sea_orm::{EntityTrait, Set};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
     use tempfile::tempdir;
 
     use super::sandbox_entity;
-    use crate::backend::LocalBackend;
+    use crate::backend::{Backend, LocalBackend, SandboxBackend};
+    use crate::logs::{LogOptions, LogSource};
     use crate::sandbox::{
         OciRootfsSource, RootfsSource, SandboxConfig, SandboxListBuilder, SandboxStatus,
     };
@@ -1130,6 +1164,58 @@ mod tests {
             pid += 1;
         }
         pid
+    }
+
+    #[tokio::test]
+    async fn follow_logs_replays_filtered_history_then_streams_from_snapshot_cursor() {
+        let temp = tempdir().unwrap();
+        let backend = Arc::new(
+            LocalBackend::builder()
+                .home(temp.path())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let log_dir = crate::logs::log_dir_for_local(&backend, "follow-test");
+        fs::create_dir_all(&log_dir).unwrap();
+        let exec_log = log_dir.join("exec.log");
+        fs::write(
+            &exec_log,
+            concat!(
+                "{\"t\":\"2026-08-24T10:00:00.000Z\",\"s\":\"stdout\",\"d\":\"first\",\"id\":1}\n",
+                "{\"t\":\"2026-08-24T10:00:01.000Z\",\"s\":\"stdout\",\"d\":\"second\",\"id\":1}\n",
+            ),
+        )
+        .unwrap();
+
+        let backend_dyn: Arc<dyn Backend> = backend.clone();
+        let opts = LogOptions {
+            tail: Some(1),
+            sources: vec![LogSource::Stdout],
+            ..Default::default()
+        };
+        let mut stream = backend
+            .follow_logs(backend_dyn, "follow-test", &opts)
+            .await
+            .unwrap();
+
+        let history = stream.next().await.unwrap().unwrap();
+        assert_eq!(history.data.as_ref(), b"second");
+
+        let mut file = fs::OpenOptions::new().append(true).open(exec_log).unwrap();
+        writeln!(
+            file,
+            "{{\"t\":\"2026-08-24T10:00:02.000Z\",\"s\":\"stdout\",\"d\":\"third\",\"id\":1}}"
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let live = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+            .await
+            .expect("follow stream should observe appended entry")
+            .unwrap()
+            .unwrap();
+        assert_eq!(live.data.as_ref(), b"third");
     }
 
     #[test]
@@ -1229,6 +1315,16 @@ mod tests {
             .unwrap()
             .last_insert_id;
 
+        sandbox_entity::Entity::update_many()
+            .col_expr(
+                sandbox_entity::Column::NetworkSlot,
+                sea_orm::sea_query::Expr::value(Some(7_u16)),
+            )
+            .filter(sandbox_entity::Column::Id.eq(sandbox_id))
+            .exec(pools.write())
+            .await
+            .unwrap();
+
         let sandbox = sandbox_entity::Entity::find_by_id(sandbox_id)
             .one(pools.write())
             .await
@@ -1260,6 +1356,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(reconciled.status, SandboxStatus::Crashed);
+        assert_eq!(reconciled.network_slot, None);
         #[cfg(unix)]
         for path in [
             &socket_paths.agent,
@@ -1282,6 +1379,38 @@ mod tests {
             Some(run_entity::TerminationReason::InternalError)
         );
         assert!(run.terminated_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn terminal_status_releases_network_slot() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let pools = open_test_pools(&db_path).await;
+
+        let sandbox_id =
+            LocalBackend::insert_sandbox_record(pools.write(), &test_config("slot-release"))
+                .await
+                .unwrap();
+        sandbox_entity::Entity::update_many()
+            .col_expr(
+                sandbox_entity::Column::NetworkSlot,
+                sea_orm::sea_query::Expr::value(Some(11_u16)),
+            )
+            .filter(sandbox_entity::Column::Id.eq(sandbox_id))
+            .exec(pools.write())
+            .await
+            .unwrap();
+
+        LocalBackend::update_sandbox_status(pools.write(), sandbox_id, SandboxStatus::Stopped)
+            .await
+            .unwrap();
+
+        let sandbox = sandbox_entity::Entity::find_by_id(sandbox_id)
+            .one(pools.read())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(sandbox.network_slot, None);
     }
 
     #[tokio::test]

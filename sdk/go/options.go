@@ -1600,6 +1600,20 @@ type MountConfig struct {
 	// Only meaningful for Bind and Named mounts. Zero value preserves the
 	// conservative default (Private).
 	HostPermissions HostPermissions
+
+	// Owner, when set, pins the guest owner presented for host files under this
+	// mount that carry no per-file stat override. Only meaningful for Bind and
+	// Named mounts. Nil keeps the runtime's fallback owner.
+	Owner *MountOwner
+}
+
+// MountOwner pins the guest owner presented for host files under a bind or named
+// mount that carry no per-file stat override (host-created files). Both fields
+// are required together; because uid 0 (root) is a valid value, this is passed
+// by pointer so that "unset" is distinct from "root".
+type MountOwner struct {
+	UID uint32
+	GID uint32
 }
 
 // MountKind discriminates between the four mount flavours.
@@ -1631,6 +1645,10 @@ type MountOptions struct {
 	Nodev              bool
 	StatVirtualization StatVirtualization
 	HostPermissions    HostPermissions
+	// Owner pins the guest owner presented for host files under this mount that
+	// carry no per-file stat override. Bind and Named mounts only. Nil keeps the
+	// runtime's fallback owner.
+	Owner *MountOwner
 	// QuotaMiB sets a guest-write quota for a bind mount, bounding how much
 	// the guest may add beyond the host directory's existing contents. Zero
 	// keeps the runtime's protective default. Bind mounts only; named volume
@@ -1690,6 +1708,7 @@ func (mountFactory) Bind(hostPath string, opts MountOptions) MountConfig {
 		Nodev:              opts.Nodev,
 		StatVirtualization: opts.StatVirtualization,
 		HostPermissions:    opts.HostPermissions,
+		Owner:              opts.Owner,
 		QuotaMiB:           opts.QuotaMiB,
 	}
 }
@@ -1705,6 +1724,7 @@ func (mountFactory) Named(name string, opts MountOptions) MountConfig {
 		Nodev:              opts.Nodev,
 		StatVirtualization: opts.StatVirtualization,
 		HostPermissions:    opts.HostPermissions,
+		Owner:              opts.Owner,
 	}
 }
 
@@ -1724,6 +1744,7 @@ func (mountFactory) NamedWith(name string, opts MountOptions, namedOpts NamedVol
 		Nodev:              opts.Nodev,
 		StatVirtualization: opts.StatVirtualization,
 		HostPermissions:    opts.HostPermissions,
+		Owner:              opts.Owner,
 	}
 }
 

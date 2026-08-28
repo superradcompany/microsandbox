@@ -107,6 +107,22 @@ impl BindIdentityMap {
         }
     }
 
+    /// Create a map that presents every host owner as one guest uid/gid pair.
+    ///
+    /// Explicit per-mount ownership is a fallback for every inode without a
+    /// persistent override, including host files owned by another account.
+    /// Keeping both branches equal avoids leaking the host ownership split into
+    /// the guest as the overflow identity.
+    pub fn fixed(guest_uid: u32, guest_gid: u32) -> Self {
+        Self {
+            host_owner_uid: 0,
+            guest_uid,
+            guest_gid,
+            overflow_uid: guest_uid,
+            overflow_gid: guest_gid,
+        }
+    }
+
     /// Apply this map to a stat result in place.
     pub fn apply(&self, st: &mut stat64) {
         if st.st_uid == self.host_owner_uid {
@@ -550,5 +566,42 @@ mod tests {
     #[test]
     fn test_unsupported_xattr_is_none_in_non_strict_mode() {
         assert!(handle_unsupported_xattr(false).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_bind_identity_map_applies_owner_and_overflow() {
+        use super::BindIdentityMap;
+
+        let map = BindIdentityMap::new(501, 1000, 1000);
+
+        // A file owned by the host owner is presented as the mapped guest owner.
+        let mut st: crate::stat64 = unsafe { std::mem::zeroed() };
+        st.st_uid = 501;
+        st.st_gid = 20;
+        map.apply(&mut st);
+        assert_eq!(st.st_uid, 1000);
+        assert_eq!(st.st_gid, 1000);
+
+        // Any other owner falls through to the overflow identity (65534).
+        let mut other: crate::stat64 = unsafe { std::mem::zeroed() };
+        other.st_uid = 4242;
+        other.st_gid = 4242;
+        map.apply(&mut other);
+        assert_eq!(other.st_uid, 65534);
+        assert_eq!(other.st_gid, 65534);
+    }
+
+    #[test]
+    fn test_fixed_bind_identity_map_applies_to_every_host_owner() {
+        use super::BindIdentityMap;
+
+        let map = BindIdentityMap::fixed(1000, 1001);
+        for host_uid in [0, 501, 4242, u32::MAX] {
+            let mut st: crate::stat64 = unsafe { std::mem::zeroed() };
+            st.st_uid = host_uid;
+            st.st_gid = host_uid;
+            map.apply(&mut st);
+            assert_eq!((st.st_uid, st.st_gid), (1000, 1001));
+        }
     }
 }

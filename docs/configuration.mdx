@@ -206,6 +206,8 @@ Defaults applied to sandboxes unless overridden per-sandbox.
 
 Explicit CLI or SDK options win over `config.json`, and `config.json` wins over built-in defaults. Microsandbox resolves the effective values once when it creates a local sandbox and persists that resolved sandbox configuration; changing the global file affects future creations, not existing sandboxes.
 
+`SandboxBuilder::new()` and `Sandbox::builder()` apply this base automatically. Use `.overlay(SandboxConfigPatch)` to overlay sparse per-sandbox values, giving the precedence order built-in defaults < `config.json` < per-sandbox patch.
+
 For workload effects, host requirements, filesystem expectations, and verification steps for these settings, see [Optimization](/sandboxes/optimization).
 
 | Field | Default | Description |

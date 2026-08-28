@@ -1453,6 +1453,22 @@ Set the host permission propagation policy for a virtiofs-backed mount. Default:
   </div>
 </div>
 
+#### <span className="msb-recv">mount.</span><span className="msb-hn">owner()</span>
+
+```rust
+fn owner(self, uid: u32, gid: u32) -> Self
+```
+
+Present host files without a per-file stat override as the specified guest owner. Existing per-file overrides still take precedence, and the host inode is not changed. Valid only for bind and directory-backed named-volume mounts with stat virtualization enabled; tmpfs, disk images, disk-backed named volumes, and `StatVirtualization::Off` are rejected.
+
+```rust
+let sb = Sandbox::builder("worker")
+    .image("python")
+    .volume("/workspace", |mount| mount.bind("./workspace").owner(1000, 1000))
+    .create()
+    .await?;
+```
+
 #### <span className="msb-recv">mount.</span><span className="msb-hn">size()</span>
 
 <a id="mb-size"></a>
@@ -1729,6 +1745,8 @@ Guest mount behavior shared by every mount kind. Set via the [`MountBuilder`](#m
 | `noexec` | `bool` | Direct execution from the mount is disabled |
 | `nosuid` | `bool` | setuid/setgid elevation from files on the mount is ignored |
 | `nodev` | `bool` | Device files on the mount are ignored |
+| `override_uid` | `Option<u32>` | Guest uid fallback for host files without a per-file override; set together with `override_gid` via [`MountBuilder::owner()`](#owner) |
+| `override_gid` | `Option<u32>` | Guest gid fallback for host files without a per-file override; set together with `override_uid` via [`MountBuilder::owner()`](#owner) |
 
 ### StatVirtualization
 

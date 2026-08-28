@@ -1048,7 +1048,7 @@ jobs:
         run: |
           gem build microsandbox.gemspec
           mold -run gem install --local microsandbox-*.gem --no-document
-          ruby --disable-gems -e 'require "rubygems"; require "microsandbox"; abort unless Microsandbox.version == "0.6.14"'
+          ruby --disable-gems -e 'require "rubygems"; require "microsandbox"; abort unless Microsandbox.version == "0.6.15"'
 
       - name: Restore standalone Ruby lockfile
         if: always()

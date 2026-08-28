@@ -38,7 +38,8 @@ export function setup(): Setup {
   return new Setup();
 }
 
-/** Download and install msb + libkrunfw to `~/.microsandbox/`. */
+/** Download and install msb + libkrunfw under non-empty `$MSB_HOME`,
+ * or `~/.microsandbox/` when the override is unset or empty. */
 export async function install(): Promise<void> {
   await withMappedErrors(() => napi.install());
 }

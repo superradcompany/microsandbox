@@ -22,7 +22,8 @@ use super::verify::verify_installation;
 /// Builder for configuring and running the microsandbox setup process.
 #[derive(Debug, typed_builder::TypedBuilder)]
 pub struct Setup {
-    /// Base directory for microsandbox files. Defaults to `~/.microsandbox`.
+    /// Base directory for microsandbox files. Defaults to non-empty
+    /// `$MSB_HOME`, then `~/.microsandbox`.
     #[builder(default, setter(strip_option, into))]
     base_dir: Option<PathBuf>,
 
@@ -150,7 +151,8 @@ impl Setup {
 /// Install microsandbox runtime dependencies with default settings.
 ///
 /// This downloads the microsandbox bundle tarball and extracts `msb`
-/// and `libkrunfw` to `~/.microsandbox/{bin,lib}/`.
+/// and `libkrunfw` under non-empty `$MSB_HOME`, or
+/// `~/.microsandbox/{bin,lib}/` when the override is unset or empty.
 pub async fn install() -> MicrosandboxResult<()> {
     Setup::builder().build().install().await
 }

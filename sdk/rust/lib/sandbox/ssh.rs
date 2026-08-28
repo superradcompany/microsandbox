@@ -2002,7 +2002,7 @@ async fn relay_tcp_to_ssh(
 
 fn build_authorized_keys(
     options: &SshServerOptions,
-    local_config: Option<&crate::config::LocalConfig>,
+    local_config: Option<&crate::config::GlobalConfig>,
 ) -> MicrosandboxResult<Vec<String>> {
     let mut keys = Vec::new();
     if let Some(path) = &options.authorized_keys_path {
@@ -2023,7 +2023,7 @@ fn build_authorized_keys(
     Ok(keys)
 }
 
-fn default_authorized_keys_path(config: &crate::config::LocalConfig) -> PathBuf {
+fn default_authorized_keys_path(config: &crate::config::GlobalConfig) -> PathBuf {
     config.ssh_dir().join("authorized_keys")
 }
 
@@ -2544,7 +2544,7 @@ fn apply_inactivity_timeout(
 
 fn resolve_inactivity_timeout(
     timeout: Option<Option<Duration>>,
-    local_config: Option<&crate::config::LocalConfig>,
+    local_config: Option<&crate::config::GlobalConfig>,
 ) -> Option<Duration> {
     timeout.unwrap_or_else(|| {
         let secs = local_config
@@ -2658,7 +2658,7 @@ mod tests {
 
     #[test]
     fn inactivity_timeout_uses_global_config() {
-        let mut config = crate::config::LocalConfig::default();
+        let mut config = crate::config::GlobalConfig::default();
         config.ssh.inactivity_timeout_secs = 1800;
 
         assert_eq!(
@@ -2672,7 +2672,7 @@ mod tests {
 
     #[test]
     fn inactivity_timeout_per_call_override_wins() {
-        let config = crate::config::LocalConfig::default();
+        let config = crate::config::GlobalConfig::default();
 
         assert_eq!(
             resolve_inactivity_timeout(Some(Some(Duration::from_secs(30))), Some(&config)),
