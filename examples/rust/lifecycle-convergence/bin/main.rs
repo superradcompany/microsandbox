@@ -72,7 +72,7 @@ async fn run_concurrency_checks(
         create("candidate-3"),
     )?;
     timings.insert("concurrent_connect_or_create", elapsed_ms(started));
-    let raced = vec![first, second, third, fourth];
+    let raced = [first, second, third, fourth];
     let race_id = raced[0].id();
     if raced.iter().any(|sandbox| sandbox.id() != race_id) {
         return Err("concurrent connect_or_create callers selected different identities".into());
@@ -99,7 +99,7 @@ async fn run_concurrency_checks(
         handles.3.connect_or_start(),
     )?;
     timings.insert("concurrent_connect_or_start", elapsed_ms(started));
-    let connected = vec![first, second, third, fourth];
+    let connected = [first, second, third, fourth];
     if connected.iter().any(|sandbox| sandbox.id() != race_id) {
         return Err("concurrent connect_or_start callers selected different identities".into());
     }

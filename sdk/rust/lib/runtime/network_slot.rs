@@ -22,7 +22,7 @@ impl NetworkSlot {
         self.0.get()
     }
 
-    /// Assign the lowest available network slot to a running sandbox.
+    /// Assign the lowest available network slot to an active sandbox start.
     ///
     /// The slot is released when the sandbox stops and may change after a
     /// restart. Concurrent starts cannot receive the same slot.
@@ -67,13 +67,14 @@ impl NetworkSlot {
                     ON occupied.network_slot = candidate.slot
                 WHERE occupied.network_slot IS NULL
             ))
-            WHERE id = ? AND status = ?
+            WHERE id = ? AND status IN (?, ?)
             RETURNING network_slot
         ";
 
         let values = [
             u16::MAX.into(),
             sandbox_id.into(),
+            sandbox_entity::SandboxStatus::Starting.into_value().into(),
             sandbox_entity::SandboxStatus::Running.into_value().into(),
         ];
 
@@ -82,7 +83,7 @@ impl NetworkSlot {
             .await?
             .ok_or_else(|| {
                 MicrosandboxError::Runtime(format!(
-                    "sandbox {sandbox_id} is missing or not running"
+                    "sandbox {sandbox_id} is missing or not starting"
                 ))
             })?
             .try_get_by_index::<Option<u16>>(0)?
@@ -331,7 +332,7 @@ mod tests {
             .expect_err("a stopped start attempt must not acquire a lease");
         assert!(
             err.to_string()
-                .contains("sandbox 65700 is missing or not running")
+                .contains("sandbox 65700 is missing or not starting")
         );
         let slot: Option<u16> = sandbox_entity::Entity::find_by_id(65_700)
             .select_only()
@@ -342,6 +343,30 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(slot, Some(1));
+    }
+
+    #[tokio::test]
+    async fn leases_while_starting_before_readiness_is_published() {
+        let temp = tempdir().unwrap();
+        let backend = LocalBackend::builder()
+            .home(temp.path().join("msb-home"))
+            .build()
+            .await
+            .unwrap();
+        insert_sandbox_rows_with_ids(&backend, &[65_700]).await;
+
+        let pools = backend.db().await.unwrap();
+        sandbox_entity::Entity::update_many()
+            .col_expr(
+                sandbox_entity::Column::Status,
+                sea_orm::sea_query::Expr::value(sandbox_entity::SandboxStatus::Starting),
+            )
+            .filter(sandbox_entity::Column::Id.eq(65_700))
+            .exec(pools.write())
+            .await
+            .unwrap();
+
+        assert_eq!(NetworkSlot::lease(&backend, 65_700).await.unwrap().get(), 1);
     }
 
     #[tokio::test]

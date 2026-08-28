@@ -2189,7 +2189,10 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     let sandbox = module.define_class("Sandbox", ruby.class_object())?;
     sandbox.define_singleton_method("builder", function!(sandbox_builder, 1))?;
     sandbox.define_singleton_method("create", function!(sandbox_create, -1))?;
-    sandbox.define_singleton_method("connect_or_create", function!(sandbox_connect_or_create, -1))?;
+    sandbox.define_singleton_method(
+        "connect_or_create",
+        function!(sandbox_connect_or_create, -1),
+    )?;
     sandbox.define_singleton_method("start", function!(sandbox_start, -1))?;
     sandbox.define_singleton_method("get", function!(sandbox_get, -1))?;
     sandbox.define_singleton_method("list", function!(sandbox_list, -1))?;
