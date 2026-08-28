@@ -12,6 +12,7 @@ pub mod exec;
 pub(crate) mod flat_rootfs;
 pub mod fs;
 mod handle;
+mod identity;
 pub mod init;
 pub(crate) mod metrics;
 mod modify;
@@ -36,15 +37,15 @@ use microsandbox_protocol::{
     message::MessageType,
 };
 use microsandbox_types::hostname_from_sandbox_name as derive_hostname;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 use microsandbox_image::progress_channel;
 
 use crate::{
     MicrosandboxResult,
     agent::AgentClient,
-    backend::LocalBackend,
-    db::entity::{run as run_entity, sandbox as sandbox_entity},
+    backend::{LocalBackend, sandbox::SandboxIdentity},
+    db::entity::sandbox as sandbox_entity,
     error::{Operation, UnsupportedReason},
     runtime::SpawnMode,
 };
@@ -106,7 +107,10 @@ pub use fs::{
     FsEntry, FsEntryKind, FsHandle, FsMetadata, FsOpenOptions, FsReadStream, FsSetAttrs,
     FsWriteSink, SandboxFsOps,
 };
-pub use handle::{DEFAULT_KILL_TIMEOUT, DEFAULT_STOP_TIMEOUT, SandboxHandle};
+pub use handle::{
+    DEFAULT_KILL_TIMEOUT, DEFAULT_STOP_TIMEOUT, DestroyOptions, RestartOptions, SandboxHandle,
+};
+pub use identity::SandboxId;
 pub use init::{HandoffInit, InitOptionsBuilder};
 pub use metrics::{
     SandboxMetrics, SandboxMetricsReport, SandboxMetricsState, all_sandbox_metrics,
@@ -586,6 +590,37 @@ impl Sandbox {
         &self.name
     }
 
+    /// Stable identity of this persisted sandbox.
+    pub fn id(&self) -> SandboxId {
+        match self.inner.as_ref() {
+            crate::backend::SandboxInner::Local(state) => SandboxId::local(state.db_id),
+            crate::backend::SandboxInner::Cloud(state) => SandboxId::cloud(&state.id),
+        }
+    }
+
+    fn identity(&self) -> SandboxIdentity {
+        match self.inner.as_ref() {
+            crate::backend::SandboxInner::Local(state) => SandboxIdentity::Local(state.db_id),
+            crate::backend::SandboxInner::Cloud(state) => SandboxIdentity::Cloud(state.id.clone()),
+        }
+    }
+
+    async fn refresh_handle(&self) -> MicrosandboxResult<SandboxHandle> {
+        let handle = self
+            .backend
+            .sandboxes()
+            .get(self.backend.clone(), &self.name)
+            .await?;
+        if handle.identity() != self.identity() {
+            return Err(crate::MicrosandboxError::SandboxReplaced {
+                name: self.name.clone(),
+                expected: self.id().to_string(),
+                actual: handle.id().to_string(),
+            });
+        }
+        Ok(handle)
+    }
+
     /// The full configuration this sandbox was created with (image, cpus,
     /// memory, env, mounts, etc.).
     pub fn config(&self) -> &SandboxConfig {
@@ -651,11 +686,7 @@ impl Sandbox {
     /// last failure message), call [`Sandbox::get`](Self::get) once and read off the
     /// returned [`SandboxHandle`]'s `*_snapshot` accessors instead.
     pub async fn status(&self) -> MicrosandboxResult<SandboxStatus> {
-        let handle = self
-            .backend
-            .sandboxes()
-            .get(self.backend.clone(), &self.name)
-            .await?;
+        let handle = self.refresh_handle().await?;
         Ok(handle.status_snapshot())
     }
 
@@ -666,11 +697,7 @@ impl Sandbox {
     /// `status()`, fetch a fresh [`SandboxHandle`] via
     /// [`Sandbox::get`](Self::get) once and read both off the snapshot.
     pub async fn last_failure_message(&self) -> MicrosandboxResult<Option<String>> {
-        let handle = self
-            .backend
-            .sandboxes()
-            .get(self.backend.clone(), &self.name)
-            .await?;
+        let handle = self.refresh_handle().await?;
         Ok(handle.last_failure_message_snapshot())
     }
 
@@ -819,7 +846,7 @@ impl Sandbox {
         tracing::debug!(sandbox = %self.name, "stop: dispatching");
         self.backend
             .sandboxes()
-            .stop(self.backend.clone(), &self.name)
+            .stop_identified(self.backend.clone(), &self.name, self.identity())
             .await
     }
 
@@ -884,7 +911,7 @@ impl Sandbox {
     pub async fn request_kill(&self) -> MicrosandboxResult<()> {
         self.backend
             .sandboxes()
-            .kill(self.backend.clone(), &self.name)
+            .kill_identified(self.backend.clone(), &self.name, self.identity())
             .await
     }
 
@@ -915,7 +942,7 @@ impl Sandbox {
     pub async fn request_drain(&self) -> MicrosandboxResult<()> {
         self.backend
             .sandboxes()
-            .drain(self.backend.clone(), &self.name)
+            .drain_identified(self.backend.clone(), &self.name, self.identity())
             .await
     }
 
@@ -930,6 +957,34 @@ impl Sandbox {
         }
     }
 
+    /// Wait until this exact sandbox reaches `status`.
+    pub async fn wait_for_status(
+        &self,
+        status: SandboxStatus,
+    ) -> MicrosandboxResult<SandboxHandle> {
+        self.refresh_handle().await?.wait_for_status(status).await
+    }
+
+    /// Stop and start this exact sandbox using default graceful options.
+    pub async fn restart(&self) -> MicrosandboxResult<Sandbox> {
+        self.restart_with(RestartOptions::default()).await
+    }
+
+    /// Stop and start this exact sandbox with explicit lifecycle options.
+    pub async fn restart_with(&self, options: RestartOptions) -> MicrosandboxResult<Sandbox> {
+        self.refresh_handle().await?.restart_with(options).await
+    }
+
+    /// Stop and remove this exact sandbox using default graceful options.
+    pub async fn destroy(&self) -> MicrosandboxResult<()> {
+        self.destroy_with(DestroyOptions::default()).await
+    }
+
+    /// Stop and remove this exact sandbox with explicit lifecycle options.
+    pub async fn destroy_with(&self, options: DestroyOptions) -> MicrosandboxResult<()> {
+        self.refresh_handle().await?.destroy_with(options).await
+    }
+
     /// Wait until this sandbox is observed in a terminal non-running state.
     pub async fn wait_until_stopped(&self) -> MicrosandboxResult<SandboxStopResult> {
         if self.owns_lifecycle() {
@@ -937,12 +992,7 @@ impl Sandbox {
             return Ok(stop_result_from_exit_status(&self.name, status));
         }
 
-        match self
-            .backend
-            .sandboxes()
-            .get(self.backend.clone(), &self.name)
-            .await
-        {
+        match self.refresh_handle().await {
             Ok(handle) => handle.wait_until_stopped().await,
             Err(error)
                 if self.is_local_ephemeral() && sandbox_not_found_for_name(&error, &self.name) =>
@@ -1550,26 +1600,25 @@ pub(super) async fn remove_local_persisted_sandbox(
     name: &str,
     expected_id: i32,
 ) -> MicrosandboxResult<()> {
-    let _guard = crate::runtime::acquire_sandbox_lifecycle_guard(
-        &local_backend.config().run_dir(),
-        name,
-        std::time::Duration::from_secs(5),
-    )
-    .await?;
+    let _transition_guard =
+        LocalBackend::acquire_sandbox_transition_guard(&local_backend.config().run_dir(), name)
+            .await?;
 
-    // Re-read only after acquiring ownership. A stale `Sandbox` object must
-    // never delete a newer sandbox that reused the same deterministic name.
+    // Re-read after acquiring transition ownership. A stale `Sandbox` object must never delete a
+    // newer sandbox that reused the same deterministic name, and an active identity must not be
+    // reaped merely because a caller held an older terminal snapshot.
     let pools = local_backend.db().await?;
-    let current = sandbox_entity::Entity::find()
+    let mut current = sandbox_entity::Entity::find()
         .filter(sandbox_entity::Column::Name.eq(name))
         .one(pools.read())
         .await?
         .ok_or_else(|| crate::MicrosandboxError::SandboxNotFound(name.to_string()))?;
     if current.id != expected_id {
-        return Err(crate::MicrosandboxError::Runtime(format!(
-            "sandbox {name:?} identity changed from database id {expected_id} to {}; refusing stale removal",
-            current.id
-        )));
+        return Err(crate::MicrosandboxError::SandboxReplaced {
+            name: name.to_string(),
+            expected: format!("local:{expected_id}"),
+            actual: format!("local:{}", current.id),
+        });
     }
     if !matches!(
         current.status,
@@ -1581,20 +1630,52 @@ pub(super) async fn remove_local_persisted_sandbox(
         )));
     }
 
-    let latest_run = run_entity::Entity::find()
-        .filter(run_entity::Column::SandboxId.eq(expected_id))
-        .order_by_desc(run_entity::Column::Id)
-        .one(pools.read())
-        .await?;
-    if latest_run
-        .and_then(|run| run.pid)
-        .is_some_and(microsandbox_utils::process::pid_is_alive)
+    // Older Windows runtimes did not own a lifecycle lock and can outlive their terminal DB row.
+    // Transition ownership prevents a new start while this identity-checked compatibility cleanup
+    // terminates that recorded generation.
+    #[cfg(windows)]
+    if reap_leaked_runtime_process(local_backend, expected_id, name).await?
+        == reap::LeakedReapVerdict::Unverifiable
     {
-        return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
-            "cannot remove sandbox {name:?}: its recorded runtime process is still alive"
+        return Err(crate::MicrosandboxError::Runtime(format!(
+            "cannot remove sandbox {name:?}: its recorded runtime process could not be verified"
         )));
     }
 
+    let _runtime_guard = crate::runtime::acquire_sandbox_lifecycle_guard(
+        &local_backend.config().run_dir(),
+        name,
+        std::time::Duration::from_secs(5),
+    )
+    .await?;
+
+    // Runtime ownership may have taken time to become available. Recheck the exact identity and
+    // terminal state before deleting any deterministic storage.
+    current = sandbox_entity::Entity::find()
+        .filter(sandbox_entity::Column::Name.eq(name))
+        .one(pools.read())
+        .await?
+        .ok_or_else(|| crate::MicrosandboxError::SandboxNotFound(name.to_string()))?;
+    if current.id != expected_id {
+        return Err(crate::MicrosandboxError::SandboxReplaced {
+            name: name.to_string(),
+            expected: format!("local:{expected_id}"),
+            actual: format!("local:{}", current.id),
+        });
+    }
+    if !matches!(
+        current.status,
+        SandboxStatus::Stopped | SandboxStatus::Crashed
+    ) {
+        return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
+            "cannot remove sandbox {name:?}: status changed to {:?}",
+            current.status
+        )));
+    }
+
+    // The runtime lock is the authoritative ownership proof. A numeric PID can remain visible
+    // while an exited Unix child is waiting to be reaped, or can already identify an unrelated
+    // process after PID reuse, so it must not override successful lock acquisition.
     crate::runtime::remove_sandbox_socket_artifacts_for(local_backend, name)?;
     remove_dir_if_exists(&local_backend.sandboxes_dir().join(name))?;
     sandbox_entity::Entity::delete_by_id(expected_id)
@@ -1626,6 +1707,8 @@ mod tests {
     #[cfg(unix)]
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
+    #[cfg(unix)]
+    use sea_orm::EntityTrait;
     use sea_orm::{ActiveModelTrait, Set};
     use tempfile::tempdir;
 
@@ -1880,7 +1963,60 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(error.to_string().contains("identity changed"));
+        assert!(matches!(
+            error,
+            crate::MicrosandboxError::SandboxReplaced { .. }
+        ));
         assert!(sandbox_dir.join("marker").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn persisted_removal_trusts_runtime_ownership_over_a_recycled_pid() {
+        use crate::db::entity::run as run_entity;
+
+        let temp = tempdir().unwrap();
+        let backend = LocalBackend::builder()
+            .home(temp.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        let pools = backend.db().await.unwrap();
+        let current = super::sandbox_entity::ActiveModel {
+            name: Set("recycled-pid".to_string()),
+            config: Set("{}".to_string()),
+            status: Set(SandboxStatus::Stopped),
+            ephemeral: Set(false),
+            ..Default::default()
+        }
+        .insert(pools.write())
+        .await
+        .unwrap();
+        run_entity::ActiveModel {
+            sandbox_id: Set(current.id),
+            // This PID is alive but cannot own the free lifecycle lock. It models both PID reuse
+            // and an exited Unix child that remains visible until its parent reaps the zombie.
+            pid: Set(Some(std::process::id() as i32)),
+            status: Set(run_entity::RunStatus::Running),
+            ..Default::default()
+        }
+        .insert(pools.write())
+        .await
+        .unwrap();
+        let sandbox_dir = backend.sandboxes_dir().join("recycled-pid");
+        std::fs::create_dir_all(&sandbox_dir).unwrap();
+
+        remove_local_persisted_sandbox(&backend, "recycled-pid", current.id)
+            .await
+            .unwrap();
+
+        assert!(!sandbox_dir.exists());
+        assert!(
+            super::sandbox_entity::Entity::find_by_id(current.id)
+                .one(pools.read())
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

@@ -5,7 +5,8 @@
 //! impl's `create`/`create_detached` and the pull-progress shims on
 //! [`Sandbox`] and `SandboxBuilder` all dispatch here.
 
-use std::path::Path;
+use std::fs::File;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use microsandbox_db::DbWriteConnection;
@@ -15,6 +16,7 @@ use microsandbox_image::{
     PullResult, Reference, Registry, ext4, tree,
 };
 use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set, sea_query::Expr};
+use sha2::{Digest as _, Sha256};
 use tokio::sync::Mutex;
 
 use super::LocalBackend;
@@ -61,6 +63,14 @@ struct ResolvedOciImage {
     pull_result: PullResult,
     metadata_reference: String,
     cached_metadata: Option<CachedImageMetadata>,
+}
+
+/// Short-lived ownership of one sandbox name while persisted state or host resources change.
+///
+/// The file handle owns a process-held lock. Closing it releases the lock on both Unix and
+/// Windows, including when a lifecycle caller exits unexpectedly.
+pub(crate) struct SandboxTransitionGuard {
+    _file: File,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -112,6 +122,12 @@ impl LocalBackend {
         // fail fast on conflicting persisted sandbox state.
         let db = self.db().await?;
         let sandbox_dir = self.sandboxes_dir().join(&config.spec.name);
+        // Transition ownership is deliberately separate from the runtime lifecycle lock: this
+        // guard serializes database/storage mutation and launcher-to-runtime handoff, while the
+        // lifecycle lock remains owned by the VM for its entire runtime generation.
+        let _transition_guard =
+            Self::acquire_sandbox_transition_guard(&self.config().run_dir(), &config.spec.name)
+                .await?;
         Self::prepare_create_target(db, &config, &sandbox_dir, &self.config().run_dir()).await?;
 
         // Resolve OCI images before spawning the sandbox process.
@@ -358,20 +374,22 @@ impl LocalBackend {
         // cannot leave a stopped sandbox that never booted.
         let created_named_volumes = ensure_named_volumes(self, &config).await?;
 
-        // Insert the sandbox record and keep its stable database ID.
+        // Claim the persisted identity in Starting state. Running is published only after the
+        // guest agent and all create-time validation are ready for callers.
         let write_db = db.write();
         let persisted_config = config.clone_for_persistence();
-        let sandbox_id = match Self::insert_sandbox_record(write_db, &persisted_config).await {
-            Ok(sandbox_id) => sandbox_id,
-            Err(err) => {
-                rollback_created_named_volumes(self, &created_named_volumes).await;
-                return Err(err);
-            }
-        };
+        let sandbox_id =
+            match Self::insert_starting_sandbox_record(write_db, &persisted_config).await {
+                Ok(sandbox_id) => sandbox_id,
+                Err(err) => {
+                    rollback_created_named_volumes(self, &created_named_volumes).await;
+                    return Err(err);
+                }
+            };
         tracing::debug!(sandbox_id, sandbox = %config.spec.name, "create_local: db record inserted");
 
-        // Spawn the sandbox process and create the bridge. On failure, mark the sandbox
-        // as stopped so it doesn't appear as a phantom "Running" entry.
+        // Spawn the sandbox process and create the bridge. On failure, return the provisional
+        // Starting row to Stopped so it cannot remain as a phantom boot.
         let (local_state, returned_config) = match self
             .create_sandbox_inner(config, sandbox_id, mode, None)
             .await
@@ -379,9 +397,13 @@ impl LocalBackend {
             Ok(pair) => pair,
             Err(e) => {
                 if created_named_volumes.is_empty() {
-                    let _ =
-                        Self::update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped)
-                            .await;
+                    let _ = Self::compare_and_set_sandbox_status(
+                        write_db,
+                        sandbox_id,
+                        &[SandboxStatus::Starting],
+                        SandboxStatus::Stopped,
+                    )
+                    .await;
                 } else {
                     rollback_created_named_volumes(self, &created_named_volumes).await;
                     let _ = Self::delete_sandbox_record(write_db, sandbox_id).await;
@@ -390,6 +412,22 @@ impl LocalBackend {
             }
         };
         let sandbox = Sandbox::from_local(backend.clone(), local_state, returned_config);
+        // This is the readiness publication boundary: create_sandbox_inner returns only after
+        // the relay is connected and agentd has accepted its readiness handshake.
+        if !Self::compare_and_set_sandbox_status(
+            write_db,
+            sandbox_id,
+            &[SandboxStatus::Starting],
+            SandboxStatus::Running,
+        )
+        .await?
+        {
+            let _ = sandbox.stop().await;
+            return Err(crate::MicrosandboxError::Runtime(format!(
+                "sandbox {:?} lost its Starting state before readiness publication",
+                sandbox.name()
+            )));
+        }
         if let Err(err) = Self::update_sandbox_active_config(
             write_db,
             sandbox_id,
@@ -1006,6 +1044,32 @@ impl LocalBackend {
         Ok(())
     }
 
+    /// Acquire exclusive transition ownership for a sandbox name without blocking the async runtime.
+    pub(crate) async fn acquire_sandbox_transition_guard(
+        run_dir: &Path,
+        name: &str,
+    ) -> MicrosandboxResult<SandboxTransitionGuard> {
+        let path = sandbox_transition_lock_path(run_dir, name);
+        let parent = path.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("transition lock has no parent: {}", path.display()),
+            )
+        })?;
+        tokio::fs::create_dir_all(parent).await?;
+        let file = microsandbox_utils::process_lock::open_lock_file(&path)?;
+
+        // LockFileEx/flock is process-wide coordination, but the nonblocking form is a short
+        // syscall. Polling it asynchronously avoids pinning one blocking-pool thread per waiter
+        // when many callers converge on the same name.
+        loop {
+            if microsandbox_utils::process_lock::try_lock_exclusive(&file)? {
+                return Ok(SandboxTransitionGuard { _file: file });
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
     /// Stop the prior sandbox before recreating it.
     ///
     /// Sends SIGTERM with the configured grace, then escalates to SIGKILL
@@ -1132,9 +1196,27 @@ impl LocalBackend {
     }
 
     /// Insert the sandbox record in the database and return its ID.
+    #[cfg(test)]
     pub(super) async fn insert_sandbox_record(
         db: &DbWriteConnection,
         config: &SandboxConfig,
+    ) -> MicrosandboxResult<i32> {
+        Self::insert_sandbox_record_with_status(db, config, SandboxStatus::Running).await
+    }
+
+    /// Insert a provisional local create record that remains non-connectable until ready.
+    async fn insert_starting_sandbox_record(
+        db: &DbWriteConnection,
+        config: &SandboxConfig,
+    ) -> MicrosandboxResult<i32> {
+        Self::insert_sandbox_record_with_status(db, config, SandboxStatus::Starting).await
+    }
+
+    /// Insert the sandbox record with an explicit initial lifecycle status.
+    async fn insert_sandbox_record_with_status(
+        db: &DbWriteConnection,
+        config: &SandboxConfig,
+        status: SandboxStatus,
     ) -> MicrosandboxResult<i32> {
         let config_json = serde_json::to_string(config)?;
         let labels = config.spec.labels.clone();
@@ -1147,7 +1229,7 @@ impl LocalBackend {
                 let model = sandbox_entity::ActiveModel {
                     name: Set(config.spec.name.clone()),
                     config: Set(config_json),
-                    status: Set(SandboxStatus::Running),
+                    status: Set(status),
                     ephemeral: Set(config.spec.lifecycle.ephemeral),
                     created_at: Set(Some(now)),
                     updated_at: Set(Some(now)),
@@ -1286,6 +1368,15 @@ impl LocalBackend {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Derive a stable, filesystem-safe transition-lock path for one sandbox name.
+fn sandbox_transition_lock_path(run_dir: &Path, name: &str) -> PathBuf {
+    let digest = Sha256::digest(name.as_bytes());
+    // Keep the original on-disk namespace so mixed-version processes still contend on one lock.
+    run_dir
+        .join("creation-locks")
+        .join(format!("{}.lock", hex::encode(&digest[..16])))
+}
 
 /// Probe every backward-compatible Unix endpoint before recovering an
 /// untracked namespace. A successful connection is direct evidence that an
@@ -1687,6 +1778,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_local_create_record_stays_starting_until_readiness_publication() {
+        let temp = tempdir().unwrap();
+        let pools = open_test_pools(&temp.path().join("test.db")).await;
+        let config = test_config("booting");
+
+        let sandbox_id = LocalBackend::insert_starting_sandbox_record(pools.write(), &config)
+            .await
+            .unwrap();
+        let row = sandbox_entity::Entity::find_by_id(sandbox_id)
+            .one(pools.read())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(row.status, SandboxStatus::Starting);
+        assert!(
+            LocalBackend::compare_and_set_sandbox_status(
+                pools.write(),
+                sandbox_id,
+                &[SandboxStatus::Starting],
+                SandboxStatus::Running,
+            )
+            .await
+            .unwrap()
+        );
+        let ready = sandbox_entity::Entity::find_by_id(sandbox_id)
+            .one(pools.read())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ready.status, SandboxStatus::Running);
+    }
+
+    #[tokio::test]
     async fn test_desired_and_active_configs_persist_mount_owner() {
         let temp = tempdir().unwrap();
         let pools = open_test_pools(&temp.path().join("test.db")).await;
@@ -1820,6 +1945,75 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("already exists"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_transition_guard_serializes_conflict_check_and_insert() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let pools = Arc::new(open_test_pools(&db_path).await);
+        let run_dir = temp.path().join("run");
+        let sandbox_dir = temp.path().join("sandboxes").join("contended");
+        let config = test_config("contended");
+
+        let winner = LocalBackend::acquire_sandbox_transition_guard(&run_dir, "contended")
+            .await
+            .unwrap();
+        LocalBackend::prepare_create_target(&pools, &config, &sandbox_dir, &run_dir)
+            .await
+            .unwrap();
+        LocalBackend::insert_sandbox_record(pools.write(), &config)
+            .await
+            .unwrap();
+
+        // A distinct file handle must observe the process-held lock, proving the guard is not an
+        // in-process mutex and therefore also coordinates independent SDK processes.
+        let competing_file = microsandbox_utils::process_lock::open_lock_file(
+            &super::sandbox_transition_lock_path(&run_dir, "contended"),
+        )
+        .unwrap();
+        assert!(
+            !tokio::task::spawn_blocking(move || {
+                microsandbox_utils::process_lock::try_lock_exclusive(&competing_file)
+            })
+            .await
+            .unwrap()
+            .unwrap()
+        );
+
+        let contender_pools = pools.clone();
+        let contender_run_dir = run_dir.clone();
+        let contender_sandbox_dir = sandbox_dir.clone();
+        let mut contender = tokio::spawn(async move {
+            let _guard =
+                LocalBackend::acquire_sandbox_transition_guard(&contender_run_dir, "contended")
+                    .await?;
+            LocalBackend::prepare_create_target(
+                &contender_pools,
+                &test_config("contended"),
+                &contender_sandbox_dir,
+                &contender_run_dir,
+            )
+            .await
+        });
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut contender)
+                .await
+                .is_err(),
+            "the losing creator must wait while the winner owns the creation lock"
+        );
+        drop(winner);
+
+        let error = tokio::time::timeout(std::time::Duration::from_secs(5), contender)
+            .await
+            .expect("losing creator did not resume after lock release")
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            crate::MicrosandboxError::SandboxAlreadyExists(_)
+        ));
     }
 
     #[tokio::test]

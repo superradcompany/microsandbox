@@ -43,6 +43,11 @@ class MicrosandboxTest < Test::Unit::TestCase
     assert_respond_to Microsandbox::Sandbox, :with
   end
 
+  def test_connect_or_create_is_available
+    assert_respond_to Microsandbox::Sandbox, :connect_or_create
+    assert_respond_to Microsandbox::Sandbox.builder("ruby-test"), :connect_or_create
+  end
+
   def test_entrypoint_rejects_non_string_elements
     builder = Microsandbox::Sandbox.builder("ruby-test")
     assert_raise(TypeError) { builder.entrypoint(["sh", 1]) }

@@ -34,6 +34,18 @@ func (s *Sandbox) BackendKind() BackendKind { return BackendKind(s.inner.Backend
 // ctx controls the boot operation only; cancelling ctx after this function
 // returns has no effect on the running sandbox.
 func CreateSandbox(ctx context.Context, name string, opts ...SandboxOption) (*Sandbox, error) {
+	return createSandboxWithMode(ctx, name, false, opts...)
+}
+
+// ConnectOrCreateSandbox connects to and runs the persisted sandbox with this
+// name, or creates it if absent. opts apply only when creation is necessary; an
+// existing sandbox retains its persisted configuration. Concurrent callers
+// converge on the winning identity.
+func ConnectOrCreateSandbox(ctx context.Context, name string, opts ...SandboxOption) (*Sandbox, error) {
+	return createSandboxWithMode(ctx, name, true, opts...)
+}
+
+func createSandboxWithMode(ctx context.Context, name string, connectOrCreate bool, opts ...SandboxOption) (*Sandbox, error) {
 	o := SandboxConfig{}
 	for _, opt := range opts {
 		opt(&o)
@@ -45,7 +57,13 @@ func CreateSandbox(ctx context.Context, name string, opts ...SandboxOption) (*Sa
 
 	ffiOpts := buildFFICreateOptions(o)
 
-	inner, err := ffi.CreateSandbox(ctx, name, ffiOpts)
+	var inner *ffi.Sandbox
+	var err error
+	if connectOrCreate {
+		inner, err = ffi.ConnectOrCreateSandbox(ctx, name, ffiOpts)
+	} else {
+		inner, err = ffi.CreateSandbox(ctx, name, ffiOpts)
+	}
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
@@ -524,11 +542,35 @@ type lifecycleOptions struct {
 	timeout time.Duration
 }
 
+type connectOrStartOptions struct {
+	detached bool
+}
+
+type restartOptions struct {
+	force    bool
+	timeout  time.Duration
+	detached bool
+}
+
+type destroyOptions struct {
+	force   bool
+	timeout time.Duration
+}
+
 // StopOption configures Sandbox.Stop and SandboxHandle.Stop.
 type StopOption func(*lifecycleOptions)
 
 // KillOption configures Sandbox.Kill and SandboxHandle.Kill.
 type KillOption func(*lifecycleOptions)
+
+// ConnectOrStartOption configures SandboxHandle.ConnectOrStart.
+type ConnectOrStartOption func(*connectOrStartOptions)
+
+// RestartOption configures identity-safe sandbox restart.
+type RestartOption func(*restartOptions)
+
+// DestroyOption configures identity-safe stop-and-remove convergence.
+type DestroyOption func(*destroyOptions)
 
 // SandboxStopResult describes a terminal sandbox state observed by WaitUntilStopped.
 type SandboxStopResult struct {
@@ -560,6 +602,39 @@ func WithStopTimeout(timeout time.Duration) StopOption {
 // WithKillTimeout sets how long Kill waits for stopped-state observation.
 func WithKillTimeout(timeout time.Duration) KillOption {
 	return func(o *lifecycleOptions) { o.timeout = timeout }
+}
+
+// WithConnectOrStartDetached starts in detached mode when a start is required.
+// It has no effect when ConnectOrStart connects to an already-running sandbox.
+func WithConnectOrStartDetached() ConnectOrStartOption {
+	return func(options *connectOrStartOptions) { options.detached = true }
+}
+
+// WithRestartForce force-terminates instead of requesting graceful shutdown.
+func WithRestartForce() RestartOption {
+	return func(options *restartOptions) { options.force = true }
+}
+
+// WithRestartTimeout sets the graceful-shutdown convergence timeout. Reaching
+// the timeout escalates the restart to forceful termination.
+func WithRestartTimeout(timeout time.Duration) RestartOption {
+	return func(options *restartOptions) { options.timeout = timeout }
+}
+
+// WithRestartDetached starts the restarted runtime in detached mode.
+func WithRestartDetached() RestartOption {
+	return func(options *restartOptions) { options.detached = true }
+}
+
+// WithDestroyForce force-terminates instead of requesting graceful shutdown.
+func WithDestroyForce() DestroyOption {
+	return func(options *destroyOptions) { options.force = true }
+}
+
+// WithDestroyTimeout sets the graceful-shutdown convergence timeout. Reaching
+// the timeout escalates destruction to forceful termination.
+func WithDestroyTimeout(timeout time.Duration) DestroyOption {
+	return func(options *destroyOptions) { options.timeout = timeout }
 }
 
 // WithListCursor continues after a cursor returned by a previous page.
@@ -628,6 +703,7 @@ func RemoveSandbox(ctx context.Context, name string) error {
 // It carries metadata (name, status, timestamps) and provides methods to
 // connect, start, stop, or remove the sandbox. Obtain via GetSandbox.
 type SandboxHandle struct {
+	id            string
 	name          string
 	status        SandboxStatus
 	configJSON    string
@@ -642,6 +718,7 @@ func newSandboxHandle(info *ffi.SandboxHandleInfo) *SandboxHandle {
 		backendKind = BackendUnknown
 	}
 	return &SandboxHandle{
+		id:            info.ID,
 		name:          info.Name,
 		status:        SandboxStatus(info.Status),
 		configJSON:    info.ConfigJSON,
@@ -653,6 +730,9 @@ func newSandboxHandle(info *ffi.SandboxHandleInfo) *SandboxHandle {
 
 // Name returns the sandbox name. Names are limited to 128 UTF-8 bytes.
 func (h *SandboxHandle) Name() string { return h.name }
+
+// ID returns the stable identity of this persisted sandbox.
+func (h *SandboxHandle) ID() string { return h.id }
 
 // Status returns the sandbox's last-known lifecycle status.
 func (h *SandboxHandle) Status() SandboxStatus { return h.status }
@@ -672,9 +752,15 @@ func (h *SandboxHandle) Config() (*SandboxConfig, error) {
 	return &config, nil
 }
 
-// Refresh returns a fresh handle for the same sandbox name.
+// Refresh returns a fresh handle for the same persisted sandbox.
 func (h *SandboxHandle) Refresh(ctx context.Context) (*SandboxHandle, error) {
-	return GetSandbox(ctx, h.name)
+	info, err := ffi.SandboxHandleInfoLifecycle(
+		ctx, h.name, h.id, "refresh", ffi.SandboxHandleLifecycleOptions{},
+	)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return newSandboxHandle(info), nil
 }
 
 // CreatedAt returns the sandbox creation time, or the zero value if unknown.
@@ -742,7 +828,9 @@ func (h *SandboxHandle) Touch(ctx context.Context) (*SandboxTouchResult, error) 
 
 // Connect reattaches to the running sandbox and returns a live handle.
 func (h *SandboxHandle) Connect(ctx context.Context) (*Sandbox, error) {
-	inner, err := ffi.ConnectSandbox(ctx, h.name)
+	inner, err := ffi.SandboxHandleLiveLifecycle(
+		ctx, h.name, h.id, "connect", ffi.SandboxHandleLifecycleOptions{},
+	)
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
@@ -751,48 +839,127 @@ func (h *SandboxHandle) Connect(ctx context.Context) (*Sandbox, error) {
 
 // Start boots the sandbox (if stopped) and returns a live handle.
 func (h *SandboxHandle) Start(ctx context.Context) (*Sandbox, error) {
-	return StartSandbox(ctx, h.name)
+	inner, err := ffi.SandboxHandleLiveLifecycle(
+		ctx, h.name, h.id, "start", ffi.SandboxHandleLifecycleOptions{},
+	)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &Sandbox{inner: inner}, nil
 }
 
 // StartDetached boots the sandbox in detached mode.
 func (h *SandboxHandle) StartDetached(ctx context.Context) (*Sandbox, error) {
-	return StartSandboxDetached(ctx, h.name)
+	inner, err := ffi.SandboxHandleLiveLifecycle(
+		ctx, h.name, h.id, "start", ffi.SandboxHandleLifecycleOptions{Detached: true},
+	)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &Sandbox{inner: inner}, nil
+}
+
+// ConnectOrStart connects when this exact sandbox is running, waits while it is
+// starting, or starts it when it is created, stopped, or crashed. A same-name
+// replacement is rejected instead of becoming this handle's target.
+func (h *SandboxHandle) ConnectOrStart(ctx context.Context, opts ...ConnectOrStartOption) (*Sandbox, error) {
+	options := connectOrStartOptions{}
+	for _, apply := range opts {
+		apply(&options)
+	}
+	inner, err := ffi.SandboxHandleLiveLifecycle(
+		ctx,
+		h.name,
+		h.id,
+		"connect_or_start",
+		ffi.SandboxHandleLifecycleOptions{Detached: options.detached},
+	)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &Sandbox{inner: inner}, nil
 }
 
 // Stop gracefully stops the sandbox and waits until stopped state is observed.
 func (h *SandboxHandle) Stop(ctx context.Context, opts ...StopOption) error {
-	return wrapFFI(ffi.StopSandboxByName(ctx, h.name, stopTimeoutMillis(opts)))
+	return wrapFFI(ffi.SandboxHandleVoidLifecycle(ctx, h.name, h.id, "stop", ffi.SandboxHandleLifecycleOptions{TimeoutMs: stopTimeoutMillis(opts)}))
 }
 
 // RequestStop requests graceful shutdown and returns once the request is sent.
 func (h *SandboxHandle) RequestStop(ctx context.Context) error {
-	return wrapFFI(ffi.RequestStopSandboxByName(ctx, h.name))
+	return wrapFFI(ffi.SandboxHandleVoidLifecycle(ctx, h.name, h.id, "request_stop", ffi.SandboxHandleLifecycleOptions{}))
 }
 
 // Kill force-kills the sandbox and waits until stopped state is observed.
 func (h *SandboxHandle) Kill(ctx context.Context, opts ...KillOption) error {
-	return wrapFFI(ffi.KillSandboxByName(ctx, h.name, killTimeoutMillis(opts)))
+	return wrapFFI(ffi.SandboxHandleVoidLifecycle(ctx, h.name, h.id, "kill", ffi.SandboxHandleLifecycleOptions{TimeoutMs: killTimeoutMillis(opts)}))
 }
 
 // RequestKill requests force termination and returns once the request is sent.
 func (h *SandboxHandle) RequestKill(ctx context.Context) error {
-	return wrapFFI(ffi.RequestKillSandboxByName(ctx, h.name))
+	return wrapFFI(ffi.SandboxHandleVoidLifecycle(ctx, h.name, h.id, "request_kill", ffi.SandboxHandleLifecycleOptions{}))
 }
 
 // RequestDrain requests graceful drain and returns once the request is sent.
 func (h *SandboxHandle) RequestDrain(ctx context.Context) error {
-	return wrapFFI(ffi.RequestDrainSandboxByName(ctx, h.name))
+	return wrapFFI(ffi.SandboxHandleVoidLifecycle(ctx, h.name, h.id, "request_drain", ffi.SandboxHandleLifecycleOptions{}))
 }
 
 // WaitUntilStopped waits until this sandbox is observed in terminal state.
 func (h *SandboxHandle) WaitUntilStopped(ctx context.Context) (*SandboxStopResult, error) {
-	result, err := ffi.WaitSandboxByNameUntilStopped(ctx, h.name)
+	result, err := ffi.SandboxHandleStopLifecycle(ctx, h.name, h.id)
 	return sandboxStopResultFromFFI(result), wrapFFI(err)
 }
 
 // Remove deletes the sandbox's persisted state. The sandbox must be stopped.
 func (h *SandboxHandle) Remove(ctx context.Context) error {
-	return RemoveSandbox(ctx, h.name)
+	return wrapFFI(ffi.SandboxHandleVoidLifecycle(ctx, h.name, h.id, "remove", ffi.SandboxHandleLifecycleOptions{}))
+}
+
+// WaitForStatus waits without a built-in timeout until this exact sandbox
+// reaches status. Use ctx for deadlines or cancellation. A same-name
+// replacement is rejected.
+func (h *SandboxHandle) WaitForStatus(ctx context.Context, status SandboxStatus) (*SandboxHandle, error) {
+	info, err := ffi.SandboxHandleInfoLifecycle(
+		ctx, h.name, h.id, "wait_for_status", ffi.SandboxHandleLifecycleOptions{Status: string(status)},
+	)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return newSandboxHandle(info), nil
+}
+
+// Restart stops and starts this exact sandbox. It defaults to graceful shutdown
+// with a ten-second convergence timeout; created, stopped, and crashed
+// sandboxes start directly.
+func (h *SandboxHandle) Restart(ctx context.Context, opts ...RestartOption) (*Sandbox, error) {
+	options := restartOptions{timeout: defaultStopTimeout}
+	for _, apply := range opts {
+		apply(&options)
+	}
+	inner, err := ffi.SandboxHandleLiveLifecycle(ctx, h.name, h.id, "restart", ffi.SandboxHandleLifecycleOptions{
+		Detached:  options.detached,
+		Force:     options.force,
+		TimeoutMs: durationMillisCeil(options.timeout),
+	})
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &Sandbox{inner: inner}, nil
+}
+
+// Destroy stops and removes this exact sandbox. It defaults to graceful
+// shutdown with a ten-second convergence timeout and refuses to remove a
+// same-name replacement.
+func (h *SandboxHandle) Destroy(ctx context.Context, opts ...DestroyOption) error {
+	options := destroyOptions{timeout: defaultStopTimeout}
+	for _, apply := range opts {
+		apply(&options)
+	}
+	return wrapFFI(ffi.SandboxHandleVoidLifecycle(ctx, h.name, h.id, "destroy", ffi.SandboxHandleLifecycleOptions{
+		Force:     options.force,
+		TimeoutMs: durationMillisCeil(options.timeout),
+	}))
 }
 
 // Snapshot captures this stopped sandbox under a bare name in the default
@@ -811,6 +978,13 @@ func (h *SandboxHandle) Snapshot(ctx context.Context, name string) (*SnapshotArt
 
 // Name returns the sandbox's name. Names are limited to 128 UTF-8 bytes.
 func (s *Sandbox) Name() string { return s.inner.Name() }
+
+// ID returns the stable identity of this persisted sandbox.
+func (s *Sandbox) ID() string { return s.inner.ID() }
+
+func (s *Sandbox) identityHandle() *SandboxHandle {
+	return &SandboxHandle{name: s.Name(), id: s.ID(), backendKind: s.BackendKind()}
+}
 
 // Stop gracefully stops the sandbox and waits until stopped state is observed.
 func (s *Sandbox) Stop(ctx context.Context, opts ...StopOption) error {
@@ -860,6 +1034,27 @@ func (s *Sandbox) RequestDrain(ctx context.Context) error {
 func (s *Sandbox) WaitUntilStopped(ctx context.Context) (*SandboxStopResult, error) {
 	result, err := s.inner.WaitUntilStopped(ctx)
 	return sandboxStopResultFromFFI(result), wrapFFI(err)
+}
+
+// WaitForStatus waits without a built-in timeout until this exact sandbox
+// reaches status. Use ctx for deadlines or cancellation. A same-name
+// replacement is rejected.
+func (s *Sandbox) WaitForStatus(ctx context.Context, status SandboxStatus) (*SandboxHandle, error) {
+	return s.identityHandle().WaitForStatus(ctx, status)
+}
+
+// Restart stops and starts this exact sandbox. It defaults to graceful shutdown
+// with a ten-second convergence timeout; created, stopped, and crashed
+// sandboxes start directly.
+func (s *Sandbox) Restart(ctx context.Context, opts ...RestartOption) (*Sandbox, error) {
+	return s.identityHandle().Restart(ctx, opts...)
+}
+
+// Destroy stops and removes this exact sandbox. It defaults to graceful
+// shutdown with a ten-second convergence timeout and refuses to remove a
+// same-name replacement.
+func (s *Sandbox) Destroy(ctx context.Context, opts ...DestroyOption) error {
+	return s.identityHandle().Destroy(ctx, opts...)
 }
 
 // OwnsLifecycle reports whether this handle owns the VM process. When true,

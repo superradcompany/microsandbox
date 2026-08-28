@@ -63,11 +63,13 @@ def _method(name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
 
 def test_create_methods_have_explicit_keyword_only_contracts() -> None:
     create = _method("create")
+    connect_or_create = _method("connect_or_create")
     create_with_progress = _method("create_with_progress")
 
     assert isinstance(create, ast.AsyncFunctionDef)
+    assert isinstance(connect_or_create, ast.AsyncFunctionDef)
     assert isinstance(create_with_progress, ast.FunctionDef)
-    for method in (create, create_with_progress):
+    for method in (create, connect_or_create, create_with_progress):
         assert method.args.kwarg is None
         assert [arg.arg for arg in method.args.kwonlyargs] == EXPECTED_KWARGS
         assert all(default is not None for default in method.args.kw_defaults)
@@ -130,3 +132,27 @@ def test_default_workload_methods_have_explicit_keyword_only_contracts() -> None
         "env",
         "detach_keys",
     ]
+
+
+def test_lifecycle_convergence_methods_are_typed() -> None:
+    tree = ast.parse(STUB_PATH.read_text())
+    classes = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name in {"Sandbox", "SandboxHandle"}
+    }
+
+    for class_name in ("Sandbox", "SandboxHandle"):
+        methods = {
+            node.name
+            for node in classes[class_name].body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        assert {"id", "wait_for_status", "restart", "destroy"} <= methods
+
+    handle_methods = {
+        node.name
+        for node in classes["SandboxHandle"].body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert "connect_or_start" in handle_methods

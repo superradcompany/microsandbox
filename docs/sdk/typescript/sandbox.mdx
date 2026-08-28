@@ -5,6 +5,20 @@ description: TypeScript SDK - Sandbox API reference
 
 Create and control a microVM sandbox: boot it from an image, run commands, stream logs and metrics, then shut it down. See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
 
+## Lifecycle convergence
+
+```typescript
+Sandbox.builder(name).connectOrCreate(): Promise<Sandbox>
+handle.connectOrStart(options?): Promise<Sandbox>
+handle.waitForStatus(status): Promise<SandboxHandle>
+handle.restart(options?): Promise<Sandbox>
+handle.destroy(options?): Promise<void>
+sandbox.id: string
+handle.id: string
+```
+
+`connectOrCreate` converges on the current persisted sandbox by name and uses builder configuration only when it creates. Receiver lifecycle operations are bound to the stable opaque `id`; a stale receiver throws `SandboxReplacedError` instead of acting on a replacement that reused the name. `Sandbox` also exposes `waitForStatus`, `restart`, and `destroy`. See [Lifecycle convergence and identity safety](/sandboxes/lifecycle#converge-on-a-named-sandbox) for state behavior and examples.
+
 ## Functions
 
 #### <span className="msb-hn">allSandboxMetrics()</span>
@@ -255,7 +269,7 @@ Restart a stopped sandbox in detached mode. The sandbox survives after your proc
 
 <p className="msb-member-group">Instance methods</p>
 
-A running `Sandbox` also exposes two read-only properties: `name` (`string`, the sandbox name) and `ownsLifecycle` (`boolean`). Local attached handles return `true`; local detached handles and all cloud handles return `false`, because the cloud worker owns the sandbox process.
+A running `Sandbox` exposes `name` (`string`), `id` (`string`), and `ownsLifecycle` (`boolean`) as read-only properties. The stable opaque `id` changes when a removed name is recreated. Local attached handles own lifecycle; local detached handles and all cloud handles do not, because the cloud worker owns the sandbox process.
 
 Command execution (`exec`, `execWith`, `execStream`, `execStreamWith`, `shell`, `shellStream`) and foreground attachment (`attach`, `attachWith`, `attachShell`) live on the [Execution](/sdk/typescript/execution) page.
 
@@ -751,6 +765,30 @@ await sandbox.stop();
 
 Gracefully shut down the sandbox and wait until stopped state is observed. Lets the sandbox finish writing any pending data to disk before it exits, so files written inside the sandbox aren't lost across a later restart. Waits up to 10_000 ms for a clean exit; if the sandbox is still running after that, it is force-killed.
 
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">waitForStatus()</span>
+
+```typescript
+waitForStatus(status: SandboxStatus): Promise<SandboxHandle>
+```
+
+Wait without a built-in timeout until this exact persisted sandbox reaches `status`. Returns a refreshed metadata handle and throws `SandboxReplacedError` rather than following a reused name. Use `Promise.race` when the caller needs its own deadline; the underlying wait is not cancellable yet.
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">restart()</span>
+
+```typescript
+restart(options?: { force?: boolean; timeoutMs?: number; detached?: boolean }): Promise<Sandbox>
+```
+
+Restart this exact sandbox. Defaults to graceful shutdown, a 10_000 ms timeout, and attached local start. A stopped, crashed, or created sandbox starts directly; `Starting` is observed until it settles. Set `force` to kill, `timeoutMs` to change shutdown convergence, or `detached` for a local background start.
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">destroy()</span>
+
+```typescript
+destroy(options?: { force?: boolean; timeoutMs?: number }): Promise<void>
+```
+
+Stop and remove this exact sandbox. Defaults to graceful shutdown with a 10_000 ms timeout. Identity checks throw `SandboxReplacedError` instead of deleting a replacement that reused the name.
+
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">stopWithTimeout()</span>
 
 <Tooltip tip="Graceful stop works on microsandbox cloud; timeout expiry cannot escalate to force kill."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
@@ -910,6 +948,18 @@ Build and boot the sandbox. By default, a local handle is attached and stops whe
     <div className="msb-param-desc">Running sandbox.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">connectOrCreate()</span>
+
+```typescript
+connectOrCreate(): Promise<Sandbox>
+```
+
+Converge on the current persisted sandbox by name. The method connects when it is running, waits through `starting`, starts it when it is `created`, `stopped`, or `crashed`, and creates it only when the name is absent. Builder settings apply only when creation is necessary; existing persisted configuration always wins. Concurrent callers converge on the winning identity. Calling [`replace()`](#replace) or [`replaceWithTimeout()`](#replacewithtimeout) on this builder is invalid.
+
+<p className="msb-label">Returns</p>
+
+`Promise<`[`Sandbox`](#instance-methods)`>`
 
 #### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">createWithPullProgress()</span>
 
@@ -2272,6 +2322,12 @@ A metadata and lifecycle handle for an existing sandbox.
 
 Sandbox name, up to 128 UTF-8 bytes
 
+#### <span className="msb-recv">handle.</span><span className="msb-hn">id</span>
+
+`string`
+
+Opaque stable identity captured by this handle. Receiver lifecycle methods remain bound to this value and throw `SandboxReplacedError` if the reusable name now points to another sandbox.
+
 #### <span className="msb-recv">handle.</span><span className="msb-hn">status</span>
 
 [`SandboxStatus`](#sandboxstatus)
@@ -2451,6 +2507,38 @@ Same as `connect()` with an explicit timeout in milliseconds
 <p className="msb-label">Returns</p>
 
 `Promise<`[`Sandbox`](#instance-methods)`>`
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">connectOrStart()</span>
+
+```typescript
+connectOrStart(options?: { detached?: boolean }): Promise<Sandbox>
+```
+
+Connect when this exact sandbox is running, wait through `starting`, or start it when it is `created`, `stopped`, or `crashed`. `draining` and `paused` are rejected. Set `detached` only to make a required local start run in the background; connecting to an already-running sandbox does not change ownership.
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">waitForStatus()</span>
+
+```typescript
+waitForStatus(status: SandboxStatus): Promise<SandboxHandle>
+```
+
+Wait without a built-in timeout until this exact sandbox reaches `status`, returning a refreshed handle. Throws `SandboxReplacedError` rather than rebinding to a replacement.
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">restart()</span>
+
+```typescript
+restart(options?: { force?: boolean; timeoutMs?: number; detached?: boolean }): Promise<Sandbox>
+```
+
+Restart this exact sandbox with the same state and option semantics as [`sandbox.restart()`](#restart).
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">destroy()</span>
+
+```typescript
+destroy(options?: { force?: boolean; timeoutMs?: number }): Promise<void>
+```
+
+Stop and remove this exact sandbox. A stale handle cannot destroy a same-name replacement.
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">stop()</span>
 
@@ -3002,7 +3090,10 @@ Current lifecycle state of a sandbox. String literal type.
 
 | Value | Description |
 |-------|-------------|
+| `"created"` | Persisted resource exists but has not started |
+| `"starting"` | Runtime is booting or waiting for capacity |
 | `"running"` | Guest agent is ready; `exec`, `shell`, `fs` work |
+| `"draining"` | Graceful shutdown in progress; existing commands finish, new ones rejected |
+| `"paused"` | VM is paused |
 | `"stopped"` | VM shut down; configuration persisted; can be restarted |
 | `"crashed"` | VM exited unexpectedly (kernel panic, OOM, etc.) |
-| `"draining"` | Graceful shutdown in progress; existing commands finish, new ones rejected |

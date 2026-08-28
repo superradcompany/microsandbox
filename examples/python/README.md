@@ -37,6 +37,7 @@ uv run --project sdk/python python examples/python/fs-read-stream/main.py
 
 | Example | Description |
 |---------|-------------|
+| `lifecycle-convergence` | Live convergence and stale-handle identity-safety checks with timing metrics |
 | `cloud-backend` | Cloud backend lifecycle and live logs |
 | `root-oci` | OCI image rootfs |
 | `root-bind` | Bind-mounted local directory |

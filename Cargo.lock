@@ -3660,6 +3660,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lifecycle-convergence"
+version = "0.1.0"
+dependencies = [
+ "microsandbox",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "linux-keyutils"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

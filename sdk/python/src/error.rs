@@ -63,6 +63,7 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
             CloudHttp { .. } => ("CloudHttpError", err.to_string()),
             SandboxNotFound(_) => ("SandboxNotFoundError", err.to_string()),
             SandboxAlreadyExists(_) => ("SandboxAlreadyExistsError", err.to_string()),
+            SandboxReplaced { .. } => ("SandboxReplacedError", err.to_string()),
             SandboxStillRunning(_) => ("SandboxStillRunningError", err.to_string()),
             SandboxNotRunning(_) => ("SandboxNotRunningError", err.to_string()),
             ExecTimeout(_) => ("ExecTimeoutError", err.to_string()),

@@ -26,6 +26,7 @@ cargo run -p fs-read-stream
 
 | Example | Command | Description |
 |---------|---------|-------------|
+| `lifecycle-convergence` | `cargo run -p lifecycle-convergence` | Live convergence and stale-handle identity-safety checks with timing metrics |
 | `cloud-backend` | `cargo run -p cloud-backend` | Cloud backend lifecycle and live logs |
 | `root-oci` | `cargo run -p root-oci` | OCI image rootfs |
 | `root-bind` | `cargo run -p root-bind` | Bind-mounted local directory |

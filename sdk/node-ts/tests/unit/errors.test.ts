@@ -6,6 +6,7 @@ import {
   MicrosandboxError,
   NoDefaultCommandError,
   SandboxNotFoundError,
+  SandboxReplacedError,
 } from "../../dist/index.js";
 import { mapNapiError } from "../../dist/internal/error-mapping.js";
 
@@ -66,6 +67,16 @@ describe("mapNapiError", () => {
     const mapped = mapNapiError(raw);
     expect(mapped).toBeInstanceOf(NoDefaultCommandError);
     expect((mapped as NoDefaultCommandError).code).toBe("noDefaultCommand");
+    expect((mapped as MicrosandboxError).cause).toBe(raw);
+  });
+
+  it("maps stale sandbox identities to SandboxReplacedError", () => {
+    const raw = new Error(
+      "[SandboxReplaced] sandbox worker was replaced (expected local:1, found local:2)",
+    );
+    const mapped = mapNapiError(raw);
+    expect(mapped).toBeInstanceOf(SandboxReplacedError);
+    expect((mapped as SandboxReplacedError).code).toBe("sandboxReplaced");
     expect((mapped as MicrosandboxError).cause).toBe(raw);
   });
 });

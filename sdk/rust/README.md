@@ -74,6 +74,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Reusable Lifecycle Convergence
+
+Use `connect_or_create` when a stable name should converge on one persisted sandbox. Existing configuration wins; the builder is used only if creation is necessary. Handles retain a stable `id`, so lifecycle calls on stale receivers refuse to act on a replacement that reused the name.
+
+```rust
+let sandbox = Sandbox::builder("worker")
+    .image("python")
+    .memory(1024)
+    .connect_or_create()
+    .await?;
+
+println!("{}: {}", sandbox.name(), sandbox.id());
+let running = Sandbox::get("worker").await?.connect_or_start().await?;
+running.request_stop().await?;
+let stopped = running
+    .wait_for_status(microsandbox::sandbox::SandboxStatus::Stopped)
+    .await?;
+let restarted = stopped.restart().await?;
+restarted.destroy().await?;
+```
+
 ## Common Examples
 
 These snippets assume you already have a live `sandbox: Sandbox`. See [examples/rust](../../examples/rust) for complete runnable crates.

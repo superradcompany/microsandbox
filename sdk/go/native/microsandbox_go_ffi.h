@@ -56,6 +56,7 @@ void msb_cancel_unregister(uint64_t id);
 char *msb_sandbox_create(uint64_t cancel_id,
                          const char *name,
                          const char *opts_json,
+                         bool connect_or_create,
                          unsigned char *buf,
                          uintptr_t buf_len);
 
@@ -74,6 +75,17 @@ char *msb_sandbox_start(uint64_t cancel_id,
                         bool detached,
                         unsigned char *buf,
                         uintptr_t buf_len);
+
+/**
+ * Identity-safe lifecycle dispatch for Go `SandboxHandle` receivers.
+ */
+char *msb_sandbox_handle_lifecycle(uint64_t cancel_id,
+                                   const char *name,
+                                   const char *expected_id,
+                                   const char *operation,
+                                   const char *opts_json,
+                                   unsigned char *buf,
+                                   uintptr_t buf_len);
 
 char *msb_sandbox_handle_stop(uint64_t cancel_id,
                               const char *name,

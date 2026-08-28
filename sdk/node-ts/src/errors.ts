@@ -8,7 +8,9 @@ export type MicrosandboxErrorCode =
   | "noDefaultCommand"
   | "sandboxNotFound"
   | "sandboxAlreadyExists"
+  | "sandboxReplaced"
   | "sandboxStillRunning"
+  | "sandboxNotRunning"
   | "runtime"
   | "json"
   | "protocol"
@@ -92,9 +94,21 @@ export class SandboxAlreadyExistsError extends MicrosandboxError {
   }
 }
 
+export class SandboxReplacedError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("sandboxReplaced", message, options);
+  }
+}
+
 export class SandboxStillRunningError extends MicrosandboxError {
   constructor(message: string, options?: ErrorOptions) {
     super("sandboxStillRunning", message, options);
+  }
+}
+
+export class SandboxNotRunningError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("sandboxNotRunning", message, options);
   }
 }
 

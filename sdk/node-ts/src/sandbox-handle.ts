@@ -6,7 +6,12 @@ import {
   type SandboxModificationPlan,
 } from "./modify.js";
 import { metricsFromNapi } from "./internal/metrics.js";
-import type { NapiSandboxConfig, NapiSandboxHandle } from "./internal/napi.js";
+import type {
+  NapiSandboxConfig,
+  NapiSandboxDestroyOptions,
+  NapiSandboxHandle,
+  NapiSandboxRestartOptions,
+} from "./internal/napi.js";
 import {
   LogEntry,
   LogStream,
@@ -34,10 +39,15 @@ export interface SandboxStopResult {
   readonly source: string | null;
 }
 
+export type RestartOptions = NapiSandboxRestartOptions;
+export type DestroyOptions = NapiSandboxDestroyOptions;
+
 export class SandboxHandle {
   private readonly inner: NapiSandboxHandle;
   /** Sandbox name. Names are limited to 128 UTF-8 bytes. */
   readonly name: string;
+  /** Stable identity that changes when this name is removed and recreated. */
+  readonly id: string;
   readonly status: SandboxStatus;
   /** Backend retained by this handle. */
   readonly backendKind: "local" | "cloud";
@@ -49,6 +59,7 @@ export class SandboxHandle {
   constructor(inner: NapiSandboxHandle) {
     this.inner = inner;
     this.name = inner.name;
+    this.id = inner.id;
     this.status = inner.status as SandboxStatus;
     this.backendKind = inner.backendKind;
     this.configJson = inner.configJson;
@@ -138,6 +149,23 @@ export class SandboxHandle {
   }
 
   /**
+   * Connect when this exact sandbox is running, wait while it is starting, or
+   * start it when it is created, stopped, or crashed.
+   *
+   * `detached` applies only when a start is required. A same-name replacement
+   * is rejected instead of becoming the target of this handle.
+   */
+  async connectOrStart(options?: { detached?: boolean }): Promise<Sandbox> {
+    const detached = options?.detached ?? false;
+    const raw = await withMappedErrors(() =>
+      this.inner.connectOrStart(detached),
+    );
+    // Connecting to an existing running sandbox never takes lifecycle
+    // ownership; only a start can return an owning attached handle.
+    return new Sandbox(raw, this.name);
+  }
+
+  /**
    * Gracefully shut down the sandbox. Lets it finish writing any
    * pending data to disk before it exits, so files written inside the
    * sandbox aren't lost across a later restart. Force-kills after
@@ -175,6 +203,32 @@ export class SandboxHandle {
 
   async requestDrain(): Promise<void> {
     await withMappedErrors(() => this.inner.requestDrain());
+  }
+
+  /**
+   * Wait until this exact persisted sandbox reaches `status`.
+   * This method has no built-in timeout and rejects same-name replacements.
+   */
+  async waitForStatus(status: SandboxStatus): Promise<SandboxHandle> {
+    const raw = await withMappedErrors(() => this.inner.waitForStatus(status));
+    return new SandboxHandle(raw);
+  }
+
+  /**
+   * Stop and start this exact persisted sandbox.
+   * Graceful shutdown and a ten-second convergence timeout are the defaults.
+   */
+  async restart(options?: RestartOptions): Promise<Sandbox> {
+    const raw = await withMappedErrors(() => this.inner.restart(options));
+    return new Sandbox(raw, this.name);
+  }
+
+  /**
+   * Stop and remove this exact persisted sandbox.
+   * The identity check refuses to remove a same-name replacement.
+   */
+  async destroy(options?: DestroyOptions): Promise<void> {
+    await withMappedErrors(() => this.inner.destroy(options));
   }
 
   async waitUntilStopped(): Promise<SandboxStopResult> {

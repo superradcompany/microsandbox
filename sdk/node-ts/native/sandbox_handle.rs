@@ -1,4 +1,4 @@
-use microsandbox::sandbox::SandboxHandle;
+use microsandbox::sandbox::{DestroyOptions, RestartOptions, SandboxHandle, SandboxStatus};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
@@ -16,6 +16,21 @@ use crate::types::*;
 #[napi(js_name = "SandboxHandle")]
 pub struct JsSandboxHandle {
     inner: SandboxHandle,
+}
+
+/// Options for `restart`.
+#[napi(object)]
+pub struct SandboxRestartOptions {
+    pub force: Option<bool>,
+    pub timeout_ms: Option<u32>,
+    pub detached: Option<bool>,
+}
+
+/// Options for `destroy`.
+#[napi(object)]
+pub struct SandboxDestroyOptions {
+    pub force: Option<bool>,
+    pub timeout_ms: Option<u32>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -36,7 +51,13 @@ impl JsSandboxHandle {
         self.inner.name().to_string()
     }
 
-    /// Status at time of query: "running", "stopped", "crashed", or "draining".
+    /// Stable backend-assigned identity for this persisted sandbox.
+    #[napi(getter)]
+    pub fn id(&self) -> String {
+        self.inner.id().to_string()
+    }
+
+    /// Status at time of query.
     #[napi(getter)]
     pub fn status(&self) -> String {
         format!("{:?}", self.inner.status_snapshot()).to_lowercase()
@@ -129,6 +150,18 @@ impl JsSandboxHandle {
         Ok(Sandbox::from_rust(inner))
     }
 
+    /// Connect when running, or start the same persisted sandbox when stopped.
+    #[napi(js_name = "connectOrStart")]
+    pub async fn connect_or_start(&self, detached: Option<bool>) -> Result<Sandbox> {
+        let inner = if detached.unwrap_or(false) {
+            self.inner.connect_or_start_detached().await
+        } else {
+            self.inner.connect_or_start().await
+        }
+        .map_err(to_napi_error)?;
+        Ok(Sandbox::from_rust(inner))
+    }
+
     /// Connect with an explicit timeout in milliseconds.
     ///
     /// If the sandbox doesn't respond within this window, the call
@@ -201,6 +234,39 @@ impl JsSandboxHandle {
         self.inner.request_drain().await.map_err(to_napi_error)
     }
 
+    /// Wait until this exact sandbox reaches the requested status.
+    #[napi(js_name = "waitForStatus")]
+    pub async fn wait_for_status(&self, status: String) -> Result<JsSandboxHandle> {
+        let status = parse_sandbox_status(&status)?;
+        let handle = self
+            .inner
+            .wait_for_status(status)
+            .await
+            .map_err(to_napi_error)?;
+        Ok(JsSandboxHandle::from_rust(handle))
+    }
+
+    /// Stop and start this exact sandbox.
+    #[napi]
+    pub async fn restart(&self, options: Option<SandboxRestartOptions>) -> Result<Sandbox> {
+        let options = restart_options(options);
+        let inner = self
+            .inner
+            .restart_with(options)
+            .await
+            .map_err(to_napi_error)?;
+        Ok(Sandbox::from_rust(inner))
+    }
+
+    /// Stop and remove this exact sandbox.
+    #[napi]
+    pub async fn destroy(&self, options: Option<SandboxDestroyOptions>) -> Result<()> {
+        self.inner
+            .destroy_with(destroy_options(options))
+            .await
+            .map_err(to_napi_error)
+    }
+
     /// Wait until the sandbox is observed in a terminal non-running state.
     #[napi]
     pub async fn wait_until_stopped(&self) -> Result<SandboxStopResult> {
@@ -261,4 +327,42 @@ impl JsSandboxHandle {
         let snap = self.inner.snapshot(&name).await.map_err(to_napi_error)?;
         Ok(crate::snapshot::JsSnapshot::from_rust(snap))
     }
+}
+
+fn parse_sandbox_status(status: &str) -> Result<SandboxStatus> {
+    match status {
+        "created" => Ok(SandboxStatus::Created),
+        "starting" => Ok(SandboxStatus::Starting),
+        "running" => Ok(SandboxStatus::Running),
+        "draining" => Ok(SandboxStatus::Draining),
+        "paused" => Ok(SandboxStatus::Paused),
+        "stopped" => Ok(SandboxStatus::Stopped),
+        "crashed" => Ok(SandboxStatus::Crashed),
+        other => Err(napi::Error::from_reason(format!(
+            "invalid sandbox status {other:?}"
+        ))),
+    }
+}
+
+pub(crate) fn restart_options(options: Option<SandboxRestartOptions>) -> RestartOptions {
+    let mut result = RestartOptions::default();
+    if let Some(options) = options {
+        result.force = options.force.unwrap_or(result.force);
+        result.detached = options.detached.unwrap_or(result.detached);
+        if let Some(timeout_ms) = options.timeout_ms {
+            result.timeout = std::time::Duration::from_millis(timeout_ms.into());
+        }
+    }
+    result
+}
+
+pub(crate) fn destroy_options(options: Option<SandboxDestroyOptions>) -> DestroyOptions {
+    let mut result = DestroyOptions::default();
+    if let Some(options) = options {
+        result.force = options.force.unwrap_or(result.force);
+        if let Some(timeout_ms) = options.timeout_ms {
+            result.timeout = std::time::Duration::from_millis(timeout_ms.into());
+        }
+    }
+    result
 }

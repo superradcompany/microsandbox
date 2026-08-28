@@ -59,6 +59,20 @@ pub enum MicrosandboxError {
     #[error("sandbox already exists: {0}")]
     SandboxAlreadyExists(String),
 
+    /// A receiver was bound to an older sandbox that has since been replaced
+    /// by another sandbox using the same name.
+    #[error(
+        "sandbox {name:?} was replaced (expected identity {expected}, found {actual}); refusing stale lifecycle operation"
+    )]
+    SandboxReplaced {
+        /// Reused sandbox name.
+        name: String,
+        /// Identity captured by the receiver.
+        expected: String,
+        /// Identity currently associated with the name.
+        actual: String,
+    },
+
     /// The sandbox is still running and cannot be removed.
     #[error("sandbox still running: {0}")]
     SandboxStillRunning(String),

@@ -1242,6 +1242,39 @@ impl SandboxBuilder {
         super::Sandbox::create(config).await
     }
 
+    /// Connect to the persisted sandbox with this name, or create it.
+    ///
+    /// Existing sandboxes keep their persisted configuration: running ones
+    /// are connected and stopped ones are started. Builder configuration is
+    /// used only when this call creates the sandbox. A concurrent creator is
+    /// handled by connecting to and converging on the winner.
+    pub async fn connect_or_create(self) -> MicrosandboxResult<super::Sandbox> {
+        if self.config.replace_existing {
+            return Err(MicrosandboxError::InvalidConfig(
+                "connect_or_create cannot be combined with replace_existing".to_string(),
+            ));
+        }
+
+        let name = self.config.spec.name.clone();
+        let detached = self.detached;
+        match super::Sandbox::get(&name).await {
+            Ok(handle) => return handle.connect_or_start_with_mode(detached).await,
+            Err(MicrosandboxError::SandboxNotFound(_)) => {}
+            Err(error) => return Err(error),
+        }
+
+        match self.create().await {
+            Ok(sandbox) => Ok(sandbox),
+            Err(MicrosandboxError::SandboxAlreadyExists(_)) => {
+                super::Sandbox::get(&name)
+                    .await?
+                    .connect_or_start_with_mode(detached)
+                    .await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Create the sandbox for detached/background use.
     pub async fn create_detached(self) -> MicrosandboxResult<super::Sandbox> {
         let config = self.build().await?;
@@ -2177,6 +2210,19 @@ mod tests {
             .unwrap();
 
         assert!(config.replace_existing);
+    }
+
+    #[tokio::test]
+    async fn connect_or_create_rejects_replace_semantics() {
+        let result = SandboxBuilder::new("connect-or-replace")
+            .replace()
+            .connect_or_create()
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(crate::MicrosandboxError::InvalidConfig(_))
+        ));
     }
 
     #[tokio::test]

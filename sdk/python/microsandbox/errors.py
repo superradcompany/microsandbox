@@ -42,6 +42,11 @@ class SandboxAlreadyExistsError(MicrosandboxError):
     code = "sandbox-already-exists"
 
 
+class SandboxReplacedError(MicrosandboxError):
+    """A handle's name now refers to a different persisted sandbox."""
+    code = "sandbox-replaced"
+
+
 class SandboxStillRunningError(MicrosandboxError):
     """Cannot perform operation because sandbox is still running."""
     code = "sandbox-still-running"

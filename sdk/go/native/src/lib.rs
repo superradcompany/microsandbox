@@ -448,6 +448,8 @@ mod error_kind {
     pub const SANDBOX_NOT_FOUND: &str = "sandbox_not_found";
     pub const SANDBOX_STILL_RUNNING: &str = "sandbox_still_running";
     pub const SANDBOX_NOT_RUNNING: &str = "sandbox_not_running";
+    pub const SANDBOX_ALREADY_EXISTS: &str = "sandbox_already_exists";
+    pub const SANDBOX_REPLACED: &str = "sandbox_replaced";
     pub const VOLUME_NOT_FOUND: &str = "volume_not_found";
     pub const VOLUME_ALREADY_EXISTS: &str = "volume_already_exists";
     pub const EXEC_TIMEOUT: &str = "exec_timeout";
@@ -516,6 +518,8 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::SandboxNotFound(_) => error_kind::SANDBOX_NOT_FOUND,
             MicrosandboxError::SandboxStillRunning(_) => error_kind::SANDBOX_STILL_RUNNING,
             MicrosandboxError::SandboxNotRunning(_) => error_kind::SANDBOX_NOT_RUNNING,
+            MicrosandboxError::SandboxAlreadyExists(_) => error_kind::SANDBOX_ALREADY_EXISTS,
+            MicrosandboxError::SandboxReplaced { .. } => error_kind::SANDBOX_REPLACED,
             MicrosandboxError::VolumeNotFound(_) => error_kind::VOLUME_NOT_FOUND,
             MicrosandboxError::VolumeAlreadyExists(_) => error_kind::VOLUME_ALREADY_EXISTS,
             MicrosandboxError::ExecTimeout(_) => error_kind::EXEC_TIMEOUT,
@@ -769,7 +773,7 @@ pub unsafe extern "C" fn msb_cancel_unregister(id: u64) {
 //   name: null-terminated C string, owned by caller (Go), borrowed for call.
 //   opts_json: JSON object with optional fields (image, memory_mib, cpus,
 //     max_memory_mib, max_cpus, thp, workdir, env). Owned by caller, borrowed for call.
-// Output on success: {"handle": <u64>}
+// Output on success: {"handle": <u64>, "id": <string>, "backend_kind": <string>}
 // The caller MUST eventually call `msb_sandbox_close(handle)` to release.
 // ---------------------------------------------------------------------------
 
@@ -2115,6 +2119,7 @@ pub unsafe extern "C" fn msb_sandbox_create(
     cancel_id: u64,
     name: *const c_char,
     opts_json: *const c_char,
+    connect_or_create: bool,
     buf: *mut c_uchar,
     buf_len: usize,
 ) -> *mut c_char {
@@ -2341,16 +2346,20 @@ pub unsafe extern "C" fn msb_sandbox_create(
                 builder = apply_volume(builder, guest_path, mount)?;
             }
 
-            let sandbox = if opts.detached {
+            let sandbox = if connect_or_create {
+                builder.detached(opts.detached).connect_or_create().await?
+            } else if opts.detached {
                 builder.create_detached().await?
             } else {
                 builder.create().await?
             };
             let backend_kind = sandbox.backend_kind().as_str();
+            let id = sandbox.id().to_string();
             let handle = register(sandbox)?;
             Ok(serde_json::json!({
                 "handle": handle,
                 "backend_kind": backend_kind,
+                "id": id,
             })
             .to_string())
         }))
@@ -2375,6 +2384,22 @@ fn sandbox_status_str(s: microsandbox::sandbox::SandboxStatus) -> &'static str {
         Paused => "paused",
         Stopped => "stopped",
         Crashed => "crashed",
+    }
+}
+
+fn parse_sandbox_status(status: &str) -> Result<microsandbox::sandbox::SandboxStatus, FfiError> {
+    use microsandbox::sandbox::SandboxStatus;
+    match status {
+        "created" => Ok(SandboxStatus::Created),
+        "starting" => Ok(SandboxStatus::Starting),
+        "running" => Ok(SandboxStatus::Running),
+        "draining" => Ok(SandboxStatus::Draining),
+        "paused" => Ok(SandboxStatus::Paused),
+        "stopped" => Ok(SandboxStatus::Stopped),
+        "crashed" => Ok(SandboxStatus::Crashed),
+        other => Err(FfiError::invalid_argument(format!(
+            "invalid sandbox status {other:?}"
+        ))),
     }
 }
 
@@ -2482,6 +2507,7 @@ pub unsafe extern "C" fn msb_sandbox_lookup(
         Ok(Box::pin(async move {
             let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
             Ok(serde_json::json!({
+                "id": h.id().to_string(),
                 "name": h.name(),
                 "status": sandbox_status_str(h.status_snapshot()),
                 "config_json": h.config_json(),
@@ -2514,10 +2540,12 @@ pub unsafe extern "C" fn msb_sandbox_connect(
         Ok(Box::pin(async move {
             let sb = Sandbox::get(&name).await?.connect().await?;
             let backend_kind = sb.backend_kind().as_str();
+            let id = sb.id().to_string();
             let handle = register(sb)?;
             Ok(serde_json::json!({
                 "handle": handle,
                 "backend_kind": backend_kind,
+                "id": id,
             })
             .to_string())
         }))
@@ -2551,12 +2579,162 @@ pub unsafe extern "C" fn msb_sandbox_start(
                 h.start().await.map_err(FfiError::from)?
             };
             let backend_kind = sb.backend_kind().as_str();
+            let id = sb.id().to_string();
             let handle = register(sb)?;
             Ok(serde_json::json!({
                 "handle": handle,
                 "backend_kind": backend_kind,
+                "id": id,
             })
             .to_string())
+        }))
+    })
+}
+
+#[derive(Default, serde::Deserialize)]
+struct SandboxHandleLifecycleOpts {
+    #[serde(default)]
+    detached: bool,
+    #[serde(default)]
+    force: bool,
+    timeout_ms: Option<u64>,
+    status: Option<String>,
+}
+
+async fn identified_sandbox_handle(
+    name: &str,
+    expected_id: &str,
+) -> Result<microsandbox::sandbox::SandboxHandle, FfiError> {
+    let handle = Sandbox::get(name).await.map_err(FfiError::from)?;
+    let actual_id = handle.id().to_string();
+    if actual_id != expected_id {
+        return Err(FfiError::from(MicrosandboxError::SandboxReplaced {
+            name: name.to_string(),
+            expected: expected_id.to_string(),
+            actual: actual_id,
+        }));
+    }
+    Ok(handle)
+}
+
+fn registered_sandbox_json(sandbox: Sandbox) -> Result<String, FfiError> {
+    let backend_kind = sandbox.backend_kind().as_str();
+    let id = sandbox.id().to_string();
+    let handle = register(sandbox)?;
+    Ok(serde_json::json!({
+        "handle": handle,
+        "backend_kind": backend_kind,
+        "id": id,
+    })
+    .to_string())
+}
+
+/// Identity-safe lifecycle dispatch for Go `SandboxHandle` receivers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_lifecycle(
+    cancel_id: u64,
+    name: *const c_char,
+    expected_id: *const c_char,
+    operation: *const c_char,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name = unsafe { cstr(name) }?;
+        let expected_id = unsafe { cstr(expected_id) }?;
+        let operation = unsafe { cstr(operation) }?;
+        let opts_raw = unsafe { cstr(opts_json) }?;
+        let opts: SandboxHandleLifecycleOpts =
+            serde_json::from_str(&opts_raw).map_err(|error| {
+                FfiError::invalid_argument(format!("invalid lifecycle opts: {error}"))
+            })?;
+
+        Ok(Box::pin(async move {
+            let handle = identified_sandbox_handle(&name, &expected_id).await?;
+            match operation.as_str() {
+                "refresh" => Ok(sandbox_handle_json(&handle)),
+                "connect" => registered_sandbox_json(handle.connect().await?),
+                "start" => {
+                    let sandbox = if opts.detached {
+                        handle.start_detached().await?
+                    } else {
+                        handle.start().await?
+                    };
+                    registered_sandbox_json(sandbox)
+                }
+                "connect_or_start" => {
+                    let sandbox = if opts.detached {
+                        handle.connect_or_start_detached().await?
+                    } else {
+                        handle.connect_or_start().await?
+                    };
+                    registered_sandbox_json(sandbox)
+                }
+                "stop" => {
+                    handle
+                        .stop_with_timeout(Duration::from_millis(opts.timeout_ms.unwrap_or(10_000)))
+                        .await?;
+                    Ok(r#"{"ok":true}"#.to_string())
+                }
+                "request_stop" => {
+                    handle.request_stop().await?;
+                    Ok(r#"{"ok":true}"#.to_string())
+                }
+                "kill" => {
+                    handle
+                        .kill_with_timeout(Duration::from_millis(opts.timeout_ms.unwrap_or(5_000)))
+                        .await?;
+                    Ok(r#"{"ok":true}"#.to_string())
+                }
+                "request_kill" => {
+                    handle.request_kill().await?;
+                    Ok(r#"{"ok":true}"#.to_string())
+                }
+                "request_drain" => {
+                    handle.request_drain().await?;
+                    Ok(r#"{"ok":true}"#.to_string())
+                }
+                "wait_until_stopped" => {
+                    Ok(sandbox_stop_result_json(handle.wait_until_stopped().await?))
+                }
+                "wait_for_status" => {
+                    let status = opts.status.as_deref().ok_or_else(|| {
+                        FfiError::invalid_argument("wait_for_status requires status")
+                    })?;
+                    let status = parse_sandbox_status(status)?;
+                    Ok(sandbox_handle_json(&handle.wait_for_status(status).await?))
+                }
+                "restart" => {
+                    let mut options = microsandbox::sandbox::RestartOptions {
+                        force: opts.force,
+                        detached: opts.detached,
+                        ..Default::default()
+                    };
+                    if let Some(timeout_ms) = opts.timeout_ms {
+                        options.timeout = Duration::from_millis(timeout_ms);
+                    }
+                    registered_sandbox_json(handle.restart_with(options).await?)
+                }
+                "remove" => {
+                    handle.remove().await?;
+                    Ok(r#"{"ok":true}"#.to_string())
+                }
+                "destroy" => {
+                    let mut options = microsandbox::sandbox::DestroyOptions {
+                        force: opts.force,
+                        ..Default::default()
+                    };
+                    if let Some(timeout_ms) = opts.timeout_ms {
+                        options.timeout = Duration::from_millis(timeout_ms);
+                    }
+                    handle.destroy_with(options).await?;
+                    Ok(r#"{"ok":true}"#.to_string())
+                }
+                other => Err(FfiError::invalid_argument(format!(
+                    "unknown sandbox lifecycle operation {other:?}"
+                ))),
+            }
         }))
     })
 }
@@ -3106,7 +3284,8 @@ fn sandbox_handle_json(h: &microsandbox::sandbox::SandboxHandle) -> String {
         None => "null".to_string(),
     };
     format!(
-        r#"{{"name":{name},"status":"{status}","config_json":{config},"created_at_unix":{created},"updated_at_unix":{updated},"backend_kind":"{backend_kind}"}}"#,
+        r#"{{"id":"{id}","name":{name},"status":"{status}","config_json":{config},"created_at_unix":{created},"updated_at_unix":{updated},"backend_kind":"{backend_kind}"}}"#,
+        id = h.id(),
         name = name_json,
         status = sandbox_status_str(h.status_snapshot()),
         config = cfg_json,

@@ -104,6 +104,25 @@ func main() {
 }
 ```
 
+### Reusable Lifecycle Convergence
+
+Use `ConnectOrCreateSandbox` when a stable name should converge on one persisted sandbox. Existing configuration wins; options are used only if creation is necessary. Handles retain a stable `ID`, so lifecycle calls on stale receivers refuse to act on a replacement that reused the name.
+
+```go
+sb, err := microsandbox.ConnectOrCreateSandbox(ctx, "worker",
+    microsandbox.WithImage("python"),
+    microsandbox.WithMemory(1024),
+)
+
+fmt.Printf("%s: %s\n", sb.Name(), sb.ID())
+handle, err := microsandbox.GetSandbox(ctx, "worker")
+running, err := handle.ConnectOrStart(ctx)
+err = running.RequestStop(ctx)
+stopped, err := running.WaitForStatus(ctx, microsandbox.SandboxStatusStopped)
+restarted, err := stopped.Restart(ctx)
+err = restarted.Destroy(ctx)
+```
+
 ## Common Examples
 
 These snippets assume you already have a live `sb *microsandbox.Sandbox` and `ctx context.Context`. See [sdk/go/examples](./examples) for complete runnable programs.

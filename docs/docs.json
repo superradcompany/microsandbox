@@ -171,6 +171,14 @@
                   "sdk/go/snapshots",
                   "sdk/go/agent-client"
                 ]
+              },
+              {
+                "group": "Ruby",
+                "icon": "gem",
+                "expanded": false,
+                "pages": [
+                  "sdk/ruby/sandbox"
+                ]
               }
             ]
           },
@@ -390,6 +398,7 @@
                 "group": "August 2026",
                 "expanded": true,
                 "pages": [
+                  "changelog/2026-08-26",
                   "changelog/2026-08-07"
                 ]
               },

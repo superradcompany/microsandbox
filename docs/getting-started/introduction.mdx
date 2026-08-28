@@ -34,7 +34,7 @@ msb run debian
 - **Fast startup.** Sandboxes are lightweight enough to create from application code.
 - **Docker-like inputs.** Use familiar OCI images from Docker Hub, GHCR, ECR, GCR, or another registry.
 - **Programmable controls.** Configure resources, volumes, secrets, networking, and lifecycle from the CLI or SDK.
-- **Multi-language SDKs.** Rust, TypeScript, Python, and Go expose the same core model.
+- **Multi-language SDKs.** Rust, TypeScript, Python, Go, and Ruby expose the same core model.
 
 ## Example use cases
 
@@ -106,6 +106,15 @@ if err != nil {
     return err
 }
 fmt.Println(out.Stdout())
+```
+
+```ruby Ruby
+require "microsandbox"
+
+Microsandbox::Sandbox.with("hello", image: "python") do |sb|
+  output = sb.exec("python", ["-c", "print('Hello from a microVM!')"])
+  puts output.stdout
+end
 ```
 </CodeGroup>
 

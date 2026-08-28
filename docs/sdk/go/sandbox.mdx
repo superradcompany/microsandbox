@@ -5,6 +5,20 @@ description: Go SDK - Sandbox API reference
 
 Create and control a microVM sandbox: boot it from an image, run commands, stream logs and metrics, then shut it down. See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
 
+## Lifecycle convergence
+
+```go
+ConnectOrCreateSandbox(ctx, name, opts...) (*Sandbox, error)
+handle.ConnectOrStart(ctx, opts...) (*Sandbox, error)
+handle.WaitForStatus(ctx, status) (*SandboxHandle, error)
+handle.Restart(ctx, opts...) (*Sandbox, error)
+handle.Destroy(ctx, opts...) error
+sandbox.ID() string
+handle.ID() string
+```
+
+`ConnectOrCreateSandbox` converges on the current persisted sandbox by name and uses options only when it creates. Receiver lifecycle operations are bound to the stable opaque `ID`; a stale receiver returns `ErrSandboxReplaced` instead of acting on a replacement that reused the name. `Sandbox` also exposes `WaitForStatus`, `Restart`, and `Destroy`. See [Lifecycle convergence and identity safety](/sandboxes/lifecycle#converge-on-a-named-sandbox) for state behavior and examples.
+
 
 ## Functions
 
@@ -65,6 +79,24 @@ Create and boot a new sandbox. Pulls the image if needed, boots the VM, starts t
     <div className="msb-param-desc">Typed <code>*Error</code>, see <a href="/sdk/errors">Error Handling</a>.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">m.</span><span className="msb-hn">ConnectOrCreateSandbox()</span>
+
+```go
+func ConnectOrCreateSandbox(ctx context.Context, name string, opts ...SandboxOption) (*Sandbox, error)
+```
+
+Converge on the current persisted sandbox by name. The function connects when it is running, waits through `SandboxStatusStarting`, starts it when it is created, stopped, or crashed, and creates it only when the name is absent. Options apply only to creation; an existing sandbox keeps its persisted configuration. Concurrent callers converge on the winning identity. `WithReplace` and `WithReplaceWithTimeout` are invalid with this function.
+
+<p className="msb-label">Parameters</p>
+
+- `ctx`: controls this convergence operation; cancellation does not stop a sandbox already returned.
+- `name`: reusable sandbox name, up to 128 UTF-8 bytes.
+- `opts`: the same creation options accepted by [`CreateSandbox`](#m-createsandbox), used only when creation is necessary.
+
+<p className="msb-label">Returns</p>
+
+`(*`[`Sandbox`](#methods)`, error)`
 
 #### <span className="msb-recv">m.</span><span className="msb-hn">GetSandbox()</span>
 
@@ -326,6 +358,14 @@ Return the sandbox name.
     <div className="msb-param-desc">Sandbox name, up to 128 UTF-8 bytes.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">ID()</span>
+
+```go
+func (s *Sandbox) ID() string
+```
+
+Return the opaque stable identity of this persisted sandbox. It remains unchanged across stop and restart and changes when the reusable name is removed and recreated. Use it for equality, logging, and correlation; do not parse it.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">FS()</span>
 
@@ -889,6 +929,30 @@ Block until the sandbox is observed in a terminal state, then return how it ende
     <div className="msb-param-desc">Terminal status, exit code, and signal.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">WaitForStatus()</span>
+
+```go
+func (s *Sandbox) WaitForStatus(ctx context.Context, status SandboxStatus) (*SandboxHandle, error)
+```
+
+Wait until this exact sandbox reaches `status`, returning a refreshed metadata handle. The context supplies cancellation or a deadline. Returns `ErrSandboxReplaced` rather than following a reused name.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">Restart()</span>
+
+```go
+func (s *Sandbox) Restart(ctx context.Context, opts ...RestartOption) (*Sandbox, error)
+```
+
+Restart this exact sandbox. Defaults to graceful shutdown, a ten-second timeout, and attached local start. A created, stopped, or crashed sandbox starts directly; a starting sandbox is observed until it settles. Use `WithRestartForce`, `WithRestartTimeout`, and `WithRestartDetached` for explicit controls.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">Destroy()</span>
+
+```go
+func (s *Sandbox) Destroy(ctx context.Context, opts ...DestroyOption) error
+```
+
+Stop and remove this exact sandbox. Defaults to graceful shutdown with a ten-second timeout. Use `WithDestroyForce` or `WithDestroyTimeout` for explicit controls. Returns `ErrSandboxReplaced` instead of deleting a same-name replacement.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Detach()</span>
 
@@ -1778,6 +1842,54 @@ Set how long [`Stop`](#sb-stop) waits for graceful shutdown before force-killing
   </div>
 </div>
 
+#### <span className="msb-recv"></span><span className="msb-hn">WithConnectOrStartDetached()</span>
+
+```go
+func WithConnectOrStartDetached() ConnectOrStartOption
+```
+
+When `ConnectOrStart` must start a local sandbox, start it in detached/background mode. This option does not change ownership when the sandbox is already running.
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithRestartForce()</span>
+
+```go
+func WithRestartForce() RestartOption
+```
+
+Force-kill instead of requesting graceful shutdown during `Restart`.
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithRestartTimeout()</span>
+
+```go
+func WithRestartTimeout(timeout time.Duration) RestartOption
+```
+
+Set the graceful-shutdown convergence window used by `Restart`. The default is ten seconds.
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithRestartDetached()</span>
+
+```go
+func WithRestartDetached() RestartOption
+```
+
+Start the restarted local sandbox in detached/background mode.
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithDestroyForce()</span>
+
+```go
+func WithDestroyForce() DestroyOption
+```
+
+Force-kill instead of requesting graceful shutdown during `Destroy`.
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithDestroyTimeout()</span>
+
+```go
+func WithDestroyTimeout(timeout time.Duration) DestroyOption
+```
+
+Set the graceful-shutdown convergence window used by `Destroy`. The default is ten seconds.
+
 #### <span className="msb-recv"></span><span className="msb-hn">WithKillTimeout()</span>
 
 ```go
@@ -2124,6 +2236,14 @@ Sandbox name, up to 128 UTF-8 bytes
 
 `string`
 
+#### <span className="msb-recv">h.</span><span className="msb-hn">ID()</span>
+
+```go
+func (h *SandboxHandle) ID() string
+```
+
+Return the opaque stable identity captured by this metadata handle. Receiver lifecycle calls remain bound to this value and return `ErrSandboxReplaced` when the reusable name now points to another sandbox.
+
 #### <span className="msb-recv">h.</span><span className="msb-hn">Status()</span>
 
 ```go
@@ -2292,6 +2412,14 @@ Reattach to the running sandbox
 
 `(*`[`Sandbox`](#methods)`, error)`
 
+#### <span className="msb-recv">h.</span><span className="msb-hn">ConnectOrStart()</span>
+
+```go
+func (h *SandboxHandle) ConnectOrStart(ctx context.Context, opts ...ConnectOrStartOption) (*Sandbox, error)
+```
+
+Connect when this exact sandbox is running, wait through `SandboxStatusStarting`, or start it when it is created, stopped, or crashed. Draining and paused states are rejected. `WithConnectOrStartDetached` affects only a required local start; connecting to an already-running sandbox does not change ownership.
+
 #### <span className="msb-recv">h.</span><span className="msb-hn">Start()</span>
 
 ```go
@@ -2315,6 +2443,30 @@ Boot a stopped sandbox in detached mode
 <p className="msb-label">Returns</p>
 
 `(*`[`Sandbox`](#methods)`, error)`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">WaitForStatus()</span>
+
+```go
+func (h *SandboxHandle) WaitForStatus(ctx context.Context, status SandboxStatus) (*SandboxHandle, error)
+```
+
+Wait until this exact sandbox reaches `status`, returning a refreshed handle. The context supplies cancellation or a deadline. Returns `ErrSandboxReplaced` rather than rebinding to a replacement.
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Restart()</span>
+
+```go
+func (h *SandboxHandle) Restart(ctx context.Context, opts ...RestartOption) (*Sandbox, error)
+```
+
+Restart this exact sandbox with the same state and option semantics as [`Sandbox.Restart`](#sb-restart).
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Destroy()</span>
+
+```go
+func (h *SandboxHandle) Destroy(ctx context.Context, opts ...DestroyOption) error
+```
+
+Stop and remove this exact sandbox. A stale handle returns `ErrSandboxReplaced` instead of destroying a same-name replacement.
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">Stop()</span>
 
@@ -2778,11 +2930,13 @@ type SandboxStatus string
 
 | Constant | Value | Description |
 |----------|-------|-------------|
+| `SandboxStatusCreated` | `"created"` | Persisted resource exists but has not started |
+| `SandboxStatusStarting` | `"starting"` | Runtime is booting or waiting for capacity |
 | `SandboxStatusRunning` | `"running"` | Guest agent is ready; `Exec`, `Shell`, `FS` work |
-| `SandboxStatusStopped` | `"stopped"` | VM shut down; configuration persisted; can be restarted |
-| `SandboxStatusCrashed` | `"crashed"` | VM exited unexpectedly (kernel panic, OOM, etc.) |
 | `SandboxStatusDraining` | `"draining"` | Graceful shutdown in progress; existing commands finish, new ones rejected |
 | `SandboxStatusPaused` | `"paused"` | VM is paused |
+| `SandboxStatusStopped` | `"stopped"` | VM shut down; configuration persisted; can be restarted |
+| `SandboxStatusCrashed` | `"crashed"` | VM exited unexpectedly (kernel panic, OOM, etc.) |
 
 ### LogOptions
 

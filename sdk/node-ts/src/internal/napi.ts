@@ -240,11 +240,25 @@ export interface NapiSandboxBuilderSetters {
 
 export interface NapiSandboxBuilder extends NapiSandboxBuilderSetters {
   create(): Promise<NapiSandbox>;
+  connectOrCreate(): Promise<NapiSandbox>;
   createWithPullProgress(): Promise<NapiPullProgressCreate>;
+}
+
+export interface NapiSandboxRestartOptions {
+  force?: boolean;
+  timeoutMs?: number;
+  detached?: boolean;
+}
+
+export interface NapiSandboxDestroyOptions {
+  force?: boolean;
+  timeoutMs?: number;
 }
 
 export interface NapiSandbox {
   readonly backendKind: "local" | "cloud";
+  readonly id: string;
+  readonly ownsLifecycle: boolean;
   configJson(): Promise<string>;
   execDefault(): Promise<NapiExecOutput>;
   execDefaultWithBuilder(builder: NapiExecOptionsBuilder): Promise<NapiExecOutput>;
@@ -276,6 +290,9 @@ export interface NapiSandbox {
   requestKill(): Promise<void>;
   killWithTimeout(timeoutMs: number): Promise<void>;
   requestDrain(): Promise<void>;
+  waitForStatus(status: string): Promise<NapiSandboxHandle>;
+  restart(options?: NapiSandboxRestartOptions): Promise<NapiSandbox>;
+  destroy(options?: NapiSandboxDestroyOptions): Promise<void>;
   waitUntilStopped(): Promise<NapiSandboxStopResult>;
   detach(): Promise<void>;
   logs(opts?: LogOptions): Promise<LogEntry[]>;
@@ -283,6 +300,7 @@ export interface NapiSandbox {
 }
 
 export interface NapiSandboxHandle {
+  readonly id: string;
   readonly name: string;
   readonly status: string;
   readonly backendKind: "local" | "cloud";
@@ -298,6 +316,7 @@ export interface NapiSandboxHandle {
   startDetached(): Promise<NapiSandbox>;
   connect(): Promise<NapiSandbox>;
   connectWithTimeout(timeoutMs: number): Promise<NapiSandbox>;
+  connectOrStart(detached?: boolean): Promise<NapiSandbox>;
   stop(): Promise<void>;
   requestStop(): Promise<void>;
   stopWithTimeout(timeoutMs: number): Promise<void>;
@@ -305,6 +324,9 @@ export interface NapiSandboxHandle {
   requestKill(): Promise<void>;
   killWithTimeout(timeoutMs: number): Promise<void>;
   requestDrain(): Promise<void>;
+  waitForStatus(status: string): Promise<NapiSandboxHandle>;
+  restart(options?: NapiSandboxRestartOptions): Promise<NapiSandbox>;
+  destroy(options?: NapiSandboxDestroyOptions): Promise<void>;
   waitUntilStopped(): Promise<NapiSandboxStopResult>;
   remove(): Promise<void>;
   logs(opts?: LogOptions): Promise<LogEntry[]>;

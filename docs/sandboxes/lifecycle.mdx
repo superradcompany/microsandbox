@@ -10,13 +10,19 @@ Understanding the lifecycle is useful once you start managing long-running sandb
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Creating: create()
-    Creating --> Running: boot complete
+    [*] --> Created: persist configuration
+    Created --> Starting: start()
+    Starting --> Running: boot complete
+    Starting --> Crashed: boot/runtime failure
     Running --> Draining: request_drain()
     Running --> Stopped: stop()
     Running --> Crashed: unexpected exit
+    Running --> Paused: backend-managed pause
+    Paused --> Running: backend-managed resume
     Draining --> Stopped: drain complete
-    Stopped --> Running: start()
+    Stopped --> Starting: start()
+    Crashed --> Starting: start()
+    Created --> [*]: remove()
     Stopped --> [*]: remove()
     Crashed --> [*]: remove()
 ```
@@ -25,9 +31,11 @@ stateDiagram-v2
 
 | Status | Description |
 |--------|-------------|
-| **Creating** | The VM is booting. The kernel is loaded, the filesystem is mounted, and the guest agent is initializing (configuring network, setting up the environment). |
+| **Created** | Persisted configuration exists, but no runtime has started yet. |
+| **Starting** | The VM is booting. The kernel is loaded, the filesystem is mounted, and the guest agent is initializing. |
 | **Running** | The guest agent is ready. You can call `exec`, `shell`, and `fs`. |
 | **Draining** | Graceful shutdown in progress. Existing commands run to completion, but new `exec` calls are rejected. Transitions to Stopped when all commands finish. |
+| **Paused** | Runtime execution is suspended by the backend. SDK resume support is not currently exposed, so convergent start calls reject this state. |
 | **Stopped** | The VM has shut down. Sandbox configuration and state are persisted to the database and can be restarted. |
 | **Crashed** | The VM exited unexpectedly (e.g., kernel panic, OOM kill). |
 
@@ -81,6 +89,15 @@ detached, err := m.CreateSandbox(ctx, "worker",
 )
 ```
 
+```ruby Ruby
+# Local lifecycle-owning handle: sandbox stops when it is collected
+sb = Microsandbox::Sandbox.create("worker", image: "python")
+
+# Detached: sandbox survives after this handle is released
+detached = Microsandbox::Sandbox.create("worker", image: "python", detached: true)
+detached.detach
+```
+
 ```bash CLI
 # Attached
 msb create python --name worker
@@ -90,6 +107,148 @@ msb run -d python --name worker
 ```
 
 </CodeGroup>
+
+## Converge on a named sandbox
+
+Use `connect_or_create` when several callers may converge on the same reusable name. It connects if the current persisted sandbox is already running, starts it if it is stopped or crashed, and creates it only when the name is missing. If another caller wins a concurrent create or start, the operation observes the winner and converges on it.
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .image("python")
+    .memory(1024)
+    .connect_or_create()
+    .await?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.builder("worker")
+  .image("python")
+  .memory(MiB(1024))
+  .connectOrCreate();
+```
+
+```python Python
+sb = await Sandbox.connect_or_create(
+    "worker",
+    image="python",
+    memory=1024,
+)
+```
+
+```go Go
+sb, err := m.ConnectOrCreateSandbox(ctx, "worker",
+    m.WithImage("python"),
+    m.WithMemory(1024),
+)
+```
+
+```ruby Ruby
+sb = Microsandbox::Sandbox.connect_or_create(
+  "worker",
+  image: "python",
+  memory: 1024
+)
+```
+</CodeGroup>
+
+Builder options apply only when a sandbox is created. An existing sandbox always keeps its persisted image, resources, environment, mounts, and other configuration. `connect_or_create` rejects replace options because replacing and converging express conflicting identity semantics.
+
+If you already hold a metadata handle, use `connect_or_start` instead. It connects without taking lifecycle ownership when the exact sandbox is running, waits through `Starting`, or starts the exact persisted sandbox when it is created, stopped, or crashed.
+
+<CodeGroup>
+```rust Rust
+let handle = Sandbox::get("worker").await?;
+let sb = handle.connect_or_start().await?;
+```
+
+```typescript TypeScript
+const handle = await Sandbox.get("worker");
+const sb = await handle.connectOrStart();
+```
+
+```python Python
+handle = await Sandbox.get("worker")
+sb = await handle.connect_or_start()
+```
+
+```go Go
+handle, err := m.GetSandbox(ctx, "worker")
+sb, err := handle.ConnectOrStart(ctx)
+```
+
+```ruby Ruby
+handle = Microsandbox::Sandbox.get("worker")
+sb = handle.connect_or_start
+```
+</CodeGroup>
+
+`Draining` is not reinterpreted as a start request, and `Paused` requires explicit resume support, which is not currently exposed.
+
+## Identity-safe receivers
+
+Sandbox names are reusable lookup keys. Every `Sandbox` and `SandboxHandle` also exposes an opaque stable `id` (`ID()` in Go) for the persisted sandbox it represents. Do not parse this value; use it for logging, correlation, and equality checks.
+
+On the built-in local and cloud backends, receiver-based status and lifecycle operations remain bound to that captured identity. If `worker` is removed and another sandbox is created with the same name, a stale receiver cannot refresh, start, stop, kill, drain, restart, destroy, or remove the replacement. The SDK returns `SandboxReplaced` (or the language's typed equivalent) when it can observe the new identity; ID-addressed cloud operations may instead report that the old resource is gone. Custom Rust backends should override the `*_identified` backend methods to provide the same guarantee.
+
+This closes the check-then-act race that an `exists()` helper would encourage:
+
+```text
+name lookup         stable identity check/action
+    │                           │
+    ├── connect_or_create ─────────┤ selects the current identity
+    │                           │
+    └── SandboxHandle(id=A) ────┤ may act only on A, never replacement B
+```
+
+Identity safety uses the existing local database row ID and cloud sandbox UUID. It requires no persistence migration or wire-protocol change.
+
+## Lifecycle invariants
+
+The convergent APIs preserve the following contracts across all SDKs:
+
+| Invariant | Contract |
+|-----------|----------|
+| Name versus identity | A name selects the current persisted sandbox. An opaque ID identifies one exact persisted sandbox, even if the name is later reused. |
+| Strict creation | Same-name local creators are serialized across processes. `create` remains strict and the loser receives an already-exists error after the winner finishes; `connect_or_create` observes that winner and returns it. |
+| Single start winner | A local start atomically changes the exact persisted identity from `Created`, `Stopped`, or `Crashed` to `Starting`. Concurrent callers cannot both claim the same runtime generation. |
+| Single runtime generation | Local database and host-namespace transitions are serialized per name, while a separate process-held lock remains owned for the runtime's lifetime. A successor cannot reuse that name's sockets, pipes, or storage until the previous runtime has exited. |
+| Existing configuration wins | Creation options are used only when `connect_or_create` creates. Reuse never overwrites the persisted image, resources, environment, mounts, or other configuration. |
+| Readiness is truthful | `Starting` means the VM or guest agent is not ready yet. `Running` is published only after the agent endpoint is connected and commands can be accepted. |
+| Exact-handle convergence | `connect_or_start` remains bound to the handle's captured ID. It connects to `Running`, waits through `Starting`, starts `Created`, `Stopped`, or `Crashed`, and rejects `Draining` or `Paused`. |
+| Restart continuity | `restart` returns the same persisted ID and retains configuration while replacing only the runtime instance. |
+| Destroy finality | `destroy` stops and removes the exact persisted identity. Recreating the same name produces a different ID. |
+| Stale receiver refusal | A receiver captured before same-name recreation cannot inspect or mutate the replacement through identity-safe receiver operations. |
+| Exact-state waits | `wait_for_status` follows the captured identity and has no implicit deadline. Use the language's normal cancellation or timeout primitive. |
+
+The local coordination is per sandbox name. It does not introduce a global lifecycle lock, and it does not keep a database transaction open while an image is prepared or a VM boots:
+
+```text
+same-name callers
+       |
+       v
+per-name transition lock ---> atomic DB claim: terminal -> Starting
+       |                                      |
+       |                                      v
+       +------------------------------> launch and wait for readiness
+                                              |
+                                              v
+runtime-lifetime lock ----------------> Starting -> Running
+       |
+       +-- released automatically when that runtime process exits
+```
+
+## Live-tested SDK surface
+
+Every checked cell below is exercised by the in-tree lifecycle-convergence example against a real microVM. The examples also cover concurrent find/create and connect/start calls, existing-configuration precedence, detached start, force and timeout controls, exec after readiness, restart continuity, same-name recreation, and stale-receiver rejection.
+
+| SDK | Connect or create | Stable ID | Connect or start | Wait for status | Restart | Destroy | Stale identity |
+|-----|----------------|-----------|------------------|-----------------|---------|---------|----------------|
+| Rust | ✅ `connect_or_create()` | ✅ `id()` | ✅ `connect_or_start()` | ✅ `wait_for_status()` | ✅ `restart()` | ✅ `destroy()` | ✅ `SandboxReplaced` |
+| TypeScript | ✅ `connectOrCreate()` | ✅ `id` | ✅ `connectOrStart()` | ✅ `waitForStatus()` | ✅ `restart()` | ✅ `destroy()` | ✅ `SandboxReplacedError` |
+| Python | ✅ `connect_or_create()` | ✅ `id` | ✅ `connect_or_start()` | ✅ `wait_for_status()` | ✅ `restart()` | ✅ `destroy()` | ✅ `SandboxReplacedError` |
+| Go | ✅ `ConnectOrCreateSandbox()` | ✅ `ID()` | ✅ `ConnectOrStart()` | ✅ `WaitForStatus()` | ✅ `Restart()` | ✅ `Destroy()` | ✅ `ErrSandboxReplaced` |
+| Ruby | ✅ `connect_or_create` | ✅ `id` | ✅ `connect_or_start` | ✅ `wait_for_status` | ✅ `restart` | ✅ `destroy` | ✅ refusal via `Microsandbox::Error` |
 
 ## Stop and restart
 
@@ -123,6 +282,13 @@ _ = sb.Stop(ctx)
 sb, err := m.StartSandbox(ctx, "worker")
 ```
 
+```ruby Ruby
+sb.stop
+
+# Later, resume where you left off
+sb = Microsandbox::Sandbox.start("worker")
+```
+
 ```bash CLI
 msb stop worker
 
@@ -136,6 +302,10 @@ msb restart worker
 </CodeGroup>
 
 `msb restart` follows the same lifecycle semantics as `msb stop` followed by `msb start`. If the sandbox is already stopped or crashed, it starts it directly.
+
+SDK receivers also expose a convergent `restart` operation with graceful shutdown by default and options for force, timeout, and detached start where supported.
+
+On microsandbox cloud, restart and destroy can request graceful stop, but timeout expiry cannot escalate to force kill. Force controls are local-only, and detached-start controls affect only local process ownership.
 
 ## Configuration
 
@@ -291,6 +461,38 @@ result = await sb.wait_until_stopped()
 result, err := sb.WaitUntilStopped(ctx)
 ```
 
+```ruby Ruby
+result = sb.wait_until_stopped
+```
+
+</CodeGroup>
+
+Use `wait_for_status` / `waitForStatus` / `WaitForStatus` when you need any exact lifecycle state rather than only a terminal state. It intentionally has no built-in timeout; compose the language's normal deadline or cancellation primitive around it.
+
+## Destroy
+
+`destroy` combines stop and remove for the exact sandbox identity. It requests a graceful stop by default, escalates after the configured timeout, and refuses to act on a replacement that reused the name.
+
+<CodeGroup>
+```rust Rust
+sb.destroy().await?;
+```
+
+```typescript TypeScript
+await sb.destroy();
+```
+
+```python Python
+await sb.destroy()
+```
+
+```go Go
+err := sb.Destroy(ctx)
+```
+
+```ruby Ruby
+sb.destroy
+```
 </CodeGroup>
 
 ## Remove
@@ -312,6 +514,10 @@ await Sandbox.remove("worker")
 
 ```go Go
 err := m.RemoveSandbox(ctx, "worker")
+```
+
+```ruby Ruby
+Microsandbox::Sandbox.remove("worker")
 ```
 
 ```bash CLI
