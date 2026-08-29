@@ -3209,7 +3209,6 @@ impl SecretViolationReport {
 mod tests {
     use super::*;
     use crate::netstack::shared::{ResolvedHostnameFamily, SharedState};
-    use crate::secrets::config::*;
 
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::Duration;
