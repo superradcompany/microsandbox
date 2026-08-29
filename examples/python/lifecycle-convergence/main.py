@@ -5,7 +5,7 @@ import json
 import os
 import time
 
-from microsandbox import Sandbox, SandboxReplacedError
+from microsandbox import Sandbox, SandboxNotFoundError, SandboxReplacedError
 
 NAME = os.environ.get("MSB_E2E_NAME", f"lifecycle-python-{os.getpid()}")
 RACE_NAME = f"{NAME}-race"
@@ -24,7 +24,7 @@ async def cleanup(name: str = NAME) -> None:
     try:
         current = await Sandbox.get(name)
         await current.destroy(force=True, timeout=5.0)
-    except Exception:
+    except SandboxNotFoundError:
         # The unique example sandbox normally does not exist before or after a run.
         pass
 
@@ -140,6 +140,14 @@ async def main() -> None:
         if await read_marker(reused) != "original":
             raise RuntimeError("existing configuration did not win")
 
+        # Strict start resumes an existing stopped identity without accepting creation options.
+        await reused.stop()
+        resumed = await measured("start", lambda: Sandbox.start(NAME))
+        if await resumed.id != original_id:
+            raise RuntimeError("start changed the persisted identity")
+        if await read_marker(resumed) != "original":
+            raise RuntimeError("start lost persisted configuration")
+
         handle = await Sandbox.get(NAME)
         connected = await measured("connect_or_start", handle.connect_or_start)
         if await connected.id != original_id:
@@ -191,7 +199,7 @@ async def main() -> None:
                     "platform": PLATFORM,
                     "sandbox": NAME,
                     "identity": original_id,
-                    "checks": 16,
+                    "checks": 17,
                     "timings_ms": timings,
                     "result": "pass",
                 },

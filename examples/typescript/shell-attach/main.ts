@@ -1,13 +1,14 @@
 import { Sandbox } from "microsandbox";
 
-console.log("Creating sandbox (image=alpine)");
+console.log("Connecting to or creating sandbox (image=alpine on first creation)");
 
+// An interactive workspace is useful across runs. Builder options seed only the first creation;
+// later runs reconnect to the persisted sandbox and preserve its files and configuration.
 await using sandbox = await Sandbox.builder("attach-example")
   .image("alpine")
   .cpus(1)
   .memory(512)
-  .replace()
-  .create();
+  .connectOrCreate();
 
 console.log("Attaching to shell (press Ctrl+] to detach)...");
 

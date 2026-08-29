@@ -33,6 +33,8 @@ uv run --project sdk/python python examples/python/net-basic/main.py
 uv run --project sdk/python python examples/python/fs-read-stream/main.py
 ```
 
+Configuration-focused examples intentionally replace their fixed-name sandbox so reruns match the source. `shell-attach` uses `connect_or_create` instead, preserving its interactive workspace and configuration across runs.
+
 ## Examples
 
 | Example | Description |
@@ -49,7 +51,7 @@ uv run --project sdk/python python examples/python/fs-read-stream/main.py
 | `snapshot-fork` | Snapshot a stopped sandbox and boot a fresh one from it |
 | `fs-read-stream` | Streaming file read |
 | `metrics-stream` | Streaming resource metrics |
-| `shell-attach` | Interactive shell attach |
+| `shell-attach` | Reusable interactive shell using `connect_or_create` |
 | `net-basic` | Basic networking |
 | `net-dns` | DNS filtering |
 | `net-policy` | Network policies |

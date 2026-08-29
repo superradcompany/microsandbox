@@ -127,6 +127,12 @@ try {
   assert(reused.id === originalId, "connectOrCreate changed the persisted identity");
   assert((await readMarker(reused)) === "original", "existing configuration did not win");
 
+  // Strict start resumes an existing stopped identity without accepting creation options.
+  await reused.stop();
+  const resumed = await measured("start", () => Sandbox.start(name));
+  assert(resumed.id === originalId, "start changed the persisted identity");
+  assert((await readMarker(resumed)) === "original", "start lost persisted configuration");
+
   const handle = await Sandbox.get(name);
   const connected = await measured("connect_or_start", () => handle.connectOrStart());
   assert(connected.id === originalId, "connectOrStart changed the persisted identity");
@@ -169,7 +175,7 @@ try {
         platform,
         sandbox: name,
         identity: originalId,
-        checks: 16,
+        checks: 17,
         timings_ms: timings,
         result: "pass",
       }),

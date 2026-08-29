@@ -192,6 +192,16 @@ async fn run(name: &str) -> Result<serde_json::Value, Box<dyn std::error::Error>
     }
     assert_marker(&read_marker(&reused).await?, "original")?;
 
+    // Strict start resumes an existing stopped identity without accepting creation options.
+    reused.stop().await?;
+    let started = Instant::now();
+    let resumed = Sandbox::start(name).await?;
+    timings.insert("start", elapsed_ms(started));
+    if resumed.id() != original_id {
+        return Err("start changed the persisted identity".into());
+    }
+    assert_marker(&read_marker(&resumed).await?, "original")?;
+
     let handle = Sandbox::get(name).await?;
     let started = Instant::now();
     let connected = handle.connect_or_start().await?;
@@ -251,7 +261,7 @@ async fn run(name: &str) -> Result<serde_json::Value, Box<dyn std::error::Error>
         "platform": platform,
         "sandbox": name,
         "identity": original_id.as_str(),
-        "checks": 16,
+        "checks": 17,
         "timings_ms": timings,
         "result": "pass"
     }))
