@@ -745,7 +745,7 @@ impl PreparedCloudPortBindings {
                     loop {
                         let accepted = tokio::select! {
                             accepted = listener.accept() => accepted,
-                            _ = listener_cancellation.changed() => break,
+                            _ = listener_cancellation.wait_for(|cancelled| *cancelled) => break,
                         };
                         let Ok((stream, _peer)) = accepted else { break };
                         let backend = backend.clone();
@@ -758,7 +758,7 @@ impl PreparedCloudPortBindings {
                                         tracing::debug!(guest_port, %error, "cloud TCP relay closed");
                                     }
                                 }
-                                _ = relay_cancellation.changed() => {}
+                                _ = relay_cancellation.wait_for(|cancelled| *cancelled) => {}
                             }
                         });
                     }
