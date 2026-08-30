@@ -12,6 +12,7 @@ use microsandbox_protocol::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch;
 
 use super::CloudBackend;
 use crate::backend::{
@@ -77,6 +78,7 @@ pub(in crate::backend) enum CloudRegistrySelection {
 /// tasks and deliberately leaves the remote sandbox running.
 pub(crate) struct CloudPortBindings {
     tasks: Vec<tokio::task::JoinHandle<()>>,
+    cancellation: watch::Sender<bool>,
 }
 
 struct PreparedCloudPortBindings {
@@ -85,6 +87,7 @@ struct PreparedCloudPortBindings {
 
 impl Drop for CloudPortBindings {
     fn drop(&mut self) {
+        let _ = self.cancellation.send(true);
         for task in &self.tasks {
             task.abort();
         }
@@ -730,31 +733,42 @@ impl PreparedCloudPortBindings {
         if self.listeners.is_empty() {
             return None;
         }
+        let (cancellation, _) = watch::channel(false);
         let tasks = self
             .listeners
             .into_iter()
             .map(|(listener, guest_port)| {
                 let backend = backend.clone();
                 let sandbox_name = sandbox_name.clone();
+                let mut listener_cancellation = cancellation.subscribe();
                 tokio::spawn(async move {
                     loop {
-                        let Ok((stream, _peer)) = listener.accept().await else {
-                            break;
+                        let accepted = tokio::select! {
+                            accepted = listener.accept() => accepted,
+                            _ = listener_cancellation.changed() => break,
                         };
+                        let Ok((stream, _peer)) = accepted else { break };
                         let backend = backend.clone();
                         let sandbox_name = sandbox_name.clone();
+                        let mut relay_cancellation = listener_cancellation.clone();
                         tokio::spawn(async move {
-                            if let Err(error) =
-                                relay_cloud_tcp(backend, &sandbox_name, stream, guest_port).await
-                            {
-                                tracing::debug!(guest_port, %error, "cloud TCP relay closed");
+                            tokio::select! {
+                                result = relay_cloud_tcp(backend, &sandbox_name, stream, guest_port) => {
+                                    if let Err(error) = result {
+                                        tracing::debug!(guest_port, %error, "cloud TCP relay closed");
+                                    }
+                                }
+                                _ = relay_cancellation.changed() => {}
                             }
                         });
                     }
                 })
             })
             .collect();
-        Some(Arc::new(CloudPortBindings { tasks }))
+        Some(Arc::new(CloudPortBindings {
+            tasks,
+            cancellation,
+        }))
     }
 }
 
@@ -818,6 +832,7 @@ async fn relay_cloud_tcp(
 
     let mut buffer = vec![0_u8; 64 * 1024];
     let mut local_eof = false;
+    let mut remote_eof = false;
     loop {
         tokio::select! {
             read = socket.read(&mut buffer), if !local_eof => {
@@ -825,6 +840,9 @@ async fn relay_cloud_tcp(
                     Ok(0) => {
                         client.send(id, MessageType::TcpEof, &TcpEof {}).await?;
                         local_eof = true;
+                        if remote_eof {
+                            break;
+                        }
                     }
                     Ok(count) => client.send(
                         id,
@@ -844,6 +862,10 @@ async fn relay_cloud_tcp(
                     MessageType::TcpEof => {
                         let _: TcpEof = message.payload()?;
                         socket.shutdown().await?;
+                        remote_eof = true;
+                        if local_eof {
+                            break;
+                        }
                     }
                     MessageType::TcpClosed => {
                         let _: TcpClosed = message.payload()?;
