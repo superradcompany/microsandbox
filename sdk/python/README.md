@@ -195,7 +195,7 @@ sandbox = await Sandbox.create(
         Secret.env(
             "OPENAI_API_KEY",
             value=os.environ["OPENAI_API_KEY"],
-            allow_hosts=["api.openai.com"],
+            allow=["api.openai.com"],
         ),
     ],
     replace=True,

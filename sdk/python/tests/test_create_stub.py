@@ -41,7 +41,7 @@ EXPECTED_KWARGS = [
     "vsock",
     "network",
     "secrets",
-    "on_secret_violation",
+    "secret_violation_action",
     "detached",
 ]
 

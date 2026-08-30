@@ -320,7 +320,7 @@ sb.modify()
     .secret(|s| s
         .env("GITHUB_TOKEN")
         .source(SecretSource::Env { var: "GITHUB_TOKEN".into() })
-        .allow_host("api.github.com"))
+        .allow("api.github.com"))
     .remove_secret("OLD_TOKEN")
     .apply()
     .await?;

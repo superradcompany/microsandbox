@@ -37,10 +37,10 @@ pub use domain::{
     Protocol, PublishedPortSpec, PullPolicy, RateLimitConfigError, RateLimiterConfig, Rlimit,
     RlimitResource, RootDisk, RootfsSource, Rule, SandboxLogLevel, SandboxPolicy, SandboxResources,
     SandboxRuntimeOptions, SandboxSpec, ScopedUpstreamCaCert, ScopedVerifyUpstream,
-    SecretConfigError, SecretEntry, SecretInjection, SecretsConfig, SecurityProfile, SnapshotSpec,
-    StatVirtualization, TlsConfig, TokenBucketConfig, TransparentHugePagePolicy, ViolationAction,
-    VolumeKind, VolumeMount, VolumeSpec, VsockRouteSpec, VsockSocketType, VsockSpec,
-    canonicalize_volume_mounts,
+    SecretConfigError, SecretEntry, SecretSubstitution, SecretViolationAction, SecretsConfig,
+    SecurityProfile, SnapshotSpec, StatVirtualization, TlsConfig, TokenBucketConfig,
+    TransparentHugePagePolicy, VolumeKind, VolumeMount, VolumeSpec, VsockRouteSpec,
+    VsockSocketType, VsockSpec, canonicalize_volume_mounts,
 };
 pub use error::{TypesError, TypesResult};
 pub use modify::{

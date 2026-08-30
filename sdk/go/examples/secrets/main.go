@@ -42,7 +42,7 @@ func main() {
 			envVarInGuest,
 			secretValue,
 			microsandbox.SecretEnvOptions{
-				AllowHosts:  []string{allowedHost},
+				Allow:       []string{allowedHost},
 				Placeholder: placeholder,
 			},
 		)),

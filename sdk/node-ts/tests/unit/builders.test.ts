@@ -575,44 +575,35 @@ describe("NetworkBuilder.secretEnvSimple (3-arg shorthand)", () => {
 });
 
 describe("NetworkBuilder secret passthrough", () => {
-  it("builds global passthrough violation policy", () => {
+  it("builds a global blocking action", () => {
     const cfg = new NetworkBuilder()
-      .onSecretViolation((v) =>
-        v
-          .blockAndTerminate()
-          .passthroughHost("api.anthropic.com")
-          .passthroughHostPattern("*.anthropic.com"),
-      )
+      .secretViolationAction("block-and-terminate")
       .build() as {
       secrets: {
-        onViolation: {
-          passthrough: unknown[];
-        };
+        violationAction: string;
       };
     };
 
-    expect(cfg.secrets.onViolation).toEqual({
-      passthrough: [
-        { exact: "api.anthropic.com" },
-        { wildcard: "*.anthropic.com" },
-      ],
-    });
+    expect(cfg.secrets.violationAction).toBe("block-and-terminate");
   });
 
-  it("builds per-secret passthrough violation policy", () => {
+  it("builds independent per-secret policies", () => {
     const secret = new SecretBuilder()
       .env("API_KEY")
       .value("sk-abc")
-      .allowHost("api.github.com")
-      .onViolation((v) =>
-        v
-          .blockAndLog()
-          .passthroughHost("api.anthropic.com")
-          .passthroughHostPattern("*.anthropic.com"),
-      )
+      .allow("api.github.com")
+      .allowPassthroughFor("api.anthropic.com")
+      .allowPassthroughFor("*.anthropic.com")
+      .substituteInBody(true)
+      .violationAction("block-and-log")
       .build();
 
     expect(secret.allowedHosts).toEqual(["api.github.com"]);
+    expect(secret.passthroughHosts).toEqual([
+      "api.anthropic.com",
+      "*.anthropic.com",
+    ]);
+    expect(secret.substitution.body).toBe(true);
   });
 });
 

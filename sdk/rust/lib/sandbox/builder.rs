@@ -842,7 +842,7 @@ impl SandboxBuilder {
     /// .secret(|s| s
     ///     .env("OPENAI_API_KEY")
     ///     .value(api_key)
-    ///     .allow_host("api.openai.com")
+    ///     .allow("api.openai.com")
     /// )
     /// ```
     ///
@@ -879,6 +879,27 @@ impl SandboxBuilder {
         self
     }
 
+    /// Set the default action for blocked secret placeholders.
+    #[cfg(feature = "net")]
+    pub fn secret_violation_action(
+        mut self,
+        action: microsandbox_types::SecretViolationAction,
+    ) -> Self {
+        match self.config.local_network_config() {
+            Ok(mut network) => {
+                network.secrets.violation_action = action;
+                if let Err(err) = self.config.set_local_network_config(network)
+                    && self.build_error.is_none()
+                {
+                    self.build_error = Some(err);
+                }
+            }
+            Err(err) if self.build_error.is_none() => self.build_error = Some(err),
+            Err(_) => {}
+        }
+        self
+    }
+
     /// Shorthand: add a secret with env var, value, and allowed host.
     ///
     /// Placeholder is auto-generated as `$MSB_<env_var>`.
@@ -908,7 +929,7 @@ impl SandboxBuilder {
         let env_var = env_var.into();
         let value = value.into();
         let allowed_host = allowed_host.into();
-        self.secret(|s| s.env(&env_var).value(value).allow_host(allowed_host))
+        self.secret(|s| s.env(&env_var).value(value).allow(allowed_host))
     }
 
     /// Set an environment variable visible to all commands in this sandbox.
@@ -1739,7 +1760,7 @@ mod tests {
     use crate::LogLevel;
     use crate::sandbox::{MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, RlimitResource};
     #[cfg(feature = "net")]
-    use microsandbox_network::secrets::config::{HostPattern, SecretEntry, SecretInjection};
+    use microsandbox_network::secrets::config::{HostPattern, SecretEntry, SecretSubstitution};
     #[cfg(feature = "net")]
     use microsandbox_types::PortProtocol;
     use microsandbox_types::{
@@ -2535,8 +2556,9 @@ mod tests {
                 source: None,
                 placeholder: "$MSB_API_KEY".into(),
                 allowed_hosts: vec![HostPattern::Exact("api.example.com".into())],
-                injection: SecretInjection::default(),
-                on_violation: None,
+                substitution: SecretSubstitution::default(),
+                passthrough_hosts: Vec::new(),
+                violation_action: None,
                 require_tls_identity: true,
             })
             .build()

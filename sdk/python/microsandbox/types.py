@@ -213,64 +213,6 @@ class ViolationAction(StrEnum):
     BLOCK = "block"
     BLOCK_AND_LOG = "block-and-log"
     BLOCK_AND_TERMINATE = "block-and-terminate"
-    PASSTHROUGH = "passthrough"
-
-
-@dataclass(frozen=True, slots=True)
-class ViolationPolicy:
-    """Secret violation behavior, including optional passthrough hosts."""
-
-    fallback: ViolationAction = ViolationAction.BLOCK_AND_LOG
-    passthrough_hosts: tuple[str, ...] = ()
-    passthrough_host_patterns: tuple[str, ...] = ()
-    passthrough_all_hosts: bool = False
-
-    @classmethod
-    def block(cls) -> ViolationPolicy:
-        return cls(fallback=ViolationAction.BLOCK)
-
-    @classmethod
-    def block_and_log(cls) -> ViolationPolicy:
-        return cls(fallback=ViolationAction.BLOCK_AND_LOG)
-
-    @classmethod
-    def block_and_terminate(cls) -> ViolationPolicy:
-        return cls(fallback=ViolationAction.BLOCK_AND_TERMINATE)
-
-    @classmethod
-    def passthrough(
-        cls,
-        *,
-        hosts: Sequence[str] = (),
-        host_patterns: Sequence[str] = (),
-        all_hosts: bool = False,
-    ) -> ViolationPolicy:
-        return cls(
-            passthrough_hosts=tuple(hosts),
-            passthrough_host_patterns=tuple(host_patterns),
-            passthrough_all_hosts=all_hosts,
-        )
-
-    def _to_dict(self) -> ViolationAction | dict:
-        # Validate the fallback even when passthrough is selected. Ignoring a
-        # malformed enum on one serialization branch would make the public
-        # type boundary depend on unrelated host-list fields.
-        _enum_value(self.fallback, ViolationAction, "ViolationPolicy.fallback")
-        if (
-            not self.passthrough_hosts
-            and not self.passthrough_host_patterns
-            and not self.passthrough_all_hosts
-        ):
-            return self.fallback
-
-        passthrough: dict = {}
-        if self.passthrough_hosts:
-            passthrough["hosts"] = list(self.passthrough_hosts)
-        if self.passthrough_host_patterns:
-            passthrough["host_patterns"] = list(self.passthrough_host_patterns)
-        if self.passthrough_all_hosts:
-            passthrough["all_hosts"] = True
-        return {"passthrough": passthrough}
 
 
 class MountKind(StrEnum):
@@ -1125,22 +1067,19 @@ class Patch:
 
 
 @dataclass(frozen=True, slots=True)
-class SecretInjection:
+class SecretSubstitution:
     """Where in the HTTP request the secret value can be substituted."""
 
     headers: bool = True
-    basic_auth: bool = True
-    query_params: bool = False
+    query: bool = False
     body: bool = False
 
     def _to_dict(self) -> dict:
         d: dict = {}
         if not self.headers:
             d["headers"] = False
-        if not self.basic_auth:
-            d["basic_auth"] = False
-        if self.query_params:
-            d["query_params"] = True
+        if self.query:
+            d["query"] = True
         if self.body:
             d["body"] = True
         return d
@@ -1152,31 +1091,32 @@ class SecretEntry:
 
     env_var: str
     value: str
-    allow_hosts: tuple[str, ...] = ()
-    allow_host_patterns: tuple[str, ...] = ()
+    allow: tuple[str, ...] = ()
+    passthrough: tuple[str, ...] = ()
     placeholder: str | None = None
-    require_tls: bool = True
-    on_violation: ViolationAction | ViolationPolicy = ViolationAction.BLOCK_AND_LOG
-    injection: SecretInjection = field(default_factory=SecretInjection)
+    require_tls_identity: bool = True
+    violation_action: ViolationAction | None = None
+    substitution: SecretSubstitution = field(default_factory=SecretSubstitution)
 
     def _to_dict(self) -> dict:
         d: dict = {"env_var": self.env_var, "value": self.value}
-        if self.allow_hosts:
-            d["allow_hosts"] = list(self.allow_hosts)
-        if self.allow_host_patterns:
-            d["allow_host_patterns"] = list(self.allow_host_patterns)
+        if self.allow:
+            d["allow"] = list(self.allow)
+        if self.passthrough:
+            d["passthrough"] = list(self.passthrough)
         if self.placeholder is not None:
             d["placeholder"] = self.placeholder
-        if not self.require_tls:
-            d["require_tls"] = False
-        violation = violation_policy_to_dict(self.on_violation)
-        if violation != str(ViolationAction.BLOCK_AND_LOG):
-            d["on_violation"] = violation
-        if not isinstance(self.injection, SecretInjection):
-            raise TypeError("SecretEntry.injection must be SecretInjection")
-        injection = self.injection._to_dict()
-        if injection:
-            d["injection"] = injection
+        if not self.require_tls_identity:
+            d["require_tls_identity"] = False
+        if self.violation_action is not None:
+            d["violation_action"] = _enum_value(
+                self.violation_action, ViolationAction, "SecretEntry.violation_action"
+            )
+        if not isinstance(self.substitution, SecretSubstitution):
+            raise TypeError("SecretEntry.substitution must be SecretSubstitution")
+        substitution = self.substitution._to_dict()
+        if substitution:
+            d["substitution"] = substitution
         return d
 
 
@@ -1188,22 +1128,22 @@ class Secret:
         env_var: str,
         *,
         value: str,
-        allow_hosts: Sequence[str] = (),
-        allow_host_patterns: Sequence[str] = (),
+        allow: Sequence[str] = (),
+        passthrough: Sequence[str] = (),
         placeholder: str | None = None,
-        require_tls: bool = True,
-        on_violation: ViolationAction | ViolationPolicy = ViolationAction.BLOCK_AND_LOG,
-        injection: SecretInjection | None = None,
+        require_tls_identity: bool = True,
+        violation_action: ViolationAction | None = None,
+        substitution: SecretSubstitution | None = None,
     ) -> SecretEntry:
         return SecretEntry(
             env_var=env_var,
             value=value,
-            allow_hosts=tuple(allow_hosts),
-            allow_host_patterns=tuple(allow_host_patterns),
+            allow=tuple(allow),
+            passthrough=tuple(passthrough),
             placeholder=placeholder,
-            require_tls=require_tls,
-            on_violation=on_violation,
-            injection=injection if injection is not None else SecretInjection(),
+            require_tls_identity=require_tls_identity,
+            violation_action=violation_action,
+            substitution=substitution if substitution is not None else SecretSubstitution(),
         )
 
 
@@ -1656,7 +1596,7 @@ class Network:
     max_connections: int | None = None
     rate_limiter: NetworkRateLimiter | None = None
     """Local egress and ingress rate limits. ``None`` means unlimited."""
-    on_secret_violation: ViolationAction | ViolationPolicy = ViolationAction.BLOCK_AND_LOG
+    secret_violation_action: ViolationAction = ViolationAction.BLOCK_AND_LOG
 
     @classmethod
     def none(cls) -> Network:
@@ -1713,19 +1653,14 @@ class Network:
             if not isinstance(self.rate_limiter, NetworkRateLimiter):
                 raise TypeError("Network.rate_limiter must be NetworkRateLimiter or None")
             d["rate_limiter"] = self.rate_limiter._to_dict()
-        violation = violation_policy_to_dict(self.on_secret_violation)
+        violation = _enum_value(
+            self.secret_violation_action,
+            ViolationAction,
+            "Network.secret_violation_action",
+        )
         if violation != str(ViolationAction.BLOCK_AND_LOG):
-            d["on_secret_violation"] = violation
+            d["secret_violation_action"] = violation
         return d
-
-
-def violation_policy_to_dict(
-    policy: ViolationAction | ViolationPolicy,
-) -> ViolationAction | dict:
-    if isinstance(policy, ViolationPolicy):
-        return policy._to_dict()
-    _enum_value(policy, ViolationAction, "on_violation")
-    return policy
 
 
 # --------------------------------------------------------------------------------------------------

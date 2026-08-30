@@ -459,7 +459,7 @@ func TestNetworkPolicyProfilesCheckedMatchesFromProfiles(t *testing.T) {
 
 func TestWithSecrets(t *testing.T) {
 	o := SandboxConfig{}
-	s1 := Secret.Env("API_KEY", "sk-secret", SecretEnvOptions{AllowHosts: []string{"api.example.com"}})
+	s1 := Secret.Env("API_KEY", "sk-secret", SecretEnvOptions{Allow: []string{"api.example.com"}})
 	s2 := Secret.Env("DB_PASS", "hunter2", SecretEnvOptions{})
 	WithSecrets(s1)(&o)
 	WithSecrets(s2)(&o)
@@ -469,8 +469,8 @@ func TestWithSecrets(t *testing.T) {
 	if o.Secrets[0].EnvVar != "API_KEY" {
 		t.Errorf("Secrets[0].EnvVar: got %q", o.Secrets[0].EnvVar)
 	}
-	if o.Secrets[0].AllowHosts[0] != "api.example.com" {
-		t.Errorf("Secrets[0].AllowHosts[0]: got %q", o.Secrets[0].AllowHosts[0])
+	if o.Secrets[0].Allow[0] != "api.example.com" {
+		t.Errorf("Secrets[0].Allow[0]: got %q", o.Secrets[0].Allow[0])
 	}
 	if o.Secrets[1].EnvVar != "DB_PASS" {
 		t.Errorf("Secrets[1].EnvVar: got %q", o.Secrets[1].EnvVar)
@@ -480,25 +480,24 @@ func TestWithSecrets(t *testing.T) {
 func TestSecretEnvFactory(t *testing.T) {
 	rt := true
 	s := Secret.Env("TOK", "val", SecretEnvOptions{
-		AllowHosts:        []string{"a.com", "b.com"},
-		AllowHostPatterns: []string{"*.corp"},
-		Placeholder:       "$TOK",
-		RequireTLS:        &rt,
+		Allow:              []string{"a.com", "b.com", "*.corp"},
+		Placeholder:        "$TOK",
+		RequireTLSIdentity: &rt,
 	})
 	if s.EnvVar != "TOK" || s.Value != "val" {
 		t.Errorf("EnvVar/Value: got %q/%q", s.EnvVar, s.Value)
 	}
-	if len(s.AllowHosts) != 2 || s.AllowHosts[0] != "a.com" {
-		t.Errorf("AllowHosts: got %v", s.AllowHosts)
+	if len(s.Allow) != 3 || s.Allow[0] != "a.com" {
+		t.Errorf("Allow: got %v", s.Allow)
 	}
-	if len(s.AllowHostPatterns) != 1 || s.AllowHostPatterns[0] != "*.corp" {
-		t.Errorf("AllowHostPatterns: got %v", s.AllowHostPatterns)
+	if s.Allow[2] != "*.corp" {
+		t.Errorf("Allow wildcard: got %v", s.Allow)
 	}
 	if s.Placeholder != "$TOK" {
 		t.Errorf("Placeholder: got %q", s.Placeholder)
 	}
-	if s.RequireTLS == nil || !*s.RequireTLS {
-		t.Error("RequireTLS should be true")
+	if s.RequireTLSIdentity == nil || !*s.RequireTLSIdentity {
+		t.Error("RequireTLSIdentity should be true")
 	}
 }
 
@@ -997,10 +996,10 @@ func TestWithVolumeLabelsMerge(t *testing.T) {
 	}
 }
 
-func TestSecretEnvOnViolation(t *testing.T) {
-	s := Secret.Env("TOK", "v", SecretEnvOptions{OnViolation: ViolationActionBlockAndTerminate})
-	if s.OnViolation != ViolationActionBlockAndTerminate {
-		t.Errorf("OnViolation: got %q", s.OnViolation)
+func TestSecretEnvViolationAction(t *testing.T) {
+	s := Secret.Env("TOK", "v", SecretEnvOptions{ViolationAction: ViolationActionBlockAndTerminate})
+	if s.ViolationAction != ViolationActionBlockAndTerminate {
+		t.Errorf("ViolationAction: got %q", s.ViolationAction)
 	}
 }
 
