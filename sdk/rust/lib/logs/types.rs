@@ -7,6 +7,47 @@ use chrono::{DateTime, Utc};
 use super::cursor::LogCursor;
 
 //--------------------------------------------------------------------------------------------------
+// Boot Errors
+//--------------------------------------------------------------------------------------------------
+
+/// Coarse classification of where sandbox startup failed.
+///
+/// Local builds re-export the runtime's matching persisted-record type. This
+/// SDK-owned definition keeps backend-routed log APIs available to cloud-only
+/// builds without linking the local runtime client.
+#[cfg(not(feature = "local"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BootErrorStage {
+    /// Volume or virtiofs mount setup failed.
+    Mount,
+    /// VM construction or entry failed.
+    BuildVm,
+    /// Runtime configuration or database setup failed.
+    Config,
+    /// Network backend setup failed.
+    Network,
+    /// Root filesystem or image setup failed.
+    Image,
+    /// No more specific startup stage applies.
+    Other,
+}
+
+/// Structured diagnostic for a sandbox startup failure.
+#[cfg(not(feature = "local"))]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BootError {
+    /// RFC 3339 wall-clock timestamp recorded for the failure.
+    pub t: String,
+    /// Coarse startup stage where the failure occurred.
+    pub stage: BootErrorStage,
+    /// Operating-system error number, when one was available.
+    pub errno: Option<i32>,
+    /// Human-readable failure message.
+    pub message: String,
+}
+
+//--------------------------------------------------------------------------------------------------
 // LogEntry
 //--------------------------------------------------------------------------------------------------
 

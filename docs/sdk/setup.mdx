@@ -65,6 +65,8 @@ Rust exposes explicit install sources and options for custom install roots, vers
 
 `InstallSource::EmbeddedArchive` requires the Rust SDK's `embed-binaries` feature. Without that feature, selecting the embedded source returns an error instead of downloading or falling back to another source.
 
+The Rust crate enables both `local` and `cloud` by default. Applications that only use the hosted backend can build with `default-features = false, features = ["cloud", "net"]`; this omits the local database, image cache, migration, metrics, and host-runtime client dependencies. Local snapshots and image-archive import/export remain part of `local` rather than separate feature flags. Both `download-binaries` and `embed-binaries` imply `local`, and they manage the `msb` + `libkrunfw` host-runtime pair; Agentd packaging belongs to the `msb` build.
+
 <CodeGroup>
 ```rust Rust
 use microsandbox::{

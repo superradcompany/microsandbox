@@ -10,41 +10,72 @@ edition.workspace = true
 [lib]
 path = "lib/lib.rs"
 
+[features]
+default = ["engine"]
+engine = [
+    "dep:base64",
+    "dep:bytes",
+    "dep:core-foundation",
+    "dep:crossbeam-queue",
+    "dep:futures",
+    "dep:hickory-net",
+    "dep:httlib-hpack",
+    "dep:httparse",
+    "dep:libc",
+    "dep:lru",
+    "dep:msb_krun",
+    "dep:msb_krun_utils",
+    "dep:parking_lot",
+    "dep:pem",
+    "dep:percent-encoding",
+    "dep:rcgen",
+    "dep:resolv-conf",
+    "dep:rustls",
+    "dep:rustls-native-certs",
+    "dep:rustls-pki-types",
+    "dep:socket2",
+    "dep:smoltcp",
+    "dep:system-configuration",
+    "dep:time",
+    "dep:tokio",
+    "dep:tokio-rustls",
+    "dep:windows-sys",
+]
+
 [dependencies]
-base64 = "0.22"
-bytes = { workspace = true }
-crossbeam-queue = { workspace = true }
-dirs = { workspace = true }
-futures = { workspace = true }
+base64 = { version = "0.22", optional = true }
+bytes = { workspace = true, optional = true }
+crossbeam-queue = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
 # tls-ring unlocks `hickory_net::tls::tls_client_connect` for the
 # upstream DoT client. The workspace already uses rustls with the ring
 # crypto provider, so no new dependency is introduced.
-hickory-net = { workspace = true, features = ["tls-ring"] }
+hickory-net = { workspace = true, features = ["tls-ring"], optional = true }
 hickory-proto = { workspace = true }
-httlib-hpack = { workspace = true }
-httparse = "1"
+httlib-hpack = { workspace = true, optional = true }
+httparse = { version = "1", optional = true }
 ipnetwork = { workspace = true }
-libc = { workspace = true }
-lru = { workspace = true }
+libc = { workspace = true, optional = true }
+lru = { workspace = true, optional = true }
 microsandbox-protocol.workspace = true
 microsandbox-types.workspace = true
 microsandbox-utils.workspace = true
-msb_krun = { workspace = true, features = ["net"] }
-msb_krun_utils.workspace = true
-parking_lot = { workspace = true }
-pem = "3"
-percent-encoding = "2"
-rcgen = { workspace = true }
-resolv-conf = { workspace = true }
-rustls = { workspace = true }
-rustls-native-certs = { workspace = true }
-rustls-pki-types.workspace = true
+msb_krun = { workspace = true, features = ["net"], optional = true }
+msb_krun_utils = { workspace = true, optional = true }
+parking_lot = { workspace = true, optional = true }
+pem = { version = "3", optional = true }
+percent-encoding = { version = "2", optional = true }
+rcgen = { workspace = true, optional = true }
+resolv-conf = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+rustls-native-certs = { workspace = true, optional = true }
+rustls-pki-types = { workspace = true, optional = true }
 serde = { workspace = true }
 # Used for the `SO_LINGER(0)` (RST-on-drop) trick on rejected inbound
 # connections in `publisher.rs`. tokio's `TcpStream::set_linger` is
 # deprecated; `socket2::SockRef::from(&stream)` is the supported path.
-socket2 = { workspace = true }
-smoltcp = { workspace = true, features = [
+socket2 = { workspace = true, optional = true }
+smoltcp = { workspace = true, optional = true, features = [
     "alloc",
     "async",
     "medium-ethernet",
@@ -56,10 +87,10 @@ smoltcp = { workspace = true, features = [
     "socket-udp",
 ] }
 thiserror = { workspace = true }
-time = { workspace = true }
-tokio = { workspace = true }
-tokio-rustls = { workspace = true }
-tracing = { workspace = true }
+time = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
+tracing.workspace = true
 zeroize = { workspace = true }
 
 # macOS reads DNS servers from SystemConfiguration / SCDynamicStore rather
@@ -68,11 +99,11 @@ zeroize = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 # Pinned to 0.9 to match system-configuration 0.7. Bumping to 0.10 would
 # create two incompatible CFString/CFArray/... types in the build.
-core-foundation = "0.9"
-system-configuration = "0.7"
+core-foundation = { version = "0.9", optional = true }
+system-configuration = { version = "0.7", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_NetworkManagement_Dns", "Win32_System_LibraryLoader"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_NetworkManagement_Dns", "Win32_System_LibraryLoader"], optional = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

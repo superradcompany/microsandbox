@@ -16,8 +16,8 @@ async-compression = { workspace = true, features = ["gzip", "tokio", "zstd"] }
 chrono.workspace = true
 futures.workspace = true
 hex.workspace = true
-libc.workspace = true
 microsandbox-utils.workspace = true
+microsandbox-types.workspace = true
 oci-client.workspace = true
 oci-spec.workspace = true
 rustls-pki-types.workspace = true
@@ -28,7 +28,6 @@ sha2.workspace = true
 tar.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "rt", "sync"] }
-tokio-util.workspace = true
 tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]

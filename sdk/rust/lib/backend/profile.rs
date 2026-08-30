@@ -23,7 +23,11 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use super::{Backend, BackendSelectionSource, CloudBackend, LocalBackend};
+#[cfg(feature = "cloud")]
+use super::CloudBackend;
+#[cfg(feature = "local")]
+use super::LocalBackend;
+use super::{Backend, BackendSelectionSource};
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -134,25 +138,27 @@ pub fn resolve_default_backend() -> MicrosandboxResult<Arc<dyn Backend>> {
     let backend_kind = std::env::var("MSB_BACKEND").ok();
     let parsed_backend_kind = parse_backend_kind(backend_kind.as_deref())?;
     if parsed_backend_kind == Some(ProfileBackend::Local) {
-        return Ok(Arc::new(LocalBackend::lazy_with_selection(
-            BackendSelectionSource::MsbBackend,
-            None,
-        )));
+        return local_backend(BackendSelectionSource::MsbBackend, None);
     }
 
     let api_key = std::env::var("MSB_API_KEY").ok();
     if parsed_backend_kind == Some(ProfileBackend::Cloud)
         && api_key.as_deref().is_some_and(|key| !key.trim().is_empty())
     {
-        let cloud =
-            direct_cloud_backend(std::env::var("MSB_API_URL").ok(), api_key)?.ok_or_else(|| {
-                MicrosandboxError::InvalidConfig(
-                    "MSB_BACKEND=cloud requires a non-empty MSB_API_KEY".into(),
-                )
-            })?;
-        return Ok(Arc::new(
-            cloud.with_selection(BackendSelectionSource::MsbBackend, None),
-        ));
+        #[cfg(not(feature = "cloud"))]
+        return Err(feature_disabled("cloud"));
+        #[cfg(feature = "cloud")]
+        {
+            let cloud = direct_cloud_backend(std::env::var("MSB_API_URL").ok(), api_key)?
+                .ok_or_else(|| {
+                    MicrosandboxError::InvalidConfig(
+                        "MSB_BACKEND=cloud requires a non-empty MSB_API_KEY".into(),
+                    )
+                })?;
+            return Ok(Arc::new(
+                cloud.with_selection(BackendSelectionSource::MsbBackend, None),
+            ));
+        }
     }
 
     let cfg = load_sdk_config()?;
@@ -165,20 +171,22 @@ pub fn resolve_default_backend() -> MicrosandboxResult<Arc<dyn Backend>> {
     )?;
 
     match selection {
-        BackendSelection::Local => Ok(Arc::new(LocalBackend::lazy_with_selection(
-            BackendSelectionSource::Default,
-            None,
-        ))),
+        BackendSelection::Local => local_backend(BackendSelectionSource::Default, None),
         BackendSelection::DirectCloud => {
-            let cloud = direct_cloud_backend(std::env::var("MSB_API_URL").ok(), api_key)?
-                .ok_or_else(|| {
-                    MicrosandboxError::InvalidConfig(
-                        "MSB_BACKEND=cloud requires a non-empty MSB_API_KEY".into(),
-                    )
-                })?;
-            Ok(Arc::new(
-                cloud.with_selection(BackendSelectionSource::MsbBackend, None),
-            ))
+            #[cfg(not(feature = "cloud"))]
+            return Err(feature_disabled("cloud"));
+            #[cfg(feature = "cloud")]
+            {
+                let cloud = direct_cloud_backend(std::env::var("MSB_API_URL").ok(), api_key)?
+                    .ok_or_else(|| {
+                        MicrosandboxError::InvalidConfig(
+                            "MSB_BACKEND=cloud requires a non-empty MSB_API_KEY".into(),
+                        )
+                    })?;
+                Ok(Arc::new(
+                    cloud.with_selection(BackendSelectionSource::MsbBackend, None),
+                ))
+            }
         }
         BackendSelection::Profile {
             name,
@@ -266,6 +274,31 @@ fn select_backend(
     Ok(BackendSelection::Local)
 }
 
+/// Construct the local backend when this build includes it, otherwise fail
+/// explicitly instead of routing a local request through Cloud.
+fn local_backend(
+    source: BackendSelectionSource,
+    profile: Option<String>,
+) -> MicrosandboxResult<Arc<dyn Backend>> {
+    #[cfg(feature = "local")]
+    {
+        Ok(Arc::new(LocalBackend::lazy_with_selection(source, profile)))
+    }
+    #[cfg(not(feature = "local"))]
+    {
+        let _ = (source, profile);
+        Err(feature_disabled("local"))
+    }
+}
+
+/// Report a backend selected at runtime but omitted from this SDK build.
+#[cfg(not(all(feature = "local", feature = "cloud")))]
+fn feature_disabled(feature: &str) -> MicrosandboxError {
+    MicrosandboxError::InvalidConfig(format!(
+        "the {feature} backend is not available; rebuild microsandbox with the {feature:?} feature"
+    ))
+}
+
 /// Build a backend instance from a named profile.
 fn backend_from_profile(
     name: &str,
@@ -273,17 +306,22 @@ fn backend_from_profile(
     source: BackendSelectionSource,
 ) -> MicrosandboxResult<Arc<dyn Backend>> {
     match profile.backend {
-        ProfileBackend::Local => Ok(Arc::new(LocalBackend::lazy_with_selection(
-            source,
-            Some(name.to_string()),
-        ))),
-        ProfileBackend::Cloud => Ok(Arc::new(
-            cloud_backend_from_profile_parts(name, profile)?
-                .with_selection(source, Some(name.to_string())),
-        )),
+        ProfileBackend::Local => local_backend(source, Some(name.to_string())),
+        ProfileBackend::Cloud => {
+            #[cfg(not(feature = "cloud"))]
+            return Err(feature_disabled("cloud"));
+            #[cfg(feature = "cloud")]
+            {
+                Ok(Arc::new(
+                    cloud_backend_from_profile_parts(name, profile)?
+                        .with_selection(source, Some(name.to_string())),
+                ))
+            }
+        }
     }
 }
 
+#[cfg(feature = "cloud")]
 pub(crate) fn cloud_backend_from_profile(name: &str) -> MicrosandboxResult<CloudBackend> {
     let cfg = load_sdk_config()?;
     let profile = cfg.profiles.get(name).ok_or_else(|| {
@@ -293,6 +331,7 @@ pub(crate) fn cloud_backend_from_profile(name: &str) -> MicrosandboxResult<Cloud
         .with_selection(BackendSelectionSource::Profile, Some(name.to_string())))
 }
 
+#[cfg(feature = "cloud")]
 fn cloud_backend_from_profile_parts(
     name: &str,
     profile: &Profile,
@@ -318,6 +357,7 @@ fn cloud_backend_from_profile_parts(
 /// Resolve direct environment values without reading ambient state. Keeping
 /// this construction pure keeps credential parsing independent from backend
 /// selection. Callers must explicitly select Cloud before invoking it.
+#[cfg(feature = "cloud")]
 fn direct_cloud_backend(
     api_url: Option<String>,
     api_key: Option<String>,
@@ -343,6 +383,7 @@ fn direct_cloud_backend(
 
 /// Resolve an `api_key_ref` string (`keyring:…` / `env:VAR` / `inline:msb_…`)
 /// to the actual API key value.
+#[cfg(feature = "cloud")]
 fn resolve_api_key_ref(profile: &str, key_ref: &str) -> MicrosandboxResult<String> {
     if let Some(rest) = key_ref.strip_prefix("env:") {
         let var = rest.trim();
@@ -404,12 +445,12 @@ fn resolve_api_key_ref(profile: &str, key_ref: &str) -> MicrosandboxResult<Strin
     )))
 }
 
-/// Return the SDK config file path. Delegates to [`crate::config::config_path`]
-/// so the SDK config and the [`LocalConfig`](crate::config::LocalConfig)
-/// always agree on the path (they live in the same JSON document). Honours
-/// `MSB_CONFIG_PATH` via that.
+/// Return the shared SDK/local configuration path.
 fn sdk_config_path() -> PathBuf {
-    crate::config::config_path()
+    if let Some(path) = std::env::var_os("MSB_CONFIG_PATH") {
+        return PathBuf::from(path);
+    }
+    microsandbox_utils::resolve_home().join(microsandbox_utils::CONFIG_FILENAME)
 }
 
 //--------------------------------------------------------------------------------------------------

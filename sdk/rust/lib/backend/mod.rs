@@ -20,15 +20,19 @@
 //! full trait-surface spec, and `planning/microsandbox/design/api/ambient-backend.md`
 //! for the resolution ladder + process-level config story.
 
+#[cfg(feature = "cloud")]
 mod cloud;
+#[cfg(feature = "local")]
 mod local;
 mod misconfigured;
 mod profile;
 pub(crate) mod sandbox;
 pub(crate) mod volume;
 
+#[cfg(feature = "cloud")]
 pub use cloud::{CloudBackend, CloudBackendBuilder, DEFAULT_CLOUD_API_URL};
 use futures::future::BoxFuture;
+#[cfg(feature = "local")]
 pub use local::{LocalBackend, LocalBackendBuilder};
 pub use microsandbox_types::{
     CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
@@ -36,13 +40,14 @@ pub use microsandbox_types::{
 };
 pub use profile::{Profile, ProfileBackend, SdkConfig, load_sdk_config, resolve_default_backend};
 pub use sandbox::{
-    SandboxBackend, SandboxCloudState, SandboxHandleCloudState, SandboxHandleInner,
-    SandboxHandleLocalState, SandboxInner, SandboxLocalState,
+    SandboxBackend, SandboxCloudState, SandboxHandleCloudState, SandboxHandleInner, SandboxInner,
 };
+pub use sandbox::{SandboxHandleLocalState, SandboxLocalState};
 pub use volume::{
     CloudVolumeKind, CloudVolumeStatus, VolumeBackend, VolumeCloudState, VolumeHandleCloudState,
-    VolumeHandleInner, VolumeHandleLocalState, VolumeInner, VolumeLocalState,
+    VolumeHandleInner, VolumeInner,
 };
+pub use volume::{VolumeHandleLocalState, VolumeLocalState};
 
 use std::{
     sync::{Arc, OnceLock, RwLock},
@@ -176,6 +181,7 @@ pub trait Backend: Send + Sync + 'static {
     /// Used by helpers that need access to local-only state (DB pool, config
     /// paths) without keeping a separate `Arc<LocalBackend>` alongside the
     /// `Arc<dyn Backend>`. Returns `None` for cloud backends.
+    #[cfg(feature = "local")]
     fn as_local(&self) -> Option<&LocalBackend> {
         None
     }

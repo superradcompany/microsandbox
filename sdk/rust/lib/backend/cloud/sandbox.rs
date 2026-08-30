@@ -20,7 +20,7 @@ use crate::sandbox::{
     SandboxStatus,
 };
 use crate::{MicrosandboxError, MicrosandboxResult};
-use microsandbox_image::RegistryAuth;
+use microsandbox_types::RegistryAuth;
 use microsandbox_types::{
     CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudSandboxStatus, RootDisk,
     SandboxRuntimeOptions, TlsConfig,
@@ -778,7 +778,7 @@ mod tests {
     fn cloud_create_body_serializes_slug_and_registry_beside_spec() {
         let mut config = base_cloud_config();
         config.slug = Some("brave-otter".into());
-        config.registry_auth = Some(microsandbox_image::RegistryAuth::Anonymous);
+        config.registry_auth = Some(RegistryAuth::Anonymous);
 
         let req = CloudCreateBody::try_from(config).unwrap();
         let json = serde_json::to_value(&req).unwrap();
@@ -900,7 +900,7 @@ mod tests {
     #[test]
     fn cloud_create_body_maps_basic_registry_auth_to_inline() {
         let mut config = base_cloud_config();
-        config.registry_auth = Some(microsandbox_image::RegistryAuth::Basic {
+        config.registry_auth = Some(RegistryAuth::Basic {
             username: "u".into(),
             password: "p".into(),
         });

@@ -38,16 +38,26 @@ cargo add microsandbox
 
 | Feature | Default | Description |
 | --- | --- | --- |
+| `local` | yes | Local runtime, setup, image cache, snapshots, metrics, and filesystem-backed volume APIs |
+| `cloud` | yes | Cloud API backend and remote sandbox/volume operations |
 | `keyring` | yes | Registry credential lookup through the platform keyring |
-| `net` | yes | Networking, port publishing, policies, TLS interception, and secrets |
-| `download-binaries` | yes | Install missing official `msb` + `libkrunfw` artifacts during Cargo builds and acquire the guest Agentd payload |
-| `embed-binaries` | no | Embed a compressed `msb` + `libkrunfw` archive and the guest Agentd payload for offline runtime materialization |
+| `net` | yes | Network configuration, port publishing, policies, TLS interception, and secrets; the SDK uses the type/builder surface without compiling the host network engine |
+| `download-binaries` | yes | Install a matching official `msb` + `libkrunfw` pair during Cargo builds; implies `local` |
+| `embed-binaries` | no | Embed a compressed `msb` + `libkrunfw` archive for offline runtime installation; implies `local` |
 | `ssh` | no | SSH, SFTP, and interactive SSH helpers |
 
-To build without the networking stack while keeping the default keyring and Cargo-time runtime installation:
+Local snapshots and image-archive import/export are part of `local`; they are not separate Cargo features. The guest Agentd payload is owned by the `msb` binary build and is not downloaded or embedded independently by the SDK.
+
+For a cloud-only application that never installs or launches a local runtime:
 
 ```bash
-cargo add microsandbox --no-default-features --features download-binaries,keyring
+cargo add microsandbox --no-default-features --features cloud,net
+```
+
+For a local-only application with Cargo-time runtime installation:
+
+```bash
+cargo add microsandbox --no-default-features --features local,net,download-binaries,keyring
 ```
 
 ## Quick Start

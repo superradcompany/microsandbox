@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use notify::Watcher;
 use tokio::sync::{oneshot, watch};
 
+#[cfg(feature = "local")]
 use super::logger::{RegisteredSandboxLogger, SandboxLogger};
 use crate::{MicrosandboxError, MicrosandboxResult};
 
@@ -180,6 +181,7 @@ impl LogRegistry {
     /// Async and non-blocking: the blocking `watch()` runs on the
     /// watcher-admin thread and `register` only awaits its reply, so a
     /// caller on the tokio runtime never stalls a worker.
+    #[cfg(feature = "local")]
     pub async fn register(
         &self,
         logger: SandboxLogger,

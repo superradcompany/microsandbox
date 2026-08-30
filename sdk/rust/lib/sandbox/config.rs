@@ -4,15 +4,17 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZero;
 use std::path::PathBuf;
 
-use microsandbox_runtime::logging::LogLevel;
+use microsandbox_types::SandboxLogLevel as LogLevel;
 use microsandbox_types::{
     EnvVar, SandboxLogLevel, SandboxResources, SandboxRuntimeOptions, SandboxSpec,
     TransparentHugePagePolicy,
 };
 use serde::{Deserialize, Serialize};
 
-use microsandbox_image::{ImageConfig, RegistryAuth};
+#[cfg(feature = "local")]
+use microsandbox_image::ImageConfig;
 use microsandbox_protocol::{HANDOFF_INIT_AUTO, HANDOFF_INIT_IMAGE_ENTRYPOINT_CANDIDATES};
+use microsandbox_types::RegistryAuth;
 use typed_path::Utf8UnixPath;
 
 use super::types::{MountOptions, RootDisk, RootfsSource, VolumeMount};
@@ -54,11 +56,11 @@ pub const DEFAULT_REPLACE_TIMEOUT: std::time::Duration = std::time::Duration::fr
 // `SandboxBuilder` at create time, not via serde.
 
 fn default_cpus() -> u8 {
-    crate::config::DEFAULT_CPUS
+    microsandbox_types::DEFAULT_SANDBOX_CPUS
 }
 
 fn default_memory_mib() -> u32 {
-    crate::config::DEFAULT_MEMORY_MIB
+    microsandbox_types::DEFAULT_SANDBOX_MEMORY_MIB
 }
 
 fn default_log_level() -> Option<SandboxLogLevel> {
@@ -66,7 +68,7 @@ fn default_log_level() -> Option<SandboxLogLevel> {
 }
 
 fn default_metrics_sample_interval_ms() -> Option<NonZero<u64>> {
-    crate::config::default_metrics_sample_interval()
+    NonZero::new(microsandbox_types::DEFAULT_METRICS_SAMPLE_INTERVAL_MS)
 }
 
 fn default_disable_metrics_sample() -> bool {
@@ -268,6 +270,7 @@ impl SandboxConfig {
     /// - `labels`: image labels form the base; user labels override by key.
     /// - `cmd`, `entrypoint`, `workdir`, `user`: image value used only if user did not set one.
     /// - `init`: an `auto` init may resolve from a known init at the start of the image entrypoint and inherit the effective entrypoint env.
+    #[cfg(feature = "local")]
     pub fn merge_image_defaults(&mut self, image: &ImageConfig) {
         self.spec.env = merge_env(&image.env, &self.spec.env);
         self.spec.labels = merge_image_labels(&image.labels, &self.spec.labels);
@@ -402,6 +405,7 @@ impl SandboxConfig {
     /// The backend default may select the complete root-disk shape. The deprecated upper-size
     /// setting remains managed-disk size sugar and cannot be combined with `root_disk`. An absent
     /// root disk resolves to managed; a sizeless tmpfs resolves to half the sandbox memory.
+    #[cfg(feature = "local")]
     pub(crate) fn apply_rootfs_defaults(
         &mut self,
         defaults: &crate::config::OciSandboxDefaults,

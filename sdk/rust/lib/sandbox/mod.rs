@@ -10,26 +10,32 @@ mod builder;
 pub(crate) mod config;
 mod config_patch;
 pub mod exec;
+#[cfg(feature = "local")]
 pub(crate) mod flat_rootfs;
 pub mod fs;
 mod handle;
 pub mod init;
 pub(crate) mod metrics;
+#[cfg(feature = "local")]
 mod modify;
+#[cfg(feature = "local")]
 mod patch;
-#[cfg(windows)]
+#[cfg(all(feature = "local", windows))]
 mod reap;
 #[cfg(feature = "ssh")]
 pub mod ssh;
 // Windows-only in shipping builds, but kept compiled under `test` so the
 // platform-independent encoding logic is covered on every host.
+mod status;
 #[cfg(any(windows, test))]
 pub(crate) mod terminal;
 mod types;
+#[cfg(feature = "local")]
 pub(crate) mod upper;
 
 use std::{collections::BTreeMap, path::Path, process::ExitStatus, sync::Arc};
 
+#[cfg(feature = "local")]
 use microsandbox_db::DbReadConnection;
 use microsandbox_protocol::{
     core::{CoreError, Ping, Pong, Touch, Touched},
@@ -37,16 +43,21 @@ use microsandbox_protocol::{
     message::MessageType,
 };
 use microsandbox_types::hostname_from_sandbox_name as derive_hostname;
+#[cfg(feature = "local")]
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 
+#[cfg(feature = "local")]
 use microsandbox_image::progress_channel;
 
 use crate::{
     MicrosandboxResult,
     agent::AgentClient,
+    error::{Operation, UnsupportedReason},
+};
+#[cfg(feature = "local")]
+use crate::{
     backend::LocalBackend,
     db::entity::{run as run_entity, sandbox as sandbox_entity},
-    error::{Operation, UnsupportedReason},
     runtime::SpawnMode,
 };
 
@@ -87,9 +98,11 @@ pub(crate) fn reserved_label_prefix(key: &str) -> Option<&'static str> {
 
 // `mod patch` and `mod types` are private; re-export the entry points the
 // local backend's lifecycle and create methods under `backend/local/` call.
+#[cfg(feature = "local")]
 pub(crate) use patch::{apply_patches, build_upper_tree};
-#[cfg(windows)]
+#[cfg(all(feature = "local", windows))]
 pub(crate) use reap::reap_leaked_runtime_process;
+#[cfg(feature = "local")]
 pub(crate) use types::validate_named_disk_mount_options;
 pub(crate) use types::validate_volume_mounts;
 
@@ -97,7 +110,6 @@ pub(crate) use types::validate_volume_mounts;
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-pub use crate::db::entity::sandbox::SandboxStatus;
 pub use crate::logs::{LogEntry, LogOptions, LogSource, LogStreamOptions};
 pub use attach::AttachOptionsBuilder;
 pub use builder::{RegistryConfigBuilder, SandboxBuilder};
@@ -118,10 +130,13 @@ pub use fs::{
 };
 pub use handle::{DEFAULT_KILL_TIMEOUT, DEFAULT_STOP_TIMEOUT, SandboxHandle};
 pub use init::{HandoffInit, InitOptionsBuilder};
+pub use metrics::SandboxMetrics;
+#[cfg(feature = "local")]
 pub use metrics::{
-    SandboxMetrics, SandboxMetricsReport, SandboxMetricsState, all_sandbox_metrics,
-    all_sandbox_metrics_local, all_sandbox_metrics_reports_local, sandbox_metrics_report_local,
+    SandboxMetricsReport, SandboxMetricsState, all_sandbox_metrics, all_sandbox_metrics_local,
+    all_sandbox_metrics_reports_local, sandbox_metrics_report_local,
 };
+#[cfg(feature = "local")]
 pub use microsandbox_image::{PullProgress, PullProgressHandle};
 #[cfg(feature = "net")]
 pub use microsandbox_network::builder::SecretBuilder;
@@ -133,7 +148,7 @@ pub use microsandbox_network::dns::Nameserver;
 pub use microsandbox_network::policy::{
     Action as NetworkAction, NetworkPolicy, NetworkProfile, Rule as NetworkRule,
 };
-pub use microsandbox_runtime::logging::LogLevel;
+pub use microsandbox_types::SandboxLogLevel as LogLevel;
 pub use microsandbox_types::{CpuPlacement, PullPolicy};
 pub use microsandbox_types::{
     EnvVar, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, NetworkSpec, PortProtocol,
@@ -142,6 +157,7 @@ pub use microsandbox_types::{
 };
 #[cfg(feature = "net")]
 pub use microsandbox_types::{HostPattern, SecretSubstitution, SecretViolationAction};
+#[cfg(feature = "local")]
 pub use modify::{
     ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,
     ModificationPolicy, ModificationWarning, PlannedChange, ResourceConvergenceState, ResourceKind,
@@ -155,6 +171,7 @@ pub use ssh::{
     SshClient, SshClientOptionsBuilder, SshExecOptionsBuilder, SshOutput, SshServer,
     SshServerOptionsBuilder, SshStdioStream,
 };
+pub use status::SandboxStatus;
 pub use types::{
     DeploymentProfile, DiskImageFormat, FlatClone, HostPermissions, ImageBuilder, ImageSource,
     IntoImage, MountBuilder, MountOptions, NamedVolumeMode, OciRootfsSource, Patch, PatchBuilder,
@@ -259,10 +276,17 @@ impl Sandbox {
     /// Start building a new sandbox configuration.
     pub fn builder(name: impl Into<String>) -> SandboxBuilder {
         let builder = SandboxBuilder::new(name);
-        let backend = crate::backend::default_backend();
-        match backend.as_local() {
-            Some(local) => builder.with_local_defaults(local.config()),
-            None => builder,
+        #[cfg(feature = "local")]
+        {
+            let backend = crate::backend::default_backend();
+            match backend.as_local() {
+                Some(local) => builder.with_local_defaults(local.config()),
+                None => builder,
+            }
+        }
+        #[cfg(not(feature = "local"))]
+        {
+            builder
         }
     }
 
@@ -302,6 +326,7 @@ impl Sandbox {
     /// only** — pull progress is a local concept (cloud workers handle image
     /// pulls server-side); on a cloud backend this falls back to a no-progress
     /// create with an immediately-closed channel.
+    #[cfg(feature = "local")]
     pub fn create_with_pull_progress(
         config: SandboxConfig,
     ) -> (
@@ -315,6 +340,7 @@ impl Sandbox {
     ///
     /// Like `create_with_pull_progress` but spawns the sandbox process in detached
     /// mode so the sandbox survives after the creating process exits.
+    #[cfg(feature = "local")]
     pub fn create_detached_with_pull_progress(
         config: SandboxConfig,
     ) -> (
@@ -324,6 +350,7 @@ impl Sandbox {
         Self::create_with_pull_progress_and_mode(config, SpawnMode::Detached)
     }
 
+    #[cfg(feature = "local")]
     fn create_with_pull_progress_and_mode(
         config: SandboxConfig,
         mode: SpawnMode,
@@ -470,6 +497,7 @@ impl Default for SandboxListBuilder {
 
 impl Sandbox {
     /// Build an outer `Sandbox` from local-variant inner state.
+    #[cfg(feature = "local")]
     pub(crate) fn from_local(
         backend: Arc<dyn crate::backend::Backend>,
         local: crate::backend::SandboxLocalState,
@@ -580,6 +608,7 @@ impl Sandbox {
     /// Takes `&self` so the caller retains ownership across an
     /// `Unsupported` error on cloud — the previous `self`-by-value
     /// signature consumed the sandbox even on the failing path.
+    #[cfg(feature = "local")]
     pub async fn remove_persisted(&self) -> MicrosandboxResult<()> {
         let local = self.require_local(Operation::SandboxRemovePersisted)?;
         let local_backend = self.backend.as_local().ok_or_else(|| {
@@ -607,6 +636,7 @@ impl Sandbox {
     /// The returned builder owns the canonical SDK patch and dry-run
     /// classification logic. It does not apply changes until later modify
     /// phases wire the same plan model into persistence and runtime control.
+    #[cfg(feature = "local")]
     pub fn modify(&self) -> SandboxModificationBuilder {
         SandboxModificationBuilder::new(self.backend.clone(), self.name.clone())
     }
@@ -626,6 +656,7 @@ impl Sandbox {
 
     /// Local-only state accessor. Returns `Some` when this `Sandbox` was
     /// created by the local libkrun backend.
+    #[cfg(feature = "local")]
     pub fn local(&self) -> Option<&crate::backend::SandboxLocalState> {
         match self.inner.as_ref() {
             crate::backend::SandboxInner::Local(s) => Some(s),
@@ -644,6 +675,7 @@ impl Sandbox {
 
     /// Same as [`Sandbox::local`] but returns a typed `Unsupported` error
     /// for cloud sandboxes. Used by methods that have no cloud equivalent yet.
+    #[cfg(feature = "local")]
     fn require_local(
         &self,
         op: Operation,
@@ -734,6 +766,7 @@ impl Sandbox {
     /// Register it with a [`LogRegistry`](crate::logs::LogRegistry) to share a
     /// single watcher across many sandboxes. Cloud logs have no host directory
     /// and continue to use [`log_stream`](Self::log_stream) over SSE.
+    #[cfg(feature = "local")]
     pub fn logger(&self) -> MicrosandboxResult<crate::logs::SandboxLogger> {
         self.require_local(Operation::SandboxLogger)?;
         let local = self
@@ -749,6 +782,7 @@ impl Sandbox {
     /// Local backend only. The request uses `core.ping` and returns the SDK-measured
     /// round-trip latency. If the sandbox runtime predates protocol generation 6,
     /// this fails before any bytes are sent with an unsupported-operation error.
+    #[cfg(feature = "local")]
     pub async fn ping(&self) -> MicrosandboxResult<SandboxPingResult> {
         self.require_local(Operation::SandboxPing)?;
         ping_agent(&self.name, self.client()).await
@@ -758,6 +792,7 @@ impl Sandbox {
     ///
     /// Local backend only. The request uses `core.touch`, so callers can keep a
     /// sandbox alive intentionally without relying on unrelated agent traffic.
+    #[cfg(feature = "local")]
     pub async fn touch(&self) -> MicrosandboxResult<SandboxTouchResult> {
         self.require_local(Operation::SandboxTouch)?;
         touch_agent(&self.name, self.client()).await
@@ -769,6 +804,7 @@ impl Sandbox {
     /// [`local()`](Self::local) to check first when calling from generic
     /// code. The cloud variant has no `AgentClient` — the cloud worker owns
     /// the in-VM bridge — so there is nothing to return.
+    #[cfg(feature = "local")]
     pub fn client(&self) -> &AgentClient {
         match self.local() {
             Some(local) => &local.client,
@@ -782,6 +818,7 @@ impl Sandbox {
     ///
     /// **Local-only**: panics if called on a cloud sandbox. Mirrors
     /// [`client`](Self::client).
+    #[cfg(feature = "local")]
     pub fn client_arc(&self) -> Arc<AgentClient> {
         match self.local() {
             Some(local) => Arc::clone(&local.client),
@@ -797,7 +834,14 @@ impl Sandbox {
     /// will terminate the sandbox. Cloud sandboxes never own a host process
     /// — the cloud worker does — so this returns `false` for them.
     pub fn owns_lifecycle(&self) -> bool {
-        self.local().map(|s| s.handle.is_some()).unwrap_or(false)
+        #[cfg(feature = "local")]
+        {
+            self.local().map(|s| s.handle.is_some()).unwrap_or(false)
+        }
+        #[cfg(not(feature = "local"))]
+        {
+            false
+        }
     }
 
     /// Read, write, and manage files inside the running sandbox.
@@ -807,7 +851,10 @@ impl Sandbox {
     /// op returns `Unsupported` until cloud guest-fs lands; on local each
     /// op routes through the agent protocol (`core.fs.*`).
     pub fn fs(&self) -> fs::SandboxFsOps<'_> {
+        #[cfg(feature = "local")]
         let client = self.local().map(|local| Arc::clone(&local.client));
+        #[cfg(not(feature = "local"))]
+        let client = None;
         fs::SandboxFsOps::new(self.backend.clone(), &self.name, client)
     }
 
@@ -868,6 +915,7 @@ impl Sandbox {
     ///
     /// **Local backend only.** Cloud sandboxes have no host process to wait
     /// on; use [`stop`](Self::stop) and poll [`status`](Self::status) instead.
+    #[cfg(feature = "local")]
     pub async fn stop_and_wait(&self) -> MicrosandboxResult<ExitStatus> {
         let local = self.require_local(Operation::SandboxStopAndWait)?;
         let stop_result = self.request_stop().await;
@@ -930,6 +978,7 @@ impl Sandbox {
     }
 
     /// Wait for the sandbox process to exit. **Local backend only.**
+    #[cfg(feature = "local")]
     pub async fn wait(&self) -> MicrosandboxResult<ExitStatus> {
         let local = self.require_local(Operation::SandboxWait)?;
         match &local.handle {
@@ -942,6 +991,7 @@ impl Sandbox {
 
     /// Wait until this sandbox is observed in a terminal non-running state.
     pub async fn wait_until_stopped(&self) -> MicrosandboxResult<SandboxStopResult> {
+        #[cfg(feature = "local")]
         if self.owns_lifecycle() {
             let status = self.wait().await?;
             return Ok(stop_result_from_exit_status(&self.name, status));
@@ -970,17 +1020,27 @@ impl Sandbox {
     /// and `run --detach`. No-op for cloud sandboxes (the cloud worker owns
     /// the lifecycle regardless of this process).
     pub async fn detach(self) {
-        if let crate::backend::SandboxInner::Local(local) = self.inner.as_ref()
-            && let Some(h) = &local.handle
+        #[cfg(feature = "local")]
         {
-            h.lock().await.disarm();
+            if let crate::backend::SandboxInner::Local(local) = self.inner.as_ref()
+                && let Some(h) = &local.handle
+            {
+                h.lock().await.disarm();
+            }
         }
         // Normal drop runs — client reader task is aborted and
         // ProcessHandle drops without sending SIGTERM.
     }
 
     fn is_local_ephemeral(&self) -> bool {
-        self.local().is_some() && self.config.spec.lifecycle.ephemeral
+        #[cfg(feature = "local")]
+        {
+            self.local().is_some() && self.config.spec.lifecycle.ephemeral
+        }
+        #[cfg(not(feature = "local"))]
+        {
+            false
+        }
     }
 
     fn resolve_default_command(&self) -> MicrosandboxResult<microsandbox_types::ResolvedCommand> {
@@ -1546,6 +1606,7 @@ pub(crate) fn validate_env(env: &[EnvVar]) -> MicrosandboxResult<()> {
     Ok(())
 }
 
+#[cfg(feature = "local")]
 pub(super) fn remove_dir_if_exists(path: &Path) -> MicrosandboxResult<()> {
     match std::fs::remove_dir_all(path) {
         Ok(()) => Ok(()),
@@ -1555,6 +1616,7 @@ pub(super) fn remove_dir_if_exists(path: &Path) -> MicrosandboxResult<()> {
 }
 
 /// Remove one exact local sandbox identity after proving no runtime owns it.
+#[cfg(feature = "local")]
 pub(super) async fn remove_local_persisted_sandbox(
     local_backend: &LocalBackend,
     name: &str,
@@ -1615,6 +1677,7 @@ pub(super) async fn remove_local_persisted_sandbox(
 }
 
 /// Load a sandbox row by name.
+#[cfg(feature = "local")]
 pub(super) async fn load_sandbox_record(
     db: &DbReadConnection,
     name: &str,

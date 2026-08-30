@@ -83,7 +83,7 @@ microsandbox-image = { version = "=0.6.15", path = "crates/image" }
 microsandbox-metrics = { version = "=0.6.15", path = "crates/metrics" }
 microsandbox-types = { version = "=0.6.15", path = "packages/microsandbox-types/rust" }
 microsandbox-migration = { version = "=0.6.15", path = "crates/migration" }
-microsandbox-network = { version = "=0.6.15", path = "crates/network" }
+microsandbox-network = { version = "=0.6.15", path = "crates/network", default-features = false }
 microsandbox-protocol = { version = "=0.6.15", path = "crates/protocol" }
 microsandbox-runtime = { version = "=0.6.15", path = "crates/runtime", default-features = false }
 microsandbox-utils = { version = "=0.6.15", path = "crates/utils" }
