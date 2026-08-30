@@ -146,6 +146,12 @@ async fn run_existing(name: String, args: RunArgs) -> anyhow::Result<()> {
 
     let sandbox = super::resolve_and_start(&name, args.sandbox.quiet).await?;
 
+    // A reused sandbox keeps whatever GPU setting it was created with; the
+    // viewer simply fails to connect if it has none.
+    if args.display {
+        spawn_display_viewer(&name);
+    }
+
     // Detach mode: ensure running and exit.
     if args.detach {
         warn_detached_command_ignored(&name, &args);
