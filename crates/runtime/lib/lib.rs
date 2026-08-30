@@ -28,6 +28,8 @@ pub mod policy;
 pub mod relay;
 mod startup;
 pub mod vm;
+#[cfg(unix)]
+pub mod gpu_display;
 pub(crate) mod writeback;
 
 pub use error::*;

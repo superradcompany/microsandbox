@@ -1941,9 +1941,17 @@ fn build_vm(
             match gpu_virgl_flags_from_env() {
                 Some(flags) => {
                     let (width, height) = gpu_display_from_env();
-                    c.gpu_virgl_flags(flags)
+                    let c = c
+                        .gpu_virgl_flags(flags)
                         .gpu_shm_size(GPU_SHM_SIZE)
-                        .gpu_display(width, height)
+                        .gpu_display(width, height);
+                    // MSB_GPU_DUMP=<dir>: keep the latest scanout frame on disk.
+                    match std::env::var_os("MSB_GPU_DUMP") {
+                        Some(dir) => c.gpu_display_backend(
+                            crate::gpu_display::frame_dump_backend(std::path::Path::new(&dir)),
+                        ),
+                        None => c,
+                    }
                 }
                 None => c,
             }

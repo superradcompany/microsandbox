@@ -212,3 +212,4 @@ russh-sftp = "2.3.0"
 # not exposed by the published 0.1.32 API). Upstream target: zerocore-ai/libkrun.
 [patch.crates-io]
 msb_krun = { path = "/Users/luotao/.cache/msb-omarchy/msb_krun-0.1.32-patched" }
+msb_krun_devices = { path = "/Users/luotao/.cache/msb-omarchy/msb_krun_devices-0.1.32-patched" }
