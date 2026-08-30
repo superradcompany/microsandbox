@@ -5,6 +5,7 @@ fn assert_same_type<T: 'static, U: 'static>() {
 }
 
 #[test]
+#[cfg(feature = "engine")]
 fn legacy_module_paths_alias_canonical_modules() {
     assert_same_type::<
         microsandbox_network::backend::SmoltcpBackend,
@@ -45,4 +46,9 @@ fn legacy_module_paths_alias_canonical_modules() {
 
     let _legacy_proxy = microsandbox_network::proxy::spawn_tcp_proxy;
     let _canonical_proxy = microsandbox_network::tcp::proxy::spawn_tcp_proxy;
+}
+
+#[test]
+fn tls_config_path_remains_available_without_the_engine() {
+    assert_same_type::<microsandbox_network::tls::TlsConfig, microsandbox_types::TlsConfig>();
 }

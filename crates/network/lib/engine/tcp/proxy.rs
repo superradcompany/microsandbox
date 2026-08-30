@@ -19,15 +19,15 @@ use tokio::sync::mpsc;
 use super::connection::ProxyConnectState;
 use super::upstream::UpstreamTcpTarget;
 use crate::engine::secrets::config::SecretsConfigExt;
+use crate::engine::tls::proxy::TlsProxy;
+use crate::engine::tls::sni;
+use crate::engine::tls::state::TlsState;
 use crate::netstack::shared::SharedState;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::secrets::config::{SecretsConfig, ViolationAction};
 use crate::secrets::handler::{
     SecretsHandler, first_line_is_not_http_request, looks_like_http_request_prefix,
 };
-use crate::tls::proxy::TlsProxy;
-use crate::tls::sni;
-use crate::tls::state::TlsState;
 
 //--------------------------------------------------------------------------------------------------
 // Constants

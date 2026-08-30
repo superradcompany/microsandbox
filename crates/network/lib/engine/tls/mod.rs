@@ -11,11 +11,3 @@ pub(crate) mod host_cas;
 pub(crate) mod proxy;
 pub(crate) mod sni;
 pub mod state;
-
-//--------------------------------------------------------------------------------------------------
-// Re-Exports
-//--------------------------------------------------------------------------------------------------
-
-pub use microsandbox_types::{
-    CertCacheConfig, InterceptCaConfig, ScopedUpstreamCaCert, ScopedVerifyUpstream, TlsConfig,
-};

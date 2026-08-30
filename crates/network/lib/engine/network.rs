@@ -20,6 +20,7 @@ use microsandbox_types::{
 use msb_krun::backends::net::NetBackend;
 
 use crate::config::{MAX_NETWORK_CONNECTIONS, NetworkConfig};
+use crate::engine::tls::state::{TlsState, TlsStateError};
 use crate::netstack::{
     backend::SmoltcpBackend,
     poll::{self, GatewayIps, PollLoopConfig},
@@ -27,7 +28,6 @@ use crate::netstack::{
 };
 use crate::policy::{NetworkPolicy, NetworkProfile};
 use crate::secrets::handle::SecretsHandle;
-use crate::tls::state::{TlsState, TlsStateError};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -477,7 +477,7 @@ impl SmoltcpNetwork {
         if !self.config.trust_host_cas {
             return None;
         }
-        crate::tls::host_cas::collect_host_cas()
+        crate::engine::tls::host_cas::collect_host_cas()
     }
 
     /// Create a handle for wiring runtime termination into the network stack.

@@ -39,8 +39,8 @@ use tokio::time::timeout;
 use super::super::common::transport::Transport;
 use super::super::forwarder::{DnsForwarder, DnsForwarderHandle};
 use super::framing::{frame, take_message};
+use crate::engine::tls::state::TlsState;
 use crate::netstack::shared::SharedState;
-use crate::tls::state::TlsState;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -407,7 +407,7 @@ async fn extract_sni(
             .await
             .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "channel closed"))?;
         initial_buf.extend_from_slice(&data);
-        if let Some(name) = crate::tls::sni::extract_sni(&initial_buf) {
+        if let Some(name) = crate::engine::tls::sni::extract_sni(&initial_buf) {
             return Ok((name, initial_buf));
         }
         if is_complete_client_hello(&initial_buf) {
@@ -452,9 +452,9 @@ mod tests {
 
     use super::*;
     use crate::engine::dns::forwarder::DnsForwarder;
+    use crate::engine::tls::ca::CertAuthority;
+    use crate::engine::tls::certgen::generate_domain_cert;
     use crate::netstack::poll::GatewayIps;
-    use crate::tls::ca::CertAuthority;
-    use crate::tls::certgen::generate_domain_cert;
 
     const TEST_DOMAIN: &str = "dns.test";
 

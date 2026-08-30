@@ -21,8 +21,8 @@ mod model;
 #[cfg(feature = "engine")]
 pub(crate) use engine::addr;
 #[cfg(feature = "engine")]
-pub use engine::{icmp, netstack, network, ports, tcp, tls, udp};
-pub use model::{config, dns, policy, secrets};
+pub use engine::{icmp, netstack, network, ports, tcp, udp};
+pub use model::{config, dns, policy, secrets, tls};
 
 //--------------------------------------------------------------------------------------------------
 // Constants

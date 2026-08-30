@@ -695,7 +695,7 @@ mod tests {
 
     #[test]
     fn load_upstream_ca_certificates_keeps_certs_and_skips_other_sections() {
-        let ca = crate::tls::ca::CertAuthority::generate();
+        let ca = crate::engine::tls::ca::CertAuthority::generate();
         let path =
             std::env::temp_dir().join(format!("msb-upstream-ca-test-{}.pem", std::process::id()));
         // Bundle a private key and stray text around the certificate: only the

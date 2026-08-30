@@ -27,12 +27,12 @@ use crate::engine::dns::{
     interceptor::DnsInterceptor,
     proxies::{dot::DotProxy, tcp::DnsTcpProxy},
 };
+use crate::engine::tls::{proxy::TlsProxy, state::TlsState};
 use crate::icmp::relay::IcmpRelay;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::ports::PortPublisher;
 use crate::secrets::handle::SecretsHandle;
 use crate::tcp::{connection::ConnectionTracker, proxy::TcpProxy, upstream::UpstreamTcpTarget};
-use crate::tls::{proxy::TlsProxy, state::TlsState};
 use crate::udp::fragments::{
     Ipv4UdpFragmentReassembler, Ipv6UdpFragmentReassembler, ReassembledUdpDatagram,
     is_ipv4_udp_fragment, is_ipv6_fragment, is_ipv6_udp_fragment,
