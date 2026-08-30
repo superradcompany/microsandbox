@@ -21,6 +21,8 @@ pub struct JsRegistryAuthInput {
 #[derive(Clone)]
 #[napi(object, js_name = "RegistryConfig")]
 pub struct JsRegistryConfig {
+    // Keep the public name stable when napi-rs renders this renamed nested object.
+    #[napi(ts_type = "RegistryAuthInput")]
     pub auth: Option<JsRegistryAuthInput>,
     pub insecure: bool,
     /// Number of PEM CA certs accumulated via `caCerts(buffer)`. Bytes

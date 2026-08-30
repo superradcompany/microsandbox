@@ -23,7 +23,7 @@ use crate::patch_builder::JsPatchBuilder;
 use crate::pull_progress::JsPullProgressStream;
 use crate::registry_builder::JsRegistryConfigBuilder;
 use crate::root_disk_builder::JsRootDiskBuilder;
-use crate::sandbox::Sandbox as JsSandbox;
+use crate::sandbox::Sandbox;
 use crate::secret_builder::JsSecretBuilder;
 use crate::tls_builder::JsTlsBuilder;
 
@@ -752,13 +752,13 @@ impl JsSandboxBuilder {
     /// synchronously before awaiting; napi-rs requires the `unsafe` tag
     /// regardless. JS callers see `create(): Promise<Sandbox>`.
     #[napi]
-    pub async unsafe fn create(&mut self) -> Result<JsSandbox> {
+    pub async unsafe fn create(&mut self) -> Result<Sandbox> {
         let b = self
             .inner
             .take()
             .ok_or_else(|| napi::Error::from_reason("SandboxBuilder already consumed"))?;
         let inner: RustSandbox = b.create().await.map_err(to_napi_error)?;
-        Ok(JsSandbox::from_rust(inner))
+        Ok(Sandbox::from_rust(inner))
     }
 
     /// Create the sandbox with image-pull progress reporting. Returns
@@ -812,7 +812,7 @@ impl JsPullProgressCreate {
     /// Await the sandbox. Resolves once the pull + boot finishes.
     /// Calling more than once errors.
     #[napi(js_name = "awaitSandbox")]
-    pub async fn await_sandbox(&self) -> Result<JsSandbox> {
+    pub async fn await_sandbox(&self) -> Result<Sandbox> {
         let mut guard = self.task.lock().await;
         let task = guard
             .take()
@@ -821,7 +821,7 @@ impl JsPullProgressCreate {
             .await
             .map_err(|e| napi::Error::from_reason(format!("create task panicked: {e}")))?
             .map_err(to_napi_error)?;
-        Ok(JsSandbox::from_rust(inner))
+        Ok(Sandbox::from_rust(inner))
     }
 }
 

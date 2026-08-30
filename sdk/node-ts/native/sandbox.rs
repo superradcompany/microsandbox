@@ -11,7 +11,7 @@ use crate::attach_options_builder::JsAttachOptionsBuilder;
 use crate::error::to_napi_error;
 use crate::exec::{ExecOutput, JsExecHandle};
 use crate::exec_options_builder::JsExecOptionsBuilder;
-use crate::fs::JsSandboxFs;
+use crate::fs::JsSandboxFsOps;
 use crate::sandbox_handle::JsSandboxHandle;
 use crate::ssh::{JsSshClient, JsSshServer, apply_client_options, apply_server_options};
 use crate::types::*;
@@ -342,8 +342,8 @@ impl Sandbox {
 
     /// Get a filesystem handle for operations on the running sandbox.
     #[napi]
-    pub fn fs(&self) -> JsSandboxFs {
-        JsSandboxFs::new(self.inner.clone())
+    pub fn fs(&self) -> JsSandboxFsOps {
+        JsSandboxFsOps::new(self.inner.clone())
     }
 
     //----------------------------------------------------------------------------------------------
